@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::Child,
     sync::mpsc,
     time::{self, MissedTickBehavior},
@@ -73,6 +73,7 @@ pub(crate) async fn run_child_with_bounded_output(
         cleanup_policy,
         None,
         None,
+        None,
     )
     .await
 }
@@ -91,6 +92,27 @@ pub(crate) async fn run_child_with_bounded_output_cancelable(
         cleanup_policy,
         Some(cancel_token),
         None,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn run_child_with_input_bounded_output_cancelable(
+    command: tokio::process::Command,
+    input: Vec<u8>,
+    max_timeout_secs: u64,
+    max_output_bytes: usize,
+    cleanup_policy: ChildCleanupPolicy,
+    cancel_token: CommandCancelToken,
+) -> Result<ChildRunResult> {
+    run_child(
+        command,
+        max_timeout_secs,
+        max_output_bytes,
+        cleanup_policy,
+        Some(cancel_token),
+        None,
+        Some(input),
     )
     .await
 }
@@ -110,6 +132,7 @@ pub(crate) async fn run_child_with_streaming_output(
         cleanup_policy,
         None,
         Some(sink),
+        None,
     )
     .await
 }
@@ -129,6 +152,7 @@ pub(crate) async fn run_child_with_streaming_output_cancelable(
         cleanup_policy,
         Some(cancel_token),
         Some(sink),
+        None,
     )
     .await
 }
@@ -214,6 +238,7 @@ async fn run_child(
     cleanup_policy: ChildCleanupPolicy,
     cancel_token: Option<CommandCancelToken>,
     sink: Option<ChildOutputSink>,
+    stdin: Option<Vec<u8>>,
 ) -> Result<ChildRunResult> {
     command.kill_on_drop(true);
     if cleanup_policy == ChildCleanupPolicy::ProcessGroup {
@@ -221,9 +246,19 @@ async fn run_child(
     }
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
+    if stdin.is_some() {
+        command.stdin(Stdio::piped());
+    }
 
     let max_timeout_secs = max_timeout_secs.max(1);
     let mut child = RunningChild::spawn(command, cleanup_policy)?;
+    let stdin_task = stdin.map(|input| {
+        let mut stdin = child.take_stdin();
+        tokio::spawn(async move {
+            stdin.write_all(&input).await?;
+            stdin.shutdown().await
+        })
+    });
     let stdout = child.take_stdout();
     let stderr = child.take_stderr();
     let stdout_task = tokio::spawn(read_bounded_output_with_sink(
@@ -247,6 +282,9 @@ async fn run_child(
                 .await;
             stdout_task.abort();
             stderr_task.abort();
+            if let Some(stdin_task) = stdin_task {
+                stdin_task.abort();
+            }
             return Ok(ChildRunResult::TimedOut(cleanup));
         }
         ChildWaitOutcome::Canceled(reason) => {
@@ -255,10 +293,19 @@ async fn run_child(
                 .await;
             stdout_task.abort();
             stderr_task.abort();
+            if let Some(stdin_task) = stdin_task {
+                stdin_task.abort();
+            }
             return Ok(ChildRunResult::Canceled { cleanup, reason });
         }
     };
     child.disarm();
+    if let Some(stdin_task) = stdin_task {
+        stdin_task
+            .await
+            .context("stdin writer task failed")?
+            .context("failed to write child stdin")?;
+    }
     let stdout = stdout_task
         .await
         .context("stdout reader task failed")?
@@ -488,6 +535,13 @@ impl RunningChild {
             .stderr
             .take()
             .expect("stderr is piped before command spawn")
+    }
+
+    fn take_stdin(&mut self) -> tokio::process::ChildStdin {
+        self.child
+            .stdin
+            .take()
+            .expect("stdin is piped before command spawn")
     }
 
     async fn wait(&mut self) -> std::io::Result<ExitStatus> {

@@ -525,57 +525,127 @@
   min-width: 140px;
 }
 
+.observabilityMetricsControls > .timeRangeTabs {
+  flex: 1 1 440px;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.observabilityMetricsControls > .timeRangeTabs button {
+  flex: 0 0 auto;
+}
+
+.fleetMetricsScopeSummary {
+  display: block;
+  max-width: min(38vw, 320px);
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--canvas);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleetMetricsAdvancedFilters {
+  flex: 1 0 100%;
+  min-width: 0;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 10px;
+}
+
+.fleetMetricsAdvancedFilters > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  list-style: none;
+}
+
+.fleetMetricsAdvancedFilters > summary::-webkit-details-marker {
+  display: none;
+}
+
+.fleetMetricsAdvancedFilters > summary:hover,
+.fleetMetricsAdvancedFilters > summary:focus-visible {
+  color: var(--primary-text);
+}
+
+.fleetMetricsAdvancedFilters > summary:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 3px;
+}
+
+.fleetMetricsAdvancedFilters > summary b {
+  display: inline-grid;
+  min-width: 20px;
+  min-height: 20px;
+  border-radius: 999px;
+  place-items: center;
+  background: var(--primary-soft);
+  color: var(--primary-text);
+  font-size: 11px;
+}
+
+.fleetMetricsAdvancedFilterGrid {
+  margin-top: 10px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+}
+
 .observabilityMetricsSummary {
   border-bottom: 1px solid var(--border);
 }
 
+.observabilityMetricsError {
+  margin: 12px 16px 0;
+}
+
 .observabilityWarningDefinitions {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1px;
   min-width: 0;
   border-bottom: 1px solid var(--border);
-  background: var(--surface-subtle);
-  padding: 12px 16px;
+  background: var(--border-subtle);
 }
 
 .observabilityWarningDefinitions > div {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 3px 10px;
-  align-items: baseline;
   min-width: 0;
-  border: 1px solid var(--border);
-  border-radius: 8px;
   background: var(--surface);
-  padding: 10px 11px;
+  padding: 11px 14px;
 }
 
 .observabilityWarningDefinitions span {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 800;
-  text-transform: uppercase;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .observabilityWarningDefinitions strong {
-  justify-self: end;
   color: var(--text);
-  font-size: 18px;
-  line-height: 1;
+  font-size: 15px;
 }
 
 .observabilityWarningDefinitions small {
   grid-column: 1 / -1;
   min-width: 0;
-  color: var(--text-secondary);
-  font-size: 12px;
+  color: var(--muted);
+  font-size: 11px;
   line-height: 1.35;
   overflow-wrap: anywhere;
-}
-
-.observabilityMetricsError {
-  margin: 12px 16px 0;
 }
 
 .observabilityStaleBanner {
@@ -730,6 +800,17 @@
   font-weight: 700;
   line-height: 1.35;
   padding: 9px 10px;
+}
+
+.observabilityMetricDefinition {
+  margin: 0;
+  border-left: 3px solid var(--primary-border);
+  background: var(--primary-selected);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 7px 9px;
+  overflow-wrap: anywhere;
 }
 
 .observabilityChartEvidence {
@@ -1787,6 +1868,15 @@
   font-size: 13px;
 }
 
+.vpsMonitorMetric.stale {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+}
+
+.vpsMonitorMetric.stale strong {
+  color: var(--warning-text);
+}
+
 .vpsMonitorEvidence {
   display: grid;
   gap: 4px;
@@ -1798,6 +1888,17 @@
 .vpsMonitorEvidence span {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.vpsMonitorEvidence .telemetryEvidence.partial,
+.vpsMonitorEvidence .telemetryEvidence.stale {
+  color: var(--warning-text);
+  font-weight: 700;
+}
+
+.vpsMonitorEvidence .telemetryEvidence.fresh {
+  color: var(--success-text);
+  font-weight: 700;
 }
 
 .vpsMonitorSignals {

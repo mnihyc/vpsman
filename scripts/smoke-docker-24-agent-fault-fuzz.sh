@@ -603,8 +603,8 @@ tunnel_plan_json="$(vpsctl_json tunnel-plan \
   --kind gre \
   --left-client-id "$(agent_id 1)" \
   --right-client-id "$(agent_id 2)" \
-  --left-underlay 203.0.113.41 \
-  --right-underlay 203.0.113.42 \
+  --left-remote-underlay 203.0.113.41 \
+  --right-remote-underlay 203.0.113.42 \
   --address-pool-cidr 10.254.25.0/30 \
   --left-tunnel-ipv4-cidr 10.254.25.0/31 \
   --right-tunnel-ipv4-cidr 10.254.25.1/31 \

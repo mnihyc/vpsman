@@ -11,7 +11,7 @@ use uuid::Uuid;
 use vpsman_common::{
     encode_json, job_command_requires_confirmation, payload_hash, CommandOutput,
     GatewayCommandDispatchResult, JobCancelRequest as GatewayJobCancelRequest, JobCommand,
-    OutputStream, DEFAULT_MAX_JOB_TIMEOUT_SECS,
+    OutputStream, RuntimeTunnelManager, TunnelEndpointSide, DEFAULT_MAX_JOB_TIMEOUT_SECS,
 };
 use vpsman_server_core::{
     CapabilitySkip, TargetCapability, JOB_STATUS_FAILED, JOB_STATUS_REJECTED, JOB_STATUS_RUNNING,
@@ -23,6 +23,7 @@ use vpsman_server_core::{
 
 use crate::{
     error::ApiError,
+    internal_operator::server_issued_job_actor,
     model::{
         AgentView, AuthContext, CancelJobRequest, CancelJobResponse, CancelJobTargetResult,
         CreateJobApprovalRequest, CreateJobRequest, CreateJobResponse, CreateJobTargetCounts,
@@ -30,6 +31,7 @@ use crate::{
     },
     privilege::{verify_privilege_intent, JobPrivilegeIntent, JobPrivilegeIntentInput},
     repository_jobs::PrecompletedJobTarget,
+    routes_ingest::record_network_routing_terminal_result,
     security::SCOPE_JOBS_READ,
     state::AppState,
     unix_now,
@@ -66,6 +68,14 @@ pub(crate) async fn cancel_job(
         .repo
         .request_job_cancel(job_id, operator.operator.id, reason.as_deref())
         .await?;
+    if plan.pending_canceled > 0 {
+        if let Err(error) =
+            record_network_routing_terminal_result(&state, job_id, "", TARGET_STATUS_CANCELED, None)
+                .await
+        {
+            warn!(?error, %job_id, "network routing state update failed after queued cancellation");
+        }
+    }
     let mut cancel_acks = Vec::with_capacity(plan.cancel_targets.len());
     for client_id in &plan.cancel_targets {
         state
@@ -188,8 +198,13 @@ pub(crate) async fn approve_job_approval(
     if approval.status != "pending" {
         return Err(ApiError::conflict("job_approval_not_pending"));
     }
-    let (_, Json(job)) =
-        create_job_from_internal_operator_mutation(&state, &operator, frozen_request).await?;
+    let (_, Json(job)) = create_job_inner(
+        &state,
+        &operator,
+        frozen_request,
+        JobPrivilegeSource::ApprovedRequest,
+    )
+    .await?;
     let approval = state
         .repo
         .decide_job_approval(
@@ -292,6 +307,7 @@ pub(crate) async fn create_job_from_internal_operator_mutation(
 
 enum JobPrivilegeSource {
     RequestAssertion,
+    ApprovedRequest,
     SavedSchedule(Uuid),
     TerminalInputRoute,
     InternalOperatorMutation,
@@ -322,6 +338,7 @@ async fn prepare_job_approval(
     if state.repo.get_job(job_id).await?.is_some() {
         return Err(ApiError::conflict("job_approval_job_id_already_exists"));
     }
+    bind_declared_network_plan(state, &mut job).await?;
     let job_command = job.job_command()?;
     validate_job_command_source(&job_command, &JobPrivilegeSource::RequestAssertion)?;
     if matches!(job_command, JobCommand::TerminalInput { .. }) {
@@ -429,6 +446,7 @@ async fn create_job_inner(
     if request.destructive && !request.confirmed {
         return Err(ApiError::conflict("destructive_confirmation_required"));
     }
+    bind_declared_network_plan(state, &mut request).await?;
     let job_command = request.job_command()?;
     validate_job_command_source(&job_command, &privilege_source)?;
     if matches!(job_command, JobCommand::TerminalInput { .. })
@@ -500,6 +518,7 @@ async fn create_job_inner(
     validate_restore_archive_binding(state, &job_command, &resolved_targets).await?;
     let source_schedule_id = match &privilege_source {
         JobPrivilegeSource::RequestAssertion => None,
+        JobPrivilegeSource::ApprovedRequest => None,
         JobPrivilegeSource::SavedSchedule(schedule_id) => Some(*schedule_id),
         JobPrivilegeSource::TerminalInputRoute => None,
         JobPrivilegeSource::InternalOperatorMutation => None,
@@ -547,7 +566,7 @@ async fn create_job_inner(
         )
         .await;
     }
-    if matches!(privilege_source, JobPrivilegeSource::RequestAssertion) {
+    if request.privileged && matches!(privilege_source, JobPrivilegeSource::RequestAssertion) {
         let privilege_intent = JobPrivilegeIntent::new(JobPrivilegeIntentInput {
             selector_expression: &request.selector_expression,
             command_type: request.command_type_label(),
@@ -700,10 +719,86 @@ async fn create_job_inner(
     ))
 }
 
+pub(crate) async fn bind_declared_network_plan(
+    state: &AppState,
+    request: &mut CreateJobRequest,
+) -> Result<(), ApiError> {
+    let Some((plan_id, supplied_plan, status_only)) =
+        request
+            .operation
+            .as_ref()
+            .and_then(|operation| match operation {
+                JobCommand::NetworkStatus { plan_id, plan, .. } => {
+                    Some((plan_id.as_str(), plan.as_ref(), true))
+                }
+                JobCommand::NetworkProbe { plan_id, plan, .. }
+                | JobCommand::NetworkSpeedTest { plan_id, plan, .. } => {
+                    Some((plan_id.as_str(), plan.as_ref(), false))
+                }
+                _ => None,
+            })
+    else {
+        return Ok(());
+    };
+
+    let plan_id = Uuid::parse_str(plan_id)
+        .map_err(|_| ApiError::bad_request("network_diagnostic_plan_id_invalid"))?;
+    let declared = state
+        .repo
+        .get_tunnel_plan(plan_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("network_diagnostic_plan_not_found"))?;
+    if !declared.enabled && !status_only {
+        return Err(ApiError::conflict("network_diagnostic_plan_disabled"));
+    }
+    if declared.plan != *supplied_plan {
+        return Err(ApiError::conflict("network_diagnostic_plan_snapshot_stale"));
+    }
+
+    let Some(JobCommand::NetworkStatus {
+        plan,
+        side,
+        runtime_adapter,
+        ..
+    }) = request.operation.as_mut()
+    else {
+        return Ok(());
+    };
+    *runtime_adapter = None;
+    if plan.runtime_control.manager != RuntimeTunnelManager::ExternalManagedAdapter {
+        return Ok(());
+    }
+    let (template_id, client_id) = match side {
+        TunnelEndpointSide::Left => (
+            plan.runtime_control.left_adapter_template_id.as_deref(),
+            plan.left_client_id.as_str(),
+        ),
+        TunnelEndpointSide::Right => (
+            plan.runtime_control.right_adapter_template_id.as_deref(),
+            plan.right_client_id.as_str(),
+        ),
+    };
+    let template_id = template_id
+        .ok_or_else(|| ApiError::bad_request("runtime_tunnel_adapter_template_required"))?;
+    *runtime_adapter = Some(
+        state
+            .repo
+            .resolve_runtime_tunnel_adapter(template_id, client_id)
+            .await
+            .map_err(|error| {
+                warn!(%error, %client_id, %template_id, "network status adapter binding failed");
+                ApiError::conflict("runtime_tunnel_adapter_unavailable")
+            })?,
+    );
+    Ok(())
+}
+
 fn job_allows_unprivileged_submission(command: &JobCommand) -> bool {
     matches!(
         command,
-        JobCommand::ConfigRead | JobCommand::NetworkStatus { .. }
+        JobCommand::ConfigRead
+            | JobCommand::NetworkStatus { .. }
+            | JobCommand::NetworkRoutingStatus { .. }
     ) && !job_command_requires_confirmation(command)
 }
 
@@ -711,14 +806,27 @@ fn validate_job_command_source(
     job_command: &JobCommand,
     privilege_source: &JobPrivilegeSource,
 ) -> Result<(), ApiError> {
-    if matches!(job_command, JobCommand::RuntimeConfigSync { .. })
-        && !matches!(
-            privilege_source,
-            JobPrivilegeSource::InternalOperatorMutation
-        )
-    {
+    let internal_mutation = matches!(
+        privilege_source,
+        JobPrivilegeSource::InternalOperatorMutation
+    );
+    if internal_mutation && server_issued_job_actor(job_command).is_none() {
+        return Err(ApiError::bad_request(
+            "internal_operator_job_not_server_issued",
+        ));
+    }
+    if matches!(job_command, JobCommand::RuntimeConfigSync { .. }) && !internal_mutation {
         return Err(ApiError::bad_request(
             "runtime_config_sync_is_server_issued",
+        ));
+    }
+    if matches!(
+        job_command,
+        JobCommand::NetworkRoutingStatus { .. } | JobCommand::NetworkRoutingApply { .. }
+    ) && !internal_mutation
+    {
+        return Err(ApiError::bad_request(
+            "network_routing_jobs_are_server_issued",
         ));
     }
     Ok(())

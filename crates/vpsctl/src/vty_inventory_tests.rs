@@ -297,6 +297,7 @@ fn parses_inventory_commands() {
             limit: 20,
             client_id: Some("edge/a".to_string()),
             bucket_secs: Some(60),
+            latest: false,
         }
     );
     assert_eq!(
@@ -309,11 +310,12 @@ fn parses_inventory_commands() {
             client_id: Some("edge/a".to_string()),
             interface: Some("eth0".to_string()),
             bucket_secs: Some(60),
+            latest: false,
         }
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "telemetry-network-rates --limit 5000 --client-id edge/a --interface eth0 --bucket-secs 60",
+            "telemetry-network-rates --limit 5000 --client-id edge/a --interface eth0 --bucket-secs 60 --latest",
         )
         .unwrap(),
         VtyInventoryCommand::TelemetryNetworkRates {
@@ -321,6 +323,7 @@ fn parses_inventory_commands() {
             client_id: Some("edge/a".to_string()),
             interface: Some("eth0".to_string()),
             bucket_secs: Some(60),
+            latest: true,
         }
     );
     assert_eq!(
@@ -355,16 +358,16 @@ fn rejects_invalid_inventory_commands() {
             .is_err()
     );
     assert_eq!(
-        telemetry_rollups_path(10, Some("edge/a"), Some(60)),
+        telemetry_rollups_path(10, Some("edge/a"), Some(60), false),
         "/api/v1/telemetry/rollups?limit=10&client_id=edge%2Fa&bucket_secs=60"
     );
     assert_eq!(
-        telemetry_network_rates_path(10, Some("edge/a"), Some("eth/0"), Some(60)),
+        telemetry_network_rates_path(10, Some("edge/a"), Some("eth/0"), Some(60), false),
         "/api/v1/telemetry/network-rates?limit=10&client_id=edge%2Fa&interface=eth%2F0&bucket_secs=60"
     );
     assert_eq!(
-        telemetry_network_rates_path(5000, Some("edge/a"), Some("eth/0"), Some(60)),
-        "/api/v1/telemetry/network-rates?limit=5000&client_id=edge%2Fa&interface=eth%2F0&bucket_secs=60"
+        telemetry_network_rates_path(5000, Some("edge/a"), Some("eth/0"), Some(60), true),
+        "/api/v1/telemetry/network-rates?limit=5000&client_id=edge%2Fa&interface=eth%2F0&bucket_secs=60&latest=true"
     );
     assert_eq!(
         telemetry_tunnels_path(10, Some("edge/a"), Some("tun/0")),

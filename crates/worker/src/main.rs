@@ -22,8 +22,8 @@ use vpsman_common::{
 };
 #[cfg(test)]
 use vpsman_common::{
-    expression_matches, parse_expression, plan_tunnel, ExpressionContext, OspfCostPolicy,
-    TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelPlanInput, VpsMetadata,
+    expression_matches, parse_expression, plan_tunnel, ExpressionContext, TunnelAddressPair,
+    TunnelEndpointSide, TunnelKind, TunnelPlanInput, VpsMetadata,
 };
 use vpsman_object_store::{BackupObjectStore, S3BackupObjectStoreSettings};
 use vpsman_server_core::{
@@ -33,10 +33,12 @@ use vpsman_server_core::{
 };
 
 const DEFAULT_BACKUP_OBJECT_STORE_DIR: &str = "runtime/data/objects/backups";
+const TELEMETRY_HISTORY_RETENTION_INTERVAL_SECS: u64 = 60;
 mod actor_authority;
 mod alert_notifications;
 mod backup_policy_retention;
 mod build_info;
+mod history_retention;
 mod webhook_rules;
 mod worker_leases;
 
@@ -48,6 +50,7 @@ use backup_policy_retention::{
     process_backup_policy_retention_prune, BackupPolicyRetentionPruneConfig,
     BackupPolicyRetentionPruneRun,
 };
+use history_retention::{process_telemetry_history_retention, TelemetryHistoryRetentionRun};
 use webhook_rules::{
     ensure_event_partitions, insert_webhook_event_in_tx, process_webhook_rules,
     WebhookRuleWorkerConfig, WebhookRuleWorkerRun,
@@ -655,6 +658,12 @@ async fn main() -> Result<()> {
             runtime_config.worker_lease_secs,
         )
         .await?;
+        let telemetry_retention = process_telemetry_history_retention_if_leader(
+            &pool,
+            &worker_id,
+            runtime_config.worker_lease_secs,
+        )
+        .await?;
         let artifact_cleanup = process_artifact_cleanup_jobs_if_leader(
             &pool,
             ArtifactObjectStores {
@@ -678,6 +687,8 @@ async fn main() -> Result<()> {
             backup_policy_prune_policies = backup_policy_prune.policies_scanned,
             backup_policy_prune_matched = backup_policy_prune.matched_rows,
             backup_policy_prune_pruned = backup_policy_prune.pruned_rows,
+            telemetry_rollups_pruned = telemetry_retention.rollups_pruned,
+            telemetry_network_rates_pruned = telemetry_retention.network_rates_pruned,
             artifact_cleanup_jobs = artifact_cleanup.jobs,
             artifact_cleanup_deleted = artifact_cleanup.deleted_rows,
             "worker once completed"
@@ -688,6 +699,8 @@ async fn main() -> Result<()> {
     let mut current_tick_secs = args.tick_secs.max(1);
     let mut ticker = time::interval(Duration::from_secs(current_tick_secs));
     let mut last_offline_check = tokio::time::Instant::now();
+    let mut last_telemetry_retention_check = tokio::time::Instant::now()
+        - Duration::from_secs(TELEMETRY_HISTORY_RETENTION_INTERVAL_SECS);
     let mut webhook_listener = match connect_webhook_listener(postgres_url).await {
         Ok(listener) => Some(listener),
         Err(error) => {
@@ -828,6 +841,29 @@ async fn main() -> Result<()> {
                 }
             }
             Err(error) => warn!(%error, "failed to process backup policy retention prune"),
+        }
+        if last_telemetry_retention_check.elapsed()
+            >= Duration::from_secs(TELEMETRY_HISTORY_RETENTION_INTERVAL_SECS)
+        {
+            last_telemetry_retention_check = tokio::time::Instant::now();
+            match process_telemetry_history_retention_if_leader(
+                &pool,
+                &worker_id,
+                runtime_config.worker_lease_secs,
+            )
+            .await
+            {
+                Ok(run) => {
+                    if run.rollups_pruned > 0 || run.network_rates_pruned > 0 {
+                        info!(
+                            telemetry_rollups_pruned = run.rollups_pruned,
+                            telemetry_network_rates_pruned = run.network_rates_pruned,
+                            "processed telemetry history retention"
+                        );
+                    }
+                }
+                Err(error) => warn!(%error, "failed to process telemetry history retention"),
+            }
         }
         match process_artifact_cleanup_jobs_if_leader(
             &pool,
@@ -1068,6 +1104,21 @@ async fn process_backup_policy_retention_prune_if_leader(
         return Ok(BackupPolicyRetentionPruneRun::default());
     }
     process_backup_policy_retention_prune(pool, config).await
+}
+
+async fn process_telemetry_history_retention_if_leader(
+    pool: &PgPool,
+    worker_id: &str,
+    lease_secs: i32,
+) -> Result<TelemetryHistoryRetentionRun> {
+    if !acquire_worker_lease(pool, "telemetry_history_retention", worker_id, lease_secs).await? {
+        debug!(
+            worker_id,
+            "skipped telemetry history retention because another worker holds the lease"
+        );
+        return Ok(TelemetryHistoryRetentionRun::default());
+    }
+    process_telemetry_history_retention(pool).await
 }
 
 #[derive(Default)]
@@ -2997,8 +3048,10 @@ mod schedule_tests {
             runtime_topology: Default::default(),
             left_client_id: "left-a".to_string(),
             right_client_id: "right-b".to_string(),
-            left_underlay: "198.51.100.10".to_string(),
-            right_underlay: "203.0.113.20".to_string(),
+            left_remote_underlay: "198.51.100.10".to_string(),
+            right_remote_underlay: "203.0.113.20".to_string(),
+            left_local_underlay: None,
+            right_local_underlay: None,
             address_pool_cidr: "10.255.0.0/30".to_string(),
             reserved_addresses: Vec::new(),
             ipv4_tunnel: Some(TunnelAddressPair {
@@ -3010,13 +3063,11 @@ mod schedule_tests {
             ipv6_tunnel: None,
             latency_primary_family: Default::default(),
             bandwidth_mbps: 100,
-            latency_ms: 18.0,
-            packet_loss_ratio: 0.0,
-            preference: 1.0,
-            ospf_policy: OspfCostPolicy::default(),
+            ospf: None,
         })
         .unwrap();
         serde_json::to_value(JobCommand::NetworkSpeedTest {
+            plan_id: "11111111-2222-4333-8444-555555555555".to_string(),
             plan: Box::new(plan),
             server_side: TunnelEndpointSide::Left,
             duration_secs: 3,

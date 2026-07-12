@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use sqlx::{types::Json as SqlJson, Row};
+use chrono::{DateTime, SecondsFormat, Utc};
+use sqlx::{postgres::PgRow, types::Json as SqlJson, Row};
 use uuid::Uuid;
-use vpsman_common::{payload_hash, CommandOutput, OutputStream};
+use vpsman_common::{payload_hash, CommandOutput, JobCommand, OutputStream, TunnelPlan};
 
 use crate::{
     model::{NetworkObservationTrendView, NetworkObservationView, TunnelPlanView},
     repository::Repository,
-    unix_now,
 };
 
 impl Repository {
@@ -59,30 +59,73 @@ impl Repository {
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
-                    .map(|row| {
-                        let metadata: SqlJson<serde_json::Value> = row.try_get("metadata")?;
-                        Ok(NetworkObservationView {
-                            id: row.try_get("id")?,
-                            job_id: row.try_get("job_id")?,
-                            client_id: row.try_get("client_id")?,
-                            seq: row.try_get("seq")?,
-                            kind: row.try_get("kind")?,
-                            role: row.try_get("role")?,
-                            plan_id: row.try_get("plan_id")?,
-                            topology_identity_hash: row.try_get("topology_identity_hash")?,
-                            plan_name: row.try_get("plan_name")?,
-                            interface_name: row.try_get("interface_name")?,
-                            peer_client_id: row.try_get("peer_client_id")?,
-                            target: row.try_get("target")?,
-                            healthy: row.try_get("healthy")?,
-                            latency_avg_ms: row.try_get("latency_avg_ms")?,
-                            packet_loss_ratio: row.try_get("packet_loss_ratio")?,
-                            throughput_mbps: row.try_get("throughput_mbps")?,
-                            bytes: row.try_get("bytes")?,
-                            metadata: metadata.0,
-                            observed_at: row.try_get("observed_at")?,
-                        })
+                    .map(|row| network_observation_from_row(row).map_err(Into::into))
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) async fn list_network_observations_since(
+        &self,
+        since_unix: i64,
+        limit: i64,
+    ) -> Result<Vec<NetworkObservationView>> {
+        match self {
+            Self::Memory(memory) => {
+                let mut observations = memory
+                    .network_observations
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|observation| {
+                        observation_timestamp_unix(&observation.observed_at)
+                            .is_some_and(|observed_at| observed_at >= since_unix)
                     })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                observations.sort_by(|left, right| {
+                    right
+                        .observed_at
+                        .cmp(&left.observed_at)
+                        .then_with(|| right.id.cmp(&left.id))
+                });
+                Ok(observations.into_iter().take(limit as usize).collect())
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        id,
+                        job_id,
+                        client_id,
+                        seq,
+                        kind,
+                        role,
+                        plan_id,
+                        topology_identity_hash,
+                        plan_name,
+                        interface_name,
+                        peer_client_id,
+                        target,
+                        healthy,
+                        latency_avg_ms,
+                        packet_loss_ratio,
+                        throughput_mbps,
+                        bytes,
+                        metadata,
+                        observed_at::text AS observed_at
+                    FROM network_observations
+                    WHERE observed_at >= to_timestamp($1)
+                    ORDER BY observed_at DESC, id DESC
+                    LIMIT $2
+                    "#,
+                )
+                .bind(since_unix)
+                .bind(limit)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|row| network_observation_from_row(row).map_err(Into::into))
                     .collect()
             }
         }
@@ -164,6 +207,7 @@ impl Repository {
         }
     }
 
+    #[cfg(test)]
     async fn bind_network_observations_to_current_topology(
         &self,
         observations: &mut [NetworkObservationView],
@@ -180,6 +224,31 @@ impl Repository {
             observation.topology_identity_hash = Some(topology_identity_hash_for_plan(plan));
         }
         Ok(())
+    }
+
+    async fn bind_network_observations_to_job_snapshot(
+        &self,
+        job_id: Uuid,
+        observations: &mut Vec<NetworkObservationView>,
+    ) -> Result<bool> {
+        let Some(context) = self.get_job_completion_context(job_id).await? else {
+            return Ok(false);
+        };
+        let (plan_id, plan) = match &context.operation {
+            JobCommand::NetworkStatus { plan_id, plan, .. }
+            | JobCommand::NetworkProbe { plan_id, plan, .. }
+            | JobCommand::NetworkSpeedTest { plan_id, plan, .. } => {
+                (Uuid::parse_str(plan_id)?, plan.as_ref())
+            }
+            _ => return Ok(false),
+        };
+        observations.retain(|observation| observation_matches_declared_plan(observation, plan));
+        let topology_identity_hash = topology_identity_hash_for_snapshot(plan_id, plan);
+        for observation in observations {
+            observation.plan_id = Some(plan_id);
+            observation.topology_identity_hash = Some(topology_identity_hash.clone());
+        }
+        Ok(true)
     }
 
     #[cfg(test)]
@@ -200,7 +269,7 @@ impl Repository {
         start_seq: i32,
         outputs: &[CommandOutput],
     ) -> Result<()> {
-        let observed_at = unix_now().to_string();
+        let observed_at = Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true);
         let mut observations = outputs
             .iter()
             .enumerate()
@@ -212,8 +281,21 @@ impl Repository {
         if observations.is_empty() {
             return Ok(());
         }
-        self.bind_network_observations_to_current_topology(&mut observations)
+        let bound_to_job = self
+            .bind_network_observations_to_job_snapshot(job_id, &mut observations)
             .await?;
+        #[cfg(test)]
+        if !bound_to_job {
+            self.bind_network_observations_to_current_topology(&mut observations)
+                .await?;
+        }
+        #[cfg(not(test))]
+        if !bound_to_job {
+            return Ok(());
+        }
+        if observations.is_empty() {
+            return Ok(());
+        }
         match self {
             Self::Memory(memory) => {
                 let mut stored = memory.network_observations.write().await;
@@ -300,6 +382,40 @@ impl Repository {
         }
         Ok(())
     }
+}
+
+fn network_observation_from_row(row: PgRow) -> Result<NetworkObservationView, sqlx::Error> {
+    let metadata: SqlJson<serde_json::Value> = row.try_get("metadata")?;
+    Ok(NetworkObservationView {
+        id: row.try_get("id")?,
+        job_id: row.try_get("job_id")?,
+        client_id: row.try_get("client_id")?,
+        seq: row.try_get("seq")?,
+        kind: row.try_get("kind")?,
+        role: row.try_get("role")?,
+        plan_id: row.try_get("plan_id")?,
+        topology_identity_hash: row.try_get("topology_identity_hash")?,
+        plan_name: row.try_get("plan_name")?,
+        interface_name: row.try_get("interface_name")?,
+        peer_client_id: row.try_get("peer_client_id")?,
+        target: row.try_get("target")?,
+        healthy: row.try_get("healthy")?,
+        latency_avg_ms: row.try_get("latency_avg_ms")?,
+        packet_loss_ratio: row.try_get("packet_loss_ratio")?,
+        throughput_mbps: row.try_get("throughput_mbps")?,
+        bytes: row.try_get("bytes")?,
+        metadata: metadata.0,
+        observed_at: row.try_get("observed_at")?,
+    })
+}
+
+fn observation_timestamp_unix(value: &str) -> Option<i64> {
+    value.parse::<i64>().ok().or_else(|| {
+        DateTime::parse_from_rfc3339(value)
+            .or_else(|_| DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f%#z"))
+            .ok()
+            .map(|value| value.with_timezone(&Utc).timestamp())
+    })
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -458,28 +574,40 @@ fn average(sum: f64, count: i64) -> Option<f64> {
 }
 
 pub(crate) fn topology_identity_hash_for_plan(plan: &TunnelPlanView) -> String {
+    topology_identity_hash_for_snapshot(plan.id, &plan.plan)
+}
+
+fn topology_identity_hash_for_snapshot(plan_id: Uuid, plan: &TunnelPlan) -> String {
     let payload = serde_json::to_vec(&serde_json::json!({
-        "plan_id": plan.id.to_string(),
+        "plan_id": plan_id.to_string(),
         "name": &plan.name,
         "kind": format!("{:?}", plan.kind),
         "left_client_id": &plan.left_client_id,
         "right_client_id": &plan.right_client_id,
-        "interface_name": &plan.plan.interface_name,
-        "left_tunnel_address": &plan.plan.left_tunnel_address,
-        "right_tunnel_address": &plan.plan.right_tunnel_address,
-        "ipv4_tunnel": &plan.plan.ipv4_tunnel,
-        "ipv6_tunnel": &plan.plan.ipv6_tunnel,
-        "latency_primary_family": format!("{:?}", plan.plan.latency_primary_family),
+        "interface_name": &plan.interface_name,
+        "left_tunnel_address": &plan.left_tunnel_address,
+        "right_tunnel_address": &plan.right_tunnel_address,
+        "ipv4_tunnel": &plan.ipv4_tunnel,
+        "ipv6_tunnel": &plan.ipv6_tunnel,
+        "latency_primary_family": format!("{:?}", plan.latency_primary_family),
     }))
     .expect("topology identity payload serializes");
     payload_hash(&payload)
 }
 
+#[cfg(test)]
 fn observation_matches_plan(observation: &NetworkObservationView, plan: &TunnelPlanView) -> bool {
+    observation_matches_declared_plan(observation, &plan.plan)
+}
+
+fn observation_matches_declared_plan(
+    observation: &NetworkObservationView,
+    plan: &TunnelPlan,
+) -> bool {
     if observation.plan_name.as_deref() != Some(plan.name.as_str()) {
         return false;
     }
-    if observation.interface_name.as_deref() != Some(plan.plan.interface_name.as_str()) {
+    if observation.interface_name.as_deref() != Some(plan.interface_name.as_str()) {
         return false;
     }
     match (
@@ -524,7 +652,6 @@ fn parse_network_observation(
     let parsed = metadata.get("parsed").unwrap_or(&serde_json::Value::Null);
     let runtime = metadata.get("runtime").unwrap_or(&serde_json::Value::Null);
     let runtime_summary = runtime.get("summary").unwrap_or(&serde_json::Value::Null);
-    let bird2 = runtime.get("bird2").unwrap_or(&serde_json::Value::Null);
     let runtime_health = runtime_summary.get("healthy").and_then(as_bool);
     Some(NetworkObservationView {
         id: Uuid::new_v4(),
@@ -548,15 +675,11 @@ fn parse_network_observation(
         }),
         healthy: if is_network_status {
             runtime_health
-                .or_else(|| bird2.get("healthy").and_then(as_bool))
-                .or_else(|| metadata.get("applied").and_then(as_bool))
         } else {
             parsed
                 .get("healthy")
                 .and_then(as_bool)
                 .or_else(|| metadata.get("success").and_then(as_bool))
-                .or_else(|| metadata.get("applied").and_then(as_bool))
-                .or_else(|| bird2.get("healthy").and_then(as_bool))
         },
         latency_avg_ms: parsed.get("latency_avg_ms").and_then(as_f64),
         packet_loss_ratio: parsed.get("packet_loss_ratio").and_then(as_f64),
@@ -648,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_network_status_runtime_summary_before_managed_file_state() {
+    fn parses_network_status_runtime_summary_and_adapter_evidence() {
         let job_id = Uuid::new_v4();
         let status = CommandOutput {
             job_id,
@@ -658,7 +781,6 @@ mod tests {
                 "plan": "external-edge",
                 "interface": "ovpn42",
                 "peer_client_id": "right",
-                "applied": true,
                 "runtime": {
                     "summary": {
                         "manager": "external_managed_adapter",

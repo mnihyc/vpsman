@@ -15,6 +15,58 @@ use crate::{
 const TELEMETRY_LIST_LIMIT_MAX: i64 = 50_000;
 
 impl Repository {
+    pub(crate) async fn dashboard_telemetry_start_unix(
+        &self,
+        client_ids: &[String],
+    ) -> Result<Option<u64>> {
+        if client_ids.is_empty() {
+            return Ok(None);
+        }
+        match self {
+            Self::Memory(memory) => {
+                let rollup_start = memory
+                    .telemetry_rollups
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|row| client_ids.contains(&row.client_id))
+                    .filter_map(|row| parse_timestamp_unix(&row.bucket_start))
+                    .min();
+                let network_start = memory
+                    .telemetry_network_rates
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|row| client_ids.contains(&row.client_id))
+                    .filter_map(|row| parse_timestamp_unix(&row.bucket_start))
+                    .min();
+                Ok(rollup_start.into_iter().chain(network_start).min())
+            }
+            Self::Postgres(pool) => {
+                let value = sqlx::query_scalar::<_, Option<f64>>(
+                    r#"
+                    SELECT extract(epoch FROM min(first_bucket))::double precision
+                    FROM (
+                        SELECT min(bucket_start) AS first_bucket
+                        FROM telemetry_rollups
+                        WHERE client_id = ANY($1::TEXT[])
+                        UNION ALL
+                        SELECT min(bucket_start) AS first_bucket
+                        FROM telemetry_network_rates
+                        WHERE client_id = ANY($1::TEXT[])
+                    ) AS bounds
+                    "#,
+                )
+                .bind(client_ids)
+                .fetch_one(pool)
+                .await?;
+                Ok(value
+                    .filter(|value| value.is_finite() && *value >= 0.0)
+                    .map(|value| value as u64))
+            }
+        }
+    }
+
     pub(crate) async fn list_dashboard_telemetry_rollups(
         &self,
         limit: i64,
@@ -22,7 +74,11 @@ impl Repository {
         end_unix: Option<u64>,
         bucket_secs: Option<i32>,
         step_secs: i32,
+        client_ids: &[String],
     ) -> Result<Vec<TelemetryRollupView>> {
+        if client_ids.is_empty() {
+            return Ok(Vec::new());
+        }
         let step_secs = normalized_dashboard_step_secs(step_secs);
         match self {
             Self::Memory(memory) => {
@@ -32,7 +88,9 @@ impl Repository {
                     .await
                     .iter()
                     .filter(|rollup| {
-                        bucket_secs.is_none_or(|bucket_secs| rollup.bucket_secs == bucket_secs)
+                        client_ids.contains(&rollup.client_id)
+                            && bucket_secs
+                                .is_none_or(|bucket_secs| rollup.bucket_secs == bucket_secs)
                             && timestamp_in_bounds(&rollup.bucket_start, start_unix, end_unix)
                     })
                     .cloned()
@@ -74,6 +132,7 @@ impl Repository {
                             ($1::INTEGER IS NULL OR bucket_secs = $1)
                             AND ($2::BIGINT IS NULL OR bucket_start >= to_timestamp($2))
                             AND ($3::BIGINT IS NULL OR bucket_start <= to_timestamp($3))
+                            AND client_id = ANY($6::TEXT[])
                     )
                     SELECT
                         client_id,
@@ -115,6 +174,7 @@ impl Repository {
                 .bind(end_unix.map(|value| value as i64))
                 .bind(step_secs)
                 .bind(limit.clamp(1, 50_000))
+                .bind(client_ids)
                 .fetch_all(pool)
                 .await?;
 
@@ -191,6 +251,108 @@ impl Repository {
         }
     }
 
+    pub(crate) async fn list_latest_telemetry_rollups(
+        &self,
+        limit: i64,
+        client_id: Option<&str>,
+        bucket_secs: Option<i32>,
+    ) -> Result<Vec<TelemetryRollupView>> {
+        match self {
+            Self::Memory(memory) => {
+                let mut latest = HashMap::<String, TelemetryRollupView>::new();
+                for rollup in memory
+                    .telemetry_rollups
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|rollup| {
+                        client_id.is_none_or(|client_id| rollup.client_id == client_id)
+                            && bucket_secs
+                                .is_none_or(|bucket_secs| rollup.bucket_secs == bucket_secs)
+                    })
+                {
+                    let replace = latest.get(&rollup.client_id).is_none_or(|current| {
+                        (
+                            parse_timestamp_unix(&current.bucket_start).unwrap_or(0),
+                            parse_timestamp_unix(&current.latest_observed_at).unwrap_or(0),
+                        ) < (
+                            parse_timestamp_unix(&rollup.bucket_start).unwrap_or(0),
+                            parse_timestamp_unix(&rollup.latest_observed_at).unwrap_or(0),
+                        )
+                    });
+                    if replace {
+                        latest.insert(rollup.client_id.clone(), rollup.clone());
+                    }
+                }
+                let mut rows = latest.into_values().collect::<Vec<_>>();
+                rows.sort_by(|left, right| {
+                    parse_timestamp_unix(&right.latest_observed_at)
+                        .unwrap_or(0)
+                        .cmp(&parse_timestamp_unix(&left.latest_observed_at).unwrap_or(0))
+                        .then_with(|| left.client_id.cmp(&right.client_id))
+                });
+                rows.truncate(limit.clamp(1, TELEMETRY_LIST_LIMIT_MAX) as usize);
+                Ok(rows)
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    WITH latest AS (
+                        SELECT DISTINCT ON (client_id)
+                            client_id,
+                            bucket_start,
+                            bucket_secs,
+                            sample_count,
+                            cpu_load_1_avg,
+                            cpu_load_1_max,
+                            memory_total_bytes_max,
+                            memory_available_bytes_avg,
+                            memory_available_bytes_min,
+                            disk_total_bytes_max,
+                            disk_available_bytes_avg,
+                            disk_available_bytes_min,
+                            network_rx_bytes_max,
+                            network_tx_bytes_max,
+                            latest_observed_at,
+                            updated_at
+                        FROM telemetry_rollups
+                        WHERE
+                            ($1::TEXT IS NULL OR client_id = $1)
+                            AND ($2::INTEGER IS NULL OR bucket_secs = $2)
+                        ORDER BY client_id, bucket_start DESC, latest_observed_at DESC, bucket_secs ASC
+                    )
+                    SELECT
+                        client_id,
+                        bucket_start::text AS bucket_start,
+                        bucket_secs,
+                        sample_count,
+                        cpu_load_1_avg,
+                        cpu_load_1_max,
+                        memory_total_bytes_max,
+                        memory_available_bytes_avg,
+                        memory_available_bytes_min,
+                        disk_total_bytes_max,
+                        disk_available_bytes_avg,
+                        disk_available_bytes_min,
+                        network_rx_bytes_max,
+                        network_tx_bytes_max,
+                        latest_observed_at::text AS latest_observed_at,
+                        updated_at::text AS updated_at
+                    FROM latest
+                    ORDER BY latest_observed_at DESC, client_id ASC
+                    LIMIT $3
+                    "#,
+                )
+                .bind(client_id)
+                .bind(bucket_secs)
+                .bind(limit.clamp(1, TELEMETRY_LIST_LIMIT_MAX))
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(telemetry_rollup_from_row).collect()
+            }
+        }
+    }
+
     pub(crate) async fn list_dashboard_telemetry_network_rates(
         &self,
         limit: i64,
@@ -198,7 +360,11 @@ impl Repository {
         end_unix: Option<u64>,
         bucket_secs: Option<i32>,
         step_secs: i32,
+        client_ids: &[String],
     ) -> Result<Vec<TelemetryNetworkRateView>> {
+        if client_ids.is_empty() {
+            return Ok(Vec::new());
+        }
         let step_secs = normalized_dashboard_step_secs(step_secs);
         match self {
             Self::Memory(memory) => {
@@ -208,13 +374,19 @@ impl Repository {
                     .await
                     .iter()
                     .filter(|rate| {
-                        bucket_secs.is_none_or(|bucket_secs| rate.bucket_secs == bucket_secs)
-                            && timestamp_in_bounds(&rate.bucket_start, start_unix, end_unix)
+                        client_ids.contains(&rate.client_id)
+                            && bucket_secs.is_none_or(|bucket_secs| rate.bucket_secs == bucket_secs)
+                            && end_unix.is_none_or(|end| {
+                                parse_timestamp_unix(&rate.bucket_start)
+                                    .is_none_or(|timestamp| timestamp <= end)
+                            })
                     })
                     .cloned()
                     .collect::<Vec<_>>();
+                let rows = select_dashboard_network_rows(rows, start_unix);
                 let mut rows =
                     derive_network_rates(aggregate_memory_network_rates(rows, step_secs));
+                rows.retain(|rate| timestamp_in_bounds(&rate.bucket_start, start_unix, end_unix));
                 rows.sort_by(|left, right| {
                     left.bucket_start
                         .cmp(&right.bucket_start)
@@ -227,7 +399,7 @@ impl Repository {
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
-                    WITH selected AS (
+                    WITH in_range AS (
                         SELECT
                             client_id,
                             interface,
@@ -245,6 +417,33 @@ impl Repository {
                             ($1::INTEGER IS NULL OR bucket_secs = $1)
                             AND ($2::BIGINT IS NULL OR bucket_start >= to_timestamp($2))
                             AND ($3::BIGINT IS NULL OR bucket_start <= to_timestamp($3))
+                            AND client_id = ANY($6::TEXT[])
+                    ),
+                    preceding AS (
+                        SELECT DISTINCT ON (client_id, interface)
+                            client_id,
+                            interface,
+                            to_timestamp(
+                                floor(
+                                    extract(epoch FROM bucket_start) / $4::double precision
+                                ) * $4::double precision
+                            ) AS chart_bucket_start,
+                            sample_count,
+                            rx_bytes_avg,
+                            tx_bytes_avg,
+                            updated_at
+                        FROM telemetry_network_rates
+                        WHERE
+                            $2::BIGINT IS NOT NULL
+                            AND ($1::INTEGER IS NULL OR bucket_secs = $1)
+                            AND bucket_start < to_timestamp($2)
+                            AND client_id = ANY($6::TEXT[])
+                        ORDER BY client_id, interface, bucket_start DESC
+                    ),
+                    selected AS (
+                        SELECT * FROM in_range
+                        UNION ALL
+                        SELECT * FROM preceding
                     ),
                     bucketed AS (
                         SELECT
@@ -311,6 +510,9 @@ impl Repository {
                         END AS tx_bps_avg,
                         updated_at
                     FROM derived
+                    WHERE
+                        ($2::BIGINT IS NULL OR chart_bucket_start >= to_timestamp($2))
+                        AND ($3::BIGINT IS NULL OR chart_bucket_start <= to_timestamp($3))
                     ORDER BY chart_bucket_start ASC, client_id ASC, interface ASC
                     LIMIT $5
                     "#,
@@ -320,6 +522,7 @@ impl Repository {
                 .bind(end_unix.map(|value| value as i64))
                 .bind(step_secs)
                 .bind(limit.clamp(1, 50_000))
+                .bind(client_ids)
                 .fetch_all(pool)
                 .await?;
 
@@ -438,6 +641,139 @@ impl Repository {
         }
     }
 
+    pub(crate) async fn list_latest_telemetry_network_rates(
+        &self,
+        limit: i64,
+        client_id: Option<&str>,
+        interface: Option<&str>,
+        bucket_secs: Option<i32>,
+    ) -> Result<Vec<TelemetryNetworkRateView>> {
+        match self {
+            Self::Memory(memory) => {
+                let rows = memory
+                    .telemetry_network_rates
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|rate| {
+                        client_id.is_none_or(|client_id| rate.client_id == client_id)
+                            && interface.is_none_or(|interface| rate.interface == interface)
+                            && bucket_secs.is_none_or(|bucket_secs| rate.bucket_secs == bucket_secs)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let rows = derive_network_rates(rows);
+                let mut latest = HashMap::<(String, String), TelemetryNetworkRateView>::new();
+                for rate in rows {
+                    let key = (rate.client_id.clone(), rate.interface.clone());
+                    let replace = latest.get(&key).is_none_or(|current| {
+                        (
+                            parse_timestamp_unix(&current.bucket_start).unwrap_or(0),
+                            std::cmp::Reverse(current.bucket_secs),
+                        ) < (
+                            parse_timestamp_unix(&rate.bucket_start).unwrap_or(0),
+                            std::cmp::Reverse(rate.bucket_secs),
+                        )
+                    });
+                    if replace {
+                        latest.insert(key, rate);
+                    }
+                }
+                let mut rows = latest.into_values().collect::<Vec<_>>();
+                rows.sort_by(|left, right| {
+                    parse_timestamp_unix(&right.bucket_start)
+                        .unwrap_or(0)
+                        .cmp(&parse_timestamp_unix(&left.bucket_start).unwrap_or(0))
+                        .then_with(|| left.client_id.cmp(&right.client_id))
+                        .then_with(|| left.interface.cmp(&right.interface))
+                });
+                rows.truncate(limit.clamp(1, TELEMETRY_LIST_LIMIT_MAX) as usize);
+                Ok(rows)
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    WITH latest AS (
+                        SELECT DISTINCT ON (client_id, interface)
+                            client_id,
+                            interface,
+                            bucket_start,
+                            bucket_secs,
+                            sample_count,
+                            rx_bytes_avg,
+                            tx_bytes_avg,
+                            updated_at
+                        FROM telemetry_network_rates
+                        WHERE
+                            ($1::TEXT IS NULL OR client_id = $1)
+                            AND ($2::TEXT IS NULL OR interface = $2)
+                            AND ($3::INTEGER IS NULL OR bucket_secs = $3)
+                        ORDER BY client_id, interface, bucket_start DESC, bucket_secs ASC
+                    )
+                    SELECT
+                        latest.client_id,
+                        latest.interface,
+                        latest.bucket_start::text AS bucket_start,
+                        latest.bucket_secs,
+                        latest.sample_count,
+                        latest.rx_bytes_avg,
+                        latest.tx_bytes_avg,
+                        GREATEST(
+                            latest.rx_bytes_avg - COALESCE(previous.rx_bytes_avg, latest.rx_bytes_avg),
+                            0::bigint
+                        ) AS rx_bytes_delta,
+                        GREATEST(
+                            latest.tx_bytes_avg - COALESCE(previous.tx_bytes_avg, latest.tx_bytes_avg),
+                            0::bigint
+                        ) AS tx_bytes_delta,
+                        CASE
+                            WHEN previous.bucket_start IS NULL THEN 0::double precision
+                            ELSE (
+                                GREATEST(latest.rx_bytes_avg - previous.rx_bytes_avg, 0::bigint) * 8
+                            )::double precision / GREATEST(
+                                extract(epoch FROM (latest.bucket_start - previous.bucket_start)),
+                                1
+                            )::double precision
+                        END AS rx_bps_avg,
+                        CASE
+                            WHEN previous.bucket_start IS NULL THEN 0::double precision
+                            ELSE (
+                                GREATEST(latest.tx_bytes_avg - previous.tx_bytes_avg, 0::bigint) * 8
+                            )::double precision / GREATEST(
+                                extract(epoch FROM (latest.bucket_start - previous.bucket_start)),
+                                1
+                            )::double precision
+                        END AS tx_bps_avg,
+                        latest.updated_at::text AS updated_at
+                    FROM latest
+                    LEFT JOIN LATERAL (
+                        SELECT bucket_start, rx_bytes_avg, tx_bytes_avg
+                        FROM telemetry_network_rates AS candidate
+                        WHERE
+                            candidate.client_id = latest.client_id
+                            AND candidate.interface = latest.interface
+                            AND candidate.bucket_secs = latest.bucket_secs
+                            AND candidate.bucket_start < latest.bucket_start
+                        ORDER BY candidate.bucket_start DESC
+                        LIMIT 1
+                    ) AS previous ON TRUE
+                    ORDER BY latest.bucket_start DESC, latest.client_id ASC, latest.interface ASC
+                    LIMIT $4
+                    "#,
+                )
+                .bind(client_id)
+                .bind(interface)
+                .bind(bucket_secs)
+                .bind(limit.clamp(1, TELEMETRY_LIST_LIMIT_MAX))
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(telemetry_network_rate_from_row)
+                    .collect()
+            }
+        }
+    }
+
     pub(crate) async fn list_telemetry_tunnels(
         &self,
         limit: i64,
@@ -455,7 +791,7 @@ impl Repository {
                     .filter(|plan| plan.deleted_at.is_none())
                     .cloned()
                     .collect::<Vec<_>>();
-                correlate_telemetry_tunnels_with_plans(&mut records, &plans);
+                retain_declared_telemetry_tunnels(&mut records, &plans);
                 records.retain(|record| {
                     client_id.is_none_or(|expected| record.client_id == expected)
                         && interface.is_none_or(|expected| record.interface == expected)
@@ -467,7 +803,7 @@ impl Repository {
                         .then_with(|| left.client_id.cmp(&right.client_id))
                         .then_with(|| left.interface.cmp(&right.interface))
                 });
-                records.truncate(limit.clamp(1, 200) as usize);
+                records.truncate(limit.clamp(1, TELEMETRY_LIST_LIMIT_MAX) as usize);
                 Ok(records)
             }
             Self::Postgres(pool) => {
@@ -480,7 +816,6 @@ impl Repository {
                         kind,
                         ownership_mode,
                         mutation_policy,
-                        promotion_required,
                         source,
                         operstate,
                         mtu,
@@ -507,13 +842,7 @@ impl Repository {
                         latency_avg_ms,
                         packet_loss_ratio,
                         latency_healthy_windows,
-                        latency_missed_windows,
-                        auto_ospf_enabled,
-                        auto_ospf_status,
-                        auto_ospf_reason,
-                        auto_ospf_current_cost,
-                        auto_ospf_recommended_cost,
-                        auto_ospf_updated_unix
+                        latency_missed_windows
                     FROM telemetry_tunnels
                     WHERE ($1::TEXT IS NULL OR client_id = $1)
                       AND ($2::TEXT IS NULL OR interface = $2)
@@ -523,7 +852,7 @@ impl Repository {
                 )
                 .bind(client_id)
                 .bind(interface)
-                .bind(limit.clamp(1, 200))
+                .bind(limit.clamp(1, TELEMETRY_LIST_LIMIT_MAX))
                 .fetch_all(pool)
                 .await?;
 
@@ -533,14 +862,7 @@ impl Repository {
                         let telemetry_plan_id = row
                             .try_get::<Option<String>, _>("telemetry_plan_id")?
                             .and_then(|value| uuid::Uuid::parse_str(&value).ok());
-                        let telemetry_plan_name =
-                            row.try_get::<Option<String>, _>("telemetry_plan_name")?;
-                        let plan_correlation =
-                            if telemetry_plan_id.is_some() || telemetry_plan_name.is_some() {
-                                "telemetry_reported_plan"
-                            } else {
-                                "unmatched"
-                            };
+                        let telemetry_plan_name = row.try_get("telemetry_plan_name")?;
                         Ok(TelemetryTunnelView {
                             client_id: row.try_get("client_id")?,
                             observed_at: row.try_get("observed_at")?,
@@ -548,8 +870,6 @@ impl Repository {
                             kind: row.try_get("kind")?,
                             ownership_mode: row.try_get("ownership_mode")?,
                             mutation_policy: row.try_get("mutation_policy")?,
-                            promotion_required: row.try_get("promotion_required")?,
-                            plan_correlation: plan_correlation.to_string(),
                             plan_id: telemetry_plan_id,
                             plan_name: telemetry_plan_name,
                             plan_runtime_manager: row.try_get("telemetry_plan_runtime_manager")?,
@@ -578,18 +898,11 @@ impl Repository {
                             packet_loss_ratio: row.try_get("packet_loss_ratio")?,
                             latency_healthy_windows: row.try_get("latency_healthy_windows")?,
                             latency_missed_windows: row.try_get("latency_missed_windows")?,
-                            auto_ospf_enabled: row.try_get("auto_ospf_enabled")?,
-                            auto_ospf_status: row.try_get("auto_ospf_status")?,
-                            auto_ospf_reason: row.try_get("auto_ospf_reason")?,
-                            auto_ospf_current_cost: row.try_get("auto_ospf_current_cost")?,
-                            auto_ospf_recommended_cost: row
-                                .try_get("auto_ospf_recommended_cost")?,
-                            auto_ospf_updated_unix: row.try_get("auto_ospf_updated_unix")?,
                         })
                     })
                     .collect::<Result<Vec<_>>>()?;
                 let plans = self.list_tunnel_plans().await?;
-                correlate_telemetry_tunnels_with_plans(&mut records, &plans);
+                retain_declared_telemetry_tunnels(&mut records, &plans);
                 Ok(records)
             }
         }
@@ -602,6 +915,37 @@ struct MemoryNetworkAggregate {
     rx_weighted_total: i128,
     tx_weighted_total: i128,
     updated_at: String,
+}
+
+fn select_dashboard_network_rows(
+    rows: Vec<TelemetryNetworkRateView>,
+    start_unix: Option<u64>,
+) -> Vec<TelemetryNetworkRateView> {
+    let Some(start_unix) = start_unix else {
+        return rows;
+    };
+    let mut selected = Vec::new();
+    let mut preceding = HashMap::<(String, String, i32), TelemetryNetworkRateView>::new();
+    for row in rows {
+        let timestamp = parse_timestamp_unix(&row.bucket_start).unwrap_or(0);
+        if timestamp >= start_unix {
+            selected.push(row);
+            continue;
+        }
+        let key = (
+            row.client_id.clone(),
+            row.interface.clone(),
+            row.bucket_secs,
+        );
+        let replace = preceding.get(&key).is_none_or(|current| {
+            parse_timestamp_unix(&current.bucket_start).unwrap_or(0) < timestamp
+        });
+        if replace {
+            preceding.insert(key, row);
+        }
+    }
+    selected.extend(preceding.into_values());
+    selected
 }
 
 fn aggregate_memory_network_rates(
@@ -699,45 +1043,49 @@ fn round_i128_div(numerator: i128, denominator: i32) -> i64 {
         as i64
 }
 
-fn correlate_telemetry_tunnels_with_plans(
-    records: &mut [TelemetryTunnelView],
+fn retain_declared_telemetry_tunnels(
+    records: &mut Vec<TelemetryTunnelView>,
     plans: &[TunnelPlanView],
 ) {
-    for record in records {
-        record.plan_correlation = if record.promotion_required {
-            "unmatched_import_candidate".to_string()
-        } else if record.plan_id.is_some() || record.plan_name.is_some() {
-            "telemetry_reported_plan".to_string()
-        } else {
-            "unmatched".to_string()
+    records.retain_mut(|record| {
+        let Some(plan) = record
+            .plan_id
+            .and_then(|plan_id| plans.iter().find(|plan| plan.id == plan_id))
+        else {
+            return false;
         };
-        let Some(match_record) = plans.iter().find_map(|plan| {
-            if plan.plan.interface_name != record.interface {
-                return None;
+        if !plan.enabled {
+            return false;
+        }
+        let (side, peer_client_id) = match record.endpoint_side.as_deref() {
+            Some("left")
+                if plan.left_client_id == record.client_id
+                    && record.peer_client_id.as_deref() == Some(plan.right_client_id.as_str()) =>
+            {
+                ("left", plan.right_client_id.as_str())
             }
-            if plan.left_client_id == record.client_id {
-                return Some((plan, "left", plan.right_client_id.as_str()));
+            Some("right")
+                if plan.right_client_id == record.client_id
+                    && record.peer_client_id.as_deref() == Some(plan.left_client_id.as_str()) =>
+            {
+                ("right", plan.left_client_id.as_str())
             }
-            if plan.right_client_id == record.client_id {
-                return Some((plan, "right", plan.left_client_id.as_str()));
-            }
-            None
-        }) else {
-            continue;
+            _ => return false,
         };
-        let (plan, side, peer_client_id) = match_record;
+        if record.interface != plan.plan.interface_name
+            || record.plan_name.as_deref() != Some(plan.name.as_str())
+        {
+            return false;
+        }
         let manager = plan.plan.runtime_control.manager;
         let runtime_manager = runtime_manager_label(manager);
-        record.plan_correlation = "matched_saved_plan".to_string();
-        record.plan_id = Some(plan.id);
-        record.plan_name = Some(plan.name.clone());
         record.plan_runtime_manager = Some(runtime_manager.to_string());
         record.endpoint_side = Some(side.to_string());
         record.peer_client_id = Some(peer_client_id.to_string());
         record.ownership_mode = runtime_manager.to_string();
         record.mutation_policy = matched_plan_mutation_policy(manager).to_string();
-        record.promotion_required = false;
-    }
+        true
+    });
 }
 
 fn parse_adapter_health(

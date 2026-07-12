@@ -1,15 +1,13 @@
-use std::path::PathBuf;
-
 use anyhow::{Context, Result};
 use uuid::Uuid;
 use vpsman_common::{
-    render_tunnel_endpoint_config, JobCommand, TunnelEndpointSide, TunnelPlan,
-    DEFAULT_MAX_JOB_TIMEOUT_SECS, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
-    NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MAX_DURATION_SECS,
-    NETWORK_SPEED_TEST_MAX_MAX_BYTES, NETWORK_SPEED_TEST_MAX_PORT,
-    NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS, NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS,
-    NETWORK_SPEED_TEST_MIN_DURATION_SECS, NETWORK_SPEED_TEST_MIN_MAX_BYTES,
-    NETWORK_SPEED_TEST_MIN_PORT, NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
+    render_tunnel_endpoint_config, JobCommand, TunnelEndpointSide, DEFAULT_MAX_JOB_TIMEOUT_SECS,
+    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS, NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS,
+    NETWORK_SPEED_TEST_MAX_DURATION_SECS, NETWORK_SPEED_TEST_MAX_MAX_BYTES,
+    NETWORK_SPEED_TEST_MAX_PORT, NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS,
+    NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MIN_DURATION_SECS,
+    NETWORK_SPEED_TEST_MIN_MAX_BYTES, NETWORK_SPEED_TEST_MIN_PORT,
+    NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
 };
 
 use crate::{
@@ -19,7 +17,7 @@ use crate::{
 
 #[derive(Debug, PartialEq)]
 pub(crate) struct VtyTunnelSpeedTestRequest {
-    pub(crate) plan_file: PathBuf,
+    pub(crate) plan_id: Uuid,
     pub(crate) server_side: TunnelEndpointSide,
     pub(crate) duration_secs: u8,
     pub(crate) max_bytes: u64,
@@ -32,7 +30,7 @@ pub(crate) struct VtyTunnelSpeedTestRequest {
 }
 
 pub(crate) fn parse_vty_tunnel_speed_test(tokens: &[&str]) -> Result<VtyTunnelSpeedTestRequest> {
-    let mut plan_file = None::<PathBuf>;
+    let mut plan_id = None::<Uuid>;
     let mut server_side = None::<TunnelEndpointSide>;
     let mut duration_secs = 3_u8;
     let mut max_bytes = 16 * 1024 * 1024_u64;
@@ -46,12 +44,15 @@ pub(crate) fn parse_vty_tunnel_speed_test(tokens: &[&str]) -> Result<VtyTunnelSp
     let mut index = 0;
     while index < tokens.len() {
         match tokens[index] {
-            "--plan-file" => {
-                plan_file = Some(PathBuf::from(next_value(tokens, index, "--plan-file")?));
+            "--plan-id" => {
+                plan_id = Some(parse_uuid(
+                    next_value(tokens, index, "--plan-id")?,
+                    "--plan-id",
+                )?);
                 index += 2;
             }
-            value if value.starts_with("--plan-file=") => {
-                plan_file = Some(PathBuf::from(flag_value(value, "--plan-file=")));
+            value if value.starts_with("--plan-id=") => {
+                plan_id = Some(parse_uuid(flag_value(value, "--plan-id="), "--plan-id")?);
                 index += 1;
             }
             "--server-side" => {
@@ -219,7 +220,7 @@ pub(crate) fn parse_vty_tunnel_speed_test(tokens: &[&str]) -> Result<VtyTunnelSp
     );
 
     Ok(VtyTunnelSpeedTestRequest {
-        plan_file: required(plan_file, "--plan-file")?,
+        plan_id: required(plan_id, "--plan-id")?,
         server_side: required(server_side, "--server-side")?,
         duration_secs,
         max_bytes,
@@ -238,16 +239,14 @@ pub(crate) fn submit_vty_tunnel_speed_test(
     privilege_context: &VtyPrivilegeContext,
     request: VtyTunnelSpeedTestRequest,
 ) -> Result<String> {
-    let plan_text = std::fs::read_to_string(&request.plan_file)
-        .with_context(|| format!("failed to read tunnel plan {}", request.plan_file.display()))?;
-    let plan: TunnelPlan =
-        serde_json::from_str(&plan_text).context("tunnel plan JSON is invalid")?;
+    let plan = crate::commands_network::fetch_tunnel_plan(api_url, token, request.plan_id)?;
     let server_endpoint = render_tunnel_endpoint_config(&plan, request.server_side)?;
     let target_clients = vec![
         server_endpoint.local_client_id.clone(),
         server_endpoint.peer_client_id.clone(),
     ];
     let operation = JobCommand::NetworkSpeedTest {
+        plan_id: request.plan_id.to_string(),
         plan: Box::new(plan),
         server_side: request.server_side,
         duration_secs: request.duration_secs,
@@ -313,6 +312,10 @@ fn parse_side(value: &str) -> Result<TunnelEndpointSide> {
     }
 }
 
+fn parse_uuid(value: &str, flag: &str) -> Result<Uuid> {
+    Uuid::parse_str(value).with_context(|| format!("{flag} must be a UUID"))
+}
+
 fn parse_bounded_u8(value: &str, flag: &str, min: u8, max: u8) -> Result<u8> {
     let parsed = value
         .parse::<u8>()
@@ -365,7 +368,7 @@ mod tests {
     #[test]
     fn parses_vty_tunnel_speed_test_with_bounds() {
         let request = parse_vty_tunnel_speed_test(&[
-            "--plan-file=/tmp/plan.json",
+            "--plan-id=00000000-0000-0000-0000-000000000001",
             "--server-side",
             "right",
             "--duration-secs=5",
@@ -383,8 +386,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            request.plan_file,
-            std::path::PathBuf::from("/tmp/plan.json")
+            request.plan_id,
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()
         );
         assert_eq!(request.server_side, TunnelEndpointSide::Right);
         assert_eq!(request.duration_secs, 5);
@@ -400,27 +403,31 @@ mod tests {
     #[test]
     fn rejects_vty_tunnel_speed_test_bad_bounds_or_side() {
         assert!(parse_vty_tunnel_speed_test(&[
-            "--plan-file=/tmp/plan.json",
+            "--plan-id=00000000-0000-0000-0000-000000000001",
             "--server-side=left",
             "--duration-secs=0",
         ])
         .is_err());
         assert!(parse_vty_tunnel_speed_test(&[
-            "--plan-file=/tmp/plan.json",
+            "--plan-id=00000000-0000-0000-0000-000000000001",
             "--server-side=left",
             "--max-bytes=1",
         ])
         .is_err());
         assert!(parse_vty_tunnel_speed_test(&[
-            "--plan-file=/tmp/plan.json",
+            "--plan-id=00000000-0000-0000-0000-000000000001",
             "--server-side=middle",
             "--confirmed",
         ])
         .is_err());
-        assert!(parse_vty_tunnel_speed_test(&["--plan-file=/tmp/plan.json"]).is_err());
-        assert!(parse_vty_tunnel_speed_test(
-            &["--plan-file=/tmp/plan.json", "--server-side=left",]
-        )
+        assert!(
+            parse_vty_tunnel_speed_test(&["--plan-id=00000000-0000-0000-0000-000000000001",])
+                .is_err()
+        );
+        assert!(parse_vty_tunnel_speed_test(&[
+            "--plan-id=00000000-0000-0000-0000-000000000001",
+            "--server-side=left",
+        ])
         .is_err());
     }
 }

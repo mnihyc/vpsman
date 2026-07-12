@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Group, Panel, Separator } from "react-resizable-panels";
@@ -19,12 +19,26 @@ export function ConsoleActionDrawer({
   open: boolean;
   title: string;
 }) {
+  const drawerRef = useRef<HTMLElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      drawerRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
+      closeButtonRef.current?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [open]);
+
   if (!open) {
     return null;
   }
 
   return (
-    <aside className="actionDrawer" aria-label={title}>
+    <aside className="actionDrawer" aria-label={title} ref={drawerRef}>
       <div className="actionDrawerHeader">
         <div>
           <h2>{title}</h2>
@@ -34,6 +48,7 @@ export function ConsoleActionDrawer({
           aria-label={`Close ${title}`}
           className="iconButton"
           onClick={onClose}
+          ref={closeButtonRef}
           title={`Close ${title}`}
           type="button"
         >

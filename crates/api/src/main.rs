@@ -11,6 +11,7 @@ mod error;
 mod fleet_alert_notifications;
 mod fleet_alerts;
 mod gateway_client;
+mod internal_operator;
 mod job_dispatcher;
 mod job_files;
 mod job_request;
@@ -30,6 +31,7 @@ mod model_source_templates;
 mod model_terminal;
 mod model_topology;
 mod model_webhook_rules;
+mod network_ospf_controller;
 mod source_template_builtins;
 pub(crate) mod object_store {
     pub(crate) use vpsman_object_store::*;
@@ -57,6 +59,7 @@ mod repository_jobs;
 mod repository_key_lifecycle;
 mod repository_migrations;
 mod repository_network;
+mod repository_network_adapters;
 mod repository_network_observations;
 mod repository_network_recommendations;
 mod repository_operator_totp;
@@ -646,6 +649,7 @@ async fn main() -> Result<()> {
         .await?;
     backup_upload_sessions::spawn_backup_upload_session_cleanup();
     job_dispatcher::spawn_job_dispatcher(state.clone());
+    network_ospf_controller::spawn_automatic_ospf_controller(state.clone());
     spawn_system_metric_sampler(state.clone());
     let listener = tokio::net::TcpListener::bind(args.bind)
         .await
@@ -803,16 +807,12 @@ mod tests_migrations;
 #[cfg(test)]
 mod tests_network;
 #[cfg(test)]
-mod tests_network_custom_adapter;
-#[cfg(test)]
 mod tests_network_observations;
 #[cfg(test)]
 #[cfg(test)]
 mod tests_network_ospf_updates;
 #[cfg(test)]
 mod tests_network_telemetry;
-#[cfg(test)]
-mod tests_network_telemetry_promotion;
 #[cfg(test)]
 mod tests_object_store;
 #[cfg(test)]

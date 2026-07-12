@@ -69,7 +69,6 @@ const PRIVILEGE_REQUIRED_COMMANDS: &[&str] = &[
     "restore-rollback",
     "migration-link",
     "migration-run",
-    "tunnel-status",
     "tunnel-probe",
     "tunnel-speed-test",
 ];
@@ -86,7 +85,7 @@ const FORCE_UNPRIVILEGED_COMMANDS: &[&str] = &[
 
 const ROOT_SENSITIVE_CAPABILITIES: &[&str] = &[
     "runtime tunnel reconciliation",
-    "Bird2 managed-file reload",
+    "operator-bound routing adapter execution",
     "agent binary activation and self-restart",
     "root-owned backup/restore paths",
     "process cgroup and rlimit enforcement",

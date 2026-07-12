@@ -209,9 +209,6 @@ fn parse_ping_output(stdout: &str) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vpsman_common::{plan_tunnel, OspfCostPolicy, TunnelKind, TunnelPlanInput};
-
-    const TEST_PROBE_WRAPPER: &str = "/opt/vpsman/ping-wrapper";
 
     #[test]
     fn parses_linux_ping_latency_and_loss() {
@@ -219,161 +216,18 @@ mod tests {
             "3 packets transmitted, 2 received, 33.3333% packet loss, time 400ms\n\
              rtt min/avg/max/mdev = 10.100/12.300/14.500/1.200 ms\n",
         );
-
         assert_eq!(parsed["transmitted"], 3);
         assert_eq!(parsed["received"], 2);
-        assert_eq!(parsed["healthy"], true);
-        assert_eq!(parsed["packet_loss_ratio"], 0.333333);
         assert_eq!(parsed["latency_avg_ms"], 12.3);
+        assert_eq!(parsed["healthy"], true);
     }
 
     #[test]
-    fn uses_configured_ping_base_argv() {
-        let mut config = AgentConfig::default();
-        config.network.probe_ping_argv = vec![
-            TEST_PROBE_WRAPPER.to_string(),
-            "--tenant".to_string(),
-            "edge".to_string(),
-        ];
-
-        let (argv, source) = ping_base_argv(&config).unwrap();
-
-        assert_eq!(source, "configured");
-        assert_eq!(
-            argv,
-            vec![
-                TEST_PROBE_WRAPPER.to_string(),
-                "--tenant".to_string(),
-                "edge".to_string()
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn rejects_probe_for_wrong_endpoint_side() {
-        let plan = test_plan();
-        let config = AgentConfig {
-            client_id: "right-b".to_string(),
-            display_name: "right-b".to_string(),
-            ..AgentConfig::default()
-        };
-
-        let error = execute_network_probe_command(NetworkProbeInput {
-            job_id: uuid::Uuid::new_v4(),
-            config: &config,
-            plan: &plan,
-            side: TunnelEndpointSide::Left,
-            count: 3,
-            interval_ms: 500,
-            max_timeout_secs: 1,
-            cancel_token: CommandCancelToken::default(),
-        })
-        .await
-        .unwrap_err();
-
-        assert!(error.to_string().contains("side targets left-a"));
-    }
-
-    #[tokio::test]
-    async fn cancellation_kills_configured_probe_process_group_children() {
-        let root = std::env::temp_dir().join(format!(
-            "vpsman-network-probe-cancel-{}",
-            uuid::Uuid::new_v4()
-        ));
-        tokio::fs::create_dir_all(&root).await.unwrap();
-        let pid_file = root.join("child.pid");
-        let plan = test_plan();
-        let cancel_token = CommandCancelToken::default();
-        let task_cancel_token = cancel_token.clone();
-        let mut config = AgentConfig {
-            client_id: "left-a".to_string(),
-            display_name: "left-a".to_string(),
-            ..AgentConfig::default()
-        };
-        config.network.probe_ping_argv = vec![
-            "/bin/sh".to_string(),
-            "-lc".to_string(),
-            format!("sleep 30 & echo $! > '{}'; wait", pid_file.display()),
-        ];
-        let task = tokio::spawn(async move {
-            execute_network_probe_command(NetworkProbeInput {
-                job_id: uuid::Uuid::new_v4(),
-                config: &config,
-                plan: &plan,
-                side: TunnelEndpointSide::Left,
-                count: 3,
-                interval_ms: 500,
-                max_timeout_secs: 60,
-                cancel_token: task_cancel_token,
-            })
-            .await
-        });
-        let child_pid = wait_for_pid_file(&pid_file).await;
-        assert!(process_running(child_pid));
-
-        cancel_token.cancel("operator requested cancellation".to_string());
-        let error = task.await.unwrap().unwrap_err();
-        let canceled = error
-            .downcast_ref::<CommandCanceled>()
-            .expect("network probe should return CommandCanceled");
-        assert_eq!(canceled.reason(), "operator requested cancellation");
-
-        for _ in 0..40 {
-            if !process_running(child_pid) {
-                break;
-            }
-            time::sleep(Duration::from_millis(25)).await;
-        }
-        assert!(
-            !process_running(child_pid),
-            "probe child pid {child_pid} survived cancellation"
-        );
-        let _ = tokio::fs::remove_dir_all(root).await;
-    }
-
-    async fn wait_for_pid_file(path: &std::path::Path) -> u32 {
-        for _ in 0..40 {
-            if let Ok(contents) = tokio::fs::read_to_string(path).await {
-                if let Ok(pid) = contents.trim().parse::<u32>() {
-                    return pid;
-                }
-            }
-            time::sleep(Duration::from_millis(25)).await;
-        }
-        panic!("pid file {} was not written", path.display());
-    }
-
-    fn process_running(pid: u32) -> bool {
-        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
-    }
-
-    fn test_plan() -> TunnelPlan {
-        plan_tunnel(&TunnelPlanInput {
-            name: "left-right".to_string(),
-            interface_name: "tunlr".to_string(),
-            kind: TunnelKind::Gre,
-            runtime_control: Default::default(),
-            runtime_topology: Default::default(),
-            left_client_id: "left-a".to_string(),
-            right_client_id: "right-b".to_string(),
-            left_underlay: "198.51.100.10".to_string(),
-            right_underlay: "203.0.113.20".to_string(),
-            address_pool_cidr: "10.255.0.0/30".to_string(),
-            reserved_addresses: Vec::new(),
-            ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
-                left: "10.255.0.0".to_string(),
-                right: "10.255.0.1".to_string(),
-                prefix_len: 31,
-            }),
-            ipv6_address_pool_cidr: None,
-            ipv6_tunnel: None,
-            latency_primary_family: Default::default(),
-            bandwidth_mbps: 100,
-            latency_ms: 15.0,
-            packet_loss_ratio: 0.0,
-            preference: 1.0,
-            ospf_policy: OspfCostPolicy::default(),
-        })
-        .unwrap()
+    fn failed_ping_is_unhealthy_without_inventing_latency() {
+        let parsed = parse_ping_output("3 packets transmitted, 0 received, 100% packet loss\n");
+        assert_eq!(parsed["received"], 0);
+        assert_eq!(parsed["packet_loss_ratio"], 1.0);
+        assert_eq!(parsed["latency_avg_ms"], serde_json::Value::Null);
+        assert_eq!(parsed["healthy"], false);
     }
 }

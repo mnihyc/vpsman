@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib-smoke.sh"
@@ -83,6 +83,21 @@ cleanup_live_agent_update_smoke() {
   fi
 }
 trap cleanup_live_agent_update_smoke EXIT
+
+live_agent_update_smoke_err() {
+  local line="$1"
+  local status="$2"
+  local -a logs=(
+    "$SMOKE_TMPDIR"/api-*.log
+    "$gateway_log"
+    "$SMOKE_TMPDIR"/agent-*.log
+    "$https_log"
+  )
+  trap - ERR
+  smoke_dump_logs "live agent-update smoke failed at line $line with status $status" "${logs[@]}"
+  exit "$status"
+}
+trap 'live_agent_update_smoke_err "$LINENO" "$?"' ERR
 
 openssl req -x509 -newkey rsa:2048 -nodes \
   -keyout "$ca_key" \
@@ -203,9 +218,10 @@ start_agent() {
   agent_log="$SMOKE_TMPDIR/agent-$label.log"
   (
     cd "$SMOKE_TMPDIR"
-    VPSMAN_AGENT_CONFIG="$agent_config" \
-    VPSMAN_UPDATE_ROOT_CERT_PEM="$ca_cert" \
-    RUST_LOG="${VPSMAN_SMOKE_AGENT_RUST_LOG:-vpsman_agent=warn}" \
+    exec env \
+      VPSMAN_AGENT_CONFIG="$agent_config" \
+      VPSMAN_UPDATE_ROOT_CERT_PEM="$ca_cert" \
+      RUST_LOG="${VPSMAN_SMOKE_AGENT_RUST_LOG:-vpsman_agent=warn}" \
       "$agent_bin" run
   ) >"$agent_log" 2>&1 &
   agent_pid="$!"
@@ -228,6 +244,47 @@ wait_agent_online() {
     fi
     status="$(api_get "/api/v1/agents" \
       | jq -r --arg id "$client_id" '.[] | select(.id == $id) | .status // empty')"
+    sleep 0.25
+  done
+}
+
+wait_runtime_config_sync_after() {
+  local previous_job_id="${1:-}"
+  local deadline=$((SECONDS + 45))
+  local applied_job_id=""
+  while true; do
+    if [[ -z "$previous_job_id" ]]; then
+      applied_job_id="$(api_get "/api/v1/runtime-config/apply-state" | jq -r \
+        --arg client "$client_id" '
+          first(.[]
+            | select(.client_id == $client)
+            | select((.applied_job_id | type == "string")
+                and (.applied_content_hash | type == "string")
+                and .pending_job_id == null
+                and .pending_status == null)
+            | .applied_job_id) // ""
+        ')"
+    else
+      applied_job_id="$(api_get "/api/v1/jobs?limit=100" | jq -r \
+        --arg previous "$previous_job_id" '
+          first(.[]
+            | select(.command_type == "runtime_config_sync")
+            | select(.id != $previous)
+            | select(.status == "completed")
+            | .id) // ""
+        ')"
+    fi
+    if [[ -n "$applied_job_id" ]]; then
+      printf '%s\n' "$applied_job_id"
+      return
+    fi
+    if (( SECONDS >= deadline )); then
+      api_get "/api/v1/runtime-config/apply-state" >&2 || true
+      api_get "/api/v1/jobs?limit=100" >&2 || true
+      smoke_dump_logs "runtime config did not settle before live agent-update operation" \
+        "$SMOKE_TMPDIR"/api-*.log "$gateway_log" "$SMOKE_TMPDIR"/agent-*.log
+      exit 1
+    fi
     sleep 0.25
   done
 }
@@ -271,12 +328,22 @@ assert_single_target_completed() {
   local job_json targets_json
   job_json="$(wait_job_terminal "$job_id")"
   targets_json="$(api_get "/api/v1/jobs/$job_id/targets")"
-  jq -e --arg command_type "$command_type" '
+  if ! jq -e --arg command_type "$command_type" '
     .status == "completed" and .command_type == $command_type and .target_count == 1
-  ' <<<"$job_json" >/dev/null
-  jq -e --arg client "$client_id" '
+  ' <<<"$job_json" >/dev/null; then
+    echo "expected $command_type job $job_id to complete" >&2
+    printf '%s\n' "$job_json" >&2
+    printf '%s\n' "$targets_json" >&2
+    return 1
+  fi
+  if ! jq -e --arg client "$client_id" '
     length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
-  ' <<<"$targets_json" >/dev/null
+  ' <<<"$targets_json" >/dev/null; then
+    echo "expected $command_type job $job_id target $client_id to complete" >&2
+    printf '%s\n' "$job_json" >&2
+    printf '%s\n' "$targets_json" >&2
+    return 1
+  fi
 }
 
 wait_update_heartbeat_observed() {
@@ -367,6 +434,7 @@ smoke_create_direct_agent_config \
 
 start_agent "initial"
 wait_agent_online
+initial_runtime_config_job_id="$(wait_runtime_config_sync_after)"
 
 reject_job_id="$(cat /proc/sys/kernel/random/uuid)"
 reject_body="$(jq -nc \
@@ -477,6 +545,7 @@ sleep 1
 start_agent "activated"
 wait_agent_online
 wait_update_heartbeat_observed "$activate_job_id"
+wait_runtime_config_sync_after "$initial_runtime_config_job_id" >/dev/null
 
 rollback_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
 VPSMAN_API_TOKEN="$access_token" \

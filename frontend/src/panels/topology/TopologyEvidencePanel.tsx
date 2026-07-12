@@ -31,6 +31,7 @@ import {
   formatFullTime,
   formatTime,
   shortId,
+  timestampMillis,
 } from "../../utils";
 import { readableTelemetryToken } from "../../topologyRuntime";
 
@@ -86,8 +87,12 @@ export function TopologyEvidencePanel({
   const [outputsByJob, setOutputsByJob] = useState<
     Record<string, JobOutputRecord[]>
   >({});
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [refreshNotice, setRefreshNotice] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [outputError, setOutputError] = useState<string | null>(null);
+  const [outputNotice, setOutputNotice] = useState<string | null>(null);
+  const [outputLoading, setOutputLoading] = useState(false);
   const throughputBaselines = useMemo(
     () => buildThroughputBaselineLookup(ospfRecommendations, ospfUpdatePlans),
     [ospfRecommendations, ospfUpdatePlans],
@@ -116,7 +121,6 @@ export function TopologyEvidencePanel({
     .map((trend) => buildTrendRow(trend, clientLabel, throughputBaselines));
   const hasUnloadedOutput = rows.some((row) => row.metric === "Output not loaded");
   const hasTrendComparison = trendRows.length > 0;
-  const hasPendingApproval = ospfUpdateRows.length > 0;
   const freshness = buildNetworkEvidenceFreshness([
     ...networkJobs.map((job) => job.created_at),
     ...observations.map((observation) => observation.observed_at),
@@ -178,33 +182,53 @@ export function TopologyEvidencePanel({
             ? "No network jobs"
             : `${networkJobs.length} recent network jobs`;
   const evidenceFeedbackMessage =
-    error ?? (loading ? "Loading network outputs" : null);
+    refreshError ?? (refreshing ? "Refreshing network evidence" : refreshNotice);
+  const outputFeedbackMessage =
+    outputError ?? (outputLoading ? "Loading retained command output" : outputNotice);
 
   async function refreshEvidence() {
-    setLoading(true);
-    setError(null);
+    setRefreshing(true);
+    setRefreshError(null);
+    setRefreshNotice(null);
     try {
-      const outputEntries = await Promise.all(
-        networkJobs.map(
-          async (job) => [job.id, await onLoadOutputs(job.id)] as const,
-        ),
-      );
       await Promise.all([
         onLoadObservations(),
         onLoadTrends(),
         onLoadOspfRecommendations(),
         onLoadOspfUpdatePlans(),
       ]);
-      setOutputsByJob(Object.fromEntries(outputEntries));
+      setRefreshNotice("Network evidence refreshed");
     } catch (loadError) {
-      setOutputsByJob({});
-      setError(
+      setRefreshError(
         loadError instanceof Error
           ? loadError.message
           : "Network evidence unavailable",
       );
     } finally {
-      setLoading(false);
+      setRefreshing(false);
+    }
+  }
+
+  async function loadCommandOutputs() {
+    setOutputLoading(true);
+    setOutputError(null);
+    setOutputNotice(null);
+    try {
+      const outputEntries = await Promise.all(
+        networkJobs.map(
+          async (job) => [job.id, await onLoadOutputs(job.id)] as const,
+        ),
+      );
+      setOutputsByJob(Object.fromEntries(outputEntries));
+      setOutputNotice(`Loaded retained output for ${outputEntries.length} network job${outputEntries.length === 1 ? "" : "s"}`);
+    } catch (loadError) {
+      setOutputError(
+        loadError instanceof Error
+          ? loadError.message
+          : "Retained command output unavailable",
+      );
+    } finally {
+      setOutputLoading(false);
     }
   }
 
@@ -225,7 +249,7 @@ export function TopologyEvidencePanel({
         <div className="headerActionStack">
           <button
             className="secondaryAction"
-            disabled={loading}
+            disabled={refreshing}
             onClick={refreshEvidence}
             type="button"
           >
@@ -234,7 +258,7 @@ export function TopologyEvidencePanel({
           </button>
           <ActionFeedback
             message={evidenceFeedbackMessage}
-            tone={error ? "danger" : "progress"}
+            tone={refreshError ? "danger" : refreshing ? "progress" : "success"}
           />
         </div>
       </div>
@@ -244,7 +268,7 @@ export function TopologyEvidencePanel({
           aria-label="Network evidence freshness"
           title={freshness.latestTimestamp ? `Latest evidence: ${formatFullTime(freshness.latestTimestamp)}` : undefined}
         >
-          <strong>Evidence set is {freshness.ageLabel} old.</strong>
+          <strong>Evidence set was observed {freshness.observedLabel}.</strong>
           <span>{freshness.detail}</span>
         </div>
       )}
@@ -298,7 +322,7 @@ export function TopologyEvidencePanel({
           className="secondaryAction compactAction"
           disabled={!onOpenTunnelPlans}
           onClick={onOpenTunnelPlans}
-          title="Open tunnel plans for lifecycle, allocation, promotion, and export workflows"
+          title="Open tunnel plans for declaration, lifecycle, allocation, and export workflows"
           type="button"
         >
           <GitBranch size={16} />
@@ -306,9 +330,9 @@ export function TopologyEvidencePanel({
         </button>
         <button
           className="secondaryAction compactAction"
-          disabled={loading}
-          onClick={refreshEvidence}
-          title="Load retained command output and refresh network evidence"
+          disabled={outputLoading || networkJobs.length === 0}
+          onClick={loadCommandOutputs}
+          title={networkJobs.length === 0 ? "No network jobs have retained output" : "Load retained command output for the recent network jobs"}
           type="button"
         >
           <RefreshCcw size={16} />
@@ -318,7 +342,7 @@ export function TopologyEvidencePanel({
           className="secondaryAction compactAction"
           disabled={!hasTrendComparison}
           onClick={scrollToTrendComparison}
-          title="Jump to trend ranges that compare recent observations"
+          title={hasTrendComparison ? "Jump to trend ranges that compare recent observations" : "No comparable trend ranges are available"}
           type="button"
         >
           <GitCompareArrows size={16} />
@@ -326,15 +350,20 @@ export function TopologyEvidencePanel({
         </button>
         <button
           className="secondaryAction compactAction"
-          disabled={!hasPendingApproval || !onOpenOspfApprovals}
+          disabled={!onOpenOspfApprovals}
           onClick={onOpenOspfApprovals}
-          title="Open OSPF cost update approvals"
+          title="Open optional OSPF routing-cost control"
           type="button"
         >
           <ShieldCheck size={16} />
           <span>Open OSPF</span>
         </button>
       </div>
+      <ActionFeedback
+        className="localActionFeedback"
+        message={outputFeedbackMessage}
+        tone={outputError ? "danger" : outputLoading ? "progress" : "success"}
+      />
       {(ospfUpdateRows.length > 0 || ospfRows.length > 0) && (
         <EvidenceGroup
           detail="Cost proposals are separated from measurements so confidence never substitutes for link health."
@@ -735,9 +764,9 @@ type ThroughputBaselineIdentity = {
 };
 
 type NetworkEvidenceFreshness = {
-  ageLabel: string;
   detail: string;
   latestTimestamp: string | null;
+  observedLabel: string;
   stale: boolean;
 };
 
@@ -841,9 +870,9 @@ function buildOspfUpdatePlanRow(
   const proposalStatus =
     plan.status === "noop"
       ? "healthy"
-      : plan.status === "review_degraded"
+      : plan.status === "review_degraded" || plan.status === "adapter_unavailable"
         ? "degraded"
-        : plan.status === "needs_observation"
+        : plan.status === "needs_adapter_status" || plan.status === "automatic_waiting_evidence"
           ? "unknown"
           : "recorded";
   const bandwidthHealth = bandwidthEvidenceHealth({
@@ -856,14 +885,14 @@ function buildOspfUpdatePlanRow(
       ? "degraded"
       : proposalStatus;
   const delta =
-    plan.cost_delta === 0
+    plan.maximum_cost_delta === 0
       ? "unchanged"
-      : plan.cost_delta > 0
-        ? `+${plan.cost_delta}`
-        : String(plan.cost_delta);
+      : `max ${plan.maximum_cost_delta}`;
   const privilegeState = plan.privilege_required
     ? "privilege required"
-    : "read-only";
+    : plan.control_mode === "automatic"
+      ? "server controlled"
+      : "read-only";
   return {
     id: plan.recommendation_id,
     planName: plan.plan_name,
@@ -872,7 +901,7 @@ function buildOspfUpdatePlanRow(
     healthDetail: bandwidthHealth.detail,
     signalLabel: bandwidthHealth.label,
     signalStatus,
-    metric: `${plan.current_ospf_cost} -> ${plan.recommended_ospf_cost}`,
+    metric: `${plan.left_current_ospf_cost ?? "?"} / ${plan.right_current_ospf_cost ?? "?"} -> ${plan.recommended_ospf_cost}`,
     metricDetail: `${delta}; ${bandwidthHealth.summary}`,
     target: plan.requires_approval ? "approval required" : "no action",
     targetDetail: plan.requires_approval
@@ -1117,15 +1146,16 @@ function buildNetworkEvidenceFreshness(
   if (!latestTimestamp) {
     return null;
   }
-  const latestMs = Date.parse(latestTimestamp);
+  const latestMs = timestampMillis(latestTimestamp);
   const ageMs = Date.now() - latestMs;
   const stale = Number.isFinite(ageMs) && ageMs > NETWORK_EVIDENCE_STALE_AFTER_MS;
+  const observedLabel = formatCompactTime(latestTimestamp);
   return {
-    ageLabel: evidenceAgeLabel(ageMs),
     detail: stale
-      ? `Latest retained evidence is ${formatCompactTime(latestTimestamp)}; refresh or run tests before applying network changes.`
-      : `Latest retained evidence is ${formatCompactTime(latestTimestamp)}.`,
+      ? `Latest retained evidence was observed ${observedLabel}; refresh or run tests before applying network changes.`
+      : `Latest retained evidence was observed ${observedLabel}.`,
     latestTimestamp,
+    observedLabel,
     stale,
   };
 }
@@ -1136,7 +1166,7 @@ function latestTimestampValue(timestamps: Array<string | null | undefined>): str
     if (!timestamp) {
       continue;
     }
-    const ms = Date.parse(timestamp);
+    const ms = timestampMillis(timestamp);
     if (!Number.isFinite(ms)) {
       continue;
     }
@@ -1151,23 +1181,8 @@ function isEvidenceTimestampStale(timestamp: string | null | undefined): boolean
   if (!timestamp) {
     return false;
   }
-  const ms = Date.parse(timestamp);
+  const ms = timestampMillis(timestamp);
   return Number.isFinite(ms) && Date.now() - ms > NETWORK_EVIDENCE_STALE_AFTER_MS;
-}
-
-function evidenceAgeLabel(ageMs: number): string {
-  if (!Number.isFinite(ageMs) || ageMs < 0) {
-    return "unknown age";
-  }
-  const dayMs = 24 * 60 * 60 * 1000;
-  const days = Math.max(1, Math.round(ageMs / dayMs));
-  if (days >= 21) {
-    return `${Math.round(days / 7)}w`;
-  }
-  if (days >= 7) {
-    return `${Math.floor(days / 7)}w ${days % 7}d`;
-  }
-  return `${days}d`;
 }
 
 function buildTrendRow(
@@ -1322,7 +1337,6 @@ function buildObservationRow(
   const manager = asString(summary.manager);
   const runtimeDetail = runtimeSummaryDetail(
     reasons,
-    asNumber(summary.external_import_candidate_count),
     `${manager ?? "runtime"}; ${observation.interface_name ?? "interface unavailable"}`,
   );
   return {
@@ -1444,7 +1458,6 @@ function buildEvidenceRow(
   if (isNetworkStatus(parsedStatus)) {
     const runtime = asRecord(parsedStatus.runtime);
     const iface = asRecord(runtime.interface);
-    const bird2 = asRecord(runtime.bird2);
     const summary = asRecord(runtime.summary);
     const runtimeStatus = asString(summary.status);
     const runtimeHealthy = asOptionalBoolean(summary.healthy);
@@ -1456,8 +1469,7 @@ function buildEvidenceRow(
     const statusHealthy = runtimeHealthy ?? applied;
     const runtimeDetail = runtimeSummaryDetail(
       reasons,
-      asNumber(summary.external_import_candidate_count),
-      `interface ${interfaceState}; bird2 ${healthLabel(bird2.healthy)}`,
+      `interface ${interfaceState}; adapter ${humanStatus(asString(summary.adapter_state) ?? "unknown")}`,
     );
     return {
       job,
@@ -1466,7 +1478,7 @@ function buildEvidenceRow(
       signalStatus: statusHealthy ? "healthy" : "drift",
       metric:
         applied && statusHealthy
-          ? "Managed blocks match"
+          ? "Declared state matches"
           : runtimeStatus
             ? `Runtime ${humanStatus(runtimeStatus).toLowerCase()}`
             : "Needs review",
@@ -1676,15 +1688,9 @@ function humanStatus(value: string): string {
 
 function runtimeSummaryDetail(
   reasons: string[],
-  importCandidateCount: number | null,
   fallback: string,
 ): string {
   const parts = reasons.map(humanStatus);
-  if (importCandidateCount !== null && importCandidateCount > 0) {
-    parts.push(
-      `${importCandidateCount} import candidate${importCandidateCount === 1 ? "" : "s"}`,
-    );
-  }
   return parts.length > 0 ? parts.join(", ") : fallback;
 }
 

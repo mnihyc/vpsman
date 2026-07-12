@@ -152,12 +152,11 @@ pub fn validate_network_command_targets(
     resolved_targets: &[String],
 ) -> Result<(), NetworkTargetValidationError> {
     let expected = match command {
-        JobCommand::NetworkStatus { plan, side } | JobCommand::NetworkProbe { plan, side, .. } => {
-            match side {
-                TunnelEndpointSide::Left => &plan.left_client_id,
-                TunnelEndpointSide::Right => &plan.right_client_id,
-            }
-        }
+        JobCommand::NetworkStatus { plan, side, .. }
+        | JobCommand::NetworkProbe { plan, side, .. } => match side {
+            TunnelEndpointSide::Left => &plan.left_client_id,
+            TunnelEndpointSide::Right => &plan.right_client_id,
+        },
         JobCommand::NetworkSpeedTest { plan, .. } => {
             let mut expected = vec![plan.left_client_id.clone(), plan.right_client_id.clone()];
             expected.sort();

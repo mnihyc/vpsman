@@ -80,7 +80,13 @@ import type {
   PrivilegeAssertion,
   UpsertRuntimeConfigPatchGeneratorRequest,
 } from "../types";
-import { formatTime, formatVpsName, runPanelAction, shortId } from "../utils";
+import {
+  formatTime,
+  formatVpsName,
+  runPanelAction,
+  shortId,
+  timestampMillis,
+} from "../utils";
 
 const CONFIG_BULK_SELECTOR_STORAGE_KEY =
   "vpsman.config.bulk.selectorExpression";
@@ -1018,11 +1024,8 @@ function runtimeConfigApplyCurrentStatus(
     };
   }
   if (state.applied_content_hash) {
-    const version = state.applied_version
-      ? `v${state.applied_version}`
-      : "applied";
     return {
-      detail: `${version}; hash ${shortId(state.applied_content_hash)}`,
+      detail: `Hash ${shortId(state.applied_content_hash)}`,
       kind: "current",
       label: "Current",
       tone: "ok",
@@ -1042,7 +1045,7 @@ function runtimeConfigQueuedStateIsStale(
   state: RuntimeConfigApplyStateRecord,
 ): boolean {
   const stateTime = configApplyStateTime(state);
-  const updatedAt = stateTime ? Date.parse(stateTime) : NaN;
+  const updatedAt = stateTime ? timestampMillis(stateTime) : NaN;
   if (!Number.isFinite(updatedAt)) {
     return true;
   }
@@ -1628,8 +1631,6 @@ function sourceStatusLabel(status: SourceStatusRecord["status"]): string {
       return "Limits unavailable";
     case "selected_no_samples":
       return "Samples missing";
-    case "needs_promotion":
-      return "Promotion needed";
     case "degraded":
       return "Degraded";
     default:
@@ -5086,22 +5087,20 @@ function runtimeConfigApplyStateSummary(
     const job = state.pending_job_id
       ? ` job ${shortId(state.pending_job_id)}`
       : "";
-    const version = state.pending_version ? ` v${state.pending_version}` : "";
     if (runtimeConfigQueuedStateIsStale(state)) {
       const queuedAt = configApplyStateTime(state);
       return queuedAt
-        ? `Runtime sync stale${version}${job}; queued since ${formatTime(queuedAt)}`
-        : `Runtime sync stale${version}${job}; queued timestamp missing`;
+        ? `Runtime sync stale${job}; queued since ${formatTime(queuedAt)}`
+        : `Runtime sync stale${job}; queued timestamp missing`;
     }
-    return `Runtime sync pending${version}${job}`;
+    return `Runtime sync pending${job}`;
   }
   if (state.applied_content_hash) {
-    const version = state.applied_version ? ` v${state.applied_version}` : "";
     const job = state.applied_job_id
       ? ` job ${shortId(state.applied_job_id)}`
       : "";
     const when = state.applied_at ? ` ${formatTime(state.applied_at)}` : "";
-    return `Runtime config applied${version}${job}${when}; hash ${shortId(state.applied_content_hash)}`;
+    return `Runtime config applied${job}${when}; hash ${shortId(state.applied_content_hash)}`;
   }
   return "No server-applied runtime sync recorded";
 }

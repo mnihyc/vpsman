@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
 import {
   openConsoleSubpage,
+  unlockPrivilegeFromTop,
   waitForConsoleShell,
 } from "./support/consoleNavigation";
 import { viewLabel } from "../src/constants";
@@ -23,10 +24,21 @@ interface ScreenshotEntry {
     | "alert-policy-editor"
     | "config-bulk-patch-preview"
     | "config-per-vps-loaded"
+    | "fleet-delete-success"
+    | "fleet-metrics-advanced"
+    | "fleet-metrics-chart"
+    | "network-latency-chart"
+    | "network-throughput-chart"
+    | "source-template-adapter-detail"
+    | "tunnel-plan-assessment"
     | "tunnel-plan-create"
-    | "tunnel-plan-promotion"
+    | "tunnel-plan-delete-review"
+    | "tunnel-plan-disable-review"
+    | "tunnel-plan-ospf"
     | "vps-rules-preview"
     | "webhook-rule-editor";
+  desktopRequiredText?: string[];
+  mobileRequiredText?: string[];
   requiredText?: string[];
   heading: string;
   id: string;
@@ -163,7 +175,7 @@ const allViews: ScreenshotEntry[] = [
     id: "10-remote-operations-files",
     requiredText: [
       "File browser",
-      "Select a VPS and file to begin.",
+      "Unlock to browse this VPS.",
       "Download folder as archive",
       "Advanced file options",
     ],
@@ -244,6 +256,19 @@ const allViews: ScreenshotEntry[] = [
   },
   {
     view: "Automation",
+    subpage: "Source templates",
+    heading: "Source templates",
+    id: "21b-automation-tunnel-adapter-detail",
+    prepare: "source-template-adapter-detail",
+    requiredText: [
+      "shared:tunnel-lifecycle-v1",
+      "Bound from tunnel plans",
+      "never ambient VPS configuration",
+      "Open tunnel plans",
+    ],
+  },
+  {
+    view: "Automation",
     subpage: "Agent updates",
     heading: "Agent updates",
     id: "22-automation-agent-updates",
@@ -254,7 +279,7 @@ const allViews: ScreenshotEntry[] = [
     subpage: "Overview",
     heading: "Network overview",
     id: "23-network-overview",
-    requiredText: ["Create tunnel", "Latest evidence", "stale"],
+    requiredText: ["Create plan", "Latest evidence", "stale"],
   },
   {
     view: "Network",
@@ -268,13 +293,26 @@ const allViews: ScreenshotEntry[] = [
     subpage: "Tunnel plans",
     heading: "Tunnel plans",
     id: "25-network-tunnel-plans",
+    requiredText: ["Create plan", "sfo-fra-gre", "external-openvpn"],
+    desktopRequiredText: [
+      "Runtime owner",
+      "Agent iproute2",
+      "External observed",
+      "Tunnel only",
+    ],
+  },
+  {
+    view: "Network",
+    subpage: "Tunnel plans",
+    heading: "Tunnel plans",
+    id: "25f-network-tunnel-connectivity-assessment",
+    prepare: "tunnel-plan-assessment",
     requiredText: [
-      "Create tunnel plan",
-      "Desired state",
-      "Runtime state",
-      "100 Mbps target",
-      "Promotion workflow",
-      "Generated config",
+      "Operator connectivity assessment",
+      "Display-only annotation",
+      "Left outer path",
+      "Right outer path",
+      "Peer probe failed; not proof of disconnect",
     ],
   },
   {
@@ -283,15 +321,50 @@ const allViews: ScreenshotEntry[] = [
     heading: "Tunnel plans",
     id: "25b-network-tunnel-plans-create",
     prepare: "tunnel-plan-create",
-    requiredText: ["Create tunnel plan", "Plan identity", "Endpoints"],
+    requiredText: [
+      "Create tunnel plan",
+      "Plan and endpoints",
+      "Runtime ownership",
+      "Endpoint addresses",
+      "OSPF cost control",
+    ],
   },
   {
     view: "Network",
     subpage: "Tunnel plans",
     heading: "Tunnel plans",
-    id: "25c-network-tunnel-plans-promotion",
-    prepare: "tunnel-plan-promotion",
-    requiredText: ["Tunnel promotion", "Promotion diff workflow"],
+    id: "25c-network-tunnel-plans-ospf",
+    prepare: "tunnel-plan-ospf",
+    requiredText: [
+      "Enable OSPF adapter workflow",
+      "Left routing adapter",
+      "Control mode",
+      "live preview",
+    ],
+  },
+  {
+    view: "Network",
+    subpage: "Tunnel plans",
+    heading: "Tunnel plans",
+    id: "25d-network-tunnel-plan-disable-review",
+    prepare: "tunnel-plan-disable-review",
+    requiredText: [
+      "Confirm tunnel plan disable",
+      "OSPF control stops; existing external daemon costs are not reverted",
+      "Stop control; keep current external values",
+    ],
+  },
+  {
+    view: "Network",
+    subpage: "Tunnel plans",
+    heading: "Tunnel plans",
+    id: "25e-network-tunnel-plan-delete-review",
+    prepare: "tunnel-plan-delete-review",
+    requiredText: [
+      "Confirm tunnel plan deletion",
+      "Already disabled and omitted from desired config",
+      "audit history remains",
+    ],
   },
   {
     view: "Network",
@@ -460,19 +533,76 @@ const allViews: ScreenshotEntry[] = [
   },
   {
     view: "Observability",
+    subpage: "Fleet metrics",
+    heading: "Fleet metrics",
+    id: "40b-observability-fleet-metrics-advanced",
+    prepare: "fleet-metrics-advanced",
+    requiredText: [
+      "Advanced filters",
+      "Scope value",
+      "Points",
+      "Start",
+      "End",
+      "Reset filters",
+    ],
+  },
+  {
+    view: "Observability",
+    subpage: "Fleet metrics",
+    heading: "Fleet metrics",
+    id: "40c-observability-fleet-metrics-chart",
+    prepare: "fleet-metrics-chart",
+    requiredText: [
+      "CPU load trend",
+      "Metric definition:",
+      "Linux 1-minute load",
+      "Data coverage:",
+      "Top VPS",
+    ],
+  },
+  {
+    view: "Observability",
     subpage: "Network metrics",
     heading: "Network metrics",
     id: "41-observability-network-metrics",
     requiredText: [
       "Stale network evidence",
-      "Latency, loss, and speed",
-      "Chart samples",
+      "Latency, loss, and throughput",
+      "Observations",
+      "OSPF review",
       "Time filter: retained evidence",
       "Tunnel grouping",
       "agent-fra-02 -> agent-sfo-01",
       "Endpoint comparison",
-      "Saved plan match",
+      "only declared plans",
       "Network review signals",
+    ],
+  },
+  {
+    view: "Observability",
+    subpage: "Network metrics",
+    heading: "Network metrics",
+    id: "41b-observability-network-latency-chart",
+    prepare: "network-latency-chart",
+    requiredText: [
+      "Latency",
+      "Metric definition:",
+      "mean RTT",
+      "Data coverage:",
+      "sfo-fra-gre",
+    ],
+  },
+  {
+    view: "Observability",
+    subpage: "Network metrics",
+    heading: "Network metrics",
+    id: "41c-observability-network-throughput-chart",
+    prepare: "network-throughput-chart",
+    requiredText: [
+      "Throughput",
+      "average TCP throughput",
+      "Average throughput 10.1 Mbps",
+      "Data coverage:",
     ],
   },
   {
@@ -711,6 +841,16 @@ const allViews: ScreenshotEntry[] = [
     heading: "System preferences",
     id: "58-system-preferences",
   },
+  {
+    view: "Fleet",
+    subpage: "Instances",
+    heading: "Fleet instances",
+    id: "59-fleet-delete-tunnel-cleanup",
+    prepare: "fleet-delete-success",
+    requiredText: [
+      "VPS deleted; tunnel cleanup queued for 1 surviving peer.",
+    ],
+  },
 ];
 
 test("structured screenshot manifest uses release IA top-level routes", () => {
@@ -829,30 +969,153 @@ async function navigateAndScreenshot(
     ).toBeVisible();
   }
 
+  if (entry.prepare === "fleet-delete-success") {
+    await unlockPrivilegeFromTop(page);
+    await openConsoleSubpage(page, "Fleet", "Instances");
+    const grid = page.getByLabel("VPS instance records data grid");
+    await grid
+      .getByLabel("Select VPS instance records row agent-nyc-03")
+      .check();
+    await grid
+      .locator(".gridToolbarActions")
+      .getByRole("button", { name: "Actions", exact: true })
+      .click();
+    await page
+      .getByRole("menuitem", { name: "Review VPS deletion" })
+      .click();
+    const prompt = page.locator(".fleetInstancesPanel > .confirmationPrompt");
+    await expect(prompt).toBeVisible({ timeout: 5_000 });
+    await prompt.getByRole("button", { name: "Delete VPS" }).click();
+    await expect(
+      page.getByText(
+        "VPS deleted; tunnel cleanup queued for 1 surviving peer.",
+      ),
+    ).toBeVisible({ timeout: 5_000 });
+  }
+  if (entry.prepare === "fleet-metrics-advanced") {
+    const filters = page.locator(".fleetMetricsAdvancedFilters");
+    await filters.locator("summary").click();
+    await filters.getByLabel("Fleet metrics scope kind").selectOption("provider");
+    await filters.getByLabel("Fleet metrics scope value").selectOption({ index: 1 });
+  }
+
+  if (entry.prepare === "fleet-metrics-chart") {
+    const filters = page.locator(".fleetMetricsAdvancedFilters");
+    if (!(await filters.getByRole("button", { name: "Reset filters" }).isVisible())) {
+      await filters.locator("summary").click();
+    }
+    const reset = filters.getByRole("button", { name: "Reset filters" });
+    if (await reset.isEnabled()) {
+      await reset.click();
+    }
+    if ((await filters.getAttribute("open")) !== null) {
+      await filters.locator("summary").click();
+    }
+    const chartSection = page.locator(".observabilityMetricsPanel .observabilityChartSection");
+    await scrollSectionBelowToolbar(chartSection);
+    await expect(chartSection.locator(".timeSeriesChartShell")).toBeVisible();
+  }
+
+  if (
+    entry.prepare === "network-latency-chart" ||
+    entry.prepare === "network-throughput-chart"
+  ) {
+    if (entry.prepare === "network-throughput-chart") {
+      await page
+        .getByLabel("Network metric selector")
+        .getByRole("button", { name: "Throughput" })
+        .click();
+    }
+    const chartSection = page.locator(
+      ".observabilityNetworkMetricsPanel .observabilityChartSection",
+    );
+    await scrollSectionBelowToolbar(chartSection);
+    await expect(chartSection.locator(".timeSeriesChartShell")).toBeVisible();
+  }
+
+  if (entry.prepare === "source-template-adapter-detail") {
+    const registry = page.getByLabel("Template registry data grid");
+    const adapterRow = registry
+      .locator(".gridRow, .gridMobileCard")
+      .filter({ hasText: "shared:tunnel-lifecycle-v1" })
+      .first();
+    await adapterRow.click();
+    const adapterRecord = adapterRow.locator(
+      "xpath=ancestor::div[contains(concat(' ', normalize-space(@class), ' '), ' gridRecord ')][1]",
+    );
+    const lifecycleAction = adapterRecord
+      .getByRole("button", { name: /^(Test\/update|Edit\/test)$/ })
+      .first();
+    await expect(lifecycleAction).toBeVisible({ timeout: 5_000 });
+    await lifecycleAction.click();
+    await expect(
+      page.getByLabel("shared:tunnel-lifecycle-v1", { exact: true }),
+    ).toBeVisible({ timeout: 5_000 });
+  }
+
   if (entry.prepare === "tunnel-plan-create") {
     await closeTunnelPlanWorkflow(page);
-    await page.getByRole("button", { name: "Create tunnel plan" }).click();
+    await page.getByRole("button", { name: "Create plan" }).click();
     await expect(
       page.getByRole("heading", { name: "Create tunnel plan" }),
     ).toBeVisible({
       timeout: 5_000,
     });
     await expect(
-      page.getByRole("button", { name: "Close create tunnel plan workflow" }),
+      page.getByRole("button", { name: "Close tunnel plan editor" }),
     ).toBeVisible();
   }
 
-  if (entry.prepare === "tunnel-plan-promotion") {
+  if (entry.prepare === "tunnel-plan-assessment") {
     await closeTunnelPlanWorkflow(page);
-    await page.getByRole("button", { name: "Promotion workflow" }).click();
-    await expect(page.getByLabel("Tunnel plan promotion workflow")).toBeVisible(
-      {
-        timeout: 5_000,
-      },
-    );
+    const row = page
+      .getByRole("table", { name: "Tunnel plans" })
+      .locator("tbody > tr")
+      .filter({ hasText: "sfo-fra-gre" })
+      .first();
+    await row.click();
+    await expect(page.locator(".tunnelConnectionAssessment")).toBeVisible({
+      timeout: 5_000,
+    });
+  }
+
+  if (entry.prepare === "tunnel-plan-ospf") {
+    await closeTunnelPlanWorkflow(page);
+    await page.getByRole("button", { name: "Create plan" }).click();
+    await page.getByText("Enable OSPF adapter workflow").click();
     await expect(
-      page.getByRole("button", { name: "Close tunnel promotion workflow" }),
+      page.getByLabel("OSPF control mode"),
     ).toBeVisible();
+  }
+
+  if (entry.prepare === "tunnel-plan-disable-review") {
+    await closeTunnelPlanWorkflow(page);
+    await page
+      .getByRole("button", { name: "Disable sfo-fra-gre" })
+      .click();
+    await expect(
+      page.getByLabel("Confirm tunnel plan disable"),
+    ).toBeVisible({ timeout: 5_000 });
+  }
+
+  if (entry.prepare === "tunnel-plan-delete-review") {
+    await closeTunnelPlanWorkflow(page);
+    await page
+      .getByRole("button", { name: "Disable sfo-fra-gre" })
+      .click();
+    await page
+      .getByLabel("Confirm tunnel plan disable")
+      .getByRole("button", { name: "Disable plans" })
+      .click();
+    await expect(
+      page.getByRole("button", { name: "Enable sfo-fra-gre" }),
+    ).toBeVisible({ timeout: 5_000 });
+    await page
+      .getByRole("button", { name: "Delete sfo-fra-gre" })
+      .click();
+    await expect(
+      page.getByLabel("Confirm tunnel plan deletion"),
+    ).toBeVisible({ timeout: 5_000 });
   }
 
   if (entry.prepare === "webhook-rule-editor") {
@@ -927,12 +1190,41 @@ async function navigateAndScreenshot(
     await prompt.getByRole("button", { name: "Cancel" }).click();
   }
 
-  for (const text of entry.requiredText ?? []) {
+  const viewportRequiredText = projectName.startsWith("mobile")
+    ? entry.mobileRequiredText
+    : entry.desktopRequiredText;
+  for (const text of [
+    ...(entry.requiredText ?? []),
+    ...(viewportRequiredText ?? []),
+  ]) {
     await expectVisibleText(page, text);
   }
 
-  await page.evaluate(() => window.scrollTo(0, 0));
   await page.waitForTimeout(200);
+  const preserveWorkflowFocus = Boolean(
+    (entry.prepare && entry.prepare !== "fleet-metrics-advanced") ||
+      entry.expandVpsRow ||
+      entry.tab,
+  );
+  if (!preserveWorkflowFocus) {
+    await page.evaluate(() => {
+      window.scrollTo(0, 0);
+      document.querySelector<HTMLElement>(".content")?.scrollTo(0, 0);
+    });
+  }
+  await page.waitForTimeout(50);
+  const verticalScrollOffsets = await page.evaluate(() => ({
+    body: document.body.scrollTop,
+    content: document.querySelector<HTMLElement>(".content")?.scrollTop ?? 0,
+    document: document.documentElement.scrollTop,
+    window: window.scrollY,
+  }));
+  if (!preserveWorkflowFocus) {
+    expect(
+      Math.max(...Object.values(verticalScrollOffsets)),
+      `${label} screenshot scroll origin`,
+    ).toBeLessThanOrEqual(1);
+  }
   const horizontalOverflowPx = await page.evaluate(
     () =>
       document.documentElement.scrollWidth -
@@ -996,16 +1288,50 @@ async function expectVisibleText(
 }
 
 async function closeTunnelPlanWorkflow(page: import("@playwright/test").Page) {
+  const prompt = page.locator(".confirmationPrompt:visible");
+  if ((await prompt.count()) > 0) {
+    const cancel = prompt.first().getByRole("button", { name: "Cancel" });
+    if (await cancel.isVisible().catch(() => false)) {
+      await cancel.click();
+    }
+  }
+  const openDetails = page.getByRole("button", {
+    name: /^Close details for /,
+  });
+  while ((await openDetails.count()) > 0) {
+    const button = openDetails.first();
+    if (!(await button.isVisible().catch(() => false))) break;
+    await button.click();
+  }
   for (const label of [
-    "Close create tunnel plan workflow",
-    "Close tunnel promotion workflow",
-    "Close generated config workflow",
+    "Close tunnel plan editor",
   ]) {
     const button = page.getByRole("button", { name: label });
     if (await button.isVisible().catch(() => false)) {
       await button.click();
     }
   }
+}
+
+async function scrollSectionBelowToolbar(
+  section: import("@playwright/test").Locator,
+) {
+  await section.evaluate((element) => {
+    if (window.innerWidth <= 600) {
+      window.scrollTo({ top: 0, behavior: "auto" });
+      document
+        .querySelector<HTMLElement>(".content")
+        ?.scrollTo({ top: 0, behavior: "auto" });
+      return;
+    }
+    element.scrollIntoView({ block: "start", behavior: "auto" });
+    const content = document.querySelector<HTMLElement>(".content");
+    if (content && content.scrollHeight > content.clientHeight) {
+      content.scrollBy({ top: -96, behavior: "auto" });
+    } else {
+      window.scrollBy({ top: -96, behavior: "auto" });
+    }
+  });
 }
 
 // Install mock API before each test batch

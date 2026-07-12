@@ -174,7 +174,11 @@ test("keeps action feedback in dedicated local containers", () => {
     /toolbarActions=\{\s*automationBulkStatus\s*\?/,
   );
   expect(topologyPanel).toContain("topologyPlanActionFeedback");
-  expect(topologyPanel).toContain("topologyAutomationActionFeedback");
+
+  const topologyOspfControls = source(
+    "panels/topology/TopologyOspfUpdateControls.tsx",
+  );
+  expect(topologyOspfControls).toContain("topologyOspfActionFeedback");
 
   const backupHistoryTables = source("panels/backups/BackupHistoryTables.tsx");
   expect(backupHistoryTables).not.toMatch(

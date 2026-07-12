@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
@@ -801,8 +801,10 @@ impl Repository {
         Ok(accepted_hello)
     }
 
-    pub(crate) async fn record_telemetry(&self, event: &GatewayTelemetryIngest) -> Result<()> {
-        let record_result: Result<()> = match self {
+    pub(crate) async fn record_telemetry(&self, event: &GatewayTelemetryIngest) -> Result<bool> {
+        let mut received_metrics = event.telemetry.metrics.clone();
+        received_metrics.observed_unix = crate::unix_now();
+        let record_result: Result<bool> = match self {
             Self::Memory(memory) => {
                 if memory
                     .hidden_clients
@@ -810,7 +812,22 @@ impl Repository {
                     .await
                     .contains(&event.telemetry.client_id)
                 {
-                    return Ok(());
+                    return Ok(false);
+                }
+                match claim_memory_telemetry_sequence(
+                    &memory.telemetry_ingest_watermarks,
+                    &event.telemetry.client_id,
+                    event.process_incarnation_id,
+                    event.telemetry_seq,
+                )
+                .await
+                {
+                    TelemetrySequenceClaim::Accepted => {}
+                    TelemetrySequenceClaim::Duplicate => {
+                        self.record_telemetry_webhook_event(event).await?;
+                        return Ok(false);
+                    }
+                    TelemetrySequenceClaim::Stale => return Ok(false),
                 }
                 let hello = AgentHello {
                     client_id: event.telemetry.client_id.clone(),
@@ -831,34 +848,34 @@ impl Repository {
                 upsert_memory_telemetry_rollup(
                     &memory.telemetry_rollups,
                     &event.telemetry.client_id,
-                    &event.telemetry.metrics,
+                    &received_metrics,
                 )
                 .await;
                 upsert_memory_telemetry_network_rates(
                     &memory.telemetry_network_rates,
                     &event.telemetry.client_id,
-                    &event.telemetry.metrics,
+                    &received_metrics,
                 )
                 .await;
                 upsert_memory_traffic_counter_samples(
                     &memory.traffic_counter_samples,
                     &event.telemetry.client_id,
-                    &event.telemetry.metrics,
+                    &received_metrics,
                 )
                 .await;
                 let mut tunnels = memory.telemetry_tunnels.write().await;
                 tunnels.retain(|record| record.client_id != event.telemetry.client_id);
-                tunnels.extend(event.telemetry.metrics.tunnels.iter().filter_map(|tunnel| {
+                tunnels.extend(received_metrics.tunnels.iter().filter_map(|tunnel| {
                     telemetry_tunnel_view(
                         &event.telemetry.client_id,
-                        event.telemetry.metrics.observed_unix,
+                        received_metrics.observed_unix,
                         tunnel,
                     )
                 }));
-                Ok(())
+                Ok(true)
             }
             Self::Postgres(pool) => {
-                let metrics = &event.telemetry.metrics;
+                let metrics = &received_metrics;
                 let mut tx = pool.begin().await?;
                 let deleted: bool = sqlx::query_scalar(
                     r#"
@@ -873,7 +890,19 @@ impl Repository {
                 .await?;
                 if deleted {
                     tx.commit().await?;
-                    return Ok(());
+                    return Ok(false);
+                }
+                match claim_postgres_telemetry_sequence(&mut tx, event).await? {
+                    TelemetrySequenceClaim::Accepted => {}
+                    TelemetrySequenceClaim::Duplicate => {
+                        tx.commit().await?;
+                        self.record_telemetry_webhook_event(event).await?;
+                        return Ok(false);
+                    }
+                    TelemetrySequenceClaim::Stale => {
+                        tx.commit().await?;
+                        return Ok(false);
+                    }
                 }
                 upsert_postgres_telemetry_rollup(&mut tx, &event.telemetry.client_id, metrics)
                     .await?;
@@ -907,12 +936,15 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
-                Ok(())
+                Ok(true)
             }
         };
-        record_result?;
+        let recorded = record_result?;
+        if !recorded {
+            return Ok(false);
+        }
         self.record_telemetry_webhook_event(event).await?;
-        Ok(())
+        Ok(true)
     }
 
     async fn record_telemetry_webhook_event(&self, event: &GatewayTelemetryIngest) -> Result<()> {
@@ -928,8 +960,8 @@ impl Repository {
         predicates.dedup();
         let (disk_total, disk_available, network_rx, network_tx) = telemetry_totals(metrics);
         let event_id = format!(
-            "telemetry:{}:{}",
-            event.telemetry.client_id, metrics.observed_unix
+            "telemetry:{}:{}:{}",
+            event.telemetry.client_id, event.process_incarnation_id, event.telemetry_seq
         );
         self.record_webhook_event(WebhookEventCandidate {
             kind: "telemetry.rollup".to_string(),
@@ -1114,6 +1146,95 @@ impl Repository {
         .await?;
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TelemetrySequenceClaim {
+    Accepted,
+    Duplicate,
+    Stale,
+}
+
+async fn claim_memory_telemetry_sequence(
+    watermarks: &Arc<RwLock<HashMap<String, (Uuid, u64)>>>,
+    client_id: &str,
+    process_incarnation_id: Uuid,
+    telemetry_seq: u64,
+) -> TelemetrySequenceClaim {
+    let mut watermarks = watermarks.write().await;
+    if let Some((process_id, seq)) = watermarks.get(client_id) {
+        if *process_id == process_incarnation_id {
+            if *seq == telemetry_seq {
+                return TelemetrySequenceClaim::Duplicate;
+            }
+            if *seq > telemetry_seq {
+                return TelemetrySequenceClaim::Stale;
+            }
+        }
+    }
+    watermarks.insert(
+        client_id.to_string(),
+        (process_incarnation_id, telemetry_seq),
+    );
+    TelemetrySequenceClaim::Accepted
+}
+
+async fn claim_postgres_telemetry_sequence(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &GatewayTelemetryIngest,
+) -> Result<TelemetrySequenceClaim> {
+    let claimed = sqlx::query_scalar::<_, i32>(
+        r#"
+        WITH claimed AS (
+            INSERT INTO telemetry_ingest_watermarks (
+                client_id,
+                process_incarnation_id,
+                telemetry_seq,
+                reported_observed_unix,
+                accepted_at
+            )
+            VALUES ($1, $2, $3, $4, now())
+            ON CONFLICT (client_id) DO UPDATE SET
+                process_incarnation_id = EXCLUDED.process_incarnation_id,
+                telemetry_seq = EXCLUDED.telemetry_seq,
+                reported_observed_unix = EXCLUDED.reported_observed_unix,
+                accepted_at = now()
+            WHERE
+                telemetry_ingest_watermarks.process_incarnation_id
+                    <> EXCLUDED.process_incarnation_id
+                OR telemetry_ingest_watermarks.telemetry_seq < EXCLUDED.telemetry_seq
+            RETURNING 1
+        )
+        SELECT COALESCE((SELECT 1 FROM claimed), 0)
+        "#,
+    )
+    .bind(&event.telemetry.client_id)
+    .bind(event.process_incarnation_id)
+    .bind(event.telemetry_seq as i64)
+    .bind(event.telemetry.metrics.observed_unix.min(i64::MAX as u64) as i64)
+    .fetch_one(&mut **tx)
+    .await?;
+    if claimed == 1 {
+        return Ok(TelemetrySequenceClaim::Accepted);
+    }
+    let current = sqlx::query_as::<_, (Uuid, i64)>(
+        r#"
+        SELECT process_incarnation_id, telemetry_seq
+        FROM telemetry_ingest_watermarks
+        WHERE client_id = $1
+        "#,
+    )
+    .bind(&event.telemetry.client_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(match current {
+        Some((process_id, seq))
+            if process_id == event.process_incarnation_id && seq == event.telemetry_seq as i64 =>
+        {
+            TelemetrySequenceClaim::Duplicate
+        }
+        _ => TelemetrySequenceClaim::Stale,
+    })
 }
 
 async fn upsert_memory_telemetry_rollup(
@@ -1540,7 +1661,6 @@ async fn upsert_postgres_telemetry_tunnels(
                 kind,
                 ownership_mode,
                 mutation_policy,
-                promotion_required,
                 source,
                 operstate,
                 mtu,
@@ -1568,12 +1688,6 @@ async fn upsert_postgres_telemetry_tunnels(
                 packet_loss_ratio,
                 latency_healthy_windows,
                 latency_missed_windows,
-                auto_ospf_enabled,
-                auto_ospf_status,
-                auto_ospf_reason,
-                auto_ospf_current_cost,
-                auto_ospf_recommended_cost,
-                auto_ospf_updated_unix,
                 updated_at
             )
             VALUES (
@@ -1610,13 +1724,6 @@ async fn upsert_postgres_telemetry_tunnels(
                 $31,
                 $32,
                 $33,
-                $34,
-                $35,
-                $36,
-                $37,
-                $38,
-                $39,
-                $40,
                 now()
             )
             "#,
@@ -1627,7 +1734,6 @@ async fn upsert_postgres_telemetry_tunnels(
         .bind(&tunnel.kind)
         .bind(&tunnel.ownership_mode)
         .bind(&tunnel.mutation_policy)
-        .bind(tunnel.promotion_required)
         .bind(&tunnel.source)
         .bind(&tunnel.operstate)
         .bind(tunnel.mtu.map(u64_to_i64))
@@ -1655,12 +1761,6 @@ async fn upsert_postgres_telemetry_tunnels(
         .bind(tunnel.packet_loss_ratio)
         .bind(tunnel.latency_healthy_windows.map(i32::from))
         .bind(tunnel.latency_missed_windows.map(i32::from))
-        .bind(tunnel.auto_ospf_enabled)
-        .bind(&tunnel.auto_ospf_status)
-        .bind(&tunnel.auto_ospf_reason)
-        .bind(tunnel.auto_ospf_current_cost.map(i32::from))
-        .bind(tunnel.auto_ospf_recommended_cost.map(i32::from))
-        .bind(tunnel.auto_ospf_updated_unix.map(u64_to_i64))
         .execute(&mut **tx)
         .await?;
     }
@@ -1682,12 +1782,6 @@ fn telemetry_tunnel_view(
         kind: tunnel.kind.clone(),
         ownership_mode: tunnel.ownership_mode.clone(),
         mutation_policy: tunnel.mutation_policy.clone(),
-        promotion_required: tunnel.promotion_required,
-        plan_correlation: if tunnel.plan_id.is_some() || tunnel.plan_name.is_some() {
-            "telemetry_reported_plan".to_string()
-        } else {
-            "unmatched".to_string()
-        },
         plan_id: tunnel
             .plan_id
             .as_deref()
@@ -1718,12 +1812,6 @@ fn telemetry_tunnel_view(
         packet_loss_ratio: tunnel.packet_loss_ratio,
         latency_healthy_windows: tunnel.latency_healthy_windows.map(i32::from),
         latency_missed_windows: tunnel.latency_missed_windows.map(i32::from),
-        auto_ospf_enabled: tunnel.auto_ospf_enabled,
-        auto_ospf_status: tunnel.auto_ospf_status.clone(),
-        auto_ospf_reason: tunnel.auto_ospf_reason.clone(),
-        auto_ospf_current_cost: tunnel.auto_ospf_current_cost.map(i32::from),
-        auto_ospf_recommended_cost: tunnel.auto_ospf_recommended_cost.map(i32::from),
-        auto_ospf_updated_unix: tunnel.auto_ospf_updated_unix.map(u64_to_i64),
     })
 }
 
@@ -1788,7 +1876,17 @@ fn parse_unix(value: &str) -> u64 {
 }
 
 fn valid_tunnel(tunnel: &RuntimeTunnelStat) -> bool {
-    valid_telemetry_name(&tunnel.interface) && valid_telemetry_name(&tunnel.kind)
+    valid_telemetry_name(&tunnel.interface)
+        && valid_telemetry_name(&tunnel.kind)
+        && tunnel
+            .plan_id
+            .as_deref()
+            .is_some_and(|value| Uuid::parse_str(value).is_ok())
+        && tunnel
+            .plan_name
+            .as_deref()
+            .is_some_and(valid_telemetry_name)
+        && matches!(tunnel.endpoint_side.as_deref(), Some("left" | "right"))
 }
 
 fn valid_telemetry_name(value: &str) -> bool {

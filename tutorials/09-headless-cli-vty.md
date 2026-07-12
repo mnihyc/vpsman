@@ -46,17 +46,29 @@ cargo run -p vpsctl -- --output pretty-json tunnel-plan \
   --kind gre \
   --left-client-id edge-a \
   --right-client-id edge-b \
-  --left-underlay 203.0.113.10 \
-  --right-underlay 203.0.113.20 \
+  --left-remote-underlay 203.0.113.20 \
+  --left-local-underlay 10.0.0.10 \
+  --right-remote-underlay 198.51.100.10 \
+  --right-local-underlay 10.0.1.20 \
   --address-pool-cidr 10.255.0.0/30 \
   --left-tunnel-ipv4-cidr 10.255.0.0/31 \
   --right-tunnel-ipv4-cidr 10.255.0.1/31 \
-  --bandwidth-mbps 100 \
-  --latency-ms 20
+  --bandwidth-mbps 100
 ```
 
-Save that stdout as `plan.json` for apply/status/rollback, or re-export a
-saved plan later:
+This is a local point-to-point preview. From `edge-a`, the remote value is the
+public/NAT destination for `edge-b`, while the optional local value is an
+address bindable on `edge-a`. The right-side values are independent and follow
+the same rule. Neither local source has to equal either public destination.
+
+The preview neither saves the declaration nor enables OSPF. Add
+`--save --confirmed` only after configuring API access, and add `--enabled`
+only when the endpoints should begin managing or observing the declared
+tunnel. OSPF is a separate opt-in contract described in
+[Tutorial 06](./06-tunnels-routing-adapters.md).
+
+Export an already saved plan when a frozen declaration is useful for audit or
+offline inspection:
 
 ```sh
 cargo run -p vpsctl -- tunnel-plan-export \
@@ -140,6 +152,8 @@ process-list tag:edge --limit 50
 process-start edge-worker --argv /usr/bin/sleep --argv 60 tag:edge
 tunnel-plans
 tunnel-plan-export --plan-id <saved_plan_uuid> --output-file ./plan.json
+tunnel-plan-disable --plan-id <saved_plan_uuid> --expected-revision <revision> --confirmed
+tunnel-plan-delete --plan-id <saved_plan_uuid> --expected-revision <disabled_revision> --confirmed
 topology-graph --limit 50
 backups
 backup-policies
@@ -150,9 +164,9 @@ restore-plans
 migration-run <restore_plan_uuid> --archive-transfer-session-id <completed_upload_session_uuid> --confirmed
 agent-update-releases --limit 10
 agent-update-release-latest --name vpsman-agent --channel stable
-agent-update-release-record --name vpsman-agent --version 0.1.1 --artifact-url https://github.com/mnihyc/vpsman/releases/download/v0.1.1/vpsman-agent-linux-x86_64-musl --sha256-hex <sha256> --rollback-artifact-url https://github.com/mnihyc/vpsman/releases/download/v0.1.0/vpsman-agent-linux-x86_64-musl --rollback-sha256-hex <rollback_sha256> --confirmed
-agent-update-check --version-url https://github.com/mnihyc/vpsman/releases/latest/download/version.json tag:edge --confirmed
-agent-update --artifact-url https://github.com/mnihyc/vpsman/releases/download/v0.1.1/vpsman-agent-linux-x86_64-musl --sha256-hex <sha256> tag:edge --confirmed
+agent-update-release-record --name vpsman-agent --version 0.1.1 --artifact-url https://github.com/<owner>/vpsman/releases/download/v0.1.1/vpsman-agent-linux-x86_64-musl --sha256-hex <sha256> --rollback-artifact-url https://github.com/<owner>/vpsman/releases/download/v0.1.0/vpsman-agent-linux-x86_64-musl --rollback-sha256-hex <rollback_sha256> --confirmed
+agent-update-check --version-url https://github.com/<owner>/vpsman/releases/latest/download/version.json tag:edge --confirmed
+agent-update --artifact-url https://github.com/<owner>/vpsman/releases/download/v0.1.1/vpsman-agent-linux-x86_64-musl --sha256-hex <sha256> tag:edge --confirmed
 agent-update-activate --staged-sha256-hex <sha256> tag:edge --restart-agent --confirmed
 agent-update-rollback --rollback-sha256-hex <sha256> tag:edge --confirmed
 ```

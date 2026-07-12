@@ -1,3 +1,5 @@
+use std::{collections::HashSet, net::IpAddr};
+
 use axum::{
     extract::{Path, Query, State},
     http::HeaderMap,
@@ -8,21 +10,23 @@ use serde::Deserialize;
 use uuid::Uuid;
 use vpsman_common::{
     allocate_tunnel_endpoints as allocate_tunnel_endpoint_pairs, payload_hash, plan_tunnel,
-    NetworkPlanError, OspfCostPolicy, RuntimeTunnelControl, RuntimeTunnelManager,
-    RuntimeTunnelTopologyIntent, TunnelAddressFamily, TunnelEndpointSide, TunnelKind, TunnelPlan,
-    TunnelPlanInput,
+    routing_cost_update_privilege_payload, JobCommand, NetworkPlanError,
+    RoutingCostAdapterCommands, RuntimeTunnelCommand, RuntimeTunnelManager, TunnelAddressFamily,
+    TunnelEndpointSide, TunnelPlan,
 };
 
 use crate::{
     error::ApiError,
     model::{
-        AllocateTunnelEndpointsRequest, AllocateTunnelEndpointsResponse, CreateTunnelPlanRequest,
-        HistoryQuery, NetworkOspfRecommendationView, NetworkOspfUpdatePlanView,
-        PromoteTelemetryTunnelRequest, PromoteTunnelPlanToCustomAdapterRequest,
-        TelemetryTunnelView, TunnelPlanView, UpdateTunnelPlanOspfCostRequest,
+        AllocateTunnelEndpointsRequest, AllocateTunnelEndpointsResponse, CreateJobRequest,
+        CreateJobResponse, CreateTunnelPlanRequest, HistoryQuery, NetworkOspfRecommendationView,
+        NetworkOspfUpdatePlanView, RefreshTunnelPlanOspfStatusRequest, TunnelPlanOspfJobsResponse,
+        TunnelPlanView, UpdateTunnelConnectionAssessmentRequest, UpdateTunnelPlanOspfCostRequest,
+        UpdateTunnelPlanRequest,
     },
     model_topology::TopologyGraphView,
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
+    routes_jobs::create_job_from_internal_operator_mutation,
     runtime_config::push_runtime_config_for_clients,
     security::{SCOPE_FLEET_READ, SCOPE_NETWORK_READ},
     state::AppState,
@@ -34,6 +38,7 @@ use crate::{
 pub(crate) struct TunnelPlanMutationRequest {
     #[serde(default)]
     pub(crate) confirmed: bool,
+    pub(crate) expected_revision: i64,
 }
 
 pub(crate) async fn list_tunnel_plans(
@@ -63,21 +68,23 @@ pub(crate) async fn create_tunnel_plan(
         &request.input.right_client_id,
     )
     .await?;
-    let previous_plan = state
+    if state
         .repo
         .list_tunnel_plans()
         .await?
-        .into_iter()
-        .find(|plan| plan.name == request.input.name);
+        .iter()
+        .any(|plan| plan.name == request.input.name)
+    {
+        return Err(ApiError::conflict("tunnel_plan_name_conflict"));
+    }
+    validate_tunnel_plan_resource_conflicts(&state, &plan, None).await?;
+    validate_tunnel_plan_adapter_bindings(&state, &plan).await?;
     let view = state
         .repo
         .record_tunnel_plan(&request.input, &plan, request.enabled, &operator)
-        .await?;
+        .await
+        .map_err(tunnel_plan_repository_error)?;
     let mut sync_client_ids = Vec::new();
-    if let Some(previous) = previous_plan.as_ref().filter(|plan| plan.enabled) {
-        sync_client_ids.push(previous.left_client_id.clone());
-        sync_client_ids.push(previous.right_client_id.clone());
-    }
     if view.enabled {
         sync_client_ids.push(view.left_client_id.clone());
         sync_client_ids.push(view.right_client_id.clone());
@@ -92,6 +99,74 @@ pub(crate) async fn create_tunnel_plan(
             push_runtime_config_for_clients(&state, &operator, sync_client_ids, reason).await?;
     }
     Ok((StatusCode::CREATED, Json(view)))
+}
+
+pub(crate) async fn update_tunnel_plan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(plan_id): Path<Uuid>,
+    Json(request): Json<UpdateTunnelPlanRequest>,
+) -> Result<Json<TunnelPlanView>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "network:write")
+        .await?;
+    require_tunnel_plan_confirmed(request.confirmed)?;
+    let existing = state
+        .repo
+        .get_tunnel_plan(plan_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("tunnel_plan_not_found"))?;
+    if existing.revision != request.expected_revision {
+        return Err(ApiError::conflict("tunnel_plan_snapshot_stale"));
+    }
+    if existing.name != request.input.name {
+        return Err(ApiError::bad_request("tunnel_plan_name_is_immutable"));
+    }
+    let enabled = request.enabled.unwrap_or(existing.enabled);
+    let plan = plan_tunnel(&request.input)
+        .map_err(|error| ApiError::bad_request(tunnel_plan_error_code(error)))?;
+    if existing.enabled == enabled && existing.input == request.input {
+        return Ok(Json(existing));
+    }
+    require_tunnel_endpoint_agents(
+        &state,
+        &request.input.left_client_id,
+        &request.input.right_client_id,
+    )
+    .await?;
+    validate_tunnel_plan_resource_conflicts(&state, &plan, Some(plan_id)).await?;
+    validate_tunnel_plan_adapter_bindings(&state, &plan).await?;
+    let view = state
+        .repo
+        .update_tunnel_plan(
+            plan_id,
+            request.expected_revision,
+            &request.input,
+            &plan,
+            enabled,
+            &operator,
+        )
+        .await
+        .map_err(tunnel_plan_repository_error)?;
+    let mut sync_client_ids = Vec::new();
+    if existing.enabled {
+        sync_client_ids.push(existing.left_client_id);
+        sync_client_ids.push(existing.right_client_id);
+    }
+    if view.enabled {
+        sync_client_ids.push(view.left_client_id.clone());
+        sync_client_ids.push(view.right_client_id.clone());
+    }
+    if !sync_client_ids.is_empty() {
+        let _sync_jobs = push_runtime_config_for_clients(
+            &state,
+            &operator,
+            sync_client_ids,
+            "tunnel_plan_updated",
+        )
+        .await?;
+    }
+    Ok(Json(view))
 }
 
 pub(crate) async fn allocate_tunnel_endpoints(
@@ -190,12 +265,87 @@ pub(crate) async fn disable_tunnel_plan(
     mutate_tunnel_plan_enabled(state, headers, plan_id, request, false).await
 }
 
+pub(crate) async fn delete_tunnel_plan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(plan_id): Path<Uuid>,
+    Json(request): Json<TunnelPlanMutationRequest>,
+) -> Result<Json<TunnelPlanView>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "network:write")
+        .await?;
+    require_tunnel_plan_confirmed(request.confirmed)?;
+    let existing = state
+        .repo
+        .get_tunnel_plan(plan_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("tunnel_plan_not_found"))?;
+    if existing.revision != request.expected_revision {
+        return Err(ApiError::conflict("tunnel_plan_snapshot_stale"));
+    }
+    if existing.enabled {
+        return Err(ApiError::conflict("tunnel_plan_disable_before_delete"));
+    }
+    let _sync_jobs = push_runtime_config_for_clients(
+        &state,
+        &operator,
+        vec![
+            existing.left_client_id.clone(),
+            existing.right_client_id.clone(),
+        ],
+        "tunnel_plan_delete_reconcile",
+    )
+    .await?;
+    let deleted = state
+        .repo
+        .delete_tunnel_plan(plan_id, request.expected_revision, &operator)
+        .await
+        .map_err(tunnel_plan_repository_error)?;
+    Ok(Json(deleted))
+}
+
+pub(crate) async fn update_tunnel_connection_assessment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(plan_id): Path<Uuid>,
+    Json(request): Json<UpdateTunnelConnectionAssessmentRequest>,
+) -> Result<Json<TunnelPlanView>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "network:write")
+        .await?;
+    let existing = state
+        .repo
+        .get_tunnel_plan(plan_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("tunnel_plan_not_found"))?;
+    if existing.revision != request.expected_revision {
+        return Err(ApiError::conflict("tunnel_plan_snapshot_stale"));
+    }
+    if !existing.enabled && request.assessment.trim() != "automatic" {
+        return Err(ApiError::conflict(
+            "tunnel_connection_assessment_requires_enabled_plan",
+        ));
+    }
+    state
+        .repo
+        .update_tunnel_connection_assessment(
+            plan_id,
+            request.expected_revision,
+            &request.assessment,
+            request.note.as_deref(),
+            &operator,
+        )
+        .await
+        .map(Json)
+        .map_err(tunnel_plan_repository_error)
+}
+
 pub(crate) async fn update_tunnel_plan_ospf_cost(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(plan_id): Path<Uuid>,
     Json(request): Json<UpdateTunnelPlanOspfCostRequest>,
-) -> Result<Json<TunnelPlanView>, ApiError> {
+) -> Result<Json<TunnelPlanOspfJobsResponse>, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "network:write")
         .await?;
@@ -205,11 +355,31 @@ pub(crate) async fn update_tunnel_plan_ospf_cost(
         .get_tunnel_plan(plan_id)
         .await?
         .ok_or_else(|| ApiError::bad_request("tunnel_plan_not_found"))?;
-    if existing.enabled {
-        require_tunnel_endpoint_agents(&state, &existing.left_client_id, &existing.right_client_id)
-            .await?;
+    require_tunnel_ospf_enabled(&existing)?;
+    if existing.revision != request.plan_revision {
+        return Err(ApiError::conflict("tunnel_plan_ospf_snapshot_stale"));
     }
+    if existing.left_ospf_status != "verified" || existing.right_ospf_status != "verified" {
+        return Err(ApiError::conflict(
+            "tunnel_plan_ospf_status_verification_required",
+        ));
+    }
+    require_tunnel_endpoint_agents(&state, &existing.left_client_id, &existing.right_client_id)
+        .await?;
     validate_ospf_recommendation_contract(&state, plan_id, &request).await?;
+    if existing.left_current_ospf_cost != request.left_current_ospf_cost.map(i32::from)
+        || existing.right_current_ospf_cost != request.right_current_ospf_cost.map(i32::from)
+    {
+        return Err(ApiError::conflict("tunnel_plan_ospf_snapshot_stale"));
+    }
+    let (left_adapter, right_adapter) = resolve_plan_routing_adapters(&state, &existing).await?;
+    if left_adapter.definition_hash != request.left_adapter_definition_hash
+        || right_adapter.definition_hash != request.right_adapter_definition_hash
+    {
+        return Err(ApiError::conflict(
+            "routing_cost_adapter_confirmation_stale",
+        ));
+    }
     let target_client_ids = vec![
         existing.left_client_id.clone(),
         existing.right_client_id.clone(),
@@ -217,7 +387,7 @@ pub(crate) async fn update_tunnel_plan_ospf_cost(
     let target = tunnel_plan_privilege_target(plan_id);
     let privilege_payload_hash = tunnel_plan_ospf_cost_payload_hash(plan_id, &request);
     let privilege_intent = DbPrivilegeIntent::new(
-        tunnel_plan_ospf_cost_action(&request.mutation_intent),
+        "network.ospf_cost.apply",
         &target,
         None,
         &target_client_ids,
@@ -230,28 +400,86 @@ pub(crate) async fn update_tunnel_plan_ospf_cost(
         request.privilege_assertion.clone(),
     )
     .await?;
-    let view = state
+    let left_job_id = Uuid::new_v4();
+    let right_job_id = Uuid::new_v4();
+    let plan = state
         .repo
-        .update_tunnel_plan_ospf_cost(
+        .stage_tunnel_plan_ospf_jobs(
             plan_id,
-            &request.recommendation_id,
-            request.current_ospf_cost,
-            request.recommended_ospf_cost,
-            &request.mutation_intent,
+            request.plan_revision,
+            request.left_current_ospf_cost,
+            request.right_current_ospf_cost,
+            Some(request.desired_ospf_cost),
+            left_job_id,
+            right_job_id,
             &operator,
         )
         .await
         .map_err(tunnel_plan_mutation_error)?;
-    if view.enabled {
-        let _sync_jobs = push_runtime_config_for_clients(
-            &state,
-            &operator,
-            vec![view.left_client_id.clone(), view.right_client_id.clone()],
-            "tunnel_plan_ospf_cost_updated",
-        )
+    let jobs = dispatch_routing_jobs(
+        &state,
+        &operator,
+        &plan,
+        left_job_id,
+        right_job_id,
+        left_adapter,
+        right_adapter,
+        Some((
+            request.left_current_ospf_cost,
+            request.right_current_ospf_cost,
+            request.desired_ospf_cost,
+        )),
+    )
+    .await?;
+    Ok(Json(TunnelPlanOspfJobsResponse { plan, jobs }))
+}
+
+pub(crate) async fn refresh_tunnel_plan_ospf_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(plan_id): Path<Uuid>,
+    Json(_request): Json<RefreshTunnelPlanOspfStatusRequest>,
+) -> Result<Json<TunnelPlanOspfJobsResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "network:write")
         .await?;
-    }
-    Ok(Json(view))
+    let existing = state
+        .repo
+        .get_tunnel_plan(plan_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("tunnel_plan_not_found"))?;
+    require_tunnel_ospf_enabled(&existing)?;
+    require_tunnel_endpoint_agents(&state, &existing.left_client_id, &existing.right_client_id)
+        .await?;
+    let (left_adapter, right_adapter) = resolve_plan_routing_adapters(&state, &existing).await?;
+    let left_job_id = Uuid::new_v4();
+    let right_job_id = Uuid::new_v4();
+    let plan = state
+        .repo
+        .stage_tunnel_plan_ospf_jobs(
+            plan_id,
+            existing.revision,
+            existing.left_current_ospf_cost.map(|value| value as u16),
+            existing.right_current_ospf_cost.map(|value| value as u16),
+            None,
+            left_job_id,
+            right_job_id,
+            &operator,
+        )
+        .await
+        .map_err(tunnel_plan_mutation_error)?;
+    let jobs = dispatch_routing_jobs(
+        &state,
+        &operator,
+        &plan,
+        left_job_id,
+        right_job_id,
+        left_adapter,
+        right_adapter,
+        None,
+    )
+    .await?;
+    Ok(Json(TunnelPlanOspfJobsResponse { plan, jobs }))
 }
 
 async fn mutate_tunnel_plan_enabled(
@@ -270,16 +498,22 @@ async fn mutate_tunnel_plan_enabled(
         .get_tunnel_plan(plan_id)
         .await?
         .ok_or_else(|| ApiError::bad_request("tunnel_plan_not_found"))?;
+    if existing.revision != request.expected_revision {
+        return Err(ApiError::conflict("tunnel_plan_snapshot_stale"));
+    }
+    if existing.enabled == enabled {
+        return Ok(Json(existing));
+    }
     if enabled {
         require_tunnel_endpoint_agents(&state, &existing.left_client_id, &existing.right_client_id)
             .await?;
-    } else {
-        require_tunnel_plan_disable_supported(&existing)?;
+        validate_tunnel_plan_adapter_bindings(&state, &existing.plan).await?;
     }
     let view = state
         .repo
-        .set_tunnel_plan_enabled(plan_id, enabled, &operator)
-        .await?;
+        .set_tunnel_plan_enabled(plan_id, request.expected_revision, enabled, &operator)
+        .await
+        .map_err(tunnel_plan_repository_error)?;
     let reason = if enabled {
         "tunnel_plan_enabled"
     } else {
@@ -293,54 +527,6 @@ async fn mutate_tunnel_plan_enabled(
     )
     .await?;
     Ok(Json(view))
-}
-
-pub(crate) async fn promote_telemetry_tunnel_plan(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(request): Json<PromoteTelemetryTunnelRequest>,
-) -> Result<(StatusCode, Json<TunnelPlanView>), ApiError> {
-    let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "network:write")
-        .await?;
-    require_tunnel_plan_confirmed(request.confirmed)?;
-    validate_telemetry_promotion_request(&request)?;
-    let mut reports = state
-        .repo
-        .list_telemetry_tunnels(1, Some(&request.client_id), Some(&request.interface))
-        .await?;
-    let Some(report) = reports.pop() else {
-        return Err(ApiError::bad_request("telemetry_tunnel_not_found"));
-    };
-    if !report.promotion_required
-        || report.mutation_policy.as_str() != "observe_only_import_candidate"
-    {
-        return Err(ApiError::bad_request(
-            "telemetry_tunnel_not_import_candidate",
-        ));
-    }
-    let input = telemetry_promotion_input(&request, &report)?;
-    let plan = plan_tunnel(&input)
-        .map_err(|error| ApiError::bad_request(tunnel_plan_error_code(error)))?;
-    require_tunnel_endpoint_agents(&state, &input.left_client_id, &input.right_client_id).await?;
-    let view = state
-        .repo
-        .record_tunnel_plan(&input, &plan, request.enabled, &operator)
-        .await?;
-    state
-        .repo
-        .record_tunnel_plan_promotion_audit(&view, &operator, &report)
-        .await?;
-    if view.enabled {
-        let _sync_jobs = push_runtime_config_for_clients(
-            &state,
-            &operator,
-            vec![view.left_client_id.clone(), view.right_client_id.clone()],
-            "tunnel_plan_promoted_from_telemetry",
-        )
-        .await?;
-    }
-    Ok((StatusCode::CREATED, Json(view)))
 }
 
 fn require_tunnel_plan_confirmed(confirmed: bool) -> Result<(), ApiError> {
@@ -369,24 +555,121 @@ async fn require_tunnel_endpoint_agents(
     Ok(())
 }
 
+async fn validate_tunnel_plan_adapter_bindings(
+    state: &AppState,
+    plan: &TunnelPlan,
+) -> Result<(), ApiError> {
+    if plan.runtime_control.manager == RuntimeTunnelManager::ExternalManagedAdapter {
+        let left_id = plan
+            .runtime_control
+            .left_adapter_template_id
+            .as_deref()
+            .ok_or_else(|| ApiError::bad_request("runtime_tunnel_adapter_template_required"))?;
+        let right_id = plan
+            .runtime_control
+            .right_adapter_template_id
+            .as_deref()
+            .ok_or_else(|| ApiError::bad_request("runtime_tunnel_adapter_template_required"))?;
+        let left = state
+            .repo
+            .resolve_runtime_tunnel_adapter(left_id, &plan.left_client_id)
+            .await
+            .map_err(|_| ApiError::conflict("runtime_tunnel_left_adapter_unavailable"))?;
+        let right = state
+            .repo
+            .resolve_runtime_tunnel_adapter(right_id, &plan.right_client_id)
+            .await
+            .map_err(|_| ApiError::conflict("runtime_tunnel_right_adapter_unavailable"))?;
+        if !plan.runtime_control.traffic_limit.is_default()
+            && (left.traffic_limit_apply.is_none() || right.traffic_limit_apply.is_none())
+        {
+            return Err(ApiError::conflict(
+                "runtime_tunnel_adapter_traffic_limit_unsupported",
+            ));
+        }
+    }
+    if let Some(ospf) = &plan.ospf {
+        resolve_routing_adapter(state, &ospf.left_adapter_template_id, &plan.left_client_id)
+            .await?;
+        resolve_routing_adapter(
+            state,
+            &ospf.right_adapter_template_id,
+            &plan.right_client_id,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn validate_tunnel_plan_resource_conflicts(
+    state: &AppState,
+    plan: &TunnelPlan,
+    excluded_plan_id: Option<Uuid>,
+) -> Result<(), ApiError> {
+    let requested_addresses = tunnel_plan_addresses(plan);
+    for existing in state
+        .repo
+        .list_tunnel_plans()
+        .await?
+        .into_iter()
+        .filter(|existing| Some(existing.id) != excluded_plan_id)
+    {
+        let shares_endpoint_interface = [
+            (&plan.left_client_id, &existing.left_client_id),
+            (&plan.left_client_id, &existing.right_client_id),
+            (&plan.right_client_id, &existing.left_client_id),
+            (&plan.right_client_id, &existing.right_client_id),
+        ]
+        .iter()
+        .any(|(requested, saved)| requested == saved)
+            && plan.interface_name == existing.plan.interface_name;
+        if shares_endpoint_interface {
+            return Err(ApiError::conflict("tunnel_plan_interface_conflict"));
+        }
+        if !requested_addresses.is_disjoint(&tunnel_plan_addresses(&existing.plan)) {
+            return Err(ApiError::conflict("tunnel_plan_address_conflict"));
+        }
+    }
+    Ok(())
+}
+
+fn tunnel_plan_addresses(plan: &TunnelPlan) -> HashSet<IpAddr> {
+    [plan.ipv4_tunnel.as_ref(), plan.ipv6_tunnel.as_ref()]
+        .into_iter()
+        .flatten()
+        .flat_map(|pair| [&pair.left, &pair.right])
+        .filter_map(|address| address.parse().ok())
+        .collect()
+}
+
 fn validate_tunnel_plan_ospf_cost_request(
     request: &UpdateTunnelPlanOspfCostRequest,
 ) -> Result<(), ApiError> {
     require_tunnel_plan_confirmed(request.confirmed)?;
+    if request.plan_revision < 1 {
+        return Err(ApiError::bad_request("tunnel_plan_ospf_revision_invalid"));
+    }
     if request.recommendation_id.trim().is_empty() {
         return Err(ApiError::bad_request(
             "tunnel_plan_ospf_recommendation_id_required",
         ));
     }
-    if !matches!(request.mutation_intent.as_str(), "apply" | "rollback") {
-        return Err(ApiError::bad_request(
-            "tunnel_plan_ospf_mutation_intent_invalid",
-        ));
+    for hash in [
+        &request.left_adapter_definition_hash,
+        &request.right_adapter_definition_hash,
+    ] {
+        if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(ApiError::bad_request(
+                "routing_cost_adapter_definition_hash_invalid",
+            ));
+        }
     }
-    if request.current_ospf_cost == 0 || request.recommended_ospf_cost == 0 {
+    if request.desired_ospf_cost == 0 {
         return Err(ApiError::bad_request("tunnel_plan_ospf_cost_invalid"));
     }
-    if request.current_ospf_cost == request.recommended_ospf_cost {
+    if request.left_current_ospf_cost == Some(request.desired_ospf_cost)
+        && request.right_current_ospf_cost == Some(request.desired_ospf_cost)
+    {
         return Err(ApiError::bad_request("tunnel_plan_ospf_cost_noop"));
     }
     Ok(())
@@ -397,9 +680,6 @@ async fn validate_ospf_recommendation_contract(
     plan_id: Uuid,
     request: &UpdateTunnelPlanOspfCostRequest,
 ) -> Result<(), ApiError> {
-    if request.mutation_intent == "rollback" {
-        return Ok(());
-    }
     let update_plans = state.repo.list_network_ospf_update_plans(1_000).await?;
     let Some(plan) = update_plans
         .into_iter()
@@ -409,9 +689,20 @@ async fn validate_ospf_recommendation_contract(
             "tunnel_plan_ospf_recommendation_missing",
         ));
     };
-    if plan.recommendation_id != request.recommendation_id
-        || plan.current_ospf_cost != i32::from(request.current_ospf_cost)
-        || plan.recommended_ospf_cost != i32::from(request.recommended_ospf_cost)
+    if !plan.requires_approval || plan.control_mode != "reviewed" {
+        return Err(ApiError::conflict(
+            "tunnel_plan_ospf_recommendation_not_actionable",
+        ));
+    }
+    if plan.plan_revision != request.plan_revision
+        || plan.recommendation_id != request.recommendation_id
+        || plan.recommended_ospf_cost != i32::from(request.desired_ospf_cost)
+        || plan.left_current_ospf_cost != request.left_current_ospf_cost.map(i32::from)
+        || plan.right_current_ospf_cost != request.right_current_ospf_cost.map(i32::from)
+        || plan.left_adapter_definition_hash.as_deref()
+            != Some(request.left_adapter_definition_hash.as_str())
+        || plan.right_adapter_definition_hash.as_deref()
+            != Some(request.right_adapter_definition_hash.as_str())
     {
         return Err(ApiError::conflict("tunnel_plan_ospf_recommendation_stale"));
     }
@@ -422,8 +713,41 @@ fn tunnel_plan_mutation_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
     if message.contains("tunnel_plan_not_found") {
         ApiError::not_found("tunnel_plan_not_found")
-    } else if message.contains("tunnel_plan_ospf_cost_stale") {
-        ApiError::conflict("tunnel_plan_ospf_cost_stale")
+    } else if message.contains("tunnel_plan_ospf_snapshot_stale") {
+        ApiError::conflict("tunnel_plan_ospf_snapshot_stale")
+    } else if message.contains("tunnel_plan_ospf_job_in_progress") {
+        ApiError::conflict("tunnel_plan_ospf_job_in_progress")
+    } else if message.contains("tunnel_plan_disabled") {
+        ApiError::conflict("tunnel_plan_disabled")
+    } else if message.contains("tunnel_plan_ospf_disabled") {
+        ApiError::conflict("tunnel_plan_ospf_disabled")
+    } else {
+        ApiError::from(error)
+    }
+}
+
+fn tunnel_plan_repository_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("tunnel_plan_name_conflict") {
+        ApiError::conflict("tunnel_plan_name_conflict")
+    } else if message.contains("tunnel_plan_snapshot_stale") {
+        ApiError::conflict("tunnel_plan_snapshot_stale")
+    } else if message.contains("tunnel_plan_name_is_immutable") {
+        ApiError::bad_request("tunnel_plan_name_is_immutable")
+    } else if message.contains("tunnel_plan_endpoint_agent_not_found") {
+        ApiError::conflict("tunnel_plan_endpoint_agent_not_found")
+    } else if message.contains("tunnel_plan_endpoints_must_differ") {
+        ApiError::bad_request("tunnel_plan_endpoints_must_differ")
+    } else if message.contains("tunnel_plan_disable_before_delete") {
+        ApiError::conflict("tunnel_plan_disable_before_delete")
+    } else if message.contains("tunnel_connection_assessment_requires_enabled_plan") {
+        ApiError::conflict("tunnel_connection_assessment_requires_enabled_plan")
+    } else if message.contains("invalid_tunnel_connection_assessment") {
+        ApiError::bad_request("invalid_tunnel_connection_assessment")
+    } else if message.contains("tunnel_connection_assessment_note_required") {
+        ApiError::bad_request("tunnel_connection_assessment_note_required")
+    } else if message.contains("tunnel_plan_not_found") {
+        ApiError::not_found("tunnel_plan_not_found")
     } else {
         ApiError::from(error)
     }
@@ -433,95 +757,230 @@ fn tunnel_plan_privilege_target(plan_id: Uuid) -> String {
     format!("tunnel_plan:{plan_id}")
 }
 
-fn tunnel_plan_ospf_cost_action(mutation_intent: &str) -> &'static str {
-    if mutation_intent == "rollback" {
-        "network.ospf_cost.rollback"
-    } else {
-        "network.ospf_cost.apply"
-    }
-}
-
 fn tunnel_plan_ospf_cost_payload_hash(
     plan_id: Uuid,
     request: &UpdateTunnelPlanOspfCostRequest,
 ) -> String {
     payload_hash(
-        tunnel_plan_ospf_cost_payload_text(
+        routing_cost_update_privilege_payload(
             plan_id,
+            request.plan_revision,
             &request.recommendation_id,
-            request.current_ospf_cost,
-            request.recommended_ospf_cost,
-            &request.mutation_intent,
+            request.left_current_ospf_cost,
+            request.right_current_ospf_cost,
+            request.desired_ospf_cost,
+            &request.left_adapter_definition_hash,
+            &request.right_adapter_definition_hash,
         )
         .as_bytes(),
     )
 }
 
-fn tunnel_plan_ospf_cost_payload_text(
-    plan_id: Uuid,
-    recommendation_id: &str,
-    current_ospf_cost: u16,
-    recommended_ospf_cost: u16,
-    mutation_intent: &str,
-) -> String {
-    format!(
-        "v1|{}|{}|{}|{}|{}",
-        plan_id,
-        recommendation_id.trim(),
-        current_ospf_cost,
-        recommended_ospf_cost,
-        mutation_intent.trim()
-    )
+fn require_tunnel_ospf_enabled(plan: &TunnelPlanView) -> Result<(), ApiError> {
+    if !plan.enabled {
+        return Err(ApiError::conflict("tunnel_plan_disabled"));
+    }
+    if plan.plan.ospf.is_none() {
+        return Err(ApiError::conflict("tunnel_plan_ospf_disabled"));
+    }
+    if plan.left_ospf_status == "pending" || plan.right_ospf_status == "pending" {
+        return Err(ApiError::conflict("tunnel_plan_ospf_job_in_progress"));
+    }
+    Ok(())
 }
 
-pub(crate) async fn promote_tunnel_plan_to_custom_adapter(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(request): Json<PromoteTunnelPlanToCustomAdapterRequest>,
-) -> Result<Json<TunnelPlanView>, ApiError> {
-    let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "network:write")
+pub(crate) async fn resolve_plan_routing_adapters(
+    state: &AppState,
+    plan: &TunnelPlanView,
+) -> Result<(RoutingCostAdapterCommands, RoutingCostAdapterCommands), ApiError> {
+    let ospf = plan
+        .plan
+        .ospf
+        .as_ref()
+        .ok_or_else(|| ApiError::conflict("tunnel_plan_ospf_disabled"))?;
+    let left = resolve_routing_adapter(state, &ospf.left_adapter_template_id, &plan.left_client_id)
         .await?;
-    validate_custom_adapter_request(&request)?;
-    let existing = state
+    let right = resolve_routing_adapter(
+        state,
+        &ospf.right_adapter_template_id,
+        &plan.right_client_id,
+    )
+    .await?;
+    Ok((left, right))
+}
+
+async fn resolve_routing_adapter(
+    state: &AppState,
+    template_id: &str,
+    client_id: &str,
+) -> Result<RoutingCostAdapterCommands, ApiError> {
+    let template_id = Uuid::parse_str(template_id)
+        .map_err(|_| ApiError::bad_request("routing_cost_adapter_template_id_invalid"))?;
+    let template = state
         .repo
-        .get_tunnel_plan(request.plan_id)
+        .source_template_by_id_in_domain(template_id, "routing_cost_adapter")
         .await?
-        .ok_or_else(|| ApiError::bad_request("tunnel_plan_not_found"))?;
-    if existing.plan.runtime_control.manager != RuntimeTunnelManager::ExternalObserved {
-        return Err(ApiError::bad_request("tunnel_plan_not_external_observed"));
+        .ok_or_else(|| ApiError::conflict("routing_cost_adapter_template_not_found"))?;
+    if template.domain != "routing_cost_adapter" {
+        return Err(ApiError::conflict(
+            "routing_cost_adapter_template_domain_mismatch",
+        ));
     }
-    let mut input = existing.input.clone();
-    if let Some(name) = &request.name {
-        input.name = name.clone();
+    if template.scope == "vps_local" && template.owner_client_id.as_deref() != Some(client_id) {
+        return Err(ApiError::conflict(
+            "routing_cost_adapter_template_scope_mismatch",
+        ));
     }
-    input.runtime_control = request.runtime_control.clone();
-    let server_topology_version = existing.input.runtime_topology.version.clone();
-    input.runtime_topology = request
-        .runtime_topology
-        .clone()
-        .unwrap_or_else(|| existing.input.runtime_topology.clone());
-    input.runtime_topology.version = server_topology_version;
-    if input.runtime_topology.desired_interfaces.is_empty() {
-        input.runtime_topology.desired_interfaces = vec![input.interface_name.clone()];
+    if !matches!(template.scope.as_str(), "shared" | "vps_local") {
+        return Err(ApiError::conflict(
+            "routing_cost_adapter_template_scope_invalid",
+        ));
     }
-    let plan = plan_tunnel(&input)
-        .map_err(|error| ApiError::bad_request(tunnel_plan_error_code(error)))?;
-    require_tunnel_endpoint_agents(&state, &input.left_client_id, &input.right_client_id).await?;
-    let view = state
-        .repo
-        .promote_tunnel_plan_to_custom_adapter(&existing, &input, &plan, &operator)
-        .await?;
-    if view.enabled {
-        let _sync_jobs = push_runtime_config_for_clients(
-            &state,
-            &operator,
-            vec![view.left_client_id.clone(), view.right_client_id.clone()],
-            "tunnel_plan_custom_adapter_updated",
-        )
-        .await?;
+    let contract_version = template
+        .definition
+        .get("contract_version")
+        .and_then(serde_json::Value::as_u64);
+    if contract_version
+        != Some(u64::from(
+            vpsman_common::ROUTING_COST_ADAPTER_CONTRACT_VERSION,
+        ))
+    {
+        return Err(ApiError::conflict(
+            "routing_cost_adapter_contract_version_invalid",
+        ));
     }
-    Ok(Json(view))
+    let status = routing_adapter_command(&template.definition, "status_command")?;
+    let update = routing_adapter_command(&template.definition, "update_command")?;
+    let definition = serde_json::to_vec(&template.definition)
+        .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+    Ok(RoutingCostAdapterCommands {
+        template_id: template.id.to_string(),
+        template_name: template.name,
+        definition_hash: payload_hash(&definition),
+        status,
+        update,
+    })
+}
+
+fn routing_adapter_command(
+    definition: &serde_json::Value,
+    field: &str,
+) -> Result<RuntimeTunnelCommand, ApiError> {
+    let command: RuntimeTunnelCommand = serde_json::from_value(
+        definition
+            .get(field)
+            .cloned()
+            .ok_or_else(|| ApiError::conflict("routing_cost_adapter_command_missing"))?,
+    )
+    .map_err(|_| ApiError::conflict("routing_cost_adapter_command_invalid"))?;
+    if command.argv.is_empty()
+        || command.argv.len() > 32
+        || !command.argv[0].starts_with('/')
+        || command
+            .argv
+            .iter()
+            .any(|part| part.is_empty() || part.len() > 4096 || part.contains('\0'))
+        || !(1..=120).contains(&command.max_timeout_secs)
+        || !(1024..=64 * 1024).contains(&command.max_output_bytes)
+    {
+        return Err(ApiError::conflict("routing_cost_adapter_command_invalid"));
+    }
+    Ok(command)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn dispatch_routing_jobs(
+    state: &AppState,
+    operator: &crate::model::AuthContext,
+    plan: &TunnelPlanView,
+    left_job_id: Uuid,
+    right_job_id: Uuid,
+    left_adapter: RoutingCostAdapterCommands,
+    right_adapter: RoutingCostAdapterCommands,
+    apply: Option<(Option<u16>, Option<u16>, u16)>,
+) -> Result<Vec<CreateJobResponse>, ApiError> {
+    let specs = [
+        (
+            TunnelEndpointSide::Left,
+            plan.left_client_id.clone(),
+            left_job_id,
+            left_adapter,
+            apply.map(|(left, _, desired)| (left, desired)),
+        ),
+        (
+            TunnelEndpointSide::Right,
+            plan.right_client_id.clone(),
+            right_job_id,
+            right_adapter,
+            apply.map(|(_, right, desired)| (right, desired)),
+        ),
+    ];
+    let mut jobs = Vec::with_capacity(specs.len());
+    for (side, client_id, job_id, adapter, endpoint_apply) in specs {
+        let operation = if let Some((expected_current_cost, desired_cost)) = endpoint_apply {
+            JobCommand::NetworkRoutingApply {
+                plan_id: plan.id.to_string(),
+                plan: Box::new(plan.plan.clone()),
+                side,
+                adapter: adapter.clone(),
+                expected_current_cost,
+                desired_cost,
+            }
+        } else {
+            JobCommand::NetworkRoutingStatus {
+                plan_id: plan.id.to_string(),
+                plan: Box::new(plan.plan.clone()),
+                side,
+                adapter: adapter.clone(),
+            }
+        };
+        let max_timeout_secs = if endpoint_apply.is_some() {
+            adapter
+                .status
+                .max_timeout_secs
+                .saturating_mul(2)
+                .saturating_add(adapter.update.max_timeout_secs)
+                .saturating_add(5)
+        } else {
+            adapter.status.max_timeout_secs.saturating_add(5)
+        };
+        let request = CreateJobRequest {
+            job_id: Some(job_id),
+            selector_expression: vpsman_common::id_selector_expression(&client_id),
+            target_client_ids: vec![client_id],
+            destructive: false,
+            confirmed: endpoint_apply.is_some(),
+            command: vpsman_common::job_command_type_label(&operation).to_string(),
+            argv: Vec::new(),
+            operation: Some(operation),
+            max_timeout_secs: Some(max_timeout_secs),
+            force_unprivileged: false,
+            privileged: endpoint_apply.is_some(),
+            privilege_assertion: None,
+        };
+        match create_job_from_internal_operator_mutation(state, operator, request).await {
+            Ok((_status, Json(response))) => {
+                if response.target_counts.queued == 0
+                    && response.target_counts.dispatching == 0
+                    && response.target_counts.running == 0
+                {
+                    let _ = state
+                        .repo
+                        .record_tunnel_plan_ospf_job_result(plan.id, side, job_id, None, false)
+                        .await;
+                }
+                jobs.push(response)
+            }
+            Err(error) => {
+                let _ = state
+                    .repo
+                    .record_tunnel_plan_ospf_job_result(plan.id, side, job_id, None, false)
+                    .await;
+                return Err(error);
+            }
+        }
+    }
+    Ok(jobs)
 }
 
 fn normalize_optional_string(value: Option<String>) -> Option<String> {
@@ -556,13 +1015,19 @@ fn resolve_allocation_family(
 
 fn tunnel_plan_error_code(error: NetworkPlanError) -> &'static str {
     match error {
+        NetworkPlanError::InvalidPlanIdentity => "invalid_tunnel_plan_identity",
+        NetworkPlanError::InvalidTunnelEndpoints => "invalid_tunnel_plan_endpoints",
+        NetworkPlanError::InvalidUnderlayAddress => "invalid_tunnel_underlay_address",
         NetworkPlanError::InvalidRuntimeTunnelCommand
         | NetworkPlanError::RuntimeTunnelAdapterCommandRequired
         | NetworkPlanError::RuntimeTunnelObservedCannotMutate
         | NetworkPlanError::InvalidRuntimeTunnelTrafficLimit => "network_runtime_control_invalid",
+        NetworkPlanError::RuntimeTunnelTopologyRequiresAgentManagement => {
+            "network_runtime_topology_requires_agent_iproute2"
+        }
         NetworkPlanError::InvalidRuntimeTunnelTopology => "network_runtime_topology_invalid",
         NetworkPlanError::InvalidRuntimeTunnelRoute => "network_runtime_route_invalid",
-        NetworkPlanError::UnsupportedBackendTunnelKind => {
+        NetworkPlanError::UnsupportedRuntimeManagerTunnelKind => {
             "unsupported_tunnel_kind_for_runtime_manager"
         }
         NetworkPlanError::InvalidInterfaceName
@@ -571,140 +1036,8 @@ fn tunnel_plan_error_code(error: NetworkPlanError) -> &'static str {
         | NetworkPlanError::AddressPoolExhausted
         | NetworkPlanError::AddressPoolRequired
         | NetworkPlanError::InvalidBandwidthMbps
+        | NetworkPlanError::InvalidOspfConfig
         | NetworkPlanError::TunnelAddressRequired => "invalid_tunnel_plan_input",
-    }
-}
-
-fn validate_custom_adapter_request(
-    request: &PromoteTunnelPlanToCustomAdapterRequest,
-) -> Result<(), ApiError> {
-    if !request.confirmed {
-        return Err(ApiError::bad_request(
-            "custom_adapter_requires_confirmation",
-        ));
-    }
-    if request.runtime_control.manager != RuntimeTunnelManager::ExternalManagedAdapter {
-        return Err(ApiError::bad_request(
-            "custom_adapter_requires_external_managed_adapter",
-        ));
-    }
-    if request.runtime_control.status.is_none() {
-        return Err(ApiError::bad_request(
-            "custom_adapter_status_command_required",
-        ));
-    }
-    if request
-        .name
-        .as_ref()
-        .is_some_and(|name| name.is_empty() || name.len() > 128)
-    {
-        return Err(ApiError::bad_request("invalid_tunnel_plan_name"));
-    }
-    Ok(())
-}
-
-fn require_tunnel_plan_disable_supported(plan: &TunnelPlanView) -> Result<(), ApiError> {
-    let control = &plan.plan.runtime_control;
-    if control.manager == RuntimeTunnelManager::ExternalManagedAdapter
-        && control.stop.is_none()
-        && control.cleanup.is_none()
-    {
-        return Err(ApiError::conflict("custom_adapter_remove_command_required"));
-    }
-    Ok(())
-}
-
-fn validate_telemetry_promotion_request(
-    request: &PromoteTelemetryTunnelRequest,
-) -> Result<(), ApiError> {
-    if request.client_id.is_empty() || request.client_id.len() > 128 {
-        return Err(ApiError::bad_request("invalid_client_id"));
-    }
-    if request.peer_client_id.is_empty() || request.peer_client_id.len() > 128 {
-        return Err(ApiError::bad_request("invalid_peer_client_id"));
-    }
-    if request.client_id == request.peer_client_id {
-        return Err(ApiError::bad_request("telemetry_tunnel_peer_required"));
-    }
-    if request.interface.is_empty() || request.interface.len() > 64 {
-        return Err(ApiError::bad_request("invalid_tunnel_interface"));
-    }
-    if request
-        .name
-        .as_ref()
-        .is_some_and(|name| name.is_empty() || name.len() > 128)
-    {
-        return Err(ApiError::bad_request("invalid_tunnel_plan_name"));
-    }
-    Ok(())
-}
-
-fn telemetry_promotion_input(
-    request: &PromoteTelemetryTunnelRequest,
-    report: &TelemetryTunnelView,
-) -> Result<TunnelPlanInput, ApiError> {
-    let side = request.side.unwrap_or(TunnelEndpointSide::Left);
-    let (left_client_id, right_client_id, left_underlay, right_underlay) = match side {
-        TunnelEndpointSide::Left => (
-            request.client_id.clone(),
-            request.peer_client_id.clone(),
-            request.local_underlay.clone(),
-            request.peer_underlay.clone(),
-        ),
-        TunnelEndpointSide::Right => (
-            request.peer_client_id.clone(),
-            request.client_id.clone(),
-            request.peer_underlay.clone(),
-            request.local_underlay.clone(),
-        ),
-    };
-    Ok(TunnelPlanInput {
-        name: request.name.clone().unwrap_or_else(|| {
-            format!(
-                "{}-{}-{}-import",
-                request.client_id, request.peer_client_id, request.interface
-            )
-        }),
-        interface_name: request.interface.clone(),
-        kind: telemetry_tunnel_kind(&report.kind)?,
-        runtime_control: RuntimeTunnelControl {
-            manager: RuntimeTunnelManager::ExternalObserved,
-            ..RuntimeTunnelControl::default()
-        },
-        runtime_topology: RuntimeTunnelTopologyIntent {
-            version: Some(format!("telemetry-import:{}", request.interface)),
-            desired_interfaces: vec![request.interface.clone()],
-            ..RuntimeTunnelTopologyIntent::default()
-        },
-        left_client_id,
-        right_client_id,
-        left_underlay,
-        right_underlay,
-        address_pool_cidr: request.address_pool_cidr.clone(),
-        reserved_addresses: Vec::new(),
-        ipv4_tunnel: request.ipv4_tunnel.clone(),
-        ipv6_address_pool_cidr: request.ipv6_address_pool_cidr.clone(),
-        ipv6_tunnel: request.ipv6_tunnel.clone(),
-        latency_primary_family: request.latency_primary_family,
-        bandwidth_mbps: request.bandwidth_mbps.unwrap_or(100),
-        latency_ms: request.latency_ms.unwrap_or(10.0),
-        packet_loss_ratio: request.packet_loss_ratio.unwrap_or(0.0),
-        preference: request.preference.unwrap_or(1.0),
-        ospf_policy: OspfCostPolicy::default(),
-    })
-}
-
-fn telemetry_tunnel_kind(value: &str) -> Result<TunnelKind, ApiError> {
-    match value {
-        "gre" => Ok(TunnelKind::Gre),
-        "ipip" => Ok(TunnelKind::Ipip),
-        "sit" => Ok(TunnelKind::Sit),
-        "fou" => Ok(TunnelKind::Fou),
-        "openvpn" => Ok(TunnelKind::Openvpn),
-        "wireguard" => Ok(TunnelKind::Wireguard),
-        "tun_tap" => Ok(TunnelKind::TunTap),
-        "custom" => Ok(TunnelKind::Custom),
-        _ => Err(ApiError::bad_request("unsupported_telemetry_tunnel_kind")),
     }
 }
 

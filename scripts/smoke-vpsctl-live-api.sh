@@ -194,6 +194,60 @@ seed_agent() {
     "$api_url/internal/v1/gateway/agent-hello" >/dev/null
 }
 
+seed_tunnel_telemetry() {
+  local client_id="$1"
+  local endpoint_side="$2"
+  local peer_client_id="$3"
+  local gateway_session_id
+  local observed_unix
+  case "$client_id" in
+    cli-agent-a) gateway_session_id="11111111-1111-4111-8111-11111111111a" ;;
+    cli-agent-b) gateway_session_id="11111111-1111-4111-8111-11111111111b" ;;
+    *) gateway_session_id="11111111-1111-4111-8111-11111111111f" ;;
+  esac
+  observed_unix="$(date +%s)"
+  curl -fsS \
+    -H "Authorization: Bearer $internal_token" \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"gateway_id\": \"vpsctl-live-api-gateway\",
+      \"gateway_session_id\": \"$gateway_session_id\",
+      \"process_incarnation_id\": \"11111111-1111-4111-8111-111111111111\",
+      \"telemetry_seq\": 1,
+      \"telemetry\": {
+        \"client_id\": \"$client_id\",
+        \"metrics\": {
+          \"observed_unix\": $observed_unix,
+          \"hostname\": \"$client_id\",
+          \"uptime_secs\": 3600,
+          \"cpu\": {\"load\": {\"one\": 0.1, \"five\": 0.1, \"fifteen\": 0.1}, \"cores\": 1},
+          \"memory\": {\"total_bytes\": 268435456, \"available_bytes\": 134217728},
+          \"disks\": [],
+          \"networks\": [],
+          \"tunnels\": [{
+            \"interface\": \"grecli\",
+            \"kind\": \"gre\",
+            \"ownership_mode\": \"agent_iproute2_managed\",
+            \"mutation_policy\": \"managed_desired\",
+            \"source\": \"approved_runtime_status_telemetry\",
+            \"rx_bytes\": 0,
+            \"tx_bytes\": 0,
+            \"traffic_source\": \"interface_counters\",
+            \"traffic_status\": \"missing\",
+            \"traffic_reason\": \"grecli_not_found\",
+            \"traffic_checked_unix\": $observed_unix,
+            \"plan_id\": \"$plan_id\",
+            \"plan_name\": \"cli-gre-a-b\",
+            \"plan_runtime_manager\": \"agent_iproute2_managed\",
+            \"endpoint_side\": \"$endpoint_side\",
+            \"peer_client_id\": \"$peer_client_id\"
+          }]
+        }
+      }
+    }" \
+    "$api_url/internal/v1/gateway/telemetry" >/dev/null
+}
+
 assign_agent_alias() {
   local client_id="$1"
   local display_name="$2"
@@ -372,7 +426,7 @@ seed_agent "cli-agent-b" "$unprivileged_capabilities"
 assign_agent_alias "cli-agent-a" "cli-edge-a"
 assign_agent_alias "cli-agent-b" "cli-edge-b"
 assign_agent_tags "cli-agent-a" edge bgp
-assign_agent_tags "cli-agent-b" edge bird2
+assign_agent_tags "cli-agent-b" edge routing
 
 summary_json="$(vpsctl_auth summary)"
 jq -e '.total >= 2 and .online == 2' <<<"$summary_json" >/dev/null
@@ -419,37 +473,56 @@ jq -e '
   any(.[]; .client_id == "cli-agent-a" and .domain == "speed_test_provider" and .status == "ready_on_demand" and .evidence.requires_two_endpoints == true) and
   any(.[]; .client_id == "cli-agent-a" and .domain == "command_execution_policy" and .status == "ready_on_demand" and .evidence.environment_policy == "inherit" and .evidence.pty_policy == "native_pty" and .evidence.process_cleanup == "process_group")
 ' <<<"$workflow_source_status_json" >/dev/null
-network_status_seed_job_json="$(vpsctl_auth job-shell \
-  --script "printf '%s\n' vpsctl-live-api-network-readiness-seed" \
-  --clients cli-agent-a \
-  --max-timeout-secs 5 \
-  --privilege-ttl-secs 60 \
+plan_json="$(vpsctl_auth tunnel-plan \
+  --name cli-gre-a-b \
+  --interface-name grecli \
+  --kind gre \
+  --left-client-id cli-agent-a \
+  --right-client-id cli-agent-b \
+  --left-remote-underlay 203.0.113.201 \
+  --right-remote-underlay 203.0.113.202 \
+  --address-pool-cidr 10.252.0.0/30 \
+  --left-tunnel-ipv4-cidr 10.252.0.0/31 \
+  --right-tunnel-ipv4-cidr 10.252.0.1/31 \
+  --bandwidth-mbps 100 \
+  --save \
   --confirmed)"
+jq -e '.name == "cli-gre-a-b" and .revision == 1 and .enabled == false and .plan.kind == "gre" and (.plan | has("mutates_host") | not) and .plan.recommended_ospf_cost == null' \
+  <<<"$plan_json" >/dev/null
+plan_id="$(jq -r '.id' <<<"$plan_json")"
+plan_revision="$(jq -r '.revision' <<<"$plan_json")"
+enabled_plan_json="$(vpsctl_auth tunnel-plan-enable \
+  --plan-id "$plan_id" \
+  --expected-revision "$plan_revision" \
+  --confirmed)"
+jq -e '.enabled == true and .revision == 2' <<<"$enabled_plan_json" >/dev/null
+plan_revision="$(jq -r '.revision' <<<"$enabled_plan_json")"
+seed_tunnel_telemetry cli-agent-a left cli-agent-b
+seed_tunnel_telemetry cli-agent-b right cli-agent-a
+network_status_seed_job_json="$(vpsctl_auth tunnel-status \
+  --plan-id "$plan_id" \
+  --side left \
+  --max-timeout-secs 5)"
 network_status_seed_job_id="$(jq -r '.job_id' <<<"$network_status_seed_job_json")"
 network_status_seed_payload_hash="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT payload_hash FROM jobs WHERE id = '$network_status_seed_job_id'")"
 network_status_seed_data="$(python3 -c 'import json,sys; print(json.dumps(list(json.dumps({
   "type": "network_status",
-  "plan": "cli-edge-a-cli-edge-b-gre",
-  "interface": "gre-bgp-a",
+  "plan": "cli-gre-a-b",
+  "interface": "grecli",
   "peer_client_id": "cli-agent-b",
+  "scope": "declared_plan_only",
   "runtime": {
+    "manager": "agent_iproute2_managed",
     "summary": {
       "healthy": False,
-      "state": "bird2_neighbor_down",
-      "message": "BIRD2 OSPF neighbor is down on the GRE transit segment"
+      "state": "declared_interface_missing",
+      "message": "Declared GRE interface is missing"
     },
-    "bird2": {
-      "healthy": False,
-      "neighbors": [
-        {
-          "peer": "cli-edge-b",
-          "state": "down",
-          "last_error": "OSPF hello timeout"
-        }
-      ]
-    }
-  },
-  "applied": False
+    "interface": {"exists": False, "operstate": None},
+    "desired_interfaces": [{"interface": "grecli", "exists": False}],
+    "declared_stale_interfaces": [],
+    "adapter": None
+  }
 }).encode())))')"
 curl -fsS \
   -H "Authorization: Bearer $internal_token" \
@@ -730,25 +803,58 @@ bulk_json="$(vpsctl_auth bulk-resolve \
 jq -e '.target_count == 2 and (.targets | length == 2) and any(.targets[]; .id == "cli-agent-a") and any(.targets[]; .id == "cli-agent-b")' \
   <<<"$bulk_json" >/dev/null
 
-plan_json="$(vpsctl_auth tunnel-plan \
+plans_json="$(vpsctl_auth tunnel-plans)"
+jq -e 'length == 1 and .[0].name == "cli-gre-a-b" and .[0].enabled == true and .[0].revision == 2' <<<"$plans_json" >/dev/null
+updated_plan_json="$(vpsctl_auth tunnel-plan \
   --name cli-gre-a-b \
   --interface-name grecli \
   --kind gre \
   --left-client-id cli-agent-a \
   --right-client-id cli-agent-b \
-  --left-underlay 203.0.113.201 \
-  --right-underlay 203.0.113.202 \
-  --address-pool-cidr 10.252.0.0/30 \
+  --left-remote-underlay 203.0.113.201 \
+  --right-remote-underlay 203.0.113.202 \
   --left-tunnel-ipv4-cidr 10.252.0.0/31 \
   --right-tunnel-ipv4-cidr 10.252.0.1/31 \
-  --bandwidth-mbps 100 \
-  --latency-ms 25 \
+  --bandwidth-mbps 250 \
   --save \
+  --update-plan-id "$plan_id" \
+  --expected-revision "$plan_revision" \
   --confirmed)"
-jq -e '.name == "cli-gre-a-b" and .status == "planned" and .plan.mutates_host == false' \
-  <<<"$plan_json" >/dev/null
-plans_json="$(vpsctl_auth tunnel-plans)"
-jq -e 'length == 1 and .[0].name == "cli-gre-a-b"' <<<"$plans_json" >/dev/null
+jq -e '.revision == 3 and .enabled == true and .plan.bandwidth_mbps == 250' <<<"$updated_plan_json" >/dev/null
+if stale_plan_output="$(vpsctl_auth tunnel-plan \
+  --name cli-gre-a-b \
+  --interface-name grecli \
+  --kind gre \
+  --left-client-id cli-agent-a \
+  --right-client-id cli-agent-b \
+  --left-remote-underlay 203.0.113.201 \
+  --right-remote-underlay 203.0.113.202 \
+  --left-tunnel-ipv4-cidr 10.252.0.0/31 \
+  --right-tunnel-ipv4-cidr 10.252.0.1/31 \
+  --bandwidth-mbps 500 \
+  --save \
+  --update-plan-id "$plan_id" \
+  --expected-revision "$plan_revision" \
+  --confirmed 2>&1)"; then
+  fail "tunnel-plan update accepted a stale declaration revision"
+fi
+[[ "$stale_plan_output" == *"tunnel_plan_snapshot_stale"* ]] \
+  || fail "stale tunnel plan update did not report tunnel_plan_snapshot_stale: $stale_plan_output"
+
+plan_revision="$(jq -r '.revision' <<<"$updated_plan_json")"
+disabled_plan_json="$(vpsctl_auth tunnel-plan-disable \
+  --plan-id "$plan_id" \
+  --expected-revision "$plan_revision" \
+  --confirmed)"
+jq -e '.enabled == false and .revision == 4' <<<"$disabled_plan_json" >/dev/null
+plan_revision="$(jq -r '.revision' <<<"$disabled_plan_json")"
+deleted_plan_json="$(vpsctl_auth tunnel-plan-delete \
+  --plan-id "$plan_id" \
+  --expected-revision "$plan_revision" \
+  --confirmed)"
+jq -e '.deleted_reason == "operator_retired" and .deleted_at != null and .revision == 5' \
+  <<<"$deleted_plan_json" >/dev/null
+jq -e 'length == 0' <<<"$(vpsctl_auth tunnel-plans)" >/dev/null
 
 schedule_json="$(vpsctl_auth schedule-create \
   --name cli-hourly-uptime \
@@ -792,8 +898,8 @@ restores_json="$(vpsctl_auth restore-plans --limit 10)"
 jq -e --arg backup_id "$backup_id" 'any(.[]; .source_backup_request_id == $backup_id and .target_client_id == "cli-agent-b")' \
   <<<"$restores_json" >/dev/null
 
-audit_json="$(vpsctl_auth audit --limit 20)"
-jq -e 'any(.[]; .action == "operator.created") and any(.[]; .action == "operator_session.revoked") and any(.[]; .action == "backup.requested_metadata_only") and any(.[]; .action == "restore.planned_metadata_only") and any(.[]; .action == "network.tunnel_plan_created")' \
+audit_json="$(vpsctl_auth audit --limit 100)"
+jq -e 'any(.[]; .action == "operator.created") and any(.[]; .action == "operator_session.revoked") and any(.[]; .action == "backup.requested_metadata_only") and any(.[]; .action == "restore.planned_metadata_only") and any(.[]; .action == "network.tunnel_plan_created") and any(.[]; .action == "network.tunnel_plan_deleted")' \
   <<<"$audit_json" >/dev/null
 
 history_retention_json="$(vpsctl_auth history-retention)"
@@ -840,7 +946,7 @@ jq -n \
       "source_template_process_limit_readiness",
       "curated_source_templates",
       "tag_bulk",
-      "tunnel_plan_save_list",
+      "tunnel_plan_save_enable_update_disable_delete",
       "schedule_create_list",
       "backup_request_restore_plan",
       "audit_visibility",

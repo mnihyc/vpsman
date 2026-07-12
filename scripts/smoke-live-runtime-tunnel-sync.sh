@@ -43,8 +43,9 @@ peer_agent_config="$SMOKE_TMPDIR/agent-right.toml"
 plan_id=""
 config_read_job_id=""
 peer_config_read_job_id=""
-current_ospf_cost=""
-updated_ospf_cost=""
+initial_bandwidth_mbps=100
+updated_bandwidth_mbps=137
+plan_revision=""
 
 cleanup_runtime_tunnel_sync_smoke() {
   smoke_cleanup
@@ -218,14 +219,16 @@ config_read_toml() {
 
 wait_config_contains_plan() {
   local id="$1"
-  local expected_cost="$2"
+  local expected_bandwidth_mbps="$2"
   local deadline=$((SECONDS + 45))
   local toml_text=""
   while (( SECONDS < deadline )); do
     toml_text="$(config_read_toml "$id")"
     if grep -F "plan_id = \"$plan_id\"" <<<"$toml_text" >/dev/null \
       && grep -F "interface_name = \"$interface_name\"" <<<"$toml_text" >/dev/null \
-      && grep -F "recommended_ospf_cost = $expected_cost" <<<"$toml_text" >/dev/null; then
+      && grep -F "bandwidth_mbps = $expected_bandwidth_mbps" <<<"$toml_text" >/dev/null \
+      && grep -F 'manager = "external_observed"' <<<"$toml_text" >/dev/null \
+      && ! grep -F "recommended_ospf_cost" <<<"$toml_text" >/dev/null; then
       return
     fi
     sleep 1
@@ -326,61 +329,86 @@ plan_json="$(VPSMAN_API_TOKEN="$access_token" \
     --runtime-manager external_observed \
     --left-client-id "$client_id" \
     --right-client-id "$peer_client_id" \
-    --left-underlay 198.51.100.10 \
-    --right-underlay 198.51.100.11 \
+    --left-remote-underlay 198.51.100.10 \
+    --right-remote-underlay 198.51.100.11 \
     --left-tunnel-ipv4-cidr 10.255.70.0/31 \
     --right-tunnel-ipv4-cidr 10.255.70.1/31 \
-    --bandwidth-mbps 100 \
-    --latency-ms 3 \
+    --bandwidth-mbps "$initial_bandwidth_mbps" \
     --save \
     --enabled \
     --confirmed)"
 plan_id="$(jq -r '.id' <<<"$plan_json")"
+plan_revision="$(jq -r '.revision' <<<"$plan_json")"
 jq -e \
   --arg id "$plan_id" \
   --arg left "$client_id" \
-  --arg right "$peer_client_id" '
+  --arg right "$peer_client_id" \
+  --argjson bandwidth "$initial_bandwidth_mbps" '
     .id == $id
       and .enabled == true
+      and .revision == 1
       and .left_client_id == $left
       and .right_client_id == $right
       and .plan.runtime_control.manager == "external_observed"
+      and .plan.bandwidth_mbps == $bandwidth
+      and .plan.ospf == null
+      and .recommended_ospf_cost == null
   ' <<<"$plan_json" >/dev/null
 
-current_ospf_cost="$(jq -r '.recommended_ospf_cost' <<<"$plan_json")"
-updated_ospf_cost="$((current_ospf_cost + 15))"
-wait_config_contains_plan "$client_id" "$current_ospf_cost"
-wait_config_contains_plan "$peer_client_id" "$current_ospf_cost"
+wait_config_contains_plan "$client_id" "$initial_bandwidth_mbps"
+wait_config_contains_plan "$peer_client_id" "$initial_bandwidth_mbps"
 
-# This smoke verifies privileged runtime sync without generating probe/speed
-# recommendation evidence; rollback keeps the stale-current-cost guard active.
 updated_plan_json="$(VPSMAN_API_TOKEN="$access_token" \
-  VPSMAN_SUPER_PASSWORD="$super_password" \
-  VPSMAN_SUPER_SALT_HEX="$super_salt_hex" \
-  target/debug/vpsctl --api-url "$api_url" tunnel-ospf-cost-update \
-    --plan-id "$plan_id" \
-    --recommendation-id "runtime-tunnel-sync-manual" \
-    --current-ospf-cost "$current_ospf_cost" \
-    --recommended-ospf-cost "$updated_ospf_cost" \
-    --mutation-intent rollback \
+  target/debug/vpsctl --api-url "$api_url" tunnel-plan \
+    --name "$plan_name" \
+    --interface-name "$interface_name" \
+    --kind gre \
+    --runtime-manager external_observed \
+    --left-client-id "$client_id" \
+    --right-client-id "$peer_client_id" \
+    --left-remote-underlay 198.51.100.10 \
+    --right-remote-underlay 198.51.100.11 \
+    --left-tunnel-ipv4-cidr 10.255.70.0/31 \
+    --right-tunnel-ipv4-cidr 10.255.70.1/31 \
+    --bandwidth-mbps "$updated_bandwidth_mbps" \
+    --save \
+    --update-plan-id "$plan_id" \
+    --expected-revision "$plan_revision" \
     --confirmed)"
-jq -e --argjson updated "$updated_ospf_cost" '
-  .recommended_ospf_cost == $updated and .plan.recommended_ospf_cost == $updated
-' \
-  <<<"$updated_plan_json" >/dev/null
-wait_config_contains_plan "$client_id" "$updated_ospf_cost"
-wait_config_contains_plan "$peer_client_id" "$updated_ospf_cost"
+plan_revision="$(jq -r '.revision' <<<"$updated_plan_json")"
+jq -e \
+  --arg id "$plan_id" \
+  --argjson bandwidth "$updated_bandwidth_mbps" '
+    .id == $id
+      and .enabled == true
+      and .revision == 2
+      and .plan.runtime_control.manager == "external_observed"
+      and .plan.bandwidth_mbps == $bandwidth
+      and .plan.ospf == null
+      and .recommended_ospf_cost == null
+  ' <<<"$updated_plan_json" >/dev/null
+wait_config_contains_plan "$client_id" "$updated_bandwidth_mbps"
+wait_config_contains_plan "$peer_client_id" "$updated_bandwidth_mbps"
 
 disabled_json="$(api_post \
   "/api/v1/tunnel-plans/$plan_id/disable" \
-  '{"confirmed": true}')"
+  "$(jq -nc --argjson revision "$plan_revision" '{confirmed: true, expected_revision: $revision}')")"
 jq -e '.enabled == false' <<<"$disabled_json" >/dev/null
+wait_config_omits_plan "$client_id"
+wait_config_omits_plan "$peer_client_id"
+
+plan_revision="$(jq -r '.revision' <<<"$disabled_json")"
+deleted_json="$(api_post \
+  "/api/v1/tunnel-plans/$plan_id/delete" \
+  "$(jq -nc --argjson revision "$plan_revision" '{confirmed: true, expected_revision: $revision}')")"
+jq -e '.deleted_reason == "operator_retired" and .deleted_at != null' <<<"$deleted_json" >/dev/null
+jq -e 'length == 0' <<<"$(api_get "/api/v1/tunnel-plans")" >/dev/null
 wait_config_omits_plan "$client_id"
 wait_config_omits_plan "$peer_client_id"
 
 jobs_json="$(api_get "/api/v1/jobs?limit=50")"
 jq -e '
-  [ .[] | select(.command_type == "runtime_config_sync") ] | length >= 4
+  [ .[] | select(.command_type == "runtime_config_sync") ] | length >= 6
 ' <<<"$jobs_json" >/dev/null
 apply_state_json="$(api_get "/api/v1/runtime-config/apply-state")"
 jq -e --arg client "$client_id" --arg peer "$peer_client_id" '
@@ -400,8 +428,8 @@ jq -n \
   --arg client_id "$client_id" \
   --arg peer_client_id "$peer_client_id" \
   --arg plan_id "$plan_id" \
-  --argjson current_ospf_cost "$current_ospf_cost" \
-  --argjson updated_ospf_cost "$updated_ospf_cost" \
+  --argjson initial_bandwidth_mbps "$initial_bandwidth_mbps" \
+  --argjson updated_bandwidth_mbps "$updated_bandwidth_mbps" \
   --arg config_read_job_id "$config_read_job_id" \
   --arg peer_config_read_job_id "$peer_config_read_job_id" \
   '{
@@ -409,9 +437,10 @@ jq -n \
     client_id: $client_id,
     peer_client_id: $peer_client_id,
     plan_id: $plan_id,
-    current_ospf_cost: $current_ospf_cost,
-    updated_ospf_cost: $updated_ospf_cost,
+    ospf_enabled: false,
+    initial_bandwidth_mbps: $initial_bandwidth_mbps,
+    updated_bandwidth_mbps: $updated_bandwidth_mbps,
     config_read_job_id: $config_read_job_id,
     peer_config_read_job_id: $peer_config_read_job_id,
-    create_update_disable_pushed_runtime_config_sync: true
+    explicit_create_update_disable_delete_pushed_runtime_config_sync: true
   }'

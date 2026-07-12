@@ -286,20 +286,28 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
         JobCommand::RestoreRollback { restored_files, .. } => {
             validate_restore_rollback_operation(restored_files)
         }
-        JobCommand::NetworkStatus { plan, side } => validate_network_plan_side(
+        JobCommand::NetworkStatus {
+            plan_id,
             plan,
-            *side,
-            "network_status_plan_must_be_observe_plan",
-            "network_status_plan_invalid",
-        ),
+            side,
+            runtime_adapter,
+        } => {
+            validate_network_diagnostic_plan_id(plan_id)?;
+            validate_network_status_operation(plan, *side, runtime_adapter.as_ref())
+        }
         JobCommand::NetworkInterfaces => Ok(()),
         JobCommand::NetworkProbe {
+            plan_id,
             plan,
             side,
             count,
             interval_ms,
-        } => validate_network_probe_operation(plan, *side, *count, *interval_ms),
+        } => {
+            validate_network_diagnostic_plan_id(plan_id)?;
+            validate_network_probe_operation(plan, *side, *count, *interval_ms)
+        }
         JobCommand::NetworkSpeedTest {
+            plan_id,
             plan,
             server_side,
             duration_secs,
@@ -307,14 +315,37 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
             rate_limit_kbps,
             port,
             connect_timeout_ms,
-        } => validate_network_speed_test_operation(
+        } => {
+            validate_network_diagnostic_plan_id(plan_id)?;
+            validate_network_speed_test_operation(
+                plan,
+                *server_side,
+                *duration_secs,
+                *max_bytes,
+                *rate_limit_kbps,
+                *port,
+                *connect_timeout_ms,
+            )
+        }
+        JobCommand::NetworkRoutingStatus {
+            plan_id,
             plan,
-            *server_side,
-            *duration_secs,
-            *max_bytes,
-            *rate_limit_kbps,
-            *port,
-            *connect_timeout_ms,
+            side,
+            adapter,
+        } => validate_network_routing_adapter_operation(plan_id, plan, *side, adapter, None),
+        JobCommand::NetworkRoutingApply {
+            plan_id,
+            plan,
+            side,
+            adapter,
+            desired_cost,
+            ..
+        } => validate_network_routing_adapter_operation(
+            plan_id,
+            plan,
+            *side,
+            adapter,
+            Some(*desired_cost),
         ),
     }
 }
@@ -489,14 +520,165 @@ fn validate_network_plan_side(
     mutating_error: &'static str,
     invalid_error: &'static str,
 ) -> Result<(), ApiError> {
-    if plan.mutates_host {
-        return Err(ApiError::bad_request(mutating_error));
-    }
+    let _ = mutating_error;
     validate_runtime_tunnel_control(&plan.runtime_control)
         .map_err(|_| ApiError::bad_request("network_runtime_control_invalid"))?;
     validate_runtime_topology_intent(&plan.runtime_topology, &plan.interface_name)
         .map_err(|_| ApiError::bad_request("network_runtime_topology_invalid"))?;
     render_tunnel_endpoint_config(plan, side).map_err(|_| ApiError::bad_request(invalid_error))?;
+    Ok(())
+}
+
+fn validate_network_status_operation(
+    plan: &vpsman_common::TunnelPlan,
+    side: vpsman_common::TunnelEndpointSide,
+    adapter: Option<&vpsman_common::RuntimeTunnelAdapterCommands>,
+) -> Result<(), ApiError> {
+    validate_network_plan_side(
+        plan,
+        side,
+        "network_status_plan_must_be_observe_plan",
+        "network_status_plan_invalid",
+    )?;
+    match plan.runtime_control.manager {
+        vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter => {
+            let adapter = adapter
+                .ok_or_else(|| ApiError::bad_request("network_status_adapter_snapshot_required"))?;
+            let expected_template_id = match side {
+                vpsman_common::TunnelEndpointSide::Left => {
+                    plan.runtime_control.left_adapter_template_id.as_deref()
+                }
+                vpsman_common::TunnelEndpointSide::Right => {
+                    plan.runtime_control.right_adapter_template_id.as_deref()
+                }
+            };
+            if expected_template_id != Some(adapter.template_id.as_str()) {
+                return Err(ApiError::bad_request(
+                    "network_status_adapter_binding_mismatch",
+                ));
+            }
+            validate_runtime_adapter_snapshot(
+                adapter,
+                !plan.runtime_control.traffic_limit.is_default(),
+            )
+        }
+        vpsman_common::RuntimeTunnelManager::AgentIproute2Managed
+        | vpsman_common::RuntimeTunnelManager::ExternalObserved => {
+            if adapter.is_some() {
+                return Err(ApiError::bad_request(
+                    "network_status_adapter_snapshot_forbidden",
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_network_diagnostic_plan_id(plan_id: &str) -> Result<(), ApiError> {
+    uuid::Uuid::parse_str(plan_id)
+        .map(|_| ())
+        .map_err(|_| ApiError::bad_request("network_diagnostic_plan_id_invalid"))
+}
+
+fn validate_runtime_adapter_snapshot(
+    adapter: &vpsman_common::RuntimeTunnelAdapterCommands,
+    traffic_limit_required: bool,
+) -> Result<(), ApiError> {
+    uuid::Uuid::parse_str(&adapter.template_id)
+        .map_err(|_| ApiError::bad_request("network_status_adapter_template_id_invalid"))?;
+    if adapter.template_name.trim().is_empty()
+        || adapter.definition_hash.len() != 64
+        || !adapter
+            .definition_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || (adapter.startup.is_none() && adapter.restart.is_none())
+        || (adapter.stop.is_none() && adapter.cleanup.is_none())
+        || (traffic_limit_required && adapter.traffic_limit_apply.is_none())
+    {
+        return Err(ApiError::bad_request(
+            "network_status_adapter_snapshot_invalid",
+        ));
+    }
+    validate_routing_adapter_command(&adapter.status)?;
+    for command in [
+        adapter.startup.as_ref(),
+        adapter.stop.as_ref(),
+        adapter.cleanup.as_ref(),
+        adapter.restart.as_ref(),
+        adapter.traffic_limit_apply.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        validate_routing_adapter_command(command)?;
+    }
+    Ok(())
+}
+
+fn validate_network_routing_adapter_operation(
+    plan_id: &str,
+    plan: &vpsman_common::TunnelPlan,
+    side: vpsman_common::TunnelEndpointSide,
+    adapter: &vpsman_common::RoutingCostAdapterCommands,
+    desired_cost: Option<u16>,
+) -> Result<(), ApiError> {
+    uuid::Uuid::parse_str(plan_id)
+        .map_err(|_| ApiError::bad_request("network_routing_plan_id_invalid"))?;
+    validate_network_plan_side(
+        plan,
+        side,
+        "network_routing_plan_invalid",
+        "network_routing_plan_invalid",
+    )?;
+    let ospf = plan
+        .ospf
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("network_routing_ospf_disabled"))?;
+    let expected_template_id = match side {
+        vpsman_common::TunnelEndpointSide::Left => &ospf.left_adapter_template_id,
+        vpsman_common::TunnelEndpointSide::Right => &ospf.right_adapter_template_id,
+    };
+    if adapter.template_id != *expected_template_id {
+        return Err(ApiError::bad_request(
+            "network_routing_adapter_binding_mismatch",
+        ));
+    }
+    if adapter.definition_hash.len() != 64
+        || !adapter
+            .definition_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(ApiError::bad_request(
+            "network_routing_adapter_hash_invalid",
+        ));
+    }
+    validate_routing_adapter_command(&adapter.status)?;
+    validate_routing_adapter_command(&adapter.update)?;
+    if desired_cost == Some(0) {
+        return Err(ApiError::bad_request("network_routing_cost_invalid"));
+    }
+    Ok(())
+}
+
+fn validate_routing_adapter_command(
+    command: &vpsman_common::RuntimeTunnelCommand,
+) -> Result<(), ApiError> {
+    if command.argv.is_empty()
+        || command.argv.len() > 32
+        || !command.argv[0].starts_with('/')
+        || command
+            .argv
+            .iter()
+            .any(|part| part.is_empty() || part.len() > 4096 || part.contains('\0'))
+        || !(1..=120).contains(&command.max_timeout_secs)
+        || !(1024..=64 * 1024).contains(&command.max_output_bytes)
+    {
+        return Err(ApiError::bad_request(
+            "network_routing_adapter_command_invalid",
+        ));
+    }
     Ok(())
 }
 

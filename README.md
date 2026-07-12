@@ -50,7 +50,8 @@ UIs. `vpsman` targets a different operating model:
 | Remote work | Reviewed shell/script jobs, interactive terminal sessions, file browser, file transfer, process supervision, and schedules. |
 | Backups | Bounded recursive configuration snapshots, chunked artifacts, restore plans, rollback, migration links, and object-store retention. |
 | Runtime config | Source templates, per-VPS overrides, bulk config patches, and visible runtime config sync jobs. |
-| Network | Tunnel plans, runtime tunnel sync, topology graph/evidence, network tests, speed tests, Bird2/OSPF cost workflows. |
+| Network | Explicit NAT-safe tunnel plans, exact endpoint evidence, topology, bounded network tests, and optional daemon-neutral routing-cost adapters. |
+| Observability | Current fleet monitor cards, scoped retained resource/network charts, explicit freshness and coverage, alert policies, event webhooks, and bounded automatic telemetry retention. |
 | Access and audit | Operator roles/scopes, sessions, TOTP, direct gateway identities, key rotation/revocation, audit logs, and evidence views. |
 | Releases | GitHub release assets, checksum manifests, compose updater, agent update jobs, and rollback-friendly deployment layout. |
 
@@ -357,6 +358,7 @@ before any release artifacts or GitHub release are published.
 - [Target selectors](docs/target-selectors.md)
 - [Operator access scopes](docs/operator-access-scopes.md)
 - [Job status model](docs/job-status-model.md)
+- [Telemetry metric definitions](docs/telemetry-metrics.md)
 - [Build notes](docs/build.md)
 
 ## Project Status

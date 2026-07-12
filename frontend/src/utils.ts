@@ -255,7 +255,7 @@ export function formatTime(
   value: string,
   timeZone = preferredTimeZone,
 ): string {
-  const date = new Date(value);
+  const date = new Date(timestampMillis(value));
   if (Number.isNaN(date.getTime())) {
     return value;
   }
@@ -266,7 +266,7 @@ export function formatCompactTime(
   value: string,
   timeZone = preferredTimeZone,
 ): string {
-  const date = new Date(value);
+  const date = new Date(timestampMillis(value));
   if (Number.isNaN(date.getTime())) {
     return value;
   }
@@ -287,7 +287,7 @@ export function formatFullTime(
   value: string,
   timeZone = preferredTimeZone,
 ): string {
-  const date = new Date(value);
+  const date = new Date(timestampMillis(value));
   if (Number.isNaN(date.getTime())) {
     return value;
   }
@@ -301,6 +301,19 @@ export function formatFullTime(
     year: "numeric",
     ...(timeZone ? { timeZone } : {}),
   });
+}
+
+export function timestampMillis(value: string): number {
+  const trimmed = value.trim();
+  if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) {
+    const numeric = Number(trimmed);
+    if (Number.isFinite(numeric)) {
+      return Math.abs(numeric) < 100_000_000_000
+        ? numeric * 1000
+        : numeric;
+    }
+  }
+  return new Date(value).getTime();
 }
 
 function formatRelativeTime(date: Date, now: Date): string | null {

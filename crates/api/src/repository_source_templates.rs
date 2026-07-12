@@ -15,7 +15,7 @@ use crate::{
     },
     repository::Repository,
     repository_template_runtime_config::render_template_runtime_candidate,
-    source_template_builtins::builtin_source_templates,
+    source_template_builtins::{builtin_source_templates, is_plan_bound_adapter_domain},
     unix_now,
 };
 
@@ -25,7 +25,7 @@ impl Repository {
         domain: Option<&str>,
     ) -> Result<Vec<SourceTemplateView>> {
         self.ensure_builtin_source_templates().await?;
-        match self {
+        let mut templates = match self {
             Self::Memory(memory) => {
                 let assignments = self
                     .effective_source_template_assignments(None, domain)
@@ -53,7 +53,7 @@ impl Repository {
                         .then_with(|| left.scope.cmp(&right.scope))
                         .then_with(|| left.name.cmp(&right.name))
                 });
-                Ok(templates)
+                templates
             }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
@@ -103,9 +103,13 @@ impl Repository {
                 .bind(domain)
                 .fetch_all(pool)
                 .await?;
-                rows.into_iter().map(source_template_from_row).collect()
+                rows.into_iter()
+                    .map(source_template_from_row)
+                    .collect::<Result<Vec<_>>>()?
             }
-        }
+        };
+        self.apply_plan_bound_template_usage(&mut templates).await?;
+        Ok(templates)
     }
 
     pub(crate) async fn create_source_template(
@@ -211,6 +215,45 @@ impl Repository {
         )
         .await?;
         Ok(template)
+    }
+
+    pub(crate) async fn source_template_by_id_in_domain(
+        &self,
+        template_id: Uuid,
+        domain: &str,
+    ) -> Result<Option<SourceTemplateView>> {
+        self.ensure_builtin_source_templates().await?;
+        match self {
+            Self::Memory(memory) => Ok(memory
+                .source_templates
+                .read()
+                .await
+                .iter()
+                .find(|template| template.id == template_id && template.domain == domain)
+                .cloned()
+                .map(|mut template| {
+                    template.assigned_client_count = 0;
+                    template
+                })),
+            Self::Postgres(pool) => {
+                let row = sqlx::query(
+                    r#"
+                    SELECT
+                        id, domain, name, scope, built_in, is_default, owner_client_id,
+                        description, definition, created_at::text AS created_at,
+                        updated_at::text AS updated_at,
+                        0::bigint AS assigned_client_count
+                    FROM source_templates
+                    WHERE id = $1 AND domain = $2
+                    "#,
+                )
+                .bind(template_id)
+                .bind(domain)
+                .fetch_optional(pool)
+                .await?;
+                row.map(source_template_from_row).transpose()
+            }
+        }
     }
 
     pub(crate) async fn clone_source_template(
@@ -657,6 +700,10 @@ impl Repository {
         operator: &AuthContext,
     ) -> Result<AssignSourceTemplateResponse> {
         self.ensure_builtin_source_templates().await?;
+        anyhow::ensure!(
+            !is_plan_bound_adapter_domain(&request.domain),
+            "source_template_adapter_requires_tunnel_plan_binding"
+        );
         let template = self
             .source_template_by_id(request.template_id)
             .await?
@@ -786,6 +833,63 @@ impl Repository {
                     .any(|client_id| client_id == &assignment.client_id)
             })
             .collect())
+    }
+
+    async fn apply_plan_bound_template_usage(
+        &self,
+        templates: &mut [SourceTemplateView],
+    ) -> Result<()> {
+        if !templates
+            .iter()
+            .any(|template| is_plan_bound_adapter_domain(&template.domain))
+        {
+            return Ok(());
+        }
+        let plans = self.list_tunnel_plans().await?;
+        for template in templates
+            .iter_mut()
+            .filter(|template| is_plan_bound_adapter_domain(&template.domain))
+        {
+            let template_id = template.id.to_string();
+            let mut clients = BTreeSet::new();
+            for plan in &plans {
+                match template.domain.as_str() {
+                    "runtime_tunnel_adapter" => {
+                        if plan
+                            .plan
+                            .runtime_control
+                            .left_adapter_template_id
+                            .as_deref()
+                            == Some(template_id.as_str())
+                        {
+                            clients.insert(plan.left_client_id.clone());
+                        }
+                        if plan
+                            .plan
+                            .runtime_control
+                            .right_adapter_template_id
+                            .as_deref()
+                            == Some(template_id.as_str())
+                        {
+                            clients.insert(plan.right_client_id.clone());
+                        }
+                    }
+                    "routing_cost_adapter" => {
+                        if let Some(ospf) = &plan.plan.ospf {
+                            if ospf.left_adapter_template_id == template_id {
+                                clients.insert(plan.left_client_id.clone());
+                            }
+                            if ospf.right_adapter_template_id == template_id {
+                                clients.insert(plan.right_client_id.clone());
+                            }
+                        }
+                    }
+                    _ => unreachable!("filtered to plan-bound adapter domains"),
+                }
+            }
+            template.assigned_client_count = clients.len() as i64;
+        }
+        Ok(())
     }
 
     async fn ensure_builtin_source_templates(&self) -> Result<()> {

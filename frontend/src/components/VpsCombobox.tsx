@@ -102,22 +102,33 @@ export function VpsCombobox({
       const gap = 4;
       const viewportWidth = window.innerWidth;
       const viewportHeight = window.innerHeight;
-      const below = viewportHeight - rect.bottom - margin;
-      const above = rect.top - margin;
-      const openAbove = below < 160 && above > below;
-      const available = Math.max(openAbove ? above : below, 120);
-      const maxHeight = Math.min(240, available);
+      const below = Math.max(0, viewportHeight - rect.bottom - gap - margin);
+      const above = Math.max(0, rect.top - gap - margin);
+      const minimumHeight = Math.min(120, Math.max(0, viewportHeight - margin * 2));
+      const openAbove = below < minimumHeight && above > below;
+      const available = openAbove ? above : below;
+      const maxHeight = Math.min(
+        240,
+        Math.max(available, minimumHeight),
+        Math.max(0, viewportHeight - margin * 2),
+      );
+      const width = Math.min(rect.width, Math.max(0, viewportWidth - margin * 2));
       const left = Math.min(
         Math.max(rect.left, margin),
-        Math.max(margin, viewportWidth - rect.width - margin),
+        Math.max(margin, viewportWidth - width - margin),
+      );
+      const desiredTop = openAbove
+        ? rect.top - gap - maxHeight
+        : rect.bottom + gap;
+      const top = Math.min(
+        Math.max(desiredTop, margin),
+        Math.max(margin, viewportHeight - maxHeight - margin),
       );
       setMenuStyle({
         left,
         maxHeight,
-        top: openAbove
-          ? Math.max(margin, rect.top - maxHeight - gap)
-          : Math.min(viewportHeight - margin, rect.bottom + gap),
-        width: rect.width,
+        top,
+        width,
       });
     };
     updateMenuPosition();

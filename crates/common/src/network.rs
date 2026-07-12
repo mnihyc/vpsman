@@ -1,28 +1,21 @@
-mod backends;
 mod cost;
-mod legacy;
 mod models;
 mod planner;
 
-pub use backends::{
-    backend_config_signature_payload, render_backend_config_for_endpoint,
-    render_tunnel_endpoint_backend_config,
-};
 pub use cost::{
-    effective_bandwidth_mbps, observed_ospf_cost, ospf_cost, MAX_TUNNEL_BANDWIDTH_MBPS,
-    MIN_TUNNEL_BANDWIDTH_MBPS,
+    effective_bandwidth_mbps, observed_ospf_cost, ospf_cost, routing_cost_update_privilege_payload,
+    MAX_TUNNEL_BANDWIDTH_MBPS, MIN_TUNNEL_BANDWIDTH_MBPS,
 };
-pub use legacy::{parse_ifupdown_configs, parse_legacy_bird_config};
 pub use models::{
-    default_runtime_fou_ipproto, default_runtime_fou_peer_port, default_runtime_fou_port,
-    BandwidthMbps, IfupdownConfig, IfupdownInterface, LegacyBirdConfig, LegacyBirdPeer,
-    OspfCostPolicy, RuntimeTunnelCommand, RuntimeTunnelControl, RuntimeTunnelFouOptions,
-    RuntimeTunnelManager, RuntimeTunnelRoute, RuntimeTunnelTopologyIntent,
-    RuntimeTunnelTrafficLimit, TunnelAddressFamily, TunnelAddressPair, TunnelBackendConfig,
-    TunnelBackendFile, TunnelConfigBackend, TunnelEndpointConfig, TunnelEndpointSide, TunnelKind,
-    TunnelObservation, TunnelPlan, TunnelPlanInput, MANAGED_BIRD2_FILE, MANAGED_IFUPDOWN_FILE,
-    MANAGED_NETPLAN_FILE, MANAGED_SYSTEMD_NETWORKD_NETDEV_FILE,
-    MANAGED_SYSTEMD_NETWORKD_NETWORK_FILE,
+    default_ospf_healthy_windows, default_ospf_min_cost_delta, default_runtime_fou_ipproto,
+    default_runtime_fou_peer_port, default_runtime_fou_port, BandwidthMbps, OspfControlMode,
+    OspfCostPolicy, RoutingCostAdapterCommands, RoutingCostAdapterJobResult,
+    RoutingCostAdapterOperation, RoutingCostAdapterRequest, RoutingCostAdapterResponse,
+    RuntimeTunnelAdapterCommands, RuntimeTunnelCommand, RuntimeTunnelControl,
+    RuntimeTunnelFouOptions, RuntimeTunnelManager, RuntimeTunnelRoute, RuntimeTunnelTopologyIntent,
+    RuntimeTunnelTrafficLimit, TunnelAddressFamily, TunnelAddressPair, TunnelEndpointConfig,
+    TunnelEndpointSide, TunnelKind, TunnelObservation, TunnelOspfConfig, TunnelPlan,
+    TunnelPlanInput, ROUTING_COST_ADAPTER_CONTRACT_VERSION,
 };
 pub use planner::{
     allocate_tunnel_endpoints, plan_tunnel, render_tunnel_endpoint_config,

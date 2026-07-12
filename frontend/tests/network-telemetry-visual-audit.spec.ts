@@ -1,8 +1,12 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
-import { activate, openConsoleSubpage } from "./support/consoleNavigation";
+import {
+  activate,
+  openConsoleSubpage,
+  waitForConsoleShell,
+} from "./support/consoleNavigation";
 
 test.skip(!process.env.VPSMAN_VISUAL_AUDIT, "manual visual audit screenshots only");
 
@@ -16,26 +20,69 @@ test("captures network telemetry placements", async ({ page }, testInfo) => {
   const manifest: Array<Record<string, unknown>> = [];
 
   await page.goto("/");
+  await waitForConsoleShell(page, 15_000);
   await openConsoleSubpage(page, "Fleet", "Instances");
   const fleetGrid = page.getByLabel("VPS instance records data grid");
-  const coreRow = fleetGrid.locator(".gridBody [role=row]", { hasText: "core-fra-02" }).first();
-  await expect(coreRow).toBeVisible();
-  await activate(coreRow.getByLabel("Expand VPS instance records row"));
-  const coreDetail = fleetGrid.locator(".gridExpandedRow", { hasText: "core-fra-02" }).first();
-  await expect(coreDetail.getByRole("heading", { name: "core-fra-02 (ra02)" })).toBeVisible();
-  await activate(coreDetail.getByRole("tab", { name: "Network" }));
-  await expect(coreDetail.getByText("Runtime tunnels", { exact: true })).toBeVisible();
-  await expect(coreDetail.getByText("Latency Down")).toBeVisible();
-  await expect(coreDetail.getByText("OSPF Report only")).toBeVisible();
-  await expect(coreDetail.getByText("latest interface rate bucket")).toBeVisible();
+  let coreDetail: Locator;
+  if (testInfo.project.name.includes("mobile")) {
+    const coreCard = fleetGrid.getByLabel(
+      "VPS instance records mobile card agent-fra-02",
+    );
+    await expect(coreCard).toBeVisible();
+    await activate(coreCard.getByRole("button", { name: /Open VPS/ }));
+    coreDetail = page.getByLabel("Canonical VPS detail");
+    await coreDetail.getByLabel("VPS detail section").selectOption("Network");
+  } else {
+    const coreRow = fleetGrid
+      .locator(".gridBody [role=row]", { hasText: "core-fra-02" })
+      .first();
+    await expect(coreRow).toBeVisible();
+    await activate(coreRow.getByLabel("Expand VPS instance records row"));
+    coreDetail = fleetGrid
+      .locator(".gridExpandedRow", { hasText: "core-fra-02" })
+      .first();
+    await activate(coreDetail.getByRole("tab", { name: "Network" }));
+  }
+  if (testInfo.project.name.includes("mobile")) {
+    await expect(coreDetail).toContainText("core-fra-02");
+    await expect(coreDetail).toContainText("agent-fra-02");
+    await expect(coreDetail.getByText("Network workflow", { exact: true })).toBeVisible();
+    await expect(coreDetail.getByText("Observed interfaces", { exact: true })).toBeVisible();
+    await expect(coreDetail.getByText("Tunnel records", { exact: true })).toBeVisible();
+    await expect(coreDetail.getByText("Latest observations", { exact: true })).toBeVisible();
+  } else {
+    await expect(coreDetail).toContainText("core-fra-02 (ra02)");
+    await expect(coreDetail.getByText("Runtime tunnels", { exact: true })).toBeVisible();
+    await expect(coreDetail.getByText("Latency Down")).toBeVisible();
+    await expect(coreDetail.getByText("sfo-fra-gre", { exact: true })).toBeVisible();
+    const declaredGre = coreDetail
+      .locator(".telemetryTunnelRow", { hasText: "sfo-fra-gre" })
+      .first();
+    await expect(
+      declaredGre.getByText(/right endpoint; peer agent-sfo-01/),
+    ).toBeVisible();
+    await expect(coreDetail.getByText("latest interface rate bucket")).toBeVisible();
+  }
   await capture(page, coreDetail, outputDir, manifest, "fleet-network-detail");
 
   await openConsoleSubpage(page, "Network", "Graph");
   await expect(page.getByRole("heading", { name: "Topology graph" })).toBeVisible();
-  await expect(page.getByText("Latency and auto OSPF")).toBeVisible();
-  await expect(page.getByText("down 1")).toBeVisible();
-  await expect(page.getByText("2 latest tunnel reports")).toBeVisible();
-  await capture(page, page.locator("main.content"), outputDir, manifest, "topology-automation");
+  const graphPanel = page.locator(".topologyGraphPanel");
+  await expect(
+    graphPanel.getByText("1 visible tunnel", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    graphPanel
+      .getByLabel("Topology graph legend")
+      .getByText("OSPF 22 (+8)", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    graphPanel.getByText("Why OSPF cost changed", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("table", { name: "OSPF adapter update plans" }),
+  ).toHaveCount(0);
+  await capture(page, page.locator("main.content"), outputDir, manifest, "topology-graph");
 
   writeFileSync(
     join(outputDir, `manifest-${testInfo.project.name}.json`),

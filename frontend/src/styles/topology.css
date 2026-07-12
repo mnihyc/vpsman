@@ -3,6 +3,814 @@
   min-width: 0;
 }
 
+/* Explicit tunnel plan and routing-adapter workspace. */
+.topologyPageStack {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.networkOverviewHeader,
+.networkOverviewActions,
+.tunnelPlanRegistry,
+.tunnelPlanComposer,
+.topologyOspfWorkspace {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.networkMetricStrip {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(96px, 1fr));
+  border-top: 1px solid var(--border-subtle);
+}
+
+.networkMetricStrip > span {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 13px 18px 15px;
+  border-right: 1px solid var(--border-subtle);
+}
+
+.networkMetricStrip > span:last-child {
+  border-right: 0;
+}
+
+.networkMetricStrip small,
+.tunnelPlanFacts small,
+.topologyOspfFacts small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.networkMetricStrip strong {
+  color: var(--text);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.networkMetricStrip .hasAttention strong {
+  color: var(--warning-text);
+}
+
+.networkWorkflowList {
+  display: grid;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.networkWorkflowList > button {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  min-height: 58px;
+  border: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: 0;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  padding: 8px 18px;
+  text-align: left;
+}
+
+.networkWorkflowList > button:last-child {
+  border-bottom: 0;
+}
+
+.networkWorkflowList > button:hover,
+.networkWorkflowList > button:focus-visible {
+  background: var(--primary-selected);
+}
+
+.networkWorkflowList > button:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+.networkWorkflowList > button > span:not(.workflowIcon) {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.networkWorkflowList strong,
+.networkWorkflowList small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.networkWorkflowList small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.workflowIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--primary-soft);
+  color: var(--primary-text);
+}
+
+.tunnelRegistryToolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-height: 48px;
+  padding: 7px 18px;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-subtle);
+}
+
+.tunnelRegistryToolbar .compactSearch {
+  width: min(320px, 100%);
+}
+
+.selectionActionBar {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-left: auto;
+}
+
+.selectionActionBar > span {
+  color: var(--primary-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.tunnelPlanTableWrap,
+.topologyOspfTableWrap {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+.tunnelPlanTable,
+.topologyOspfTable {
+  width: 100%;
+  min-width: 1160px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.tunnelPlanTable th,
+.topologyOspfTable th {
+  height: 40px;
+  color: var(--muted);
+  background: var(--surface-subtle);
+  font-size: 11px;
+  font-weight: 800;
+  text-align: left;
+}
+
+.tunnelPlanTable th,
+.tunnelPlanTable td,
+.topologyOspfTable th,
+.topologyOspfTable td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  vertical-align: middle;
+}
+
+.tunnelPlanTable tbody > tr:not(.tunnelPlanDetailRow),
+.topologyOspfTable tbody > tr:not(.topologyOspfDetailRow) {
+  height: 58px;
+  cursor: pointer;
+}
+
+.tunnelPlanTable tbody > tr:not(.tunnelPlanDetailRow):hover,
+.topologyOspfTable tbody > tr:not(.topologyOspfDetailRow):hover {
+  background: var(--surface-subtle);
+}
+
+.tunnelPlanTable tbody > tr.isExpanded,
+.tunnelPlanTable tbody > tr.isSelected,
+.topologyOspfTable tbody > tr.isExpanded {
+  background: var(--primary-selected);
+}
+
+.tunnelPlanTable tbody > tr:focus-visible,
+.topologyOspfTable tbody > tr:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+.tunnelPlanTable .selectionCell {
+  width: 42px;
+  padding-right: 4px;
+  text-align: center;
+}
+
+.tunnelPlanTable th:nth-child(2) { width: 15%; }
+.tunnelPlanTable th:nth-child(3) { width: 14%; }
+.tunnelPlanTable th:nth-child(4) { width: 14%; }
+.tunnelPlanTable th:nth-child(5) { width: 14%; }
+.tunnelPlanTable th:nth-child(6) { width: 17%; }
+.tunnelPlanTable th:nth-child(7) { width: 12%; }
+.tunnelPlanTable th:last-child { width: 118px; }
+
+.topologyOspfTable th:nth-child(1) { width: 18%; }
+.topologyOspfTable th:nth-child(2) { width: 15%; }
+.topologyOspfTable th:nth-child(3) { width: 18%; }
+.topologyOspfTable th:nth-child(4) { width: 15%; }
+.topologyOspfTable th:nth-child(5) { width: 20%; }
+.topologyOspfTable th:last-child { width: 132px; }
+
+.endpointStatusPair,
+.topologyEndpointPair {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+.tunnelConnectivitySummary .status {
+  justify-self: start;
+  max-width: 100%;
+}
+
+.tunnelConnectionAssessment {
+  display: grid;
+  grid-template-columns: minmax(170px, 0.7fr) minmax(260px, 1.3fr) auto;
+  align-items: end;
+  gap: 10px 12px;
+  min-width: 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.tunnelConnectionAssessmentHeading {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  min-width: 0;
+}
+
+.tunnelConnectionAssessmentHeading strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.tunnelConnectionAssessmentHeading span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.tunnelConnectionAssessment > label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.tunnelConnectionAssessment > label > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.tunnelConnectionAssessment select,
+.tunnelConnectionAssessment input {
+  width: 100%;
+  min-width: 0;
+}
+
+.tunnelConnectionAssessment > button {
+  grid-column: 3;
+  justify-self: start;
+  width: auto;
+  min-width: 132px;
+}
+
+.topologyRowActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  min-width: 0;
+}
+
+.isEnableAction {
+  color: var(--success-text);
+}
+
+.isDisableAction {
+  color: var(--danger-text);
+}
+
+.isDeleteAction:not(:disabled) {
+  color: var(--danger-text);
+}
+
+.isDeleteAction:disabled {
+  color: var(--muted);
+}
+
+.tunnelPlanDetailRow td,
+.topologyOspfDetailRow td {
+  padding: 0;
+  background: var(--canvas);
+}
+
+.tunnelPlanDetail,
+.topologyOspfDetail {
+  position: relative;
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px 52px 16px 18px;
+}
+
+.topologyDetailClose {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+}
+
+.tunnelPlanFacts,
+.topologyOspfFacts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px 18px;
+  min-width: 0;
+}
+
+.tunnelPlanFacts > span,
+.topologyOspfFacts > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.tunnelPlanFacts strong,
+.topologyOspfFacts strong {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+  white-space: normal;
+}
+
+.tunnelIntentLine,
+.topologyAdapterHashes {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.topologyOspfJobLinks {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tunnelIntentLine code,
+.topologyAdapterHashes code {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tunnelPlanComposer {
+  scroll-margin-top: 12px;
+}
+
+.tunnelPlanForm {
+  display: grid;
+  min-width: 0;
+}
+
+.topologyFormSection {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  margin: 0;
+  padding: 16px 18px 18px;
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.topologyFormSection > legend {
+  float: left;
+  width: 100%;
+  margin: 0 0 2px;
+  padding: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.topologyFormGrid {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  clear: both;
+}
+
+.topologyFormGrid.twoColumn { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.topologyFormGrid.threeColumn { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.topologyFormGrid.fourColumn { grid-template-columns: repeat(4, minmax(120px, 1fr)); }
+
+.topologyFormGrid > label,
+.topologyFormGrid > .topologyField,
+.topologyAdvancedFields label {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.topologyFormGrid > label > span,
+.topologyFormGrid > .topologyField > span,
+.topologyAdvancedFields label > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.topologyFormGrid input,
+.topologyFormGrid select,
+.topologyFormGrid textarea,
+.topologyAdvancedFields input,
+.topologyAdvancedFields textarea {
+  width: 100%;
+  min-width: 0;
+}
+
+.runtimeManagerSegments {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+  max-width: 880px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.runtimeManagerSegments > button {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  min-height: 58px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  padding: 8px 12px;
+  text-align: left;
+}
+
+.runtimeManagerSegments > button:last-child {
+  border-right: 0;
+}
+
+.runtimeManagerSegments > button:hover {
+  background: var(--surface-subtle);
+}
+
+.runtimeManagerSegments > button.isActive {
+  background: var(--primary-selected);
+  color: var(--primary-text);
+  box-shadow: inset 0 -2px 0 var(--primary);
+}
+
+.runtimeManagerSegments small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.templateSelectRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 36px;
+  gap: 6px;
+  min-width: 0;
+}
+
+.addressAllocationToolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+}
+
+.compactCheckbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.addressFamilySelect {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.addressFamilySelect select {
+  min-width: 78px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0 8px;
+}
+
+.addressFamilySelect select:focus-visible {
+  border-color: var(--primary);
+  outline: 2px solid var(--primary-soft);
+  outline-offset: 1px;
+}
+
+.topologyAdvancedFields {
+  min-width: 0;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 10px;
+}
+
+.topologyAdvancedFields > summary {
+  color: var(--primary-text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.topologyAdvancedFields[open] > summary {
+  margin-bottom: 12px;
+}
+
+.toggleLine {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 9px;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.toggleLine > input {
+  flex: 0 0 auto;
+  margin-top: 3px;
+}
+
+.toggleLine > span {
+  display: grid;
+  gap: 2px;
+}
+
+.toggleLine small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.ospfControlGrid {
+  grid-template-columns: minmax(130px, 0.9fr) repeat(3, minmax(120px, 1fr)) minmax(112px, 0.7fr);
+  align-items: end;
+}
+
+.topologyOspfPreviewInline {
+  display: grid;
+  grid-template-columns: auto auto;
+  align-items: center;
+  gap: 2px 8px;
+  min-height: 38px;
+  border: 1px solid var(--primary-border);
+  border-radius: 8px;
+  background: var(--primary-selected);
+  color: var(--primary-text);
+  padding: 6px 10px;
+}
+
+.topologyOspfPreviewInline > span,
+.topologyOspfPreviewInline > small {
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.topologyOspfPreviewInline > strong {
+  grid-row: 1 / 3;
+  grid-column: 2;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.tunnelComposerFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 14px 18px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--surface-subtle);
+}
+
+.endpointCost {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 25px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 7px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.endpointCost.isVerified {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+  color: var(--success-text);
+}
+
+.endpointCost.needsCheck {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+  color: var(--warning-text);
+}
+
+.sourceAdapterContract {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.sourceAdapterBindingNote {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+}
+
+.sourceAdapterBindingNote > div {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.sourceAdapterBindingNote > div > span {
+  flex-basis: 100%;
+}
+
+.isSpinning {
+  animation: topology-spin 900ms linear infinite;
+}
+
+@keyframes topology-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .isSpinning { animation: none; }
+}
+
+@media (max-width: 1050px) {
+  .networkMetricStrip {
+    grid-template-columns: repeat(3, minmax(110px, 1fr));
+  }
+
+  .networkMetricStrip > span:nth-child(3) {
+    border-right: 0;
+  }
+
+  .topologyFormGrid.fourColumn,
+  .ospfControlGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .tunnelPlanFacts,
+  .topologyOspfFacts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .tunnelPlanComposerHeader {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    flex-wrap: nowrap;
+  }
+
+  .tunnelPlanComposerHeader > .iconAction {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: start;
+  }
+
+  .tunnelPlanTable,
+  .topologyOspfTable {
+    min-width: 100%;
+    table-layout: auto;
+  }
+
+  .tunnelPlanTable tr > :nth-child(n + 3):nth-child(-n + 7),
+  .topologyOspfTable tr > :nth-child(n + 3):nth-child(-n + 5) {
+    display: none;
+  }
+
+  .tunnelPlanTable th:nth-child(2),
+  .topologyOspfTable th:first-child {
+    width: auto;
+  }
+
+  .topologyOspfTable th:nth-child(2) {
+    width: 112px;
+  }
+
+  .tunnelPlanTable th:last-child {
+    width: 150px;
+  }
+
+  .topologyOspfTable th:last-child {
+    width: 138px;
+  }
+
+  .networkMetricStrip,
+  .topologyFormGrid.twoColumn,
+  .topologyFormGrid.threeColumn,
+  .topologyFormGrid.fourColumn,
+  .ospfControlGrid,
+  .tunnelPlanFacts,
+  .topologyOspfFacts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .networkMetricStrip > span {
+    border-right: 0;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .networkMetricStrip > span:last-child {
+    border-bottom: 0;
+  }
+
+  .runtimeManagerSegments {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .runtimeManagerSegments > button {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .runtimeManagerSegments > button:last-child {
+    border-bottom: 0;
+  }
+
+  .tunnelRegistryToolbar,
+  .tunnelComposerFooter {
+    align-items: stretch;
+  }
+
+  .selectionActionBar {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .tunnelPlanDetail,
+  .topologyOspfDetail {
+    padding-left: 14px;
+  }
+
+  .tunnelConnectionAssessment {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .tunnelConnectionAssessment > button {
+    grid-column: auto;
+    width: 100%;
+  }
+}
+
 .networkOverviewPanel {
   overflow: hidden;
 }
@@ -129,11 +937,16 @@
   background: var(--canvas);
 }
 
-.topologyGraphPanel .sectionHeader h2 {
+.topologyGraphTitleRow {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+}
+
+.topologyGraphTitleRow h2 {
+  margin: 0;
 }
 
 .topologyFreshnessBadge {
@@ -291,9 +1104,8 @@
   stroke-width: 2;
 }
 
-.topologyGraphEdge.healthy line,
-.topologyGraphEdge.applied line {
-  stroke: var(--primary);
+.topologyGraphEdge.healthy line {
+  stroke: var(--success);
 }
 
 .topologyGraphEdge.degraded line {
@@ -301,7 +1113,12 @@
   stroke-dasharray: 6 5;
 }
 
-.topologyGraphEdge.rolled_back line {
+.topologyGraphEdge.unknown line {
+  stroke: var(--muted);
+  stroke-dasharray: 3 5;
+}
+
+.topologyGraphEdge.disabled line {
   stroke: var(--placeholder);
   stroke-dasharray: 3 5;
 }
@@ -546,191 +1363,6 @@
   background: var(--primary);
 }
 
-.promotionWorkflow {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 12px;
-  align-items: start;
-  min-width: 0;
-  padding: 12px;
-}
-
-.promotionWorkflow > .confirmationPrompt {
-  grid-column: 1 / -1;
-}
-
-.promotionDiffHeader {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-
-.promotionDiffHeader strong {
-  color: var(--text);
-  font-size: 13px;
-}
-
-.promotionDiffHeader span {
-  color: var(--text-secondary);
-  font-size: 13px;
-  line-height: 1.4;
-}
-
-.promotionStageCard {
-  align-content: start;
-  display: grid;
-  gap: 10px;
-  min-width: 0;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  padding: 12px;
-}
-
-.promotionStageHeader small {
-  display: block;
-  margin-bottom: 2px;
-  color: var(--primary);
-  font-size: 11px;
-  font-weight: 800;
-  text-transform: uppercase;
-}
-
-.promotionStageHeader span {
-  display: block;
-  margin-top: 3px;
-  color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.35;
-}
-
-.promotionAdvancedDrawer {
-  display: block;
-  min-width: 0;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  padding: 0;
-}
-
-.promotionAdvancedDrawer[open] {
-  display: grid;
-  gap: 10px;
-  padding-bottom: 12px;
-}
-
-.promotionAdvancedDrawer > summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-width: 0;
-  cursor: pointer;
-  padding: 12px;
-}
-
-.promotionAdvancedDrawer > summary > span {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-
-.promotionAdvancedDrawer > summary strong {
-  color: var(--text);
-  font-size: 13px;
-}
-
-.promotionAdvancedDrawer > summary small {
-  color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.35;
-}
-
-.promotionAdvancedDrawer > .promotionStageCard {
-  margin: 0 12px;
-  border: 0;
-  background: transparent;
-  padding: 0;
-}
-
-.promotionGroupLabel {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  background: var(--canvas);
-  padding: 9px 10px;
-}
-
-.promotionGroupLabel strong {
-  color: var(--text);
-  font-size: 13px;
-}
-
-.promotionGroupLabel span {
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.35;
-}
-
-.promotionDisclosure {
-  display: block;
-  min-width: 0;
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  background: var(--surface-subtle);
-  padding: 9px 10px;
-}
-
-.promotionDisclosure[open] {
-  display: grid;
-  gap: 9px;
-}
-
-.promotionDisclosure:not([open]) > :not(summary) {
-  display: none;
-}
-
-.promotionDisclosure summary {
-  cursor: pointer;
-  color: var(--text-secondary);
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.promotionStageCard {
-  width: 100%;
-}
-
-.promotionStageCard .dispatchControls {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
-}
-
-.promotionStageCard > .primaryAction {
-  margin-bottom: 0;
-}
-
-.promotionStageCard textarea {
-  min-height: 72px;
-}
-
-.promotionStageCard .adapterArgvField {
-  grid-column: 1 / -1;
-}
-
-.promotionAdapterCard {
-  grid-template-columns: minmax(0, 1fr);
-}
-
-.promotionAdapterCard > .sectionHeader,
-.promotionAdapterCard > .dispatchControls,
-.promotionAdapterCard > .promotionGroupLabel,
-.promotionAdapterCard > .promotionDisclosure,
-.promotionAdapterCard > label,
-.promotionAdapterCard > .primaryAction {
-  grid-column: 1 / -1;
-}
 
 .topologyPlanComposer .dispatchForm {
   grid-template-columns: minmax(0, 1fr);
@@ -1009,7 +1641,6 @@
 .topologyNetworkReviewStrip,
 .ospfCostReviewStrip,
 .topologyEvidenceTimeline,
-.promotionDiffStrip,
 .tunnelPlanWizardStrip {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
@@ -1054,7 +1685,6 @@
 .topologyNetworkReviewStrip > div,
 .ospfCostReviewStrip > div,
 .topologyEvidenceTimeline > div,
-.promotionDiffStrip > div,
 .tunnelPlanWizardStrip > div {
   display: grid;
   gap: 4px;
@@ -1068,7 +1698,6 @@
 .topologyNetworkReviewStrip > div.ready,
 .ospfCostReviewStrip > div.ready,
 .topologyEvidenceTimeline > div.ready,
-.promotionDiffStrip > div.ready,
 .tunnelPlanWizardStrip > div.ready {
   border-color: var(--success-border);
   background: var(--success-soft);
@@ -1077,7 +1706,6 @@
 .topologyNetworkReviewStrip > div.attention,
 .ospfCostReviewStrip > div.attention,
 .topologyEvidenceTimeline > div.attention,
-.promotionDiffStrip > div.attention,
 .tunnelPlanWizardStrip > div.attention {
   border-color: var(--warning-border);
   background: var(--warning-soft);
@@ -1086,7 +1714,6 @@
 .topologyNetworkReviewStrip span,
 .ospfCostReviewStrip span,
 .topologyEvidenceTimeline span,
-.promotionDiffStrip span,
 .tunnelPlanWizardStrip span {
   color: var(--muted);
   font-size: 11px;
@@ -1097,7 +1724,6 @@
 .topologyNetworkReviewStrip strong,
 .ospfCostReviewStrip strong,
 .topologyEvidenceTimeline strong,
-.promotionDiffStrip strong,
 .tunnelPlanWizardStrip strong {
   min-width: 0;
   overflow-wrap: anywhere;
@@ -1109,7 +1735,6 @@
 .topologyNetworkReviewStrip > div.ready strong,
 .ospfCostReviewStrip > div.ready strong,
 .topologyEvidenceTimeline > div.ready strong,
-.promotionDiffStrip > div.ready strong,
 .tunnelPlanWizardStrip > div.ready strong {
   color: var(--success-text);
 }
@@ -1117,7 +1742,6 @@
 .topologyNetworkReviewStrip > div.attention strong,
 .ospfCostReviewStrip > div.attention strong,
 .topologyEvidenceTimeline > div.attention strong,
-.promotionDiffStrip > div.attention strong,
 .tunnelPlanWizardStrip > div.attention strong {
   color: var(--warning-text);
 }
@@ -1125,7 +1749,6 @@
 .topologyNetworkReviewStrip p,
 .ospfCostReviewStrip p,
 .topologyEvidenceTimeline p,
-.promotionDiffStrip p,
 .tunnelPlanWizardStrip p {
   margin: 0;
   color: var(--text-secondary);
@@ -1482,12 +2105,6 @@
   white-space: nowrap;
 }
 
-@media (max-width: 980px) {
-  .promotionAdapterCard {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
 @media (max-width: 760px) {
   .tunnelPlansRegistryPanel .gridToolbar {
     align-items: stretch;
@@ -1645,12 +2262,46 @@
     display: grid;
   }
 
-  .promotionWorkflow {
-    padding: 10px;
-  }
-
   .topologyNetworkTestActionRow {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+/* Keep the live cost adjacent to the values it summarizes. */
+.topologyOspfPreviewInline {
+  align-self: end;
+  display: grid;
+  grid-template-columns: auto auto;
+  align-items: center;
+  gap: 2px 8px;
+  min-width: 0;
+  min-height: 38px;
+  border: 1px solid var(--primary-border);
+  border-radius: 8px;
+  background: var(--primary-selected);
+  color: var(--primary-text);
+  padding: 6px 10px;
+}
+
+.topologyOspfPreviewInline > span,
+.topologyOspfPreviewInline > small {
+  min-width: 0;
+  color: var(--primary-text);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.topologyOspfPreviewInline > strong {
+  grid-row: 1 / 3;
+  grid-column: 2;
+  color: var(--primary-text);
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.topologyOspfPreviewInline > small {
+  grid-column: 1;
 }

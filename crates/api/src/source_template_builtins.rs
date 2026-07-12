@@ -18,13 +18,17 @@ pub(crate) const SOURCE_TEMPLATE_DOMAINS: &[&str] = &[
     "process_supervisor_policy",
     "runtime_tunnel_adapter",
     "traffic_limit_status_source",
-    "routing_daemon_adapter",
+    "routing_cost_adapter",
     "backup_object_store",
     "restore_path_mapping",
     "update_artifact_source",
     "update_restart_policy",
     "update_rollback_heartbeat_source",
 ];
+
+pub(crate) fn is_plan_bound_adapter_domain(domain: &str) -> bool {
+    matches!(domain, "runtime_tunnel_adapter" | "routing_cost_adapter")
+}
 
 pub(crate) fn builtin_source_templates() -> Vec<BuiltInSourceTemplate> {
     vec![
@@ -210,28 +214,6 @@ pub(crate) fn builtin_source_templates() -> Vec<BuiltInSourceTemplate> {
             }),
         },
         BuiltInSourceTemplate {
-            id: "00000000-0000-4000-8000-000000000008",
-            domain: "runtime_tunnel_adapter",
-            name: "builtin:agent_iproute2_managed",
-            is_default: true,
-            description: "Default client-managed iproute2/tc runtime tunnel adapter",
-            definition: serde_json::json!({"manager": "agent_iproute2_managed"}),
-        },
-        BuiltInSourceTemplate {
-            id: "00000000-0000-4000-8000-000000000081",
-            domain: "runtime_tunnel_adapter",
-            name: "builtin:agent_iproute2_runtime_reconcile",
-            is_default: false,
-            description:
-                "Client-managed iproute2/tc runtime tunnel adapter with runtime reconciliation enabled",
-            definition: serde_json::json!({
-                "manager": "agent_iproute2_managed",
-                "runtime_reconcile_enabled": true,
-                "runtime_ip_argv": ["/sbin/ip"],
-                "runtime_tc_argv": ["/sbin/tc"]
-            }),
-        },
-        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000082",
             domain: "process_supervisor_policy",
             name: "builtin:agent_supervisor",
@@ -254,19 +236,6 @@ pub(crate) fn builtin_source_templates() -> Vec<BuiltInSourceTemplate> {
             definition: serde_json::json!({
                 "source": "tunnel_plan_runtime_control",
                 "status_source": "network_status_and_telemetry"
-            }),
-        },
-        BuiltInSourceTemplate {
-            id: "00000000-0000-4000-8000-000000000084",
-            domain: "routing_daemon_adapter",
-            name: "builtin:bird2_ospf",
-            is_default: true,
-            description:
-                "Default Bird2 OSPF adapter for topology evidence, neighbor checks, and cost updates",
-            definition: serde_json::json!({
-                "provider": "bird2",
-                "workflow": "tunnel_ospf_cost_update",
-                "status_source": "bird2_status"
             }),
         },
         BuiltInSourceTemplate {

@@ -1,7 +1,7 @@
 use super::*;
 use vpsman_common::{
     plan_tunnel, AgentCapabilitySnapshot, AgentHello, AgentPrivilegeMode, CommandOutput,
-    OspfCostPolicy, OutputStream, RuntimeTunnelCommand, RuntimeTunnelControl, RuntimeTunnelManager,
+    OspfCostPolicy, OutputStream, RuntimeTunnelControl, RuntimeTunnelManager,
     RuntimeTunnelTrafficLimit, TunnelKind, TunnelPlanInput,
 };
 
@@ -135,10 +135,13 @@ async fn curated_builtin_source_templates_are_selectable_not_default() {
     let templates = repo.list_source_templates(None).await.unwrap();
     let domains = crate::source_template_builtins::SOURCE_TEMPLATE_DOMAINS;
     assert!(templates.len() > domains.len());
-    for domain in domains {
+    for domain in domains
+        .iter()
+        .filter(|domain| !matches!(**domain, "runtime_tunnel_adapter" | "routing_cost_adapter"))
+    {
         let defaults = templates
             .iter()
-            .filter(|template| template.domain == *domain && template.is_default)
+            .filter(|template| template.domain == **domain && template.is_default)
             .collect::<Vec<_>>();
         assert_eq!(
             defaults.len(),
@@ -151,7 +154,7 @@ async fn curated_builtin_source_templates_are_selectable_not_default() {
         .list_source_template_assignments(Some("edge-a"), None)
         .await
         .unwrap();
-    assert_eq!(default_assignments.len(), domains.len());
+    assert_eq!(default_assignments.len(), domains.len() - 2);
     assert!(default_assignments
         .iter()
         .all(|assignment| assignment.template_scope == "built_in"));
@@ -165,7 +168,6 @@ async fn curated_builtin_source_templates_are_selectable_not_default() {
         "builtin:usr_bin_ping",
         "builtin:usr_bin_w",
         "builtin:busybox_ash_argv",
-        "builtin:agent_iproute2_runtime_reconcile",
         "builtin:s3_path_style_reserved",
         "builtin:github_release_sha256",
     ];
@@ -208,11 +210,6 @@ async fn curated_builtin_source_templates_are_selectable_not_default() {
             "command_execution_policy",
             "builtin:busybox_ash_argv",
             "/bin/ash",
-        ),
-        (
-            "runtime_tunnel_adapter",
-            "builtin:agent_iproute2_runtime_reconcile",
-            "runtime_reconcile_enabled = true",
         ),
     ];
     for (domain, template_name, _) in assignments {
@@ -265,6 +262,62 @@ async fn curated_builtin_source_templates_are_selectable_not_default() {
         assert!(tested.valid);
         assert!(!tested.renderable);
         assert_eq!(tested.unsupported_domains.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn adapter_templates_cannot_become_ambient_vps_assignments() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        upsert_memory_agent(
+            &memory.agents,
+            &AgentHello {
+                client_id: "edge-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
+                agent_version: "test".to_string(),
+                os_release: "test".to_string(),
+                arch: "x86_64".to_string(),
+                update_heartbeat: None,
+                internal_build_number: 1,
+                capabilities: Default::default(),
+            },
+        )
+        .await;
+    }
+    let operator = memory_admin();
+    for domain in ["runtime_tunnel_adapter", "routing_cost_adapter"] {
+        let template = repo
+            .create_source_template(
+                &CreateSourceTemplateRequest {
+                    domain: domain.to_string(),
+                    name: format!("shared:{domain}"),
+                    scope: "shared".to_string(),
+                    owner_client_id: None,
+                    description: None,
+                    definition: serde_json::json!({}),
+                },
+                &operator,
+            )
+            .await
+            .unwrap();
+        let error = repo
+            .assign_source_template(
+                &AssignSourceTemplateRequest {
+                    domain: domain.to_string(),
+                    template_id: template.id,
+                    selector_expression: "id:edge-a".to_string(),
+                    target_client_ids: vec!["edge-a".to_string()],
+                    confirmed: true,
+                    preview_hash: None,
+                    privilege_assertion: None,
+                },
+                &operator,
+            )
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("source_template_adapter_requires_tunnel_plan_binding"));
     }
 }
 
@@ -637,21 +690,21 @@ async fn source_template_clone_keeps_assignment_separate() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = memory_admin();
     let builtins = repo
-        .list_source_templates(Some("runtime_tunnel_adapter"))
+        .list_source_templates(Some("command_execution_policy"))
         .await
         .unwrap();
     let source = builtins
         .iter()
-        .find(|template| template.name == "builtin:agent_iproute2_managed")
+        .find(|template| template.name == "builtin:linux_shell_argv")
         .unwrap();
     let clone = repo
         .clone_source_template(
             source.id,
             &CloneSourceTemplateRequest {
-                name: "shared:iproute2-managed-runtime".to_string(),
+                name: "shared:site-shell-policy".to_string(),
                 scope: "shared".to_string(),
                 owner_client_id: None,
-                description: Some("site default runtime tunnel adapter".to_string()),
+                description: Some("site command execution policy".to_string()),
             },
             &operator,
         )
@@ -1002,7 +1055,6 @@ async fn source_status_links_selected_templates_to_live_source_evidence() {
                     can_manage_runtime_tunnels: true,
                     can_apply_process_limits: true,
                     unprivileged_hint: None,
-                    ..AgentCapabilitySnapshot::default()
                 },
             },
         )
@@ -1025,7 +1077,6 @@ async fn source_status_links_selected_templates_to_live_source_evidence() {
                     can_manage_runtime_tunnels: false,
                     can_apply_process_limits: false,
                     unprivileged_hint: Some("running without root in test".to_string()),
-                    ..AgentCapabilitySnapshot::default()
                 },
             },
         )
@@ -1041,8 +1092,6 @@ async fn source_status_links_selected_templates_to_live_source_evidence() {
                 kind: "gre".to_string(),
                 ownership_mode: "managed".to_string(),
                 mutation_policy: "managed".to_string(),
-                promotion_required: false,
-                plan_correlation: "managed_desired".to_string(),
                 plan_id: Some(Uuid::nil()),
                 plan_name: Some("edge-a-gre42".to_string()),
                 plan_runtime_manager: Some("agent_iproute2_managed".to_string()),
@@ -1083,12 +1132,6 @@ async fn source_status_links_selected_templates_to_live_source_evidence() {
                 packet_loss_ratio: None,
                 latency_healthy_windows: None,
                 latency_missed_windows: None,
-                auto_ospf_enabled: None,
-                auto_ospf_status: None,
-                auto_ospf_reason: None,
-                auto_ospf_current_cost: None,
-                auto_ospf_recommended_cost: None,
-                auto_ospf_updated_unix: None,
             });
     }
     let operator = memory_admin();
@@ -1124,10 +1167,125 @@ async fn source_status_links_selected_templates_to_live_source_evidence() {
     .await
     .unwrap();
 
+    let runtime_adapter = repo
+        .create_source_template(
+            &CreateSourceTemplateRequest {
+                domain: "runtime_tunnel_adapter".to_string(),
+                name: "shared:runtime-adapter".to_string(),
+                scope: "shared".to_string(),
+                owner_client_id: None,
+                description: None,
+                definition: serde_json::json!({
+                    "manager": "external_managed_adapter",
+                    "contract_version": 1,
+                    "startup_command": {
+                        "argv": ["/usr/local/libexec/tunnel-adapter", "start"],
+                        "max_timeout_secs": 10,
+                        "max_output_bytes": 4096
+                    },
+                    "cleanup_command": {
+                        "argv": ["/usr/local/libexec/tunnel-adapter", "cleanup"],
+                        "max_timeout_secs": 10,
+                        "max_output_bytes": 4096
+                    },
+                    "status_command": {
+                        "argv": ["/usr/local/libexec/tunnel-adapter", "status"],
+                        "max_timeout_secs": 10,
+                        "max_output_bytes": 4096
+                    }
+                }),
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    let routing_adapter = repo
+        .create_source_template(
+            &CreateSourceTemplateRequest {
+                domain: "routing_cost_adapter".to_string(),
+                name: "shared:routing-adapter".to_string(),
+                scope: "shared".to_string(),
+                owner_client_id: None,
+                description: None,
+                definition: serde_json::json!({
+                    "contract_version": 1,
+                    "status_command": {
+                        "argv": ["/usr/local/libexec/routing-adapter", "status"],
+                        "max_timeout_secs": 10,
+                        "max_output_bytes": 4096
+                    },
+                    "update_command": {
+                        "argv": ["/usr/local/libexec/routing-adapter", "apply"],
+                        "max_timeout_secs": 10,
+                        "max_output_bytes": 4096
+                    }
+                }),
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    let tunnel_input = TunnelPlanInput {
+        name: "edge-a-gre42".to_string(),
+        interface_name: "gre42".to_string(),
+        kind: TunnelKind::Gre,
+        runtime_control: RuntimeTunnelControl {
+            manager: RuntimeTunnelManager::ExternalManagedAdapter,
+            left_adapter_template_id: Some(runtime_adapter.id.to_string()),
+            right_adapter_template_id: Some(runtime_adapter.id.to_string()),
+            ..RuntimeTunnelControl::default()
+        },
+        runtime_topology: Default::default(),
+        left_client_id: "edge-a".to_string(),
+        right_client_id: "edge-b".to_string(),
+        left_remote_underlay: "198.51.100.10".to_string(),
+        right_remote_underlay: "203.0.113.20".to_string(),
+        left_local_underlay: None,
+        right_local_underlay: None,
+        address_pool_cidr: "10.42.0.0/30".to_string(),
+        reserved_addresses: Vec::new(),
+        ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
+            left: "10.42.0.0".to_string(),
+            right: "10.42.0.1".to_string(),
+            prefix_len: 31,
+        }),
+        ipv6_address_pool_cidr: None,
+        ipv6_tunnel: None,
+        latency_primary_family: Default::default(),
+        bandwidth_mbps: 100,
+        ospf: None,
+    };
+    let tunnel_plan = plan_tunnel(&tunnel_input).unwrap();
+    let saved_tunnel = repo
+        .record_tunnel_plan(&tunnel_input, &tunnel_plan, true, &operator)
+        .await
+        .unwrap();
+    if let Repository::Memory(memory) = &repo {
+        memory.telemetry_tunnels.write().await[0].plan_id = Some(saved_tunnel.id);
+    }
+
+    let templates = repo.list_source_templates(None).await.unwrap();
+    assert_eq!(
+        templates
+            .iter()
+            .find(|template| template.id == runtime_adapter.id)
+            .unwrap()
+            .assigned_client_count,
+        2
+    );
+    assert_eq!(
+        templates
+            .iter()
+            .find(|template| template.id == routing_adapter.id)
+            .unwrap()
+            .assigned_client_count,
+        0
+    );
+
     let all = repo.list_source_status(Some("edge-a"), None).await.unwrap();
     assert_eq!(
         all.len(),
-        crate::source_template_builtins::SOURCE_TEMPLATE_DOMAINS.len()
+        crate::source_template_builtins::SOURCE_TEMPLATE_DOMAINS.len() - 2
     );
     assert!(all
         .iter()
@@ -1191,12 +1349,7 @@ async fn source_status_links_selected_templates_to_live_source_evidence() {
         .list_source_status(Some("edge-a"), Some("runtime_tunnel_adapter"))
         .await
         .unwrap();
-    assert_eq!(tunnels.len(), 1);
-    assert_eq!(tunnels[0].status, "ok");
-    assert_eq!(
-        tunnels[0].evidence["samples"][0]["plan_correlation"],
-        "telemetry_reported_plan"
-    );
+    assert!(tunnels.is_empty());
 
     let unprivileged_process = repo
         .list_source_status(Some("edge-b"), Some("process_inventory_source"))
@@ -1332,11 +1485,7 @@ async fn source_status_enriches_backup_and_update_runtime_readiness() {
         interface_name: "tunab".to_string(),
         kind: TunnelKind::Gre,
         runtime_control: RuntimeTunnelControl {
-            manager: RuntimeTunnelManager::ExternalManagedAdapter,
-            traffic_limit_apply: Some(RuntimeTunnelCommand {
-                argv: vec!["/bin/true".to_string()],
-                ..RuntimeTunnelCommand::default()
-            }),
+            manager: RuntimeTunnelManager::AgentIproute2Managed,
             traffic_limit: RuntimeTunnelTrafficLimit {
                 ingress_kbps: Some(5_000),
                 egress_kbps: Some(10_000),
@@ -1347,8 +1496,10 @@ async fn source_status_enriches_backup_and_update_runtime_readiness() {
         runtime_topology: Default::default(),
         left_client_id: "edge-a".to_string(),
         right_client_id: "edge-b".to_string(),
-        left_underlay: "198.51.100.10".to_string(),
-        right_underlay: "198.51.100.11".to_string(),
+        left_remote_underlay: "198.51.100.10".to_string(),
+        right_remote_underlay: "198.51.100.11".to_string(),
+        left_local_underlay: None,
+        right_local_underlay: None,
         address_pool_cidr: "10.42.0.0/30".to_string(),
         reserved_addresses: Vec::new(),
         ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
@@ -1360,10 +1511,17 @@ async fn source_status_enriches_backup_and_update_runtime_readiness() {
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
-        latency_ms: 12.0,
-        packet_loss_ratio: 0.0,
-        preference: 1.0,
-        ospf_policy: OspfCostPolicy::default(),
+        ospf: Some(vpsman_common::TunnelOspfConfig {
+            mode: vpsman_common::OspfControlMode::Reviewed,
+            planned_latency_ms: 12.0,
+            planned_packet_loss_ratio: 0.0,
+            preference: 1.0,
+            policy: OspfCostPolicy::default(),
+            min_cost_delta: 5,
+            healthy_windows: 2,
+            left_adapter_template_id: "33333333-3333-4333-8333-333333333333".to_string(),
+            right_adapter_template_id: "44444444-4444-4444-8444-444444444444".to_string(),
+        }),
     };
     let tunnel_plan = plan_tunnel(&tunnel_input).unwrap();
     repo.record_tunnel_plan(&tunnel_input, &tunnel_plan, true, &memory_admin())
@@ -1446,13 +1604,12 @@ async fn source_status_enriches_backup_and_update_runtime_readiness() {
     let traffic_limits = status_row(&no_store_rows, "traffic_limit_status_source");
     assert_eq!(traffic_limits.status, "ready");
     assert_eq!(traffic_limits.evidence["traffic_limit_plan_count"], 1);
-    let tunnel = status_row(&no_store_rows, "runtime_tunnel_adapter");
-    assert_eq!(tunnel.evidence["routing_recommendation_count"], 1);
-    assert_eq!(tunnel.evidence["probe_sample_count"], 1);
-    assert_eq!(tunnel.evidence["speed_sample_count"], 1);
-    let routing = status_row(&no_store_rows, "routing_daemon_adapter");
-    assert_eq!(routing.status, "ready");
-    assert_eq!(routing.evidence["routing_recommendation_count"], 1);
+    assert!(no_store_rows.iter().all(|row| {
+        !matches!(
+            row.domain.as_str(),
+            "runtime_tunnel_adapter" | "routing_cost_adapter"
+        )
+    }));
 
     if let Repository::Memory(memory) = &repo {
         memory

@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { AlertTriangle, X } from "lucide-react";
-import { scrollIntoViewWithMotion } from "../motion";
 import { usePanelDisplaySettings } from "../panelDisplay";
 
 type ModalSiblingState = {
@@ -43,7 +42,7 @@ export function ConfirmationPrompt({
   typedConfirmationLabel?: string;
   typedConfirmationText?: string;
   title: string;
-  tone?: "danger" | "normal";
+  tone?: "danger" | "normal" | "warning";
 }) {
   const { preferences } = usePanelDisplaySettings();
   const overlayRef = useRef<HTMLDivElement | null>(null);
@@ -93,21 +92,29 @@ export function ConfirmationPrompt({
     }
     const element = promptRef.current;
     let focusTimeout: number | null = null;
-    window.requestAnimationFrame(() => {
-      scrollIntoViewWithMotion(element, { block: "center" });
+    const focusPrompt = () => {
+      if (!element.isConnected) {
+        return;
+      }
+      if (displayMode === "inline") {
+        scrollInlinePromptIntoView(element);
+      }
       element.focus({ preventScroll: true });
+    };
+    window.requestAnimationFrame(() => {
+      focusPrompt();
       focusTimeout = window.setTimeout(() => {
-        if (element.isConnected) {
-          element.focus({ preventScroll: true });
-        }
-      }, 100);
+        // Menus restore focus to their trigger after closing. Reassert both
+        // prompt visibility and focus after that handoff completes.
+        focusPrompt();
+      }, 150);
     });
     return () => {
       if (focusTimeout !== null) {
         window.clearTimeout(focusTimeout);
       }
     };
-  }, [open]);
+  }, [displayMode, open]);
 
   useEffect(() => {
     if (!open || displayMode !== "overlay" || !overlayRef.current) {
@@ -345,6 +352,108 @@ export function ConfirmationPrompt({
     return createPortal(overlay, document.body);
   }
   return prompt;
+}
+
+function scrollInlinePromptIntoView(element: HTMLElement) {
+  const content = element.closest<HTMLElement>(".content");
+  const scrollContainers = verticalScrollContainers(element);
+  const contentScrollContainer =
+    scrollContainers.find((container) => container === content) ?? null;
+  const nestedScrollContainers = scrollContainers.filter(
+    (container) => container !== content,
+  );
+  const behavior: ScrollBehavior = "auto";
+
+  let outerTarget = element;
+  for (const container of nestedScrollContainers) {
+    scrollTargetWithinContainer(outerTarget, container, behavior);
+    outerTarget = container;
+  }
+  if (nestedScrollContainers.length > 0) {
+    outerTarget = element.closest<HTMLElement>(".actionDrawer") ?? outerTarget;
+  }
+
+  if (contentScrollContainer) {
+    scrollTargetWithinContainer(
+      outerTarget,
+      contentScrollContainer,
+      behavior,
+      stickyTopbarBottom(content),
+    );
+    return;
+  }
+
+  scrollTargetWithinViewport(
+    outerTarget,
+    behavior,
+    stickyTopbarBottom(content),
+  );
+}
+
+function scrollTargetWithinContainer(
+  target: HTMLElement,
+  container: HTMLElement,
+  behavior: ScrollBehavior,
+  occludedTop = 0,
+) {
+  const containerBox = container.getBoundingClientRect();
+  const visibleTop = Math.max(containerBox.top, occludedTop) + 12;
+  const visibleBottom = Math.min(containerBox.bottom, window.innerHeight) - 12;
+  const delta = scrollDelta(target.getBoundingClientRect(), visibleTop, visibleBottom);
+  if (Math.abs(delta) >= 1) {
+    container.scrollBy({ behavior, top: delta });
+  }
+}
+
+function scrollTargetWithinViewport(
+  target: HTMLElement,
+  behavior: ScrollBehavior,
+  occludedTop: number,
+) {
+  const visibleTop = Math.max(0, occludedTop) + 12;
+  const visibleBottom = window.innerHeight - 12;
+  const delta = scrollDelta(target.getBoundingClientRect(), visibleTop, visibleBottom);
+  if (Math.abs(delta) >= 1) {
+    window.scrollBy({ behavior, top: delta });
+  }
+}
+
+function scrollDelta(box: DOMRect, visibleTop: number, visibleBottom: number) {
+  const availableHeight = Math.max(0, visibleBottom - visibleTop);
+  if (box.height > availableHeight || box.top < visibleTop) {
+    return box.top - visibleTop;
+  }
+  if (box.bottom > visibleBottom) {
+    return box.bottom - visibleBottom;
+  }
+  return 0;
+}
+
+function stickyTopbarBottom(content: HTMLElement | null) {
+  const topbar = content?.querySelector<HTMLElement>(":scope > .topbar");
+  if (!topbar) {
+    return 0;
+  }
+  const position = window.getComputedStyle(topbar).position;
+  return position === "sticky" || position === "fixed"
+    ? topbar.getBoundingClientRect().bottom
+    : 0;
+}
+
+function verticalScrollContainers(element: HTMLElement) {
+  const containers: HTMLElement[] = [];
+  let current = element.parentElement;
+  while (current && current !== document.body) {
+    const overflowY = window.getComputedStyle(current).overflowY;
+    if (
+      (overflowY === "auto" || overflowY === "scroll") &&
+      current.scrollHeight > current.clientHeight
+    ) {
+      containers.push(current);
+    }
+    current = current.parentElement;
+  }
+  return containers;
 }
 
 function getFocusableElements(container: HTMLElement): HTMLElement[] {

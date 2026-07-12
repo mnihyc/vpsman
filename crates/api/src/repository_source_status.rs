@@ -153,7 +153,7 @@ fn derive_status(
         "update_restart_policy" => update_restart_policy_status(template, source_kind),
         "update_rollback_heartbeat_source" => update_rollback_heartbeat_status(template, source_kind),
         "traffic_limit_status_source" => traffic_limit_status_source_status(template, source_kind),
-        "routing_daemon_adapter" => routing_daemon_adapter_status(template, source_kind),
+        "routing_cost_adapter" => routing_cost_adapter_status(template),
         _ => (
             "unknown_domain".to_string(),
             "domain is selected but has no status policy yet".to_string(),
@@ -444,23 +444,20 @@ fn traffic_limit_status_source_status(
     )
 }
 
-fn routing_daemon_adapter_status(
+fn routing_cost_adapter_status(
     template: &SourceTemplateView,
-    source_kind: &str,
 ) -> (String, String, serde_json::Value) {
     (
         "ready_on_demand".to_string(),
-        format!(
-            "routing-daemon adapter {source_kind} is selected; topology evidence and OSPF plan mutations provide status"
-        ),
+        "routing cost adapter is available for explicit tunnel endpoint jobs".to_string(),
         json!({
             "continuous_status": false,
-            "workflow": "network_routing",
-            "command_types": ["network_status", "tunnel_ospf_cost_update"],
+            "workflow": "network_routing_adapter",
+            "command_types": ["network_routing_status", "network_routing_apply"],
             "privilege_gated": true,
-            "source_kind": source_kind,
-            "provider": template.definition.get("provider").and_then(serde_json::Value::as_str).unwrap_or("bird2"),
-            "status_source": template.definition.get("status_source").and_then(serde_json::Value::as_str).unwrap_or("bird2_status"),
+            "contract_version": template.definition.get("contract_version"),
+            "status_command_configured": template.definition.get("status_command").is_some(),
+            "update_command_configured": template.definition.get("update_command").is_some(),
         }),
     )
 }
@@ -534,16 +531,11 @@ fn tunnel_adapter_status(tunnels: &[TelemetryTunnelView]) -> (String, String, se
             }),
         );
     }
-    let promotion_required = tunnels
-        .iter()
-        .filter(|tunnel| tunnel.promotion_required)
-        .count();
     let degraded = tunnels.iter().filter(|tunnel| {
         tunnel
             .adapter_health
             .as_ref()
             .is_some_and(|health| !health.success)
-            || tunnel.plan_correlation == "stale_saved_plan"
     });
     let degraded_count = degraded.count();
     let samples = tunnels
@@ -551,8 +543,6 @@ fn tunnel_adapter_status(tunnels: &[TelemetryTunnelView]) -> (String, String, se
         .map(|tunnel| {
             json!({
                 "interface": tunnel.interface,
-                "plan_correlation": tunnel.plan_correlation,
-                "promotion_required": tunnel.promotion_required,
                 "plan_id": tunnel.plan_id,
                 "plan_name": tunnel.plan_name,
                 "adapter_status": tunnel.adapter_health.as_ref().map(|health| health.status.as_str()),
@@ -566,19 +556,6 @@ fn tunnel_adapter_status(tunnels: &[TelemetryTunnelView]) -> (String, String, se
             json!({
                 "continuous_status": true,
                 "sample_count": samples.len(),
-                "promotion_required": promotion_required,
-                "degraded_count": degraded_count,
-                "samples": samples,
-            }),
-        )
-    } else if promotion_required > 0 {
-        (
-            "needs_promotion".to_string(),
-            "observed tunnel candidates need explicit template-backed promotion".to_string(),
-            json!({
-                "continuous_status": true,
-                "sample_count": samples.len(),
-                "promotion_required": promotion_required,
                 "degraded_count": degraded_count,
                 "samples": samples,
             }),
@@ -590,7 +567,6 @@ fn tunnel_adapter_status(tunnels: &[TelemetryTunnelView]) -> (String, String, se
             json!({
                 "continuous_status": true,
                 "sample_count": samples.len(),
-                "promotion_required": promotion_required,
                 "degraded_count": degraded_count,
                 "samples": samples,
             }),
@@ -633,7 +609,7 @@ fn module_label(domain: &str) -> &'static str {
         "process_supervisor_policy" => "Process supervisor policy",
         "runtime_tunnel_adapter" => "Runtime tunnel adapter",
         "traffic_limit_status_source" => "Traffic-limit status",
-        "routing_daemon_adapter" => "Routing daemon adapter",
+        "routing_cost_adapter" => "Routing cost adapter",
         "backup_object_store" => "Backup object store",
         "restore_path_mapping" => "Restore path mapping",
         "update_artifact_source" => "Update artifact source",

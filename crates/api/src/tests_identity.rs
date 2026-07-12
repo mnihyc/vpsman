@@ -7,8 +7,9 @@ use tokio::{
     sync::Mutex,
 };
 use vpsman_common::{
-    AgentCapabilitySnapshot, AgentHello, AgentPrivilegeMode, GatewayAgentHelloIngest,
+    plan_tunnel, AgentCapabilitySnapshot, AgentHello, AgentPrivilegeMode, GatewayAgentHelloIngest,
     GatewayPrivilegeVerificationResult, GatewaySessionDisconnectResult, PrivilegeAssertion,
+    RuntimeTunnelManager,
 };
 use vpsman_server_core::TARGET_STATUS_AGENT_LOST;
 
@@ -588,7 +589,6 @@ async fn memory_agent_inventory_preserves_unprivileged_capability_snapshot() {
                         "root-only operations require forced best-effort or a root agent"
                             .to_string(),
                     ),
-                    ..AgentCapabilitySnapshot::default()
                 },
             },
         )
@@ -607,6 +607,70 @@ async fn memory_agent_inventory_preserves_unprivileged_capability_snapshot() {
     assert!(!agents[0].capabilities.can_manage_runtime_tunnels);
     assert!(!agents[0].capabilities.can_apply_process_limits);
     assert!(agents[0].capabilities.unprivileged_hint.is_some());
+}
+
+#[tokio::test]
+async fn deleting_tunnel_endpoint_queues_empty_desired_state_for_surviving_peer() {
+    let state = identity_route_test_state(
+        crate::gateway_client::GatewayDispatchClient::test_privilege_auto_approve(),
+    );
+    let headers = crate::test_auth_headers(&state).await;
+    let operator = identity_operator();
+    for (client_id, key_byte) in [("client-a", "91"), ("client-b", "92")] {
+        state
+            .repo
+            .upsert_agent_identity(
+                &UpsertAgentIdentityRequest {
+                    client_id: Some(client_id.to_string()),
+                    client_public_key_hex: key_byte.repeat(32),
+                    display_name: Some(client_id.to_string()),
+                    tags: Vec::new(),
+                    replace_existing_key: false,
+                    confirmed: true,
+                    privilege_assertion: None,
+                },
+                &operator,
+            )
+            .await
+            .unwrap();
+    }
+
+    let input =
+        crate::tests_network::test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let plan = plan_tunnel(&input).unwrap();
+    state
+        .repo
+        .record_tunnel_plan(&input, &plan, true, &operator)
+        .await
+        .unwrap();
+
+    let axum::Json(response) = routes_inventory::delete_agent(
+        axum::extract::State(state.clone()),
+        headers,
+        axum::extract::Path("client-a".to_string()),
+        axum::Json(DeleteAgentRequest {
+            confirmed: true,
+            reason: Some("retire tunnel endpoint".to_string()),
+            privilege_assertion: Some(dummy_privilege_assertion()),
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert!(response.deleted);
+    assert_eq!(response.runtime_sync_job_ids.len(), 1);
+    assert!(response.runtime_sync_failed_client_ids.is_empty());
+    assert!(state.repo.list_tunnel_plans().await.unwrap().is_empty());
+    let pending = state
+        .repo
+        .runtime_config_pending_state_for_client("client-b")
+        .await
+        .unwrap()
+        .expect("surviving tunnel peer must receive an explicit cleanup snapshot");
+    assert_eq!(
+        pending.pending_job_id,
+        response.runtime_sync_job_ids.first().copied()
+    );
 }
 
 #[tokio::test]

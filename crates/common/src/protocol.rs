@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     AgentMetrics, AgentRuntimeConfig, FilePushChunk, PrivilegeAssertion, ProtocolError,
-    TunnelConfigBackend, TunnelEndpointSide, TunnelPlan, MAX_DIRECT_FILE_DOWNLOAD_BYTES,
+    RoutingCostAdapterCommands, TunnelEndpointSide, TunnelPlan, MAX_DIRECT_FILE_DOWNLOAD_BYTES,
 };
 
 pub const NETWORK_SPEED_TEST_MIN_DURATION_SECS: u8 = 1;
@@ -245,20 +245,6 @@ pub const RESTORE_PLAN_STATUS_CLASS_BY_STATUS: [(&str, &str); 1] =
 pub const MIGRATION_LINK_STATUS_CLASS_BY_STATUS: [(&str, &str); 1] =
     [("linked_metadata_only", WORKFLOW_STATUS_CLASS_SUCCESSFUL)];
 
-pub const TUNNEL_PLAN_STATUS_CLASS_BY_STATUS: [(&str, &str); 5] = [
-    ("planned", WORKFLOW_STATUS_CLASS_NEUTRAL),
-    ("applied", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
-    ("partially_applied", WORKFLOW_STATUS_CLASS_WARNING),
-    ("rolled_back", WORKFLOW_STATUS_CLASS_NEUTRAL),
-    ("partially_rolled_back", WORKFLOW_STATUS_CLASS_WARNING),
-];
-
-pub const TUNNEL_ENDPOINT_STATUS_CLASS_BY_STATUS: [(&str, &str); 3] = [
-    ("planned", WORKFLOW_STATUS_CLASS_NEUTRAL),
-    ("applied", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
-    ("rolled_back", WORKFLOW_STATUS_CLASS_NEUTRAL),
-];
-
 pub const AGENT_UPDATE_RELEASE_STATUS_CLASS_BY_STATUS: [(&str, &str); 1] =
     [("published_external", WORKFLOW_STATUS_CLASS_SUCCESSFUL)];
 
@@ -309,7 +295,7 @@ pub const WEBHOOK_RULE_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS: [(&str, &str); 2
     ("failed", WORKFLOW_STATUS_CLASS_WARNING),
 ];
 
-pub const SOURCE_READINESS_STATUS_CLASS_BY_STATUS: [(&str, &str); 14] = [
+pub const SOURCE_READINESS_STATUS_CLASS_BY_STATUS: [(&str, &str); 13] = [
     ("agent_offline", WORKFLOW_STATUS_CLASS_WARNING),
     ("selected", WORKFLOW_STATUS_CLASS_NEUTRAL),
     ("selected_workflow", WORKFLOW_STATUS_CLASS_NEUTRAL),
@@ -321,7 +307,6 @@ pub const SOURCE_READINESS_STATUS_CLASS_BY_STATUS: [(&str, &str); 14] = [
     ("selected_no_artifacts", WORKFLOW_STATUS_CLASS_WARNING),
     ("selected_no_limits", WORKFLOW_STATUS_CLASS_WARNING),
     ("selected_no_samples", WORKFLOW_STATUS_CLASS_WARNING),
-    ("needs_promotion", WORKFLOW_STATUS_CLASS_WARNING),
     ("ok", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
     ("degraded", WORKFLOW_STATUS_CLASS_WARNING),
 ];
@@ -334,12 +319,11 @@ pub const TOPOLOGY_NODE_STATUS_CLASS_BY_STATUS: [(&str, &str); 5] = [
     ("unknown", WORKFLOW_STATUS_CLASS_NEUTRAL),
 ];
 
-pub const TOPOLOGY_EDGE_HEALTH_STATUS_CLASS_BY_STATUS: [(&str, &str); 5] = [
-    ("planned", WORKFLOW_STATUS_CLASS_NEUTRAL),
-    ("applied", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+pub const TOPOLOGY_EDGE_HEALTH_STATUS_CLASS_BY_STATUS: [(&str, &str); 4] = [
+    ("disabled", WORKFLOW_STATUS_CLASS_NEUTRAL),
+    ("unknown", WORKFLOW_STATUS_CLASS_NEUTRAL),
     ("healthy", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
     ("degraded", WORKFLOW_STATUS_CLASS_WARNING),
-    ("rolled_back", WORKFLOW_STATUS_CLASS_NEUTRAL),
 ];
 
 pub const TOPOLOGY_NEIGHBOR_STATE_CLASS_BY_STATE: [(&str, &str); 5] = [
@@ -692,14 +676,6 @@ pub fn migration_link_status_class_by_status() -> &'static [(&'static str, &'sta
     &MIGRATION_LINK_STATUS_CLASS_BY_STATUS
 }
 
-pub fn tunnel_plan_status_class_by_status() -> &'static [(&'static str, &'static str)] {
-    &TUNNEL_PLAN_STATUS_CLASS_BY_STATUS
-}
-
-pub fn tunnel_endpoint_status_class_by_status() -> &'static [(&'static str, &'static str)] {
-    &TUNNEL_ENDPOINT_STATUS_CLASS_BY_STATUS
-}
-
 pub fn agent_update_release_status_class_by_status() -> &'static [(&'static str, &'static str)] {
     &AGENT_UPDATE_RELEASE_STATUS_CLASS_BY_STATUS
 }
@@ -881,8 +857,6 @@ pub struct AgentCapabilitySnapshot {
     #[serde(default = "default_agent_max_job_timeout_secs")]
     pub max_job_timeout_secs: u64,
     #[serde(default)]
-    pub network_backend: TunnelConfigBackend,
-    #[serde(default)]
     pub can_attempt_privileged_ops: bool,
     #[serde(default)]
     pub can_manage_runtime_tunnels: bool,
@@ -898,7 +872,6 @@ impl Default for AgentCapabilitySnapshot {
             privilege_mode: AgentPrivilegeMode::Unknown,
             effective_uid: None,
             max_job_timeout_secs: default_agent_max_job_timeout_secs(),
-            network_backend: TunnelConfigBackend::default(),
             can_attempt_privileged_ops: false,
             can_manage_runtime_tunnels: false,
             can_apply_process_limits: false,
@@ -937,8 +910,7 @@ pub struct ServerHello {
     pub server_build_number: u64,
     pub accepted: bool,
     pub message: String,
-    pub telemetry_light_secs: u64,
-    pub telemetry_full_secs: u64,
+    pub telemetry_interval_secs: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -979,6 +951,7 @@ pub struct GatewayTelemetryIngest {
     pub gateway_id: String,
     pub gateway_session_id: Uuid,
     pub process_incarnation_id: Uuid,
+    pub telemetry_seq: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_ip: Option<String>,
     pub telemetry: TelemetryEnvelope,
@@ -1270,6 +1243,8 @@ pub fn job_command_variant_names() -> &'static [&'static str] {
         "network_interfaces",
         "network_probe",
         "network_speed_test",
+        "network_routing_status",
+        "network_routing_apply",
     ]
 }
 
@@ -1278,7 +1253,7 @@ pub const JOB_COMMAND_SAFETY_WRITE: &str = "write";
 pub const JOB_COMMAND_SAFETY_EXEC: &str = "exec";
 pub const JOB_COMMAND_SAFETY_EXCLUSIVE: &str = "exclusive";
 
-pub const JOB_COMMAND_TYPE_LABELS: [&str; 49] = [
+pub const JOB_COMMAND_TYPE_LABELS: [&str; 51] = [
     "shell_argv",
     "shell_pty",
     "shell_script",
@@ -1328,9 +1303,11 @@ pub const JOB_COMMAND_TYPE_LABELS: [&str; 49] = [
     "network_interfaces",
     "network_probe",
     "network_speed_test",
+    "network_routing_status",
+    "network_routing_apply",
 ];
 
-pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 48] = [
+pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 50] = [
     ("shell", JOB_COMMAND_SAFETY_EXEC),
     ("shell_script", JOB_COMMAND_SAFETY_EXEC),
     ("terminal_open", JOB_COMMAND_SAFETY_EXEC),
@@ -1379,9 +1356,11 @@ pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 48] = [
     ("network_interfaces", JOB_COMMAND_SAFETY_READ),
     ("network_probe", JOB_COMMAND_SAFETY_READ),
     ("network_speed_test", JOB_COMMAND_SAFETY_EXEC),
+    ("network_routing_status", JOB_COMMAND_SAFETY_READ),
+    ("network_routing_apply", JOB_COMMAND_SAFETY_EXEC),
 ];
 
-pub const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE: [(&str, bool); 48] = [
+pub const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE: [(&str, bool); 50] = [
     ("shell", true),
     ("shell_script", true),
     ("terminal_open", true),
@@ -1430,9 +1409,11 @@ pub const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE: [(&str, bool); 48
     ("network_interfaces", false),
     ("network_probe", false),
     ("network_speed_test", true),
+    ("network_routing_status", false),
+    ("network_routing_apply", true),
 ];
 
-pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 48] = [
+pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 50] = [
     ("shell", "shell_argv"),
     ("shell_script", "shell_script"),
     ("terminal_open", "terminal_open"),
@@ -1487,9 +1468,11 @@ pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 48] = [
     ("network_interfaces", "network_interfaces"),
     ("network_probe", "network_probe"),
     ("network_speed_test", "network_speed_test"),
+    ("network_routing_status", "network_routing_status"),
+    ("network_routing_apply", "network_routing_apply"),
 ];
 
-pub const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE: [(&str, &str); 49] = [
+pub const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE: [(&str, &str); 51] = [
     ("shell_argv", "shell"),
     ("shell_pty", "shell"),
     ("shell_script", "shell"),
@@ -1539,6 +1522,8 @@ pub const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE: [(&str, &str); 49] = [
     ("network_interfaces", "network"),
     ("network_probe", "network"),
     ("network_speed_test", "network"),
+    ("network_routing_status", "network"),
+    ("network_routing_apply", "network"),
 ];
 
 pub fn job_command_type_labels() -> &'static [&'static str] {
@@ -1982,14 +1967,6 @@ pub const BACKUP_REQUEST_STATUSES: &[&str] = &[
 ];
 pub const RESTORE_PLAN_STATUSES: &[&str] = &["planned_metadata_only"];
 pub const MIGRATION_LINK_STATUSES: &[&str] = &["linked_metadata_only"];
-pub const TUNNEL_PLAN_STATUSES: &[&str] = &[
-    "planned",
-    "applied",
-    "partially_applied",
-    "rolled_back",
-    "partially_rolled_back",
-];
-pub const TUNNEL_ENDPOINT_STATUSES: &[&str] = &["planned", "applied", "rolled_back"];
 pub const AGENT_UPDATE_RELEASE_STATUSES: &[&str] = &["published_external"];
 
 pub const SERVER_JOB_TYPE_ARTIFACT_CLEANUP: &str = "artifact_cleanup";
@@ -2070,14 +2047,12 @@ pub const SOURCE_READINESS_STATUSES: &[&str] = &[
     "selected_no_artifacts",
     "selected_no_limits",
     "selected_no_samples",
-    "needs_promotion",
     "ok",
     "degraded",
 ];
 
 pub const TOPOLOGY_NODE_STATUSES: &[&str] = &["online", "offline", "never", "stale", "unknown"];
-pub const TOPOLOGY_EDGE_HEALTH_STATUSES: &[&str] =
-    &["planned", "applied", "healthy", "degraded", "rolled_back"];
+pub const TOPOLOGY_EDGE_HEALTH_STATUSES: &[&str] = &["disabled", "unknown", "healthy", "degraded"];
 pub const TOPOLOGY_NEIGHBOR_STATES: &[&str] = &[
     "unknown",
     "healthy",
@@ -2100,20 +2075,6 @@ pub const TOPOLOGY_RUNTIME_STATES: &[&str] = &[
     "skipped",
 ];
 pub const TOPOLOGY_OBSERVATION_STATES: &[&str] = &["unknown", "healthy", "degraded", "recorded"];
-pub const TOPOLOGY_DRIFT_POLICIES: &[&str] = &[
-    "hold_convergence_until_endpoints_online",
-    "observe_only_until_import_promoted",
-    "observe_runtime_drift_before_apply",
-    "observe_and_recommend",
-    "eligible_for_apply",
-];
-pub const TOPOLOGY_DRIFT_ACTIONS: &[&str] = &[
-    "wait_for_reconnect",
-    "promote_observed_first",
-    "inspect_runtime_status",
-    "inspect_degraded_samples",
-    "none",
-];
 
 pub fn terminal_command_types() -> &'static [&'static str] {
     TERMINAL_COMMAND_TYPES
@@ -2157,14 +2118,6 @@ pub fn restore_plan_statuses() -> &'static [&'static str] {
 
 pub fn migration_link_statuses() -> &'static [&'static str] {
     MIGRATION_LINK_STATUSES
-}
-
-pub fn tunnel_plan_statuses() -> &'static [&'static str] {
-    TUNNEL_PLAN_STATUSES
-}
-
-pub fn tunnel_endpoint_statuses() -> &'static [&'static str] {
-    TUNNEL_ENDPOINT_STATUSES
 }
 
 pub fn agent_update_release_statuses() -> &'static [&'static str] {
@@ -2225,14 +2178,6 @@ pub fn topology_runtime_states() -> &'static [&'static str] {
 
 pub fn topology_observation_states() -> &'static [&'static str] {
     TOPOLOGY_OBSERVATION_STATES
-}
-
-pub fn topology_drift_policies() -> &'static [&'static str] {
-    TOPOLOGY_DRIFT_POLICIES
-}
-
-pub fn topology_drift_actions() -> &'static [&'static str] {
-    TOPOLOGY_DRIFT_ACTIONS
 }
 
 fn contains_static(values: &'static [&'static str], value: &str) -> bool {
@@ -2350,14 +2295,6 @@ pub fn is_webhook_rule_delivery_history_status(status: &str) -> bool {
 
 pub fn is_webhook_rule_delivery_process_status(status: &str) -> bool {
     contains_static(WEBHOOK_RULE_DELIVERY_PROCESS_STATUSES, status)
-}
-
-pub fn is_topology_drift_policy(status: &str) -> bool {
-    contains_static(TOPOLOGY_DRIFT_POLICIES, status)
-}
-
-pub fn is_topology_drift_action(status: &str) -> bool {
-    contains_static(TOPOLOGY_DRIFT_ACTIONS, status)
 }
 
 pub fn normalize_topology_runtime_state(value: &str) -> &'static str {
@@ -2877,17 +2814,22 @@ pub enum JobCommand {
         restored_files: Vec<RestoreRollbackFile>,
     },
     NetworkStatus {
+        plan_id: String,
         plan: Box<TunnelPlan>,
         side: TunnelEndpointSide,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime_adapter: Option<crate::RuntimeTunnelAdapterCommands>,
     },
     NetworkInterfaces,
     NetworkProbe {
+        plan_id: String,
         plan: Box<TunnelPlan>,
         side: TunnelEndpointSide,
         count: u8,
         interval_ms: u16,
     },
     NetworkSpeedTest {
+        plan_id: String,
         plan: Box<TunnelPlan>,
         server_side: TunnelEndpointSide,
         duration_secs: u8,
@@ -2895,6 +2837,20 @@ pub enum JobCommand {
         rate_limit_kbps: u32,
         port: u16,
         connect_timeout_ms: u16,
+    },
+    NetworkRoutingStatus {
+        plan_id: String,
+        plan: Box<TunnelPlan>,
+        side: TunnelEndpointSide,
+        adapter: RoutingCostAdapterCommands,
+    },
+    NetworkRoutingApply {
+        plan_id: String,
+        plan: Box<TunnelPlan>,
+        side: TunnelEndpointSide,
+        adapter: RoutingCostAdapterCommands,
+        expected_current_cost: Option<u16>,
+        desired_cost: u16,
     },
 }
 
@@ -2949,7 +2905,9 @@ pub fn job_command_protocol_version(command: &JobCommand) -> u16 {
         JobCommand::NetworkStatus { .. }
         | JobCommand::NetworkInterfaces
         | JobCommand::NetworkProbe { .. }
-        | JobCommand::NetworkSpeedTest { .. } => NETWORK_COMMAND_PROTOCOL_VERSION,
+        | JobCommand::NetworkSpeedTest { .. }
+        | JobCommand::NetworkRoutingStatus { .. }
+        | JobCommand::NetworkRoutingApply { .. } => NETWORK_COMMAND_PROTOCOL_VERSION,
     }
 }
 
@@ -3002,7 +2960,9 @@ pub fn job_command_min_supported_protocol_version(command: &JobCommand) -> u16 {
         | JobCommand::NetworkStatus { .. }
         | JobCommand::NetworkInterfaces
         | JobCommand::NetworkProbe { .. }
-        | JobCommand::NetworkSpeedTest { .. } => MIN_COMMAND_PROTOCOL_VERSION,
+        | JobCommand::NetworkSpeedTest { .. }
+        | JobCommand::NetworkRoutingStatus { .. }
+        | JobCommand::NetworkRoutingApply { .. } => MIN_COMMAND_PROTOCOL_VERSION,
     }
 }
 
@@ -3057,6 +3017,8 @@ pub fn job_command_type_label(command: &JobCommand) -> &'static str {
         JobCommand::NetworkInterfaces => "network_interfaces",
         JobCommand::NetworkProbe { .. } => "network_probe",
         JobCommand::NetworkSpeedTest { .. } => "network_speed_test",
+        JobCommand::NetworkRoutingStatus { .. } => "network_routing_status",
+        JobCommand::NetworkRoutingApply { .. } => "network_routing_apply",
     }
 }
 
@@ -3079,6 +3041,8 @@ pub fn scheduled_command_type_label(command: &JobCommand, fallback: &str) -> Str
         | JobCommand::NetworkInterfaces
         | JobCommand::NetworkProbe { .. }
         | JobCommand::NetworkSpeedTest { .. }
+        | JobCommand::NetworkRoutingStatus { .. }
+        | JobCommand::NetworkRoutingApply { .. }
         | JobCommand::UpdateAgent { .. }
         | JobCommand::AgentUpdateActivate { .. }
         | JobCommand::AgentUpdateRollback { .. }
@@ -3113,7 +3077,8 @@ pub fn job_command_safety(command: &JobCommand) -> JobCommandSafety {
         | JobCommand::ProcessLogs { .. }
         | JobCommand::NetworkStatus { .. }
         | JobCommand::NetworkInterfaces
-        | JobCommand::NetworkProbe { .. } => JobCommandSafety::Read,
+        | JobCommand::NetworkProbe { .. }
+        | JobCommand::NetworkRoutingStatus { .. } => JobCommandSafety::Read,
         JobCommand::Shell { .. }
         | JobCommand::ShellScript { .. }
         | JobCommand::TerminalOpen { .. }
@@ -3144,7 +3109,8 @@ pub fn job_command_safety(command: &JobCommand) -> JobCommandSafety {
         JobCommand::ProcessStart { .. }
         | JobCommand::ProcessStop { .. }
         | JobCommand::ProcessRestart { .. }
-        | JobCommand::NetworkSpeedTest { .. } => JobCommandSafety::Exec,
+        | JobCommand::NetworkSpeedTest { .. }
+        | JobCommand::NetworkRoutingApply { .. } => JobCommandSafety::Exec,
         JobCommand::Backup { .. } => JobCommandSafety::Read,
     }
 }
@@ -3288,12 +3254,11 @@ mod tests {
         fleet_alert_notification_delivery_statuses, is_file_transfer_command_type,
         is_file_transfer_session_event, is_fleet_alert_notification_delivery_process_status,
         is_fleet_alert_notification_delivery_status, is_server_job_status, is_server_job_type,
-        is_terminal_command_type, is_terminal_session_event, is_topology_drift_action,
-        is_topology_drift_policy, is_topology_edge_health_status, is_topology_neighbor_state,
-        is_topology_node_status, is_topology_observation_state, is_topology_probe_state,
-        is_topology_runtime_state, is_webhook_rule_delivery_history_status,
-        is_webhook_rule_delivery_process_status, is_webhook_rule_delivery_status,
-        job_command_confirmation_required_by_operation_type,
+        is_terminal_command_type, is_terminal_session_event, is_topology_edge_health_status,
+        is_topology_neighbor_state, is_topology_node_status, is_topology_observation_state,
+        is_topology_probe_state, is_topology_runtime_state,
+        is_webhook_rule_delivery_history_status, is_webhook_rule_delivery_process_status,
+        is_webhook_rule_delivery_status, job_command_confirmation_required_by_operation_type,
         job_command_requires_confirmation_by_operation_type, job_command_safety_by_operation_type,
         job_command_type_by_operation_type, job_command_type_label_from_operation_type,
         job_command_type_labels, job_command_variant_names, job_status_class_by_status,
@@ -3301,10 +3266,9 @@ mod tests {
         job_target_status_classes, job_target_statuses, migration_link_statuses,
         parse_build_number, restore_plan_statuses, server_job_statuses, server_job_types,
         terminal_command_types, terminal_session_events, terminal_session_state,
-        terminal_session_states, terminal_session_statuses, topology_drift_actions,
-        topology_drift_policies, topology_edge_health_statuses, topology_neighbor_states,
-        topology_node_statuses, topology_observation_states, topology_probe_states,
-        topology_runtime_states, webhook_rule_delivery_history_statuses,
+        terminal_session_states, terminal_session_statuses, topology_edge_health_statuses,
+        topology_neighbor_states, topology_node_statuses, topology_observation_states,
+        topology_probe_states, topology_runtime_states, webhook_rule_delivery_history_statuses,
         webhook_rule_delivery_process_statuses, webhook_rule_delivery_statuses,
         AgentUpdateReleaseStatus, BackupRequestStatus, JobCommand, JobStatus, JobStatusClass,
         JobTargetStatus, JobTargetStatusClass, MigrationLinkStatus, RestorePlanStatus, ServerHello,
@@ -3330,8 +3294,7 @@ mod tests {
             server_build_number: 1001,
             accepted: true,
             message: "accepted".to_string(),
-            telemetry_light_secs: 15,
-            telemetry_full_secs: 60,
+            telemetry_interval_secs: 15,
         };
 
         let encoded = serde_json::to_value(&hello).unwrap();
@@ -3573,12 +3536,6 @@ mod tests {
         for status in topology_observation_states() {
             assert!(is_topology_observation_state(status));
         }
-        for status in topology_drift_policies() {
-            assert!(is_topology_drift_policy(status));
-        }
-        for status in topology_drift_actions() {
-            assert!(is_topology_drift_action(status));
-        }
         assert!(is_topology_observation_state("recorded"));
         assert!(!is_topology_probe_state("recorded"));
     }
@@ -3650,14 +3607,6 @@ mod tests {
         assert_status_class_map_total(
             migration_link_statuses(),
             super::migration_link_status_class_by_status(),
-        );
-        assert_status_class_map_total(
-            super::tunnel_plan_statuses(),
-            super::tunnel_plan_status_class_by_status(),
-        );
-        assert_status_class_map_total(
-            super::tunnel_endpoint_statuses(),
-            super::tunnel_endpoint_status_class_by_status(),
         );
         assert_status_class_map_total(
             super::agent_update_release_statuses(),

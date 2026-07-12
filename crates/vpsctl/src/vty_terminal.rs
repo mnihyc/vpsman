@@ -57,7 +57,7 @@ pub(crate) fn submit_vty_terminal_command(
 enum VtyTerminalRequest {
     Job {
         command_label: &'static str,
-        operation: JobCommand,
+        operation: Box<JobCommand>,
         selection: VtyJobSelection,
         max_timeout_secs: u64,
     },
@@ -146,7 +146,7 @@ fn parse_terminal_open(args: &[&str]) -> Result<VtyTerminalRequest> {
     let selection = VtyJobSelection::parse(&targets)?;
     Ok(VtyTerminalRequest::Job {
         command_label: "terminal_open",
-        operation: JobCommand::TerminalOpen {
+        operation: Box::new(JobCommand::TerminalOpen {
             session_id: session_id.unwrap_or_else(Uuid::new_v4),
             argv,
             cwd,
@@ -157,7 +157,7 @@ fn parse_terminal_open(args: &[&str]) -> Result<VtyTerminalRequest> {
             replay_from_seq,
             idle_timeout_secs,
             flow_window_bytes,
-        },
+        }),
         selection,
         max_timeout_secs,
     })
@@ -253,10 +253,10 @@ fn parse_terminal_poll(args: &[&str]) -> Result<VtyTerminalRequest> {
     let selection = VtyJobSelection::parse(&targets)?;
     Ok(VtyTerminalRequest::Job {
         command_label: "terminal_poll",
-        operation: JobCommand::TerminalPoll {
+        operation: Box::new(JobCommand::TerminalPoll {
             session_id: session_id.context("terminal-poll requires --session-id")?,
             replay_from_seq,
-        },
+        }),
         selection,
         max_timeout_secs,
     })
@@ -294,11 +294,11 @@ fn parse_terminal_resize(args: &[&str]) -> Result<VtyTerminalRequest> {
     let selection = VtyJobSelection::parse(&targets)?;
     Ok(VtyTerminalRequest::Job {
         command_label: "terminal_resize",
-        operation: JobCommand::TerminalResize {
+        operation: Box::new(JobCommand::TerminalResize {
             session_id: session_id.context("terminal-resize requires --session-id")?,
             cols: cols.context("terminal-resize requires --cols")?,
             rows: rows.context("terminal-resize requires --rows")?,
-        },
+        }),
         selection,
         max_timeout_secs,
     })
@@ -335,10 +335,10 @@ fn parse_terminal_close(args: &[&str]) -> Result<VtyTerminalRequest> {
     let selection = VtyJobSelection::parse(&targets)?;
     Ok(VtyTerminalRequest::Job {
         command_label: "terminal_close",
-        operation: JobCommand::TerminalClose {
+        operation: Box::new(JobCommand::TerminalClose {
             session_id: session_id.context("terminal-close requires --session-id")?,
             reason,
-        },
+        }),
         selection,
         max_timeout_secs,
     })
@@ -467,7 +467,7 @@ mod tests {
                 assert!(selection.clients.is_empty());
                 assert_eq!(selection.tags, vec!["id:edge-a".to_string()]);
                 assert!(selection.confirmed);
-                match operation {
+                match *operation {
                     JobCommand::TerminalOpen {
                         argv, cols, rows, ..
                     } => {
@@ -549,7 +549,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(command_label, "terminal_poll");
-                match operation {
+                match *operation {
                     JobCommand::TerminalPoll {
                         replay_from_seq, ..
                     } => assert_eq!(replay_from_seq, Some(4)),
@@ -576,7 +576,7 @@ mod tests {
         )
         .unwrap();
         match resize {
-            VtyTerminalRequest::Job { operation, .. } => match operation {
+            VtyTerminalRequest::Job { operation, .. } => match *operation {
                 JobCommand::TerminalResize { cols, rows, .. } => {
                     assert_eq!(cols, 90);
                     assert_eq!(rows, 24);
@@ -597,7 +597,7 @@ mod tests {
         )
         .unwrap();
         match close {
-            VtyTerminalRequest::Job { operation, .. } => match operation {
+            VtyTerminalRequest::Job { operation, .. } => match *operation {
                 JobCommand::TerminalClose { reason, .. } => {
                     assert_eq!(reason.as_deref(), Some("done"));
                 }

@@ -1,9 +1,7 @@
-use std::path::PathBuf;
-
 use anyhow::{Context, Result};
 use uuid::Uuid;
 use vpsman_common::{
-    render_tunnel_endpoint_config, JobCommand, TunnelEndpointSide, TunnelPlan,
+    render_tunnel_endpoint_config, JobCommand, TunnelEndpointSide,
     MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
 };
 
@@ -14,7 +12,7 @@ use crate::{
 
 #[derive(Debug, PartialEq)]
 pub(crate) struct VtyTunnelProbeRequest {
-    pub(crate) plan_file: PathBuf,
+    pub(crate) plan_id: Uuid,
     pub(crate) side: TunnelEndpointSide,
     pub(crate) count: u8,
     pub(crate) interval_ms: u16,
@@ -23,7 +21,7 @@ pub(crate) struct VtyTunnelProbeRequest {
 }
 
 pub(crate) fn parse_vty_tunnel_probe(tokens: &[&str]) -> Result<VtyTunnelProbeRequest> {
-    let mut plan_file = None::<PathBuf>;
+    let mut plan_id = None::<Uuid>;
     let mut side = None::<TunnelEndpointSide>;
     let mut count = 3_u8;
     let mut interval_ms = 500_u16;
@@ -33,12 +31,15 @@ pub(crate) fn parse_vty_tunnel_probe(tokens: &[&str]) -> Result<VtyTunnelProbeRe
     let mut index = 0;
     while index < tokens.len() {
         match tokens[index] {
-            "--plan-file" => {
-                plan_file = Some(PathBuf::from(next_value(tokens, index, "--plan-file")?));
+            "--plan-id" => {
+                plan_id = Some(parse_uuid(
+                    next_value(tokens, index, "--plan-id")?,
+                    "--plan-id",
+                )?);
                 index += 2;
             }
-            value if value.starts_with("--plan-file=") => {
-                plan_file = Some(PathBuf::from(flag_value(value, "--plan-file=")));
+            value if value.starts_with("--plan-id=") => {
+                plan_id = Some(parse_uuid(flag_value(value, "--plan-id="), "--plan-id")?);
                 index += 1;
             }
             "--side" => {
@@ -134,7 +135,7 @@ pub(crate) fn parse_vty_tunnel_probe(tokens: &[&str]) -> Result<VtyTunnelProbeRe
     }
 
     Ok(VtyTunnelProbeRequest {
-        plan_file: required(plan_file, "--plan-file")?,
+        plan_id: required(plan_id, "--plan-id")?,
         side: required(side, "--side")?,
         count,
         interval_ms,
@@ -149,12 +150,10 @@ pub(crate) fn submit_vty_tunnel_probe(
     privilege_context: &VtyPrivilegeContext,
     request: VtyTunnelProbeRequest,
 ) -> Result<String> {
-    let plan_text = std::fs::read_to_string(&request.plan_file)
-        .with_context(|| format!("failed to read tunnel plan {}", request.plan_file.display()))?;
-    let plan: TunnelPlan =
-        serde_json::from_str(&plan_text).context("tunnel plan JSON is invalid")?;
+    let plan = crate::commands_network::fetch_tunnel_plan(api_url, token, request.plan_id)?;
     let endpoint = render_tunnel_endpoint_config(&plan, request.side)?;
     let operation = JobCommand::NetworkProbe {
+        plan_id: request.plan_id.to_string(),
         plan: Box::new(plan),
         side: request.side,
         count: request.count,
@@ -218,6 +217,10 @@ fn parse_probe_side(value: &str) -> Result<TunnelEndpointSide> {
     }
 }
 
+fn parse_uuid(value: &str, flag: &str) -> Result<Uuid> {
+    Uuid::parse_str(value).with_context(|| format!("{flag} must be a UUID"))
+}
+
 fn parse_bounded_u8(value: &str, flag: &str, min: u8, max: u8) -> Result<u8> {
     let parsed = value
         .parse::<u8>()
@@ -259,7 +262,7 @@ mod tests {
     #[test]
     fn parses_vty_tunnel_probe_with_bounds() {
         let request = parse_vty_tunnel_probe(&[
-            "--plan-file=/tmp/plan.json",
+            "--plan-id=00000000-0000-0000-0000-000000000001",
             "--side",
             "right",
             "--count=5",
@@ -272,8 +275,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            request.plan_file,
-            std::path::PathBuf::from("/tmp/plan.json")
+            request.plan_id,
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()
         );
         assert_eq!(request.side, TunnelEndpointSide::Right);
         assert_eq!(request.count, 5);
@@ -285,18 +288,24 @@ mod tests {
     #[test]
     fn rejects_vty_tunnel_probe_bad_bounds_or_side() {
         assert!(parse_vty_tunnel_probe(&[
-            "--plan-file=/tmp/plan.json",
+            "--plan-id=00000000-0000-0000-0000-000000000001",
             "--side=left",
             "--count=0",
         ])
         .is_err());
         assert!(parse_vty_tunnel_probe(&[
-            "--plan-file=/tmp/plan.json",
+            "--plan-id=00000000-0000-0000-0000-000000000001",
             "--side=left",
             "--interval-ms=199",
         ])
         .is_err());
-        assert!(parse_vty_tunnel_probe(&["--plan-file=/tmp/plan.json", "--side=middle",]).is_err());
-        assert!(parse_vty_tunnel_probe(&["--plan-file=/tmp/plan.json"]).is_err());
+        assert!(parse_vty_tunnel_probe(&[
+            "--plan-id=00000000-0000-0000-0000-000000000001",
+            "--side=middle",
+        ])
+        .is_err());
+        assert!(
+            parse_vty_tunnel_probe(&["--plan-id=00000000-0000-0000-0000-000000000001",]).is_err()
+        );
     }
 }

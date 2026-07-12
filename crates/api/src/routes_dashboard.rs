@@ -36,6 +36,7 @@ const DASHBOARD_MAX_CHART_POINTS: u32 = 1_440;
 const DASHBOARD_TOP_CLUSTERS: usize = 8;
 const DASHBOARD_TOP_ALERTS: usize = 5;
 const DASHBOARD_TOP_DEGRADED: usize = 5;
+const NETWORK_SNAPSHOT_COHERENCE_SECS: u64 = 180;
 const DASHBOARD_MAX_NETWORK_POINTS: usize = 80;
 
 #[derive(Debug, Deserialize)]
@@ -138,6 +139,7 @@ struct ResourceClientSeries {
     points: Vec<DashboardResourcePointView>,
     current: Option<f64>,
     peak: Option<f64>,
+    latest_sample_at: String,
     risk_score: f64,
     policy: FleetAlertPolicy,
 }
@@ -371,6 +373,8 @@ async fn build_dashboard_overview(
         .iter()
         .map(|agent| agent.id.clone())
         .collect::<HashSet<_>>();
+    let mut scoped_client_id_list = scoped_client_ids.iter().cloned().collect::<Vec<_>>();
+    scoped_client_id_list.sort();
     let agents_by_id = scoped_agents
         .iter()
         .map(|agent| (agent.id.clone(), agent.clone()))
@@ -389,20 +393,36 @@ async fn build_dashboard_overview(
         .filter(|alert| timestamp_in_range(&alert.observed_at, &range))
         .filter(|alert| scope.matches_client(alert.client_id.as_deref(), &scoped_client_ids))
         .collect::<Vec<_>>();
-    let chart_step_secs = dashboard_chart_step_secs(&range, chart_points);
+    let telemetry_range = if range.mode == "all" {
+        DashboardRange {
+            start_unix: state
+                .repo
+                .dashboard_telemetry_start_unix(&scoped_client_id_list)
+                .await?
+                .unwrap_or(range.end_unix),
+            ..range
+        }
+    } else {
+        range
+    };
+    let chart_step_secs = dashboard_chart_step_secs(&telemetry_range, chart_points);
     let preferred_bucket_secs = preferred_dashboard_bucket_secs();
-    let rollups =
-        load_dashboard_rollups(state, &range, preferred_bucket_secs, chart_step_secs).await?;
-    let rollups = rollups
-        .into_iter()
-        .filter(|rollup| scoped_client_ids.contains(&rollup.client_id))
-        .collect::<Vec<_>>();
-    let network_rates =
-        load_dashboard_network_rates(state, &range, preferred_bucket_secs, chart_step_secs).await?;
-    let network_rates = network_rates
-        .into_iter()
-        .filter(|rate| scoped_client_ids.contains(&rate.client_id))
-        .collect::<Vec<_>>();
+    let rollups = load_dashboard_rollups(
+        state,
+        &telemetry_range,
+        preferred_bucket_secs,
+        chart_step_secs,
+        &scoped_client_id_list,
+    )
+    .await?;
+    let network_rates = load_dashboard_network_rates(
+        state,
+        &telemetry_range,
+        preferred_bucket_secs,
+        chart_step_secs,
+        &scoped_client_id_list,
+    )
+    .await?;
     let jobs = state.repo.list_jobs(DASHBOARD_LIMIT).await?;
     let running_jobs = jobs
         .iter()
@@ -420,7 +440,7 @@ async fn build_dashboard_overview(
         .filter(|backup| scoped_client_ids.contains(&backup.client_id))
         .collect::<Vec<_>>();
     let latest_rollups = latest_rollups_by_client(&rollups);
-    let latest_rates = latest_rates_by_client_interface(&network_rates);
+    let latest_rates = coherent_latest_rates(latest_rates_by_client_interface(&network_rates));
     let latest_rates_by_client = network_by_client(latest_rates.values());
     let alert_counts_by_client = alert_counts_by_client(&alerts);
     let stale_agents = scoped_agents
@@ -496,7 +516,9 @@ async fn build_dashboard_overview(
                 .count(),
             offline: scoped_agents
                 .iter()
-                .filter(|agent| agent.status == "offline" || agent.status == "never")
+                .filter(|agent| {
+                    matches!(agent.status.as_str(), "offline" | "disconnected" | "never")
+                })
                 .count(),
             stale: stale_agents,
             warnings: stale_agents.max(alerts.len()),
@@ -775,6 +797,7 @@ async fn load_dashboard_rollups(
     range: &DashboardRange,
     preferred_bucket_secs: Option<i32>,
     chart_step_secs: u64,
+    client_ids: &[String],
 ) -> Result<Vec<TelemetryRollupView>, ApiError> {
     let bounded_range = telemetry_query_bounds(range);
     let chart_step_secs = chart_step_secs as i32;
@@ -786,6 +809,7 @@ async fn load_dashboard_rollups(
             bounded_range.1,
             preferred_bucket_secs,
             chart_step_secs,
+            client_ids,
         )
         .await?;
     if rollups.is_empty() && preferred_bucket_secs.is_some() {
@@ -797,6 +821,7 @@ async fn load_dashboard_rollups(
                 bounded_range.1,
                 None,
                 chart_step_secs,
+                client_ids,
             )
             .await?;
     }
@@ -808,6 +833,7 @@ async fn load_dashboard_network_rates(
     range: &DashboardRange,
     preferred_bucket_secs: Option<i32>,
     chart_step_secs: u64,
+    client_ids: &[String],
 ) -> Result<Vec<TelemetryNetworkRateView>, ApiError> {
     let bounded_range = telemetry_query_bounds(range);
     let chart_step_secs = chart_step_secs as i32;
@@ -819,6 +845,7 @@ async fn load_dashboard_network_rates(
             bounded_range.1,
             preferred_bucket_secs,
             chart_step_secs,
+            client_ids,
         )
         .await?;
     if rates.is_empty() && preferred_bucket_secs.is_some() {
@@ -830,6 +857,7 @@ async fn load_dashboard_network_rates(
                 bounded_range.1,
                 None,
                 chart_step_secs,
+                client_ids,
             )
             .await?;
     }
@@ -837,7 +865,7 @@ async fn load_dashboard_network_rates(
 }
 
 fn telemetry_query_bounds(range: &DashboardRange) -> (Option<u64>, Option<u64>) {
-    if range.mode == "all" {
+    if range.mode == "all" && range.start_unix == 0 {
         (None, Some(range.end_unix))
     } else {
         (Some(range.start_unix), Some(range.end_unix))
@@ -849,9 +877,6 @@ fn preferred_dashboard_bucket_secs() -> Option<i32> {
 }
 
 fn dashboard_chart_step_secs(range: &DashboardRange, chart_points: u32) -> u64 {
-    if range.mode == "all" && range.start_unix == 0 {
-        return 60 * 60;
-    }
     let span = range.end_unix.saturating_sub(range.start_unix);
     let points = u64::from(chart_points.clamp(2, DASHBOARD_MAX_CHART_POINTS));
     let raw_step = span.saturating_add(points.saturating_sub(1)) / points;
@@ -1090,6 +1115,11 @@ fn build_resource_curve(
                 .cmp(&timestamp_sort_key(&right.bucket_start))
                 .then_with(|| left.latest_observed_at.cmp(&right.latest_observed_at))
         });
+        let latest_sample_at = client_rollups
+            .iter()
+            .max_by_key(|rollup| timestamp_sort_key(&rollup.latest_observed_at))
+            .map(|rollup| rollup.latest_observed_at.clone())
+            .unwrap_or_default();
 
         let mut points_by_bucket = BTreeMap::<u64, ResourceBucketAggregate>::new();
         let mut current = None;
@@ -1143,6 +1173,7 @@ fn build_resource_curve(
             points,
             current,
             peak,
+            latest_sample_at,
             risk_score,
             policy: base_policy.clone(),
         });
@@ -1155,6 +1186,12 @@ fn build_resource_curve(
             .then_with(|| left.agent.display_name.cmp(&right.agent.display_name))
     });
     let sampled_clients = candidates.len();
+    let latest_sample_at = candidates
+        .iter()
+        .map(|candidate| candidate.latest_sample_at.as_str())
+        .max_by_key(|value| timestamp_sort_key(value))
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     let top_limit = preferences.dashboard_resource_top_limit as usize;
     let series = candidates
         .into_iter()
@@ -1181,6 +1218,7 @@ fn build_resource_curve(
         sampled_clients,
         excluded_clients,
         top_limit,
+        latest_sample_at,
         series,
     })
 }
@@ -1621,7 +1659,7 @@ fn cluster_for_agents(
     for agent in &agents {
         if agent.status == "online" {
             online += 1;
-        } else if agent.status == "offline" {
+        } else if matches!(agent.status.as_str(), "offline" | "disconnected" | "never") {
             offline += 1;
         } else if is_degraded_agent_status(&agent.status) {
             stale += 1;
@@ -1740,6 +1778,28 @@ fn latest_rates_by_client_interface(
         }
     }
     latest
+}
+
+fn coherent_latest_rates(
+    mut rates: HashMap<(String, String), TelemetryNetworkRateView>,
+) -> HashMap<(String, String), TelemetryNetworkRateView> {
+    let mut latest_by_client = HashMap::<String, u64>::new();
+    for rate in rates.values() {
+        let observed = timestamp_sort_key(&rate.bucket_start);
+        latest_by_client
+            .entry(rate.client_id.clone())
+            .and_modify(|latest| *latest = (*latest).max(observed))
+            .or_insert(observed);
+    }
+    rates.retain(|_, rate| {
+        let latest = latest_by_client
+            .get(&rate.client_id)
+            .copied()
+            .unwrap_or_default();
+        latest.saturating_sub(timestamp_sort_key(&rate.bucket_start))
+            <= NETWORK_SNAPSHOT_COHERENCE_SECS
+    });
+    rates
 }
 
 fn network_by_client<'a>(

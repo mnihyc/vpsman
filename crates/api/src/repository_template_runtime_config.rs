@@ -94,8 +94,17 @@ impl RuntimeConfigRenderer {
             "command_execution_policy" => self.apply_command_execution_policy(template),
             "latency_probe_source" => self.apply_latency_probe_source(template),
             "runtime_traffic_accounting_source" => self.apply_runtime_traffic_source(template),
-            "runtime_tunnel_adapter" => self.apply_runtime_tunnel_adapter(template),
-            "routing_daemon_adapter" => self.apply_routing_daemon_adapter(template),
+            "runtime_tunnel_adapter" | "routing_cost_adapter" => {
+                self.unsupported_domains.push(format!(
+                    "{domain}:{} is bound directly to tunnel plan endpoints and is not agent-wide runtime config",
+                    template.name
+                ));
+                self.render_notes.push(format!(
+                    "{domain}:{} is delivered only through an explicit saved tunnel plan binding",
+                    template.name
+                ));
+                Ok(())
+            }
             "speed_test_provider"
             | "process_supervisor_policy"
             | "traffic_limit_status_source"
@@ -312,70 +321,6 @@ impl RuntimeConfigRenderer {
         Ok(())
     }
 
-    fn apply_runtime_tunnel_adapter(&mut self, template: &SourceTemplateView) -> Result<()> {
-        let manager =
-            string_field(&template.definition, "manager").unwrap_or("agent_iproute2_managed");
-        match manager {
-            "agent_iproute2_managed" => {
-                let section = self.section_mut("network")?;
-                if bool_field(&template.definition, "runtime_reconcile_enabled").unwrap_or(false) {
-                    section.insert("apply_enabled".to_string(), Value::Bool(true));
-                    section.insert("runtime_reconcile_enabled".to_string(), Value::Bool(true));
-                }
-                if let Some(argv) =
-                    argv_field(&template.definition, &["runtime_ip_argv", "ip_argv"])?
-                {
-                    section.insert("runtime_ip_argv".to_string(), Value::Array(argv));
-                }
-                if let Some(argv) =
-                    argv_field(&template.definition, &["runtime_tc_argv", "tc_argv"])?
-                {
-                    section.insert("runtime_tc_argv".to_string(), Value::Array(argv));
-                }
-            }
-            "external_managed_adapter" | "custom_adapter" => {
-                self.unsupported_domains.push(format!(
-                    "runtime_tunnel_adapter:{} adapter commands are rendered from tunnel plans, not agent-level fallback config",
-                    template.name
-                ));
-            }
-            _ => bail!("unsupported_runtime_tunnel_adapter:{manager}"),
-        }
-        Ok(())
-    }
-
-    fn apply_routing_daemon_adapter(&mut self, template: &SourceTemplateView) -> Result<()> {
-        let section = self.section_mut("network")?;
-        if let Some(enabled) = bool_field(&template.definition, "latency_monitoring_enabled") {
-            section.insert(
-                "latency_monitoring_enabled".to_string(),
-                Value::Bool(enabled),
-            );
-        }
-        if let Some(value) = u64_field(&template.definition, "latency_monitoring_interval_secs") {
-            section.insert("latency_monitoring_interval_secs".to_string(), value.into());
-        }
-        if let Some(value) = u64_field(&template.definition, "latency_down_windows") {
-            section.insert("latency_down_windows".to_string(), value.into());
-        }
-        if let Some(enabled) = bool_field(&template.definition, "auto_ospf_enabled") {
-            section.insert("auto_ospf_enabled".to_string(), Value::Bool(enabled));
-        }
-        if let Some(value) = u64_field(&template.definition, "auto_ospf_min_cost_delta") {
-            section.insert("auto_ospf_min_cost_delta".to_string(), value.into());
-        }
-        if let Some(value) = u64_field(&template.definition, "auto_ospf_healthy_windows") {
-            section.insert("auto_ospf_healthy_windows".to_string(), value.into());
-        }
-        if let Some(command) = command_field(
-            &template.definition,
-            &["auto_ospf_updater", "ospf_updater", "command"],
-        )? {
-            section.insert("auto_ospf_updater".to_string(), command);
-        }
-        Ok(())
-    }
-
     fn section_mut(&mut self, name: &str) -> Result<&mut Map<String, Value>> {
         let value = self
             .sections
@@ -393,14 +338,6 @@ fn insert_string(section: &mut Map<String, Value>, key: &str, value: &str) {
 
 fn string_field<'a>(definition: &'a Value, key: &str) -> Option<&'a str> {
     definition.get(key).and_then(Value::as_str)
-}
-
-fn bool_field(definition: &Value, key: &str) -> Option<bool> {
-    definition.get(key).and_then(Value::as_bool)
-}
-
-fn u64_field(definition: &Value, key: &str) -> Option<u64> {
-    definition.get(key).and_then(Value::as_u64)
 }
 
 fn validate_one_of(value: &str, allowed: &[&str], field: &str) -> Result<()> {

@@ -1,24 +1,17 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::Path,
-    time::Duration,
-};
+use std::{path::Path, time::Duration};
 
 use anyhow::{Context, Result};
 use tokio::{process::Command, time};
 use vpsman_common::{
-    payload_hash, render_backend_config_for_endpoint, render_tunnel_endpoint_config, AgentConfig,
-    AgentNetworkConfig, CommandOutput, OutputStream, RuntimeTunnelManager, TunnelEndpointConfig,
-    TunnelEndpointSide, TunnelPlan, MANAGED_BIRD2_FILE,
+    payload_hash, render_tunnel_endpoint_config, AgentConfig, AgentNetworkConfig, CommandOutput,
+    OutputStream, RuntimeTunnelAdapterCommands, RuntimeTunnelManager, TunnelEndpointConfig,
+    TunnelEndpointSide, TunnelPlan,
 };
 
-use crate::network_managed_files::{
-    managed_block, managed_block_bounds, managed_destination, read_existing_regular_file,
-};
-use crate::network_runtime::render_runtime_adapter_command;
 use crate::{
     child_process::{run_child_with_bounded_output_cancelable, ChildCleanupPolicy, ChildRunResult},
     command_worker::{run_cancelable, CommandCancelToken, CommandCanceled},
+    network_runtime::render_runtime_adapter_command,
 };
 
 const DEFAULT_PROC_SELF_NETNS_PATH: &str = "/proc/self/ns/net";
@@ -27,6 +20,7 @@ pub(crate) struct NetworkStatusInput<'a> {
     pub(crate) job_id: uuid::Uuid,
     pub(crate) config: &'a AgentConfig,
     pub(crate) plan: &'a TunnelPlan,
+    pub(crate) runtime_adapter: Option<&'a RuntimeTunnelAdapterCommands>,
     pub(crate) side: TunnelEndpointSide,
     pub(crate) max_timeout_secs: u64,
     pub(crate) cancel_token: CommandCancelToken,
@@ -57,46 +51,12 @@ async fn inspect_network_plan(input: NetworkStatusInput<'_>) -> Result<Vec<Comma
             input.config.client_id
         );
     }
-    let root = Path::new(&input.config.network.root_dir);
-    let bird2_path = managed_destination(root, MANAGED_BIRD2_FILE)?;
-    let backend_config =
-        render_backend_config_for_endpoint(input.plan, &endpoint, input.config.network.backend)
-            .map_err(|error| anyhow::anyhow!("invalid backend tunnel config: {error}"))?;
-    let mut files = Vec::new();
-    for file in &backend_config.files {
-        let path = managed_destination(root, file.managed_path)?;
-        files.push(
-            inspect_managed_file(
-                &path,
-                file.managed_path,
-                &managed_block(input.plan, &endpoint, file.block_kind, &file.contents),
-            )
-            .await?,
-        );
-    }
-    files.push(
-        inspect_managed_file(
-            &bird2_path,
-            MANAGED_BIRD2_FILE,
-            &managed_block(
-                input.plan,
-                &endpoint,
-                "bird2",
-                &endpoint.bird2_interface_snippet,
-            ),
-        )
-        .await?,
-    );
-    let applied = files
-        .iter()
-        .all(|file| file["expected_block_matches"].as_bool() == Some(true));
-    let malformed = files
-        .iter()
-        .any(|file| file["managed_block_malformed"].as_bool() == Some(true));
+
     let runtime = inspect_runtime_status(
         &input.config.network,
-        root,
+        Path::new(&input.config.network.root_dir),
         input.plan,
+        input.runtime_adapter,
         &endpoint,
         input.cancel_token,
     )
@@ -105,16 +65,10 @@ async fn inspect_network_plan(input: NetworkStatusInput<'_>) -> Result<Vec<Comma
         "type": "network_status",
         "plan": input.plan.name,
         "interface": input.plan.interface_name,
-        "side": match input.side {
-            TunnelEndpointSide::Left => "left",
-            TunnelEndpointSide::Right => "right",
-        },
+        "side": endpoint_side_label(input.side),
         "client_id": input.config.client_id,
         "peer_client_id": endpoint.peer_client_id,
-        "config_backend": input.config.network.backend.as_str(),
-        "applied": applied,
-        "malformed": malformed,
-        "files": files,
+        "scope": "declared_plan_only",
         "runtime": runtime,
     });
     Ok(vec![CommandOutput {
@@ -126,112 +80,40 @@ async fn inspect_network_plan(input: NetworkStatusInput<'_>) -> Result<Vec<Comma
     }])
 }
 
-async fn inspect_managed_file(
-    path: &Path,
-    managed_path: &'static str,
-    expected_block: &str,
-) -> Result<serde_json::Value> {
-    let expected_hash = payload_hash(expected_block.as_bytes());
-    let Some(contents) = read_existing_regular_file(path).await? else {
-        return Ok(serde_json::json!({
-            "path": managed_path,
-            "destination": path,
-            "exists": false,
-            "utf8": true,
-            "file_size_bytes": 0,
-            "file_sha256_hex": null,
-            "managed_block_present": false,
-            "managed_block_malformed": false,
-            "managed_block_sha256_hex": null,
-            "expected_block_sha256_hex": expected_hash,
-            "expected_block_matches": false,
-        }));
-    };
-    let file_hash = payload_hash(&contents);
-    let file_size = contents.len();
-    let Ok(text) = std::str::from_utf8(&contents) else {
-        return Ok(serde_json::json!({
-            "path": managed_path,
-            "destination": path,
-            "exists": true,
-            "utf8": false,
-            "file_size_bytes": file_size,
-            "file_sha256_hex": file_hash,
-            "managed_block_present": false,
-            "managed_block_malformed": false,
-            "managed_block_sha256_hex": null,
-            "expected_block_sha256_hex": expected_hash,
-            "expected_block_matches": false,
-        }));
-    };
-    let block_result = managed_block_bounds(text, expected_block);
-    let (present, malformed, observed_hash, matches_expected) = match block_result {
-        Ok(Some((start, end))) => {
-            let observed = &text[start..end];
-            let observed_hash = payload_hash(observed.as_bytes());
-            (
-                true,
-                false,
-                Some(observed_hash.clone()),
-                observed_hash == expected_hash && observed == expected_block,
-            )
-        }
-        Ok(None) => (false, false, None, false),
-        Err(_) => (true, true, None, false),
-    };
-    Ok(serde_json::json!({
-        "path": managed_path,
-        "destination": path,
-        "exists": true,
-        "utf8": true,
-        "file_size_bytes": file_size,
-        "file_sha256_hex": file_hash,
-        "managed_block_present": present,
-        "managed_block_malformed": malformed,
-        "managed_block_sha256_hex": observed_hash,
-        "expected_block_sha256_hex": expected_hash,
-        "expected_block_matches": matches_expected,
-    }))
-}
-
 async fn inspect_runtime_status(
     config: &AgentNetworkConfig,
     root: &Path,
     plan: &TunnelPlan,
+    runtime_adapter: Option<&RuntimeTunnelAdapterCommands>,
     endpoint: &TunnelEndpointConfig,
     cancel_token: CommandCancelToken,
 ) -> Result<serde_json::Value> {
     let interface = inspect_interface_sysfs(root, &plan.interface_name).await;
     let desired_interfaces = inspect_desired_interfaces(root, plan).await;
     let declared_stale_interfaces = inspect_declared_stale_interfaces(root, plan).await;
-    let observed_tunnels = discover_observed_tunnels(root, plan).await;
     let kernel_namespace = inspect_kernel_namespace(root).await;
     let kernel = inspect_kernel_status(config, root, plan, endpoint, cancel_token.clone()).await?;
     let adapter =
-        inspect_runtime_adapter_status(config, plan, endpoint, cancel_token.clone()).await?;
-    let bird2 = inspect_bird2_status(config, plan, endpoint, cancel_token).await?;
-    let summary = summarize_runtime_status(RuntimeStatusSummaryInput {
+        inspect_runtime_adapter_status(config, plan, runtime_adapter, endpoint, cancel_token)
+            .await?;
+    let summary = summarize_runtime_status(
         plan,
-        interface: &interface,
-        desired_interfaces: &desired_interfaces,
-        declared_stale_interfaces: &declared_stale_interfaces,
-        observed_tunnels: &observed_tunnels,
-        kernel_namespace: &kernel_namespace,
-        kernel: &kernel,
-        adapter: &adapter,
-        bird2: &bird2,
-    });
+        &interface,
+        &desired_interfaces,
+        &declared_stale_interfaces,
+        &kernel_namespace,
+        &kernel,
+        &adapter,
+    );
     Ok(serde_json::json!({
         "manager": plan.runtime_control.manager,
         "topology_version": &plan.runtime_topology.version,
+        "interface": interface,
         "desired_interfaces": desired_interfaces,
         "declared_stale_interfaces": declared_stale_interfaces,
-        "observed_tunnels": observed_tunnels,
         "kernel_namespace": kernel_namespace,
         "kernel": kernel,
-        "interface": interface,
         "adapter": adapter,
-        "bird2": bird2,
         "summary": summary,
     }))
 }
@@ -305,97 +187,14 @@ async fn inspect_declared_stale_interfaces(
     reports
 }
 
-async fn discover_observed_tunnels(root: &Path, plan: &TunnelPlan) -> Vec<serde_json::Value> {
-    const MAX_OBSERVED_TUNNELS: usize = 64;
-    let mut desired = BTreeSet::from([plan.interface_name.clone()]);
-    desired.extend(plan.runtime_topology.desired_interfaces.iter().cloned());
-    let declared_stale = plan
-        .runtime_topology
-        .stale_interfaces
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let Ok(mut entries) = tokio::fs::read_dir(root.join("sys/class/net")).await else {
-        return Vec::new();
-    };
-    let mut tunnels = Vec::new();
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let interface = entry.file_name().to_string_lossy().to_string();
-        if interface.is_empty() || interface.len() > 64 {
-            continue;
-        }
-        let interface_path = entry.path();
-        let link_type = read_sysfs_i64(&interface_path.join("type")).await;
-        let Some(kind) = classify_runtime_tunnel(&interface, link_type) else {
-            continue;
-        };
-        let is_desired = desired.contains(&interface);
-        let is_declared_stale = declared_stale.contains(&interface);
-        let promotion_required = !is_desired && !is_declared_stale;
-        tunnels.push(serde_json::json!({
-            "interface": interface,
-            "kind": kind,
-            "source": "sysfs",
-            "desired": is_desired,
-            "declared_stale": is_declared_stale,
-            "import_candidate": promotion_required,
-            "mutation_policy": observed_tunnel_mutation_policy(is_desired, is_declared_stale),
-            "promotion_required": promotion_required,
-            "promotion_hint": if promotion_required {
-                Some("promote_to_external_observed_or_adapter_plan_before_mutation")
-            } else {
-                None
-            },
-            "operstate": read_sysfs_string(&interface_path.join("operstate")).await,
-            "mtu": read_sysfs_u64(&interface_path.join("mtu")).await,
-            "link_type": link_type,
-        }));
-        if tunnels.len() >= MAX_OBSERVED_TUNNELS {
-            break;
-        }
-    }
-    tunnels.sort_by(|left, right| {
-        left["interface"]
-            .as_str()
-            .unwrap_or_default()
-            .cmp(right["interface"].as_str().unwrap_or_default())
-    });
-    tunnels
-}
-
-fn observed_tunnel_mutation_policy(is_desired: bool, is_declared_stale: bool) -> &'static str {
-    if is_desired {
-        "managed_desired"
-    } else if is_declared_stale {
-        "delete_allowed_when_declared_stale"
-    } else {
-        "observe_only_import_candidate"
-    }
-}
-
-fn classify_runtime_tunnel(interface: &str, link_type: Option<i64>) -> Option<&'static str> {
-    let lower = interface.to_ascii_lowercase();
-    match link_type {
-        Some(778) => Some("gre"),
-        Some(776) => Some("sit"),
-        Some(768) => Some("ipip"),
-        Some(65534) if lower.starts_with("tun") || lower.starts_with("tap") => Some("tun_tap"),
-        _ if lower.starts_with("wg") => Some("wireguard"),
-        _ if lower.starts_with("tun") || lower.starts_with("tap") => Some("tun_tap"),
-        _ if lower.starts_with("gre") => Some("gre"),
-        _ if lower.starts_with("ipip") => Some("ipip"),
-        _ if lower.starts_with("sit") => Some("sit"),
-        _ if lower.contains("openvpn") || lower.starts_with("ovpn") => Some("openvpn"),
-        _ if lower.starts_with("vpn") || lower.starts_with("vps") => Some("custom"),
-        _ => None,
-    }
-}
-
 async fn read_sysfs_string(path: &Path) -> Option<String> {
-    read_small_text(path)
+    let metadata = tokio::fs::metadata(path).await.ok()?;
+    if !metadata.is_file() || metadata.len() > 4096 {
+        return None;
+    }
+    tokio::fs::read_to_string(path)
         .await
         .ok()
-        .flatten()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
 }
@@ -406,16 +205,6 @@ async fn read_sysfs_u64(path: &Path) -> Option<u64> {
 
 async fn read_sysfs_i64(path: &Path) -> Option<i64> {
     read_sysfs_string(path).await?.parse().ok()
-}
-
-async fn read_small_text(path: &Path) -> Result<Option<String>> {
-    let Ok(metadata) = tokio::fs::metadata(path).await else {
-        return Ok(None);
-    };
-    if !metadata.is_file() || metadata.len() > 4096 {
-        return Ok(None);
-    }
-    Ok(Some(tokio::fs::read_to_string(path).await?))
 }
 
 async fn inspect_kernel_namespace(root: &Path) -> serde_json::Value {
@@ -433,7 +222,7 @@ async fn inspect_kernel_namespace(root: &Path) -> serde_json::Value {
         "netns_link": netns_link,
         "configured_root": root,
         "probe_policy": if real_kernel_namespace {
-            "real_kernel_readonly_ip_json"
+            "declared_interface_read_only"
         } else {
             "rooted_sysfs_only"
         },
@@ -452,7 +241,7 @@ async fn inspect_kernel_status(
             "configured": false,
             "skipped": true,
             "reason": "kernel_probes_require_real_root_namespace",
-            "probe_scope": "read_only",
+            "probe_scope": "declared_interface_read_only",
         }));
     }
     if config.runtime_ip_argv.is_empty() {
@@ -460,9 +249,10 @@ async fn inspect_kernel_status(
             "configured": false,
             "skipped": true,
             "reason": "runtime_ip_argv_unconfigured",
-            "probe_scope": "read_only",
+            "probe_scope": "declared_interface_read_only",
         }));
     }
+
     let link = run_kernel_ip_probe(
         config,
         "kernel_link",
@@ -492,7 +282,7 @@ async fn inspect_kernel_status(
     .await?;
     Ok(serde_json::json!({
         "configured": true,
-        "probe_scope": "read_only",
+        "probe_scope": "declared_interface_read_only",
         "link": link,
         "neighbors": neighbors,
         "routes": routes,
@@ -531,65 +321,10 @@ async fn run_kernel_ip_probe(
     }
 }
 
-async fn inspect_bird2_status(
-    config: &AgentNetworkConfig,
-    plan: &TunnelPlan,
-    endpoint: &TunnelEndpointConfig,
-    cancel_token: CommandCancelToken,
-) -> Result<serde_json::Value> {
-    if config.bird2_status_argv.is_empty() {
-        return Ok(serde_json::json!({
-            "configured": false,
-            "skipped": true,
-        }));
-    }
-    let argv = render_probe_argv(&config.bird2_status_argv, plan, endpoint);
-    match run_status_probe(
-        "bird2_status",
-        &argv,
-        config.status_probe_timeout_secs,
-        config.status_probe_max_output_bytes as usize,
-        cancel_token,
-    )
-    .await
-    {
-        Ok(mut report) => {
-            let parsed = report["stdout"]["text"]
-                .as_str()
-                .map(|text| parse_bird2_ospf_status(text, &plan.interface_name))
-                .unwrap_or_else(|| {
-                    serde_json::json!({
-                        "parser": "bird2_ospf_status_v1",
-                        "parsed": false,
-                        "reason": "stdout_not_utf8",
-                    })
-                });
-            if let Some(object) = report.as_object_mut() {
-                object.insert(
-                    "healthy".to_string(),
-                    parsed
-                        .get("healthy")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null),
-                );
-                object.insert("parsed_ospf".to_string(), parsed);
-            }
-            Ok(report)
-        }
-        Err(error) if error.downcast_ref::<CommandCanceled>().is_some() => Err(error),
-        Err(error) => Ok(serde_json::json!({
-            "configured": true,
-            "label": "bird2_status",
-            "argv": argv,
-            "success": false,
-            "error": error.to_string(),
-        })),
-    }
-}
-
 async fn inspect_runtime_adapter_status(
     config: &AgentNetworkConfig,
     plan: &TunnelPlan,
+    runtime_adapter: Option<&RuntimeTunnelAdapterCommands>,
     endpoint: &TunnelEndpointConfig,
     cancel_token: CommandCancelToken,
 ) -> Result<serde_json::Value> {
@@ -605,13 +340,14 @@ async fn inspect_runtime_adapter_status(
             "reason": "external_observed",
         })),
         RuntimeTunnelManager::ExternalManagedAdapter => {
-            let Some(command) = &plan.runtime_control.status else {
+            let Some(adapter) = runtime_adapter else {
                 return Ok(serde_json::json!({
                     "configured": false,
                     "skipped": true,
-                    "reason": "adapter_status_unconfigured",
+                    "reason": "adapter_snapshot_unconfigured",
                 }));
             };
+            let command = &adapter.status;
             let argv = match render_runtime_adapter_command(command, plan, endpoint) {
                 Ok(argv) => argv,
                 Err(error) => {
@@ -654,30 +390,15 @@ async fn inspect_runtime_adapter_status(
     }
 }
 
-struct RuntimeStatusSummaryInput<'a> {
-    plan: &'a TunnelPlan,
-    interface: &'a serde_json::Value,
-    desired_interfaces: &'a [serde_json::Value],
-    declared_stale_interfaces: &'a [serde_json::Value],
-    observed_tunnels: &'a [serde_json::Value],
-    kernel_namespace: &'a serde_json::Value,
-    kernel: &'a serde_json::Value,
-    adapter: &'a serde_json::Value,
-    bird2: &'a serde_json::Value,
-}
-
-fn summarize_runtime_status(input: RuntimeStatusSummaryInput<'_>) -> serde_json::Value {
-    let RuntimeStatusSummaryInput {
-        plan,
-        interface,
-        desired_interfaces,
-        declared_stale_interfaces,
-        observed_tunnels,
-        kernel_namespace,
-        kernel,
-        adapter,
-        bird2,
-    } = input;
+fn summarize_runtime_status(
+    plan: &TunnelPlan,
+    interface: &serde_json::Value,
+    desired_interfaces: &[serde_json::Value],
+    declared_stale_interfaces: &[serde_json::Value],
+    kernel_namespace: &serde_json::Value,
+    kernel: &serde_json::Value,
+    adapter: &serde_json::Value,
+) -> serde_json::Value {
     let mut reasons = Vec::new();
     let interface_exists = interface["exists"].as_bool().unwrap_or(false);
     let interface_operstate = interface["operstate"].as_str();
@@ -701,10 +422,6 @@ fn summarize_runtime_status(input: RuntimeStatusSummaryInput<'_>) -> serde_json:
     if stale_present_count > 0 {
         reasons.push("stale_interface_present");
     }
-    let external_import_candidate_count = observed_tunnels
-        .iter()
-        .filter(|report| report["import_candidate"].as_bool() == Some(true))
-        .count();
 
     let adapter_state = match plan.runtime_control.manager {
         RuntimeTunnelManager::AgentIproute2Managed => "not_applicable",
@@ -722,23 +439,6 @@ fn summarize_runtime_status(input: RuntimeStatusSummaryInput<'_>) -> serde_json:
         }
     };
 
-    let bird2_state = if bird2["configured"].as_bool() == Some(false) {
-        "not_configured"
-    } else if bird2["healthy"].as_bool() == Some(true) {
-        "healthy"
-    } else if bird2["healthy"].as_bool() == Some(false) {
-        reasons.push("bird2_not_full");
-        "unhealthy"
-    } else {
-        "unknown"
-    };
-    let real_kernel_namespace_covered = kernel_namespace["real_kernel_namespace"]
-        .as_bool()
-        .unwrap_or(false);
-    let kernel_link_probe_state = probe_state(&kernel["link"]);
-    let neighbor_probe_state = probe_state(&kernel["neighbors"]);
-    let route_probe_state = probe_state(&kernel["routes"]);
-
     let healthy = reasons.is_empty();
     let status =
         if plan.runtime_control.manager == RuntimeTunnelManager::ExternalObserved && healthy {
@@ -752,34 +452,28 @@ fn summarize_runtime_status(input: RuntimeStatusSummaryInput<'_>) -> serde_json:
             "drift"
         } else if reasons.contains(&"adapter_status_failed") {
             "adapter_unhealthy"
-        } else if reasons.contains(&"bird2_not_full") {
-            "routing_unhealthy"
         } else {
             "degraded"
         };
 
     serde_json::json!({
         "manager": plan.runtime_control.manager,
+        "scope": "declared_plan_only",
         "status": status,
         "healthy": healthy,
-        "drift": matches!(status, "drift"),
+        "drift": status == "drift",
         "reasons": reasons,
         "interface_exists": interface_exists,
         "interface_operstate": interface_operstate,
         "desired_missing_count": desired_missing_count,
         "stale_present_count": stale_present_count,
-        "external_import_candidate_count": external_import_candidate_count,
-        "external_import_candidate_policy": if external_import_candidate_count > 0 {
-            "observe_only_requires_plan_promotion"
-        } else {
-            "none"
-        },
         "adapter_state": adapter_state,
-        "bird2_state": bird2_state,
-        "real_kernel_namespace_covered": real_kernel_namespace_covered,
-        "kernel_link_probe_state": kernel_link_probe_state,
-        "neighbor_probe_state": neighbor_probe_state,
-        "route_probe_state": route_probe_state,
+        "real_kernel_namespace_covered": kernel_namespace["real_kernel_namespace"]
+            .as_bool()
+            .unwrap_or(false),
+        "kernel_link_probe_state": probe_state(&kernel["link"]),
+        "neighbor_probe_state": probe_state(&kernel["neighbors"]),
+        "route_probe_state": probe_state(&kernel["routes"]),
         "topology_version": &plan.runtime_topology.version,
     })
 }
@@ -797,92 +491,6 @@ fn probe_state(report: &serde_json::Value) -> &'static str {
         "failed"
     } else {
         "unknown"
-    }
-}
-
-fn parse_bird2_ospf_status(output: &str, interface_name: &str) -> serde_json::Value {
-    let mut interface_seen = false;
-    let mut full_neighbor_seen = false;
-    let mut neighbor_state_count = 0_u64;
-    let mut state_counts = BTreeMap::<String, u64>::new();
-    let mut interface_states = Vec::new();
-
-    for line in output
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-    {
-        let references_interface = line_references_interface(line, interface_name);
-        interface_seen |= references_interface;
-        let Some(state) = extract_ospf_neighbor_state(line) else {
-            continue;
-        };
-        neighbor_state_count += 1;
-        *state_counts.entry(state.to_string()).or_default() += 1;
-        if references_interface {
-            interface_states.push(serde_json::json!({
-                "state": state,
-            }));
-        }
-        if references_interface && state == "full" {
-            full_neighbor_seen = true;
-        }
-    }
-
-    serde_json::json!({
-        "parser": "bird2_ospf_status_v1",
-        "parsed": true,
-        "interface": interface_name,
-        "interface_seen": interface_seen,
-        "full_neighbor_seen": full_neighbor_seen,
-        "healthy": interface_seen && full_neighbor_seen,
-        "neighbor_state_count": neighbor_state_count,
-        "state_counts": state_counts,
-        "interface_states": interface_states,
-    })
-}
-
-fn line_references_interface(line: &str, interface_name: &str) -> bool {
-    let expected = interface_name.to_ascii_lowercase();
-    line.split_whitespace()
-        .map(|part| {
-            part.trim_matches(|character: char| {
-                matches!(
-                    character,
-                    '"' | '\'' | ',' | ';' | ':' | '(' | ')' | '[' | ']'
-                )
-            })
-            .to_ascii_lowercase()
-        })
-        .any(|part| part == expected)
-}
-
-fn extract_ospf_neighbor_state(line: &str) -> Option<&'static str> {
-    line.split_whitespace()
-        .filter_map(normalize_ospf_state_token)
-        .next()
-}
-
-fn normalize_ospf_state_token(token: &str) -> Option<&'static str> {
-    let state = token
-        .trim_matches(|character: char| {
-            matches!(
-                character,
-                '"' | '\'' | ',' | ';' | ':' | '(' | ')' | '[' | ']'
-            )
-        })
-        .to_ascii_lowercase();
-    let state = state.split('/').next().unwrap_or(&state);
-    match state {
-        "full" => Some("full"),
-        "2way" | "two-way" | "twoway" => Some("two_way"),
-        "exstart" => Some("exstart"),
-        "exchange" => Some("exchange"),
-        "loading" => Some("loading"),
-        "init" => Some("init"),
-        "attempt" => Some("attempt"),
-        "down" => Some("down"),
-        _ => None,
     }
 }
 
@@ -908,8 +516,8 @@ async fn run_status_probe(
     max_output_bytes: usize,
     cancel_token: CommandCancelToken,
 ) -> Result<serde_json::Value> {
-    if argv.is_empty() {
-        anyhow::bail!("network status probe {label} argv is empty");
+    if argv.is_empty() || !argv[0].starts_with('/') {
+        anyhow::bail!("network status probe {label} requires an absolute executable");
     }
     let mut command = Command::new(&argv[0]);
     command.args(&argv[1..]);
@@ -928,32 +536,20 @@ async fn run_status_probe(
             argv,
             exit_code: output.exit_code,
             timed_out: false,
-            killed_for_output_limit: output.stdout_truncated || output.stderr_truncated,
+            output_limited: output.stdout_truncated || output.stderr_truncated,
             max_output_bytes,
-            stdout: LimitedOutput {
-                bytes: output.stdout,
-                truncated: output.stdout_truncated,
-            },
-            stderr: LimitedOutput {
-                bytes: output.stderr,
-                truncated: output.stderr_truncated,
-            },
+            stdout: output.stdout,
+            stderr: output.stderr,
         })),
         ChildRunResult::TimedOut(_) => Ok(probe_report(ProbeReportInput {
             label,
             argv,
             exit_code: None,
             timed_out: true,
-            killed_for_output_limit: false,
+            output_limited: false,
             max_output_bytes,
-            stdout: LimitedOutput {
-                bytes: Vec::new(),
-                truncated: false,
-            },
-            stderr: LimitedOutput {
-                bytes: Vec::new(),
-                truncated: false,
-            },
+            stdout: Vec::new(),
+            stderr: Vec::new(),
         })),
         ChildRunResult::Canceled { reason, .. } => {
             Err(CommandCanceled::new("network_status", reason).into())
@@ -966,14 +562,14 @@ struct ProbeReportInput<'a> {
     argv: &'a [String],
     exit_code: Option<i32>,
     timed_out: bool,
-    killed_for_output_limit: bool,
+    output_limited: bool,
     max_output_bytes: usize,
-    stdout: LimitedOutput,
-    stderr: LimitedOutput,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
 }
 
 fn probe_report(input: ProbeReportInput<'_>) -> serde_json::Value {
-    let success = input.exit_code == Some(0) && !input.timed_out && !input.killed_for_output_limit;
+    let success = input.exit_code == Some(0) && !input.timed_out && !input.output_limited;
     serde_json::json!({
         "configured": true,
         "label": input.label,
@@ -981,27 +577,28 @@ fn probe_report(input: ProbeReportInput<'_>) -> serde_json::Value {
         "success": success,
         "exit_code": input.exit_code,
         "timed_out": input.timed_out,
-        "killed_for_output_limit": input.killed_for_output_limit,
+        "output_limited": input.output_limited,
         "max_output_bytes": input.max_output_bytes,
-        "stdout": output_json(input.stdout),
-        "stderr": output_json(input.stderr),
+        "stdout": output_json(&input.stdout),
+        "stderr": output_json(&input.stderr),
     })
 }
 
-fn output_json(output: LimitedOutput) -> serde_json::Value {
-    let utf8 = std::str::from_utf8(&output.bytes).ok();
+fn output_json(output: &[u8]) -> serde_json::Value {
+    let utf8 = std::str::from_utf8(output).ok();
     serde_json::json!({
-        "size_bytes": output.bytes.len(),
-        "sha256_hex": payload_hash(&output.bytes),
-        "truncated": output.truncated,
+        "size_bytes": output.len(),
+        "sha256_hex": payload_hash(output),
         "utf8": utf8.is_some(),
         "text": utf8.map(str::to_string),
     })
 }
 
-struct LimitedOutput {
-    bytes: Vec<u8>,
-    truncated: bool,
+fn endpoint_side_label(side: TunnelEndpointSide) -> &'static str {
+    match side {
+        TunnelEndpointSide::Left => "left",
+        TunnelEndpointSide::Right => "right",
+    }
 }
 
 #[cfg(test)]

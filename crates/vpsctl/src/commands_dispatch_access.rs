@@ -457,6 +457,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 command.limit,
                 command.client_id,
                 command.bucket_secs,
+                command.latest,
             )?;
             Ok(None)
         }
@@ -468,6 +469,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 command.client_id,
                 command.interface,
                 command.bucket_secs,
+                command.latest,
             )?;
             Ok(None)
         }

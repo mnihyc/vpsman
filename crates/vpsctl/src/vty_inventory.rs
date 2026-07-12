@@ -209,12 +209,14 @@ enum VtyInventoryCommand {
         limit: u16,
         client_id: Option<String>,
         bucket_secs: Option<i32>,
+        latest: bool,
     },
     TelemetryNetworkRates {
         limit: u16,
         client_id: Option<String>,
         interface: Option<String>,
         bucket_secs: Option<i32>,
+        latest: bool,
     },
     TelemetryTunnels {
         limit: u16,
@@ -229,6 +231,7 @@ struct TelemetryNetworkRateArgs {
     client_id: Option<String>,
     interface: Option<String>,
     bucket_secs: Option<i32>,
+    latest: bool,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -993,9 +996,10 @@ pub(crate) fn submit_vty_inventory_command(
             limit,
             client_id,
             bucket_secs,
+            latest,
         } => http_get(
             api_url,
-            &telemetry_rollups_path(limit, client_id.as_deref(), bucket_secs),
+            &telemetry_rollups_path(limit, client_id.as_deref(), bucket_secs, latest),
             token,
         ),
         VtyInventoryCommand::TelemetryNetworkRates {
@@ -1003,6 +1007,7 @@ pub(crate) fn submit_vty_inventory_command(
             client_id,
             interface,
             bucket_secs,
+            latest,
         } => http_get(
             api_url,
             &telemetry_network_rates_path(
@@ -1010,6 +1015,7 @@ pub(crate) fn submit_vty_inventory_command(
                 client_id.as_deref(),
                 interface.as_deref(),
                 bucket_secs,
+                latest,
             ),
             token,
         ),
@@ -1165,11 +1171,12 @@ fn parse_vty_inventory_command(command: &str) -> Result<VtyInventoryCommand> {
                 .collect(),
         }),
         "telemetry-rollups" => {
-            let (limit, client_id, bucket_secs) = parse_telemetry_rollups_args(&parts)?;
+            let (limit, client_id, bucket_secs, latest) = parse_telemetry_rollups_args(&parts)?;
             Ok(VtyInventoryCommand::TelemetryRollups {
                 limit,
                 client_id,
                 bucket_secs,
+                latest,
             })
         }
         "telemetry-network-rates" => {
@@ -1179,6 +1186,7 @@ fn parse_vty_inventory_command(command: &str) -> Result<VtyInventoryCommand> {
                 client_id: args.client_id,
                 interface: args.interface,
                 bucket_secs: args.bucket_secs,
+                latest: args.latest,
             })
         }
         "telemetry-tunnels" => {
@@ -2756,10 +2764,13 @@ fn next_arg<'a>(parts: &'a [&str], index: usize, flag: &str) -> Result<&'a str> 
         .with_context(|| format!("{flag} requires a value"))
 }
 
-fn parse_telemetry_rollups_args(parts: &[&str]) -> Result<(u16, Option<String>, Option<i32>)> {
+fn parse_telemetry_rollups_args(
+    parts: &[&str],
+) -> Result<(u16, Option<String>, Option<i32>, bool)> {
     let mut limit = 50_u16;
     let mut client_id = None;
     let mut bucket_secs = None;
+    let mut latest = false;
     let mut index = 1;
     while index < parts.len() {
         match parts[index] {
@@ -2787,6 +2798,10 @@ fn parse_telemetry_rollups_args(parts: &[&str]) -> Result<(u16, Option<String>, 
                         .context("--bucket-secs must be an integer")?,
                 );
                 index += 2;
+            }
+            "--latest" => {
+                latest = true;
+                index += 1;
             }
             value if value.starts_with("--limit=") => {
                 limit = value
@@ -2827,7 +2842,7 @@ fn parse_telemetry_rollups_args(parts: &[&str]) -> Result<(u16, Option<String>, 
             "telemetry-rollups --bucket-secs must be 60"
         );
     }
-    Ok((limit, client_id, bucket_secs))
+    Ok((limit, client_id, bucket_secs, latest))
 }
 
 fn parse_telemetry_network_rates_args(parts: &[&str]) -> Result<TelemetryNetworkRateArgs> {
@@ -2835,6 +2850,7 @@ fn parse_telemetry_network_rates_args(parts: &[&str]) -> Result<TelemetryNetwork
     let mut client_id = None;
     let mut interface = None;
     let mut bucket_secs = None;
+    let mut latest = false;
     let mut index = 1;
     while index < parts.len() {
         match parts[index] {
@@ -2873,6 +2889,10 @@ fn parse_telemetry_network_rates_args(parts: &[&str]) -> Result<TelemetryNetwork
                         .context("--bucket-secs must be an integer")?,
                 );
                 index += 2;
+            }
+            "--latest" => {
+                latest = true;
+                index += 1;
             }
             value if value.starts_with("--limit=") => {
                 limit = value
@@ -2928,6 +2948,7 @@ fn parse_telemetry_network_rates_args(parts: &[&str]) -> Result<TelemetryNetwork
         client_id,
         interface,
         bucket_secs,
+        latest,
     })
 }
 
@@ -3005,7 +3026,12 @@ fn parse_telemetry_tunnels_args(parts: &[&str]) -> Result<TelemetryTunnelArgs> {
     })
 }
 
-fn telemetry_rollups_path(limit: u16, client_id: Option<&str>, bucket_secs: Option<i32>) -> String {
+fn telemetry_rollups_path(
+    limit: u16,
+    client_id: Option<&str>,
+    bucket_secs: Option<i32>,
+    latest: bool,
+) -> String {
     let mut path = format!("/api/v1/telemetry/rollups?limit={limit}");
     if let Some(client_id) = client_id {
         path.push_str("&client_id=");
@@ -3015,6 +3041,9 @@ fn telemetry_rollups_path(limit: u16, client_id: Option<&str>, bucket_secs: Opti
         path.push_str("&bucket_secs=");
         path.push_str(&bucket_secs.to_string());
     }
+    if latest {
+        path.push_str("&latest=true");
+    }
     path
 }
 
@@ -3023,6 +3052,7 @@ fn telemetry_network_rates_path(
     client_id: Option<&str>,
     interface: Option<&str>,
     bucket_secs: Option<i32>,
+    latest: bool,
 ) -> String {
     let mut path = format!("/api/v1/telemetry/network-rates?limit={limit}");
     if let Some(client_id) = client_id {
@@ -3036,6 +3066,9 @@ fn telemetry_network_rates_path(
     if let Some(bucket_secs) = bucket_secs {
         path.push_str("&bucket_secs=");
         path.push_str(&bucket_secs.to_string());
+    }
+    if latest {
+        path.push_str("&latest=true");
     }
     path
 }

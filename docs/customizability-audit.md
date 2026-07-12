@@ -29,6 +29,12 @@ binary path, or one accounting source is not enough.
 ## Converted In Current Slice
 
 - General agent telemetry:
+  - One honest `telemetry_interval_secs` cadence controls complete samples;
+    there is no unused light/full split or implied partial-sample freshness.
+  - Linux and custom collectors share protocol cardinality ceilings (256
+    filesystems, 512 interfaces, and 512 declared tunnel observations), and
+    repeated filesystem sources are counted once. Declared runtime plans
+    reserve their observation slots before custom tunnel data is truncated.
   - Default template: `linux_procfs`.
   - Selectable sources: `linux_procfs`, `custom_command`,
     `linux_procfs_and_custom_command`.
@@ -47,20 +53,31 @@ binary path, or one accounting source is not enough.
   - Template domain: `runtime_traffic_accounting_source`; `vnstat` should
     become a shared customizable template, not a hardcoded or one-off command.
 - Runtime tunnel adapters:
-  - Custom adapters can define startup, restart, status, traffic-limit, stop,
-    and cleanup commands with typed placeholder expansion.
-  - Template domain: `runtime_tunnel_adapter`, where adapter command sets
-    are template fields and VPSs select the adapter template applicable to the
-    tunnel or provider.
+  - Core GRE, IPIP, SIT, and FOU realization is an explicit agent iproute2
+    ownership mode on each saved plan; it is not represented as an external
+    source template.
+  - Operator-created adapters can define startup, restart, status,
+    traffic-limit, stop, and cleanup commands with typed placeholder expansion.
+  - Template domain: `runtime_tunnel_adapter`. It has no built-in or default
+    implementation. A plan binds one operator-owned template ID to each
+    endpoint when `external_managed_adapter` is selected.
+  - External-observed plans name one exact interface and never invoke a runtime
+    adapter or scan for other tunnel-like interfaces.
 - FOU runtime realization:
-  - Default template values: port `5555`, peer port `5555`, IP protocol `4`.
-  - Selectable fields: per-plan typed FOU port, peer port, and IP protocol.
-  - Covered surfaces: shared Rust model, ifupdown/systemd-networkd
-    compatibility rendering, agent runtime `ip fou` and `ip tunnel`
-    commands, adapter placeholders, CLI, VTY, and topology panel authoring.
-  - Template domain: `runtime_tunnel_realization_policy`; FOU defaults
-    should eventually live alongside other tunnel realization defaults instead
-    of only as shared model defaults.
+  - Port `5555`, peer port `5555`, and IP protocol `4` are visible per-plan
+    defaults, not hidden host configuration or generated files.
+  - Per-plan typed FOU port, peer port, and IP protocol are covered by shared
+    models, agent `ip fou`/`ip tunnel` reconciliation, adapter placeholders,
+    CLI, VTY, and the tunnel-plan editor.
+- Routing cost adapters:
+  - Template domain: `routing_cost_adapter`. It has no built-in or default
+    implementation and does not identify any routing daemon.
+  - Each OSPF-enabled plan binds one explicit adapter template to each endpoint.
+    Versioned JSON stdin/stdout carries status and apply requests; the server
+    owns reviewed or automatic decisions and the agent only executes explicit
+    jobs.
+  - vpsman never installs, edits, deletes, discovers, or chooses the external
+    executable or routing-daemon configuration.
 - ICMP latency probes:
   - Configured source: `[network].probe_ping_argv`.
   - Default template candidates: `/bin/ping`, `/usr/bin/ping`.
@@ -90,10 +107,9 @@ binary path, or one accounting source is not enough.
 - Agent update restart request:
   - Activation no longer shells out to request a supervised restart; it uses an
     internal delayed `SIGTERM` request.
-- Frontend operation defaults and compatibility paths:
-  - Topology compatibility backend managed-file paths are now served from a
-    network-backend template catalog rather than embedded directly in panel and
-    renderer logic.
+- Frontend operation defaults:
+  - Tunnel authoring exposes only the three explicit runtime owners and filters
+    adapter selectors to operator-created templates in the matching domain.
   - Backup/restore selected-path defaults and placeholders are named backup
     path templates.
   - Job-operation command examples, terminal default argv, and backup path
@@ -103,13 +119,13 @@ binary path, or one accounting source is not enough.
     workflow. Future work should connect each operational panel to active
     source/status and assignment controls where the default affects real VPS
     behavior.
-- Agent executable and compatibility command candidates:
-  - Network compatibility backend validation/reload commands, Bird2/netplan
-    paths, user-session executable candidates, and latency-probe executable
-    candidates are now named templates/constants instead of scattered literals.
-  - The audit scanner now treats vpsman-managed compatibility files as
-    accepted adapter paths and avoids false positives where `/proc` appeared
-    inside `/api/v1/process...`.
+- Agent executable candidates:
+  - User-session and latency-probe executable candidates are named templates or
+    constants instead of scattered literals. Network runtime/routing adapters
+    require explicit operator-created absolute argv and have no managed-file
+    compatibility path.
+  - The audit scanner avoids false positives where `/proc` appears inside an
+    API path.
 
 ## Remaining High-Priority Gaps
 
@@ -139,10 +155,12 @@ binary path, or one accounting source is not enough.
   - Current state: typed `tc` apply commands exist.
   - Required model: status source, rollback source, provider defaults, and
     non-tunnel flow-limit adapters.
-- Routing daemon integration:
-  - Current state: Bird2 first.
-  - Required model: routing-daemon custom adapter model for Bird2, FRR, and custom
-    commands; topology and OSPF-like cost policy should remain daemon-neutral.
+- Routing-cost integration:
+  - Current state: daemon-neutral operator-created adapter templates, explicit
+    per-endpoint bindings, status-before-apply, stale-snapshot checks, and
+    status-after-apply verification are implemented.
+  - Remaining model: richer adapter preflight evidence and source-status links;
+    no daemon-specific integration belongs in vpsman.
 - Backup, restore, and update:
   - Current state: local filesystem and S3-compatible object stores are
     implemented for backup/update artifacts; source template status reports
@@ -203,10 +221,10 @@ binary path, or one accounting source is not enough.
   and reports open candidates without failing by default.
 - Current result: `total_matches=565`, `classified_matches=463`,
   `open_candidates=102`.
-- The open set is now the audit backlog. It includes frontend placeholders,
-  compatibility backend paths, `w`/`who` discovery, network hook templates,
+- This historical open set became the audit backlog. It included frontend placeholders,
+  compatibility backend paths, `w`/`who` discovery, former network hook templates,
   ping/vnstat parsing, installer paths, backup examples, and process/terminal
-  default examples. Each future conversion should either promote the assumption
+  default examples. Each later conversion was required to turn the assumption
   into a typed template/adapter field, mark it as a fixture/operator-input hint,
   or leave a concrete TODO with an owner module.
 - Source template bulk update must remain template-centric: updating a shared template
@@ -221,11 +239,10 @@ binary path, or one accounting source is not enough.
 
 2026-06-02 03:19 PDT scan:
 
-- Accepted default templates already documented: runtime `ip`/`tc`, ifupdown,
-  netplan, systemd-networkd, Bird2, ping, procfs, sysfs, local filesystem
-  object store, and managed compatibility files. These remain accepted only
-  while they are visible as templates or compatibility adapters instead of hidden
-  product assumptions.
+- Accepted default templates already documented include ping, procfs, sysfs,
+  local filesystem object storage, command execution, and bounded built-in
+  network probes. External tunnel and routing-cost adapters deliberately have
+  no built-in/default template and no managed compatibility files.
 - Test fixture paths such as `/tmp/...`, `/etc/hostname`, `/bin/sleep`,
   `/bin/sh` inside `#[cfg(test)]` modules, and adapter example scripts appear
   heavily in API/CLI/VTY tests and are not product policy by themselves.
@@ -239,17 +256,14 @@ binary path, or one accounting source is not enough.
 
 - Converted the prior fixed FOU assumptions (`port=5555`, `peer_port=5555`,
   `ipproto=4`) into `RuntimeTunnelFouOptions` with serde defaults and
-  validation. Non-default values now render through compatibility backends,
-  agent runtime commands, CLI, VTY, and Network > Tunnel plans.
-- This is a typed adapter-field conversion, not a source template bulk command
-  model. Fleet-wide changes should be modeled later as updating a named tunnel
-  realization template selected by relevant VPSs/plans, then validating/rendering
-  the affected plans before privilege-gated mutation.
-- Product-code hotspot: telemetry promotion defaults in
-  `crates/api/src/routes_network.rs` currently fall back to fixed bandwidth,
-  latency, packet-loss, preference, and OSPF policy values. Those should become
-  named operator templates/profiles with explicit VPS or tag assignment helpers
-  rather than compiled business policy.
+  validation. Non-default values flow through agent runtime commands, external
+  adapter placeholders, CLI, VTY, and Network > Tunnel plans.
+- This is a typed per-plan field model, not a source-template bulk command.
+  Core iproute2 realization stays visible on each declaration; shared templates
+  are reserved for external operator-owned implementations.
+- Telemetry promotion and inferred tunnel import are intentionally absent.
+  Operators create declarations with explicit bandwidth, ownership, endpoints,
+  and optional routing policy.
 - Product-code hotspot: frontend topology controls contain fixed probe/speed
   defaults. These should evolve into saved operator templates with source/provider
   visibility and per-VPS selected-template display, while keeping safe bounded
@@ -270,16 +284,15 @@ binary path, or one accounting source is not enough.
 2026-06-02 08:27 PDT scan:
 
 - Converted another batch of hidden/default assumptions into explicit template
-  catalogs or named template constants: frontend topology backend files,
-  backup/restore path defaults, job-operation placeholders, agent network-hook
-  compatibility commands, user-session executable candidates, and latency-probe
-  executable candidates.
+  catalogs or named template constants: backup/restore path defaults,
+  job-operation placeholders, user-session executable candidates, and
+  latency-probe executable candidates.
 - `scripts/release-check.sh` now runs `scripts/audit-customizability.sh` after
   repository hygiene, making customizability review part of the aggregate
   release gate.
-- Scanner fixes classify vpsman-managed compatibility files as accepted
-  adapter paths, classify UI placeholders, and search for the real `/proc` path
-  family instead of matching `/api/v1/process...`.
+- Scanner fixes classify UI placeholders and search for the real `/proc` path
+  family instead of matching `/api/v1/process...`. Network managed-file paths
+  are no longer an accepted product category.
 - Current result: `total_matches=548`, `classified_matches=510`,
   `open_candidates=38`.
 - Remaining open candidates are not release-complete. The current list is

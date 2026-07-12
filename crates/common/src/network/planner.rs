@@ -6,11 +6,10 @@ use std::{
 use super::{
     cost::{ospf_cost, MAX_TUNNEL_BANDWIDTH_MBPS, MIN_TUNNEL_BANDWIDTH_MBPS},
     models::{
-        RuntimeTunnelCommand, RuntimeTunnelControl, RuntimeTunnelFouOptions, RuntimeTunnelManager,
-        RuntimeTunnelRoute, RuntimeTunnelTopologyIntent, RuntimeTunnelTrafficLimit,
-        TunnelAddressFamily, TunnelAddressPair, TunnelEndpointConfig, TunnelEndpointSide,
-        TunnelKind, TunnelObservation, TunnelPlan, TunnelPlanInput, MANAGED_BIRD2_FILE,
-        MANAGED_IFUPDOWN_FILE,
+        RuntimeTunnelControl, RuntimeTunnelFouOptions, RuntimeTunnelManager, RuntimeTunnelRoute,
+        RuntimeTunnelTopologyIntent, RuntimeTunnelTrafficLimit, TunnelAddressFamily,
+        TunnelAddressPair, TunnelEndpointConfig, TunnelEndpointSide, TunnelKind, TunnelObservation,
+        TunnelOspfConfig, TunnelPlan, TunnelPlanInput,
     },
 };
 
@@ -20,6 +19,12 @@ const MAX_RUNTIME_TOPOLOGY_ROUTES: usize = 256;
 
 #[derive(Debug, thiserror::Error, Eq, PartialEq)]
 pub enum NetworkPlanError {
+    #[error("invalid tunnel plan identity")]
+    InvalidPlanIdentity,
+    #[error("tunnel endpoints must be two different clients")]
+    InvalidTunnelEndpoints,
+    #[error("invalid tunnel underlay address")]
+    InvalidUnderlayAddress,
     #[error("invalid tunnel interface name")]
     InvalidInterfaceName,
     #[error("invalid IPv4 CIDR")]
@@ -32,14 +37,16 @@ pub enum NetworkPlanError {
     AddressPoolRequired,
     #[error("tunnel plan requires at least one IPv4 or IPv6 endpoint pair")]
     TunnelAddressRequired,
-    #[error("tunnel kind is not supported by selected network backend")]
-    UnsupportedBackendTunnelKind,
+    #[error("tunnel kind is not supported by the selected runtime manager")]
+    UnsupportedRuntimeManagerTunnelKind,
     #[error("runtime tunnel command must be bounded and use absolute argv")]
     InvalidRuntimeTunnelCommand,
-    #[error("custom adapter requires at least one lifecycle command")]
+    #[error("custom adapter requires endpoint source-template bindings")]
     RuntimeTunnelAdapterCommandRequired,
     #[error("external observed tunnels cannot include mutating commands or traffic limits")]
     RuntimeTunnelObservedCannotMutate,
+    #[error("runtime topology routes and cleanup require agent iproute2 ownership")]
+    RuntimeTunnelTopologyRequiresAgentManagement,
     #[error("runtime tunnel traffic limit is invalid")]
     InvalidRuntimeTunnelTrafficLimit,
     #[error("runtime tunnel topology intent is invalid")]
@@ -48,18 +55,29 @@ pub enum NetworkPlanError {
     InvalidRuntimeTunnelRoute,
     #[error("bandwidth must be between 10 and 10000 Mbps")]
     InvalidBandwidthMbps,
+    #[error("OSPF configuration is invalid")]
+    InvalidOspfConfig,
 }
 
 pub fn plan_tunnel(input: &TunnelPlanInput) -> Result<TunnelPlan, NetworkPlanError> {
+    validate_plan_identity(input)?;
     validate_interface_name(&input.interface_name)?;
     validate_bandwidth_mbps(input.bandwidth_mbps)?;
     validate_runtime_tunnel_control(&input.runtime_control)?;
     validate_runtime_fou_options(input.kind, &input.runtime_control.fou)?;
+    if input.runtime_control.manager != RuntimeTunnelManager::AgentIproute2Managed
+        && !input.runtime_topology.is_default()
+    {
+        return Err(NetworkPlanError::RuntimeTunnelTopologyRequiresAgentManagement);
+    }
     validate_runtime_topology_intent(&input.runtime_topology, &input.interface_name)?;
+    if let Some(ospf) = &input.ospf {
+        validate_ospf_config(ospf)?;
+    }
     if input.runtime_control.manager == RuntimeTunnelManager::AgentIproute2Managed
         && input.kind.linux_tunnel_mode().is_none()
     {
-        return Err(NetworkPlanError::UnsupportedBackendTunnelKind);
+        return Err(NetworkPlanError::UnsupportedRuntimeManagerTunnelKind);
     }
     let reserved_ipv4 = input
         .reserved_addresses
@@ -93,39 +111,19 @@ pub fn plan_tunnel(input: &TunnelPlanInput) -> Result<TunnelPlan, NetworkPlanErr
             .or(ipv4_tunnel.as_ref())
             .expect("at least one tunnel address pair exists"),
     };
-    let observation = TunnelObservation {
-        latency_ms: input.latency_ms,
-        packet_loss_ratio: input.packet_loss_ratio,
-        bandwidth_mbps: input.bandwidth_mbps,
-        preference: input.preference,
-    };
-    let recommended_ospf_cost = ospf_cost(input.ospf_policy, observation);
+    let recommended_ospf_cost = input.ospf.as_ref().map(|ospf| {
+        ospf_cost(
+            ospf.policy,
+            TunnelObservation {
+                latency_ms: ospf.planned_latency_ms,
+                packet_loss_ratio: ospf.planned_packet_loss_ratio,
+                bandwidth_mbps: input.bandwidth_mbps,
+                preference: ospf.preference,
+            },
+        )
+    });
     let left_address = primary_tunnel.left.clone();
     let right_address = primary_tunnel.right.clone();
-    let ifupdown_file = MANAGED_IFUPDOWN_FILE.to_string();
-    let bird2_file = MANAGED_BIRD2_FILE.to_string();
-    let ifupdown_snippet = render_runtime_snippet(
-        TunnelSnippetInput {
-            name: &input.name,
-            interface_name: &input.interface_name,
-            kind: input.kind,
-            local_underlay: &input.left_underlay,
-            remote_underlay: &input.right_underlay,
-            ipv4: ipv4_tunnel.as_ref().map(|pair| EndpointAddressPair {
-                local: pair.left.as_str(),
-                remote: pair.right.as_str(),
-                prefix_len: pair.prefix_len,
-            }),
-            ipv6: ipv6_tunnel.as_ref().map(|pair| EndpointAddressPair {
-                local: pair.left.as_str(),
-                remote: pair.right.as_str(),
-                prefix_len: pair.prefix_len,
-            }),
-            fou: &input.runtime_control.fou,
-        },
-        input.runtime_control.manager,
-    );
-    let touched_files = touched_files_for_runtime(input.runtime_control.manager);
     let conflicts = plan_conflicts(input, &reserved_ipv4, &reserved_ipv6)?;
 
     Ok(TunnelPlan {
@@ -136,8 +134,10 @@ pub fn plan_tunnel(input: &TunnelPlanInput) -> Result<TunnelPlan, NetworkPlanErr
         runtime_topology: input.runtime_topology.clone(),
         left_client_id: input.left_client_id.clone(),
         right_client_id: input.right_client_id.clone(),
-        left_underlay: input.left_underlay.clone(),
-        right_underlay: input.right_underlay.clone(),
+        left_remote_underlay: input.left_remote_underlay.clone(),
+        left_local_underlay: input.left_local_underlay.clone(),
+        right_remote_underlay: input.right_remote_underlay.clone(),
+        right_local_underlay: input.right_local_underlay.clone(),
         left_tunnel_address: left_address.clone(),
         right_tunnel_address: right_address.clone(),
         tunnel_prefix_len: primary_tunnel.prefix_len,
@@ -145,24 +145,56 @@ pub fn plan_tunnel(input: &TunnelPlanInput) -> Result<TunnelPlan, NetworkPlanErr
         ipv6_tunnel: ipv6_tunnel.clone(),
         latency_primary_family: primary_family,
         bandwidth_mbps: input.bandwidth_mbps,
+        ospf: input.ospf.clone(),
         recommended_ospf_cost,
-        ifupdown_file: ifupdown_file.clone(),
-        bird2_file: bird2_file.clone(),
-        ifupdown_snippet,
-        bird2_interface_snippet: render_bird2_interface_snippet(
-            input.kind,
-            &input.name,
-            &input.interface_name,
-            &input.left_client_id,
-            &input.right_client_id,
-            recommended_ospf_cost,
-        ),
-        touched_files,
-        validation_steps: validation_steps_for_runtime(input.runtime_control.manager),
-        rollback_notes: rollback_notes_for_runtime(input.runtime_control.manager),
         conflicts,
-        mutates_host: false,
     })
+}
+
+fn validate_plan_identity(input: &TunnelPlanInput) -> Result<(), NetworkPlanError> {
+    let name = input.name.trim();
+    if name.is_empty() || name.len() > 128 || name.chars().any(char::is_control) {
+        return Err(NetworkPlanError::InvalidPlanIdentity);
+    }
+    if input.left_client_id.trim().is_empty()
+        || input.right_client_id.trim().is_empty()
+        || input.left_client_id == input.right_client_id
+    {
+        return Err(NetworkPlanError::InvalidTunnelEndpoints);
+    }
+    validate_endpoint_underlay(
+        &input.left_remote_underlay,
+        input.left_local_underlay.as_deref(),
+        input.runtime_control.manager,
+    )?;
+    validate_endpoint_underlay(
+        &input.right_remote_underlay,
+        input.right_local_underlay.as_deref(),
+        input.runtime_control.manager,
+    )?;
+    Ok(())
+}
+
+fn validate_endpoint_underlay(
+    remote: &str,
+    local: Option<&str>,
+    manager: RuntimeTunnelManager,
+) -> Result<(), NetworkPlanError> {
+    let remote = remote
+        .parse::<IpAddr>()
+        .map_err(|_| NetworkPlanError::InvalidUnderlayAddress)?;
+    let local = local
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::parse::<IpAddr>)
+        .transpose()
+        .map_err(|_| NetworkPlanError::InvalidUnderlayAddress)?;
+    if local.is_some_and(|local| local.is_ipv4() != remote.is_ipv4())
+        || (manager == RuntimeTunnelManager::AgentIproute2Managed && !remote.is_ipv4())
+    {
+        return Err(NetworkPlanError::InvalidUnderlayAddress);
+    }
+    Ok(())
 }
 
 fn validate_bandwidth_mbps(value: u32) -> Result<(), NetworkPlanError> {
@@ -171,6 +203,42 @@ fn validate_bandwidth_mbps(value: u32) -> Result<(), NetworkPlanError> {
     } else {
         Err(NetworkPlanError::InvalidBandwidthMbps)
     }
+}
+
+fn validate_ospf_config(config: &TunnelOspfConfig) -> Result<(), NetworkPlanError> {
+    let valid_template_id = |value: &str| {
+        !value.is_empty()
+            && value.len() <= 128
+            && value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+            })
+    };
+    let policy = config.policy;
+    let policy_values = [
+        policy.latency_weight,
+        policy.loss_weight,
+        policy.bandwidth_weight,
+        policy.preference_bias,
+    ];
+    if !config.planned_latency_ms.is_finite()
+        || !(0.0..=60_000.0).contains(&config.planned_latency_ms)
+        || !config.planned_packet_loss_ratio.is_finite()
+        || !(0.0..=1.0).contains(&config.planned_packet_loss_ratio)
+        || !config.preference.is_finite()
+        || !(0.1..=100.0).contains(&config.preference)
+        || config.min_cost_delta == 0
+        || !(1..=10).contains(&config.healthy_windows)
+        || policy.min_cost == 0
+        || policy.min_cost > policy.max_cost
+        || policy_values
+            .iter()
+            .any(|value| !value.is_finite() || *value < 0.0)
+        || !valid_template_id(&config.left_adapter_template_id)
+        || !valid_template_id(&config.right_adapter_template_id)
+    {
+        return Err(NetworkPlanError::InvalidOspfConfig);
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -258,24 +326,24 @@ pub fn render_tunnel_endpoint_config(
     let (
         local_client_id,
         peer_client_id,
-        local_underlay,
         remote_underlay,
+        local_underlay,
         local_address,
         remote_address,
     ) = match side {
         TunnelEndpointSide::Left => (
             &plan.left_client_id,
             &plan.right_client_id,
-            &plan.left_underlay,
-            &plan.right_underlay,
+            &plan.left_remote_underlay,
+            &plan.left_local_underlay,
             &plan.left_tunnel_address,
             &plan.right_tunnel_address,
         ),
         TunnelEndpointSide::Right => (
             &plan.right_client_id,
             &plan.left_client_id,
-            &plan.right_underlay,
-            &plan.left_underlay,
+            &plan.right_remote_underlay,
+            &plan.right_local_underlay,
             &plan.right_tunnel_address,
             &plan.left_tunnel_address,
         ),
@@ -285,37 +353,8 @@ pub fn render_tunnel_endpoint_config(
         local_client_id: local_client_id.clone(),
         peer_client_id: peer_client_id.clone(),
         runtime_control: plan.runtime_control.clone(),
-        ifupdown_file: MANAGED_IFUPDOWN_FILE.to_string(),
-        bird2_file: MANAGED_BIRD2_FILE.to_string(),
-        ifupdown_snippet: render_runtime_snippet(
-            TunnelSnippetInput {
-                name: &plan.name,
-                interface_name: &plan.interface_name,
-                kind: plan.kind,
-                local_underlay,
-                remote_underlay,
-                ipv4: plan.ipv4_tunnel.as_ref().map(|pair| EndpointAddressPair {
-                    local: address_for_side(pair, side, true),
-                    remote: address_for_side(pair, side, false),
-                    prefix_len: pair.prefix_len,
-                }),
-                ipv6: plan.ipv6_tunnel.as_ref().map(|pair| EndpointAddressPair {
-                    local: address_for_side(pair, side, true),
-                    remote: address_for_side(pair, side, false),
-                    prefix_len: pair.prefix_len,
-                }),
-                fou: &plan.runtime_control.fou,
-            },
-            plan.runtime_control.manager,
-        ),
-        bird2_interface_snippet: render_bird2_interface_snippet(
-            plan.kind,
-            &plan.name,
-            &plan.interface_name,
-            local_client_id,
-            peer_client_id,
-            plan.recommended_ospf_cost,
-        ),
+        remote_underlay: remote_underlay.clone(),
+        local_underlay: local_underlay.clone(),
         local_tunnel_address: local_address.clone(),
         remote_tunnel_address: remote_address.clone(),
         tunnel_prefix_len: plan.tunnel_prefix_len,
@@ -328,49 +367,38 @@ pub fn render_tunnel_endpoint_config(
 pub fn validate_runtime_tunnel_control(
     control: &RuntimeTunnelControl,
 ) -> Result<(), NetworkPlanError> {
-    let has_mutating_command = control.startup.is_some()
-        || control.stop.is_some()
-        || control.cleanup.is_some()
-        || control.restart.is_some()
-        || control.traffic_limit_apply.is_some();
-    let has_lifecycle_command =
-        has_mutating_command || control.status.is_some() || !control.traffic_limit.is_default();
-
     match control.manager {
         RuntimeTunnelManager::AgentIproute2Managed => {
-            if control.startup.is_some()
-                || control.stop.is_some()
-                || control.cleanup.is_some()
-                || control.restart.is_some()
-                || control.status.is_some()
-                || control.traffic_limit_apply.is_some()
+            if control.left_adapter_template_id.is_some()
+                || control.right_adapter_template_id.is_some()
             {
                 return Err(NetworkPlanError::InvalidRuntimeTunnelCommand);
             }
         }
         RuntimeTunnelManager::ExternalObserved => {
-            if has_lifecycle_command {
+            if control.left_adapter_template_id.is_some()
+                || control.right_adapter_template_id.is_some()
+                || !control.traffic_limit.is_default()
+                || !control.fou.is_default()
+            {
                 return Err(NetworkPlanError::RuntimeTunnelObservedCannotMutate);
             }
         }
         RuntimeTunnelManager::ExternalManagedAdapter => {
-            if !has_lifecycle_command {
+            if !valid_template_id(control.left_adapter_template_id.as_deref())
+                || !valid_template_id(control.right_adapter_template_id.as_deref())
+            {
                 return Err(NetworkPlanError::RuntimeTunnelAdapterCommandRequired);
-            }
-            if !control.traffic_limit.is_default() && control.traffic_limit_apply.is_none() {
-                return Err(NetworkPlanError::InvalidRuntimeTunnelCommand);
             }
         }
     }
 
-    validate_runtime_command(control.startup.as_ref())?;
-    validate_runtime_command(control.stop.as_ref())?;
-    validate_runtime_command(control.cleanup.as_ref())?;
-    validate_runtime_command(control.restart.as_ref())?;
-    validate_runtime_command(control.status.as_ref())?;
-    validate_runtime_command(control.traffic_limit_apply.as_ref())?;
     validate_runtime_traffic_limit(&control.traffic_limit)?;
     Ok(())
+}
+
+fn valid_template_id(value: Option<&str>) -> bool {
+    value.is_some_and(|value| uuid::Uuid::parse_str(value).is_ok())
 }
 
 fn validate_runtime_fou_options(
@@ -432,7 +460,8 @@ fn validate_runtime_interface_set(interfaces: &[String]) -> Result<(), NetworkPl
     }
     let mut seen = HashSet::new();
     for interface in interfaces {
-        validate_interface_name(interface)?;
+        validate_interface_name(interface)
+            .map_err(|_| NetworkPlanError::InvalidRuntimeTunnelTopology)?;
         if !seen.insert(interface.as_str()) {
             return Err(NetworkPlanError::InvalidRuntimeTunnelTopology);
         }
@@ -466,32 +495,6 @@ fn validate_runtime_routes(routes: &[RuntimeTunnelRoute]) -> Result<(), NetworkP
         );
         if !seen.insert(key) {
             return Err(NetworkPlanError::InvalidRuntimeTunnelRoute);
-        }
-    }
-    Ok(())
-}
-
-fn validate_runtime_command(
-    command: Option<&RuntimeTunnelCommand>,
-) -> Result<(), NetworkPlanError> {
-    let Some(command) = command else {
-        return Ok(());
-    };
-    if command.argv.is_empty()
-        || command.argv.len() > 32
-        || !command.argv[0].starts_with('/')
-        || !(1..=120).contains(&command.max_timeout_secs)
-        || !(1024..=64 * 1024).contains(&command.max_output_bytes)
-    {
-        return Err(NetworkPlanError::InvalidRuntimeTunnelCommand);
-    }
-    for arg in &command.argv {
-        if arg.is_empty()
-            || arg.len() > 4096
-            || arg.as_bytes().contains(&0)
-            || arg.chars().any(char::is_control)
-        {
-            return Err(NetworkPlanError::InvalidRuntimeTunnelCommand);
         }
     }
     Ok(())
@@ -658,26 +661,46 @@ fn resolve_ipv6_tunnel(
 }
 
 fn validate_ipv4_pair(pair: &TunnelAddressPair) -> Result<(), NetworkPlanError> {
-    pair.left
+    let left = pair
+        .left
         .parse::<Ipv4Addr>()
         .map_err(|_| NetworkPlanError::InvalidCidr)?;
-    pair.right
+    let right = pair
+        .right
         .parse::<Ipv4Addr>()
         .map_err(|_| NetworkPlanError::InvalidCidr)?;
     if pair.prefix_len > 32 {
+        return Err(NetworkPlanError::InvalidCidr);
+    }
+    let mask = if pair.prefix_len == 0 {
+        0
+    } else {
+        u32::MAX << (32 - pair.prefix_len)
+    };
+    if left == right || ipv4_to_u32(left) & mask != ipv4_to_u32(right) & mask {
         return Err(NetworkPlanError::InvalidCidr);
     }
     Ok(())
 }
 
 fn validate_ipv6_pair(pair: &TunnelAddressPair) -> Result<(), NetworkPlanError> {
-    pair.left
+    let left = pair
+        .left
         .parse::<Ipv6Addr>()
         .map_err(|_| NetworkPlanError::InvalidCidr)?;
-    pair.right
+    let right = pair
+        .right
         .parse::<Ipv6Addr>()
         .map_err(|_| NetworkPlanError::InvalidCidr)?;
     if pair.prefix_len > 128 {
+        return Err(NetworkPlanError::InvalidCidr);
+    }
+    let mask = if pair.prefix_len == 0 {
+        0
+    } else {
+        u128::MAX << (128 - pair.prefix_len)
+    };
+    if left == right || ipv6_to_u128(left) & mask != ipv6_to_u128(right) & mask {
         return Err(NetworkPlanError::InvalidCidr);
     }
     Ok(())
@@ -740,243 +763,6 @@ fn parse_ip_cidr(value: &str) -> Result<(), NetworkPlanError> {
     }
 }
 
-fn address_for_side(pair: &TunnelAddressPair, side: TunnelEndpointSide, local: bool) -> &str {
-    match (side, local) {
-        (TunnelEndpointSide::Left, true) | (TunnelEndpointSide::Right, false) => &pair.left,
-        (TunnelEndpointSide::Left, false) | (TunnelEndpointSide::Right, true) => &pair.right,
-    }
-}
-
-#[derive(Clone, Copy)]
-struct EndpointAddressPair<'a> {
-    local: &'a str,
-    remote: &'a str,
-    prefix_len: u8,
-}
-
-#[derive(Clone, Copy)]
-struct TunnelSnippetInput<'a> {
-    name: &'a str,
-    interface_name: &'a str,
-    kind: TunnelKind,
-    local_underlay: &'a str,
-    remote_underlay: &'a str,
-    ipv4: Option<EndpointAddressPair<'a>>,
-    ipv6: Option<EndpointAddressPair<'a>>,
-    fou: &'a RuntimeTunnelFouOptions,
-}
-
-fn render_ifupdown_snippet(input: TunnelSnippetInput<'_>) -> String {
-    let linux_mode = input
-        .kind
-        .linux_tunnel_mode()
-        .expect("iproute2-managed tunnel kind is validated before rendering");
-    let mut lines = vec![format!(
-        "# vpsman tunnel {}: server-managed runtime config",
-        input.name
-    )];
-    if let Some(ipv4) = input.ipv4 {
-        lines.extend(render_ifupdown_ipv4_stanza(input, ipv4, linux_mode, true));
-    }
-    if let Some(ipv6) = input.ipv6 {
-        lines.extend(render_ifupdown_ipv6_stanza(
-            input,
-            ipv6,
-            linux_mode,
-            input.ipv4.is_none(),
-        ));
-    }
-    lines.join("\n")
-}
-
-fn render_ifupdown_ipv4_stanza(
-    input: TunnelSnippetInput<'_>,
-    address: EndpointAddressPair<'_>,
-    linux_mode: &str,
-    include_lifecycle: bool,
-) -> Vec<String> {
-    let mut lines = vec![
-        format!("auto {}", input.interface_name),
-        format!("iface {} inet static", input.interface_name),
-        format!("    address {}", address.local),
-        format!("    netmask {}", ipv4_netmask(address.prefix_len)),
-        format!("    pointopoint {}", address.remote),
-    ];
-    if include_lifecycle {
-        append_tunnel_lifecycle(&mut lines, input, linux_mode);
-    }
-    lines
-}
-
-fn render_ifupdown_ipv6_stanza(
-    input: TunnelSnippetInput<'_>,
-    address: EndpointAddressPair<'_>,
-    linux_mode: &str,
-    include_lifecycle: bool,
-) -> Vec<String> {
-    let mut lines = vec![
-        format!("auto {}", input.interface_name),
-        format!("iface {} inet6 static", input.interface_name),
-        format!("    address {}", address.local),
-        format!("    netmask {}", address.prefix_len),
-        format!("    pointopoint {}", address.remote),
-    ];
-    if include_lifecycle {
-        append_tunnel_lifecycle(&mut lines, input, linux_mode);
-    }
-    lines
-}
-
-fn append_tunnel_lifecycle(
-    lines: &mut Vec<String>,
-    input: TunnelSnippetInput<'_>,
-    linux_mode: &str,
-) {
-    if input.kind == TunnelKind::Fou {
-        lines.push(format!(
-            "    pre-up ip fou add port {} ipproto {} || true",
-            input.fou.port, input.fou.ipproto
-        ));
-    }
-    let mut tunnel_command = format!(
-        "    pre-up ip tunnel add $IFACE mode {} remote {} local {} ttl 255",
-        linux_mode, input.remote_underlay, input.local_underlay
-    );
-    if input.kind == TunnelKind::Fou {
-        tunnel_command.push_str(&format!(
-            " encap fou encap-sport auto encap-dport {}",
-            input.fou.peer_port
-        ));
-    }
-    lines.push(tunnel_command);
-    lines.push("    up ip link set $IFACE up".to_string());
-    lines.push("    post-down ip tunnel del $IFACE || true".to_string());
-    if input.kind == TunnelKind::Fou {
-        lines.push(format!(
-            "    post-down ip fou del port {} || true",
-            input.fou.port
-        ));
-    }
-}
-
-fn render_runtime_snippet(input: TunnelSnippetInput<'_>, manager: RuntimeTunnelManager) -> String {
-    match manager {
-        RuntimeTunnelManager::AgentIproute2Managed => render_ifupdown_snippet(input),
-        RuntimeTunnelManager::ExternalObserved => [
-            format!(
-                "# vpsman tunnel {}: external observed runtime tunnel",
-                input.name
-            ),
-            format!(
-                "# interface {} is owned by an external program and is not created by vpsman",
-                input.interface_name
-            ),
-            "# vpsman will observe status, probe/speed evidence, and manage the Bird2 block"
-                .to_string(),
-        ]
-        .join("\n"),
-        RuntimeTunnelManager::ExternalManagedAdapter => [
-            format!(
-                "# vpsman tunnel {}: custom adapter runtime tunnel",
-                input.name
-            ),
-            format!(
-                "# interface {} is created, restarted, shaped, or stopped by adapter commands",
-                input.interface_name
-            ),
-            "# vpsman will run bounded adapter argv, observe evidence, and manage the Bird2 block"
-                .to_string(),
-        ]
-        .join("\n"),
-    }
-}
-
-fn touched_files_for_runtime(manager: RuntimeTunnelManager) -> Vec<String> {
-    match manager {
-        RuntimeTunnelManager::AgentIproute2Managed => vec![
-            MANAGED_IFUPDOWN_FILE.to_string(),
-            MANAGED_BIRD2_FILE.to_string(),
-        ],
-        RuntimeTunnelManager::ExternalObserved | RuntimeTunnelManager::ExternalManagedAdapter => {
-            vec![MANAGED_BIRD2_FILE.to_string()]
-        }
-    }
-}
-
-fn validation_steps_for_runtime(manager: RuntimeTunnelManager) -> Vec<String> {
-    let mut steps = vec!["review generated runtime snippets before enabling the plan".to_string()];
-    match manager {
-        RuntimeTunnelManager::AgentIproute2Managed => {
-            steps.push(
-                "run ifreload --syntax-check for ifupdown2-managed snippets where available"
-                    .to_string(),
-            );
-        }
-        RuntimeTunnelManager::ExternalObserved => {
-            steps.push("confirm the external interface exists before Bird2 reload".to_string());
-            steps.push(
-                "capture status, latency, and speed evidence before accepting OSPF cost"
-                    .to_string(),
-            );
-        }
-        RuntimeTunnelManager::ExternalManagedAdapter => {
-            steps.push(
-                "run adapter status/start or restart evidence before Bird2 reload".to_string(),
-            );
-            steps.push(
-                "confirm adapter traffic-limit output when shaping is configured".to_string(),
-            );
-        }
-    }
-    steps.push("run bird -p before Bird2 reload where available".to_string());
-    steps.push("verify tunnel latency and packet loss before accepting OSPF cost".to_string());
-    steps
-}
-
-fn rollback_notes_for_runtime(manager: RuntimeTunnelManager) -> Vec<String> {
-    match manager {
-        RuntimeTunnelManager::AgentIproute2Managed => vec![
-            "remove only the vpsman-managed interface block from /etc/network/interfaces.d/vpsman-tunnels".to_string(),
-            "remove only the matching vpsman-managed Bird2 interface block".to_string(),
-            "reload networking and Bird2 after validation succeeds".to_string(),
-        ],
-        RuntimeTunnelManager::ExternalObserved => vec![
-            "do not delete the external interface from vpsman rollback".to_string(),
-            "remove only the matching vpsman-managed Bird2 interface block".to_string(),
-            "reload Bird2 after validation succeeds".to_string(),
-        ],
-        RuntimeTunnelManager::ExternalManagedAdapter => vec![
-            "run the adapter stop command only when rollback is intended to stop runtime ownership".to_string(),
-            "remove only the matching vpsman-managed Bird2 interface block".to_string(),
-            "reload Bird2 after validation succeeds".to_string(),
-        ],
-    }
-}
-
-fn render_bird2_interface_snippet(
-    kind: TunnelKind,
-    name: &str,
-    interface_name: &str,
-    local_client_id: &str,
-    peer_client_id: &str,
-    ospf_cost: u16,
-) -> String {
-    [
-        format!(
-            "# vpsman {} tunnel {}: {} -> {}",
-            kind.bird2_label(),
-            name,
-            local_client_id,
-            peer_client_id
-        ),
-        format!("interface \"{}\" {{", interface_name),
-        "  type ptp;".to_string(),
-        format!("  cost {ospf_cost};"),
-        "};".to_string(),
-    ]
-    .join("\n")
-}
-
 fn ipv4_to_u32(address: Ipv4Addr) -> u32 {
     u32::from_be_bytes(address.octets())
 }
@@ -991,14 +777,4 @@ fn ipv6_to_u128(address: Ipv6Addr) -> u128 {
 
 fn u128_to_ipv6(value: u128) -> Ipv6Addr {
     Ipv6Addr::from(value.to_be_bytes())
-}
-
-fn ipv4_netmask(prefix_len: u8) -> Ipv4Addr {
-    let prefix_len = prefix_len.min(32);
-    let mask = if prefix_len == 0 {
-        0
-    } else {
-        u32::MAX << (32 - prefix_len)
-    };
-    u32_to_ipv4(mask)
 }

@@ -68,7 +68,7 @@ pub(crate) struct GatewaySession {
 }
 
 pub(crate) enum GatewaySessionMessage {
-    Command(GatewayCommand),
+    Command(Box<GatewayCommand>),
     Cancel(GatewayCancelCommand),
 }
 

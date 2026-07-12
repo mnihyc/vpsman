@@ -37,7 +37,7 @@ export async function installTransferJobApiMock(page: Page) {
     const downloadFixtureBytes = new TextEncoder().encode("resumable browser download payload");
     const selectorAgents = [
       { display_name: "edge-sfo-01", id: "agent-sfo-01", last_seen_at: "2026-06-27T08:00:00.000Z", status: "online", tags: ["provider:alpha", "country:US", "edge"] },
-      { display_name: "core-fra-02", id: "agent-fra-02", last_seen_at: "2026-06-27T08:00:00.000Z", status: "online", tags: ["country:DE", "bgp", "bird2"] },
+      { display_name: "core-fra-02", id: "agent-fra-02", last_seen_at: "2026-06-27T08:00:00.000Z", status: "online", tags: ["country:DE", "bgp", "routing"] },
       { display_name: "backup-nyc-03", id: "agent-nyc-03", status: "stale", tags: ["country:US"] },
     ];
     type SelectorAgent = (typeof selectorAgents)[number];
@@ -483,11 +483,11 @@ export async function installTransferJobApiMock(page: Page) {
             type: "file_list_dir",
           };
         }
-        if (path === "/var/log/bird") {
+        if (path === "/var/log/routing") {
           return {
             entries: [
-              entry("/var/log/bird/bird.log", "file", 1048576),
-              entry("/var/log/bird/bird.log.1", "file", 524288),
+              entry("/var/log/routing/routing.log", "file", 1048576),
+              entry("/var/log/routing/routing.log.1", "file", 524288),
             ],
             limit: 250,
             metadata: baseMetadata(path, "directory"),
@@ -501,7 +501,7 @@ export async function installTransferJobApiMock(page: Page) {
         }
         if (path === "/var/log") {
           return {
-            entries: [entry("/var/log/bird", "directory"), entry("/var/log/nginx", "directory")],
+            entries: [entry("/var/log/routing", "directory"), entry("/var/log/nginx", "directory")],
             limit: 250,
             metadata: baseMetadata(path, "directory"),
             offset: 0,

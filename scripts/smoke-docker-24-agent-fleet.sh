@@ -570,10 +570,15 @@ api_post "/api/v1/tunnel-plans" "$(jq -n \
   "name": "docker-fleet-gre",
   "interface_name": "gre24",
   "kind": "gre",
+  "runtime_control": {
+    "manager": "external_observed"
+  },
   "left_client_id": $left,
   "right_client_id": $right,
-  "left_underlay": "203.0.113.11",
-  "right_underlay": "203.0.113.12",
+  "left_remote_underlay": "203.0.113.12",
+  "left_local_underlay": null,
+  "right_remote_underlay": "203.0.113.11",
+  "right_local_underlay": null,
   "address_pool_cidr": "10.254.24.0/30",
   "reserved_addresses": [],
   "ipv4_tunnel": {
@@ -583,12 +588,16 @@ api_post "/api/v1/tunnel-plans" "$(jq -n \
   },
   "latency_primary_family": "ipv4",
   "bandwidth_mbps": 1000,
-  "latency_ms": 12,
-  "packet_loss_ratio": 0,
-  "preference": 1.0,
   "enabled": true,
   "confirmed": true
-}')" | jq -e '.name == "docker-fleet-gre" and .status == "planned"' >/dev/null
+}')" | jq -e '
+  .name == "docker-fleet-gre"
+    and .enabled == true
+    and .revision == 1
+    and .plan.runtime_control.manager == "external_observed"
+    and .plan.ospf == null
+    and .recommended_ospf_cost == null
+' >/dev/null
 
 backup_json="$(vpsctl_json backup-request \
   --client-id "$first_client_id" \

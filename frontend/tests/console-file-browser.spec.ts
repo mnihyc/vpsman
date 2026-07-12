@@ -24,9 +24,10 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
   await page.evaluate(() => localStorage.removeItem("vpsman.fileBrowser.state"));
   await openConsoleSubpage(page, "Remote Operations", "Files");
   await expect(page.getByRole("heading", { name: "File browser", exact: true })).toBeVisible();
-  await expect(page.getByText("Select a VPS and file to begin.")).toBeVisible();
+  await expect(page.getByText("Unlock to browse this VPS.")).toBeVisible();
   await expect(page.locator(".codeMirrorShell")).toHaveCount(0);
   await unlockPrivilege(page, "Files");
+  await expect(page.getByText("Refresh the selected directory.")).toBeVisible();
   const targetPicker = page.getByRole("combobox", { name: "File browser target VPS" });
   await expect(targetPicker).toHaveValue("edge-sfo-01 (fo01)");
   await targetPicker.fill("sfo");
@@ -181,7 +182,7 @@ test("mobile file browser opens text files as a focused editor", async ({ page }
   await page.goto("/");
   await page.evaluate(() => localStorage.removeItem("vpsman.fileBrowser.state"));
   await openConsoleSubpage(page, "Remote Operations", "Files");
-  await expect(page.getByText("Select a VPS and file to begin.")).toBeVisible();
+  await expect(page.getByText("Unlock to browse this VPS.")).toBeVisible();
   await expect(page.locator(".codeMirrorShell")).toHaveCount(0);
   await unlockPrivilege(page, "Files");
   await activate(page.getByRole("button", { name: "Refresh", exact: true }));
@@ -195,7 +196,7 @@ test("mobile file browser opens text files as a focused editor", async ({ page }
   await expect(page.locator(".codeMirrorShell")).toContainText("listen=443");
 
   await activate(page.getByRole("button", { name: "Back to files" }));
-  await expect(page.getByText("Select a VPS and file to begin.")).toBeVisible();
+  await expect(page.getByText("Select a text file to edit.")).toBeVisible();
 });
 
 test("runs bulk file download and upload workflows with grouped summaries", async ({ page }, testInfo) => {

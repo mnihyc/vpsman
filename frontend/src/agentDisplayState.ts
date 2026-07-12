@@ -32,11 +32,24 @@ export function agentDisplayState(agent: AgentView): AgentDisplayState {
       tone: "warning",
     };
   }
-  if (status === "offline") {
+  if (status === "offline" || status === "disconnected") {
     return {
-      detail: lastSeen ? `Last contact ${formatTime(lastSeen)}` : "No current agent connection.",
+      detail: lastSeen
+        ? status === "disconnected"
+          ? `Gateway session disconnected; last contact ${formatTime(lastSeen)}`
+          : `Last contact ${formatTime(lastSeen)}`
+        : status === "disconnected"
+          ? "The last gateway session ended and no current connection is active."
+          : "No current agent connection.",
       label: "Offline",
       tone: "neutral",
+    };
+  }
+  if (status === "never") {
+    return {
+      detail: "Registered, but the agent has never established a gateway session.",
+      label: "Never connected",
+      tone: "warning",
     };
   }
   return {

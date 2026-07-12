@@ -14,6 +14,12 @@ import { ActionFeedback } from "../components/ActionFeedback";
 import { TimeSeriesChart, type TimeSeriesChartLine } from "../components/TimeSeriesChart";
 import { VpsCombobox } from "../components/VpsCombobox";
 import { consolePalette, dashboardChartColors } from "../colorPalette";
+import {
+  dashboardScopeLabel,
+  dashboardScopeValueOptions,
+  dateTimeLocalToIso,
+  isoToDateTimeLocal,
+} from "../dashboardQuery";
 import type {
   AgentView,
   DashboardDrilldownRecord,
@@ -30,6 +36,10 @@ import type {
   DashboardTrafficSort,
   DashboardWindow,
 } from "../types";
+import {
+  INTERFACE_RATE_DEFINITION,
+  resourceMetricDefinition,
+} from "../telemetryMetrics";
 import { formatCompactTime } from "../utils";
 
 type HomeTelemetryPanelProps = {
@@ -106,7 +116,7 @@ export function HomeTelemetryPanel({
   };
   const windowOptions = overview?.available_filters.windows.map((option) => option.value) ?? fallbackDashboardWindows;
   const groupOptions = overview?.available_filters.group_by_options ?? fallbackGroupOptions();
-  const scopeOptions = scopeValueOptions(preferences.scopeKind, overview);
+  const scopeOptions = dashboardScopeValueOptions(preferences.scopeKind, overview);
   const customRangeActive = Boolean(preferences.startAt.trim());
   const selectedScopeLabel = dashboardScopeLabel(preferences, overview);
   const selectedGroupLabel = groupLabel(preferences.groupBy);
@@ -117,8 +127,8 @@ export function HomeTelemetryPanel({
   const networkSpeedChart = useMemo(
     () => ({
       lines: [
-        { color: consolePalette.chart.blue, label: "Inbound speed", values: (network?.points ?? []).map((point) => point.rx_bps) },
-        { color: consolePalette.chart.green, label: "Outbound speed", values: (network?.points ?? []).map((point) => point.tx_bps) },
+        { color: consolePalette.chart.blue, label: "Avg inbound rate", values: (network?.points ?? []).map((point) => point.rx_bps) },
+        { color: consolePalette.chart.green, label: "Avg outbound rate", values: (network?.points ?? []).map((point) => point.tx_bps) },
       ],
       times: (network?.points ?? []).map((point) => point.bucket_start),
     }),
@@ -429,6 +439,7 @@ export function HomeTelemetryPanel({
                   className={preferences.resourceMetric === option.value ? "active" : ""}
                   key={option.value}
                   onClick={() => onPreferencesChange({ resourceMetric: option.value })}
+                  title={resourceMetricDefinition(option.value)}
                   type="button"
                 >
                   {option.label}
@@ -460,6 +471,12 @@ export function HomeTelemetryPanel({
                   Inspect
                 </button>
               </div>
+              <p
+                className="observabilityMetricDefinition"
+                title={resourceMetricDefinition(preferences.resourceMetric)}
+              >
+                Metric definition: {resourceMetricDefinition(preferences.resourceMetric)}
+              </p>
               <TimeSeriesChart
                 ariaLabel="Resource usage curve"
                 emptyLabel="No resource telemetry after current filters and exclusions"
@@ -509,7 +526,7 @@ export function HomeTelemetryPanel({
             <div>
               <h2 id="dashboard-network-title">Network</h2>
               <span>
-                Speed shows telemetry rates; Traffic shows byte volume over the selected time range.
+                Rate is an interval average from interface-counter deltas; Traffic is byte volume over the selected range.
               </span>
             </div>
             <div className="dashboardHeaderTools">
@@ -520,7 +537,7 @@ export function HomeTelemetryPanel({
                   onClick={() => onPreferencesChange({ networkView: "speed" })}
                   type="button"
                 >
-                  Speed
+                  Rate
                 </button>
                 <button
                   aria-pressed={preferences.networkView === "traffic"}
@@ -549,7 +566,7 @@ export function HomeTelemetryPanel({
             </div>
             <ConsoleStatusBadge tone={network?.points.length ? "info" : "neutral"}>
               {preferences.networkView === "speed"
-                ? `${network?.points.length ?? 0} speed points`
+                ? `${network?.points.length ?? 0} rate points`
                 : `${network?.traffic_top_clients.length ?? 0} traffic clients`}
             </ConsoleStatusBadge>
           </div>
@@ -558,19 +575,19 @@ export function HomeTelemetryPanel({
               <>
                 <div className="dashboardCurveCard">
                   <div className="dashboardChartHeader">
-                    <span>Network speed</span>
+                    <span title={INTERFACE_RATE_DEFINITION}>Network rate</span>
                     <button
                       className="secondaryAction compactAction"
                       onClick={() =>
                         openDrawer({
-                          description: "Aggregated receive and transmit speed history for the selected time range.",
+                          description: `Aggregated receive and transmit rate history for the selected time range. ${INTERFACE_RATE_DEFINITION}`,
                           drilldown: { label: "Open network evidence", query: null, subpage: "evidence", view: "Network" },
                           metrics: [
-                            { label: "Inbound now", tone: "info", value: formatBitsPerSecond(network?.rx_bps ?? 0) },
-                            { label: "Outbound now", tone: "info", value: formatBitsPerSecond(network?.tx_bps ?? 0) },
+                            { label: "Inbound avg", tone: "info", value: formatBitsPerSecond(network?.rx_bps ?? 0) },
+                            { label: "Outbound avg", tone: "info", value: formatBitsPerSecond(network?.tx_bps ?? 0) },
                             { label: "Peak bucket", value: formatBitsPerSecond(networkPeak) },
                           ],
-                          title: "Network speed",
+                          title: "Network rate",
                         })
                       }
                       type="button"
@@ -579,8 +596,8 @@ export function HomeTelemetryPanel({
                     </button>
                   </div>
                   <TimeSeriesChart
-                    ariaLabel="Network speed curve"
-                    emptyLabel="No network speed samples for this time gap"
+                    ariaLabel="Network interval-average rate curve"
+                    emptyLabel="No network rate samples for this time gap"
                     lines={networkSpeedChart.lines}
                     times={networkSpeedChart.times}
                     valueFormatter={(value) => formatBitsPerSecond(value ?? 0)}
@@ -588,7 +605,7 @@ export function HomeTelemetryPanel({
                 </div>
                 <div className="dashboardTopClients">
                   <div className="dashboardSideRailHeader">
-                    <strong>Top speed</strong>
+                    <strong>Top rate</strong>
                     <span>{network?.top_clients.length ?? 0} VPS</span>
                   </div>
                   {(network?.top_clients ?? []).map((client) => (
@@ -596,8 +613,8 @@ export function HomeTelemetryPanel({
                       description: `${client.interfaces.length} observed interface${client.interfaces.length === 1 ? "" : "s"}.`,
                       drilldown: client.drilldown,
                       metrics: [
-                        { label: "Inbound speed", tone: "info", value: formatBitsPerSecond(client.rx_bps) },
-                        { label: "Outbound speed", tone: "info", value: formatBitsPerSecond(client.tx_bps) },
+                        { label: "Inbound avg", tone: "info", value: formatBitsPerSecond(client.rx_bps) },
+                        { label: "Outbound avg", tone: "info", value: formatBitsPerSecond(client.tx_bps) },
                         { label: "Interfaces", value: client.interfaces.join(", ") || "No interfaces" },
                       ],
                       title: client.label,
@@ -854,7 +871,7 @@ function clusterDrawerMetrics(cluster: DashboardLabelClusterRecord): DrawerMetri
       { label: "Pending backups", tone: cluster.stale ? "info" : "neutral", value: String(cluster.stale) },
       { label: "Alerts", tone: cluster.warnings ? "warning" : "ok", value: String(cluster.warnings) },
       { label: "Running jobs", tone: cluster.running_jobs ? "info" : "neutral", value: String(cluster.running_jobs) },
-      { label: "Traffic", tone: "info", value: formatBitsPerSecond(cluster.rx_bps + cluster.tx_bps) },
+      { label: "Avg network rate", tone: "info", value: formatBitsPerSecond(cluster.rx_bps + cluster.tx_bps) },
     ];
   }
   return [
@@ -862,7 +879,7 @@ function clusterDrawerMetrics(cluster: DashboardLabelClusterRecord): DrawerMetri
     { label: "Stale", tone: cluster.stale ? "warning" : "ok", value: String(cluster.stale) },
     { label: "Warnings", tone: cluster.warnings ? "warning" : "ok", value: String(cluster.warnings) },
     { label: "Running jobs", tone: cluster.running_jobs ? "info" : "neutral", value: String(cluster.running_jobs) },
-    { label: "Traffic", tone: "info", value: formatBitsPerSecond(cluster.rx_bps + cluster.tx_bps) },
+    { label: "Avg network rate", tone: "info", value: formatBitsPerSecond(cluster.rx_bps + cluster.tx_bps) },
   ];
 }
 
@@ -1034,23 +1051,6 @@ function groupDescription(value: DashboardPreferences["groupBy"], scopeLabel: st
   }
 }
 
-function dashboardScopeLabel(preferences: DashboardPreferences, overview: DashboardOverviewRecord | null): string {
-  const value = preferences.scopeValue.trim();
-  if (preferences.scopeKind === "all") {
-    return "All VPS";
-  }
-  if (!value) {
-    return overview?.scope.label ?? "Selected VPS";
-  }
-  if (preferences.scopeKind === "provider") {
-    return value.startsWith("provider:") ? value : `provider:${value}`;
-  }
-  if (preferences.scopeKind === "country") {
-    return value.startsWith("country:") ? value : `country:${value}`;
-  }
-  return value;
-}
-
 function fallbackGroupOptions() {
   return [
     { description: "Provider, country, and custom tags together", label: "Labels", value: "labels" },
@@ -1061,42 +1061,6 @@ function fallbackGroupOptions() {
     { description: "Online, offline, and stale client states", label: "Status", value: "status" },
     { description: "Time buckets across the selected range", label: "Date buckets", value: "date" },
   ] satisfies Array<{ description: string; label: string; value: DashboardPreferences["groupBy"] }>;
-}
-
-function scopeValueOptions(kind: DashboardScopeKind, overview: DashboardOverviewRecord | null) {
-  if (!overview) {
-    return [];
-  }
-  if (kind === "provider") {
-    return overview.available_filters.providers;
-  }
-  if (kind === "country") {
-    return overview.available_filters.countries;
-  }
-  if (kind === "tag") {
-    return overview.available_filters.tags;
-  }
-  return [];
-}
-
-function isoToDateTimeLocal(value: string): string {
-  if (!value.trim()) {
-    return "";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "";
-  }
-  const offsetMs = date.getTimezoneOffset() * 60_000;
-  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
-}
-
-function dateTimeLocalToIso(value: string): string {
-  if (!value.trim()) {
-    return "";
-  }
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
 }
 
 function severityTone(value: string): "critical" | "warning" | "ok" | "info" | "neutral" {

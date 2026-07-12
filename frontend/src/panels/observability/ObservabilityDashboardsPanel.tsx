@@ -30,6 +30,7 @@ import type {
   DashboardSummaryRecord,
   DashboardWindow,
 } from "../../types";
+import { INTERFACE_RATE_DEFINITION } from "../../telemetryMetrics";
 import { formatCompactTime } from "../../utils";
 
 type ObservabilityDashboardsPanelProps = {
@@ -91,11 +92,11 @@ const dashboardPresets: DashboardPreset[] = [
   },
   {
     description:
-      "Fleet ingress/egress speed, traffic totals, and busiest network endpoints.",
+      "Fleet interval-average ingress/egress rates, traffic totals, and busiest network endpoints.",
     id: "network_traffic",
     label: "Network traffic",
     source: "Dashboard network curve API",
-    widgets: ["network speed chart", "traffic chart", "top network VPS table"],
+    widgets: ["network rate chart", "traffic chart", "top network VPS table"],
   },
   {
     description:
@@ -706,15 +707,15 @@ function NetworkDashboard({
   network: DashboardNetworkRecord;
   window: DashboardWindow;
 }) {
-  const speedLines: TimeSeriesChartLine[] = [
+  const rateLines: TimeSeriesChartLine[] = [
     {
       color: consolePalette.chart.blue,
-      label: "Inbound speed",
+      label: "Avg inbound rate",
       values: network.points.map((point) => point.rx_bps),
     },
     {
       color: consolePalette.chart.green,
-      label: "Outbound speed",
+      label: "Avg outbound rate",
       values: network.points.map((point) => point.tx_bps),
     },
   ];
@@ -730,9 +731,9 @@ function NetworkDashboard({
       values: network.traffic_points.map((point) => point.tx_bytes),
     },
   ];
-  const speedCoverage = widgetCoverageNote({
+  const rateCoverage = widgetCoverageNote({
     bucketTimes: network.points.map((point) => point.bucket_start),
-    label: "Network speed",
+    label: "Network rate",
     pointCount: network.points.length,
     selectedWindow: window,
   });
@@ -748,17 +749,17 @@ function NetworkDashboard({
       aria-label="Network traffic dashboard widgets"
     >
       <MetricTile
-        detail="Current retained ingress"
-        label="RX speed"
+        detail="Latest coherent interval average"
+        label="Avg RX rate"
         value={formatBps(network.rx_bps)}
       />
       <MetricTile
-        detail="Current retained egress"
-        label="TX speed"
+        detail="Latest coherent interval average"
+        label="Avg TX rate"
         value={formatBps(network.tx_bps)}
       />
       <MetricTile
-        detail="Top speed rows"
+        detail="Top rate rows"
         label="Network VPS"
         value={countValue(network.top_clients.length)}
       />
@@ -769,17 +770,20 @@ function NetworkDashboard({
       />
       <div
         className="dashboardWidgetChart wideWidget"
-        aria-label="Network speed chart widget"
+        aria-label="Network rate chart widget"
       >
         <WidgetHeader
-          title="Network speed chart"
-          detail="Ingress and egress bps over time"
+          title="Network rate chart"
+          detail="Interval-average ingress and egress bps over time"
         />
-        <WidgetCoverageNote note={speedCoverage} />
+        <p className="observabilityMetricDefinition" title={INTERFACE_RATE_DEFINITION}>
+          Metric definition: {INTERFACE_RATE_DEFINITION}
+        </p>
+        <WidgetCoverageNote note={rateCoverage} />
         <TimeSeriesChart
-          ariaLabel="Dashboard preset network speed chart"
-          emptyLabel="No network speed points"
-          lines={speedLines}
+          ariaLabel="Dashboard preset network interval-average rate chart"
+          emptyLabel="No network rate points"
+          lines={rateLines}
           times={network.points.map((point) => point.bucket_start)}
           valueFormatter={(value) => formatBps(value)}
         />
@@ -807,7 +811,7 @@ function NetworkDashboard({
       >
         <WidgetHeader
           title="Top network VPS"
-          detail={countPhrase(network.top_clients.length, "speed row")}
+          detail={countPhrase(network.top_clients.length, "rate row")}
         />
         {network.top_clients.slice(0, 8).map((client) => (
           <div className="dashboardWidgetRow" key={client.client_id}>
@@ -1159,8 +1163,11 @@ function dashboardAgentStatusLabel(status: string | null | undefined): string {
   if (!status) {
     return "State unavailable";
   }
-  if (status === "offline") {
+  if (status === "offline" || status === "disconnected") {
     return "Offline";
+  }
+  if (status === "never") {
+    return "Never connected";
   }
   if (status === "stale") {
     return "Stale";

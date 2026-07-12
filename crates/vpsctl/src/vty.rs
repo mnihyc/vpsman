@@ -136,7 +136,8 @@ Backups, restores, and migrations:
 
 Network and topology:
   tunnel-plans | tunnel-plan | tunnel-plan-export | tunnel-allocate
-  tunnel-promote-external-observe | tunnel-promote-custom-adapter
+  tunnel-plan-enable | tunnel-plan-disable | tunnel-plan-delete
+  tunnel-ospf-status-refresh
   tunnel-ospf-cost-update | tunnel-status | tunnel-probe | tunnel-speed-test
   network-observations | network-trends | network-ospf-recommendations
   network-ospf-update-plans | topology-graph

@@ -8,6 +8,49 @@ use vpsman_common::{
 use vpsman_server_core::{TARGET_STATUS_AGENT_LOST, TARGET_STATUS_SKIPPED};
 
 #[tokio::test]
+async fn fleet_summary_accounts_for_every_visible_connection_state() {
+    let repo = Repository::Memory(MemoryState::default());
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    let agent = |id: &str, status: &str, last_seen_at: Option<&str>| AgentView {
+        id: id.to_string(),
+        display_name: id.to_string(),
+        status: status.to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: last_seen_at.map(str::to_string),
+        arch: None,
+        internal_build_number: 1,
+        process_incarnation_id: None,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: Default::default(),
+    };
+    memory.agents.write().await.extend([
+        agent("online", "online", Some("2026-07-12T12:00:00Z")),
+        agent("missing-contact", "online", None),
+        agent("disconnected", "disconnected", Some("2026-07-12T11:59:00Z")),
+        agent("never", "never", None),
+        agent("stale", "stale", Some("2026-07-11T12:00:00Z")),
+    ]);
+
+    let summary = repo.fleet_summary().await.unwrap();
+    assert_eq!(summary.total, 5);
+    assert_eq!(summary.online, 1);
+    assert_eq!(summary.offline, 1);
+    assert_eq!(summary.never, 1);
+    assert_eq!(summary.stale, 1);
+    assert_eq!(summary.unknown, 1);
+    assert_eq!(summary.warnings, 4);
+    assert_eq!(
+        summary.online + summary.offline + summary.never + summary.stale + summary.unknown,
+        summary.total
+    );
+}
+
+#[tokio::test]
 async fn memory_namespaced_tags_participate_in_bulk_resolution() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
@@ -304,8 +347,8 @@ async fn deleting_memory_agent_removes_inventory_access_and_bulk_targets() {
         .await
         .unwrap();
 
-    assert!(response.deleted);
-    assert_eq!(response.client_id, "client-delete");
+    assert!(response.response.deleted);
+    assert_eq!(response.response.client_id, "client-delete");
     assert!(repo.list_agents().await.unwrap().is_empty());
     assert_eq!(repo.fleet_summary().await.unwrap().total, 0);
     assert!(repo.list_gateway_sessions(10).await.unwrap().is_empty());

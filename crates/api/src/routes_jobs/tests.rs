@@ -1,8 +1,8 @@
 use uuid::Uuid;
 use vpsman_common::{
     plan_tunnel, AgentCapabilitySnapshot, AgentPrivilegeMode, AgentRuntimeConfig,
-    AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource, OspfCostPolicy,
-    ProcessResourceLimits, ProcessRunPolicy, TunnelAddressPair, TunnelKind, TunnelPlanInput,
+    AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource, ProcessResourceLimits,
+    ProcessRunPolicy, TunnelAddressPair, TunnelKind, TunnelPlanInput,
 };
 
 use super::*;
@@ -465,11 +465,70 @@ fn capability_split_allows_config_read_for_unprivileged_targets() {
 }
 
 #[test]
-fn unprivileged_submission_allowlist_includes_config_read_only() {
+fn unprivileged_submission_allowlist_keeps_server_routing_status_read_only() {
     assert!(job_allows_unprivileged_submission(&JobCommand::ConfigRead));
+    let routing_status = network_routing_command(false);
+    let network_status = match &routing_status {
+        JobCommand::NetworkRoutingStatus {
+            plan_id,
+            plan,
+            side,
+            ..
+        } => JobCommand::NetworkStatus {
+            plan_id: plan_id.clone(),
+            plan: plan.clone(),
+            side: *side,
+            runtime_adapter: None,
+        },
+        _ => unreachable!("test fixture must be routing status"),
+    };
+    assert!(job_allows_unprivileged_submission(&network_status));
+    let routing_apply = network_routing_command(true);
+    assert!(job_allows_unprivileged_submission(&routing_status));
+    assert!(!job_allows_unprivileged_submission(&routing_apply));
+    assert!(validate_job_command_source(
+        &routing_status,
+        &JobPrivilegeSource::InternalOperatorMutation,
+    )
+    .is_ok());
+    assert_eq!(
+        validate_job_command_source(&routing_status, &JobPrivilegeSource::RequestAssertion)
+            .unwrap_err()
+            .code,
+        "network_routing_jobs_are_server_issued"
+    );
     assert!(!job_allows_unprivileged_submission(
         &mutating_runtime_config_sync_command()
     ));
+}
+
+#[test]
+fn internal_operator_mutations_accept_only_server_issued_commands() {
+    let shell = JobCommand::Shell {
+        argv: vec!["/bin/true".to_string()],
+        pty: false,
+    };
+    assert_eq!(
+        validate_job_command_source(&shell, &JobPrivilegeSource::InternalOperatorMutation)
+            .unwrap_err()
+            .code,
+        "internal_operator_job_not_server_issued"
+    );
+    assert!(validate_job_command_source(
+        &mutating_runtime_config_sync_command(),
+        &JobPrivilegeSource::InternalOperatorMutation,
+    )
+    .is_ok());
+    assert!(validate_job_command_source(
+        &network_routing_command(false),
+        &JobPrivilegeSource::InternalOperatorMutation,
+    )
+    .is_ok());
+    assert!(validate_job_command_source(
+        &network_routing_command(true),
+        &JobPrivilegeSource::InternalOperatorMutation,
+    )
+    .is_ok());
 }
 
 #[test]
@@ -652,8 +711,10 @@ fn mutating_runtime_config_sync_command() -> JobCommand {
         runtime_topology: Default::default(),
         left_client_id: "left-a".to_string(),
         right_client_id: "right-b".to_string(),
-        left_underlay: "198.51.100.10".to_string(),
-        right_underlay: "203.0.113.20".to_string(),
+        left_remote_underlay: "198.51.100.10".to_string(),
+        right_remote_underlay: "203.0.113.20".to_string(),
+        left_local_underlay: None,
+        right_local_underlay: None,
         address_pool_cidr: "10.255.0.0/30".to_string(),
         reserved_addresses: Vec::new(),
         ipv4_tunnel: Some(TunnelAddressPair {
@@ -665,10 +726,7 @@ fn mutating_runtime_config_sync_command() -> JobCommand {
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
-        latency_ms: 18.0,
-        packet_loss_ratio: 0.0,
-        preference: 1.0,
-        ospf_policy: OspfCostPolicy::default(),
+        ospf: None,
     })
     .unwrap();
     let mut config = AgentRuntimeConfig {
@@ -684,16 +742,73 @@ fn mutating_runtime_config_sync_command() -> JobCommand {
             plan_id: Some("plan-left-right".to_string()),
             endpoint_side: vpsman_common::TunnelEndpointSide::Left,
             plan,
+            runtime_adapter: None,
             traffic_source: AgentRuntimeTrafficSource::InterfaceCounters,
             traffic_command: None,
             latency_monitoring_enabled: true,
-            auto_ospf_enabled: false,
-            auto_ospf_updater: None,
         });
     JobCommand::RuntimeConfigSync {
         desired_version: 1,
         reason: "test-mutating-runtime-config-sync".to_string(),
         config: Box::new(config),
+    }
+}
+
+fn network_routing_command(apply: bool) -> JobCommand {
+    let plan = plan_tunnel(&TunnelPlanInput {
+        name: "routing-status".to_string(),
+        interface_name: "tunrs".to_string(),
+        kind: TunnelKind::Gre,
+        runtime_control: Default::default(),
+        runtime_topology: Default::default(),
+        left_client_id: "left-a".to_string(),
+        right_client_id: "right-b".to_string(),
+        left_remote_underlay: "198.51.100.10".to_string(),
+        right_remote_underlay: "203.0.113.20".to_string(),
+        left_local_underlay: None,
+        right_local_underlay: None,
+        address_pool_cidr: "10.255.1.0/30".to_string(),
+        reserved_addresses: Vec::new(),
+        ipv4_tunnel: Some(TunnelAddressPair {
+            left: "10.255.1.1".to_string(),
+            right: "10.255.1.2".to_string(),
+            prefix_len: 30,
+        }),
+        ipv6_address_pool_cidr: None,
+        ipv6_tunnel: None,
+        latency_primary_family: Default::default(),
+        bandwidth_mbps: 100,
+        ospf: None,
+    })
+    .unwrap();
+    let command = vpsman_common::RuntimeTunnelCommand {
+        argv: vec!["/opt/routing-adapter".to_string()],
+        max_timeout_secs: 10,
+        max_output_bytes: 4096,
+    };
+    let adapter = vpsman_common::RoutingCostAdapterCommands {
+        template_id: Uuid::new_v4().to_string(),
+        template_name: "routing-adapter".to_string(),
+        definition_hash: "a".repeat(64),
+        status: command.clone(),
+        update: command,
+    };
+    if apply {
+        JobCommand::NetworkRoutingApply {
+            plan_id: Uuid::new_v4().to_string(),
+            plan: Box::new(plan),
+            side: vpsman_common::TunnelEndpointSide::Left,
+            adapter,
+            expected_current_cost: Some(100),
+            desired_cost: 90,
+        }
+    } else {
+        JobCommand::NetworkRoutingStatus {
+            plan_id: Uuid::new_v4().to_string(),
+            plan: Box::new(plan),
+            side: vpsman_common::TunnelEndpointSide::Left,
+            adapter,
+        }
     }
 }
 

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use axum::{
     extract::{Path, Query, State},
@@ -103,11 +103,14 @@ pub(crate) async fn delete_agent(
     let targets = vec![client_id.clone()];
     let intent = DbPrivilegeIntent::new("agent.delete", &client_id, None, &targets, true, None);
     verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
-    let response = state
+    let deleted = state
         .repo
         .delete_agent(&client_id, &request, &operator)
         .await
         .map_err(agent_mutation_error)?;
+    let mut response = deleted.response;
+    let tunnel_peer_client_ids =
+        peer_client_ids_for_deleted_agent(&client_id, deleted.retired_tunnel_endpoint_pairs);
     if let Err(error) = state
         .disconnect_gateway_session_for_lifecycle(&client_id, "vps_deleted")
         .await
@@ -117,11 +120,43 @@ pub(crate) async fn delete_agent(
             client_id, "post-commit gateway disconnect failed after agent delete"
         );
     }
+    for peer_client_id in tunnel_peer_client_ids {
+        match push_runtime_config_for_clients(
+            &state,
+            &operator,
+            [peer_client_id.clone()],
+            "agent_deleted_tunnel_peer_cleanup",
+        )
+        .await
+        {
+            Ok(sync_jobs) => response
+                .runtime_sync_job_ids
+                .extend(sync_jobs.into_iter().map(|job| job.job_id)),
+            Err(error) => {
+                warn!(
+                    ?error,
+                    deleted_client_id = client_id,
+                    peer_client_id,
+                    "post-commit tunnel peer cleanup sync failed to queue"
+                );
+                response.runtime_sync_failed_client_ids.push(peer_client_id);
+            }
+        }
+    }
+    response.runtime_sync_job_ids.sort_unstable();
+    response.runtime_sync_job_ids.dedup();
+    response.runtime_sync_failed_client_ids.sort();
+    response.runtime_sync_failed_client_ids.dedup();
     state.publish(WsEvent::AgentUpdated {
         client_id,
         gateway_id: "inventory_delete".to_string(),
     });
-    state.process_job_terminal_events(500).await?;
+    if let Err(error) = state.process_job_terminal_events(500).await {
+        warn!(
+            ?error,
+            "post-commit terminal event processing failed after agent delete"
+        );
+    }
     Ok(Json(response))
 }
 
@@ -150,7 +185,16 @@ pub(crate) async fn list_telemetry_rollups(
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
     validate_telemetry_rollup_query(&query)?;
-    Ok(Json(
+    let rows = if query.latest {
+        state
+            .repo
+            .list_latest_telemetry_rollups(
+                limit_or_default(query.limit),
+                query.client_id.as_deref(),
+                query.bucket_secs,
+            )
+            .await?
+    } else {
         state
             .repo
             .list_telemetry_rollups(
@@ -158,8 +202,9 @@ pub(crate) async fn list_telemetry_rollups(
                 query.client_id.as_deref(),
                 query.bucket_secs,
             )
-            .await?,
-    ))
+            .await?
+    };
+    Ok(Json(rows))
 }
 
 pub(crate) async fn list_telemetry_network_rates(
@@ -171,7 +216,17 @@ pub(crate) async fn list_telemetry_network_rates(
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
     validate_telemetry_network_rate_query(&query)?;
-    Ok(Json(
+    let rows = if query.latest {
+        state
+            .repo
+            .list_latest_telemetry_network_rates(
+                telemetry_network_rate_limit_or_default(query.limit),
+                query.client_id.as_deref(),
+                query.interface.as_deref(),
+                query.bucket_secs,
+            )
+            .await?
+    } else {
         state
             .repo
             .list_telemetry_network_rates(
@@ -180,8 +235,9 @@ pub(crate) async fn list_telemetry_network_rates(
                 query.interface.as_deref(),
                 query.bucket_secs,
             )
-            .await?,
-    ))
+            .await?
+    };
+    Ok(Json(rows))
 }
 
 pub(crate) async fn list_telemetry_tunnels(
@@ -387,7 +443,8 @@ pub(crate) async fn diff_source_template(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_CONFIG_READ)
         .await?;
-    validate_source_template_candidate(&request.description, &request.definition)?;
+    let domain = source_template_domain(&state, template_id).await?;
+    validate_source_template_candidate(&domain, &request.description, &request.definition)?;
     Ok(Json(
         state
             .repo
@@ -406,7 +463,8 @@ pub(crate) async fn test_source_template(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_CONFIG_READ)
         .await?;
-    validate_template_definition(&request.definition)?;
+    let domain = source_template_domain(&state, template_id).await?;
+    validate_template_definition(&domain, &request.definition)?;
     Ok(Json(
         state
             .repo
@@ -425,7 +483,8 @@ pub(crate) async fn update_source_template(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "config:write")
         .await?;
-    validate_source_template_candidate(&request.description, &request.definition)?;
+    let domain = source_template_domain(&state, template_id).await?;
+    validate_source_template_candidate(&domain, &request.description, &request.definition)?;
     if request.confirmed {
         let mut preview_request = request.clone();
         preview_request.confirmed = false;
@@ -444,6 +503,7 @@ pub(crate) async fn update_source_template(
         .await?;
         let preview_hash = source_template_update_preview_hash(&preview.diff, &affected)?;
         preview.affected_client_ids = affected.clone();
+        preview.affected_client_count = affected.len() as i64;
         if !preview.confirmation_required {
             return Ok(Json(preview));
         }
@@ -470,13 +530,27 @@ pub(crate) async fn update_source_template(
             .update_source_template(template_id, &request, &operator)
             .await
             .map_err(source_template_lifecycle_error)?;
+        if response.template.domain == "routing_cost_adapter" {
+            state
+                .repo
+                .mark_routing_adapter_template_stale(response.template.id)
+                .await?;
+        }
         response.affected_client_ids = affected.clone();
+        response.affected_client_count = affected.len() as i64;
         response.preview_hash = Some(preview_hash);
-        if response.affected_client_count > 0 {
+        let sync_clients = if response.template.domain == "runtime_tunnel_adapter" {
+            source_template_active_runtime_client_ids(&state, response.template.id).await?
+        } else if response.template.domain == "routing_cost_adapter" {
+            Vec::new()
+        } else {
+            affected.clone()
+        };
+        if !sync_clients.is_empty() {
             let _sync_jobs = push_runtime_config_for_clients(
                 &state,
                 &operator,
-                affected,
+                sync_clients,
                 "source_template_updated",
             )
             .await?;
@@ -495,6 +569,7 @@ pub(crate) async fn update_source_template(
     )
     .await?;
     response.affected_client_ids = affected.clone();
+    response.affected_client_count = affected.len() as i64;
     if response.confirmation_required {
         response.preview_hash = Some(source_template_update_preview_hash(
             &response.diff,
@@ -851,14 +926,91 @@ async fn source_template_assigned_client_ids(
     template_id: uuid::Uuid,
     domain: &str,
 ) -> Result<Vec<String>, ApiError> {
-    let mut client_ids = state
+    let template_id_text = template_id.to_string();
+    let mut client_ids = if crate::source_template_builtins::is_plan_bound_adapter_domain(domain) {
+        Vec::new()
+    } else {
+        state
+            .repo
+            .list_source_template_assignments(None, Some(domain))
+            .await?
+            .into_iter()
+            .filter(|assignment| assignment.template_id == template_id)
+            .map(|assignment| assignment.client_id)
+            .collect::<Vec<_>>()
+    };
+    for plan in state.repo.list_tunnel_plans().await? {
+        match domain {
+            "runtime_tunnel_adapter" => {
+                if plan
+                    .plan
+                    .runtime_control
+                    .left_adapter_template_id
+                    .as_deref()
+                    == Some(template_id_text.as_str())
+                {
+                    client_ids.push(plan.left_client_id.clone());
+                }
+                if plan
+                    .plan
+                    .runtime_control
+                    .right_adapter_template_id
+                    .as_deref()
+                    == Some(template_id_text.as_str())
+                {
+                    client_ids.push(plan.right_client_id.clone());
+                }
+            }
+            "routing_cost_adapter" => {
+                if let Some(ospf) = &plan.plan.ospf {
+                    if ospf.left_adapter_template_id == template_id_text {
+                        client_ids.push(plan.left_client_id.clone());
+                    }
+                    if ospf.right_adapter_template_id == template_id_text {
+                        client_ids.push(plan.right_client_id.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    client_ids.sort();
+    client_ids.dedup();
+    Ok(client_ids)
+}
+
+async fn source_template_active_runtime_client_ids(
+    state: &AppState,
+    template_id: uuid::Uuid,
+) -> Result<Vec<String>, ApiError> {
+    let template_id = template_id.to_string();
+    let mut client_ids = Vec::new();
+    for plan in state
         .repo
-        .list_source_template_assignments(None, Some(domain))
+        .list_tunnel_plans()
         .await?
         .into_iter()
-        .filter(|assignment| assignment.template_id == template_id)
-        .map(|assignment| assignment.client_id)
-        .collect::<Vec<_>>();
+        .filter(|plan| plan.enabled)
+    {
+        if plan
+            .plan
+            .runtime_control
+            .left_adapter_template_id
+            .as_deref()
+            == Some(template_id.as_str())
+        {
+            client_ids.push(plan.left_client_id);
+        }
+        if plan
+            .plan
+            .runtime_control
+            .right_adapter_template_id
+            .as_deref()
+            == Some(template_id.as_str())
+        {
+            client_ids.push(plan.right_client_id);
+        }
+    }
     client_ids.sort();
     client_ids.dedup();
     Ok(client_ids)
@@ -928,11 +1080,25 @@ fn sorted_str_refs(values: &[String]) -> Vec<&str> {
     values
 }
 
+async fn source_template_domain(
+    state: &AppState,
+    template_id: uuid::Uuid,
+) -> Result<String, ApiError> {
+    state
+        .repo
+        .list_source_templates(None)
+        .await?
+        .into_iter()
+        .find(|template| template.id == template_id)
+        .map(|template| template.domain)
+        .ok_or_else(|| ApiError::not_found("source_template_not_found"))
+}
+
 fn validate_create_source_template(request: &CreateSourceTemplateRequest) -> Result<(), ApiError> {
     validate_domain(&request.domain)?;
     validate_template_name(&request.name)?;
     validate_source_template_scope(&request.scope, request.owner_client_id.as_deref())?;
-    validate_source_template_candidate(&request.description, &request.definition)
+    validate_source_template_candidate(&request.domain, &request.description, &request.definition)
 }
 
 fn validate_runtime_config_patch_generator(
@@ -1000,6 +1166,7 @@ fn validate_clone_source_template(request: &CloneSourceTemplateRequest) -> Resul
 }
 
 fn validate_source_template_candidate(
+    domain: &str,
     description: &Option<String>,
     definition: &serde_json::Value,
 ) -> Result<(), ApiError> {
@@ -1011,7 +1178,7 @@ fn validate_source_template_candidate(
             "source_template_description_too_large",
         ));
     }
-    validate_template_definition(definition)
+    validate_template_definition(domain, definition)
 }
 
 fn validate_source_template_scope(
@@ -1048,6 +1215,11 @@ fn validate_source_template_scope(
 
 fn validate_assign_source_template(request: &AssignSourceTemplateRequest) -> Result<(), ApiError> {
     validate_domain(&request.domain)?;
+    if crate::source_template_builtins::is_plan_bound_adapter_domain(&request.domain) {
+        return Err(ApiError::bad_request(
+            "source_template_adapter_requires_tunnel_plan_binding",
+        ));
+    }
     if request.selector_expression.trim().is_empty() {
         return Err(ApiError::bad_request(
             "source_template_assignment_targets_required",
@@ -1162,7 +1334,10 @@ fn validate_template_name(name: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn validate_template_definition(definition: &serde_json::Value) -> Result<(), ApiError> {
+fn validate_template_definition(
+    domain: &str,
+    definition: &serde_json::Value,
+) -> Result<(), ApiError> {
     if !definition.is_object() {
         return Err(ApiError::bad_request(
             "source_template_definition_must_be_object",
@@ -1176,7 +1351,124 @@ fn validate_template_definition(definition: &serde_json::Value) -> Result<(), Ap
             "source_template_definition_too_large",
         ));
     }
-    validate_argv_fields(definition)
+    validate_argv_fields(definition)?;
+    if domain == "runtime_tunnel_adapter" {
+        validate_runtime_tunnel_adapter_definition(definition)?;
+    }
+    if domain == "routing_cost_adapter" {
+        validate_routing_cost_adapter_definition(definition)?;
+    }
+    Ok(())
+}
+
+fn validate_runtime_tunnel_adapter_definition(
+    definition: &serde_json::Value,
+) -> Result<(), ApiError> {
+    let object = definition
+        .as_object()
+        .ok_or_else(|| ApiError::bad_request("source_template_definition_must_be_object"))?;
+    const ALLOWED_FIELDS: &[&str] = &[
+        "manager",
+        "contract_version",
+        "startup_command",
+        "restart_command",
+        "stop_command",
+        "cleanup_command",
+        "status_command",
+        "traffic_limit_command",
+    ];
+    if object
+        .keys()
+        .any(|key| !ALLOWED_FIELDS.contains(&key.as_str()))
+    {
+        return Err(ApiError::bad_request(
+            "runtime_tunnel_adapter_definition_field_invalid",
+        ));
+    }
+    if object.get("manager").and_then(serde_json::Value::as_str) != Some("external_managed_adapter")
+        || object
+            .get("contract_version")
+            .and_then(serde_json::Value::as_u64)
+            != Some(1)
+    {
+        return Err(ApiError::bad_request(
+            "runtime_tunnel_adapter_contract_invalid",
+        ));
+    }
+    if !object.contains_key("status_command")
+        || (!object.contains_key("startup_command") && !object.contains_key("restart_command"))
+        || (!object.contains_key("stop_command") && !object.contains_key("cleanup_command"))
+    {
+        return Err(ApiError::bad_request(
+            "runtime_tunnel_adapter_lifecycle_commands_required",
+        ));
+    }
+    for field in [
+        "startup_command",
+        "restart_command",
+        "stop_command",
+        "cleanup_command",
+        "status_command",
+        "traffic_limit_command",
+    ] {
+        let Some(value) = object.get(field) else {
+            continue;
+        };
+        let command: vpsman_common::RuntimeTunnelCommand = serde_json::from_value(value.clone())
+            .map_err(|_| ApiError::bad_request("runtime_tunnel_adapter_command_invalid"))?;
+        if !(1..=120).contains(&command.max_timeout_secs)
+            || !(1024..=64 * 1024).contains(&command.max_output_bytes)
+        {
+            return Err(ApiError::bad_request(
+                "runtime_tunnel_adapter_command_bounds_invalid",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_routing_cost_adapter_definition(
+    definition: &serde_json::Value,
+) -> Result<(), ApiError> {
+    let object = definition
+        .as_object()
+        .ok_or_else(|| ApiError::bad_request("source_template_definition_must_be_object"))?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "contract_version" | "status_command" | "update_command"
+        )
+    }) {
+        return Err(ApiError::bad_request(
+            "routing_cost_adapter_definition_field_invalid",
+        ));
+    }
+    if object
+        .get("contract_version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(u64::from(
+            vpsman_common::ROUTING_COST_ADAPTER_CONTRACT_VERSION,
+        ))
+    {
+        return Err(ApiError::bad_request(
+            "routing_cost_adapter_contract_version_invalid",
+        ));
+    }
+    for field in ["status_command", "update_command"] {
+        let command = object
+            .get(field)
+            .ok_or_else(|| ApiError::bad_request("routing_cost_adapter_command_required"))?;
+        let command: vpsman_common::RuntimeTunnelCommand = serde_json::from_value(command.clone())
+            .map_err(|_| ApiError::bad_request("routing_cost_adapter_command_invalid"))?;
+        if !(1..=120).contains(&command.max_timeout_secs)
+            || !(1024..=64 * 1024).contains(&command.max_output_bytes)
+        {
+            return Err(ApiError::bad_request(
+                "routing_cost_adapter_command_bounds_invalid",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_argv_fields(value: &serde_json::Value) -> Result<(), ApiError> {
@@ -1378,6 +1670,21 @@ fn validate_delete_agent_request(request: &DeleteAgentRequest) -> Result<(), Api
     Ok(())
 }
 
+fn peer_client_ids_for_deleted_agent(
+    client_id: &str,
+    endpoint_pairs: impl IntoIterator<Item = (String, String)>,
+) -> BTreeSet<String> {
+    let mut peers = BTreeSet::new();
+    for (left_client_id, right_client_id) in endpoint_pairs {
+        if left_client_id == client_id && right_client_id != client_id {
+            peers.insert(right_client_id);
+        } else if right_client_id == client_id && left_client_id != client_id {
+            peers.insert(left_client_id);
+        }
+    }
+    peers
+}
+
 fn agent_mutation_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
     if message.contains("agent_not_found") {
@@ -1443,7 +1750,11 @@ fn validate_telemetry_tunnel_query(query: &TelemetryTunnelQuery) -> Result<(), A
 
 #[cfg(test)]
 mod tests {
-    use super::{telemetry_network_rate_limit_or_default, validate_persisted_tag_name};
+    use super::{
+        peer_client_ids_for_deleted_agent, telemetry_network_rate_limit_or_default,
+        validate_assign_source_template, validate_persisted_tag_name,
+    };
+    use crate::model::AssignSourceTemplateRequest;
 
     #[test]
     fn persisted_tags_reject_inner_selector_prefixes() {
@@ -1460,5 +1771,39 @@ mod tests {
         assert_eq!(telemetry_network_rate_limit_or_default(None), 100);
         assert_eq!(telemetry_network_rate_limit_or_default(Some(5_000)), 5_000);
         assert_eq!(telemetry_network_rate_limit_or_default(Some(50_000)), 5_000);
+    }
+
+    #[test]
+    fn adapter_templates_require_explicit_tunnel_plan_bindings() {
+        for domain in ["runtime_tunnel_adapter", "routing_cost_adapter"] {
+            let error = validate_assign_source_template(&AssignSourceTemplateRequest {
+                domain: domain.to_string(),
+                template_id: uuid::Uuid::new_v4(),
+                selector_expression: "id:edge-a".to_string(),
+                target_client_ids: vec!["edge-a".to_string()],
+                confirmed: false,
+                preview_hash: None,
+                privilege_assertion: None,
+            })
+            .unwrap_err();
+            assert_eq!(
+                error.code,
+                "source_template_adapter_requires_tunnel_plan_binding"
+            );
+        }
+    }
+
+    #[test]
+    fn deleting_agent_collects_each_declared_tunnel_peer_once() {
+        let peers = peer_client_ids_for_deleted_agent(
+            "edge-a",
+            [
+                ("edge-a".to_string(), "edge-b".to_string()),
+                ("edge-c".to_string(), "edge-a".to_string()),
+                ("edge-a".to_string(), "edge-b".to_string()),
+                ("edge-c".to_string(), "edge-d".to_string()),
+            ],
+        );
+        assert_eq!(peers.into_iter().collect::<Vec<_>>(), ["edge-b", "edge-c"]);
     }
 }

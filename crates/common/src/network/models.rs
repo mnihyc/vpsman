@@ -1,22 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-pub const MANAGED_IFUPDOWN_FILE: &str = "/etc/network/interfaces.d/vpsman-tunnels";
-pub const MANAGED_BIRD2_FILE: &str = "/etc/bird/vpsman-ospf.conf";
-pub const MANAGED_NETPLAN_FILE: &str = "/etc/netplan/90-vpsman-tunnels.yaml";
-pub const MANAGED_SYSTEMD_NETWORKD_NETDEV_FILE: &str =
-    "/etc/systemd/network/90-vpsman-tunnels.netdev";
-pub const MANAGED_SYSTEMD_NETWORKD_NETWORK_FILE: &str =
-    "/etc/systemd/network/90-vpsman-tunnels.network";
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TunnelConfigBackend {
-    #[default]
-    Ifupdown,
-    Netplan,
-    SystemdNetworkd,
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TunnelKind {
@@ -63,22 +46,10 @@ impl TunnelKind {
             Self::Openvpn | Self::Wireguard | Self::TunTap | Self::Custom => None,
         }
     }
-
-    pub(crate) fn bird2_label(self) -> &'static str {
-        match self {
-            Self::Gre => "GRE",
-            Self::Ipip => "IPIP",
-            Self::Sit => "SIT",
-            Self::Fou => "FOU",
-            Self::Openvpn => "OpenVPN",
-            Self::Wireguard => "WireGuard",
-            Self::TunTap => "TUN/TAP",
-            Self::Custom => "custom",
-        }
-    }
 }
 
 pub type BandwidthMbps = u32;
+pub const ROUTING_COST_ADAPTER_CONTRACT_VERSION: u16 = 1;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct OspfCostPolicy {
@@ -103,6 +74,39 @@ impl Default for OspfCostPolicy {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OspfControlMode {
+    #[default]
+    Reviewed,
+    Automatic,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct TunnelOspfConfig {
+    #[serde(default)]
+    pub mode: OspfControlMode,
+    pub planned_latency_ms: f64,
+    pub planned_packet_loss_ratio: f64,
+    pub preference: f64,
+    #[serde(default)]
+    pub policy: OspfCostPolicy,
+    #[serde(default = "default_ospf_min_cost_delta")]
+    pub min_cost_delta: u16,
+    #[serde(default = "default_ospf_healthy_windows")]
+    pub healthy_windows: u8,
+    pub left_adapter_template_id: String,
+    pub right_adapter_template_id: String,
+}
+
+pub fn default_ospf_min_cost_delta() -> u16 {
+    5
+}
+
+pub fn default_ospf_healthy_windows() -> u8 {
+    2
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct TunnelObservation {
     pub latency_ms: f64,
@@ -118,6 +122,88 @@ pub struct RuntimeTunnelCommand {
     pub max_timeout_secs: u64,
     #[serde(default = "default_runtime_command_max_output_bytes")]
     pub max_output_bytes: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RoutingCostAdapterCommands {
+    pub template_id: String,
+    pub template_name: String,
+    pub definition_hash: String,
+    pub status: RuntimeTunnelCommand,
+    pub update: RuntimeTunnelCommand,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RuntimeTunnelAdapterCommands {
+    pub template_id: String,
+    pub template_name: String,
+    pub definition_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup: Option<RuntimeTunnelCommand>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<RuntimeTunnelCommand>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<RuntimeTunnelCommand>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart: Option<RuntimeTunnelCommand>,
+    pub status: RuntimeTunnelCommand,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traffic_limit_apply: Option<RuntimeTunnelCommand>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingCostAdapterOperation {
+    Status,
+    Apply,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RoutingCostAdapterRequest {
+    pub contract_version: u16,
+    pub operation: RoutingCostAdapterOperation,
+    pub plan_id: String,
+    pub plan_name: String,
+    pub interface_name: String,
+    pub endpoint_side: TunnelEndpointSide,
+    pub client_id: String,
+    pub peer_client_id: String,
+    pub local_underlay: Option<String>,
+    pub remote_underlay: String,
+    pub local_address: String,
+    pub remote_address: String,
+    pub prefix_len: u8,
+    pub expected_current_cost: Option<u16>,
+    pub desired_cost: Option<u16>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutingCostAdapterResponse {
+    pub contract_version: u16,
+    pub interface_name: String,
+    pub ready: bool,
+    pub current_cost: Option<u16>,
+    pub applied_cost: Option<u16>,
+    pub adapter_version: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutingCostAdapterJobResult {
+    pub contract_version: u16,
+    pub operation: RoutingCostAdapterOperation,
+    pub plan_id: String,
+    pub endpoint_side: TunnelEndpointSide,
+    pub client_id: String,
+    pub adapter_template_id: String,
+    pub adapter_definition_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<RoutingCostAdapterResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<RoutingCostAdapterResponse>,
+    pub after: RoutingCostAdapterResponse,
 }
 
 impl Default for RuntimeTunnelCommand {
@@ -208,17 +294,9 @@ pub struct RuntimeTunnelControl {
     #[serde(default)]
     pub manager: RuntimeTunnelManager,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub startup: Option<RuntimeTunnelCommand>,
+    pub left_adapter_template_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stop: Option<RuntimeTunnelCommand>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cleanup: Option<RuntimeTunnelCommand>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub restart: Option<RuntimeTunnelCommand>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<RuntimeTunnelCommand>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub traffic_limit_apply: Option<RuntimeTunnelCommand>,
+    pub right_adapter_template_id: Option<String>,
     #[serde(default, skip_serializing_if = "RuntimeTunnelTrafficLimit::is_default")]
     pub traffic_limit: RuntimeTunnelTrafficLimit,
     #[serde(default, skip_serializing_if = "RuntimeTunnelFouOptions::is_default")]
@@ -252,37 +330,6 @@ pub fn default_runtime_fou_ipproto() -> u8 {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct LegacyBirdPeer {
-    pub protocol_name: String,
-    pub interface_name: String,
-    pub peer_name: Option<String>,
-    pub cost: Option<u16>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct LegacyBirdConfig {
-    pub router_id: Option<String>,
-    pub node_name: Option<String>,
-    pub peers: Vec<LegacyBirdPeer>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct IfupdownConfig {
-    pub interfaces: Vec<IfupdownInterface>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct IfupdownInterface {
-    pub source_path: String,
-    pub name: String,
-    pub address: Option<String>,
-    pub point_to_point: Option<String>,
-    pub tunnel_kind: Option<TunnelKind>,
-    pub tunnel_local: Option<String>,
-    pub tunnel_remote: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TunnelAddressPair {
     pub left: String,
     pub right: String,
@@ -303,8 +350,12 @@ pub struct TunnelPlanInput {
     pub runtime_topology: RuntimeTunnelTopologyIntent,
     pub left_client_id: String,
     pub right_client_id: String,
-    pub left_underlay: String,
-    pub right_underlay: String,
+    pub left_remote_underlay: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_local_underlay: Option<String>,
+    pub right_remote_underlay: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_local_underlay: Option<String>,
     pub address_pool_cidr: String,
     #[serde(default)]
     pub reserved_addresses: Vec<String>,
@@ -317,14 +368,11 @@ pub struct TunnelPlanInput {
     #[serde(default)]
     pub latency_primary_family: TunnelAddressFamily,
     pub bandwidth_mbps: BandwidthMbps,
-    pub latency_ms: f64,
-    pub packet_loss_ratio: f64,
-    pub preference: f64,
-    #[serde(default)]
-    pub ospf_policy: OspfCostPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ospf: Option<TunnelOspfConfig>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct TunnelPlan {
     pub name: String,
     pub interface_name: String,
@@ -338,8 +386,12 @@ pub struct TunnelPlan {
     pub runtime_topology: RuntimeTunnelTopologyIntent,
     pub left_client_id: String,
     pub right_client_id: String,
-    pub left_underlay: String,
-    pub right_underlay: String,
+    pub left_remote_underlay: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_local_underlay: Option<String>,
+    pub right_remote_underlay: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_local_underlay: Option<String>,
     pub left_tunnel_address: String,
     pub right_tunnel_address: String,
     pub tunnel_prefix_len: u8,
@@ -350,16 +402,11 @@ pub struct TunnelPlan {
     #[serde(default)]
     pub latency_primary_family: TunnelAddressFamily,
     pub bandwidth_mbps: BandwidthMbps,
-    pub recommended_ospf_cost: u16,
-    pub ifupdown_file: String,
-    pub bird2_file: String,
-    pub ifupdown_snippet: String,
-    pub bird2_interface_snippet: String,
-    pub touched_files: Vec<String>,
-    pub validation_steps: Vec<String>,
-    pub rollback_notes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ospf: Option<TunnelOspfConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommended_ospf_cost: Option<u16>,
     pub conflicts: Vec<String>,
-    pub mutates_host: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -369,10 +416,9 @@ pub struct TunnelEndpointConfig {
     pub peer_client_id: String,
     #[serde(default, skip_serializing_if = "RuntimeTunnelControl::is_default")]
     pub runtime_control: RuntimeTunnelControl,
-    pub ifupdown_file: String,
-    pub bird2_file: String,
-    pub ifupdown_snippet: String,
-    pub bird2_interface_snippet: String,
+    pub remote_underlay: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_underlay: Option<String>,
     pub local_tunnel_address: String,
     pub remote_tunnel_address: String,
     pub tunnel_prefix_len: u8,
@@ -382,17 +428,4 @@ pub struct TunnelEndpointConfig {
     pub ipv4_tunnel: Option<TunnelAddressPair>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ipv6_tunnel: Option<TunnelAddressPair>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct TunnelBackendFile {
-    pub managed_path: &'static str,
-    pub block_kind: &'static str,
-    pub contents: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct TunnelBackendConfig {
-    pub backend: TunnelConfigBackend,
-    pub files: Vec<TunnelBackendFile>,
 }

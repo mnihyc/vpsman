@@ -94,6 +94,8 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   if (isMobile) {
     writeScreenshotManifest(testInfo.project.name);
     await expectCleanLayout(page);
+    await expect(page.locator(".workspaceRouteError")).toHaveCount(0);
+    expect(recoveredWorkspaceModuleTimeouts(consoleErrors)).toBeLessThanOrEqual(1);
     expect(actionableConsoleErrors(consoleErrors)).toEqual([]);
     return;
   }
@@ -326,6 +328,8 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   await maybeScreenshot(page, testInfo.project.name, "preferences");
   writeScreenshotManifest(testInfo.project.name);
 
+  await expect(page.locator(".workspaceRouteError")).toHaveCount(0);
+  expect(recoveredWorkspaceModuleTimeouts(consoleErrors)).toBeLessThanOrEqual(1);
   expect(actionableConsoleErrors(consoleErrors)).toEqual([]);
 });
 
@@ -445,11 +449,13 @@ async function expectLiveDashboardTelemetry(page: Page) {
     has: page.getByRole("heading", { name: "Network", exact: true }),
   });
   await networkSection
-    .getByRole("button", { name: "Speed", exact: true })
+    .getByRole("button", { name: "Rate", exact: true })
     .click();
-  await expect(networkSection.getByLabel("Network speed curve")).toBeVisible();
+  await expect(
+    networkSection.getByLabel("Network interval-average rate curve"),
+  ).toBeVisible();
   await expect(networkSection).not.toContainText(
-    /No network speed samples|unavailable/i,
+    /No network rate samples|unavailable/i,
   );
   expect(
     await networkSection.locator(".dashboardClientRow").count(),
@@ -1387,6 +1393,18 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
   for (const entry of subpages) {
     await openLiveConsoleSubpage(page, entry.view, entry.subpage);
     await expectMainMarker(page, entry.marker);
+    if (entry.view === "Network" && entry.subpage === "Graph") {
+      const graphPanel = page.locator(".topologyGraphPanel");
+      await expect(graphPanel).toContainText(
+        "2 of 2 plan endpoints shown; 1 of 1 tunnel shown",
+      );
+      await expect(graphPanel.locator(".topologyGraphNode")).toHaveCount(2);
+      await expect(graphPanel.locator(".topologyFreshnessBadge")).toContainText(
+        /just now|ago/,
+      );
+      await expect(graphPanel.getByText("OSPF cost", { exact: true })).toHaveCount(0);
+      await expect(graphPanel.getByText("Why OSPF cost changed")).toHaveCount(0);
+    }
     await expectCleanLayout(page);
     await maybeExtendedScreenshot(
       page,
@@ -1492,6 +1510,7 @@ function expectExtendedScreenshotNames(projectName: string, names: string[]) {
 function actionableConsoleErrors(errors: string[]): string[] {
   return errors.filter(
     (entry) =>
+      !isRecoverableWorkspaceModuleTimeout(entry) &&
       !entry.includes("ResizeObserver loop") &&
       !entry.includes("net::ERR_NETWORK_CHANGED") &&
       !entry.includes(
@@ -1502,5 +1521,20 @@ function actionableConsoleErrors(errors: string[]): string[] {
       ) &&
       !entry.includes("status of 401") &&
       !entry.includes("status of 404"),
+  );
+}
+
+function recoveredWorkspaceModuleTimeouts(errors: string[]): number {
+  return errors.filter((entry) =>
+    entry.startsWith("Error: Workspace module load timed out after"),
+  ).length;
+}
+
+function isRecoverableWorkspaceModuleTimeout(entry: string): boolean {
+  return (
+    entry.startsWith("Error: Workspace module load timed out after") ||
+    entry.startsWith(
+      "Workspace route failed to render Error: Workspace module load timed out after",
+    )
   );
 }

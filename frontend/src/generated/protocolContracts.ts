@@ -55,6 +55,8 @@ export const JOB_OPERATION_TYPES = [
   "network_interfaces",
   "network_probe",
   "network_speed_test",
+  "network_routing_status",
+  "network_routing_apply",
 ] as const;
 export type GeneratedJobOperationType = typeof JOB_OPERATION_TYPES[number];
 
@@ -108,6 +110,8 @@ export const JOB_COMMAND_TYPES = [
   "network_interfaces",
   "network_probe",
   "network_speed_test",
+  "network_routing_status",
+  "network_routing_apply",
 ] as const;
 export type GeneratedJobCommandType = typeof JOB_COMMAND_TYPES[number];
 
@@ -168,6 +172,8 @@ export const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE = {
   "network_interfaces": "read",
   "network_probe": "read",
   "network_speed_test": "exec",
+  "network_routing_status": "read",
+  "network_routing_apply": "exec",
 } as const satisfies Record<GeneratedJobOperationType, GeneratedJobCommandSafety>;
 
 export const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE = {
@@ -219,6 +225,8 @@ export const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE = {
   "network_interfaces": false,
   "network_probe": false,
   "network_speed_test": true,
+  "network_routing_status": false,
+  "network_routing_apply": true,
 } as const satisfies Record<GeneratedJobOperationType, boolean>;
 
 export const JOB_COMMAND_TYPE_BY_OPERATION_TYPE = {
@@ -270,6 +278,8 @@ export const JOB_COMMAND_TYPE_BY_OPERATION_TYPE = {
   "network_interfaces": "network_interfaces",
   "network_probe": "network_probe",
   "network_speed_test": "network_speed_test",
+  "network_routing_status": "network_routing_status",
+  "network_routing_apply": "network_routing_apply",
 } as const satisfies Record<GeneratedJobOperationType, GeneratedJobCommandType>;
 
 export const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE = {
@@ -322,6 +332,8 @@ export const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE = {
   "network_interfaces": "network",
   "network_probe": "network",
   "network_speed_test": "network",
+  "network_routing_status": "network",
+  "network_routing_apply": "network",
 } as const satisfies Record<GeneratedJobCommandType, string>;
 
 export const JOB_STATUSES = [
@@ -652,36 +664,6 @@ export const MIGRATION_LINK_STATUS_CLASS_BY_STATUS = {
   "linked_metadata_only": "successful",
 } as const satisfies Record<GeneratedMigrationLinkStatus, GeneratedWorkflowStatusClass>;
 
-export const TUNNEL_PLAN_STATUSES = [
-  "planned",
-  "applied",
-  "partially_applied",
-  "rolled_back",
-  "partially_rolled_back",
-] as const;
-export type GeneratedTunnelPlanStatus = typeof TUNNEL_PLAN_STATUSES[number];
-
-export const TUNNEL_PLAN_STATUS_CLASS_BY_STATUS = {
-  "planned": "neutral",
-  "applied": "successful",
-  "partially_applied": "warning",
-  "rolled_back": "neutral",
-  "partially_rolled_back": "warning",
-} as const satisfies Record<GeneratedTunnelPlanStatus, GeneratedWorkflowStatusClass>;
-
-export const TUNNEL_ENDPOINT_STATUSES = [
-  "planned",
-  "applied",
-  "rolled_back",
-] as const;
-export type GeneratedTunnelEndpointStatus = typeof TUNNEL_ENDPOINT_STATUSES[number];
-
-export const TUNNEL_ENDPOINT_STATUS_CLASS_BY_STATUS = {
-  "planned": "neutral",
-  "applied": "successful",
-  "rolled_back": "neutral",
-} as const satisfies Record<GeneratedTunnelEndpointStatus, GeneratedWorkflowStatusClass>;
-
 export const AGENT_UPDATE_RELEASE_STATUSES = [
   "published_external",
 ] as const;
@@ -808,7 +790,6 @@ export const SOURCE_READINESS_STATUSES = [
   "selected_no_artifacts",
   "selected_no_limits",
   "selected_no_samples",
-  "needs_promotion",
   "ok",
   "degraded",
 ] as const;
@@ -826,7 +807,6 @@ export const SOURCE_READINESS_STATUS_CLASS_BY_STATUS = {
   "selected_no_artifacts": "warning",
   "selected_no_limits": "warning",
   "selected_no_samples": "warning",
-  "needs_promotion": "warning",
   "ok": "successful",
   "degraded": "warning",
 } as const satisfies Record<GeneratedSourceReadinessStatus, GeneratedWorkflowStatusClass>;
@@ -849,20 +829,18 @@ export const TOPOLOGY_NODE_STATUS_CLASS_BY_STATUS = {
 } as const satisfies Record<GeneratedTopologyNodeStatus, GeneratedWorkflowStatusClass>;
 
 export const TOPOLOGY_EDGE_HEALTH_STATUSES = [
-  "planned",
-  "applied",
+  "disabled",
+  "unknown",
   "healthy",
   "degraded",
-  "rolled_back",
 ] as const;
 export type GeneratedTopologyEdgeHealthStatus = typeof TOPOLOGY_EDGE_HEALTH_STATUSES[number];
 
 export const TOPOLOGY_EDGE_HEALTH_STATUS_CLASS_BY_STATUS = {
-  "planned": "neutral",
-  "applied": "successful",
+  "disabled": "neutral",
+  "unknown": "neutral",
   "healthy": "successful",
   "degraded": "warning",
-  "rolled_back": "neutral",
 } as const satisfies Record<GeneratedTopologyEdgeHealthStatus, GeneratedWorkflowStatusClass>;
 
 export const TOPOLOGY_NEIGHBOR_STATES = [
@@ -940,24 +918,6 @@ export const TOPOLOGY_OBSERVATION_STATE_CLASS_BY_STATE = {
   "degraded": "warning",
   "recorded": "successful",
 } as const satisfies Record<GeneratedTopologyObservationState, GeneratedWorkflowStatusClass>;
-
-export const TOPOLOGY_DRIFT_POLICIES = [
-  "hold_convergence_until_endpoints_online",
-  "observe_only_until_import_promoted",
-  "observe_runtime_drift_before_apply",
-  "observe_and_recommend",
-  "eligible_for_apply",
-] as const;
-export type GeneratedTopologyDriftPolicy = typeof TOPOLOGY_DRIFT_POLICIES[number];
-
-export const TOPOLOGY_DRIFT_ACTIONS = [
-  "wait_for_reconnect",
-  "promote_observed_first",
-  "inspect_runtime_status",
-  "inspect_degraded_samples",
-  "none",
-] as const;
-export type GeneratedTopologyDriftAction = typeof TOPOLOGY_DRIFT_ACTIONS[number];
 
 export type GeneratedJsonValue =
   | null
@@ -1232,8 +1192,10 @@ export const PRIVILEGE_OPERATION_GOLDEN_VECTORS = [
   { command_type: "backup", input_json: "{\"type\":\"backup\",\"paths\":[\"/etc/app.conf\"],\"include_config\":false,\"follow_symlinks\":false,\"missing_path_policy\":\"fail\"}", canonical_json: "{\"type\":\"backup\",\"paths\":[\"/etc/app.conf\"],\"include_config\":false,\"follow_symlinks\":false,\"missing_path_policy\":\"fail\"}" },
   { command_type: "restore", input_json: "{\"type\":\"restore\",\"source_backup_request_id\":\"11111111-2222-4333-8444-555555555555\",\"archive_transfer_session_id\":\"22222222-3333-4444-8555-666666666666\",\"paths\":[\"/etc/app.conf\"],\"include_config\":false,\"destination_root\":null,\"archive_path\":\"/var/lib/vpsman/restores/app.tar\",\"archive_size_bytes\":128,\"archive_sha256_hex\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}", canonical_json: "{\"type\":\"restore\",\"source_backup_request_id\":\"11111111-2222-4333-8444-555555555555\",\"archive_transfer_session_id\":\"22222222-3333-4444-8555-666666666666\",\"paths\":[\"/etc/app.conf\"],\"include_config\":false,\"destination_root\":null,\"archive_path\":\"/var/lib/vpsman/restores/app.tar\",\"archive_size_bytes\":128,\"archive_sha256_hex\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}" },
   { command_type: "restore_rollback", input_json: "{\"type\":\"restore_rollback\",\"source_restore_job_id\":\"33333333-4444-4555-8666-777777777777\",\"restored_files\":[{\"archive_path\":\"etc/app.conf\",\"destination_path\":\"/etc/app.conf\",\"rollback_path\":\"/var/lib/vpsman/rollback/app.conf\",\"restored_size_bytes\":4,\"restored_sha256_hex\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}]}", canonical_json: "{\"type\":\"restore_rollback\",\"source_restore_job_id\":\"33333333-4444-4555-8666-777777777777\",\"restored_files\":[{\"archive_path\":\"etc/app.conf\",\"destination_path\":\"/etc/app.conf\",\"rollback_path\":\"/var/lib/vpsman/rollback/app.conf\",\"restored_size_bytes\":4,\"restored_sha256_hex\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}]}" },
-  { command_type: "network_status", input_json: "{\"type\":\"network_status\",\"plan\":{\"name\":\"left-a-right-b\",\"interface_name\":\"tunab\",\"kind\":\"gre\",\"left_client_id\":\"left-a\",\"right_client_id\":\"right-b\",\"left_underlay\":\"198.51.100.10\",\"right_underlay\":\"203.0.113.20\",\"left_tunnel_address\":\"10.255.0.0\",\"right_tunnel_address\":\"10.255.0.1\",\"tunnel_prefix_len\":31,\"ipv4_tunnel\":{\"left\":\"10.255.0.0\",\"right\":\"10.255.0.1\",\"prefix_len\":31},\"latency_primary_family\":\"ipv4\",\"bandwidth_mbps\":100,\"recommended_ospf_cost\":28,\"ifupdown_file\":\"/etc/network/interfaces.d/vpsman-tunnels\",\"bird2_file\":\"/etc/bird/vpsman-ospf.conf\",\"ifupdown_snippet\":\"# vpsman tunnel left-a-right-b: server-managed runtime config\\nauto tunab\\niface tunab inet static\\n    address 10.255.0.0\\n    netmask 255.255.255.254\\n    pointopoint 10.255.0.1\\n    pre-up ip tunnel add $IFACE mode gre remote 203.0.113.20 local 198.51.100.10 ttl 255\\n    up ip link set $IFACE up\\n    post-down ip tunnel del $IFACE || true\",\"bird2_interface_snippet\":\"# vpsman GRE tunnel left-a-right-b: left-a -> right-b\\ninterface \\\"tunab\\\" {\\n  type ptp;\\n  cost 28;\\n};\",\"touched_files\":[\"/etc/network/interfaces.d/vpsman-tunnels\",\"/etc/bird/vpsman-ospf.conf\"],\"validation_steps\":[\"review generated runtime snippets before enabling the plan\",\"run ifreload --syntax-check for ifupdown2-managed snippets where available\",\"run bird -p before Bird2 reload where available\",\"verify tunnel latency and packet loss before accepting OSPF cost\"],\"rollback_notes\":[\"remove only the vpsman-managed interface block from /etc/network/interfaces.d/vpsman-tunnels\",\"remove only the matching vpsman-managed Bird2 interface block\",\"reload networking and Bird2 after validation succeeds\"],\"conflicts\":[],\"mutates_host\":false},\"side\":\"left\"}", canonical_json: "{\"type\":\"network_status\",\"plan\":{\"name\":\"left-a-right-b\",\"interface_name\":\"tunab\",\"kind\":\"gre\",\"left_client_id\":\"left-a\",\"right_client_id\":\"right-b\",\"left_underlay\":\"198.51.100.10\",\"right_underlay\":\"203.0.113.20\",\"left_tunnel_address\":\"10.255.0.0\",\"right_tunnel_address\":\"10.255.0.1\",\"tunnel_prefix_len\":31,\"ipv4_tunnel\":{\"left\":\"10.255.0.0\",\"right\":\"10.255.0.1\",\"prefix_len\":31},\"latency_primary_family\":\"ipv4\",\"bandwidth_mbps\":100,\"recommended_ospf_cost\":28,\"ifupdown_file\":\"/etc/network/interfaces.d/vpsman-tunnels\",\"bird2_file\":\"/etc/bird/vpsman-ospf.conf\",\"ifupdown_snippet\":\"# vpsman tunnel left-a-right-b: server-managed runtime config\\nauto tunab\\niface tunab inet static\\n    address 10.255.0.0\\n    netmask 255.255.255.254\\n    pointopoint 10.255.0.1\\n    pre-up ip tunnel add $IFACE mode gre remote 203.0.113.20 local 198.51.100.10 ttl 255\\n    up ip link set $IFACE up\\n    post-down ip tunnel del $IFACE || true\",\"bird2_interface_snippet\":\"# vpsman GRE tunnel left-a-right-b: left-a -> right-b\\ninterface \\\"tunab\\\" {\\n  type ptp;\\n  cost 28;\\n};\",\"touched_files\":[\"/etc/network/interfaces.d/vpsman-tunnels\",\"/etc/bird/vpsman-ospf.conf\"],\"validation_steps\":[\"review generated runtime snippets before enabling the plan\",\"run ifreload --syntax-check for ifupdown2-managed snippets where available\",\"run bird -p before Bird2 reload where available\",\"verify tunnel latency and packet loss before accepting OSPF cost\"],\"rollback_notes\":[\"remove only the vpsman-managed interface block from /etc/network/interfaces.d/vpsman-tunnels\",\"remove only the matching vpsman-managed Bird2 interface block\",\"reload networking and Bird2 after validation succeeds\"],\"conflicts\":[],\"mutates_host\":false},\"side\":\"left\"}" },
+  { command_type: "network_status", input_json: "{\"type\":\"network_status\",\"plan_id\":\"11111111-2222-4333-8444-555555555555\",\"plan\":{\"name\":\"left-a-right-b\",\"interface_name\":\"tunab\",\"kind\":\"gre\",\"left_client_id\":\"left-a\",\"right_client_id\":\"right-b\",\"left_remote_underlay\":\"203.0.113.20\",\"left_local_underlay\":\"10.0.0.10\",\"right_remote_underlay\":\"198.51.100.10\",\"left_tunnel_address\":\"10.255.0.0\",\"right_tunnel_address\":\"10.255.0.1\",\"tunnel_prefix_len\":31,\"ipv4_tunnel\":{\"left\":\"10.255.0.0\",\"right\":\"10.255.0.1\",\"prefix_len\":31},\"latency_primary_family\":\"ipv4\",\"bandwidth_mbps\":100,\"conflicts\":[]},\"side\":\"left\"}", canonical_json: "{\"type\":\"network_status\",\"plan_id\":\"11111111-2222-4333-8444-555555555555\",\"plan\":{\"name\":\"left-a-right-b\",\"interface_name\":\"tunab\",\"kind\":\"gre\",\"left_client_id\":\"left-a\",\"right_client_id\":\"right-b\",\"left_remote_underlay\":\"203.0.113.20\",\"left_local_underlay\":\"10.0.0.10\",\"right_remote_underlay\":\"198.51.100.10\",\"left_tunnel_address\":\"10.255.0.0\",\"right_tunnel_address\":\"10.255.0.1\",\"tunnel_prefix_len\":31,\"ipv4_tunnel\":{\"left\":\"10.255.0.0\",\"right\":\"10.255.0.1\",\"prefix_len\":31},\"latency_primary_family\":\"ipv4\",\"bandwidth_mbps\":100,\"conflicts\":[]},\"side\":\"left\"}" },
   { command_type: "network_interfaces", input_json: "{\"type\":\"network_interfaces\"}", canonical_json: "{\"type\":\"network_interfaces\"}" },
-  { command_type: "network_probe", input_json: "{\"type\":\"network_probe\",\"plan\":{\"name\":\"left-a-right-b\",\"interface_name\":\"tunab\",\"kind\":\"gre\",\"left_client_id\":\"left-a\",\"right_client_id\":\"right-b\",\"left_underlay\":\"198.51.100.10\",\"right_underlay\":\"203.0.113.20\",\"left_tunnel_address\":\"10.255.0.0\",\"right_tunnel_address\":\"10.255.0.1\",\"tunnel_prefix_len\":31,\"ipv4_tunnel\":{\"left\":\"10.255.0.0\",\"right\":\"10.255.0.1\",\"prefix_len\":31},\"latency_primary_family\":\"ipv4\",\"bandwidth_mbps\":100,\"recommended_ospf_cost\":28,\"ifupdown_file\":\"/etc/network/interfaces.d/vpsman-tunnels\",\"bird2_file\":\"/etc/bird/vpsman-ospf.conf\",\"ifupdown_snippet\":\"# vpsman tunnel left-a-right-b: server-managed runtime config\\nauto tunab\\niface tunab inet static\\n    address 10.255.0.0\\n    netmask 255.255.255.254\\n    pointopoint 10.255.0.1\\n    pre-up ip tunnel add $IFACE mode gre remote 203.0.113.20 local 198.51.100.10 ttl 255\\n    up ip link set $IFACE up\\n    post-down ip tunnel del $IFACE || true\",\"bird2_interface_snippet\":\"# vpsman GRE tunnel left-a-right-b: left-a -> right-b\\ninterface \\\"tunab\\\" {\\n  type ptp;\\n  cost 28;\\n};\",\"touched_files\":[\"/etc/network/interfaces.d/vpsman-tunnels\",\"/etc/bird/vpsman-ospf.conf\"],\"validation_steps\":[\"review generated runtime snippets before enabling the plan\",\"run ifreload --syntax-check for ifupdown2-managed snippets where available\",\"run bird -p before Bird2 reload where available\",\"verify tunnel latency and packet loss before accepting OSPF cost\"],\"rollback_notes\":[\"remove only the vpsman-managed interface block from /etc/network/interfaces.d/vpsman-tunnels\",\"remove only the matching vpsman-managed Bird2 interface block\",\"reload networking and Bird2 after validation succeeds\"],\"conflicts\":[],\"mutates_host\":false},\"side\":\"left\",\"count\":3,\"interval_ms\":500}", canonical_json: "{\"type\":\"network_probe\",\"plan\":{\"name\":\"left-a-right-b\",\"interface_name\":\"tunab\",\"kind\":\"gre\",\"left_client_id\":\"left-a\",\"right_client_id\":\"right-b\",\"left_underlay\":\"198.51.100.10\",\"right_underlay\":\"203.0.113.20\",\"left_tunnel_address\":\"10.255.0.0\",\"right_tunnel_address\":\"10.255.0.1\",\"tunnel_prefix_len\":31,\"ipv4_tunnel\":{\"left\":\"10.255.0.0\",\"right\":\"10.255.0.1\",\"prefix_len\":31},\"latency_primary_family\":\"ipv4\",\"bandwidth_mbps\":100,\"recommended_ospf_cost\":28,\"ifupdown_file\":\"/etc/network/interfaces.d/vpsman-tunnels\",\"bird2_file\":\"/etc/bird/vpsman-ospf.conf\",\"ifupdown_snippet\":\"# vpsman tunnel left-a-right-b: server-managed runtime config\\nauto tunab\\niface tunab inet static\\n    address 10.255.0.0\\n    netmask 255.255.255.254\\n    pointopoint 10.255.0.1\\n    pre-up ip tunnel add $IFACE mode gre remote 203.0.113.20 local 198.51.100.10 ttl 255\\n    up ip link set $IFACE up\\n    post-down ip tunnel del $IFACE || true\",\"bird2_interface_snippet\":\"# vpsman GRE tunnel left-a-right-b: left-a -> right-b\\ninterface \\\"tunab\\\" {\\n  type ptp;\\n  cost 28;\\n};\",\"touched_files\":[\"/etc/network/interfaces.d/vpsman-tunnels\",\"/etc/bird/vpsman-ospf.conf\"],\"validation_steps\":[\"review generated runtime snippets before enabling the plan\",\"run ifreload --syntax-check for ifupdown2-managed snippets where available\",\"run bird -p before Bird2 reload where available\",\"verify tunnel latency and packet loss before accepting OSPF cost\"],\"rollback_notes\":[\"remove only the vpsman-managed interface block from /etc/network/interfaces.d/vpsman-tunnels\",\"remove only the matching vpsman-managed Bird2 interface block\",\"reload networking and Bird2 after validation succeeds\"],\"conflicts\":[],\"mutates_host\":false},\"side\":\"left\",\"count\":3,\"interval_ms\":500}" },
-  { command_type: "network_speed_test", input_json: "{\"type\":\"network_speed_test\",\"plan\":{\"name\":\"left-a-right-b\",\"interface_name\":\"tunab\",\"kind\":\"gre\",\"left_client_id\":\"left-a\",\"right_client_id\":\"right-b\",\"left_underlay\":\"198.51.100.10\",\"right_underlay\":\"203.0.113.20\",\"left_tunnel_address\":\"10.255.0.0\",\"right_tunnel_address\":\"10.255.0.1\",\"tunnel_prefix_len\":31,\"ipv4_tunnel\":{\"left\":\"10.255.0.0\",\"right\":\"10.255.0.1\",\"prefix_len\":31},\"latency_primary_family\":\"ipv4\",\"bandwidth_mbps\":100,\"recommended_ospf_cost\":28,\"ifupdown_file\":\"/etc/network/interfaces.d/vpsman-tunnels\",\"bird2_file\":\"/etc/bird/vpsman-ospf.conf\",\"ifupdown_snippet\":\"# vpsman tunnel left-a-right-b: server-managed runtime config\\nauto tunab\\niface tunab inet static\\n    address 10.255.0.0\\n    netmask 255.255.255.254\\n    pointopoint 10.255.0.1\\n    pre-up ip tunnel add $IFACE mode gre remote 203.0.113.20 local 198.51.100.10 ttl 255\\n    up ip link set $IFACE up\\n    post-down ip tunnel del $IFACE || true\",\"bird2_interface_snippet\":\"# vpsman GRE tunnel left-a-right-b: left-a -> right-b\\ninterface \\\"tunab\\\" {\\n  type ptp;\\n  cost 28;\\n};\",\"touched_files\":[\"/etc/network/interfaces.d/vpsman-tunnels\",\"/etc/bird/vpsman-ospf.conf\"],\"validation_steps\":[\"review generated runtime snippets before enabling the plan\",\"run ifreload --syntax-check for ifupdown2-managed snippets where available\",\"run bird -p before Bird2 reload where available\",\"verify tunnel latency and packet loss before accepting OSPF cost\"],\"rollback_notes\":[\"remove only the vpsman-managed interface block from /etc/network/interfaces.d/vpsman-tunnels\",\"remove only the matching vpsman-managed Bird2 interface block\",\"reload networking and Bird2 after validation succeeds\"],\"conflicts\":[],\"mutates_host\":false},\"server_side\":\"left\",\"duration_secs\":3,\"max_bytes\":16777216,\"rate_limit_kbps\":100000,\"port\":5201,\"connect_timeout_ms\":5000}", canonical_json: "{\"type\":\"network_speed_test\",\"plan\":{\"name\":\"left-a-right-b\",\"interface_name\":\"tunab\",\"kind\":\"gre\",\"left_client_id\":\"left-a\",\"right_client_id\":\"right-b\",\"left_underlay\":\"198.51.100.10\",\"right_underlay\":\"203.0.113.20\",\"left_tunnel_address\":\"10.255.0.0\",\"right_tunnel_address\":\"10.255.0.1\",\"tunnel_prefix_len\":31,\"ipv4_tunnel\":{\"left\":\"10.255.0.0\",\"right\":\"10.255.0.1\",\"prefix_len\":31},\"latency_primary_family\":\"ipv4\",\"bandwidth_mbps\":100,\"recommended_ospf_cost\":28,\"ifupdown_file\":\"/etc/network/interfaces.d/vpsman-tunnels\",\"bird2_file\":\"/etc/bird/vpsman-ospf.conf\",\"ifupdown_snippet\":\"# vpsman tunnel left-a-right-b: server-managed runtime config\\nauto tunab\\niface tunab inet static\\n    address 10.255.0.0\\n    netmask 255.255.255.254\\n    pointopoint 10.255.0.1\\n    pre-up ip tunnel add $IFACE mode gre remote 203.0.113.20 local 198.51.100.10 ttl 255\\n    up ip link set $IFACE up\\n    post-down ip tunnel del $IFACE || true\",\"bird2_interface_snippet\":\"# vpsman GRE tunnel left-a-right-b: left-a -> right-b\\ninterface \\\"tunab\\\" {\\n  type ptp;\\n  cost 28;\\n};\",\"touched_files\":[\"/etc/network/interfaces.d/vpsman-tunnels\",\"/etc/bird/vpsman-ospf.conf\"],\"validation_steps\":[\"review generated runtime snippets before enabling the plan\",\"run ifreload --syntax-check for ifupdown2-managed snippets where available\",\"run bird -p before Bird2 reload where available\",\"verify tunnel latency and packet loss before accepting OSPF cost\"],\"rollback_notes\":[\"remove only the vpsman-managed interface block from /etc/network/interfaces.d/vpsman-tunnels\",\"remove only the matching vpsman-managed Bird2 interface block\",\"reload networking and Bird2 after validation succeeds\"],\"conflicts\":[],\"mutates_host\":false},\"server_side\":\"left\",\"duration_secs\":3,\"max_bytes\":16777216,\"rate_limit_kbps\":100000,\"port\":5201,\"connect_timeout_ms\":5000}" },
+  { command_type: "network_probe", input_json: "{\"type\":\"network_probe\",\"plan_id\":\"11111111-2222-4333-8444-555555555555\",\"plan\":{\"name\":\"left-a-right-b\",\"interface_name\":\"tunab\",\"kind\":\"gre\",\"left_client_id\":\"left-a\",\"right_client_id\":\"right-b\",\"left_remote_underlay\":\"203.0.113.20\",\"left_local_underlay\":\"10.0.0.10\",\"right_remote_underlay\":\"198.51.100.10\",\"left_tunnel_address\":\"10.255.0.0\",\"right_tunnel_address\":\"10.255.0.1\",\"tunnel_prefix_len\":31,\"ipv4_tunnel\":{\"left\":\"10.255.0.0\",\"right\":\"10.255.0.1\",\"prefix_len\":31},\"latency_primary_family\":\"ipv4\",\"bandwidth_mbps\":100,\"conflicts\":[]},\"side\":\"left\",\"count\":3,\"interval_ms\":500}", canonical_json: "{\"type\":\"network_probe\",\"plan_id\":\"11111111-2222-4333-8444-555555555555\",\"plan\":{\"name\":\"left-a-right-b\",\"interface_name\":\"tunab\",\"kind\":\"gre\",\"left_client_id\":\"left-a\",\"right_client_id\":\"right-b\",\"left_remote_underlay\":\"203.0.113.20\",\"left_local_underlay\":\"10.0.0.10\",\"right_remote_underlay\":\"198.51.100.10\",\"left_tunnel_address\":\"10.255.0.0\",\"right_tunnel_address\":\"10.255.0.1\",\"tunnel_prefix_len\":31,\"ipv4_tunnel\":{\"left\":\"10.255.0.0\",\"right\":\"10.255.0.1\",\"prefix_len\":31},\"latency_primary_family\":\"ipv4\",\"bandwidth_mbps\":100,\"conflicts\":[]},\"side\":\"left\",\"count\":3,\"interval_ms\":500}" },
+  { command_type: "network_speed_test", input_json: "{\"type\":\"network_speed_test\",\"plan_id\":\"11111111-2222-4333-8444-555555555555\",\"plan\":{\"name\":\"left-a-right-b\",\"interface_name\":\"tunab\",\"kind\":\"gre\",\"left_client_id\":\"left-a\",\"right_client_id\":\"right-b\",\"left_remote_underlay\":\"203.0.113.20\",\"left_local_underlay\":\"10.0.0.10\",\"right_remote_underlay\":\"198.51.100.10\",\"left_tunnel_address\":\"10.255.0.0\",\"right_tunnel_address\":\"10.255.0.1\",\"tunnel_prefix_len\":31,\"ipv4_tunnel\":{\"left\":\"10.255.0.0\",\"right\":\"10.255.0.1\",\"prefix_len\":31},\"latency_primary_family\":\"ipv4\",\"bandwidth_mbps\":100,\"conflicts\":[]},\"server_side\":\"left\",\"duration_secs\":3,\"max_bytes\":16777216,\"rate_limit_kbps\":100000,\"port\":5201,\"connect_timeout_ms\":5000}", canonical_json: "{\"type\":\"network_speed_test\",\"plan_id\":\"11111111-2222-4333-8444-555555555555\",\"plan\":{\"name\":\"left-a-right-b\",\"interface_name\":\"tunab\",\"kind\":\"gre\",\"left_client_id\":\"left-a\",\"right_client_id\":\"right-b\",\"left_remote_underlay\":\"203.0.113.20\",\"left_local_underlay\":\"10.0.0.10\",\"right_remote_underlay\":\"198.51.100.10\",\"left_tunnel_address\":\"10.255.0.0\",\"right_tunnel_address\":\"10.255.0.1\",\"tunnel_prefix_len\":31,\"ipv4_tunnel\":{\"left\":\"10.255.0.0\",\"right\":\"10.255.0.1\",\"prefix_len\":31},\"latency_primary_family\":\"ipv4\",\"bandwidth_mbps\":100,\"conflicts\":[]},\"server_side\":\"left\",\"duration_secs\":3,\"max_bytes\":16777216,\"rate_limit_kbps\":100000,\"port\":5201,\"connect_timeout_ms\":5000}" },
+  { command_type: "network_routing_status", input_json: "{\"type\":\"network_routing_status\",\"plan_id\":\"plan-a\",\"plan\":{\"name\":\"left-a-right-b\",\"interface_name\":\"tunab\",\"kind\":\"gre\",\"left_client_id\":\"left-a\",\"right_client_id\":\"right-b\",\"left_remote_underlay\":\"203.0.113.20\",\"left_local_underlay\":\"10.0.0.10\",\"right_remote_underlay\":\"198.51.100.10\",\"left_tunnel_address\":\"10.255.0.0\",\"right_tunnel_address\":\"10.255.0.1\",\"tunnel_prefix_len\":31,\"ipv4_tunnel\":{\"left\":\"10.255.0.0\",\"right\":\"10.255.0.1\",\"prefix_len\":31},\"latency_primary_family\":\"ipv4\",\"bandwidth_mbps\":100,\"conflicts\":[]},\"side\":\"left\",\"adapter\":{\"template_id\":\"routing-adapter-a\",\"template_name\":\"Routing adapter A\",\"definition_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"status\":{\"argv\":[\"/opt/network-adapters/status\"],\"max_timeout_secs\":10,\"max_output_bytes\":16384},\"update\":{\"argv\":[\"/opt/network-adapters/update\"],\"max_timeout_secs\":10,\"max_output_bytes\":16384}}}", canonical_json: "{\"type\":\"network_routing_status\",\"plan_id\":\"plan-a\",\"plan\":{\"name\":\"left-a-right-b\",\"interface_name\":\"tunab\",\"kind\":\"gre\",\"left_client_id\":\"left-a\",\"right_client_id\":\"right-b\",\"left_remote_underlay\":\"203.0.113.20\",\"left_local_underlay\":\"10.0.0.10\",\"right_remote_underlay\":\"198.51.100.10\",\"left_tunnel_address\":\"10.255.0.0\",\"right_tunnel_address\":\"10.255.0.1\",\"tunnel_prefix_len\":31,\"ipv4_tunnel\":{\"left\":\"10.255.0.0\",\"right\":\"10.255.0.1\",\"prefix_len\":31},\"latency_primary_family\":\"ipv4\",\"bandwidth_mbps\":100,\"conflicts\":[]},\"side\":\"left\",\"adapter\":{\"template_id\":\"routing-adapter-a\",\"template_name\":\"Routing adapter A\",\"definition_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"status\":{\"argv\":[\"/opt/network-adapters/status\"],\"max_timeout_secs\":10,\"max_output_bytes\":16384},\"update\":{\"argv\":[\"/opt/network-adapters/update\"],\"max_timeout_secs\":10,\"max_output_bytes\":16384}}}" },
+  { command_type: "network_routing_apply", input_json: "{\"type\":\"network_routing_apply\",\"plan_id\":\"plan-a\",\"plan\":{\"name\":\"left-a-right-b\",\"interface_name\":\"tunab\",\"kind\":\"gre\",\"left_client_id\":\"left-a\",\"right_client_id\":\"right-b\",\"left_remote_underlay\":\"203.0.113.20\",\"left_local_underlay\":\"10.0.0.10\",\"right_remote_underlay\":\"198.51.100.10\",\"left_tunnel_address\":\"10.255.0.0\",\"right_tunnel_address\":\"10.255.0.1\",\"tunnel_prefix_len\":31,\"ipv4_tunnel\":{\"left\":\"10.255.0.0\",\"right\":\"10.255.0.1\",\"prefix_len\":31},\"latency_primary_family\":\"ipv4\",\"bandwidth_mbps\":100,\"conflicts\":[]},\"side\":\"left\",\"adapter\":{\"template_id\":\"routing-adapter-a\",\"template_name\":\"Routing adapter A\",\"definition_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"status\":{\"argv\":[\"/opt/network-adapters/status\"],\"max_timeout_secs\":10,\"max_output_bytes\":16384},\"update\":{\"argv\":[\"/opt/network-adapters/update\"],\"max_timeout_secs\":10,\"max_output_bytes\":16384}},\"expected_current_cost\":20,\"desired_cost\":24}", canonical_json: "{\"type\":\"network_routing_apply\",\"plan_id\":\"plan-a\",\"plan\":{\"name\":\"left-a-right-b\",\"interface_name\":\"tunab\",\"kind\":\"gre\",\"left_client_id\":\"left-a\",\"right_client_id\":\"right-b\",\"left_remote_underlay\":\"203.0.113.20\",\"left_local_underlay\":\"10.0.0.10\",\"right_remote_underlay\":\"198.51.100.10\",\"left_tunnel_address\":\"10.255.0.0\",\"right_tunnel_address\":\"10.255.0.1\",\"tunnel_prefix_len\":31,\"ipv4_tunnel\":{\"left\":\"10.255.0.0\",\"right\":\"10.255.0.1\",\"prefix_len\":31},\"latency_primary_family\":\"ipv4\",\"bandwidth_mbps\":100,\"conflicts\":[]},\"side\":\"left\",\"adapter\":{\"template_id\":\"routing-adapter-a\",\"template_name\":\"Routing adapter A\",\"definition_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"status\":{\"argv\":[\"/opt/network-adapters/status\"],\"max_timeout_secs\":10,\"max_output_bytes\":16384},\"update\":{\"argv\":[\"/opt/network-adapters/update\"],\"max_timeout_secs\":10,\"max_output_bytes\":16384}},\"expected_current_cost\":20,\"desired_cost\":24}" },
 ] as const satisfies readonly { command_type: string; input_json: string; canonical_json: string }[];

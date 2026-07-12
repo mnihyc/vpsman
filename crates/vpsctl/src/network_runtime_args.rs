@@ -2,8 +2,8 @@ use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
 use vpsman_common::{
     default_runtime_fou_ipproto, default_runtime_fou_peer_port, default_runtime_fou_port,
-    RuntimeTunnelCommand, RuntimeTunnelControl, RuntimeTunnelFouOptions, RuntimeTunnelManager,
-    RuntimeTunnelRoute, RuntimeTunnelTopologyIntent, RuntimeTunnelTrafficLimit,
+    RuntimeTunnelControl, RuntimeTunnelFouOptions, RuntimeTunnelManager, RuntimeTunnelRoute,
+    RuntimeTunnelTopologyIntent, RuntimeTunnelTrafficLimit,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -26,12 +26,8 @@ impl From<RuntimeManagerArg> for RuntimeTunnelManager {
 
 pub(crate) struct RuntimeControlArgs<'a> {
     pub(crate) manager: RuntimeTunnelManager,
-    pub(crate) startup_argv: &'a [String],
-    pub(crate) stop_argv: &'a [String],
-    pub(crate) cleanup_argv: &'a [String],
-    pub(crate) restart_argv: &'a [String],
-    pub(crate) status_argv: &'a [String],
-    pub(crate) traffic_limit_argv: &'a [String],
+    pub(crate) left_adapter_template_id: Option<&'a str>,
+    pub(crate) right_adapter_template_id: Option<&'a str>,
     pub(crate) traffic_ingress_kbps: Option<u32>,
     pub(crate) traffic_egress_kbps: Option<u32>,
     pub(crate) traffic_burst_kb: Option<u32>,
@@ -51,12 +47,8 @@ pub(crate) struct RuntimeTopologyArgs<'a> {
 pub(crate) fn build_runtime_control(args: RuntimeControlArgs<'_>) -> RuntimeTunnelControl {
     RuntimeTunnelControl {
         manager: args.manager,
-        startup: runtime_command(args.startup_argv),
-        stop: runtime_command(args.stop_argv),
-        cleanup: runtime_command(args.cleanup_argv),
-        restart: runtime_command(args.restart_argv),
-        status: runtime_command(args.status_argv),
-        traffic_limit_apply: runtime_command(args.traffic_limit_argv),
+        left_adapter_template_id: args.left_adapter_template_id.map(str::to_string),
+        right_adapter_template_id: args.right_adapter_template_id.map(str::to_string),
         traffic_limit: RuntimeTunnelTrafficLimit {
             ingress_kbps: args.traffic_ingress_kbps,
             egress_kbps: args.traffic_egress_kbps,
@@ -89,31 +81,11 @@ pub(crate) fn parse_runtime_manager(value: &str) -> Result<RuntimeTunnelManager>
         "agent_iproute2_managed" | "iproute2" | "agent" => {
             Ok(RuntimeTunnelManager::AgentIproute2Managed)
         }
-        "external_observed" | "observed" | "imported" => Ok(RuntimeTunnelManager::ExternalObserved),
+        "external_observed" | "observed" => Ok(RuntimeTunnelManager::ExternalObserved),
         "external_managed_adapter" | "adapter" | "external_adapter" => {
             Ok(RuntimeTunnelManager::ExternalManagedAdapter)
         }
         _ => bail!("invalid runtime manager {value}"),
-    }
-}
-
-pub(crate) fn split_argv_spec(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
-fn runtime_command(argv: &[String]) -> Option<RuntimeTunnelCommand> {
-    if argv.is_empty() {
-        None
-    } else {
-        Some(RuntimeTunnelCommand {
-            argv: argv.to_vec(),
-            ..RuntimeTunnelCommand::default()
-        })
     }
 }
 

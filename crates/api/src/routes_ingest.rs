@@ -8,7 +8,9 @@ use vpsman_common::{
     is_terminal_command_type, AgentUpdateVerificationResult, CommandOutput,
     GatewayAgentHelloIngest, GatewayAgentUpdateVerificationIngest, GatewayCommandOutputIngest,
     GatewayRuntimeConfigReloadRequest, GatewaySessionLifecycleIngest, GatewayTelemetryIngest,
-    GatewayTerminalOutputIngest, JobCommand, OutputStream, MAX_RUNTIME_CONFIG_REASON_BYTES,
+    GatewayTerminalOutputIngest, JobCommand, OutputStream, RoutingCostAdapterJobResult,
+    RoutingCostAdapterOperation, MAX_RUNTIME_CONFIG_REASON_BYTES, MAX_TELEMETRY_DISKS,
+    MAX_TELEMETRY_NETWORKS, MAX_TELEMETRY_TUNNELS,
 };
 use vpsman_server_core::{
     target_status_is_active, TARGET_STATUS_AGENT_LOST, TARGET_STATUS_AGENT_TIMEOUT,
@@ -216,7 +218,7 @@ pub(crate) async fn ingest_telemetry(
     state.require_internal_gateway(&headers)?;
     validate_gateway_telemetry_event(&event)?;
     let client_id = event.telemetry.client_id.clone();
-    let observed_unix = event.telemetry.metrics.observed_unix;
+    let received_unix = crate::unix_now();
     let gateway_id = event.gateway_id.clone();
     if !state
         .repo
@@ -233,15 +235,21 @@ pub(crate) async fn ingest_telemetry(
             message: "gateway session not active".to_string(),
         }));
     }
-    state.repo.record_telemetry(&event).await?;
-    state.publish(WsEvent::TelemetryUpdated {
-        client_id,
-        observed_unix,
-        gateway_id,
-    });
+    let recorded = state.repo.record_telemetry(&event).await?;
+    if recorded {
+        state.publish(WsEvent::TelemetryUpdated {
+            client_id,
+            observed_unix: received_unix,
+            gateway_id,
+        });
+    }
     Ok(Json(IngestResponse {
         accepted: true,
-        message: "telemetry recorded".to_string(),
+        message: if recorded {
+            "telemetry recorded".to_string()
+        } else {
+            "telemetry already recorded".to_string()
+        },
     }))
 }
 
@@ -360,6 +368,22 @@ pub(crate) async fn ingest_command_output(
                     job_id = %event.job_id,
                     client_id = %event.client_id,
                     "agent update lifecycle audit failed after command output ingest"
+                );
+            }
+            if let Err(error) = record_network_routing_terminal_result(
+                &state,
+                event.job_id,
+                &event.client_id,
+                &outcome.status,
+                Some(&event.output),
+            )
+            .await
+            {
+                warn!(
+                    ?error,
+                    job_id = %event.job_id,
+                    client_id = %event.client_id,
+                    "network routing result validation failed after command output ingest"
                 );
             }
             if outcome.status == TARGET_STATUS_COMPLETED {
@@ -495,6 +519,22 @@ async fn finalize_contiguous_final_job_output_if_ready(
                 "agent update lifecycle audit failed after deferred command output finalization"
             );
         }
+        if let Err(error) = record_network_routing_terminal_result(
+            state,
+            job_id,
+            client_id,
+            &outcome.status,
+            Some(&candidate.output),
+        )
+        .await
+        {
+            warn!(
+                ?error,
+                job_id = %job_id,
+                client_id,
+                "network routing result validation failed after deferred output finalization"
+            );
+        }
         if outcome.status == TARGET_STATUS_COMPLETED {
             if let Err(error) =
                 try_auto_record_backup_artifact_for_job_target(state, job_id, client_id).await
@@ -586,6 +626,100 @@ fn agent_update_lifecycle_failure_status(status: &str) -> bool {
             | TARGET_STATUS_AGENT_LOST
             | TARGET_STATUS_CANCELED
     )
+}
+
+pub(crate) async fn record_network_routing_terminal_result(
+    state: &AppState,
+    job_id: uuid::Uuid,
+    client_id: &str,
+    outcome_status: &str,
+    output: Option<&CommandOutput>,
+) -> Result<(), ApiError> {
+    let Some(context) = state.repo.get_job_completion_context(job_id).await? else {
+        return Ok(());
+    };
+    let (plan_id, side, adapter, expected_operation, desired_cost) = match &context.operation {
+        JobCommand::NetworkRoutingStatus {
+            plan_id,
+            side,
+            adapter,
+            ..
+        } => (
+            plan_id,
+            *side,
+            adapter,
+            RoutingCostAdapterOperation::Status,
+            None,
+        ),
+        JobCommand::NetworkRoutingApply {
+            plan_id,
+            side,
+            adapter,
+            desired_cost,
+            ..
+        } => (
+            plan_id,
+            *side,
+            adapter,
+            RoutingCostAdapterOperation::Apply,
+            Some(*desired_cost),
+        ),
+        _ => return Ok(()),
+    };
+    let plan_id = uuid::Uuid::parse_str(plan_id)
+        .map_err(|_| ApiError::conflict("network_routing_result_plan_id_invalid"))?;
+    if outcome_status != TARGET_STATUS_COMPLETED {
+        state
+            .repo
+            .record_tunnel_plan_ospf_job_result(plan_id, side, job_id, None, false)
+            .await?;
+        return Ok(());
+    }
+    let Some(output) = output else {
+        state
+            .repo
+            .record_tunnel_plan_ospf_job_result(plan_id, side, job_id, None, false)
+            .await?;
+        return Err(ApiError::conflict("network_routing_result_missing"));
+    };
+    let result = serde_json::from_slice::<RoutingCostAdapterJobResult>(&output.data)
+        .map_err(|_| ApiError::conflict("network_routing_result_invalid"));
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            state
+                .repo
+                .record_tunnel_plan_ospf_job_result(plan_id, side, job_id, None, false)
+                .await?;
+            return Err(error);
+        }
+    };
+    let valid = output.stream == OutputStream::Status
+        && result.contract_version == vpsman_common::ROUTING_COST_ADAPTER_CONTRACT_VERSION
+        && result.operation == expected_operation
+        && result.plan_id == plan_id.to_string()
+        && result.endpoint_side == side
+        && result.client_id == client_id
+        && result.adapter_template_id == adapter.template_id
+        && result.adapter_definition_hash == adapter.definition_hash
+        && result.after.ready
+        && desired_cost.is_none_or(|desired| result.after.current_cost == Some(desired));
+    state
+        .repo
+        .record_tunnel_plan_ospf_job_result(
+            plan_id,
+            side,
+            job_id,
+            valid.then_some(result.after.current_cost).flatten(),
+            valid,
+        )
+        .await?;
+    if !valid {
+        return Err(ApiError::conflict(
+            "network_routing_result_contract_mismatch",
+        ));
+    }
+    Ok(())
 }
 
 async fn try_auto_record_backup_artifact_for_job_target(
@@ -825,13 +959,64 @@ fn validate_gateway_telemetry_event(event: &GatewayTelemetryIngest) -> Result<()
         || event.gateway_id.len() > 128
         || event.gateway_session_id == uuid::Uuid::nil()
         || event.process_incarnation_id == uuid::Uuid::nil()
+        || event.telemetry_seq == 0
+        || event.telemetry_seq > i64::MAX as u64
         || event.telemetry.client_id.is_empty()
         || event.telemetry.client_id.len() > 128
+        || !valid_agent_metrics(&event.telemetry.metrics)
     {
         return Err(ApiError::bad_request("invalid_gateway_telemetry_event"));
     }
     validate_gateway_remote_ip(event.remote_ip.as_deref())?;
     Ok(())
+}
+
+fn valid_agent_metrics(metrics: &vpsman_common::AgentMetrics) -> bool {
+    if metrics.hostname.is_empty()
+        || metrics.hostname.len() > 255
+        || metrics.hostname.chars().any(char::is_control)
+        || metrics.disks.len() > MAX_TELEMETRY_DISKS
+        || metrics.networks.len() > MAX_TELEMETRY_NETWORKS
+        || metrics.tunnels.len() > MAX_TELEMETRY_TUNNELS
+        || ![
+            metrics.cpu.load.one,
+            metrics.cpu.load.five,
+            metrics.cpu.load.fifteen,
+        ]
+        .into_iter()
+        .all(|value| value.is_finite() && (0.0..=1_000_000.0).contains(&value))
+        || metrics.memory.available_bytes > metrics.memory.total_bytes
+    {
+        return false;
+    }
+    if metrics.disks.iter().any(|disk| {
+        disk.mountpoint.is_empty()
+            || disk.mountpoint.len() > 4096
+            || disk.mountpoint.chars().any(char::is_control)
+            || disk.available_bytes > disk.total_bytes
+    }) {
+        return false;
+    }
+    let mut interfaces = std::collections::HashSet::new();
+    if metrics.networks.iter().any(|network| {
+        network.interface.is_empty()
+            || network.interface.len() > 64
+            || network.interface.chars().any(char::is_control)
+            || !interfaces.insert(network.interface.as_str())
+    }) {
+        return false;
+    }
+    metrics.tunnels.iter().all(|tunnel| {
+        !tunnel.interface.is_empty()
+            && tunnel.interface.len() <= 64
+            && !tunnel.interface.chars().any(char::is_control)
+            && tunnel
+                .latency_avg_ms
+                .is_none_or(|value| value.is_finite() && value >= 0.0)
+            && tunnel
+                .packet_loss_ratio
+                .is_none_or(|value| value.is_finite() && (0.0..=1.0).contains(&value))
+    })
 }
 
 fn validate_agent_update_verification_event(

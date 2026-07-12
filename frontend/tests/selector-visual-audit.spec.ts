@@ -2,10 +2,14 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
-import { activate, openConsoleSubpage } from "./support/consoleNavigation";
+import {
+  activate,
+  openConsoleSubpage,
+  waitForConsoleShell,
+} from "./support/consoleNavigation";
 
 test.skip(!process.env.VPSMAN_VISUAL_AUDIT, "manual selector visual audit screenshots only");
-test.setTimeout(90_000);
+test.setTimeout(120_000);
 
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
@@ -17,6 +21,7 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
   const manifest: Array<Record<string, unknown>> = [];
 
   await page.goto("/");
+  await waitForConsoleShell(page, 15_000);
   await openVpsMenu(
     page.locator(".homeQuickActions"),
     "Home quick action target",
@@ -34,6 +39,7 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
   await capture(page, outputDir, manifest, "file-browser-target");
 
   await openConsoleSubpage(page, "Network", "Tunnel plans");
+  await activate(page.getByRole("button", { name: "Create tunnel plan" }));
   const tunnelComposer = page.locator(".scheduleComposer", {
     has: page.getByRole("heading", { name: "Create tunnel plan" }),
   });
@@ -42,12 +48,12 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
   await capture(page, outputDir, manifest, "topology-tunnel-targets");
 
   await openConsoleSubpage(page, "Backups", "Restore");
-  await activate(page.getByRole("button", { name: "Open restore workflow" }));
-  const restoreWorkflow = page.getByLabel("Open restore workflow");
+  await activate(page.getByRole("button", { name: "Choose restore artifact" }));
+  const restoreWorkflow = page.getByLabel("Choose restore artifact");
   await restoreWorkflow.getByLabel("Restore source backup request").selectOption({ index: 1 });
   await openVpsMenu(restoreWorkflow, "Restore target client", "fra", /core-fra-02.*agent-fra-02/);
   await capture(page, outputDir, manifest, "restore-target");
-  await restoreWorkflow.getByRole("option", { name: /core-fra-02.*agent-fra-02/ }).click();
+  await restoreWorkflow.getByLabel("Restore target client").press("Enter");
   await expect(restoreWorkflow.getByText("/var/lib/vpsman/restores/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/agent-fra-02")).toBeVisible();
   await expect(restoreWorkflow.getByLabel("Staged archive")).toHaveValue(
     "agent-fra-02:50505050-2222-4333-8444-555555555555",
@@ -59,7 +65,7 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
     scrollToTop: false,
   });
 
-  await openConsoleSubpage(page, "Fleet", "Alert policies");
+  await openConsoleSubpage(page, "Observability", "Alerts");
   await activate(page.getByRole("button", { name: "Create policy" }).first());
   const policyEditor = page.locator(".consoleDetailPanel", {
     hasText: "Create alert policy",
@@ -70,27 +76,41 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
   });
   await policyExpression.fill("tag:edge && status:online");
   await expect(policyExpression).toHaveValue("tag:edge && status:online");
-  await capture(page, outputDir, manifest, "fleet-policy-expression-filter");
+  await capture(
+    page,
+    outputDir,
+    manifest,
+    "observability-alert-policy-expression-filter",
+  );
   await activate(policyEditor.getByLabel("Close detail panel"));
   const policyGrid = page.getByLabel("Policy groups data grid");
   await openExpressionMenu(policyGrid, "Policy groups search", "enabled", /^enabled$/);
-  await capture(page, outputDir, manifest, "fleet-policy-grid-search-suggestion");
+  await capture(
+    page,
+    outputDir,
+    manifest,
+    "observability-alert-policy-grid-search-suggestion",
+  );
 
-  await openConsoleSubpage(page, "Fleet", "Notifications");
-  const notifications = page.locator(".consoleCrudPanel", {
-    has: page.getByText("Alert notification channels", { exact: true }),
-  });
-  await activate(notifications.getByRole("button", { name: "Create channel" }).first());
-  const channelEditor = notifications.locator(".consoleDetailPanel", {
+  await activate(page.getByRole("tab", { name: /Destinations/ }));
+  await activate(page.getByRole("button", { name: "Create channel" }).first());
+  const channelEditor = page.locator(".consoleDetailPanel", {
     hasText: "Create notification channel",
   }).last();
   await expect(channelEditor).toBeVisible();
   await channelEditor.getByLabel("Notification scope kind").selectOption("client");
   await openVpsMenu(channelEditor, "Notification scope value", "fra", /core-fra-02.*agent-fra-02/);
-  await capture(page, outputDir, manifest, "fleet-notification-client-scope");
+  await capture(
+    page,
+    outputDir,
+    manifest,
+    "observability-notification-client-scope",
+  );
   await activate(channelEditor.getByLabel("Close detail panel"));
-  await activate(page.getByRole("tab", { name: "Webhooks" }));
-  await expect(page.getByText("Webhook rules", { exact: true }).first()).toBeVisible();
+  await openConsoleSubpage(page, "Observability", "Event webhooks");
+  await expect(
+    page.getByText("Event webhook rules", { exact: true }).first(),
+  ).toBeVisible();
   await activate(page.getByRole("button", { name: "Create rule" }).first());
   await openExpressionMenu(
     page.locator("main"),
@@ -98,7 +118,12 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
     "interval.",
     /^interval\.30sec$/,
   );
-  await capture(page, outputDir, manifest, "fleet-webhook-expression-event-search");
+  await capture(
+    page,
+    outputDir,
+    manifest,
+    "observability-webhook-expression-event-search",
+  );
 
   await openConsoleSubpage(page, "Jobs", "Dispatch");
   const dispatchComposer = page.locator(".commandComposer");

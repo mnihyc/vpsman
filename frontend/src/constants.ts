@@ -240,18 +240,18 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
       id: "tunnel_plans",
       label: "Tunnel plans",
       description:
-        "Saved tunnel plans, reviewed plan authoring, and observed-to-managed promotion",
+        "Explicit tunnel declarations, runtime ownership, endpoint state, and optional routing adapters",
     },
     {
       id: "tests",
       label: "Tests",
-      description: "Tunnel status, probes, and speed tests",
+      description: "Tunnel status, probes, and bounded throughput tests",
     },
     {
       id: "ospf",
       label: "OSPF",
       description:
-        "OSPF update recommendations, cost updates, and rollback planning",
+        "Per-plan routing adapter status, reviewed cost changes, and automatic controller state",
     },
     {
       id: "evidence",
@@ -301,7 +301,7 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     {
       id: "network_metrics",
       label: "Network metrics",
-      description: "Latency, loss, speed, tunnel, and endpoint trends",
+      description: "Latency, loss, throughput, tunnel, and endpoint trends",
     },
     {
       id: "alerts",
@@ -450,6 +450,7 @@ export const emptySummary: FleetSummary = {
   running_jobs: 0,
   stale: 0,
   total: 0,
+  unknown: 0,
   warnings: 0,
 };
 

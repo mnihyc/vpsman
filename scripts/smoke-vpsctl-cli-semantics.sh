@@ -46,24 +46,85 @@ for kind in gre ipip sit fou; do
     --kind "$kind" \
     --left-client-id edge-a \
     --right-client-id edge-b \
-    --left-underlay 203.0.113.10 \
-    --right-underlay 203.0.113.20 \
+    --left-remote-underlay 203.0.113.10 \
+    --right-remote-underlay 203.0.113.20 \
     --address-pool-cidr 10.255.0.0/30 \
     --left-tunnel-ipv4-cidr 10.255.0.0/31 \
     --right-tunnel-ipv4-cidr 10.255.0.1/31 \
-    --bandwidth-mbps 100 \
-    --latency-ms 20)"
+    --bandwidth-mbps 100)"
   require_contains "$plan" "\"kind\": \"$kind\"" "tunnel-plan $kind"
-  require_contains "$plan" "\"mutates_host\": false" "tunnel-plan $kind"
-  require_contains "$plan" "\"recommended_ospf_cost\"" "tunnel-plan $kind"
-  require_contains "$plan" "\"ifupdown_snippet\"" "tunnel-plan $kind"
-  require_contains "$plan" "\"bird2_interface_snippet\"" "tunnel-plan $kind"
+  require_contains "$plan" "\"bandwidth_mbps\": 100" "tunnel-plan $kind"
+  require_contains "$plan" "\"conflicts\": []" "tunnel-plan $kind"
+  if [[ "$plan" == *"recommended_ospf_cost"* || "$plan" == *"snippet"* || "$plan" == *"touched_files"* ]]; then
+    fail "tunnel-plan $kind exposed routing or generated-file state without explicit OSPF"
+  fi
   if [[ "$kind" == "fou" ]]; then
-    require_contains "$plan" "encap fou" "tunnel-plan fou"
-  else
-    require_contains "$plan" "mode $kind" "tunnel-plan $kind"
+    require_contains "$plan" "\"kind\": \"fou\"" "tunnel-plan fou"
   fi
 done
+
+observed_plan="$("$bin" tunnel-plan \
+  --name external-openvpn \
+  --interface-name ovpn42 \
+  --kind openvpn \
+  --runtime-manager external_observed \
+  --left-client-id edge-a \
+  --right-client-id edge-b \
+  --left-remote-underlay 203.0.113.10 \
+  --right-remote-underlay 203.0.113.20 \
+  --left-tunnel-ipv4-cidr 10.255.10.0/31 \
+  --right-tunnel-ipv4-cidr 10.255.10.1/31 \
+  --bandwidth-mbps 1234)"
+require_contains "$observed_plan" '"manager": "external_observed"' "external observed tunnel"
+
+routed_plan="$("$bin" tunnel-plan \
+  --name routed-gre \
+  --interface-name gre42 \
+  --kind gre \
+  --left-client-id edge-a \
+  --right-client-id edge-b \
+  --left-remote-underlay 203.0.113.10 \
+  --right-remote-underlay 203.0.113.20 \
+  --left-tunnel-ipv4-cidr 10.255.20.0/31 \
+  --right-tunnel-ipv4-cidr 10.255.20.1/31 \
+  --bandwidth-mbps 1234 \
+  --ospf \
+  --ospf-latency-ms 20 \
+  --left-routing-adapter-template-id 33333333-3333-4333-8333-333333333333 \
+  --right-routing-adapter-template-id 44444444-4444-4444-8444-444444444444)"
+require_contains "$routed_plan" '"mode": "reviewed"' "OSPF tunnel plan"
+require_contains "$routed_plan" '"left_adapter_template_id": "33333333-3333-4333-8333-333333333333"' "OSPF left adapter"
+require_contains "$routed_plan" '"recommended_ospf_cost"' "OSPF tunnel plan"
+
+if incomplete_update="$("$bin" tunnel-plan \
+  --name update-contract \
+  --interface-name greup \
+  --kind gre \
+  --left-client-id edge-a \
+  --right-client-id edge-b \
+  --left-remote-underlay 203.0.113.10 \
+  --right-remote-underlay 203.0.113.20 \
+  --left-tunnel-ipv4-cidr 10.255.30.0/31 \
+  --right-tunnel-ipv4-cidr 10.255.30.1/31 \
+  --bandwidth-mbps 100 \
+  --save \
+  --update-plan-id 00000000-0000-4000-8000-000000000001 \
+  --confirmed 2>&1)"; then
+  fail "tunnel-plan accepted an update without --expected-revision"
+fi
+require_contains "$incomplete_update" "requires both --update-plan-id and --expected-revision" "tunnel plan update snapshot"
+
+if lifecycle_error="$("$bin" tunnel-plan-disable \
+  --plan-id 00000000-0000-0000-0000-000000000001 2>&1)"; then
+  fail "tunnel-plan-disable accepted a mutation without --confirmed"
+fi
+require_contains "$lifecycle_error" "requires --confirmed" "tunnel plan lifecycle confirmation"
+
+if delete_error="$("$bin" tunnel-plan-delete \
+  --plan-id 00000000-0000-0000-0000-000000000001 2>&1)"; then
+  fail "tunnel-plan-delete accepted a mutation without --confirmed"
+fi
+require_contains "$delete_error" "requires --confirmed" "tunnel plan delete confirmation"
 
 noise_out="$("$bin" noise-keygen)"
 require_regex "$noise_out" '"private_key_hex":"[0-9a-f]{64}"' "noise-keygen"
@@ -109,7 +170,7 @@ fi
 require_contains "$(cat "$tmp_dir/bad-config-patch.err")" "config_patch_section_not_allowed:auth" "bad config patch"
 
 if "$bin" tunnel-probe \
-  --plan-file "$tmp_dir/missing-plan.json" \
+  --plan-id 00000000-0000-0000-0000-000000000001 \
   --side left \
   --count 0 \
   >"$tmp_dir/bad-probe.out" 2>"$tmp_dir/bad-probe.err"; then
@@ -118,7 +179,7 @@ fi
 require_contains "$(cat "$tmp_dir/bad-probe.err")" "--count must be between" "bad probe"
 
 if "$bin" tunnel-speed-test \
-  --plan-file "$tmp_dir/missing-plan.json" \
+  --plan-id 00000000-0000-0000-0000-000000000001 \
   --server-side left \
   --duration-secs 0 \
   --confirmed \

@@ -359,7 +359,7 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                lock_postgres_agent_key_lifecycle(&mut tx).await?;
+                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
                 let mut agent_lost_job_ids = Vec::new();
                 if fetch_postgres_key_revocation(&mut tx, &public_key_sha256_hex)
                     .await?
@@ -684,7 +684,7 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                lock_postgres_agent_key_lifecycle(&mut tx).await?;
+                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
                 let row = sqlx::query(
                     r#"
                     SELECT public_key, status, process_incarnation_id
@@ -1221,10 +1221,10 @@ async fn fetch_postgres_agent_identity(
     })
 }
 
-pub(crate) async fn lock_postgres_agent_key_lifecycle(
+pub(crate) async fn lock_postgres_agent_identity_lifecycle(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<()> {
-    // Key mutations are rare; one transaction lock closes ownership/revocation races across clients.
+    // Identity and endpoint mutations are rare; one lock closes cross-record lifecycle races.
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('vpsman.agent_key_lifecycle'))")
         .execute(&mut **tx)
         .await?;

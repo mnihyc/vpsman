@@ -4,6 +4,7 @@ import {
   FileText,
   Pencil,
   Plus,
+  Route,
   SlidersHorizontal,
   UserPlus,
 } from "lucide-react";
@@ -66,13 +67,16 @@ const SOURCE_TEMPLATE_DOMAINS = [
   "process_supervisor_policy",
   "runtime_tunnel_adapter",
   "traffic_limit_status_source",
-  "routing_daemon_adapter",
+  "routing_cost_adapter",
   "backup_object_store",
   "restore_path_mapping",
   "update_artifact_source",
   "update_restart_policy",
   "update_rollback_heartbeat_source",
 ];
+const ASSIGNABLE_SOURCE_TEMPLATE_DOMAINS = SOURCE_TEMPLATE_DOMAINS.filter(
+  (domain) => !isPlanBoundAdapterDomain(domain),
+);
 
 const DEFAULT_DEFINITION = '{\n  "source": "custom"\n}';
 const SOURCE_TEMPLATE_SELECTOR_STORAGE_KEY =
@@ -111,6 +115,7 @@ export function SourceTemplatePanel({
   onCloneTemplate,
   onCreateTemplate,
   onDiffTemplate,
+  onOpenTunnelPlans,
   onRenderTemplateRuntimeConfig,
   onResolveBulk,
   onTestTemplate,
@@ -135,6 +140,7 @@ export function SourceTemplatePanel({
     templateId: string,
     request: SourceTemplateDiffRequest,
   ) => Promise<SourceTemplateDiffResponse>;
+  onOpenTunnelPlans: () => void;
   onRenderTemplateRuntimeConfig: (
     clientId: string,
   ) => Promise<TemplateRuntimeConfigResponse>;
@@ -163,7 +169,9 @@ export function SourceTemplatePanel({
   const [ownerClientId, setOwnerClientId] = useState("");
   const [description, setDescription] = useState("");
   const [definitionText, setDefinitionText] = useState(DEFAULT_DEFINITION);
-  const [assignDomain, setAssignDomain] = useState(SOURCE_TEMPLATE_DOMAINS[1]);
+  const [assignDomain, setAssignDomain] = useState(
+    ASSIGNABLE_SOURCE_TEMPLATE_DOMAINS[1],
+  );
   const [assignTemplateId, setAssignTemplateId] = useState("");
   const [assignmentSelectorExpression, setAssignmentSelectorExpression] =
     useState(() => readLocalString(SOURCE_TEMPLATE_SELECTOR_STORAGE_KEY, ""));
@@ -226,6 +234,9 @@ export function SourceTemplatePanel({
       ) ?? null,
     [effectiveLifecycleTemplateId, templates],
   );
+  const planBoundAdapter =
+    lifecycleTemplate !== null &&
+    isPlanBoundAdapterDomain(lifecycleTemplate.domain);
   const assignmentSelectorParse = useMemo(
     () => parseSearchExpression(assignmentSelectorExpression),
     [assignmentSelectorExpression],
@@ -237,16 +248,17 @@ export function SourceTemplatePanel({
         : agentsMatchingExpression(agents, assignmentSelectorExpression).length,
     [agents, assignmentSelectorExpression, assignmentSelectorParse.error],
   );
+  const lifecycleUsage = planBoundAdapter ? "bound endpoint VPSs" : "assigned VPSs";
   const lifecycleStatus = lastUpdate?.confirmation_required
-    ? `${lastUpdate.affected_client_count} VPSs inherit this template; confirmation required`
+    ? `${lastUpdate.affected_client_count} ${lifecycleUsage}; confirmation required`
     : lastUpdate
-      ? `${lastUpdate.affected_client_count} VPSs inherited the template update`
+      ? `${lastUpdate.affected_client_count} ${lifecycleUsage} received the template update`
       : lastTest
         ? lastTest.valid
           ? `${lastTest.renderable ? "Renderable" : "Workflow"} template test passed for ${lastTest.domain}`
           : `Template test failed: ${lastTest.error ?? "invalid definition"}`
         : lastDiff
-          ? `${lastDiff.changed_keys.length} keys changed; ${lastDiff.affected_client_count} VPSs affected`
+          ? `${lastDiff.changed_keys.length} keys changed; ${lastDiff.affected_client_count} ${lifecycleUsage} affected`
           : null;
   const status =
     (sourceStatus.length > 0 ? sourceStatusSummary : null) ??
@@ -380,7 +392,7 @@ export function SourceTemplatePanel({
       },
       {
         cell: (template) => template.assigned_client_count,
-        header: "Assigned",
+        header: "VPS use",
         id: "assigned",
         searchValue: (template) => template.assigned_client_count,
         sortValue: (template) => template.assigned_client_count,
@@ -406,16 +418,27 @@ export function SourceTemplatePanel({
             ? `Open ${rows[0].name} template detail.`
             : "Select exactly one template to open.",
         disabled: (rows) => rows.length !== 1,
+        hidden: (rows) =>
+          rows.length === 1 && isPlanBoundAdapterDomain(rows[0].domain),
         icon: <FileText size={14} />,
-        onSelect: (rows) => openTemplateDetail(rows[0], "assign"),
+        onSelect: (rows) =>
+          openTemplateDetail(
+            rows[0],
+            isPlanBoundAdapterDomain(rows[0].domain) ? "lifecycle" : "assign",
+          ),
       },
       {
         label: "Assign",
         description: (rows) =>
-          rows.length === 1
-            ? `Load ${rows[0].name} into the assignment form.`
+          rows.length === 1 && isPlanBoundAdapterDomain(rows[0].domain)
+            ? "Adapter templates are bound from Network > Tunnel plans."
+            : rows.length === 1
+              ? `Load ${rows[0].name} into the assignment form.`
             : "Select exactly one template to assign.",
-        disabled: (rows) => rows.length !== 1,
+        disabled: (rows) =>
+          rows.length !== 1 || isPlanBoundAdapterDomain(rows[0].domain),
+        hidden: (rows) =>
+          rows.length === 1 && isPlanBoundAdapterDomain(rows[0].domain),
         icon: <UserPlus size={14} />,
         onSelect: (rows) => prepareTemplateAssignment(rows[0]),
       },
@@ -469,7 +492,7 @@ export function SourceTemplatePanel({
       });
       setCreateName("");
       setDescription("");
-      setDefinitionText(DEFAULT_DEFINITION);
+      setDefinitionText(defaultDefinitionForDomain(createDomain));
     });
   }
 
@@ -853,6 +876,10 @@ export function SourceTemplatePanel({
   }
 
   function prepareTemplateAssignment(template: SourceTemplateRecord) {
+    if (isPlanBoundAdapterDomain(template.domain)) {
+      prepareTemplateLifecycle(template);
+      return;
+    }
     clearAssignmentConfirmation();
     setAssignDomain(template.domain);
     setAssignTemplateId(template.id);
@@ -868,7 +895,7 @@ export function SourceTemplatePanel({
     setCreateScope("shared");
     setOwnerClientId("");
     setDescription("");
-    setDefinitionText(DEFAULT_DEFINITION);
+    setDefinitionText(defaultDefinitionForDomain(SOURCE_TEMPLATE_DOMAINS[1]));
     setActionError(null);
     setDrawerMode("create");
   }
@@ -879,8 +906,10 @@ export function SourceTemplatePanel({
     setLastDiff(null);
     setLastTest(null);
     setLastUpdate(null);
-    setAssignDomain(template.domain);
-    setAssignTemplateId(template.id);
+    if (!isPlanBoundAdapterDomain(template.domain)) {
+      setAssignDomain(template.domain);
+      setAssignTemplateId(template.id);
+    }
     setDetailTab("lifecycle");
     setDrawerMode("detail");
   }
@@ -890,9 +919,13 @@ export function SourceTemplatePanel({
     tab: SourceTemplateDetailTab,
   ) {
     setLifecycleTemplateId(template.id);
-    setAssignDomain(template.domain);
-    setAssignTemplateId(template.id);
-    setDetailTab(tab);
+    if (!isPlanBoundAdapterDomain(template.domain)) {
+      setAssignDomain(template.domain);
+      setAssignTemplateId(template.id);
+    }
+    setDetailTab(
+      isPlanBoundAdapterDomain(template.domain) ? "lifecycle" : tab,
+    );
     setDrawerMode("detail");
     setActionError(null);
   }
@@ -977,7 +1010,11 @@ export function SourceTemplatePanel({
                   <strong>{sourceTokenLabel(template.scope)}</strong>
                   <span>Default</span>
                   <strong>{template.is_default ? "Yes" : "No"}</strong>
-                  <span>Assigned VPSs</span>
+                  <span>
+                    {isPlanBoundAdapterDomain(template.domain)
+                      ? "Bound endpoint VPSs"
+                      : "Assigned VPSs"}
+                  </span>
                   <strong>{template.assigned_client_count}</strong>
                   <span>Description</span>
                   <strong>{template.description ?? "None"}</strong>
@@ -986,28 +1023,32 @@ export function SourceTemplatePanel({
                   className="consoleInlineDetailActions"
                   aria-label={`Template workflow actions for ${template.name}`}
                 >
-                  <button
-                    className="secondaryAction compactAction"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      openTemplateDetail(template, "assign");
-                    }}
-                    type="button"
-                  >
-                    <UserPlus size={14} />
-                    <span>Assign</span>
-                  </button>
-                  <button
-                    className="secondaryAction compactAction"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      openTemplateDetail(template, "render");
-                    }}
-                    type="button"
-                  >
-                    <FileText size={14} />
-                    <span>Render</span>
-                  </button>
+                  {!isPlanBoundAdapterDomain(template.domain) && (
+                    <>
+                      <button
+                        className="secondaryAction compactAction"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          openTemplateDetail(template, "assign");
+                        }}
+                        type="button"
+                      >
+                        <UserPlus size={14} />
+                        <span>Assign</span>
+                      </button>
+                      <button
+                        className="secondaryAction compactAction"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          openTemplateDetail(template, "render");
+                        }}
+                        type="button"
+                      >
+                        <FileText size={14} />
+                        <span>Render</span>
+                      </button>
+                    </>
+                  )}
                   <button
                     className="secondaryAction compactAction"
                     onClick={(event) => {
@@ -1048,15 +1089,22 @@ export function SourceTemplatePanel({
                       0,
                     )}
                   </strong>
-                  assigned VPSs
+                  VPS uses
                 </span>
               </div>
             )}
             rowActions={templateActions}
-            onOpenRow={(template) => openTemplateDetail(template, "assign")}
-            openRowLabel="Assign"
+            onOpenRow={(template) =>
+              openTemplateDetail(
+                template,
+                isPlanBoundAdapterDomain(template.domain)
+                  ? "lifecycle"
+                  : "assign",
+              )
+            }
+            openRowLabel="Open"
             openRowTitle={(template) =>
-              `Open assignment details for template ${template.name}.`
+              `Open details for template ${template.name}.`
             }
             showMobileOpenRowAction={false}
             rows={templates}
@@ -1135,7 +1183,7 @@ export function SourceTemplatePanel({
           drawerMode === "create"
             ? "Create one reusable source template."
             : lifecycleTemplate
-              ? `${sourceDomainLabel(lifecycleTemplate.domain)} · ${lifecycleTemplate.assigned_client_count} assigned VPSs`
+              ? `${sourceDomainLabel(lifecycleTemplate.domain)} · ${lifecycleTemplate.assigned_client_count} ${isPlanBoundAdapterDomain(lifecycleTemplate.domain) ? "bound endpoint VPSs" : "assigned VPSs"}`
               : "Select a template from the registry."
         }
         onClose={() => setDrawerMode(null)}
@@ -1167,7 +1215,11 @@ export function SourceTemplatePanel({
                 <span>Domain</span>
                 <select
                   aria-label="Template domain"
-                  onChange={(event) => setCreateDomain(event.target.value)}
+                  onChange={(event) => {
+                    const domain = event.target.value;
+                    setCreateDomain(domain);
+                    setDefinitionText(defaultDefinitionForDomain(domain));
+                  }}
                   value={createDomain}
                 >
                   {SOURCE_TEMPLATE_DOMAINS.map((domain) => (
@@ -1198,6 +1250,12 @@ export function SourceTemplatePanel({
                 </select>
               </label>
             </div>
+            {adapterDomainHelp(createDomain) && (
+              <div className="operationNote sourceAdapterContract" role="note" title={adapterDomainContractTitle(createDomain) ?? undefined}>
+                <Route size={17} />
+                <span>{adapterDomainHelp(createDomain)}</span>
+              </div>
+            )}
             {createScope === "vps_local" && (
               <label>
                 <span>Owner VPS</span>
@@ -1246,11 +1304,14 @@ export function SourceTemplatePanel({
               role="tablist"
               aria-label="Source template workflow"
             >
-              {[
-                ["assign", "Assign"],
-                ["render", "Render"],
-                ["lifecycle", "Test / update"],
-              ].map(([value, label]) => (
+              {(planBoundAdapter
+                ? [["lifecycle", "Test / update"]]
+                : [
+                    ["assign", "Assign"],
+                    ["render", "Render"],
+                    ["lifecycle", "Test / update"],
+                  ]
+              ).map(([value, label]) => (
                 <button
                   aria-selected={detailTab === value}
                   className={detailTab === value ? "selected" : ""}
@@ -1263,22 +1324,43 @@ export function SourceTemplatePanel({
                 </button>
               ))}
             </div>
-            <div className="timeline templateAssignmentSummary">
-              <SlidersHorizontal size={18} />
-              <div>
-                <strong>
-                  {assignments.length} template assignment records
-                </strong>
-                <span>{assignmentSummary(assignments, lastAssignment)}</span>
+            {planBoundAdapter ? (
+              <div className="operationNote sourceAdapterBindingNote" role="note">
+                <Route size={18} />
+                <div>
+                  <strong>Bound from tunnel plans</strong>
+                  <span>
+                    This definition is used only by explicit endpoint bindings;
+                    it is never ambient VPS configuration.
+                  </span>
+                  <button
+                    className="secondaryAction compactAction"
+                    onClick={onOpenTunnelPlans}
+                    type="button"
+                  >
+                    <Route size={14} />
+                    <span>Open tunnel plans</span>
+                  </button>
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="timeline templateAssignmentSummary">
+                <SlidersHorizontal size={18} />
+                <div>
+                  <strong>
+                    {assignments.length} template assignment records
+                  </strong>
+                  <span>{assignmentSummary(assignments, lastAssignment)}</span>
+                </div>
+              </div>
+            )}
             <ActionFeedback
               className="localActionFeedback sourceTemplateActionFeedback"
               message={sourceWorkflowFeedbackMessage}
               tone={sourceWorkflowFeedbackTone}
             />
 
-            {detailTab === "assign" && (
+            {!planBoundAdapter && detailTab === "assign" && (
               <form
                 className="compactForm templateForm"
                 onSubmit={submitAssignment}
@@ -1299,7 +1381,7 @@ export function SourceTemplatePanel({
                       }
                       value={assignDomain}
                     >
-                      {SOURCE_TEMPLATE_DOMAINS.map((domain) => (
+                      {ASSIGNABLE_SOURCE_TEMPLATE_DOMAINS.map((domain) => (
                         <option key={domain} value={domain}>
                           {sourceDomainLabel(domain)}
                         </option>
@@ -1370,7 +1452,7 @@ export function SourceTemplatePanel({
               </form>
             )}
 
-            {detailTab === "render" && (
+            {!planBoundAdapter && detailTab === "render" && (
               <form
                 className="compactForm templateForm"
                 onSubmit={previewTemplateRuntimeConfig}
@@ -1441,8 +1523,9 @@ export function SourceTemplatePanel({
               >
                 <strong>Template lifecycle</strong>
                 <span className="formHint">
-                  Diff, test, clone, or update a saved template. Updates report
-                  affected VPS count before commit.
+                  {planBoundAdapter
+                    ? "Diff, validate, clone, or update this operator-owned contract. Updates report every bound endpoint VPS before commit."
+                    : "Diff, test, clone, or update a saved template. Updates report affected VPS count before commit."}
                 </span>
                 <div className="formRow templateFormRow">
                   <label>
@@ -1485,6 +1568,12 @@ export function SourceTemplatePanel({
                     value={lifecycleDescription}
                   />
                 </label>
+                {lifecycleTemplate && adapterDomainHelp(lifecycleTemplate.domain) && (
+                  <div className="operationNote sourceAdapterContract" role="note" title={adapterDomainContractTitle(lifecycleTemplate.domain) ?? undefined}>
+                    <Route size={17} />
+                    <span>{adapterDomainHelp(lifecycleTemplate.domain)}</span>
+                  </div>
+                )}
                 <label>
                   <span>Definition JSON</span>
                   <textarea
@@ -1509,9 +1598,10 @@ export function SourceTemplatePanel({
                     className="secondaryAction"
                     disabled={pending || !lifecycleTemplate}
                     onClick={testLifecycleTemplate}
+                    title={lifecycleTemplate && adapterDomainHelp(lifecycleTemplate.domain) ? "Validates the saved contract shape. Endpoint status verifies that the operator-owned executable is present and working." : undefined}
                     type="button"
                   >
-                    Test
+                    {lifecycleTemplate && adapterDomainHelp(lifecycleTemplate.domain) ? "Validate definition" : "Test"}
                   </button>
                   <button
                     className="secondaryAction"
@@ -1624,10 +1714,6 @@ function sourceEvidenceSummary(row: SourceStatusRecord): string {
   }
   const sampleCount =
     typeof evidence.sample_count === "number" ? evidence.sample_count : null;
-  const promotionRequired =
-    typeof evidence.promotion_required === "number"
-      ? evidence.promotion_required
-      : null;
   const degradedCount =
     typeof evidence.degraded_count === "number"
       ? evidence.degraded_count
@@ -1814,9 +1900,6 @@ function sourceEvidenceSummary(row: SourceStatusRecord): string {
   if (sampleCount !== null) {
     parts.push(`${sampleCount} samples`);
   }
-  if (promotionRequired !== null && promotionRequired > 0) {
-    parts.push(`${promotionRequired} promotion`);
-  }
   if (degradedCount !== null && degradedCount > 0) {
     parts.push(`${degradedCount} degraded`);
   }
@@ -1864,8 +1947,6 @@ function sourceStatusLabel(status: string): string {
       return "Source selected; limits unavailable";
     case "selected_no_samples":
       return "Source selected; no samples";
-    case "needs_promotion":
-      return "Promotion needed";
     case "degraded":
       return "Degraded";
     default:
@@ -1877,6 +1958,95 @@ function sourceDomainLabel(value: string): string {
   return sourceTokenLabel(value)
     .replace(/\bospf\b/gi, "OSPF")
     .replace(/\bvps\b/gi, "VPS");
+}
+
+function defaultDefinitionForDomain(domain: string): string {
+  if (domain === "runtime_tunnel_adapter") {
+    return JSON.stringify(
+      {
+        manager: "external_managed_adapter",
+        contract_version: 1,
+        startup_command: {
+          argv: [
+            "/opt/operator/tunnel-adapter",
+            "start",
+            "--interface",
+            "{interface}",
+            "--kind",
+            "{kind}",
+            "--local-source",
+            "{local_underlay}",
+            "--remote-destination",
+            "{remote_underlay}",
+            "--local-address",
+            "{local_address}",
+            "--remote-address",
+            "{remote_address}",
+            "--prefix-len",
+            "{prefix_len}",
+          ],
+          max_timeout_secs: 10,
+          max_output_bytes: 16384,
+        },
+        cleanup_command: {
+          argv: ["/opt/operator/tunnel-adapter", "cleanup", "--interface", "{interface}"],
+          max_timeout_secs: 10,
+          max_output_bytes: 16384,
+        },
+        status_command: {
+          argv: ["/opt/operator/tunnel-adapter", "status", "--interface", "{interface}"],
+          max_timeout_secs: 10,
+          max_output_bytes: 16384,
+        },
+      },
+      null,
+      2,
+    );
+  }
+  if (domain === "routing_cost_adapter") {
+    return JSON.stringify(
+      {
+        contract_version: 1,
+        status_command: {
+          argv: ["/opt/operator/routing-cost-adapter", "status"],
+          max_timeout_secs: 10,
+          max_output_bytes: 16384,
+        },
+        update_command: {
+          argv: ["/opt/operator/routing-cost-adapter", "apply"],
+          max_timeout_secs: 10,
+          max_output_bytes: 16384,
+        },
+      },
+      null,
+      2,
+    );
+  }
+  return DEFAULT_DEFINITION;
+}
+
+function adapterDomainHelp(domain: string): string | null {
+  if (domain === "runtime_tunnel_adapter") {
+    return "Direct absolute argv controls only the declared tunnel. vpsman substitutes plan placeholders and never installs, edits, or removes the executable.";
+  }
+  if (domain === "routing_cost_adapter") {
+    return "Status and update receive contract-v1 JSON on stdin and must return contract-v1 JSON. vpsman never assumes or configures a routing daemon.";
+  }
+  return null;
+}
+
+function isPlanBoundAdapterDomain(domain: string): boolean {
+  return domain === "runtime_tunnel_adapter" || domain === "routing_cost_adapter";
+}
+
+function adapterDomainContractTitle(domain: string): string | null {
+  if (domain === "runtime_tunnel_adapter") {
+    return "Supported placeholders include endpoint-specific {remote_underlay} and optional {local_underlay}; the latter is empty when OS source selection is requested. Tunnel-interface addresses, IPv4/IPv6 variants, FOU values, and traffic limits are also available. Status exits 0 when ready.";
+  }
+  if (domain === "routing_cost_adapter") {
+    return "Request fields include operation, plan and endpoint identity, addresses, expected_current_cost, and desired_cost. Response fields include contract_version, interface_name, ready, current_cost, applied_cost, adapter_version, and message.";
+  }
+  return null;
 }
 
 function sourceTokenLabel(value: string): string {

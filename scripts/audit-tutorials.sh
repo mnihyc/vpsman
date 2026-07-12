@@ -14,7 +14,7 @@ expected_files=(
   "03-fleet-organization.md"
   "04-daily-operations.md"
   "05-source-templates.md"
-  "06-tunnels-topology-bird2.md"
+  "06-tunnels-routing-adapters.md"
   "07-backup-restore-migration.md"
   "08-agent-updates.md"
   "09-headless-cli-vty.md"
@@ -58,9 +58,10 @@ for file in "${expected_files[@]}"; do
       grep -qi 'record-table' "$path" || fail "$path must cover panel record-table controls"
       grep -qi 'filtered row' "$path" || fail "$path must cover filtered row counts"
       ;;
-    06-tunnels-topology-bird2.md)
-      grep -qi 'external' "$path" || fail "$path must cover external/imported tunnels"
-      grep -qi 'Bird2' "$path" || fail "$path must cover Bird2/OSPF operations"
+    06-tunnels-routing-adapters.md)
+      grep -qi 'external observed' "$path" || fail "$path must cover explicit observed tunnels"
+      grep -qi 'routing.cost adapter' "$path" || fail "$path must cover routing-cost adapter operations"
+      grep -qi 'never installs' "$path" || fail "$path must document external ownership boundaries"
       ;;
     09-headless-cli-vty.md)
       grep -qi 'VTY' "$path" || fail "$path must cover headless VTY operations"

@@ -13,16 +13,12 @@ import type {
   GeneratedRestorePlanStatus,
   GeneratedServerJobStatus,
   GeneratedServerJobType,
-  GeneratedTopologyDriftAction,
-  GeneratedTopologyDriftPolicy,
   GeneratedTopologyEdgeHealthStatus,
   GeneratedTopologyNeighborState,
   GeneratedTopologyNodeStatus,
   GeneratedTopologyObservationState,
   GeneratedTopologyProbeState,
   GeneratedTopologyRuntimeState,
-  GeneratedTunnelEndpointStatus,
-  GeneratedTunnelPlanStatus,
   GeneratedWebhookRuleDeliveryHistoryStatus,
   GeneratedWebhookRuleDeliveryProcessStatus,
   GeneratedWebhookRuleDeliveryStatus,
@@ -59,16 +55,27 @@ export type MigrationLinkStatus = GeneratedMigrationLinkStatus;
 export type RestorePlanStatus = GeneratedRestorePlanStatus;
 export type ServerJobStatus = GeneratedServerJobStatus;
 export type ServerJobType = GeneratedServerJobType;
-export type TopologyDriftAction = GeneratedTopologyDriftAction;
-export type TopologyDriftPolicy = GeneratedTopologyDriftPolicy;
 export type TopologyEdgeHealthStatus = GeneratedTopologyEdgeHealthStatus;
 export type TopologyNeighborState = GeneratedTopologyNeighborState;
 export type TopologyNodeStatus = GeneratedTopologyNodeStatus;
 export type TopologyObservationState = GeneratedTopologyObservationState;
 export type TopologyProbeState = GeneratedTopologyProbeState;
 export type TopologyRuntimeState = GeneratedTopologyRuntimeState;
-export type TunnelEndpointStatus = GeneratedTunnelEndpointStatus;
-export type TunnelPlanStatus = GeneratedTunnelPlanStatus;
+export type TunnelEndpointRuntimeState =
+  | "disabled"
+  | "unknown"
+  | "stale"
+  | "healthy"
+  | "degraded";
+export type TunnelEndpointReachabilityState =
+  | "unknown"
+  | "reachable"
+  | "probe_failed"
+  | "not_configured";
+export type TunnelConnectionAssessment =
+  | "automatic"
+  | "connected"
+  | "disconnected";
 export type WebhookRuleDeliveryHistoryStatus =
   GeneratedWebhookRuleDeliveryHistoryStatus;
 export type WebhookRuleDeliveryProcessStatus =
@@ -80,6 +87,7 @@ export type FleetSummary = {
   online: number;
   offline: number;
   never: number;
+  unknown: number;
   stale: number;
   warnings: number;
   running_jobs: number;
@@ -361,6 +369,7 @@ export type DashboardResourceCurveRecord = {
   sampled_clients: number;
   excluded_clients: number;
   top_limit: number;
+  latest_sample_at: string | null;
   series: DashboardResourceSeriesRecord[];
 };
 
@@ -737,13 +746,14 @@ export type DeleteAgentResponse = {
   client_id: string;
   deleted: boolean;
   deleted_at: string;
+  runtime_sync_job_ids: string[];
+  runtime_sync_failed_client_ids: string[];
 };
 
 export type AgentCapabilitySnapshot = {
   privilege_mode: "unknown" | "root" | "unprivileged";
   effective_uid?: number | null;
   max_job_timeout_secs: number;
-  network_backend?: TunnelConfigBackend | null;
   can_attempt_privileged_ops: boolean;
   can_manage_runtime_tunnels: boolean;
   can_apply_process_limits: boolean;
@@ -805,8 +815,6 @@ export type TelemetryTunnelRecord = {
   kind: string;
   ownership_mode: string;
   mutation_policy: string;
-  promotion_required: boolean;
-  plan_correlation: string;
   plan_id: string | null;
   plan_name: string | null;
   plan_runtime_manager: RuntimeTunnelManager | null;
@@ -834,12 +842,6 @@ export type TelemetryTunnelRecord = {
   packet_loss_ratio?: number | null;
   latency_healthy_windows?: number | null;
   latency_missed_windows?: number | null;
-  auto_ospf_enabled?: boolean | null;
-  auto_ospf_status?: string | null;
-  auto_ospf_reason?: string | null;
-  auto_ospf_current_cost?: number | null;
-  auto_ospf_recommended_cost?: number | null;
-  auto_ospf_updated_unix?: number | null;
 };
 
 export type TelemetryTunnelAdapterHealth = {
@@ -1173,7 +1175,6 @@ export type TunnelKind =
   | "tun_tap"
   | "custom";
 export type TunnelEndpointSide = "left" | "right";
-export type TunnelConfigBackend = "ifupdown" | "netplan" | "systemd_networkd";
 export type RuntimeTunnelManager =
   | "agent_iproute2_managed"
   | "external_observed"
@@ -1183,6 +1184,26 @@ export type RuntimeTunnelCommand = {
   argv: string[];
   max_timeout_secs?: number;
   max_output_bytes?: number;
+};
+
+export type RoutingCostAdapterCommands = {
+  template_id: string;
+  template_name: string;
+  definition_hash: string;
+  status: RuntimeTunnelCommand;
+  update: RuntimeTunnelCommand;
+};
+
+export type RuntimeTunnelAdapterCommands = {
+  template_id: string;
+  template_name: string;
+  definition_hash: string;
+  startup?: RuntimeTunnelCommand | null;
+  stop?: RuntimeTunnelCommand | null;
+  cleanup?: RuntimeTunnelCommand | null;
+  restart?: RuntimeTunnelCommand | null;
+  status: RuntimeTunnelCommand;
+  traffic_limit_apply?: RuntimeTunnelCommand | null;
 };
 
 export type RuntimeTunnelTrafficLimit = {
@@ -1199,14 +1220,33 @@ export type RuntimeTunnelFouOptions = {
 
 export type RuntimeTunnelControl = {
   manager: RuntimeTunnelManager;
-  startup?: RuntimeTunnelCommand | null;
-  stop?: RuntimeTunnelCommand | null;
-  cleanup?: RuntimeTunnelCommand | null;
-  restart?: RuntimeTunnelCommand | null;
-  status?: RuntimeTunnelCommand | null;
-  traffic_limit_apply?: RuntimeTunnelCommand | null;
+  left_adapter_template_id?: string | null;
+  right_adapter_template_id?: string | null;
   traffic_limit?: RuntimeTunnelTrafficLimit;
   fou?: RuntimeTunnelFouOptions;
+};
+
+export type OspfControlMode = "reviewed" | "automatic";
+
+export type OspfCostPolicy = {
+  latency_weight: number;
+  loss_weight: number;
+  bandwidth_weight: number;
+  preference_bias: number;
+  min_cost: number;
+  max_cost: number;
+};
+
+export type TunnelOspfConfig = {
+  mode: OspfControlMode;
+  planned_latency_ms: number;
+  planned_packet_loss_ratio: number;
+  preference: number;
+  policy: OspfCostPolicy;
+  min_cost_delta: number;
+  healthy_windows: number;
+  left_adapter_template_id: string;
+  right_adapter_template_id: string;
 };
 
 export type TunnelPlanInput = {
@@ -1217,8 +1257,10 @@ export type TunnelPlanInput = {
   runtime_topology?: RuntimeTunnelTopologyIntent;
   left_client_id: string;
   right_client_id: string;
-  left_underlay: string;
-  right_underlay: string;
+  left_remote_underlay: string;
+  left_local_underlay?: string | null;
+  right_remote_underlay: string;
+  right_local_underlay?: string | null;
   address_pool_cidr: string;
   reserved_addresses: string[];
   ipv4_tunnel?: TunnelAddressPair | null;
@@ -1226,9 +1268,7 @@ export type TunnelPlanInput = {
   ipv6_tunnel?: TunnelAddressPair | null;
   latency_primary_family?: TunnelAddressFamily;
   bandwidth_mbps: number;
-  latency_ms: number;
-  packet_loss_ratio: number;
-  preference: number;
+  ospf?: TunnelOspfConfig | null;
 };
 
 export type TunnelAddressFamily = "ipv4" | "ipv6";
@@ -1262,16 +1302,9 @@ export type TunnelPlan = TunnelPlanInput & {
   ipv6_tunnel?: TunnelAddressPair | null;
   latency_primary_family?: TunnelAddressFamily;
   runtime_control?: RuntimeTunnelControl;
-  recommended_ospf_cost: number;
-  ifupdown_file: string;
-  bird2_file: string;
-  ifupdown_snippet: string;
-  bird2_interface_snippet: string;
-  touched_files: string[];
-  validation_steps: string[];
-  rollback_notes: string[];
+  ospf?: TunnelOspfConfig | null;
+  recommended_ospf_cost: number | null;
   conflicts: string[];
-  mutates_host: boolean;
 };
 
 export type TunnelPlanRecord = {
@@ -1279,14 +1312,22 @@ export type TunnelPlanRecord = {
   name: string;
   kind: TunnelKind;
   enabled: boolean;
+  revision: number;
   left_client_id: string;
   right_client_id: string;
-  left_status: TunnelEndpointStatus;
-  right_status: TunnelEndpointStatus;
-  recommended_ospf_cost: number;
-  status: TunnelPlanStatus;
-  last_apply_job_id: string | null;
-  last_rollback_job_id: string | null;
+  recommended_ospf_cost: number | null;
+  ospf_status: string;
+  left_ospf_status: string;
+  right_ospf_status: string;
+  desired_ospf_cost: number | null;
+  left_current_ospf_cost: number | null;
+  right_current_ospf_cost: number | null;
+  left_ospf_job_id: string | null;
+  right_ospf_job_id: string | null;
+  connection_assessment: TunnelConnectionAssessment;
+  connection_assessment_note: string | null;
+  connection_assessed_at: string | null;
+  connection_assessed_by: string | null;
   input: TunnelPlanInput;
   plan: TunnelPlan;
   created_at: string;
@@ -1296,34 +1337,13 @@ export type TunnelPlanRecord = {
   deleted_reason: string | null;
 };
 
-export type PromoteTelemetryTunnelRequest = {
-  client_id: string;
-  interface: string;
-  peer_client_id: string;
-  local_underlay: string;
-  peer_underlay: string;
-  address_pool_cidr: string;
-  ipv4_tunnel?: TunnelAddressPair | null;
-  ipv6_address_pool_cidr?: string | null;
-  ipv6_tunnel?: TunnelAddressPair | null;
-  latency_primary_family?: TunnelAddressFamily;
-  side?: TunnelEndpointSide;
-  name?: string | null;
-  bandwidth_mbps?: number | null;
-  latency_ms?: number | null;
-  packet_loss_ratio?: number | null;
-  preference?: number | null;
-  enabled: boolean;
-  confirmed: boolean;
-};
-
 export type TopologyGraphNode = {
   client_id: string;
   display_name: string;
   status: TopologyNodeStatus;
   tags: string[];
   tunnel_count: number;
-  applied_tunnel_count: number;
+  healthy_tunnel_count: number;
   degraded_tunnel_count: number;
   latest_observed_at: string | null;
 };
@@ -1336,16 +1356,20 @@ export type TopologyGraphEdge = {
   kind: TunnelKind;
   left_client_id: string;
   right_client_id: string;
-  left_status: TunnelEndpointStatus;
-  right_status: TunnelEndpointStatus;
-  status: TunnelPlanStatus;
   enabled: boolean;
   health: TopologyEdgeHealthStatus;
-  convergence_blocked: boolean;
-  offline_client_ids: string[];
-  server_drift_reasons: string[];
-  topology_drift_policy: TopologyDriftPolicy;
-  topology_drift_action: TopologyDriftAction;
+  left_runtime_state: TunnelEndpointRuntimeState;
+  right_runtime_state: TunnelEndpointRuntimeState;
+  left_runtime_reason: string | null;
+  right_runtime_reason: string | null;
+  left_reachability_state: TunnelEndpointReachabilityState;
+  right_reachability_state: TunnelEndpointReachabilityState;
+  left_reachability_reason: string | null;
+  right_reachability_reason: string | null;
+  left_observed_at: string | null;
+  right_observed_at: string | null;
+  unavailable_client_ids: string[];
+  availability_reasons: string[];
   neighbor_state: TopologyNeighborState;
   probe_state: TopologyObservationState;
   runtime_state: TopologyRuntimeState;
@@ -1358,9 +1382,8 @@ export type TopologyGraphEdge = {
   kernel_namespace_covered: boolean;
   desired_missing_count: number;
   stale_present_count: number;
-  import_candidate_count: number;
   bandwidth_mbps: number;
-  recommended_ospf_cost: number;
+  recommended_ospf_cost: number | null;
   cost_delta: number | null;
   latency_avg_ms: number | null;
   latency_series_ms: number[];
@@ -1370,8 +1393,6 @@ export type TopologyGraphEdge = {
   sample_count: number;
   degraded_count: number;
   latest_observed_at: string | null;
-  last_apply_job_id: string | null;
-  last_rollback_job_id: string | null;
   left_tunnel_address: string;
   right_tunnel_address: string;
   ipv4_tunnel?: TunnelAddressPair | null;
@@ -1559,6 +1580,8 @@ export type NetworkOspfUpdateEvidenceRecord = {
   throughput_max_mbps: number | null;
   sample_count: number;
   degraded_count: number;
+  healthy_probe_streak: number;
+  required_healthy_probe_streak: number;
   latest_observed_at: string | null;
   reason: string;
 };
@@ -1566,14 +1589,24 @@ export type NetworkOspfUpdateEvidenceRecord = {
 export type NetworkOspfUpdatePlanRecord = {
   recommendation_id: string;
   plan_id: string;
+  plan_revision: number;
   plan_name: string;
   interface_name: string;
   left_client_id: string;
   right_client_id: string;
-  bird2_file: string;
-  current_ospf_cost: number;
+  control_mode: OspfControlMode;
+  left_adapter_template_id: string;
+  right_adapter_template_id: string;
+  left_adapter_template_name: string | null;
+  right_adapter_template_name: string | null;
+  left_adapter_definition_hash: string | null;
+  right_adapter_definition_hash: string | null;
+  left_current_ospf_cost: number | null;
+  right_current_ospf_cost: number | null;
+  left_ospf_status: string;
+  right_ospf_status: string;
   recommended_ospf_cost: number;
-  cost_delta: number;
+  maximum_cost_delta: number;
   status: string;
   confidence: string;
   requires_approval: boolean;
@@ -1581,8 +1614,6 @@ export type NetworkOspfUpdatePlanRecord = {
   mutation_mode: string;
   approval_scope: string[];
   evidence: NetworkOspfUpdateEvidenceRecord;
-  proposed_left_bird2_interface_snippet: string;
-  proposed_right_bird2_interface_snippet: string;
   change_summary: string;
   evidence_summary: string;
 };
@@ -1850,12 +1881,15 @@ export type JobOperation =
     }
   | {
       type: "network_status";
+      plan_id: string;
       plan: TunnelPlan;
       side: TunnelEndpointSide;
+      runtime_adapter?: RuntimeTunnelAdapterCommands | null;
     }
   | { type: "network_interfaces" }
   | {
       type: "network_probe";
+      plan_id: string;
       plan: TunnelPlan;
       side: TunnelEndpointSide;
       count: number;
@@ -1863,6 +1897,7 @@ export type JobOperation =
     }
   | {
       type: "network_speed_test";
+      plan_id: string;
       plan: TunnelPlan;
       server_side: TunnelEndpointSide;
       duration_secs: number;
@@ -1870,6 +1905,22 @@ export type JobOperation =
       rate_limit_kbps: number;
       port: number;
       connect_timeout_ms: number;
+    }
+  | {
+      type: "network_routing_status";
+      plan_id: string;
+      plan: TunnelPlan;
+      side: TunnelEndpointSide;
+      adapter: RoutingCostAdapterCommands;
+    }
+  | {
+      type: "network_routing_apply";
+      plan_id: string;
+      plan: TunnelPlan;
+      side: TunnelEndpointSide;
+      adapter: RoutingCostAdapterCommands;
+      expected_current_cost: number | null;
+      desired_cost: number;
     }
   | {
       type: "restore";
@@ -2056,13 +2107,36 @@ export type CreateTunnelPlanRequest = TunnelPlanInput & {
   confirmed: boolean;
 };
 
+export type UpdateTunnelPlanRequest = CreateTunnelPlanRequest & {
+  expected_revision: number;
+};
+
+export type UpdateTunnelConnectionAssessmentRequest = {
+  expected_revision: number;
+  assessment: TunnelConnectionAssessment;
+  note: string | null;
+};
+
+export type TunnelPlanRevisionTarget = {
+  plan_id: string;
+  expected_revision: number;
+};
+
 export type UpdateTunnelPlanOspfCostRequest = {
+  plan_revision: number;
   recommendation_id: string;
-  current_ospf_cost: number;
-  recommended_ospf_cost: number;
-  mutation_intent: "apply" | "rollback";
+  left_adapter_definition_hash: string;
+  right_adapter_definition_hash: string;
+  left_current_ospf_cost: number | null;
+  right_current_ospf_cost: number | null;
+  desired_ospf_cost: number;
   confirmed: boolean;
   privilege_assertion?: PrivilegeAssertion | null;
+};
+
+export type TunnelPlanOspfJobsResponse = {
+  plan: TunnelPlanRecord;
+  jobs: CreateJobResponse[];
 };
 
 export type AllocateTunnelEndpointsRequest = {

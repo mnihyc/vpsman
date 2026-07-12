@@ -440,7 +440,9 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
         | JobCommand::RestoreRollback { .. }
         | JobCommand::NetworkStatus { .. }
         | JobCommand::NetworkProbe { .. }
-        | JobCommand::NetworkSpeedTest { .. } => {
+        | JobCommand::NetworkSpeedTest { .. }
+        | JobCommand::NetworkRoutingStatus { .. }
+        | JobCommand::NetworkRoutingApply { .. } => {
             anyhow::bail!("unsupported command type in direct executor")
         }
     }

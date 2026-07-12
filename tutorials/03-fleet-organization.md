@@ -43,7 +43,8 @@ tags for operational groups, provider labels, countries, regions, or optional
 cargo run -p vpsctl -- summary
 cargo run -p vpsctl -- agents
 cargo run -p vpsctl -- fleet-alerts
-cargo run -p vpsctl -- telemetry-rollups
+cargo run -p vpsctl -- telemetry-rollups --latest
+cargo run -p vpsctl -- telemetry-network-rates --latest
 cargo run -p vpsctl -- gateway-sessions
 ```
 

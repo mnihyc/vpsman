@@ -65,7 +65,10 @@ export function useDashboardData(activeView: ActiveView) {
     useState<WsTerminalOutputEvent | null>(null);
   const dashboardOverviewReloadTimer = useRef<number | null>(null);
   const fleetReloadTimer = useRef<number | null>(null);
+  const fleetTelemetryReloadTimer = useRef<number | null>(null);
+  const fleetTelemetryReloadedAt = useRef(0);
   const inventoryReloadTimer = useRef<number | null>(null);
+  const topologyReloadTimer = useRef<number | null>(null);
   const refreshAuthRef = useRef<Promise<void> | null>(null);
 
   const forceAuthRequired = useCallback(() => {
@@ -135,11 +138,28 @@ export function useDashboardData(activeView: ActiveView) {
     if (fleetReloadTimer.current !== null) {
       return;
     }
+    if (fleetTelemetryReloadTimer.current !== null) {
+      window.clearTimeout(fleetTelemetryReloadTimer.current);
+      fleetTelemetryReloadTimer.current = null;
+    }
     fleetReloadTimer.current = window.setTimeout(() => {
       fleetReloadTimer.current = null;
+      fleetTelemetryReloadedAt.current = Date.now();
       void fleet.loadFleet();
     }, 750);
   }, [fleet.loadFleet]);
+  const scheduleFleetTelemetryReload = useCallback(() => {
+    if (fleetTelemetryReloadTimer.current !== null) {
+      return;
+    }
+    const elapsed = Date.now() - fleetTelemetryReloadedAt.current;
+    const delay = Math.max(0, 5_000 - elapsed);
+    fleetTelemetryReloadTimer.current = window.setTimeout(() => {
+      fleetTelemetryReloadTimer.current = null;
+      fleetTelemetryReloadedAt.current = Date.now();
+      void fleet.loadFleetTelemetry();
+    }, delay);
+  }, [fleet.loadFleetTelemetry]);
   const scheduleInventoryReload = useCallback(() => {
     if (inventoryReloadTimer.current !== null) {
       return;
@@ -149,6 +169,29 @@ export function useDashboardData(activeView: ActiveView) {
       void inventory.loadTagInventory();
     }, 1_000);
   }, [inventory.loadTagInventory]);
+  const scheduleTopologyReload = useCallback(() => {
+    if (topologyReloadTimer.current !== null) {
+      return;
+    }
+    topologyReloadTimer.current = window.setTimeout(() => {
+      topologyReloadTimer.current = null;
+      void Promise.all([
+        topology.loadTunnelPlans(),
+        topology.loadTopologyGraph(),
+        topology.loadNetworkObservations(),
+        topology.loadNetworkTrends(),
+        topology.loadOspfRecommendations(),
+        topology.loadOspfUpdatePlans(),
+      ]);
+    }, 500);
+  }, [
+    topology.loadNetworkObservations,
+    topology.loadNetworkTrends,
+    topology.loadOspfRecommendations,
+    topology.loadOspfUpdatePlans,
+    topology.loadTopologyGraph,
+    topology.loadTunnelPlans,
+  ]);
 
   useEffect(
     () => () => {
@@ -158,8 +201,14 @@ export function useDashboardData(activeView: ActiveView) {
       if (fleetReloadTimer.current !== null) {
         window.clearTimeout(fleetReloadTimer.current);
       }
+      if (fleetTelemetryReloadTimer.current !== null) {
+        window.clearTimeout(fleetTelemetryReloadTimer.current);
+      }
       if (inventoryReloadTimer.current !== null) {
         window.clearTimeout(inventoryReloadTimer.current);
+      }
+      if (topologyReloadTimer.current !== null) {
+        window.clearTimeout(topologyReloadTimer.current);
       }
     },
     [],
@@ -183,10 +232,23 @@ export function useDashboardData(activeView: ActiveView) {
       return;
     }
     let disposed = false;
+    let tick = 0;
+    let refreshInFlight = false;
 
     async function loadIfActive() {
-      if (!disposed) {
-        await fleet.loadFleet();
+      if (disposed || refreshInFlight) {
+        return;
+      }
+      refreshInFlight = true;
+      try {
+        if (tick === 0 || tick % 4 === 0) {
+          await fleet.loadFleet();
+        } else {
+          await fleet.loadFleetTelemetry();
+        }
+        tick += 1;
+      } finally {
+        refreshInFlight = false;
       }
     }
 
@@ -196,7 +258,7 @@ export function useDashboardData(activeView: ActiveView) {
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [apiToken, fleet.loadFleet]);
+  }, [apiToken, fleet.loadFleet, fleet.loadFleetTelemetry]);
 
   useEffect(() => {
     if (
@@ -346,17 +408,17 @@ export function useDashboardData(activeView: ActiveView) {
         fleet.replaceFleetSnapshot(event.summary, event.agents);
         return;
       }
-      if (
+      if (event.type === "telemetry_updated") {
+        scheduleFleetTelemetryReload();
+      } else if (
         event.type === "agent_updated" ||
-        event.type === "telemetry_updated" ||
         event.type === "job_rejected"
       ) {
         scheduleFleetReload();
       }
       if (
-        activeView === "Home" &&
+        (activeView === "Home" || activeView === "Observability") &&
         (event.type === "agent_updated" ||
-          event.type === "telemetry_updated" ||
           event.type === "job_rejected")
       ) {
         scheduleDashboardOverviewReload();
@@ -388,6 +450,9 @@ export function useDashboardData(activeView: ActiveView) {
         if (activeView === "Home" || activeView === "Observability") {
           scheduleDashboardOverviewReload();
         }
+        if (activeView === "Network") {
+          scheduleTopologyReload();
+        }
       }
       if (event.type === "backup_artifact_recorded") {
         void backups.loadBackups();
@@ -412,7 +477,9 @@ export function useDashboardData(activeView: ActiveView) {
     jobs.loadTerminalSessions,
     scheduleDashboardOverviewReload,
     scheduleFleetReload,
+    scheduleFleetTelemetryReload,
     scheduleInventoryReload,
+    scheduleTopologyReload,
     activeView,
   ]);
 
@@ -500,9 +567,9 @@ export function useDashboardData(activeView: ActiveView) {
     updateTagOrder: inventory.updateTagOrder,
     allocateTunnelEndpoints: topology.allocateTunnelEndpoints,
     createTunnelPlan: topology.createTunnelPlan,
+    deleteTunnelPlan: topology.deleteTunnelPlan,
     exportTunnelPlan: topology.exportTunnelPlan,
-    promoteTelemetryTunnel: topology.promoteTelemetryTunnel,
-    promoteTunnelPlanToCustomAdapter: topology.promoteTunnelPlanToCustomAdapter,
+    refreshTunnelPlanOspfStatus: topology.refreshTunnelPlanOspfStatus,
     disableTotp: access.disableTotp,
     handleAuth,
     jobs: jobs.jobs,
@@ -574,6 +641,7 @@ export function useDashboardData(activeView: ActiveView) {
     cancelServerJob: jobs.cancelServerJob,
     previewArtifactCleanup: jobs.previewArtifactCleanup,
     loadTagInventory: inventory.loadTagInventory,
+    loadSourceTemplates: inventory.loadSourceTemplates,
     loadSchedules: schedules.loadSchedules,
     loadNetworkObservations: topology.loadNetworkObservations,
     loadNetworkTrends: topology.loadNetworkTrends,
@@ -582,7 +650,9 @@ export function useDashboardData(activeView: ActiveView) {
     loadTopologyGraph: topology.loadTopologyGraph,
     loadTunnelPlans: topology.loadTunnelPlans,
     setTunnelPlanEnabled: topology.setTunnelPlanEnabled,
+    updateTunnelConnectionAssessment: topology.updateTunnelConnectionAssessment,
     updateTunnelPlanOspfCost: topology.updateTunnelPlanOspfCost,
+    updateTunnelPlan: topology.updateTunnelPlan,
     networkObservations: topology.networkObservations,
     networkTrends: topology.networkTrends,
     ospfRecommendations: topology.ospfRecommendations,

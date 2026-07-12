@@ -19,8 +19,6 @@ import {
   TOPOLOGY_OBSERVATION_STATE_CLASS_BY_STATE,
   TOPOLOGY_PROBE_STATE_CLASS_BY_STATE,
   TOPOLOGY_RUNTIME_STATE_CLASS_BY_STATE,
-  TUNNEL_ENDPOINT_STATUS_CLASS_BY_STATUS,
-  TUNNEL_PLAN_STATUS_CLASS_BY_STATUS,
   WEBHOOK_RULE_DELIVERY_HISTORY_STATUS_CLASS_BY_STATUS,
   WEBHOOK_RULE_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS,
   WEBHOOK_RULE_DELIVERY_STATUS_CLASS_BY_STATUS,
@@ -47,8 +45,6 @@ import type {
   GeneratedTopologyObservationState,
   GeneratedTopologyProbeState,
   GeneratedTopologyRuntimeState,
-  GeneratedTunnelEndpointStatus,
-  GeneratedTunnelPlanStatus,
   GeneratedWebhookRuleDeliveryHistoryStatus,
   GeneratedWebhookRuleDeliveryProcessStatus,
   GeneratedWebhookRuleDeliveryStatus,
@@ -98,12 +94,11 @@ export function migrationLinkStatusBadgeClass(status: GeneratedMigrationLinkStat
   return workflowStatusClassBadge(MIGRATION_LINK_STATUS_CLASS_BY_STATUS[status]);
 }
 
-export function tunnelPlanStatusBadgeClass(status: GeneratedTunnelPlanStatus): string {
-  return workflowStatusClassBadge(TUNNEL_PLAN_STATUS_CLASS_BY_STATUS[status]);
-}
-
-export function tunnelEndpointStatusBadgeClass(status: GeneratedTunnelEndpointStatus): string {
-  return workflowStatusClassBadge(TUNNEL_ENDPOINT_STATUS_CLASS_BY_STATUS[status]);
+export function tunnelEndpointRuntimeStateBadgeClass(status: string): string {
+  if (status === "healthy") return "ok";
+  if (status === "degraded" || status === "stale") return "warn";
+  if (status === "disabled") return "neutral";
+  return "info";
 }
 
 export function agentUpdateReleaseStatusBadgeClass(status: GeneratedAgentUpdateReleaseStatus): string {

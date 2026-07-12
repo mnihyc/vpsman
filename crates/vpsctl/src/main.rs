@@ -46,7 +46,6 @@ mod vty_job_outputs;
 mod vty_jobs;
 mod vty_migrations;
 mod vty_network;
-mod vty_network_adapter;
 mod vty_network_dispatch;
 mod vty_network_observations;
 mod vty_network_ospf;

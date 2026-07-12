@@ -30,6 +30,7 @@ import {
   formatTime,
   formatVpsName,
   shortId,
+  timestampMillis,
   type VpsNameDisplayMode,
 } from "../../utils";
 
@@ -43,7 +44,7 @@ type GraphLayout = {
   nodes: PositionedNode[];
 };
 
-type HealthFilter = "all" | "attention" | "applied" | "planned";
+type HealthFilter = "all" | "attention" | "healthy" | "unknown";
 type GraphPan = {
   x: number;
   y: number;
@@ -58,8 +59,8 @@ type GraphLegendItem = {
 const healthFilters: { label: string; value: HealthFilter }[] = [
   { label: "All", value: "all" },
   { label: "Attention", value: "attention" },
-  { label: "Applied", value: "applied" },
-  { label: "Planned", value: "planned" },
+  { label: "Healthy", value: "healthy" },
+  { label: "Unknown", value: "unknown" },
 ];
 
 export function TopologyGraphPanel({
@@ -130,11 +131,14 @@ export function TopologyGraphPanel({
     () => buildGraphLegendItems(filtered.edges),
     [filtered.edges],
   );
+  const hasVisibleOspfCost = filtered.edges.some(
+    (edge) => edge.recommended_ospf_cost !== null,
+  );
   const showMinimap = filtered.edges.length > 10 || nodes.length > 8;
   const status =
     graph.edges.length === 0
       ? "No topology edges"
-      : `${filtered.nodes.length} shown / ${graph.nodes.length} nodes; ${filtered.edges.length} shown / ${graph.edges.length} tunnels`;
+      : `${filtered.nodes.length} of ${graph.nodes.length} plan endpoints shown; ${filtered.edges.length} of ${graph.edges.length} ${graph.edges.length === 1 ? "tunnel" : "tunnels"} shown`;
 
   return (
     <section
@@ -142,8 +146,8 @@ export function TopologyGraphPanel({
     >
       <div className="sectionHeader">
         <div>
-          <h2>
-            Topology graph
+          <div className="topologyGraphTitleRow">
+            <h2>Topology graph</h2>
             {latestTopologyEvidence ? (
               <span
                 className={`topologyFreshnessBadge ${latestTopologyEvidenceStale ? "stale" : "current"}`}
@@ -154,7 +158,7 @@ export function TopologyGraphPanel({
                 {latestTopologyEvidenceStale ? "stale" : "current"}
               </span>
             ) : null}
-          </h2>
+          </div>
           <span>{status}</span>
         </div>
         <button
@@ -174,7 +178,7 @@ export function TopologyGraphPanel({
             <input
               aria-label="Filter topology graph"
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search graph"
+              placeholder="Search plans or endpoints"
               value={query}
             />
           </label>
@@ -247,8 +251,8 @@ export function TopologyGraphPanel({
           <GitGraph size={28} />
           <strong>No saved tunnel plans</strong>
           <span>
-            Saved plans and persisted observations will appear here as an
-            applied topology graph.
+            Saved plans and their explicit endpoint observations will appear
+            here.
           </span>
         </div>
       ) : filtered.edges.length === 0 && filtered.nodes.length === 0 ? (
@@ -277,11 +281,13 @@ export function TopologyGraphPanel({
               </div>
             ))}
           </div>
-          <details className="topologyGraphCostModel">
-            <summary>Why OSPF cost changed</summary>
-            <p>{OSPF_COST_MODEL_SUMMARY}</p>
-            <small>{OSPF_COST_MODEL_DETAIL}</small>
-          </details>
+          {hasVisibleOspfCost ? (
+            <details className="topologyGraphCostModel">
+              <summary>Why OSPF cost changed</summary>
+              <p>{OSPF_COST_MODEL_SUMMARY}</p>
+              <small>{OSPF_COST_MODEL_DETAIL}</small>
+            </details>
+          ) : null}
           <div className="topologyMobileGraphToggle">
             <span>
               Mobile defaults to the tunnel list so endpoint state and actions
@@ -360,13 +366,15 @@ export function TopologyGraphPanel({
                           >
                             {edgeInlineMetric(edge)}
                           </text>
-                          <text
-                            className="topologyGraphMetric"
-                            x={(left.x + right.x) / 2}
-                            y={(left.y + right.y) / 2 + 18}
-                          >
-                            {ospfCostSummary(edge)}
-                          </text>
+                          {edge.recommended_ospf_cost !== null ? (
+                            <text
+                              className="topologyGraphMetric"
+                              x={(left.x + right.x) / 2}
+                              y={(left.y + right.y) / 2 + 18}
+                            >
+                              {ospfCostSummary(edge)}
+                            </text>
+                          ) : null}
                         </>
                       )}
                     </g>
@@ -389,7 +397,7 @@ export function TopologyGraphPanel({
                     <title>{nodeHoverDetail(node, vpsNameDisplayMode, agentById)}</title>
                     <circle cx={node.x} cy={node.y} r="42" />
                     <text x={node.x} y={node.y - 8}>
-                      {nodeLabel(node, vpsNameDisplayMode)}
+                      {graphNodeLabel(node, vpsNameDisplayMode)}
                     </text>
                     <text
                       className="topologyGraphMetric"
@@ -403,7 +411,7 @@ export function TopologyGraphPanel({
                       x={node.x}
                       y={node.y + 26}
                     >
-                      {node.applied_tunnel_count}/{node.tunnel_count} applied
+                      {node.healthy_tunnel_count}/{node.tunnel_count} healthy
                     </text>
                   </g>
                 ))}
@@ -461,10 +469,10 @@ export function TopologyGraphPanel({
               </span>
               <span className="topologyMetric">
                 <strong>
-                  {selectedNode.applied_tunnel_count}/
+                  {selectedNode.healthy_tunnel_count}/
                   {selectedNode.tunnel_count}
                 </strong>
-                <small>applied tunnels</small>
+                <small>healthy tunnels</small>
               </span>
               <span className="topologyMetric">
                 <strong>{selectedNode.degraded_tunnel_count}</strong>
@@ -516,9 +524,9 @@ export function TopologyGraphPanel({
                   <strong>{edgeMetric(edge)}</strong>
                   <small>{edgeStatusDetail(edge)}</small>
                 </span>
-                <span className="topologyMetric" data-label="Drift">
-                  <strong>{humanStatus(edge.topology_drift_action)}</strong>
-                  <small>{humanStatus(edge.topology_drift_policy)}</small>
+                <span className="topologyMetric" data-label="Endpoints">
+                  <strong>{humanStatus(edge.left_runtime_state)} / {humanStatus(edge.right_runtime_state)}</strong>
+                  <small>{endpointRuntimeDetail(edge)}</small>
                 </span>
                 <span className="topologyMetric" data-label="Neighbor">
                   <strong>{humanStatus(edge.neighbor_state)}</strong>
@@ -583,12 +591,9 @@ function runtimeConfigApplyStateDetail(
       : "waiting";
   }
   if (state.applied_content_hash) {
-    const version = state.applied_version
-      ? `v${state.applied_version}`
-      : shortId(state.applied_content_hash);
     return state.applied_at
-      ? `${version} ${formatTime(state.applied_at)}`
-      : version;
+      ? `applied ${formatCompactTime(state.applied_at)}`
+      : `hash ${shortId(state.applied_content_hash)}`;
   }
   return "no successful sync";
 }
@@ -622,11 +627,11 @@ function latestIso(values: Array<string | null | undefined>): string | null {
     if (!value) {
       return latest;
     }
-    const timestamp = new Date(value).getTime();
+    const timestamp = timestampMillis(value);
     if (!Number.isFinite(timestamp)) {
       return latest;
     }
-    if (!latest || timestamp > new Date(latest).getTime()) {
+    if (!latest || timestamp > timestampMillis(latest)) {
       return value;
     }
     return latest;
@@ -637,7 +642,7 @@ function isStaleEvidence(value: string | null): boolean {
   if (!value) {
     return false;
   }
-  const timestamp = new Date(value).getTime();
+  const timestamp = timestampMillis(value);
   return Number.isFinite(timestamp)
     ? Date.now() - timestamp > 24 * 60 * 60 * 1000
     : false;
@@ -647,11 +652,11 @@ function buildGraphLegendItems(edges: TopologyGraphEdge[]): GraphLegendItem[] {
   const attentionCount = edges.filter((edge) =>
     edgeMatchesHealth(edge, "attention"),
   ).length;
-  const appliedCount = edges.filter((edge) =>
-    edgeMatchesHealth(edge, "applied"),
+  const healthyCount = edges.filter((edge) =>
+    edgeMatchesHealth(edge, "healthy"),
   ).length;
-  const plannedCount = edges.filter((edge) =>
-    edgeMatchesHealth(edge, "planned"),
+  const unknownCount = edges.filter((edge) =>
+    edgeMatchesHealth(edge, "unknown"),
   ).length;
   const latestMeasuredEdge =
     edges.find(
@@ -661,21 +666,14 @@ function buildGraphLegendItems(edges: TopologyGraphEdge[]): GraphLegendItem[] {
     ) ??
     edges[0] ??
     null;
-  return [
+  const latestOspfEdge =
+    edges.find((edge) => edge.recommended_ospf_cost !== null) ?? null;
+  const items: GraphLegendItem[] = [
     {
-      detail: `${appliedCount} applied, ${plannedCount} planned, ${attentionCount} attention`,
+      detail: `${healthyCount} healthy, ${unknownCount} unknown, ${attentionCount} attention`,
       label: "Layers",
       tone: attentionCount > 0 ? "attention" : "ready",
       value: `${edges.length} visible tunnel${edges.length === 1 ? "" : "s"}`,
-    },
-    {
-      detail: latestMeasuredEdge
-        ? `Network / OSPF owns review and apply; ${ospfCostReason(latestMeasuredEdge)}`
-        : "Cost appears after a measured or saved tunnel is visible.",
-      label: "OSPF cost",
-      value: latestMeasuredEdge
-        ? ospfCostSummary(latestMeasuredEdge)
-        : "No cost",
     },
     {
       detail: latestMeasuredEdge
@@ -691,6 +689,14 @@ function buildGraphLegendItems(edges: TopologyGraphEdge[]): GraphLegendItem[] {
         : "No samples",
     },
   ];
+  if (latestOspfEdge) {
+    items.splice(1, 0, {
+      detail: `Optional OSPF uses explicit endpoint adapters; ${ospfCostReason(latestOspfEdge)}`,
+      label: "OSPF cost",
+      value: ospfCostSummary(latestOspfEdge),
+    });
+  }
+  return items;
 }
 
 function filterGraph(
@@ -737,11 +743,7 @@ function filterGraph(
   for (const clientId of queryMatchedNodeIds) {
     visibleNodeIds.add(clientId);
   }
-  const nodes = graph.nodes.filter((node) =>
-    normalizedQuery || healthFilter !== "all"
-      ? visibleNodeIds.has(node.client_id)
-      : true,
-  );
+  const nodes = graph.nodes.filter((node) => visibleNodeIds.has(node.client_id));
   return { edges, nodes };
 }
 
@@ -752,18 +754,18 @@ function positionNodes(nodes: TopologyGraphNode[]): GraphLayout {
   if (nodes.length === 1) {
     return { height: 360, nodes: [{ ...nodes[0], x: 450, y: 180 }] };
   }
-  if (nodes.length > 12) {
-    const columns = Math.min(6, Math.ceil(Math.sqrt(nodes.length * 1.4)));
+  if (nodes.length > 8) {
+    const columns = Math.min(4, Math.ceil(Math.sqrt(nodes.length * 1.2)));
     const rows = Math.ceil(nodes.length / columns);
-    const height = Math.max(420, rows * 92 + 120);
+    const height = Math.max(420, rows * 116 + 100);
     const xStep = columns === 1 ? 0 : 740 / (columns - 1);
-    const yStep = rows === 1 ? 0 : (height - 140) / (rows - 1);
+    const yStep = rows === 1 ? 0 : (height - 128) / (rows - 1);
     return {
       height,
       nodes: nodes.map((node, index) => ({
         ...node,
         x: Math.round(80 + (index % columns) * xStep),
-        y: Math.round(70 + Math.floor(index / columns) * yStep),
+        y: Math.round(64 + Math.floor(index / columns) * yStep),
       })),
     };
   }
@@ -794,18 +796,16 @@ function edgeMatchesHealth(
   if (filter === "attention") {
     return (
       edge.health === "degraded" ||
-      edge.health === "rolled_back" ||
       (edge.degraded_count ?? 0) > 0 ||
       (edge.desired_missing_count ?? 0) > 0 ||
       (edge.stale_present_count ?? 0) > 0 ||
-      (edge.import_candidate_count ?? 0) > 0 ||
-      Boolean(edge.convergence_blocked)
+      edge.unavailable_client_ids.length > 0
     );
   }
-  if (filter === "applied") {
-    return edge.health === "healthy" || edge.health === "applied";
+  if (filter === "healthy") {
+    return edge.health === "healthy";
   }
-  return edge.health === "planned" || edge.status === "planned";
+  return edge.health === "unknown" || edge.health === "disabled";
 }
 
 function edgeSearchText(edge: TopologyGraphEdge): string {
@@ -815,10 +815,7 @@ function edgeSearchText(edge: TopologyGraphEdge): string {
     edge.interface_name,
     edge.kind,
     edge.health,
-    edge.status,
     edge.enabled ? "enabled" : "disabled",
-    edge.topology_drift_policy ?? "",
-    edge.topology_drift_action ?? "",
     edge.neighbor_state ?? "",
     edge.probe_state ?? "",
     edge.runtime_state ?? "",
@@ -830,11 +827,12 @@ function edgeSearchText(edge: TopologyGraphEdge): string {
     ...(edge.runtime_reasons ?? []),
     edge.left_client_id,
     edge.right_client_id,
-    edge.left_status,
-    edge.right_status,
-    edge.convergence_blocked ? "convergence blocked" : "",
-    ...edgeOfflineClientIds(edge),
-    ...edgeServerDriftReasons(edge),
+    edge.left_runtime_state,
+    edge.right_runtime_state,
+    edge.left_runtime_reason ?? "",
+    edge.right_runtime_reason ?? "",
+    ...edgeUnavailableClientIds(edge),
+    ...edgeAvailabilityReasons(edge),
     edge.left_tunnel_address,
     edge.right_tunnel_address,
   ].join(" ");
@@ -890,12 +888,18 @@ function formatLoss(value: number | null): string {
 }
 
 function ospfCostSummary(edge: TopologyGraphEdge): string {
+  if (edge.recommended_ospf_cost === null) {
+    return "OSPF off";
+  }
   return edge.cost_delta === null
     ? `OSPF ${edge.recommended_ospf_cost}`
     : `OSPF ${edge.recommended_ospf_cost} (${edge.cost_delta > 0 ? "+" : ""}${edge.cost_delta})`;
 }
 
 function ospfCostReason(edge: TopologyGraphEdge): string {
+  if (edge.recommended_ospf_cost === null) {
+    return "This tunnel plan has no routing cost adapter workflow.";
+  }
   return `${latencyLabel(edge)}, ${formatLoss(edge.packet_loss_avg_ratio)} loss, ${bandwidthLabel(edge)} drive recommended cost ${edge.recommended_ospf_cost}.`;
 }
 
@@ -903,14 +907,9 @@ function edgeStatusDetail(edge: TopologyGraphEdge): string {
   if (!edge.enabled) {
     return "disabled";
   }
-  if (edge.convergence_blocked) {
-    const blockedCount = edgeOfflineClientIds(edge).length;
-    return blockedCount > 0
-      ? `${blockedCount} endpoint${blockedCount === 1 ? "" : "s"} offline`
-      : "convergence blocked";
-  }
-  if ((edge.import_candidate_count ?? 0) > 0) {
-    return `${edge.import_candidate_count} import candidate${edge.import_candidate_count === 1 ? "" : "s"}`;
+  const unavailableCount = edgeUnavailableClientIds(edge).length;
+  if (unavailableCount > 0) {
+    return `${unavailableCount} endpoint${unavailableCount === 1 ? "" : "s"} unavailable`;
   }
   if ((edge.stale_present_count ?? 0) > 0) {
     return `${edge.stale_present_count} stale interface${edge.stale_present_count === 1 ? "" : "s"}`;
@@ -918,15 +917,15 @@ function edgeStatusDetail(edge: TopologyGraphEdge): string {
   if ((edge.desired_missing_count ?? 0) > 0) {
     return `${edge.desired_missing_count} desired interface${edge.desired_missing_count === 1 ? "" : "s"} missing`;
   }
-  const serverDriftReasons = edgeServerDriftReasons(edge);
-  if (serverDriftReasons.length > 0) {
-    return serverDriftReasons.map(humanStatus).join(", ");
+  const availabilityReasons = edgeAvailabilityReasons(edge);
+  if (availabilityReasons.length > 0) {
+    return availabilityReasons.map(humanStatus).join(", ");
   }
   const runtimeReasons = edgeRuntimeReasons(edge);
   if (runtimeReasons.length > 0) {
     return runtimeReasons.map(humanStatus).join(", ");
   }
-  return `${humanStatus(edge.left_status)} / ${humanStatus(edge.right_status)}`;
+  return `${humanStatus(edge.left_runtime_state)} / ${humanStatus(edge.right_runtime_state)}`;
 }
 
 function runtimeCoverageDetail(edge: TopologyGraphEdge): string {
@@ -977,13 +976,15 @@ function hasLatencyCurve(edge: TopologyGraphEdge): boolean {
   );
 }
 
-function edgeOfflineClientIds(edge: TopologyGraphEdge): string[] {
-  return Array.isArray(edge.offline_client_ids) ? edge.offline_client_ids : [];
+function edgeUnavailableClientIds(edge: TopologyGraphEdge): string[] {
+  return Array.isArray(edge.unavailable_client_ids)
+    ? edge.unavailable_client_ids
+    : [];
 }
 
-function edgeServerDriftReasons(edge: TopologyGraphEdge): string[] {
-  return Array.isArray(edge.server_drift_reasons)
-    ? edge.server_drift_reasons
+function edgeAvailabilityReasons(edge: TopologyGraphEdge): string[] {
+  return Array.isArray(edge.availability_reasons)
+    ? edge.availability_reasons
     : [];
 }
 
@@ -1000,6 +1001,17 @@ function nodeLabel(
   mode: VpsNameDisplayMode,
 ): string {
   return formatVpsName(node, mode);
+}
+
+function graphNodeLabel(
+  node: Pick<TopologyGraphNode, "client_id" | "display_name">,
+  mode: VpsNameDisplayMode,
+): string {
+  const label = nodeLabel(node, mode);
+  if (label.length <= 24) {
+    return label;
+  }
+  return `${label.slice(0, 16)}...${label.slice(-5)}`;
 }
 
 function edgeEndpointLabel(
@@ -1049,7 +1061,7 @@ function nodeHoverDetail(
   return [
     nodeLabel(node, mode),
     `status ${statusDetail}`,
-    `${node.applied_tunnel_count}/${node.tunnel_count} applied`,
+    `${node.healthy_tunnel_count}/${node.tunnel_count} healthy`,
     `${node.degraded_tunnel_count} degraded`,
     `region ${regionLabel(node)}`,
     node.latest_observed_at
@@ -1071,6 +1083,17 @@ function edgeHoverDetail(
     ospfCostSummary(edge),
     ospfCostReason(edge),
   ].join("; ");
+}
+
+function endpointRuntimeDetail(edge: TopologyGraphEdge): string {
+  const reasons = [edge.left_runtime_reason, edge.right_runtime_reason]
+    .filter((value): value is string => Boolean(value))
+    .map(humanStatus);
+  if (reasons.length > 0) {
+    return reasons.join("; ");
+  }
+  const observed = latestIso([edge.left_observed_at, edge.right_observed_at]);
+  return observed ? `latest ${formatCompactTime(observed)}` : "no endpoint evidence";
 }
 
 function regionLabel(node: Pick<TopologyGraphNode, "tags">): string {

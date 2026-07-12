@@ -11,7 +11,9 @@ use crate::repository::Repository;
 use crate::repository_jobs::{
     mark_active_targets_agent_lost_for_client_in_tx, skip_unstarted_queued_targets_for_client_in_tx,
 };
-use crate::repository_key_lifecycle::{lock_postgres_agent_key_lifecycle, public_key_sha256_hex};
+use crate::repository_key_lifecycle::{
+    lock_postgres_agent_identity_lifecycle, public_key_sha256_hex,
+};
 use crate::selector_expression::{agent_matches_selector_expression, parse_selector_expression};
 use crate::unix_now;
 
@@ -89,28 +91,29 @@ impl Repository {
             Self::Memory(memory) => {
                 let agents = memory.agents.read().await;
                 let hidden = memory.hidden_clients.read().await;
+                let visible_agents = agents
+                    .iter()
+                    .filter(|agent| !hidden.contains(&agent.id))
+                    .collect::<Vec<_>>();
+                let (mut online, mut offline, mut never, mut stale, mut unknown) =
+                    (0_usize, 0_usize, 0_usize, 0_usize, 0_usize);
+                for agent in &visible_agents {
+                    match agent.status.as_str() {
+                        "online" if agent.last_seen_at.is_some() => online += 1,
+                        "offline" | "disconnected" => offline += 1,
+                        "never" => never += 1,
+                        "stale" => stale += 1,
+                        _ => unknown += 1,
+                    }
+                }
                 Ok(FleetSummary {
-                    total: agents
-                        .iter()
-                        .filter(|agent| !hidden.contains(&agent.id))
-                        .count(),
-                    online: agents
-                        .iter()
-                        .filter(|agent| agent.status == "online" && !hidden.contains(&agent.id))
-                        .count(),
-                    offline: agents
-                        .iter()
-                        .filter(|agent| agent.status == "offline" && !hidden.contains(&agent.id))
-                        .count(),
-                    never: agents
-                        .iter()
-                        .filter(|agent| agent.status == "never" && !hidden.contains(&agent.id))
-                        .count(),
-                    stale: agents
-                        .iter()
-                        .filter(|agent| agent.status == "stale" && !hidden.contains(&agent.id))
-                        .count(),
-                    warnings: 0,
+                    total: visible_agents.len(),
+                    online,
+                    offline,
+                    never,
+                    unknown,
+                    stale,
+                    warnings: offline + never + stale + unknown,
                     running_jobs: 0,
                 })
             }
@@ -119,11 +122,15 @@ impl Repository {
                     r#"
                     SELECT
                         (SELECT count(*) FROM clients WHERE hidden_at IS NULL) AS total,
-                        (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status = 'online') AS online,
-                        (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status = 'offline') AS offline,
+                        (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status = 'online' AND last_seen_at IS NOT NULL) AS online,
+                        (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status IN ('offline', 'disconnected')) AS offline,
                         (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status = 'never') AS never,
                         (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status = 'stale') AS stale,
-                        (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status IN ('offline', 'never', 'stale')) AS warnings,
+                        (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND (
+                            (status = 'online' AND last_seen_at IS NULL)
+                            OR status NOT IN ('online', 'offline', 'disconnected', 'never', 'stale')
+                        )) AS unknown,
+                        (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND NOT (status = 'online' AND last_seen_at IS NOT NULL)) AS warnings,
                         (SELECT count(*) FROM jobs WHERE status IN ('queued', 'running')) AS running_jobs
                     "#,
                 )
@@ -134,6 +141,7 @@ impl Repository {
                     online: row.try_get::<i64, _>("online")? as usize,
                     offline: row.try_get::<i64, _>("offline")? as usize,
                     never: row.try_get::<i64, _>("never")? as usize,
+                    unknown: row.try_get::<i64, _>("unknown")? as usize,
                     stale: row.try_get::<i64, _>("stale")? as usize,
                     warnings: row.try_get::<i64, _>("warnings")? as usize,
                     running_jobs: row.try_get::<i64, _>("running_jobs")? as usize,
@@ -843,7 +851,7 @@ impl Repository {
         client_id: &str,
         request: &DeleteAgentRequest,
         operator: &AuthContext,
-    ) -> Result<DeleteAgentResponse> {
+    ) -> Result<DeleteAgentResult> {
         let reason = request
             .reason
             .as_deref()
@@ -892,14 +900,17 @@ impl Repository {
                 }
                 let tunnel_delete_reason =
                     deleted_endpoint_tunnel_plan_reason(client_id, reason.as_deref());
-                let soft_deleted_tunnel_plan_count = {
+                let (soft_deleted_tunnel_plan_count, retired_tunnel_endpoint_pairs) = {
                     let mut plans = memory.tunnel_plans.write().await;
                     let mut count = 0usize;
+                    let mut endpoint_pairs = Vec::new();
                     for plan in plans.iter_mut().filter(|plan| {
                         plan.deleted_at.is_none()
                             && (plan.left_client_id == client_id
                                 || plan.right_client_id == client_id)
                     }) {
+                        endpoint_pairs
+                            .push((plan.left_client_id.clone(), plan.right_client_id.clone()));
                         plan.deleted_at = Some(deleted_at.clone());
                         plan.deleted_by = Some(operator.operator.id);
                         plan.deleted_reason = Some(tunnel_delete_reason.clone());
@@ -907,7 +918,7 @@ impl Repository {
                         plan.updated_at = deleted_at.clone();
                         count += 1;
                     }
-                    count
+                    (count, endpoint_pairs)
                 };
                 for session in memory.gateway_sessions.write().await.iter_mut() {
                     if session.client_id == client_id && session.status == "active" {
@@ -954,15 +965,20 @@ impl Repository {
                     }),
                     created_at: deleted_at.clone(),
                 });
-                Ok(DeleteAgentResponse {
-                    client_id: client_id.to_string(),
-                    deleted: true,
-                    deleted_at,
+                Ok(DeleteAgentResult {
+                    response: DeleteAgentResponse {
+                        client_id: client_id.to_string(),
+                        deleted: true,
+                        deleted_at,
+                        runtime_sync_job_ids: Vec::new(),
+                        runtime_sync_failed_client_ids: Vec::new(),
+                    },
+                    retired_tunnel_endpoint_pairs,
                 })
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                lock_postgres_agent_key_lifecycle(&mut tx).await?;
+                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
                 let client_row = sqlx::query(
                     r#"
                     SELECT process_incarnation_id, public_key
@@ -1050,7 +1066,7 @@ impl Repository {
                 .await?;
                 let tunnel_delete_reason =
                     deleted_endpoint_tunnel_plan_reason(client_id, reason.as_deref());
-                let soft_deleted_tunnel_plan_count = sqlx::query(
+                let soft_deleted_tunnel_plan_rows = sqlx::query(
                     r#"
                     UPDATE tunnel_plans
                     SET
@@ -1061,14 +1077,24 @@ impl Repository {
                         updated_at = now()
                     WHERE deleted_at IS NULL
                       AND (left_client_id = $1 OR right_client_id = $1)
+                    RETURNING left_client_id, right_client_id
                     "#,
                 )
                 .bind(client_id)
                 .bind(operator.operator.id)
                 .bind(&tunnel_delete_reason)
-                .execute(&mut *tx)
-                .await?
-                .rows_affected();
+                .fetch_all(&mut *tx)
+                .await?;
+                let soft_deleted_tunnel_plan_count = soft_deleted_tunnel_plan_rows.len();
+                let retired_tunnel_endpoint_pairs = soft_deleted_tunnel_plan_rows
+                    .into_iter()
+                    .map(|row| {
+                        Ok((
+                            row.try_get("left_client_id")?,
+                            row.try_get("right_client_id")?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
                 let skipped_job_ids = skip_unstarted_queued_targets_for_client_in_tx(
                     &mut tx,
                     client_id,
@@ -1103,10 +1129,15 @@ impl Repository {
                 for job_id in job_ids {
                     self.refresh_job_status_from_targets(job_id).await?;
                 }
-                Ok(DeleteAgentResponse {
-                    client_id: client_id.to_string(),
-                    deleted: true,
-                    deleted_at,
+                Ok(DeleteAgentResult {
+                    response: DeleteAgentResponse {
+                        client_id: client_id.to_string(),
+                        deleted: true,
+                        deleted_at,
+                        runtime_sync_job_ids: Vec::new(),
+                        runtime_sync_failed_client_ids: Vec::new(),
+                    },
+                    retired_tunnel_endpoint_pairs,
                 })
             }
         }

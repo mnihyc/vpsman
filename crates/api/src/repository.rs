@@ -99,6 +99,7 @@ pub(crate) struct MemoryState {
     pub(crate) telemetry_rollups: Arc<RwLock<Vec<TelemetryRollupView>>>,
     pub(crate) telemetry_network_rates: Arc<RwLock<Vec<TelemetryNetworkRateView>>>,
     pub(crate) telemetry_tunnels: Arc<RwLock<Vec<TelemetryTunnelView>>>,
+    pub(crate) telemetry_ingest_watermarks: Arc<RwLock<HashMap<String, (Uuid, u64)>>>,
     pub(crate) audits: Arc<RwLock<Vec<AuditLogView>>>,
     pub(crate) schedules: Arc<RwLock<Vec<ScheduleView>>>,
     pub(crate) backup_policies: Arc<RwLock<Vec<BackupPolicyMetadata>>>,

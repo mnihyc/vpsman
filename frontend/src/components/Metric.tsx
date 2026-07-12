@@ -1,6 +1,16 @@
-export function Metric({ label, value, tone }: { label: string; value: string; tone: "blue" | "green" | "yellow" }) {
+export function Metric({
+  label,
+  title,
+  value,
+  tone,
+}: {
+  label: string;
+  title?: string;
+  value: string;
+  tone: "blue" | "green" | "yellow";
+}) {
   return (
-    <div className={`metric ${tone}`}>
+    <div className={`metric ${tone}`} title={title}>
       <span>{label}</span>
       <strong>{value}</strong>
     </div>

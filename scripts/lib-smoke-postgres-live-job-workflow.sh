@@ -35,11 +35,13 @@ smoke_create_direct_agent_config \
 
 VPSMAN_AGENT_CONFIG="$agent_config" \
 VPSMAN_SUPERVISOR_DIR="$agent_supervisor_dir" \
+VPSMAN_SMOKE_ROUTING_STATE_DIR="$routing_adapter_state_dir" \
 RUST_LOG="vpsman_agent=warn" \
   bash -c 'cd "$1" && exec "$2" run' _ "$SMOKE_TMPDIR" "$ROOT_DIR/target/debug/vpsman-agent" >"$agent_log" 2>&1 &
 agent_pid="$!"
 smoke_track_pid "$agent_pid"
 VPSMAN_AGENT_CONFIG="$peer_agent_config" \
+VPSMAN_SMOKE_ROUTING_STATE_DIR="$routing_adapter_state_dir" \
 RUST_LOG="vpsman_agent=warn" \
   bash -c 'cd "$1" && exec "$2" run' _ "$SMOKE_TMPDIR" "$ROOT_DIR/target/debug/vpsman-agent" >"$peer_agent_log" 2>&1 &
 peer_agent_pid="$!"
@@ -48,38 +50,62 @@ wait_agent_online "$client_id"
 wait_agent_online "$peer_client_id"
 assert_gateway_sessions_active
 
+routing_adapter_python="$(command -v python3)"
+routing_adapter_script="$ROOT_DIR/scripts/fixtures/routing-cost-adapter-smoke.py"
+routing_adapter_definition="$(jq -nc \
+  --arg python "$routing_adapter_python" \
+  --arg script "$routing_adapter_script" '{
+  contract_version: 1,
+  status_command: {argv:[$python, $script], max_timeout_secs:5, max_output_bytes:4096},
+  update_command: {argv:[$python, $script], max_timeout_secs:5, max_output_bytes:4096}
+}')"
+routing_adapter_json="$(VPSMAN_API_TOKEN="$access_token" \
+  target/debug/vpsctl --api-url "$api_url" source-template-create \
+    --domain routing_cost_adapter \
+    --name smoke:routing-cost-adapter \
+    --description "postgres live routing adapter contract" \
+    --definition-json "$routing_adapter_definition")"
+routing_adapter_template_id="$(jq -r '.id' <<<"$routing_adapter_json")"
+
 target/debug/vpsctl --api-url "$api_url" tunnel-plan \
   --name postgres-live-status \
   --interface-name pgstat0 \
   --kind gre \
   --left-client-id "$client_id" \
   --right-client-id "$peer_client_id" \
-  --left-underlay 127.0.0.1 \
-  --right-underlay 127.0.0.1 \
+  --left-remote-underlay 127.0.0.1 \
+  --right-remote-underlay 127.0.0.1 \
   --address-pool-cidr 127.0.0.0/29 \
   --reserved-addresses 127.0.0.0,127.0.0.1 \
   --left-tunnel-ipv4-cidr 127.0.0.2/31 \
   --right-tunnel-ipv4-cidr 127.0.0.3/31 \
   --bandwidth-mbps 100 \
-  --latency-ms 5 >"$network_plan_file"
-VPSMAN_API_TOKEN="$access_token" \
+  --ospf \
+  --ospf-latency-ms 5 \
+  --left-routing-adapter-template-id "$routing_adapter_template_id" \
+  --right-routing-adapter-template-id "$routing_adapter_template_id" >/dev/null
+network_plan_json="$(VPSMAN_API_TOKEN="$access_token" \
 target/debug/vpsctl --api-url "$api_url" tunnel-plan \
   --name postgres-live-status \
   --interface-name pgstat0 \
   --kind gre \
   --left-client-id "$client_id" \
   --right-client-id "$peer_client_id" \
-  --left-underlay 127.0.0.1 \
-  --right-underlay 127.0.0.1 \
+  --left-remote-underlay 127.0.0.1 \
+  --right-remote-underlay 127.0.0.1 \
   --address-pool-cidr 127.0.0.0/29 \
   --reserved-addresses 127.0.0.0,127.0.0.1 \
   --left-tunnel-ipv4-cidr 127.0.0.2/31 \
   --right-tunnel-ipv4-cidr 127.0.0.3/31 \
   --bandwidth-mbps 100 \
-  --latency-ms 5 \
+  --ospf \
+  --ospf-latency-ms 5 \
+  --left-routing-adapter-template-id "$routing_adapter_template_id" \
+  --right-routing-adapter-template-id "$routing_adapter_template_id" \
   --save \
   --enabled \
-  --confirmed >/dev/null
+  --confirmed)"
+network_plan_id="$(jq -r '.id' <<<"$network_plan_json")"
 
 shell_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
 VPSMAN_API_TOKEN="$access_token" \
@@ -450,12 +476,10 @@ cmp -s "$source_file" "$destination_file"
 
 assert_persisted_job_state
 
-network_status_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
-VPSMAN_API_TOKEN="$access_token" \
+network_status_json="$(VPSMAN_API_TOKEN="$access_token" \
   target/debug/vpsctl --api-url "$api_url" tunnel-status \
-    --plan-file "$network_plan_file" \
+    --plan-id "$network_plan_id" \
     --side left \
-    --super-salt-hex "$super_salt_hex" \
     --max-timeout-secs 10)"
 network_status_job_id="$(jq -r '.job_id' <<<"$network_status_json")"
 smoke_assert_job_create_queued "$network_status_json" 1
@@ -465,7 +489,7 @@ assert_status_observation
 network_probe_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
 VPSMAN_API_TOKEN="$access_token" \
   target/debug/vpsctl --api-url "$api_url" tunnel-probe \
-    --plan-file "$network_plan_file" \
+    --plan-id "$network_plan_id" \
     --side left \
     --count 2 \
     --interval-ms 200 \
@@ -479,7 +503,7 @@ assert_probe_observation
 network_speed_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
 VPSMAN_API_TOKEN="$access_token" \
   target/debug/vpsctl --api-url "$api_url" tunnel-speed-test \
-    --plan-file "$network_plan_file" \
+    --plan-id "$network_plan_id" \
     --server-side left \
     --duration-secs 1 \
     --max-bytes 16384 \
@@ -495,6 +519,16 @@ smoke_wait_api_job_status "$api_url" "$network_speed_job_id" completed 45 >/dev/
 assert_speed_observations
 assert_network_trends
 assert_ospf_recommendations
+assert_ospf_update_plans
+ospf_status_refresh_json="$(VPSMAN_API_TOKEN="$access_token" \
+  target/debug/vpsctl --api-url "$api_url" tunnel-ospf-status-refresh \
+    --plan-id "$network_plan_id")"
+mapfile -t ospf_status_job_ids < <(jq -r '.jobs[].job_id' <<<"$ospf_status_refresh_json")
+[[ "${#ospf_status_job_ids[@]}" == "2" ]]
+for ospf_status_job_id in "${ospf_status_job_ids[@]}"; do
+  smoke_wait_api_job_status "$api_url" "$ospf_status_job_id" completed 45 >/dev/null
+done
+assert_ospf_adapter_status_verified
 assert_ospf_update_plans
 kill "$peer_agent_pid" >/dev/null 2>&1 || true
 wait "$peer_agent_pid" >/dev/null 2>&1 || true
@@ -529,6 +563,7 @@ assert_probe_observation
 assert_speed_observations
 assert_network_trends
 assert_ospf_recommendations
+assert_ospf_adapter_status_verified
 assert_ospf_update_plans
 
 jq -n \
@@ -598,5 +633,5 @@ jq -n \
     network_speed_job_id: $network_speed_job_id,
     destination: $destination,
     sha256_hex: $sha256_hex,
-    checks: ["auth_session", "enrollment", "agent_noise_connect", "gateway_session_lifecycle", "scheduled_job_resume_payload_hash", "privilege_unlocked_shell_job", "privilege_unlocked_shell_pty_job", "privilege_unlocked_shell_script_job", "job_output_follow_cli", "job_output_follow_vty", "live_shell_output_streaming", "large_job_output_artifact_retention", "agent_timeout_shell_job", "privilege_unlocked_file_pull", "job_target_status_archive_download", "terminal_session_lifecycle", "terminal_session_poll_output", "terminal_session_inventory", "resumable_file_transfer_upload", "resumable_file_transfer_download", "file_transfer_session_inventory", "no_privilege_unlock_user_sessions_rejected", "privilege_unlocked_user_sessions", "privilege_unlocked_process_start", "privilege_unlocked_process_status", "privilege_unlocked_process_logs", "privilege_unlocked_process_restart", "privilege_unlocked_process_stop", "process_supervisor_inventory", "privilege_unlocked_file_push", "job_target_output_audit", "network_status_observation", "network_probe_observation", "network_speed_observations", "network_observation_trends", "network_ospf_recommendations", "network_ospf_update_plans", "api_restart"]
+    checks: ["auth_session", "enrollment", "agent_noise_connect", "gateway_session_lifecycle", "scheduled_job_resume_payload_hash", "privilege_unlocked_shell_job", "privilege_unlocked_shell_pty_job", "privilege_unlocked_shell_script_job", "job_output_follow_cli", "job_output_follow_vty", "live_shell_output_streaming", "large_job_output_artifact_retention", "agent_timeout_shell_job", "privilege_unlocked_file_pull", "job_target_status_archive_download", "terminal_session_lifecycle", "terminal_session_poll_output", "terminal_session_inventory", "resumable_file_transfer_upload", "resumable_file_transfer_download", "file_transfer_session_inventory", "no_privilege_unlock_user_sessions_rejected", "privilege_unlocked_user_sessions", "privilege_unlocked_process_start", "privilege_unlocked_process_status", "privilege_unlocked_process_logs", "privilege_unlocked_process_restart", "privilege_unlocked_process_stop", "process_supervisor_inventory", "privilege_unlocked_file_push", "job_target_output_audit", "network_status_observation", "network_probe_observation", "network_speed_observations", "network_observation_trends", "network_ospf_recommendations", "network_ospf_update_plans", "routing_adapter_status", "api_restart"]
   }'

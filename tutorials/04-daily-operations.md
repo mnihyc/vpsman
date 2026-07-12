@@ -135,8 +135,17 @@ For daily 20+ VPS operation, this is the preferred browser pattern:
 History retention policies are managed by domain. This includes audit logs,
 system and telemetry rollups, per-interface network rates, job outputs, backup
 artifacts, network/topology history, client lifecycle history, and ended gateway
-sessions. Use dry-run before pruning, especially for object-backed domains such
-as job outputs and backup artifacts:
+sessions. Telemetry rollups and per-interface network rates default to 90 days;
+the running worker applies those two policies automatically every minute in
+bounded leased batches. A stored policy override changes the automatic age,
+batch limit, or enabled state. Other domains remain explicit maintenance
+workflows. Use dry-run before manual pruning, especially for object-backed
+domains such as job outputs and backup artifacts:
+
+Dashboard network rates are interval averages derived from cumulative interface
+counters, not instantaneous samples. Active tunnel throughput is a separate
+bounded-test average. See [Telemetry metric definitions](../docs/telemetry-metrics.md)
+before comparing chart rates, traffic totals, or test throughput.
 
 ```sh
 cargo run -p vpsctl -- history-retention
@@ -238,8 +247,8 @@ cargo run -p vpsctl -- file-transfer-upload \
   --confirmed
 
 cargo run -p vpsctl -- file-transfer-download \
-  --path /var/log/bird.log \
-  --destination ./bird.log \
+  --path /var/log/routing.log \
+  --destination ./routing.log \
   --clients edge-01 \
   --confirmed
 ```

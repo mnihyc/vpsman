@@ -472,7 +472,7 @@ impl AppState {
                 "runtime_tunnel_adapter"
                     | "runtime_traffic_accounting_source"
                     | "traffic_limit_status_source"
-                    | "routing_daemon_adapter"
+                    | "routing_cost_adapter"
             )
         }) {
             let plans = self.repo.list_tunnel_plans().await?;
@@ -797,7 +797,7 @@ fn enrich_runtime_tunnel_status_rows(
     for row in rows.iter_mut().filter(|row| {
         matches!(
             row.domain.as_str(),
-            "runtime_tunnel_adapter" | "routing_daemon_adapter"
+            "runtime_tunnel_adapter" | "routing_cost_adapter"
         )
     }) {
         let client_plans = plans
@@ -853,7 +853,7 @@ fn enrich_runtime_tunnel_status_rows(
             "continuous_status": true,
         });
         row.evidence = merge_evidence(row.evidence.take(), runtime_evidence);
-        if row.domain == "routing_daemon_adapter" && row.status != "agent_offline" {
+        if row.domain == "routing_cost_adapter" && row.status != "agent_offline" {
             row.status = if degraded_observation_count > 0 {
                 "degraded".to_string()
             } else if routing_recommendation_count > 0 || network_status_sample_count > 0 {
@@ -862,7 +862,7 @@ fn enrich_runtime_tunnel_status_rows(
                 "ready_on_demand".to_string()
             };
             row.status_reason =
-                "routing daemon adapter is selected; network status, topology trends, and OSPF recommendations provide evidence"
+                "routing cost adapter is available for explicit tunnel endpoint status and apply jobs"
                     .to_string();
         }
     }
@@ -885,7 +885,11 @@ fn enrich_runtime_traffic_status_rows(rows: &mut [SourceStatusView], plans: &[Tu
             .count();
         let traffic_limit_apply_plan_count = client_plans
             .iter()
-            .filter(|plan| plan.plan.runtime_control.traffic_limit_apply.is_some())
+            .filter(|plan| {
+                tunnel_plan_has_traffic_limit(plan)
+                    && plan.plan.runtime_control.manager
+                        != vpsman_common::RuntimeTunnelManager::ExternalObserved
+            })
             .count();
         let runtime_evidence = json!({
             "traffic_shaping_status_source": "tunnel_plan_runtime_control",
@@ -917,8 +921,7 @@ fn tunnel_plan_touches_client(plan: &TunnelPlanView, client_id: &str) -> bool {
 }
 
 fn tunnel_plan_has_traffic_limit(plan: &TunnelPlanView) -> bool {
-    plan.plan.runtime_control.traffic_limit_apply.is_some()
-        || !plan.plan.runtime_control.traffic_limit.is_default()
+    !plan.plan.runtime_control.traffic_limit.is_default()
 }
 
 fn normalize_optional_text(value: Option<String>) -> Option<String> {

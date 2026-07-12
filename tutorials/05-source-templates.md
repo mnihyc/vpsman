@@ -8,10 +8,17 @@ into every workflow.
 
 - Built-in default: cheap Linux defaults such as procfs/sysfs telemetry.
 - Built-in alternative: curated optional sources such as `vnstat` traffic,
-  pinned `ping`, BusyBox `ash`, or ifupdown/Bird2 hooks.
+  pinned `ping`, or BusyBox `ash`.
 - Shared custom template: one operator-managed template assigned to tags or
   explicit clients.
 - VPS-local custom template: a one-off template owned by a single VPS.
+
+Two network domains intentionally have no built-in adapter implementation:
+`runtime_tunnel_adapter` and `routing_cost_adapter`. Their templates describe
+operator-installed executables and are bound explicitly to tunnel endpoints.
+The core agent iproute2 mode is selected directly on a tunnel plan and is not a
+source template. See [Tutorial 06](06-tunnels-routing-adapters.md) for those
+contracts and ownership boundaries.
 
 Bulk update means updating the template definition. Assignment decides which VPSs
 select that template.
@@ -132,8 +139,12 @@ cargo run -p vpsctl -- source-template-update \
 
 ## Operator Rules
 
-- Do not hardcode `/proc`, `/sys`, `vnstat`, `ping`, `birdc`, `ip`, or `tc`
-  assumptions into workflows. Put them in templates or server runtime config.
+- Do not hardcode environment-specific `/proc`, `/sys`, `vnstat`, `ping`, or
+  external adapter executable assumptions into workflows. Put them in templates
+  or explicit runtime configuration.
+- Do not use source templates to imply that vpsman installs or owns an external
+  tunnel program or routing daemon. The operator owns those executables; vpsman
+  stores only their bounded command contracts.
 - Prefer shared templates for provider families and VPS-local templates for one-off
   images.
 - Keep defaults cheap for 1-core, 256MB VPSs. Use custom commands only when

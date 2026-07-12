@@ -520,12 +520,10 @@ pub(crate) fn telemetry_rollups(
     limit: u16,
     client_id: Option<String>,
     bucket_secs: Option<i32>,
+    latest: bool,
 ) -> Result<()> {
     if let Some(bucket_secs) = bucket_secs {
-        anyhow::ensure!(
-            (60..=86_400).contains(&bucket_secs),
-            "--bucket-secs must be between 60 and 86400"
-        );
+        anyhow::ensure!(bucket_secs == 60, "--bucket-secs must be 60");
     }
     let mut path = format!("/api/v1/telemetry/rollups?limit={}", limit.clamp(1, 200));
     if let Some(client_id) = client_id {
@@ -540,6 +538,9 @@ pub(crate) fn telemetry_rollups(
         path.push_str("&bucket_secs=");
         path.push_str(&bucket_secs.to_string());
     }
+    if latest {
+        path.push_str("&latest=true");
+    }
     println!("{}", http_get(api_url, &path, token)?);
     Ok(())
 }
@@ -551,12 +552,10 @@ pub(crate) fn telemetry_network_rates(
     client_id: Option<String>,
     interface: Option<String>,
     bucket_secs: Option<i32>,
+    latest: bool,
 ) -> Result<()> {
     if let Some(bucket_secs) = bucket_secs {
-        anyhow::ensure!(
-            (60..=86_400).contains(&bucket_secs),
-            "--bucket-secs must be between 60 and 86400"
-        );
+        anyhow::ensure!(bucket_secs == 60, "--bucket-secs must be 60");
     }
     let mut path = format!(
         "/api/v1/telemetry/network-rates?limit={}",
@@ -581,6 +580,9 @@ pub(crate) fn telemetry_network_rates(
     if let Some(bucket_secs) = bucket_secs {
         path.push_str("&bucket_secs=");
         path.push_str(&bucket_secs.to_string());
+    }
+    if latest {
+        path.push_str("&latest=true");
     }
     println!("{}", http_get(api_url, &path, token)?);
     Ok(())

@@ -1,9 +1,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use vpsman_common::{
-    AgentCapabilitySnapshot, BandwidthMbps, JobCommand, PrivilegeAssertion, RuntimeTunnelControl,
-    RuntimeTunnelTopologyIntent, TunnelAddressFamily, TunnelAddressPair, TunnelEndpointSide,
-    TunnelKind, TunnelPlan, TunnelPlanInput,
+    AgentCapabilitySnapshot, JobCommand, PrivilegeAssertion, TunnelAddressFamily,
+    TunnelAddressPair, TunnelKind, TunnelPlan, TunnelPlanInput,
 };
 
 pub(crate) use crate::auth_model::*;
@@ -19,6 +18,7 @@ pub(crate) struct FleetSummary {
     pub(crate) online: usize,
     pub(crate) offline: usize,
     pub(crate) never: usize,
+    pub(crate) unknown: usize,
     pub(crate) stale: usize,
     pub(crate) warnings: usize,
     pub(crate) running_jobs: usize,
@@ -86,6 +86,14 @@ pub(crate) struct DeleteAgentResponse {
     pub(crate) client_id: String,
     pub(crate) deleted: bool,
     pub(crate) deleted_at: String,
+    pub(crate) runtime_sync_job_ids: Vec<Uuid>,
+    pub(crate) runtime_sync_failed_client_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DeleteAgentResult {
+    pub(crate) response: DeleteAgentResponse,
+    pub(crate) retired_tunnel_endpoint_pairs: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -174,8 +182,6 @@ pub(crate) struct TelemetryTunnelView {
     pub(crate) kind: String,
     pub(crate) ownership_mode: String,
     pub(crate) mutation_policy: String,
-    pub(crate) promotion_required: bool,
-    pub(crate) plan_correlation: String,
     pub(crate) plan_id: Option<Uuid>,
     pub(crate) plan_name: Option<String>,
     pub(crate) plan_runtime_manager: Option<String>,
@@ -203,12 +209,6 @@ pub(crate) struct TelemetryTunnelView {
     pub(crate) packet_loss_ratio: Option<f64>,
     pub(crate) latency_healthy_windows: Option<i32>,
     pub(crate) latency_missed_windows: Option<i32>,
-    pub(crate) auto_ospf_enabled: Option<bool>,
-    pub(crate) auto_ospf_status: Option<String>,
-    pub(crate) auto_ospf_reason: Option<String>,
-    pub(crate) auto_ospf_current_cost: Option<i32>,
-    pub(crate) auto_ospf_recommended_cost: Option<i32>,
-    pub(crate) auto_ospf_updated_unix: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -393,6 +393,8 @@ pub(crate) struct NetworkOspfUpdateEvidenceView {
     pub(crate) throughput_max_mbps: Option<f64>,
     pub(crate) sample_count: i64,
     pub(crate) degraded_count: i64,
+    pub(crate) healthy_probe_streak: i64,
+    pub(crate) required_healthy_probe_streak: i64,
     pub(crate) latest_observed_at: Option<String>,
     pub(crate) reason: String,
 }
@@ -401,14 +403,24 @@ pub(crate) struct NetworkOspfUpdateEvidenceView {
 pub(crate) struct NetworkOspfUpdatePlanView {
     pub(crate) recommendation_id: String,
     pub(crate) plan_id: Uuid,
+    pub(crate) plan_revision: i64,
     pub(crate) plan_name: String,
     pub(crate) interface_name: String,
     pub(crate) left_client_id: String,
     pub(crate) right_client_id: String,
-    pub(crate) bird2_file: String,
-    pub(crate) current_ospf_cost: i32,
+    pub(crate) control_mode: String,
+    pub(crate) left_adapter_template_id: String,
+    pub(crate) right_adapter_template_id: String,
+    pub(crate) left_adapter_template_name: Option<String>,
+    pub(crate) right_adapter_template_name: Option<String>,
+    pub(crate) left_adapter_definition_hash: Option<String>,
+    pub(crate) right_adapter_definition_hash: Option<String>,
+    pub(crate) left_current_ospf_cost: Option<i32>,
+    pub(crate) right_current_ospf_cost: Option<i32>,
+    pub(crate) left_ospf_status: String,
+    pub(crate) right_ospf_status: String,
     pub(crate) recommended_ospf_cost: i32,
-    pub(crate) cost_delta: i32,
+    pub(crate) maximum_cost_delta: i32,
     pub(crate) status: String,
     pub(crate) confidence: String,
     pub(crate) requires_approval: bool,
@@ -416,8 +428,6 @@ pub(crate) struct NetworkOspfUpdatePlanView {
     pub(crate) mutation_mode: String,
     pub(crate) approval_scope: Vec<String>,
     pub(crate) evidence: NetworkOspfUpdateEvidenceView,
-    pub(crate) proposed_left_bird2_interface_snippet: String,
-    pub(crate) proposed_right_bird2_interface_snippet: String,
     pub(crate) change_summary: String,
     pub(crate) evidence_summary: String,
 }
@@ -439,14 +449,22 @@ pub(crate) struct TunnelPlanView {
     pub(crate) name: String,
     pub(crate) kind: TunnelKind,
     pub(crate) enabled: bool,
+    pub(crate) revision: i64,
     pub(crate) left_client_id: String,
     pub(crate) right_client_id: String,
-    pub(crate) left_status: String,
-    pub(crate) right_status: String,
-    pub(crate) recommended_ospf_cost: i32,
-    pub(crate) status: String,
-    pub(crate) last_apply_job_id: Option<Uuid>,
-    pub(crate) last_rollback_job_id: Option<Uuid>,
+    pub(crate) recommended_ospf_cost: Option<i32>,
+    pub(crate) ospf_status: String,
+    pub(crate) left_ospf_status: String,
+    pub(crate) right_ospf_status: String,
+    pub(crate) desired_ospf_cost: Option<i32>,
+    pub(crate) left_current_ospf_cost: Option<i32>,
+    pub(crate) right_current_ospf_cost: Option<i32>,
+    pub(crate) left_ospf_job_id: Option<Uuid>,
+    pub(crate) right_ospf_job_id: Option<Uuid>,
+    pub(crate) connection_assessment: String,
+    pub(crate) connection_assessment_note: Option<String>,
+    pub(crate) connection_assessed_at: Option<String>,
+    pub(crate) connection_assessed_by: Option<Uuid>,
     pub(crate) input: TunnelPlanInput,
     pub(crate) plan: TunnelPlan,
     pub(crate) created_at: String,
@@ -540,20 +558,46 @@ pub(crate) struct CreateTunnelPlanRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct UpdateTunnelPlanRequest {
+    #[serde(flatten)]
+    pub(crate) input: TunnelPlanInput,
+    pub(crate) expected_revision: i64,
+    #[serde(default)]
+    pub(crate) enabled: Option<bool>,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct UpdateTunnelConnectionAssessmentRequest {
+    pub(crate) expected_revision: i64,
+    pub(crate) assessment: String,
+    pub(crate) note: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct UpdateTunnelPlanOspfCostRequest {
+    pub(crate) plan_revision: i64,
     pub(crate) recommendation_id: String,
-    pub(crate) current_ospf_cost: u16,
-    pub(crate) recommended_ospf_cost: u16,
-    #[serde(default = "default_ospf_cost_mutation_intent")]
-    pub(crate) mutation_intent: String,
+    pub(crate) left_adapter_definition_hash: String,
+    pub(crate) right_adapter_definition_hash: String,
+    pub(crate) left_current_ospf_cost: Option<u16>,
+    pub(crate) right_current_ospf_cost: Option<u16>,
+    pub(crate) desired_ospf_cost: u16,
     #[serde(default)]
     pub(crate) confirmed: bool,
     #[serde(default)]
     pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
-fn default_ospf_cost_mutation_intent() -> String {
-    "apply".to_string()
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RefreshTunnelPlanOspfStatusRequest {}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct TunnelPlanOspfJobsResponse {
+    pub(crate) plan: TunnelPlanView,
+    pub(crate) jobs: Vec<CreateJobResponse>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -579,46 +623,6 @@ pub(crate) struct AllocateTunnelEndpointsResponse {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct PromoteTelemetryTunnelRequest {
-    pub(crate) client_id: String,
-    pub(crate) interface: String,
-    pub(crate) peer_client_id: String,
-    pub(crate) local_underlay: String,
-    pub(crate) peer_underlay: String,
-    pub(crate) address_pool_cidr: String,
-    #[serde(default)]
-    pub(crate) ipv4_tunnel: Option<TunnelAddressPair>,
-    #[serde(default)]
-    pub(crate) ipv6_address_pool_cidr: Option<String>,
-    #[serde(default)]
-    pub(crate) ipv6_tunnel: Option<TunnelAddressPair>,
-    #[serde(default)]
-    pub(crate) latency_primary_family: TunnelAddressFamily,
-    pub(crate) side: Option<TunnelEndpointSide>,
-    pub(crate) name: Option<String>,
-    pub(crate) bandwidth_mbps: Option<BandwidthMbps>,
-    pub(crate) latency_ms: Option<f64>,
-    pub(crate) packet_loss_ratio: Option<f64>,
-    pub(crate) preference: Option<f64>,
-    #[serde(default)]
-    pub(crate) enabled: bool,
-    #[serde(default)]
-    pub(crate) confirmed: bool,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct PromoteTunnelPlanToCustomAdapterRequest {
-    pub(crate) plan_id: Uuid,
-    pub(crate) runtime_control: RuntimeTunnelControl,
-    #[serde(default)]
-    pub(crate) runtime_topology: Option<RuntimeTunnelTopologyIntent>,
-    #[serde(default)]
-    pub(crate) name: Option<String>,
-    #[serde(default)]
-    pub(crate) confirmed: bool,
-}
-
-#[derive(Debug, Deserialize)]
 pub(crate) struct HistoryQuery {
     pub(crate) limit: Option<i64>,
 }
@@ -637,6 +641,8 @@ pub(crate) struct TelemetryRollupQuery {
     pub(crate) limit: Option<i64>,
     pub(crate) client_id: Option<String>,
     pub(crate) bucket_secs: Option<i32>,
+    #[serde(default)]
+    pub(crate) latest: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -645,6 +651,8 @@ pub(crate) struct TelemetryNetworkRateQuery {
     pub(crate) client_id: Option<String>,
     pub(crate) interface: Option<String>,
     pub(crate) bucket_secs: Option<i32>,
+    #[serde(default)]
+    pub(crate) latest: bool,
 }
 
 #[derive(Debug, Deserialize)]

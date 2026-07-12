@@ -216,6 +216,31 @@ export function FileBrowserPanel({
   const selectedDownloadLabel = downloadActionLabel(selectedEntry, selectedPath);
   const editorStateText = editorPath ? `${editorContent.length} chars${editorDirty ? " · unsaved" : ""}` : "Select a text file to edit";
   const editorStatusText = editorStateText;
+  const fileEditorEmptyState = !selectedAgent
+    ? {
+        detail:
+          "Choose an available VPS in the target selector. Directory reads and file operations require privilege unlock.",
+        title: "Select a VPS to browse files.",
+      }
+    : !privilegeMaterial
+      ? {
+          detail: `${targetNameId(selectedAgent)} is selected. Open Privilege Vault, then refresh ${currentPath} to load its files.`,
+          title: "Unlock to browse this VPS.",
+        }
+      : !currentDirectoryEvidence
+        ? {
+            detail: `${targetNameId(selectedAgent)} is ready. Refresh ${currentPath}, then open a text file from the directory tree.`,
+            title: "Refresh the selected directory.",
+          }
+        : currentEntries.length === 0
+          ? {
+              detail: `${currentPath} contains no visible entries. Change the path, show hidden files, or use Create to add a file or directory.`,
+              title: "No files in this directory.",
+            }
+          : {
+              detail: `${currentEntries.length} ${currentEntries.length === 1 ? "entry is" : "entries are"} loaded from ${currentPath}. Double-click a text file to open it; other actions remain available from the tree and Actions panel.`,
+              title: "Select a text file to edit.",
+            };
 
   useEffect(() => {
     if (!targetClientId && agents[0]?.id) {
@@ -945,11 +970,8 @@ export function FileBrowserPanel({
           ) : (
             <div className="fileEditorEmptyState" role="status">
               <File size={20} />
-              <strong>Select a VPS and file to begin.</strong>
-              <span>
-                Choose a target, refresh a directory, then open a text file. Directory reads and file
-                operations require privilege unlock because they inspect the remote VPS filesystem.
-              </span>
+              <strong>{fileEditorEmptyState.title}</strong>
+              <span>{fileEditorEmptyState.detail}</span>
             </div>
           )}
         </main>

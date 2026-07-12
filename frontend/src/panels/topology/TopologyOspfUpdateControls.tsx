@@ -1,6 +1,14 @@
-import { useMemo, useState } from "react";
-import { Gauge, RotateCcw, ShieldCheck } from "lucide-react";
-import { ActionFeedback } from "../../components/ActionFeedback";
+import { useEffect, useMemo, useState } from "react";
+import {
+  CircleCheck,
+  ExternalLink,
+  Gauge,
+  RefreshCw,
+  ShieldCheck,
+  TriangleAlert,
+  X,
+} from "lucide-react";
+import { ActionFeedback, type ActionFeedbackTone } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
 import { sha256Hex } from "../../fileTransfer";
@@ -20,685 +28,645 @@ import {
   clientDisplayNameFromMap,
   clientDisplayNameMap,
   formatCompactTime,
-  runPanelAction,
   shortId,
 } from "../../utils";
-import { resolveAgentsById, TargetImpactPreview } from "../TargetImpactPreview";
 
-const ospfPrivilegeEncoder = new TextEncoder();
+const encoder = new TextEncoder();
 
 export function TopologyOspfUpdateControls({
   agents,
   ospfUpdatePlans,
-  tunnelPlans,
+  onOpenJobDetails,
+  onOpenSourceTemplates,
+  onOpenTunnelPlans,
+  onRefresh,
+  onRefreshTunnelPlanOspfStatus,
   onUpdateTunnelPlanOspfCost,
   privilegeMaterial,
   setPrivilegeMaterial,
+  tunnelPlans,
 }: {
   agents: AgentView[];
   ospfUpdatePlans: NetworkOspfUpdatePlanRecord[];
-  tunnelPlans: TunnelPlanRecord[];
+  onOpenJobDetails?: (jobId: string) => void;
+  onOpenSourceTemplates: () => void;
+  onOpenTunnelPlans: () => void;
+  onRefresh: () => Promise<void>;
+  onRefreshTunnelPlanOspfStatus: (planId: string) => Promise<void>;
   onUpdateTunnelPlanOspfCost: (
     planId: string,
     request: UpdateTunnelPlanOspfCostRequest,
   ) => Promise<void>;
   privilegeMaterial: PrivilegeMaterial | null;
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
+  tunnelPlans: TunnelPlanRecord[];
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
-  const [selectedPlanId, setSelectedPlanId] = useState(
-    () => ospfUpdatePlans[0]?.plan_id ?? "",
+  const [expandedPlanId, setExpandedPlanId] = useState<string | null>(
+    ospfUpdatePlans[0]?.plan_id ?? null,
   );
-  const [snapshot, setSnapshot] = useState<OspfUpdateSnapshot | null>(null);
-  const [appliedRollback, setAppliedRollback] =
-    useState<OspfAppliedRollback | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
-  const [pending, setPending] = useState(false);
-
-  const selectedUpdatePlan =
-    ospfUpdatePlans.find((plan) => plan.plan_id === selectedPlanId) ??
-    ospfUpdatePlans[0] ??
-    null;
-  const selectedTunnelPlan = useMemo(
-    () =>
-      tunnelPlans.find((plan) => plan.id === selectedUpdatePlan?.plan_id) ??
-      null,
-    [selectedUpdatePlan?.plan_id, tunnelPlans],
-  );
-  const agentNameById = useMemo(
+  const [pendingPlanId, setPendingPlanId] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const [snapshot, setSnapshot] = useState<ApplySnapshot | null>(null);
+  const names = useMemo(
     () => clientDisplayNameMap(agents, vpsNameDisplayMode),
     [agents, vpsNameDisplayMode],
   );
-  const clientLabel = (clientId: string) =>
-    clientDisplayNameFromMap(clientId, agentNameById);
-  const selectedTunnelOspfCost =
-    selectedTunnelPlan?.plan.recommended_ospf_cost ??
-    selectedTunnelPlan?.recommended_ospf_cost ??
-    null;
-  const hasPendingCostChange =
-    !!selectedUpdatePlan &&
-    (selectedTunnelOspfCost ?? selectedUpdatePlan.current_ospf_cost) !==
-      selectedUpdatePlan.recommended_ospf_cost;
-  const planTargets = resolveAgentsById(
-    agents,
-    selectedUpdatePlan
-      ? [selectedUpdatePlan.left_client_id, selectedUpdatePlan.right_client_id]
-      : [],
+  const plansById = useMemo(
+    () => new Map(tunnelPlans.map((plan) => [plan.id, plan])),
+    [tunnelPlans],
   );
-  const status = selectedUpdatePlan
-    ? `${selectedUpdatePlan.current_ospf_cost} to ${selectedUpdatePlan.recommended_ospf_cost}`
-    : "No OSPF cost changes";
-  const ospfFeedbackMessage = actionError ?? (pending ? "Updating OSPF cost" : null);
-  const canReview =
-    !pending &&
-    !snapshot &&
-    !!selectedUpdatePlan &&
-    !!selectedTunnelPlan &&
-    hasPendingCostChange;
-  const activeRollback =
-    appliedRollback &&
-    selectedUpdatePlan?.plan_id === appliedRollback.planId &&
-    selectedTunnelOspfCost === appliedRollback.appliedCost
-      ? appliedRollback
-      : null;
-  const canReviewRollback =
-    !pending &&
-    !snapshot &&
-    !!selectedUpdatePlan &&
-    !!selectedTunnelPlan &&
-    !!activeRollback;
-  const costChangeSummary = selectedUpdatePlan
-    ? formatCostChange(selectedUpdatePlan)
-    : "No cost change";
-  const measurementSummary = selectedUpdatePlan
-    ? formatMeasurementSummary(selectedUpdatePlan)
-    : "No evidence";
-  const trafficImpactSummary = selectedUpdatePlan
-    ? formatTrafficImpact(selectedUpdatePlan)
-    : "No traffic impact";
-  const rollbackSummary = activeRollback
-    ? `Restore cost ${activeRollback.rollbackCost} on ${activeRollback.interfaceName}`
-    : "Rollback available after a successful Apply in this panel";
-  const monitoringSummary = selectedUpdatePlan
-    ? formatMonitoringPlan(selectedUpdatePlan)
-    : "No monitoring plan";
-  const baselineMismatch = selectedUpdatePlan
-    ? formatBaselineMismatch(selectedUpdatePlan)
-    : null;
-  const affectedTunnelSummary = selectedUpdatePlan
-    ? `${selectedUpdatePlan.interface_name} / ${clientLabel(selectedUpdatePlan.left_client_id)} / ${clientLabel(selectedUpdatePlan.right_client_id)}`
-    : "No tunnel selected";
+  const clientLabel = (clientId: string) =>
+    clientDisplayNameFromMap(clientId, names);
 
-  function openReview(mode: OspfReviewMode) {
-    if (!selectedUpdatePlan || !selectedTunnelPlan) {
-      setActionError("Select an OSPF update plan");
+  useEffect(() => {
+    if (ospfUpdatePlans.length === 0) {
+      setExpandedPlanId(null);
       return;
     }
-    if (!hasPendingCostChange) {
-      if (mode === "rollback" && activeRollback) {
-        openRollbackReview(selectedUpdatePlan, activeRollback);
-        return;
-      }
-      setActionError("OSPF cost already matches the recommendation");
+    if (!ospfUpdatePlans.some((plan) => plan.plan_id === expandedPlanId)) {
+      setExpandedPlanId(ospfUpdatePlans[0].plan_id);
+    }
+  }, [expandedPlanId, ospfUpdatePlans]);
+
+  async function refreshData() {
+    setRefreshing(true);
+    setFeedback({ message: "Refreshing OSPF cost state", tone: "progress" });
+    try {
+      await onRefresh();
+      setFeedback({ message: "OSPF cost state refreshed", tone: "success" });
+    } catch (error) {
+      setFeedback({
+        message: error instanceof Error ? error.message : "OSPF state refresh failed",
+        tone: "danger",
+      });
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  async function refreshStatus(plan: NetworkOspfUpdatePlanRecord) {
+    setFeedback(null);
+    setPendingPlanId(plan.plan_id);
+    try {
+      await onRefreshTunnelPlanOspfStatus(plan.plan_id);
+      setFeedback({
+        message: `Routing adapter checks queued for ${plan.plan_name}`,
+        tone: "success",
+      });
+    } catch (error) {
+      setFeedback({
+        message: error instanceof Error ? error.message : "Adapter status check failed",
+        tone: "danger",
+      });
+    } finally {
+      setPendingPlanId(null);
+    }
+  }
+
+  function openApplyReview(plan: NetworkOspfUpdatePlanRecord) {
+    if (!canApply(plan)) {
+      setFeedback({
+        message: applyBlockedReason(plan),
+        tone: "warning",
+      });
       return;
     }
-    if (mode === "rollback") {
-      if (!activeRollback) {
-        setActionError(
-          "Rollback becomes available after a successful OSPF apply creates a rollback value",
-        );
-        return;
-      }
-      openRollbackReview(selectedUpdatePlan, activeRollback);
-      return;
-    }
-    const requestedCost = selectedUpdatePlan.recommended_ospf_cost;
-    const currentCost = selectedUpdatePlan.current_ospf_cost;
-    setActionError(null);
+    const request: UpdateTunnelPlanOspfCostRequest = {
+      confirmed: true,
+      plan_revision: plan.plan_revision,
+      desired_ospf_cost: plan.recommended_ospf_cost,
+      left_adapter_definition_hash: plan.left_adapter_definition_hash!,
+      left_current_ospf_cost: plan.left_current_ospf_cost,
+      recommendation_id: plan.recommendation_id,
+      right_adapter_definition_hash: plan.right_adapter_definition_hash!,
+      right_current_ospf_cost: plan.right_current_ospf_cost,
+    };
+    setFeedback(null);
     setSnapshot({
-      appliedCost: requestedCost,
-      confirmLabel: "Update cost",
-      detail:
-        "Update the server-managed tunnel plan cost and push runtime config to both endpoints if the plan is enabled.",
-      items: [
-        { label: "Action", value: "Apply recommended cost" },
-        {
-          label: "Recommendation ID",
-          value: selectedUpdatePlan.recommendation_id,
-        },
-        { label: "Plan", value: selectedUpdatePlan.plan_name },
-        {
-          label: "Endpoints",
-          value: `${clientLabel(selectedUpdatePlan.left_client_id)} / ${clientLabel(selectedUpdatePlan.right_client_id)}`,
-        },
-        { label: "Interface", value: selectedUpdatePlan.interface_name },
-        {
-          label: "Cost change",
-          value: `${currentCost} -> ${requestedCost} (${formatDelta(requestedCost - currentCost)})`,
-        },
-        { label: "Why", value: selectedUpdatePlan.evidence.reason },
-        {
-          label: "Evidence summary",
-          value: selectedUpdatePlan.evidence_summary,
-        },
-        {
-          label: "Evidence time",
-          value: formatEvidenceFreshness(selectedUpdatePlan),
-        },
-        { label: "Status", value: formatOspfPlanStatus(selectedUpdatePlan) },
-        {
-          label: "Traffic impact",
-          value: formatTrafficImpact(selectedUpdatePlan),
-        },
-        ...(baselineMismatch
-          ? [{ label: "Baseline warning", value: baselineMismatch }]
-          : []),
-        {
-          label: "Rollback plan",
-          value: formatRollbackPlan(selectedUpdatePlan),
-        },
-        {
-          label: "Monitor after apply",
-          value: formatMonitoringPlan(selectedUpdatePlan),
-        },
-        {
-          label: "Approval scope",
-          value: formatApprovalScope(selectedUpdatePlan),
-        },
-        { label: "Audit event", value: "network.ospf_cost.apply" },
-        {
-          label: "Sync",
-          value: selectedTunnelPlan.enabled ? "Now" : "Deferred",
-        },
-      ],
-      mode: "apply",
-      planId: selectedUpdatePlan.plan_id,
-      planName: selectedUpdatePlan.plan_name,
-      request: {
-        confirmed: true,
-        mutation_intent: "apply",
-        recommendation_id: selectedUpdatePlan.recommendation_id,
-        current_ospf_cost: currentCost,
-        recommended_ospf_cost: requestedCost,
-      },
-      recommendationId: selectedUpdatePlan.recommendation_id,
-      rollbackCost: currentCost,
-      rollbackInterfaceName: selectedUpdatePlan.interface_name,
-      targetClientIds: [
-        selectedUpdatePlan.left_client_id,
-        selectedUpdatePlan.right_client_id,
-      ],
-      title: "Confirm OSPF cost update",
+      plan,
+      request,
+      targetClientIds: [plan.left_client_id, plan.right_client_id],
     });
   }
 
-  async function applySnapshot(next: OspfUpdateSnapshot) {
-    let completed = false;
-    await runPanelAction(setPending, setActionError, async () => {
-      const privilegeAssertion = await buildOspfPrivilegeAssertion(next);
-      await onUpdateTunnelPlanOspfCost(next.planId, {
-        ...next.request,
+  async function applySnapshot(active: ApplySnapshot) {
+    if (!privilegeMaterial) {
+      setFeedback({
+        message: "Privilege unlock is required before applying routing cost",
+        tone: "warning",
+      });
+      return;
+    }
+    setFeedback(null);
+    setPendingPlanId(active.plan.plan_id);
+    try {
+      const payloadHash = await sha256Hex(
+        encoder.encode(ospfPrivilegePayload(active.plan.plan_id, active.request)),
+      );
+      const privilegeAssertion = await buildPrivilegeAssertion({
+        intent: canonicalDbPrivilegeIntent({
+          action: "network.ospf_cost.apply",
+          confirmed: true,
+          payloadHash,
+          resolvedTargets: active.targetClientIds,
+          target: `tunnel_plan:${active.plan.plan_id}`,
+        }),
+        privilegeMaterial,
+      });
+      await onUpdateTunnelPlanOspfCost(active.plan.plan_id, {
+        ...active.request,
         privilege_assertion: privilegeAssertion,
       });
-      completed = true;
-    });
-    if (!completed) {
-      return;
-    }
-    setSnapshot(null);
-    if (next.mode === "apply") {
-      setAppliedRollback({
-        appliedCost: next.appliedCost,
-        interfaceName: next.rollbackInterfaceName,
-        planId: next.planId,
-        planName: next.planName,
-        recommendationId: next.recommendationId,
-        rollbackCost: next.rollbackCost,
+      setSnapshot(null);
+      setFeedback({
+        message: `Routing cost update queued for ${active.plan.plan_name}`,
+        tone: "success",
       });
-    } else {
-      setAppliedRollback(null);
+    } catch (error) {
+      setSnapshot(null);
+      setFeedback({
+        message: error instanceof Error ? error.message : "Routing cost update failed",
+        tone: "danger",
+      });
+    } finally {
+      setPendingPlanId(null);
     }
-  }
-
-  function openRollbackReview(
-    plan: NetworkOspfUpdatePlanRecord,
-    rollback: OspfAppliedRollback,
-  ) {
-    setActionError(null);
-    setSnapshot({
-      appliedCost: rollback.rollbackCost,
-      confirmLabel: "Rollback cost",
-      detail:
-        "Restore the previously reviewed OSPF cost from the applied recommendation and push runtime config to both endpoints if the plan is enabled.",
-      items: [
-        { label: "Action", value: "Rollback applied recommendation" },
-        { label: "Recommendation ID", value: rollback.recommendationId },
-        { label: "Plan", value: rollback.planName },
-        {
-          label: "Endpoints",
-          value: `${clientLabel(plan.left_client_id)} / ${clientLabel(plan.right_client_id)}`,
-        },
-        { label: "Interface", value: rollback.interfaceName },
-        {
-          label: "Cost change",
-          value: `${rollback.appliedCost} -> ${rollback.rollbackCost} (${formatDelta(rollback.rollbackCost - rollback.appliedCost)})`,
-        },
-        { label: "Evidence summary", value: plan.evidence_summary },
-        { label: "Monitor after rollback", value: formatMonitoringPlan(plan) },
-        { label: "Approval scope", value: formatApprovalScope(plan) },
-        { label: "Audit event", value: "network.ospf_cost.rollback" },
-        {
-          label: "Sync",
-          value: selectedTunnelPlan?.enabled ? "Now" : "Deferred",
-        },
-      ],
-      mode: "rollback",
-      planId: rollback.planId,
-      planName: rollback.planName,
-      request: {
-        confirmed: true,
-        mutation_intent: "rollback",
-        recommendation_id: rollback.recommendationId,
-        current_ospf_cost: rollback.appliedCost,
-        recommended_ospf_cost: rollback.rollbackCost,
-      },
-      recommendationId: rollback.recommendationId,
-      rollbackCost: rollback.appliedCost,
-      rollbackInterfaceName: rollback.interfaceName,
-      targetClientIds: [plan.left_client_id, plan.right_client_id],
-      title: "Confirm OSPF rollback",
-    });
-  }
-
-  async function buildOspfPrivilegeAssertion(snapshot: OspfUpdateSnapshot) {
-    if (!privilegeMaterial) {
-      throw new Error("Privilege unlock is required before final submission");
-    }
-    const payloadHash = await sha256Hex(
-      ospfPrivilegeEncoder.encode(
-        ospfCostPrivilegePayloadText(snapshot.planId, snapshot.request),
-      ),
-    );
-    return buildPrivilegeAssertion({
-      intent: canonicalDbPrivilegeIntent({
-        action:
-          snapshot.mode === "rollback"
-            ? "network.ospf_cost.rollback"
-            : "network.ospf_cost.apply",
-        target: `tunnel_plan:${snapshot.planId}`,
-        resolvedTargets: snapshot.targetClientIds,
-        confirmed: true,
-        payloadHash,
-      }),
-      privilegeMaterial,
-    });
   }
 
   if (ospfUpdatePlans.length === 0) {
-    return null;
+    return (
+      <section className="fleetPanel topologyOspfWorkspace">
+        <div className="sectionHeader">
+          <div>
+            <h2>OSPF cost control</h2>
+            <span>No OSPF-enabled tunnel plans</span>
+          </div>
+          <Gauge size={20} />
+        </div>
+        <div className="emptyState compactEmptyState">
+          <strong>OSPF is opt-in per tunnel plan</strong>
+          <span>
+            No routing updater is built in. Create an operator-owned adapter contract, then enable OSPF on a tunnel plan and bind one adapter to each endpoint.
+          </span>
+          <div className="dispatchActions">
+            <button className="secondaryAction compactAction" onClick={onOpenSourceTemplates} type="button">
+              <ExternalLink size={15} />
+              Manage adapters
+            </button>
+            <button className="primaryAction compactAction" onClick={onOpenTunnelPlans} type="button">
+              <Gauge size={15} />
+              Open tunnel plans
+            </button>
+          </div>
+        </div>
+      </section>
+    );
   }
 
   return (
-    <section className="fleetPanel commandComposer">
+    <section className="fleetPanel topologyOspfWorkspace">
       <div className="sectionHeader">
         <div>
-          <h2>OSPF cost</h2>
-          <span>{status}</span>
+          <h2>OSPF cost control</h2>
+          <span>{ospfUpdatePlans.length} explicit routing adapter workflows</span>
         </div>
         <div className="headerActionStack">
-          <ShieldCheck size={20} />
-        </div>
-      </div>
-      <div className="dispatchForm">
-        <ActionFeedback
-          className="localActionFeedback"
-          message={ospfFeedbackMessage}
-          tone={actionError ? "danger" : "progress"}
-        />
-        <div className="dispatchControls">
-          <label>
-            <span>Update plan</span>
-            <select
-              aria-label="OSPF update plan"
-              onChange={(event) => {
-                setSnapshot(null);
-                setActionError(null);
-                setSelectedPlanId(event.target.value);
-              }}
-              value={selectedUpdatePlan?.plan_id ?? ""}
-            >
-              {ospfUpdatePlans.map((plan) => (
-                <option key={plan.plan_id} value={plan.plan_id}>
-                  {plan.plan_name}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-        {selectedUpdatePlan && (
-          <>
-            <div
-              className="ospfRecommendationObject"
-              aria-label="Immutable OSPF recommendation"
-            >
-              <span>
-                <small>Recommendation ID</small>
-                <strong title={selectedUpdatePlan.recommendation_id}>
-                  {shortId(selectedUpdatePlan.recommendation_id)}
-                </strong>
-              </span>
-              <span>
-                <small>Current cost</small>
-                <strong>{selectedUpdatePlan.current_ospf_cost}</strong>
-              </span>
-              <span>
-                <small>Proposed cost</small>
-                <strong>{selectedUpdatePlan.recommended_ospf_cost}</strong>
-              </span>
-              <span>
-                <small>Evidence time</small>
-                <strong>{formatEvidenceTime(selectedUpdatePlan)}</strong>
-              </span>
-              <span>
-                <small>Status</small>
-                <strong>{formatOspfPlanStatus(selectedUpdatePlan)}</strong>
-              </span>
-            </div>
-            <div
-              className="ospfCostReviewStrip"
-              aria-label="OSPF cost review evidence"
-            >
-              <div className="attention">
-                <span>Cost change</span>
-                <strong>{costChangeSummary}</strong>
-                <p>{selectedUpdatePlan.change_summary}</p>
-              </div>
-              <div>
-                <span>Why</span>
-                <strong>
-                  {formatDisplayToken(selectedUpdatePlan.confidence)}
-                </strong>
-                <p>{selectedUpdatePlan.evidence.reason}</p>
-              </div>
-              <div>
-                <span>Measurements</span>
-                <strong>{measurementSummary}</strong>
-                <p>{formatEvidenceFreshness(selectedUpdatePlan)}</p>
-              </div>
-              <div>
-                <span>Affected tunnel</span>
-                <strong>{affectedTunnelSummary}</strong>
-                <p>{selectedUpdatePlan.bird2_file}</p>
-              </div>
-              <div className="attention">
-                <span>Traffic impact</span>
-                <strong>{trafficImpactSummary}</strong>
-                <p>
-                  {baselineMismatch ??
-                    formatBandwidthImpact(selectedUpdatePlan)}
-                </p>
-              </div>
-              <div>
-                <span>Rollback and monitor</span>
-                <strong>{rollbackSummary}</strong>
-                <p>{monitoringSummary}</p>
-              </div>
-            </div>
-          </>
-        )}
-        <TargetImpactPreview
-          mode="generic"
-          targets={planTargets}
-          title="Plan endpoint visibility"
-        />
-        {selectedUpdatePlan && (
-          <details className="operationNote topologyEvidenceDisclosure">
-            <summary>Proposed Bird2 interface snippets</summary>
-            <div className="ospfSnippetGrid">
-              <div>
-                <strong>Left endpoint</strong>
-                <pre>
-                  {selectedUpdatePlan.proposed_left_bird2_interface_snippet}
-                </pre>
-              </div>
-              <div>
-                <strong>Right endpoint</strong>
-                <pre>
-                  {selectedUpdatePlan.proposed_right_bird2_interface_snippet}
-                </pre>
-              </div>
-            </div>
-          </details>
-        )}
-        <ConfirmationPrompt
-          confirmLabel={snapshot?.confirmLabel ?? "Update cost"}
-          confirmDisabled={!privilegeMaterial}
-          detail={snapshot?.detail ?? ""}
-          items={snapshot?.items ?? []}
-          onCancel={() => setSnapshot(null)}
-          onConfirm={() => snapshot && void applySnapshot(snapshot)}
-          open={snapshot !== null}
-          pending={pending}
-          title={snapshot?.title ?? "Confirm OSPF cost update"}
-          tone="normal"
-        >
-          {snapshot && !privilegeMaterial && (
-            <PrivilegeVaultBox
-              labelPrefix="OSPF cost"
-              lastPayloadHash={null}
-              onPrivilegeMaterialChange={setPrivilegeMaterial}
-              privilegeMaterial={privilegeMaterial}
-              showVaultClear={false}
-              usePrivilegeLabel={
-                snapshot.mode === "rollback"
-                  ? "Unlock OSPF rollback"
-                  : "Unlock OSPF apply"
-              }
-            />
-          )}
-        </ConfirmationPrompt>
-        <div className="dispatchActions">
+          <ShieldCheck aria-hidden="true" size={20} />
           <button
-            className="primaryAction"
-            disabled={!canReview}
-            onClick={() => openReview("apply")}
-            title={
-              canReview
-                ? "Confirm the reviewed OSPF recommendation before applying it"
-                : "Select an OSPF update plan with a pending cost change"
-            }
+            className="secondaryAction compactAction"
+            disabled={refreshing}
+            onClick={() => void refreshData()}
+            title="Refresh saved plans, endpoint cost status, and recommendations"
             type="button"
           >
-            <Gauge size={17} />
-            Apply cost
+            <RefreshCw className={refreshing ? "isSpinning" : undefined} size={15} />
+            Refresh
           </button>
           <button
-            className="secondaryAction"
-            disabled={!canReviewRollback}
-            onClick={() => openReview("rollback")}
-            title={
-              canReviewRollback
-                ? "Rollback the OSPF recommendation applied in this panel"
-                : "Rollback becomes available after a successful Apply creates a rollback value"
-            }
+            className="secondaryAction compactAction"
+            onClick={onOpenSourceTemplates}
+            title="Create, validate, or update operator-owned routing cost adapter contracts."
             type="button"
           >
-            <RotateCcw size={16} />
-            Rollback cost
+            <ExternalLink size={15} />
+            Manage adapters
           </button>
         </div>
       </div>
+      <ActionFeedback
+        className="localActionFeedback topologyOspfActionFeedback"
+        message={feedback?.message}
+        tone={feedback?.tone}
+      />
+      <div className="topologyOspfTableWrap">
+        <table aria-label="OSPF adapter update plans" className="topologyOspfTable">
+          <thead>
+            <tr>
+              <th>Plan</th>
+              <th>Control</th>
+              <th>Current cost</th>
+              <th>Recommendation</th>
+              <th>Evidence</th>
+              <th aria-label="Actions" />
+            </tr>
+          </thead>
+          <tbody>
+            {ospfUpdatePlans.map((plan) => {
+              const expanded = expandedPlanId === plan.plan_id;
+              const pending = pendingPlanId === plan.plan_id;
+              const savedPlan = plansById.get(plan.plan_id);
+              return (
+                <OspfPlanRows
+                  clientLabel={clientLabel}
+                  expanded={expanded}
+                  key={plan.plan_id}
+                  onApply={() => openApplyReview(plan)}
+                  onOpenJobDetails={onOpenJobDetails}
+                  onRefresh={() => void refreshStatus(plan)}
+                  onToggle={() =>
+                    setExpandedPlanId((current) =>
+                      current === plan.plan_id ? null : plan.plan_id,
+                    )
+                  }
+                  pending={pending}
+                  plan={plan}
+                  savedPlan={savedPlan}
+                />
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <ConfirmationPrompt
+        confirmDisabled={!privilegeMaterial}
+        confirmLabel="Apply routing cost"
+        detail={snapshot ? applyConfirmationDetail(snapshot.plan) : "Review the frozen routing cost snapshot."}
+        items={snapshot ? confirmationItems(snapshot, clientLabel) : []}
+        onCancel={() => setSnapshot(null)}
+        onConfirm={() => snapshot && void applySnapshot(snapshot)}
+        open={snapshot !== null}
+        pending={snapshot ? pendingPlanId === snapshot.plan.plan_id : false}
+        title="Confirm OSPF cost update"
+        tone={snapshot && isCautionRecommendation(snapshot.plan) ? "warning" : "normal"}
+      >
+        {snapshot && !privilegeMaterial && (
+          <PrivilegeVaultBox
+            labelPrefix="OSPF cost"
+            lastPayloadHash={null}
+            onPrivilegeMaterialChange={setPrivilegeMaterial}
+            privilegeMaterial={privilegeMaterial}
+            showVaultClear={false}
+            usePrivilegeLabel="Unlock OSPF apply"
+          />
+        )}
+      </ConfirmationPrompt>
     </section>
   );
 }
 
-type OspfReviewMode = "apply" | "rollback";
-
-type OspfUpdateSnapshot = {
-  appliedCost: number;
-  confirmLabel: string;
-  detail: string;
-  items: Array<{ label: string; value: string }>;
-  mode: OspfReviewMode;
-  planId: string;
-  planName: string;
-  recommendationId: string;
-  request: UpdateTunnelPlanOspfCostRequest;
-  rollbackCost: number;
-  rollbackInterfaceName: string;
-  targetClientIds: string[];
-  title: string;
-};
-
-type OspfAppliedRollback = {
-  appliedCost: number;
-  interfaceName: string;
-  planId: string;
-  planName: string;
-  recommendationId: string;
-  rollbackCost: number;
-};
-
-function formatCostChange(plan: NetworkOspfUpdatePlanRecord): string {
-  return `${plan.current_ospf_cost} -> ${plan.recommended_ospf_cost} (${formatDelta(plan.cost_delta)})`;
+function OspfPlanRows({
+  clientLabel,
+  expanded,
+  onApply,
+  onOpenJobDetails,
+  onRefresh,
+  onToggle,
+  pending,
+  plan,
+  savedPlan,
+}: {
+  clientLabel: (clientId: string) => string;
+  expanded: boolean;
+  onApply: () => void;
+  onOpenJobDetails?: (jobId: string) => void;
+  onRefresh: () => void;
+  onToggle: () => void;
+  pending: boolean;
+  plan: NetworkOspfUpdatePlanRecord;
+  savedPlan: TunnelPlanRecord | undefined;
+}) {
+  const mutationReady = canApply(plan);
+  return (
+    <>
+      <tr
+        aria-expanded={expanded}
+        className={expanded ? "isExpanded" : undefined}
+        onClick={onToggle}
+        tabIndex={0}
+        onKeyDown={(event) => {
+          if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
+            event.preventDefault();
+            onToggle();
+          }
+        }}
+      >
+        <td>
+          <span className="historyPrimary">
+            <strong title={plan.plan_name}>{plan.plan_name}</strong>
+            <small title={plan.interface_name}>{plan.interface_name}</small>
+          </span>
+        </td>
+        <td>
+          <span className="historyPrimary">
+            <strong
+              title={plan.control_mode === "automatic" ? "Automatic" : "Reviewed"}
+            >
+              {plan.control_mode === "automatic" ? "Automatic" : "Reviewed"}
+            </strong>
+            <small title={formatUpdateStatus(plan.status)}>
+              {formatUpdateStatus(plan.status)}
+            </small>
+          </span>
+        </td>
+        <td>
+          <span className="topologyEndpointPair">
+            <EndpointCost
+              cost={plan.left_current_ospf_cost}
+              label="L"
+              status={plan.left_ospf_status}
+            />
+            <EndpointCost
+              cost={plan.right_current_ospf_cost}
+              label="R"
+              status={plan.right_ospf_status}
+            />
+          </span>
+        </td>
+        <td>
+          <span className="historyPrimary">
+            <strong title={String(plan.recommended_ospf_cost)}>
+              {plan.recommended_ospf_cost}
+            </strong>
+            <small title={formatPlanDelta(plan)}>
+              {formatPlanDelta(plan)}
+            </small>
+          </span>
+        </td>
+        <td>
+          <span className="historyPrimary">
+            <strong title={formatConfidence(plan.confidence)}>
+              {formatConfidence(plan.confidence)}
+            </strong>
+            <small title={plan.evidence_summary}>
+              {plan.evidence.sample_count} samples, {plan.evidence.degraded_count} degraded
+            </small>
+          </span>
+        </td>
+        <td>
+          <div className="topologyRowActions" onClick={(event) => event.stopPropagation()}>
+            <button
+              aria-label={`Check routing adapter status for ${plan.plan_name}`}
+              className="iconAction"
+              disabled={pending || !savedPlan?.enabled}
+              onClick={onRefresh}
+              title={savedPlan?.enabled ? "Check both endpoint adapters" : "Enable the plan before checking adapters"}
+              type="button"
+            >
+              <RefreshCw className={pending ? "isSpinning" : undefined} size={15} />
+            </button>
+            {plan.control_mode === "reviewed" && (
+              <button
+                className="primaryAction compactAction"
+                disabled={pending || !mutationReady}
+                onClick={onApply}
+                title={mutationReady ? "Review and apply this adapter-bound cost" : applyBlockedReason(plan)}
+                type="button"
+              >
+                <Gauge size={15} />
+                Apply
+              </button>
+            )}
+          </div>
+        </td>
+      </tr>
+      {expanded && (
+        <tr className="topologyOspfDetailRow">
+          <td colSpan={6}>
+            <div className="topologyOspfDetail">
+              <button
+                aria-label={`Close details for ${plan.plan_name}`}
+                className="iconAction topologyDetailClose"
+                onClick={onToggle}
+                title="Close details"
+                type="button"
+              >
+                <X size={15} />
+              </button>
+              <div className="topologyOspfFacts">
+                <Fact label="Left endpoint" value={`${clientLabel(plan.left_client_id)} · ${plan.left_adapter_template_name ?? "Adapter unavailable"}`} />
+                <Fact label="Right endpoint" value={`${clientLabel(plan.right_client_id)} · ${plan.right_adapter_template_name ?? "Adapter unavailable"}`} />
+                <Fact label="Current costs" value={`${plan.left_current_ospf_cost ?? "unknown"} / ${plan.right_current_ospf_cost ?? "unknown"}`} />
+                <Fact label="Recommendation" value={`${plan.recommended_ospf_cost} · ${formatPlanDelta(plan)}`} />
+                <Fact label="Healthy probes" value={`${plan.evidence.healthy_probe_streak} consecutive · ${plan.evidence.required_healthy_probe_streak} required for automatic mode`} />
+                <Fact label="Evidence" value={plan.evidence_summary} />
+                <Fact label="Controller" value={controllerSummary(plan)} />
+              </div>
+              <div className="topologyAdapterHashes">
+                <code title={plan.left_adapter_definition_hash ?? "No left adapter snapshot"}>
+                  L {plan.left_adapter_definition_hash ? shortId(plan.left_adapter_definition_hash) : "unavailable"}
+                </code>
+                <code title={plan.right_adapter_definition_hash ?? "No right adapter snapshot"}>
+                  R {plan.right_adapter_definition_hash ? shortId(plan.right_adapter_definition_hash) : "unavailable"}
+                </code>
+                <span title={plan.evidence.latest_observed_at ?? "No observation time"}>
+                  {plan.evidence.latest_observed_at
+                    ? formatCompactTime(plan.evidence.latest_observed_at)
+                    : "No observation time"}
+                </span>
+              </div>
+              {(savedPlan?.left_ospf_job_id || savedPlan?.right_ospf_job_id) && (
+                <div className="topologyOspfJobLinks" aria-label={`Routing adapter jobs for ${plan.plan_name}`}>
+                  {savedPlan.left_ospf_job_id && (
+                    <button className="secondaryAction compactAction" onClick={() => onOpenJobDetails?.(savedPlan.left_ospf_job_id!)} title={`Open left adapter job ${savedPlan.left_ospf_job_id}`} type="button">
+                      Left adapter job
+                    </button>
+                  )}
+                  {savedPlan.right_ospf_job_id && (
+                    <button className="secondaryAction compactAction" onClick={() => onOpenJobDetails?.(savedPlan.right_ospf_job_id!)} title={`Open right adapter job ${savedPlan.right_ospf_job_id}`} type="button">
+                      Right adapter job
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
 }
 
-function ospfCostPrivilegePayloadText(
+function EndpointCost({
+  cost,
+  label,
+  status,
+}: {
+  cost: number | null;
+  label: string;
+  status: string;
+}) {
+  const healthy = status === "verified" && cost !== null;
+  return (
+    <span className={`endpointCost ${healthy ? "isVerified" : "needsCheck"}`} title={`${status}; cost ${cost ?? "unknown"}`}>
+      {healthy ? <CircleCheck size={13} /> : <TriangleAlert size={13} />}
+      <b>{label}</b>
+      <span>{cost ?? "?"}</span>
+    </span>
+  );
+}
+
+function Fact({ label, value }: { label: string; value: string }) {
+  return (
+    <span>
+      <small>{label}</small>
+      <strong title={value}>{value}</strong>
+    </span>
+  );
+}
+
+function canApply(plan: NetworkOspfUpdatePlanRecord): boolean {
+  return (
+    plan.control_mode === "reviewed" &&
+    ["review_required", "review_degraded", "review_planned_baseline"].includes(plan.status) &&
+    plan.left_ospf_status === "verified" &&
+    plan.right_ospf_status === "verified" &&
+    Boolean(plan.left_adapter_definition_hash) &&
+    Boolean(plan.right_adapter_definition_hash)
+  );
+}
+
+function applyBlockedReason(plan: NetworkOspfUpdatePlanRecord): string {
+  if (!plan.left_adapter_definition_hash || !plan.right_adapter_definition_hash) {
+    return "Both routing adapter templates must be available";
+  }
+  if (plan.left_ospf_status !== "verified" || plan.right_ospf_status !== "verified") {
+    return "Check both endpoint adapters before applying a cost";
+  }
+  if (plan.status === "below_minimum_delta") {
+    return "The cost change is below this plan's minimum delta";
+  }
+  if (plan.status === "noop") {
+    return "Both endpoints already report the recommended cost";
+  }
+  return `Cost apply is unavailable while status is ${formatUpdateStatus(plan.status)}`;
+}
+
+function confirmationItems(
+  snapshot: ApplySnapshot,
+  clientLabel: (clientId: string) => string,
+) {
+  const { plan, request } = snapshot;
+  return [
+    { label: "Plan", value: `${plan.plan_name} · ${plan.interface_name} · r${plan.plan_revision}` },
+    {
+      label: "Endpoints",
+      value: `${clientLabel(plan.left_client_id)} / ${clientLabel(plan.right_client_id)}`,
+    },
+    {
+      label: "Current costs",
+      value: `${request.left_current_ospf_cost ?? "unknown"} / ${request.right_current_ospf_cost ?? "unknown"}`,
+    },
+    { label: "Desired cost", value: String(request.desired_ospf_cost) },
+    { label: "Review condition", value: formatUpdateStatus(plan.status) },
+    { label: "Recommendation", value: request.recommendation_id },
+    {
+      label: "Adapter snapshots",
+      value: `${request.left_adapter_definition_hash} / ${request.right_adapter_definition_hash}`,
+    },
+    { label: "Evidence", value: plan.evidence_summary },
+  ];
+}
+
+function isCautionRecommendation(plan: NetworkOspfUpdatePlanRecord): boolean {
+  return ["review_degraded", "review_planned_baseline"].includes(plan.status);
+}
+
+function applyConfirmationDetail(plan: NetworkOspfUpdatePlanRecord): string {
+  const base = "Run the bound routing adapters on both endpoints using this frozen status snapshot. The agent executes only the stored adapter argv and never edits adapter or routing-daemon files itself.";
+  if (plan.status === "review_degraded") {
+    return `${base} Recent evidence includes degraded samples; apply only after judging that evidence.`;
+  }
+  if (plan.status === "review_planned_baseline") {
+    return `${base} No recent probe evidence is available, so this applies the operator-declared planned baseline.`;
+  }
+  return base;
+}
+
+function ospfPrivilegePayload(
   planId: string,
   request: UpdateTunnelPlanOspfCostRequest,
 ): string {
   return [
-    "v1",
+    "v3",
     planId,
+    request.plan_revision,
     request.recommendation_id.trim(),
-    String(request.current_ospf_cost),
-    String(request.recommended_ospf_cost),
-    request.mutation_intent.trim(),
+    request.left_current_ospf_cost ?? "none",
+    request.right_current_ospf_cost ?? "none",
+    request.desired_ospf_cost,
+    request.left_adapter_definition_hash,
+    request.right_adapter_definition_hash,
   ].join("|");
 }
 
-function formatDelta(delta: number): string {
-  return delta > 0 ? `+${delta}` : String(delta);
-}
-
-function formatMeasurementSummary(plan: NetworkOspfUpdatePlanRecord): string {
-  const evidence = plan.evidence;
-  return [
-    formatNullableMetric(evidence.latency_avg_ms, "ms avg"),
-    formatLossRatio(evidence.packet_loss_avg_ratio),
-    formatNullableMetric(evidence.throughput_avg_mbps, "Mbps avg"),
-    formatNullableMetric(evidence.throughput_max_mbps, "Mbps max"),
-  ].join("; ");
-}
-
-function formatTrafficImpact(plan: NetworkOspfUpdatePlanRecord): string {
-  if (plan.cost_delta > 0) {
-    return `Less preferred by ${plan.cost_delta}`;
+function controllerSummary(plan: NetworkOspfUpdatePlanRecord): string {
+  if (plan.control_mode === "reviewed") {
+    return "Operator review required for cost changes";
   }
-  if (plan.cost_delta < 0) {
-    return `More preferred by ${Math.abs(plan.cost_delta)}`;
+  switch (plan.status) {
+    case "automatic_ready":
+      return "Server controller will dispatch the adapter update";
+    case "automatic_waiting_evidence":
+      return `Waiting for ${plan.evidence.required_healthy_probe_streak} consecutive healthy probes; ${plan.evidence.healthy_probe_streak} observed`;
+    case "in_progress":
+      return "Server-issued adapter jobs are in progress";
+    default:
+      return `Automatic controller: ${formatUpdateStatus(plan.status)}`;
   }
-  return "No preference change";
 }
 
-function formatBandwidthImpact(plan: NetworkOspfUpdatePlanRecord): string {
-  return `Configured ${formatBandwidthMbps(plan.evidence.configured_bandwidth_mbps)}; effective ${formatBandwidthMbps(plan.evidence.effective_bandwidth_mbps)}. Equal-prefix traffic should prefer lower-cost alternatives when available.`;
+function formatUpdateStatus(status: string): string {
+  const labels: Record<string, string> = {
+    adapter_unavailable: "Adapter unavailable",
+    automatic_ready: "Ready for controller",
+    automatic_waiting_evidence: "Waiting for evidence",
+    below_minimum_delta: "Below minimum delta",
+    in_progress: "Jobs in progress",
+    needs_adapter_status: "Check adapters",
+    noop: "Current",
+    review_degraded: "Degraded evidence",
+    review_planned_baseline: "Planned baseline",
+    review_required: "Review required",
+  };
+  return labels[status] ?? formatConfidence(status);
 }
 
-function formatBaselineMismatch(
-  plan: NetworkOspfUpdatePlanRecord,
-): string | null {
-  const configured = plan.evidence.configured_bandwidth_mbps;
-  const effective = plan.evidence.effective_bandwidth_mbps;
-  const measured = plan.evidence.throughput_avg_mbps ?? effective;
-  if (!configured || !measured || measured >= configured * 0.8) {
-    return null;
+function formatConfidence(value: string): string {
+  const normalized = value.replace(/[_-]+/g, " ").trim();
+  return normalized ? normalized[0].toUpperCase() + normalized.slice(1) : "Unknown";
+}
+
+function formatMaximumDelta(delta: number): string {
+  if (delta === 0) return "No endpoint change";
+  return `max delta ${delta > 0 ? `+${delta}` : delta}`;
+}
+
+function formatPlanDelta(plan: NetworkOspfUpdatePlanRecord): string {
+  if (plan.left_current_ospf_cost === null || plan.right_current_ospf_cost === null) {
+    return "Initial apply";
   }
-  const percent = Math.max(1, Math.round((measured / configured) * 100));
-  return `${formatMetric(measured)} Mbps is ${percent}% of expected ${configured} Mbps; keep this tunnel less preferred until speed evidence improves.`;
+  return formatMaximumDelta(plan.maximum_cost_delta);
 }
 
-function formatRollbackPlan(plan: NetworkOspfUpdatePlanRecord): string {
-  return `Restore cost ${plan.current_ospf_cost} on ${plan.interface_name}`;
-}
+type ApplySnapshot = {
+  plan: NetworkOspfUpdatePlanRecord;
+  request: UpdateTunnelPlanOspfCostRequest;
+  targetClientIds: string[];
+};
 
-function formatMonitoringPlan(plan: NetworkOspfUpdatePlanRecord): string {
-  return `After apply, rerun probe/speed tests and verify ${plan.interface_name} in Evidence.`;
-}
-
-function formatEvidenceFreshness(plan: NetworkOspfUpdatePlanRecord): string {
-  const latest = formatEvidenceTime(plan);
-  const stale = isStaleEvidence(plan.evidence.latest_observed_at)
-    ? "Stale evidence: "
-    : "";
-  return `${stale}${plan.evidence.sample_count} samples, ${plan.evidence.degraded_count} degraded, latest ${latest}`;
-}
-
-function formatEvidenceTime(plan: NetworkOspfUpdatePlanRecord): string {
-  return plan.evidence.latest_observed_at
-    ? formatCompactTime(plan.evidence.latest_observed_at)
-    : "No observation time";
-}
-
-function isStaleEvidence(value: string | null): boolean {
-  if (!value) {
-    return true;
-  }
-  const observed = new Date(value).getTime();
-  if (Number.isNaN(observed)) {
-    return true;
-  }
-  return Date.now() - observed > 24 * 60 * 60 * 1000;
-}
-
-function formatApprovalScope(plan: NetworkOspfUpdatePlanRecord): string {
-  const approval = plan.requires_approval
-    ? "approval required"
-    : "no approval required";
-  const privilege = plan.privilege_required
-    ? "privilege required"
-    : "no privilege required";
-  return `${approval}; ${privilege}; ${formatDisplayToken(plan.mutation_mode)}; ${plan.approval_scope.join(", ")}`;
-}
-
-function formatOspfPlanStatus(plan: NetworkOspfUpdatePlanRecord): string {
-  if (plan.status === "review_required") {
-    return "Review required";
-  }
-  if (plan.status === "review_degraded") {
-    return "Review degraded evidence";
-  }
-  if (plan.status === "needs_observation") {
-    return "Needs fresh observation";
-  }
-  if (plan.status === "noop") {
-    return "No cost change";
-  }
-  return formatDisplayToken(plan.status);
-}
-
-function formatBandwidthMbps(value: number): string {
-  return `${Math.round(value)} Mbps`;
-}
-
-function formatNullableMetric(value: number | null, unit: string): string {
-  return value === null
-    ? `${unit} unavailable`
-    : `${formatMetric(value)} ${unit}`;
-}
-
-function formatLossRatio(value: number | null): string {
-  return value === null
-    ? "loss unavailable"
-    : `${formatMetric(value * 100)}% loss`;
-}
-
-function formatMetric(value: number): string {
-  return Number.isInteger(value)
-    ? String(value)
-    : value.toFixed(value < 10 ? 2 : 1);
-}
-
-function formatDisplayToken(value: string): string {
-  return value.replace(/_/g, " ");
-}
+type Feedback = {
+  message: string;
+  tone: ActionFeedbackTone;
+};

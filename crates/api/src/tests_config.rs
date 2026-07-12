@@ -113,7 +113,7 @@ async fn agent_requested_runtime_config_reload_compares_hash_before_queuing() {
 
     repo.upsert_runtime_config_overrides(
         &["client-a".to_string()],
-        "telemetry_light_secs = 30\n",
+        "telemetry_interval_secs = 30\n",
         "operator runtime config update",
         &memory_admin(),
     )

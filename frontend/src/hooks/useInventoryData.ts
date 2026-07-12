@@ -98,6 +98,21 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
     }
   }, [apiToken, onUnauthorized]);
 
+  const loadSourceTemplates = useCallback(async () => {
+    try {
+      setSourceTemplates(
+        await apiGet<SourceTemplateRecord[]>("/api/v1/source-templates", apiToken),
+      );
+    } catch (error) {
+      if (isApiUnauthorized(error)) {
+        onUnauthorized();
+        setSourceTemplates([]);
+        throw new Error("Operator login required");
+      }
+      throw error;
+    }
+  }, [apiToken, onUnauthorized]);
+
   const loadRuntimeConfigApplyStates = useCallback(async () => {
     try {
       setRuntimeConfigApplyStates(
@@ -322,6 +337,7 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
     deleteTag,
     diffSourceTemplate,
     loadTagInventory,
+    loadSourceTemplates,
     loadRuntimeConfigApplyStates,
     runtimeConfigApplyStates,
     runtimeConfigPatchGenerators,

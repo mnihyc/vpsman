@@ -6,7 +6,8 @@ use tokio::process::Command;
 use tracing::warn;
 use vpsman_common::{
     AgentConfig, AgentMetrics, AgentTelemetrySource, CpuStat, DiskStat, LoadAverage, MemoryStat,
-    NetworkStat, RuntimeTunnelCommand, RuntimeTunnelStat,
+    NetworkStat, RuntimeTunnelCommand, RuntimeTunnelStat, MAX_TELEMETRY_DISKS,
+    MAX_TELEMETRY_NETWORKS, MAX_TELEMETRY_TUNNELS,
 };
 
 use crate::child_process::{run_child_with_bounded_output, ChildCleanupPolicy, ChildRunResult};
@@ -132,13 +133,13 @@ fn apply_patch(metrics: &mut AgentMetrics, patch: CustomMetricsPatch) {
         metrics.memory = memory;
     }
     if let Some(disks) = patch.disks {
-        metrics.disks = disks.into_iter().take(128).collect();
+        metrics.disks = disks.into_iter().take(MAX_TELEMETRY_DISKS).collect();
     }
     if let Some(networks) = patch.networks {
-        metrics.networks = networks.into_iter().take(512).collect();
+        metrics.networks = networks.into_iter().take(MAX_TELEMETRY_NETWORKS).collect();
     }
     if let Some(tunnels) = patch.tunnels {
-        metrics.tunnels = tunnels.into_iter().take(128).collect();
+        metrics.tunnels = tunnels.into_iter().take(MAX_TELEMETRY_TUNNELS).collect();
     }
 }
 

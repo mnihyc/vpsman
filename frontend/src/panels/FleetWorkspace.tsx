@@ -77,8 +77,6 @@ import {
   addressFamilyLabel,
   latencyStatusLabel,
   mutationPolicyLabel,
-  ospfStatusLabel,
-  planCorrelationLabel,
   runtimeManagerLabel,
   telemetryReasonLabel,
   telemetrySourceLabel,
@@ -399,6 +397,10 @@ export function FleetWorkspace({
   const [deletePending, setDeletePending] = useState(false);
   const [deleteReviewPending, setDeleteReviewPending] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleteFeedback, setDeleteFeedback] = useState<{
+    message: string;
+    tone: ActionFeedbackTone;
+  } | null>(null);
   const deleteReviewTargetRef = useRef<string | null>(null);
   const deleteSnapshotRef = useRef<DeleteAgentConfirmationSnapshot | null>(
     null,
@@ -929,6 +931,7 @@ export function FleetWorkspace({
 
   async function requestDeleteAgent(rows: AgentView[]) {
     clearDeleteReview();
+    setDeleteFeedback(null);
     if (rows.length !== 1) {
       return;
     }
@@ -977,10 +980,22 @@ export function FleetWorkspace({
       return;
     }
     await runPanelAction(setDeletePending, setDeleteError, async () => {
-      await onDeleteAgent(deleteSnapshot.clientId, {
+      const response = await onDeleteAgent(deleteSnapshot.clientId, {
         confirmed: true,
         privilege_assertion: deleteSnapshot.privilegeAssertion,
         reason: "Deleted from fleet inventory selection action",
+      });
+      const failedSyncs = response.runtime_sync_failed_client_ids.length;
+      const queuedSyncs = response.runtime_sync_job_ids.length;
+      setDeleteFeedback({
+        message:
+          failedSyncs > 0
+            ? `VPS deleted; tunnel cleanup failed to queue for ${failedSyncs} surviving ${failedSyncs === 1 ? "peer" : "peers"}: ${response.runtime_sync_failed_client_ids.join(", ")}. Review runtime config state before trusting those interfaces.`
+            : queuedSyncs > 0
+              ? `VPS deleted; tunnel cleanup queued for ${queuedSyncs} surviving ${queuedSyncs === 1 ? "peer" : "peers"}.`
+              : "VPS deleted; no surviving tunnel peer required cleanup.",
+        tone:
+          failedSyncs > 0 ? "warning" : queuedSyncs > 0 ? "progress" : "success",
       });
       clearDeleteReview();
       onSelectAgent(null);
@@ -1104,6 +1119,7 @@ export function FleetWorkspace({
           apiError={apiError}
           columns={fleetColumns}
           deleteError={deleteError}
+          deleteFeedback={deleteFeedback}
           deletePending={deletePending}
           deleteSnapshot={deleteSnapshot}
           onCancelDelete={() => {
@@ -1256,6 +1272,7 @@ function FleetInstancesPanel({
   apiError,
   columns,
   deleteError,
+  deleteFeedback,
   deletePending,
   deleteSnapshot,
   onCancelDelete,
@@ -1278,6 +1295,7 @@ function FleetInstancesPanel({
   apiError: string | null;
   columns: ConsoleDataGridColumn<AgentView>[];
   deleteError: string | null;
+  deleteFeedback: { message: string; tone: ActionFeedbackTone } | null;
   deletePending: boolean;
   deleteSnapshot: DeleteAgentConfirmationSnapshot | null;
   onCancelDelete: () => void;
@@ -1314,11 +1332,16 @@ function FleetInstancesPanel({
           <span>Live control-plane inventory</span>
         </div>
         <span className="sectionContext">
-          {summary.online} live / {summary.total} total ·{" "}
+          {summary.online} live / {summary.never + summary.unknown} no contact / {summary.total} total ·{" "}
           {formatConsoleStreamState(wsState)}
         </span>
       </div>
       <ConsoleFreshnessBanner error={apiError} />
+      <ActionFeedback
+        className="localActionFeedback"
+        message={deleteFeedback?.message}
+        tone={deleteFeedback?.tone}
+      />
 
       <ConsoleDataGrid
         actions={actions}
@@ -1381,7 +1404,7 @@ function FleetInstancesPanel({
       />
       <ConfirmationPrompt
         confirmLabel="Delete VPS"
-        detail="This deactivates VPS access immediately and permanently removes it from inventory, selectors, dashboard, tags, topology, and future bulk targeting. Historical jobs and audit records remain."
+        detail="This deactivates VPS access immediately and permanently removes it from inventory, selectors, dashboard, tags, topology, and future bulk targeting. Tunnel declarations using this VPS are retired and surviving peers receive cleanup sync jobs. Historical jobs and audit records remain."
         error={deleteError}
         items={
           deleteSnapshot
@@ -1516,7 +1539,7 @@ function FleetInstanceDetail({
     tagVisibilityOverrides,
   );
   const isNetworkManaged = agent.tags.some((tag) =>
-    ["bgp", "bird2", "ospf", "tunnel"].includes(tag.toLowerCase()),
+    ["bgp", "ospf", "tunnel"].includes(tag.toLowerCase()),
   );
   const agentLabel = formatVpsName(agent, vpsNameDisplayMode);
   const displayState = agentDisplayState(agent);
@@ -1883,7 +1906,7 @@ function FleetInstanceDetail({
             <DetailLine
               icon={<Gauge size={18} />}
               label="Fleet position"
-              value={`${summary.online} live / ${summary.total} total`}
+              value={`${summary.online} live / ${summary.never + summary.unknown} no contact / ${summary.total} total`}
             />
           </>
         )}
@@ -9204,9 +9227,9 @@ function TunnelList({ tunnels }: { tunnels: TelemetryTunnelRecord[] }) {
                   tone={latencyTone(tunnel.latency_status)}
                 />
                 <TelemetryStack
-                  detail={formatTunnelOspfDetail(tunnel)}
-                  main={formatTunnelOspfMain(tunnel)}
-                  tone={ospfTone(tunnel.auto_ospf_status)}
+                  detail={formatTunnelPlanDetail(tunnel)}
+                  main={formatTunnelPlanMain(tunnel)}
+                  tone={adapterTone(tunnel)}
                 />
               </div>
             ))}
@@ -9238,13 +9261,12 @@ function TelemetryStack({
 function tunnelRowClass(tunnel: TelemetryTunnelRecord): string {
   if (
     tunnel.latency_status === "down" ||
-    tunnel.auto_ospf_status === "failed"
+    tunnel.adapter_health?.success === false
   ) {
     return "telemetryRowCritical";
   }
   if (
-    tunnel.latency_status === "missed" ||
-    tunnel.auto_ospf_status === "report_only"
+    tunnel.latency_status === "missed"
   ) {
     return "telemetryRowWarn";
   }
@@ -9298,27 +9320,16 @@ function formatTunnelLatencyDetail(tunnel: TelemetryTunnelRecord): string {
     .join("; ");
 }
 
-function formatTunnelOspfMain(tunnel: TelemetryTunnelRecord): string {
-  const status = ospfStatusLabel(
-    tunnel.auto_ospf_status,
-    tunnel.auto_ospf_enabled,
-  );
-  const cost =
-    tunnel.auto_ospf_current_cost || tunnel.auto_ospf_recommended_cost
-      ? ` ${tunnel.auto_ospf_current_cost ?? "?"}->${tunnel.auto_ospf_recommended_cost ?? "?"}`
-      : "";
-  return `OSPF ${status}${cost}`;
+function formatTunnelPlanMain(tunnel: TelemetryTunnelRecord): string {
+  return tunnel.plan_name ?? "Declared tunnel";
 }
 
-function formatTunnelOspfDetail(tunnel: TelemetryTunnelRecord): string {
-  const enabled = tunnel.auto_ospf_enabled ? "enabled" : "disabled";
-  const updated =
-    typeof tunnel.auto_ospf_updated_unix === "number"
-      ? `updated ${formatCompactTime(new Date(tunnel.auto_ospf_updated_unix * 1000).toISOString())}`
-      : "no update";
-  return [enabled, updated, telemetryReasonLabel(tunnel.auto_ospf_reason)]
-    .filter(Boolean)
-    .join("; ");
+function formatTunnelPlanDetail(tunnel: TelemetryTunnelRecord): string {
+  return [
+    tunnel.endpoint_side ? `${tunnel.endpoint_side} endpoint` : "endpoint",
+    tunnel.peer_client_id ? `peer ${tunnel.peer_client_id}` : "peer unavailable",
+    tunnel.plan_id ? `plan ${shortId(tunnel.plan_id)}` : "plan unavailable",
+  ].join("; ");
 }
 
 function latencyTone(
@@ -9340,20 +9351,13 @@ function latencyTone(
   return "neutral";
 }
 
-function ospfTone(
-  status: string | null | undefined,
+function adapterTone(
+  tunnel: TelemetryTunnelRecord,
 ): "critical" | "neutral" | "ok" | "warn" {
-  if (status === "failed") {
+  if (tunnel.adapter_health?.success === false) {
     return "critical";
   }
-  if (
-    status === "report_only" ||
-    status === "stabilizing" ||
-    status === "monitoring_only"
-  ) {
-    return "warn";
-  }
-  if (status === "stable" || status === "updated" || status === "disabled") {
+  if (tunnel.adapter_health?.success === true || tunnel.ownership_mode === "external_observed") {
     return "ok";
   }
   return "neutral";
@@ -9362,26 +9366,10 @@ function ospfTone(
 function formatTunnelPolicy(tunnel: TelemetryTunnelRecord) {
   const adapterHealth = formatAdapterHealth(tunnel);
   const traffic = formatTunnelTraffic(tunnel);
-  if (tunnel.plan_correlation === "matched_saved_plan") {
-    const manager = runtimeManagerLabel(
-      tunnel.plan_runtime_manager ?? tunnel.ownership_mode,
-    );
-    if (tunnel.mutation_policy === "observe_only_saved_plan") {
-      return tunnel.plan_name
-        ? `saved observed plan ${tunnel.plan_name} (${manager})${adapterHealth}${traffic}`
-        : `saved observed plan (${manager})${adapterHealth}${traffic}`;
-    }
-    return tunnel.plan_name
-      ? `managed by ${tunnel.plan_name} (${manager})${adapterHealth}${traffic}`
-      : `managed (${manager})${adapterHealth}${traffic}`;
-  }
-  if (tunnel.promotion_required) {
-    return `import candidate${adapterHealth}${traffic}`;
-  }
-  if (tunnel.mutation_policy === "managed_desired") {
-    return `managed${adapterHealth}${traffic}`;
-  }
-  return `${planCorrelationLabel(tunnel.plan_correlation)} ${mutationPolicyLabel(tunnel.mutation_policy)}${adapterHealth}${traffic}`;
+  const manager = runtimeManagerLabel(
+    tunnel.plan_runtime_manager ?? tunnel.ownership_mode,
+  );
+  return `${manager}; ${mutationPolicyLabel(tunnel.mutation_policy)}${adapterHealth}${traffic}`;
 }
 
 function formatAdapterHealth(tunnel: TelemetryTunnelRecord) {

@@ -869,8 +869,7 @@ async fn handle_agent_frame(
                 server_build_number: crate::build_info::server_build_number(),
                 accepted: true,
                 message: "accepted".to_string(),
-                telemetry_light_secs: 15,
-                telemetry_full_secs: 60,
+                telemetry_interval_secs: 15,
             };
             write_json_frame(stream, MessageKind::ServerHello, 0, frame.seq, &reply).await?;
         }
@@ -891,6 +890,7 @@ async fn handle_agent_frame(
                 gateway_id: context.args.gateway_id.clone(),
                 gateway_session_id: context.session_id,
                 process_incarnation_id: active_process_incarnation_id,
+                telemetry_seq: frame.seq,
                 remote_ip: Some(context.remote_ip.to_string()),
                 telemetry,
             };

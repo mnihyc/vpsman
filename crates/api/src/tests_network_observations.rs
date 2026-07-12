@@ -183,6 +183,7 @@ async fn topology_graph_combines_plans_endpoint_state_and_observation_trends() {
                 stale_reason: None,
                 capabilities: Default::default(),
             },
+            topology_test_agent("unrelated-c", "online"),
         ]);
     }
     let operator = AuthContext {
@@ -210,8 +211,10 @@ async fn topology_graph_combines_plans_endpoint_state_and_observation_trends() {
         runtime_topology: Default::default(),
         left_client_id: plan.left_client_id.clone(),
         right_client_id: plan.right_client_id.clone(),
-        left_underlay: plan.left_underlay.clone(),
-        right_underlay: plan.right_underlay.clone(),
+        left_remote_underlay: plan.left_remote_underlay.clone(),
+        right_remote_underlay: plan.right_remote_underlay.clone(),
+        left_local_underlay: None,
+        right_local_underlay: None,
         address_pool_cidr: "10.255.0.0/30".to_string(),
         reserved_addresses: Vec::new(),
         ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
@@ -223,10 +226,7 @@ async fn topology_graph_combines_plans_endpoint_state_and_observation_trends() {
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
-        latency_ms: 18.0,
-        packet_loss_ratio: 0.0,
-        preference: 1.0,
-        ospf_policy: OspfCostPolicy::default(),
+        ospf: Some(test_ospf(1.0)),
     };
     repo.record_tunnel_plan(&input, &plan, true, &operator)
         .await
@@ -291,17 +291,22 @@ async fn topology_graph_combines_plans_endpoint_state_and_observation_trends() {
     .unwrap();
 
     assert_eq!(graph.nodes.len(), 2);
+    assert!(graph
+        .nodes
+        .iter()
+        .all(|node| node.client_id == "left-a" || node.client_id == "right-b"));
+    assert!(chrono::DateTime::parse_from_rfc3339(&graph.generated_at).is_ok());
     assert_eq!(graph.edges.len(), 1);
     assert_eq!(graph.edges[0].plan_name, "edge-a-edge-b");
     assert_eq!(graph.edges[0].health, "degraded");
-    assert_eq!(graph.edges[0].status, "planned");
-    assert!(graph.edges[0].convergence_blocked);
+    assert_eq!(graph.edges[0].left_runtime_state, "unknown");
+    assert_eq!(graph.edges[0].right_runtime_state, "stale");
     assert_eq!(
-        graph.edges[0].offline_client_ids,
+        graph.edges[0].unavailable_client_ids,
         vec!["right-b".to_string()]
     );
     assert_eq!(
-        graph.edges[0].server_drift_reasons,
+        graph.edges[0].availability_reasons,
         vec!["endpoint_not_online:right-b:stale".to_string()]
     );
     assert_eq!(graph.edges[0].sample_count, 2);
@@ -388,7 +393,8 @@ async fn topology_graph_ignores_observations_from_reused_plan_name_with_differen
         session_id: Uuid::nil(),
     };
     let original = test_plan();
-    repo.record_tunnel_plan(&test_plan_input("right-b"), &original, true, &operator)
+    let saved = repo
+        .record_tunnel_plan(&test_plan_input("right-b"), &original, true, &operator)
         .await
         .unwrap();
 
@@ -423,9 +429,16 @@ async fn topology_graph_ignores_observations_from_reused_plan_name_with_differen
     assert!(old_observation.topology_identity_hash.is_some());
 
     let replacement = plan_tunnel(&test_plan_input("right-c")).unwrap();
-    repo.record_tunnel_plan(&test_plan_input("right-c"), &replacement, true, &operator)
-        .await
-        .unwrap();
+    repo.update_tunnel_plan(
+        saved.id,
+        saved.revision,
+        &test_plan_input("right-c"),
+        &replacement,
+        true,
+        &operator,
+    )
+    .await
+    .unwrap();
 
     let graph = repo.topology_graph(10).await.unwrap();
     assert_eq!(graph.edges.len(), 1);
@@ -501,8 +514,10 @@ async fn topology_graph_marks_offline_runtime_endpoint_without_agent_observation
         runtime_topology: Default::default(),
         left_client_id: plan.left_client_id.clone(),
         right_client_id: plan.right_client_id.clone(),
-        left_underlay: plan.left_underlay.clone(),
-        right_underlay: plan.right_underlay.clone(),
+        left_remote_underlay: plan.left_remote_underlay.clone(),
+        right_remote_underlay: plan.right_remote_underlay.clone(),
+        left_local_underlay: None,
+        right_local_underlay: None,
         address_pool_cidr: "10.255.0.0/30".to_string(),
         reserved_addresses: Vec::new(),
         ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
@@ -514,10 +529,7 @@ async fn topology_graph_marks_offline_runtime_endpoint_without_agent_observation
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
-        latency_ms: 18.0,
-        packet_loss_ratio: 0.0,
-        preference: 1.0,
-        ospf_policy: OspfCostPolicy::default(),
+        ospf: Some(test_ospf(1.0)),
     };
     repo.record_tunnel_plan(&input, &plan, true, &operator)
         .await
@@ -527,15 +539,15 @@ async fn topology_graph_marks_offline_runtime_endpoint_without_agent_observation
 
     assert_eq!(graph.edges.len(), 1);
     assert_eq!(graph.edges[0].health, "degraded");
-    assert!(graph.edges[0].convergence_blocked);
+    assert_eq!(graph.edges[0].right_runtime_state, "degraded");
     assert_eq!(graph.edges[0].sample_count, 0);
     assert_eq!(graph.edges[0].degraded_count, 0);
     assert_eq!(
-        graph.edges[0].offline_client_ids,
+        graph.edges[0].unavailable_client_ids,
         vec!["right-b".to_string()]
     );
     assert_eq!(
-        graph.edges[0].server_drift_reasons,
+        graph.edges[0].availability_reasons,
         vec!["endpoint_not_online:right-b:offline".to_string()]
     );
     let right = graph
@@ -547,7 +559,94 @@ async fn topology_graph_marks_offline_runtime_endpoint_without_agent_observation
 }
 
 #[tokio::test]
-async fn topology_graph_exposes_runtime_status_coverage_and_drift_policy() {
+async fn topology_graph_uses_exact_plan_bound_endpoint_telemetry() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        memory.agents.write().await.extend([
+            topology_test_agent("left-a", "online"),
+            topology_test_agent("right-b", "online"),
+        ]);
+    }
+    let operator = topology_test_operator();
+    let plan = test_plan();
+    let input = test_plan_input("right-b");
+    let saved = repo
+        .record_tunnel_plan(&input, &plan, true, &operator)
+        .await
+        .unwrap();
+    if let Repository::Memory(memory) = &repo {
+        memory.telemetry_tunnels.write().await.extend([
+            topology_test_tunnel(saved.id, "left-a", "left", "ok", None),
+            topology_test_tunnel(
+                saved.id,
+                "right-b",
+                "right",
+                "missing",
+                Some("tunab_not_found"),
+            ),
+        ]);
+    }
+
+    let graph = repo.topology_graph(10).await.unwrap();
+    let edge = &graph.edges[0];
+    assert_eq!(edge.left_runtime_state, "healthy");
+    assert_eq!(edge.right_runtime_state, "degraded");
+    assert_eq!(
+        edge.right_runtime_reason.as_deref(),
+        Some("tunab_not_found")
+    );
+    assert_eq!(edge.health, "degraded");
+
+    repo.set_tunnel_plan_enabled(saved.id, saved.revision, false, &operator)
+        .await
+        .unwrap();
+    let disabled = repo.topology_graph(10).await.unwrap();
+    assert_eq!(disabled.edges[0].health, "disabled");
+    assert_eq!(disabled.edges[0].left_runtime_state, "disabled");
+    assert_eq!(disabled.edges[0].right_runtime_state, "disabled");
+}
+
+#[tokio::test]
+async fn failed_latency_probe_does_not_reclassify_converged_runtime_as_failed() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        memory.agents.write().await.extend([
+            topology_test_agent("left-a", "online"),
+            topology_test_agent("right-b", "online"),
+        ]);
+    }
+    let operator = topology_test_operator();
+    let plan = test_plan();
+    let input = test_plan_input("right-b");
+    let saved = repo
+        .record_tunnel_plan(&input, &plan, true, &operator)
+        .await
+        .unwrap();
+    let mut left = topology_test_tunnel(saved.id, "left-a", "left", "ok", None);
+    left.latency_monitoring_enabled = Some(true);
+    left.latency_status = Some("healthy".to_string());
+    let mut right = topology_test_tunnel(saved.id, "right-b", "right", "ok", None);
+    right.latency_monitoring_enabled = Some(true);
+    right.latency_status = Some("failed".to_string());
+    right.latency_reason = Some("icmp_blocked_or_unreachable".to_string());
+    if let Repository::Memory(memory) = &repo {
+        memory.telemetry_tunnels.write().await.extend([left, right]);
+    }
+
+    let graph = repo.topology_graph(10).await.unwrap();
+    let edge = &graph.edges[0];
+    assert_eq!(edge.left_runtime_state, "healthy");
+    assert_eq!(edge.right_runtime_state, "healthy");
+    assert_eq!(edge.left_reachability_state, "reachable");
+    assert_eq!(edge.right_reachability_state, "probe_failed");
+    assert_eq!(
+        edge.right_reachability_reason.as_deref(),
+        Some("icmp_blocked_or_unreachable")
+    );
+}
+
+#[tokio::test]
+async fn topology_graph_exposes_explicit_runtime_status_coverage() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
         memory.agents.write().await.extend([
@@ -609,8 +708,10 @@ async fn topology_graph_exposes_runtime_status_coverage_and_drift_policy() {
             runtime_topology: Default::default(),
             left_client_id: plan.left_client_id.clone(),
             right_client_id: plan.right_client_id.clone(),
-            left_underlay: plan.left_underlay.clone(),
-            right_underlay: plan.right_underlay.clone(),
+            left_remote_underlay: plan.left_remote_underlay.clone(),
+            right_remote_underlay: plan.right_remote_underlay.clone(),
+            left_local_underlay: None,
+            right_local_underlay: None,
             address_pool_cidr: "10.255.0.0/30".to_string(),
             reserved_addresses: Vec::new(),
             ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
@@ -622,10 +723,7 @@ async fn topology_graph_exposes_runtime_status_coverage_and_drift_policy() {
             ipv6_tunnel: None,
             latency_primary_family: Default::default(),
             bandwidth_mbps: 100,
-            latency_ms: 18.0,
-            packet_loss_ratio: 0.0,
-            preference: 1.0,
-            ospf_policy: OspfCostPolicy::default(),
+            ospf: Some(test_ospf(1.0)),
         },
         &plan,
         true,
@@ -652,14 +750,12 @@ async fn topology_graph_exposes_runtime_status_coverage_and_drift_policy() {
                         "healthy": false,
                         "reasons": ["desired_interface_missing", "stale_interface_present"],
                         "adapter_state": "not_applicable",
-                        "bird2_state": "routing_unhealthy",
                         "kernel_link_probe_state": "success",
                         "neighbor_probe_state": "failed",
                         "route_probe_state": "skipped",
                         "real_kernel_namespace_covered": true,
                         "desired_missing_count": 1,
-                        "stale_present_count": 1,
-                        "external_import_candidate_count": 0
+                        "stale_present_count": 1
                     }
                 }
             }))
@@ -675,11 +771,6 @@ async fn topology_graph_exposes_runtime_status_coverage_and_drift_policy() {
     let edge = &graph.edges[0];
 
     assert_eq!(edge.health, "degraded");
-    assert_eq!(
-        edge.topology_drift_policy,
-        "observe_runtime_drift_before_apply"
-    );
-    assert_eq!(edge.topology_drift_action, "inspect_runtime_status");
     assert_eq!(edge.runtime_state, "drift");
     assert_eq!(
         edge.runtime_reasons,
@@ -689,14 +780,13 @@ async fn topology_graph_exposes_runtime_status_coverage_and_drift_policy() {
         ]
     );
     assert_eq!(edge.adapter_state, "not_applicable");
-    assert_eq!(edge.routing_state, "routing_unhealthy");
+    assert_eq!(edge.routing_state, "unknown");
     assert_eq!(edge.kernel_link_probe_state, "success");
     assert_eq!(edge.kernel_neighbor_probe_state, "failed");
     assert_eq!(edge.kernel_route_probe_state, "skipped");
     assert!(edge.kernel_namespace_covered);
     assert_eq!(edge.desired_missing_count, 1);
     assert_eq!(edge.stale_present_count, 1);
-    assert_eq!(edge.import_candidate_count, 0);
 }
 
 #[tokio::test]
@@ -728,8 +818,10 @@ async fn recommends_ospf_cost_from_probe_and_speed_trends() {
             runtime_topology: Default::default(),
             left_client_id: plan.left_client_id.clone(),
             right_client_id: plan.right_client_id.clone(),
-            left_underlay: plan.left_underlay.clone(),
-            right_underlay: plan.right_underlay.clone(),
+            left_remote_underlay: plan.left_remote_underlay.clone(),
+            right_remote_underlay: plan.right_remote_underlay.clone(),
+            left_local_underlay: None,
+            right_local_underlay: None,
             address_pool_cidr: "10.255.0.0/30".to_string(),
             reserved_addresses: Vec::new(),
             ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
@@ -741,10 +833,7 @@ async fn recommends_ospf_cost_from_probe_and_speed_trends() {
             ipv6_tunnel: None,
             latency_primary_family: Default::default(),
             bandwidth_mbps: 100,
-            latency_ms: 18.0,
-            packet_loss_ratio: 0.0,
-            preference: 0.5,
-            ospf_policy: OspfCostPolicy::default(),
+            ospf: Some(test_ospf(0.5)),
         },
         &plan,
         true,
@@ -832,8 +921,10 @@ fn test_plan_input(right_client_id: &str) -> TunnelPlanInput {
         runtime_topology: Default::default(),
         left_client_id: "left-a".to_string(),
         right_client_id: right_client_id.to_string(),
-        left_underlay: "198.51.100.10".to_string(),
-        right_underlay: "203.0.113.20".to_string(),
+        left_remote_underlay: "198.51.100.10".to_string(),
+        right_remote_underlay: "203.0.113.20".to_string(),
+        left_local_underlay: None,
+        right_local_underlay: None,
         address_pool_cidr: "10.255.0.0/30".to_string(),
         reserved_addresses: Vec::new(),
         ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
@@ -845,10 +936,109 @@ fn test_plan_input(right_client_id: &str) -> TunnelPlanInput {
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
-        latency_ms: 18.0,
-        packet_loss_ratio: 0.0,
-        preference: 1.0,
-        ospf_policy: OspfCostPolicy::default(),
+        ospf: Some(test_ospf(1.0)),
+    }
+}
+
+fn test_ospf(preference: f64) -> vpsman_common::TunnelOspfConfig {
+    vpsman_common::TunnelOspfConfig {
+        mode: vpsman_common::OspfControlMode::Reviewed,
+        planned_latency_ms: 18.0,
+        planned_packet_loss_ratio: 0.0,
+        preference,
+        policy: OspfCostPolicy::default(),
+        min_cost_delta: 5,
+        healthy_windows: 2,
+        left_adapter_template_id: "33333333-3333-4333-8333-333333333333".to_string(),
+        right_adapter_template_id: "44444444-4444-4444-8444-444444444444".to_string(),
+    }
+}
+
+fn topology_test_agent(id: &str, status: &str) -> AgentView {
+    AgentView {
+        id: id.to_string(),
+        display_name: id.to_string(),
+        status: status.to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: None,
+        arch: None,
+        internal_build_number: 1,
+        process_incarnation_id: None,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: Default::default(),
+    }
+}
+
+fn topology_test_operator() -> AuthContext {
+    AuthContext {
+        operator: OperatorView {
+            id: Uuid::nil(),
+            username: "test-operator".to_string(),
+            role: "admin".to_string(),
+            scopes: vec!["*".to_string()],
+            preferences: crate::model::OperatorPreferences::default(),
+            totp_enabled: false,
+            status: "active".to_string(),
+            session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
+            created_at: crate::unix_now().to_string(),
+            disabled_at: None,
+            deleted_at: None,
+        },
+        session_id: Uuid::nil(),
+    }
+}
+
+fn topology_test_tunnel(
+    plan_id: Uuid,
+    client_id: &str,
+    endpoint_side: &str,
+    traffic_status: &str,
+    traffic_reason: Option<&str>,
+) -> crate::model::TelemetryTunnelView {
+    crate::model::TelemetryTunnelView {
+        client_id: client_id.to_string(),
+        observed_at: crate::unix_now().to_string(),
+        interface: "tunab".to_string(),
+        kind: "gre".to_string(),
+        ownership_mode: "agent_iproute2_managed".to_string(),
+        mutation_policy: "managed_desired".to_string(),
+        plan_id: Some(plan_id),
+        plan_name: Some("edge-a-edge-b".to_string()),
+        plan_runtime_manager: Some("agent_iproute2_managed".to_string()),
+        endpoint_side: Some(endpoint_side.to_string()),
+        peer_client_id: Some(
+            if endpoint_side == "left" {
+                "right-b"
+            } else {
+                "left-a"
+            }
+            .to_string(),
+        ),
+        source: "approved_runtime_status_telemetry".to_string(),
+        operstate: None,
+        mtu: None,
+        link_type: None,
+        address: None,
+        rx_bytes: 1,
+        tx_bytes: 1,
+        traffic_source: Some("interface_counters".to_string()),
+        traffic_status: Some(traffic_status.to_string()),
+        traffic_reason: traffic_reason.map(str::to_string),
+        traffic_checked_unix: Some(crate::unix_now() as i64),
+        adapter_health: None,
+        latency_monitoring_enabled: Some(false),
+        latency_status: Some("disabled".to_string()),
+        latency_reason: None,
+        latency_primary_family: Some("ipv4".to_string()),
+        latency_target: None,
+        latency_checked_unix: None,
+        latency_avg_ms: None,
+        packet_loss_ratio: None,
+        latency_healthy_windows: None,
+        latency_missed_windows: None,
     }
 }
 

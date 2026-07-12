@@ -1,68 +1,53 @@
 import {
+  type FormEvent,
   useEffect,
   useMemo,
   useRef,
   useState,
-  type FormEvent,
-  type ReactNode,
 } from "react";
 import {
   Activity,
+  CirclePlus,
   Download,
-  FileDiff,
-  GitBranch,
+  ExternalLink,
+  Gauge,
+  GitGraph,
+  Network,
+  Pencil,
   Power,
   PowerOff,
   RefreshCcw,
   Route,
-  Save,
-  Wand2,
+  Search,
+  Settings2,
+  Trash2,
   X,
 } from "lucide-react";
-import {
-  ConsoleDataGrid,
-  type ConsoleDataGridAction,
-  type ConsoleDataGridColumn,
-} from "../components/ConsoleDataGrid";
-import {
-  ActionFeedback,
-  type ActionFeedbackTone,
-} from "../components/ActionFeedback";
+import { ActionFeedback, type ActionFeedbackTone } from "../components/ActionFeedback";
+import { ApiResponseError } from "../api";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { VpsCombobox } from "../components/VpsCombobox";
+import { tunnelEndpointRuntimeStateBadgeClass } from "../jobStatusPresentation";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import {
-  OSPF_COST_MODEL_DETAIL,
-  OSPF_COST_MODEL_SUMMARY,
-  addressFamilyLabel,
   buildRuntimeControl,
   buildRuntimeTopology,
   calculateOspfCostPreview,
   clampTunnelBandwidthMbps,
-  endpointSideLabel,
-  latencyStatusLabel,
-  mutationPolicyLabel,
-  ospfStatusLabel,
-  planCorrelationLabel,
+  DEFAULT_TUNNEL_BANDWIDTH_MBPS,
+  MAX_TUNNEL_BANDWIDTH_MBPS,
+  MIN_TUNNEL_BANDWIDTH_MBPS,
+  OSPF_COST_MODEL_DETAIL,
   readableTelemetryToken,
   runtimeManagerLabel,
-  telemetryReasonLabel,
-  telemetrySourceLabel,
 } from "../topologyRuntime";
-import {
-  buildPrivilegeAssertion,
-  canonicalDbPrivilegeIntent,
-  type PrivilegeMaterial,
-} from "../privilege";
-import { sha256Hex } from "../fileTransfer";
-import { selectorExpressionForClientIds } from "../searchExpression";
 import type {
   AgentView,
+  AllocateTunnelEndpointsRequest,
+  AllocateTunnelEndpointsResponse,
   CreateJobRequest,
   CreateJobResponse,
   CreateTunnelPlanRequest,
-  AllocateTunnelEndpointsRequest,
-  AllocateTunnelEndpointsResponse,
   JobHistoryRecord,
   JobOutputRecord,
   JobTargetRecord,
@@ -70,80 +55,57 @@ import type {
   NetworkObservationTrendRecord,
   NetworkOspfRecommendationRecord,
   NetworkOspfUpdatePlanRecord,
-  PromoteTelemetryTunnelRequest,
-  RuntimeTunnelManager,
+  OspfCostPolicy,
+  PrivilegeAssertion,
   RuntimeConfigApplyStateRecord,
-  RuntimeConfigPatchRequest,
-  RuntimeConfigPatchResponse,
+  RuntimeTunnelRoute,
+  RuntimeTunnelManager,
+  SourceTemplateRecord,
   TelemetryTunnelRecord,
-  TunnelAddressFamily,
-  TunnelAddressPair,
   TopologyGraph,
   TopologyGraphEdge,
+  TunnelAddressPair,
   TunnelKind,
   TunnelPlan,
   TunnelPlanRecord,
+  TunnelPlanRevisionTarget,
+  TunnelConnectionAssessment,
+  UpdateTunnelConnectionAssessmentRequest,
   UpdateTunnelPlanOspfCostRequest,
+  UpdateTunnelPlanRequest,
 } from "../types";
-import type { PromoteTunnelPlanToCustomAdapterRequest } from "../typesTopology";
 import {
   clientDisplayNameFromMap,
   clientDisplayNameMap,
   formatCompactTime,
-  formatFullTime,
-  formatTime,
-  runPanelAction,
   shortId,
+  timestampMillis,
 } from "../utils";
-import { scrollIntoViewWithMotion } from "../motion";
-import { TopologyNetworkTestControls } from "./topology/TopologyNetworkTestControls";
+import type { PrivilegeMaterial } from "../privilege";
 import { TopologyEvidencePanel } from "./topology/TopologyEvidencePanel";
 import { TopologyGraphPanel } from "./topology/TopologyGraphPanel";
+import { TopologyNetworkTestControls } from "./topology/TopologyNetworkTestControls";
 import { TopologyOspfUpdateControls } from "./topology/TopologyOspfUpdateControls";
-import { TopologyPromotionPanel } from "./topology/TopologyPromotionPanel";
 
-const tunnelKinds: TunnelKind[] = [
+const AGENT_TUNNEL_KINDS: TunnelKind[] = ["gre", "ipip", "sit", "fou"];
+const ALL_TUNNEL_KINDS: TunnelKind[] = [
   "gre",
   "ipip",
   "sit",
   "fou",
-  "openvpn",
   "wireguard",
+  "openvpn",
   "tun_tap",
   "custom",
 ];
-const iproute2TunnelKinds = new Set<TunnelKind>(["gre", "ipip", "sit", "fou"]);
-const runtimeManagers: RuntimeTunnelManager[] = [
-  "agent_iproute2_managed",
-  "external_observed",
-  "external_managed_adapter",
-];
-
-type AutomationRow = ReturnType<typeof buildAutomationRows>[number];
-type OspfProposalLookup = Map<string, NetworkOspfUpdatePlanRecord>;
-type TunnelPlanSaveSnapshot = {
-  draftKey: string;
-  request: CreateTunnelPlanRequest;
+const DEFAULT_OSPF_POLICY: OspfCostPolicy = {
+  bandwidth_weight: 10,
+  latency_weight: 1,
+  loss_weight: 400,
+  max_cost: 65535,
+  min_cost: 5,
+  preference_bias: 1,
 };
-type TunnelPlanToggleSnapshot = {
-  enabled: boolean;
-  endpointPairs: string[];
-  planIds: string[];
-  planNames: string[];
-  syncTargetLabels: string[];
-};
-type TunnelPlanReviewItem = {
-  detail: string;
-  label: string;
-  tone?: "attention" | "ready";
-  value: string;
-};
-type TunnelPlanWorkflow =
-  | "create"
-  | "promotion"
-  | "config"
-  | "automation"
-  | null;
 
 export function TopologyPanel({
   activeSubpage,
@@ -154,3265 +116,2145 @@ export function TopologyPanel({
   loading,
   networkObservations,
   networkTrends,
-  ospfRecommendations,
-  ospfUpdatePlans,
-  runtimeConfigApplyStates,
-  onCreateJob,
   onAllocateTunnelEndpoints,
+  onCreateJob,
   onCreateTunnelPlan,
+  onDeleteTunnelPlan,
   onExportTunnelPlan,
   onInitialPlanWorkflowConsumed,
   onLoadNetworkObservations,
   onLoadNetworkTrends,
   onLoadOspfRecommendations,
   onLoadOspfUpdatePlans,
-  onLoadTopologyGraph,
+  onLoadSourceTemplates,
   onLoadOutputs,
   onLoadTargets,
+  onLoadTopologyGraph,
   onOpenJobDetails,
+  onOpenCreateTunnelPlan,
   onOpenPrivilegeUnlock,
+  onOpenSourceTemplates,
   onOpenVpsDetail,
-  onSelectSubpage,
-  onPromoteTelemetryTunnel,
-  onPromoteTunnelPlanToCustomAdapter,
   onRefresh,
-  onSubmitRuntimeConfigPatch,
+  onRefreshTunnelPlanOspfStatus,
+  onSelectSubpage,
   onSetTunnelPlanEnabled,
+  onUpdateTunnelConnectionAssessment,
   onUpdateTunnelPlanOspfCost,
+  onUpdateTunnelPlan,
+  ospfRecommendations,
+  ospfUpdatePlans,
   privilegeMaterial,
+  runtimeConfigApplyStates,
   setPrivilegeMaterial,
+  sourceTemplates,
   telemetryTunnels,
   topologyGraph,
   tunnelPlans,
-}: {
-  activeSubpage: string;
-  agents: AgentView[];
-  error: string | null;
-  initialPlanWorkflow?: TunnelPlanWorkflow;
-  jobs: JobHistoryRecord[];
-  loading: boolean;
-  networkObservations: NetworkObservationRecord[];
-  networkTrends: NetworkObservationTrendRecord[];
-  ospfRecommendations: NetworkOspfRecommendationRecord[];
-  ospfUpdatePlans: NetworkOspfUpdatePlanRecord[];
-  runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
-  topologyGraph: TopologyGraph;
-  onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
-  onAllocateTunnelEndpoints: (
-    request: AllocateTunnelEndpointsRequest,
-  ) => Promise<AllocateTunnelEndpointsResponse>;
-  onCreateTunnelPlan: (request: CreateTunnelPlanRequest) => Promise<void>;
-  onExportTunnelPlan: (planId: string) => Promise<TunnelPlan>;
-  onInitialPlanWorkflowConsumed?: () => void;
-  onLoadNetworkObservations: () => Promise<void>;
-  onLoadNetworkTrends: () => Promise<void>;
-  onLoadOspfRecommendations: () => Promise<void>;
-  onLoadOspfUpdatePlans: () => Promise<void>;
-  onLoadTopologyGraph: () => Promise<void>;
-  onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
-  onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
-  onOpenJobDetails?: (jobId: string) => void;
-  onOpenPrivilegeUnlock: () => void;
-  onOpenVpsDetail?: (clientId: string) => void;
-  onSelectSubpage: (subpage: string) => void;
-  onPromoteTelemetryTunnel: (
-    request: PromoteTelemetryTunnelRequest,
-  ) => Promise<void>;
-  onPromoteTunnelPlanToCustomAdapter: (
-    request: PromoteTunnelPlanToCustomAdapterRequest,
-  ) => Promise<void>;
-  onRefresh: () => Promise<void>;
-  onSubmitRuntimeConfigPatch: (
-    request: RuntimeConfigPatchRequest,
-  ) => Promise<RuntimeConfigPatchResponse>;
-  onSetTunnelPlanEnabled: (
-    planIds: string[],
-    enabled: boolean,
-  ) => Promise<void>;
-  onUpdateTunnelPlanOspfCost: (
-    planId: string,
-    request: UpdateTunnelPlanOspfCostRequest,
-  ) => Promise<void>;
-  privilegeMaterial: PrivilegeMaterial | null;
-  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
-  telemetryTunnels: TelemetryTunnelRecord[];
-  tunnelPlans: TunnelPlanRecord[];
-}) {
+}: TopologyPanelProps) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
-  const [form, setForm] = useState<CreateTunnelPlanRequest>(() =>
-    initialTunnelPlanForm(),
-  );
-  const [reservedText, setReservedText] = useState("");
-  const [runtimeStartupArgv, setRuntimeStartupArgv] = useState("");
-  const [runtimeStopArgv, setRuntimeStopArgv] = useState("");
-  const [runtimeCleanupArgv, setRuntimeCleanupArgv] = useState("");
-  const [runtimeRestartArgv, setRuntimeRestartArgv] = useState("");
-  const [runtimeStatusArgv, setRuntimeStatusArgv] = useState("");
-  const [runtimeTrafficArgv, setRuntimeTrafficArgv] = useState("");
-  const [trafficIngressKbps, setTrafficIngressKbps] = useState("");
-  const [trafficEgressKbps, setTrafficEgressKbps] = useState("");
-  const [trafficBurstKb, setTrafficBurstKb] = useState("");
-  const [trafficLimitEnabled, setTrafficLimitEnabled] = useState(false);
-  const [fouPort, setFouPort] = useState("5555");
-  const [fouPeerPort, setFouPeerPort] = useState("5555");
-  const [fouIpproto, setFouIpproto] = useState("4");
-  const [topologyDesiredText, setTopologyDesiredText] = useState("");
-  const [topologyStaleText, setTopologyStaleText] = useState("");
-  const [topologyRoutesText, setTopologyRoutesText] = useState("");
-  const [topologyStaleRoutesText, setTopologyStaleRoutesText] = useState("");
-  const [actionError, setActionError] = useState<string | null>(null);
-  const [pending, setPending] = useState(false);
-  const [automationBulkPending, setAutomationBulkPending] = useState(false);
-  const [automationBulkStatus, setAutomationBulkStatus] = useState<
-    string | null
-  >(null);
-  const [automationBulkFeedbackTone, setAutomationBulkFeedbackTone] =
-    useState<ActionFeedbackTone>("info");
-  const [tunnelPlanTogglePending, setTunnelPlanTogglePending] = useState(false);
-  const [tunnelPlanSaveSnapshot, setTunnelPlanSaveSnapshot] =
-    useState<TunnelPlanSaveSnapshot | null>(null);
-  const [tunnelPlanToggleSnapshot, setTunnelPlanToggleSnapshot] =
-    useState<TunnelPlanToggleSnapshot | null>(null);
-  const [activePlanWorkflow, setActivePlanWorkflow] =
-    useState<TunnelPlanWorkflow>(null);
-  const planWorkflowRef = useRef<HTMLElement | null>(null);
-  useEffect(() => {
-    if (!initialPlanWorkflow) {
-      return;
-    }
-    setActivePlanWorkflow(initialPlanWorkflow);
-    onInitialPlanWorkflowConsumed?.();
-  }, [initialPlanWorkflow, onInitialPlanWorkflowConsumed]);
-  const agentNameById = useMemo(
+  const clientNames = useMemo(
     () => clientDisplayNameMap(agents, vpsNameDisplayMode),
     [agents, vpsNameDisplayMode],
   );
   const clientLabel = (clientId: string) =>
-    clientDisplayNameFromMap(clientId, agentNameById);
-  const reviewedClientLabel = (clientId: string) =>
-    `${clientLabel(clientId)} (${shortId(clientId)})`;
-  const ospfProposalLookup = useMemo(
-    () => buildOspfProposalLookup(ospfUpdatePlans),
-    [ospfUpdatePlans],
-  );
-  const tunnelPlanEvidenceById = useMemo(
-    () => buildTunnelPlanEvidenceLookup(topologyGraph.edges),
-    [topologyGraph.edges],
-  );
-  const automationRows = useMemo(
-    () =>
-      buildAutomationRows(
-        agents,
-        telemetryTunnels,
-        tunnelPlans,
-        clientLabel,
-        ospfProposalLookup,
-      ),
-    [agents, telemetryTunnels, tunnelPlans, agentNameById, ospfProposalLookup],
-  );
-  const tunnelPlanColumns = useMemo<ConsoleDataGridColumn<TunnelPlanRecord>[]>(
-    () => [
-      {
-        id: "name",
-        header: "Plan",
-        size: 250,
-        minSize: 200,
-        sortValue: (plan) => plan.name,
-        searchValue: (plan) =>
-          `${plan.name} ${plan.id} ${plan.kind} ${plan.plan.interface_name} ${runtimeManagerLabel(plan.plan.runtime_control?.manager)}`,
-        cell: (plan) => (
-          <span className="historyPrimary">
-            <strong title={plan.name}>{plan.name}</strong>
-            <small title={`${plan.id} / ${plan.plan.interface_name}`}>
-              {plan.kind.toUpperCase()} · {plan.plan.interface_name} ·{" "}
-              {shortId(plan.id)}
-            </small>
-          </span>
-        ),
-      },
-      {
-        id: "endpoints",
-        header: "Endpoints",
-        size: 310,
-        minSize: 230,
-        sortValue: (plan) =>
-          `${clientLabel(plan.left_client_id)} ${clientLabel(plan.right_client_id)}`,
-        searchValue: (plan) =>
-          [
-            clientLabel(plan.left_client_id),
-            clientLabel(plan.right_client_id),
-            plan.left_client_id,
-            plan.right_client_id,
-            plan.plan.left_underlay,
-            plan.plan.right_underlay,
-          ].join(" "),
-        cell: (plan) => (
-          <span className="historyPrimary">
-            <strong
-              title={`${clientLabel(plan.left_client_id)} / ${clientLabel(plan.right_client_id)}`}
-            >
-              {clientLabel(plan.left_client_id)} /{" "}
-              {clientLabel(plan.right_client_id)}
-            </strong>
-            <small
-              title={`${plan.plan.left_underlay} -> ${plan.plan.right_underlay}`}
-            >
-              {plan.plan.left_underlay} {"->"} {plan.plan.right_underlay}
-            </small>
-          </span>
-        ),
-      },
-      {
-        id: "desired",
-        header: "Desired state",
-        size: 170,
-        minSize: 135,
-        sortValue: (plan) => (plan.enabled ? "enabled" : "disabled"),
-        searchValue: (plan) =>
-          plan.enabled
-            ? "enabled desired runtime sync"
-            : "disabled desired draft",
-        cell: (plan) => (
-          <span className="historyPrimary">
-            <strong className={`status ${plan.enabled ? "ok" : "warn"}`}>
-              {plan.enabled ? "Enabled" : "Disabled"}
-            </strong>
-            <small>
-              {plan.enabled ? "Runtime sync allowed" : "Runtime sync off"}
-            </small>
-          </span>
-        ),
-      },
-      {
-        id: "runtime",
-        header: "Runtime state",
-        size: 190,
-        minSize: 150,
-        sortValue: (plan) => plan.status,
-        searchValue: (plan) =>
-          `${plan.status} ${plan.left_status} ${plan.right_status}`,
-        cell: (plan) => (
-          <span className="historyPrimary">
-            <strong className={`status ${tunnelPlanRuntimeTone(plan)}`}>
-              {readableTelemetryToken(plan.status)}
-            </strong>
-            <small>
-              {runtimeManagerLabel(plan.plan.runtime_control?.manager)};{" "}
-              {endpointRuntimeSummary(plan)}
-            </small>
-          </span>
-        ),
-      },
-      {
-        id: "health",
-        header: "Health",
-        size: 180,
-        minSize: 150,
-        sortValue: (plan) =>
-          tunnelPlanHealth(plan, tunnelPlanEvidenceById.get(plan.id)).label,
-        searchValue: (plan) =>
-          tunnelPlanHealth(plan, tunnelPlanEvidenceById.get(plan.id)).detail,
-        cell: (plan) => {
-          const health = tunnelPlanHealth(
-            plan,
-            tunnelPlanEvidenceById.get(plan.id),
-          );
-          return (
-            <span className="historyPrimary">
-              <strong className={`status ${health.tone}`}>
-                {health.label}
-              </strong>
-              <small>{health.detail}</small>
-            </span>
-          );
-        },
-      },
-      {
-        id: "evidence_age",
-        header: "Evidence age",
-        size: 160,
-        minSize: 128,
-        sortValue: (plan) =>
-          tunnelPlanEvidenceById.get(plan.id)?.latest_observed_at ?? "",
-        searchValue: (plan) => {
-          const evidence = tunnelPlanEvidenceAge(
-            tunnelPlanEvidenceById.get(plan.id),
-          );
-          return `${evidence.label} ${evidence.detail}`;
-        },
-        cell: (plan) => {
-          const evidence = tunnelPlanEvidenceAge(
-            tunnelPlanEvidenceById.get(plan.id),
-          );
-          return (
-            <span className="historyPrimary">
-              <strong className={`status ${evidence.tone}`}>{evidence.label}</strong>
-              <small title={evidence.title}>{evidence.detail}</small>
-            </span>
-          );
-        },
-      },
-      {
-        id: "ospf",
-        header: "OSPF cost",
-        size: 150,
-        minSize: 120,
-        sortValue: (plan) => plan.recommended_ospf_cost,
-        searchValue: (plan) =>
-          `${plan.recommended_ospf_cost} ${formatBandwidthMbps(plan.plan.bandwidth_mbps)}`,
-        cell: (plan) => (
-          <span className="historyPrimary">
-            <strong>OSPF {plan.recommended_ospf_cost}</strong>
-            <small>
-              {formatBandwidthMbps(plan.plan.bandwidth_mbps)} target
-            </small>
-          </span>
-        ),
-      },
-      {
-        id: "updated",
-        header: "Updated",
-        size: 145,
-        minSize: 120,
-        sortValue: (plan) => plan.updated_at ?? plan.created_at,
-        searchValue: (plan) => `${plan.updated_at} ${plan.created_at}`,
-        cell: (plan) => (
-          <span className="historyPrimary">
-            <strong title={formatFullTime(plan.updated_at ?? plan.created_at)}>
-              {formatCompactTime(plan.updated_at ?? plan.created_at)}
-            </strong>
-            <small title={formatFullTime(plan.created_at)}>
-              created {formatCompactTime(plan.created_at)}
-            </small>
-          </span>
-        ),
-      },
-      {
-        id: "action",
-        header: "Action",
-        size: 132,
-        minSize: 118,
-        enableHiding: false,
-        sortValue: (plan) => (plan.enabled ? "disable" : "enable"),
-        searchValue: (plan) => (plan.enabled ? "disable" : "enable"),
-        cell: (plan) => {
-          const disableBlocked =
-            plan.enabled && customAdapterRemoveUnavailable(plan);
-          const disableBlockedTitle =
-            "Add a custom adapter stop or cleanup argv before disabling this runtime plan.";
-          const disableBlockedHintId = disableBlocked
-            ? `tunnel-plan-disable-blocked-${plan.id}`
-            : undefined;
-          return (
-            <div className="tunnelPlanRowActions">
-              <button
-                aria-describedby={disableBlockedHintId}
-                aria-disabled={disableBlocked ? true : undefined}
-                className={`secondaryAction compactAction lifecycleAction ${
-                  plan.enabled ? "disableAction" : "enableAction"
-                }`}
-                disabled={tunnelPlanTogglePending}
-                onClick={() =>
-                  setTunnelPlanEnabledForRows([plan], !plan.enabled)
-                }
-                title={
-                  disableBlocked
-                    ? disableBlockedTitle
-                    : plan.enabled
-                      ? "Disable this saved desired state after confirmation."
-                      : "Enable this saved desired state after confirmation."
-                }
-                type="button"
-              >
-                {plan.enabled ? <PowerOff size={14} /> : <Power size={14} />}
-                <span>{plan.enabled ? "Disable" : "Enable"}</span>
-              </button>
-              {disableBlocked ? (
-                <span className="srOnly" id={disableBlockedHintId}>
-                  {disableBlockedTitle}
-                </span>
-              ) : null}
-            </div>
-          );
-        },
-      },
-    ],
-    [agentNameById, tunnelPlanEvidenceById, tunnelPlanTogglePending],
-  );
-  const tunnelPlanActions: ConsoleDataGridAction<TunnelPlanRecord>[] = [
-    {
-      description: (rows) =>
-        rows.length === 0
-          ? "Select one or more tunnel plans first."
-          : rows.every((plan) => plan.enabled)
-            ? "Selected tunnel plans are already enabled."
-            : `Enable ${rows.filter((plan) => !plan.enabled).length} selected tunnel plan${rows.filter((plan) => !plan.enabled).length === 1 ? "" : "s"}.`,
-      disabled: (rows) =>
-        tunnelPlanTogglePending || rows.every((plan) => plan.enabled),
-      icon: <Power size={15} />,
-      label: "Enable plan",
-      onSelect: (rows) => void setTunnelPlanEnabledForRows(rows, true),
-    },
-    {
-      description: (rows) =>
-        rows.length === 0
-          ? "Select one or more tunnel plans first."
-          : rows.some(
-                (plan) => plan.enabled && customAdapterRemoveUnavailable(plan),
-              )
-            ? "Add stop or cleanup argv before disabling selected custom adapter tunnel plans."
-          : rows.every((plan) => !plan.enabled)
-            ? "Selected tunnel plans are already disabled."
-            : `Disable ${rows.filter((plan) => plan.enabled).length} selected tunnel plan${rows.filter((plan) => plan.enabled).length === 1 ? "" : "s"}.`,
-      disabled: (rows) =>
-        tunnelPlanTogglePending ||
-        rows.every((plan) => !plan.enabled) ||
-        rows.some(
-          (plan) => plan.enabled && customAdapterRemoveUnavailable(plan),
-        ),
-      icon: <PowerOff size={15} />,
-      label: "Disable plan",
-      onSelect: (rows) => void setTunnelPlanEnabledForRows(rows, false),
-    },
-    {
-      description: (rows) =>
-        rows.length === 1
-          ? "Download this tunnel plan as JSON."
-          : "Select exactly one tunnel plan to export JSON.",
-      disabled: (rows) => pending || rows.length !== 1,
-      icon: <Download size={15} />,
-      label: "Export JSON",
-      onSelect: (rows) => void exportTunnelPlanJson(rows[0]),
-      separatorBefore: true,
-    },
-  ];
-  const automationColumns = useMemo<ConsoleDataGridColumn<AutomationRow>[]>(
-    () => [
-      {
-        id: "agent",
-        header: "VPS",
-        size: 250,
-        minSize: 190,
-        sortValue: (row) => row.label,
-        searchValue: (row) => `${row.label} ${row.clientId}`,
-        cell: (row) => (
-          <span className="historyPrimary">
-            <strong>{row.label}</strong>
-            <small>
-              {row.monitored} monitored · {row.endpointCount} saved endpoints
-            </small>
-          </span>
-        ),
-      },
-      {
-        id: "latency",
-        header: "Latency",
-        size: 250,
-        minSize: 190,
-        sortValue: (row) => row.urgency,
-        searchValue: (row) =>
-          `${row.latency} ${row.latencyDetail} ${row.latencyTitle}`,
-        cell: (row) => (
-          <TelemetryCell
-            detail={row.latencyDetail}
-            main={row.latency}
-            title={row.latencyTitle}
-            tone={row.latencyTone}
-          />
-        ),
-      },
-      {
-        id: "auto_ospf",
-        header: "Auto OSPF",
-        size: 250,
-        minSize: 190,
-        sortValue: (row) => row.autoOspf,
-        searchValue: (row) =>
-          `${row.autoOspf} ${row.autoOspfDetail} ${row.autoOspfTitle}`,
-        cell: (row) => (
-          <TelemetryCell
-            detail={row.autoOspfDetail}
-            main={row.autoOspf}
-            title={row.autoOspfTitle}
-            tone={row.autoOspfTone}
-          />
-        ),
-      },
-      {
-        id: "cost_report",
-        header: "Updater report",
-        size: 230,
-        minSize: 180,
-        sortValue: (row) => row.lastReportTitle,
-        searchValue: (row) =>
-          `${row.cost} ${row.costDetail} ${row.lastReport} ${row.lastReportTitle} ${row.reportDetail}`,
-        cell: (row) => (
-          <TelemetryCell
-            detail={`${row.costDetail}; ${row.reportDetail}`}
-            main={`${row.cost} / ${row.lastReport}`}
-            title={`${row.cost} / ${row.lastReportTitle}; ${row.costDetail}; ${row.reportDetail}`}
-          />
-        ),
-      },
-    ],
-    [],
-  );
-  const automationActions: ConsoleDataGridAction<AutomationRow>[] = [
-    {
-      disabled: (rows) =>
-        automationBulkPending || rows.every((row) => row.endpointCount === 0),
-      icon: <Power size={15} />,
-      label: "Enable monitoring",
-      onSelect: (rows) => void applyAutomationBulk(rows, true),
-    },
-    {
-      disabled: (rows) =>
-        automationBulkPending || rows.every((row) => row.endpointCount === 0),
-      icon: <PowerOff size={15} />,
-      label: "Disable monitoring",
-      onSelect: (rows) => void applyAutomationBulk(rows, false),
-    },
-  ];
-  const runtimeManager =
-    form.runtime_control?.manager ?? "agent_iproute2_managed";
-  const runtimeKindConstraint = runtimeKindConstraintMessage(
-    runtimeManager,
-    form.kind,
-  );
-  const topologySubpage = [
-    "graph",
-    "plans",
-    "apply",
-    "evidence",
-    "ospf",
-  ].includes(activeSubpage)
-    ? activeSubpage
-    : "graph";
-  const ready =
-    form.name.trim() &&
-    form.interface_name.trim() &&
-    form.left_client_id &&
-    form.right_client_id &&
-    form.left_client_id !== form.right_client_id &&
-    form.left_underlay.trim() &&
-    form.right_underlay.trim() &&
-    hasAddressSource(form);
-  const topologyPlanFeedbackMessage =
-    actionError ?? error ?? (loading ? "Loading tunnel plans" : null);
-  const topologyPlanFeedbackTone =
-    actionError || error ? "danger" : "progress";
-  const tunnelPlanDraftKey = useMemo(
-    () =>
-      JSON.stringify({
-        form,
-        reservedText,
-        runtimeStartupArgv,
-        runtimeStopArgv,
-        runtimeCleanupArgv,
-        runtimeRestartArgv,
-        runtimeStatusArgv,
-        runtimeTrafficArgv,
-        trafficIngressKbps,
-        trafficEgressKbps,
-        trafficBurstKb,
-        trafficLimitEnabled,
-        fouPort,
-        fouPeerPort,
-        fouIpproto,
-        topologyDesiredText,
-        topologyStaleText,
-        topologyRoutesText,
-        topologyStaleRoutesText,
-      }),
-    [
-      form,
-      reservedText,
-      runtimeStartupArgv,
-      runtimeStopArgv,
-      runtimeCleanupArgv,
-      runtimeRestartArgv,
-      runtimeStatusArgv,
-      runtimeTrafficArgv,
-      trafficIngressKbps,
-      trafficEgressKbps,
-      trafficBurstKb,
-      trafficLimitEnabled,
-      fouPort,
-      fouPeerPort,
-      fouIpproto,
-      topologyDesiredText,
-      topologyStaleText,
-      topologyRoutesText,
-      topologyStaleRoutesText,
-    ],
-  );
-  const draftTunnelPlanBuild = buildTunnelPlanReviewRequest();
-  const draftTunnelPlanRequest = draftTunnelPlanBuild.request;
-  const tunnelPlanReviewItems = buildTunnelPlanReviewItems({
-    clientLabel,
-    draftError: draftTunnelPlanBuild.error,
-    form,
-    ready: Boolean(ready),
-    request: draftTunnelPlanRequest,
-    reservedAddresses: splitReserved(reservedText),
-    savedPlans: tunnelPlans,
-    trafficLimitEnabled,
-  });
-  const previewBandwidthMbps = clampTunnelBandwidthMbps(form.bandwidth_mbps);
-  const ospfCostPreview = calculateOspfCostPreview({
-    bandwidthMbps: form.bandwidth_mbps,
-    latencyMs: form.latency_ms,
-    packetLossRatio: form.packet_loss_ratio,
-    preference: form.preference,
-  });
-  const latestTunnelPlan = tunnelPlans[0] ?? null;
-  const latestConfigReviewItems = latestTunnelPlan
-    ? buildGeneratedConfigReviewItems(latestTunnelPlan, clientLabel)
-    : [];
+    clientDisplayNameFromMap(clientId, clientNames);
+  const [sourceTemplateLoadError, setSourceTemplateLoadError] = useState<
+    string | null
+  >(null);
 
   useEffect(() => {
-    if (topologySubpage !== "plans" || !activePlanWorkflow) {
-      return;
+    if (activeSubpage === "graph") void onLoadTopologyGraph();
+    if (activeSubpage === "overview") {
+      void Promise.all([onLoadTopologyGraph(), onLoadOspfUpdatePlans()]);
     }
-    window.requestAnimationFrame(() => {
-      const element = planWorkflowRef.current;
-      if (!element) {
-        return;
-      }
-      scrollIntoViewWithMotion(element, { block: "start" });
-      element.focus({ preventScroll: true });
-    });
-  }, [activePlanWorkflow, topologySubpage]);
-
-  function openPlanWorkflow(workflow: Exclude<TunnelPlanWorkflow, null>) {
-    setActivePlanWorkflow(workflow);
-  }
-
-  function buildTunnelPlanReviewRequest(): {
-    error: string | null;
-    request: CreateTunnelPlanRequest | null;
-  } {
-    try {
-      return { error: null, request: buildTunnelPlanSaveRequest() };
-    } catch (error) {
-      return {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Draft contains invalid generated config values",
-        request: null,
-      };
+    if (activeSubpage === "evidence") {
+      void Promise.all([
+        onLoadNetworkObservations(),
+        onLoadNetworkTrends(),
+        onLoadOspfRecommendations(),
+        onLoadOspfUpdatePlans(),
+      ]);
     }
-  }
-
-  async function submitPlan(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setActionError(null);
-    if (!ready) {
-      setActionError("Tunnel plan is incomplete");
-      return;
-    }
-    const draft = buildTunnelPlanReviewRequest();
-    if (!draft.request) {
-      setActionError(draft.error ?? "Tunnel plan generated config is invalid");
-      return;
-    }
-    setTunnelPlanSaveSnapshot({
-      draftKey: tunnelPlanDraftKey,
-      request: draft.request,
-    });
-  }
-
-  async function executeTunnelPlanSave(snapshot: TunnelPlanSaveSnapshot) {
-    await runPanelAction(setPending, setActionError, async () => {
-      await onCreateTunnelPlan(snapshot.request);
-      setTunnelPlanSaveSnapshot(null);
-    });
-  }
-
-  function buildTunnelPlanSaveRequest(): CreateTunnelPlanRequest {
-    const invalidRuntimeKind = runtimeKindConstraintMessage(
-      runtimeManager,
-      form.kind,
-    );
-    if (invalidRuntimeKind) {
-      throw new Error(invalidRuntimeKind);
-    }
-    return {
-      ...form,
-      bandwidth_mbps: clampTunnelBandwidthMbps(form.bandwidth_mbps),
-      reserved_addresses: splitReserved(reservedText),
-      ipv4_tunnel: completePairOrNull(form.ipv4_tunnel ?? null),
-      ipv6_address_pool_cidr: form.ipv6_address_pool_cidr?.trim() || null,
-      ipv6_tunnel: completePairOrNull(form.ipv6_tunnel ?? null),
-      runtime_control: buildRuntimeControl(runtimeManager, {
-        startup: runtimeStartupArgv,
-        stop: runtimeStopArgv,
-        cleanup: runtimeCleanupArgv,
-        restart: runtimeRestartArgv,
-        status: runtimeStatusArgv,
-        traffic: trafficLimitEnabled ? runtimeTrafficArgv : "",
-        ingressKbps: trafficLimitEnabled ? trafficIngressKbps : "",
-        egressKbps: trafficLimitEnabled ? trafficEgressKbps : "",
-        burstKb: trafficLimitEnabled ? trafficBurstKb : "",
-        fouPort: form.kind === "fou" ? fouPort : "",
-        fouPeerPort: form.kind === "fou" ? fouPeerPort : "",
-        fouIpproto: form.kind === "fou" ? fouIpproto : "",
-      }),
-      runtime_topology: buildRuntimeTopology({
-        desiredText: topologyDesiredText,
-        staleText: topologyStaleText,
-        routesText: topologyRoutesText,
-        staleRoutesText: topologyStaleRoutesText,
-      }),
-      confirmed: true,
-    };
-  }
-
-  async function allocateEndpoints() {
-    await runPanelAction(setPending, setActionError, async () => {
-      const ipv4Pool = form.address_pool_cidr.trim();
-      const ipv6Pool = (form.ipv6_address_pool_cidr ?? "").trim();
-      const hasLocalPool = Boolean(ipv4Pool || ipv6Pool);
-      const reservedAddresses = mergeReservedAddresses(
-        splitReserved(reservedText),
-        currentTunnelAddresses(form),
-      );
-      const allocation = await onAllocateTunnelEndpoints({
-        ipv4_pool_cidr: ipv4Pool || null,
-        ipv6_pool_cidr: ipv6Pool || null,
-        reserved_addresses: reservedAddresses,
-        include_ipv4: hasLocalPool ? Boolean(ipv4Pool) : undefined,
-        include_ipv6: hasLocalPool ? Boolean(ipv6Pool) : undefined,
-      });
-      if (!allocation.ipv4_tunnel && !allocation.ipv6_tunnel) {
-        throw new Error(
-          "No tunnel allocation pool is configured; enter endpoint CIDRs or configure an allocator pool",
+    if (activeSubpage === "tests") void onLoadNetworkTrends();
+    if (activeSubpage === "ospf") void onLoadOspfUpdatePlans();
+    if (activeSubpage === "tunnel_plans") {
+      setSourceTemplateLoadError(null);
+      void onLoadTopologyGraph();
+      void onLoadSourceTemplates().catch((loadError) => {
+        setSourceTemplateLoadError(
+          loadError instanceof Error
+            ? loadError.message
+            : "Source templates unavailable",
         );
-      }
-      setReservedText(formatReservedAddresses(reservedAddresses));
-      setForm((current) => ({
-        ...current,
-        ipv4_tunnel: allocation.ipv4_tunnel,
-        ipv6_tunnel: allocation.ipv6_tunnel,
-        latency_primary_family: allocation.latency_primary_family,
-      }));
-    });
+      });
+    }
+  }, [
+    activeSubpage,
+    onLoadNetworkObservations,
+    onLoadNetworkTrends,
+    onLoadOspfRecommendations,
+    onLoadOspfUpdatePlans,
+    onLoadSourceTemplates,
+    onLoadTopologyGraph,
+  ]);
+
+  if (activeSubpage === "graph") {
+    return (
+      <TopologyGraphPanel
+        agents={agents}
+        graph={topologyGraph}
+        loading={loading}
+        onOpenVpsDetail={onOpenVpsDetail}
+        onRefresh={onLoadTopologyGraph}
+        runtimeConfigApplyStates={runtimeConfigApplyStates}
+      />
+    );
   }
 
-  async function exportTunnelPlanJson(plan: TunnelPlanRecord | undefined) {
-    if (!plan) {
-      return;
-    }
-    await runPanelAction(setPending, setActionError, async () => {
-      const exported = await onExportTunnelPlan(plan.id);
-      saveBlob(
-        new Blob([`${JSON.stringify(exported, null, 2)}\n`], {
-          type: "application/json",
-        }),
-        `${safeFileName(plan.name || plan.id)}.plan.json`,
-      );
-    });
+  if (activeSubpage === "tests") {
+    return (
+      <TopologyNetworkTestControls
+        agents={agents}
+        loading={loading}
+        networkTrends={networkTrends}
+        onCreateJob={onCreateJob}
+        onLoadNetworkTrends={onLoadNetworkTrends}
+        onLoadTargets={onLoadTargets}
+        onOpenJobDetails={onOpenJobDetails}
+        onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+        onOpenTunnelPlans={() => onSelectSubpage("tunnel_plans")}
+        privilegeMaterial={privilegeMaterial}
+        setPrivilegeMaterial={setPrivilegeMaterial}
+        tunnelPlans={tunnelPlans}
+      />
+    );
+  }
+
+  if (activeSubpage === "ospf") {
+    return (
+      <TopologyOspfUpdateControls
+        agents={agents}
+        onOpenJobDetails={onOpenJobDetails}
+        onOpenSourceTemplates={onOpenSourceTemplates}
+        onOpenTunnelPlans={() => onSelectSubpage("tunnel_plans")}
+        onRefresh={async () => {
+          await Promise.all([onRefresh(), onLoadOspfUpdatePlans()]);
+        }}
+        onRefreshTunnelPlanOspfStatus={onRefreshTunnelPlanOspfStatus}
+        onUpdateTunnelPlanOspfCost={onUpdateTunnelPlanOspfCost}
+        ospfUpdatePlans={ospfUpdatePlans}
+        privilegeMaterial={privilegeMaterial}
+        setPrivilegeMaterial={setPrivilegeMaterial}
+        tunnelPlans={tunnelPlans}
+      />
+    );
+  }
+
+  if (activeSubpage === "evidence") {
+    return (
+      <TopologyEvidencePanel
+        clientLabel={clientLabel}
+        jobs={jobs}
+        observations={networkObservations}
+        onLoadObservations={onLoadNetworkObservations}
+        onLoadOspfRecommendations={onLoadOspfRecommendations}
+        onLoadOspfUpdatePlans={onLoadOspfUpdatePlans}
+        onLoadOutputs={onLoadOutputs}
+        onLoadTrends={onLoadNetworkTrends}
+        onOpenGraph={() => onSelectSubpage("graph")}
+        onOpenJobDetails={onOpenJobDetails}
+        onOpenOspfApprovals={() => onSelectSubpage("ospf")}
+        onOpenTests={() => onSelectSubpage("tests")}
+        onOpenTunnelPlans={() => onSelectSubpage("tunnel_plans")}
+        ospfRecommendations={ospfRecommendations}
+        ospfUpdatePlans={ospfUpdatePlans}
+        trends={networkTrends}
+      />
+    );
+  }
+
+  if (activeSubpage === "overview") {
+    return (
+      <NetworkOverview
+        error={error}
+        loading={loading}
+        onCreate={onOpenCreateTunnelPlan}
+        onRefresh={async () => {
+          await Promise.all([onRefresh(), onLoadTopologyGraph(), onLoadOspfUpdatePlans()]);
+        }}
+        onSelectSubpage={onSelectSubpage}
+        ospfUpdatePlans={ospfUpdatePlans}
+        telemetryTunnels={telemetryTunnels}
+        topologyGraph={topologyGraph}
+        tunnelPlans={tunnelPlans}
+      />
+    );
   }
 
   return (
-    <div className="workspaceGrid">
-      {topologySubpage === "plans" && (
-        <section className="fleetPanel tunnelPlansRegistryPanel">
-          <ActionFeedback
-            className="localActionFeedback topologyPlanActionFeedback"
-            message={topologyPlanFeedbackMessage}
-            tone={topologyPlanFeedbackTone}
+    <TunnelPlansWorkspace
+      agents={agents}
+      error={error ?? sourceTemplateLoadError}
+      initialPlanWorkflow={initialPlanWorkflow}
+      loading={loading}
+      onAllocateTunnelEndpoints={onAllocateTunnelEndpoints}
+      onCreateTunnelPlan={onCreateTunnelPlan}
+      onDeleteTunnelPlan={onDeleteTunnelPlan}
+      onExportTunnelPlan={onExportTunnelPlan}
+      onInitialPlanWorkflowConsumed={onInitialPlanWorkflowConsumed}
+      onOpenSourceTemplates={onOpenSourceTemplates}
+      onRefresh={onRefresh}
+      onSetTunnelPlanEnabled={onSetTunnelPlanEnabled}
+      onUpdateTunnelConnectionAssessment={onUpdateTunnelConnectionAssessment}
+      onUpdateTunnelPlan={onUpdateTunnelPlan}
+      sourceTemplates={sourceTemplates}
+      topologyGraph={topologyGraph}
+      tunnelPlans={tunnelPlans}
+    />
+  );
+}
+
+function NetworkOverview({
+  error,
+  loading,
+  onCreate,
+  onRefresh,
+  onSelectSubpage,
+  ospfUpdatePlans,
+  telemetryTunnels,
+  topologyGraph,
+  tunnelPlans,
+}: {
+  error: string | null;
+  loading: boolean;
+  onCreate: () => void;
+  onRefresh: () => Promise<void>;
+  onSelectSubpage: (subpage: string) => void;
+  ospfUpdatePlans: NetworkOspfUpdatePlanRecord[];
+  telemetryTunnels: TelemetryTunnelRecord[];
+  topologyGraph: TopologyGraph;
+  tunnelPlans: TunnelPlanRecord[];
+}) {
+  const enabled = tunnelPlans.filter((plan) => plan.enabled).length;
+  const attention = topologyGraph.edges.filter(
+    (edge) => edge.enabled && edge.health !== "healthy",
+  ).length;
+  const ospfAttention = ospfUpdatePlans.filter((plan) =>
+    matchesActionableOspfStatus(plan.status),
+  ).length;
+  const latestEvidence = telemetryTunnels.reduce<string | null>(
+    (latest, tunnel) =>
+      !latest || timestampMillis(tunnel.observed_at) > timestampMillis(latest)
+        ? tunnel.observed_at
+        : latest,
+    null,
+  );
+  const evidenceStale =
+    !latestEvidence ||
+    Date.now() - timestampMillis(latestEvidence) > 15 * 60 * 1000;
+  return (
+    <div className="topologyPageStack">
+      <section className="fleetPanel networkOverviewHeader">
+        <div className="sectionHeader">
+          <div>
+            <h2>Network posture</h2>
+            <span>Declared tunnel state, runtime evidence, and routing control</span>
+          </div>
+          <div className="headerActionStack">
+            <button className="secondaryAction" disabled={loading} onClick={() => void onRefresh()} type="button">
+              <RefreshCcw size={16} />
+              Refresh
+            </button>
+            <button className="primaryAction" onClick={onCreate} type="button">
+              <CirclePlus size={17} />
+              Create plan
+            </button>
+          </div>
+        </div>
+        <ActionFeedback className="localActionFeedback" message={error} tone="danger" />
+        <div
+          aria-label="Network posture summary"
+          className="networkMetricStrip"
+        >
+          <Metric label="Plans" value={tunnelPlans.length} />
+          <Metric label="Enabled" value={enabled} />
+          <Metric label="Runtime attention" tone={attention > 0 ? "warning" : "normal"} value={attention} />
+          <Metric label="Declared observations" value={telemetryTunnels.length} />
+          <Metric
+            label="Latest evidence"
+            title={latestEvidence ?? "No declared tunnel evidence"}
+            tone={evidenceStale ? "warning" : "normal"}
+            value={latestEvidence ? (evidenceStale ? "Stale" : "Current") : "None"}
           />
-          <ConsoleDataGrid
-            actions={tunnelPlanActions}
-            columns={tunnelPlanColumns}
-            defaultPageSize={20}
-            empty={
-              <div className="emptyState compactEmpty">
-                {loading ? "Loading tunnel plans" : "No tunnel plans"}
-              </div>
-            }
-            getRowId={(plan) => plan.id}
-            itemLabel="plans"
-            renderSelectionPanel={(rows) => (
-              <div className="gridSelectionSummary">
-                <span>
-                  <strong>{rows.length}</strong> selected
-                </span>
-                <span>
-                  <strong>{rows.filter((plan) => plan.enabled).length}</strong>{" "}
-                  enabled
-                </span>
-                <span>
-                  <strong>{rows.filter((plan) => !plan.enabled).length}</strong>{" "}
-                  disabled
-                </span>
-                <span>
-                  Bulk actions affect selected plans only; each row also has a
-                  direct lifecycle action.
-                </span>
-              </div>
-            )}
-            renderExpandedRow={(plan) => (
-              <TunnelPlanGridDetail plan={plan} clientLabel={clientLabel} />
-            )}
-            rows={tunnelPlans}
-            searchPlaceholder="Search tunnel plans"
-            storageKey="vpsman.grid.topology.tunnelPlans.v2"
-            title="Tunnel plans"
-            toolbarActions={
-              <>
-                <button
-                  className="primaryAction compactAction"
-                  onClick={() => openPlanWorkflow("create")}
-                  title="Create a saved tunnel plan with endpoints, routing, runtime ownership, and OSPF cost preview."
-                  type="button"
-                >
-                  <GitBranch size={16} />
-                  <span>Create tunnel plan</span>
-                </button>
-                <button
-                  className="secondaryAction compactAction"
-                  disabled={tunnelPlans.length === 0}
-                  onClick={() => onSelectSubpage("tests")}
-                  title={
-                    tunnelPlans.length === 0
-                      ? "Save a plan before running connectivity tests."
-                      : "Open network tests for saved plans."
-                  }
-                  type="button"
-                >
-                  <Activity size={16} />
-                  <span>Test connectivity</span>
-                </button>
-                <button
-                  className="secondaryAction compactAction"
-                  onClick={() => openPlanWorkflow("promotion")}
-                  title="Promote observed tunnel telemetry into a reviewed saved plan or adapter workflow."
-                  type="button"
-                >
-                  <FileDiff size={16} />
-                  <span>Promotion workflow</span>
-                </button>
-                {latestTunnelPlan ? (
-                  <button
-                    className="secondaryAction compactAction"
-                    onClick={() => openPlanWorkflow("config")}
-                    title="Generate and review runtime tunnel configuration for the latest saved plan."
-                    type="button"
-                  >
-                    <Route size={16} />
-                    <span>Generated config</span>
-                  </button>
-                ) : null}
-                <button
-                  className="secondaryAction compactAction"
-                  disabled={loading || pending}
-                  onClick={onRefresh}
-                  type="button"
-                >
-                  <RefreshCcw size={16} />
-                  <span>Refresh</span>
-                </button>
-                <span className="topologyPlanActionHint">
-                  Select plan rows for bulk enable, disable, or export.
-                </span>
-              </>
-            }
-          />
-          <OspfCostModelNote
-            action={
-              <button
-                className="secondaryAction compactAction"
-                onClick={() => openPlanWorkflow("automation")}
-                type="button"
-              >
-                <Route size={15} />
-                <span>Latency and auto OSPF</span>
+          <Metric label="OSPF attention" tone={ospfAttention > 0 ? "warning" : "normal"} value={ospfAttention} />
+        </div>
+      </section>
+      <section className="fleetPanel networkOverviewActions">
+        <div className="sectionHeader">
+          <div>
+            <h2>Workflows</h2>
+            <span>Open the evidence or control surface needed for the current task</span>
+          </div>
+        </div>
+        <div
+          aria-label="Network overview workflow links"
+          className="networkWorkflowList"
+        >
+          <WorkflowLink icon={<Network size={18} />} label="Tunnel plans" detail="Declare ownership, endpoints, addresses, and optional OSPF" onClick={() => onSelectSubpage("tunnel_plans")} />
+          <WorkflowLink icon={<GitGraph size={18} />} label="Graph" detail="Inspect declared relationships and runtime drift" onClick={() => onSelectSubpage("graph")} />
+          <WorkflowLink icon={<Activity size={18} />} label="Tests" detail="Run status, probe, and bounded throughput jobs" onClick={() => onSelectSubpage("tests")} />
+          <WorkflowLink icon={<Gauge size={18} />} label="OSPF" detail="Check bound adapters and control reviewed or automatic cost updates" onClick={() => onSelectSubpage("ospf")} />
+          <WorkflowLink icon={<Route size={18} />} label="Evidence" detail="Review persisted observations, trends, and jobs" onClick={() => onSelectSubpage("evidence")} />
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function TunnelPlansWorkspace({
+  agents,
+  error,
+  initialPlanWorkflow,
+  loading,
+  onAllocateTunnelEndpoints,
+  onCreateTunnelPlan,
+  onDeleteTunnelPlan,
+  onExportTunnelPlan,
+  onInitialPlanWorkflowConsumed,
+  onOpenSourceTemplates,
+  onRefresh,
+  onSetTunnelPlanEnabled,
+  onUpdateTunnelConnectionAssessment,
+  onUpdateTunnelPlan,
+  sourceTemplates,
+  topologyGraph,
+  tunnelPlans,
+}: {
+  agents: AgentView[];
+  error: string | null;
+  initialPlanWorkflow: "create" | null;
+  loading: boolean;
+  onAllocateTunnelEndpoints: (
+    request: AllocateTunnelEndpointsRequest,
+  ) => Promise<AllocateTunnelEndpointsResponse>;
+  onCreateTunnelPlan: (request: CreateTunnelPlanRequest) => Promise<void>;
+  onDeleteTunnelPlan: (target: TunnelPlanRevisionTarget) => Promise<void>;
+  onExportTunnelPlan: (planId: string) => Promise<TunnelPlan>;
+  onInitialPlanWorkflowConsumed: () => void;
+  onOpenSourceTemplates: () => void;
+  onRefresh: () => Promise<void>;
+  onSetTunnelPlanEnabled: (targets: TunnelPlanRevisionTarget[], enabled: boolean) => Promise<void>;
+  onUpdateTunnelConnectionAssessment: (planId: string, request: UpdateTunnelConnectionAssessmentRequest) => Promise<void>;
+  onUpdateTunnelPlan: (planId: string, request: UpdateTunnelPlanRequest) => Promise<void>;
+  sourceTemplates: SourceTemplateRecord[];
+  topologyGraph: TopologyGraph;
+  tunnelPlans: TunnelPlanRecord[];
+}) {
+  const [query, setQuery] = useState("");
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [createOpen, setCreateOpen] = useState(initialPlanWorkflow === "create");
+  const [editingPlan, setEditingPlan] = useState<TunnelPlanRecord | null>(null);
+  const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const [lifecycleSnapshot, setLifecycleSnapshot] =
+    useState<LifecycleSnapshot | null>(null);
+  const [deleteSnapshot, setDeleteSnapshot] = useState<DeleteSnapshot | null>(null);
+  const [pending, setPending] = useState(false);
+  const createRef = useRef<HTMLDivElement | null>(null);
+  const listRef = useRef<HTMLElement | null>(null);
+  const filtered = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    if (!normalized) return tunnelPlans;
+    return tunnelPlans.filter((plan) =>
+      [
+        plan.name,
+        plan.kind,
+        plan.plan.interface_name,
+        plan.left_client_id,
+        plan.right_client_id,
+        runtimeManagerLabel(plan.plan.runtime_control?.manager),
+      ]
+        .join(" ")
+        .toLowerCase()
+        .includes(normalized),
+    );
+  }, [query, tunnelPlans]);
+
+  useEffect(() => {
+    if (initialPlanWorkflow !== "create") return;
+    setEditingPlan(null);
+    setCreateOpen(true);
+    onInitialPlanWorkflowConsumed();
+  }, [initialPlanWorkflow, onInitialPlanWorkflowConsumed]);
+
+  useEffect(() => {
+    if (!createOpen) return;
+    window.setTimeout(() => {
+      createRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      createRef.current?.querySelector<HTMLElement>("input, select, button")?.focus();
+    }, 0);
+  }, [createOpen, editingPlan?.id]);
+
+  function requestLifecycle(ids: string[], enabled: boolean) {
+    const targets = [...new Set(ids)]
+      .map((id) => tunnelPlans.find((plan) => plan.id === id))
+      .filter(
+        (plan): plan is TunnelPlanRecord =>
+          Boolean(plan) && plan?.enabled !== enabled,
+      )
+      .map((plan) => ({
+        expected_revision: plan.revision,
+        name: plan.name,
+        ospfEnabled: Boolean(plan.plan.ospf),
+        plan_id: plan.id,
+      }));
+    if (targets.length === 0) return;
+    setLifecycleSnapshot({
+      enabled,
+      targets,
+    });
+  }
+
+  async function applyLifecycle(snapshot: LifecycleSnapshot) {
+    setPending(true);
+    setFeedback(null);
+    try {
+      await onSetTunnelPlanEnabled(snapshot.targets, snapshot.enabled);
+      setLifecycleSnapshot(null);
+      setSelected(new Set());
+      setFeedback({
+        message: `${snapshot.targets.length} tunnel plan${snapshot.targets.length === 1 ? "" : "s"} ${snapshot.enabled ? "enabled" : "disabled"}`,
+        tone: "success",
+      });
+    } catch (actionError) {
+      setLifecycleSnapshot(null);
+      setFeedback({
+        message: actionError instanceof Error ? actionError.message : "Tunnel plan update failed",
+        tone: "danger",
+      });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function applyDelete(snapshot: DeleteSnapshot) {
+    setPending(true);
+    setFeedback(null);
+    try {
+      await onDeleteTunnelPlan(snapshot.target);
+      setDeleteSnapshot(null);
+      setSelected((current) => {
+        const next = new Set(current);
+        next.delete(snapshot.target.plan_id);
+        return next;
+      });
+      if (editingPlan?.id === snapshot.target.plan_id) {
+        setCreateOpen(false);
+        setEditingPlan(null);
+      }
+      setExpandedId((current) => current === snapshot.target.plan_id ? null : current);
+      setFeedback({
+        message: `Deleted tunnel plan ${snapshot.name}`,
+        tone: "success",
+      });
+    } catch (actionError) {
+      setDeleteSnapshot(null);
+      setFeedback({
+        message: tunnelPlanDeleteError(actionError),
+        tone: "danger",
+      });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function exportPlan(plan: TunnelPlanRecord) {
+    setFeedback(null);
+    try {
+      const exported = await onExportTunnelPlan(plan.id);
+      const blob = new Blob([JSON.stringify(exported, null, 2)], {
+        type: "application/json",
+      });
+      const href = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = href;
+      anchor.download = `${safeFilename(plan.name)}.json`;
+      anchor.click();
+      URL.revokeObjectURL(href);
+      setFeedback({ message: `Exported ${plan.name}`, tone: "success" });
+    } catch (actionError) {
+      setFeedback({
+        message: actionError instanceof Error ? actionError.message : "Tunnel plan export failed",
+        tone: "danger",
+      });
+    }
+  }
+
+  const selectedRows = tunnelPlans.filter((plan) => selected.has(plan.id));
+  const selectedDisabledRows = selectedRows.filter((plan) => !plan.enabled);
+  const selectedEnabledRows = selectedRows.filter((plan) => plan.enabled);
+  const editorOpen = createOpen;
+  const lifecycleIncludesOspf = Boolean(
+    lifecycleSnapshot?.targets.some((target) => target.ospfEnabled),
+  );
+  const runtimeEdgeByPlan = new Map(
+    topologyGraph.edges.map((edge) => [edge.plan_id, edge]),
+  );
+  return (
+    <div className="topologyPageStack">
+      <section className="fleetPanel tunnelPlanRegistry" ref={listRef}>
+        <div className="sectionHeader">
+          <div>
+            <h2>Tunnel plans</h2>
+            <span>{tunnelPlans.length} declared point-to-point tunnels</span>
+          </div>
+          <div className="headerActionStack">
+            <button className="secondaryAction" disabled={loading} onClick={() => void onRefresh()} type="button">
+              <RefreshCcw size={16} />
+              Refresh
+            </button>
+            <button
+              className="primaryAction"
+              disabled={editorOpen}
+              onClick={() => { setEditingPlan(null); setCreateOpen(true); }}
+              title={editorOpen ? "Close the current tunnel plan editor first" : "Create a tunnel plan"}
+              type="button"
+            >
+              <CirclePlus size={17} />
+              Create plan
+            </button>
+          </div>
+        </div>
+        <ActionFeedback className="localActionFeedback topologyPlanActionFeedback" message={error ?? feedback?.message} tone={error ? "danger" : feedback?.tone} />
+        <div className="tunnelRegistryToolbar">
+          <label className="searchControl compactSearch">
+            <Search size={15} />
+            <input aria-label="Search tunnel plans" onChange={(event) => setQuery(event.target.value)} placeholder="Search plans" value={query} />
+          </label>
+          {selectedRows.length > 0 && (
+            <div className="selectionActionBar" aria-label="Selected tunnel plan actions">
+              <span>{selectedRows.length} selected</span>
+              <button className="secondaryAction compactAction" disabled={selectedDisabledRows.length === 0} onClick={() => requestLifecycle(selectedDisabledRows.map((plan) => plan.id), true)} title={selectedDisabledRows.length === 0 ? "All selected plans are already enabled" : `Enable ${selectedDisabledRows.length} disabled plan${selectedDisabledRows.length === 1 ? "" : "s"}`} type="button">
+                <Power size={14} /> Enable
               </button>
-            }
-          />
-        </section>
-      )}
-      <ConfirmationPrompt
-        confirmLabel="Save plan"
-        detail="Save the reviewed tunnel plan as canonical topology state."
-        error={actionError}
-        items={[
-          { label: "Name", value: tunnelPlanSaveSnapshot?.request.name ?? "-" },
-          {
-            label: "Status",
-            value: tunnelPlanSaveSnapshot?.request.enabled
-              ? "Enabled"
-              : "Disabled",
-          },
-          { label: "Kind", value: tunnelPlanSaveSnapshot?.request.kind ?? "-" },
-          {
-            label: "Endpoints",
-            value: tunnelPlanSaveSnapshot
-              ? `${clientLabel(tunnelPlanSaveSnapshot.request.left_client_id)} / ${clientLabel(tunnelPlanSaveSnapshot.request.right_client_id)}`
-              : "-",
-          },
-          {
-            label: "Runtime",
-            value: tunnelPlanSaveSnapshot
-              ? runtimeManagerLabel(
-                  tunnelPlanSaveSnapshot.request.runtime_control?.manager,
-                )
-              : "-",
-          },
-          {
-            label: "Sync",
-            value: tunnelPlanSaveSnapshot?.request.enabled ? "Now" : "Deferred",
-          },
-        ]}
-        onCancel={() => setTunnelPlanSaveSnapshot(null)}
-        onConfirm={() => {
-          if (tunnelPlanSaveSnapshot) {
-            void executeTunnelPlanSave(tunnelPlanSaveSnapshot);
-          }
-        }}
-        open={Boolean(
-          tunnelPlanSaveSnapshot &&
-          tunnelPlanSaveSnapshot.draftKey === tunnelPlanDraftKey,
+              <button className="secondaryAction compactAction" disabled={selectedEnabledRows.length === 0} onClick={() => requestLifecycle(selectedEnabledRows.map((plan) => plan.id), false)} title={selectedEnabledRows.length === 0 ? "All selected plans are already disabled" : `Disable ${selectedEnabledRows.length} enabled plan${selectedEnabledRows.length === 1 ? "" : "s"}`} type="button">
+                <PowerOff size={14} /> Disable
+              </button>
+            </div>
+          )}
+        </div>
+        {filtered.length === 0 ? (
+          <div className="emptyState compactEmptyState">
+            <strong>{tunnelPlans.length === 0 ? "No tunnel plans" : "No matching plans"}</strong>
+            <span>{tunnelPlans.length === 0 ? "Create an explicit plan before vpsman observes or manages a tunnel." : "Adjust the plan search."}</span>
+          </div>
+        ) : (
+          <div className="tunnelPlanTableWrap">
+            <table aria-label="Tunnel plans" className="tunnelPlanTable">
+              <thead>
+                <tr>
+                  <th className="selectionCell">
+                    <input
+                      aria-label="Select visible tunnel plans"
+                      checked={filtered.length > 0 && filtered.every((plan) => selected.has(plan.id))}
+                      onChange={(event) => {
+                        const next = new Set(selected);
+                        for (const plan of filtered) {
+                          if (event.target.checked) next.add(plan.id);
+                          else next.delete(plan.id);
+                        }
+                        setSelected(next);
+                      }}
+                      type="checkbox"
+                    />
+                  </th>
+                  <th>Plan</th>
+                  <th>Endpoints</th>
+                  <th>Runtime owner</th>
+                  <th>Runtime</th>
+                  <th>Connectivity</th>
+                  <th>OSPF</th>
+                  <th aria-label="Actions" />
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((plan) => {
+                  const expanded = expandedId === plan.id;
+                  return (
+                    <TunnelPlanRows
+                      expanded={expanded}
+                      editorOpen={editorOpen}
+                      key={plan.id}
+                      onExport={() => void exportPlan(plan)}
+                      onEdit={() => { setEditingPlan(plan); setCreateOpen(true); }}
+                      onDelete={() => setDeleteSnapshot({
+                        leftClientId: plan.left_client_id,
+                        name: plan.name,
+                        rightClientId: plan.right_client_id,
+                        target: { expected_revision: plan.revision, plan_id: plan.id },
+                      })}
+                      onLifecycle={(enabled) => requestLifecycle([plan.id], enabled)}
+                      onUpdateConnectionAssessment={onUpdateTunnelConnectionAssessment}
+                      onSelect={(checked) => {
+                        const next = new Set(selected);
+                        if (checked) next.add(plan.id);
+                        else next.delete(plan.id);
+                        setSelected(next);
+                      }}
+                      onToggle={() => setExpandedId((current) => current === plan.id ? null : plan.id)}
+                      plan={plan}
+                      runtimeEdge={runtimeEdgeByPlan.get(plan.id)}
+                      selected={selected.has(plan.id)}
+                    />
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
+      </section>
+      {createOpen && (
+        <div ref={createRef}>
+          <TunnelPlanComposer
+            agents={agents}
+            existingPlans={tunnelPlans}
+            initialPlan={editingPlan}
+            key={editingPlan?.id ?? "new-tunnel-plan"}
+            onAllocateTunnelEndpoints={onAllocateTunnelEndpoints}
+            onClose={() => { setCreateOpen(false); setEditingPlan(null); }}
+            onSaveTunnelPlan={async (request) => {
+              if (editingPlan) {
+                await onUpdateTunnelPlan(editingPlan.id, {
+                  ...request,
+                  expected_revision: editingPlan.revision,
+                });
+              } else {
+                await onCreateTunnelPlan(request);
+              }
+              setCreateOpen(false);
+              setEditingPlan(null);
+              setFeedback({
+                message: `${editingPlan ? "Updated" : "Created"} tunnel plan ${request.name}`,
+                tone: "success",
+              });
+              window.setTimeout(() => listRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+            }}
+            onOpenSourceTemplates={onOpenSourceTemplates}
+            sourceTemplates={sourceTemplates}
+          />
+        </div>
+      )}
+      <ConfirmationPrompt
+        confirmLabel={lifecycleSnapshot?.enabled ? "Enable plans" : "Disable plans"}
+        detail={lifecycleSnapshot?.enabled
+          ? `Enable these declared plans and push their exact desired state to both endpoints.${lifecycleIncludesOspf ? " OSPF control resumes as unverified; existing external daemon costs remain unchanged until a verified update." : ""}`
+          : `Disable these plans and push runtime config that removes their managed state from both endpoints. External observed plans are no longer observed.${lifecycleIncludesOspf ? " OSPF control stops; existing external daemon costs are not reverted." : ""}`}
+        items={lifecycleSnapshot ? [
+          { label: "Action", value: lifecycleSnapshot.enabled ? "Enable" : "Disable" },
+          { label: "Plans", value: lifecycleSnapshot.targets.map((target) => `${target.name} (r${target.expected_revision})`).join(", ") },
+          { label: "Endpoints", value: `${lifecycleSnapshot.targets.length * 2} endpoint configurations` },
+          ...(lifecycleIncludesOspf ? [{
+            label: "Routing cost",
+            value: lifecycleSnapshot.enabled
+              ? "Resume control unverified; keep current external values until verification"
+              : "Stop control; keep current external values",
+          }] : []),
+        ] : []}
+        onCancel={() => setLifecycleSnapshot(null)}
+        onConfirm={() => lifecycleSnapshot && void applyLifecycle(lifecycleSnapshot)}
+        open={lifecycleSnapshot !== null}
         pending={pending}
-        title="Confirm tunnel plan save"
+        title={lifecycleSnapshot?.enabled ? "Confirm tunnel plan enable" : "Confirm tunnel plan disable"}
+        tone={lifecycleSnapshot?.enabled ? "normal" : "danger"}
       />
       <ConfirmationPrompt
-        confirmLabel={
-          tunnelPlanToggleSnapshot?.enabled ? "Enable plans" : "Disable plans"
-        }
-        detail="Confirm the reviewed lifecycle change and push runtime config to the affected agents."
-        error={actionError}
-        items={[
-          {
-            label: "Action",
-            value: tunnelPlanToggleSnapshot?.enabled ? "Enable" : "Disable",
-          },
-          {
-            label: "Plans",
-            value: tunnelPlanToggleSnapshot?.planIds.length ?? 0,
-          },
-          {
-            label: "Names",
-            value: tunnelPlanToggleSnapshot
-              ? tunnelPlanToggleSnapshot.planNames.slice(0, 4).join(", ") +
-                (tunnelPlanToggleSnapshot.planNames.length > 4 ? " ..." : "")
-              : "-",
-          },
-          {
-            label: "Endpoint pairs",
-            title: tunnelPlanToggleSnapshot?.endpointPairs.join(" / "),
-            value: tunnelPlanToggleSnapshot
-              ? tunnelPlanToggleSnapshot.endpointPairs.slice(0, 3).join(", ") +
-                (tunnelPlanToggleSnapshot.endpointPairs.length > 3
-                  ? " ..."
-                  : "")
-              : "-",
-          },
-          {
-            label: "Runtime effect",
-            title: tunnelPlanToggleSnapshot?.syncTargetLabels.join(", "),
-            value: tunnelPlanToggleSnapshot
-              ? `${tunnelPlanToggleSnapshot.enabled ? "Push desired runtime config to" : "Remove runtime plan from"} ${tunnelPlanToggleSnapshot.syncTargetLabels.length} endpoint${tunnelPlanToggleSnapshot.syncTargetLabels.length === 1 ? "" : "s"}`
-              : "-",
-          },
-        ]}
-        onCancel={() => setTunnelPlanToggleSnapshot(null)}
-        onConfirm={() => {
-          if (tunnelPlanToggleSnapshot) {
-            void executeTunnelPlanToggle(tunnelPlanToggleSnapshot);
-          }
-        }}
-        open={Boolean(tunnelPlanToggleSnapshot)}
-        pending={tunnelPlanTogglePending}
-        title="Confirm tunnel plan lifecycle"
+        confirmLabel="Delete plan"
+        detail="Permanently retire this disabled declaration. Its name, interface reservation, and tunnel addresses become available for a new plan; audit history remains."
+        items={deleteSnapshot ? [
+          { label: "Plan", value: `${deleteSnapshot.name} (r${deleteSnapshot.target.expected_revision})` },
+          { label: "Endpoints", value: `${deleteSnapshot.leftClientId} / ${deleteSnapshot.rightClientId}` },
+          { label: "Runtime state", value: "Already disabled and omitted from desired config" },
+        ] : []}
+        onCancel={() => setDeleteSnapshot(null)}
+        onConfirm={() => deleteSnapshot && void applyDelete(deleteSnapshot)}
+        open={deleteSnapshot !== null}
+        pending={pending}
+        title="Confirm tunnel plan deletion"
+        tone="danger"
       />
+    </div>
+  );
+}
 
-      {((topologySubpage === "plans" && activePlanWorkflow === "automation") ||
-        topologySubpage === "ospf") && (
-        <section
-          className="fleetPanel topologyPlanWorkflowPanel"
-          ref={activePlanWorkflow === "automation" ? planWorkflowRef : null}
-          tabIndex={-1}
-        >
-          {topologySubpage === "plans" ? (
-            <div className="sectionHeader">
-              <div>
-                <h2>Latency and auto OSPF</h2>
-                <span>
-                  Runtime monitoring, recommendation, and endpoint automation
-                  state.
-                </span>
-              </div>
-              <div className="sectionActions">
-                <Route size={20} />
-                <button
-                  aria-label="Close latency and auto OSPF workflow"
-                  className="iconButton"
-                  onClick={() => setActivePlanWorkflow(null)}
-                  title="Close latency and auto OSPF workflow"
-                  type="button"
-                >
-                  <X size={18} />
-                </button>
-              </div>
-            </div>
-          ) : null}
-          <ActionFeedback
-            className="localActionFeedback topologyAutomationActionFeedback"
-            message={automationBulkStatus}
-            tone={automationBulkFeedbackTone}
-          />
-          <ConsoleDataGrid
-            actions={automationActions}
-            columns={automationColumns}
-            defaultPageSize={20}
-            empty={<div className="emptyState compactEmpty">No agents</div>}
-            getRowId={(row) => row.clientId}
-            itemLabel="VPSs"
-            mobileFieldLayout="stacked"
-            renderExpandedRow={(row) => <AutomationGridDetail row={row} />}
-            rows={automationRows}
-            searchPlaceholder="Search automation state"
-            storageKey="vpsman.grid.topology.automation.v2"
-            title={
-              topologySubpage === "plans"
-                ? "Automation state"
-                : "Latency and auto OSPF"
-            }
-            toolbarActions={<Route size={18} />}
-          />
-        </section>
-      )}
+function TunnelPlanRows({
+  editorOpen,
+  expanded,
+  onDelete,
+  onEdit,
+  onExport,
+  onLifecycle,
+  onUpdateConnectionAssessment,
+  onSelect,
+  onToggle,
+  plan,
+  runtimeEdge,
+  selected,
+}: {
+  editorOpen: boolean;
+  expanded: boolean;
+  onDelete: () => void;
+  onEdit: () => void;
+  onExport: () => void;
+  onLifecycle: (enabled: boolean) => void;
+  onUpdateConnectionAssessment: (planId: string, request: UpdateTunnelConnectionAssessmentRequest) => Promise<void>;
+  onSelect: (checked: boolean) => void;
+  onToggle: () => void;
+  plan: TunnelPlanRecord;
+  runtimeEdge?: TopologyGraphEdge;
+  selected: boolean;
+}) {
+  const runtime = plan.plan.runtime_control?.manager ?? "agent_iproute2_managed";
+  const leftRuntimeState = plan.enabled
+    ? (runtimeEdge?.left_runtime_state ?? "unknown")
+    : "disabled";
+  const rightRuntimeState = plan.enabled
+    ? (runtimeEdge?.right_runtime_state ?? "unknown")
+    : "disabled";
+  const connectivity = tunnelConnectivityPresentation(plan, runtimeEdge);
+  const [assessment, setAssessment] = useState<TunnelConnectionAssessment>(
+    plan.connection_assessment ?? "automatic",
+  );
+  const [assessmentNote, setAssessmentNote] = useState(
+    plan.connection_assessment_note ?? "",
+  );
+  const [assessmentPending, setAssessmentPending] = useState(false);
+  const [assessmentFeedback, setAssessmentFeedback] = useState<Feedback | null>(null);
+  useEffect(() => {
+    setAssessment(plan.connection_assessment ?? "automatic");
+    setAssessmentNote(plan.connection_assessment_note ?? "");
+    setAssessmentFeedback(null);
+  }, [plan.connection_assessment, plan.connection_assessment_note, plan.revision]);
+  const assessmentChanged = assessment !== (plan.connection_assessment ?? "automatic")
+    || (assessment === "automatic" ? "" : assessmentNote.trim())
+      !== (plan.connection_assessment === "automatic" ? "" : (plan.connection_assessment_note ?? ""));
+  const assessmentValid = assessment === "automatic"
+    || (plan.enabled && assessmentNote.trim().length > 0 && assessmentNote.trim().length <= 500);
 
-      {topologySubpage === "graph" && (
-        <TopologyGraphPanel
-          agents={agents}
-          graph={topologyGraph}
-          loading={loading}
-          onOpenVpsDetail={onOpenVpsDetail}
-          onRefresh={onLoadTopologyGraph}
-          runtimeConfigApplyStates={runtimeConfigApplyStates}
-        />
-      )}
-
-      {topologySubpage === "plans" && activePlanWorkflow === "create" && (
-        <section
-          className="fleetPanel scheduleComposer topologyPlanComposer"
-          ref={planWorkflowRef}
-          tabIndex={-1}
-        >
-          <div className="sectionHeader">
-            <div>
-              <h2>Create tunnel plan</h2>
-            </div>
-            <div className="sectionActions">
-              <GitBranch size={20} />
-              <button
-                aria-label="Close create tunnel plan workflow"
-                className="iconButton"
-                onClick={() => setActivePlanWorkflow(null)}
-                title="Close create tunnel plan workflow"
-                type="button"
-              >
-                <X size={18} />
-              </button>
-            </div>
+  async function saveConnectionAssessment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!assessmentChanged || !assessmentValid) return;
+    setAssessmentPending(true);
+    setAssessmentFeedback(null);
+    try {
+      await onUpdateConnectionAssessment(plan.id, {
+        assessment,
+        expected_revision: plan.revision,
+        note: assessment === "automatic" ? null : assessmentNote.trim(),
+      });
+      setAssessmentFeedback({
+        message: assessment === "automatic"
+          ? "Operator assessment cleared; measured evidence is authoritative"
+          : `Recorded ${assessment} as an operator assessment`,
+        tone: "success",
+      });
+    } catch (error) {
+      setAssessmentFeedback({
+        message: tunnelConnectionAssessmentError(error),
+        tone: "danger",
+      });
+    } finally {
+      setAssessmentPending(false);
+    }
+  }
+  return (
+    <>
+      <tr aria-expanded={expanded} className={`${expanded ? "isExpanded" : ""} ${selected ? "isSelected" : ""}`} onClick={onToggle} tabIndex={0} onKeyDown={(event) => {
+        if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
+          event.preventDefault();
+          onToggle();
+        }
+      }}>
+        <td className="selectionCell" onClick={(event) => event.stopPropagation()}>
+          <input aria-label={`Select ${plan.name}`} checked={selected} onChange={(event) => onSelect(event.target.checked)} type="checkbox" />
+        </td>
+        <td>
+          <span className="historyPrimary">
+            <strong title={plan.name}>{plan.name}</strong>
+            <small title={`${plan.kind} · ${plan.plan.interface_name}`}>{formatTunnelKind(plan.kind)} · {plan.plan.interface_name}</small>
+          </span>
+        </td>
+        <td>
+          <span className="historyPrimary">
+            <strong title={plan.left_client_id}>{plan.left_client_id}</strong>
+            <small title={plan.right_client_id}>{plan.right_client_id}</small>
+          </span>
+        </td>
+        <td>
+          <span className="historyPrimary">
+            <strong title={runtimeManagerLabel(runtime)}>{runtimeManagerLabel(runtime)}</strong>
+            <small title={plan.enabled ? "Enabled" : "Disabled"}>{plan.enabled ? "Enabled" : "Disabled"}</small>
+          </span>
+        </td>
+        <td>
+          <span className="endpointStatusPair">
+            <span className={`status ${tunnelEndpointRuntimeStateBadgeClass(leftRuntimeState)}`} title={endpointRuntimeTitle("Left", leftRuntimeState, runtimeEdge?.left_runtime_reason, runtimeEdge?.left_observed_at)}>L {readableTelemetryToken(leftRuntimeState)}</span>
+            <span className={`status ${tunnelEndpointRuntimeStateBadgeClass(rightRuntimeState)}`} title={endpointRuntimeTitle("Right", rightRuntimeState, runtimeEdge?.right_runtime_reason, runtimeEdge?.right_observed_at)}>R {readableTelemetryToken(rightRuntimeState)}</span>
+          </span>
+        </td>
+        <td>
+          <span className="historyPrimary tunnelConnectivitySummary">
+            <strong className={`status ${connectivity.statusClass}`} title={connectivity.title}>{connectivity.label}</strong>
+            <small title={connectivity.detail}>{connectivity.detail}</small>
+          </span>
+        </td>
+        <td>
+          <span className="historyPrimary">
+            <strong title={plan.plan.ospf ? `${plan.recommended_ospf_cost ?? "unknown"} cost` : "OSPF off"}>{plan.plan.ospf ? `${plan.recommended_ospf_cost ?? "?"} cost` : "Off"}</strong>
+            <small title={plan.plan.ospf ? `${formatOspfMode(plan.plan.ospf.mode)} · ${readableTelemetryToken(plan.ospf_status)}` : "Tunnel only"}>{plan.plan.ospf ? `${formatOspfMode(plan.plan.ospf.mode)} · ${readableTelemetryToken(plan.ospf_status)}` : "Tunnel only"}</small>
+          </span>
+        </td>
+        <td>
+          <div className="topologyRowActions" onClick={(event) => event.stopPropagation()}>
+            <button aria-label={`Edit ${plan.name}`} className="iconAction" disabled={editorOpen} onClick={onEdit} title={editorOpen ? "Close the current tunnel plan editor first" : "Edit plan"} type="button"><Pencil size={15} /></button>
+            <button aria-label={`Export ${plan.name}`} className="iconAction" onClick={onExport} title="Export plan JSON" type="button"><Download size={15} /></button>
+            <button aria-label={`${plan.enabled ? "Disable" : "Enable"} ${plan.name}`} className={`iconAction ${plan.enabled ? "isDisableAction" : "isEnableAction"}`} onClick={() => onLifecycle(!plan.enabled)} title={plan.enabled ? "Disable plan" : "Enable plan"} type="button">
+              {plan.enabled ? <PowerOff size={15} /> : <Power size={15} />}
+            </button>
+            <button aria-label={`Delete ${plan.name}`} className="iconAction isDeleteAction" disabled={plan.enabled} onClick={onDelete} title={plan.enabled ? "Disable this plan before deleting it" : "Delete this disabled plan"} type="button"><Trash2 size={15} /></button>
           </div>
-          <div
-            aria-label="Tunnel plan wizard"
-            className="tunnelPlanWizardStrip"
-          >
-            {tunnelPlanReviewItems.map((item) => (
-              <div
-                className={item.tone ?? ""}
-                key={item.label}
-                title={item.detail}
-              >
-                <span>{item.label}</span>
-                <strong>{item.value}</strong>
-                <p>{item.detail}</p>
+        </td>
+      </tr>
+      {expanded && (
+        <tr className="tunnelPlanDetailRow">
+          <td colSpan={8}>
+            <div className="tunnelPlanDetail">
+              <button aria-label={`Close details for ${plan.name}`} className="iconAction topologyDetailClose" onClick={onToggle} title="Close details" type="button"><X size={15} /></button>
+              <div className="tunnelPlanFacts">
+                <PlanFact label="Declaration" value={plan.enabled ? "Enabled" : "Disabled"} />
+                <PlanFact label="Endpoints" value={`${plan.left_client_id} / ${plan.right_client_id}`} />
+                <PlanFact label="Endpoint state" value={`L ${readableTelemetryToken(leftRuntimeState)} · R ${readableTelemetryToken(rightRuntimeState)}`} />
+                <PlanFact label="Connectivity" value={`${connectivity.label} · ${connectivity.detail}`} />
+                <PlanFact label="Left outer path" value={formatEndpointUnderlay(plan.plan.left_local_underlay, plan.plan.left_remote_underlay)} />
+                <PlanFact label="Right outer path" value={formatEndpointUnderlay(plan.plan.right_local_underlay, plan.plan.right_remote_underlay)} />
+                <PlanFact label="Tunnel addresses" value={formatTunnelAddresses(plan)} />
+                <PlanFact label="Bandwidth" value={`${plan.plan.bandwidth_mbps} Mbps`} />
+                <PlanFact label="Runtime ownership" value={formatRuntimeBinding(plan)} />
+                <PlanFact label="OSPF control" value={formatPlanOspf(plan)} />
               </div>
-            ))}
-          </div>
-          <form className="dispatchForm topologyPlanForm" onSubmit={submitPlan}>
-            <div
-              className="operationNote formSectionNote"
-              title="Name the intended tunnel and choose the link type before selecting endpoints."
-            >
-              <strong>Plan identity</strong>
-            </div>
-            <div className="dispatchControls">
-              <label>
-                <span>Name</span>
-                <input
-                  value={form.name}
-                  onChange={(event) => setField("name", event.target.value)}
-                />
-              </label>
-              <label>
-                <span>Interface</span>
-                <input
-                  value={form.interface_name}
-                  onChange={(event) =>
-                    setField("interface_name", event.target.value)
-                  }
-                />
-              </label>
-              <label>
-                <span>Kind</span>
-                <select
-                  aria-describedby="tunnel-kind-runtime-constraint"
-                  value={form.kind}
-                  onChange={(event) =>
-                    setField("kind", event.target.value as TunnelKind)
-                  }
-                >
-                  {tunnelKinds.map((kind) => (
-                    <option
-                      disabled={
-                        runtimeManager === "agent_iproute2_managed" &&
-                        !iproute2TunnelKinds.has(kind)
-                      }
-                      key={kind}
-                      value={kind}
-                    >
-                      {kind.toUpperCase()}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div className="topologyLifecycleField">
-                <span>Status</span>
-                <label className="checkLine inlineCheck topologyLifecycleToggle">
-                  <input
-                    aria-label="Plan enabled"
-                    checked={form.enabled}
-                    onChange={(event) =>
-                      setField("enabled", event.target.checked)
-                    }
-                    type="checkbox"
-                  />
-                  <span>Enable after save: {form.enabled ? "On" : "Off"}</span>
+              <form className="tunnelConnectionAssessment" onClick={(event) => event.stopPropagation()} onSubmit={(event) => void saveConnectionAssessment(event)}>
+                <div className="tunnelConnectionAssessmentHeading">
+                  <strong>Operator connectivity assessment</strong>
+                  <span title="Use only when endpoint probes cannot establish reachability.">Display-only annotation; runtime and automatic OSPF stay machine-derived.</span>
+                </div>
+                <label>
+                  <span>Assessment</span>
+                  <select
+                    aria-label={`Connectivity assessment for ${plan.name}`}
+                    disabled={assessmentPending || !plan.enabled}
+                    onChange={(event) => {
+                      setAssessment(event.target.value as TunnelConnectionAssessment);
+                      setAssessmentFeedback(null);
+                    }}
+                    value={assessment}
+                  >
+                    <option value="automatic">Automatic (measured)</option>
+                    <option value="connected">Connected (operator)</option>
+                    <option value="disconnected">Disconnected (operator)</option>
+                  </select>
                 </label>
-              </div>
-            </div>
-            <div
-              className="operationNote formSectionNote"
-              title="Pair exactly two VPSs, provide underlays, then enter or generate explicit tunnel endpoints."
-            >
-              <strong>Endpoints</strong>
-            </div>
-            <div className="dispatchControls">
-              <label>
-                <span>Left VPS</span>
-                <VpsCombobox
-                  agents={agents}
-                  ariaLabel="Left VPS"
-                  excludeIds={
-                    form.right_client_id ? [form.right_client_id] : []
-                  }
-                  onChange={(value) => setEndpointClient("left", value)}
-                  placeholder="Search left VPS"
-                  value={form.left_client_id}
-                />
-              </label>
-              <label>
-                <span>Right VPS</span>
-                <VpsCombobox
-                  agents={agents}
-                  ariaLabel="Right VPS"
-                  excludeIds={form.left_client_id ? [form.left_client_id] : []}
-                  onChange={(value) => setEndpointClient("right", value)}
-                  placeholder="Search right VPS"
-                  value={form.right_client_id}
-                />
-              </label>
-            </div>
-            <div className="dispatchControls">
-              <label>
-                <span>Left underlay</span>
-                <input
-                  value={form.left_underlay}
-                  onChange={(event) =>
-                    setField("left_underlay", event.target.value)
-                  }
-                />
-              </label>
-              <label>
-                <span>Right underlay</span>
-                <input
-                  value={form.right_underlay}
-                  onChange={(event) =>
-                    setField("right_underlay", event.target.value)
-                  }
-                />
-              </label>
-            </div>
-            <div className="dispatchControls">
-              <label>
-                <span>Left IPv4 CIDR</span>
-                <input
-                  value={formatEndpointCidr(form.ipv4_tunnel ?? null, "left")}
-                  onChange={(event) =>
-                    setAddressCidr(
-                      "ipv4_tunnel",
-                      "left",
-                      event.target.value,
-                      31,
-                    )
-                  }
-                  placeholder="IPv4 CIDR"
-                />
-              </label>
-              <label>
-                <span>Right IPv4 CIDR</span>
-                <input
-                  value={formatEndpointCidr(form.ipv4_tunnel ?? null, "right")}
-                  onChange={(event) =>
-                    setAddressCidr(
-                      "ipv4_tunnel",
-                      "right",
-                      event.target.value,
-                      31,
-                    )
-                  }
-                  placeholder="IPv4 CIDR"
-                />
-              </label>
-            </div>
-            <div className="dispatchControls">
-              <label>
-                <span>Left IPv6 CIDR</span>
-                <input
-                  value={formatEndpointCidr(form.ipv6_tunnel ?? null, "left")}
-                  onChange={(event) =>
-                    setAddressCidr(
-                      "ipv6_tunnel",
-                      "left",
-                      event.target.value,
-                      127,
-                    )
-                  }
-                  placeholder="IPv6 CIDR"
-                />
-              </label>
-              <label>
-                <span>Right IPv6 CIDR</span>
-                <input
-                  value={formatEndpointCidr(form.ipv6_tunnel ?? null, "right")}
-                  onChange={(event) =>
-                    setAddressCidr(
-                      "ipv6_tunnel",
-                      "right",
-                      event.target.value,
-                      127,
-                    )
-                  }
-                  placeholder="IPv6 CIDR"
-                />
-              </label>
-            </div>
-            <div className="dispatchControls">
-              <label>
-                <span>Latency primary</span>
-                <select
-                  value={form.latency_primary_family ?? "ipv4"}
-                  onChange={(event) =>
-                    setField(
-                      "latency_primary_family",
-                      event.target.value as TunnelAddressFamily,
-                    )
-                  }
+                {assessment !== "automatic" && (
+                  <label className="tunnelAssessmentNote">
+                    <span>Evidence note</span>
+                    <input
+                      aria-label={`Connectivity assessment note for ${plan.name}`}
+                      disabled={assessmentPending || !plan.enabled}
+                      maxLength={500}
+                      onChange={(event) => {
+                        setAssessmentNote(event.target.value);
+                        setAssessmentFeedback(null);
+                      }}
+                      placeholder="e.g. application traffic verified; ICMP blocked"
+                      title={assessmentNote || "Explain the operator evidence for this assessment"}
+                      value={assessmentNote}
+                    />
+                  </label>
+                )}
+                <button
+                  className="secondaryAction compactAction"
+                  disabled={assessmentPending || !assessmentChanged || !assessmentValid}
+                  title={!plan.enabled
+                    ? "Enable the plan before recording a connectivity assessment"
+                    : !assessmentChanged
+                      ? "No assessment changes to save"
+                      : !assessmentValid
+                        ? "Add an evidence note of 500 characters or fewer"
+                        : "Save this audited display assessment without changing runtime or OSPF automation"}
+                  type="submit"
                 >
+                  {assessmentPending
+                    ? "Saving"
+                    : assessment === "automatic" && plan.connection_assessment !== "automatic"
+                      ? "Clear assessment"
+                      : "Save assessment"}
+                </button>
+              </form>
+              <ActionFeedback className="localActionFeedback" message={assessmentFeedback?.message} tone={assessmentFeedback?.tone} />
+              {(plan.plan.runtime_control?.manager ?? "agent_iproute2_managed") ===
+                "agent_iproute2_managed" &&
+                (plan.plan.runtime_topology?.desired_interfaces?.length ?? 0) > 0 && (
+                <div className="tunnelIntentLine">
+                  <strong>Declared interfaces</strong>
+                  <code title={plan.plan.runtime_topology?.desired_interfaces?.join(", ")}>{plan.plan.runtime_topology?.desired_interfaces?.join(", ")}</code>
+                </div>
+              )}
+              {plan.plan.conflicts.length > 0 && (
+                <ActionFeedback message={plan.plan.conflicts.join("; ")} tone="warning" />
+              )}
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function TunnelPlanComposer({
+  agents,
+  existingPlans,
+  initialPlan,
+  onAllocateTunnelEndpoints,
+  onClose,
+  onSaveTunnelPlan,
+  onOpenSourceTemplates,
+  sourceTemplates,
+}: {
+  agents: AgentView[];
+  existingPlans: TunnelPlanRecord[];
+  initialPlan: TunnelPlanRecord | null;
+  onAllocateTunnelEndpoints: (request: AllocateTunnelEndpointsRequest) => Promise<AllocateTunnelEndpointsResponse>;
+  onClose: () => void;
+  onSaveTunnelPlan: (request: CreateTunnelPlanRequest) => Promise<void>;
+  onOpenSourceTemplates: () => void;
+  sourceTemplates: SourceTemplateRecord[];
+}) {
+  const [form, setForm] = useState<TunnelPlanForm>(() =>
+    initialPlan ? tunnelPlanFormFromRecord(initialPlan) : initialTunnelPlanForm(),
+  );
+  const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const [pending, setPending] = useState(false);
+  const [allocationPending, setAllocationPending] = useState(false);
+  const [snapshot, setSnapshot] = useState<CreateTunnelPlanRequest | null>(null);
+  const runtimeTemplates = sourceTemplates.filter((template) => template.domain === "runtime_tunnel_adapter");
+  const routingTemplates = sourceTemplates.filter((template) => template.domain === "routing_cost_adapter");
+  const leftRuntimeTemplates = templatesForClient(runtimeTemplates, form.leftClientId);
+  const rightRuntimeTemplates = templatesForClient(runtimeTemplates, form.rightClientId);
+  const leftRoutingTemplates = templatesForClient(routingTemplates, form.leftClientId);
+  const rightRoutingTemplates = templatesForClient(routingTemplates, form.rightClientId);
+  const policy = ospfPolicyFromForm(form);
+  const previewCost = calculateOspfCostPreview({
+    bandwidthMbps: numberOr(form.bandwidthMbps, DEFAULT_TUNNEL_BANDWIDTH_MBPS),
+    latencyMs: numberOr(form.plannedLatencyMs, 20),
+    packetLossRatio: numberOr(form.packetLossPercent, 0) / 100,
+    policy,
+    preference: numberOr(form.preference, 1),
+  });
+  const duplicateName = !initialPlan
+    && existingPlans.some((plan) => plan.name === form.name.trim());
+  const formError = validateTunnelPlanForm(form);
+  const resourceConflict = formError
+    ? null
+    : validateExistingTunnelPlanConflicts(form, existingPlans, initialPlan?.id);
+  const bindingError = validateAdapterBindings(
+    form,
+    leftRuntimeTemplates,
+    rightRuntimeTemplates,
+    leftRoutingTemplates,
+    rightRoutingTemplates,
+  );
+  const validationError = duplicateName
+    ? "A tunnel plan with this name already exists; edit it from the table"
+    : formError ?? resourceConflict ?? bindingError;
+  const existing = initialPlan;
+  const unchanged = Boolean(
+    existing
+      && !validationError
+      && tunnelPlanFormMatchesInitial(form, existing),
+  );
+
+  function update<K extends keyof TunnelPlanForm>(key: K, value: TunnelPlanForm[K]) {
+    setSnapshot(null);
+    setFeedback(null);
+    setForm((current) => ({ ...current, [key]: value }));
+  }
+
+  function changeManager(manager: RuntimeTunnelManager) {
+    if (manager === "agent_iproute2_managed" && !AGENT_TUNNEL_KINDS.includes(form.kind)) {
+      setFeedback({
+        message: `${formatTunnelKind(form.kind)} cannot be agent-managed. Select GRE, IPIP, SIT, or FOU before choosing Agent iproute2.`,
+        tone: "warning",
+      });
+      return;
+    }
+    setSnapshot(null);
+    setFeedback(null);
+    setForm((current) => ({
+      ...current,
+      runtimeManager: manager,
+    }));
+  }
+
+  async function allocate() {
+    setAllocationPending(true);
+    setFeedback(null);
+    try {
+      const response = await onAllocateTunnelEndpoints({
+        include_ipv4: form.includeIpv4,
+        include_ipv6: form.includeIpv6,
+        ipv4_pool_cidr: form.ipv4Pool.trim() || null,
+        ipv6_pool_cidr: form.ipv6Pool.trim() || null,
+        reserved_addresses: [],
+      });
+      setForm((current) => applyAllocation(current, response));
+      setFeedback({
+        message: response.ipv4_tunnel || response.ipv6_tunnel ? "Allocated unused endpoint addresses" : "No allocation pool is configured; enter endpoint addresses manually",
+        tone: response.ipv4_tunnel || response.ipv6_tunnel ? "success" : "warning",
+      });
+    } catch (error) {
+      setFeedback({ message: error instanceof Error ? error.message : "Address allocation failed", tone: "danger" });
+    } finally {
+      setAllocationPending(false);
+    }
+  }
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (validationError) {
+      setFeedback({ message: validationError, tone: "warning" });
+      return;
+    }
+    if (unchanged) {
+      setFeedback({ message: "No tunnel plan changes to review", tone: "warning" });
+      return;
+    }
+    try {
+      setSnapshot(buildTunnelPlanRequest(form));
+      setFeedback(null);
+    } catch (error) {
+      setFeedback({ message: error instanceof Error ? error.message : "Tunnel plan is invalid", tone: "danger" });
+    }
+  }
+
+  async function confirmCreate(request: CreateTunnelPlanRequest) {
+    setPending(true);
+    setFeedback(null);
+    try {
+      await onSaveTunnelPlan(request);
+      setSnapshot(null);
+    } catch (error) {
+      setSnapshot(null);
+      setFeedback({ message: tunnelPlanSaveError(error), tone: "danger" });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  const kindOptions = form.runtimeManager === "agent_iproute2_managed" ? AGENT_TUNNEL_KINDS : ALL_TUNNEL_KINDS;
+  return (
+    <section className="fleetPanel tunnelPlanComposer">
+      <div className="sectionHeader tunnelPlanComposerHeader">
+        <div>
+          <h2>{existing ? "Update tunnel plan" : "Create tunnel plan"}</h2>
+          <span>Declare one exact point-to-point tunnel; OSPF remains optional</span>
+        </div>
+        <button aria-label="Close tunnel plan editor" className="iconAction" onClick={onClose} title="Close editor" type="button"><X size={17} /></button>
+      </div>
+      <ActionFeedback className="localActionFeedback" message={feedback?.message} tone={feedback?.tone} />
+      <form className="tunnelPlanForm" noValidate onSubmit={submit}>
+        <fieldset className="topologyFormSection">
+          <legend>Plan and endpoints</legend>
+          <div className="topologyFormGrid threeColumn">
+            <Field label="Plan name"><input aria-label="Tunnel plan name" maxLength={128} onChange={(event) => update("name", event.target.value)} placeholder="edge-a-edge-b" readOnly={Boolean(existing)} required title={existing ? "Plan identity is fixed; create a new declaration to use another name." : undefined} value={form.name} /></Field>
+            <Field label="Interface" tooltip="Exact interface name to manage or observe on both endpoints."><input aria-label="Tunnel interface" maxLength={15} onChange={(event) => update("interfaceName", event.target.value)} placeholder="tun0" required value={form.interfaceName} /></Field>
+            <Field label="Kind" tooltip="Agent iproute2 supports GRE, IPIP, SIT, and FOU. WireGuard, OpenVPN, TUN/TAP, and custom interfaces require external ownership."><select aria-label="Tunnel kind" onChange={(event) => update("kind", event.target.value as TunnelKind)} value={form.kind}>{kindOptions.map((kind) => <option key={kind} value={kind}>{formatTunnelKind(kind)}</option>)}</select></Field>
+          </div>
+          <div className="topologyFormGrid threeColumn tunnelEndpointUnderlayGrid">
+            <Field label="Left VPS"><VpsCombobox agents={agents} ariaLabel="Left tunnel VPS" excludeIds={form.rightClientId ? [form.rightClientId] : []} onChange={(value) => update("leftClientId", value)} value={form.leftClientId} /></Field>
+            <Field label="Left remote destination" tooltip="Outer destination reached from the left VPS. Enter the peer's public or NAT address; vpsman never derives it from the right-side fields."><input aria-label="Left remote underlay destination" onChange={(event) => update("leftRemoteUnderlay", event.target.value)} placeholder="203.0.113.20" required value={form.leftRemoteUnderlay} /></Field>
+            <Field label="Left local source" tooltip="Optional outer-packet source bound on the left VPS. It may be a private interface address behind NAT. Leave empty to let the OS route choose."><input aria-label="Left local underlay source" onChange={(event) => update("leftLocalUnderlay", event.target.value)} placeholder="Automatic" value={form.leftLocalUnderlay} /></Field>
+            <Field label="Right VPS"><VpsCombobox agents={agents} ariaLabel="Right tunnel VPS" excludeIds={form.leftClientId ? [form.leftClientId] : []} onChange={(value) => update("rightClientId", value)} value={form.rightClientId} /></Field>
+            <Field label="Right remote destination" tooltip="Outer destination reached from the right VPS. Enter the peer's public or NAT address; vpsman never derives it from the left-side fields."><input aria-label="Right remote underlay destination" onChange={(event) => update("rightRemoteUnderlay", event.target.value)} placeholder="198.51.100.10" required value={form.rightRemoteUnderlay} /></Field>
+            <Field label="Right local source" tooltip="Optional outer-packet source bound on the right VPS. It may be a private interface address behind NAT. Leave empty to let the OS route choose."><input aria-label="Right local underlay source" onChange={(event) => update("rightLocalUnderlay", event.target.value)} placeholder="Automatic" value={form.rightLocalUnderlay} /></Field>
+          </div>
+        </fieldset>
+
+        <fieldset className="topologyFormSection">
+          <legend>Runtime ownership</legend>
+          <div className="runtimeManagerSegments" role="radiogroup" aria-label="Tunnel runtime ownership">
+            <ManagerChoice active={form.runtimeManager === "agent_iproute2_managed"} detail="vpsman creates and removes GRE, IPIP, SIT, or FOU with iproute2." label="Agent iproute2" onClick={() => changeManager("agent_iproute2_managed")} />
+            <ManagerChoice active={form.runtimeManager === "external_observed"} detail="vpsman inspects this exact declared interface and never mutates it." label="External observed" onClick={() => changeManager("external_observed")} />
+            <ManagerChoice active={form.runtimeManager === "external_managed_adapter"} detail="vpsman executes operator-owned lifecycle scripts from source templates." label="External adapter" onClick={() => changeManager("external_managed_adapter")} />
+          </div>
+          {form.runtimeManager === "external_managed_adapter" && (
+            <div className="topologyFormGrid twoColumn adapterBindingGrid">
+              <TemplateField clientId={form.leftClientId} label="Left runtime adapter" onChange={(value) => update("leftRuntimeTemplateId", value)} onOpenSourceTemplates={onOpenSourceTemplates} templates={leftRuntimeTemplates} value={form.leftRuntimeTemplateId} />
+              <TemplateField clientId={form.rightClientId} label="Right runtime adapter" onChange={(value) => update("rightRuntimeTemplateId", value)} onOpenSourceTemplates={onOpenSourceTemplates} templates={rightRuntimeTemplates} value={form.rightRuntimeTemplateId} />
+            </div>
+          )}
+          {form.runtimeManager !== "external_observed" && (
+            <div className="topologyFormGrid fourColumn compactNumericGrid">
+              <Field label="Ingress limit" tooltip="Optional ingress limit from 64 to 1000000 Kbps."><UnitInput ariaLabel="Ingress limit" max={1_000_000} min={64} onChange={(value) => update("ingressKbps", value)} unit="Kbps" value={form.ingressKbps} /></Field>
+              <Field label="Egress limit" tooltip="Optional egress limit from 64 to 1000000 Kbps."><UnitInput ariaLabel="Egress limit" max={1_000_000} min={64} onChange={(value) => update("egressKbps", value)} unit="Kbps" value={form.egressKbps} /></Field>
+              <Field label="Burst" tooltip="Optional traffic shaping burst from 1 to 1048576 KiB."><UnitInput ariaLabel="Traffic burst" max={1_048_576} min={1} onChange={(value) => update("burstKb", value)} unit="KiB" value={form.burstKb} /></Field>
+              <Field label="Bandwidth" tooltip="Operator-declared planning bandwidth from 10 to 10000 Mbps."><UnitInput ariaLabel="Tunnel bandwidth" max={MAX_TUNNEL_BANDWIDTH_MBPS} min={MIN_TUNNEL_BANDWIDTH_MBPS} onChange={(value) => update("bandwidthMbps", value)} required unit="Mbps" value={form.bandwidthMbps} /></Field>
+            </div>
+          )}
+          {form.runtimeManager === "external_observed" && (
+            <div className="topologyFormGrid twoColumn compactNumericGrid">
+              <Field label="Bandwidth" tooltip="Operator-declared planning bandwidth from 10 to 10000 Mbps."><UnitInput ariaLabel="Tunnel bandwidth" max={MAX_TUNNEL_BANDWIDTH_MBPS} min={MIN_TUNNEL_BANDWIDTH_MBPS} onChange={(value) => update("bandwidthMbps", value)} required unit="Mbps" value={form.bandwidthMbps} /></Field>
+            </div>
+          )}
+          {form.kind === "fou" && form.runtimeManager !== "external_observed" && (
+            <div className="topologyFormGrid threeColumn compactNumericGrid">
+              <Field label="FOU port" tooltip="UDP port registered locally by ip fou on each endpoint."><UnitInput ariaLabel="FOU local port" max={65535} min={1} onChange={(value) => update("fouPort", value)} unit="port" value={form.fouPort} /></Field>
+              <Field label="Peer port" tooltip="Remote UDP destination port used for FOU encapsulation."><UnitInput ariaLabel="FOU peer port" max={65535} min={1} onChange={(value) => update("fouPeerPort", value)} unit="port" value={form.fouPeerPort} /></Field>
+              <Field label="IP protocol" tooltip="Inner IP protocol registered with FOU; 4 is IP-in-IP and 47 is GRE."><UnitInput ariaLabel="FOU IP protocol" max={255} min={1} onChange={(value) => update("fouIpProto", value)} unit="id" value={form.fouIpProto} /></Field>
+            </div>
+          )}
+          {form.runtimeManager === "agent_iproute2_managed" && (
+            <details className="topologyAdvancedFields">
+              <summary>Agent-managed routes and cleanup</summary>
+              <div className="topologyFormGrid twoColumn">
+                <Field label="Desired interfaces" tooltip="One exact interface per line. The plan interface is always included by the server."><textarea aria-label="Desired tunnel interfaces" onChange={(event) => update("desiredInterfaces", event.target.value)} placeholder="Optional additional exact interfaces" rows={3} value={form.desiredInterfaces} /></Field>
+                <Field label="Stale interfaces" tooltip="Only interfaces explicitly listed here are eligible for cleanup."><textarea aria-label="Stale tunnel interfaces" onChange={(event) => update("staleInterfaces", event.target.value)} placeholder="One exact interface per line" rows={3} value={form.staleInterfaces} /></Field>
+                <Field label="Desired routes" tooltip="One route per line: CIDR, via=IP, dev=interface, metric=number."><textarea aria-label="Desired tunnel routes" onChange={(event) => update("routes", event.target.value)} placeholder="10.0.0.0/24, via=10.255.0.1" rows={3} value={form.routes} /></Field>
+                <Field label="Stale routes" tooltip="Only exact routes listed here are eligible for cleanup."><textarea aria-label="Stale tunnel routes" onChange={(event) => update("staleRoutes", event.target.value)} placeholder="10.0.0.0/24, dev=tun0" rows={3} value={form.staleRoutes} /></Field>
+              </div>
+            </details>
+          )}
+        </fieldset>
+
+        <fieldset className="topologyFormSection">
+          <legend>Endpoint addresses</legend>
+          <div className="addressAllocationToolbar">
+            <label className="compactCheckbox"><input checked={form.includeIpv4} onChange={(event) => update("includeIpv4", event.target.checked)} type="checkbox" /> IPv4</label>
+            <label className="compactCheckbox"><input checked={form.includeIpv6} onChange={(event) => update("includeIpv6", event.target.checked)} type="checkbox" /> IPv6</label>
+            {form.includeIpv4 && form.includeIpv6 && (
+              <label className="addressFamilySelect" title="Primary address family for continuous latency evidence. The other family remains configured.">
+                <span>Probe family</span>
+                <select aria-label="Latency probe address family" onChange={(event) => update("latencyPrimaryFamily", event.target.value as "ipv4" | "ipv6")} value={form.latencyPrimaryFamily}>
                   <option value="ipv4">IPv4</option>
                   <option value="ipv6">IPv6</option>
                 </select>
               </label>
-              <button
-                className="secondaryAction"
-                disabled={pending}
-                onClick={allocateEndpoints}
-                type="button"
-              >
-                <Wand2 size={17} />
-                Allocate endpoints
-              </button>
-            </div>
-            <details
-              className="operationNote formSectionNote"
-              title="Uses Suite Config pools unless overridden here. Reserved addresses are comma-separated; repeated allocation appends current endpoint IPs before requesting another suggestion."
-            >
-              <summary>Allocation overrides</summary>
-              <div className="dispatchControls">
-                <label>
-                  <span>IPv4 pool override</span>
-                  <input
-                    value={form.address_pool_cidr}
-                    onChange={(event) =>
-                      setField("address_pool_cidr", event.target.value)
-                    }
-                    placeholder="No default"
-                  />
-                </label>
-                <label>
-                  <span>IPv6 pool override</span>
-                  <input
-                    value={form.ipv6_address_pool_cidr ?? ""}
-                    onChange={(event) =>
-                      setField("ipv6_address_pool_cidr", event.target.value)
-                    }
-                    placeholder="No default"
-                  />
-                </label>
-                <label>
-                  <span>Reserved addresses</span>
-                  <input
-                    value={reservedText}
-                    onChange={(event) => setReservedText(event.target.value)}
-                  />
-                </label>
-              </div>
-            </details>
-            <div className="dispatchControls">
-              <label>
-                <span>Bandwidth Mbps</span>
-                <input
-                  max={10000}
-                  min={10}
-                  onChange={(event) =>
-                    setField("bandwidth_mbps", Number(event.target.value))
-                  }
-                  step={1}
-                  type="number"
-                  value={form.bandwidth_mbps}
-                />
-              </label>
-              <label>
-                <span>Latency ms</span>
-                <input
-                  min={0}
-                  onChange={(event) =>
-                    setField("latency_ms", Number(event.target.value))
-                  }
-                  type="number"
-                  value={form.latency_ms}
-                />
-              </label>
-              <label>
-                <span>Packet loss %</span>
-                <input
-                  max={100}
-                  min={0}
-                  onChange={(event) =>
-                    setField(
-                      "packet_loss_ratio",
-                      Number(event.target.value) / 100,
-                    )
-                  }
-                  step={0.1}
-                  type="number"
-                  value={Number((form.packet_loss_ratio * 100).toFixed(3))}
-                />
-              </label>
-              <label>
-                <span>Preference / priority</span>
-                <input
-                  min={0.1}
-                  step={0.1}
-                  onChange={(event) =>
-                    setField("preference", Number(event.target.value))
-                  }
-                  type="number"
-                  value={form.preference}
-                />
-              </label>
-              <div
-                aria-label="OSPF cost preview"
-                className="topologyOspfPreviewInline"
-                title={OSPF_COST_MODEL_DETAIL}
-              >
-                <span>OSPF cost</span>
-                <strong>{ospfCostPreview}</strong>
-                <small>
-                  {formatBandwidthMbps(previewBandwidthMbps)} target
-                </small>
-              </div>
-            </div>
-            <div
-              className="operationNote formSectionNote"
-              title="Choose whether the agent owns the tunnel, observes it externally, or delegates lifecycle commands to a custom adapter."
-            >
-              <strong>Runtime</strong>
-            </div>
-            <div className="dispatchControls">
-              <label>
-                <span>Runtime owner</span>
-                <select
-                  value={runtimeManager}
-                  onChange={(event) =>
-                    setRuntimeManager(event.target.value as RuntimeTunnelManager)
-                  }
-                >
-                  {runtimeManagers.map((manager) => (
-                    <option key={manager} value={manager}>
-                      {runtimeManagerLabel(manager)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="checkLine inlineCheck topologyLifecycleToggle">
-                <input
-                  checked={trafficLimitEnabled}
-                  onChange={(event) =>
-                    setTrafficLimitEnabled(event.target.checked)
-                  }
-                  type="checkbox"
-                />
-                <span>Traffic shaping</span>
-              </label>
-              <label>
-                <span>Egress Kbps</span>
-                <input
-                  disabled={!trafficLimitEnabled}
-                  min={64}
-                  onChange={(event) => setTrafficEgressKbps(event.target.value)}
-                  placeholder="Empty means disabled"
-                  type="number"
-                  value={trafficEgressKbps}
-                />
-              </label>
-              <label>
-                <span>Ingress Kbps</span>
-                <input
-                  disabled={!trafficLimitEnabled}
-                  min={64}
-                  onChange={(event) =>
-                    setTrafficIngressKbps(event.target.value)
-                  }
-                  placeholder="Empty means disabled"
-                  type="number"
-                  value={trafficIngressKbps}
-                />
-              </label>
-              <label>
-                <span>Burst KB</span>
-                <input
-                  disabled={!trafficLimitEnabled}
-                  min={1}
-                  onChange={(event) => setTrafficBurstKb(event.target.value)}
-                  placeholder="Empty means disabled"
-                  type="number"
-                  value={trafficBurstKb}
-                />
-              </label>
-            </div>
-            <div
-              className={
-                runtimeKindConstraint
-                  ? "operationNote formSectionNote attention"
-                  : "operationNote formSectionNote"
-              }
-              id="tunnel-kind-runtime-constraint"
-              role={runtimeKindConstraint ? "alert" : undefined}
-            >
-              <strong>
-                {runtimeKindConstraint ??
-                  "Runtime owner and tunnel kind are compatible."}
-              </strong>
-            </div>
-            {form.kind === "fou" && (
-              <div className="dispatchControls">
-                <label>
-                  <span>FOU port</span>
-                  <input
-                    min={1}
-                    max={65535}
-                    onChange={(event) => setFouPort(event.target.value)}
-                    type="number"
-                    value={fouPort}
-                  />
-                </label>
-                <label>
-                  <span>FOU peer port</span>
-                  <input
-                    min={1}
-                    max={65535}
-                    onChange={(event) => setFouPeerPort(event.target.value)}
-                    type="number"
-                    value={fouPeerPort}
-                  />
-                </label>
-                <label>
-                  <span>FOU IP proto</span>
-                  <input
-                    min={1}
-                    max={255}
-                    onChange={(event) => setFouIpproto(event.target.value)}
-                    type="number"
-                    value={fouIpproto}
-                  />
-                </label>
-              </div>
             )}
-            {runtimeManager === "external_managed_adapter" && (
-              <>
-                <div className="dispatchControls">
-                  <label>
-                    <span>Start argv</span>
-                    <textarea
-                      value={runtimeStartupArgv}
-                      onChange={(event) =>
-                        setRuntimeStartupArgv(event.target.value)
-                      }
-                    />
-                  </label>
-                  <label>
-                    <span>Restart argv</span>
-                    <textarea
-                      value={runtimeRestartArgv}
-                      onChange={(event) =>
-                        setRuntimeRestartArgv(event.target.value)
-                      }
-                    />
-                  </label>
-                </div>
-                <div className="dispatchControls">
-                  <label>
-                    <span>Status argv</span>
-                    <textarea
-                      value={runtimeStatusArgv}
-                      onChange={(event) =>
-                        setRuntimeStatusArgv(event.target.value)
-                      }
-                    />
-                  </label>
-                  <label>
-                    <span>Stop argv</span>
-                    <textarea
-                      value={runtimeStopArgv}
-                      onChange={(event) =>
-                        setRuntimeStopArgv(event.target.value)
-                      }
-                    />
-                  </label>
-                </div>
-                <label>
-                  <span>Cleanup argv</span>
-                  <textarea
-                    value={runtimeCleanupArgv}
-                    onChange={(event) =>
-                      setRuntimeCleanupArgv(event.target.value)
-                    }
-                  />
-                </label>
-                <label>
-                  <span>Traffic argv</span>
-                  <textarea
-                    value={runtimeTrafficArgv}
-                    onChange={(event) =>
-                      setRuntimeTrafficArgv(event.target.value)
-                    }
-                  />
-                </label>
-              </>
-            )}
-            <details
-              className="operationNote formSectionNote topologyEvidenceDisclosure"
-              title="Optional desired/stale interface and route evidence helps later promotion and drift review."
-            >
-              <summary>Network evidence</summary>
-              <div className="dispatchControls">
-                <label>
-                  <span>Desired interfaces</span>
-                  <input
-                    value={topologyDesiredText}
-                    onChange={(event) =>
-                      setTopologyDesiredText(event.target.value)
-                    }
-                  />
-                </label>
-                <label>
-                  <span>Stale interfaces</span>
-                  <input
-                    value={topologyStaleText}
-                    onChange={(event) =>
-                      setTopologyStaleText(event.target.value)
-                    }
-                  />
-                </label>
-                <label>
-                  <span>Routes</span>
-                  <textarea
-                    value={topologyRoutesText}
-                    onChange={(event) =>
-                      setTopologyRoutesText(event.target.value)
-                    }
-                  />
-                </label>
-                <label>
-                  <span>Stale routes</span>
-                  <textarea
-                    value={topologyStaleRoutesText}
-                    onChange={(event) =>
-                      setTopologyStaleRoutesText(event.target.value)
-                    }
-                  />
-                </label>
-              </div>
-            </details>
-            <button
-              className="primaryAction"
-              disabled={
-                pending || !ready || Boolean(draftTunnelPlanBuild.error)
-              }
-              type="submit"
-            >
-              <Save size={17} />
-              Save plan
-            </button>
-          </form>
-        </section>
-      )}
-
-      {topologySubpage === "plans" && activePlanWorkflow === "promotion" && (
-        <section ref={planWorkflowRef} tabIndex={-1}>
-          <TopologyPromotionPanel
-            agents={agents}
-            onClose={() => setActivePlanWorkflow(null)}
-            onAllocateTunnelEndpoints={onAllocateTunnelEndpoints}
-            onPromoteTelemetryTunnel={onPromoteTelemetryTunnel}
-            onPromoteTunnelPlanToCustomAdapter={
-              onPromoteTunnelPlanToCustomAdapter
-            }
-            telemetryTunnels={telemetryTunnels}
-            tunnelPlans={tunnelPlans}
-          />
-        </section>
-      )}
-
-      {topologySubpage === "apply" && tunnelPlans.length > 0 && (
-        <TopologyNetworkTestControls
-          agents={agents}
-          networkTrends={networkTrends}
-          onCreateJob={onCreateJob}
-          onLoadTargets={onLoadTargets}
-          onOpenJobDetails={onOpenJobDetails}
-          onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
-          privilegeMaterial={privilegeMaterial}
-          setPrivilegeMaterial={setPrivilegeMaterial}
-          tunnelPlans={tunnelPlans}
-        />
-      )}
-      {topologySubpage === "ospf" && tunnelPlans.length > 0 && (
-        <>
-          <section className="fleetPanel">
-            <OspfCostModelNote />
-          </section>
-          <TopologyOspfUpdateControls
-            agents={agents}
-            ospfUpdatePlans={ospfUpdatePlans}
-            tunnelPlans={tunnelPlans}
-            onUpdateTunnelPlanOspfCost={onUpdateTunnelPlanOspfCost}
-            privilegeMaterial={privilegeMaterial}
-            setPrivilegeMaterial={setPrivilegeMaterial}
-          />
-        </>
-      )}
-
-      {topologySubpage === "evidence" && (
-        <TopologyEvidencePanel
-          clientLabel={clientLabel}
-          jobs={jobs}
-          observations={networkObservations}
-          onLoadTrends={onLoadNetworkTrends}
-          onLoadObservations={onLoadNetworkObservations}
-          onLoadOspfRecommendations={onLoadOspfRecommendations}
-          onLoadOspfUpdatePlans={onLoadOspfUpdatePlans}
-          onLoadOutputs={onLoadOutputs}
-          onOpenGraph={() => onSelectSubpage("graph")}
-          onOpenJobDetails={onOpenJobDetails}
-          onOpenOspfApprovals={() => onSelectSubpage("ospf")}
-          onOpenTests={() => onSelectSubpage("tests")}
-          onOpenTunnelPlans={() => onSelectSubpage("tunnel_plans")}
-          ospfRecommendations={ospfRecommendations}
-          ospfUpdatePlans={ospfUpdatePlans}
-          trends={networkTrends}
-        />
-      )}
-
-      {topologySubpage === "plans" &&
-        latestTunnelPlan &&
-        activePlanWorkflow === "config" && (
-          <section
-            className="fleetPanel topologyPreview"
-            ref={planWorkflowRef}
-            tabIndex={-1}
-          >
-            <div className="sectionHeader">
-              <div>
-                <h2>Latest generated config</h2>
-                <span>
-                  {runtimeManagerLabel(
-                    latestTunnelPlan.plan.runtime_control?.manager,
-                  )}
-                </span>
-              </div>
-              <div className="sectionActions">
-                <Route size={20} />
-                <button
-                  aria-label="Close generated config workflow"
-                  className="iconButton"
-                  onClick={() => setActivePlanWorkflow(null)}
-                  title="Close generated config workflow"
-                  type="button"
-                >
-                  <X size={18} />
-                </button>
-              </div>
+            <button className="secondaryAction compactAction" disabled={allocationPending || (!form.includeIpv4 && !form.includeIpv6)} onClick={() => void allocate()} title={!form.includeIpv4 && !form.includeIpv6 ? "Select IPv4 or IPv6 before allocating addresses" : "Allocate an unused endpoint pair from the configured pool"} type="button"><Settings2 size={14} />{allocationPending ? "Allocating" : "Allocate"}</button>
+          </div>
+          {form.includeIpv4 && (
+            <div className="topologyFormGrid fourColumn compactNumericGrid">
+              <Field label="IPv4 pool" tooltip="Optional. Leave empty to use the server-configured allocation pool."><input aria-label="IPv4 allocation pool" onChange={(event) => update("ipv4Pool", event.target.value)} placeholder="Configured pool" value={form.ipv4Pool} /></Field>
+              <Field label="Left IPv4"><input aria-label="Left tunnel IPv4" onChange={(event) => update("leftIpv4", event.target.value)} placeholder="10.255.0.0" value={form.leftIpv4} /></Field>
+              <Field label="Right IPv4"><input aria-label="Right tunnel IPv4" onChange={(event) => update("rightIpv4", event.target.value)} placeholder="10.255.0.1" value={form.rightIpv4} /></Field>
+              <Field label="Prefix"><UnitInput ariaLabel="IPv4 tunnel prefix" max={32} min={0} onChange={(value) => update("ipv4Prefix", value)} unit="bits" value={form.ipv4Prefix} /></Field>
             </div>
-            <div
-              aria-label="Generated runtime config review"
-              className="tunnelPlanWizardStrip generatedConfigReviewStrip"
-            >
-              {latestConfigReviewItems.map((item) => (
-                <div
-                  className={item.tone ?? ""}
-                  key={item.label}
-                  title={item.detail}
-                >
-                  <span>{item.label}</span>
-                  <strong>{item.value}</strong>
-                  <p>{item.detail}</p>
-                </div>
-              ))}
+          )}
+          {form.includeIpv6 && (
+            <div className="topologyFormGrid fourColumn compactNumericGrid">
+              <Field label="IPv6 pool" tooltip="Optional. Leave empty to use the server-configured allocation pool."><input aria-label="IPv6 allocation pool" onChange={(event) => update("ipv6Pool", event.target.value)} placeholder="Configured pool" value={form.ipv6Pool} /></Field>
+              <Field label="Left IPv6"><input aria-label="Left tunnel IPv6" onChange={(event) => update("leftIpv6", event.target.value)} placeholder="fd00::" value={form.leftIpv6} /></Field>
+              <Field label="Right IPv6"><input aria-label="Right tunnel IPv6" onChange={(event) => update("rightIpv6", event.target.value)} placeholder="fd00::1" value={form.rightIpv6} /></Field>
+              <Field label="Prefix"><UnitInput ariaLabel="IPv6 tunnel prefix" max={128} min={0} onChange={(value) => update("ipv6Prefix", value)} unit="bits" value={form.ipv6Prefix} /></Field>
             </div>
-            <details className="operationNote formSectionNote topologyGeneratedConfigDisclosure">
-              <summary>Advanced / generated config</summary>
-              <div className="generatedConfigSnippetGrid">
-                <div>
-                  <strong>{latestTunnelPlan.plan.ifupdown_file}</strong>
-                  <pre>{latestTunnelPlan.plan.ifupdown_snippet}</pre>
-                </div>
-                <div>
-                  <strong>{latestTunnelPlan.plan.bird2_file}</strong>
-                  <pre>{latestTunnelPlan.plan.bird2_interface_snippet}</pre>
-                </div>
+          )}
+        </fieldset>
+
+        <fieldset className="topologyFormSection ospfOptionalSection">
+          <legend>OSPF cost control</legend>
+          <label className="toggleLine" title="Optional external routing-cost control. Tunnel creation and observation do not require OSPF.">
+            <input checked={form.ospfEnabled} onChange={(event) => update("ospfEnabled", event.target.checked)} type="checkbox" />
+            <span><strong>Enable OSPF adapter workflow</strong><small>Off keeps this tunnel-only. Routing adapters are operator-owned; none are built in.</small></span>
+          </label>
+          {form.ospfEnabled && (
+            <>
+              <div className="topologyFormGrid twoColumn adapterBindingGrid">
+                <TemplateField clientId={form.leftClientId} label="Left routing adapter" onChange={(value) => update("leftRoutingTemplateId", value)} onOpenSourceTemplates={onOpenSourceTemplates} templates={leftRoutingTemplates} value={form.leftRoutingTemplateId} />
+                <TemplateField clientId={form.rightClientId} label="Right routing adapter" onChange={(value) => update("rightRoutingTemplateId", value)} onOpenSourceTemplates={onOpenSourceTemplates} templates={rightRoutingTemplates} value={form.rightRoutingTemplateId} />
               </div>
-            </details>
-          </section>
-        )}
-    </div>
-  );
+              <div className="topologyFormGrid ospfControlGrid">
+                <Field label="Control mode" tooltip="Reviewed waits for operator confirmation. Automatic is executed only by the server controller after configured health gates."><select aria-label="OSPF control mode" onChange={(event) => update("ospfMode", event.target.value as "reviewed" | "automatic")} value={form.ospfMode}><option value="reviewed">Reviewed</option><option value="automatic">Automatic</option></select></Field>
+                  <Field label="Planned latency" tooltip="Baseline round-trip latency used only until recent probe evidence exists."><UnitInput ariaLabel="Planned tunnel latency" min={0} onChange={(value) => update("plannedLatencyMs", value)} required step="0.1" unit="ms" value={form.plannedLatencyMs} /></Field>
+                  <Field label="Planned loss" tooltip="Baseline packet loss used for the planned cost preview; measured probes replace it when available."><UnitInput ariaLabel="Planned packet loss" max={100} min={0} onChange={(value) => update("packetLossPercent", value)} required step="0.01" unit="%" value={form.packetLossPercent} /></Field>
+                <Field label="Preference" tooltip="Values above 1 make the tunnel more preferred by lowering cost; values below 1 raise cost."><input aria-label="Tunnel preference" max={100} min={0.1} onChange={(event) => update("preference", event.target.value)} step="0.1" type="number" value={form.preference} /></Field>
+                <div className="topologyOspfPreviewInline" aria-label="Live OSPF cost preview" title={OSPF_COST_MODEL_DETAIL}><span>Cost</span><strong>{previewCost}</strong><small>live preview</small></div>
+              </div>
+              <details className="topologyAdvancedFields">
+                <summary title="Tune the automatic probe gate and the explicit cost formula. Reviewed mode also uses this formula but waits for confirmation.">Automatic gates and cost policy</summary>
+                <div className="topologyFormGrid fourColumn compactNumericGrid">
+                  <Field label="Minimum delta" tooltip="Ignore smaller differences between the current endpoint cost and the recommendation."><UnitInput ariaLabel="Minimum OSPF cost delta" max={65535} min={1} onChange={(value) => update("minCostDelta", value)} unit="cost" value={form.minCostDelta} /></Field>
+                  <Field label="Healthy probes" tooltip="Automatic mode requires this many consecutive healthy probes within the recent evidence window. Reviewed mode still shows the streak for judgment."><UnitInput ariaLabel="Required consecutive healthy OSPF probes" max={10} min={1} onChange={(value) => update("healthyWindows", value)} unit="probes" value={form.healthyWindows} /></Field>
+                  <Field label="Latency weight" tooltip="Multiplier applied to measured or planned latency in the cost formula."><input aria-label="OSPF latency weight" min={0} onChange={(event) => update("latencyWeight", event.target.value)} step="0.1" type="number" value={form.latencyWeight} /></Field>
+                  <Field label="Loss weight" tooltip="Multiplier applied to packet-loss ratio; higher values penalize lossy paths more strongly."><input aria-label="OSPF loss weight" min={0} onChange={(event) => update("lossWeight", event.target.value)} step="1" type="number" value={form.lossWeight} /></Field>
+                  <Field label="Bandwidth weight" tooltip="Multiplier for the diminishing-return bandwidth penalty across 10-10000 Mbps."><input aria-label="OSPF bandwidth weight" min={0} onChange={(event) => update("bandwidthWeight", event.target.value)} step="0.1" type="number" value={form.bandwidthWeight} /></Field>
+                  <Field label="Preference bias" tooltip="Global multiplier on computed cost before the per-plan preference divisor."><input aria-label="OSPF preference bias" min={0} onChange={(event) => update("preferenceBias", event.target.value)} step="0.1" type="number" value={form.preferenceBias} /></Field>
+                  <Field label="Minimum cost" tooltip="Lower clamp for the final OSPF cost."><input aria-label="Minimum OSPF cost" max={65535} min={1} onChange={(event) => update("minCost", event.target.value)} type="number" value={form.minCost} /></Field>
+                  <Field label="Maximum cost" tooltip="Upper clamp for the final OSPF cost."><input aria-label="Maximum OSPF cost" max={65535} min={1} onChange={(event) => update("maxCost", event.target.value)} type="number" value={form.maxCost} /></Field>
+                </div>
+              </details>
+            </>
+          )}
+        </fieldset>
 
-  function setField<K extends keyof CreateTunnelPlanRequest>(
-    key: K,
-    value: CreateTunnelPlanRequest[K],
-  ) {
-    setForm((current) => ({ ...current, [key]: value }));
-  }
-
-  function setRuntimeManager(manager: RuntimeTunnelManager) {
-    setForm((current) => ({
-      ...current,
-      kind:
-        manager === "agent_iproute2_managed" &&
-        !iproute2TunnelKinds.has(current.kind)
-          ? "gre"
-          : current.kind,
-      runtime_control: {
-        ...(current.runtime_control ?? { traffic_limit: {} }),
-        manager,
-      },
-    }));
-  }
-
-  function setEndpointClient(side: "left" | "right", clientId: string) {
-    setForm((current) => {
-      const clientKey = side === "left" ? "left_client_id" : "right_client_id";
-      const underlayKey = side === "left" ? "left_underlay" : "right_underlay";
-      return {
-        ...current,
-        [clientKey]: clientId,
-        [underlayKey]: autoUnderlayValue(
-          current[underlayKey],
-          current[clientKey],
-          clientId,
-          agents,
-        ),
-      };
-    });
-  }
-
-  function setAddressCidr(
-    key: "ipv4_tunnel" | "ipv6_tunnel",
-    side: "left" | "right",
-    value: string,
-    fallbackPrefix: number,
-  ) {
-    setForm((current) => {
-      const currentPair = current[key] ?? {
-        left: "",
-        right: "",
-        prefix_len: fallbackPrefix,
-      };
-      const parsed = parseEndpointCidr(value, currentPair.prefix_len);
-      const nextPair = {
-        ...currentPair,
-        [side]: parsed.address,
-        prefix_len: parsed.prefix_len,
-      };
-      return { ...current, [key]: normalizePair(nextPair) };
-    });
-  }
-
-  function setTunnelPlanEnabledForRows(
-    rows: TunnelPlanRecord[],
-    enabled: boolean,
-  ) {
-    const targets = rows.filter((plan) => plan.enabled !== enabled);
-    if (targets.length === 0) {
-      return;
-    }
-    setActionError(null);
-    if (!enabled) {
-      const blocked = targets.filter(customAdapterRemoveUnavailable);
-      if (blocked.length > 0) {
-        setActionError(
-          `Add stop or cleanup argv before disabling custom adapter plan${blocked.length === 1 ? "" : "s"}: ${blocked.map((plan) => plan.name).join(", ")}`,
-        );
-        return;
-      }
-    }
-    const syncTargetLabels = Array.from(
-      new Set(
-        targets.flatMap((plan) => [
-          reviewedClientLabel(plan.left_client_id),
-          reviewedClientLabel(plan.right_client_id),
-        ]),
-      ),
-    );
-    setTunnelPlanToggleSnapshot({
-      enabled,
-      endpointPairs: targets.map(
-        (plan) =>
-          `${reviewedClientLabel(plan.left_client_id)} -> ${reviewedClientLabel(plan.right_client_id)}`,
-      ),
-      planIds: targets.map((plan) => plan.id),
-      planNames: targets.map((plan) => plan.name),
-      syncTargetLabels,
-    });
-  }
-
-  async function executeTunnelPlanToggle(snapshot: TunnelPlanToggleSnapshot) {
-    await runPanelAction(
-      setTunnelPlanTogglePending,
-      setActionError,
-      async () => {
-        await onSetTunnelPlanEnabled(snapshot.planIds, snapshot.enabled);
-        setTunnelPlanToggleSnapshot(null);
-      },
-    );
-  }
-
-  async function applyAutomationBulk(rows: AutomationRow[], enabled: boolean) {
-    if (!privilegeMaterial) {
-      setAutomationBulkFeedbackTone("danger");
-      setAutomationBulkStatus("Privilege unlock required");
-      onOpenPrivilegeUnlock();
-      return;
-    }
-    const targets = rows.filter((row) => row.endpointCount > 0);
-    if (targets.length === 0) {
-      setAutomationBulkFeedbackTone("danger");
-      setAutomationBulkStatus("No endpoint targets selected");
-      return;
-    }
-    setAutomationBulkFeedbackTone("progress");
-    setAutomationBulkStatus(
-      `${enabled ? "Enabling" : "Disabling"} monitoring defaults on ${targets.length} VPS${targets.length === 1 ? "" : "s"}`,
-    );
-    await runPanelAction(
-      setAutomationBulkPending,
-      (message) => {
-        if (message === null) {
-          return;
-        }
-        setAutomationBulkFeedbackTone("danger");
-        setAutomationBulkStatus(message);
-      },
-      async () => {
-        const targetClientIds = targets.map((target) => target.clientId);
-        const selectorExpression =
-          selectorExpressionForClientIds(targetClientIds);
-        const toml = buildMonitoringConfigPatchToml(enabled);
-        const payloadHash = await sha256Hex(new TextEncoder().encode(toml));
-        const privilegeAssertion = await buildPrivilegeAssertion({
-          intent: canonicalDbPrivilegeIntent({
-            action: "runtime_config.patch",
-            target: "runtime_config",
-            selectorExpression,
-            resolvedTargets: targetClientIds,
-            confirmed: true,
-            payloadHash,
-          }),
-          privilegeMaterial,
-        });
-        const response = await onSubmitRuntimeConfigPatch({
-          confirmed: true,
-          reason: enabled
-            ? "Enable tunnel monitoring defaults"
-            : "Disable tunnel monitoring defaults",
-          selector_expression: selectorExpression,
-          target_client_ids: targetClientIds,
-          toml,
-          privilege_assertion: privilegeAssertion,
-        });
-        setAutomationBulkFeedbackTone("success");
-        setAutomationBulkStatus(
-          `${enabled ? "Enabled" : "Disabled"} monitoring defaults on ${response.target_count} VPSs; ${response.sync_job_ids.length} sync jobs`,
-        );
-      },
-    );
-  }
-}
-
-function splitReserved(value: string): string[] {
-  return value
-    .split(",")
-    .map((part) => part.trim())
-    .filter(Boolean);
-}
-
-function formatReservedAddresses(addresses: string[]): string {
-  return addresses.join(", ");
-}
-
-function mergeReservedAddresses(
-  existing: string[],
-  additions: string[],
-): string[] {
-  const seen = new Set<string>();
-  const merged: string[] = [];
-  for (const address of [...existing, ...additions]) {
-    const trimmed = address.trim();
-    if (!trimmed || seen.has(trimmed)) {
-      continue;
-    }
-    seen.add(trimmed);
-    merged.push(trimmed);
-  }
-  return merged;
-}
-
-function currentTunnelAddresses(form: CreateTunnelPlanRequest): string[] {
-  return [
-    ...addressPairValues(form.ipv4_tunnel ?? null),
-    ...addressPairValues(form.ipv6_tunnel ?? null),
-  ];
-}
-
-function buildTunnelPlanReviewItems({
-  clientLabel,
-  draftError,
-  form,
-  ready,
-  request,
-  reservedAddresses,
-  savedPlans,
-  trafficLimitEnabled,
-}: {
-  clientLabel: (clientId: string) => string;
-  draftError: string | null;
-  form: CreateTunnelPlanRequest;
-  ready: boolean;
-  request: CreateTunnelPlanRequest | null;
-  reservedAddresses: string[];
-  savedPlans: TunnelPlanRecord[];
-  trafficLimitEnabled: boolean;
-}): TunnelPlanReviewItem[] {
-  const hasEndpointPair = Boolean(
-    form.left_client_id &&
-    form.right_client_id &&
-    form.left_client_id !== form.right_client_id,
-  );
-  const hasUnderlays = Boolean(
-    form.left_underlay.trim() && form.right_underlay.trim(),
-  );
-  const addresses = currentTunnelAddresses(form);
-  const addressReview = buildAddressValidationReview(
-    form,
-    reservedAddresses,
-    savedPlans,
-  );
-  const runtimeReview = buildRuntimeReview(
-    form,
-    request,
-    draftError,
-    trafficLimitEnabled,
-  );
-  const identityReady = Boolean(form.name.trim() && form.interface_name.trim());
-  const endpointAndTypeReady = hasEndpointPair && hasUnderlays && identityReady;
-  const addressReady =
-    addresses.length > 0 && addressReview.tone !== "attention";
-  const reviewReady =
-    ready && !draftError && runtimeReview.tone !== "attention";
-  const previewCost = calculateOspfCostPreview({
-    bandwidthMbps: form.bandwidth_mbps,
-    latencyMs: form.latency_ms,
-    packetLossRatio: form.packet_loss_ratio,
-    preference: form.preference,
-  });
-  return [
-    {
-      detail: hasEndpointPair
-        ? `Type ${form.kind.toUpperCase()} on ${form.interface_name || "missing interface"}; underlay ${form.left_underlay || "missing"} -> ${form.right_underlay || "missing"}; OSPF ${previewCost} from ${formatBandwidthMbps(form.bandwidth_mbps)}.`
-        : "Name the plan, choose tunnel type, then select exactly two VPS endpoints before address allocation.",
-      label: "1 Endpoints & type",
-      tone: endpointAndTypeReady ? "ready" : "attention",
-      value:
-        hasEndpointPair && form.name.trim()
-          ? `${form.kind.toUpperCase()} / ${clientLabel(form.left_client_id)} -> ${clientLabel(form.right_client_id)}`
-          : `${form.kind.toUpperCase()} / missing inputs`,
-    },
-    {
-      detail:
-        addresses.length > 0
-          ? `${addressReview.value}: ${addressReview.detail}. Primary latency family ${addressFamilyLabel(form.latency_primary_family)}; allocator pool ${form.address_pool_cidr || form.ipv6_address_pool_cidr || "not set"}.`
-          : "Enter endpoint CIDRs or allocate them from the configured pool before collision checks can run.",
-      label: "2 Addresses & routing",
-      tone: addressReady ? "ready" : "attention",
-      value:
-        addresses.length > 0
-          ? formatDraftAddressSummary(form)
-          : "Allocate or enter CIDRs",
-    },
-    {
-      detail: [
-        runtimeReview.detail,
-        ready
-          ? "After save, run status, probe, and speed-test jobs from Network / Tests before promotion."
-          : "Create remains blocked until identity, endpoints, underlays, and addresses are valid.",
-        form.enabled ? "Enable after save is on." : "Enable after save is off.",
-      ].join(" "),
-      label: "3 Review & create",
-      tone: reviewReady ? "ready" : "attention",
-      value: draftError
-        ? "Invalid draft"
-        : ready
-          ? form.enabled
-            ? "Save enabled"
-            : "Save draft"
-          : "Blocked",
-    },
-  ];
-}
-
-function buildAddressValidationReview(
-  form: CreateTunnelPlanRequest,
-  reservedAddresses: string[],
-  savedPlans: TunnelPlanRecord[],
-): TunnelPlanReviewItem {
-  const addresses = currentTunnelAddresses(form);
-  if (addresses.length === 0) {
-    return {
-      detail:
-        "No endpoint CIDRs are present yet, so overlap and saved-plan collision checks cannot run.",
-      label: "4 Validate",
-      tone: "attention",
-      value: "Needs endpoints",
-    };
-  }
-  const duplicateDrafts = duplicateValues(addresses);
-  const reservedSet = new Set(
-    reservedAddresses.map((address) => address.trim()).filter(Boolean),
-  );
-  const reservedOverlap = addresses.filter((address) =>
-    reservedSet.has(address),
-  );
-  const savedAddressOwners = savedTunnelAddressOwners(savedPlans);
-  const savedOverlap = addresses
-    .map((address) => ({
-      address,
-      owners: savedAddressOwners.get(address) ?? [],
-    }))
-    .filter((entry) => entry.owners.length > 0);
-  const prefixWarnings = draftPrefixWarnings(form);
-  const issues = [
-    ...duplicateDrafts.map((address) => `duplicate draft address ${address}`),
-    ...reservedOverlap.map((address) => `reserved address ${address}`),
-    ...savedOverlap.map(
-      (entry) =>
-        `${entry.address} already used by ${entry.owners.slice(0, 2).join(", ")}`,
-    ),
-    ...prefixWarnings,
-  ];
-  if (issues.length > 0) {
-    return {
-      detail:
-        issues.slice(0, 3).join("; ") +
-        (issues.length > 3 ? `; ${issues.length - 3} more` : ""),
-      label: "4 Validate",
-      tone: "attention",
-      value: `${issues.length} collision signal${issues.length === 1 ? "" : "s"}`,
-    };
-  }
-  return {
-    detail:
-      "Draft endpoints have no exact duplicate, reserved-address, saved-plan, or point-to-point prefix collision visible in the console.",
-    label: "4 Validate",
-    tone: "ready",
-    value: "No visible overlap",
-  };
-}
-
-function buildRuntimeReview(
-  form: CreateTunnelPlanRequest,
-  request: CreateTunnelPlanRequest | null,
-  draftError: string | null,
-  trafficLimitEnabled: boolean,
-): TunnelPlanReviewItem {
-  if (draftError) {
-    return {
-      detail: draftError,
-      label: "6 Review config",
-      tone: "attention",
-      value: "Invalid draft",
-    };
-  }
-  const runtime = request?.runtime_control ?? form.runtime_control;
-  const manager = runtimeManagerLabel(runtime?.manager);
-  const topology = request?.runtime_topology ?? {};
-  const routeCount =
-    (topology.routes?.length ?? 0) + (topology.stale_routes?.length ?? 0);
-  const adapterRequired = runtime?.manager === "external_managed_adapter";
-  const adapterHasStatus = Boolean(runtime?.status?.argv?.length);
-  return {
-    detail: [
-      trafficLimitEnabled
-        ? "traffic shaping configured"
-        : "traffic shaping off",
-      adapterRequired
-        ? adapterHasStatus
-          ? "adapter status argv present"
-          : "adapter status argv missing"
-        : "agent or external lifecycle selected",
-      routeCount > 0
-        ? `${routeCount} route evidence entr${routeCount === 1 ? "y" : "ies"}`
-        : "no route evidence",
-    ].join("; "),
-    label: "6 Review config",
-    tone: adapterRequired && !adapterHasStatus ? "attention" : "ready",
-    value: manager,
-  };
-}
-
-function buildGeneratedConfigReviewItems(
-  plan: TunnelPlanRecord,
-  clientLabel: (clientId: string) => string,
-): TunnelPlanReviewItem[] {
-  const generated = plan.plan;
-  const conflicts = generated.conflicts ?? [];
-  const validation = generated.validation_steps ?? [];
-  const rollback = generated.rollback_notes ?? [];
-  const touchedFiles = generated.touched_files ?? [];
-  return [
-    {
-      detail: `${clientLabel(plan.left_client_id)} -> ${clientLabel(plan.right_client_id)} on ${generated.interface_name}.`,
-      label: "Plan",
-      tone: plan.enabled ? "ready" : "attention",
-      value: `${plan.name} / ${plan.kind.toUpperCase()}`,
-    },
-    {
-      detail:
-        touchedFiles.join("; ") || "No runtime files reported by generator.",
-      label: "Touched files",
-      tone: touchedFiles.length > 0 ? "ready" : "attention",
-      value: `${touchedFiles.length} file${touchedFiles.length === 1 ? "" : "s"}`,
-    },
-    {
-      detail:
-        validation.slice(0, 2).join("; ") ||
-        "No validation steps were returned with this generated plan.",
-      label: "Validation",
-      tone: validation.length > 0 ? "ready" : "attention",
-      value: `${validation.length} step${validation.length === 1 ? "" : "s"}`,
-    },
-    {
-      detail:
-        conflicts.slice(0, 2).join("; ") ||
-        "Generated plan reported no conflicts.",
-      label: "Conflicts",
-      tone: conflicts.length > 0 ? "attention" : "ready",
-      value:
-        conflicts.length > 0
-          ? `${conflicts.length} conflict${conflicts.length === 1 ? "" : "s"}`
-          : "None",
-    },
-    {
-      detail:
-        rollback.slice(0, 2).join("; ") ||
-        "No rollback notes returned with this generated plan.",
-      label: "Rollback",
-      tone: rollback.length > 0 ? "ready" : "attention",
-      value: `${rollback.length} note${rollback.length === 1 ? "" : "s"}`,
-    },
-    {
-      detail: generated.mutates_host
-        ? "Generator says this plan mutates host runtime state when applied."
-        : "Save stores topology state; apply still requires the explicit runtime lifecycle.",
-      label: "Runtime diff",
-      tone: generated.mutates_host ? "attention" : "ready",
-      value: generated.mutates_host ? "Host-mutating" : "Review-only save",
-    },
-  ];
-}
-
-function formatDraftAddressSummary(form: CreateTunnelPlanRequest): string {
-  const ipv4 = completePairOrNull(form.ipv4_tunnel ?? null);
-  const ipv6 = completePairOrNull(form.ipv6_tunnel ?? null);
-  if (ipv4 && ipv6) {
-    return `IPv4 ${formatAddressPair(ipv4)} / IPv6 ${formatAddressPair(ipv6)}`;
-  }
-  if (ipv4) {
-    return `IPv4 ${formatAddressPair(ipv4)}`;
-  }
-  if (ipv6) {
-    return `IPv6 ${formatAddressPair(ipv6)}`;
-  }
-  return "Allocate or enter CIDRs";
-}
-
-function duplicateValues(values: string[]): string[] {
-  const seen = new Set<string>();
-  const duplicates = new Set<string>();
-  for (const value of values) {
-    if (seen.has(value)) {
-      duplicates.add(value);
-    }
-    seen.add(value);
-  }
-  return [...duplicates];
-}
-
-function savedTunnelAddressOwners(
-  plans: TunnelPlanRecord[],
-): Map<string, string[]> {
-  const owners = new Map<string, string[]>();
-  for (const plan of plans) {
-    for (const address of [
-      ...addressPairValues(plan.plan.ipv4_tunnel ?? null),
-      ...addressPairValues(plan.plan.ipv6_tunnel ?? null),
-      plan.plan.left_tunnel_address,
-      plan.plan.right_tunnel_address,
-    ]) {
-      if (!address) {
-        continue;
-      }
-      const list = owners.get(address) ?? [];
-      list.push(plan.name);
-      owners.set(address, list);
-    }
-  }
-  return owners;
-}
-
-function draftPrefixWarnings(form: CreateTunnelPlanRequest): string[] {
-  const warnings: string[] = [];
-  if (
-    form.ipv4_tunnel &&
-    (form.ipv4_tunnel.prefix_len < 0 || form.ipv4_tunnel.prefix_len > 32)
-  ) {
-    warnings.push(
-      `IPv4 prefix /${form.ipv4_tunnel.prefix_len} is outside 0-32`,
-    );
-  }
-  if (
-    form.ipv6_tunnel &&
-    (form.ipv6_tunnel.prefix_len < 0 || form.ipv6_tunnel.prefix_len > 128)
-  ) {
-    warnings.push(
-      `IPv6 prefix /${form.ipv6_tunnel.prefix_len} is outside 0-128`,
-    );
-  }
-  if (
-    form.ipv4_tunnel &&
-    form.ipv4_tunnel.left &&
-    form.ipv4_tunnel.right &&
-    form.ipv4_tunnel.prefix_len !== 31
-  ) {
-    warnings.push(
-      `IPv4 point-to-point prefix is /${form.ipv4_tunnel.prefix_len}, expected /31`,
-    );
-  }
-  if (
-    form.ipv6_tunnel &&
-    form.ipv6_tunnel.left &&
-    form.ipv6_tunnel.right &&
-    form.ipv6_tunnel.prefix_len !== 127
-  ) {
-    warnings.push(
-      `IPv6 point-to-point prefix is /${form.ipv6_tunnel.prefix_len}, expected /127`,
-    );
-  }
-  return warnings;
-}
-
-function addressPairValues(pair: TunnelAddressPair | null): string[] {
-  if (!pair) {
-    return [];
-  }
-  return [pair.left, pair.right].filter(Boolean);
-}
-
-function formatEndpointCidr(
-  pair: TunnelAddressPair | null,
-  side: "left" | "right",
-): string {
-  const address = side === "left" ? pair?.left : pair?.right;
-  if (!pair || !address) {
-    return "";
-  }
-  return `${address}/${pair.prefix_len}`;
-}
-
-function parseEndpointCidr(
-  value: string,
-  fallbackPrefix: number,
-): { address: string; prefix_len: number } {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return { address: "", prefix_len: fallbackPrefix };
-  }
-  const slashIndex = trimmed.lastIndexOf("/");
-  if (slashIndex < 0) {
-    return { address: trimmed, prefix_len: fallbackPrefix };
-  }
-  const address = trimmed.slice(0, slashIndex).trim();
-  const rawPrefix = Number(trimmed.slice(slashIndex + 1).trim());
-  const prefix_len = Number.isFinite(rawPrefix)
-    ? Math.trunc(rawPrefix)
-    : fallbackPrefix;
-  return { address, prefix_len };
-}
-
-function defaultUnderlayForAgent(
-  agents: AgentView[],
-  clientId: string,
-): string {
-  const agent = agents.find((candidate) => candidate.id === clientId);
-  return agent?.last_ip?.trim() || agent?.registration_ip?.trim() || "";
-}
-
-function autoUnderlayValue(
-  currentValue: string,
-  currentClientId: string,
-  nextClientId: string,
-  agents: AgentView[],
-): string {
-  const nextAuto = defaultUnderlayForAgent(agents, nextClientId);
-  if (!nextAuto) {
-    return currentValue;
-  }
-  const currentAuto = defaultUnderlayForAgent(agents, currentClientId);
-  const currentTrimmed = currentValue.trim();
-  if (!currentTrimmed || currentTrimmed === currentAuto) {
-    return nextAuto;
-  }
-  return currentValue;
-}
-
-function customAdapterRemoveUnavailable(plan: TunnelPlanRecord): boolean {
-  const control = plan.plan.runtime_control;
-  return (
-    control?.manager === "external_managed_adapter" &&
-    !control.stop?.argv?.length &&
-    !control.cleanup?.argv?.length
-  );
-}
-
-function initialTunnelPlanForm(): CreateTunnelPlanRequest {
-  return {
-    name: "",
-    interface_name: "tun0",
-    kind: "gre",
-    runtime_control: { manager: "agent_iproute2_managed", traffic_limit: {} },
-    runtime_topology: {},
-    left_client_id: "",
-    right_client_id: "",
-    left_underlay: "",
-    right_underlay: "",
-    address_pool_cidr: "",
-    reserved_addresses: [],
-    ipv4_tunnel: null,
-    ipv6_address_pool_cidr: "",
-    ipv6_tunnel: null,
-    latency_primary_family: "ipv4",
-    bandwidth_mbps: 100,
-    latency_ms: 20,
-    packet_loss_ratio: 0,
-    preference: 1,
-    enabled: false,
-    confirmed: false,
-  };
-}
-
-function runtimeKindConstraintMessage(
-  manager: RuntimeTunnelManager,
-  kind: TunnelKind,
-): string | null {
-  if (manager !== "agent_iproute2_managed" || iproute2TunnelKinds.has(kind)) {
-    return null;
-  }
-  return "Agent iproute2 supports GRE, IPIP, SIT, or FOU only. Use External observed or Custom adapter for OpenVPN, WireGuard, TUN/TAP, or custom tunnels.";
-}
-
-function saveBlob(blob: Blob, name: string) {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = name || "plan.json";
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-}
-
-function safeFileName(value: string): string {
-  return (
-    value
-      .trim()
-      .replace(/[^A-Za-z0-9._-]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "tunnel-plan"
-  );
-}
-
-function normalizePair(pair: TunnelAddressPair): TunnelAddressPair | null {
-  if (!pair.left && !pair.right) {
-    return null;
-  }
-  return pair;
-}
-
-function hasAddressSource(form: CreateTunnelPlanRequest): boolean {
-  return Boolean(
-    completePairOrNull(form.ipv4_tunnel ?? null) ||
-    completePairOrNull(form.ipv6_tunnel ?? null),
-  );
-}
-
-function completePairOrNull(
-  pair: TunnelAddressPair | null,
-): TunnelAddressPair | null {
-  if (!pair?.left || !pair.right) {
-    return null;
-  }
-  return pair;
-}
-
-function buildMonitoringConfigPatchToml(enabled: boolean): string {
-  return tomlDocument({
-    network: {
-      runtime_status_telemetry_enabled: true,
-      latency_monitoring_enabled: enabled,
-      auto_ospf_enabled: enabled,
-    },
-  });
-}
-
-function OspfCostModelNote({ action }: { action?: ReactNode }) {
-  return (
-    <div
-      className="operationNote formSectionNote compactModelNote topologyPlanModelNote"
-      title={OSPF_COST_MODEL_DETAIL}
-    >
-      <div>
-        <strong>OSPF cost model</strong>
-        <span>{OSPF_COST_MODEL_SUMMARY}</span>
-      </div>
-      {action}
-    </div>
-  );
-}
-
-function TunnelPlanGridDetail({
-  clientLabel,
-  plan,
-}: {
-  clientLabel: (clientId: string) => string;
-  plan: TunnelPlanRecord;
-}) {
-  return (
-    <div className="gridDetailLine">
-      <strong>{plan.name}</strong>
-      <span>{plan.enabled ? "enabled" : "disabled"}</span>
-      <span className="monoCell">interface {plan.plan.interface_name}</span>
-      <span>
-        {plan.kind.toUpperCase()} /{" "}
-        {runtimeManagerLabel(plan.plan.runtime_control?.manager)}
-      </span>
-      <span>
-        {clientLabel(plan.left_client_id)} underlay {plan.plan.left_underlay}
-      </span>
-      <span>
-        {clientLabel(plan.right_client_id)} underlay {plan.plan.right_underlay}
-      </span>
-      <span>IPv4 {formatAddressPair(plan.plan.ipv4_tunnel)}</span>
-      <span>IPv6 {formatAddressPair(plan.plan.ipv6_tunnel)}</span>
-      <span>
-        primary {addressFamilyLabel(plan.plan.latency_primary_family)}
-      </span>
-      <span>loss {(plan.plan.packet_loss_ratio * 100).toFixed(1)}%</span>
-      <span>preference {plan.plan.preference}</span>
-      <span>
-        L {readableTelemetryToken(plan.left_status)} / R{" "}
-        {readableTelemetryToken(plan.right_status)}
-      </span>
-      {plan.last_apply_job_id && (
-        <span>apply {shortId(plan.last_apply_job_id)}</span>
-      )}
-      {plan.last_rollback_job_id && (
-        <span>rollback {shortId(plan.last_rollback_job_id)}</span>
-      )}
-    </div>
-  );
-}
-
-function AutomationGridDetail({ row }: { row: AutomationRow }) {
-  if (row.tunnels.length === 0) {
-    return (
-      <div className="gridDetailLine">
-        <strong>{row.label}</strong>
-        <span>{row.endpointCount} saved endpoints</span>
-        <span>No latest tunnel telemetry reports</span>
-      </div>
-    );
-  }
-  return (
-    <div className="networkInterfaceList">
-      {row.tunnels.map((tunnel) => (
-        <div
-          className={`networkInterfaceRow ${telemetryTunnelRowClass(tunnel)}`}
-          key={`${tunnel.client_id}:${tunnel.interface}:${tunnel.plan_id ?? tunnel.plan_name ?? ""}`}
-        >
-          <TelemetryCell
-            detail={`${readableTelemetryToken(tunnel.kind)}; ${endpointSideLabel(tunnel.endpoint_side)}`}
-            main={tunnel.interface}
-            title={`${readableTelemetryToken(tunnel.kind)}; ${endpointSideLabel(tunnel.endpoint_side)}; ${telemetrySourceLabel(tunnel.source)}; ${planCorrelationLabel(tunnel.plan_correlation)}; ${mutationPolicyLabel(tunnel.mutation_policy)}`}
-          />
-          <TelemetryCell
-            detail={formatAutomationLatencyShort(tunnel)}
-            main={formatTunnelLatencySummary(tunnel)}
-            title={formatAutomationLatencyDetail(tunnel)}
-            tone={latencyTone(tunnel.latency_status)}
-          />
-          <TelemetryCell
-            detail={formatAutomationOspfShort(tunnel, row.ospfProposalLookup)}
-            main={formatTunnelOspfSummary(tunnel)}
-            title={formatAutomationOspfDetail(tunnel, row.ospfProposalLookup)}
-            tone={ospfTone(tunnel.auto_ospf_status)}
-          />
-          <TelemetryCell
-            detail={`observed ${formatTime(tunnel.observed_at)}; ${tunnel.peer_client_id ?? "peer unknown"}`}
-            main={formatTunnelCostSummary(tunnel, row.ospfProposalLookup)}
-            title={`observed ${formatTime(tunnel.observed_at)}; peer ${tunnel.peer_client_id ?? "unknown"}`}
-          />
+        <div className="tunnelComposerFooter">
+          <label className="toggleLine compactToggle">
+            <input checked={form.enabled} onChange={(event) => update("enabled", event.target.checked)} type="checkbox" />
+            <span><strong>{existing ? "Enabled after update" : "Enable after save"}</strong><small>Push runtime state to both endpoints immediately.</small></span>
+          </label>
+          <div className="dispatchActions">
+            <button className="secondaryAction" onClick={onClose} type="button">Cancel</button>
+            <button className="primaryAction" disabled={pending || unchanged} title={pending ? "Saving tunnel plan" : unchanged ? "No tunnel plan changes to review" : validationError ?? "Review the exact declaration before saving"} type="submit"><CirclePlus size={16} />{existing ? "Review update" : "Review plan"}</button>
+          </div>
         </div>
-      ))}
+      </form>
+      <ConfirmationPrompt
+        confirmLabel={existing ? "Update plan" : "Save plan"}
+        detail="Save this exact declaration. When enabled, vpsman pushes only the declared runtime plan and adapter template snapshots to the two selected agents."
+        items={snapshot ? createConfirmationItems(snapshot, existing ?? undefined, sourceTemplates) : []}
+        onCancel={() => setSnapshot(null)}
+        onConfirm={() => snapshot && void confirmCreate(snapshot)}
+        open={snapshot !== null}
+        pending={pending}
+        title={existing ? "Confirm tunnel plan update" : "Confirm tunnel plan creation"}
+        tone="normal"
+      />
+    </section>
+  );
+}
+
+function ManagerChoice({ active, detail, label, onClick }: { active: boolean; detail: string; label: string; onClick: () => void }) {
+  return (
+    <button aria-pressed={active} className={active ? "isActive" : undefined} onClick={onClick} title={detail} type="button">
+      <strong>{label}</strong><small>{detail}</small>
+    </button>
+  );
+}
+
+function TemplateField({ clientId, label, onChange, onOpenSourceTemplates, templates, value }: { clientId: string; label: string; onChange: (value: string) => void; onOpenSourceTemplates: () => void; templates: SourceTemplateRecord[]; value: string }) {
+  return (
+    <div className="topologyField" title="The source template stores direct absolute argv. The agent never installs or edits the script.">
+      <span>{label}</span>
+      <div className="templateSelectRow">
+        <select aria-label={label} disabled={!clientId || templates.length === 0} onChange={(event) => onChange(event.target.value)} value={value}>
+          <option value="">{!clientId ? "Select endpoint first" : templates.length === 0 ? "No compatible templates" : "Select template"}</option>
+          {templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}
+        </select>
+        <button aria-label={`Open source templates for ${label}`} className="iconAction" onClick={onOpenSourceTemplates} title="Open Automation / Source templates" type="button"><ExternalLink size={15} /></button>
+      </div>
     </div>
   );
 }
 
-function buildAutomationRows(
-  agents: AgentView[],
-  tunnels: TelemetryTunnelRecord[],
-  tunnelPlans: TunnelPlanRecord[],
-  clientLabel: (clientId: string) => string,
-  ospfProposalLookup: OspfProposalLookup,
-) {
-  return agents.map((agent) => {
-    const endpointCount = tunnelPlans.filter(
-      (record) =>
-        record.enabled &&
-        (record.plan.left_client_id === agent.id ||
-          record.plan.right_client_id === agent.id),
-    ).length;
-    const owned = tunnels.filter(
-      (tunnel) => tunnel.client_id === agent.id && tunnel.plan_name,
-    );
-    const monitoredCount = owned.filter(
-      (tunnel) => tunnel.latency_monitoring_enabled,
-    ).length;
-    const latencyStates = summarizeStates(
-      owned.map((tunnel) => tunnel.latency_status).filter(Boolean) as string[],
-      latencyStatusLabel,
-    );
-    const autoStates = summarizeStates(
-      owned
-        .map((tunnel) => tunnel.auto_ospf_status)
-        .filter(Boolean) as string[],
-      (status) => ospfStatusLabel(status, true),
-    );
-    const prioritized = owned.slice().sort(compareTunnelUrgency);
-    const costs = owned
-      .filter(
-        (tunnel) =>
-          ospfProposalForTunnel(tunnel, ospfProposalLookup) ||
-          tunnel.auto_ospf_current_cost ||
-          tunnel.auto_ospf_recommended_cost,
-      )
-      .map((tunnel) => formatTunnelCostPair(tunnel, ospfProposalLookup));
-    const unreportedCount = Math.max(endpointCount - owned.length, 0);
-    const latestObserved = latestIso(owned.map((tunnel) => tunnel.observed_at));
-    return {
-      clientId: agent.id,
-      endpointCount,
-      label: clientLabel(agent.id),
-      ospfProposalLookup,
-      monitored:
-        endpointCount === 0
-          ? "No tunnel endpoints"
-          : `${monitoredCount}/${endpointCount}`,
-      latency: latencyStates || "No samples",
-      latencyDetail:
-        prioritized
-          .map(formatAutomationLatencyShort)
-          .filter(Boolean)
-          .slice(0, 2)
-          .join(" · ") ||
-        (endpointCount > 0
-          ? `${owned.length}/${endpointCount} endpoint reports`
-          : "No saved tunnel endpoints"),
-      latencyTitle:
-        prioritized
-          .map(formatAutomationLatencyDetail)
-          .filter(Boolean)
-          .slice(0, 4)
-          .join(" | ") ||
-        (endpointCount > 0
-          ? `${owned.length}/${endpointCount} endpoint reports`
-          : "No saved tunnel endpoints"),
-      latencyTone: automationLatencyTone(owned),
-      autoOspf: autoStates || "Monitoring only",
-      autoOspfDetail:
-        prioritized
-          .map((tunnel) =>
-            formatAutomationOspfShort(tunnel, ospfProposalLookup),
-          )
-          .filter(Boolean)
-          .slice(0, 2)
-          .join(" · ") || "No updater report",
-      autoOspfTitle:
-        prioritized
-          .map((tunnel) =>
-            formatAutomationOspfDetail(tunnel, ospfProposalLookup),
-          )
-          .filter(Boolean)
-          .slice(0, 4)
-          .join(" | ") || "External updater not reporting",
-      autoOspfTone: automationOspfTone(owned),
-      cost: costs.slice(0, 3).join(", ") || "No updater cost",
-      costDetail:
-        costs.length > 3
-          ? `${costs.length - 3} more observed updater reports`
-          : "observed runtime report; OSPF review owns the proposal",
-      tunnels: prioritized,
-      urgency: prioritized[0] ? tunnelUrgency(prioritized[0]) : 0,
-      lastReport: latestObserved ? formatCompactTime(latestObserved) : "No report",
-      lastReportTitle: latestObserved ? formatTime(latestObserved) : "No report",
-      reportDetail:
-        unreportedCount > 0
-          ? `${unreportedCount} saved endpoint${unreportedCount === 1 ? "" : "s"} without telemetry`
-          : `${owned.length} latest tunnel report${owned.length === 1 ? "" : "s"}`,
-    };
-  });
+function Field({ children, label, tooltip }: { children: React.ReactNode; label: string; tooltip?: string }) {
+  return <label title={tooltip}><span>{label}</span>{children}</label>;
 }
 
-function TelemetryCell({
-  detail,
-  main,
-  title,
-  tone = "neutral",
-}: {
-  detail: string;
-  main: string;
-  title?: string;
-  tone?: "critical" | "neutral" | "ok" | "warn";
-}) {
-  return (
-    <span className="telemetryStack" title={title ?? detail}>
-      <strong className={`telemetryStatus ${tone}`}>{main}</strong>
-      <small>{detail}</small>
-    </span>
+function UnitInput({ ariaLabel, max, min, onChange, required, step, unit, value }: { ariaLabel: string; max?: number; min?: number; onChange: (value: string) => void; required?: boolean; step?: string; unit: string; value: string }) {
+  return <div className="inlineUnitInput"><input aria-label={ariaLabel} max={max} min={min} onChange={(event) => onChange(event.target.value)} required={required} step={step} type="number" value={value} /><small>{unit}</small></div>;
+}
+
+function Metric({ label, title, tone = "normal", value }: { label: string; title?: string; tone?: "normal" | "warning"; value: number | string }) {
+  return <span className={tone === "warning" ? "hasAttention" : undefined} title={title}><small>{label}</small><strong>{value}</strong></span>;
+}
+
+function WorkflowLink({ detail, icon, label, onClick }: { detail: string; icon: React.ReactNode; label: string; onClick: () => void }) {
+  return <button onClick={onClick} type="button"><span className="workflowIcon">{icon}</span><span><strong>{label}</strong><small>{detail}</small></span><ExternalLink size={15} /></button>;
+}
+
+function PlanFact({ label, value }: { label: string; value: string }) {
+  return <span><small>{label}</small><strong title={value}>{value}</strong></span>;
+}
+
+function endpointRuntimeTitle(
+  label: string,
+  state: string,
+  reason?: string | null,
+  observedAt?: string | null,
+): string {
+  return [
+    `${label} endpoint: ${readableTelemetryToken(state)}`,
+    reason ? readableTelemetryToken(reason) : null,
+    observedAt ? `Observed ${observedAt}` : "No endpoint observation",
+  ]
+    .filter(Boolean)
+    .join("; ");
+}
+
+function tunnelConnectivityPresentation(
+  plan: TunnelPlanRecord,
+  edge?: TopologyGraphEdge,
+): { label: string; detail: string; statusClass: string; title: string } {
+  if (!plan.enabled) {
+    return {
+      detail: "Plan disabled",
+      label: "Disabled",
+      statusClass: "neutral",
+      title: "Connectivity is not evaluated while the tunnel plan is disabled.",
+    };
+  }
+  if (plan.connection_assessment !== "automatic") {
+    const label = plan.connection_assessment === "connected" ? "Connected" : "Disconnected";
+    const assessedAt = plan.connection_assessed_at
+      ? formatCompactTime(plan.connection_assessed_at)
+      : "time unavailable";
+    const actor = plan.connection_assessed_by
+      ? `operator ${shortId(plan.connection_assessed_by)}`
+      : "operator";
+    return {
+      detail: `Operator assessment · ${assessedAt}`,
+      label,
+      statusClass: plan.connection_assessment === "connected" ? "info" : "warning",
+      title: `${label} assessed by ${actor}; ${plan.connection_assessment_note ?? "no evidence note"}. Runtime reconciliation and automatic OSPF still use machine evidence.`,
+    };
+  }
+  const left = edge?.left_reachability_state ?? "unknown";
+  const right = edge?.right_reachability_state ?? "unknown";
+  const reasons = [edge?.left_reachability_reason, edge?.right_reachability_reason]
+    .filter((value): value is string => Boolean(value))
+    .map(readableTelemetryToken)
+    .join("; ");
+  if (left === "reachable" && right === "reachable") {
+    return {
+      detail: "Measured on both endpoints",
+      label: "Reachable",
+      statusClass: "ok",
+      title: "Both declared endpoints reported successful reachability evidence.",
+    };
+  }
+  if (left === "probe_failed" || right === "probe_failed") {
+    if (left === "reachable" || right === "reachable") {
+      return {
+        detail: "Peer probe failed; not proof of disconnect",
+        label: "Partially verified",
+        statusClass: "warning",
+        title: `One endpoint has positive reachability evidence while the peer probe failed${reasons ? `; ${reasons}` : ""}.`,
+      };
+    }
+    return {
+      detail: "Probe failed; not proof of disconnect",
+      label: "Unverified",
+      statusClass: "warning",
+      title: `A configured reachability probe failed. ICMP or the selected probe may be blocked even when the tunnel carries traffic${reasons ? `; ${reasons}` : ""}.`,
+    };
+  }
+  if (left === "reachable" || right === "reachable") {
+    return {
+      detail: "One endpoint measured",
+      label: "Partially verified",
+      statusClass: "info",
+      title: `Only one endpoint has positive reachability evidence${reasons ? `; ${reasons}` : ""}.`,
+    };
+  }
+  if (left === "not_configured" && right === "not_configured") {
+    return {
+      detail: "No reachability probe configured",
+      label: "Unverified",
+      statusClass: "neutral",
+      title: "Runtime reconciliation remains visible, but neither endpoint has a configured reachability probe.",
+    };
+  }
+  return {
+    detail: "Awaiting reachability evidence",
+    label: "Unverified",
+    statusClass: "neutral",
+    title: reasons || "No current endpoint reachability evidence is available.",
+  };
+}
+
+function tunnelConnectionAssessmentError(error: unknown): string {
+  if (error instanceof ApiResponseError) {
+    if (error.code === "tunnel_plan_snapshot_stale") {
+      return "This plan changed before the assessment was saved. Refresh its details and review the current evidence.";
+    }
+    if (error.code === "tunnel_connection_assessment_requires_enabled_plan") {
+      return "Enable the tunnel plan before recording a connectivity assessment.";
+    }
+    if (error.code === "tunnel_connection_assessment_note_required") {
+      return "Add a concise evidence note of 500 characters or fewer for a manual assessment.";
+    }
+  }
+  return error instanceof Error ? error.message : "Connectivity assessment update failed";
+}
+
+function initialTunnelPlanForm(): TunnelPlanForm {
+  return {
+    bandwidthMbps: String(DEFAULT_TUNNEL_BANDWIDTH_MBPS),
+    bandwidthWeight: String(DEFAULT_OSPF_POLICY.bandwidth_weight),
+    burstKb: "",
+    desiredInterfaces: "",
+    egressKbps: "",
+    enabled: false,
+    fouIpProto: "4",
+    fouPeerPort: "5555",
+    fouPort: "5555",
+    healthyWindows: "2",
+    includeIpv4: true,
+    includeIpv6: false,
+    ingressKbps: "",
+    interfaceName: "",
+    ipv4Pool: "",
+    ipv4Prefix: "31",
+    ipv6Pool: "",
+    ipv6Prefix: "127",
+    kind: "gre",
+    latencyWeight: String(DEFAULT_OSPF_POLICY.latency_weight),
+    latencyPrimaryFamily: "ipv4",
+    leftClientId: "",
+    leftIpv4: "",
+    leftIpv6: "",
+    leftRoutingTemplateId: "",
+    leftRuntimeTemplateId: "",
+    leftLocalUnderlay: "",
+    leftRemoteUnderlay: "",
+    lossWeight: String(DEFAULT_OSPF_POLICY.loss_weight),
+    maxCost: String(DEFAULT_OSPF_POLICY.max_cost),
+    minCost: String(DEFAULT_OSPF_POLICY.min_cost),
+    minCostDelta: "5",
+    name: "",
+    ospfEnabled: false,
+    ospfMode: "reviewed",
+    packetLossPercent: "0",
+    plannedLatencyMs: "20",
+    preference: "1",
+    preferenceBias: String(DEFAULT_OSPF_POLICY.preference_bias),
+    rightClientId: "",
+    rightIpv4: "",
+    rightIpv6: "",
+    rightRoutingTemplateId: "",
+    rightRuntimeTemplateId: "",
+    rightLocalUnderlay: "",
+    rightRemoteUnderlay: "",
+    routes: "",
+    runtimeManager: "agent_iproute2_managed",
+    runtimeTopologyVersion: "",
+    staleInterfaces: "",
+    staleRoutes: "",
+  };
+}
+
+function tunnelPlanFormFromRecord(record: TunnelPlanRecord): TunnelPlanForm {
+  const input = record.input;
+  const runtime = input.runtime_control ?? { manager: "agent_iproute2_managed" as const };
+  const topology = input.runtime_topology ?? {};
+  const traffic = runtime.traffic_limit ?? {};
+  const fou = runtime.fou ?? { ipproto: 4, peer_port: 5555, port: 5555 };
+  const ospf = input.ospf ?? null;
+  const policy = ospf?.policy ?? DEFAULT_OSPF_POLICY;
+  return {
+    ...initialTunnelPlanForm(),
+    bandwidthMbps: String(input.bandwidth_mbps),
+    bandwidthWeight: String(policy.bandwidth_weight),
+    burstKb: optionalNumberText(traffic.burst_kb),
+    desiredInterfaces: (topology.desired_interfaces ?? []).join("\n"),
+    egressKbps: optionalNumberText(traffic.egress_kbps),
+    enabled: record.enabled,
+    fouIpProto: String(fou.ipproto),
+    fouPeerPort: String(fou.peer_port),
+    fouPort: String(fou.port),
+    healthyWindows: String(ospf?.healthy_windows ?? 2),
+    includeIpv4: Boolean(input.ipv4_tunnel),
+    includeIpv6: Boolean(input.ipv6_tunnel),
+    ingressKbps: optionalNumberText(traffic.ingress_kbps),
+    interfaceName: input.interface_name,
+    ipv4Pool: input.address_pool_cidr,
+    ipv4Prefix: String(input.ipv4_tunnel?.prefix_len ?? 31),
+    ipv6Pool: input.ipv6_address_pool_cidr ?? "",
+    ipv6Prefix: String(input.ipv6_tunnel?.prefix_len ?? 127),
+    kind: input.kind,
+    latencyPrimaryFamily: input.latency_primary_family ?? "ipv4",
+    latencyWeight: String(policy.latency_weight),
+    leftClientId: input.left_client_id,
+    leftIpv4: input.ipv4_tunnel?.left ?? "",
+    leftIpv6: input.ipv6_tunnel?.left ?? "",
+    leftRoutingTemplateId: ospf?.left_adapter_template_id ?? "",
+    leftRuntimeTemplateId: runtime.left_adapter_template_id ?? "",
+    leftLocalUnderlay: input.left_local_underlay ?? "",
+    leftRemoteUnderlay: input.left_remote_underlay,
+    lossWeight: String(policy.loss_weight),
+    maxCost: String(policy.max_cost),
+    minCost: String(policy.min_cost),
+    minCostDelta: String(ospf?.min_cost_delta ?? 5),
+    name: record.name,
+    ospfEnabled: Boolean(ospf),
+    ospfMode: ospf?.mode ?? "reviewed",
+    packetLossPercent: String((ospf?.planned_packet_loss_ratio ?? 0) * 100),
+    plannedLatencyMs: String(ospf?.planned_latency_ms ?? 20),
+    preference: String(ospf?.preference ?? 1),
+    preferenceBias: String(policy.preference_bias),
+    rightClientId: input.right_client_id,
+    rightIpv4: input.ipv4_tunnel?.right ?? "",
+    rightIpv6: input.ipv6_tunnel?.right ?? "",
+    rightRoutingTemplateId: ospf?.right_adapter_template_id ?? "",
+    rightRuntimeTemplateId: runtime.right_adapter_template_id ?? "",
+    rightLocalUnderlay: input.right_local_underlay ?? "",
+    rightRemoteUnderlay: input.right_remote_underlay,
+    routes: (topology.routes ?? []).map(formatRuntimeRoute).join("\n"),
+    runtimeManager: runtime.manager,
+    runtimeTopologyVersion: topology.version ?? "",
+    staleInterfaces: (topology.stale_interfaces ?? []).join("\n"),
+    staleRoutes: (topology.stale_routes ?? []).map(formatRuntimeRoute).join("\n"),
+  };
+}
+
+function formatRuntimeRoute(route: RuntimeTunnelRoute): string {
+  return [
+    route.destination_cidr,
+    route.via ? `via=${route.via}` : null,
+    route.interface_name ? `dev=${route.interface_name}` : null,
+    route.metric !== null && route.metric !== undefined ? `metric=${route.metric}` : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
+}
+
+function optionalNumberText(value: number | null | undefined): string {
+  return value === null || value === undefined ? "" : String(value);
+}
+
+function validateTunnelPlanForm(form: TunnelPlanForm): string | null {
+  if (!form.name.trim()) return "Plan name is required";
+  if (form.name.trim().length > 128) return "Plan name must be 128 characters or fewer";
+  if (!form.interfaceName.trim()) return "Interface name is required";
+  if (!/^[A-Za-z0-9_.-]{1,15}$/.test(form.interfaceName.trim())) return "Interface must be 1-15 letters, numbers, dots, underscores, or hyphens";
+  if (!form.leftClientId || !form.rightClientId) return "Select both endpoint VPSs";
+  if (form.leftClientId === form.rightClientId) return "Tunnel endpoints must be different VPSs";
+  const leftUnderlayError = validateEndpointUnderlay(
+    "Left",
+    form.leftRemoteUnderlay,
+    form.leftLocalUnderlay,
+    form.runtimeManager,
   );
+  if (leftUnderlayError) return leftUnderlayError;
+  const rightUnderlayError = validateEndpointUnderlay(
+    "Right",
+    form.rightRemoteUnderlay,
+    form.rightLocalUnderlay,
+    form.runtimeManager,
+  );
+  if (rightUnderlayError) return rightUnderlayError;
+  const bandwidth = Number(form.bandwidthMbps);
+  if (!Number.isInteger(bandwidth) || bandwidth < MIN_TUNNEL_BANDWIDTH_MBPS || bandwidth > MAX_TUNNEL_BANDWIDTH_MBPS) return `Bandwidth must be a whole number from ${MIN_TUNNEL_BANDWIDTH_MBPS} to ${MAX_TUNNEL_BANDWIDTH_MBPS} Mbps`;
+  if (form.runtimeManager !== "external_observed") {
+    const trafficError = validateOptionalIntegerRange(form.ingressKbps, "Ingress limit", 64, 1_000_000)
+      ?? validateOptionalIntegerRange(form.egressKbps, "Egress limit", 64, 1_000_000)
+      ?? validateOptionalIntegerRange(form.burstKb, "Burst", 1, 1_048_576);
+    if (trafficError) return trafficError;
+  }
+  if (form.kind === "fou" && form.runtimeManager !== "external_observed") {
+    const fouError = validateIntegerRange(form.fouPort, "FOU port", 1, 65_535)
+      ?? validateIntegerRange(form.fouPeerPort, "FOU peer port", 1, 65_535)
+      ?? validateIntegerRange(form.fouIpProto, "FOU IP protocol", 1, 255);
+    if (fouError) return fouError;
+  }
+  if (!form.includeIpv4 && !form.includeIpv6) return "Select IPv4 or IPv6 tunnel addresses";
+  if (form.includeIpv4) {
+    if (!form.leftIpv4.trim() || !form.rightIpv4.trim()) return "Enter or allocate both IPv4 endpoint addresses";
+    if (!isIpv4Address(form.leftIpv4) || !isIpv4Address(form.rightIpv4) || form.leftIpv4.trim() === form.rightIpv4.trim()) return "IPv4 endpoint addresses must be valid and different";
+    const prefixError = validateIntegerRange(form.ipv4Prefix, "IPv4 prefix", 0, 32);
+    if (prefixError) return prefixError;
+    if (!sameIpSubnet(form.leftIpv4, form.rightIpv4, Number(form.ipv4Prefix), 32)) return "IPv4 endpoint addresses must share the selected point-to-point prefix";
+    if (form.ipv4Pool.trim() && !isIpCidr(form.ipv4Pool, 32)) return "IPv4 allocation pool must be a valid CIDR";
+  }
+  if (form.includeIpv6) {
+    if (!form.leftIpv6.trim() || !form.rightIpv6.trim()) return "Enter or allocate both IPv6 endpoint addresses";
+    if (!isIpv6Address(form.leftIpv6) || !isIpv6Address(form.rightIpv6) || form.leftIpv6.trim() === form.rightIpv6.trim()) return "IPv6 endpoint addresses must be valid and different";
+    const prefixError = validateIntegerRange(form.ipv6Prefix, "IPv6 prefix", 0, 128);
+    if (prefixError) return prefixError;
+    if (!sameIpSubnet(form.leftIpv6, form.rightIpv6, Number(form.ipv6Prefix), 128)) return "IPv6 endpoint addresses must share the selected point-to-point prefix";
+    if (form.ipv6Pool.trim() && !isIpCidr(form.ipv6Pool, 128)) return "IPv6 allocation pool must be a valid CIDR";
+  }
+  if (form.runtimeManager === "agent_iproute2_managed" && !AGENT_TUNNEL_KINDS.includes(form.kind)) return `${formatTunnelKind(form.kind)} requires external ownership`;
+  if (form.runtimeManager === "external_managed_adapter" && (!form.leftRuntimeTemplateId || !form.rightRuntimeTemplateId)) return "Select a runtime adapter template for both endpoints";
+  if (form.ospfEnabled && (!form.leftRoutingTemplateId || !form.rightRoutingTemplateId)) return "Select a routing cost adapter for both endpoints";
+  if (form.ospfEnabled) {
+    const ospfError = validateNumberRange(form.plannedLatencyMs, "Planned latency", 0, 60_000)
+      ?? validateNumberRange(form.packetLossPercent, "Planned packet loss", 0, 100)
+      ?? validateNumberRange(form.preference, "Preference", 0.1, 100)
+      ?? validateIntegerRange(form.minCostDelta, "Minimum OSPF cost delta", 1, 65_535)
+      ?? validateIntegerRange(form.healthyWindows, "Required healthy probes", 1, 10)
+      ?? validateNonNegativeNumber(form.latencyWeight, "Latency weight")
+      ?? validateNonNegativeNumber(form.lossWeight, "Loss weight")
+      ?? validateNonNegativeNumber(form.bandwidthWeight, "Bandwidth weight")
+      ?? validateNonNegativeNumber(form.preferenceBias, "Preference bias");
+    if (ospfError) return ospfError;
+  }
+  const minCost = Number(form.minCost);
+  const maxCost = Number(form.maxCost);
+  if (form.ospfEnabled && (!Number.isInteger(minCost) || !Number.isInteger(maxCost) || minCost < 1 || minCost > maxCost || maxCost > 65535)) return "OSPF cost bounds must be whole numbers within 1-65535 and minimum cannot exceed maximum";
+  return null;
 }
 
-function planStatusClass(status: string): "neutral" | "ok" | "warn" {
-  if (status.includes("rolled_back") || status.includes("failed")) {
-    return "warn";
-  }
-  if (status.includes("applied")) {
-    return "ok";
-  }
-  return "neutral";
+function validateOptionalIntegerRange(value: string, label: string, min: number, max: number): string | null {
+  return value.trim() ? validateIntegerRange(value, label, min, max) : null;
 }
 
-function tunnelPlanRuntimeTone(
-  plan: TunnelPlanRecord,
-): "neutral" | "ok" | "warn" {
-  return planStatusClass(plan.status);
+function validateIntegerRange(value: string, label: string, min: number, max: number): string | null {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= min && parsed <= max
+    ? null
+    : `${label} must be a whole number from ${min} to ${max}`;
 }
 
-function endpointRuntimeSummary(plan: TunnelPlanRecord): string {
-  return `L ${readableTelemetryToken(plan.left_status)} / R ${readableTelemetryToken(plan.right_status)}`;
+function validateNumberRange(value: string, label: string, min: number, max: number): string | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= min && parsed <= max
+    ? null
+    : `${label} must be from ${min} to ${max}`;
 }
 
-function tunnelPlanHealth(
-  plan: TunnelPlanRecord,
-  evidence?: TopologyGraphEdge,
-): {
-  detail: string;
-  label: string;
-  tone: "neutral" | "ok" | "warn";
-} {
-  const evidenceAge = tunnelPlanEvidenceAge(evidence);
-  if (evidenceAge.isStale) {
-    return {
-      detail: evidenceAge.detail,
-      label: "Stale evidence",
-      tone: "warn",
-    };
-  }
-  if (plan.status.includes("partially")) {
-    return {
-      detail: endpointRuntimeSummary(plan),
-      label: "Needs review",
-      tone: "warn",
-    };
-  }
-  if (plan.status.includes("rolled_back")) {
-    return {
-      detail: endpointRuntimeSummary(plan),
-      label: "Rolled back",
-      tone: "neutral",
-    };
-  }
-  if (plan.status === "applied") {
-    const bothApplied =
-      plan.left_status === "applied" && plan.right_status === "applied";
-    return {
-      detail: bothApplied
-        ? "Both endpoints applied"
-        : endpointRuntimeSummary(plan),
-      label: bothApplied ? "Applied" : "Endpoint mismatch",
-      tone: bothApplied ? "ok" : "warn",
-    };
-  }
-  if (plan.enabled) {
-    return {
-      detail: "Saved desired state; run tests before apply",
-      label: "Ready to test",
-      tone: "neutral",
-    };
-  }
-  return {
-    detail: "Saved disabled; runtime sync off",
-    label: "Draft",
-    tone: "neutral",
-  };
+function validateNonNegativeNumber(value: string, label: string): string | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0
+    ? null
+    : `${label} must be zero or greater`;
 }
 
-function buildTunnelPlanEvidenceLookup(
-  edges: TopologyGraphEdge[],
-): Map<string, TopologyGraphEdge> {
-  const lookup = new Map<string, TopologyGraphEdge>();
-  for (const edge of edges) {
-    const current = lookup.get(edge.plan_id);
-    if (
-      !current ||
-      compareOptionalIso(edge.latest_observed_at, current.latest_observed_at) > 0
-    ) {
-      lookup.set(edge.plan_id, edge);
-    }
+function validateEndpointUnderlay(
+  side: "Left" | "Right",
+  remoteValue: string,
+  localValue: string,
+  manager: RuntimeTunnelManager,
+): string | null {
+  const remote = remoteValue.trim();
+  const local = localValue.trim();
+  if (!remote) return `${side} remote underlay destination is required`;
+  if (!isIpAddress(remote)) return `${side} remote underlay destination must be a valid IP address`;
+  if (local && !isIpAddress(local)) return `${side} local underlay source must be a valid IP address`;
+  if (local && isIpv4Address(local) !== isIpv4Address(remote)) {
+    return `${side} local source and remote destination must use the same IP family`;
   }
-  return lookup;
+  if (manager === "agent_iproute2_managed" && !isIpv4Address(remote)) {
+    return `${side} agent iproute2 underlay requires an IPv4 remote destination`;
+  }
+  return null;
 }
 
-function tunnelPlanEvidenceAge(edge: TopologyGraphEdge | undefined): {
-  detail: string;
-  isStale: boolean;
-  label: string;
-  title: string;
-  tone: "neutral" | "ok" | "warn";
-} {
-  if (!edge?.latest_observed_at) {
-    return {
-      detail: "No topology observation is linked to this saved plan",
-      isStale: false,
-      label: "No evidence",
-      title: "No topology observation is linked to this saved plan",
-      tone: "neutral",
-    };
-  }
-  const isStale = tunnelEvidenceIsStale(edge.latest_observed_at);
-  return {
-    detail: `${isStale ? "Stale evidence" : "Latest evidence"}; ${countPhrase(edge.sample_count, "sample")}`,
-    isStale,
-    label: formatCompactTime(edge.latest_observed_at),
-    title: formatFullTime(edge.latest_observed_at),
-    tone: isStale ? "warn" : "ok",
-  };
+function isIpAddress(value: string): boolean {
+  return isIpv4Address(value) || isIpv6Address(value);
 }
 
-function tunnelEvidenceIsStale(value: string): boolean {
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) {
+function isIpv4Address(value: string): boolean {
+  const parts = value.trim().split(".");
+  return parts.length === 4 && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255 && (part === "0" || !part.startsWith("0")));
+}
+
+function isIpv6Address(value: string): boolean {
+  const address = value.trim();
+  if (!address.includes(":") || !/^[0-9a-f:.]+$/i.test(address)) return false;
+  try {
+    new URL(`http://[${address}]/`);
     return true;
+  } catch {
+    return false;
   }
-  return Date.now() - timestamp > 7 * 24 * 60 * 60 * 1000;
 }
 
-function compareOptionalIso(
-  left: string | null | undefined,
-  right: string | null | undefined,
-): number {
-  const leftTime = left ? Date.parse(left) : Number.NEGATIVE_INFINITY;
-  const rightTime = right ? Date.parse(right) : Number.NEGATIVE_INFINITY;
-  const safeLeft = Number.isFinite(leftTime) ? leftTime : Number.NEGATIVE_INFINITY;
-  const safeRight = Number.isFinite(rightTime) ? rightTime : Number.NEGATIVE_INFINITY;
-  return safeLeft - safeRight;
+function isIpCidr(value: string, bits: 32 | 128): boolean {
+  const [address, prefix, ...rest] = value.trim().split("/");
+  const parsedPrefix = Number(prefix);
+  return rest.length === 0
+    && (bits === 32 ? isIpv4Address(address) : isIpv6Address(address))
+    && Number.isInteger(parsedPrefix)
+    && parsedPrefix >= 0
+    && parsedPrefix <= bits;
 }
 
-function countPhrase(count: number, singular: string, plural = `${singular}s`): string {
-  return `${count} ${count === 1 ? singular : plural}`;
+function sameIpSubnet(left: string, right: string, prefix: number, bits: 32 | 128): boolean {
+  const leftValue = ipAddressValue(left, bits);
+  const rightValue = ipAddressValue(right, bits);
+  if (leftValue === null || rightValue === null || prefix < 0 || prefix > bits) return false;
+  const hostBits = BigInt(bits - prefix);
+  return leftValue >> hostBits === rightValue >> hostBits;
 }
 
-function formatAddressPair(pair: TunnelAddressPair | null | undefined): string {
-  if (!pair) {
-    return "disabled";
+function ipAddressValue(value: string, bits: 32 | 128): bigint | null {
+  if (bits === 32) {
+    if (!isIpv4Address(value)) return null;
+    return value.trim().split(".").reduce((result, part) => (result << 8n) + BigInt(part), 0n);
   }
-  return `${pair.left} / ${pair.right}/${pair.prefix_len}`;
+  return ipv6AddressValue(value);
 }
 
-function formatBandwidthMbps(value: number): string {
-  return `${clampTunnelBandwidthMbps(value)} Mbps`;
+function ipv6AddressValue(value: string): bigint | null {
+  let address = value.trim().toLowerCase();
+  const ipv4Tail = address.match(/(?:^|:)(\d+\.\d+\.\d+\.\d+)$/)?.[1];
+  if (ipv4Tail) {
+    const ipv4 = ipAddressValue(ipv4Tail, 32);
+    if (ipv4 === null) return null;
+    address = `${address.slice(0, -ipv4Tail.length)}${((ipv4 >> 16n) & 0xffffn).toString(16)}:${(ipv4 & 0xffffn).toString(16)}`;
+  }
+  const halves = address.split("::");
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(":") : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const missing = 8 - left.length - right.length;
+  if ((halves.length === 1 && missing !== 0) || (halves.length === 2 && missing < 1)) return null;
+  const groups = [...left, ...Array.from({ length: missing }, () => "0"), ...right];
+  if (groups.length !== 8 || groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) return null;
+  return groups.reduce((result, group) => (result << 16n) + BigInt(`0x${group}`), 0n);
 }
 
-function telemetryTunnelRowClass(tunnel: TelemetryTunnelRecord): string {
-  if (
-    latencyTone(tunnel.latency_status) === "critical" ||
-    ospfTone(tunnel.auto_ospf_status) === "critical"
-  ) {
-    return "telemetryRowCritical";
-  }
-  if (
-    latencyTone(tunnel.latency_status) === "warn" ||
-    ospfTone(tunnel.auto_ospf_status) === "warn"
-  ) {
-    return "telemetryRowWarn";
-  }
-  return "";
-}
-
-function latencyTone(
-  status: string | null | undefined,
-): "critical" | "neutral" | "ok" | "warn" {
-  if (status === "down") {
-    return "critical";
-  }
-  if (status === "healthy") {
-    return "ok";
-  }
-  if (
-    status === "missed" ||
-    status === "unconfigured" ||
-    status === "disabled"
-  ) {
-    return "warn";
-  }
-  return "neutral";
-}
-
-function ospfTone(
-  status: string | null | undefined,
-): "critical" | "neutral" | "ok" | "warn" {
-  if (status === "failed") {
-    return "critical";
-  }
-  if (status === "updated" || status === "stable" || status === "disabled") {
-    return "ok";
-  }
-  if (
-    status === "report_only" ||
-    status === "stabilizing" ||
-    status === "monitoring_only"
-  ) {
-    return "warn";
-  }
-  return "neutral";
-}
-
-function formatTunnelLatencySummary(tunnel: TelemetryTunnelRecord): string {
-  const status = latencyStatusLabel(tunnel.latency_status);
-  if (typeof tunnel.latency_avg_ms === "number") {
-    return `${status} / ${tunnel.latency_avg_ms.toFixed(1)} ms`;
-  }
-  return status;
-}
-
-function formatTunnelOspfSummary(tunnel: TelemetryTunnelRecord): string {
-  return ospfStatusLabel(tunnel.auto_ospf_status, tunnel.auto_ospf_enabled);
-}
-
-function buildOspfProposalLookup(
-  plans: NetworkOspfUpdatePlanRecord[],
-): OspfProposalLookup {
-  const lookup: OspfProposalLookup = new Map();
+function validateExistingTunnelPlanConflicts(
+  form: TunnelPlanForm,
+  plans: TunnelPlanRecord[],
+  editingPlanId?: string,
+): string | null {
+  const clientIds = new Set([form.leftClientId, form.rightClientId]);
+  const requestedAddresses = new Set(
+    [
+      form.includeIpv4 ? ipAddressKey(form.leftIpv4, 32) : null,
+      form.includeIpv4 ? ipAddressKey(form.rightIpv4, 32) : null,
+      form.includeIpv6 ? ipAddressKey(form.leftIpv6, 128) : null,
+      form.includeIpv6 ? ipAddressKey(form.rightIpv6, 128) : null,
+    ].filter((value): value is string => Boolean(value)),
+  );
   for (const plan of plans) {
-    for (const key of ospfProposalKeys(
-      plan.plan_id,
-      plan.plan_name,
-      plan.interface_name,
-    )) {
-      lookup.set(key, plan);
+    if (plan.id === editingPlanId) continue;
+    if (
+      plan.plan.interface_name === form.interfaceName.trim()
+      && (clientIds.has(plan.left_client_id) || clientIds.has(plan.right_client_id))
+    ) {
+      return "Another saved plan already uses this interface on one of the selected VPSs";
     }
-  }
-  return lookup;
-}
-
-function ospfProposalForTunnel(
-  tunnel: TelemetryTunnelRecord,
-  lookup: OspfProposalLookup,
-): NetworkOspfUpdatePlanRecord | null {
-  for (const key of ospfProposalKeys(
-    tunnel.plan_id,
-    tunnel.plan_name,
-    tunnel.interface,
-  )) {
-    const proposal = lookup.get(key);
-    if (proposal) {
-      return proposal;
+    const savedAddresses = [
+      plan.plan.ipv4_tunnel ? ipAddressKey(plan.plan.ipv4_tunnel.left, 32) : null,
+      plan.plan.ipv4_tunnel ? ipAddressKey(plan.plan.ipv4_tunnel.right, 32) : null,
+      plan.plan.ipv6_tunnel ? ipAddressKey(plan.plan.ipv6_tunnel.left, 128) : null,
+      plan.plan.ipv6_tunnel ? ipAddressKey(plan.plan.ipv6_tunnel.right, 128) : null,
+    ];
+    if (savedAddresses.some((address) => address && requestedAddresses.has(address))) {
+      return "Another saved plan already uses one of these tunnel endpoint addresses";
     }
   }
   return null;
 }
 
-function ospfProposalKeys(
-  planId: string | null | undefined,
-  planName: string | null | undefined,
-  interfaceName: string | null | undefined,
-): string[] {
-  const normalizedInterface = interfaceName?.trim();
-  if (!normalizedInterface) {
-    return [];
-  }
-  const keys: string[] = [];
-  const normalizedPlanId = planId?.trim();
-  if (normalizedPlanId) {
-    keys.push(`id:${normalizedPlanId}:${normalizedInterface}`);
-  }
-  const normalizedPlanName = planName?.trim();
-  if (normalizedPlanName) {
-    keys.push(`name:${normalizedPlanName}:${normalizedInterface}`);
-  }
-  return keys;
+function ipAddressKey(value: string, bits: 32 | 128): string | null {
+  const parsed = ipAddressValue(value, bits);
+  return parsed === null ? null : `${bits}:${parsed.toString(16)}`;
 }
 
-function formatTunnelCostSummary(
-  tunnel: TelemetryTunnelRecord,
-  ospfProposalLookup: OspfProposalLookup,
-): string {
-  const proposal = ospfProposalForTunnel(tunnel, ospfProposalLookup);
-  if (proposal) {
-    return `reviewed ${proposal.current_ospf_cost} -> ${proposal.recommended_ospf_cost}`;
-  }
-  if (tunnel.auto_ospf_current_cost || tunnel.auto_ospf_recommended_cost) {
-    return `updater ${tunnel.auto_ospf_current_cost ?? "?"} -> ${tunnel.auto_ospf_recommended_cost ?? "?"}`;
-  }
-  return "no updater cost";
-}
-
-function formatTunnelCostPair(
-  tunnel: TelemetryTunnelRecord,
-  ospfProposalLookup: OspfProposalLookup,
-): string {
-  const proposal = ospfProposalForTunnel(tunnel, ospfProposalLookup);
-  if (proposal) {
-    return `${proposal.current_ospf_cost}->${proposal.recommended_ospf_cost}`;
-  }
-  if (tunnel.auto_ospf_current_cost && tunnel.auto_ospf_recommended_cost) {
-    return `${tunnel.auto_ospf_current_cost}->${tunnel.auto_ospf_recommended_cost}`;
-  }
-  return String(tunnel.auto_ospf_recommended_cost ?? tunnel.auto_ospf_current_cost);
-}
-
-function compareTunnelUrgency(
-  left: TelemetryTunnelRecord,
-  right: TelemetryTunnelRecord,
-): number {
-  return (
-    tunnelUrgency(right) - tunnelUrgency(left) ||
-    right.observed_at.localeCompare(left.observed_at)
-  );
-}
-
-function tunnelUrgency(tunnel: TelemetryTunnelRecord): number {
-  const latency = tunnel.latency_status ?? "";
-  const autoOspf = tunnel.auto_ospf_status ?? "";
-  if (latency === "down" || autoOspf === "failed") {
-    return 4;
-  }
-  if (latency === "missed" || autoOspf === "report_only") {
-    return 3;
-  }
-  if (
-    latency === "unconfigured" ||
-    latency === "disabled" ||
-    autoOspf === "monitoring_only"
-  ) {
-    return 2;
-  }
-  if (
-    latency === "healthy" ||
-    autoOspf === "updated" ||
-    autoOspf === "stable"
-  ) {
-    return 1;
-  }
-  return 0;
-}
-
-function automationLatencyTone(
-  tunnels: TelemetryTunnelRecord[],
-): "critical" | "neutral" | "ok" | "warn" {
-  const states = tunnels.map((tunnel) => tunnel.latency_status ?? "");
-  if (states.includes("down")) {
-    return "critical";
-  }
-  if (
-    states.some((state) =>
-      ["missed", "unconfigured", "disabled"].includes(state),
-    )
-  ) {
-    return "warn";
-  }
-  if (states.includes("healthy")) {
-    return "ok";
-  }
-  return "neutral";
-}
-
-function automationOspfTone(
-  tunnels: TelemetryTunnelRecord[],
-): "critical" | "neutral" | "ok" | "warn" {
-  const states = tunnels.map((tunnel) => tunnel.auto_ospf_status ?? "");
-  if (states.includes("failed")) {
-    return "critical";
-  }
-  if (
-    states.some((state) =>
-      ["report_only", "stabilizing", "monitoring_only"].includes(state),
-    )
-  ) {
-    return "warn";
-  }
-  if (
-    states.some((state) => ["updated", "stable", "disabled"].includes(state))
-  ) {
-    return "ok";
-  }
-  return "neutral";
-}
-
-function formatAutomationLatencyDetail(tunnel: TelemetryTunnelRecord): string {
-  const status = latencyStatusLabel(tunnel.latency_status);
-  const metric =
-    typeof tunnel.latency_avg_ms === "number"
-      ? `${tunnel.latency_avg_ms.toFixed(1)} ms`
-      : "no avg";
-  const loss =
-    typeof tunnel.packet_loss_ratio === "number"
-      ? `${(tunnel.packet_loss_ratio * 100).toFixed(1)}% loss`
-      : "loss n/a";
-  const checked =
-    typeof tunnel.latency_checked_unix === "number"
-      ? formatUnixTime(tunnel.latency_checked_unix)
-      : formatTime(tunnel.observed_at);
-  const windows = [
-    typeof tunnel.latency_healthy_windows === "number"
-      ? `ok ${tunnel.latency_healthy_windows}`
-      : "",
-    typeof tunnel.latency_missed_windows === "number"
-      ? `miss ${tunnel.latency_missed_windows}`
-      : "",
-  ]
-    .filter(Boolean)
-    .join("/");
-  const target = `${addressFamilyLabel(tunnel.latency_primary_family)} ${tunnel.latency_target ?? "target n/a"}`;
-  const reason = telemetryReasonLabel(tunnel.latency_reason);
-  return `${tunnel.interface}: ${status}; ${metric}; ${loss}; ${target}; ${windows || "windows n/a"}; checked ${checked}${reason ? `; ${reason}` : ""}`;
-}
-
-function formatAutomationOspfDetail(
-  tunnel: TelemetryTunnelRecord,
-  ospfProposalLookup: OspfProposalLookup,
-): string {
-  const status = ospfStatusLabel(
-    tunnel.auto_ospf_status,
-    tunnel.auto_ospf_enabled,
-  );
-  const proposal = ospfProposalForTunnel(tunnel, ospfProposalLookup);
-  const costs = proposal
-    ? `reviewed recommendation ${shortId(proposal.recommendation_id)} ${proposal.current_ospf_cost} -> ${proposal.recommended_ospf_cost}`
-    : tunnel.auto_ospf_current_cost || tunnel.auto_ospf_recommended_cost
-      ? `observed updater ${tunnel.auto_ospf_current_cost ?? "?"} -> ${tunnel.auto_ospf_recommended_cost ?? "?"}`
-      : "no updater cost";
-  const updated =
-    typeof tunnel.auto_ospf_updated_unix === "number"
-      ? `updated ${formatUnixTime(tunnel.auto_ospf_updated_unix)}`
-      : "no update";
-  const reason = telemetryReasonLabel(tunnel.auto_ospf_reason);
-  return `${tunnel.interface}: ${status}; cost ${costs}; ${updated}${reason ? `; ${reason}` : ""}`;
-}
-
-function formatAutomationLatencyShort(tunnel: TelemetryTunnelRecord): string {
-  const parts = [
-    tunnel.interface,
-    typeof tunnel.packet_loss_ratio === "number" && tunnel.packet_loss_ratio > 0
-      ? `${(tunnel.packet_loss_ratio * 100).toFixed(1)}% loss`
-      : typeof tunnel.latency_avg_ms === "number"
-        ? `${tunnel.latency_avg_ms.toFixed(1)} ms`
-        : latencyStatusLabel(tunnel.latency_status),
-  ].filter(Boolean);
-  return parts.join("; ") || "No latency detail";
-}
-
-function formatAutomationOspfShort(
-  tunnel: TelemetryTunnelRecord,
-  ospfProposalLookup: OspfProposalLookup,
-): string {
-  const parts = [
-    tunnel.interface,
-    formatTunnelCostSummary(tunnel, ospfProposalLookup),
-    shortTelemetryReasonLabel(tunnel.auto_ospf_reason),
-  ].filter((part) => part && part !== "cost n/a");
-  return parts.join("; ") || "No updater detail";
-}
-
-function shortTelemetryReasonLabel(reason: string | null | undefined): string {
-  if (!reason) {
-    return "";
-  }
-  if (reason.startsWith("external_cost_program_unconfigured")) {
-    return "No updater";
-  }
-  if (reason.startsWith("external_cost_program_succeeded")) {
-    return "Applied";
-  }
-  if (reason.startsWith("latency_probe_unhealthy")) {
-    return "Adjacency down";
-  }
-  if (reason.startsWith("latency_probe_missing_healthy_sample")) {
-    return "Awaiting probes";
-  }
-  return telemetryReasonLabel(reason);
-}
-
-function latestIso(values: string[]): string | null {
-  return values.reduce<string | null>(
-    (latest, value) => (!latest || value > latest ? value : latest),
-    null,
-  );
-}
-
-function formatUnixTime(value: number): string {
-  return formatTime(new Date(value * 1000).toISOString());
-}
-
-function summarizeStates(
-  states: string[],
-  label: (state: string) => string,
-): string {
-  const counts = new Map<string, number>();
-  for (const state of states) {
-    counts.set(state, (counts.get(state) ?? 0) + 1);
-  }
-  return [...counts.entries()]
-    .sort(
-      (left, right) => right[1] - left[1] || left[0].localeCompare(right[0]),
-    )
-    .map(([state, count]) => `${label(state)} ${count}`)
-    .join(", ");
-}
-
-type TomlValue =
-  | string
-  | number
-  | boolean
-  | TomlValue[]
-  | object
-  | null
-  | undefined;
-
-function tomlDocument(root: Record<string, TomlValue>): string {
-  const lines: string[] = [];
-  for (const [section, value] of Object.entries(root)) {
-    if (!isTomlObject(value)) {
-      continue;
+function validateAdapterBindings(
+  form: TunnelPlanForm,
+  leftRuntimeTemplates: SourceTemplateRecord[],
+  rightRuntimeTemplates: SourceTemplateRecord[],
+  leftRoutingTemplates: SourceTemplateRecord[],
+  rightRoutingTemplates: SourceTemplateRecord[],
+): string | null {
+  if (form.runtimeManager === "external_managed_adapter") {
+    const left = leftRuntimeTemplates.find((template) => template.id === form.leftRuntimeTemplateId);
+    const right = rightRuntimeTemplates.find((template) => template.id === form.rightRuntimeTemplateId);
+    if (form.leftRuntimeTemplateId && !left) return "The left runtime adapter is no longer available for this VPS";
+    if (form.rightRuntimeTemplateId && !right) return "The right runtime adapter is no longer available for this VPS";
+    const hasTrafficLimit = [form.ingressKbps, form.egressKbps, form.burstKb]
+      .some((value) => value.trim() !== "");
+    if (hasTrafficLimit && (!templateHasDefinitionField(left, "traffic_limit_command") || !templateHasDefinitionField(right, "traffic_limit_command"))) {
+      return "Both selected runtime adapters must declare traffic_limit_command before this plan can apply traffic limits";
     }
-    lines.push(`[${tomlKey(section)}]`);
-    for (const [key, child] of Object.entries(value)) {
-      if (child === null || child === undefined) {
-        continue;
-      }
-      lines.push(`${tomlKey(key)} = ${tomlValue(child)}`);
+  }
+  if (form.ospfEnabled) {
+    if (form.leftRoutingTemplateId && !leftRoutingTemplates.some((template) => template.id === form.leftRoutingTemplateId)) {
+      return "The left routing adapter is no longer available for this VPS";
     }
-    lines.push("");
+    if (form.rightRoutingTemplateId && !rightRoutingTemplates.some((template) => template.id === form.rightRoutingTemplateId)) {
+      return "The right routing adapter is no longer available for this VPS";
+    }
   }
-  return `${lines.join("\n").trim()}\n`;
+  return null;
 }
 
-function tomlValue(value: TomlValue): string {
-  if (typeof value === "string") {
-    return JSON.stringify(value);
-  }
-  if (typeof value === "number") {
-    return Number.isFinite(value) ? String(value) : "0";
-  }
-  if (typeof value === "boolean") {
-    return value ? "true" : "false";
-  }
-  if (Array.isArray(value)) {
-    return `[${value
-      .filter((item) => item !== null && item !== undefined)
-      .map(tomlValue)
-      .join(", ")}]`;
-  }
-  if (isTomlObject(value)) {
-    return tomlInlineTable(value);
-  }
-  return '""';
+function templateHasDefinitionField(
+  template: SourceTemplateRecord | undefined,
+  field: string,
+): boolean {
+  return Boolean(
+    template
+      && typeof template.definition === "object"
+      && template.definition !== null
+      && !Array.isArray(template.definition)
+      && field in template.definition,
+  );
 }
 
-function tomlInlineTable(value: object): string {
-  const entries = Object.entries(
-    value as Record<string, TomlValue | null | undefined>,
-  )
-    .filter(
-      (entry): entry is [string, TomlValue] =>
-        entry[1] !== null && entry[1] !== undefined,
-    )
-    .map(([key, child]) => `${tomlKey(key)} = ${tomlValue(child)}`);
-  return `{ ${entries.join(", ")} }`;
+function buildTunnelPlanRequest(form: TunnelPlanForm): CreateTunnelPlanRequest {
+  const runtimeControl = buildRuntimeControl(form.runtimeManager, {
+    burstKb: form.burstKb,
+    egressKbps: form.egressKbps,
+    fouIpproto: form.kind === "fou" ? form.fouIpProto : undefined,
+    fouPeerPort: form.kind === "fou" ? form.fouPeerPort : undefined,
+    fouPort: form.kind === "fou" ? form.fouPort : undefined,
+    ingressKbps: form.ingressKbps,
+    leftAdapterTemplateId: form.leftRuntimeTemplateId,
+    rightAdapterTemplateId: form.rightRuntimeTemplateId,
+  });
+  const runtimeTopology = form.runtimeManager === "agent_iproute2_managed"
+    ? buildRuntimeTopology({
+        desiredText: form.desiredInterfaces,
+        routesText: form.routes,
+        staleRoutesText: form.staleRoutes,
+        staleText: form.staleInterfaces,
+        version: form.runtimeTopologyVersion,
+      })
+    : {};
+  return {
+    address_pool_cidr: form.ipv4Pool.trim(),
+    bandwidth_mbps: clampTunnelBandwidthMbps(form.bandwidthMbps),
+    confirmed: true,
+    enabled: form.enabled,
+    interface_name: form.interfaceName.trim(),
+    ipv4_tunnel: form.includeIpv4 ? addressPair(form.leftIpv4, form.rightIpv4, form.ipv4Prefix) : null,
+    ipv6_address_pool_cidr: form.ipv6Pool.trim() || null,
+    ipv6_tunnel: form.includeIpv6 ? addressPair(form.leftIpv6, form.rightIpv6, form.ipv6Prefix) : null,
+    kind: form.kind,
+    latency_primary_family: form.includeIpv4 && form.includeIpv6
+      ? form.latencyPrimaryFamily
+      : form.includeIpv4 ? "ipv4" : "ipv6",
+    left_client_id: form.leftClientId,
+    left_local_underlay: form.leftLocalUnderlay.trim() || null,
+    left_remote_underlay: form.leftRemoteUnderlay.trim(),
+    name: form.name.trim(),
+    ospf: form.ospfEnabled ? {
+      healthy_windows: integerOr(form.healthyWindows, 2),
+      left_adapter_template_id: form.leftRoutingTemplateId,
+      min_cost_delta: integerOr(form.minCostDelta, 5),
+      mode: form.ospfMode,
+      planned_latency_ms: numberOr(form.plannedLatencyMs, 20),
+      planned_packet_loss_ratio: numberOr(form.packetLossPercent, 0) / 100,
+      policy: ospfPolicyFromForm(form),
+      preference: numberOr(form.preference, 1),
+      right_adapter_template_id: form.rightRoutingTemplateId,
+    } : null,
+    reserved_addresses: [],
+    right_client_id: form.rightClientId,
+    right_local_underlay: form.rightLocalUnderlay.trim() || null,
+    right_remote_underlay: form.rightRemoteUnderlay.trim(),
+    runtime_control: runtimeControl,
+    runtime_topology: runtimeTopology,
+  };
 }
 
-function isTomlObject(value: TomlValue): value is object {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+function ospfPolicyFromForm(form: TunnelPlanForm): OspfCostPolicy {
+  return {
+    bandwidth_weight: numberOr(form.bandwidthWeight, 10),
+    latency_weight: numberOr(form.latencyWeight, 1),
+    loss_weight: numberOr(form.lossWeight, 400),
+    max_cost: integerOr(form.maxCost, 65535),
+    min_cost: integerOr(form.minCost, 5),
+    preference_bias: numberOr(form.preferenceBias, 1),
+  };
 }
 
-function tomlKey(value: string): string {
-  return /^[A-Za-z0-9_-]+$/.test(value) ? value : JSON.stringify(value);
+function applyAllocation(form: TunnelPlanForm, response: AllocateTunnelEndpointsResponse): TunnelPlanForm {
+  return {
+    ...form,
+    ...(response.ipv4_tunnel ? {
+      includeIpv4: true,
+      ipv4Prefix: String(response.ipv4_tunnel.prefix_len),
+      leftIpv4: response.ipv4_tunnel.left,
+      rightIpv4: response.ipv4_tunnel.right,
+    } : {}),
+    ...(response.ipv6_tunnel ? {
+      includeIpv6: true,
+      ipv6Prefix: String(response.ipv6_tunnel.prefix_len),
+      leftIpv6: response.ipv6_tunnel.left,
+      rightIpv6: response.ipv6_tunnel.right,
+    } : {}),
+  };
 }
+
+function templatesForClient(templates: SourceTemplateRecord[], clientId: string): SourceTemplateRecord[] {
+  return templates.filter((template) => template.scope === "shared" || (template.scope === "vps_local" && template.owner_client_id === clientId));
+}
+
+function addressPair(left: string, right: string, prefix: string): TunnelAddressPair {
+  return { left: left.trim(), prefix_len: integerOr(prefix, 0), right: right.trim() };
+}
+
+function createConfirmationItems(
+  request: CreateTunnelPlanRequest,
+  existing: TunnelPlanRecord | undefined,
+  sourceTemplates: SourceTemplateRecord[],
+) {
+  const runtime = request.runtime_control;
+  const topology = request.runtime_topology;
+  const traffic = runtime?.traffic_limit;
+  const templateName = (templateId: string | null | undefined) =>
+    sourceTemplates.find((template) => template.id === templateId)?.name
+      ?? (templateId ? shortId(templateId) : "not bound");
+  const trafficSummary = [
+    traffic?.ingress_kbps ? `ingress ${traffic.ingress_kbps} Kbps` : null,
+    traffic?.egress_kbps ? `egress ${traffic.egress_kbps} Kbps` : null,
+    traffic?.burst_kb ? `burst ${traffic.burst_kb} KiB` : null,
+  ].filter(Boolean).join(", ") || "No shaping";
+  const cleanupSummary = [
+    `${topology?.desired_interfaces?.length ?? 0} desired interfaces`,
+    `${topology?.stale_interfaces?.length ?? 0} stale interfaces`,
+    `${topology?.routes?.length ?? 0} desired routes`,
+    `${topology?.stale_routes?.length ?? 0} stale routes`,
+  ].join("; ");
+  return [
+    { label: "Operation", value: existing ? `Update declaration ${existing.id} at revision ${existing.revision}` : "Create declaration" },
+    { label: "Plan", value: `${request.name} · ${formatTunnelKind(request.kind)} · ${request.interface_name}` },
+    { label: "Endpoints", value: `${request.left_client_id} / ${request.right_client_id}` },
+    { label: "Left outer path", value: formatEndpointUnderlay(request.left_local_underlay, request.left_remote_underlay) },
+    { label: "Right outer path", value: formatEndpointUnderlay(request.right_local_underlay, request.right_remote_underlay) },
+    { label: "Runtime owner", value: runtimeManagerLabel(request.runtime_control?.manager) },
+    ...(runtime?.manager === "external_managed_adapter" ? [{
+      label: "Runtime adapters",
+      value: `${templateName(runtime.left_adapter_template_id)} / ${templateName(runtime.right_adapter_template_id)}`,
+    }] : []),
+    { label: "Traffic policy", value: trafficSummary },
+    ...(runtime?.manager === "agent_iproute2_managed" ? [{
+      label: "Routes and cleanup",
+      value: cleanupSummary,
+    }] : []),
+    { label: "Addresses", value: [request.ipv4_tunnel ? `${request.ipv4_tunnel.left}/${request.ipv4_tunnel.prefix_len} / ${request.ipv4_tunnel.right}/${request.ipv4_tunnel.prefix_len}` : null, request.ipv6_tunnel ? `${request.ipv6_tunnel.left}/${request.ipv6_tunnel.prefix_len} / ${request.ipv6_tunnel.right}/${request.ipv6_tunnel.prefix_len}` : null].filter(Boolean).join("; ") },
+    { label: "OSPF", value: request.ospf ? `${formatOspfMode(request.ospf.mode)} · planned cost ${calculateOspfCostPreview({ bandwidthMbps: request.bandwidth_mbps, latencyMs: request.ospf.planned_latency_ms, packetLossRatio: request.ospf.planned_packet_loss_ratio, policy: request.ospf.policy, preference: request.ospf.preference })}` : "Off" },
+    ...(request.ospf ? [
+      {
+        label: "Routing adapters",
+        value: `${templateName(request.ospf.left_adapter_template_id)} / ${templateName(request.ospf.right_adapter_template_id)}`,
+      },
+      {
+        label: "OSPF gates",
+        value: `minimum delta ${request.ospf.min_cost_delta}; ${request.ospf.healthy_windows} consecutive healthy probes for automatic mode`,
+      },
+    ] : []),
+    { label: "Activation", value: request.enabled ? "Enable and push to both endpoints" : "Save disabled" },
+  ];
+}
+
+function tunnelPlanFormMatchesInitial(
+  form: TunnelPlanForm,
+  initialPlan: TunnelPlanRecord,
+): boolean {
+  try {
+    return JSON.stringify(buildTunnelPlanRequest(form))
+      === JSON.stringify(buildTunnelPlanRequest(tunnelPlanFormFromRecord(initialPlan)));
+  } catch {
+    return false;
+  }
+}
+
+function tunnelPlanSaveError(error: unknown): string {
+  if (error instanceof ApiResponseError) {
+    if (error.code === "tunnel_plan_snapshot_stale") {
+      return "This tunnel plan changed after the editor opened. Close and reopen the editor before reviewing the current declaration.";
+    }
+    if (error.code === "tunnel_plan_name_conflict") {
+      return "A tunnel plan with this name already exists. Edit that declaration from the registry.";
+    }
+    if (error.code === "tunnel_plan_endpoint_agent_not_found") {
+      return "One of these VPS endpoints was deleted after the editor opened. Close the editor and review the current inventory before creating or updating this declaration.";
+    }
+    if (error.code === "tunnel_plan_interface_conflict") {
+      return "Another saved plan already uses this interface on one of the selected VPSs.";
+    }
+    if (error.code === "tunnel_plan_address_conflict") {
+      return "Another saved plan already uses one of these tunnel endpoint addresses.";
+    }
+  }
+  return error instanceof Error ? error.message : "Tunnel plan save failed";
+}
+
+function tunnelPlanDeleteError(error: unknown): string {
+  if (error instanceof ApiResponseError) {
+    if (error.code === "tunnel_plan_snapshot_stale") {
+      return "This tunnel plan changed after the delete review opened. Refresh the registry and review it again.";
+    }
+    if (error.code === "tunnel_plan_disable_before_delete") {
+      return "Disable the tunnel plan and let its desired runtime state be removed before deleting it.";
+    }
+  }
+  return error instanceof Error ? error.message : "Tunnel plan deletion failed";
+}
+
+function formatTunnelAddresses(plan: TunnelPlanRecord): string {
+  const values = [plan.plan.ipv4_tunnel, plan.plan.ipv6_tunnel]
+    .filter((pair): pair is TunnelAddressPair => Boolean(pair))
+    .map((pair) => `${pair.left}/${pair.prefix_len} / ${pair.right}/${pair.prefix_len}`);
+  return values.join("; ") || "No addresses";
+}
+
+function formatEndpointUnderlay(
+  local: string | null | undefined,
+  remote: string,
+): string {
+  return `Source ${local?.trim() || "automatic"} -> destination ${remote}`;
+}
+
+function formatRuntimeBinding(plan: TunnelPlanRecord): string {
+  const control = plan.plan.runtime_control;
+  if (!control || control.manager === "agent_iproute2_managed") return "Agent iproute2";
+  if (control.manager === "external_observed") return "External observed; no mutation";
+  return `External adapters ${shortId(control.left_adapter_template_id ?? "missing")} / ${shortId(control.right_adapter_template_id ?? "missing")}`;
+}
+
+function formatPlanOspf(plan: TunnelPlanRecord): string {
+  const ospf = plan.plan.ospf;
+  if (!ospf) return "Off";
+  return `${formatOspfMode(ospf.mode)} · cost ${plan.recommended_ospf_cost ?? "unknown"} · ${readableTelemetryToken(plan.ospf_status)}`;
+}
+
+function formatTunnelKind(kind: TunnelKind): string {
+  const labels: Record<TunnelKind, string> = {
+    custom: "Custom",
+    fou: "FOU",
+    gre: "GRE",
+    ipip: "IPIP",
+    openvpn: "OpenVPN",
+    sit: "SIT",
+    tun_tap: "TUN/TAP",
+    wireguard: "WireGuard",
+  };
+  return labels[kind];
+}
+
+function formatOspfMode(mode: string): string {
+  return mode === "automatic" ? "Automatic" : "Reviewed";
+}
+
+function matchesActionableOspfStatus(status: string): boolean {
+  return [
+    "adapter_unavailable",
+    "needs_adapter_status",
+    "review_degraded",
+    "review_planned_baseline",
+    "review_required",
+    "automatic_waiting_evidence",
+  ].includes(status);
+}
+
+function numberOr(value: string, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function integerOr(value: string, fallback: number): number {
+  return Math.trunc(numberOr(value, fallback));
+}
+
+function safeFilename(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "tunnel-plan";
+}
+
+type TunnelPlanForm = {
+  bandwidthMbps: string;
+  bandwidthWeight: string;
+  burstKb: string;
+  desiredInterfaces: string;
+  egressKbps: string;
+  enabled: boolean;
+  fouIpProto: string;
+  fouPeerPort: string;
+  fouPort: string;
+  healthyWindows: string;
+  includeIpv4: boolean;
+  includeIpv6: boolean;
+  ingressKbps: string;
+  interfaceName: string;
+  ipv4Pool: string;
+  ipv4Prefix: string;
+  ipv6Pool: string;
+  ipv6Prefix: string;
+  kind: TunnelKind;
+  latencyWeight: string;
+  latencyPrimaryFamily: "ipv4" | "ipv6";
+  leftClientId: string;
+  leftIpv4: string;
+  leftIpv6: string;
+  leftRoutingTemplateId: string;
+  leftRuntimeTemplateId: string;
+  leftLocalUnderlay: string;
+  leftRemoteUnderlay: string;
+  lossWeight: string;
+  maxCost: string;
+  minCost: string;
+  minCostDelta: string;
+  name: string;
+  ospfEnabled: boolean;
+  ospfMode: "reviewed" | "automatic";
+  packetLossPercent: string;
+  plannedLatencyMs: string;
+  preference: string;
+  preferenceBias: string;
+  rightClientId: string;
+  rightIpv4: string;
+  rightIpv6: string;
+  rightRoutingTemplateId: string;
+  rightRuntimeTemplateId: string;
+  rightLocalUnderlay: string;
+  rightRemoteUnderlay: string;
+  routes: string;
+  runtimeManager: RuntimeTunnelManager;
+  runtimeTopologyVersion: string;
+  staleInterfaces: string;
+  staleRoutes: string;
+};
+
+type Feedback = { message: string; tone: ActionFeedbackTone };
+type LifecycleSnapshot = {
+  enabled: boolean;
+  targets: Array<TunnelPlanRevisionTarget & { name: string; ospfEnabled: boolean }>;
+};
+type DeleteSnapshot = {
+  leftClientId: string;
+  name: string;
+  rightClientId: string;
+  target: TunnelPlanRevisionTarget;
+};
+
+type TopologyPanelProps = {
+  activeSubpage: string;
+  agents: AgentView[];
+  error: string | null;
+  initialPlanWorkflow: "create" | null;
+  jobs: JobHistoryRecord[];
+  loading: boolean;
+  networkObservations: NetworkObservationRecord[];
+  networkTrends: NetworkObservationTrendRecord[];
+  onAllocateTunnelEndpoints: (request: AllocateTunnelEndpointsRequest) => Promise<AllocateTunnelEndpointsResponse>;
+  onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
+  onCreateTunnelPlan: (request: CreateTunnelPlanRequest) => Promise<void>;
+  onDeleteTunnelPlan: (target: TunnelPlanRevisionTarget) => Promise<void>;
+  onExportTunnelPlan: (planId: string) => Promise<TunnelPlan>;
+  onInitialPlanWorkflowConsumed: () => void;
+  onLoadNetworkObservations: () => Promise<void>;
+  onLoadNetworkTrends: () => Promise<void>;
+  onLoadOspfRecommendations: () => Promise<void>;
+  onLoadOspfUpdatePlans: () => Promise<void>;
+  onLoadSourceTemplates: () => Promise<void>;
+  onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
+  onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
+  onLoadTopologyGraph: () => Promise<void>;
+  onOpenJobDetails?: (jobId: string) => void;
+  onOpenCreateTunnelPlan: () => void;
+  onOpenPrivilegeUnlock: () => void;
+  onOpenSourceTemplates: () => void;
+  onOpenVpsDetail?: (clientId: string) => void;
+  onRefresh: () => Promise<void>;
+  onRefreshTunnelPlanOspfStatus: (planId: string) => Promise<void>;
+  onSelectSubpage: (subpage: string) => void;
+  onSetTunnelPlanEnabled: (targets: TunnelPlanRevisionTarget[], enabled: boolean) => Promise<void>;
+  onUpdateTunnelConnectionAssessment: (planId: string, request: UpdateTunnelConnectionAssessmentRequest) => Promise<void>;
+  onUpdateTunnelPlanOspfCost: (planId: string, request: UpdateTunnelPlanOspfCostRequest) => Promise<void>;
+  onUpdateTunnelPlan: (planId: string, request: UpdateTunnelPlanRequest) => Promise<void>;
+  ospfRecommendations: NetworkOspfRecommendationRecord[];
+  ospfUpdatePlans: NetworkOspfUpdatePlanRecord[];
+  privilegeMaterial: PrivilegeMaterial | null;
+  runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
+  sourceTemplates: SourceTemplateRecord[];
+  telemetryTunnels: TelemetryTunnelRecord[];
+  topologyGraph: TopologyGraph;
+  tunnelPlans: TunnelPlanRecord[];
+};

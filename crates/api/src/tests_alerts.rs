@@ -5,6 +5,41 @@ use vpsman_common::{AgentCapabilitySnapshot, AgentPrivilegeMode};
 #[tokio::test]
 async fn fleet_alerts_derive_actionable_current_status() {
     let repo = Repository::Memory(MemoryState::default());
+    let tunnel_input = vpsman_common::TunnelPlanInput {
+        name: "edge-a-gre42".to_string(),
+        interface_name: "gre42".to_string(),
+        kind: vpsman_common::TunnelKind::Gre,
+        runtime_control: vpsman_common::RuntimeTunnelControl {
+            manager: vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter,
+            left_adapter_template_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+            right_adapter_template_id: Some("22222222-2222-4222-8222-222222222222".to_string()),
+            ..Default::default()
+        },
+        runtime_topology: Default::default(),
+        left_client_id: "edge-a".to_string(),
+        right_client_id: "edge-b".to_string(),
+        left_remote_underlay: "198.51.100.10".to_string(),
+        right_remote_underlay: "203.0.113.20".to_string(),
+        left_local_underlay: None,
+        right_local_underlay: None,
+        address_pool_cidr: "10.42.0.0/30".to_string(),
+        reserved_addresses: Vec::new(),
+        ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
+            left: "10.42.0.0".to_string(),
+            right: "10.42.0.1".to_string(),
+            prefix_len: 31,
+        }),
+        ipv6_address_pool_cidr: None,
+        ipv6_tunnel: None,
+        latency_primary_family: Default::default(),
+        bandwidth_mbps: 100,
+        ospf: None,
+    };
+    let tunnel_plan = vpsman_common::plan_tunnel(&tunnel_input).unwrap();
+    let saved_tunnel = repo
+        .record_tunnel_plan(&tunnel_input, &tunnel_plan, true, &test_operator())
+        .await
+        .unwrap();
     let online = AgentView {
         id: "edge-a".to_string(),
         display_name: "Edge A".to_string(),
@@ -41,7 +76,6 @@ async fn fleet_alerts_derive_actionable_current_status() {
             can_manage_runtime_tunnels: false,
             can_apply_process_limits: false,
             unprivileged_hint: Some("agent is running without root".to_string()),
-            ..AgentCapabilitySnapshot::default()
         },
     };
     let backup_job = Uuid::new_v4();
@@ -58,9 +92,7 @@ async fn fleet_alerts_derive_actionable_current_status() {
                 kind: "gre".to_string(),
                 ownership_mode: "managed".to_string(),
                 mutation_policy: "managed".to_string(),
-                promotion_required: false,
-                plan_correlation: "managed_desired".to_string(),
-                plan_id: None,
+                plan_id: Some(saved_tunnel.id),
                 plan_name: Some("edge-a-gre42".to_string()),
                 plan_runtime_manager: Some("agent_iproute2_managed".to_string()),
                 endpoint_side: Some("left".to_string()),
@@ -100,12 +132,6 @@ async fn fleet_alerts_derive_actionable_current_status() {
                 packet_loss_ratio: None,
                 latency_healthy_windows: None,
                 latency_missed_windows: None,
-                auto_ospf_enabled: None,
-                auto_ospf_status: None,
-                auto_ospf_reason: None,
-                auto_ospf_current_cost: None,
-                auto_ospf_recommended_cost: None,
-                auto_ospf_updated_unix: None,
             });
         memory.jobs.write().await.push(JobHistoryView {
             id: backup_job,

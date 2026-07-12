@@ -58,10 +58,10 @@ resumable_download_events="$SMOKE_TMPDIR/resumable-download-events.jsonl"
 shell_marker="$destination_dir/shell-marker.txt"
 shell_script_marker="$destination_dir/shell-script-marker.txt"
 large_output_file="$SMOKE_TMPDIR/large-output-artifact.bin"
-network_plan_file="$SMOKE_TMPDIR/network-status-plan.json"
 agent_supervisor_dir="$SMOKE_TMPDIR/agent-supervisor"
 object_store_dir="$SMOKE_TMPDIR/object-store"
-mkdir -p "$destination_dir" "$object_store_dir"
+routing_adapter_state_dir="$SMOKE_TMPDIR/routing-adapter-state"
+mkdir -p "$destination_dir" "$object_store_dir" "$routing_adapter_state_dir"
 
 payload="vpsman postgres live job output smoke payload $(date +%s%N)"
 printf '%s\n' "$payload" >"$source_file"
@@ -440,7 +440,8 @@ assert_status_observation() {
       and .peer_client_id == $peer
       and .healthy == false
       and .metadata.type == "network_status"
-      and .metadata.applied == false)
+      and .metadata.scope == "declared_plan_only"
+      and .metadata.runtime.manager == "agent_iproute2_managed")
   ' <<<"$observations_json" >/dev/null
 }
 
@@ -542,18 +543,47 @@ assert_ospf_update_plans() {
   local update_plans_json
   update_plans_json="$(VPSMAN_API_TOKEN="$access_token" \
     target/debug/vpsctl --api-url "$api_url" network-ospf-update-plans --limit 50)"
-  jq -e --arg client "$client_id" --arg peer "$peer_client_id" '
+  jq -e --arg client "$client_id" --arg peer "$peer_client_id" --arg adapter "$routing_adapter_template_id" '
     any(.[]; .plan_name == "postgres-live-status"
       and .interface_name == "pgstat0"
       and .left_client_id == $client
       and .right_client_id == $peer
-      and .mutation_mode == "reviewed_plan_only"
-      and .privilege_required == (.cost_delta != 0)
-      and .bird2_file == "/etc/bird/vpsman-ospf.conf"
-      and (.status == "noop" or .status == "review_required" or .status == "review_degraded")
+      and .control_mode == "reviewed"
+      and .mutation_mode == "server_issued_adapter_jobs"
+      and .privilege_required == (.status == "review_required")
+      and .requires_approval == (.status == "review_required")
+      and .left_adapter_template_id == $adapter
+      and .right_adapter_template_id == $adapter
+      and (.left_adapter_definition_hash | length == 64)
+      and (.right_adapter_definition_hash | length == 64)
+      and (.status == "needs_adapter_status" or .status == "review_required" or .status == "review_degraded")
       and .evidence.sample_count >= 2
-      and (.proposed_left_bird2_interface_snippet | contains("cost ")))
+      and .recommended_ospf_cost >= 1)
   ' <<<"$update_plans_json" >/dev/null
+}
+
+assert_ospf_adapter_status_verified() {
+  local update_plans_json
+  local deadline=$((SECONDS + 20))
+  until update_plans_json="$(VPSMAN_API_TOKEN="$access_token" \
+    target/debug/vpsctl --api-url "$api_url" network-ospf-update-plans --limit 50)" \
+    && jq -e --arg plan_id "$network_plan_id" '
+      any(.[]; .plan_id == $plan_id
+        and .left_ospf_status == "verified"
+        and .right_ospf_status == "verified"
+        and .left_current_ospf_cost == 1000
+        and .right_current_ospf_cost == 1000
+        and .status == "review_required"
+        and .requires_approval == true
+        and .privilege_required == true)
+    ' <<<"$update_plans_json" >/dev/null; do
+    if (( SECONDS >= deadline )); then
+      echo "routing adapter status did not become verified" >&2
+      jq . <<<"${update_plans_json:-[]}" >&2 || true
+      return 1
+    fi
+    sleep 0.25
+  done
 }
 
 assert_shell_job_output() {

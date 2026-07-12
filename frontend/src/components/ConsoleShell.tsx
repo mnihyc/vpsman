@@ -129,6 +129,19 @@ export function ConsoleShell({
   const scopeName = activeSavedFleetView?.name ?? (fleetQuery.trim() ? "Filtered resources" : "All VPS resources");
   const showFullFleetMetrics =
     activeView === "Home" || (activeView === "Fleet" && activeSubpage === "monitor");
+  const noContactCount = summary.never + summary.unknown;
+  const unavailableCount = summary.offline + summary.stale + noContactCount;
+  const fleetStatusTitle = `${summaryScopeLabel}: ${summary.total} VPS; ${summary.online} online; ${summary.offline} offline; ${summary.stale} stale; ${noContactCount} no contact; ${summary.running_jobs} running jobs`;
+  const fleetStatusText = [
+    `${summaryScopeLabel}: ${summary.total} VPS`,
+    `${summary.online} online`,
+    summary.offline > 0 ? `${summary.offline} offline` : null,
+    summary.stale > 0 ? `${summary.stale} stale` : null,
+    noContactCount > 0 ? `${noContactCount} no contact` : null,
+    `${summary.running_jobs} jobs`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   const activeViewLabel = viewLabel(activeView);
   const activeSubpageLabel = subpageLabel(activeView, activeSubpage);
   const activeSubpageDescription = subpageDescription(activeView, activeSubpage);
@@ -558,17 +571,22 @@ export function ConsoleShell({
               <Metric label="Online" value={String(summary.online)} tone="green" />
               <Metric label="Offline" value={String(summary.offline)} tone="yellow" />
               <Metric label="Stale" value={String(summary.stale)} tone="yellow" />
+              <Metric
+                label="No contact"
+                title="Never-connected VPSs plus records whose reported online state lacks trustworthy gateway contact evidence"
+                value={String(summary.never + summary.unknown)}
+                tone="yellow"
+              />
               <Metric label="Warnings" value={String(summary.warnings)} tone="yellow" />
               <Metric label="Jobs" value={String(summary.running_jobs)} tone="blue" />
-              <Metric label="Online %" value={onlineRatio} tone="green" />
             </div>
           ) : (
             <div className="fleetStatusStrip" aria-label="Fleet status summary">
-              <strong className="fleetStatusFull">
-                {summaryScopeLabel}: {summary.total} VPS · {summary.online} online · {summary.stale} stale · {summary.running_jobs} running jobs
+              <strong className="fleetStatusFull" title={fleetStatusTitle}>
+                {fleetStatusText}
               </strong>
-              <strong className="fleetStatusCompact">
-                {summary.total} VPS · {summary.online} online · {summary.running_jobs} jobs
+              <strong className="fleetStatusCompact" title={fleetStatusTitle}>
+                {summary.total} VPS · {summary.online} online · {unavailableCount} unavailable · {summary.running_jobs} jobs
               </strong>
               <span className={summary.warnings > 0 ? "warn" : "ok"}>
                 {summary.warnings > 0

@@ -1,6 +1,5 @@
 import type {
-  PromoteTelemetryTunnelRequest,
-  RuntimeTunnelCommand,
+  OspfCostPolicy,
   RuntimeTunnelControl,
   RuntimeTunnelFouOptions,
   RuntimeTunnelManager,
@@ -23,12 +22,8 @@ const OSPF_MIN_COST = 5;
 const OSPF_MAX_COST = 65535;
 
 export type RuntimeControlFormValues = {
-  startup: string;
-  stop: string;
-  cleanup: string;
-  restart: string;
-  status: string;
-  traffic: string;
+  leftAdapterTemplateId?: string;
+  rightAdapterTemplateId?: string;
   ingressKbps: string;
   egressKbps: string;
   burstKb: string;
@@ -57,17 +52,13 @@ export function buildRuntimeControl(
   const fou = buildFouOptions(values);
   const fouPayload = fou ? { fou } : {};
   if (manager === "external_observed") {
-    return { manager, traffic_limit: {}, ...fouPayload };
+    return { manager, traffic_limit: {} };
   }
   if (manager === "external_managed_adapter") {
     return {
       manager,
-      startup: commandFromText(values.startup),
-      stop: commandFromText(values.stop),
-      cleanup: commandFromText(values.cleanup),
-      restart: commandFromText(values.restart),
-      status: commandFromText(values.status),
-      traffic_limit_apply: commandFromText(values.traffic),
+      left_adapter_template_id: values.leftAdapterTemplateId?.trim() || null,
+      right_adapter_template_id: values.rightAdapterTemplateId?.trim() || null,
       traffic_limit: trafficLimit,
       ...fouPayload,
     };
@@ -99,49 +90,11 @@ export function isDefaultRuntimeTopology(
   );
 }
 
-export function normalizeTelemetryPromotionRequest(
-  request: PromoteTelemetryTunnelRequest,
-): PromoteTelemetryTunnelRequest {
-  return {
-    ...request,
-    client_id: request.client_id.trim(),
-    interface: request.interface.trim(),
-    peer_client_id: request.peer_client_id.trim(),
-    local_underlay: request.local_underlay.trim(),
-    peer_underlay: request.peer_underlay.trim(),
-    address_pool_cidr: request.address_pool_cidr.trim(),
-    ipv4_tunnel: normalizeTunnelAddressPair(request.ipv4_tunnel ?? null),
-    ipv6_address_pool_cidr: request.ipv6_address_pool_cidr?.trim() || null,
-    ipv6_tunnel: normalizeTunnelAddressPair(request.ipv6_tunnel ?? null),
-    latency_primary_family: request.latency_primary_family ?? "ipv4",
-    name: request.name?.trim() || undefined,
-    bandwidth_mbps: clampTunnelBandwidthMbps(request.bandwidth_mbps),
-    latency_ms: request.latency_ms ?? 20,
-    packet_loss_ratio: request.packet_loss_ratio ?? 0,
-    preference: request.preference ?? 1,
-    enabled: Boolean(request.enabled),
-  };
-}
-
-function normalizeTunnelAddressPair(
-  pair: PromoteTelemetryTunnelRequest["ipv4_tunnel"],
-) {
-  if (!pair) {
-    return null;
-  }
-  const left = pair.left.trim();
-  const right = pair.right.trim();
-  if (!left || !right) {
-    return null;
-  }
-  return { left, right, prefix_len: pair.prefix_len };
-}
-
 export const OSPF_COST_MODEL_DETAIL =
   "cost = clamp(round((latency_ms + loss_ratio * 400 + 10 * sqrt(100 / clamp(bandwidth_mbps, 10, 10000))) / max(preference, 0.1)), 5, 65535). The sqrt bandwidth term gives diminishing returns across arbitrary Mbps values, so low bandwidth is visible but high bandwidth cannot hide bad latency or loss. Manual speed-test evidence can downgrade effective bandwidth; bandwidth tests never run automatically.";
 
 export const OSPF_COST_MODEL_SUMMARY =
-  "Latency/loss plus a bounded sqrt bandwidth penalty; speed-test evidence is manual while monitoring and auto-OSPF state are shown separately.";
+  "Latency/loss plus a bounded sqrt bandwidth penalty; evidence is explicit and automatic changes are controlled by the server per plan.";
 
 export function normalizeTunnelBandwidthMbps(value: unknown): number {
   const numeric = Number(value);
@@ -162,11 +115,13 @@ export function calculateOspfCostPreview({
   bandwidthMbps,
   latencyMs,
   packetLossRatio,
+  policy,
   preference,
 }: {
   bandwidthMbps: number;
   latencyMs: number;
   packetLossRatio: number;
+  policy?: OspfCostPolicy;
   preference: number;
 }): number {
   const bandwidth = clampTunnelBandwidthMbps(bandwidthMbps);
@@ -179,13 +134,27 @@ export function calculateOspfCostPreview({
     0.1,
     Number.isFinite(preference) ? preference : 1,
   );
+  const effectivePolicy = policy ?? {
+    bandwidth_weight: OSPF_BANDWIDTH_WEIGHT,
+    latency_weight: 1,
+    loss_weight: OSPF_LOSS_WEIGHT,
+    max_cost: OSPF_MAX_COST,
+    min_cost: OSPF_MIN_COST,
+    preference_bias: 1,
+  };
   const bandwidthPenalty =
-    OSPF_BANDWIDTH_WEIGHT *
+    effectivePolicy.bandwidth_weight *
     Math.sqrt(OSPF_BANDWIDTH_REFERENCE_MBPS / bandwidth);
-  const raw = latency + loss * OSPF_LOSS_WEIGHT + bandwidthPenalty;
+  const raw =
+    latency * effectivePolicy.latency_weight +
+    loss * effectivePolicy.loss_weight +
+    bandwidthPenalty;
   return Math.min(
-    OSPF_MAX_COST,
-    Math.max(OSPF_MIN_COST, Math.round(raw / preferenceBias)),
+    effectivePolicy.max_cost,
+    Math.max(
+      effectivePolicy.min_cost,
+      Math.round((raw * effectivePolicy.preference_bias) / preferenceBias),
+    ),
   );
 }
 
@@ -196,7 +165,7 @@ export function runtimeManagerLabel(
     return "External observed";
   }
   if (manager === "external_managed_adapter") {
-    return "Custom adapter";
+    return "External adapter";
   }
   if (manager === "agent_iproute2_managed" || !manager) {
     return "Agent iproute2";
@@ -232,18 +201,16 @@ export function ospfStatusLabel(
   enabled?: boolean | null,
 ): string {
   switch (status) {
-    case "updated":
-      return "Updated";
-    case "stable":
-      return "Stable";
+    case "verified":
+      return "Verified";
+    case "unverified":
+      return "Check required";
+    case "stale":
+      return "Stale";
+    case "partial":
+      return "Partial";
     case "failed":
       return "Failed";
-    case "report_only":
-      return "Report only";
-    case "stabilizing":
-      return "Stabilizing";
-    case "monitoring_only":
-      return "Monitoring only";
     case "disabled":
       return "Off";
     case "pending":
@@ -303,22 +270,6 @@ export function mutationPolicyLabel(policy: string | null | undefined): string {
   }
 }
 
-export function planCorrelationLabel(
-  correlation: string | null | undefined,
-): string {
-  switch (correlation) {
-    case "matched_saved_plan":
-      return "Saved plan";
-    case "unmatched":
-      return "Unmatched";
-    case null:
-    case undefined:
-      return "Plan unknown";
-    default:
-      return readableTelemetryToken(correlation);
-  }
-}
-
 export function trafficStatusLabel(status: string | null | undefined): string {
   if (!status || status === "ok") {
     return "OK";
@@ -341,14 +292,6 @@ function telemetryReasonLabelByKey(key: string): string {
   switch (key) {
     case "probe_ok":
       return "Probe OK";
-    case "external_cost_program_succeeded":
-      return "Updater applied";
-    case "external_cost_program_unconfigured":
-      return "No external updater";
-    case "external_cost_program_failed":
-      return "Updater failed";
-    case "latency_probe_unhealthy_ospf_handles_dead_adjacency":
-      return "Adjacency down; OSPF handles failover";
     case "latency_probe_missing_healthy_sample":
       return "Waiting for healthy probes";
     case "latency_probe_disabled":
@@ -390,15 +333,6 @@ export function addressFamilyLabel(family: string | null | undefined): string {
     default:
       return readableTelemetryToken(family);
   }
-}
-
-function commandFromText(value: string): RuntimeTunnelCommand | undefined {
-  const trimmed = value.trim();
-  const argv = trimmed
-    .split(/[\n,]/.test(trimmed) ? /[\n,]/ : /\s+/)
-    .map((part) => part.trim())
-    .filter(Boolean);
-  return argv.length > 0 ? { argv } : undefined;
 }
 
 function splitList(value: string): string[] {

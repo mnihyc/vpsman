@@ -79,10 +79,11 @@ use crate::{
     },
     routes_migrations::{create_migration_link, create_migration_run, list_migration_links},
     routes_network::{
-        allocate_tunnel_endpoints, create_tunnel_plan, disable_tunnel_plan, enable_tunnel_plan,
-        export_tunnel_plan, get_topology_graph, list_network_ospf_recommendations,
-        list_network_ospf_update_plans, list_tunnel_plans, promote_telemetry_tunnel_plan,
-        promote_tunnel_plan_to_custom_adapter, update_tunnel_plan_ospf_cost,
+        allocate_tunnel_endpoints, create_tunnel_plan, delete_tunnel_plan, disable_tunnel_plan,
+        enable_tunnel_plan, export_tunnel_plan, get_topology_graph,
+        list_network_ospf_recommendations, list_network_ospf_update_plans, list_tunnel_plans,
+        refresh_tunnel_plan_ospf_status, update_tunnel_connection_assessment, update_tunnel_plan,
+        update_tunnel_plan_ospf_cost,
     },
     routes_restores::{create_restore_plan, list_restore_plans},
     routes_schedules::{
@@ -523,6 +524,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/api/v1/tunnel-plans/{plan_id}/plan",
             get(export_tunnel_plan),
         )
+        .route("/api/v1/tunnel-plans/{plan_id}", put(update_tunnel_plan))
         .route(
             "/api/v1/tunnel-plans/{plan_id}/enable",
             post(enable_tunnel_plan),
@@ -532,16 +534,20 @@ pub(crate) fn build_router(state: AppState) -> Router {
             post(disable_tunnel_plan),
         )
         .route(
+            "/api/v1/tunnel-plans/{plan_id}/delete",
+            post(delete_tunnel_plan),
+        )
+        .route(
+            "/api/v1/tunnel-plans/{plan_id}/connection-assessment",
+            put(update_tunnel_connection_assessment),
+        )
+        .route(
             "/api/v1/tunnel-plans/{plan_id}/ospf-cost",
             post(update_tunnel_plan_ospf_cost),
         )
         .route(
-            "/api/v1/tunnel-plans/promote-telemetry",
-            post(promote_telemetry_tunnel_plan),
-        )
-        .route(
-            "/api/v1/tunnel-plans/promote-custom-adapter",
-            post(promote_tunnel_plan_to_custom_adapter),
+            "/api/v1/tunnel-plans/{plan_id}/ospf-status",
+            post(refresh_tunnel_plan_ospf_status),
         )
         .route(
             "/api/v1/backups",

@@ -1,4 +1,5 @@
 use super::models::{BandwidthMbps, OspfCostPolicy, TunnelObservation};
+use uuid::Uuid;
 
 pub const MIN_TUNNEL_BANDWIDTH_MBPS: BandwidthMbps = 10;
 pub const MAX_TUNNEL_BANDWIDTH_MBPS: BandwidthMbps = 10_000;
@@ -68,4 +69,27 @@ pub fn observed_ospf_cost(
         },
     );
     (cost, effective_bandwidth_mbps)
+}
+
+pub fn routing_cost_update_privilege_payload(
+    plan_id: Uuid,
+    plan_revision: i64,
+    recommendation_id: &str,
+    left_current_cost: Option<u16>,
+    right_current_cost: Option<u16>,
+    desired_cost: u16,
+    left_adapter_definition_hash: &str,
+    right_adapter_definition_hash: &str,
+) -> String {
+    format!(
+        "v3|{}|{}|{}|{}|{}|{}|{}|{}",
+        plan_id,
+        plan_revision,
+        recommendation_id.trim(),
+        left_current_cost.map_or_else(|| "none".to_string(), |value| value.to_string()),
+        right_current_cost.map_or_else(|| "none".to_string(), |value| value.to_string()),
+        desired_cost,
+        left_adapter_definition_hash,
+        right_adapter_definition_hash,
+    )
 }

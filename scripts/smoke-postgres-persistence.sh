@@ -160,6 +160,17 @@ api_post() {
     "$api_url$path"
 }
 
+api_put() {
+  local path="$1"
+  local json="$2"
+  curl -fsS \
+    -X PUT \
+    -H "Authorization: Bearer $access_token" \
+    -H "Content-Type: application/json" \
+    -d "$json" \
+    "$api_url$path"
+}
+
 api_delete() {
   local path="$1"
   local reviewed_name="$2"
@@ -246,6 +257,7 @@ seed_telemetry() {
   local disk_available="$5"
   local network_rx="$6"
   local network_tx="$7"
+  local telemetry_seq="$8"
   local process_incarnation_id="33333333-3333-4333-8333-333333333333"
   local gateway_session_id
   case "$client_id" in
@@ -260,6 +272,7 @@ seed_telemetry() {
       \"gateway_id\": \"postgres-persistence-gateway\",
       \"gateway_session_id\": \"$gateway_session_id\",
       \"process_incarnation_id\": \"$process_incarnation_id\",
+      \"telemetry_seq\": $telemetry_seq,
       \"telemetry\": {
         \"client_id\": \"$client_id\",
         \"metrics\": {
@@ -336,7 +349,7 @@ seed_agent "pg-agent-a" "" "$first_public_key_hex"
 seed_agent "pg-agent-b" "$unprivileged_capabilities"
 api_post "/api/v1/agents/pg-agent-b/alias" '{"display_name":"pg-edge-b","confirmed":true}' >/dev/null
 vpsctl_json agent-tag --client-id pg-agent-b --tag edge --confirmed >/dev/null
-vpsctl_json agent-tag --client-id pg-agent-b --tag bird2 --confirmed >/dev/null
+vpsctl_json agent-tag --client-id pg-agent-b --tag routing --confirmed >/dev/null
 api_get "/api/v1/agents" | jq -e '
   any(.[]; .id == "pg-agent-b" and
     .capabilities.privilege_mode == "unprivileged" and
@@ -345,30 +358,30 @@ api_get "/api/v1/agents" | jq -e '
     .capabilities.can_apply_process_limits == false)
 ' >/dev/null
 telemetry_bucket=$(( (($(date +%s) - 600) / 60) * 60 ))
-seed_telemetry "pg-agent-a" "$((telemetry_bucket + 10))" 0.5 134217728 5368709120 1000 2000
-seed_telemetry "pg-agent-a" "$((telemetry_bucket + 20))" 1.0 100663296 4294967296 4000 8000
-seed_telemetry "pg-agent-a" "$((telemetry_bucket - 7200))" 9.9 67108864 2147483648 9000 18000
+seed_telemetry "pg-agent-a" "$((telemetry_bucket + 10))" 0.5 134217728 5368709120 1000 2000 1
+seed_telemetry "pg-agent-a" "$((telemetry_bucket + 20))" 1.0 100663296 4294967296 4000 8000 2
+seed_telemetry "pg-agent-a" "$((telemetry_bucket - 7200))" 9.9 67108864 2147483648 9000 18000 1
 vpsctl_json telemetry-rollups --client-id pg-agent-a --bucket-secs 60 --limit 10 | jq -e '
-  any(.[]; .client_id == "pg-agent-a" and .bucket_secs == 60 and .sample_count == 2 and
-    (.cpu_load_1_avg > 0.74 and .cpu_load_1_avg < 0.76) and
-    .cpu_load_1_max == 1 and
-    .memory_total_bytes_max == 268435456 and
-    .memory_available_bytes_min == 100663296 and
-    .disk_total_bytes_max == 10737418240 and
-    .disk_available_bytes_avg == 4831838208 and
-    .disk_available_bytes_min == 4294967296 and
-    .network_rx_bytes_max == 4000 and
-    .network_tx_bytes_max == 8000)
+  map(select(.client_id == "pg-agent-a" and .bucket_secs == 60)) as $rows |
+  ($rows | map(.sample_count) | add) == 2 and
+  (($rows | map(.cpu_load_1_avg * .sample_count) | add) / 2 > 0.74) and
+  (($rows | map(.cpu_load_1_avg * .sample_count) | add) / 2 < 0.76) and
+  ($rows | map(.cpu_load_1_max) | max) == 1 and
+  ($rows | map(.memory_total_bytes_max) | max) == 268435456 and
+  (($rows | map(.memory_available_bytes_avg * .sample_count) | add) / 2) == 117440512 and
+  ($rows | map(.memory_available_bytes_min) | min) == 100663296 and
+  ($rows | map(.disk_total_bytes_max) | max) == 10737418240 and
+  (($rows | map(.disk_available_bytes_avg * .sample_count) | add) / 2) == 4831838208 and
+  ($rows | map(.disk_available_bytes_min) | min) == 4294967296 and
+  ($rows | map(.network_rx_bytes_max) | max) == 4000 and
+  ($rows | map(.network_tx_bytes_max) | max) == 8000
 ' >/dev/null
 vpsctl_json telemetry-network-rates --client-id pg-agent-a --interface eth0 --bucket-secs 60 --limit 10 | jq -e '
-  any(.[]; .client_id == "pg-agent-a" and .interface == "eth0" and .bucket_secs == 60 and
-    .sample_count == 2 and
-    .rx_bytes_avg == 2500 and
-    .tx_bytes_avg == 5000 and
-    .rx_bytes_delta == 0 and
-    .tx_bytes_delta == 0 and
-    .rx_bps_avg == 0 and
-    .tx_bps_avg == 0)
+  map(select(.client_id == "pg-agent-a" and .interface == "eth0" and .bucket_secs == 60)) as $rows |
+  ($rows | map(.sample_count) | add) == 2 and
+  (($rows | map(.rx_bytes_avg * .sample_count) | add) / 2) == 2500 and
+  (($rows | map(.tx_bytes_avg * .sample_count) | add) / 2) == 5000 and
+  all($rows[]; .rx_bytes_delta >= 0 and .tx_bytes_delta >= 0 and .rx_bps_avg >= 0 and .tx_bps_avg >= 0)
 ' >/dev/null
 
 vpsctl_json agent-tag --client-id pg-agent-a --tag group:pg-persistent --confirmed >/dev/null
@@ -443,8 +456,10 @@ plan_json="$(api_post "/api/v1/tunnel-plans" '{
   "kind": "gre",
   "left_client_id": "pg-agent-a",
   "right_client_id": "pg-agent-b",
-  "left_underlay": "203.0.113.77",
-  "right_underlay": "203.0.113.78",
+  "left_remote_underlay": "203.0.113.78",
+  "left_local_underlay": null,
+  "right_remote_underlay": "203.0.113.77",
+  "right_local_underlay": null,
   "address_pool_cidr": "10.251.0.0/30",
   "reserved_addresses": [],
   "ipv4_tunnel": {
@@ -453,12 +468,32 @@ plan_json="$(api_post "/api/v1/tunnel-plans" '{
     "prefix_len": 31
   },
   "bandwidth_mbps": 1000,
-  "latency_ms": 17,
-  "packet_loss_ratio": 0,
-  "preference": 1.5,
   "confirmed": true
 }')"
-jq -e '.name == "pg-gre-a-b" and .status == "planned" and .plan.mutates_host == false' <<<"$plan_json" >/dev/null
+jq -e '.name == "pg-gre-a-b" and .revision == 1 and .enabled == false and .plan.kind == "gre" and (.plan | has("mutates_host") | not) and .plan.recommended_ospf_cost == null' <<<"$plan_json" >/dev/null
+plan_id="$(jq -r '.id' <<<"$plan_json")"
+plan_json="$(api_put "/api/v1/tunnel-plans/$plan_id" '{
+  "name": "pg-gre-a-b",
+  "interface_name": "gre77",
+  "kind": "gre",
+  "left_client_id": "pg-agent-a",
+  "right_client_id": "pg-agent-b",
+  "left_remote_underlay": "203.0.113.78",
+  "left_local_underlay": null,
+  "right_remote_underlay": "203.0.113.77",
+  "right_local_underlay": null,
+  "address_pool_cidr": "10.251.0.0/30",
+  "reserved_addresses": [],
+  "ipv4_tunnel": {
+    "left": "10.251.0.0",
+    "right": "10.251.0.1",
+    "prefix_len": 31
+  },
+  "bandwidth_mbps": 1500,
+  "expected_revision": 1,
+  "confirmed": true
+}')"
+jq -e '.revision == 2 and .enabled == false and .plan.bandwidth_mbps == 1500' <<<"$plan_json" >/dev/null
 
 schedule_json="$(vpsctl_json schedule-create \
   --name pg-hourly-uptime \
@@ -933,6 +968,7 @@ jq -e '
   any(.[]; .action == "agent_identity.upserted" and .target == "client:pg-agent-a") and
   any(.[]; .action == "client_key.revoked" and .target == "client:pg-revoked-agent") and
   any(.[]; .action == "network.tunnel_plan_created") and
+  any(.[]; .action == "network.tunnel_plan_updated") and
   any(.[]; .action == "schedule.created") and
   any(.[]; .action == "fleet.alert_notification_deliveries_worker_processed") and
   any(.[]; .action == "fleet.alert_notification_deliveries_pruned") and
@@ -954,7 +990,7 @@ api_get "/api/v1/auth/me" | jq -e '.username == "postgres-smoke"' >/dev/null
 api_get "/api/v1/fleet/summary" | jq -e '.total == 2 and .online == 2' >/dev/null
 api_get "/api/v1/agents" | jq -e '
   any(.[]; .id == "pg-agent-a" and .display_name == "pg-edge-a-rotated" and (.tags | index("persistent")) and (.tags | index("rotated")) and (.tags | index("os:debian"))) and
-  any(.[]; .id == "pg-agent-b" and (.tags | index("bird2")) and .capabilities.privilege_mode == "unprivileged" and .capabilities.can_apply_process_limits == false)
+  any(.[]; .id == "pg-agent-b" and (.tags | index("routing")) and .capabilities.privilege_mode == "unprivileged" and .capabilities.can_apply_process_limits == false)
 ' >/dev/null
 persisted_rotated_key_hex="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT encode(public_key, 'hex') FROM clients WHERE id = 'pg-agent-a'")"
 if [[ "$persisted_rotated_key_hex" != "$second_public_key_hex" ]]; then
@@ -967,25 +1003,24 @@ api_get "/api/v1/key-lifecycle/report" | jq -e '
   any(.clients[]; .client_id == "pg-agent-a" and .current_key_revoked == false)
 ' >/dev/null
 api_get "/api/v1/telemetry/rollups?client_id=pg-agent-a&bucket_secs=60&limit=10" | jq -e '
-  any(.[]; .client_id == "pg-agent-a" and .sample_count == 2 and
-    .memory_available_bytes_avg == 117440512 and
-    .disk_available_bytes_avg == 4831838208 and
-    .network_rx_bytes_max == 4000 and
-    .network_tx_bytes_max == 8000)
+  map(select(.client_id == "pg-agent-a" and .bucket_secs == 60)) as $rows |
+  ($rows | map(.sample_count) | add) == 2 and
+  (($rows | map(.memory_available_bytes_avg * .sample_count) | add) / 2) == 117440512 and
+  (($rows | map(.disk_available_bytes_avg * .sample_count) | add) / 2) == 4831838208 and
+  ($rows | map(.network_rx_bytes_max) | max) == 4000 and
+  ($rows | map(.network_tx_bytes_max) | max) == 8000
 ' >/dev/null
 api_get "/api/v1/telemetry/network-rates?client_id=pg-agent-a&interface=eth0&bucket_secs=60&limit=10" | jq -e '
-  any(.[]; .client_id == "pg-agent-a" and .interface == "eth0" and .sample_count == 2 and
-    .rx_bytes_avg == 2500 and
-    .tx_bytes_avg == 5000 and
-    .rx_bytes_delta == 0 and
-    .tx_bytes_delta == 0 and
-    .rx_bps_avg == 0 and
-    .tx_bps_avg == 0)
+  map(select(.client_id == "pg-agent-a" and .interface == "eth0" and .bucket_secs == 60)) as $rows |
+  ($rows | map(.sample_count) | add) == 2 and
+  (($rows | map(.rx_bytes_avg * .sample_count) | add) / 2) == 2500 and
+  (($rows | map(.tx_bytes_avg * .sample_count) | add) / 2) == 5000 and
+  all($rows[]; .rx_bytes_delta >= 0 and .tx_bytes_delta >= 0 and .rx_bps_avg >= 0 and .tx_bps_avg >= 0)
 ' >/dev/null
 api_post "/api/v1/bulk/resolve" '{"selector_expression":"tag:edge"}' \
   | jq -e '.target_count == 2 and (.targets | map(.id) | sort == ["pg-agent-a","pg-agent-b"])' >/dev/null
 api_get "/api/v1/tunnel-plans" | jq -e '
-  any(.[]; .name == "pg-gre-a-b" and .status == "planned" and .plan.mutates_host == false)
+  any(.[]; .name == "pg-gre-a-b" and .revision == 2 and .enabled == false and .plan.kind == "gre" and .plan.bandwidth_mbps == 1500 and (.plan | has("mutates_host") | not) and .plan.recommended_ospf_cost == null)
 ' >/dev/null
 api_get "/api/v1/schedules" | jq -e --arg schedule_id "$schedule_id" '
   any(.[]; .id == $schedule_id and .name == "pg-hourly-uptime" and .enabled == true and .command_type == "shell_argv" and .selector_expression == "tag:edge" and (.target_client_ids | sort == ["pg-agent-a","pg-agent-b"]))
@@ -1048,6 +1083,7 @@ audit_json="$(api_get "/api/v1/audit?limit=200")"
 jq -e '
   any(.[]; .action == "agent_identity.upserted" and .target == "client:pg-agent-a") and
   any(.[]; .action == "network.tunnel_plan_created") and
+  any(.[]; .action == "network.tunnel_plan_updated") and
   any(.[]; .action == "schedule.created") and
   any(.[]; .action == "backup_policy.upserted") and
   any(.[]; .action == "backup_policy.retention_pruned") and

@@ -971,13 +971,14 @@ nav {
   position: sticky;
   top: 88px;
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   max-height: calc(100vh - 112px);
   min-width: 0;
   overflow: hidden;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(60, 64, 67, 0.14);
+  box-shadow: 0 2px 8px rgba(60, 64, 67, 0.12);
 }
 
 .actionDrawerHeader {
@@ -1172,9 +1173,19 @@ nav {
   box-shadow: var(--shadow-drawer);
 }
 
+.confirmationPrompt.inlinePrompt {
+  margin-block-end: 12px;
+  scroll-margin-block: 12px;
+}
+
 .confirmationPrompt.danger {
   border-color: var(--danger);
   background: var(--danger-soft);
+}
+
+.confirmationPrompt.warning {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
 }
 
 .confirmationPromptIcon {
@@ -1190,6 +1201,11 @@ nav {
 .confirmationPrompt.danger .confirmationPromptIcon {
   background: var(--danger-soft);
   color: var(--danger);
+}
+
+.confirmationPrompt.warning .confirmationPromptIcon {
+  background: var(--warning-soft);
+  color: var(--warning-text);
 }
 
 .confirmationPromptBody {
@@ -1464,8 +1480,18 @@ h2 {
 }
 
 .quickStats {
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
   justify-self: stretch;
   width: 100%;
+}
+
+.quickStats .metric {
+  padding-inline: 8px;
+}
+
+.quickStats .metric span {
+  white-space: nowrap;
 }
 
 .summaryScopeLabel {

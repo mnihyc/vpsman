@@ -16,10 +16,13 @@ use crate::{
 #[derive(Debug, PartialEq)]
 pub(crate) struct VtyTunnelOspfCostUpdateRequest {
     pub(crate) plan_id: Uuid,
+    pub(crate) plan_revision: i64,
     pub(crate) recommendation_id: String,
-    pub(crate) current_ospf_cost: u16,
-    pub(crate) recommended_ospf_cost: u16,
-    pub(crate) mutation_intent: String,
+    pub(crate) left_current_ospf_cost: Option<u16>,
+    pub(crate) right_current_ospf_cost: Option<u16>,
+    pub(crate) desired_ospf_cost: u16,
+    pub(crate) left_adapter_definition_hash: String,
+    pub(crate) right_adapter_definition_hash: String,
     pub(crate) confirmed: bool,
 }
 
@@ -27,10 +30,13 @@ pub(crate) fn parse_vty_tunnel_ospf_cost_update(
     tokens: &[&str],
 ) -> Result<VtyTunnelOspfCostUpdateRequest> {
     let mut plan_id = None::<Uuid>;
+    let mut plan_revision = None::<i64>;
     let mut recommendation_id = None::<String>;
-    let mut current_ospf_cost = None::<u16>;
-    let mut recommended_ospf_cost = None::<u16>;
-    let mut mutation_intent = "apply".to_string();
+    let mut left_current_ospf_cost = None::<u16>;
+    let mut right_current_ospf_cost = None::<u16>;
+    let mut desired_ospf_cost = None::<u16>;
+    let mut left_adapter_definition_hash = None::<String>;
+    let mut right_adapter_definition_hash = None::<String>;
     let mut confirmed = false;
 
     let mut index = 0;
@@ -51,6 +57,20 @@ pub(crate) fn parse_vty_tunnel_ospf_cost_update(
                 plan_id = Some(parse_uuid(flag_value(value, "--plan-id="), "--plan-id")?);
                 index += 1;
             }
+            "--plan-revision" => {
+                plan_revision = Some(parse_revision(
+                    next_value(tokens, index, "--plan-revision")?,
+                    "--plan-revision",
+                )?);
+                index += 2;
+            }
+            value if value.starts_with("--plan-revision=") => {
+                plan_revision = Some(parse_revision(
+                    flag_value(value, "--plan-revision="),
+                    "--plan-revision",
+                )?);
+                index += 1;
+            }
             "--recommendation-id" => {
                 recommendation_id = Some(parse_non_empty_string(
                     next_value(tokens, index, "--recommendation-id")?,
@@ -65,41 +85,74 @@ pub(crate) fn parse_vty_tunnel_ospf_cost_update(
                 )?);
                 index += 1;
             }
-            "--current-ospf-cost" => {
-                current_ospf_cost = Some(parse_u16(
-                    next_value(tokens, index, tokens[index])?,
-                    "--current-ospf-cost",
+            "--left-current-ospf-cost" => {
+                left_current_ospf_cost = Some(parse_u16(
+                    next_value(tokens, index, "--left-current-ospf-cost")?,
+                    "--left-current-ospf-cost",
                 )?);
                 index += 2;
             }
-            value if value.starts_with("--current-ospf-cost=") => {
-                current_ospf_cost = Some(parse_u16(
-                    flag_value(value, "--current-ospf-cost="),
-                    "--current-ospf-cost",
+            value if value.starts_with("--left-current-ospf-cost=") => {
+                left_current_ospf_cost = Some(parse_u16(
+                    flag_value(value, "--left-current-ospf-cost="),
+                    "--left-current-ospf-cost",
                 )?);
                 index += 1;
             }
-            "--recommended-ospf-cost" => {
-                recommended_ospf_cost = Some(parse_u16(
-                    next_value(tokens, index, tokens[index])?,
-                    "--recommended-ospf-cost",
+            "--right-current-ospf-cost" => {
+                right_current_ospf_cost = Some(parse_u16(
+                    next_value(tokens, index, "--right-current-ospf-cost")?,
+                    "--right-current-ospf-cost",
                 )?);
                 index += 2;
             }
-            value if value.starts_with("--recommended-ospf-cost=") => {
-                recommended_ospf_cost = Some(parse_u16(
-                    flag_value(value, "--recommended-ospf-cost="),
-                    "--recommended-ospf-cost",
+            value if value.starts_with("--right-current-ospf-cost=") => {
+                right_current_ospf_cost = Some(parse_u16(
+                    flag_value(value, "--right-current-ospf-cost="),
+                    "--right-current-ospf-cost",
                 )?);
                 index += 1;
             }
-            "--mutation-intent" => {
-                mutation_intent =
-                    parse_mutation_intent(next_value(tokens, index, "--mutation-intent")?)?;
+            "--desired-ospf-cost" => {
+                desired_ospf_cost = Some(parse_u16(
+                    next_value(tokens, index, "--desired-ospf-cost")?,
+                    "--desired-ospf-cost",
+                )?);
                 index += 2;
             }
-            value if value.starts_with("--mutation-intent=") => {
-                mutation_intent = parse_mutation_intent(flag_value(value, "--mutation-intent="))?;
+            value if value.starts_with("--desired-ospf-cost=") => {
+                desired_ospf_cost = Some(parse_u16(
+                    flag_value(value, "--desired-ospf-cost="),
+                    "--desired-ospf-cost",
+                )?);
+                index += 1;
+            }
+            "--left-adapter-definition-hash" => {
+                left_adapter_definition_hash = Some(parse_hash(
+                    next_value(tokens, index, "--left-adapter-definition-hash")?,
+                    "--left-adapter-definition-hash",
+                )?);
+                index += 2;
+            }
+            value if value.starts_with("--left-adapter-definition-hash=") => {
+                left_adapter_definition_hash = Some(parse_hash(
+                    flag_value(value, "--left-adapter-definition-hash="),
+                    "--left-adapter-definition-hash",
+                )?);
+                index += 1;
+            }
+            "--right-adapter-definition-hash" => {
+                right_adapter_definition_hash = Some(parse_hash(
+                    next_value(tokens, index, "--right-adapter-definition-hash")?,
+                    "--right-adapter-definition-hash",
+                )?);
+                index += 2;
+            }
+            value if value.starts_with("--right-adapter-definition-hash=") => {
+                right_adapter_definition_hash = Some(parse_hash(
+                    flag_value(value, "--right-adapter-definition-hash="),
+                    "--right-adapter-definition-hash",
+                )?);
                 index += 1;
             }
             other => anyhow::bail!("unknown tunnel-ospf-cost-update flag {other}"),
@@ -107,19 +160,28 @@ pub(crate) fn parse_vty_tunnel_ospf_cost_update(
     }
 
     anyhow::ensure!(confirmed, "tunnel-ospf-cost-update requires --confirmed");
-    let current_ospf_cost = required(current_ospf_cost, "--current-ospf-cost")?;
-    let recommended_ospf_cost = required(recommended_ospf_cost, "--recommended-ospf-cost")?;
+    let desired_ospf_cost = required(desired_ospf_cost, "--desired-ospf-cost")?;
     anyhow::ensure!(
-        current_ospf_cost != recommended_ospf_cost,
-        "tunnel-ospf-cost-update requires a changed OSPF cost"
+        left_current_ospf_cost != Some(desired_ospf_cost)
+            || right_current_ospf_cost != Some(desired_ospf_cost),
+        "tunnel-ospf-cost-update requires at least one endpoint cost change"
     );
 
     Ok(VtyTunnelOspfCostUpdateRequest {
         plan_id: required(plan_id, "--plan-id")?,
+        plan_revision: required(plan_revision, "--plan-revision")?,
         recommendation_id: required(recommendation_id, "--recommendation-id")?,
-        current_ospf_cost,
-        recommended_ospf_cost,
-        mutation_intent,
+        left_current_ospf_cost,
+        right_current_ospf_cost,
+        desired_ospf_cost,
+        left_adapter_definition_hash: required(
+            left_adapter_definition_hash,
+            "--left-adapter-definition-hash",
+        )?,
+        right_adapter_definition_hash: required(
+            right_adapter_definition_hash,
+            "--right-adapter-definition-hash",
+        )?,
         confirmed,
     })
 }
@@ -139,17 +201,20 @@ pub(crate) fn submit_vty_tunnel_ospf_cost_update(
     let target_client_ids = tunnel_plan_client_ids(&plan)?;
     let payload_hash = tunnel_ospf_cost_payload_hash(
         request.plan_id,
+        request.plan_revision,
         &request.recommendation_id,
-        request.current_ospf_cost,
-        request.recommended_ospf_cost,
-        &request.mutation_intent,
+        request.left_current_ospf_cost,
+        request.right_current_ospf_cost,
+        request.desired_ospf_cost,
+        &request.left_adapter_definition_hash,
+        &request.right_adapter_definition_hash,
     );
     let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
     let salt_hex = load_super_salt_hex(None)?;
     let target = tunnel_plan_privilege_target(request.plan_id);
     let privilege_assertion = build_privilege_for_db(
         DbPrivilegeRequest {
-            action: tunnel_ospf_cost_action(&request.mutation_intent),
+            action: tunnel_ospf_cost_action(),
             target: &target,
             selector_expression: None,
             resolved_targets: &target_client_ids,
@@ -165,10 +230,13 @@ pub(crate) fn submit_vty_tunnel_ospf_cost_update(
         &format!("/api/v1/tunnel-plans/{}/ospf-cost", request.plan_id),
         token,
         &serde_json::json!({
+            "plan_revision": request.plan_revision,
             "recommendation_id": request.recommendation_id,
-            "current_ospf_cost": request.current_ospf_cost,
-            "recommended_ospf_cost": request.recommended_ospf_cost,
-            "mutation_intent": request.mutation_intent,
+            "left_current_ospf_cost": request.left_current_ospf_cost,
+            "right_current_ospf_cost": request.right_current_ospf_cost,
+            "desired_ospf_cost": request.desired_ospf_cost,
+            "left_adapter_definition_hash": request.left_adapter_definition_hash,
+            "right_adapter_definition_hash": request.right_adapter_definition_hash,
             "confirmed": request.confirmed,
             "privilege_assertion": privilege_assertion,
         }),
@@ -198,17 +266,26 @@ fn parse_u16(value: &str, flag: &str) -> Result<u16> {
     Ok(parsed)
 }
 
+fn parse_revision(value: &str, flag: &str) -> Result<i64> {
+    let parsed = value
+        .parse::<i64>()
+        .with_context(|| format!("{flag} must be an integer"))?;
+    anyhow::ensure!(parsed > 0, "{flag} must be positive");
+    Ok(parsed)
+}
+
 fn parse_non_empty_string(value: &str, flag: &str) -> Result<String> {
     let trimmed = value.trim();
     anyhow::ensure!(!trimmed.is_empty(), "{flag} must not be empty");
     Ok(trimmed.to_string())
 }
 
-fn parse_mutation_intent(value: &str) -> Result<String> {
-    match value {
-        "apply" | "rollback" => Ok(value.to_string()),
-        _ => anyhow::bail!("--mutation-intent must be apply or rollback"),
-    }
+fn parse_hash(value: &str, flag: &str) -> Result<String> {
+    anyhow::ensure!(
+        value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "{flag} must be a 64-character hexadecimal SHA-256 hash"
+    );
+    Ok(value.to_string())
 }
 
 fn parse_uuid(value: &str, flag: &str) -> Result<Uuid> {
@@ -221,17 +298,24 @@ fn parse_uuid(value: &str, flag: &str) -> Result<Uuid> {
 mod tests {
     use super::parse_vty_tunnel_ospf_cost_update;
 
+    const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
     #[test]
-    fn parses_vty_tunnel_ospf_cost_update() {
+    fn parses_endpoint_adapter_snapshot() {
         let request = parse_vty_tunnel_ospf_cost_update(&[
             "--plan-id",
             "00000000-0000-0000-0000-000000000001",
+            "--plan-revision=7",
             "--recommendation-id=ospf-1234abcd5678ef90",
-            "--current-ospf-cost",
+            "--left-current-ospf-cost",
             "100",
-            "--recommended-ospf-cost=50",
-            "--mutation-intent",
-            "rollback",
+            "--right-current-ospf-cost=90",
+            "--desired-ospf-cost=50",
+            "--left-adapter-definition-hash",
+            HASH_A,
+            "--right-adapter-definition-hash",
+            HASH_B,
             "--confirmed",
         ])
         .unwrap();
@@ -241,43 +325,52 @@ mod tests {
             "00000000-0000-0000-0000-000000000001"
         );
         assert_eq!(request.recommendation_id, "ospf-1234abcd5678ef90");
-        assert_eq!(request.current_ospf_cost, 100);
-        assert_eq!(request.recommended_ospf_cost, 50);
-        assert_eq!(request.mutation_intent, "rollback");
+        assert_eq!(request.plan_revision, 7);
+        assert_eq!(request.left_current_ospf_cost, Some(100));
+        assert_eq!(request.right_current_ospf_cost, Some(90));
+        assert_eq!(request.desired_ospf_cost, 50);
+        assert_eq!(request.left_adapter_definition_hash, HASH_A);
+        assert_eq!(request.right_adapter_definition_hash, HASH_B);
         assert!(request.confirmed);
+    }
+
+    #[test]
+    fn accepts_unknown_endpoint_cost_but_rejects_stale_or_incomplete_snapshots() {
         assert!(parse_vty_tunnel_ospf_cost_update(&[
-            "--plan-id",
-            "00000000-0000-0000-0000-000000000001",
-            "--recommendation-id",
-            "ospf-1234abcd5678ef90",
-            "--current-ospf-cost",
-            "100",
-            "--recommended-ospf-cost",
-            "100",
+            "--plan-id=00000000-0000-0000-0000-000000000001",
+            "--plan-revision=7",
+            "--recommendation-id=ospf-1234abcd5678ef90",
+            "--right-current-ospf-cost=90",
+            "--desired-ospf-cost=50",
+            "--left-adapter-definition-hash",
+            HASH_A,
+            "--right-adapter-definition-hash",
+            HASH_B,
+            "--confirmed",
+        ])
+        .is_ok());
+        assert!(parse_vty_tunnel_ospf_cost_update(&[
+            "--plan-id=00000000-0000-0000-0000-000000000001",
+            "--plan-revision=7",
+            "--recommendation-id=ospf-1234abcd5678ef90",
+            "--left-current-ospf-cost=50",
+            "--right-current-ospf-cost=50",
+            "--desired-ospf-cost=50",
+            "--left-adapter-definition-hash",
+            HASH_A,
+            "--right-adapter-definition-hash",
+            HASH_B,
             "--confirmed",
         ])
         .is_err());
         assert!(parse_vty_tunnel_ospf_cost_update(&[
-            "--plan-id",
-            "00000000-0000-0000-0000-000000000001",
-            "--current-ospf-cost",
-            "100",
-            "--recommended-ospf-cost",
-            "50",
-            "--confirmed",
-        ])
-        .is_err());
-        assert!(parse_vty_tunnel_ospf_cost_update(&[
-            "--plan-id",
-            "00000000-0000-0000-0000-000000000001",
-            "--recommendation-id",
-            "ospf-1234abcd5678ef90",
-            "--current-ospf-cost",
-            "100",
-            "--recommended-ospf-cost",
-            "50",
-            "--mutation-intent",
-            "preview",
+            "--plan-id=00000000-0000-0000-0000-000000000001",
+            "--plan-revision=7",
+            "--recommendation-id=ospf-1234abcd5678ef90",
+            "--desired-ospf-cost=50",
+            "--left-adapter-definition-hash=not-a-hash",
+            "--right-adapter-definition-hash",
+            HASH_B,
             "--confirmed",
         ])
         .is_err());

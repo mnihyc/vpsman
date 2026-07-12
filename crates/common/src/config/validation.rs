@@ -1,12 +1,13 @@
 use super::models::{
     AgentAuthConfig, AgentBackupConfig, AgentConfig, AgentExecutionConfig, AgentNetworkConfig,
-    AgentNetworkPreset, AgentNoiseConfig, AgentProcessInventorySource,
-    AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource, AgentTelemetryConfig,
-    AgentTelemetrySource, AgentUpdateConfig, AgentUserSessionsSource, ServerEndpoint,
+    AgentNoiseConfig, AgentProcessInventorySource, AgentRuntimeStatusTelemetryPlan,
+    AgentRuntimeTrafficSource, AgentTelemetryConfig, AgentTelemetrySource, AgentUpdateConfig,
+    AgentUserSessionsSource, ServerEndpoint,
 };
 use crate::{
-    validate_runtime_topology_intent, validate_runtime_tunnel_control, RuntimeTunnelManager,
-    TunnelConfigBackend, TunnelEndpointSide, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
+    validate_runtime_topology_intent, validate_runtime_tunnel_control,
+    RuntimeTunnelAdapterCommands, RuntimeTunnelManager, TunnelEndpointSide,
+    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS, MAX_TELEMETRY_TUNNELS,
 };
 
 pub const INCREMENTAL_CONFIG_PATCH_SECTIONS: &[&str] =
@@ -23,11 +24,7 @@ pub fn validate_agent_config_shape(config: &AgentConfig) -> Result<(), String> {
     validate_execution_config(&config.execution)?;
     validate_telemetry_config(&config.telemetry)?;
     validate_network_config(&config.network)?;
-    validate_telemetry_interval(config.telemetry_light_secs, "telemetry_light_secs")?;
-    validate_telemetry_interval(config.telemetry_full_secs, "telemetry_full_secs")?;
-    if config.telemetry_full_secs < config.telemetry_light_secs {
-        return Err("telemetry_full_secs_must_be_greater_than_or_equal_to_light".to_string());
-    }
+    validate_telemetry_interval(config.telemetry_interval_secs, "telemetry_interval_secs")?;
     validate_tags(&config.tags)?;
     Ok(())
 }
@@ -282,12 +279,14 @@ fn validate_telemetry_config(config: &AgentTelemetryConfig) -> Result<(), String
 
 fn validate_network_config(config: &AgentNetworkConfig) -> Result<(), String> {
     validate_absolute_config_path(&config.root_dir, "network_root_dir")?;
-    validate_network_backend_preset(config.backend, config.preset)?;
-    if config.runtime_reconcile_enabled && !config.apply_enabled {
+    if config.runtime_reconcile_enabled
+        && !config.apply_enabled
+        && config
+            .runtime_status_telemetry_plans
+            .iter()
+            .any(|plan| plan.plan.runtime_control.manager != RuntimeTunnelManager::ExternalObserved)
+    {
         return Err("network_runtime_reconcile_requires_apply_enabled".to_string());
-    }
-    if !(1..=120).contains(&config.hook_timeout_secs) {
-        return Err("network_hook_timeout_secs_out_of_range".to_string());
     }
     validate_network_hook_argv(&config.runtime_ip_argv, "network_runtime_ip_argv")?;
     validate_network_hook_argv(&config.runtime_tc_argv, "network_runtime_tc_argv")?;
@@ -297,18 +296,6 @@ fn validate_network_config(config: &AgentNetworkConfig) -> Result<(), String> {
     if !(1024..=64 * 1024).contains(&config.runtime_command_max_output_bytes) {
         return Err("network_runtime_command_max_output_bytes_out_of_range".to_string());
     }
-    validate_network_hook_argv(
-        &config.ifupdown_validate_argv,
-        "network_ifupdown_validate_argv",
-    )?;
-    validate_network_hook_argv(&config.bird2_validate_argv, "network_bird2_validate_argv")?;
-    for argv in &config.reload_argv {
-        validate_network_hook_argv(argv, "network_reload_argv")?;
-    }
-    for argv in &config.bird2_reload_argv {
-        validate_network_hook_argv(argv, "network_bird2_reload_argv")?;
-    }
-    validate_network_hook_argv(&config.bird2_status_argv, "network_bird2_status_argv")?;
     validate_network_hook_argv(&config.probe_ping_argv, "network_probe_ping_argv")?;
     if !(1..=30).contains(&config.status_probe_timeout_secs) {
         return Err("network_status_probe_timeout_secs_out_of_range".to_string());
@@ -326,41 +313,14 @@ fn validate_network_config(config: &AgentNetworkConfig) -> Result<(), String> {
     if !(1..=60).contains(&config.latency_down_windows) {
         return Err("network_latency_down_windows_out_of_range".to_string());
     }
-    if config.auto_ospf_min_cost_delta == 0 {
-        return Err("network_auto_ospf_min_cost_delta_out_of_range".to_string());
-    }
-    if !(1..=10).contains(&config.auto_ospf_healthy_windows) {
-        return Err("network_auto_ospf_healthy_windows_out_of_range".to_string());
-    }
-    if let Some(command) = &config.auto_ospf_updater {
-        validate_network_hook_argv(&command.argv, "network_auto_ospf_updater_argv")?;
-        validate_runtime_command_budget(command, "network_auto_ospf_updater")?;
-    }
     validate_runtime_status_telemetry_plans(&config.runtime_status_telemetry_plans)?;
-    if config.validate_enabled
-        && config.preset.is_none()
-        && config.ifupdown_validate_argv.is_empty()
-        && config.bird2_validate_argv.is_empty()
-    {
-        return Err("network_validation_argv_required".to_string());
-    }
-    if config.reload_enabled && !config.validate_enabled {
-        return Err("network_reload_requires_validation".to_string());
-    }
-    if config.reload_enabled
-        && config.preset.is_none()
-        && config.reload_argv.is_empty()
-        && config.bird2_reload_argv.is_empty()
-    {
-        return Err("network_reload_argv_required".to_string());
-    }
     Ok(())
 }
 
 fn validate_runtime_status_telemetry_plans(
     plans: &[AgentRuntimeStatusTelemetryPlan],
 ) -> Result<(), String> {
-    if plans.len() > 16 {
+    if plans.len() > MAX_TELEMETRY_TUNNELS {
         return Err("network_runtime_status_telemetry_plans_too_many".to_string());
     }
     for plan in plans {
@@ -376,15 +336,7 @@ fn validate_runtime_status_telemetry_plans(
             .map_err(|_| "network_runtime_status_telemetry_control_invalid".to_string())?;
         validate_runtime_topology_intent(&plan.plan.runtime_topology, &plan.plan.interface_name)
             .map_err(|_| "network_runtime_status_telemetry_topology_invalid".to_string())?;
-        if plan.plan.runtime_control.manager == RuntimeTunnelManager::ExternalManagedAdapter
-            && plan.plan.runtime_control.status.is_none()
-        {
-            return Err("network_runtime_status_telemetry_status_command_required".to_string());
-        }
-        if let Some(command) = &plan.auto_ospf_updater {
-            validate_network_hook_argv(&command.argv, "network_runtime_auto_ospf_updater_argv")?;
-            validate_runtime_command_budget(command, "network_runtime_auto_ospf_updater")?;
-        }
+        validate_runtime_adapter_snapshot(plan)?;
         match plan.traffic_source {
             AgentRuntimeTrafficSource::InterfaceCounters => {
                 if plan.traffic_command.is_some() {
@@ -424,6 +376,94 @@ fn validate_runtime_status_telemetry_plans(
     Ok(())
 }
 
+fn validate_runtime_adapter_snapshot(plan: &AgentRuntimeStatusTelemetryPlan) -> Result<(), String> {
+    match plan.plan.runtime_control.manager {
+        RuntimeTunnelManager::ExternalManagedAdapter => {
+            let adapter = plan
+                .runtime_adapter
+                .as_ref()
+                .ok_or_else(|| "network_runtime_adapter_snapshot_required".to_string())?;
+            let expected_template_id = match plan.endpoint_side {
+                TunnelEndpointSide::Left => plan
+                    .plan
+                    .runtime_control
+                    .left_adapter_template_id
+                    .as_deref(),
+                TunnelEndpointSide::Right => plan
+                    .plan
+                    .runtime_control
+                    .right_adapter_template_id
+                    .as_deref(),
+            };
+            if expected_template_id != Some(adapter.template_id.as_str()) {
+                return Err("network_runtime_adapter_snapshot_binding_mismatch".to_string());
+            }
+            validate_runtime_adapter_commands(adapter)?;
+            if !plan.plan.runtime_control.traffic_limit.is_default()
+                && adapter.traffic_limit_apply.is_none()
+            {
+                return Err("network_runtime_adapter_traffic_limit_command_required".to_string());
+            }
+        }
+        RuntimeTunnelManager::AgentIproute2Managed | RuntimeTunnelManager::ExternalObserved => {
+            if plan.runtime_adapter.is_some() {
+                return Err("network_runtime_adapter_snapshot_forbidden".to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_runtime_adapter_commands(adapter: &RuntimeTunnelAdapterCommands) -> Result<(), String> {
+    validate_identifier(
+        &adapter.template_id,
+        "network_runtime_adapter_template_id",
+        128,
+    )?;
+    uuid::Uuid::parse_str(&adapter.template_id)
+        .map_err(|_| "network_runtime_adapter_template_id_invalid".to_string())?;
+    if adapter.template_name.trim().is_empty()
+        || adapter.template_name.len() > 256
+        || adapter.definition_hash.len() != 64
+        || !adapter
+            .definition_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("network_runtime_adapter_identity_invalid".to_string());
+    }
+    validate_runtime_adapter_command(&adapter.status, "status")?;
+    for (field, command) in [
+        ("startup", adapter.startup.as_ref()),
+        ("stop", adapter.stop.as_ref()),
+        ("cleanup", adapter.cleanup.as_ref()),
+        ("restart", adapter.restart.as_ref()),
+        ("traffic_limit", adapter.traffic_limit_apply.as_ref()),
+    ] {
+        if let Some(command) = command {
+            validate_runtime_adapter_command(command, field)?;
+        }
+    }
+    if adapter.startup.is_none() && adapter.restart.is_none() {
+        return Err("network_runtime_adapter_start_command_required".to_string());
+    }
+    if adapter.stop.is_none() && adapter.cleanup.is_none() {
+        return Err("network_runtime_adapter_remove_command_required".to_string());
+    }
+    Ok(())
+}
+
+fn validate_runtime_adapter_command(
+    command: &crate::RuntimeTunnelCommand,
+    field: &str,
+) -> Result<(), String> {
+    validate_network_hook_argv(
+        &command.argv,
+        &format!("network_runtime_adapter_{field}_argv"),
+    )?;
+    validate_runtime_command_budget(command, &format!("network_runtime_adapter_{field}"))
+}
+
 fn validate_runtime_command_budget(
     command: &crate::RuntimeTunnelCommand,
     field: &str,
@@ -434,33 +474,6 @@ fn validate_runtime_command_budget(
         return Err(format!("{field}_invalid"));
     }
     Ok(())
-}
-
-fn validate_network_backend_preset(
-    backend: TunnelConfigBackend,
-    preset: Option<AgentNetworkPreset>,
-) -> Result<(), String> {
-    let Some(preset) = preset else {
-        return Ok(());
-    };
-    let compatible = matches!(
-        (backend, preset),
-        (
-            TunnelConfigBackend::Ifupdown,
-            AgentNetworkPreset::DebianIfupdown2Bird2 | AgentNetworkPreset::DebianIfupdownBird2
-        ) | (
-            TunnelConfigBackend::Netplan,
-            AgentNetworkPreset::DebianNetplanBird2
-        ) | (
-            TunnelConfigBackend::SystemdNetworkd,
-            AgentNetworkPreset::DebianSystemdNetworkdBird2
-        )
-    );
-    if compatible {
-        Ok(())
-    } else {
-        Err("network_backend_preset_mismatch".to_string())
-    }
 }
 
 fn validate_network_hook_argv(argv: &[String], field: &str) -> Result<(), String> {

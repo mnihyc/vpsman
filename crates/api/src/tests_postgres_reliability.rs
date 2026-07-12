@@ -8,8 +8,9 @@ use sqlx::{
 use tokio::sync::broadcast;
 use uuid::Uuid;
 use vpsman_common::{
-    payload_hash, AgentCapabilitySnapshot, AgentHello, AgentUpdateHeartbeat, CommandOutput,
-    GatewayAgentHelloIngest, JobCommand, OutputStream,
+    payload_hash, plan_tunnel, AgentCapabilitySnapshot, AgentHello, AgentMetrics,
+    AgentUpdateHeartbeat, CommandOutput, CpuStat, GatewayAgentHelloIngest, GatewayTelemetryIngest,
+    JobCommand, LoadAverage, OutputStream, RuntimeTunnelManager, TelemetryEnvelope,
 };
 use vpsman_server_core::{
     JOB_STATUS_CANCELED, JOB_STATUS_COMPLETED, JOB_STATUS_CONTROL_TIMEOUT, JOB_STATUS_FAILED,
@@ -35,6 +36,272 @@ struct PgReliabilityTestDb {
     pool: PgPool,
     admin_pool: PgPool,
     db_name: String,
+}
+
+#[tokio::test]
+async fn postgres_fleet_summary_accounts_for_disconnected_and_missing_contact_states() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    for (index, status, last_seen_at) in [
+        (1_u8, "online", Some("2026-07-12T12:00:00Z")),
+        (2, "online", None),
+        (3, "disconnected", Some("2026-07-12T11:59:00Z")),
+        (4, "never", None),
+        (5, "stale", Some("2026-07-11T12:00:00Z")),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO clients (id, display_name, public_key, status, last_seen_at)
+            VALUES ($1, $1, $2, $3, $4::timestamptz)
+            "#,
+        )
+        .bind(format!("fleet-summary-{index}"))
+        .bind(vec![index; 32])
+        .bind(status)
+        .bind(last_seen_at)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+
+    let summary = db.repo.fleet_summary().await.unwrap();
+    assert_eq!(summary.total, 5);
+    assert_eq!(summary.online, 1);
+    assert_eq!(summary.offline, 1);
+    assert_eq!(summary.never, 1);
+    assert_eq!(summary.stale, 1);
+    assert_eq!(summary.unknown, 1);
+    assert_eq!(summary.warnings, 4);
+    assert_eq!(
+        summary.online + summary.offline + summary.never + summary.stale + summary.unknown,
+        summary.total
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_telemetry_ingest_is_sequence_bound_and_idempotent() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "telemetry-sequence-client";
+    sqlx::query(
+        r#"
+        INSERT INTO clients (id, display_name, public_key, status)
+        VALUES ($1, $2, $3, 'offline')
+        "#,
+    )
+    .bind(client_id)
+    .bind("Telemetry sequence client")
+    .bind(vec![42_u8; 32])
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let process_incarnation_id = Uuid::new_v4();
+    let mut event = GatewayTelemetryIngest {
+        gateway_id: "gateway-a".to_string(),
+        gateway_session_id: Uuid::new_v4(),
+        process_incarnation_id,
+        telemetry_seq: 2,
+        remote_ip: None,
+        telemetry: TelemetryEnvelope {
+            client_id: client_id.to_string(),
+            metrics: AgentMetrics {
+                observed_unix: 1,
+                hostname: client_id.to_string(),
+                cpu: CpuStat {
+                    load: LoadAverage {
+                        one: 1.0,
+                        five: 0.8,
+                        fifteen: 0.5,
+                    },
+                    cores: 2,
+                },
+                ..AgentMetrics::default()
+            },
+        },
+    };
+
+    assert!(db.repo.record_telemetry(&event).await.unwrap());
+    assert!(!db.repo.record_telemetry(&event).await.unwrap());
+    event.telemetry_seq = 1;
+    event.telemetry.metrics.cpu.load.one = 99.0;
+    assert!(!db.repo.record_telemetry(&event).await.unwrap());
+    event.telemetry_seq = 3;
+    event.telemetry.metrics.cpu.load.one = 3.0;
+    assert!(db.repo.record_telemetry(&event).await.unwrap());
+
+    let sample_count: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(sum(sample_count), 0)::bigint FROM telemetry_rollups WHERE client_id = $1",
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(sample_count, 2);
+    let telemetry_seq: i64 = sqlx::query_scalar(
+        "SELECT telemetry_seq FROM telemetry_ingest_watermarks WHERE client_id = $1",
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(telemetry_seq, 3);
+    let webhook_event_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM webhook_events WHERE kind = 'telemetry.rollup' AND event_id LIKE $1",
+    )
+    .bind(format!("telemetry:{client_id}:%"))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(webhook_event_count, 2);
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_telemetry_queries_scope_before_limit_and_preserve_rate_baseline() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    for (client_id, key_byte) in [
+        ("selected-telemetry", 51_u8),
+        ("unrelated-telemetry", 52_u8),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO clients (id, display_name, public_key, status)
+            VALUES ($1, $1, $2, 'online')
+            "#,
+        )
+        .bind(client_id)
+        .bind(vec![key_byte; 32])
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    let current = crate::unix_now() / 60 * 60;
+    let previous = current.saturating_sub(60);
+    for (client_id, load) in [
+        ("unrelated-telemetry", 9.0_f64),
+        ("selected-telemetry", 0.5_f64),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO telemetry_rollups (
+                client_id, bucket_start, bucket_secs, sample_count,
+                cpu_load_1_avg, cpu_load_1_max,
+                memory_total_bytes_max, memory_available_bytes_avg, memory_available_bytes_min,
+                disk_total_bytes_max, disk_available_bytes_avg, disk_available_bytes_min,
+                network_rx_bytes_max, network_tx_bytes_max, latest_observed_at
+            )
+            VALUES (
+                $1, to_timestamp($2::double precision), 60, 1,
+                $3, $3, 1000, 500, 500, 2000, 1500, 1500, 0, 0,
+                to_timestamp($2::double precision)
+            )
+            "#,
+        )
+        .bind(client_id)
+        .bind(current as f64)
+        .bind(load)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    for (client_id, observed, rx, tx) in [
+        ("unrelated-telemetry", current, 99_000_i64, 99_000_i64),
+        ("selected-telemetry", previous, 1_000_i64, 2_000_i64),
+        ("selected-telemetry", current, 4_000_i64, 8_000_i64),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO telemetry_network_rates (
+                client_id, interface, bucket_start, bucket_secs,
+                sample_count, rx_bytes_avg, tx_bytes_avg
+            )
+            VALUES ($1, 'eth0', to_timestamp($2::double precision), 60, 1, $3, $4)
+            "#,
+        )
+        .bind(client_id)
+        .bind(observed as f64)
+        .bind(rx)
+        .bind(tx)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    for (observed, rx, tx) in [
+        (current.saturating_sub(300), 10_000_i64, 20_000_i64),
+        (current + 60, 25_000_i64, 50_000_i64),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO telemetry_network_rates (
+                client_id, interface, bucket_start, bucket_secs,
+                sample_count, rx_bytes_avg, tx_bytes_avg
+            )
+            VALUES ('selected-telemetry', 'eth0', to_timestamp($1::double precision), 300, 1, $2, $3)
+            "#,
+        )
+        .bind(observed as f64)
+        .bind(rx)
+        .bind(tx)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+
+    let scope = vec!["selected-telemetry".to_string()];
+    let rollups = db
+        .repo
+        .list_dashboard_telemetry_rollups(
+            1,
+            Some(current),
+            Some(current + 59),
+            Some(60),
+            60,
+            &scope,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rollups.len(), 1);
+    assert_eq!(rollups[0].client_id, "selected-telemetry");
+    let rates = db
+        .repo
+        .list_dashboard_telemetry_network_rates(
+            10,
+            Some(current),
+            Some(current + 59),
+            Some(60),
+            60,
+            &scope,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rates.len(), 1);
+    assert_eq!(rates[0].client_id, "selected-telemetry");
+    assert_eq!(rates[0].rx_bytes_delta, 3_000);
+    assert_eq!(rates[0].tx_bytes_delta, 6_000);
+    let latest = db
+        .repo
+        .list_latest_telemetry_network_rates(10, Some("selected-telemetry"), Some("eth0"), Some(60))
+        .await
+        .unwrap();
+    assert_eq!(latest.len(), 1);
+    assert_eq!(latest[0].rx_bytes_delta, 3_000);
+    let latest_mixed = db
+        .repo
+        .list_latest_telemetry_network_rates(10, Some("selected-telemetry"), Some("eth0"), None)
+        .await
+        .unwrap();
+    assert_eq!(latest_mixed.len(), 1);
+    assert_eq!(latest_mixed[0].bucket_secs, 300);
+    assert_eq!(latest_mixed[0].rx_bytes_delta, 15_000);
+
+    db.cleanup().await;
 }
 
 impl PgReliabilityTestDb {
@@ -163,6 +430,104 @@ async fn insert_client(pool: &PgPool, client_id: &str, incarnation: Option<Uuid>
     .execute(pool)
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn postgres_agent_delete_returns_retired_peers_and_rejects_hidden_endpoint_reuse() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    insert_client(&db.pool, "client-a", None).await;
+    insert_client(&db.pool, "client-b", None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+    let input =
+        crate::tests_network::test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let plan = plan_tunnel(&input).unwrap();
+    db.repo
+        .record_tunnel_plan(&input, &plan, true, &operator)
+        .await
+        .unwrap();
+
+    let deleted = db
+        .repo
+        .delete_agent(
+            "client-a",
+            &DeleteAgentRequest {
+                confirmed: true,
+                reason: Some("retire endpoint".to_string()),
+                privilege_assertion: None,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        deleted.retired_tunnel_endpoint_pairs,
+        vec![("client-a".to_string(), "client-b".to_string())]
+    );
+    assert!(db.repo.list_tunnel_plans().await.unwrap().is_empty());
+    assert_eq!(
+        db.repo
+            .record_tunnel_plan(&input, &plan, true, &operator)
+            .await
+            .unwrap_err()
+            .to_string(),
+        "tunnel_plan_endpoint_agent_not_found"
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_tunnel_underlay_and_operator_assessment_round_trip_without_conflation() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    insert_client(&db.pool, "client-a", None).await;
+    insert_client(&db.pool, "client-b", None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+    let mut input =
+        crate::tests_network::test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    input.left_remote_underlay = "203.0.113.20".to_string();
+    input.left_local_underlay = Some("10.0.0.10".to_string());
+    input.right_remote_underlay = "198.51.100.10".to_string();
+    input.right_local_underlay = Some("10.0.1.20".to_string());
+    let plan = plan_tunnel(&input).unwrap();
+    let saved = db
+        .repo
+        .record_tunnel_plan(&input, &plan, true, &operator)
+        .await
+        .unwrap();
+
+    let assessed = db
+        .repo
+        .update_tunnel_connection_assessment(
+            saved.id,
+            saved.revision,
+            "connected",
+            Some("Application traffic verified across NAT"),
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(assessed.plan.left_remote_underlay, "203.0.113.20");
+    assert_eq!(
+        assessed.plan.left_local_underlay.as_deref(),
+        Some("10.0.0.10")
+    );
+    assert_eq!(assessed.plan.right_remote_underlay, "198.51.100.10");
+    assert_eq!(
+        assessed.plan.right_local_underlay.as_deref(),
+        Some("10.0.1.20")
+    );
+    assert_eq!(assessed.connection_assessment, "connected");
+    assert_eq!(
+        assessed.connection_assessment_note.as_deref(),
+        Some("Application traffic verified across NAT")
+    );
+    assert_eq!(assessed.connection_assessed_by, Some(operator.operator.id));
+
+    db.cleanup().await;
 }
 
 #[tokio::test]

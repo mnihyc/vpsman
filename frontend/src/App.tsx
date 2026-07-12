@@ -17,7 +17,6 @@ import { FleetMonitorPanel } from "./panels/FleetMonitorPanel";
 import { JobEvidencePanel } from "./panels/audit/JobEvidencePanel";
 import { SessionEvidencePanel } from "./panels/audit/SessionEvidencePanel";
 import { JobArtifactsPanel } from "./panels/jobs/JobArtifactsPanel";
-import { NetworkOverviewPanel } from "./panels/NetworkOverviewPanel";
 import { PanelDisplayProvider } from "./panelDisplay";
 import type { ActiveView, AgentView, FleetSummary } from "./types";
 import type { PrivilegeMaterial } from "./privilege";
@@ -382,7 +381,7 @@ function getScopedPageDescription(view: ActiveView, subpage: string): string {
     }
     switch (subpage) {
       case "network_metrics":
-        return "Latency, loss, speed, tunnels, endpoints, and alerts";
+        return "Latency, loss, throughput, tunnels, endpoints, and alerts";
       case "alerts":
         return "Alert policies, active context, channels, and delivery evidence";
       case "webhooks":
@@ -576,9 +575,9 @@ export function App() {
   }, [shellSummary.online, shellSummary.total]);
   const pageDescription =
     activeView === "Fleet" && hasFleetScope
-      ? `${visibleSummary.online} visible live / ${visibleSummary.total} visible / ${dashboard.summary.total} total`
+      ? `${visibleSummary.online} visible live / ${visibleSummary.never + visibleSummary.unknown} no contact / ${visibleSummary.total} visible / ${dashboard.summary.total} total`
       : activeView === "Fleet"
-        ? `${visibleSummary.online} live / ${visibleSummary.total} total`
+        ? `${visibleSummary.online} live / ${visibleSummary.never + visibleSummary.unknown} no contact / ${visibleSummary.total} total`
         : getScopedPageDescription(activeView, activeSubpage);
 
   useEffect(() => {
@@ -1058,6 +1057,15 @@ export function App() {
         onOpenConfig={openConfigWorkflow}
         onOpenFiles={releaseRoutes.openFiles}
         onOpenFleetAlerts={() => selectView("Fleet", "alerts")}
+        onOpenFleetMetrics={(agent) => {
+          dashboard.updateDashboardPreferences({
+            endAt: "",
+            scopeKind: "client",
+            scopeValue: agent.id,
+            startAt: "",
+          });
+          selectView("Observability", "fleet_metrics");
+        }}
         onOpenInstances={() => selectView("Fleet", "instances")}
         onOpenJob={releaseRoutes.openJobEvidence}
         onOpenJobs={() => selectView("Jobs", "history")}
@@ -1209,6 +1217,7 @@ export function App() {
           onCloneTemplate={dashboard.cloneSourceTemplate}
           onCreateTemplate={dashboard.createSourceTemplate}
           onDiffTemplate={dashboard.diffSourceTemplate}
+          onOpenTunnelPlans={() => selectView("Network", "tunnel_plans")}
           onRenderTemplateRuntimeConfig={dashboard.renderTemplateRuntimeConfig}
           onResolveBulk={dashboard.resolveBulkPreview}
           onTestTemplate={dashboard.testSourceTemplate}
@@ -1261,10 +1270,12 @@ export function App() {
   function renderFleetMetricsPanel() {
     return (
       <FleetMetricsPanel
+        agents={visibleAgents}
         error={dashboard.dashboardOverviewError}
         loading={dashboard.dashboardOverviewLoading}
         onPreferencesChange={dashboard.updateDashboardPreferences}
         onRefresh={() => void dashboard.loadDashboardOverview()}
+        onOpenVpsDetail={releaseRoutes.openVpsDetail}
         onWindowChange={dashboard.setDashboardOverviewWindow}
         overview={dashboard.dashboardOverview}
         preferences={dashboard.dashboardPreferences}
@@ -1440,30 +1451,35 @@ export function App() {
         onAllocateTunnelEndpoints={dashboard.allocateTunnelEndpoints}
         onCreateJob={dashboard.createJob}
         onCreateTunnelPlan={dashboard.createTunnelPlan}
+        onDeleteTunnelPlan={dashboard.deleteTunnelPlan}
         onExportTunnelPlan={dashboard.exportTunnelPlan}
         onLoadNetworkObservations={dashboard.loadNetworkObservations}
         onLoadNetworkTrends={dashboard.loadNetworkTrends}
         onLoadOspfRecommendations={dashboard.loadOspfRecommendations}
         onLoadOspfUpdatePlans={dashboard.loadOspfUpdatePlans}
+        onLoadSourceTemplates={dashboard.loadSourceTemplates}
         onLoadTopologyGraph={dashboard.loadTopologyGraph}
         onLoadOutputs={dashboard.loadJobOutputs}
         onLoadTargets={dashboard.loadJobTargets}
+        onOpenCreateTunnelPlan={openCreateTunnelPlan}
         onOpenJobDetails={openJobDetails}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
+        onOpenSourceTemplates={() => selectView("Automation", "source_templates")}
         onOpenVpsDetail={releaseRoutes.openVpsDetail}
         onSelectSubpage={(subpage) =>
           selectReleaseDestination("Network", subpage)
         }
-        onPromoteTelemetryTunnel={dashboard.promoteTelemetryTunnel}
-        onPromoteTunnelPlanToCustomAdapter={
-          dashboard.promoteTunnelPlanToCustomAdapter
-        }
         onRefresh={dashboard.loadTunnelPlans}
-        onSubmitRuntimeConfigPatch={dashboard.submitRuntimeConfigPatch}
+        onRefreshTunnelPlanOspfStatus={
+          dashboard.refreshTunnelPlanOspfStatus
+        }
         onSetTunnelPlanEnabled={dashboard.setTunnelPlanEnabled}
+        onUpdateTunnelConnectionAssessment={dashboard.updateTunnelConnectionAssessment}
         onUpdateTunnelPlanOspfCost={dashboard.updateTunnelPlanOspfCost}
+        onUpdateTunnelPlan={dashboard.updateTunnelPlan}
         privilegeMaterial={privilegeMaterial}
         setPrivilegeMaterial={setPrivilegeMaterial}
+        sourceTemplates={dashboard.sourceTemplates}
         topologyGraph={dashboard.topologyGraph}
         telemetryTunnels={dashboard.telemetryTunnels}
         tunnelPlans={dashboard.tunnelPlans}
@@ -1617,6 +1633,7 @@ export function App() {
         return (
           <FleetMonitorPanel
             agents={visibleAgents}
+            apiError={dashboard.apiError}
             backups={dashboard.backups}
             failedJobCount={
               dashboard.jobs.filter((job) => isFailedJobStatus(job.status))
@@ -1689,20 +1706,6 @@ export function App() {
       return renderRunbooksPanel();
     }
     if (activeView === "Network") {
-      if (activeSubpage === "overview") {
-        return (
-          <NetworkOverviewPanel
-            networkObservations={dashboard.networkObservations}
-            networkTrends={dashboard.networkTrends}
-            onCreateTunnelPlan={openCreateTunnelPlan}
-            onSelectSubpage={(subpage) => selectView("Network", subpage)}
-            ospfRecommendations={dashboard.ospfRecommendations}
-            ospfUpdatePlans={dashboard.ospfUpdatePlans}
-            telemetryTunnels={dashboard.telemetryTunnels}
-            tunnelPlans={dashboard.tunnelPlans}
-          />
-        );
-      }
       return renderNetworkPanel(networkSubpage(activeSubpage));
     }
     if (activeView === "Backups") {
@@ -2017,13 +2020,19 @@ function displaySummaryForAgents(
   runningJobs: number,
 ): FleetSummary {
   const states = agents.map((agent) => agentDisplayState(agent));
+  const online = states.filter((state) => state.label === "Online").length;
+  const offline = states.filter((state) => state.label === "Offline").length;
+  const never = states.filter((state) => state.label === "Never connected").length;
+  const stale = states.filter((state) => state.label === "Stale").length;
+  const unknown = agents.length - online - offline - never - stale;
   return {
-    never: agents.filter((agent) => !agent.last_seen_at).length,
-    offline: states.filter((state) => state.label === "Offline").length,
-    online: states.filter((state) => state.label === "Online").length,
+    never,
+    offline,
+    online,
     running_jobs: runningJobs,
-    stale: states.filter((state) => state.label === "Stale").length,
+    stale,
     total: agents.length,
+    unknown,
     warnings: states.filter(
       (state) => state.tone === "warning" || state.tone === "critical",
     ).length,
@@ -2069,10 +2078,14 @@ function jobSubpage(subpage: string) {
 }
 
 function networkSubpage(subpage: string) {
-  if (subpage === "tunnel_plans") return "plans";
-  if (subpage === "tests") return "apply";
-  if (["graph", "evidence", "ospf"].includes(subpage)) return subpage;
-  return "graph";
+  if (
+    ["overview", "graph", "tunnel_plans", "tests", "ospf", "evidence"].includes(
+      subpage,
+    )
+  ) {
+    return subpage;
+  }
+  return "overview";
 }
 
 function accessSubpage(subpage: string) {

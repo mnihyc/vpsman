@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { agentDisplayState, type AgentDisplayState } from "../agentDisplayState";
+import { ActionFeedback } from "../components/ActionFeedback";
 import type { FileTransferSessionRecord } from "../typesFileTransfer";
 import type {
   AgentView,
@@ -20,10 +21,12 @@ import type {
   TelemetryRollupRecord,
   TelemetryTunnelRecord,
 } from "../types";
-import { displayNameOrUnnamed, formatTime } from "../utils";
+import { INTERFACE_RATE_DEFINITION } from "../telemetryMetrics";
+import { displayNameOrUnnamed, formatTime, timestampMillis } from "../utils";
 
 type FleetMonitorPanelProps = {
   agents: AgentView[];
+  apiError?: string | null;
   ariaLabel?: string;
   description?: string;
   embedded?: boolean;
@@ -53,14 +56,16 @@ type FleetMonitorSort = "warning" | "traffic" | "cpu" | "memory" | "region" | "p
 const monitorSortOptions: Array<{ label: string; value: FleetMonitorSort }> = [
   { label: "Warnings first", value: "warning" },
   { label: "Traffic", value: "traffic" },
-  { label: "CPU", value: "cpu" },
+  { label: "1m load", value: "cpu" },
   { label: "Memory", value: "memory" },
   { label: "Region", value: "region" },
   { label: "Provider", value: "provider" },
 ];
+const NETWORK_SNAPSHOT_COHERENCE_MS = 180_000;
 
 export function FleetMonitorPanel({
   agents,
+  apiError = null,
   ariaLabel = "VPS monitor cards",
   description = "Compact VPS health cards for scanning state, resources, network, and alerts before opening terminal or file workflows.",
   embedded = false,
@@ -164,6 +169,11 @@ export function FleetMonitorPanel({
           {toolbarAction}
         </div>
       </div>
+      <ActionFeedback
+        className="localActionFeedback"
+        message={apiError}
+        tone="danger"
+      />
 
       {sortedAgents.length === 0 ? (
         <div className="emptyState">
@@ -231,14 +241,14 @@ export function VpsMonitorCard({
   tunnels,
 }: VpsMonitorCardProps) {
   const displayState = agentDisplayState(agent);
-  const statusTone = monitorStatusTone(agent, displayState);
   const provider = tagValue(agent.tags, "provider") ?? "provider unset";
   const region = tagValue(agent.tags, "country") ?? tagValue(agent.tags, "region") ?? "region unset";
   const visibleTags = agent.tags.slice(0, density === "compact" ? 2 : 4);
   const hiddenTagCount = Math.max(0, agent.tags.length - visibleTags.length);
+  const currentRates = coherentNetworkRates(rates);
   const networkBps =
-    rates.length > 0
-      ? rates.reduce((total, rate) => total + rate.rx_bps_avg + rate.tx_bps_avg, 0)
+    currentRates.length > 0
+      ? currentRates.reduce((total, rate) => total + rate.rx_bps_avg + rate.tx_bps_avg, 0)
       : null;
   const latency = averageLatency(tunnels);
   const memoryUsed = rollup
@@ -247,11 +257,22 @@ export function VpsMonitorCard({
   const diskUsed = rollup
     ? percent(rollup.disk_total_bytes_max - rollup.disk_available_bytes_avg, rollup.disk_total_bytes_max)
     : null;
-  const telemetryFreshness = latestTimestamp([
-    rollup?.latest_observed_at,
-    ...rates.map((rate) => rate.bucket_start),
-    ...tunnels.map((tunnel) => tunnel.observed_at),
-  ]);
+  const resourceFreshness = rollup?.latest_observed_at ?? null;
+  const networkFreshness = latestTimestamp(currentRates.map((rate) => rate.bucket_start));
+  const tunnelFreshness = latestTimestamp(tunnels.map((tunnel) => tunnel.observed_at));
+  const resourceTelemetryState = monitorTelemetryState(displayState, resourceFreshness);
+  const networkTelemetryState = monitorTelemetryState(displayState, networkFreshness);
+  const tunnelTelemetryState = monitorTelemetryState(displayState, tunnelFreshness);
+  const telemetryState = monitorTelemetrySummary(
+    resourceTelemetryState,
+    networkTelemetryState,
+    latestTimestamp([resourceFreshness, networkFreshness]),
+  );
+  const statusTone =
+    (telemetryState.kind === "partial" || telemetryState.kind === "stale") &&
+    monitorStatusTone(agent, displayState) === "online"
+      ? "warning"
+      : monitorStatusTone(agent, displayState);
   const lastContact = agent.last_seen_at ?? agent.stale_since ?? null;
 
   return (
@@ -265,30 +286,44 @@ export function VpsMonitorCard({
           {displayState.label}
         </span>
         <strong>{displayNameOrUnnamed(agent.display_name)}</strong>
-        <small>{provider} / {region}</small>
+        <small title={`${provider} / ${region}`}>{provider} / {region}</small>
       </button>
       <div className="vpsMonitorTags" aria-label={`Tags for ${displayNameOrUnnamed(agent.display_name)}`}>
         {visibleTags.length === 0 ? (
           <span>untagged</span>
         ) : (
-          visibleTags.map((tag) => <span key={tag}>{tag}</span>)
+          visibleTags.map((tag) => <span key={tag} title={tag}>{tag}</span>)
         )}
         {hiddenTagCount > 0 && <span>+{hiddenTagCount}</span>}
       </div>
       <div className="vpsMonitorMetrics">
-        <MonitorMetric icon={<Gauge size={15} />} label="CPU" value={rollup ? rollup.cpu_load_1_avg.toFixed(2) : "n/a"} />
-        <MonitorMetric icon={<Activity size={15} />} label="Memory" value={memoryUsed ?? "n/a"} />
-        <MonitorMetric icon={<Server size={15} />} label="Disk" value={diskUsed ?? "n/a"} />
+        <MonitorMetric
+          icon={<Gauge size={15} />}
+          label="1m load"
+          stale={resourceTelemetryState.kind === "stale"}
+          title="Linux 1-minute load average, not CPU utilization percentage"
+          value={rollup ? rollup.cpu_load_1_avg.toFixed(2) : "n/a"}
+        />
+        <MonitorMetric icon={<Activity size={15} />} label="Memory" stale={resourceTelemetryState.kind === "stale"} value={memoryUsed ?? "n/a"} />
+        <MonitorMetric icon={<Server size={15} />} label="Disk" stale={resourceTelemetryState.kind === "stale"} value={diskUsed ?? "n/a"} />
         <MonitorMetric
           icon={<Network size={15} />}
           label="Network"
+          stale={networkTelemetryState.kind === "stale"}
+          title={`${INTERFACE_RATE_DEFINITION} Latest RX plus TX interval-average rates are summed across ${currentRates.length} concurrently reported interface${currentRates.length === 1 ? "" : "s"}; virtual paths can overlap.`}
           value={networkBps === null ? "n/a" : formatRate(networkBps)}
         />
       </div>
       <div className="vpsMonitorEvidence">
-        <span>{latency === null ? "Latency n/a" : `${latency.toFixed(1)} ms avg`}</span>
+        <span title={tunnelTelemetryState.title}>
+          {latency === null
+            ? "Latency n/a"
+            : `${latency.toFixed(1)} ms avg${tunnelTelemetryState.kind === "stale" ? " · last-known" : ""}`}
+        </span>
         <span>{formatMonitorContactEvidence(agent, displayState, lastContact)}</span>
-        <span>{telemetryFreshness ? `Telemetry ${formatTime(telemetryFreshness)}` : "Telemetry not reported"}</span>
+        <span className={`telemetryEvidence ${telemetryState.kind}`} title={telemetryState.title}>
+          {telemetryState.label}
+        </span>
         <span>{signals.fleetJobText}</span>
         <span>{agent.stale_reason ?? signals.statusText}</span>
       </div>
@@ -338,19 +373,96 @@ export function VpsMonitorCard({
 function MonitorMetric({
   icon,
   label,
+  stale = false,
+  title,
   value,
 }: {
   icon: JSX.Element;
   label: string;
+  stale?: boolean;
+  title?: string;
   value: string;
 }) {
+  const metricTitle = [title, stale ? "Last-known value; current telemetry is stale" : null]
+    .filter(Boolean)
+    .join(". ");
   return (
-    <span className="vpsMonitorMetric">
+    <span className={`vpsMonitorMetric${stale ? " stale" : ""}`} title={metricTitle || undefined}>
       {icon}
       <span>{label}</span>
       <strong>{value}</strong>
     </span>
   );
+}
+
+type MonitorTelemetryState = {
+  kind: "fresh" | "missing" | "partial" | "stale";
+  label: string;
+  title: string;
+};
+
+function monitorTelemetryState(
+  displayState: AgentDisplayState,
+  latestAt: string | null,
+): MonitorTelemetryState {
+  if (!latestAt) {
+    return {
+      kind: "missing",
+      label: "Telemetry unavailable",
+      title: "This VPS has not reported retained resource or network telemetry",
+    };
+  }
+  const latestMs = timestampMillis(latestAt);
+  if (!Number.isFinite(latestMs)) {
+    return {
+      kind: "stale",
+      label: "Telemetry time invalid",
+      title: "The latest telemetry timestamp is invalid and cannot be treated as current",
+    };
+  }
+  const ageMs = Math.max(0, Date.now() - latestMs);
+  const stale = displayState.label !== "Online" || ageMs > 3 * 60_000;
+  return {
+    kind: stale ? "stale" : "fresh",
+    label: `Telemetry ${stale ? "stale" : "current"} · ${formatTime(latestAt)}`,
+    title: stale
+      ? "Last-known telemetry is retained for diagnosis and is not current state"
+      : "Latest telemetry is within the current-state freshness window",
+  };
+}
+
+function monitorTelemetrySummary(
+  resource: MonitorTelemetryState,
+  network: MonitorTelemetryState,
+  latestAt: string | null,
+): MonitorTelemetryState {
+  if (resource.kind === "missing" && network.kind === "missing") {
+    return {
+      kind: "missing",
+      label: "Telemetry unavailable",
+      title: "Resource and network telemetry have not been reported",
+    };
+  }
+  const latestLabel = latestAt ? ` · ${formatTime(latestAt)}` : "";
+  if (resource.kind === "stale" || network.kind === "stale") {
+    return {
+      kind: "stale",
+      label: `Telemetry stale${latestLabel}`,
+      title: `Resource: ${resource.title}. Network: ${network.title}`,
+    };
+  }
+  if (resource.kind === "missing" || network.kind === "missing") {
+    return {
+      kind: "partial",
+      label: `Telemetry partial${latestLabel}`,
+      title: `Resource: ${resource.title}. Network: ${network.title}`,
+    };
+  }
+  return {
+    kind: "fresh",
+    label: `Telemetry current${latestLabel}`,
+    title: "Latest resource and network telemetry are within the current-state freshness window",
+  };
 }
 
 function MonitorSignal({
@@ -481,7 +593,11 @@ function latestRollupsByClient(records: TelemetryRollupRecord[]) {
   const latest = new Map<string, TelemetryRollupRecord>();
   for (const record of records) {
     const current = latest.get(record.client_id);
-    if (!current || record.latest_observed_at > current.latest_observed_at) {
+    if (
+      !current ||
+      timestampMillis(record.latest_observed_at) >
+        timestampMillis(current.latest_observed_at)
+    ) {
       latest.set(record.client_id, record);
     }
   }
@@ -493,7 +609,10 @@ function latestRatesByClient(records: TelemetryNetworkRateRecord[]) {
   for (const record of records) {
     const byInterface = latest.get(record.client_id) ?? new Map<string, TelemetryNetworkRateRecord>();
     const current = byInterface.get(record.interface);
-    if (!current || record.bucket_start > current.bucket_start) {
+    if (
+      !current ||
+      timestampMillis(record.bucket_start) > timestampMillis(current.bucket_start)
+    ) {
       byInterface.set(record.interface, record);
     }
     latest.set(record.client_id, byInterface);
@@ -564,7 +683,24 @@ function compareMonitorAgents({
 }
 
 function networkRateTotal(rates: TelemetryNetworkRateRecord[]) {
-  return rates.reduce((total, rate) => total + rate.rx_bps_avg + rate.tx_bps_avg, 0);
+  return coherentNetworkRates(rates).reduce(
+    (total, rate) => total + rate.rx_bps_avg + rate.tx_bps_avg,
+    0,
+  );
+}
+
+function coherentNetworkRates(rates: TelemetryNetworkRateRecord[]) {
+  const latest = Math.max(
+    ...rates.map((rate) => timestampMillis(rate.bucket_start)).filter(Number.isFinite),
+  );
+  if (!Number.isFinite(latest)) {
+    return [];
+  }
+  return rates.filter(
+    (rate) =>
+      latest - timestampMillis(rate.bucket_start) <=
+      NETWORK_SNAPSHOT_COHERENCE_MS,
+  );
 }
 
 function memoryUsedRatio(rollup: TelemetryRollupRecord | undefined) {
@@ -658,7 +794,7 @@ function formatMonitorContactEvidence(
 
 function latestTimestamp(values: Array<string | null | undefined>) {
   const latest = values
-    .map((value) => (value ? Date.parse(value) : Number.NaN))
+    .map((value) => (value ? timestampMillis(value) : Number.NaN))
     .filter((value) => Number.isFinite(value))
     .sort((left, right) => right - left)[0];
   return latest === undefined ? null : new Date(latest).toISOString();

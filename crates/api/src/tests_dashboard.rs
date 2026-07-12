@@ -27,6 +27,59 @@ async fn dashboard_overview_rejects_invalid_window() {
 }
 
 #[tokio::test]
+async fn dashboard_overview_counts_disconnected_and_never_connected_vpss_as_offline() {
+    let repo = Repository::Memory(MemoryState::default());
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    let agent = |id: &str, status: &str| AgentView {
+        id: id.to_string(),
+        display_name: id.to_string(),
+        status: status.to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: None,
+        arch: None,
+        internal_build_number: 1,
+        process_incarnation_id: None,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: Default::default(),
+    };
+    memory.agents.write().await.extend([
+        agent("disconnected", "disconnected"),
+        agent("never", "never"),
+    ]);
+    let state = dashboard_test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
+    let Json(view) = routes_dashboard::dashboard_overview(
+        State(state),
+        headers,
+        Query(routes_dashboard::DashboardOverviewQuery {
+            group_by: Some("status".to_string()),
+            ..dashboard_query_default()
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(view.summary.total, 2);
+    assert_eq!(view.summary.online, 0);
+    assert_eq!(view.summary.offline, 2);
+    assert_eq!(view.summary.stale, 0);
+    let disconnected_groups = view
+        .label_clusters
+        .iter()
+        .filter(|cluster| matches!(cluster.label.as_str(), "disconnected" | "never"))
+        .collect::<Vec<_>>();
+    assert_eq!(disconnected_groups.len(), 2);
+    assert!(disconnected_groups
+        .iter()
+        .all(|cluster| cluster.total == 1 && cluster.offline == 1));
+}
+
+#[tokio::test]
 async fn system_dashboard_counts_agent_lost_lifecycle_failures() {
     let repo = Repository::Memory(MemoryState::default());
     let now = unix_now().to_string();
@@ -72,6 +125,7 @@ async fn system_dashboard_counts_agent_lost_lifecycle_failures() {
 async fn dashboard_overview_aggregates_memory_state() {
     let repo = Repository::Memory(MemoryState::default());
     let now_unix = unix_now();
+    let removed_interface_previous = now_unix.saturating_sub(2 * 60 * 60).to_string();
     let previous = now_unix.saturating_sub(60 * 60).to_string();
     let now = now_unix.to_string();
     let job_id = Uuid::new_v4();
@@ -113,7 +167,6 @@ async fn dashboard_overview_aggregates_memory_state() {
                     can_manage_runtime_tunnels: false,
                     can_apply_process_limits: false,
                     unprivileged_hint: Some("agent is running without root".to_string()),
-                    ..AgentCapabilitySnapshot::default()
                 },
             },
         ]);
@@ -126,6 +179,20 @@ async fn dashboard_overview_aggregates_memory_state() {
             dashboard_test_rate("edge-a", "eth0", &now, 9_000, 5_000),
             dashboard_test_rate("edge-b", "eth0", &previous, 2_000, 1_000),
             dashboard_test_rate("edge-b", "eth0", &now, 4_000, 10_000),
+            dashboard_test_rate(
+                "edge-a",
+                "removed0",
+                &removed_interface_previous,
+                1_000,
+                1_000,
+            ),
+            dashboard_test_rate(
+                "edge-a",
+                "removed0",
+                &previous,
+                1_000_000_000,
+                1_000_000_000,
+            ),
         ]);
         memory.jobs.write().await.push(JobHistoryView {
             id: job_id,
@@ -188,12 +255,18 @@ async fn dashboard_overview_aggregates_memory_state() {
     assert!(view.resources.cpu_load_avg.unwrap() > 0.7);
     assert_eq!(view.resource_curve.metric, "cpu_load");
     assert_eq!(view.resource_curve.sampled_clients, 2);
+    assert_eq!(
+        view.resource_curve.latest_sample_at.as_deref(),
+        Some(now.as_str())
+    );
     assert!(view
         .resource_curve
         .series
         .iter()
         .any(|series| series.client_id == "edge-b" && series.critical_threshold.is_some()));
     assert_eq!(view.network.top_clients.len(), 2);
+    assert!(view.network.rx_bps < 1_000.0);
+    assert!(view.network.tx_bps < 1_000.0);
     assert!(!view.network.traffic_points.is_empty());
     assert_eq!(view.network.traffic_top_clients.len(), 2);
     assert_eq!(view.network.traffic_series.len(), 2);
@@ -378,6 +451,130 @@ async fn dashboard_overview_supports_all_window_with_available_data_start() {
     assert!(view.resource_curve.series[0].points.len() >= 2);
     assert_eq!(view.network.traffic_series[0].rx_bytes, 2000);
     assert_eq!(view.network.traffic_series[0].tx_bytes, 2000);
+}
+
+#[tokio::test]
+async fn dashboard_repository_scopes_before_limit_and_keeps_pre_window_network_baseline() {
+    let repo = Repository::Memory(MemoryState::default());
+    let current = unix_now() / 60 * 60;
+    let previous = current.saturating_sub(60);
+    if let Repository::Memory(memory) = &repo {
+        memory.telemetry_rollups.write().await.extend([
+            dashboard_test_rollup("unrelated", &current.to_string(), 9.0, 9.0, 100, 100),
+            dashboard_test_rollup("selected", &current.to_string(), 0.5, 0.8, 600, 1600),
+        ]);
+        memory.telemetry_network_rates.write().await.extend([
+            dashboard_test_rate("unrelated", "eth0", &current.to_string(), 99_000, 99_000),
+            dashboard_test_rate("selected", "eth0", &previous.to_string(), 1_000, 2_000),
+            dashboard_test_rate("selected", "eth0", &current.to_string(), 4_000, 8_000),
+        ]);
+    }
+    let scope = vec!["selected".to_string()];
+    let rollups = repo
+        .list_dashboard_telemetry_rollups(
+            1,
+            Some(current),
+            Some(current + 59),
+            Some(60),
+            60,
+            &scope,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rollups.len(), 1);
+    assert_eq!(rollups[0].client_id, "selected");
+
+    let rates = repo
+        .list_dashboard_telemetry_network_rates(
+            10,
+            Some(current),
+            Some(current + 59),
+            Some(60),
+            60,
+            &scope,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rates.len(), 1);
+    assert_eq!(rates[0].client_id, "selected");
+    assert_eq!(rates[0].rx_bytes_delta, 3_000);
+    assert_eq!(rates[0].tx_bytes_delta, 6_000);
+    assert!(rates[0].rx_bps_avg > 0.0);
+    assert!(rates[0].tx_bps_avg > 0.0);
+}
+
+#[tokio::test]
+async fn latest_telemetry_snapshots_return_one_current_row_per_resource_key() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        let mut coarse_rollup = dashboard_test_rollup("edge-a", "250", 2.5, 2.7, 400, 1400);
+        coarse_rollup.bucket_secs = 300;
+        memory.telemetry_rollups.write().await.extend([
+            dashboard_test_rollup("edge-a", "100", 0.5, 0.7, 600, 1600),
+            dashboard_test_rollup("edge-a", "200", 1.5, 1.7, 500, 1500),
+            dashboard_test_rollup("edge-b", "150", 0.8, 1.0, 550, 1400),
+            coarse_rollup,
+        ]);
+        let mut coarse_previous = dashboard_test_rate("edge-a", "eth0", "150", 2_000, 3_000);
+        coarse_previous.bucket_secs = 300;
+        let mut coarse_current = dashboard_test_rate("edge-a", "eth0", "250", 12_000, 13_000);
+        coarse_current.bucket_secs = 300;
+        memory.telemetry_network_rates.write().await.extend([
+            dashboard_test_rate("edge-a", "eth0", "100", 1_000, 2_000),
+            dashboard_test_rate("edge-a", "eth0", "200", 7_000, 8_000),
+            dashboard_test_rate("edge-a", "wg0", "180", 3_000, 4_000),
+            coarse_previous,
+            coarse_current,
+        ]);
+    }
+
+    let rollups = repo
+        .list_latest_telemetry_rollups(10, None, Some(60))
+        .await
+        .unwrap();
+    assert_eq!(rollups.len(), 2);
+    assert_eq!(
+        rollups
+            .iter()
+            .find(|rollup| rollup.client_id == "edge-a")
+            .unwrap()
+            .latest_observed_at,
+        "200"
+    );
+
+    let rates = repo
+        .list_latest_telemetry_network_rates(10, Some("edge-a"), None, Some(60))
+        .await
+        .unwrap();
+    assert_eq!(rates.len(), 2);
+    let eth0 = rates.iter().find(|rate| rate.interface == "eth0").unwrap();
+    assert_eq!(eth0.bucket_start, "200");
+    assert_eq!(eth0.rx_bytes_delta, 6_000);
+
+    let mixed_rollups = repo
+        .list_latest_telemetry_rollups(10, None, None)
+        .await
+        .unwrap();
+    assert_eq!(mixed_rollups.len(), 2);
+    let edge_a_rollup = mixed_rollups
+        .iter()
+        .find(|rollup| rollup.client_id == "edge-a")
+        .unwrap();
+    assert_eq!(edge_a_rollup.bucket_start, "250");
+    assert_eq!(edge_a_rollup.bucket_secs, 300);
+
+    let mixed_rates = repo
+        .list_latest_telemetry_network_rates(10, Some("edge-a"), None, None)
+        .await
+        .unwrap();
+    assert_eq!(mixed_rates.len(), 2);
+    let mixed_eth0 = mixed_rates
+        .iter()
+        .find(|rate| rate.interface == "eth0")
+        .unwrap();
+    assert_eq!(mixed_eth0.bucket_start, "250");
+    assert_eq!(mixed_eth0.bucket_secs, 300);
+    assert_eq!(mixed_eth0.rx_bytes_delta, 10_000);
 }
 
 fn dashboard_query_default() -> routes_dashboard::DashboardOverviewQuery {

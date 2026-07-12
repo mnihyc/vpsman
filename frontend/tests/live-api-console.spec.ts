@@ -45,59 +45,60 @@ test("uses the real API proxy for fleet, topology planning, and audit visibility
   ).toBeVisible();
   await expect(page.getByRole("row", { name: /edge-live-a/ })).toBeVisible();
   await expect(
-    page.locator(".consoleHeader").getByText("2 live / 2 total"),
+    page.locator(".consoleHeader").getByText("2 live / 0 no contact / 2 total"),
   ).toBeVisible();
 
   await openConsoleSubpage(page, "Network", "Tunnel plans");
   await expect(
-    page.getByRole("heading", { name: "Tunnel plans" }),
+    page.locator(".consoleHeader").getByRole("heading", {
+      level: 1,
+      name: "Tunnel plans",
+    }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Create tunnel plan" }).click();
-  const composer = page.locator(".scheduleComposer", {
+  await page.getByRole("button", { name: "Create plan" }).click();
+  const composer = page.locator(".tunnelPlanComposer", {
     has: page.getByRole("heading", { name: "Create tunnel plan" }),
   });
-  await composer.getByLabel("Name", { exact: true }).fill("live-gre-a-b");
-  await composer.getByLabel("Interface", { exact: true }).fill("gre42");
-  await composer.getByLabel("Kind").selectOption("gre");
-  await composer.getByLabel("Bandwidth Mbps").fill("1000");
+  await expect(composer).toBeVisible();
+  await composer.getByLabel("Tunnel plan name", { exact: true }).fill("live-gre-a-b");
+  await composer.getByLabel("Tunnel interface", { exact: true }).fill("gre42");
+  await composer.getByLabel("Tunnel kind", { exact: true }).selectOption("gre");
+  await composer.getByLabel("Tunnel bandwidth", { exact: true }).fill("1000");
   await chooseVpsBySearch(
     composer,
-    "Left VPS",
+    "Left tunnel VPS",
     "live-agent-a",
     /live-agent-a|edge-live-a/,
   );
   await chooseVpsBySearch(
     composer,
-    "Right VPS",
+    "Right tunnel VPS",
     "live-agent-b",
     /live-agent-b|edge-live-b/,
   );
   await composer
-    .getByLabel("Left underlay", { exact: true })
-    .fill("203.0.113.10");
-  await composer
-    .getByLabel("Right underlay", { exact: true })
+    .getByLabel("Left remote underlay destination")
     .fill("203.0.113.20");
-  await composer.getByText("Allocation overrides").click();
-  await composer.getByLabel("IPv4 pool override").fill("10.252.0.0/30");
-  await composer.getByRole("button", { name: "Allocate endpoints" }).click();
-  await expect(
-    composer.getByLabel("Left IPv4 CIDR", { exact: true }),
-  ).toHaveValue("10.252.0.0/31");
-  await expect(
-    composer.getByLabel("Right IPv4 CIDR", { exact: true }),
-  ).toHaveValue("10.252.0.1/31");
-  await composer.getByLabel("Latency ms").fill("18");
-  await composer.getByLabel("Preference").fill("1.2");
-  await composer.getByRole("button", { name: "Save plan" }).click();
+  await composer
+    .getByLabel("Right remote underlay destination")
+    .fill("203.0.113.10");
+  await composer.getByLabel("IPv4 allocation pool").fill("10.252.0.0/30");
+  await composer.getByRole("button", { name: "Allocate" }).click();
+  await expect(composer.getByLabel("Left tunnel IPv4")).toHaveValue(
+    "10.252.0.0",
+  );
+  await expect(composer.getByLabel("Right tunnel IPv4")).toHaveValue(
+    "10.252.0.1",
+  );
+  await expect(composer.getByLabel("IPv4 tunnel prefix")).toHaveValue("31");
+  await composer.getByRole("button", { name: "Review plan" }).click();
   const savePrompt = page.locator(".confirmationPrompt", {
-    hasText: "Confirm tunnel plan save",
+    hasText: "Confirm tunnel plan creation",
   });
   await expect(savePrompt).toBeVisible();
   await savePrompt.getByRole("button", { name: "Save plan", exact: true }).click();
-  await page
-    .getByRole("button", { name: "Close create tunnel plan workflow" })
-    .click();
+  await expect(savePrompt).toBeHidden();
+  await expect(composer).toBeHidden();
 
   const planRow = page.getByRole("row", { name: /live-gre-a-b/ });
   await expect(planRow).toBeVisible();
@@ -106,7 +107,9 @@ test("uses the real API proxy for fleet, topology planning, and audit visibility
   ).toBeVisible();
   await expect(planRow).toContainText(/GRE.*gre42/);
   await expect(planRow).toContainText("Agent iproute2");
-  await expect(planRow).toContainText("Planned");
+  await expect(planRow).toContainText("Disabled");
+  await expect(planRow).toContainText("Off");
+  await expect(planRow).toContainText("Tunnel only");
 
   await page.getByRole("button", { name: "Audit" }).click();
   await expect(

@@ -287,11 +287,11 @@ async fn dispatch_gateway_command(
             let (response_tx, response_rx) = oneshot::channel();
             session
                 .sender
-                .try_send(GatewaySessionMessage::Command(GatewayCommand {
+                .try_send(GatewaySessionMessage::Command(Box::new(GatewayCommand {
                     request: dispatch.request.clone(),
                     payload_hash: dispatch.payload_hash.clone(),
                     response: response_tx,
-                }))
+                })))
                 .map_err(|error| match error {
                     mpsc::error::TrySendError::Full(_) => {
                         anyhow!("agent_session_command_queue_full:{}", dispatch.client_id)
@@ -558,11 +558,11 @@ mod tests {
         for _ in 0..SESSION_COMMAND_QUEUE_CAPACITY {
             let (response, _response_rx) = tokio::sync::oneshot::channel();
             sender
-                .try_send(GatewaySessionMessage::Command(GatewayCommand {
+                .try_send(GatewaySessionMessage::Command(Box::new(GatewayCommand {
                     request: test_job_request(),
                     payload_hash: "test-payload-hash".to_string(),
                     response,
-                }))
+                })))
                 .unwrap();
         }
         let (close_tx, _close_rx) = tokio::sync::watch::channel(None::<String>);
@@ -605,11 +605,11 @@ mod tests {
         for _ in 0..SESSION_COMMAND_QUEUE_CAPACITY {
             let (response, _response_rx) = tokio::sync::oneshot::channel();
             sender
-                .try_send(GatewaySessionMessage::Command(GatewayCommand {
+                .try_send(GatewaySessionMessage::Command(Box::new(GatewayCommand {
                     request: test_job_request(),
                     payload_hash: "test-payload-hash".to_string(),
                     response,
-                }))
+                })))
                 .unwrap();
         }
         let (close_tx, mut close_rx) = tokio::sync::watch::channel(None::<String>);

@@ -1,20 +1,23 @@
 use std::collections::HashMap;
 
 use anyhow::{ensure, Result};
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 use vpsman_common::{
-    aggregate_topology_probe_state, aggregate_topology_runtime_state, is_topology_drift_action,
-    is_topology_drift_policy, is_topology_edge_health_status, is_topology_neighbor_state,
-    is_topology_node_status, is_topology_observation_state, is_topology_probe_state,
-    is_topology_runtime_state, topology_runtime_state_is_degraded, TunnelKind,
+    aggregate_topology_probe_state, aggregate_topology_runtime_state,
+    is_topology_edge_health_status, is_topology_neighbor_state, is_topology_node_status,
+    is_topology_observation_state, is_topology_probe_state, is_topology_runtime_state,
+    topology_runtime_state_is_degraded, TunnelEndpointSide, TunnelKind,
 };
 
 use crate::{
-    model::{AgentView, NetworkObservationTrendView, NetworkObservationView},
+    model::{
+        AgentView, NetworkObservationTrendView, NetworkObservationView, TelemetryTunnelView,
+        TunnelPlanView,
+    },
     model_topology::{TopologyGraphEdgeView, TopologyGraphNodeView, TopologyGraphView},
     repository::Repository,
     repository_network_observations::topology_identity_hash_for_plan,
-    unix_now,
 };
 
 impl Repository {
@@ -25,13 +28,17 @@ impl Repository {
         let observations = self
             .list_network_observations(limit.saturating_mul(4).clamp(1, 1000))
             .await?;
+        let telemetry = self
+            .list_telemetry_tunnels(limit.saturating_mul(2).clamp(1, 1000), None, None)
+            .await?;
         let recommendations = self.list_network_ospf_recommendations(limit).await?;
 
         let agent_status = agents
             .iter()
             .map(|agent| (agent.id.clone(), agent.status.clone()))
             .collect::<HashMap<_, _>>();
-        let mut nodes = seed_topology_nodes(agents);
+        let node_catalog = seed_topology_nodes(agents);
+        let mut nodes = HashMap::new();
         let mut edges = Vec::with_capacity(plans.len());
         let recommendation_by_plan = recommendations
             .iter()
@@ -39,26 +46,55 @@ impl Repository {
             .collect::<HashMap<_, _>>();
 
         for plan in plans {
-            nodes
-                .entry(plan.left_client_id.clone())
-                .or_insert_with(|| synthetic_node(&plan.left_client_id));
+            nodes.entry(plan.left_client_id.clone()).or_insert_with(|| {
+                node_catalog
+                    .get(&plan.left_client_id)
+                    .cloned()
+                    .unwrap_or_else(|| synthetic_node(&plan.left_client_id))
+            });
             nodes
                 .entry(plan.right_client_id.clone())
-                .or_insert_with(|| synthetic_node(&plan.right_client_id));
+                .or_insert_with(|| {
+                    node_catalog
+                        .get(&plan.right_client_id)
+                        .cloned()
+                        .unwrap_or_else(|| synthetic_node(&plan.right_client_id))
+                });
 
             let topology_identity_hash = topology_identity_hash_for_plan(&plan);
             let summary = summarize_edge_trends(plan.id, &topology_identity_hash, &trends);
             let evidence =
                 summarize_edge_observations(plan.id, &topology_identity_hash, &observations);
-            let drift =
-                summarize_server_drift(&plan.left_client_id, &plan.right_client_id, &agent_status);
+            let availability = summarize_endpoint_availability(
+                &plan.left_client_id,
+                &plan.right_client_id,
+                &agent_status,
+            );
+            let left_runtime = summarize_endpoint_runtime(
+                &plan,
+                TunnelEndpointSide::Left,
+                &telemetry,
+                &agent_status,
+            );
+            let right_runtime = summarize_endpoint_runtime(
+                &plan,
+                TunnelEndpointSide::Right,
+                &telemetry,
+                &agent_status,
+            );
             let recommendation = recommendation_by_plan.get(&plan.id).copied();
             let health = edge_health(
-                &plan.status,
+                plan.enabled,
+                &left_runtime.state,
+                &right_runtime.state,
                 summary.degraded_count,
-                summary.sample_count,
-                drift.convergence_blocked,
                 evidence.runtime_degraded,
+            );
+            let runtime_state = aggregate_endpoint_runtime_state(
+                &evidence.runtime_state,
+                &left_runtime.state,
+                &right_runtime.state,
+                plan.enabled,
             );
             let edge = TopologyGraphEdgeView {
                 plan_id: plan.id,
@@ -68,45 +104,36 @@ impl Repository {
                 kind: tunnel_kind_label(plan.kind),
                 left_client_id: plan.left_client_id.clone(),
                 right_client_id: plan.right_client_id.clone(),
-                left_status: plan.left_status.clone(),
-                right_status: plan.right_status.clone(),
-                status: plan.status.clone(),
                 enabled: plan.enabled,
                 health: health.clone(),
-                convergence_blocked: drift.convergence_blocked,
-                offline_client_ids: drift.offline_client_ids.clone(),
-                server_drift_reasons: drift.reasons.clone(),
-                topology_drift_policy: topology_drift_policy(
-                    &health,
-                    drift.convergence_blocked,
-                    summary.degraded_count,
-                    evidence.import_candidate_count,
-                    evidence.runtime_degraded,
-                ),
-                topology_drift_action: topology_drift_action(
-                    &health,
-                    drift.convergence_blocked,
-                    summary.degraded_count,
-                    evidence.import_candidate_count,
-                    evidence.runtime_degraded,
-                ),
+                left_runtime_state: left_runtime.state,
+                right_runtime_state: right_runtime.state,
+                left_runtime_reason: left_runtime.reason,
+                right_runtime_reason: right_runtime.reason,
+                left_reachability_state: left_runtime.reachability_state,
+                right_reachability_state: right_runtime.reachability_state,
+                left_reachability_reason: left_runtime.reachability_reason,
+                right_reachability_reason: right_runtime.reachability_reason,
+                left_observed_at: left_runtime.observed_at.clone(),
+                right_observed_at: right_runtime.observed_at.clone(),
+                unavailable_client_ids: availability.unavailable_client_ids,
+                availability_reasons: availability.reasons,
                 neighbor_state: evidence.neighbor_state,
                 probe_state: evidence.probe_state,
-                runtime_state: evidence.runtime_state,
+                runtime_state,
                 runtime_reasons: evidence.runtime_reasons,
                 adapter_state: evidence.adapter_state,
-                routing_state: evidence.routing_state,
+                routing_state: plan_routing_state(&plan.ospf_status).to_string(),
                 kernel_link_probe_state: evidence.kernel_link_probe_state,
                 kernel_neighbor_probe_state: evidence.kernel_neighbor_probe_state,
                 kernel_route_probe_state: evidence.kernel_route_probe_state,
                 kernel_namespace_covered: evidence.kernel_namespace_covered,
                 desired_missing_count: evidence.desired_missing_count,
                 stale_present_count: evidence.stale_present_count,
-                import_candidate_count: evidence.import_candidate_count,
                 bandwidth_mbps: plan.plan.bandwidth_mbps,
                 recommended_ospf_cost: recommendation
                     .map(|record| record.recommended_ospf_cost)
-                    .unwrap_or(plan.recommended_ospf_cost),
+                    .or(plan.recommended_ospf_cost),
                 cost_delta: recommendation.map(|record| record.cost_delta),
                 latency_avg_ms: summary.latency_avg_ms,
                 latency_series_ms: evidence.latency_series_ms,
@@ -115,9 +142,11 @@ impl Repository {
                 throughput_max_mbps: summary.throughput_max_mbps,
                 sample_count: summary.sample_count,
                 degraded_count: summary.degraded_count,
-                latest_observed_at: summary.latest_observed_at.clone(),
-                last_apply_job_id: plan.last_apply_job_id,
-                last_rollback_job_id: plan.last_rollback_job_id,
+                latest_observed_at: latest_observed_at([
+                    summary.latest_observed_at.as_deref(),
+                    left_runtime.observed_at.as_deref(),
+                    right_runtime.observed_at.as_deref(),
+                ]),
                 left_tunnel_address: plan.plan.left_tunnel_address.clone(),
                 right_tunnel_address: plan.plan.right_tunnel_address.clone(),
                 ipv4_tunnel: plan.plan.ipv4_tunnel.clone(),
@@ -140,7 +169,7 @@ impl Repository {
             right
                 .latest_observed_at
                 .cmp(&left.latest_observed_at)
-                .then_with(|| right.status.cmp(&left.status))
+                .then_with(|| right.health.cmp(&left.health))
                 .then_with(|| left.plan_name.cmp(&right.plan_name))
         });
         validate_topology_contract(&nodes, &edges)?;
@@ -148,7 +177,7 @@ impl Repository {
         Ok(TopologyGraphView {
             nodes,
             edges,
-            generated_at: unix_now().to_string(),
+            generated_at: Utc::now().to_rfc3339(),
         })
     }
 }
@@ -166,18 +195,11 @@ fn validate_topology_contract(
     }
     for edge in edges {
         ensure!(
-            vpsman_common::TUNNEL_ENDPOINT_STATUSES.contains(&edge.left_status.as_str())
-                && vpsman_common::TUNNEL_ENDPOINT_STATUSES.contains(&edge.right_status.as_str())
-                && vpsman_common::TUNNEL_PLAN_STATUSES.contains(&edge.status.as_str()),
-            "topology tunnel status contract drift: left={} right={} status={}",
-            edge.left_status,
-            edge.right_status,
-            edge.status
-        );
-        ensure!(
             is_topology_edge_health_status(&edge.health)
-                && is_topology_drift_policy(&edge.topology_drift_policy)
-                && is_topology_drift_action(&edge.topology_drift_action)
+                && is_endpoint_runtime_state(&edge.left_runtime_state)
+                && is_endpoint_runtime_state(&edge.right_runtime_state)
+                && is_endpoint_reachability_state(&edge.left_reachability_state)
+                && is_endpoint_reachability_state(&edge.right_reachability_state)
                 && is_topology_neighbor_state(&edge.neighbor_state)
                 && is_topology_observation_state(&edge.probe_state)
                 && is_topology_runtime_state(&edge.runtime_state)
@@ -212,22 +234,27 @@ struct EdgeObservationSummary {
     runtime_state: String,
     runtime_reasons: Vec<String>,
     adapter_state: String,
-    routing_state: String,
     kernel_link_probe_state: String,
     kernel_neighbor_probe_state: String,
     kernel_route_probe_state: String,
     kernel_namespace_covered: bool,
     desired_missing_count: i64,
     stale_present_count: i64,
-    import_candidate_count: i64,
     runtime_degraded: bool,
 }
 
 #[derive(Default)]
-struct ServerDriftSummary {
-    convergence_blocked: bool,
-    offline_client_ids: Vec<String>,
+struct EndpointAvailabilitySummary {
+    unavailable_client_ids: Vec<String>,
     reasons: Vec<String>,
+}
+
+struct EndpointRuntimeSummary {
+    state: String,
+    reason: Option<String>,
+    reachability_state: String,
+    reachability_reason: Option<String>,
+    observed_at: Option<String>,
 }
 
 fn seed_topology_nodes(agents: Vec<AgentView>) -> HashMap<String, TopologyGraphNodeView> {
@@ -242,7 +269,7 @@ fn seed_topology_nodes(agents: Vec<AgentView>) -> HashMap<String, TopologyGraphN
                     status: agent.status,
                     tags: agent.tags,
                     tunnel_count: 0,
-                    applied_tunnel_count: 0,
+                    healthy_tunnel_count: 0,
                     degraded_tunnel_count: 0,
                     latest_observed_at: None,
                 },
@@ -258,7 +285,7 @@ fn synthetic_node(client_id: &str) -> TopologyGraphNodeView {
         status: "unknown".to_string(),
         tags: Vec::new(),
         tunnel_count: 0,
-        applied_tunnel_count: 0,
+        healthy_tunnel_count: 0,
         degraded_tunnel_count: 0,
         latest_observed_at: None,
     }
@@ -273,8 +300,8 @@ fn update_node_from_edge(
         return;
     };
     node.tunnel_count += 1;
-    if matches!(edge.health.as_str(), "healthy" | "applied") {
-        node.applied_tunnel_count += 1;
+    if edge.health == "healthy" {
+        node.healthy_tunnel_count += 1;
     }
     if edge.health == "degraded" {
         node.degraded_tunnel_count += 1;
@@ -388,14 +415,12 @@ fn summarize_edge_observations(
     let mut runtime_state = "unknown".to_string();
     let mut runtime_reasons = Vec::<String>::new();
     let mut adapter_state = "unknown".to_string();
-    let mut routing_state = "unknown".to_string();
     let mut kernel_link_probe_state = "unknown".to_string();
     let mut kernel_neighbor_probe_state = "unknown".to_string();
     let mut kernel_route_probe_state = "unknown".to_string();
     let mut kernel_namespace_covered = false;
     let mut desired_missing_count = 0_i64;
     let mut stale_present_count = 0_i64;
-    let mut import_candidate_count = 0_i64;
     for observation in observations.iter().filter(|observation| {
         observation.plan_id == Some(plan_id)
             && observation.topology_identity_hash.as_deref() == Some(topology_identity_hash)
@@ -426,12 +451,6 @@ fn summarize_edge_observations(
             .and_then(serde_json::Value::as_str)
         {
             adapter_state = aggregate_runtime_state(&adapter_state, value).to_string();
-        }
-        if let Some(value) = summary
-            .and_then(|summary| summary.get("bird2_state"))
-            .and_then(serde_json::Value::as_str)
-        {
-            routing_state = aggregate_runtime_state(&routing_state, value).to_string();
         }
         if let Some(value) = summary
             .and_then(|summary| summary.get("kernel_link_probe_state"))
@@ -470,25 +489,14 @@ fn summarize_edge_observations(
         {
             stale_present_count = stale_present_count.max(count);
         }
-        if let Some(count) = summary
-            .and_then(|summary| summary.get("external_import_candidate_count"))
-            .and_then(serde_json::Value::as_i64)
-        {
-            import_candidate_count = import_candidate_count.max(count);
-        }
         if neighbor_state != "healthy" {
-            neighbor_state = match (
-                summary
-                    .and_then(|summary| summary.get("bird2_state"))
-                    .and_then(serde_json::Value::as_str),
-                summary
-                    .and_then(|summary| summary.get("neighbor_probe_state"))
-                    .and_then(serde_json::Value::as_str),
-            ) {
-                (Some("healthy"), _) => "healthy".to_string(),
-                (_, Some("success")) => "kernel_probe_success".to_string(),
-                (_, Some("failed")) => "kernel_probe_failed".to_string(),
-                (_, Some("skipped")) if neighbor_state == "unknown" => "not_probed".to_string(),
+            neighbor_state = match summary
+                .and_then(|summary| summary.get("neighbor_probe_state"))
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("success") => "kernel_probe_success".to_string(),
+                Some("failed") => "kernel_probe_failed".to_string(),
+                Some("skipped") if neighbor_state == "unknown" => "not_probed".to_string(),
                 _ => neighbor_state,
             };
         }
@@ -500,19 +508,16 @@ fn summarize_edge_observations(
         neighbor_state,
         runtime_degraded: runtime_state_is_degraded(&runtime_state)
             || desired_missing_count > 0
-            || stale_present_count > 0
-            || import_candidate_count > 0,
+            || stale_present_count > 0,
         runtime_state,
         runtime_reasons,
         adapter_state,
-        routing_state,
         kernel_link_probe_state,
         kernel_neighbor_probe_state,
         kernel_route_probe_state,
         kernel_namespace_covered,
         desired_missing_count,
         stale_present_count,
-        import_candidate_count,
     }
 }
 
@@ -546,97 +551,319 @@ fn weighted_average(
     (samples > 0).then_some(weighted / samples as f64)
 }
 
-fn summarize_server_drift(
+fn summarize_endpoint_runtime(
+    plan: &TunnelPlanView,
+    side: TunnelEndpointSide,
+    telemetry: &[TelemetryTunnelView],
+    agent_status: &HashMap<String, String>,
+) -> EndpointRuntimeSummary {
+    if !plan.enabled {
+        return EndpointRuntimeSummary {
+            state: "disabled".to_string(),
+            reason: Some("plan_disabled".to_string()),
+            reachability_state: "not_configured".to_string(),
+            reachability_reason: Some("plan_disabled".to_string()),
+            observed_at: None,
+        };
+    }
+    let (client_id, side_name) = match side {
+        TunnelEndpointSide::Left => (&plan.left_client_id, "left"),
+        TunnelEndpointSide::Right => (&plan.right_client_id, "right"),
+    };
+    match agent_status.get(client_id).map(String::as_str) {
+        None => {
+            return EndpointRuntimeSummary {
+                state: "unknown".to_string(),
+                reason: Some("endpoint_not_registered".to_string()),
+                reachability_state: "unknown".to_string(),
+                reachability_reason: Some("endpoint_not_registered".to_string()),
+                observed_at: None,
+            }
+        }
+        Some("stale") => {
+            return EndpointRuntimeSummary {
+                state: "stale".to_string(),
+                reason: Some("endpoint_telemetry_stale".to_string()),
+                reachability_state: "unknown".to_string(),
+                reachability_reason: Some("endpoint_telemetry_stale".to_string()),
+                observed_at: latest_endpoint_observed_at(plan.id, client_id, side_name, telemetry),
+            }
+        }
+        Some("offline") => {
+            return EndpointRuntimeSummary {
+                state: "degraded".to_string(),
+                reason: Some("endpoint_offline".to_string()),
+                reachability_state: "unknown".to_string(),
+                reachability_reason: Some("endpoint_offline".to_string()),
+                observed_at: latest_endpoint_observed_at(plan.id, client_id, side_name, telemetry),
+            }
+        }
+        Some("never") => {
+            return EndpointRuntimeSummary {
+                state: "unknown".to_string(),
+                reason: Some("endpoint_never_seen".to_string()),
+                reachability_state: "unknown".to_string(),
+                reachability_reason: Some("endpoint_never_seen".to_string()),
+                observed_at: None,
+            }
+        }
+        Some("online") => {}
+        Some(status) => {
+            return EndpointRuntimeSummary {
+                state: "degraded".to_string(),
+                reason: Some(format!("endpoint_not_online:{status}")),
+                reachability_state: "unknown".to_string(),
+                reachability_reason: Some(format!("endpoint_not_online:{status}")),
+                observed_at: latest_endpoint_observed_at(plan.id, client_id, side_name, telemetry),
+            }
+        }
+    }
+
+    let Some(record) = latest_endpoint_record(plan.id, client_id, side_name, telemetry) else {
+        return EndpointRuntimeSummary {
+            state: "unknown".to_string(),
+            reason: Some("declared_endpoint_not_observed".to_string()),
+            reachability_state: "unknown".to_string(),
+            reachability_reason: Some("declared_endpoint_not_observed".to_string()),
+            observed_at: None,
+        };
+    };
+    let observed_at = Some(record.observed_at.clone());
+    let (reachability_state, reachability_reason) = endpoint_reachability(record);
+    if let Some(status) = record
+        .traffic_status
+        .as_deref()
+        .filter(|status| *status != "ok")
+    {
+        return EndpointRuntimeSummary {
+            state: "degraded".to_string(),
+            reason: record
+                .traffic_reason
+                .clone()
+                .or_else(|| Some(format!("traffic_status:{status}"))),
+            reachability_state,
+            reachability_reason,
+            observed_at,
+        };
+    }
+    if let Some(adapter) = record
+        .adapter_health
+        .as_ref()
+        .filter(|adapter| adapter.configured && !adapter.success)
+    {
+        return EndpointRuntimeSummary {
+            state: "degraded".to_string(),
+            reason: adapter
+                .reason
+                .clone()
+                .or_else(|| Some(format!("runtime_adapter_status:{}", adapter.status))),
+            reachability_state,
+            reachability_reason,
+            observed_at,
+        };
+    }
+    if record
+        .operstate
+        .as_deref()
+        .is_some_and(|status| matches!(status, "down" | "lowerlayerdown" | "notpresent"))
+    {
+        return EndpointRuntimeSummary {
+            state: "degraded".to_string(),
+            reason: Some(format!(
+                "interface_operstate:{}",
+                record.operstate.as_deref().unwrap_or("unknown")
+            )),
+            reachability_state,
+            reachability_reason,
+            observed_at,
+        };
+    }
+    let positive_evidence = record.traffic_status.as_deref() == Some("ok")
+        || record
+            .adapter_health
+            .as_ref()
+            .is_some_and(|adapter| adapter.configured && adapter.success)
+        || record
+            .operstate
+            .as_deref()
+            .is_some_and(|status| !matches!(status, "down" | "lowerlayerdown" | "notpresent"));
+    EndpointRuntimeSummary {
+        state: if positive_evidence {
+            "healthy"
+        } else {
+            "unknown"
+        }
+        .to_string(),
+        reason: (!positive_evidence).then(|| "runtime_evidence_incomplete".to_string()),
+        reachability_state,
+        reachability_reason,
+        observed_at,
+    }
+}
+
+fn endpoint_reachability(record: &TelemetryTunnelView) -> (String, Option<String>) {
+    match record.latency_status.as_deref() {
+        Some("healthy") => ("reachable".to_string(), None),
+        Some("down" | "missed" | "failed") => (
+            "probe_failed".to_string(),
+            record
+                .latency_reason
+                .clone()
+                .or_else(|| Some("latency_probe_failed".to_string())),
+        ),
+        Some("disabled" | "unconfigured") => {
+            ("not_configured".to_string(), record.latency_reason.clone())
+        }
+        _ => ("unknown".to_string(), record.latency_reason.clone()),
+    }
+}
+
+fn latest_endpoint_record<'a>(
+    plan_id: Uuid,
+    client_id: &str,
+    side: &str,
+    telemetry: &'a [TelemetryTunnelView],
+) -> Option<&'a TelemetryTunnelView> {
+    telemetry
+        .iter()
+        .filter(|record| {
+            record.plan_id == Some(plan_id)
+                && record.client_id == client_id
+                && record.endpoint_side.as_deref() == Some(side)
+        })
+        .max_by_key(|record| timestamp_seconds(&record.observed_at).unwrap_or(i64::MIN))
+}
+
+fn latest_endpoint_observed_at(
+    plan_id: Uuid,
+    client_id: &str,
+    side: &str,
+    telemetry: &[TelemetryTunnelView],
+) -> Option<String> {
+    latest_endpoint_record(plan_id, client_id, side, telemetry)
+        .map(|record| record.observed_at.clone())
+}
+
+fn aggregate_endpoint_runtime_state(
+    detailed_state: &str,
+    left_state: &str,
+    right_state: &str,
+    enabled: bool,
+) -> String {
+    if !enabled {
+        return "not_configured".to_string();
+    }
+    let endpoint_state = if matches!(left_state, "degraded" | "stale")
+        || matches!(right_state, "degraded" | "stale")
+    {
+        "degraded"
+    } else if left_state == "unknown" || right_state == "unknown" {
+        "unknown"
+    } else {
+        "healthy"
+    };
+    if topology_runtime_state_is_degraded(detailed_state) {
+        detailed_state.to_string()
+    } else if endpoint_state == "unknown" {
+        "unknown".to_string()
+    } else {
+        aggregate_topology_runtime_state(detailed_state, endpoint_state).to_string()
+    }
+}
+
+fn is_endpoint_runtime_state(value: &str) -> bool {
+    matches!(
+        value,
+        "disabled" | "unknown" | "stale" | "healthy" | "degraded"
+    )
+}
+
+fn is_endpoint_reachability_state(value: &str) -> bool {
+    matches!(
+        value,
+        "unknown" | "reachable" | "probe_failed" | "not_configured"
+    )
+}
+
+fn latest_observed_at<'a>(values: impl IntoIterator<Item = Option<&'a str>>) -> Option<String> {
+    values
+        .into_iter()
+        .flatten()
+        .max_by_key(|value| timestamp_seconds(value).unwrap_or(i64::MIN))
+        .map(str::to_string)
+}
+
+fn timestamp_seconds(value: &str) -> Option<i64> {
+    value.parse::<i64>().ok().or_else(|| {
+        DateTime::parse_from_rfc3339(value)
+            .or_else(|_| DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f%#z"))
+            .ok()
+            .map(|value| value.with_timezone(&Utc).timestamp())
+    })
+}
+
+fn summarize_endpoint_availability(
     left_client_id: &str,
     right_client_id: &str,
     agent_status: &HashMap<String, String>,
-) -> ServerDriftSummary {
-    let mut offline_client_ids = Vec::new();
+) -> EndpointAvailabilitySummary {
+    let mut unavailable_client_ids = Vec::new();
     let mut reasons = Vec::new();
     for client_id in [left_client_id, right_client_id] {
         match agent_status.get(client_id).map(String::as_str) {
             Some("online") => {}
             Some(status) => {
-                offline_client_ids.push(client_id.to_string());
+                unavailable_client_ids.push(client_id.to_string());
                 reasons.push(format!("endpoint_not_online:{client_id}:{status}"));
             }
             None => {
-                offline_client_ids.push(client_id.to_string());
+                unavailable_client_ids.push(client_id.to_string());
                 reasons.push(format!("endpoint_missing:{client_id}"));
             }
         }
     }
-    offline_client_ids.sort();
-    offline_client_ids.dedup();
+    unavailable_client_ids.sort();
+    unavailable_client_ids.dedup();
     reasons.sort();
     reasons.dedup();
-    ServerDriftSummary {
-        convergence_blocked: !offline_client_ids.is_empty(),
-        offline_client_ids,
+    EndpointAvailabilitySummary {
+        unavailable_client_ids,
         reasons,
     }
 }
 
 fn edge_health(
-    status: &str,
+    enabled: bool,
+    left_runtime_state: &str,
+    right_runtime_state: &str,
     degraded_count: i64,
-    sample_count: i64,
-    convergence_blocked: bool,
     runtime_degraded: bool,
 ) -> String {
-    if status.contains("rolled_back") {
-        "rolled_back".to_string()
-    } else if convergence_blocked || degraded_count > 0 || runtime_degraded {
+    if !enabled {
+        "disabled".to_string()
+    } else if degraded_count > 0
+        || runtime_degraded
+        || matches!(left_runtime_state, "degraded" | "stale")
+        || matches!(right_runtime_state, "degraded" | "stale")
+    {
         "degraded".to_string()
-    } else if sample_count > 0 && status.contains("applied") {
+    } else if left_runtime_state == "healthy" && right_runtime_state == "healthy" {
         "healthy".to_string()
-    } else if status.contains("applied") {
-        "applied".to_string()
     } else {
-        "planned".to_string()
+        "unknown".to_string()
     }
 }
 
-fn topology_drift_policy(
-    health: &str,
-    convergence_blocked: bool,
-    degraded_count: i64,
-    import_candidate_count: i64,
-    runtime_degraded: bool,
-) -> String {
-    if convergence_blocked {
-        "hold_convergence_until_endpoints_online"
-    } else if import_candidate_count > 0 {
-        "observe_only_until_import_promoted"
-    } else if runtime_degraded {
-        "observe_runtime_drift_before_apply"
-    } else if degraded_count > 0 || health == "degraded" {
-        "observe_and_recommend"
-    } else {
-        "eligible_for_apply"
+fn plan_routing_state(status: &str) -> &'static str {
+    match status {
+        "disabled" => "not_configured",
+        "verified" => "healthy",
+        "pending" => "observed",
+        "failed" => "routing_unhealthy",
+        "stale" => "drift",
+        "partial" => "degraded",
+        _ => "unknown",
     }
-    .to_string()
-}
-
-fn topology_drift_action(
-    health: &str,
-    convergence_blocked: bool,
-    degraded_count: i64,
-    import_candidate_count: i64,
-    runtime_degraded: bool,
-) -> String {
-    if convergence_blocked {
-        "wait_for_reconnect"
-    } else if import_candidate_count > 0 {
-        "promote_observed_first"
-    } else if runtime_degraded {
-        "inspect_runtime_status"
-    } else if degraded_count > 0 || health == "degraded" {
-        "inspect_degraded_samples"
-    } else {
-        "none"
-    }
-    .to_string()
 }
 
 fn tunnel_kind_label(kind: TunnelKind) -> String {

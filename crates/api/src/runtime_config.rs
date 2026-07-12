@@ -8,15 +8,16 @@ use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
     runtime_config_content_hash, validate_agent_config_shape, AgentConfig, AgentRuntimeConfig,
-    AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource, JobCommand, TunnelEndpointSide,
+    AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource, JobCommand, RuntimeTunnelManager,
+    TunnelEndpointSide,
 };
 
 use crate::{
     error::ApiError,
-    model::{AuthContext, CreateJobRequest, CreateJobResponse, OperatorPreferences, OperatorView},
+    internal_operator::system_operator,
+    model::{AuthContext, CreateJobRequest, CreateJobResponse},
     routes_jobs::create_job_from_internal_operator_mutation,
     state::AppState,
-    DEFAULT_REFRESH_TOKEN_TTL_SECS,
 };
 
 pub(crate) async fn push_runtime_config_for_clients(
@@ -69,7 +70,7 @@ pub(crate) async fn request_runtime_config_reload_for_agent(
         if applied_content_hash.eq_ignore_ascii_case(current_content_hash.trim()) {
             return Ok(Vec::new());
         }
-        let operator = runtime_config_system_operator();
+        let operator = system_operator("runtime-config-agent-request");
         return push_runtime_config_job(
             state,
             &operator,
@@ -98,7 +99,7 @@ pub(crate) async fn request_runtime_config_reload_for_agent(
     if desired_content_hash.eq_ignore_ascii_case(current_content_hash.trim()) {
         return Ok(Vec::new());
     }
-    let operator = runtime_config_system_operator();
+    let operator = system_operator("runtime-config-agent-request");
     push_runtime_config_job(
         state,
         &operator,
@@ -143,6 +144,8 @@ pub(crate) async fn compose_runtime_config(
             .context("runtime_config_override_merge_failed")?;
     }
     apply_enabled_tunnel_plans(state, client_id, &mut effective).await?;
+    validate_agent_config_shape(&effective)
+        .map_err(|error| anyhow::anyhow!("composed_runtime_config_invalid:{error}"))?;
 
     Ok(AgentRuntimeConfig {
         version,
@@ -152,8 +155,7 @@ pub(crate) async fn compose_runtime_config(
         execution: effective.execution,
         telemetry: effective.telemetry,
         network: effective.network,
-        telemetry_light_secs: effective.telemetry_light_secs,
-        telemetry_full_secs: effective.telemetry_full_secs,
+        telemetry_interval_secs: effective.telemetry_interval_secs,
         tags: effective.tags,
     })
 }
@@ -216,41 +218,50 @@ async fn push_runtime_config_job(
     Ok(response)
 }
 
-fn runtime_config_system_operator() -> AuthContext {
-    AuthContext {
-        operator: OperatorView {
-            id: Uuid::nil(),
-            username: "runtime-config-agent-request".to_string(),
-            role: "system".to_string(),
-            scopes: vec!["*".to_string()],
-            preferences: OperatorPreferences::default(),
-            totp_enabled: false,
-            status: "active".to_string(),
-            session_refresh_ttl_secs: DEFAULT_REFRESH_TOKEN_TTL_SECS,
-            created_at: crate::unix_now().to_string(),
-            disabled_at: None,
-            deleted_at: None,
-        },
-        session_id: Uuid::nil(),
-    }
-}
-
 async fn apply_enabled_tunnel_plans(
     state: &AppState,
     client_id: &str,
     effective: &mut AgentConfig,
 ) -> Result<(), ApiError> {
     let plans = state.repo.list_tunnel_plans().await?;
+    let mut has_mutating_plan = false;
     for plan in plans
         .into_iter()
         .filter(|plan| plan.enabled)
         .filter(|plan| plan.left_client_id == client_id || plan.right_client_id == client_id)
     {
+        has_mutating_plan |=
+            plan.plan.runtime_control.manager != RuntimeTunnelManager::ExternalObserved;
         let endpoint_side = if plan.left_client_id == client_id {
             TunnelEndpointSide::Left
         } else {
             TunnelEndpointSide::Right
         };
+        let runtime_adapter =
+            if plan.plan.runtime_control.manager == RuntimeTunnelManager::ExternalManagedAdapter {
+                let template_id = match endpoint_side {
+                    TunnelEndpointSide::Left => plan
+                        .plan
+                        .runtime_control
+                        .left_adapter_template_id
+                        .as_deref(),
+                    TunnelEndpointSide::Right => plan
+                        .plan
+                        .runtime_control
+                        .right_adapter_template_id
+                        .as_deref(),
+                }
+                .ok_or_else(|| ApiError::conflict("runtime_tunnel_adapter_template_required"))?;
+                Some(
+                    state
+                        .repo
+                        .resolve_runtime_tunnel_adapter(template_id, client_id)
+                        .await
+                        .map_err(ApiError::from)?,
+                )
+            } else {
+                None
+            };
         effective
             .network
             .runtime_status_telemetry_plans
@@ -258,15 +269,14 @@ async fn apply_enabled_tunnel_plans(
                 plan_id: Some(plan.id.to_string()),
                 endpoint_side,
                 plan: plan.plan,
+                runtime_adapter,
                 traffic_source: AgentRuntimeTrafficSource::InterfaceCounters,
                 traffic_command: None,
                 latency_monitoring_enabled: effective.network.latency_monitoring_enabled,
-                auto_ospf_enabled: effective.network.auto_ospf_enabled,
-                auto_ospf_updater: effective.network.auto_ospf_updater.clone(),
             });
     }
     if !effective.network.runtime_status_telemetry_plans.is_empty() {
-        effective.network.apply_enabled = true;
+        effective.network.apply_enabled |= has_mutating_plan;
         effective.network.runtime_reconcile_enabled = true;
         effective.network.runtime_status_telemetry_enabled = true;
     }

@@ -357,12 +357,20 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             commands_network::tunnel_plan_export(api_url, token, request)?;
             Ok(None)
         }
-        Command::TunnelPromoteExternalObserve(request) => {
-            commands_network::tunnel_promote_external_observe(api_url, token, request)?;
+        Command::TunnelPlanEnable(request) => {
+            commands_network::set_tunnel_plan_enabled(api_url, token, request, true)?;
             Ok(None)
         }
-        Command::TunnelPromoteCustomAdapter(request) => {
-            commands_network::tunnel_promote_custom_adapter(api_url, token, request)?;
+        Command::TunnelPlanDisable(request) => {
+            commands_network::set_tunnel_plan_enabled(api_url, token, request, false)?;
+            Ok(None)
+        }
+        Command::TunnelPlanDelete(request) => {
+            commands_network::delete_tunnel_plan(api_url, token, request)?;
+            Ok(None)
+        }
+        Command::TunnelOspfStatusRefresh(request) => {
+            commands_network::refresh_tunnel_ospf_status(api_url, token, request)?;
             Ok(None)
         }
         Command::TunnelOspfCostUpdate(request) => {

@@ -8,7 +8,11 @@ import type {
   NetworkOspfRecommendationRecord,
   TelemetryTunnelRecord,
 } from "../../types";
-import { formatCompactTime } from "../../utils";
+import {
+  networkObservationMetricDefinition,
+  type NetworkObservationMetric,
+} from "../../telemetryMetrics";
+import { formatCompactTime, timestampMillis } from "../../utils";
 
 type NetworkMetricsPanelProps = {
   networkObservations: NetworkObservationRecord[];
@@ -47,7 +51,7 @@ type ObservationChartData = {
   times: string[];
 };
 
-type NetworkChartMetric = "latency" | "loss" | "throughput";
+type NetworkChartMetric = NetworkObservationMetric;
 type ThroughputBenchmark = {
   configuredBandwidthMbps: number;
   latestObservedAt: string | null;
@@ -65,32 +69,36 @@ export function NetworkMetricsPanel({
   telemetryTunnels,
 }: NetworkMetricsPanelProps) {
   const [selectedMetric, setSelectedMetric] = useState<NetworkChartMetric>("latency");
-  const groups = buildMetricGroups(networkTrends, networkObservations, telemetryTunnels);
-  const overlays = buildOverlayRows(networkObservations, telemetryTunnels, ospfRecommendations);
+  const declaredObservations = networkObservations.filter((observation) => Boolean(observation.plan_id));
+  const declaredTrends = networkTrends.filter((trend) => Boolean(trend.plan_id));
+  const declaredTunnels = telemetryTunnels.filter((tunnel) => Boolean(tunnel.plan_id));
+  const groups = buildMetricGroups(declaredTrends, declaredObservations, declaredTunnels);
+  const overlays = buildOverlayRows(declaredObservations, declaredTunnels, ospfRecommendations);
   const latencyChart = buildObservationChart(
-    networkObservations,
+    declaredObservations,
     (observation) => observation.latency_avg_ms,
   );
-  const lossChart = buildObservationChart(networkObservations, (observation) =>
+  const lossChart = buildObservationChart(declaredObservations, (observation) =>
     observation.packet_loss_ratio === null ? null : observation.packet_loss_ratio * 100,
   );
   const throughputChart = buildObservationChart(
-    networkObservations,
+    declaredObservations,
     (observation) => observation.throughput_mbps,
   );
   const latestEvidence = latestTime([
-    ...networkObservations.map((observation) => observation.observed_at),
-    ...networkTrends.map((trend) => trend.latest_observed_at),
+    ...declaredObservations.map((observation) => observation.observed_at),
+    ...declaredTrends.map((trend) => trend.latest_observed_at),
   ]);
-  const oldestEvidence = oldestTime(networkObservations.map((observation) => observation.observed_at));
+  const oldestEvidence = oldestTime(declaredObservations.map((observation) => observation.observed_at));
   const degradedCount =
     groups.reduce((total, group) => total + group.degradedCount, 0) +
-    telemetryTunnels.filter((tunnel) => isTunnelDegraded(tunnel)).length;
+    declaredTunnels.filter((tunnel) => isTunnelDegraded(tunnel)).length;
   const ospfDeltaCount = ospfRecommendations.filter((recommendation) => recommendation.cost_delta !== 0).length;
-  const observationCount = networkObservations.length;
+  const observationCount = declaredObservations.length;
   const chartOptions = [
     {
       chart: latencyChart,
+      definition: networkObservationMetricDefinition("latency"),
       emptyLabel: "No latency observations",
       key: "latency" as const,
       title: "Latency",
@@ -99,6 +107,7 @@ export function NetworkMetricsPanel({
     },
     {
       chart: lossChart,
+      definition: networkObservationMetricDefinition("loss"),
       emptyLabel: "No packet-loss observations",
       key: "loss" as const,
       title: "Packet loss",
@@ -107,6 +116,7 @@ export function NetworkMetricsPanel({
     },
     {
       chart: throughputChart,
+      definition: networkObservationMetricDefinition("throughput"),
       emptyLabel: "No throughput observations",
       key: "throughput" as const,
       title: "Throughput",
@@ -118,8 +128,8 @@ export function NetworkMetricsPanel({
     chartOptions.find((option) => option.key === selectedMetric) ??
     chartOptions[0];
   const evidence = buildNetworkEvidence(
-    oldestEvidence,
-    latestEvidence,
+    oldestTime(selectedChart.chart.times),
+    latestTime(selectedChart.chart.times),
     selectedChart.chart,
   );
   const throughputBenchmark = buildThroughputBenchmark(ospfRecommendations);
@@ -150,11 +160,15 @@ export function NetworkMetricsPanel({
 
         <div className="metricGrid observabilityMetricsSummary" aria-label="Network metrics summary">
           <MetricTile
-            detail={latestEvidence ? `latest ${formatCompactTime(latestEvidence)}` : "no retained observations"}
+            detail={
+              oldestEvidence && latestEvidence
+                ? `${formatEvidenceTime(oldestEvidence)} to ${formatEvidenceTime(latestEvidence)}; latest ${formatCompactTime(latestEvidence)}`
+                : "no retained observations"
+            }
             label="Evidence range"
-            value={oldestEvidence && latestEvidence ? `${formatCompactTime(oldestEvidence)} - ${formatCompactTime(latestEvidence)}` : "No data"}
+            value={evidenceWindowSummary(oldestEvidence, latestEvidence)}
           />
-          <MetricTile detail="latency, loss, speed, and status records" label="Observations" value={String(observationCount)} />
+          <MetricTile detail="retained test/status records; charts include only records containing the selected metric" label="Observations" value={String(observationCount)} />
           <MetricTile detail="trend groups plus endpoint health" label="Degraded signals" value={String(degradedCount)} />
           <MetricTile detail="recommendations with non-zero cost delta" label="OSPF review" value={String(ospfDeltaCount)} />
         </div>
@@ -164,7 +178,7 @@ export function NetworkMetricsPanel({
             <div>
               <strong>Stale network evidence</strong>
               <span>
-                Last sample {evidence.lastSampleLabel}; retained window {evidence.windowLabel}. Run a capped test for current latency, loss, or speed before changing routing.
+                Last selected-metric sample {evidence.lastSampleLabel}; retained window {evidence.windowLabel}. Run a capped test for current latency, loss, or throughput before changing routing.
               </span>
             </div>
             <div>
@@ -180,18 +194,10 @@ export function NetworkMetricsPanel({
           </div>
         )}
 
-        <NetworkCountDefinitions
-          degradedCount={degradedCount}
-          observationCount={observationCount}
-          reviewSignalCount={overlays.length}
-          samplePointCount={selectedChart.chart.observedPoints}
-          selectedMetric={selectedChart.title}
-        />
-
         <section className="dashboardSection observabilityChartSection" aria-labelledby="observability-network-charts-title">
           <div className="dashboardSectionHeader">
             <div>
-              <h2 id="observability-network-charts-title">Latency, loss, and speed</h2>
+              <h2 id="observability-network-charts-title">Latency, loss, and throughput</h2>
               <span>Charts use retained observations only; run new diagnostics from Network / Tests.</span>
             </div>
             <div className="dashboardSectionTools" aria-label="Network metric selector">
@@ -201,6 +207,7 @@ export function NetworkMetricsPanel({
                   className={selectedMetric === option.key ? "active" : ""}
                   key={option.key}
                   onClick={() => setSelectedMetric(option.key)}
+                  title={option.definition}
                   type="button"
                 >
                   {option.title}
@@ -211,8 +218,10 @@ export function NetworkMetricsPanel({
           <div className="observabilityNetworkChartGrid single" aria-label="Network metrics charts">
             <NetworkChartCard
               emptyLabel={selectedChart.emptyLabel}
+              definition={selectedChart.definition}
               evidence={evidence}
               lines={selectedChart.chart.lines}
+              observedPoints={selectedChart.chart.observedPoints}
               pointsOnly={evidence.isSparse}
               times={selectedChart.chart.times}
               title={selectedChart.title}
@@ -228,7 +237,7 @@ export function NetworkMetricsPanel({
           <div className="dashboardSectionHeader">
             <div>
               <h2 id="observability-network-groups-title">Tunnel grouping</h2>
-              <span>Grouped by saved plan, topology identity, interface, and endpoint pair when backend plan IDs are unavailable.</span>
+              <span>Grouped by explicit declared plan ID and endpoint pair.</span>
             </div>
           </div>
           <div className="observabilityNetworkGroupGrid" aria-label="Network metrics tunnel grouping">
@@ -241,15 +250,15 @@ export function NetworkMetricsPanel({
                 </small>
                 <dl>
                   <div>
-                    <dt>Latency</dt>
+                    <dt>Avg latency</dt>
                     <dd>{formatNullableMetric(group.latencyMs, "ms")}</dd>
                   </div>
                   <div>
-                    <dt>Loss</dt>
+                    <dt>Avg loss</dt>
                     <dd>{formatLoss(group.lossRatio)}</dd>
                   </div>
                   <div>
-                    <dt>Speed</dt>
+                    <dt>Avg throughput</dt>
                     <dd>{formatNullableMetric(group.throughputMbps, "Mbps")}</dd>
                   </div>
                 </dl>
@@ -270,14 +279,14 @@ export function NetworkMetricsPanel({
           <div className="dashboardSectionHeader">
             <div>
               <h2 id="observability-network-endpoints-title">Endpoint comparison</h2>
-              <span>Endpoint telemetry highlights managed, observed, and promotion-required tunnel sides.</span>
+              <span>Endpoint telemetry covers only declared plans and highlights managed or observed tunnel sides.</span>
             </div>
           </div>
           <div className="observabilityEndpointTable" aria-label="Network endpoint comparison">
-            {telemetryTunnels.map((tunnel) => (
+            {declaredTunnels.map((tunnel) => (
               <EndpointRow key={`${tunnel.client_id}:${tunnel.interface}:${tunnel.observed_at}`} tunnel={tunnel} />
             ))}
-            {!telemetryTunnels.length && (
+            {!declaredTunnels.length && (
               <div className="emptyState compactEmpty">
                 <Activity size={18} />
                 <strong>No endpoint telemetry</strong>
@@ -291,7 +300,7 @@ export function NetworkMetricsPanel({
           <div className="dashboardSectionHeader">
             <div>
               <h2 id="observability-network-overlays-title">Network review signals</h2>
-              <span>Derived from unhealthy observations, latency/adapter state, promotion requirements, and OSPF cost changes.</span>
+              <span>Derived from unhealthy observations, latency or adapter state, and OSPF cost changes.</span>
             </div>
           </div>
           <div className="observabilityOverlayList" aria-label="Network metrics review signals">
@@ -306,7 +315,7 @@ export function NetworkMetricsPanel({
               <div className="emptyState compactEmpty">
                 <Activity size={18} />
                 <strong>No review signals</strong>
-                <span>No unhealthy observations, pending promotions, or OSPF cost changes are present.</span>
+                <span>No unhealthy observations, degraded declared endpoints, or OSPF cost changes are present.</span>
               </div>
             )}
           </div>
@@ -317,18 +326,22 @@ export function NetworkMetricsPanel({
 }
 
 function NetworkChartCard({
+  definition,
   emptyLabel,
   evidence,
   lines,
+  observedPoints,
   pointsOnly,
   times,
   title,
   throughputBenchmark,
   valueFormatter,
 }: {
+  definition: string;
   emptyLabel: string;
   evidence: NetworkEvidence;
   lines: TimeSeriesChartLine[];
+  observedPoints: number;
   pointsOnly: boolean;
   times: string[];
   title: string;
@@ -339,10 +352,17 @@ function NetworkChartCard({
     <article className="dashboardCurveCard">
       <div className="dashboardChartHeader">
         <span>{title}</span>
-        <small>{times.length ? `${times.length} point${times.length === 1 ? "" : "s"}` : "No points"}</small>
+        <small>
+          {observedPoints
+            ? `${observedPoints} measurement${observedPoints === 1 ? "" : "s"} · ${times.length} timestamp${times.length === 1 ? "" : "s"}`
+            : "No measurements"}
+        </small>
       </div>
       <p className="observabilityRangeLine">
         Time filter: retained evidence · Window: {evidence.windowLabel} · Last sample: {evidence.lastSampleLabel}
+      </p>
+      <p className="observabilityMetricDefinition" title={definition}>
+        Metric definition: {definition}
       </p>
       {evidence.isSparse && (
         <p className="observabilitySparseNotice">
@@ -354,7 +374,7 @@ function NetworkChartCard({
           aria-label="Network throughput benchmark"
           className="observabilitySparseNotice"
         >
-          Throughput {formatMetric(throughputBenchmark.throughputMbps)} Mbps ·
+          Average throughput {formatMetric(throughputBenchmark.throughputMbps)} Mbps ·
           expected {formatMetric(throughputBenchmark.configuredBandwidthMbps)} Mbps ·{" "}
           {throughputBenchmark.status} · sample{" "}
           {throughputBenchmark.latestObservedAt
@@ -435,55 +455,6 @@ type NetworkEvidence = {
   windowLabel: string;
 };
 
-function NetworkCountDefinitions({
-  degradedCount,
-  observationCount,
-  reviewSignalCount,
-  samplePointCount,
-  selectedMetric,
-}: {
-  degradedCount: number;
-  observationCount: number;
-  reviewSignalCount: number;
-  samplePointCount: number;
-  selectedMetric: string;
-}) {
-  const definitions = [
-    {
-      detail: "persisted network observation rows returned by the backend",
-      label: "Observations",
-      value: String(observationCount),
-    },
-    {
-      detail: `${selectedMetric} measurements visible in the selected chart`,
-      label: "Chart samples",
-      value: String(samplePointCount),
-    },
-    {
-      detail: "unhealthy observations plus degraded endpoint telemetry",
-      label: "Degraded signals",
-      value: String(degradedCount),
-    },
-    {
-      detail: "unhealthy observations, promotion needs, endpoint degradation, and OSPF cost changes",
-      label: "Review signals",
-      value: String(reviewSignalCount),
-    },
-  ];
-
-  return (
-    <div className="observabilityWarningDefinitions" aria-label="Network metrics count definitions">
-      {definitions.map((definition) => (
-        <div key={definition.label}>
-          <span>{definition.label}</span>
-          <strong>{definition.value}</strong>
-          <small>{definition.detail}</small>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function EndpointRow({ tunnel }: { tunnel: TelemetryTunnelRecord }) {
   const traffic = `${formatBytes(tunnel.rx_bytes)} RX / ${formatBytes(tunnel.tx_bytes)} TX`;
   return (
@@ -501,16 +472,34 @@ function buildObservationChart(
   observations: NetworkObservationRecord[],
   value: (observation: NetworkObservationRecord) => number | null,
 ): ObservationChartData {
-  const times = sortedUniqueTimes(observations.map((observation) => observation.observed_at));
-  const groups = new Map<string, NetworkObservationRecord[]>();
-  for (const observation of observations) {
-    const key = observationGroupKey(observation);
-    groups.set(key, [...(groups.get(key) ?? []), observation]);
+  const measured = observations
+    .map((observation) => ({ measurement: value(observation), observation }))
+    .filter(
+      (entry): entry is { measurement: number; observation: NetworkObservationRecord } =>
+        typeof entry.measurement === "number" && Number.isFinite(entry.measurement),
+    );
+  const times = sortedUniqueTimes(measured.map(({ observation }) => observation.observed_at));
+  const groups = new Map<string, typeof measured>();
+  for (const entry of measured) {
+    const key = observationSeriesKey(entry.observation);
+    groups.set(key, [...(groups.get(key) ?? []), entry]);
+  }
+  const planSeriesCounts = new Map<string, number>();
+  for (const group of groups.values()) {
+    const planKey = observationGroupKey(group[0].observation);
+    planSeriesCounts.set(planKey, (planSeriesCounts.get(planKey) ?? 0) + 1);
   }
   const lines = Array.from(groups.entries()).map(([key, group], index) => ({
     color: dashboardChartColors[index % dashboardChartColors.length],
-    label: observationGroupLabel(key, group),
-    values: times.map((time) => value(group.find((observation) => observation.observed_at === time) ?? emptyObservation())),
+    label: observationSeriesLabel(
+      key,
+      group.map(({ observation }) => observation),
+      planSeriesCounts,
+    ),
+    values: times.map(
+      (time) =>
+        group.find(({ observation }) => observation.observed_at === time)?.measurement ?? null,
+    ),
   }));
   return {
     lines,
@@ -531,10 +520,12 @@ function buildMetricGroups(
   const grouped = new Map<string, NetworkObservationTrendRecord[]>();
   for (const trend of trends) {
     const key = trendGroupKey(trend);
+    if (!key) continue;
     grouped.set(key, [...(grouped.get(key) ?? []), trend]);
   }
   for (const observation of observations) {
     const key = observationGroupKey(observation);
+    if (!key) continue;
     if (!grouped.has(key)) {
       grouped.set(key, []);
     }
@@ -544,25 +535,34 @@ function buildMetricGroups(
       const trend = group[0] ?? null;
       const relatedObservations = observations.filter((observation) => observationGroupKey(observation) === key);
       const relatedTunnels = tunnels.filter((tunnel) => tunnelGroupKey(tunnel) === key);
+      const trendSampleCount = group.reduce((total, item) => total + item.sample_count, 0);
       return {
-        degradedCount: group.reduce((total, item) => total + item.degraded_count, 0) + relatedObservations.filter((observation) => observation.healthy === false).length,
+        degradedCount: group.length
+          ? group.reduce((total, item) => total + item.degraded_count, 0)
+          : relatedObservations.filter((observation) => observation.healthy === false).length,
         endpointCount: new Set([
           ...group.flatMap((item) => [item.client_id, item.peer_client_id].filter(Boolean)),
           ...relatedObservations.flatMap((item) => [item.client_id, item.peer_client_id].filter(Boolean)),
           ...relatedTunnels.flatMap((item) => [item.client_id, item.peer_client_id].filter(Boolean)),
         ]).size,
         key,
-        label: trend?.plan_name ?? relatedObservations[0]?.plan_name ?? relatedTunnels[0]?.plan_name ?? "Unplanned tunnel",
+        label: trend?.plan_name ?? relatedObservations[0]?.plan_name ?? relatedTunnels[0]?.plan_name ?? "Declared tunnel",
         latestObservedAt: latestTime([
           ...group.map((item) => item.latest_observed_at),
           ...relatedObservations.map((item) => item.observed_at),
           ...relatedTunnels.map((item) => item.observed_at),
         ]),
-        lossRatio: firstNumber(group.map((item) => item.packet_loss_avg_ratio), relatedObservations.map((item) => item.packet_loss_ratio)),
+        lossRatio:
+          weightedTrendMetric(group, (item) => item.packet_loss_avg_ratio) ??
+          averageMetric(relatedObservations.map((item) => item.packet_loss_ratio)),
         peerLabel: endpointPairLabel(group, relatedObservations, relatedTunnels),
-        sampleCount: group.reduce((total, item) => total + item.sample_count, 0) || relatedObservations.length,
-        throughputMbps: firstNumber(group.map((item) => item.throughput_avg_mbps), relatedObservations.map((item) => item.throughput_mbps)),
-        latencyMs: firstNumber(group.map((item) => item.latency_avg_ms), relatedObservations.map((item) => item.latency_avg_ms)),
+        sampleCount: trendSampleCount || relatedObservations.length,
+        throughputMbps:
+          weightedTrendMetric(group, (item) => item.throughput_avg_mbps) ??
+          averageMetric(relatedObservations.map((item) => item.throughput_mbps)),
+        latencyMs:
+          weightedTrendMetric(group, (item) => item.latency_avg_ms) ??
+          averageMetric(relatedObservations.map((item) => item.latency_avg_ms)),
       };
     })
     .sort((left, right) => (right.degradedCount - left.degradedCount) || left.label.localeCompare(right.label));
@@ -583,13 +583,13 @@ function buildOverlayRows(
       source: "Unhealthy observation",
     }));
   const tunnelRows = tunnels
-    .filter((tunnel) => isTunnelDegraded(tunnel) || tunnel.promotion_required)
+    .filter(isTunnelDegraded)
     .map((tunnel) => ({
       detail: `${endpointDirectionLabel(tunnel.client_id, tunnel.peer_client_id)} ${tunnel.interface}: ${formatEndpointRuntime(tunnel)}`,
       key: `tunnel:${tunnel.client_id}:${tunnel.interface}:${tunnel.observed_at}`,
       label: tunnel.plan_name ?? tunnel.interface,
-      severity: tunnel.promotion_required ? "warning" as const : "critical" as const,
-      source: tunnel.promotion_required ? "Promotion required" : "Endpoint degraded",
+      severity: "critical" as const,
+      source: "Declared endpoint degraded",
     }));
   const ospfRows = recommendations
     .filter((recommendation) => recommendation.cost_delta !== 0)
@@ -608,25 +608,51 @@ function isTunnelDegraded(tunnel: TelemetryTunnelRecord): boolean {
     tunnel.operstate !== null && tunnel.operstate !== "up" ||
     tunnel.latency_status === "down" ||
     tunnel.latency_status === "missed" ||
+    tunnel.adapter_health?.success === false ||
+    Boolean(tunnel.traffic_status && tunnel.traffic_status !== "ok") ||
     tunnel.packet_loss_ratio !== null && tunnel.packet_loss_ratio !== undefined && tunnel.packet_loss_ratio > 0
   );
 }
 
 function trendGroupKey(trend: NetworkObservationTrendRecord): string {
-  return trend.plan_id ?? trend.topology_identity_hash ?? `${trend.client_id}:${trend.peer_client_id ?? "peer"}:${trend.interface_name ?? trend.kind}`;
+  return trend.plan_id ?? "";
 }
 
 function observationGroupKey(observation: NetworkObservationRecord): string {
-  return observation.plan_id ?? observation.topology_identity_hash ?? `${observation.client_id}:${observation.peer_client_id ?? "peer"}:${observation.interface_name ?? observation.kind}`;
+  return observation.plan_id ?? "";
+}
+
+function observationSeriesKey(observation: NetworkObservationRecord): string {
+  return [
+    observation.plan_id ?? "",
+    observation.client_id,
+    observation.peer_client_id ?? "",
+    observation.role ?? "",
+  ].join(":");
 }
 
 function tunnelGroupKey(tunnel: TelemetryTunnelRecord): string {
-  return tunnel.plan_id ?? `${tunnel.client_id}:${tunnel.peer_client_id ?? "peer"}:${tunnel.interface}`;
+  return tunnel.plan_id ?? "";
 }
 
 function observationGroupLabel(key: string, group: NetworkObservationRecord[]): string {
   const first = group[0] ?? null;
   return first?.plan_name ?? first?.interface_name ?? key;
+}
+
+function observationSeriesLabel(
+  key: string,
+  group: NetworkObservationRecord[],
+  planSeriesCounts: Map<string, number>,
+): string {
+  const first = group[0] ?? null;
+  if (!first) return key;
+  const planKey = observationGroupKey(first);
+  const planLabel = observationGroupLabel(planKey, group);
+  if ((planSeriesCounts.get(planKey) ?? 0) <= 1) {
+    return planLabel;
+  }
+  return `${planLabel} · ${endpointDirectionLabel(first.client_id, first.peer_client_id)}`;
 }
 
 function endpointPairLabel(
@@ -650,36 +676,35 @@ function endpointPairLabel(
   return "Direction not reported";
 }
 
-function firstNumber(primary: Array<number | null>, fallback: Array<number | null>): number | null {
-  return primary.find((value): value is number => typeof value === "number") ?? fallback.find((value): value is number => typeof value === "number") ?? null;
+function averageMetric(values: Array<number | null>): number | null {
+  const measured = values.filter(
+    (value): value is number => typeof value === "number" && Number.isFinite(value),
+  );
+  return measured.length
+    ? measured.reduce((total, value) => total + value, 0) / measured.length
+    : null;
 }
 
-function emptyObservation(): NetworkObservationRecord {
-  return {
-    bytes: null,
-    client_id: "",
-    healthy: null,
-    id: "",
-    interface_name: null,
-    job_id: "",
-    kind: "",
-    latency_avg_ms: null,
-    metadata: {},
-    observed_at: "",
-    packet_loss_ratio: null,
-    peer_client_id: null,
-    plan_id: null,
-    plan_name: null,
-    role: null,
-    seq: 0,
-    target: null,
-    throughput_mbps: null,
-    topology_identity_hash: null,
-  };
+function weightedTrendMetric(
+  trends: NetworkObservationTrendRecord[],
+  value: (trend: NetworkObservationTrendRecord) => number | null,
+): number | null {
+  let weightedTotal = 0;
+  let weightTotal = 0;
+  for (const trend of trends) {
+    const measurement = value(trend);
+    if (typeof measurement !== "number" || !Number.isFinite(measurement)) continue;
+    const weight = Math.max(1, trend.sample_count);
+    weightedTotal += measurement * weight;
+    weightTotal += weight;
+  }
+  return weightTotal ? weightedTotal / weightTotal : null;
 }
 
 function sortedUniqueTimes(times: string[]): string[] {
-  return Array.from(new Set(times.filter(Boolean))).sort((left, right) => Date.parse(left) - Date.parse(right));
+  return Array.from(new Set(times.filter(Boolean))).sort(
+    (left, right) => timestampMillis(left) - timestampMillis(right),
+  );
 }
 
 function latestTime(times: string[]): string | null {
@@ -718,7 +743,7 @@ function buildNetworkEvidence(
   latestEvidence: string | null,
   chart: ObservationChartData,
 ): NetworkEvidence {
-  const latestMs = latestEvidence ? Date.parse(latestEvidence) : NaN;
+  const latestMs = latestEvidence ? timestampMillis(latestEvidence) : NaN;
   const staleMs = 24 * 60 * 60 * 1000;
   const totalPossiblePoints = Math.max(
     chart.observedPoints,
@@ -728,12 +753,41 @@ function buildNetworkEvidence(
     isSparse: chart.observedPoints > 0 && chart.observedPoints <= 3,
     isStale: Number.isFinite(latestMs) && Date.now() - latestMs > staleMs,
     lastSampleLabel: latestEvidence ? formatCompactTime(latestEvidence) : "No samples",
-    pointLabel: `${chart.observedPoints}/${totalPossiblePoints} point${chart.observedPoints === 1 ? "" : "s"} present`,
+    pointLabel:
+      chart.observedPoints === totalPossiblePoints
+        ? `${chart.observedPoints} measured point${chart.observedPoints === 1 ? "" : "s"}`
+        : `${chart.observedPoints}/${totalPossiblePoints} measured points present`,
     windowLabel:
       oldestEvidence && latestEvidence
         ? `${formatEvidenceTime(oldestEvidence)} to ${formatEvidenceTime(latestEvidence)}`
         : "No retained evidence",
   };
+}
+
+function evidenceWindowSummary(
+  oldestEvidence: string | null,
+  latestEvidence: string | null,
+): string {
+  if (!oldestEvidence || !latestEvidence) {
+    return "No data";
+  }
+  const durationMs = Math.max(
+    0,
+    timestampMillis(latestEvidence) - timestampMillis(oldestEvidence),
+  );
+  if (!Number.isFinite(durationMs)) {
+    return "Invalid timestamps";
+  }
+  return durationMs > 0 ? `${formatDuration(durationMs)} retained` : "Single timestamp";
+}
+
+function formatDuration(valueMs: number): string {
+  const totalMinutes = Math.max(1, Math.round(valueMs / 60_000));
+  if (totalMinutes < 60) return `${totalMinutes}m`;
+  const totalHours = Math.round(totalMinutes / 60);
+  if (totalHours < 24) return `${totalHours}h`;
+  const totalDays = Math.round(totalHours / 24);
+  return `${totalDays}d`;
 }
 
 function endpointDirectionLabel(
@@ -748,24 +802,13 @@ function observationDirectionLabel(observation: NetworkObservationRecord): strin
 }
 
 function formatEndpointRuntime(tunnel: TelemetryTunnelRecord): string {
-  if (tunnel.promotion_required) {
-    return "Promotion required";
-  }
-  const correlation = readableNetworkToken(tunnel.plan_correlation);
+  const ownership = readableNetworkToken(tunnel.ownership_mode);
   const operstate = tunnel.operstate ? readableNetworkToken(tunnel.operstate) : null;
-  return operstate ? `${correlation}; ${operstate}` : correlation;
+  return operstate ? `${ownership}; ${operstate}` : ownership;
 }
 
 function readableNetworkToken(value: string): string {
   switch (value) {
-    case "matched_saved_plan":
-      return "Saved plan match";
-    case "matched_observed_plan":
-      return "Observed plan match";
-    case "unmatched":
-      return "No saved plan match";
-    case "promotion_required":
-      return "Promotion required";
     case "down":
       return "Down";
     case "missed":

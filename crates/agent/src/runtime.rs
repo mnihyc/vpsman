@@ -37,6 +37,9 @@ use crate::{
     config_update::read_redacted_config,
     executor::execute_job_command_with_config_cancel_and_output_sink,
     network_probe::{execute_network_probe_command, NetworkProbeInput},
+    network_routing_adapter::{
+        execute_network_routing_adapter_command, NetworkRoutingAdapterInput,
+    },
     network_runtime::{
         execute_runtime_tunnel_reconcile_report_cancelable,
         execute_runtime_tunnel_remove_report_cancelable, NetworkRuntimeReconcileInput,
@@ -182,7 +185,7 @@ async fn connect_and_stream(
     resume_active_commands(&mut stream, &mut seq, command_runtime).await?;
     let mut telemetry_runtime_state = TelemetryRuntimeState::default();
     let mut ticker = time::interval(Duration::from_secs(
-        server_hello.telemetry_light_secs.max(5),
+        server_hello.telemetry_interval_secs.max(5),
     ));
     let mut unmanaged_update_schedule = UnmanagedUpdateSchedule::new(config);
     let mut unmanaged_update_sleep =
@@ -215,7 +218,7 @@ async fn connect_and_stream(
                             },
                         )
                         .await? {
-                            ticker = time::interval(Duration::from_secs(config.telemetry_light_secs.max(5)));
+                            ticker = time::interval(Duration::from_secs(config.telemetry_interval_secs.max(5)));
                             unmanaged_update_schedule = UnmanagedUpdateSchedule::new(config);
                             unmanaged_update_sleep.as_mut().reset(unmanaged_update_schedule.next_due());
                         }
@@ -280,7 +283,7 @@ async fn connect_and_stream(
                             .await?;
                             if let Some(next_config) = config_update {
                                 *config = next_config;
-                                ticker = time::interval(Duration::from_secs(config.telemetry_light_secs.max(5)));
+                                ticker = time::interval(Duration::from_secs(config.telemetry_interval_secs.max(5)));
                                 unmanaged_update_schedule = UnmanagedUpdateSchedule::new(config);
                                 unmanaged_update_sleep.as_mut().reset(unmanaged_update_schedule.next_due());
                             }
@@ -476,6 +479,7 @@ async fn reconcile_configured_runtime_tunnels_cancelable(
             NetworkRuntimeReconcileInput {
                 config,
                 plan,
+                runtime_adapter: telemetry_plan.runtime_adapter.as_ref(),
                 side: telemetry_plan.endpoint_side,
                 max_timeout_secs: config.network.runtime_command_timeout_secs.max(1),
                 #[cfg(test)]
@@ -591,6 +595,7 @@ async fn apply_runtime_config_sync(
             NetworkRuntimeRemoveInput {
                 config,
                 plan: &stale.plan,
+                runtime_adapter: stale.runtime_adapter.as_ref(),
                 side: stale.endpoint_side,
                 max_timeout_secs: config.network.runtime_command_timeout_secs.max(1),
                 #[cfg(test)]
@@ -632,9 +637,9 @@ async fn apply_runtime_config_sync(
     )
     .await;
     let removal_failed = removals.iter().any(|removal| {
-        matches!(
+        !matches!(
             removal.get("status").and_then(serde_json::Value::as_str),
-            Some("failed" | "remove_unavailable")
+            Some("removed" | "observed_only")
         )
     });
     let reconcile_failed =
@@ -681,13 +686,16 @@ fn runtime_tunnel_identity_matches(
         && left.plan.runtime_control.manager == right.plan.runtime_control.manager
         && left.plan.left_client_id == right.plan.left_client_id
         && left.plan.right_client_id == right.plan.right_client_id
-        && left.plan.left_underlay == right.plan.left_underlay
-        && left.plan.right_underlay == right.plan.right_underlay
+        && left.plan.left_remote_underlay == right.plan.left_remote_underlay
+        && left.plan.left_local_underlay == right.plan.left_local_underlay
+        && left.plan.right_remote_underlay == right.plan.right_remote_underlay
+        && left.plan.right_local_underlay == right.plan.right_local_underlay
         && left.plan.left_tunnel_address == right.plan.left_tunnel_address
         && left.plan.right_tunnel_address == right.plan.right_tunnel_address
         && left.plan.tunnel_prefix_len == right.plan.tunnel_prefix_len
         && left.plan.ipv4_tunnel == right.plan.ipv4_tunnel
         && left.plan.ipv6_tunnel == right.plan.ipv6_tunnel
+        && left.runtime_adapter == right.runtime_adapter
         && runtime_tunnel_control_identity_matches(
             &left.plan.runtime_control,
             &right.plan.runtime_control,
@@ -702,10 +710,9 @@ fn runtime_tunnel_control_identity_matches(
         vpsman_common::RuntimeTunnelManager::AgentIproute2Managed => left.fou == right.fou,
         vpsman_common::RuntimeTunnelManager::ExternalObserved => true,
         vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter => {
-            left.startup == right.startup
-                && left.stop == right.stop
-                && left.cleanup == right.cleanup
-                && left.restart == right.restart
+            left.left_adapter_template_id == right.left_adapter_template_id
+                && left.right_adapter_template_id == right.right_adapter_template_id
+                && left.traffic_limit == right.traffic_limit
         }
     }
 }
@@ -842,7 +849,6 @@ fn agent_capabilities(config: &AgentConfig) -> AgentCapabilitySnapshot {
         },
         effective_uid: Some(effective_uid),
         max_job_timeout_secs: config.auth.max_job_timeout_secs.max(1),
-        network_backend: config.network.backend,
         can_attempt_privileged_ops: true,
         can_manage_runtime_tunnels: root,
         can_apply_process_limits: root,
@@ -1710,11 +1716,17 @@ async fn execute_authorized_command(
             })
             .await
         }
-        JobCommand::NetworkStatus { plan, side } => {
+        JobCommand::NetworkStatus {
+            plan,
+            side,
+            runtime_adapter,
+            ..
+        } => {
             execute_network_status_command(NetworkStatusInput {
                 job_id: request.job_id,
                 config: &config,
                 plan,
+                runtime_adapter: runtime_adapter.as_ref(),
                 side: *side,
                 max_timeout_secs,
                 cancel_token: cancel_token.clone(),
@@ -1726,6 +1738,7 @@ async fn execute_authorized_command(
             side,
             count,
             interval_ms,
+            ..
         } => {
             execute_network_probe_command(NetworkProbeInput {
                 job_id: request.job_id,
@@ -1747,6 +1760,7 @@ async fn execute_authorized_command(
             rate_limit_kbps,
             port,
             connect_timeout_ms,
+            ..
         } => {
             execute_network_speed_test_command(NetworkSpeedTestInput {
                 job_id: request.job_id,
@@ -1759,6 +1773,48 @@ async fn execute_authorized_command(
                 rate_limit_kbps: *rate_limit_kbps,
                 port: *port,
                 connect_timeout_ms: *connect_timeout_ms,
+                max_timeout_secs,
+                cancel_token: cancel_token.clone(),
+            })
+            .await
+        }
+        JobCommand::NetworkRoutingStatus {
+            plan_id,
+            plan,
+            side,
+            adapter,
+        } => {
+            execute_network_routing_adapter_command(NetworkRoutingAdapterInput {
+                job_id: request.job_id,
+                client_id: &config.client_id,
+                plan_id,
+                plan,
+                side: *side,
+                adapter,
+                expected_current_cost: None,
+                desired_cost: None,
+                max_timeout_secs,
+                cancel_token: cancel_token.clone(),
+            })
+            .await
+        }
+        JobCommand::NetworkRoutingApply {
+            plan_id,
+            plan,
+            side,
+            adapter,
+            expected_current_cost,
+            desired_cost,
+        } => {
+            execute_network_routing_adapter_command(NetworkRoutingAdapterInput {
+                job_id: request.job_id,
+                client_id: &config.client_id,
+                plan_id,
+                plan,
+                side: *side,
+                adapter,
+                expected_current_cost: *expected_current_cost,
+                desired_cost: Some(*desired_cost),
                 max_timeout_secs,
                 cancel_token: cancel_token.clone(),
             })
@@ -2294,8 +2350,10 @@ mod tests {
             runtime_topology: Default::default(),
             left_client_id: "left-a".to_string(),
             right_client_id: "right-b".to_string(),
-            left_underlay: "198.51.100.10".to_string(),
-            right_underlay: "203.0.113.20".to_string(),
+            left_remote_underlay: "198.51.100.10".to_string(),
+            right_remote_underlay: "203.0.113.20".to_string(),
+            left_local_underlay: None,
+            right_local_underlay: None,
             address_pool_cidr: "10.255.0.0/30".to_string(),
             reserved_addresses: Vec::new(),
             ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
@@ -2307,10 +2365,7 @@ mod tests {
             ipv6_tunnel: None,
             latency_primary_family: Default::default(),
             bandwidth_mbps: 100,
-            latency_ms: 15.0,
-            packet_loss_ratio: 0.0,
-            preference: 1.0,
-            ospf_policy: vpsman_common::OspfCostPolicy::default(),
+            ospf: None,
         })
         .unwrap();
         let config = AgentConfig {
@@ -2328,11 +2383,10 @@ mod tests {
                         plan_id: Some("plan-a".to_string()),
                         endpoint_side: vpsman_common::TunnelEndpointSide::Left,
                         plan,
+                        runtime_adapter: None,
                         traffic_source: Default::default(),
                         traffic_command: None,
                         latency_monitoring_enabled: true,
-                        auto_ospf_enabled: false,
-                        auto_ospf_updater: None,
                     },
                 ],
                 ..Default::default()
@@ -2354,13 +2408,13 @@ mod tests {
         let base = AgentConfig {
             client_id: "client-a".to_string(),
             display_name: "old-name".to_string(),
-            telemetry_light_secs: 15,
+            telemetry_interval_secs: 15,
             ..AgentConfig::default()
         };
         let desired = AgentRuntimeConfig {
             version: 9,
             display_name: "new-name".to_string(),
-            telemetry_light_secs: 30,
+            telemetry_interval_secs: 30,
             ..AgentRuntimeConfig::default()
         };
 
@@ -2379,7 +2433,7 @@ mod tests {
         assert_eq!(result.outputs[0].exit_code, Some(0));
         let applied = result.applied_config.expect("sync should apply");
         assert_eq!(applied.display_name, "new-name");
-        assert_eq!(applied.telemetry_light_secs, 30);
+        assert_eq!(applied.telemetry_interval_secs, 30);
     }
 
     #[test]
@@ -2389,8 +2443,7 @@ mod tests {
             "10.255.0.0",
             "10.255.0.1",
         ));
-        changed_cost.plan.recommended_ospf_cost =
-            changed_cost.plan.recommended_ospf_cost.saturating_add(10);
+        changed_cost.plan.bandwidth_mbps = changed_cost.plan.bandwidth_mbps.saturating_add(10);
         let baseline = runtime_sync_test_telemetry_plan(runtime_sync_test_plan(
             "203.0.113.20",
             "10.255.0.0",
@@ -2487,7 +2540,7 @@ mod tests {
                 .network
                 .runtime_status_telemetry_plans[0]
                 .plan
-                .right_underlay,
+                .right_remote_underlay,
             "203.0.113.99"
         );
     }
@@ -2551,6 +2604,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_config_sync_preserves_omitted_plan_when_cleanup_is_blocked() {
+        let plan = runtime_sync_test_telemetry_plan(runtime_sync_test_plan(
+            "203.0.113.20",
+            "10.255.0.0",
+            "10.255.0.1",
+        ));
+        let base = AgentConfig {
+            client_id: "left-a".to_string(),
+            network: vpsman_common::AgentNetworkConfig {
+                apply_enabled: false,
+                runtime_reconcile_enabled: false,
+                runtime_status_telemetry_plans: vec![plan],
+                ..Default::default()
+            },
+            ..AgentConfig::default()
+        };
+        let mut desired = AgentRuntimeConfig::from_agent_config(14, &base);
+        desired.network.runtime_status_telemetry_plans.clear();
+
+        let result = apply_runtime_config_sync(
+            uuid::Uuid::new_v4(),
+            &base,
+            &desired,
+            14,
+            "test-cleanup-blocked",
+            CommandCancelToken::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.outputs[0].exit_code, Some(1));
+        let body: serde_json::Value = serde_json::from_slice(&result.outputs[0].data).unwrap();
+        assert_eq!(body["status"], "failed");
+        assert_eq!(body["removals"][0]["status"], "skipped");
+        assert_eq!(body["removals"][0]["reason"], "runtime_reconcile_disabled");
+        assert!(result.applied_config.is_none());
+    }
+
+    #[tokio::test]
+    async fn runtime_config_sync_stops_observing_without_a_mutation_gate() {
+        let mut plan = runtime_sync_test_plan("203.0.113.20", "10.255.0.0", "10.255.0.1");
+        plan.runtime_control.manager = vpsman_common::RuntimeTunnelManager::ExternalObserved;
+        let base = AgentConfig {
+            client_id: "left-a".to_string(),
+            network: vpsman_common::AgentNetworkConfig {
+                apply_enabled: false,
+                runtime_reconcile_enabled: false,
+                runtime_status_telemetry_plans: vec![runtime_sync_test_telemetry_plan(plan)],
+                ..Default::default()
+            },
+            ..AgentConfig::default()
+        };
+        let mut desired = AgentRuntimeConfig::from_agent_config(15, &base);
+        desired.network.runtime_status_telemetry_plans.clear();
+
+        let result = apply_runtime_config_sync(
+            uuid::Uuid::new_v4(),
+            &base,
+            &desired,
+            15,
+            "test-stop-observing",
+            CommandCancelToken::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.outputs[0].exit_code, Some(0));
+        let body: serde_json::Value = serde_json::from_slice(&result.outputs[0].data).unwrap();
+        assert_eq!(body["status"], "applied");
+        assert_eq!(body["removals"][0]["status"], "observed_only");
+        assert!(result
+            .applied_config
+            .expect("read-only observation removal should apply")
+            .network
+            .runtime_status_telemetry_plans
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn runtime_config_sync_blocks_status_only_adapter_removal() {
         let root = std::env::temp_dir().join(format!(
             "vpsman-runtime-sync-adapter-remove-unavailable-{}",
@@ -2560,13 +2692,26 @@ mod tests {
         let mut plan = runtime_sync_test_plan("203.0.113.20", "10.255.0.0", "10.255.0.1");
         plan.runtime_control = vpsman_common::RuntimeTunnelControl {
             manager: vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter,
-            status: Some(vpsman_common::RuntimeTunnelCommand {
+            left_adapter_template_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+            right_adapter_template_id: Some("22222222-2222-4222-8222-222222222222".to_string()),
+            ..Default::default()
+        };
+        let mut telemetry_plan = runtime_sync_test_telemetry_plan(plan);
+        telemetry_plan.runtime_adapter = Some(vpsman_common::RuntimeTunnelAdapterCommands {
+            template_id: "11111111-1111-4111-8111-111111111111".to_string(),
+            template_name: "status-only-test".to_string(),
+            definition_hash: "ab".repeat(32),
+            startup: None,
+            stop: None,
+            cleanup: None,
+            restart: None,
+            status: vpsman_common::RuntimeTunnelCommand {
                 argv: vec!["/bin/echo".to_string(), "status".to_string()],
                 max_timeout_secs: 5,
                 max_output_bytes: 4096,
-            }),
-            ..Default::default()
-        };
+            },
+            traffic_limit_apply: None,
+        });
         let base = AgentConfig {
             client_id: "left-a".to_string(),
             network: vpsman_common::AgentNetworkConfig {
@@ -2577,7 +2722,7 @@ mod tests {
                 runtime_tc_argv: vec!["/bin/echo".to_string()],
                 runtime_unprivileged_mutation_policy:
                     vpsman_common::AgentRuntimeUnprivilegedMutationPolicy::TryAll,
-                runtime_status_telemetry_plans: vec![runtime_sync_test_telemetry_plan(plan)],
+                runtime_status_telemetry_plans: vec![telemetry_plan],
                 ..Default::default()
             },
             ..AgentConfig::default()
@@ -2618,8 +2763,10 @@ mod tests {
             runtime_topology: Default::default(),
             left_client_id: "client-a".to_string(),
             right_client_id: "client-b".to_string(),
-            left_underlay: "198.51.100.10".to_string(),
-            right_underlay: "203.0.113.20".to_string(),
+            left_remote_underlay: "198.51.100.10".to_string(),
+            right_remote_underlay: "203.0.113.20".to_string(),
+            left_local_underlay: None,
+            right_local_underlay: None,
             address_pool_cidr: "10.255.0.0/30".to_string(),
             reserved_addresses: Vec::new(),
             ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
@@ -2631,10 +2778,7 @@ mod tests {
             ipv6_tunnel: None,
             latency_primary_family: Default::default(),
             bandwidth_mbps: 100,
-            latency_ms: 15.0,
-            packet_loss_ratio: 0.0,
-            preference: 1.0,
-            ospf_policy: vpsman_common::OspfCostPolicy::default(),
+            ospf: None,
         })
         .unwrap();
         let base = AgentConfig {
@@ -2663,11 +2807,10 @@ mod tests {
                 plan_id: Some("plan-a".to_string()),
                 endpoint_side: vpsman_common::TunnelEndpointSide::Left,
                 plan,
+                runtime_adapter: None,
                 traffic_source: Default::default(),
                 traffic_command: None,
                 latency_monitoring_enabled: true,
-                auto_ospf_enabled: false,
-                auto_ospf_updater: None,
             },
         );
 
@@ -2739,7 +2882,7 @@ mod tests {
     }
 
     fn runtime_sync_test_plan(
-        right_underlay: &str,
+        right_remote_underlay: &str,
         left_tunnel: &str,
         right_tunnel: &str,
     ) -> vpsman_common::TunnelPlan {
@@ -2751,8 +2894,10 @@ mod tests {
             runtime_topology: Default::default(),
             left_client_id: "left-a".to_string(),
             right_client_id: "right-b".to_string(),
-            left_underlay: "198.51.100.10".to_string(),
-            right_underlay: right_underlay.to_string(),
+            left_remote_underlay: "198.51.100.10".to_string(),
+            right_remote_underlay: right_remote_underlay.to_string(),
+            left_local_underlay: None,
+            right_local_underlay: None,
             address_pool_cidr: "10.255.0.0/30".to_string(),
             reserved_addresses: Vec::new(),
             ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
@@ -2764,10 +2909,7 @@ mod tests {
             ipv6_tunnel: None,
             latency_primary_family: Default::default(),
             bandwidth_mbps: 100,
-            latency_ms: 15.0,
-            packet_loss_ratio: 0.0,
-            preference: 1.0,
-            ospf_policy: vpsman_common::OspfCostPolicy::default(),
+            ospf: None,
         })
         .unwrap()
     }
@@ -2779,11 +2921,10 @@ mod tests {
             plan_id: Some("plan-a".to_string()),
             endpoint_side: vpsman_common::TunnelEndpointSide::Left,
             plan,
+            runtime_adapter: None,
             traffic_source: Default::default(),
             traffic_command: None,
             latency_monitoring_enabled: true,
-            auto_ospf_enabled: false,
-            auto_ospf_updater: None,
         }
     }
 

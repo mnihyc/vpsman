@@ -10308,3 +10308,37 @@ These should come before polish:
 - Stronger stale/overdue/invalid states.
 
 The current version is heading in the right direction. It should not become more enterprise-heavy. The next release should focus on **making the current simpler model internally consistent, visibly fresh or stale, and easier to complete on mobile and long pages**.
+
+# === NETWORK OWNERSHIP REPLACEMENT - 2026-07-12 ===
+
+This is a new canonical section appended after the older issue material. It
+supersedes historical Bird2, generated-daemon, telemetry-promotion, inferred
+tunnel, and compatibility assumptions without rewriting those records.
+
+| Replacement issue | Status | Implemented product contract | Verification |
+|---|---|---|---|
+| Saved-plan authority | **FIXED** | A saved UUID/revision is the only tunnel intent. No host discovery, import, promotion, heuristic ownership, or unmanaged inventory is accepted. | Common/API/agent/CLI contract tests, forbidden-term audit, exact lifecycle smoke. |
+| Runtime ownership | **FIXED** | Operators choose Agent iproute2, External observed, or External adapter. iproute2 accepts only GRE/IPIP/SIT/FOU; external software remains operator owned. | Plan validation, adapter contract, source-template, CLI/VTY, and browser authoring tests. |
+| Daemon-neutral OSPF | **FIXED** | OSPF is off by default and binds one explicit routing-cost adapter per endpoint. No routing daemon, daemon config, updater executable, or heuristic parser is shipped. | Reviewed/automatic controller tests, adapter CAS tests, UI/CLI snapshot tests. |
+| Exact lifecycle convergence | **FIXED** | Create/update/enable/disable/retire and reconnect push complete desired state. Failed managed cleanup retains the exact prior snapshot for retry; external observed mode never mutates. | Live `100 -> 137 Mbps` create/update/disable/delete smoke, reconnect/update smoke, omitted-plan cleanup regressions. |
+| Endpoint retirement convergence | **FIXED** | Deleting a VPS retires every active declaration that names it and immediately queues the surviving peers' complete, now-empty desired state. The delete response and Fleet feedback distinguish queued cleanup from peers that failed to queue; retryable terminal-event bookkeeping cannot mask the committed delete. | Route/repository and live-PostgreSQL regressions, peer de-duplication unit test, all 392 API tests, production frontend build, focused Fleet deletion browser tests, and responsive screenshots. |
+| NAT-safe outer addressing | **FIXED** | Each endpoint declares an independent required remote destination and optional locally bindable source. Public/NAT destinations are never reused or inferred as interface addresses; omitting a local source delegates source selection to the host route. | Planner, agent argv/identity, API/PostgreSQL, CLI/VTY, adapter-contract, live lifecycle, and desktop/mobile authoring/confirmation tests. |
+| Honest tunnel state | **FIXED** | Runtime reconciliation, optional reachability evidence, and revision-bound operator assessment are separate. A failed probe means unverified connectivity, not failed creation or disconnection; a human assessment never drives runtime cleanup or automatic OSPF. | API CAS/reset and probe-separation tests, frontend runtime/connectivity assertions, responsive screenshots, and the exhaustive browser matrix. |
+| Cost and evidence integrity | **FIXED** | Operator bandwidth is any integer from 10 through 10000 Mbps. One smooth bounded formula combines health, bandwidth, and preference; cost appears beside editable inputs. Evidence is current-plan UUID/declaration/endpoint bound. | Shared formula tests, desktop/mobile preview tests, graph/evidence/API/CLI tests. |
+| Durable server authority | **FIXED** | Only runtime config sync and routing status/apply jobs may carry actorless server authority. Public internal mutations are rejected; approved human jobs retain approver authority. | All 392 API tests plus dedicated allowlist, approved-request, reconnect, and live routing workflows. |
+| Network workflow UI | **FIXED** | Registry stays visible; editor opens below with focus and upper-right close. Mobile keeps identity/control/actions visible and moves complete endpoint/runtime/OSPF evidence into expansion. Truncated values expose titles. | Focused desktop/mobile geometry/detail/tooltip tests and fresh structured screenshot batches. |
+
+Final verification: `scripts/release-check.sh` completed with
+`release_check=ok` at `target/release-check/20260712-142456`; the exhaustive
+browser suite reported 327 passed and 125 intentional cross-project skips; the
+50-agent 600-second backlog soak and live desktop/mobile audit passed.
+
+NAT-safe extension verification: 395 API tests, 16 common planner tests, 22
+agent network tests, six VTY tunnel-plan tests, production frontend build 519,
+exact two-agent create/update/disable/delete lifecycle, migration/tutorial/
+protocol audits, and all 329 runnable cases in the 456-case browser matrix were
+exercised. The complete run reported 328 passed, 127 intentional skips, and one
+mobile navigation failure because its test helper used the display label
+`Remote` as an internal route key; after correcting the harness to `Remote
+Operations`, the failed case and its companion route test passed desktop/mobile
+4/4.

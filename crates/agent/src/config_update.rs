@@ -33,8 +33,7 @@ pub(crate) fn read_redacted_config(
                 "execution",
                 "telemetry",
                 "network",
-                "telemetry_light_secs",
-                "telemetry_full_secs",
+                "telemetry_interval_secs",
                 "tags"
             ],
             "autocomplete": supported_config_autocomplete(),
@@ -69,8 +68,7 @@ fn supported_config_autocomplete() -> serde_json::Value {
     serde_json::json!({
         "top_level": [
             "display_name",
-            "telemetry_light_secs",
-            "telemetry_full_secs",
+            "telemetry_interval_secs",
             "tags"
         ],
         "sections": {
@@ -105,22 +103,22 @@ fn supported_config_autocomplete() -> serde_json::Value {
             ],
             "network": [
                 "root_dir",
-                "backend",
-                "preset",
                 "apply_enabled",
-                "validate_enabled",
-                "reload_enabled",
                 "runtime_reconcile_enabled",
+                "runtime_unprivileged_mutation_policy",
+                "runtime_ip_argv",
+                "runtime_tc_argv",
+                "runtime_command_timeout_secs",
+                "runtime_command_max_output_bytes",
+                "probe_ping_argv",
+                "status_probe_timeout_secs",
+                "status_probe_max_output_bytes",
                 "runtime_status_telemetry_enabled",
                 "runtime_status_telemetry_interval_secs",
+                "runtime_vnstat_argv",
                 "latency_monitoring_enabled",
                 "latency_monitoring_interval_secs",
-                "latency_down_windows",
-                "auto_ospf_enabled",
-                "auto_ospf_min_cost_delta",
-                "auto_ospf_healthy_windows",
-                "auto_ospf_policy",
-                "auto_ospf_updater"
+                "latency_down_windows"
             ]
         }
     })

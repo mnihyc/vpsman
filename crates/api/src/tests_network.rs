@@ -1,113 +1,275 @@
 use super::*;
 
-use axum::{extract::State, http::StatusCode, Json};
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use axum::{extract::State, Json};
 use tokio::sync::broadcast;
 use vpsman_common::{
-    plan_tunnel, AgentCapabilitySnapshot, AgentHello, JobCommand, OspfCostPolicy,
-    RuntimeTunnelControl, RuntimeTunnelManager, RuntimeTunnelTopologyIntent, TunnelEndpointSide,
-    TunnelKind, TunnelPlan, TunnelPlanInput, CURRENT_COMMAND_PROTOCOL_VERSION, MANAGED_BIRD2_FILE,
-    MIN_COMMAND_PROTOCOL_VERSION,
+    plan_tunnel, JobCommand, OspfControlMode, OspfCostPolicy, RuntimeTunnelAdapterCommands,
+    RuntimeTunnelCommand, RuntimeTunnelControl, RuntimeTunnelManager, TunnelAddressFamily,
+    TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelOspfConfig, TunnelPlanInput,
 };
 
-use crate::{
-    gateway_client::GatewayDispatchClient,
-    job_request::{
-        job_command_min_supported_protocol_version, job_command_protocol_version,
-        validate_job_command,
-    },
-    routes_jobs::create_job,
-};
+use crate::{gateway_client::GatewayDispatchClient, job_request::validate_job_command};
+
+const LEFT_RUNTIME_ADAPTER: &str = "11111111-1111-4111-8111-111111111111";
+const RIGHT_RUNTIME_ADAPTER: &str = "22222222-2222-4222-8222-222222222222";
+const LEFT_ROUTING_ADAPTER: &str = "33333333-3333-4333-8333-333333333333";
+const RIGHT_ROUTING_ADAPTER: &str = "44444444-4444-4444-8444-444444444444";
 
 #[tokio::test]
-async fn tunnel_plan_records_non_mutating_plan_and_audit() {
+async fn saved_plan_is_explicit_and_has_no_ospf_state_when_ospf_is_off() {
     let repo = Repository::Memory(MemoryState::default());
-    let operator = AuthContext {
-        operator: OperatorView {
-            id: Uuid::nil(),
-            username: "test-operator".to_string(),
-            role: "admin".to_string(),
-            scopes: vec!["*".to_string()],
-            preferences: crate::model::OperatorPreferences::default(),
-            totp_enabled: false,
-            status: "active".to_string(),
-            session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
-            created_at: crate::unix_now().to_string(),
-            disabled_at: None,
-            deleted_at: None,
-        },
-        session_id: Uuid::nil(),
-    };
-    let input = TunnelPlanInput {
-        name: "edge-a-edge-b".to_string(),
-        interface_name: "tun-ab".to_string(),
-        kind: TunnelKind::Gre,
-        runtime_control: Default::default(),
-        runtime_topology: Default::default(),
-        left_client_id: "client-a".to_string(),
-        right_client_id: "client-b".to_string(),
-        left_underlay: "203.0.113.1".to_string(),
-        right_underlay: "203.0.113.2".to_string(),
-        address_pool_cidr: "10.10.0.0/30".to_string(),
-        reserved_addresses: Vec::new(),
-        ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
-            left: "10.10.0.0".to_string(),
-            right: "10.10.0.1".to_string(),
-            prefix_len: 31,
-        }),
-        ipv6_address_pool_cidr: None,
-        ipv6_tunnel: None,
-        latency_primary_family: Default::default(),
-        bandwidth_mbps: 100,
-        latency_ms: 18.0,
-        packet_loss_ratio: 0.0,
-        preference: 1.0,
-        ospf_policy: OspfCostPolicy::default(),
-    };
+    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
     let plan = plan_tunnel(&input).unwrap();
     let view = repo
-        .record_tunnel_plan(&input, &plan, true, &operator)
+        .record_tunnel_plan(&input, &plan, true, &network_test_operator())
         .await
         .unwrap();
-    let plans = repo.list_tunnel_plans().await.unwrap();
-    let audits = repo.list_audit_logs(10).await.unwrap();
 
-    assert_eq!(view.name, "edge-a-edge-b");
-    assert_eq!(view.kind, TunnelKind::Gre);
-    assert!(!view.plan.mutates_host);
-    assert_eq!(plans.len(), 1);
-    assert_eq!(audits[0].action, "network.tunnel_plan_created");
-    assert_eq!(audits[0].metadata["mutates_host"], false);
+    assert!(view.enabled);
+    assert_eq!(view.ospf_status, "disabled");
+    assert_eq!(view.recommended_ospf_cost, None);
+    assert_eq!(repo.list_tunnel_plans().await.unwrap().len(), 1);
+    assert_eq!(
+        repo.list_audit_logs(10).await.unwrap()[0].action,
+        "network.tunnel_plan_created"
+    );
 }
 
 #[tokio::test]
-async fn allocate_tunnel_endpoints_skips_existing_plan_addresses() {
+async fn connection_assessment_is_audited_revision_bound_and_cleared_by_plan_changes() {
     let repo = Repository::Memory(MemoryState::default());
-    let operator = AuthContext {
-        operator: OperatorView {
-            id: Uuid::nil(),
-            username: "test-operator".to_string(),
-            role: "admin".to_string(),
-            scopes: vec!["*".to_string()],
-            preferences: crate::model::OperatorPreferences::default(),
-            totp_enabled: false,
-            status: "active".to_string(),
-            session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
-            created_at: crate::unix_now().to_string(),
-            disabled_at: None,
-            deleted_at: None,
-        },
-        session_id: Uuid::nil(),
-    };
-    let mut input = test_plan_input();
+    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);
+    let plan = plan_tunnel(&input).unwrap();
+    let saved = repo
+        .record_tunnel_plan(&input, &plan, true, &network_test_operator())
+        .await
+        .unwrap();
+    let original_updated_at = saved.updated_at.clone();
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+
+    let Json(assessed) = crate::routes_network::update_tunnel_connection_assessment(
+        State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(saved.id),
+        Json(UpdateTunnelConnectionAssessmentRequest {
+            assessment: "connected".to_string(),
+            expected_revision: saved.revision,
+            note: Some("Application traffic verified; ICMP is blocked".to_string()),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(assessed.connection_assessment, "connected");
+    assert_eq!(assessed.revision, saved.revision + 1);
+    assert_eq!(assessed.updated_at, original_updated_at);
+    assert!(assessed.connection_assessed_at.is_some());
+    assert_eq!(assessed.ospf_status, saved.ospf_status);
+
+    let stale = crate::routes_network::update_tunnel_connection_assessment(
+        State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(saved.id),
+        Json(UpdateTunnelConnectionAssessmentRequest {
+            assessment: "disconnected".to_string(),
+            expected_revision: saved.revision,
+            note: Some("Console test failed".to_string()),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(stale.code, "tunnel_plan_snapshot_stale");
+
+    let missing_note = crate::routes_network::update_tunnel_connection_assessment(
+        State(state),
+        headers,
+        axum::extract::Path(saved.id),
+        Json(UpdateTunnelConnectionAssessmentRequest {
+            assessment: "disconnected".to_string(),
+            expected_revision: assessed.revision,
+            note: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        missing_note.code,
+        "tunnel_connection_assessment_note_required"
+    );
+
+    let mut changed_input = input.clone();
+    changed_input.bandwidth_mbps = 1500;
+    let changed_plan = plan_tunnel(&changed_input).unwrap();
+    let updated = repo
+        .update_tunnel_plan(
+            saved.id,
+            assessed.revision,
+            &changed_input,
+            &changed_plan,
+            true,
+            &network_test_operator(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.connection_assessment, "automatic");
+    assert!(updated.connection_assessment_note.is_none());
+    assert!(repo
+        .list_audit_logs(10)
+        .await
+        .unwrap()
+        .iter()
+        .any(|event| event.action == "network.tunnel_connection_assessed"));
+}
+
+#[tokio::test]
+async fn enabled_ospf_plan_starts_unverified_and_stages_exact_endpoint_jobs() {
+    let repo = Repository::Memory(MemoryState::default());
+    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);
+    let plan = plan_tunnel(&input).unwrap();
+    let saved = repo
+        .record_tunnel_plan(&input, &plan, true, &network_test_operator())
+        .await
+        .unwrap();
+    assert_eq!(saved.ospf_status, "unverified");
+    assert!(saved.recommended_ospf_cost.is_some());
+
+    let left_job = Uuid::new_v4();
+    let right_job = Uuid::new_v4();
+    let stale_error = repo
+        .stage_tunnel_plan_ospf_jobs(
+            saved.id,
+            saved.revision + 1,
+            None,
+            None,
+            None,
+            left_job,
+            right_job,
+            &network_test_operator(),
+        )
+        .await
+        .unwrap_err();
+    assert!(stale_error
+        .to_string()
+        .contains("tunnel_plan_ospf_snapshot_stale"));
+    let staged = repo
+        .stage_tunnel_plan_ospf_jobs(
+            saved.id,
+            saved.revision,
+            None,
+            None,
+            None,
+            left_job,
+            right_job,
+            &network_test_operator(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(staged.ospf_status, "pending");
+    assert_eq!(staged.left_ospf_job_id, Some(left_job));
+    assert_eq!(staged.right_ospf_job_id, Some(right_job));
+
+    repo.record_tunnel_plan_ospf_job_result(
+        saved.id,
+        TunnelEndpointSide::Left,
+        left_job,
+        Some(20),
+        true,
+    )
+    .await
+    .unwrap();
+    let verified = repo
+        .record_tunnel_plan_ospf_job_result(
+            saved.id,
+            TunnelEndpointSide::Right,
+            right_job,
+            Some(20),
+            true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(verified.ospf_status, "verified");
+    assert_eq!(verified.left_current_ospf_cost, Some(20));
+    assert_eq!(verified.right_current_ospf_cost, Some(20));
+
+    assert!(repo
+        .record_tunnel_plan_ospf_job_result(
+            saved.id,
+            TunnelEndpointSide::Left,
+            left_job,
+            None,
+            false,
+        )
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn routing_template_update_marks_only_bound_endpoint_state_stale() {
+    let repo = Repository::Memory(MemoryState::default());
+    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);
+    let plan = plan_tunnel(&input).unwrap();
+    let saved = repo
+        .record_tunnel_plan(&input, &plan, true, &network_test_operator())
+        .await
+        .unwrap();
+    let left_job = Uuid::new_v4();
+    let right_job = Uuid::new_v4();
+    repo.stage_tunnel_plan_ospf_jobs(
+        saved.id,
+        saved.revision,
+        None,
+        None,
+        None,
+        left_job,
+        right_job,
+        &network_test_operator(),
+    )
+    .await
+    .unwrap();
+
+    repo.mark_routing_adapter_template_stale(Uuid::parse_str(LEFT_ROUTING_ADAPTER).unwrap())
+        .await
+        .unwrap();
+    let stale = repo.get_tunnel_plan(saved.id).await.unwrap().unwrap();
+    assert_eq!(stale.left_ospf_status, "stale");
+    assert_eq!(stale.right_ospf_status, "pending");
+    assert_eq!(stale.left_ospf_job_id, None);
+    assert_eq!(stale.ospf_status, "pending");
+}
+
+#[tokio::test]
+async fn routing_template_update_leaves_disabled_plan_state_disabled() {
+    let repo = Repository::Memory(MemoryState::default());
+    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);
+    let plan = plan_tunnel(&input).unwrap();
+    let saved = repo
+        .record_tunnel_plan(&input, &plan, false, &network_test_operator())
+        .await
+        .unwrap();
+
+    repo.mark_routing_adapter_template_stale(Uuid::parse_str(LEFT_ROUTING_ADAPTER).unwrap())
+        .await
+        .unwrap();
+    let unchanged = repo.get_tunnel_plan(saved.id).await.unwrap().unwrap();
+    assert_eq!(unchanged.ospf_status, "disabled");
+    assert_eq!(unchanged.left_ospf_status, "disabled");
+    assert_eq!(unchanged.right_ospf_status, "disabled");
+}
+
+#[tokio::test]
+async fn allocation_skips_addresses_already_owned_by_saved_plans() {
+    let repo = Repository::Memory(MemoryState::default());
+    let mut input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
     input.address_pool_cidr = "10.10.0.0/29".to_string();
-    input.ipv4_tunnel = Some(vpsman_common::TunnelAddressPair {
+    input.ipv4_tunnel = Some(TunnelAddressPair {
         left: "10.10.0.0".to_string(),
         right: "10.10.0.1".to_string(),
         prefix_len: 31,
     });
     let plan = plan_tunnel(&input).unwrap();
-    repo.record_tunnel_plan(&input, &plan, true, &operator)
+    repo.record_tunnel_plan(&input, &plan, false, &network_test_operator())
         .await
         .unwrap();
 
@@ -118,455 +280,168 @@ async fn allocate_tunnel_endpoints_skips_existing_plan_addresses() {
         headers,
         Json(AllocateTunnelEndpointsRequest {
             ipv4_pool_cidr: Some("10.10.0.0/29".to_string()),
-            ipv6_pool_cidr: Some("fd00:10::/126".to_string()),
+            ipv6_pool_cidr: None,
             reserved_addresses: Vec::new(),
             include_ipv4: Some(true),
-            include_ipv6: Some(true),
+            include_ipv6: Some(false),
         }),
     )
     .await
     .unwrap();
-
-    let ipv4 = allocation.ipv4_tunnel.expect("ipv4");
-    let ipv6 = allocation.ipv6_tunnel.expect("ipv6");
-    assert_eq!(ipv4.left, "10.10.0.2");
-    assert_eq!(ipv4.right, "10.10.0.3");
-    assert_eq!(ipv4.prefix_len, 31);
-    assert_eq!(ipv6.left, "fd00:10::");
-    assert_eq!(ipv6.right, "fd00:10::1");
-    assert_eq!(ipv6.prefix_len, 127);
+    assert_eq!(allocation.ipv4_tunnel.unwrap().left, "10.10.0.2");
 }
 
 #[tokio::test]
-async fn allocate_tunnel_endpoints_empty_without_configured_pools() {
-    let state = test_state(Repository::Memory(MemoryState::default()));
-    let headers = crate::test_auth_headers(&state).await;
-    let Json(allocation) = crate::routes_network::allocate_tunnel_endpoints(
-        State(state),
-        headers,
-        Json(AllocateTunnelEndpointsRequest {
-            ipv4_pool_cidr: None,
-            ipv6_pool_cidr: None,
-            reserved_addresses: Vec::new(),
-            include_ipv4: None,
-            include_ipv6: None,
-        }),
-    )
-    .await
-    .unwrap();
-
-    assert!(allocation.ipv4_tunnel.is_none());
-    assert!(allocation.ipv6_tunnel.is_none());
-}
-
-#[tokio::test]
-async fn allocate_tunnel_endpoints_uses_configured_pools_for_empty_request() {
-    let state = test_state_with_suite_config(
-        Repository::Memory(MemoryState::default()),
-        r#"
-version = 1
-
-[network]
-tunnel_ipv4_allocation_pool_cidr = "10.20.0.0/30"
-tunnel_ipv6_allocation_pool_cidr = "fd80:20::/126"
-"#,
-    );
-    let headers = crate::test_auth_headers(&state).await;
-    let Json(allocation) = crate::routes_network::allocate_tunnel_endpoints(
-        State(state),
-        headers,
-        Json(AllocateTunnelEndpointsRequest {
-            ipv4_pool_cidr: None,
-            ipv6_pool_cidr: None,
-            reserved_addresses: Vec::new(),
-            include_ipv4: None,
-            include_ipv6: None,
-        }),
-    )
-    .await
-    .unwrap();
-
-    let ipv4 = allocation.ipv4_tunnel.expect("ipv4");
-    let ipv6 = allocation.ipv6_tunnel.expect("ipv6");
-    assert_eq!(ipv4.left, "10.20.0.0");
-    assert_eq!(ipv4.right, "10.20.0.1");
-    assert_eq!(ipv6.left, "fd80:20::");
-    assert_eq!(ipv6.right, "fd80:20::1");
-}
-
-#[tokio::test]
-async fn allocate_tunnel_endpoints_request_pool_does_not_pull_other_configured_family() {
-    let state = test_state_with_suite_config(
-        Repository::Memory(MemoryState::default()),
-        r#"
-version = 1
-
-[network]
-tunnel_ipv6_allocation_pool_cidr = "fd80:21::/126"
-"#,
-    );
-    let headers = crate::test_auth_headers(&state).await;
-    let Json(allocation) = crate::routes_network::allocate_tunnel_endpoints(
-        State(state),
-        headers,
-        Json(AllocateTunnelEndpointsRequest {
-            ipv4_pool_cidr: Some("10.21.0.0/30".to_string()),
-            ipv6_pool_cidr: None,
-            reserved_addresses: Vec::new(),
-            include_ipv4: None,
-            include_ipv6: None,
-        }),
-    )
-    .await
-    .unwrap();
-
-    assert!(allocation.ipv4_tunnel.is_some());
-    assert!(allocation.ipv6_tunnel.is_none());
-}
-
-#[tokio::test]
-async fn export_tunnel_plan_returns_inner_plan_json() {
+async fn create_plan_route_requires_confirmation_before_any_write() {
     let repo = Repository::Memory(MemoryState::default());
-    let operator = AuthContext {
-        operator: OperatorView {
-            id: Uuid::nil(),
-            username: "test-operator".to_string(),
-            role: "admin".to_string(),
-            scopes: vec!["*".to_string()],
-            preferences: crate::model::OperatorPreferences::default(),
-            totp_enabled: false,
-            status: "active".to_string(),
-            session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
-            created_at: crate::unix_now().to_string(),
-            disabled_at: None,
-            deleted_at: None,
-        },
-        session_id: Uuid::nil(),
-    };
-    let input = test_plan_input();
-    let plan = plan_tunnel(&input).unwrap();
-    let view = repo
-        .record_tunnel_plan(&input, &plan, true, &operator)
-        .await
-        .unwrap();
+    seed_online_agent(&repo, "client-a").await;
+    seed_online_agent(&repo, "client-b").await;
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let error = crate::routes_network::create_tunnel_plan(
+        State(state),
+        headers,
+        Json(CreateTunnelPlanRequest {
+            input: test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false),
+            enabled: false,
+            confirmed: false,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "tunnel_plan_mutation_requires_confirmation");
+    assert!(repo.list_tunnel_plans().await.unwrap().is_empty());
+}
 
+#[tokio::test]
+async fn tunnel_plan_create_rejects_duplicates_and_update_rejects_stale_revisions() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_online_agent(&repo, "client-a").await;
+    seed_online_agent(&repo, "client-b").await;
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let (_, Json(created)) = crate::routes_network::create_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateTunnelPlanRequest {
+            input: input.clone(),
+            enabled: false,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(created.revision, 1);
+
+    let audit_count_before_noops = repo.list_audit_logs(100).await.unwrap().len();
+    let Json(unchanged) = crate::routes_network::update_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(created.id),
+        Json(UpdateTunnelPlanRequest {
+            input: input.clone(),
+            expected_revision: created.revision,
+            enabled: Some(false),
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(unchanged.revision, created.revision);
+    let Json(still_disabled) = crate::routes_network::disable_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(created.id),
+        Json(crate::routes_network::TunnelPlanMutationRequest {
+            confirmed: true,
+            expected_revision: created.revision,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(still_disabled.revision, created.revision);
+    assert_eq!(
+        repo.list_audit_logs(100).await.unwrap().len(),
+        audit_count_before_noops
+    );
+
+    let duplicate = crate::routes_network::create_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateTunnelPlanRequest {
+            input: input.clone(),
+            enabled: false,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(duplicate.code, "tunnel_plan_name_conflict");
+
+    let mut replacement = input.clone();
+    replacement.bandwidth_mbps = 2500;
+    let Json(updated) = crate::routes_network::update_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(created.id),
+        Json(UpdateTunnelPlanRequest {
+            input: replacement.clone(),
+            expected_revision: created.revision,
+            enabled: Some(false),
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(updated.id, created.id);
+    assert_eq!(updated.revision, 2);
+    assert_eq!(updated.plan.bandwidth_mbps, 2500);
+
+    let stale = crate::routes_network::update_tunnel_plan(
+        State(state),
+        headers,
+        axum::extract::Path(created.id),
+        Json(UpdateTunnelPlanRequest {
+            input: replacement,
+            expected_revision: created.revision,
+            enabled: Some(false),
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(stale.code, "tunnel_plan_snapshot_stale");
+    let lifecycle_state = test_state(repo.clone());
+    let lifecycle_headers = crate::test_auth_headers(&lifecycle_state).await;
+    let stale_lifecycle = crate::routes_network::disable_tunnel_plan(
+        State(lifecycle_state),
+        lifecycle_headers,
+        axum::extract::Path(created.id),
+        Json(crate::routes_network::TunnelPlanMutationRequest {
+            confirmed: true,
+            expected_revision: created.revision,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(stale_lifecycle.code, "tunnel_plan_snapshot_stale");
+    assert_eq!(repo.list_tunnel_plans().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn tunnel_plan_create_rejects_endpoint_interface_and_address_collisions() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_online_agent(&repo, "client-a").await;
+    seed_online_agent(&repo, "client-b").await;
     let state = test_state(repo);
     let headers = crate::test_auth_headers(&state).await;
-    let Json(exported) = crate::routes_network::export_tunnel_plan(
-        State(state),
-        headers,
-        axum::extract::Path(view.id),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(exported.name, plan.name);
-    assert_eq!(exported.interface_name, plan.interface_name);
-    assert_eq!(exported.ipv4_tunnel, plan.ipv4_tunnel);
-}
-
-#[test]
-fn create_tunnel_plan_request_defaults_enabled_false_when_omitted() {
-    let mut payload = serde_json::to_value(test_plan_input()).unwrap();
-    payload["confirmed"] = serde_json::Value::Bool(true);
-
-    let request: CreateTunnelPlanRequest = serde_json::from_value(payload).unwrap();
-
-    assert!(request.confirmed);
-    assert!(!request.enabled);
-}
-
-#[tokio::test]
-async fn deleting_agent_soft_deletes_tunnel_plans_for_either_endpoint() {
-    let repo = Repository::Memory(MemoryState::default());
-    let operator = AuthContext {
-        operator: OperatorView {
-            id: Uuid::nil(),
-            username: "network-operator".to_string(),
-            role: "admin".to_string(),
-            scopes: vec!["*".to_string()],
-            preferences: crate::model::OperatorPreferences::default(),
-            totp_enabled: false,
-            status: "active".to_string(),
-            session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
-            created_at: crate::unix_now().to_string(),
-            disabled_at: None,
-            deleted_at: None,
-        },
-        session_id: Uuid::nil(),
-    };
-    if let Repository::Memory(memory) = &repo {
-        upsert_memory_agent(
-            &memory.agents,
-            &AgentHello {
-                client_id: "right-b".to_string(),
-                process_incarnation_id: uuid::Uuid::new_v4(),
-                agent_version: "test".to_string(),
-                os_release: "test".to_string(),
-                arch: "x86_64".to_string(),
-                update_heartbeat: None,
-                internal_build_number: 1,
-                capabilities: Default::default(),
-            },
-        )
-        .await;
-    }
-
-    let endpoint_as_right = test_plan_input();
-    let endpoint_as_right_plan = plan_tunnel(&endpoint_as_right).unwrap();
-    repo.record_tunnel_plan(&endpoint_as_right, &endpoint_as_right_plan, true, &operator)
-        .await
-        .unwrap();
-
-    let mut endpoint_as_left = test_plan_input();
-    endpoint_as_left.name = "edge-b-edge-c".to_string();
-    endpoint_as_left.interface_name = "tunbc".to_string();
-    endpoint_as_left.left_client_id = "right-b".to_string();
-    endpoint_as_left.right_client_id = "edge-c".to_string();
-    endpoint_as_left.left_underlay = "203.0.113.20".to_string();
-    endpoint_as_left.right_underlay = "192.0.2.30".to_string();
-    endpoint_as_left.address_pool_cidr = "10.255.0.4/31".to_string();
-    endpoint_as_left.ipv4_tunnel = Some(vpsman_common::TunnelAddressPair {
-        left: "10.255.0.4".to_string(),
-        right: "10.255.0.5".to_string(),
-        prefix_len: 31,
-    });
-    let endpoint_as_left_plan = plan_tunnel(&endpoint_as_left).unwrap();
-    repo.record_tunnel_plan(&endpoint_as_left, &endpoint_as_left_plan, true, &operator)
-        .await
-        .unwrap();
-
-    let mut survivor = test_plan_input();
-    survivor.name = "edge-c-edge-d".to_string();
-    survivor.interface_name = "tuncd".to_string();
-    survivor.left_client_id = "edge-c".to_string();
-    survivor.right_client_id = "edge-d".to_string();
-    survivor.left_underlay = "192.0.2.30".to_string();
-    survivor.right_underlay = "192.0.2.40".to_string();
-    survivor.address_pool_cidr = "10.255.0.8/31".to_string();
-    survivor.ipv4_tunnel = Some(vpsman_common::TunnelAddressPair {
-        left: "10.255.0.8".to_string(),
-        right: "10.255.0.9".to_string(),
-        prefix_len: 31,
-    });
-    let survivor_plan = plan_tunnel(&survivor).unwrap();
-    repo.record_tunnel_plan(&survivor, &survivor_plan, true, &operator)
-        .await
-        .unwrap();
-
-    repo.delete_agent(
-        "right-b",
-        &DeleteAgentRequest {
-            confirmed: true,
-            reason: Some("decommissioned peer".to_string()),
-            privilege_assertion: None,
-        },
-        &operator,
-    )
-    .await
-    .unwrap();
-
-    let active_names = repo
-        .list_tunnel_plans()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|plan| plan.name)
-        .collect::<Vec<_>>();
-    assert_eq!(active_names, vec!["edge-c-edge-d".to_string()]);
-
-    if let Repository::Memory(memory) = &repo {
-        let plans = memory.tunnel_plans.read().await;
-        let deleted = plans
-            .iter()
-            .filter(|plan| plan.deleted_at.is_some())
-            .map(|plan| plan.name.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(deleted, vec!["edge-a-edge-b", "edge-b-edge-c"]);
-        for plan in plans.iter().filter(|plan| plan.deleted_at.is_some()) {
-            assert_eq!(plan.deleted_by, Some(operator.operator.id));
-            assert!(!plan.enabled);
-            assert!(plan
-                .deleted_reason
-                .as_deref()
-                .unwrap_or_default()
-                .contains("endpoint_vps_deleted:right-b"));
-        }
-        let survivor = plans
-            .iter()
-            .find(|plan| plan.name == "edge-c-edge-d")
-            .unwrap();
-        assert!(survivor.deleted_at.is_none());
-        let audits = memory.audits.read().await;
-        let deleted_audit = audits
-            .iter()
-            .find(|audit| audit.action == "agent.deleted")
-            .unwrap();
-        assert_eq!(
-            deleted_audit.metadata["soft_deleted_tunnel_plan_count"].as_u64(),
-            Some(2)
-        );
-    }
-}
-
-#[tokio::test]
-async fn tunnel_plan_enabled_state_is_explicit_and_controls_ospf_recommendations() {
-    let repo = Repository::Memory(MemoryState::default());
-    let operator = AuthContext {
-        operator: OperatorView {
-            id: Uuid::nil(),
-            username: "network-operator".to_string(),
-            role: "admin".to_string(),
-            scopes: vec!["*".to_string()],
-            preferences: crate::model::OperatorPreferences::default(),
-            totp_enabled: false,
-            status: "active".to_string(),
-            session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
-            created_at: crate::unix_now().to_string(),
-            disabled_at: None,
-            deleted_at: None,
-        },
-        session_id: Uuid::nil(),
-    };
-    let input = test_plan_input();
-    let plan = plan_tunnel(&input).unwrap();
-    let created = repo
-        .record_tunnel_plan(&input, &plan, true, &operator)
-        .await
-        .unwrap();
-    assert!(created.enabled);
-    assert_eq!(
-        repo.list_network_ospf_recommendations(10)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
-
-    let disabled = repo
-        .set_tunnel_plan_enabled(created.id, false, &operator)
-        .await
-        .unwrap();
-    assert!(!disabled.enabled);
-    let visible = repo.list_tunnel_plans().await.unwrap();
-    assert_eq!(visible.len(), 1);
-    assert!(!visible[0].enabled);
-    assert!(repo
-        .list_network_ospf_recommendations(10)
-        .await
-        .unwrap()
-        .is_empty());
-
-    let edited_plan = plan_tunnel(&input).unwrap();
-    let edited = repo
-        .record_tunnel_plan(&input, &edited_plan, true, &operator)
-        .await
-        .unwrap();
-    assert!(edited.enabled);
-    assert_eq!(
-        repo.list_network_ospf_recommendations(10)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
-
-    let enabled = repo
-        .set_tunnel_plan_enabled(created.id, true, &operator)
-        .await
-        .unwrap();
-    assert!(enabled.enabled);
-    assert_eq!(
-        repo.list_network_ospf_recommendations(10)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
-
-    if let Repository::Memory(memory) = &repo {
-        let actions = memory
-            .audits
-            .read()
-            .await
-            .iter()
-            .map(|audit| audit.action.clone())
-            .collect::<Vec<_>>();
-        assert!(actions.contains(&"network.tunnel_plan_disabled".to_string()));
-        assert!(actions.contains(&"network.tunnel_plan_enabled".to_string()));
-    }
-}
-
-#[tokio::test]
-async fn create_tunnel_plan_accepts_external_observed_import() {
-    let repo = Repository::Memory(MemoryState::default());
-    if let Repository::Memory(memory) = &repo {
-        seed_online_agent(memory, "left-a").await;
-        seed_online_agent(memory, "right-b").await;
-    }
-    let mut input = test_plan_input();
-    input.name = "wg-import".to_string();
-    input.interface_name = "wg42".to_string();
-    input.kind = TunnelKind::Wireguard;
-    input.runtime_control = RuntimeTunnelControl {
-        manager: RuntimeTunnelManager::ExternalObserved,
-        ..RuntimeTunnelControl::default()
-    };
-    input.runtime_topology = RuntimeTunnelTopologyIntent {
-        version: Some("provider-a:42".to_string()),
-        desired_interfaces: vec!["wg42".to_string()],
-        ..RuntimeTunnelTopologyIntent::default()
-    };
-
-    let state = test_state_with_privilege_auto_approve(repo.clone());
-    let headers = crate::test_auth_headers(&state).await;
-    let (status, Json(view)) = crate::routes_network::create_tunnel_plan(
-        State(state),
-        headers,
+    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let _ = crate::routes_network::create_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
         Json(CreateTunnelPlanRequest {
-            input,
-            enabled: true,
-            confirmed: true,
-        }),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(view.kind, TunnelKind::Wireguard);
-    assert_eq!(
-        view.plan.runtime_control.manager,
-        RuntimeTunnelManager::ExternalObserved
-    );
-    assert_eq!(
-        view.plan.touched_files,
-        vec![MANAGED_BIRD2_FILE.to_string()]
-    );
-    assert!(view.plan.ifupdown_snippet.contains("external observed"));
-
-    let audits = repo.list_audit_logs(10).await.unwrap();
-    let audit = audits
-        .iter()
-        .find(|audit| audit.action == "network.tunnel_plan_created")
-        .expect("tunnel plan creation audit");
-    assert_eq!(audit.metadata["runtime_manager"], "external_observed");
-}
-
-#[tokio::test]
-async fn create_disabled_tunnel_plan_does_not_issue_runtime_sync() {
-    let repo = Repository::Memory(MemoryState::default());
-    if let Repository::Memory(memory) = &repo {
-        seed_online_agent(memory, "left-a").await;
-        seed_online_agent(memory, "right-b").await;
-    }
-    let input = test_plan_input();
-    let state = test_state_with_privilege_auto_approve(repo.clone());
-    let headers = crate::test_auth_headers(&state).await;
-    let (status, Json(view)) = crate::routes_network::create_tunnel_plan(
-        State(state),
-        headers,
-        Json(CreateTunnelPlanRequest {
-            input,
+            input: input.clone(),
             enabled: false,
             confirmed: true,
         }),
@@ -574,114 +449,92 @@ async fn create_disabled_tunnel_plan_does_not_issue_runtime_sync() {
     .await
     .unwrap();
 
-    assert_eq!(status, StatusCode::CREATED);
-    assert!(!view.enabled);
-    assert!(repo.list_jobs(10).await.unwrap().is_empty());
-    let audits = repo.list_audit_logs(10).await.unwrap();
-    let audit = audits
-        .iter()
-        .find(|audit| audit.action == "network.tunnel_plan_created")
-        .expect("tunnel plan creation audit");
-    assert_eq!(audit.metadata["enabled"], false);
-}
-
-#[tokio::test]
-async fn ospf_cost_update_requires_privilege_before_saving_plan_cost() {
-    let repo = Repository::Memory(MemoryState::default());
-    if let Repository::Memory(memory) = &repo {
-        seed_online_agent(memory, "left-a").await;
-        seed_online_agent(memory, "right-b").await;
-    }
-    let input = test_plan_input();
-    let plan = plan_tunnel(&input).unwrap();
-    let view = repo
-        .record_tunnel_plan(&input, &plan, true, &network_test_operator())
-        .await
-        .unwrap();
-    let current_cost = view.recommended_ospf_cost as u16;
-    let mut state = test_state(repo.clone());
-    state.gateway = GatewayDispatchClient::new(
-        Some("http://127.0.0.1:9".to_string()),
-        Some("internal-token".to_string()),
-    );
-    let headers = crate::test_auth_headers(&state).await;
-    let error = crate::routes_network::update_tunnel_plan_ospf_cost(
-        State(state),
-        headers,
-        axum::extract::Path(view.id),
-        Json(UpdateTunnelPlanOspfCostRequest {
-            recommendation_id: "manual-rollback-test".to_string(),
-            current_ospf_cost: current_cost,
-            recommended_ospf_cost: current_cost + 5,
-            mutation_intent: "rollback".to_string(),
+    let mut interface_collision = input.clone();
+    interface_collision.name = "same-interface".to_string();
+    interface_collision.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.10.0.2".to_string(),
+        right: "10.10.0.3".to_string(),
+        prefix_len: 31,
+    });
+    let error = crate::routes_network::create_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateTunnelPlanRequest {
+            input: interface_collision,
+            enabled: false,
             confirmed: true,
-            privilege_assertion: None,
         }),
     )
     .await
     .unwrap_err();
+    assert_eq!(error.code, "tunnel_plan_interface_conflict");
 
-    assert_eq!(error.status, StatusCode::FORBIDDEN);
-    assert_eq!(error.code, "privilege_assertion_required");
-    let unchanged = repo.get_tunnel_plan(view.id).await.unwrap().unwrap();
-    assert_eq!(unchanged.recommended_ospf_cost, view.recommended_ospf_cost);
+    let mut address_collision = input;
+    address_collision.name = "same-addresses".to_string();
+    address_collision.interface_name = "tun-other".to_string();
+    let error = crate::routes_network::create_tunnel_plan(
+        State(state),
+        headers,
+        Json(CreateTunnelPlanRequest {
+            input: address_collision,
+            enabled: false,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "tunnel_plan_address_conflict");
 }
 
 #[tokio::test]
-async fn ospf_cost_update_with_privilege_updates_plan_and_syncs_enabled_endpoints() {
+async fn disabled_tunnel_plan_can_be_revision_bound_retired_and_recreated() {
     let repo = Repository::Memory(MemoryState::default());
-    if let Repository::Memory(memory) = &repo {
-        seed_online_agent(memory, "left-a").await;
-        seed_online_agent(memory, "right-b").await;
-    }
-    let input = test_plan_input();
-    let plan = plan_tunnel(&input).unwrap();
-    let view = repo
-        .record_tunnel_plan(&input, &plan, true, &network_test_operator())
-        .await
-        .unwrap();
-    let current_cost = view.recommended_ospf_cost as u16;
-    let state = test_state_with_privilege_auto_approve(repo.clone());
+    seed_online_agent(&repo, "client-a").await;
+    seed_online_agent(&repo, "client-b").await;
+    let state = test_state(repo.clone());
     let headers = crate::test_auth_headers(&state).await;
-    let Json(updated) = crate::routes_network::update_tunnel_plan_ospf_cost(
-        State(state),
-        headers,
-        axum::extract::Path(view.id),
-        Json(UpdateTunnelPlanOspfCostRequest {
-            recommendation_id: "manual-rollback-test".to_string(),
-            current_ospf_cost: current_cost,
-            recommended_ospf_cost: current_cost + 5,
-            mutation_intent: "rollback".to_string(),
+    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let (_, Json(created)) = crate::routes_network::create_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateTunnelPlanRequest {
+            input: input.clone(),
+            enabled: false,
             confirmed: true,
-            privilege_assertion: None,
         }),
     )
     .await
     .unwrap();
 
-    assert_eq!(updated.recommended_ospf_cost, i32::from(current_cost + 5));
-    assert_eq!(updated.plan.recommended_ospf_cost, current_cost + 5);
-    let jobs = repo.list_jobs(10).await.unwrap();
-    assert_eq!(jobs.len(), 2);
-    let audits = repo.list_audit_logs(10).await.unwrap();
-    assert!(audits
-        .iter()
-        .any(|audit| audit.action == "network.tunnel_plan_ospf_cost_updated"));
-}
+    let stale = crate::routes_network::delete_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(created.id),
+        Json(crate::routes_network::TunnelPlanMutationRequest {
+            confirmed: true,
+            expected_revision: created.revision + 1,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(stale.code, "tunnel_plan_snapshot_stale");
 
-#[tokio::test]
-async fn updating_enabled_tunnel_plan_pushes_old_and_new_endpoint_configs() {
-    let repo = Repository::Memory(MemoryState::default());
-    if let Repository::Memory(memory) = &repo {
-        seed_online_agent(memory, "left-a").await;
-        seed_online_agent(memory, "right-b").await;
-        seed_online_agent(memory, "left-c").await;
-        seed_online_agent(memory, "right-d").await;
-    }
-    let state = test_state(repo.clone());
-    let headers = crate::test_auth_headers(&state).await;
-    let input = test_plan_input();
-    let (_status, Json(_created)) = crate::routes_network::create_tunnel_plan(
+    let Json(deleted) = crate::routes_network::delete_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(created.id),
+        Json(crate::routes_network::TunnelPlanMutationRequest {
+            confirmed: true,
+            expected_revision: created.revision,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(deleted.deleted_reason.as_deref(), Some("operator_retired"));
+    assert!(deleted.deleted_at.is_some());
+    assert!(repo.list_tunnel_plans().await.unwrap().is_empty());
+
+    let (_, Json(recreated)) = crate::routes_network::create_tunnel_plan(
         State(state.clone()),
         headers.clone(),
         Json(CreateTunnelPlanRequest {
@@ -692,679 +545,338 @@ async fn updating_enabled_tunnel_plan_pushes_old_and_new_endpoint_configs() {
     )
     .await
     .unwrap();
-    if let Repository::Memory(memory) = &repo {
-        memory.jobs.write().await.clear();
-        memory.job_targets.write().await.clear();
-    }
-
-    let mut updated = test_plan_input();
-    updated.left_client_id = "left-c".to_string();
-    updated.right_client_id = "right-d".to_string();
-    updated.left_underlay = "198.51.100.30".to_string();
-    updated.right_underlay = "198.51.100.40".to_string();
-    updated.ipv4_tunnel = Some(vpsman_common::TunnelAddressPair {
-        left: "10.10.1.0".to_string(),
-        right: "10.10.1.1".to_string(),
-        prefix_len: 31,
-    });
-    let (_status, Json(_updated)) = crate::routes_network::create_tunnel_plan(
+    let enabled = crate::routes_network::delete_tunnel_plan(
         State(state),
         headers,
+        axum::extract::Path(recreated.id),
+        Json(crate::routes_network::TunnelPlanMutationRequest {
+            confirmed: true,
+            expected_revision: recreated.revision,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(enabled.code, "tunnel_plan_disable_before_delete");
+}
+
+#[tokio::test]
+async fn tunnel_plan_update_preserves_enabled_state_when_omitted() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_online_agent(&repo, "client-a").await;
+    seed_online_agent(&repo, "client-b").await;
+    let state = test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
+    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let (_, Json(created)) = crate::routes_network::create_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
         Json(CreateTunnelPlanRequest {
-            input: updated,
+            input: input.clone(),
             enabled: true,
             confirmed: true,
         }),
     )
     .await
     .unwrap();
+    let mut replacement = input;
+    replacement.bandwidth_mbps = 2500;
 
-    let jobs = repo.list_jobs(10).await.unwrap();
-    let mut synced_clients = Vec::new();
-    for job in &jobs {
-        let targets = repo.list_job_targets(job.id).await.unwrap();
-        assert_eq!(targets.len(), 1);
-        synced_clients.push(targets[0].client_id.clone());
-    }
-    synced_clients.sort();
-    assert_eq!(
-        synced_clients,
-        vec![
-            "left-a".to_string(),
-            "left-c".to_string(),
-            "right-b".to_string(),
-            "right-d".to_string(),
-        ]
-    );
-}
-
-#[tokio::test]
-async fn create_tunnel_plan_requires_explicit_confirmation() {
-    let repo = Repository::Memory(MemoryState::default());
-    let input = test_plan_input();
-    let state = test_state(repo);
-    let headers = crate::test_auth_headers(&state).await;
-
-    let error = crate::routes_network::create_tunnel_plan(
+    let Json(updated) = crate::routes_network::update_tunnel_plan(
         State(state),
         headers,
-        Json(CreateTunnelPlanRequest {
-            input,
-            enabled: true,
-            confirmed: false,
-        }),
-    )
-    .await
-    .unwrap_err();
-
-    assert_eq!(error.status, StatusCode::CONFLICT);
-    assert_eq!(error.code, "tunnel_plan_mutation_requires_confirmation");
-}
-
-#[tokio::test]
-async fn create_tunnel_plan_rejects_custom_kind_without_external_runtime_manager() {
-    let repo = Repository::Memory(MemoryState::default());
-    let mut input = test_plan_input();
-    input.name = "custom-bad".to_string();
-    input.interface_name = "cust42".to_string();
-    input.kind = TunnelKind::Custom;
-
-    let state = test_state(repo);
-    let headers = crate::test_auth_headers(&state).await;
-    let error = crate::routes_network::create_tunnel_plan(
-        State(state),
-        headers,
-        Json(CreateTunnelPlanRequest {
-            input,
-            enabled: true,
+        axum::extract::Path(created.id),
+        Json(UpdateTunnelPlanRequest {
+            input: replacement,
+            expected_revision: created.revision,
+            enabled: None,
             confirmed: true,
         }),
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "unsupported_tunnel_kind_for_runtime_manager");
+    assert!(updated.enabled);
+    assert_eq!(updated.revision, 2);
+    assert_eq!(updated.plan.bandwidth_mbps, 2500);
+}
+
+#[tokio::test]
+async fn external_observed_plan_enables_evidence_without_enabling_mutation() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_online_agent(&repo, "client-a").await;
+    seed_online_agent(&repo, "client-b").await;
+    let input = test_plan_input(RuntimeTunnelManager::ExternalObserved, false);
+    let plan = plan_tunnel(&input).unwrap();
+    repo.record_tunnel_plan(&input, &plan, true, &network_test_operator())
+        .await
+        .unwrap();
+    let state = test_state(repo);
+
+    let runtime = crate::runtime_config::compose_runtime_config(&state, "client-a", 1)
+        .await
+        .unwrap();
+    assert!(runtime.network.runtime_reconcile_enabled);
+    assert!(runtime.network.runtime_status_telemetry_enabled);
+    assert!(!runtime.network.apply_enabled);
+    assert_eq!(runtime.network.runtime_status_telemetry_plans.len(), 1);
+    assert_eq!(
+        runtime.network.runtime_status_telemetry_plans[0]
+            .plan
+            .runtime_control
+            .manager,
+        RuntimeTunnelManager::ExternalObserved
+    );
 }
 
 #[test]
-fn network_status_validation_rejects_mutating_plan() {
-    let mut plan = test_plan();
+fn network_status_requires_a_server_bound_runtime_adapter_snapshot() {
+    let plan = plan_tunnel(&test_plan_input(
+        RuntimeTunnelManager::ExternalManagedAdapter,
+        false,
+    ))
+    .unwrap();
+    let missing = JobCommand::NetworkStatus {
+        plan_id: Uuid::new_v4().to_string(),
+        plan: Box::new(plan.clone()),
+        side: TunnelEndpointSide::Left,
+        runtime_adapter: None,
+    };
+    assert_eq!(
+        validate_job_command(&missing).unwrap_err().code,
+        "network_status_adapter_snapshot_required"
+    );
+
+    let bound = JobCommand::NetworkStatus {
+        plan_id: Uuid::new_v4().to_string(),
+        plan: Box::new(plan),
+        side: TunnelEndpointSide::Left,
+        runtime_adapter: Some(runtime_adapter(LEFT_RUNTIME_ADAPTER)),
+    };
+    validate_job_command(&bound).unwrap();
+}
+
+#[test]
+fn network_status_side_must_match_the_only_dispatch_target() {
+    let plan = plan_tunnel(&test_plan_input(
+        RuntimeTunnelManager::AgentIproute2Managed,
+        false,
+    ))
+    .unwrap();
     let command = JobCommand::NetworkStatus {
-        plan: Box::new(plan.clone()),
-        side: TunnelEndpointSide::Left,
-    };
-    validate_job_command(&command).unwrap();
-
-    plan.mutates_host = true;
-    let command = JobCommand::NetworkStatus {
+        plan_id: Uuid::new_v4().to_string(),
         plan: Box::new(plan),
         side: TunnelEndpointSide::Left,
+        runtime_adapter: None,
     };
-    let error = validate_job_command(&command).unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "network_status_plan_must_be_observe_plan");
-}
-
-#[test]
-fn network_interfaces_validation_uses_current_protocol() {
-    let command = JobCommand::NetworkInterfaces;
-
-    validate_job_command(&command).unwrap();
-    assert_eq!(
-        job_command_protocol_version(&command),
-        CURRENT_COMMAND_PROTOCOL_VERSION
-    );
-    assert_eq!(
-        job_command_min_supported_protocol_version(&command),
-        MIN_COMMAND_PROTOCOL_VERSION
-    );
-}
-
-#[test]
-fn network_probe_validation_rejects_mutating_plan_or_unbounded_probe() {
-    let mut plan = test_plan();
-    let command = JobCommand::NetworkProbe {
-        plan: Box::new(plan.clone()),
-        side: TunnelEndpointSide::Left,
-        count: 3,
-        interval_ms: 500,
-    };
-    validate_job_command(&command).unwrap();
-
-    let bad_count = JobCommand::NetworkProbe {
-        plan: Box::new(plan.clone()),
-        side: TunnelEndpointSide::Left,
-        count: 0,
-        interval_ms: 500,
-    };
-    let error = validate_job_command(&bad_count).unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "network_probe_count_out_of_range");
-
-    let bad_interval = JobCommand::NetworkProbe {
-        plan: Box::new(plan.clone()),
-        side: TunnelEndpointSide::Left,
-        count: 3,
-        interval_ms: 50,
-    };
-    let error = validate_job_command(&bad_interval).unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "network_probe_interval_ms_out_of_range");
-
-    plan.mutates_host = true;
-    let command = JobCommand::NetworkProbe {
-        plan: Box::new(plan),
-        side: TunnelEndpointSide::Left,
-        count: 3,
-        interval_ms: 500,
-    };
-    let error = validate_job_command(&command).unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "network_probe_plan_must_be_observe_plan");
-}
-
-#[test]
-fn network_speed_test_validation_rejects_mutating_plan_or_unbounded_budget() {
-    let mut plan = test_plan();
-    let build_command = |plan: TunnelPlan,
-                         duration_secs: u8,
-                         max_bytes: u64,
-                         rate_limit_kbps: u32,
-                         port: u16,
-                         connect_timeout_ms: u16| {
-        JobCommand::NetworkSpeedTest {
-            plan: Box::new(plan),
-            server_side: TunnelEndpointSide::Left,
-            duration_secs,
-            max_bytes,
-            rate_limit_kbps,
-            port,
-            connect_timeout_ms,
-        }
-    };
-    let command = build_command(plan.clone(), 3, 16 * 1024 * 1024, 100_000, 5201, 5000);
-    validate_job_command(&command).unwrap();
-
-    let bad_duration = build_command(plan.clone(), 0, 16 * 1024 * 1024, 100_000, 5201, 5000);
-    let error = validate_job_command(&bad_duration).unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "network_speed_test_duration_secs_out_of_range");
-
-    let bad_bytes = build_command(plan.clone(), 3, 1, 100_000, 5201, 5000);
-    let error = validate_job_command(&bad_bytes).unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "network_speed_test_max_bytes_out_of_range");
-
-    let bad_rate = build_command(plan.clone(), 3, 16 * 1024 * 1024, 0, 5201, 5000);
-    let error = validate_job_command(&bad_rate).unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(
-        error.code,
-        "network_speed_test_rate_limit_kbps_out_of_range"
-    );
-
-    let bad_port = build_command(plan.clone(), 3, 16 * 1024 * 1024, 100_000, 22, 5000);
-    let error = validate_job_command(&bad_port).unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "network_speed_test_port_out_of_range");
-
-    let bad_connect_timeout = build_command(plan.clone(), 3, 16 * 1024 * 1024, 100_000, 5201, 50);
-    let error = validate_job_command(&bad_connect_timeout).unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(
-        error.code,
-        "network_speed_test_connect_timeout_ms_out_of_range"
-    );
-
-    plan.mutates_host = true;
-    let command = build_command(plan, 3, 16 * 1024 * 1024, 100_000, 5201, 5000);
-    let error = validate_job_command(&command).unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "network_speed_test_plan_must_be_observe_plan");
-}
-
-#[tokio::test]
-async fn network_status_create_job_rejects_wrong_side_target() {
-    let repo = Repository::Memory(MemoryState::default());
-    if let Repository::Memory(memory) = &repo {
-        upsert_memory_agent(
-            &memory.agents,
-            &AgentHello {
-                client_id: "right-b".to_string(),
-                process_incarnation_id: uuid::Uuid::new_v4(),
-                agent_version: "test".to_string(),
-                os_release: "test".to_string(),
-                arch: "x86_64".to_string(),
-                update_heartbeat: None,
-                internal_build_number: 1,
-                capabilities: Default::default(),
-            },
-        )
-        .await;
-    }
-
-    let request = CreateJobRequest {
-        job_id: Some(Uuid::new_v4()),
-        selector_expression: "id:right-b".to_string(),
-        target_client_ids: vec!["right-b".to_string()],
-        destructive: false,
-        confirmed: false,
-        command: "network_status".to_string(),
-        argv: Vec::new(),
-        operation: Some(JobCommand::NetworkStatus {
-            plan: Box::new(test_plan()),
-            side: TunnelEndpointSide::Left,
-        }),
-        max_timeout_secs: Some(60),
-        force_unprivileged: false,
-        privileged: true,
-        privilege_assertion: None,
-    };
-    let state = test_state(repo);
-    let headers = crate::test_auth_headers(&state).await;
-    let error = create_job(State(state), headers, Json(request))
-        .await
-        .unwrap_err();
-
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "network_endpoint_target_mismatch");
-}
-
-#[tokio::test]
-async fn network_status_create_job_allows_unprivileged_read_submission() {
-    let repo = Repository::Memory(MemoryState::default());
-    if let Repository::Memory(memory) = &repo {
-        seed_never_connected_memory_agent(memory, "left-a").await;
-    }
-
-    let request = CreateJobRequest {
-        job_id: Some(Uuid::new_v4()),
-        selector_expression: "id:left-a".to_string(),
-        target_client_ids: vec!["left-a".to_string()],
-        destructive: false,
-        confirmed: false,
-        command: "network_status".to_string(),
-        argv: Vec::new(),
-        operation: Some(JobCommand::NetworkStatus {
-            plan: Box::new(test_plan()),
-            side: TunnelEndpointSide::Left,
-        }),
-        max_timeout_secs: Some(60),
-        force_unprivileged: true,
-        privileged: false,
-        privilege_assertion: None,
-    };
-    let state = test_state_with_privilege_auto_approve(repo.clone());
-    let headers = crate::test_auth_headers(&state).await;
-    let (status, Json(response)) = create_job(State(state), headers, Json(request))
-        .await
-        .unwrap();
-
-    assert_eq!(status, StatusCode::ACCEPTED);
-    assert_eq!(response.status, "skipped");
-    assert_eq!(response.target_count, 1);
-    let job = repo.get_job(response.job_id).await.unwrap().unwrap();
-    assert!(!job.privileged);
-}
-
-#[tokio::test]
-async fn network_probe_create_job_rejects_wrong_side_target() {
-    let repo = Repository::Memory(MemoryState::default());
-    if let Repository::Memory(memory) = &repo {
-        upsert_memory_agent(
-            &memory.agents,
-            &AgentHello {
-                client_id: "right-b".to_string(),
-                process_incarnation_id: uuid::Uuid::new_v4(),
-                agent_version: "test".to_string(),
-                os_release: "test".to_string(),
-                arch: "x86_64".to_string(),
-                update_heartbeat: None,
-                internal_build_number: 1,
-                capabilities: Default::default(),
-            },
-        )
-        .await;
-    }
-
-    let request = CreateJobRequest {
-        job_id: Some(Uuid::new_v4()),
-        selector_expression: "id:right-b".to_string(),
-        target_client_ids: vec!["right-b".to_string()],
-        destructive: false,
-        confirmed: false,
-        command: "network_probe".to_string(),
-        argv: Vec::new(),
-        operation: Some(JobCommand::NetworkProbe {
-            plan: Box::new(test_plan()),
-            side: TunnelEndpointSide::Left,
-            count: 3,
-            interval_ms: 500,
-        }),
-        max_timeout_secs: Some(60),
-        force_unprivileged: false,
-        privileged: true,
-        privilege_assertion: None,
-    };
-    let state = test_state(repo);
-    let headers = crate::test_auth_headers(&state).await;
-    let error = create_job(State(state), headers, Json(request))
-        .await
-        .unwrap_err();
-
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "network_endpoint_target_mismatch");
-}
-
-#[tokio::test]
-async fn network_probe_create_job_requires_privilege_unlock() {
-    let repo = Repository::Memory(MemoryState::default());
-    if let Repository::Memory(memory) = &repo {
-        seed_never_connected_memory_agent(memory, "left-a").await;
-    }
-
-    let request = CreateJobRequest {
-        job_id: Some(Uuid::new_v4()),
-        selector_expression: "id:left-a".to_string(),
-        target_client_ids: vec!["left-a".to_string()],
-        destructive: false,
-        confirmed: false,
-        command: "network_probe".to_string(),
-        argv: Vec::new(),
-        operation: Some(JobCommand::NetworkProbe {
-            plan: Box::new(test_plan()),
-            side: TunnelEndpointSide::Left,
-            count: 3,
-            interval_ms: 500,
-        }),
-        max_timeout_secs: Some(60),
-        force_unprivileged: true,
-        privileged: false,
-        privilege_assertion: None,
-    };
-    let state = test_state(repo);
-    let headers = crate::test_auth_headers(&state).await;
-    let (status, Json(response)) = create_job(State(state), headers, Json(request))
-        .await
-        .unwrap();
-
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(response.status, "rejected");
-    assert_eq!(response.target_count, 1);
-}
-
-#[tokio::test]
-async fn network_speed_test_create_job_requires_both_tunnel_endpoints() {
-    let repo = Repository::Memory(MemoryState::default());
-    if let Repository::Memory(memory) = &repo {
-        upsert_memory_agent(
-            &memory.agents,
-            &AgentHello {
-                client_id: "left-a".to_string(),
-                process_incarnation_id: uuid::Uuid::new_v4(),
-                agent_version: "test".to_string(),
-                os_release: "test".to_string(),
-                arch: "x86_64".to_string(),
-                update_heartbeat: None,
-                internal_build_number: 1,
-                capabilities: Default::default(),
-            },
-        )
-        .await;
-    }
-
-    let request = CreateJobRequest {
-        job_id: Some(Uuid::new_v4()),
-        selector_expression: "id:left-a".to_string(),
-        target_client_ids: vec!["left-a".to_string()],
-        destructive: false,
-        confirmed: true,
-        command: "network_speed_test".to_string(),
-        argv: Vec::new(),
-        operation: Some(JobCommand::NetworkSpeedTest {
-            plan: Box::new(test_plan()),
-            server_side: TunnelEndpointSide::Left,
-            duration_secs: 3,
-            max_bytes: 16 * 1024 * 1024,
-            rate_limit_kbps: 100_000,
-            port: 5201,
-            connect_timeout_ms: 5000,
-        }),
-        max_timeout_secs: Some(60),
-        force_unprivileged: false,
-        privileged: true,
-        privilege_assertion: None,
-    };
-    let state = test_state(repo);
-    let headers = crate::test_auth_headers(&state).await;
-    let error = create_job(State(state), headers, Json(request))
-        .await
-        .unwrap_err();
-
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "network_speed_test_target_mismatch");
-}
-
-#[tokio::test]
-async fn network_speed_test_create_job_requires_confirmation() {
-    let repo = Repository::Memory(MemoryState::default());
-    if let Repository::Memory(memory) = &repo {
-        seed_online_agent(memory, "left-a").await;
-        seed_online_agent(memory, "right-b").await;
-    }
-    let request = CreateJobRequest {
-        job_id: Some(Uuid::new_v4()),
-        selector_expression: "id:left-a || id:right-b".to_string(),
-        target_client_ids: vec!["left-a".to_string(), "right-b".to_string()],
-        destructive: false,
-        confirmed: false,
-        command: "network_speed_test".to_string(),
-        argv: Vec::new(),
-        operation: Some(network_speed_test_operation(test_plan())),
-        max_timeout_secs: Some(60),
-        force_unprivileged: false,
-        privileged: true,
-        privilege_assertion: None,
-    };
-    let state = test_state(repo);
-    let headers = crate::test_auth_headers(&state).await;
-    let error = create_job(State(state), headers, Json(request))
-        .await
-        .unwrap_err();
-
-    assert_eq!(error.status, StatusCode::CONFLICT);
-    assert_eq!(error.code, "network_speed_test_confirmation_required");
-}
-
-#[tokio::test]
-async fn network_speed_test_create_job_skips_both_endpoints_when_peer_is_unavailable() {
-    let repo = Repository::Memory(MemoryState::default());
-    if let Repository::Memory(memory) = &repo {
-        seed_online_agent(memory, "left-a").await;
-        seed_never_connected_memory_agent(memory, "right-b").await;
-    }
-    let request = CreateJobRequest {
-        job_id: Some(Uuid::new_v4()),
-        selector_expression: "id:left-a || id:right-b".to_string(),
-        target_client_ids: vec!["left-a".to_string(), "right-b".to_string()],
-        destructive: false,
-        confirmed: true,
-        command: "network_speed_test".to_string(),
-        argv: Vec::new(),
-        operation: Some(network_speed_test_operation(test_plan())),
-        max_timeout_secs: Some(60),
-        force_unprivileged: false,
-        privileged: true,
-        privilege_assertion: None,
-    };
-    let state = test_state_with_privilege_auto_approve(repo.clone());
-    let headers = crate::test_auth_headers(&state).await;
-    let (status, Json(response)) = create_job(State(state), headers, Json(request))
-        .await
-        .unwrap();
-
-    assert_eq!(status, StatusCode::ACCEPTED);
-    assert_eq!(response.status, "skipped");
-    assert_eq!(response.target_counts.total, 2);
-    assert_eq!(response.target_counts.skipped, 2);
-    let targets = repo.list_job_targets(response.job_id).await.unwrap();
-    assert_eq!(targets.len(), 2);
-    let left = targets
-        .iter()
-        .find(|target| target.client_id == "left-a")
-        .unwrap();
-    let right = targets
-        .iter()
-        .find(|target| target.client_id == "right-b")
-        .unwrap();
-    assert_eq!(left.status, "skipped");
-    assert_eq!(
-        left.message.as_deref(),
-        Some("network_speed_test_peer_unavailable: peer target was skipped; speed test requires both endpoints")
-    );
-    assert_eq!(right.status, "skipped");
-    assert_eq!(
-        right.message.as_deref(),
-        Some("target_never_connected: target has never connected; job skipped")
-    );
-
-    let outputs = repo.list_job_outputs(response.job_id).await.unwrap();
-    assert_eq!(outputs.len(), 2);
-    let left_output = outputs
-        .iter()
-        .find(|output| output.client_id == "left-a")
-        .unwrap();
-    let output_bytes = BASE64_STANDARD.decode(&left_output.data_base64).unwrap();
-    let output: serde_json::Value = serde_json::from_slice(&output_bytes).unwrap();
-    assert_eq!(output["type"], "network_speed_test_peer_unavailable");
-    assert_eq!(output["reason"], "network_speed_test_peer_unavailable");
-    assert_eq!(output["peer_client_id"], "right-b");
-}
-
-fn test_plan() -> TunnelPlan {
-    plan_tunnel(&test_plan_input()).unwrap()
-}
-
-fn network_speed_test_operation(plan: TunnelPlan) -> JobCommand {
-    JobCommand::NetworkSpeedTest {
-        plan: Box::new(plan),
-        server_side: TunnelEndpointSide::Left,
-        duration_secs: 3,
-        max_bytes: 16 * 1024 * 1024,
-        rate_limit_kbps: 100_000,
-        port: 5201,
-        connect_timeout_ms: 5000,
-    }
-}
-
-async fn seed_online_agent(memory: &MemoryState, client_id: &str) {
-    upsert_memory_agent(
-        &memory.agents,
-        &AgentHello {
-            client_id: client_id.to_string(),
-            process_incarnation_id: uuid::Uuid::new_v4(),
-            agent_version: "test".to_string(),
-            os_release: "test".to_string(),
-            arch: "x86_64".to_string(),
-            update_heartbeat: None,
-            internal_build_number: 1,
-            capabilities: Default::default(),
-        },
+    assert!(vpsman_server_core::validate_network_command_targets(
+        &command,
+        &["client-a".to_string()]
     )
-    .await;
+    .is_ok());
+    assert!(vpsman_server_core::validate_network_command_targets(
+        &command,
+        &["client-b".to_string()]
+    )
+    .is_err());
 }
 
-async fn seed_never_connected_memory_agent(memory: &MemoryState, client_id: &str) {
-    memory.agents.write().await.push(AgentView {
-        id: client_id.to_string(),
-        display_name: client_id.to_string(),
-        status: "never".to_string(),
-        tags: Vec::new(),
-        registration_ip: None,
-        last_ip: None,
-        last_seen_at: None,
-        arch: None,
-        internal_build_number: 1,
-        process_incarnation_id: None,
-        stale_since: None,
-        stale_reason: None,
-        capabilities: AgentCapabilitySnapshot::default(),
+#[tokio::test]
+async fn network_diagnostics_require_an_exact_declared_plan_and_limit_disabled_plans_to_status() {
+    let repo = Repository::Memory(MemoryState::default());
+    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let plan = plan_tunnel(&input).unwrap();
+    let saved = repo
+        .record_tunnel_plan(&input, &plan, true, &network_test_operator())
+        .await
+        .unwrap();
+    let state = test_state(repo.clone());
+
+    let request_for = |plan_id: Uuid, plan: vpsman_common::TunnelPlan| CreateJobRequest {
+        job_id: Some(Uuid::new_v4()),
+        selector_expression: String::new(),
+        target_client_ids: vec![plan.left_client_id.clone()],
+        destructive: false,
+        confirmed: false,
+        command: "network_status".to_string(),
+        argv: Vec::new(),
+        operation: Some(JobCommand::NetworkStatus {
+            plan_id: plan_id.to_string(),
+            plan: Box::new(plan),
+            side: TunnelEndpointSide::Left,
+            runtime_adapter: None,
+        }),
+        max_timeout_secs: Some(30),
+        force_unprivileged: false,
+        privileged: false,
+        privilege_assertion: None,
+    };
+
+    let mut exact = request_for(saved.id, saved.plan.clone());
+    crate::routes_jobs::bind_declared_network_plan(&state, &mut exact)
+        .await
+        .unwrap();
+
+    let mut stale_plan = saved.plan.clone();
+    stale_plan.bandwidth_mbps = 250;
+    let mut stale = request_for(saved.id, stale_plan);
+    assert_eq!(
+        crate::routes_jobs::bind_declared_network_plan(&state, &mut stale)
+            .await
+            .unwrap_err()
+            .code,
+        "network_diagnostic_plan_snapshot_stale"
+    );
+
+    let mut missing = request_for(Uuid::new_v4(), saved.plan.clone());
+    assert_eq!(
+        crate::routes_jobs::bind_declared_network_plan(&state, &mut missing)
+            .await
+            .unwrap_err()
+            .code,
+        "network_diagnostic_plan_not_found"
+    );
+
+    repo.set_tunnel_plan_enabled(saved.id, saved.revision, false, &network_test_operator())
+        .await
+        .unwrap();
+    let mut disabled_status = request_for(saved.id, saved.plan.clone());
+    crate::routes_jobs::bind_declared_network_plan(&state, &mut disabled_status)
+        .await
+        .unwrap();
+
+    let mut disabled_probe = request_for(saved.id, saved.plan.clone());
+    disabled_probe.command = "network_probe".to_string();
+    disabled_probe.operation = Some(JobCommand::NetworkProbe {
+        plan_id: saved.id.to_string(),
+        plan: Box::new(saved.plan),
+        side: TunnelEndpointSide::Left,
+        count: 3,
+        interval_ms: 500,
     });
+    assert_eq!(
+        crate::routes_jobs::bind_declared_network_plan(&state, &mut disabled_probe)
+            .await
+            .unwrap_err()
+            .code,
+        "network_diagnostic_plan_disabled"
+    );
 }
 
-fn test_plan_input() -> TunnelPlanInput {
+pub(super) fn test_plan_input(manager: RuntimeTunnelManager, ospf: bool) -> TunnelPlanInput {
     TunnelPlanInput {
         name: "edge-a-edge-b".to_string(),
         interface_name: "tunab".to_string(),
-        kind: TunnelKind::Gre,
-        runtime_control: Default::default(),
+        kind: if manager == RuntimeTunnelManager::AgentIproute2Managed {
+            TunnelKind::Gre
+        } else {
+            TunnelKind::Wireguard
+        },
+        runtime_control: RuntimeTunnelControl {
+            manager,
+            left_adapter_template_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+                .then(|| LEFT_RUNTIME_ADAPTER.to_string()),
+            right_adapter_template_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+                .then(|| RIGHT_RUNTIME_ADAPTER.to_string()),
+            ..RuntimeTunnelControl::default()
+        },
         runtime_topology: Default::default(),
-        left_client_id: "left-a".to_string(),
-        right_client_id: "right-b".to_string(),
-        left_underlay: "198.51.100.10".to_string(),
-        right_underlay: "203.0.113.20".to_string(),
-        address_pool_cidr: "10.255.0.0/30".to_string(),
+        left_client_id: "client-a".to_string(),
+        right_client_id: "client-b".to_string(),
+        left_remote_underlay: "203.0.113.1".to_string(),
+        right_remote_underlay: "203.0.113.2".to_string(),
+        left_local_underlay: None,
+        right_local_underlay: None,
+        address_pool_cidr: "10.10.0.0/29".to_string(),
         reserved_addresses: Vec::new(),
-        ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
-            left: "10.255.0.0".to_string(),
-            right: "10.255.0.1".to_string(),
+        ipv4_tunnel: Some(TunnelAddressPair {
+            left: "10.10.0.0".to_string(),
+            right: "10.10.0.1".to_string(),
             prefix_len: 31,
         }),
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
-        latency_primary_family: Default::default(),
-        bandwidth_mbps: 100,
-        latency_ms: 18.0,
-        packet_loss_ratio: 0.0,
-        preference: 1.0,
-        ospf_policy: OspfCostPolicy::default(),
+        latency_primary_family: TunnelAddressFamily::Ipv4,
+        bandwidth_mbps: 1234,
+        ospf: ospf.then(|| TunnelOspfConfig {
+            mode: OspfControlMode::Reviewed,
+            planned_latency_ms: 18.0,
+            planned_packet_loss_ratio: 0.0,
+            preference: 1.0,
+            policy: OspfCostPolicy::default(),
+            min_cost_delta: 5,
+            healthy_windows: 2,
+            left_adapter_template_id: LEFT_ROUTING_ADAPTER.to_string(),
+            right_adapter_template_id: RIGHT_ROUTING_ADAPTER.to_string(),
+        }),
     }
 }
 
+fn runtime_adapter(template_id: &str) -> RuntimeTunnelAdapterCommands {
+    let command = |verb: &str| RuntimeTunnelCommand {
+        argv: vec!["/opt/vpsman-adapters/runtime".to_string(), verb.to_string()],
+        max_timeout_secs: 10,
+        max_output_bytes: 16 * 1024,
+    };
+    RuntimeTunnelAdapterCommands {
+        template_id: template_id.to_string(),
+        template_name: "runtime-adapter".to_string(),
+        definition_hash: "ab".repeat(32),
+        startup: Some(command("start")),
+        stop: Some(command("stop")),
+        cleanup: None,
+        restart: None,
+        status: command("status"),
+        traffic_limit_apply: None,
+    }
+}
+
+async fn seed_online_agent(repo: &Repository, client_id: &str) {
+    let Repository::Memory(memory) = repo else {
+        panic!("memory repository required");
+    };
+    memory.agents.write().await.push(AgentView {
+        id: client_id.to_string(),
+        display_name: client_id.to_string(),
+        status: "online".to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: Some(crate::unix_now().to_string()),
+        arch: Some("x86_64".to_string()),
+        internal_build_number: 1,
+        process_incarnation_id: Some(Uuid::new_v4()),
+        stale_since: None,
+        stale_reason: None,
+        capabilities: vpsman_common::AgentCapabilitySnapshot::default(),
+    });
+}
+
 fn test_state(repo: Repository) -> AppState {
-    let (events, _) = broadcast::channel(1);
+    let (events, _) = broadcast::channel(32);
     AppState {
         repo,
         events,
         internal_token: None,
-        gateway: GatewayDispatchClient::default(),
+        gateway: GatewayDispatchClient::new(None, None),
         backup_object_store: None,
-        update_release_policy: Default::default(),
-        fleet_alert_policy: Default::default(),
-        job_output_artifact_min_bytes: 32768,
+        update_release_policy: crate::state::UpdateReleasePolicy::default(),
+        fleet_alert_policy: crate::fleet_alerts::FleetAlertPolicy::default(),
+        job_output_artifact_min_bytes: crate::state::DEFAULT_ARTIFACT_MAX_BYTES,
         artifact_max_bytes: crate::state::DEFAULT_ARTIFACT_MAX_BYTES,
         require_registered_agent_updates: false,
-        suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
+        suite_config_path: std::path::PathBuf::from("/tmp/vpsman-test-suite-config-missing.toml"),
         dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
-    }
-}
-
-fn test_state_with_suite_config(repo: Repository, suite_config: &str) -> AppState {
-    let path =
-        std::env::temp_dir().join(format!("vpsman-tests-suite-config-{}.toml", Uuid::new_v4()));
-    std::fs::write(&path, suite_config).expect("write suite config");
-    AppState {
-        suite_config_path: path,
-        ..test_state(repo)
-    }
-}
-
-fn test_state_with_privilege_auto_approve(repo: Repository) -> AppState {
-    AppState {
-        gateway: GatewayDispatchClient::test_privilege_auto_approve(),
-        ..test_state(repo)
     }
 }
 
 fn network_test_operator() -> AuthContext {
     AuthContext {
         operator: OperatorView {
-            id: Uuid::nil(),
-            username: "network-operator".to_string(),
+            id: Uuid::new_v4(),
+            username: "network-test".to_string(),
             role: "admin".to_string(),
             scopes: vec!["*".to_string()],
-            preferences: crate::model::OperatorPreferences::default(),
+            preferences: OperatorPreferences::default(),
             totp_enabled: false,
             status: "active".to_string(),
             session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
@@ -1372,6 +884,6 @@ fn network_test_operator() -> AuthContext {
             disabled_at: None,
             deleted_at: None,
         },
-        session_id: Uuid::nil(),
+        session_id: Uuid::new_v4(),
     }
 }

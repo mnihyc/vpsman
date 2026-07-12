@@ -640,14 +640,15 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["restored_files", operation.restored_files.map(canonicalRestoreRollbackFile)],
       ]);
     case "network_status":
-      return ordered([["type", operation.type], ["plan", operation.plan as JsonValue], ["side", operation.side]]);
+      return ordered([["type", operation.type], ["plan_id", operation.plan_id], ["plan", operation.plan as JsonValue], ["side", operation.side], ["runtime_adapter", optional(operation.runtime_adapter as JsonValue | null | undefined)]]);
     case "network_interfaces":
       return ordered([["type", operation.type]]);
     case "network_probe":
-      return ordered([["type", operation.type], ["plan", operation.plan as JsonValue], ["side", operation.side], ["count", operation.count], ["interval_ms", operation.interval_ms]]);
+      return ordered([["type", operation.type], ["plan_id", operation.plan_id], ["plan", operation.plan as JsonValue], ["side", operation.side], ["count", operation.count], ["interval_ms", operation.interval_ms]]);
     case "network_speed_test":
       return ordered([
         ["type", operation.type],
+        ["plan_id", operation.plan_id],
         ["plan", operation.plan as JsonValue],
         ["server_side", operation.server_side],
         ["duration_secs", operation.duration_secs],
@@ -655,6 +656,24 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["rate_limit_kbps", operation.rate_limit_kbps],
         ["port", operation.port],
         ["connect_timeout_ms", operation.connect_timeout_ms],
+      ]);
+    case "network_routing_status":
+      return ordered([
+        ["type", operation.type],
+        ["plan_id", operation.plan_id],
+        ["plan", operation.plan as JsonValue],
+        ["side", operation.side],
+        ["adapter", operation.adapter as unknown as JsonValue],
+      ]);
+    case "network_routing_apply":
+      return ordered([
+        ["type", operation.type],
+        ["plan_id", operation.plan_id],
+        ["plan", operation.plan as JsonValue],
+        ["side", operation.side],
+        ["adapter", operation.adapter as unknown as JsonValue],
+        ["expected_current_cost", optional(operation.expected_current_cost)],
+        ["desired_cost", operation.desired_cost],
       ]);
   }
 }

@@ -42,6 +42,7 @@ import {
   formatCompactTime,
   formatFullTime,
   shortId,
+  timestampMillis,
 } from "../utils";
 
 type VpsDetailTab =
@@ -74,6 +75,7 @@ type VpsDetailPanelProps = {
   onOpenConfig: (agent: AgentView) => void;
   onOpenFiles: (agent: AgentView) => void;
   onOpenFleetAlerts: () => void;
+  onOpenFleetMetrics: (agent: AgentView) => void;
   onOpenInstances: () => void;
   onOpenJob: (jobId: string) => void;
   onOpenJobs: () => void;
@@ -123,6 +125,7 @@ export function VpsDetailPanel({
   onOpenConfig,
   onOpenFiles,
   onOpenFleetAlerts,
+  onOpenFleetMetrics,
   onOpenInstances,
   onOpenJob,
   onOpenJobs,
@@ -385,6 +388,7 @@ export function VpsDetailPanel({
               loading={loading}
               related={related}
               onOpenFleetAlerts={onOpenFleetAlerts}
+              onOpenFleetMetrics={() => onOpenFleetMetrics(agent)}
               onOpenJob={onOpenJob}
             />
           )}
@@ -480,6 +484,7 @@ function SummaryTab({
   loading,
   related,
   onOpenFleetAlerts,
+  onOpenFleetMetrics,
   onOpenJob,
 }: {
   agent: AgentView;
@@ -487,6 +492,7 @@ function SummaryTab({
   loading: boolean;
   related: VpsDetailContext;
   onOpenFleetAlerts: () => void;
+  onOpenFleetMetrics: () => void;
   onOpenJob: (jobId: string) => void;
 }) {
   return (
@@ -512,6 +518,10 @@ function SummaryTab({
             detail="Network, job, backup, and alert evidence may still exist because those workflows retain their own records."
           />
         )}
+        <button className="secondaryAction compactAction" onClick={onOpenFleetMetrics} type="button">
+          <Activity size={14} />
+          View retained metrics
+        </button>
       </DetailBlock>
       <DetailBlock title="Warnings" icon={<AlertTriangle size={18} />}>
         {related.alerts.length === 0 ? (
@@ -830,11 +840,11 @@ function NetworkTab({
         </button>
         <VpsFact label="Selected traffic" value={trafficSelectorLabel(trafficRules)} />
         <VpsFact
-          label="Latest RX"
+          label="Latest avg RX"
           value={latestRate ? formatBytesPerSecond(latestRate.rx_bps_avg) : "No rate"}
         />
         <VpsFact
-          label="Latest TX"
+          label="Latest avg TX"
           value={latestRate ? formatBytesPerSecond(latestRate.tx_bps_avg) : "No rate"}
         />
         <VpsFact
@@ -1272,7 +1282,6 @@ function sourceReadinessStatusLabel(status: string): string {
     agent_offline: "Agent offline",
     degraded: "Degraded",
     metadata_only: "Metadata only",
-    needs_promotion: "Needs promotion",
     ok: "Ready",
     ready: "Ready",
     ready_on_demand: "Ready on demand",
@@ -1363,9 +1372,8 @@ function runtimeApplyDetail(state: RuntimeConfigApplyStateRecord | null): string
   if (state.pending_status === "failed") return state.pending_error ?? "Runtime config apply failed";
   if (state.pending_status === "queued") return state.pending_reason ?? "Runtime config apply queued";
   if (state.applied_content_hash) {
-    const version = state.applied_version ? `v${state.applied_version}; ` : "";
     const job = state.applied_job_id ? `; job ${shortId(state.applied_job_id)}` : "";
-    return `${version}hash ${shortId(state.applied_content_hash)}${job}`;
+    return `Hash ${shortId(state.applied_content_hash)}${job}`;
   }
   return "No server-applied runtime sync recorded";
 }
@@ -1375,7 +1383,7 @@ function runtimeApplyStateTime(state: RuntimeConfigApplyStateRecord): string {
 }
 
 function runtimeApplyQueuedIsStale(state: RuntimeConfigApplyStateRecord): boolean {
-  const updatedAt = Date.parse(runtimeApplyStateTime(state));
+  const updatedAt = timestampMillis(runtimeApplyStateTime(state));
   return !Number.isFinite(updatedAt) || Date.now() - updatedAt > 24 * 60 * 60 * 1000;
 }
 

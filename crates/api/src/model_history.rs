@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use vpsman_common::{DEFAULT_TELEMETRY_RETENTION_DAYS, DEFAULT_TELEMETRY_RETENTION_PRUNE_LIMIT};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HistoryDomain {
@@ -65,8 +66,9 @@ impl HistoryDomain {
         match self {
             Self::JobOutputs => 30,
             Self::SystemMetricRollups => 3650,
-            Self::TelemetryRollups => 3650,
-            Self::TelemetryNetworkRates => 3650,
+            Self::TelemetryRollups | Self::TelemetryNetworkRates => {
+                DEFAULT_TELEMETRY_RETENTION_DAYS
+            }
             Self::NetworkObservations | Self::TopologyHistory => 180,
             Self::ClientStatusHistory | Self::GatewaySessions => 365,
             Self::AuditLogs => 365,
@@ -77,9 +79,10 @@ impl HistoryDomain {
     pub(crate) fn default_prune_limit(self) -> i32 {
         match self {
             Self::JobOutputs | Self::NetworkObservations => 5_000,
+            Self::TelemetryRollups | Self::TelemetryNetworkRates => {
+                DEFAULT_TELEMETRY_RETENTION_PRUNE_LIMIT
+            }
             Self::SystemMetricRollups
-            | Self::TelemetryRollups
-            | Self::TelemetryNetworkRates
             | Self::TopologyHistory
             | Self::ClientStatusHistory
             | Self::GatewaySessions => 2_000,

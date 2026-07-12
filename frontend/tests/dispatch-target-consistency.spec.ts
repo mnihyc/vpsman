@@ -2,6 +2,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import {
   backupId,
   installConsoleApiMock,
+  tunnelPlans,
 } from "./support/consoleLayoutFixtures";
 import {
   openConsoleSubpage,
@@ -38,6 +39,20 @@ async function chooseVpsBySearch(
     name: optionName,
   });
   await expect(option).toBeVisible();
+  await expect
+    .poll(async () => {
+      const menuBox = await root.page().locator(".vpsComboboxMenu").boundingBox();
+      const viewport = root.page().viewportSize();
+      return Boolean(
+        menuBox &&
+          viewport &&
+          menuBox.x >= 0 &&
+          menuBox.y >= 0 &&
+          menuBox.x + menuBox.width <= viewport.width &&
+          menuBox.y + menuBox.height <= viewport.height,
+      );
+    }, { message: `${label} options should remain inside the viewport` })
+    .toBe(true);
   const selectedLabel = (await option.locator("strong").innerText()).trim();
   await option.click();
   await expect(combobox).toHaveValue(selectedLabel);
@@ -987,6 +1002,7 @@ test("topology network test confirmation closes on edit and submits a fresh snap
     target_client_ids: ["agent-sfo-01", "agent-fra-02"],
     max_timeout_secs: 120,
     operation: {
+      plan_id: tunnelPlans[0].id,
       server_side: "left",
       type: "network_speed_test",
     },
@@ -1029,17 +1045,18 @@ test("topology async review preparation ignores stale edits", async ({
     confirmed: true,
     max_timeout_secs: 135,
     operation: {
+      plan_id: tunnelPlans[0].id,
       server_side: "left",
       type: "network_speed_test",
     },
   });
 
   await openConsoleSubpage(page, "Network", "OSPF");
-  await activate(page.getByRole("button", { name: "Apply cost" }));
+  await activate(page.getByRole("button", { name: "Apply" }));
   await expect(page.getByText("Confirm OSPF cost update")).toBeVisible();
   await activate(
     page.locator(".confirmationPrompt").getByRole("button", {
-      name: "Update cost",
+      name: "Apply routing cost",
     }),
   );
 
@@ -1056,8 +1073,13 @@ test("topology async review preparation ignores stale edits", async ({
   expect(ospfRequest).toMatchObject({
     body: {
       confirmed: true,
-      mutation_intent: "apply",
+      desired_ospf_cost: 22,
+      left_adapter_definition_hash: "c".repeat(64),
+      left_current_ospf_cost: 14,
+      plan_revision: tunnelPlans[0].revision,
       recommendation_id: "ospf-1234abcd5678ef90",
+      right_adapter_definition_hash: "d".repeat(64),
+      right_current_ospf_cost: 14,
     },
   });
   expectPrivilegeAssertion((ospfRequest as { body: unknown }).body);
@@ -1084,7 +1106,7 @@ test("privileged confirmation closes when the local assertion expires", async ({
   await expect(page.getByText("Confirm speed test")).toBeHidden();
 });
 
-test("OSPF cost update and rollback submit reviewed server-side plan mutations", async ({
+test("OSPF cost update submits a frozen endpoint-adapter snapshot", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -1096,22 +1118,16 @@ test("OSPF cost update and rollback submit reviewed server-side plan mutations",
   await openConsoleSubpage(page, "Network", "OSPF");
   await unlockPrivilegeFor(page, "Network", "OSPF");
 
-  await expect(
-    page.getByRole("button", { name: "Rollback cost" }),
-  ).toBeDisabled();
-  await activate(page.getByRole("button", { name: "Apply cost" }));
+  await activate(page.getByRole("button", { name: "Apply" }));
   const applyPrompt = page.locator(".confirmationPrompt").last();
   await expect(applyPrompt).toContainText("Confirm OSPF cost update");
-  await expect(applyPrompt).toContainText("Apply recommended cost");
-  await expect(applyPrompt).toContainText("Recommendation ID");
-  await expect(applyPrompt).toContainText("14 -> 22 (+8)");
-  await expect(applyPrompt).toContainText("network.ospf_cost.apply");
-  await expect(applyPrompt).toContainText(
-    "client:agent-sfo-01, client:agent-fra-02",
-  );
+  await expect(applyPrompt).toContainText("Current costs");
+  await expect(applyPrompt).toContainText("14 / 14");
+  await expect(applyPrompt).toContainText("Desired cost");
+  await expect(applyPrompt).toContainText("Adapter snapshots");
   await activate(
     applyPrompt.getByRole("button", {
-      name: "Update cost",
+      name: "Apply routing cost",
     }),
   );
 
@@ -1128,138 +1144,97 @@ test("OSPF cost update and rollback submit reviewed server-side plan mutations",
   expect(request).toMatchObject({
     body: {
       confirmed: true,
-      mutation_intent: "apply",
+      desired_ospf_cost: 22,
+      left_adapter_definition_hash: "c".repeat(64),
+      left_current_ospf_cost: 14,
+      plan_revision: tunnelPlans[0].revision,
       recommendation_id: "ospf-1234abcd5678ef90",
-      current_ospf_cost: 14,
-      recommended_ospf_cost: 22,
+      right_adapter_definition_hash: "d".repeat(64),
+      right_current_ospf_cost: 14,
     },
   });
   expectPrivilegeAssertion((request as { body: unknown }).body);
-
-  await activate(page.getByRole("button", { name: "Rollback cost" }));
-  const rollbackPrompt = page.locator(".confirmationPrompt").last();
-  await expect(rollbackPrompt).toContainText("Confirm OSPF rollback");
-  await expect(rollbackPrompt).toContainText("Rollback applied recommendation");
-  await expect(rollbackPrompt).toContainText("22 -> 14 (-8)");
-  await expect(rollbackPrompt).toContainText("network.ospf_cost.rollback");
-  await expect(rollbackPrompt).toContainText(
-    "client:agent-sfo-01, client:agent-fra-02",
-  );
-  await activate(
-    rollbackPrompt.getByRole("button", {
-      name: "Rollback cost",
-    }),
-  );
-
-  const rollbackRequest = await page.evaluate(() => {
-    const requests = (
-      window as unknown as {
-        __vpsmanTestRequests: {
-          tunnelPlanOspfCostUpdates: Array<{ plan_id: string; body: unknown }>;
-        };
-      }
-    ).__vpsmanTestRequests;
-    return requests.tunnelPlanOspfCostUpdates.at(-1);
-  });
-  expect(rollbackRequest).toMatchObject({
-    body: {
-      confirmed: true,
-      mutation_intent: "rollback",
-      recommendation_id: "ospf-1234abcd5678ef90",
-      current_ospf_cost: 22,
-      recommended_ospf_cost: 14,
-    },
-  });
-  expectPrivilegeAssertion((rollbackRequest as { body: unknown }).body);
+  await expect(page.getByText("Jobs in progress")).toBeVisible();
+  await expect(page.getByRole("button", { name: /rollback/i })).toHaveCount(0);
 });
 
-test("custom adapter submits a fresh snapshot after reopening review", async ({
+test("tunnel plan submits a fresh explicit declaration after reopening review", async ({
   page,
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "custom adapter consistency is covered in desktop workflow tests",
+    "tunnel declaration consistency is covered in desktop workflow tests",
   );
   await installConsoleApiMock(page);
   await page.goto("/");
   await openConsoleSubpage(page, "Network", "Tunnel plans");
-  await activate(page.getByRole("button", { name: "Promotion workflow" }));
+  await activate(page.getByRole("button", { name: "Create plan" }));
 
-  const promotionPanel = page.getByLabel("Tunnel plan promotion workflow");
-  const adapterForm = promotionPanel.locator("form", {
-    has: page.getByRole("heading", { name: "Custom adapter" }),
+  const composer = page.locator(".tunnelPlanComposer");
+  await composer.getByLabel("Tunnel plan name").fill("managed-edge-link");
+  const interfaceInput = composer.getByLabel("Tunnel interface", {
+    exact: true,
   });
-  await expect(
-    promotionPanel.getByText("Promotion diff workflow"),
-  ).toBeVisible();
-  await activate(
-    promotionPanel.getByText("Advanced: custom adapter promotion"),
+  await interfaceInput.fill("tun-old");
+  await chooseVpsBySearch(
+    composer,
+    "Left tunnel VPS",
+    "sfo",
+    /edge-sfo-01.*agent-sfo-01/,
   );
-  for (const argvLabel of [
-    "Status argv",
-    "Start argv",
-    "Restart argv",
-    "Stop argv",
-    "Cleanup argv",
-    "Traffic argv",
-  ]) {
-    await expect(
-      adapterForm.getByLabel(argvLabel, { exact: true }),
-    ).toHaveAttribute("title", /Command and arguments executed by the adapter/);
-  }
-  await adapterForm
-    .getByLabel("Observed plan")
-    .selectOption("eeeeeeee-ffff-4000-8111-222222222222");
-  const statusArgv = adapterForm.getByLabel("Status argv", { exact: true });
-  await statusArgv.fill(
-    "/usr/local/libexec/vpsman-openvpn-adapter\nstatus-a\n{interface}",
+  await chooseVpsBySearch(
+    composer,
+    "Right tunnel VPS",
+    "fra",
+    /core-fra-02.*agent-fra-02/,
   );
-  await activate(
-    adapterForm.getByRole("button", { name: "Review custom adapter" }),
-  );
-  const promotionConfirmation = promotionPanel.locator(".confirmationPrompt", {
-    hasText: "Confirm custom adapter",
+  await composer.getByLabel("Left remote underlay destination").fill("203.0.113.20");
+  await composer.getByLabel("Right remote underlay destination").fill("198.51.100.10");
+  await composer.getByLabel("Left tunnel IPv4").fill("10.255.60.0");
+  await composer.getByLabel("Right tunnel IPv4").fill("10.255.60.1");
+  await activate(composer.getByRole("button", { name: "External adapter" }));
+  await composer
+    .getByLabel("Left runtime adapter", { exact: true })
+    .selectOption("33333333-3333-4333-8333-333333333333");
+  await composer
+    .getByLabel("Right runtime adapter", { exact: true })
+    .selectOption("33333333-3333-4333-8333-333333333333");
+
+  await activate(composer.getByRole("button", { name: "Review plan" }));
+  const confirmation = page.locator(".confirmationPrompt", {
+    hasText: "Confirm tunnel plan creation",
   });
-  await expect(promotionConfirmation).toBeVisible();
-  await expect(
-    promotionConfirmation.locator("dd", { hasText: "status-a" }),
-  ).toHaveAttribute("title", /status-a/);
+  await expect(confirmation).toBeVisible();
+  await expect(confirmation).toContainText("managed-edge-link · GRE · tun-old");
   await activate(
-    promotionConfirmation.getByRole("button", { name: "Close confirmation" }),
+    confirmation.getByRole("button", { name: "Close confirmation" }),
   );
-  await expect(promotionConfirmation).toBeHidden();
-  await statusArgv.fill(
-    "/usr/local/libexec/vpsman-openvpn-adapter\nstatus-b\n{interface}",
-  );
-  await activate(
-    adapterForm.getByRole("button", { name: "Review custom adapter" }),
-  );
-  await expect(promotionConfirmation).toBeVisible();
-  await activate(
-    promotionConfirmation.getByRole("button", {
-      name: "Save custom adapter",
-    }),
-  );
+  await expect(confirmation).toBeHidden();
+
+  await interfaceInput.fill("tun-new");
+  await activate(composer.getByRole("button", { name: "Review plan" }));
+  await expect(confirmation).toBeVisible();
+  await expect(confirmation).toContainText("managed-edge-link · GRE · tun-new");
+  await activate(confirmation.getByRole("button", { name: "Save plan" }));
 
   const request = await page.evaluate(() => {
     const requests = (
       window as unknown as {
-        __vpsmanTestRequests: { tunnelPlanAdapterPromotions: unknown[] };
+        __vpsmanTestRequests: { tunnelPlans: unknown[] };
       }
     ).__vpsmanTestRequests;
-    return requests.tunnelPlanAdapterPromotions.at(-1);
+    return requests.tunnelPlans.at(-1);
   });
   expect(request).toMatchObject({
     confirmed: true,
-    plan_id: "eeeeeeee-ffff-4000-8111-222222222222",
+    interface_name: "tun-new",
+    left_client_id: "agent-sfo-01",
+    name: "managed-edge-link",
+    right_client_id: "agent-fra-02",
     runtime_control: {
-      status: {
-        argv: [
-          "/usr/local/libexec/vpsman-openvpn-adapter",
-          "status-b",
-          "{interface}",
-        ],
-      },
+      left_adapter_template_id: "33333333-3333-4333-8333-333333333333",
+      manager: "external_managed_adapter",
+      right_adapter_template_id: "33333333-3333-4333-8333-333333333333",
     },
   });
 });

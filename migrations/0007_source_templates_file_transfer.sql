@@ -223,16 +223,6 @@ INSERT INTO source_templates (
         '{"shell_script_argv":["/bin/sh","-lc"]}'::jsonb
     ),
     (
-        '00000000-0000-4000-8000-000000000008',
-        'runtime_tunnel_adapter',
-        'builtin:agent_iproute2_managed',
-        'built_in',
-        TRUE,
-        TRUE,
-        'Default client-managed iproute2/tc runtime tunnel adapter',
-        '{"manager":"agent_iproute2_managed"}'::jsonb
-    ),
-    (
         '00000000-0000-4000-8000-000000000009',
         'backup_object_store',
         'builtin:local_filesystem',
@@ -333,16 +323,6 @@ INSERT INTO source_templates (
         '{"shell_script_argv":["/bin/ash","-lc"]}'::jsonb
     ),
     (
-        '00000000-0000-4000-8000-000000000081',
-        'runtime_tunnel_adapter',
-        'builtin:agent_iproute2_runtime_reconcile',
-        'built_in',
-        TRUE,
-        FALSE,
-        'Client-managed iproute2/tc runtime tunnel adapter with runtime reconciliation enabled',
-        '{"manager":"agent_iproute2_managed","runtime_reconcile_enabled":true,"runtime_ip_argv":["/sbin/ip"],"runtime_tc_argv":["/sbin/tc"]}'::jsonb
-    ),
-    (
         '00000000-0000-4000-8000-000000000091',
         'backup_object_store',
         'builtin:s3_path_style_reserved',
@@ -420,21 +400,6 @@ $$,
         TRUE
     ),
     (
-        '33333333-3333-4333-8333-333333333333',
-        'Runtime tunnel adapter',
-        'network',
-        'runtime',
-        'Adjust runtime tunnel adapter safety and reconciliation flags.',
-        '{"fields":{"apply_enabled":{"type":"boolean"},"runtime_reconcile_enabled":{"type":"boolean"},"runtime_command_timeout_secs":{"type":"number","minimum":1,"maximum":120}}}'::jsonb,
-        $$[network]
-apply_enabled = {{apply_enabled}}
-runtime_reconcile_enabled = {{runtime_reconcile_enabled}}
-runtime_command_timeout_secs = {{runtime_command_timeout_secs}}
-$$,
-        '{"expandable":true,"affected_sections":["network"],"patch_only":true,"predefined":true}'::jsonb,
-        TRUE
-    ),
-    (
         '55555555-5555-4555-8555-555555555555',
         'Autonomous updater enabled',
         'update',
@@ -468,25 +433,6 @@ unmanaged_activate = {{unmanaged_activate}}
 unmanaged_restart_agent = {{unmanaged_restart_agent}}
 $$,
         '{"expandable":true,"affected_sections":["update"],"patch_only":true,"predefined":true}'::jsonb,
-        TRUE
-    ),
-    (
-        '44444444-4444-4444-8444-444444444444',
-        'Routing daemon adapter',
-        'network',
-        'routing',
-        'Configure interval latency monitoring and the agent-level fallback external OSPF cost updater. Tunnel-local updaters remain higher priority.',
-        '{"fields":{"latency_monitoring_enabled":{"type":"boolean","default":true},"latency_monitoring_interval_secs":{"type":"number","minimum":15,"maximum":3600,"default":60},"latency_down_windows":{"type":"number","minimum":1,"maximum":60,"default":3},"auto_ospf_enabled":{"type":"boolean","default":false},"auto_ospf_min_cost_delta":{"type":"number","minimum":1,"maximum":65535,"default":5},"auto_ospf_healthy_windows":{"type":"number","minimum":1,"maximum":10,"default":2},"updater_argv":{"type":"array","default":["/usr/local/libexec/vpsman-ospf-cost"]}}}'::jsonb,
-        $$[network]
-latency_monitoring_enabled = {{latency_monitoring_enabled}}
-latency_monitoring_interval_secs = {{latency_monitoring_interval_secs}}
-latency_down_windows = {{latency_down_windows}}
-auto_ospf_enabled = {{auto_ospf_enabled}}
-auto_ospf_min_cost_delta = {{auto_ospf_min_cost_delta}}
-auto_ospf_healthy_windows = {{auto_ospf_healthy_windows}}
-auto_ospf_updater = { argv = {{updater_argv}}, max_timeout_secs = 10, max_output_bytes = 16384 }
-$$,
-        '{"expandable":true,"affected_sections":["network"],"patch_only":true,"predefined":true}'::jsonb,
         TRUE
     )
 ON CONFLICT (id) DO NOTHING;

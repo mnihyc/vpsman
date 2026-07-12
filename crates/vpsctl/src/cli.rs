@@ -21,9 +21,9 @@ use crate::cli_access::{
 };
 use crate::cli_update::{AgentUpdateReleaseLatestArgs, AgentUpdateReleaseRecordArgs};
 use crate::commands_network::{
-    TunnelAllocateCommand, TunnelOspfCostUpdateCommand, TunnelPlanCommand, TunnelPlanExportCommand,
-    TunnelProbeCommand, TunnelPromoteCustomAdapterCommand, TunnelSpeedTestCommand,
-    TunnelStatusCommand,
+    TunnelAllocateCommand, TunnelOspfCostUpdateCommand, TunnelOspfStatusRefreshCommand,
+    TunnelPlanCommand, TunnelPlanExportCommand, TunnelPlanMutationCommand, TunnelProbeCommand,
+    TunnelSpeedTestCommand, TunnelStatusCommand,
 };
 use crate::commands_terminal::{
     TerminalCloseCommand, TerminalInputCommand, TerminalOpenCommand, TerminalPollCommand,
@@ -1034,8 +1034,10 @@ pub(crate) enum Command {
     TunnelAllocate(TunnelAllocateCommand),
     TunnelPlan(Box<TunnelPlanCommand>),
     TunnelPlanExport(TunnelPlanExportCommand),
-    TunnelPromoteExternalObserve(crate::commands_network::TunnelPromoteExternalObserveCommand),
-    TunnelPromoteCustomAdapter(TunnelPromoteCustomAdapterCommand),
+    TunnelPlanEnable(TunnelPlanMutationCommand),
+    TunnelPlanDisable(TunnelPlanMutationCommand),
+    TunnelPlanDelete(TunnelPlanMutationCommand),
+    TunnelOspfStatusRefresh(TunnelOspfStatusRefreshCommand),
     TunnelOspfCostUpdate(TunnelOspfCostUpdateCommand),
     TunnelStatus(TunnelStatusCommand),
     TunnelProbe(TunnelProbeCommand),
@@ -1047,5 +1049,48 @@ pub(crate) enum Command {
 impl Command {
     pub(crate) fn supports_output_mode(&self) -> bool {
         !matches!(self, Command::Vty)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::Args;
+
+    #[test]
+    fn tunnel_plan_defaults_do_not_enable_or_require_ospf() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let parsed = Args::try_parse_from([
+                    "vpsctl",
+                    "tunnel-plan",
+                    "--name",
+                    "edge",
+                    "--interface-name",
+                    "tun0",
+                    "--kind",
+                    "gre",
+                    "--left-client-id",
+                    "left",
+                    "--right-client-id",
+                    "right",
+                    "--left-remote-underlay",
+                    "198.51.100.10",
+                    "--right-remote-underlay",
+                    "203.0.113.20",
+                    "--left-tunnel-ipv4-cidr",
+                    "10.255.0.0/31",
+                    "--right-tunnel-ipv4-cidr",
+                    "10.255.0.1/31",
+                    "--bandwidth-mbps",
+                    "100",
+                ]);
+                assert!(parsed.is_ok(), "{parsed:?}");
+            })
+            .expect("spawn CLI parser test")
+            .join()
+            .expect("CLI parser test panicked");
     }
 }

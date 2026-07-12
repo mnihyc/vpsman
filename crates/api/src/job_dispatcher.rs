@@ -19,11 +19,13 @@ use vpsman_server_core::{
 
 use crate::{
     backup_auto_artifacts::try_auto_record_backup_artifact,
+    internal_operator::{server_issued_job_actor, system_operator},
     model::{AuthContext, BackupRequestStatus, CreateBackupRequest, WsEvent},
     repository::Repository,
     repository_backups::BackupRequestSourceLink,
     repository_job_outputs::{JobOutputPersistConfig, JobOutputWriteResult},
     repository_jobs::ClaimedJobTarget,
+    routes_ingest::record_network_routing_terminal_result,
     state::AppState,
     TargetDispatchOutcome,
 };
@@ -410,6 +412,22 @@ async fn expire_control_timeout_targets(state: &AppState) -> Result<()> {
                 }
             }
         }
+        if let Err(error) = record_network_routing_terminal_result(
+            state,
+            target.job_id,
+            &target.client_id,
+            &target.status,
+            None,
+        )
+        .await
+        {
+            warn!(
+                ?error,
+                job_id = %target.job_id,
+                client_id = %target.client_id,
+                "network routing state update failed after deadline expiry"
+            );
+        }
         let refreshed = state
             .repo
             .refresh_job_status_from_targets(target.job_id)
@@ -508,6 +526,23 @@ async fn finish_claimed_target(
         }
     }
     if target_terminalized {
+        let output = outcome.outputs.iter().rev().find(|output| output.done);
+        if let Err(error) = record_network_routing_terminal_result(
+            state,
+            claimed.job_id,
+            &claimed.client_id,
+            &outcome.status,
+            output,
+        )
+        .await
+        {
+            warn!(
+                ?error,
+                job_id = %claimed.job_id,
+                client_id = %claimed.client_id,
+                "network routing state update failed after synchronous dispatch"
+            );
+        }
         let refreshed = state
             .repo
             .refresh_job_status_from_targets(claimed.job_id)
@@ -589,7 +624,10 @@ async fn auth_context_for_claim(
     claimed: &ClaimedJobTarget,
 ) -> Result<Option<AuthContext>> {
     let Some(actor_id) = claimed.actor_id else {
-        return Ok(None);
+        if claimed.source_schedule_id.is_some() {
+            return Ok(None);
+        }
+        return Ok(server_issued_job_actor(&claimed.operation).map(system_operator));
     };
     if actor_id.is_nil() {
         return Ok(None);

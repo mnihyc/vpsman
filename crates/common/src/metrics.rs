@@ -1,5 +1,11 @@
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_TELEMETRY_RETENTION_DAYS: i32 = 90;
+pub const DEFAULT_TELEMETRY_RETENTION_PRUNE_LIMIT: i32 = 10_000;
+pub const MAX_TELEMETRY_DISKS: usize = 256;
+pub const MAX_TELEMETRY_NETWORKS: usize = 512;
+pub const MAX_TELEMETRY_TUNNELS: usize = 512;
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct LoadAverage {
     pub one: f64,
@@ -65,8 +71,6 @@ pub struct RuntimeTunnelStat {
     pub ownership_mode: String,
     #[serde(default = "default_runtime_tunnel_mutation_policy")]
     pub mutation_policy: String,
-    #[serde(default)]
-    pub promotion_required: bool,
     pub source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operstate: Option<String>,
@@ -118,18 +122,6 @@ pub struct RuntimeTunnelStat {
     pub latency_healthy_windows: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency_missed_windows: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_ospf_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_ospf_status: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_ospf_reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_ospf_current_cost: Option<u16>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_ospf_recommended_cost: Option<u16>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_ospf_updated_unix: Option<u64>,
 }
 
 fn default_runtime_tunnel_mutation_policy() -> String {

@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import {
   calculateOspfCostPreview,
   clampTunnelBandwidthMbps,
+  runtimeManagerLabel,
 } from "../src/topologyRuntime";
 
 function previewCost(
@@ -146,4 +147,12 @@ test("OSPF preview sanitizes temporary numeric form states", () => {
     }),
   ).toBe(10);
   expect(previewCost(100, -20, -1, -1)).toBe(100);
+});
+
+test("tunnel runtime ownership uses one operator-facing vocabulary", () => {
+  expect(runtimeManagerLabel("agent_iproute2_managed")).toBe("Agent iproute2");
+  expect(runtimeManagerLabel("external_observed")).toBe("External observed");
+  expect(runtimeManagerLabel("external_managed_adapter")).toBe(
+    "External adapter",
+  );
 });

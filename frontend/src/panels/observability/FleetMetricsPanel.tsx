@@ -1,22 +1,35 @@
-import { Activity, RefreshCw } from "lucide-react";
+import { Activity, RefreshCw, SlidersHorizontal } from "lucide-react";
 import { ActionFeedback } from "../../components/ActionFeedback";
 import { TimeSeriesChart, type TimeSeriesChartLine } from "../../components/TimeSeriesChart";
+import { VpsCombobox } from "../../components/VpsCombobox";
 import { dashboardChartColors } from "../../colorPalette";
+import {
+  dashboardScopeLabel,
+  dashboardScopeValueOptions,
+  dateTimeLocalToIso,
+  isoToDateTimeLocal,
+} from "../../dashboardQuery";
 import type {
+  AgentView,
   DashboardLabelClusterRecord,
   DashboardOverviewRecord,
+  DashboardPointDensity,
   DashboardPreferences,
   DashboardResourceMetric,
   DashboardResourceSeriesRecord,
+  DashboardScopeKind,
   DashboardWindow,
 } from "../../types";
+import { resourceMetricDefinition } from "../../telemetryMetrics";
 import { formatCompactTime } from "../../utils";
 
 type FleetMetricsPanelProps = {
+  agents: AgentView[];
   error: string | null;
   loading: boolean;
   onPreferencesChange: (patch: Partial<DashboardPreferences>) => void;
   onRefresh: () => void;
+  onOpenVpsDetail: (agent: AgentView | string) => void;
   onWindowChange: (window: DashboardWindow) => void;
   overview: DashboardOverviewRecord | null;
   preferences: DashboardPreferences;
@@ -28,6 +41,11 @@ const resourceMetricOptions: Array<{ label: string; value: DashboardResourceMetr
   { label: "CPU", value: "cpu_load" },
   { label: "Memory", value: "memory_used" },
   { label: "Disk", value: "disk_free" },
+];
+const pointDensityOptions: Array<{ label: string; value: DashboardPointDensity }> = [
+  { label: "Compact", value: "compact" },
+  { label: "Balanced", value: "balanced" },
+  { label: "Dense", value: "dense" },
 ];
 
 type ResourceChartData = {
@@ -45,11 +63,19 @@ type ResourceEvidence = {
   sparseNotice: string | null;
 };
 
+type TelemetryFreshness = {
+  detail: string;
+  label: string;
+  stale: boolean;
+};
+
 export function FleetMetricsPanel({
+  agents,
   error,
   loading,
   onPreferencesChange,
   onRefresh,
+  onOpenVpsDetail,
   onWindowChange,
   overview,
   preferences,
@@ -57,16 +83,31 @@ export function FleetMetricsPanel({
 }: FleetMetricsPanelProps) {
   const resourceCurve = overview?.resource_curve ?? null;
   const resourceChart = resourceChartData(resourceCurve?.series ?? []);
+  const latestSampleAt = resourceCurve?.latest_sample_at ?? null;
   const sampledClients = resourceCurve?.sampled_clients ?? overview?.resources.sampled_clients ?? 0;
+  const customRangeActive = Boolean(preferences.startAt.trim() || preferences.endAt.trim());
+  const selectedRangeName = customRangeActive ? "Custom" : windowLabel(window);
   const resourceEvidence = buildResourceEvidence(
     overview,
-    window,
+    selectedRangeName,
     resourceChart,
     sampledClients,
+    latestSampleAt,
+  );
+  const freshness = buildTelemetryFreshness(
+    overview,
+    latestSampleAt,
   );
   const windowOptions = overview?.available_filters.windows.map((option) => option.value) ?? fallbackDashboardWindows;
   const groupOptions = overview?.available_filters.group_by_options ?? [];
   const excludedClients = resourceCurve?.excluded_clients ?? 0;
+  const matchedClients = overview?.scope.matched_clients ?? 0;
+  const selectedScopeLabel = dashboardScopeLabel(preferences, overview);
+  const scopeOptions = dashboardScopeValueOptions(preferences.scopeKind, overview);
+  const activeAdvancedFilters =
+    Number(preferences.scopeKind !== "all" && Boolean(preferences.scopeValue.trim())) +
+    Number(customRangeActive) +
+    Number(preferences.pointDensity !== "balanced");
   const generatedAt = overview?.generated_at ? formatCompactTime(overview.generated_at) : "No refresh evidence";
   const timeRange = overview
     ? `${formatCompactTime(overview.time_range.start_at)} - ${formatCompactTime(overview.time_range.end_at)}`
@@ -82,6 +123,9 @@ export function FleetMetricsPanel({
             <span>Read-only CPU, memory, disk, and fleet grouping analysis from retained telemetry.</span>
           </div>
           <div className="sectionActions">
+            <span className="fleetMetricsScopeSummary" title={`Current metrics scope: ${selectedScopeLabel}`}>
+              Scope: {selectedScopeLabel}
+            </span>
             <button className="secondaryAction compactAction" disabled={loading} onClick={onRefresh} type="button">
               <RefreshCw size={14} />
               Refresh
@@ -95,12 +139,24 @@ export function FleetMetricsPanel({
           tone="danger"
         />
 
+        {freshness.stale && (
+          <div className="observabilityStaleBanner" role="status">
+            <div>
+              <strong>{freshness.label}</strong>
+              <span>{freshness.detail}</span>
+            </div>
+            <div>
+              <span>{selectedScopeLabel}</span>
+            </div>
+          </div>
+        )}
+
         <div className="observabilityMetricsControls" aria-label="Fleet metrics controls">
           <div className="timeRangeTabs" aria-label="Fleet metrics time range">
             {windowOptions.map((option) => (
               <button
-                aria-pressed={window === option}
-                className={window === option ? "active" : ""}
+                aria-pressed={!customRangeActive && window === option}
+                className={!customRangeActive && window === option ? "active" : ""}
                 key={option}
                 onClick={() => onWindowChange(option)}
                 type="button"
@@ -116,6 +172,7 @@ export function FleetMetricsPanel({
                 className={preferences.resourceMetric === option.value ? "active" : ""}
                 key={option.value}
                 onClick={() => onPreferencesChange({ resourceMetric: option.value })}
+                title={resourceMetricDefinition(option.value)}
                 type="button"
               >
                 {option.label}
@@ -145,15 +202,138 @@ export function FleetMetricsPanel({
               ))}
             </select>
           </label>
+          <details className="fleetMetricsAdvancedFilters">
+            <summary>
+              <SlidersHorizontal size={14} />
+              <span>Advanced filters</span>
+              {activeAdvancedFilters > 0 && <b>{activeAdvancedFilters}</b>}
+            </summary>
+            <div className="dashboardControlBar fleetMetricsAdvancedFilterGrid">
+              <label>
+                <span>Scope</span>
+                <select
+                  aria-label="Fleet metrics scope kind"
+                  onChange={(event) =>
+                    onPreferencesChange({
+                      scopeKind: event.target.value as DashboardScopeKind,
+                      scopeValue: "",
+                    })
+                  }
+                  value={preferences.scopeKind}
+                >
+                  <option value="all">All VPS</option>
+                  <option value="provider">Provider</option>
+                  <option value="country">Country</option>
+                  <option value="tag">Tag</option>
+                  <option value="client">VPS ID/name</option>
+                </select>
+              </label>
+              {preferences.scopeKind === "all" ? (
+                <div className="dashboardScopeHint">Full fleet selected</div>
+              ) : preferences.scopeKind === "client" ? (
+                <label>
+                  <span>Scope value</span>
+                  <VpsCombobox
+                    agents={agents}
+                    ariaLabel="Fleet metrics scope value"
+                    onChange={(value) => onPreferencesChange({ scopeValue: value })}
+                    placeholder="Search scoped VPS"
+                    value={preferences.scopeValue}
+                  />
+                </label>
+              ) : (
+                <label>
+                  <span>Scope value</span>
+                  <select
+                    aria-label="Fleet metrics scope value"
+                    onChange={(event) => onPreferencesChange({ scopeValue: event.target.value })}
+                    value={preferences.scopeValue}
+                  >
+                    <option value="">Select {preferences.scopeKind}</option>
+                    {scopeOptions.map((option) => (
+                      <option key={option.query} value={option.value}>
+                        {option.label} ({option.count})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              <label>
+                <span>Points</span>
+                <select
+                  aria-label="Fleet metrics point density"
+                  onChange={(event) =>
+                    onPreferencesChange({
+                      pointDensity: event.target.value as DashboardPointDensity,
+                    })
+                  }
+                  value={preferences.pointDensity}
+                >
+                  {pointDensityOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Start</span>
+                <input
+                  aria-label="Fleet metrics start date"
+                  onChange={(event) =>
+                    onPreferencesChange({ startAt: dateTimeLocalToIso(event.target.value) })
+                  }
+                  type="datetime-local"
+                  value={isoToDateTimeLocal(preferences.startAt)}
+                />
+              </label>
+              <label>
+                <span>End</span>
+                <input
+                  aria-label="Fleet metrics end date"
+                  onChange={(event) =>
+                    onPreferencesChange({ endAt: dateTimeLocalToIso(event.target.value) })
+                  }
+                  type="datetime-local"
+                  value={isoToDateTimeLocal(preferences.endAt)}
+                />
+              </label>
+              <button
+                className="secondaryAction compactAction"
+                disabled={activeAdvancedFilters === 0}
+                onClick={() =>
+                  onPreferencesChange({
+                    endAt: "",
+                    pointDensity: "balanced",
+                    scopeKind: "all",
+                    scopeValue: "",
+                    startAt: "",
+                  })
+                }
+                type="button"
+              >
+                Reset filters
+              </button>
+            </div>
+          </details>
         </div>
 
         <div className="metricGrid observabilityMetricsSummary" aria-label="Fleet metrics summary">
-          <MetricTile label="Current metric" value={resourceMetricTitle(preferences.resourceMetric)} detail={`${sampledClients} VPS sampled`} />
-          <MetricTile label="Selected range" value={windowLabel(window)} detail={resourceEvidence.selectedRangeLabel || timeRange} />
+          <MetricTile
+            label="Current metric"
+            value={resourceMetricTitle(preferences.resourceMetric)}
+            detail={`${sampledClients} charted · ${excludedClients} excluded`}
+          />
+          <MetricTile
+            label="Scope"
+            value={selectedScopeLabel}
+            detail={`${matchedClients} matched · ${sampledClients} with retained samples`}
+          />
+          <MetricTile label="Selected range" value={selectedRangeName} detail={resourceEvidence.selectedRangeLabel || timeRange} />
           <MetricTile
             label="Telemetry freshness"
-            value={loading ? "Refreshing" : resourceEvidence.lastSampleValue}
-            detail={`Data available ${resourceEvidence.dataAvailableValue}; overview ${generatedAt}`}
+            value={loading ? "Refreshing" : freshness.label}
+            detail={`Data available ${resourceEvidence.dataAvailableValue} · overview ${generatedAt}`}
           />
           <MetricTile
             label="Grouping"
@@ -180,12 +360,18 @@ export function FleetMetricsPanel({
                 <small>{sampledClients} sampled VPS</small>
               </div>
               <p className="observabilityRangeLine">
-                Selected: {windowLabel(window)} · Data available: {resourceEvidence.dataAvailableValue} · Last sample: {resourceEvidence.lastSampleValue}
+                Selected: {selectedRangeName} · Data available: {resourceEvidence.dataAvailableValue} · Last sample: {resourceEvidence.lastSampleValue}
+              </p>
+              <p
+                className="observabilityMetricDefinition"
+                title={resourceMetricDefinition(preferences.resourceMetric)}
+              >
+                Metric definition: {resourceMetricDefinition(preferences.resourceMetric)}
               </p>
               <div className="observabilityChartEvidence" aria-label="Fleet resource freshness">
                 <div>
                   <span>Selected window</span>
-                  <strong>{windowLabel(window)}</strong>
+                  <strong>{selectedRangeName}</strong>
                   <small>{resourceEvidence.selectedRangeLabel}</small>
                 </div>
                 <div className={resourceEvidence.isSparse ? "warning" : undefined}>
@@ -217,7 +403,14 @@ export function FleetMetricsPanel({
                 <span>{resourceCurve?.series.length ?? 0} shown</span>
               </div>
               {(resourceCurve?.series ?? []).map((series) => (
-                <div className="dashboardClientRow staticRow" key={series.client_id}>
+                <button
+                  aria-label={`Open ${series.label} instance detail`}
+                  className="dashboardClientRow"
+                  key={series.client_id}
+                  onClick={() => onOpenVpsDetail(series.client_id)}
+                  title={`Open instance detail for ${series.label}`}
+                  type="button"
+                >
                   <span>
                     <strong>{series.label}</strong>
                     <small>
@@ -225,7 +418,7 @@ export function FleetMetricsPanel({
                     </small>
                   </span>
                   <b>{formatResourceValue(preferences.resourceMetric, series.current)}</b>
-                </div>
+                </button>
               ))}
               {!resourceCurve?.series.length && (
                 <div className="emptyState compactEmpty">
@@ -279,7 +472,7 @@ function GroupTile({ cluster }: { cluster: DashboardLabelClusterRecord }) {
       <span>{cluster.kind}</span>
       <strong>{cluster.label}</strong>
       <small>
-        {cluster.online}/{cluster.total} reported reachable, {cluster.warnings} warning observations, {formatBitsPerSecond(cluster.rx_bps + cluster.tx_bps)} retained traffic
+        {cluster.online}/{cluster.total} reported reachable, {cluster.warnings} warning observations, {formatBitsPerSecond(cluster.rx_bps + cluster.tx_bps)} aggregate interval-average rate
       </small>
     </div>
   );
@@ -382,12 +575,13 @@ function resourcePeakLabel(metric: DashboardResourceMetric): string {
 
 function buildResourceEvidence(
   overview: DashboardOverviewRecord | null,
-  window: DashboardWindow,
+  selectedRangeName: string,
   chart: ResourceChartData,
   sampledClients: number,
+  latestSampleAt: string | null,
 ): ResourceEvidence {
   const firstSample = chart.times[0] ?? null;
-  const lastSample = chart.times[chart.times.length - 1] ?? null;
+  const lastSample = latestSampleAt ?? chart.times[chart.times.length - 1] ?? null;
   const selectedStartMs = overview ? Date.parse(overview.time_range.start_at) : NaN;
   const selectedEndMs = overview ? Date.parse(overview.time_range.end_at) : NaN;
   const selectedDurationMs =
@@ -426,8 +620,61 @@ function buildResourceEvidence(
       ? `${formatEvidenceTime(overview.time_range.start_at)} to ${formatEvidenceTime(overview.time_range.end_at)}`
       : "No selected range evidence",
     sparseNotice: isSparse
-      ? `Sparse data: ${pointsPerVps} sample${pointsPerVps === 1 ? "" : "s"} per VPS across the selected ${windowLabel(window)}. Treat this as point evidence, not a continuous trend.`
+      ? `Sparse data: ${pointsPerVps} sample${pointsPerVps === 1 ? "" : "s"} per VPS across the selected ${selectedRangeName}. Treat this as point evidence, not a continuous trend.`
       : null,
+  };
+}
+
+function buildTelemetryFreshness(
+  overview: DashboardOverviewRecord | null,
+  lastSample: string | null,
+): TelemetryFreshness {
+  if (!overview) {
+    return {
+      detail: "Waiting for the first retained telemetry query",
+      label: "Waiting",
+      stale: false,
+    };
+  }
+  const generatedMs = Date.parse(overview.generated_at);
+  const rangeEndMs = Date.parse(overview.time_range.end_at);
+  const currentRange =
+    Number.isFinite(generatedMs) &&
+    Number.isFinite(rangeEndMs) &&
+    Math.abs(generatedMs - rangeEndMs) <= 5 * 60_000;
+  if (!lastSample) {
+    return {
+      detail: currentRange
+        ? "No retained samples match the current scope and range"
+        : "No retained samples match this historical scope and range",
+      label: "No samples",
+      stale: currentRange,
+    };
+  }
+  const lastSampleMs = Date.parse(lastSample);
+  if (!currentRange) {
+    return {
+      detail: `Historical query; latest matching sample ${formatEvidenceTime(lastSample)}`,
+      label: "Historical range",
+      stale: false,
+    };
+  }
+  const lagMs =
+    Number.isFinite(rangeEndMs) && Number.isFinite(lastSampleMs)
+      ? Math.max(0, rangeEndMs - lastSampleMs)
+      : 0;
+  if (lagMs <= 3 * 60_000) {
+    return {
+      detail: `Latest sample ${formatEvidenceTime(lastSample)}`,
+      label: "Current",
+      stale: false,
+    };
+  }
+  const lag = formatDuration(lagMs);
+  return {
+    detail: `Latest sample is ${lag} behind the selected range end; values remain visible as last-known evidence`,
+    label: `Telemetry ${lag} behind`,
+    stale: true,
   };
 }
 

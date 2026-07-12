@@ -25,25 +25,54 @@ jq -e '
   and (.public_key_hex | test("^[0-9a-f]{64}$"))
 ' <<<"$noise_json" >/dev/null
 
-plan_json="$("$bin" --output pretty-json tunnel-plan \
+plain_plan_json="$("$bin" --output pretty-json tunnel-plan \
   --name edge-structured \
   --interface-name tunstructured \
   --kind gre \
   --left-client-id edge-a \
   --right-client-id edge-b \
-  --left-underlay 203.0.113.10 \
-  --right-underlay 203.0.113.20 \
+  --left-remote-underlay 203.0.113.10 \
+  --right-remote-underlay 203.0.113.20 \
   --address-pool-cidr 10.253.0.0/30 \
   --left-tunnel-ipv4-cidr 10.253.0.0/31 \
   --right-tunnel-ipv4-cidr 10.253.0.1/31 \
-  --bandwidth-mbps 100 \
-  --latency-ms 25)"
+  --bandwidth-mbps 137)"
 jq -e '
   .name == "edge-structured"
   and .kind == "gre"
-  and .mutates_host == false
+  and .bandwidth_mbps == 137
+  and .latency_primary_family == "ipv4"
+  and (.conflicts | length == 0)
+  and (has("ospf") | not)
+  and (has("recommended_ospf_cost") | not)
+' <<<"$plain_plan_json" >/dev/null
+
+ospf_plan_json="$("$bin" --output pretty-json tunnel-plan \
+  --name edge-structured-ospf \
+  --interface-name tunospf \
+  --kind gre \
+  --left-client-id edge-a \
+  --right-client-id edge-b \
+  --left-remote-underlay 203.0.113.10 \
+  --right-remote-underlay 203.0.113.20 \
+  --address-pool-cidr 10.253.0.4/30 \
+  --left-tunnel-ipv4-cidr 10.253.0.4/31 \
+  --right-tunnel-ipv4-cidr 10.253.0.5/31 \
+  --bandwidth-mbps 137 \
+  --ospf \
+  --ospf-latency-ms 25 \
+  --ospf-packet-loss-ratio 0.01 \
+  --ospf-preference 1.2 \
+  --left-routing-adapter-template-id 00000000-0000-0000-0000-000000000101 \
+  --right-routing-adapter-template-id 00000000-0000-0000-0000-000000000102)"
+jq -e '
+  .name == "edge-structured-ospf"
+  and .ospf.mode == "reviewed"
+  and .ospf.planned_latency_ms == 25
+  and .ospf.left_adapter_template_id == "00000000-0000-0000-0000-000000000101"
+  and .ospf.right_adapter_template_id == "00000000-0000-0000-0000-000000000102"
   and (.recommended_ospf_cost | type == "number")
-' <<<"$plan_json" >/dev/null
+' <<<"$ospf_plan_json" >/dev/null
 
 jsonl_normalized="$("$bin" --output json job-follow \
   --api-url "http://127.0.0.1:9" \
@@ -65,5 +94,5 @@ help_text="$("$bin" --help)"
 
 printf '{\n'
 printf '  "vpsctl_structured_output_smoke": "ok",\n'
-printf '  "checks": ["global_output_help", "compact_json", "pretty_json", "interactive_vty_rejection"]\n'
+printf '  "checks": ["global_output_help", "compact_json", "plain_tunnel_json", "explicit_ospf_json", "interactive_vty_rejection"]\n'
 printf '}\n'

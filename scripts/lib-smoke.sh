@@ -306,12 +306,14 @@ smoke_track_container() {
 }
 
 smoke_free_port() {
+  local port_min="${SMOKE_PORT_MIN:-20000}"
+  local port_max="${SMOKE_PORT_MAX:-29999}"
   local port
-  for port in $(shuf -i 20000-45000 -n 200); do
+  for port in $(shuf -i "$port_min-$port_max" -n 200); do
     if smoke_port_is_reserved "$port"; then
       continue
     fi
-    if ! timeout 0.2 bash -c "</dev/tcp/127.0.0.1/$port" >/dev/null 2>&1; then
+    if smoke_port_can_bind "$port"; then
       SMOKE_RESERVED_PORTS+=("$port")
       printf '%s\n' "$port"
       return 0
@@ -319,6 +321,21 @@ smoke_free_port() {
   done
   echo "failed to find free local TCP port" >&2
   return 1
+}
+
+smoke_port_can_bind() {
+  local port="$1"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$port" <<'PY'
+import socket
+import sys
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+    listener.bind(("127.0.0.1", int(sys.argv[1])))
+PY
+    return
+  fi
+  ! timeout 0.2 bash -c "</dev/tcp/127.0.0.1/$port" >/dev/null 2>&1
 }
 
 smoke_port_is_reserved() {

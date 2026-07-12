@@ -157,8 +157,7 @@ if [[ "${VPSMAN_RELEASE_SKIP_SMOKES:-0}" == "1" ]]; then
   skip_step smoke-live-source-template-runtime-config "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-live-agent-update "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-live-runtime-tunnel-sync "VPSMAN_RELEASE_SKIP_SMOKES=1"
-  skip_step smoke-network-preset-container "VPSMAN_RELEASE_SKIP_SMOKES=1"
-  skip_step smoke-bird2-topology-convergence "VPSMAN_RELEASE_SKIP_SMOKES=1"
+  skip_step smoke-network-adapter-contract "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-docker-50-agent-long-running-fleet "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-final-e2e "VPSMAN_RELEASE_SKIP_SMOKES=1"
 else
@@ -209,10 +208,8 @@ else
     env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-live-agent-update.sh
   run_step smoke-live-runtime-tunnel-sync \
     env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-live-runtime-tunnel-sync.sh
-  run_step smoke-network-preset-container \
-    bash scripts/smoke-network-preset-container.sh
-  run_step smoke-bird2-topology-convergence \
-    bash scripts/smoke-bird2-topology-convergence.sh
+  run_step smoke-network-adapter-contract \
+    bash scripts/smoke-network-adapter-contract.sh
   run_step smoke-docker-50-agent-long-running-fleet \
     env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-docker-50-agent-long-running-fleet.sh
   run_step smoke-final-e2e \

@@ -43,7 +43,6 @@ CREATE TABLE telemetry_tunnels (
     kind TEXT NOT NULL,
     ownership_mode TEXT NOT NULL,
     mutation_policy TEXT NOT NULL,
-    promotion_required BOOLEAN NOT NULL,
     source TEXT NOT NULL,
     operstate TEXT,
     mtu BIGINT,
@@ -71,12 +70,6 @@ CREATE TABLE telemetry_tunnels (
     packet_loss_ratio DOUBLE PRECISION,
     latency_healthy_windows INTEGER,
     latency_missed_windows INTEGER,
-    auto_ospf_enabled BOOLEAN,
-    auto_ospf_status TEXT,
-    auto_ospf_reason TEXT,
-    auto_ospf_current_cost INTEGER,
-    auto_ospf_recommended_cost INTEGER,
-    auto_ospf_updated_unix BIGINT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (client_id, interface)
 );

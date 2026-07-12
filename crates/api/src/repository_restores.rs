@@ -235,6 +235,7 @@ impl Repository {
                         paths,
                         include_config,
                         follow_symlinks,
+                        missing_path_policy,
                         status,
                         payload_hash,
                         command_scope,

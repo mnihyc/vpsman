@@ -295,7 +295,7 @@ impl Repository {
                 limit: Some(5000),
             })
             .await?;
-        let rollups = latest_rollups(self.list_telemetry_rollups(5000, None, None).await?);
+        let rollups = latest_rollups(self.list_latest_telemetry_rollups(5000, None, None).await?);
         let traffic_by_client = traffic
             .iter()
             .map(|record| (record.client_id.clone(), record))
@@ -741,7 +741,7 @@ impl Repository {
             })
             .await?;
         let samples = self.list_traffic_counter_samples().await?;
-        let rollups = latest_rollups(self.list_telemetry_rollups(5000, None, None).await?);
+        let rollups = latest_rollups(self.list_latest_telemetry_rollups(5000, None, None).await?);
         let now = Utc::now();
         let now_text = now.to_rfc3339();
         let mut fired = 0_usize;

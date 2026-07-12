@@ -147,7 +147,10 @@ impl AppState {
             .collect::<HashMap<_, _>>();
         append_agent_status_alerts(&mut alerts, &agents);
 
-        let rollups = self.repo.list_telemetry_rollups(200, None, None).await?;
+        let rollups = self
+            .repo
+            .list_latest_telemetry_rollups(5_000, None, None)
+            .await?;
         let base_alert_policy = self.fleet_alert_policy();
         append_resource_alerts(&mut alerts, &latest_rollups(rollups), &base_alert_policy)?;
 
@@ -163,7 +166,7 @@ impl AppState {
             .await?;
         alerts.extend(policy_alerts.iter().map(policy_alert_to_fleet_alert));
 
-        let tunnels = self.repo.list_telemetry_tunnels(200, None, None).await?;
+        let tunnels = self.repo.list_telemetry_tunnels(5_000, None, None).await?;
         append_tunnel_alerts(&mut alerts, &tunnels);
 
         let source_status = self.list_source_status(None, None).await?;
@@ -349,36 +352,6 @@ fn append_tunnel_alerts(alerts: &mut Vec<FleetAlertView>, tunnels: &[TelemetryTu
                 }),
             );
         }
-        if tunnel.plan_correlation == "stale_saved_plan" {
-            push_tunnel_alert(
-                alerts,
-                "warning",
-                tunnel,
-                "tunnel_saved_plan_drift",
-                "Saved tunnel plan has runtime drift",
-                "runtime tunnel telemetry no longer matches the saved plan".to_string(),
-                json!({
-                    "plan_id": tunnel.plan_id,
-                    "plan_name": &tunnel.plan_name,
-                    "plan_correlation": &tunnel.plan_correlation,
-                }),
-            );
-        } else if tunnel.promotion_required {
-            push_tunnel_alert(
-                alerts,
-                "info",
-                tunnel,
-                "tunnel_import_candidate",
-                "Observed tunnel needs promotion",
-                "operator review is required before this observed tunnel becomes managed"
-                    .to_string(),
-                json!({
-                    "promotion_required": true,
-                    "mutation_policy": &tunnel.mutation_policy,
-                    "plan_correlation": &tunnel.plan_correlation,
-                }),
-            );
-        }
     }
 }
 
@@ -386,7 +359,7 @@ fn append_source_readiness_alerts(alerts: &mut Vec<FleetAlertView>, rows: &[Sour
     for row in rows {
         let severity = match row.status.as_str() {
             "degraded" | "selected_no_store" => "warning",
-            "selected_no_samples" | "selected_no_artifacts" | "needs_promotion" => "info",
+            "selected_no_samples" | "selected_no_artifacts" => "info",
             _ => continue,
         };
         push_alert(

@@ -20,7 +20,8 @@ use crate::{
     unix_now,
 };
 use vpsman_common::{
-    SERVER_JOB_STATUS_FAILED, SERVER_JOB_STATUS_RUNNING, SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
+    DEFAULT_TELEMETRY_RETENTION_DAYS, SERVER_JOB_STATUS_FAILED, SERVER_JOB_STATUS_RUNNING,
+    SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
 };
 
 #[tokio::test]
@@ -37,7 +38,7 @@ async fn history_retention_policy_updates_and_prunes_memory_audit() {
     }));
     assert!(defaults.iter().any(|policy| {
         policy.domain == "telemetry_rollups"
-            && policy.retention_days == 3650
+            && policy.retention_days == DEFAULT_TELEMETRY_RETENTION_DAYS
             && policy.built_in_default
     }));
 

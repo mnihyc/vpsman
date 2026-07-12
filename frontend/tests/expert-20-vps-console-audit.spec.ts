@@ -290,7 +290,7 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
     .fill("provider:acmecloud && tag:payments");
   await expect(composer.getByText("24/24").first()).toBeVisible();
   await activate(composer.getByRole("button", { name: "Refresh target preview" }));
-  await expect(composer.getByText("24 resolved targets")).toBeVisible();
+  await expect(composer.getByText("24/24 resolved from selector")).toBeVisible();
 
   const impact = composer.locator(".targetImpactPreview");
   await expect(
@@ -356,6 +356,11 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
     failedReasons.getByText(/process_guard: permission denied/),
   ).toBeVisible();
   await expect(failedReasons.getByText(/agent offline/)).toBeVisible();
+  await resultPanel.scrollIntoViewIfNeeded();
+  await page.screenshot({
+    fullPage: true,
+    path: testInfo.outputPath("expert-24-vps-dispatch-result.png"),
+  });
 
   const jobRequest = await page.evaluate(() => {
     const requests = (
@@ -410,7 +415,7 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   expect(layout.overlaps).toEqual([]);
   await page.screenshot({
     fullPage: true,
-    path: testInfo.outputPath("expert-24-vps-dispatch.png"),
+    path: testInfo.outputPath("expert-24-vps-registration.png"),
   });
 });
 

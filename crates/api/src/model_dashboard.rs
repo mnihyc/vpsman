@@ -111,6 +111,7 @@ pub(crate) struct DashboardResourceCurveView {
     pub(crate) sampled_clients: usize,
     pub(crate) excluded_clients: usize,
     pub(crate) top_limit: usize,
+    pub(crate) latest_sample_at: Option<String>,
     pub(crate) series: Vec<DashboardResourceSeriesView>,
 }
 

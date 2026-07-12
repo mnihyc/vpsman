@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use tokio::time;
 use vpsman_common::{
     render_tunnel_endpoint_config, AgentConfig, AgentRuntimeUnprivilegedMutationPolicy,
-    RuntimeTunnelCommand, RuntimeTunnelManager, RuntimeTunnelRoute, RuntimeTunnelTrafficLimit,
-    TunnelEndpointConfig, TunnelEndpointSide, TunnelKind, TunnelPlan,
+    RuntimeTunnelAdapterCommands, RuntimeTunnelCommand, RuntimeTunnelManager, RuntimeTunnelRoute,
+    RuntimeTunnelTrafficLimit, TunnelEndpointConfig, TunnelEndpointSide, TunnelKind, TunnelPlan,
 };
 
 mod command_runner;
@@ -17,6 +17,7 @@ use self::command_runner::run_runtime_command_cancelable;
 pub(crate) struct NetworkRuntimeReconcileInput<'a> {
     pub(crate) config: &'a AgentConfig,
     pub(crate) plan: &'a TunnelPlan,
+    pub(crate) runtime_adapter: Option<&'a RuntimeTunnelAdapterCommands>,
     pub(crate) side: TunnelEndpointSide,
     pub(crate) max_timeout_secs: u64,
     #[cfg(test)]
@@ -26,6 +27,7 @@ pub(crate) struct NetworkRuntimeReconcileInput<'a> {
 pub(crate) struct NetworkRuntimeRemoveInput<'a> {
     pub(crate) config: &'a AgentConfig,
     pub(crate) plan: &'a TunnelPlan,
+    pub(crate) runtime_adapter: Option<&'a RuntimeTunnelAdapterCommands>,
     pub(crate) side: TunnelEndpointSide,
     pub(crate) max_timeout_secs: u64,
     #[cfg(test)]
@@ -57,13 +59,6 @@ pub(crate) async fn execute_runtime_tunnel_reconcile_report_cancelable(
     )
     .await
     .context("runtime tunnel reconcile timed out")?
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) async fn execute_runtime_tunnel_remove_report(
-    input: NetworkRuntimeRemoveInput<'_>,
-) -> Result<serde_json::Value> {
-    execute_runtime_tunnel_remove_report_cancelable(input, CommandCancelToken::default()).await
 }
 
 pub(crate) async fn execute_runtime_tunnel_remove_report_cancelable(
@@ -101,7 +96,9 @@ async fn reconcile_runtime_tunnel(
             "interface": input.plan.interface_name,
         }));
     }
-    if !input.config.network.apply_enabled {
+    if !input.config.network.apply_enabled
+        && input.plan.runtime_control.manager != RuntimeTunnelManager::ExternalObserved
+    {
         return Ok(serde_json::json!({
             "type": "runtime_tunnel_reconcile",
             "status": "skipped",
@@ -128,15 +125,22 @@ async fn reconcile_runtime_tunnel(
         preflight_reports.extend(reports);
         existing_link_validation = validation;
     }
-    let cleanup_specs = build_runtime_topology_cleanup_steps(input.config, input.plan)?;
+    let cleanup_specs =
+        if input.plan.runtime_control.manager == RuntimeTunnelManager::AgentIproute2Managed {
+            build_runtime_topology_cleanup_steps(input.config, input.plan)?
+        } else {
+            Vec::new()
+        };
     let specs = match input.plan.runtime_control.manager {
         RuntimeTunnelManager::AgentIproute2Managed => {
             build_iproute2_reconcile_steps(input.config, input.plan, &endpoint, link_exists)?
         }
         RuntimeTunnelManager::ExternalObserved => Vec::new(),
-        RuntimeTunnelManager::ExternalManagedAdapter => {
-            build_external_adapter_steps(input.plan, &endpoint)?
-        }
+        RuntimeTunnelManager::ExternalManagedAdapter => build_external_adapter_steps(
+            input.plan,
+            &endpoint,
+            required_runtime_adapter(input.runtime_adapter)?,
+        )?,
     };
 
     let specs = cleanup_specs.into_iter().chain(specs).collect::<Vec<_>>();
@@ -192,6 +196,7 @@ async fn reconcile_runtime_tunnel(
                 input.config,
                 input.plan,
                 &endpoint,
+                input.runtime_adapter,
                 link_exists,
                 failed_required_label.unwrap_or("unknown_required_step"),
                 cancel_token.clone(),
@@ -247,7 +252,9 @@ async fn remove_runtime_tunnel(
         );
     }
 
-    if !input.config.network.runtime_reconcile_enabled {
+    if !input.config.network.runtime_reconcile_enabled
+        && input.plan.runtime_control.manager != RuntimeTunnelManager::ExternalObserved
+    {
         return Ok(serde_json::json!({
             "type": "runtime_tunnel_remove",
             "status": "skipped",
@@ -256,7 +263,9 @@ async fn remove_runtime_tunnel(
             "interface": input.plan.interface_name,
         }));
     }
-    if !input.config.network.apply_enabled {
+    if !input.config.network.apply_enabled
+        && input.plan.runtime_control.manager != RuntimeTunnelManager::ExternalObserved
+    {
         return Ok(serde_json::json!({
             "type": "runtime_tunnel_remove",
             "status": "skipped",
@@ -273,14 +282,17 @@ async fn remove_runtime_tunnel(
             build_iproute2_remove_steps(input.config, input.plan, link_exists)?
         }
         RuntimeTunnelManager::ExternalObserved => Vec::new(),
-        RuntimeTunnelManager::ExternalManagedAdapter => {
-            build_external_adapter_remove_steps(input.plan, &endpoint)?
-        }
+        RuntimeTunnelManager::ExternalManagedAdapter => build_external_adapter_remove_steps(
+            input.plan,
+            &endpoint,
+            required_runtime_adapter(input.runtime_adapter)?,
+        )?,
     };
     let effective_uid = effective_uid(input.effective_uid_override());
     let unprivileged_mutation_policy = input.config.network.runtime_unprivileged_mutation_policy;
-    let adapter_remove_available = input.plan.runtime_control.stop.is_some()
-        || input.plan.runtime_control.cleanup.is_some()
+    let adapter_remove_available = input
+        .runtime_adapter
+        .is_some_and(|adapter| adapter.stop.is_some() || adapter.cleanup.is_some())
         || input.plan.runtime_control.manager != RuntimeTunnelManager::ExternalManagedAdapter;
     let mut reports = Vec::new();
     let mut degraded = false;
@@ -548,12 +560,12 @@ fn build_ip_tunnel_argv(
             tunnel_mode,
             "remote",
             remote_underlay(plan, endpoint),
-            "local",
-            local_underlay(plan, endpoint),
-            "ttl",
-            "255",
         ],
     );
+    if let Some(local) = local_underlay(plan, endpoint) {
+        argv.extend(["local".to_string(), local.to_string()]);
+    }
+    argv.extend(["ttl".to_string(), "255".to_string()]);
     if plan.kind == TunnelKind::Fou {
         argv.extend([
             "encap".to_string(),
@@ -777,7 +789,7 @@ fn existing_iproute2_tunnel_mismatches(
     let expected_remote = remote_underlay(plan, endpoint);
     let mut mismatches = Vec::new();
     push_string_mismatch(&mut mismatches, "mode", link.kind.as_deref(), expected_mode);
-    push_ip_mismatch(
+    push_optional_ip_mismatch(
         &mut mismatches,
         "local_underlay",
         link.local.as_deref(),
@@ -886,6 +898,31 @@ fn push_ip_mismatch(
             "{field} expected {expected} got {}",
             actual.unwrap_or("<missing>")
         ));
+    }
+}
+
+fn push_optional_ip_mismatch(
+    mismatches: &mut Vec<String>,
+    field: &str,
+    actual: Option<&str>,
+    expected: Option<&str>,
+) {
+    match expected {
+        Some(expected) => push_ip_mismatch(mismatches, field, actual, expected),
+        None => {
+            let actual = actual.map(str::trim).filter(|value| !value.is_empty());
+            if actual.is_some_and(|actual| {
+                !matches!(
+                    actual.to_ascii_lowercase().as_str(),
+                    "any" | "0.0.0.0" | "::"
+                )
+            }) {
+                mismatches.push(format!(
+                    "{field} expected automatic source selection got {}",
+                    actual.unwrap_or("<missing>")
+                ));
+            }
+        }
     }
 }
 
@@ -1055,12 +1092,13 @@ fn build_traffic_limit_steps(
 fn build_external_adapter_steps(
     plan: &TunnelPlan,
     endpoint: &TunnelEndpointConfig,
+    adapter: &RuntimeTunnelAdapterCommands,
 ) -> Result<Vec<RuntimeCommandSpec>> {
     let control = &plan.runtime_control;
     let mut steps = Vec::new();
-    if let Some(command) = control.restart.as_ref().or(control.startup.as_ref()) {
+    if let Some(command) = adapter.restart.as_ref().or(adapter.startup.as_ref()) {
         steps.push(RuntimeCommandSpec {
-            label: if control.restart.is_some() {
+            label: if adapter.restart.is_some() {
                 "runtime_adapter_restart"
             } else {
                 "runtime_adapter_startup"
@@ -1071,33 +1109,33 @@ fn build_external_adapter_steps(
         });
     }
     if !control.traffic_limit.is_default() {
-        if let Some(command) = &control.traffic_limit_apply {
-            steps.push(RuntimeCommandSpec {
-                label: "runtime_adapter_traffic_limit",
-                argv: render_runtime_adapter_command(command, plan, endpoint)?,
-                mutates: true,
-                required: true,
-            });
-        }
-    }
-    if let Some(command) = &control.status {
+        let command = adapter
+            .traffic_limit_apply
+            .as_ref()
+            .context("runtime adapter traffic-limit command is required")?;
         steps.push(RuntimeCommandSpec {
-            label: "runtime_adapter_status",
+            label: "runtime_adapter_traffic_limit",
             argv: render_runtime_adapter_command(command, plan, endpoint)?,
-            mutates: false,
-            required: false,
+            mutates: true,
+            required: true,
         });
     }
+    steps.push(RuntimeCommandSpec {
+        label: "runtime_adapter_status",
+        argv: render_runtime_adapter_command(&adapter.status, plan, endpoint)?,
+        mutates: false,
+        required: true,
+    });
     Ok(steps)
 }
 
 fn build_external_adapter_remove_steps(
     plan: &TunnelPlan,
     endpoint: &TunnelEndpointConfig,
+    adapter: &RuntimeTunnelAdapterCommands,
 ) -> Result<Vec<RuntimeCommandSpec>> {
-    let control = &plan.runtime_control;
     let mut steps = Vec::new();
-    if let Some(command) = &control.stop {
+    if let Some(command) = &adapter.stop {
         steps.push(RuntimeCommandSpec {
             label: "runtime_adapter_stop",
             argv: render_runtime_adapter_command(command, plan, endpoint)?,
@@ -1105,7 +1143,7 @@ fn build_external_adapter_remove_steps(
             required: true,
         });
     }
-    if let Some(command) = &control.cleanup {
+    if let Some(command) = &adapter.cleanup {
         steps.push(RuntimeCommandSpec {
             label: "runtime_adapter_cleanup",
             argv: render_runtime_adapter_command(command, plan, endpoint)?,
@@ -1113,14 +1151,12 @@ fn build_external_adapter_remove_steps(
             required: true,
         });
     }
-    if let Some(command) = &control.status {
-        steps.push(RuntimeCommandSpec {
-            label: "runtime_adapter_status",
-            argv: render_runtime_adapter_command(command, plan, endpoint)?,
-            mutates: false,
-            required: false,
-        });
-    }
+    steps.push(RuntimeCommandSpec {
+        label: "runtime_adapter_status",
+        argv: render_runtime_adapter_command(&adapter.status, plan, endpoint)?,
+        mutates: false,
+        required: false,
+    });
     Ok(steps)
 }
 
@@ -1128,12 +1164,18 @@ async fn run_runtime_compensation(
     config: &AgentConfig,
     plan: &TunnelPlan,
     endpoint: &TunnelEndpointConfig,
+    runtime_adapter: Option<&RuntimeTunnelAdapterCommands>,
     link_exists_before: bool,
     triggered_by: &'static str,
     cancel_token: CommandCancelToken,
 ) -> Result<serde_json::Value> {
-    let (specs, unavailable_reason) =
-        build_runtime_compensation_steps(config, plan, endpoint, link_exists_before)?;
+    let (specs, unavailable_reason) = build_runtime_compensation_steps(
+        config,
+        plan,
+        endpoint,
+        runtime_adapter,
+        link_exists_before,
+    )?;
     if specs.is_empty() {
         return Ok(serde_json::json!({
             "status": "not_available",
@@ -1173,6 +1215,7 @@ fn build_runtime_compensation_steps(
     config: &AgentConfig,
     plan: &TunnelPlan,
     endpoint: &TunnelEndpointConfig,
+    runtime_adapter: Option<&RuntimeTunnelAdapterCommands>,
     link_exists_before: bool,
 ) -> Result<(Vec<RuntimeCommandSpec>, Option<&'static str>)> {
     match plan.runtime_control.manager {
@@ -1196,8 +1239,9 @@ fn build_runtime_compensation_steps(
         }
         RuntimeTunnelManager::ExternalObserved => Ok((Vec::new(), Some("observed_only"))),
         RuntimeTunnelManager::ExternalManagedAdapter => {
+            let adapter = required_runtime_adapter(runtime_adapter)?;
             let mut specs = Vec::new();
-            if let Some(command) = &plan.runtime_control.stop {
+            if let Some(command) = &adapter.stop {
                 specs.push(RuntimeCommandSpec {
                     label: "runtime_adapter_compensate_stop",
                     argv: render_runtime_adapter_command(command, plan, endpoint)?,
@@ -1205,7 +1249,7 @@ fn build_runtime_compensation_steps(
                     required: false,
                 });
             }
-            if let Some(command) = &plan.runtime_control.cleanup {
+            if let Some(command) = &adapter.cleanup {
                 specs.push(RuntimeCommandSpec {
                     label: "runtime_adapter_compensate_cleanup",
                     argv: render_runtime_adapter_command(command, plan, endpoint)?,
@@ -1219,6 +1263,12 @@ fn build_runtime_compensation_steps(
             Ok((specs, None))
         }
     }
+}
+
+fn required_runtime_adapter(
+    adapter: Option<&RuntimeTunnelAdapterCommands>,
+) -> Result<&RuntimeTunnelAdapterCommands> {
+    adapter.context("runtime tunnel adapter snapshot is required")
 }
 
 pub(crate) fn render_runtime_adapter_command(
@@ -1236,7 +1286,10 @@ pub(crate) fn render_runtime_adapter_command(
                 .replace("{kind}", runtime_kind_name(plan.kind))
                 .replace("{local_client_id}", &endpoint.local_client_id)
                 .replace("{peer_client_id}", &endpoint.peer_client_id)
-                .replace("{local_underlay}", local_underlay(plan, endpoint))
+                .replace(
+                    "{local_underlay}",
+                    local_underlay(plan, endpoint).unwrap_or_default(),
+                )
                 .replace("{remote_underlay}", remote_underlay(plan, endpoint))
                 .replace("{local_address}", local_address(plan, endpoint))
                 .replace("{remote_address}", remote_address(plan, endpoint))
@@ -1280,6 +1333,15 @@ pub(crate) fn render_runtime_adapter_command(
                         .map(|value| value.to_string())
                         .unwrap_or_default(),
                 )
+                .replace(
+                    "{burst_kb}",
+                    &plan
+                        .runtime_control
+                        .traffic_limit
+                        .burst_kb
+                        .map(|value| value.to_string())
+                        .unwrap_or_default(),
+                )
         })
         .collect())
 }
@@ -1307,20 +1369,15 @@ fn extend_argv<'a>(base: &[String], parts: impl IntoIterator<Item = &'a str>) ->
         .collect()
 }
 
-fn local_underlay<'a>(plan: &'a TunnelPlan, endpoint: &TunnelEndpointConfig) -> &'a str {
-    if endpoint.side == TunnelEndpointSide::Left {
-        &plan.left_underlay
-    } else {
-        &plan.right_underlay
-    }
+fn local_underlay<'a>(
+    _plan: &'a TunnelPlan,
+    endpoint: &'a TunnelEndpointConfig,
+) -> Option<&'a str> {
+    endpoint.local_underlay.as_deref()
 }
 
-fn remote_underlay<'a>(plan: &'a TunnelPlan, endpoint: &TunnelEndpointConfig) -> &'a str {
-    if endpoint.side == TunnelEndpointSide::Left {
-        &plan.right_underlay
-    } else {
-        &plan.left_underlay
-    }
+fn remote_underlay<'a>(_plan: &'a TunnelPlan, endpoint: &'a TunnelEndpointConfig) -> &'a str {
+    &endpoint.remote_underlay
 }
 
 fn local_address<'a>(_plan: &TunnelPlan, endpoint: &'a TunnelEndpointConfig) -> &'a str {

@@ -21,8 +21,9 @@ Use these in order for a new deployment:
    supervision, and schedules.
 6. `05-source-templates.md`: choose default, shared, and VPS-local data
    source presets without hardcoding provider assumptions.
-7. `06-tunnels-topology-bird2.md`: manage runtime-owned tunnels, imported
-   tunnels, topology, probes, speed tests, and Bird2 OSPF costs.
+7. `06-tunnels-routing-adapters.md`: declare native, observed, or
+   adapter-managed tunnels; inspect topology and tests; and optionally control
+   OSPF costs through operator-owned adapters.
 8. `07-backup-restore-migration.md`: create backups, restore, roll back
    restores, and link rebuilt-VPS migration records.
 9. `08-agent-updates.md`: publish, stage, activate, and roll back agent

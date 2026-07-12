@@ -91,9 +91,12 @@ cargo run -p vpsctl -- client-key-revoke --client-id edge-nrt-04 --confirmed
 For inventory retirement, use Fleet > Instances, select exactly one VPS, then
 run the `Review VPS deletion` row action. Deletion requires local privilege
 unlock and confirmation, hides the VPS from normal fleet views, disconnects any
-active gateway session, disables tunnel plans for that endpoint, and marks
-pending or active work for that VPS as skipped or lost. A deleted client id is
-not reused; rebuild with a new id unless you are only rotating the current key.
+active gateway session, retires tunnel declarations using that endpoint,
+immediately queues runtime-config cleanup for surviving peers, and marks pending
+or active work for that VPS as skipped or lost. If cleanup cannot be queued, the
+panel reports the affected peers so the operator can retry convergence before
+trusting those interfaces. A deleted client id is not reused; rebuild with a new
+id unless you are only rotating the current key.
 
 ## 6. Rebuild or rotate safely
 

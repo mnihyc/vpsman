@@ -609,6 +609,8 @@ pub(crate) struct TelemetryRollupsCommand {
     pub(crate) client_id: Option<String>,
     #[arg(long)]
     pub(crate) bucket_secs: Option<i32>,
+    #[arg(long, default_value_t = false)]
+    pub(crate) latest: bool,
 }
 
 #[derive(Debug, Args)]
@@ -621,6 +623,8 @@ pub(crate) struct TelemetryNetworkRatesCommand {
     pub(crate) interface: Option<String>,
     #[arg(long)]
     pub(crate) bucket_secs: Option<i32>,
+    #[arg(long, default_value_t = false)]
+    pub(crate) latest: bool,
 }
 
 #[derive(Debug, Args)]

@@ -64,6 +64,8 @@ test("frontend operation canonicalization matches Rust-generated golden vectors"
       "network_interfaces",
       "network_probe",
       "network_speed_test",
+      "network_routing_status",
+      "network_routing_apply",
     ]),
   );
 

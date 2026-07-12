@@ -66,7 +66,10 @@ VPSMAN_BACKUP_OBJECT_STORE_DIR="$SMOKE_TMPDIR/object-store" \
 RUST_LOG="vpsman_api=warn" \
   target/debug/vpsman-api >"$api_log" 2>&1 &
 smoke_track_pid "$!"
-smoke_wait_http "$api_url/health"
+if ! smoke_wait_http "$api_url/health"; then
+  smoke_dump_logs "API did not become healthy for live file-push smoke" "$api_log"
+  exit 1
+fi
 
 auth_json="$(curl -fsS \
   -H "Content-Type: application/json" \

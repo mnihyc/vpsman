@@ -224,7 +224,7 @@ test("streams a ready download to a browser file handle", async ({ page }, testI
       text: new TextDecoder().decode(new Uint8Array(state.chunks.flat())),
     };
   });
-  expect(streamed.suggestedName).toBe("core-fra-02 (ra02)-51515151-bird.log");
+  expect(streamed.suggestedName).toBe("core-fra-02 (ra02)-51515151-routing.log");
   expect(streamed.text).toContain("server-side transfer handoff agent-fra-02");
 });
 

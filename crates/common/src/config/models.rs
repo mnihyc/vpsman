@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    auth::payload_hash, OspfCostPolicy, RuntimeTunnelCommand, TunnelConfigBackend,
-    TunnelEndpointSide, TunnelPlan, DEFAULT_MAX_JOB_TIMEOUT_SECS,
+    auth::payload_hash, RuntimeTunnelCommand, TunnelEndpointSide, TunnelPlan,
+    DEFAULT_MAX_JOB_TIMEOUT_SECS,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -40,10 +40,8 @@ pub struct AgentConfig {
     pub telemetry: AgentTelemetryConfig,
     #[serde(default)]
     pub network: AgentNetworkConfig,
-    #[serde(default = "default_telemetry_light_secs")]
-    pub telemetry_light_secs: u64,
-    #[serde(default = "default_telemetry_full_secs")]
-    pub telemetry_full_secs: u64,
+    #[serde(default = "default_telemetry_interval_secs")]
+    pub telemetry_interval_secs: u64,
     #[serde(default)]
     pub tags: Vec<String>,
 }
@@ -64,10 +62,8 @@ pub struct AgentRuntimeConfig {
     pub telemetry: AgentTelemetryConfig,
     #[serde(default)]
     pub network: AgentNetworkConfig,
-    #[serde(default = "default_telemetry_light_secs")]
-    pub telemetry_light_secs: u64,
-    #[serde(default = "default_telemetry_full_secs")]
-    pub telemetry_full_secs: u64,
+    #[serde(default = "default_telemetry_interval_secs")]
+    pub telemetry_interval_secs: u64,
     #[serde(default)]
     pub tags: Vec<String>,
 }
@@ -82,8 +78,7 @@ impl AgentRuntimeConfig {
             execution: config.execution.clone(),
             telemetry: config.telemetry.clone(),
             network: config.network.clone(),
-            telemetry_light_secs: config.telemetry_light_secs,
-            telemetry_full_secs: config.telemetry_full_secs,
+            telemetry_interval_secs: config.telemetry_interval_secs,
             tags: config.tags.clone(),
         }
     }
@@ -97,8 +92,7 @@ impl AgentRuntimeConfig {
         config.execution = self.execution.clone();
         config.telemetry = self.telemetry.clone();
         config.network = self.network.clone();
-        config.telemetry_light_secs = self.telemetry_light_secs;
-        config.telemetry_full_secs = self.telemetry_full_secs;
+        config.telemetry_interval_secs = self.telemetry_interval_secs;
         config.tags = self.tags.clone();
     }
 }
@@ -120,8 +114,7 @@ impl Default for AgentRuntimeConfig {
             execution: AgentExecutionConfig::default(),
             telemetry: AgentTelemetryConfig::default(),
             network: AgentNetworkConfig::default(),
-            telemetry_light_secs: default_telemetry_light_secs(),
-            telemetry_full_secs: default_telemetry_full_secs(),
+            telemetry_interval_secs: default_telemetry_interval_secs(),
             tags: Vec::new(),
         }
     }
@@ -223,12 +216,8 @@ pub fn default_agent_max_job_timeout_secs() -> u64 {
     DEFAULT_MAX_JOB_TIMEOUT_SECS
 }
 
-pub fn default_telemetry_light_secs() -> u64 {
+pub fn default_telemetry_interval_secs() -> u64 {
     15
-}
-
-pub fn default_telemetry_full_secs() -> u64 {
-    60
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -332,21 +321,9 @@ pub struct AgentNetworkConfig {
     #[serde(default)]
     pub runtime_reconcile_enabled: bool,
     #[serde(default)]
-    pub allow_routing_without_runtime_ready: bool,
-    #[serde(default)]
     pub runtime_unprivileged_mutation_policy: AgentRuntimeUnprivilegedMutationPolicy,
-    #[serde(default)]
-    pub backend: TunnelConfigBackend,
-    #[serde(default)]
-    pub preset: Option<AgentNetworkPreset>,
     #[serde(default = "default_network_root_dir")]
     pub root_dir: String,
-    #[serde(default)]
-    pub validate_enabled: bool,
-    #[serde(default)]
-    pub reload_enabled: bool,
-    #[serde(default = "default_network_hook_timeout_secs")]
-    pub hook_timeout_secs: u64,
     #[serde(default = "default_network_runtime_ip_argv")]
     pub runtime_ip_argv: Vec<String>,
     #[serde(default = "default_network_runtime_tc_argv")]
@@ -355,16 +332,6 @@ pub struct AgentNetworkConfig {
     pub runtime_command_timeout_secs: u64,
     #[serde(default = "default_network_runtime_command_max_output_bytes")]
     pub runtime_command_max_output_bytes: u32,
-    #[serde(default)]
-    pub ifupdown_validate_argv: Vec<String>,
-    #[serde(default)]
-    pub bird2_validate_argv: Vec<String>,
-    #[serde(default)]
-    pub reload_argv: Vec<Vec<String>>,
-    #[serde(default)]
-    pub bird2_reload_argv: Vec<Vec<String>>,
-    #[serde(default)]
-    pub bird2_status_argv: Vec<String>,
     #[serde(default)]
     pub probe_ping_argv: Vec<String>,
     #[serde(default = "default_network_status_probe_timeout_secs")]
@@ -383,36 +350,24 @@ pub struct AgentNetworkConfig {
     pub latency_monitoring_interval_secs: u64,
     #[serde(default = "default_network_latency_down_windows")]
     pub latency_down_windows: u8,
-    #[serde(default)]
-    pub auto_ospf_enabled: bool,
-    #[serde(default = "default_network_auto_ospf_min_cost_delta")]
-    pub auto_ospf_min_cost_delta: u16,
-    #[serde(default = "default_network_auto_ospf_healthy_windows")]
-    pub auto_ospf_healthy_windows: u8,
-    #[serde(default)]
-    pub auto_ospf_policy: OspfCostPolicy,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_ospf_updater: Option<RuntimeTunnelCommand>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runtime_status_telemetry_plans: Vec<AgentRuntimeStatusTelemetryPlan>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct AgentRuntimeStatusTelemetryPlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_id: Option<String>,
     pub endpoint_side: TunnelEndpointSide,
     pub plan: TunnelPlan,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_adapter: Option<crate::RuntimeTunnelAdapterCommands>,
     #[serde(default)]
     pub traffic_source: AgentRuntimeTrafficSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traffic_command: Option<RuntimeTunnelCommand>,
     #[serde(default = "default_true")]
     pub latency_monitoring_enabled: bool,
-    #[serde(default)]
-    pub auto_ospf_enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_ospf_updater: Option<RuntimeTunnelCommand>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -487,23 +442,12 @@ impl Default for AgentNetworkConfig {
         Self {
             apply_enabled: false,
             runtime_reconcile_enabled: false,
-            allow_routing_without_runtime_ready: false,
             runtime_unprivileged_mutation_policy: AgentRuntimeUnprivilegedMutationPolicy::default(),
-            backend: TunnelConfigBackend::Ifupdown,
-            preset: None,
             root_dir: default_network_root_dir(),
-            validate_enabled: false,
-            reload_enabled: false,
-            hook_timeout_secs: default_network_hook_timeout_secs(),
             runtime_ip_argv: default_network_runtime_ip_argv(),
             runtime_tc_argv: default_network_runtime_tc_argv(),
             runtime_command_timeout_secs: default_network_runtime_command_timeout_secs(),
             runtime_command_max_output_bytes: default_network_runtime_command_max_output_bytes(),
-            ifupdown_validate_argv: Vec::new(),
-            bird2_validate_argv: Vec::new(),
-            reload_argv: Vec::new(),
-            bird2_reload_argv: Vec::new(),
-            bird2_status_argv: Vec::new(),
             probe_ping_argv: Vec::new(),
             status_probe_timeout_secs: default_network_status_probe_timeout_secs(),
             status_probe_max_output_bytes: default_network_status_probe_max_output_bytes(),
@@ -514,31 +458,13 @@ impl Default for AgentNetworkConfig {
             latency_monitoring_enabled: true,
             latency_monitoring_interval_secs: default_network_latency_monitoring_interval_secs(),
             latency_down_windows: default_network_latency_down_windows(),
-            auto_ospf_enabled: false,
-            auto_ospf_min_cost_delta: default_network_auto_ospf_min_cost_delta(),
-            auto_ospf_healthy_windows: default_network_auto_ospf_healthy_windows(),
-            auto_ospf_policy: OspfCostPolicy::default(),
-            auto_ospf_updater: None,
             runtime_status_telemetry_plans: Vec::new(),
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentNetworkPreset {
-    DebianIfupdown2Bird2,
-    DebianIfupdownBird2,
-    DebianNetplanBird2,
-    DebianSystemdNetworkdBird2,
-}
-
 fn default_network_root_dir() -> String {
     "/".to_string()
-}
-
-fn default_network_hook_timeout_secs() -> u64 {
-    10
 }
 
 fn default_network_runtime_ip_argv() -> Vec<String> {
@@ -583,14 +509,6 @@ fn default_network_latency_monitoring_interval_secs() -> u64 {
 
 fn default_network_latency_down_windows() -> u8 {
     3
-}
-
-fn default_network_auto_ospf_min_cost_delta() -> u16 {
-    5
-}
-
-fn default_network_auto_ospf_healthy_windows() -> u8 {
-    2
 }
 
 fn default_telemetry_proc_root() -> String {
@@ -660,8 +578,7 @@ impl Default for AgentConfig {
             execution: AgentExecutionConfig::default(),
             telemetry: AgentTelemetryConfig::default(),
             network: AgentNetworkConfig::default(),
-            telemetry_light_secs: 15,
-            telemetry_full_secs: 60,
+            telemetry_interval_secs: 15,
             tags: Vec::new(),
         }
     }

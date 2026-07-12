@@ -28,23 +28,22 @@ use vpsman_common::{
     server_job_statuses, server_job_types, source_readiness_status_class_by_status,
     source_readiness_statuses, terminal_command_types, terminal_input_privilege_intent_fields,
     terminal_session_events, terminal_session_state_class_by_state, terminal_session_states,
-    terminal_session_status_class_by_status, terminal_session_statuses, topology_drift_actions,
-    topology_drift_policies, topology_edge_health_status_class_by_status,
-    topology_edge_health_statuses, topology_neighbor_state_class_by_state,
-    topology_neighbor_states, topology_node_status_class_by_status, topology_node_statuses,
+    terminal_session_status_class_by_status, terminal_session_statuses,
+    topology_edge_health_status_class_by_status, topology_edge_health_statuses,
+    topology_neighbor_state_class_by_state, topology_neighbor_states,
+    topology_node_status_class_by_status, topology_node_statuses,
     topology_observation_state_class_by_state, topology_observation_states,
     topology_probe_state_class_by_state, topology_probe_states,
     topology_runtime_state_class_by_state, topology_runtime_states,
-    tunnel_endpoint_status_class_by_status, tunnel_endpoint_statuses,
-    tunnel_plan_status_class_by_status, tunnel_plan_statuses,
     webhook_rule_delivery_history_status_class_by_status, webhook_rule_delivery_history_statuses,
     webhook_rule_delivery_process_status_class_by_status, webhook_rule_delivery_process_statuses,
     webhook_rule_delivery_status_class_by_status, webhook_rule_delivery_statuses,
     workflow_status_classes, FileActionPolicy, FileExistingPolicy, FileOwnershipPolicy,
-    FilePushChunk, JobCommand, OspfCostPolicy, ProcessResourceLimits, ProcessRestartPolicy,
-    ProcessRunPolicy, RestoreRollbackFile, TerminalUserPolicy, TunnelAddressPair,
-    TunnelEndpointSide, TunnelKind, TunnelPlanInput, CURRENT_COMMAND_PROTOCOL_VERSION,
-    MAX_TERMINAL_INPUT_BYTES, MIN_TERMINAL_COLS, MIN_TERMINAL_ROWS,
+    FilePushChunk, JobCommand, ProcessResourceLimits, ProcessRestartPolicy, ProcessRunPolicy,
+    RestoreRollbackFile, RoutingCostAdapterCommands, RuntimeTunnelCommand, TerminalUserPolicy,
+    TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelPlanInput,
+    CURRENT_COMMAND_PROTOCOL_VERSION, MAX_TERMINAL_INPUT_BYTES, MIN_TERMINAL_COLS,
+    MIN_TERMINAL_ROWS,
 };
 
 fn main() -> io::Result<()> {
@@ -329,30 +328,6 @@ fn main() -> io::Result<()> {
     )?;
     write_domain_array(
         &mut output,
-        "TUNNEL_PLAN_STATUSES",
-        "GeneratedTunnelPlanStatus",
-        tunnel_plan_statuses(),
-    )?;
-    write_status_class_map(
-        &mut output,
-        "TUNNEL_PLAN_STATUS_CLASS_BY_STATUS",
-        tunnel_plan_status_class_by_status(),
-        "GeneratedTunnelPlanStatus",
-    )?;
-    write_domain_array(
-        &mut output,
-        "TUNNEL_ENDPOINT_STATUSES",
-        "GeneratedTunnelEndpointStatus",
-        tunnel_endpoint_statuses(),
-    )?;
-    write_status_class_map(
-        &mut output,
-        "TUNNEL_ENDPOINT_STATUS_CLASS_BY_STATUS",
-        tunnel_endpoint_status_class_by_status(),
-        "GeneratedTunnelEndpointStatus",
-    )?;
-    write_domain_array(
-        &mut output,
         "AGENT_UPDATE_RELEASE_STATUSES",
         "GeneratedAgentUpdateReleaseStatus",
         agent_update_release_statuses(),
@@ -524,18 +499,6 @@ fn main() -> io::Result<()> {
         "TOPOLOGY_OBSERVATION_STATE_CLASS_BY_STATE",
         topology_observation_state_class_by_state(),
         "GeneratedTopologyObservationState",
-    )?;
-    write_domain_array(
-        &mut output,
-        "TOPOLOGY_DRIFT_POLICIES",
-        "GeneratedTopologyDriftPolicy",
-        topology_drift_policies(),
-    )?;
-    write_domain_array(
-        &mut output,
-        "TOPOLOGY_DRIFT_ACTIONS",
-        "GeneratedTopologyDriftAction",
-        topology_drift_actions(),
     )?;
     write_alert_policy_contract_types(&mut output)?;
     write_contract_golden_vectors(&mut output)?;
@@ -1340,14 +1303,17 @@ fn contract_golden_vectors() -> io::Result<Vec<ContractGoldenVector>> {
         golden_vector(
             "network_status",
             JobCommand::NetworkStatus {
+                plan_id: "11111111-2222-4333-8444-555555555555".to_string(),
                 plan: Box::new(network_plan.clone()),
                 side: TunnelEndpointSide::Left,
+                runtime_adapter: None,
             },
         ),
         golden_vector("network_interfaces", JobCommand::NetworkInterfaces),
         golden_vector(
             "network_probe",
             JobCommand::NetworkProbe {
+                plan_id: "11111111-2222-4333-8444-555555555555".to_string(),
                 plan: Box::new(network_plan.clone()),
                 side: TunnelEndpointSide::Left,
                 count: 3,
@@ -1357,13 +1323,34 @@ fn contract_golden_vectors() -> io::Result<Vec<ContractGoldenVector>> {
         golden_vector(
             "network_speed_test",
             JobCommand::NetworkSpeedTest {
-                plan: Box::new(network_plan),
+                plan_id: "11111111-2222-4333-8444-555555555555".to_string(),
+                plan: Box::new(network_plan.clone()),
                 server_side: TunnelEndpointSide::Left,
                 duration_secs: 3,
                 max_bytes: 16 * 1024 * 1024,
                 rate_limit_kbps: 100_000,
                 port: 5201,
                 connect_timeout_ms: 5000,
+            },
+        ),
+        golden_vector(
+            "network_routing_status",
+            JobCommand::NetworkRoutingStatus {
+                plan_id: "plan-a".to_string(),
+                plan: Box::new(network_plan.clone()),
+                side: TunnelEndpointSide::Left,
+                adapter: golden_routing_adapter(),
+            },
+        ),
+        golden_vector(
+            "network_routing_apply",
+            JobCommand::NetworkRoutingApply {
+                plan_id: "plan-a".to_string(),
+                plan: Box::new(network_plan),
+                side: TunnelEndpointSide::Left,
+                adapter: golden_routing_adapter(),
+                expected_current_cost: Some(20),
+                desired_cost: 24,
             },
         ),
     ];
@@ -1409,8 +1396,10 @@ fn golden_tunnel_plan() -> io::Result<vpsman_common::TunnelPlan> {
         runtime_topology: Default::default(),
         left_client_id: "left-a".to_string(),
         right_client_id: "right-b".to_string(),
-        left_underlay: "198.51.100.10".to_string(),
-        right_underlay: "203.0.113.20".to_string(),
+        left_remote_underlay: "203.0.113.20".to_string(),
+        left_local_underlay: Some("10.0.0.10".to_string()),
+        right_remote_underlay: "198.51.100.10".to_string(),
+        right_local_underlay: None,
         address_pool_cidr: "10.255.0.0/30".to_string(),
         reserved_addresses: Vec::new(),
         ipv4_tunnel: Some(TunnelAddressPair {
@@ -1422,12 +1411,25 @@ fn golden_tunnel_plan() -> io::Result<vpsman_common::TunnelPlan> {
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
-        latency_ms: 18.0,
-        packet_loss_ratio: 0.0,
-        preference: 1.0,
-        ospf_policy: OspfCostPolicy::default(),
+        ospf: None,
     })
     .map_err(io::Error::other)
+}
+
+fn golden_routing_adapter() -> RoutingCostAdapterCommands {
+    RoutingCostAdapterCommands {
+        template_id: "routing-adapter-a".to_string(),
+        template_name: "Routing adapter A".to_string(),
+        definition_hash: "aa".repeat(32),
+        status: RuntimeTunnelCommand {
+            argv: vec!["/opt/network-adapters/status".to_string()],
+            ..RuntimeTunnelCommand::default()
+        },
+        update: RuntimeTunnelCommand {
+            argv: vec!["/opt/network-adapters/update".to_string()],
+            ..RuntimeTunnelCommand::default()
+        },
+    }
 }
 
 fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {

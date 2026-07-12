@@ -28,7 +28,7 @@ commands=(
   job-targets job-target-status-download job-outputs job-follow job-output-download server-jobs server-job-cancel artifact-cleanup-preview artifact-cleanup-create audit history-retention history-retention-upsert history-retention-prune history-export network-observations network-trends network-ospf-recommendations network-ospf-update-plans topology-graph
   backups backup-artifacts backup-policies backup-policy-upsert backup-policy-prune restore-plans migration-links backup-request backup-run
   backup-artifact-record backup-artifact-upload backup-artifact-upload-chunked backup-artifact-handoff restore-plan restore-run restore-rollback migration-link migration-run
-  bulk-resolve tunnel-plans tunnel-allocate tunnel-plan tunnel-plan-export tunnel-promote-external-observe tunnel-promote-custom-adapter tunnel-ospf-cost-update
+  bulk-resolve tunnel-plans tunnel-allocate tunnel-plan tunnel-plan-export tunnel-plan-enable tunnel-plan-disable tunnel-plan-delete tunnel-ospf-status-refresh tunnel-ospf-cost-update
   tunnel-status tunnel-probe tunnel-speed-test noise-keygen vty
 )
 
@@ -97,7 +97,7 @@ workflow_for_command() {
     backups|backup-artifacts|backup-policies|backup-policy-upsert|backup-policy-prune|restore-plans|migration-links|backup-request|backup-run|backup-artifact-record|backup-artifact-upload|backup-artifact-upload-chunked|backup-artifact-handoff|restore-plan|migration-link|migration-run|restore-run|restore-rollback)
       printf 'backup_restore_and_migration\n'
       ;;
-    network-observations|network-trends|network-ospf-recommendations|network-ospf-update-plans|topology-graph|tunnel-plans|tunnel-allocate|tunnel-plan|tunnel-plan-export|tunnel-promote-external-observe|tunnel-promote-custom-adapter|tunnel-ospf-cost-update|tunnel-status|tunnel-probe|tunnel-speed-test)
+    network-observations|network-trends|network-ospf-recommendations|network-ospf-update-plans|topology-graph|tunnel-plans|tunnel-allocate|tunnel-plan|tunnel-plan-export|tunnel-plan-enable|tunnel-plan-disable|tunnel-plan-delete|tunnel-ospf-status-refresh|tunnel-ospf-cost-update|tunnel-status|tunnel-probe|tunnel-speed-test)
       printf 'topology_and_network_operations\n'
       ;;
     compose-secrets|noise-keygen|vty)
@@ -109,7 +109,7 @@ workflow_for_command() {
   esac
 }
 
-for expected in "operators" "operator-create" "operator-update" "operator-disable" "operator-enable" "operator-delete" "operator-password-reset" "operator-totp-clear" "operator-sessions" "operator-session-revoke" "operator-auth-events" "totp-setup" "totp-confirm" "totp-disable" "agent-identity-upsert" "client-key-revocations" "client-key-revoke" "key-lifecycle-report" "fleet-alerts" "fleet-alert-export" "fleet-alert-states" "fleet-alert-state-update" "vps-rules" "alert-policies" "alert-policy" "fleet-alert-notification-channels" "fleet-alert-notification-channel-upsert" "fleet-alert-notifications" "fleet-alert-notification-dispatch" "fleet-alert-notification-process" "gateway-sessions" "telemetry-rollups" "telemetry-network-rates" "telemetry-tunnels" "source-templates" "source-template-create" "source-template-clone" "source-template-diff" "source-template-test" "source-template-update" "source-status" "source-template-assignments" "template-runtime-config" "source-template-assign" "job-shell" "job-follow" "job-target-status-download" "job-output-download" "server-jobs" "server-job-cancel" "artifact-cleanup-preview" "artifact-cleanup-create" "history-retention" "history-retention-upsert" "history-retention-prune" "history-export" "terminal-sessions" "terminal-replay" "terminal-follow" "file-transfers" "file-transfer-handoff" "file-transfer-sources" "file-transfer-source-upload" "file-transfer-source-download" "backup-policies" "backup-policy-upsert" "backup-policy-prune" "backup-artifact-upload-chunked" "backup-artifact-handoff" "tunnel-allocate" "tunnel-plan-export" "tunnel-speed-test" "tunnel-promote-external-observe" "tunnel-promote-custom-adapter" "tunnel-ospf-cost-update" "restore-run" "restore-rollback" "migration-links" "migration-link" "migration-run" "network-observations" "network-trends" "network-ospf-recommendations" "network-ospf-update-plans" "topology-graph" "config-patch" "agent-update" "agent-update-check" "agent-update-activate" "agent-update-rollback" "agent-update-release-record" "agent-update-release-latest" "agent-update-releases" "process-supervisor-inventory"; do
+for expected in "operators" "operator-create" "operator-update" "operator-disable" "operator-enable" "operator-delete" "operator-password-reset" "operator-totp-clear" "operator-sessions" "operator-session-revoke" "operator-auth-events" "totp-setup" "totp-confirm" "totp-disable" "agent-identity-upsert" "client-key-revocations" "client-key-revoke" "key-lifecycle-report" "fleet-alerts" "fleet-alert-export" "fleet-alert-states" "fleet-alert-state-update" "vps-rules" "alert-policies" "alert-policy" "fleet-alert-notification-channels" "fleet-alert-notification-channel-upsert" "fleet-alert-notifications" "fleet-alert-notification-dispatch" "fleet-alert-notification-process" "gateway-sessions" "telemetry-rollups" "telemetry-network-rates" "telemetry-tunnels" "source-templates" "source-template-create" "source-template-clone" "source-template-diff" "source-template-test" "source-template-update" "source-status" "source-template-assignments" "template-runtime-config" "source-template-assign" "job-shell" "job-follow" "job-target-status-download" "job-output-download" "server-jobs" "server-job-cancel" "artifact-cleanup-preview" "artifact-cleanup-create" "history-retention" "history-retention-upsert" "history-retention-prune" "history-export" "terminal-sessions" "terminal-replay" "terminal-follow" "file-transfers" "file-transfer-handoff" "file-transfer-sources" "file-transfer-source-upload" "file-transfer-source-download" "backup-policies" "backup-policy-upsert" "backup-policy-prune" "backup-artifact-upload-chunked" "backup-artifact-handoff" "tunnel-allocate" "tunnel-plan-export" "tunnel-plan-enable" "tunnel-plan-disable" "tunnel-plan-delete" "tunnel-ospf-status-refresh" "tunnel-speed-test" "tunnel-ospf-cost-update" "restore-run" "restore-rollback" "migration-links" "migration-link" "migration-run" "network-observations" "network-trends" "network-ospf-recommendations" "network-ospf-update-plans" "topology-graph" "config-patch" "agent-update" "agent-update-check" "agent-update-activate" "agent-update-rollback" "agent-update-release-record" "agent-update-release-latest" "agent-update-releases" "process-supervisor-inventory"; do
   if [[ "$root_help" != *"$expected"* ]]; then
     smoke_fail "root help is missing expected command: $expected"
   fi
@@ -117,6 +117,9 @@ done
 
 file_transfer_upload_help="$("$bin" file-transfer-upload --help)"
 [[ "$file_transfer_upload_help" == *"--source-artifact-id"* ]] || smoke_fail "file-transfer-upload help missing --source-artifact-id"
+tunnel_plan_help="$("$bin" tunnel-plan --help)"
+[[ "$tunnel_plan_help" == *"--update-plan-id"* ]] || smoke_fail "tunnel-plan help missing --update-plan-id"
+[[ "$tunnel_plan_help" == *"--expected-revision"* ]] || smoke_fail "tunnel-plan help missing --expected-revision"
 
 declare -A workflow_counts=()
 for command in "${commands[@]}"; do
