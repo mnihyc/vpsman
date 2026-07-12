@@ -366,7 +366,10 @@ async fn restore_job_accepts_matching_selected_archive_upload() {
 
     assert_eq!(status, axum::http::StatusCode::ACCEPTED);
     assert_eq!(response.status, "queued");
-    let dispatch = gateway_task.await.unwrap();
+    let dispatch = tokio::time::timeout(std::time::Duration::from_secs(2), gateway_task)
+        .await
+        .expect("restore gateway dispatch was not attempted")
+        .unwrap();
     assert_eq!(dispatch.client_id, "client-b");
 }
 

@@ -306,7 +306,10 @@ async fn backup_job_dispatch_auto_records_request_and_object_artifact() {
         .unwrap();
     assert_eq!(status, axum::http::StatusCode::ACCEPTED);
     assert_eq!(response.status, "queued");
-    let dispatch = gateway_task.await.unwrap();
+    let dispatch = tokio::time::timeout(std::time::Duration::from_secs(2), gateway_task)
+        .await
+        .expect("backup gateway dispatch was not attempted")
+        .unwrap();
     wait_for_job_status(&repo, response.job_id, "completed").await;
     let backups = repo.list_backup_requests(10).await.unwrap();
     let artifacts = repo.list_backup_artifacts(10).await.unwrap();

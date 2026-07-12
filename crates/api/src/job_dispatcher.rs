@@ -119,7 +119,11 @@ pub(crate) fn wake_job_dispatcher(state: AppState) {
     wake_state.notify.notify_one();
     if !wake_state.loop_started.load(Ordering::Acquire) {
         tokio::spawn(async move {
-            if let Err(error) = run_dispatcher_sweep(&state).await {
+            // Without the long-lived dispatcher loop there is no single state
+            // whose pending wakes can be coalesced. Dispatch this state's work
+            // directly so embedded callers and parallel tests cannot absorb
+            // each other's wakeups through the process-global coordinator.
+            if let Err(error) = dispatch_due_job_targets(&state).await {
                 warn!(%error, "durable job dispatcher wake failed");
             }
         });
