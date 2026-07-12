@@ -1890,17 +1890,20 @@ async fn wait_for_job_status(
     job_id: uuid::Uuid,
     expected: &str,
 ) {
-    for _ in 0..50 {
-        let jobs = repo.list_jobs(100).await.unwrap();
-        if jobs
-            .iter()
-            .any(|job| job.id == job_id && job.status == expected)
-        {
-            return;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let jobs = repo.list_jobs(100).await.unwrap();
+            if jobs
+                .iter()
+                .any(|job| job.id == job_id && job.status == expected)
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("job {job_id} did not reach status {expected}");
+    })
+    .await
+    .unwrap_or_else(|_| panic!("job {job_id} did not reach status {expected}"));
 }
 
 fn backup_test_operator() -> AuthContext {
