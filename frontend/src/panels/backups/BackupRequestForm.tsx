@@ -16,12 +16,10 @@ type BackupRequestFormProps = {
   followSymlinks: boolean;
   includeConfig: boolean;
   missingPathPolicy: BackupMissingPathPolicy;
-  note: string;
   onClientIdChange: (value: string) => void;
   onFollowSymlinksChange: (value: boolean) => void;
   onIncludeConfigChange: (value: boolean) => void;
   onMissingPathPolicyChange: (value: BackupMissingPathPolicy) => void;
-  onNoteChange: (value: string) => void;
   onPathsTextChange: (value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   pathsCount: number;
@@ -38,12 +36,10 @@ export function BackupRequestForm({
   followSymlinks,
   includeConfig,
   missingPathPolicy,
-  note,
   onClientIdChange,
   onFollowSymlinksChange,
   onIncludeConfigChange,
   onMissingPathPolicyChange,
-  onNoteChange,
   onPathsTextChange,
   onSubmit,
   pathsCount,
@@ -55,8 +51,8 @@ export function BackupRequestForm({
   return (
     <>
       <div className="sectionHeader compact">
-        <h2>Request backup</h2>
-        <span>{selectedAgentName ?? "Single-client metadata request"}</span>
+        <h2>Backup scope</h2>
+        <span>{selectedAgentName ?? "Single VPS job and artifact collection"}</span>
       </div>
       <form className="dispatchForm" onSubmit={onSubmit}>
         <label>
@@ -65,7 +61,7 @@ export function BackupRequestForm({
             agents={agents}
             ariaLabel="Backup client"
             onChange={onClientIdChange}
-            placeholder="Search backup VPS"
+            placeholder="Select VPS"
             value={clientId}
           />
         </label>
@@ -84,15 +80,6 @@ export function BackupRequestForm({
               onMissingPathPolicyChange(preset.missingPathPolicy);
             }}
             presets={BACKUP_PATH_PRESETS}
-          />
-        </label>
-        <label>
-          <span>Note</span>
-          <input
-            aria-label="Backup note"
-            onChange={(event) => onNoteChange(event.target.value)}
-            placeholder="pre-migration snapshot"
-            value={note}
           />
         </label>
         <div className="backupOptionStrip" aria-label="Backup collection options">
@@ -141,11 +128,16 @@ export function BackupRequestForm({
         {!confirmationOpen && (
           <button
             className="primaryAction"
-            disabled={pending || !privilegeReady || !clientId}
+            disabled={pending || !clientId}
+            title={
+              privilegeReady
+                ? "Review the frozen backup target and scope"
+                : "Opens privilege unlock before preparing the backup review"
+            }
             type="submit"
           >
             <Play size={17} />
-            Review backup
+            Review backup run
           </button>
         )}
       </form>

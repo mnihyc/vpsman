@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { apiDelete, apiGet, apiPost, apiPut, buildListPath, isApiUnauthorized } from "../api";
 import type {
+  CreateJobResponse,
   CreateScheduleRequest,
   DeferScheduleRequest,
   SchedulePrivilegeMutationRequest,
@@ -91,8 +92,13 @@ export function useSchedulesData(
 
   const applyScheduleNow = useCallback(
     async (scheduleId: string, request: SchedulePrivilegeMutationRequest) => {
-      await apiPost(`/api/v1/schedules/${scheduleId}/apply-now`, apiToken, request);
+      const response = await apiPost<CreateJobResponse>(
+        `/api/v1/schedules/${scheduleId}/apply-now`,
+        apiToken,
+        request,
+      );
       await Promise.all([loadSchedules(), onAuditChanged()]);
+      return response;
     },
     [apiToken, loadSchedules, onAuditChanged],
   );

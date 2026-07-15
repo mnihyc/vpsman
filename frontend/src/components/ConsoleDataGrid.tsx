@@ -70,6 +70,7 @@ export type ConsoleDataGridColumn<T> = {
   searchValue?: (row: T) => string | number | boolean | null | undefined;
   size?: number;
   sortValue?: (row: T) => string | number | boolean | null | undefined;
+  stickyEnd?: boolean;
 };
 
 export type ConsoleDataGridAction<T> = {
@@ -293,6 +294,7 @@ export function ConsoleDataGrid<T>({
         minSize: column.minSize ?? 96,
         size: column.size ?? 160,
         enableHiding: column.enableHiding ?? true,
+        meta: { stickyEnd: column.stickyEnd === true },
         cell: ({ row }: { row: Row<T> }) => (
           <span
             className={
@@ -627,6 +629,7 @@ export function ConsoleDataGrid<T>({
             ) : null}
             {renderExpandedRow ? (
               <button
+                aria-label={`${expandedRows[row.id] ? "Hide" : "Show"} details for ${title} row ${rowId}`}
                 aria-expanded={Boolean(expandedRows[row.id])}
                 className="secondaryAction compactAction"
                 onClick={(event) => {
@@ -909,6 +912,8 @@ export function ConsoleDataGrid<T>({
               const visibleContextRowActions = contextRowActions.filter(
                 (action) => !action.hidden?.([row.original]),
               );
+              const rowIsActionable =
+                rowClickExpands || Boolean(openRowOnClick && onOpenRow);
               return (
               <ContextMenu.Root key={row.id}>
                 <ContextMenu.Trigger asChild>
@@ -917,6 +922,11 @@ export function ConsoleDataGrid<T>({
                       renderMobileCard(row)
                     ) : (
                       <div
+                        aria-expanded={
+                          renderExpandedRow
+                            ? Boolean(expandedRows[row.id])
+                            : undefined
+                        }
                         className={
                           row.getIsSelected() ? "gridRow selected" : "gridRow"
                         }
@@ -929,11 +939,31 @@ export function ConsoleDataGrid<T>({
                             onOpenRow?.(row.original);
                           }
                         }}
+                        onKeyDown={(event) => {
+                          if (
+                            !rowIsActionable ||
+                            event.target !== event.currentTarget ||
+                            (event.key !== "Enter" && event.key !== " ")
+                          ) {
+                            return;
+                          }
+                          event.preventDefault();
+                          if (rowClickExpands) {
+                            toggleExpandedRow(row.id, row.original);
+                          } else if (openRowOnClick) {
+                            onOpenRow?.(row.original);
+                          }
+                        }}
                         role="row"
+                        tabIndex={rowIsActionable ? 0 : undefined}
                       >
                         {row.getVisibleCells().map((cell) => (
                           <div
-                            className="gridCell"
+                            className={
+                              gridColumnSticksToEnd(cell.column)
+                                ? "gridCell stickyEndColumn"
+                                : "gridCell"
+                            }
                             key={cell.id}
                             role="gridcell"
                             style={gridColumnStyle(cell.column)}
@@ -1140,10 +1170,16 @@ function SortableHeaderCell<T>({
     disabled: !canDrag,
     id: header.column.id,
   });
-  const headerClassName = ["gridHeaderCell", isDragging ? "dragging" : ""]
+  const headerClassName = [
+    "gridHeaderCell",
+    gridColumnSticksToEnd(header.column) ? "stickyEndColumn" : "",
+    isDragging ? "dragging" : "",
+  ]
     .filter(Boolean)
     .join(" ");
-  const headerTitle = String(header.column.columnDef.header ?? "");
+  const headerDefinition = header.column.columnDef.header;
+  const headerTitle =
+    typeof headerDefinition === "string" ? headerDefinition : "";
 
   return (
     <div
@@ -1158,9 +1194,9 @@ function SortableHeaderCell<T>({
     >
       {canDrag && (
         <button
-          aria-label={`Reorder ${headerTitle} column`}
+          aria-label={`Reorder ${headerTitle || header.column.id} column`}
           className="gridDragHandle"
-          title={`Reorder ${headerTitle} column`}
+          title={`Reorder ${headerTitle || header.column.id} column`}
           type="button"
           {...attributes}
           {...listeners}
@@ -1172,7 +1208,7 @@ function SortableHeaderCell<T>({
         <button
           className="gridHeaderButton sortable"
           onClick={header.column.getToggleSortingHandler()}
-          title={headerTitle}
+          title={headerTitle || undefined}
           type="button"
         >
           {flexRender(header.column.columnDef.header, header.getContext())}
@@ -1183,7 +1219,7 @@ function SortableHeaderCell<T>({
               : ""}
         </button>
       ) : (
-        <div className="gridHeaderButton" title={headerTitle}>
+        <div className="gridHeaderButton" title={headerTitle || undefined}>
           {flexRender(header.column.columnDef.header, header.getContext())}
         </div>
       )}
@@ -1214,6 +1250,10 @@ function gridColumnStyle<T>(column: Header<T, unknown>["column"]) {
     minWidth: minSize,
     width: size,
   };
+}
+
+function gridColumnSticksToEnd<T>(column: Header<T, unknown>["column"]): boolean {
+  return Boolean((column.columnDef.meta as { stickyEnd?: boolean } | undefined)?.stickyEnd);
 }
 
 function reconcileColumnOrder(current: string[], defaults: string[]): string[] {

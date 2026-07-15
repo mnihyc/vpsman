@@ -174,7 +174,26 @@
 }
 
 .restoreArchiveEmpty {
+  line-height: 1.4;
+}
+
+.restoreArchiveEmptyState {
   grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.restoreArchiveSummary .restoreArchiveActions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.restoreArchiveSummary .restoreArchiveActions button {
+  min-height: 32px;
+  width: auto;
 }
 
 .dispatchForm .checkLine {
@@ -223,8 +242,32 @@
 }
 
 .migrationChecklist {
-  border-top: 1px solid var(--border);
-  padding-top: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 10px;
+}
+
+.migrationChecklistHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  grid-column: 1 / -1;
+  gap: 12px;
+  min-width: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 8px;
+}
+
+.migrationChecklistHeader strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.migrationChecklistHeader span {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .migrationCheckItem {
@@ -1036,8 +1079,11 @@
 }
 
 @media (max-width: 900px) {
+  .backupActionPanel .actionRow,
   .backupRecoveryDecision,
   .backupQuickStart,
+  .migrationChecklist,
+  .migrationPlanSummary,
   .backupMigrationRoute,
   .backupEvidenceRow {
     grid-template-columns: minmax(0, 1fr);

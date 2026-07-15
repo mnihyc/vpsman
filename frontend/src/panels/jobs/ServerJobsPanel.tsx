@@ -96,6 +96,7 @@ export function ServerJobsPanel({
   const previewExpressionMatches = preview?.expression === expression;
   const previewDomainsMatch = preview ? sameDomains(preview.domains, domains) : false;
   const previewFresh = Boolean(preview && previewExpressionMatches && previewDomainsMatch);
+  const previewEmpty = Boolean(previewFresh && preview?.matched_count === 0);
   const cleanupEvidence = cleanupPreviewEvidence(preview);
   const cleanupCanDelete = Boolean(
     previewFresh &&
@@ -105,6 +106,8 @@ export function ServerJobsPanel({
   );
   const previewReadiness = cleanupCanDelete
     ? "Reviewed preview has deletion evidence and can open one final confirmation."
+    : previewEmpty
+      ? "Preview is current. No artifacts match the cleanup criteria."
     : previewFresh
       ? "Preview is current, but deletion is blocked until the backend reports age range, retention/protection, and affected objects."
     : preview
@@ -188,6 +191,7 @@ export function ServerJobsPanel({
         enableHiding: false,
         header: "Action",
         id: "action",
+        stickyEnd: true,
       },
     ],
     [pendingJobId],
@@ -488,11 +492,13 @@ export function ServerJobsPanel({
             </div>
           ) : null}
           <div className="cleanupReadinessSummary" aria-label="Artifact cleanup readiness">
-            <div className={cleanupCanDelete ? "ready" : "attention"}>
+            <div className={cleanupCanDelete ? "ready" : previewEmpty ? undefined : "attention"}>
               <span>Delete status</span>
               <strong>
                 {cleanupCanDelete
                   ? "Ready for confirmation"
+                  : previewEmpty
+                    ? "Nothing to delete"
                   : previewFresh
                     ? "Delete blocked"
                     : "Preview required"}
@@ -504,7 +510,7 @@ export function ServerJobsPanel({
               <strong>{formatCleanupDomains(preview?.domains ?? domains) || "No domains selected"}</strong>
               <p>{domains.length} selected artifact types. Type filters and object-prefix criteria narrow the preview.</p>
             </div>
-            <div className={preview ? "attention" : undefined}>
+            <div className={preview && !previewEmpty ? "attention" : undefined}>
               <span>Deletion impact</span>
               <strong>
                 {preview
@@ -513,14 +519,20 @@ export function ServerJobsPanel({
               </strong>
               <p>
                 {preview
-                  ? "Count and size are known, but deletion requires object-level evidence before confirmation."
+                  ? previewEmpty
+                    ? "No artifacts match. Adjust the criteria to inspect a different cleanup scope."
+                    : "Count and size are known, but deletion requires object-level evidence before confirmation."
                   : "Run Preview to calculate object count and total size."}
               </p>
             </div>
             <div>
-              <span>Missing evidence</span>
-              <strong>{cleanupEvidence.missingLabel}</strong>
-              <p>Backend preview must expose oldest/newest object age, retained/reference-protected counts, and a representative object list or download.</p>
+              <span>{previewEmpty ? "Evidence status" : "Missing evidence"}</span>
+              <strong>{previewEmpty ? "Not needed" : cleanupEvidence.missingLabel}</strong>
+              <p>
+                {previewEmpty
+                  ? "Object-level evidence is required only when the preview contains artifacts."
+                  : "Backend preview must expose oldest/newest object age, retained/reference-protected counts, and a representative object list or download."}
+              </p>
             </div>
           </div>
           <div className="retentionActions">
@@ -541,6 +553,8 @@ export function ServerJobsPanel({
               title={
                 cleanupCanDelete
                   ? "Delete artifacts using the reviewed expression, artifact types, preview hash, and object evidence"
+                  : previewEmpty
+                    ? "No artifacts match the current preview"
                   : "Deletion blocked until preview includes age range, retention/protection, and affected-object evidence"
               }
               type="button"
@@ -731,6 +745,15 @@ function cleanupPreviewEvidence(preview: ArtifactCleanupPreviewRecord | null): {
       missingLabel: "Preview required",
       objectsLabel: "Not previewed",
       retentionLabel: "Not previewed",
+    };
+  }
+  if (preview.matched_count === 0) {
+    return {
+      ageRangeLabel: "No matching artifacts",
+      complete: true,
+      missingLabel: "None",
+      objectsLabel: "No matching artifacts",
+      retentionLabel: "0 eligible / 0 protected",
     };
   }
   const ageRangeReady = Boolean(preview.oldest_created_at && preview.newest_created_at);

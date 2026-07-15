@@ -19,9 +19,7 @@ async function expectFocusInside(locator: Locator) {
   await expect
     .poll(
       async () =>
-        locator.evaluate((element) =>
-          element.contains(document.activeElement),
-        ),
+        locator.evaluate((element) => element.contains(document.activeElement)),
       { message: "focus should remain inside the active modal" },
     )
     .toBe(true);
@@ -40,18 +38,24 @@ async function chooseVpsBySearch(
   });
   await expect(option).toBeVisible();
   await expect
-    .poll(async () => {
-      const menuBox = await root.page().locator(".vpsComboboxMenu").boundingBox();
-      const viewport = root.page().viewportSize();
-      return Boolean(
-        menuBox &&
+    .poll(
+      async () => {
+        const menuBox = await root
+          .page()
+          .locator(".vpsComboboxMenu")
+          .boundingBox();
+        const viewport = root.page().viewportSize();
+        return Boolean(
+          menuBox &&
           viewport &&
           menuBox.x >= 0 &&
           menuBox.y >= 0 &&
           menuBox.x + menuBox.width <= viewport.width &&
           menuBox.y + menuBox.height <= viewport.height,
-      );
-    }, { message: `${label} options should remain inside the viewport` })
+        );
+      },
+      { message: `${label} options should remain inside the viewport` },
+    )
     .toBe(true);
   const selectedLabel = (await option.locator("strong").innerText()).trim();
   await option.click();
@@ -59,7 +63,9 @@ async function chooseVpsBySearch(
 }
 
 async function includeBulkTagReviewTargets(page: Page) {
-  const includeReviewTargets = page.getByLabel("Include targets needing review");
+  const includeReviewTargets = page.getByLabel(
+    "Include targets needing review",
+  );
   await expect(includeReviewTargets).toBeVisible();
   await includeReviewTargets.check();
   await expect(includeReviewTargets).toBeChecked();
@@ -131,11 +137,22 @@ test("job dispatch submits backend-resolved targets when dashboard inventory is 
   await page
     .getByLabel("Bulk target selector expression")
     .fill("id:agent-sfo-01");
-  await activate(page.locator(".commandComposer").getByRole("button", { name: "Dispatch", exact: true }));
-  await expect(page.getByText("Confirm job dispatch")).toBeVisible();
+  await activate(
+    page
+      .locator(".commandComposer")
+      .getByRole("button", { name: "Dispatch", exact: true }),
+  );
+  const firstPrompt = page.getByLabel("Confirm job dispatch");
+  await expect(firstPrompt).toBeVisible();
+  await expect(firstPrompt).toContainText("Resolved VPS");
+  await expect(firstPrompt).toContainText("edge-sfo-01 (agent-sfo-01)");
   await page.getByLabel("Command argv").fill("/usr/bin/id");
   await expect(page.getByText("Confirm job dispatch")).toBeHidden();
-  await activate(page.locator(".commandComposer").getByRole("button", { name: "Dispatch", exact: true }));
+  await activate(
+    page
+      .locator(".commandComposer")
+      .getByRole("button", { name: "Dispatch", exact: true }),
+  );
   await expect(page.getByText("Confirm job dispatch")).toBeVisible();
   await activate(
     page
@@ -381,13 +398,21 @@ test("job dispatch async review preparation ignores stale edits", async ({
   await page
     .getByLabel("Bulk target selector expression")
     .fill("id:agent-sfo-01");
-  await activate(page.locator(".commandComposer").getByRole("button", { name: "Dispatch", exact: true }));
+  await activate(
+    page
+      .locator(".commandComposer")
+      .getByRole("button", { name: "Dispatch", exact: true }),
+  );
   await expect(page.getByText("Preparing dispatch confirmation")).toBeVisible();
   await page.getByLabel("Command argv").fill("/usr/bin/id");
   await expect(page.getByText("Preparing dispatch confirmation")).toBeHidden();
   await expect(page.getByText("Confirm job dispatch")).toBeHidden();
 
-  await activate(page.locator(".commandComposer").getByRole("button", { name: "Dispatch", exact: true }));
+  await activate(
+    page
+      .locator(".commandComposer")
+      .getByRole("button", { name: "Dispatch", exact: true }),
+  );
   await expect(page.getByText("Confirm job dispatch")).toBeVisible();
   await activate(
     page
@@ -542,6 +567,7 @@ test("backup policy review submits a frozen target list and privilege assertion"
   await unlockPrivilegeFor(page, "Backups", "Policies");
 
   await activate(page.getByRole("button", { name: "Create policy" }).first());
+  await page.getByLabel("Backup policy name").fill("nightly system backup");
   const policySelector = page.getByRole("searchbox", {
     name: "Backup policy target expression",
   });
@@ -549,11 +575,13 @@ test("backup policy review submits a frozen target list and privilege assertion"
   await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.type("id:agent-fra-02");
   await page.keyboard.press("Escape");
-  await page
-    .getByRole("checkbox", { name: "Skip missing roots" })
-    .check();
+  await page.getByRole("checkbox", { name: "Skip missing roots" }).check();
+  await page.getByRole("checkbox", { name: "Enabled" }).uncheck();
   await activate(page.getByRole("button", { name: "Review policy" }));
   await expect(page.getByText("Confirm backup policy")).toBeVisible();
+  await expect(
+    page.getByText("Disabled - saved without scheduled runs"),
+  ).toBeVisible();
   await activate(page.getByRole("button", { name: "Save policy" }));
 
   const request = await page.evaluate(() => {
@@ -566,6 +594,7 @@ test("backup policy review submits a frozen target list and privilege assertion"
   });
   expect(request).toMatchObject({
     confirmed: true,
+    enabled: false,
     missing_path_policy: "skip",
     selector_expression: "id:agent-fra-02",
     target_client_ids: ["agent-fra-02"],
@@ -588,10 +617,8 @@ test("backup workflow confirmations clear when switching backup subpages", async
   await openConsoleSubpage(page, "Backups", "Requests");
   await unlockPrivilegeFor(page, "Backups", "Requests");
 
-  await activate(
-    page.getByRole("button", { name: "Open backup request", exact: true }),
-  );
-  const requestWorkflow = page.getByLabel("Open backup request");
+  await activate(page.getByRole("button", { name: "Run backup", exact: true }));
+  const requestWorkflow = page.getByLabel("Run backup");
   await chooseVpsBySearch(
     requestWorkflow,
     "Backup client",
@@ -599,14 +626,65 @@ test("backup workflow confirmations clear when switching backup subpages", async
     /edge-sfo-01.*agent-sfo-01/,
   );
   await activate(
-    requestWorkflow.getByRole("button", { name: "Review backup" }),
+    requestWorkflow.getByRole("button", { name: "Review backup run" }),
   );
-  await expect(
-    requestWorkflow.getByLabel("Confirm backup request"),
-  ).toBeVisible();
+  await expect(requestWorkflow.getByLabel("Confirm backup run")).toBeVisible();
 
   await openConsoleSubpage(page, "Backups", "Policies");
-  await expect(page.getByLabel("Confirm backup request")).toBeHidden();
+  await expect(page.getByLabel("Confirm backup run")).toBeHidden();
+});
+
+test("backup run dispatches one audited backup job for the reviewed VPS", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "backup dispatch request integrity is covered in the desktop workflow",
+  );
+  await installConsoleApiMock(page);
+  await page.goto("/");
+  await openConsoleSubpage(page, "Backups", "Requests");
+  await unlockPrivilegeFor(page, "Backups", "Requests");
+
+  await activate(page.getByRole("button", { name: "Run backup", exact: true }));
+  const workflow = page.getByRole("complementary", { name: "Run backup" });
+  await chooseVpsBySearch(
+    workflow,
+    "Backup client",
+    "sfo",
+    /edge-sfo-01.*agent-sfo-01/,
+  );
+  await activate(workflow.getByRole("button", { name: "Review backup run" }));
+  const confirmation = workflow.getByLabel("Confirm backup run");
+  await expect(confirmation).toContainText(
+    "Completion records archive metadata; a verified upload or retained-output transfer package is required before restore or download.",
+  );
+  await activate(confirmation.getByRole("button", { name: "Run backup" }));
+  await expect(workflow).toContainText(/Backup job .* (queued|running)/);
+
+  const request = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { jobs: Array<Record<string, unknown>> };
+      }
+    ).__vpsmanTestRequests.jobs;
+    return requests.at(-1);
+  });
+  expect(request).toMatchObject({
+    command: "backup",
+    confirmed: true,
+    selector_expression: "id:agent-sfo-01",
+    target_client_ids: ["agent-sfo-01"],
+    operation: {
+      include_config: true,
+      type: "backup",
+    },
+    privileged: true,
+  });
+  expect(
+    (request as { privilege_assertion?: { assertion_hex?: string } })
+      .privilege_assertion?.assertion_hex,
+  ).toMatch(/^[0-9a-f]+$/);
 });
 
 test("template render preview follows the selected VPS without submitting apply jobs", async ({
@@ -741,10 +819,12 @@ test("template assignment async review ignores stale selector edits", async ({
     page.getByRole("region", { name: "Confirm template assignment" }),
   ).toBeVisible();
   await activate(
-    page.getByRole("region", { name: "Confirm template assignment" }).getByRole("button", {
-      name: "Apply template assignment",
-      exact: true,
-    }),
+    page
+      .getByRole("region", { name: "Confirm template assignment" })
+      .getByRole("button", {
+        name: "Apply template assignment",
+        exact: true,
+      }),
   );
 
   const request = await page.evaluate(() => {
@@ -1188,8 +1268,12 @@ test("tunnel plan submits a fresh explicit declaration after reopening review", 
     "fra",
     /core-fra-02.*agent-fra-02/,
   );
-  await composer.getByLabel("Left remote underlay destination").fill("203.0.113.20");
-  await composer.getByLabel("Right remote underlay destination").fill("198.51.100.10");
+  await composer
+    .getByLabel("Left remote underlay destination")
+    .fill("203.0.113.20");
+  await composer
+    .getByLabel("Right remote underlay destination")
+    .fill("198.51.100.10");
   await composer.getByLabel("Left tunnel IPv4").fill("10.255.60.0");
   await composer.getByLabel("Right tunnel IPv4").fill("10.255.60.1");
   await activate(composer.getByRole("button", { name: "External adapter" }));
@@ -1437,9 +1521,7 @@ test("backup restore confirmations close on edit and submit fresh snapshots", as
     restoreWorkflow.getByRole("button", { name: "Review live restore" }),
   );
   await expect(restoreWorkflow.getByLabel("Confirm restore")).toBeVisible();
-  const restoreRunConfirmation = restoreWorkflow.getByLabel(
-    "Confirm restore",
-  );
+  const restoreRunConfirmation = restoreWorkflow.getByLabel("Confirm restore");
   await expect(
     restoreRunConfirmation.locator("dd", { hasText: archivePath }),
   ).toHaveAttribute("title", archivePath);
@@ -1511,7 +1593,9 @@ test("backup restore async review preparation ignores stale edits", async ({
   await expect(page.getByText("Preparing draft restore review")).toBeVisible();
   await restoreWorkflow.getByLabel("Restore note").fill("restore-stale-b");
   await expect(page.getByText("Preparing draft restore review")).toBeHidden();
-  await expect(restoreWorkflow.getByLabel("Confirm draft restore")).toBeHidden();
+  await expect(
+    restoreWorkflow.getByLabel("Confirm draft restore"),
+  ).toBeHidden();
 
   await activate(
     restoreWorkflow.getByRole("button", { name: "Review draft restore" }),

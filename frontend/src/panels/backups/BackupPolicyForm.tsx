@@ -79,7 +79,8 @@ export function BackupPolicyForm({
       <div className="sectionHeader compact">
         <h2>Backup policy</h2>
         <span>
-          {targetCount} fixed VPS target{targetCount === 1 ? "" : "s"} after confirmation
+          {targetCount} fixed VPS target{targetCount === 1 ? "" : "s"} after
+          confirmation
         </span>
       </div>
       <form className="dispatchForm" onSubmit={onSubmit}>
@@ -88,6 +89,7 @@ export function BackupPolicyForm({
           <input
             aria-label="Backup policy name"
             onChange={(event) => onNameChange(event.target.value)}
+            placeholder="nightly system backup"
             value={name}
           />
         </label>
@@ -104,11 +106,18 @@ export function BackupPolicyForm({
             placeholder="id:edge-01 || provider:alpha && country:us"
             showMatchCount
             value={targetsText}
-            verification={targetExpressionValid ? "valid" : "invalid"}
+            verification={
+              targetsText.trim()
+                ? targetExpressionValid
+                  ? "valid"
+                  : "invalid"
+                : "neutral"
+            }
             verificationMessage={targetExpressionMessage}
           />
           <small className="formHint">
-            The confirmation saves the resolved VPS list as fixed targets; the selector remains for audit and future manual target updates.
+            The confirmation saves the resolved VPS list as fixed targets; the
+            selector remains for audit and future manual target updates.
           </small>
         </div>
         <label>
@@ -199,7 +208,9 @@ export function BackupPolicyForm({
             <input
               checked={missingPathPolicy === "skip"}
               onChange={(event) =>
-                onMissingPathPolicyChange(event.target.checked ? "skip" : "fail")
+                onMissingPathPolicyChange(
+                  event.target.checked ? "skip" : "fail",
+                )
               }
               type="checkbox"
             />
@@ -218,8 +229,12 @@ export function BackupPolicyForm({
           <CalendarClock size={18} />
           <span>{cronExpr.trim() || "cron required"}</span>
           <span>{includeConfig ? "config" : "no config"}</span>
-          <span>{followSymlinks ? "follows symlinks" : "no symlink follow"}</span>
-          <span>{missingPathPolicy === "skip" ? "optional roots" : "strict roots"}</span>
+          <span>
+            {followSymlinks ? "follows symlinks" : "no symlink follow"}
+          </span>
+          <span>
+            {missingPathPolicy === "skip" ? "optional roots" : "strict roots"}
+          </span>
           <span>
             {pathsCount} path{pathsCount === 1 ? "" : "s"}
           </span>
@@ -232,7 +247,21 @@ export function BackupPolicyForm({
               !name.trim() ||
               !cronExpr.trim() ||
               !targetsText.trim() ||
-              !targetExpressionValid
+              !targetExpressionValid ||
+              targetCount === 0
+            }
+            title={
+              !name.trim()
+                ? "Enter a policy name"
+                : !targetsText.trim()
+                  ? "Enter a target selector"
+                  : !targetExpressionValid
+                    ? targetExpressionMessage
+                    : targetCount === 0
+                      ? "Choose a selector that matches at least one VPS"
+                      : !cronExpr.trim()
+                        ? "Enter a UTC cron expression"
+                        : "Review the fixed targets and backup policy"
             }
             type="submit"
           >

@@ -1,3 +1,4 @@
+import { Download, Upload } from "lucide-react";
 import { formatTime, shortHash, shortId } from "../../utils";
 
 export type RestoreArchiveTransferOption = {
@@ -14,7 +15,10 @@ type RestoreArchiveTransferSelectProps = {
   emptyMessage: string;
   label?: string;
   onChange: (value: string) => void;
+  onDownloadPackage?: () => void;
+  onOpenTransfers?: () => void;
   options: RestoreArchiveTransferOption[];
+  pending?: boolean;
   value: string;
 };
 
@@ -23,7 +27,10 @@ export function RestoreArchiveTransferSelect({
   emptyMessage,
   label = "Staged archive",
   onChange,
+  onDownloadPackage,
+  onOpenTransfers,
   options,
+  pending = false,
   value,
 }: RestoreArchiveTransferSelectProps) {
   const selected = options.find((option) => option.key === value) ?? null;
@@ -42,10 +49,17 @@ export function RestoreArchiveTransferSelect({
           }
           value={selected ? selected.key : ""}
         >
-          <option value="">{options.length === 0 ? emptyMessage : "Select staged archive"}</option>
+          <option value="">
+            {options.length === 0
+              ? onDownloadPackage || onOpenTransfers
+                ? "No matching upload"
+                : emptyMessage
+              : "Select staged archive"}
+          </option>
           {options.map((option) => (
             <option key={option.key} title={option.path} value={option.key}>
-              {shortId(option.sessionId)} / {formatBytes(option.sizeBytes)} / {shortHash(option.sha256Hex)}
+              {shortId(option.sessionId)} / {formatBytes(option.sizeBytes)} /{" "}
+              {shortHash(option.sha256Hex)}
             </option>
           ))}
         </select>
@@ -59,19 +73,55 @@ export function RestoreArchiveTransferSelect({
             </div>
             <div>
               <span>Size</span>
-              <strong title={String(selected.sizeBytes)}>{formatBytes(selected.sizeBytes)}</strong>
+              <strong title={String(selected.sizeBytes)}>
+                {formatBytes(selected.sizeBytes)}
+              </strong>
             </div>
             <div>
               <span>SHA-256</span>
-              <strong title={selected.sha256Hex}>{shortHash(selected.sha256Hex)}</strong>
+              <strong title={selected.sha256Hex}>
+                {shortHash(selected.sha256Hex)}
+              </strong>
             </div>
             <div>
               <span>Observed</span>
-              <strong title={selected.observedAt}>{formatTime(selected.observedAt)}</strong>
+              <strong title={selected.observedAt}>
+                {formatTime(selected.observedAt)}
+              </strong>
             </div>
           </>
         ) : (
-          <span className="restoreArchiveEmpty">{emptyMessage}</span>
+          <div className="restoreArchiveEmptyState">
+            <span className="restoreArchiveEmpty">{emptyMessage}</span>
+            {onDownloadPackage || onOpenTransfers ? (
+              <div className="restoreArchiveActions">
+                {onDownloadPackage ? (
+                  <button
+                    className="secondaryAction"
+                    disabled={pending}
+                    onClick={onDownloadPackage}
+                    title="Download the selected backup package to this browser"
+                    type="button"
+                  >
+                    <Download size={15} />
+                    Download package
+                  </button>
+                ) : null}
+                {onOpenTransfers ? (
+                  <button
+                    className="secondaryAction"
+                    disabled={pending}
+                    onClick={onOpenTransfers}
+                    title="Open Remote / Transfers with the selected restore target"
+                    type="button"
+                  >
+                    <Upload size={15} />
+                    Open Transfers
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
         )}
       </div>
     </div>

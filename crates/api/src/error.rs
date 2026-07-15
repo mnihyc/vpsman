@@ -12,6 +12,7 @@ pub(crate) struct ApiError {
     pub(crate) status: StatusCode,
     pub(crate) code: &'static str,
     pub(crate) error: anyhow::Error,
+    pub(crate) public_message: Option<String>,
 }
 
 impl ApiError {
@@ -20,6 +21,7 @@ impl ApiError {
             status: StatusCode::UNAUTHORIZED,
             code,
             error: anyhow::anyhow!(code),
+            public_message: None,
         }
     }
 
@@ -28,6 +30,7 @@ impl ApiError {
             status: StatusCode::CONFLICT,
             code,
             error: anyhow::anyhow!(code),
+            public_message: None,
         }
     }
 
@@ -36,6 +39,7 @@ impl ApiError {
             status: StatusCode::GONE,
             code,
             error: anyhow::anyhow!(code),
+            public_message: None,
         }
     }
 
@@ -44,6 +48,7 @@ impl ApiError {
             status: StatusCode::FORBIDDEN,
             code,
             error: anyhow::anyhow!(code),
+            public_message: None,
         }
     }
 
@@ -52,6 +57,7 @@ impl ApiError {
             status: StatusCode::NOT_FOUND,
             code,
             error: anyhow::anyhow!(code),
+            public_message: None,
         }
     }
 
@@ -60,6 +66,16 @@ impl ApiError {
             status: StatusCode::BAD_REQUEST,
             code,
             error: anyhow::anyhow!(code),
+            public_message: None,
+        }
+    }
+
+    pub(crate) fn bad_request_with_message(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code,
+            error: anyhow::anyhow!(code),
+            public_message: Some(message.into()),
         }
     }
 
@@ -68,6 +84,7 @@ impl ApiError {
             status: StatusCode::TOO_MANY_REQUESTS,
             code,
             error: anyhow::anyhow!(code),
+            public_message: None,
         }
     }
 }
@@ -84,6 +101,7 @@ impl IntoResponse for ApiError {
             self.status,
             Json(ErrorResponse {
                 error: self.code.to_string(),
+                message: self.public_message,
                 status: self.status.as_u16(),
             }),
         )
@@ -97,6 +115,7 @@ impl From<anyhow::Error> for ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             code: "internal_server_error",
             error,
+            public_message: None,
         }
     }
 }

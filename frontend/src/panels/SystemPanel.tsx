@@ -28,6 +28,7 @@ import { parse, stringify, type TomlTable } from "smol-toml";
 import { ActionFeedback } from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
+import { AdminRoleBoundary } from "../components/RoleBoundary";
 import {
   TimeSeriesChart,
   type TimeSeriesChartLine,
@@ -206,6 +207,11 @@ const commonScopeOptions = [
   "*",
 ];
 const defaultSessionTtlDays = 365;
+const defaultAdminSessionTtlDays = 30;
+
+function defaultSessionTtlDaysForRole(role: string): number {
+  return role === "admin" ? defaultAdminSessionTtlDays : defaultSessionTtlDays;
+}
 const operatorHelpText = {
   username:
     "Login username. Existing operator usernames are locked in the editor; create a new operator for a new login name.",
@@ -598,6 +604,26 @@ export function SystemPanel({
   suiteConfigLoading,
   tags,
 }: SystemPanelProps) {
+  if (
+    operator?.role !== "admin" &&
+    ["config", "users", "sessions"].includes(activeSubpage)
+  ) {
+    const title =
+      activeSubpage === "config"
+        ? "Suite configuration"
+        : activeSubpage === "sessions"
+          ? "Operator sessions"
+          : "Operator accounts";
+    return (
+      <div className="workspace singleColumn systemWorkspace">
+        <AdminRoleBoundary
+          currentRole={operator?.role}
+          detail="This page can change control-plane policy or inspect authority records and is intentionally visible only to admins."
+          title={title}
+        />
+      </div>
+    );
+  }
   if (activeSubpage === "config") {
     return (
       <SystemConfigPanel
@@ -862,10 +888,13 @@ export function SystemUsersPanel({
   const [draftSessionTtlDays, setDraftSessionTtlDays] = useState(
     defaultSessionTtlDays,
   );
+  const [draftSessionTtlCustomized, setDraftSessionTtlCustomized] =
+    useState(false);
   const [pendingAction, setPendingAction] = useState<PendingUserAction | null>(
     null,
   );
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionStatus, setActionStatus] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
   const [reviewPending, setReviewPending] = useState(false);
   const canManageUsers = currentOperator?.role === "admin";
@@ -935,8 +964,12 @@ export function SystemUsersPanel({
     setDraftPassword("");
     setDraftRole(selectedOperator.role);
     setDraftScopes(selectedOperator.scopes.join(", "));
-    setDraftSessionTtlDays(
-      secondsToDays(selectedOperator.session_refresh_ttl_secs),
+    const sessionTtlDays = secondsToDays(
+      selectedOperator.session_refresh_ttl_secs,
+    );
+    setDraftSessionTtlDays(sessionTtlDays);
+    setDraftSessionTtlCustomized(
+      sessionTtlDays !== defaultSessionTtlDaysForRole(selectedOperator.role),
     );
     setActionError(null);
     setPendingAction(null);
@@ -1035,6 +1068,7 @@ export function SystemUsersPanel({
       {
         id: "actions",
         header: "Actions",
+        stickyEnd: true,
         cell: (row) => (
           <div className="operatorInlineActions">
             <button
@@ -1083,6 +1117,7 @@ export function SystemUsersPanel({
   function invalidateUserReview() {
     setPendingAction(null);
     setReviewPending(false);
+    setActionStatus(null);
     invalidateReviewGeneration();
   }
 
@@ -1101,6 +1136,7 @@ export function SystemUsersPanel({
     setDraftRole("operator");
     setDraftScopes("");
     setDraftSessionTtlDays(defaultSessionTtlDays);
+    setDraftSessionTtlCustomized(false);
     setActionError(null);
   }
 
@@ -1109,19 +1145,22 @@ export function SystemUsersPanel({
     setSelectedId(null);
     setEditorMode("closed");
     setActionError(null);
+    setActionStatus(null);
   }
 
   async function requestPendingAction(
     builder: (material: PrivilegeMaterial) => Promise<PendingUserAction>,
   ) {
     if (!privilegeMaterial) {
-      setActionError("Local privilege unlock is required");
+      setActionError(null);
+      setActionStatus(null);
       onOpenPrivilegeUnlock();
       return;
     }
     const reviewGeneration = captureReviewGeneration();
     setReviewPending(true);
     setActionError(null);
+    setActionStatus(null);
     try {
       await waitForReviewRender();
       const action = await builder(privilegeMaterial);
@@ -1406,6 +1445,7 @@ export function SystemUsersPanel({
     setActionError(null);
     try {
       if (pendingAction.kind === "create") {
+        const username = pendingAction.username;
         await onCreateOperator(
           pendingAction.username,
           pendingAction.role,
@@ -1416,6 +1456,7 @@ export function SystemUsersPanel({
           pendingAction.privilege.privilegeAssertion,
         );
         resetCreateDraft();
+        setActionStatus(`Created operator ${username}`);
       } else if (pendingAction.kind === "update") {
         await onUpdateOperator(
           pendingAction.operator.id,
@@ -1425,6 +1466,7 @@ export function SystemUsersPanel({
           pendingAction.adminRisk,
           pendingAction.privilege.privilegeAssertion,
         );
+        setActionStatus(`Updated operator ${pendingAction.operator.username}`);
       } else if (pendingAction.kind === "status") {
         for (const operator of pendingAction.operators) {
           await onSetOperatorStatus(
@@ -1434,6 +1476,15 @@ export function SystemUsersPanel({
             pendingAction.privileges[operator.id].privilegeAssertion,
           );
         }
+        const statusVerb =
+          pendingAction.status === "active"
+            ? "Enabled"
+            : pendingAction.status === "disabled"
+              ? "Disabled"
+              : "Deleted";
+        setActionStatus(
+          `${statusVerb} ${pendingAction.operators.length} operator${pendingAction.operators.length === 1 ? "" : "s"}`,
+        );
       } else if (pendingAction.kind === "password") {
         await onResetOperatorPassword(
           pendingAction.operator.id,
@@ -1442,6 +1493,9 @@ export function SystemUsersPanel({
           pendingAction.privilege.privilegeAssertion,
         );
         setDraftPassword("");
+        setActionStatus(
+          `Reset password for ${pendingAction.operator.username}`,
+        );
       } else if (pendingAction.kind === "totp") {
         for (const operator of pendingAction.operators) {
           await onClearOperatorTotp(
@@ -1450,6 +1504,9 @@ export function SystemUsersPanel({
             pendingAction.privileges[operator.id].privilegeAssertion,
           );
         }
+        setActionStatus(
+          `Cleared TOTP for ${pendingAction.operators.length} operator${pendingAction.operators.length === 1 ? "" : "s"}`,
+        );
       } else {
         for (const session of pendingAction.sessions) {
           await onRevokeOperatorSession(
@@ -1458,6 +1515,9 @@ export function SystemUsersPanel({
             pendingAction.privileges[session.id].privilegeAssertion,
           );
         }
+        setActionStatus(
+          `Revoked ${pendingAction.sessions.length} bearer session${pendingAction.sessions.length === 1 ? "" : "s"} for ${pendingAction.operator.username}`,
+        );
       }
       setPendingAction(null);
     } catch (error) {
@@ -1513,14 +1573,14 @@ export function SystemUsersPanel({
             }
           />
           <SystemPostureTile
-            detail={`${visibleOperators.length} visible operator records. Standard roles are Viewer, Operator, and Admin; ${explicitScopeUsers} operators have explicit scope overrides${customRoles.length > 0 ? `, and ${customRoles.length} custom roles are loaded` : ""}.`}
+            detail={`${visibleOperators.length} visible operator record${visibleOperators.length === 1 ? "" : "s"}. Standard roles are Viewer, Operator, and Admin; ${explicitScopeUsers} operator${explicitScopeUsers === 1 ? " has" : "s have"} explicit scope overrides${customRoles.length > 0 ? `, and ${customRoles.length} custom role${customRoles.length === 1 ? " is" : "s are"} loaded` : ""}.`}
             icon={<LockKeyhole size={18} />}
             label="Role model"
             tone={customRoles.length > 0 ? "warning" : "info"}
             value={`${operatorRoleOptions.length} standard roles`}
           />
           <SystemPostureTile
-            detail={`${revokableSessionCount} non-current active bearer sessions can be revoked here or reviewed in Audit / Sessions; ${expiredSessionCount} expired bearer session${expiredSessionCount === 1 ? "" : "s"} excluded from active counts.`}
+            detail={`${revokableSessionCount} non-current active bearer session${revokableSessionCount === 1 ? "" : "s"} can be revoked here or reviewed in Audit / Sessions; ${expiredSessionCount} expired bearer session${expiredSessionCount === 1 ? "" : "s"} excluded from active counts.`}
             icon={<Activity size={18} />}
             label="Bearer sessions"
             tone={activeSessionCount > 0 ? "info" : "neutral"}
@@ -1559,7 +1619,7 @@ export function SystemUsersPanel({
                 <strong>{operatorRoleLabel(role)}</strong>
                 <span>{roleDescription(role)}</span>
                 <small>
-                  {roleCount} users ·{" "}
+                  {roleCount} user{roleCount === 1 ? "" : "s"} ·{" "}
                   {role === "admin"
                     ? "extra confirmation on grants"
                     : "scope overrides supported"}
@@ -1575,7 +1635,9 @@ export function SystemUsersPanel({
               <div className="attention" key={role}>
                 <strong>{operatorRoleLabel(role)}</strong>
                 <span>{roleDescription(role)}</span>
-                <small>{roleCount} users · custom backend role</small>
+                <small>
+                  {roleCount} user{roleCount === 1 ? "" : "s"} · custom backend role
+                </small>
               </div>
             );
           })}
@@ -1585,7 +1647,9 @@ export function SystemUsersPanel({
         <div className="sectionHeader fleetInstancesHeader">
           <div>
             <h2>Operator accounts</h2>
-            <span>{operators.length} operator records</span>
+            <span>
+              {operators.length} operator record{operators.length === 1 ? "" : "s"}
+            </span>
           </div>
           <span className="sectionContext">
             {editorMode === "edit" && selectedOperator
@@ -1742,8 +1806,21 @@ export function SystemUsersPanel({
           <div className="operatorEditorBody">
             <ActionFeedback
               className="localActionFeedback"
-              message={actionError ?? (reviewPending ? "Preparing review" : null)}
-              tone={actionError ? "danger" : "progress"}
+              message={
+                actionError ??
+                (reviewPending
+                  ? "Preparing review"
+                  : actionPending
+                    ? "Applying user action"
+                    : actionStatus)
+              }
+              tone={
+                actionError
+                  ? "danger"
+                  : reviewPending || actionPending
+                    ? "progress"
+                    : "success"
+              }
             />
             {selectedOperator && selectedAccessSummary ? (
               <OperatorAccessEvidencePanel
@@ -1790,6 +1867,7 @@ export function SystemUsersPanel({
                 />
                 <input
                   aria-label="Operator password"
+                  autoComplete="new-password"
                   disabled={!canManageUsers || editingDeleted}
                   minLength={12}
                   onChange={(event) => {
@@ -1815,7 +1893,13 @@ export function SystemUsersPanel({
                   disabled={!canManageUsers || editingDeleted}
                   onChange={(event) => {
                     invalidateUserReview();
-                    setDraftRole(event.target.value);
+                    const nextRole = event.target.value;
+                    if (!draftSessionTtlCustomized) {
+                      setDraftSessionTtlDays(
+                        defaultSessionTtlDaysForRole(nextRole),
+                      );
+                    }
+                    setDraftRole(nextRole);
                   }}
                   title={operatorHelpText.role}
                   value={draftRole}
@@ -1839,6 +1923,7 @@ export function SystemUsersPanel({
                   min={1}
                   onChange={(event) => {
                     invalidateUserReview();
+                    setDraftSessionTtlCustomized(true);
                     setDraftSessionTtlDays(Number(event.target.value));
                   }}
                   title={operatorHelpText.sessionRefreshTtl}
@@ -1847,6 +1932,15 @@ export function SystemUsersPanel({
                 />
               </label>
             </div>
+
+            {draftRole === "admin" &&
+              draftSessionTtlDays > defaultAdminSessionTtlDays && (
+                <ActionFeedback
+                  className="localActionFeedback"
+                  message={`Admin session TTL is above the ${defaultAdminSessionTtlDays}-day policy target. You may continue only if this longer renewal window is intentional.`}
+                  tone="warning"
+                />
+              )}
 
             <div className="operatorScopeEditor">
               <label>
@@ -5161,7 +5255,7 @@ function SystemConfigPanel({
       return;
     }
     if (!privilegeMaterial) {
-      setConfigError("Open Privilege Vault before reviewing suite config save");
+      setConfigError("Unlock privilege before reviewing suite config save");
       return;
     }
     let activeResult = validation;
@@ -5632,7 +5726,7 @@ function SystemConfigPanel({
                       type="button"
                     >
                       <LockKeyhole size={16} />
-                      Open Privilege Vault
+                      Unlock privilege
                     </button>
                   ) : nextAction.action === "review" ? (
                     <button
@@ -5706,7 +5800,7 @@ function SystemConfigPanel({
                     <span>
                       {privilegeMaterial
                         ? "Privilege unlocked for this browser session"
-                        : "Open Privilege Vault before saving suite config"}
+                        : "Unlock privilege before saving suite config"}
                     </span>
                     {!privilegeMaterial && (
                       <button
@@ -5714,7 +5808,7 @@ function SystemConfigPanel({
                         onClick={onOpenPrivilegeUnlock}
                         type="button"
                       >
-                        Open Privilege Vault
+                        Unlock privilege
                       </button>
                     )}
                   </div>

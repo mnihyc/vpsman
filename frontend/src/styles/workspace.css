@@ -804,7 +804,8 @@
 
 .observabilityMetricDefinition {
   margin: 0;
-  border-left: 3px solid var(--primary-border);
+  border: 1px solid var(--primary-border);
+  border-radius: 6px;
   background: var(--primary-selected);
   color: var(--text-secondary);
   font-size: 12px;
@@ -5824,6 +5825,17 @@ button.vpsDetailRecord:hover {
 
 .sectionHeader.compact {
   display: block;
+}
+
+.targetDetailHeader.sectionHeader.compact {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.targetDetailHeader > .iconButton {
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
 .sectionContext {

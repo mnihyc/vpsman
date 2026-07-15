@@ -12,6 +12,8 @@ import {
   evaluateSearchExpression,
   filterBySearchExpression,
   parseSearchExpression,
+  termMatchTitle,
+  tokenizeSearchExpression,
   type SearchFields,
 } from "../src/searchExpression";
 import type { AgentView } from "../src/types";
@@ -101,6 +103,32 @@ test("agent selector autocomplete values parse and matching values rank before u
     expect(parsed.error, suggestion).toBeNull();
   }
   expect(suggestions.indexOf("status:online")).toBeLessThan(suggestions.indexOf("status:never"));
+});
+
+test("selector chip help describes that predicate rather than the full expression", () => {
+  const agents = [
+    agentFromContext({
+      vps: {
+        display_name: "edge-sin-01",
+        id: "201",
+        status: "online",
+        tags: [],
+      },
+    }),
+    agentFromContext({
+      vps: {
+        display_name: "core-fra-01",
+        id: "202",
+        status: "online",
+        tags: [],
+      },
+    }),
+  ];
+  const token = tokenizeSearchExpression("id:201 OR id:202").tokens[0]!;
+  const title = termMatchTitle(token, agents);
+
+  expect(title).toContain("1 matched target: 201 (edge-sin-01; online)");
+  expect(title).not.toContain("202 (core-fra-01; online)");
 });
 
 test("webhook expression autocomplete values are accepted event predicates", () => {

@@ -61,3 +61,7 @@ webpki-roots = "1.0.7"
 
 [profile.release]
 strip = "symbols"
+
+[profile.release.package.vpsman-agent]
+codegen-units = 1
+strip = "symbols"

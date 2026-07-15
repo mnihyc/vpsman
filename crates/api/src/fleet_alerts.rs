@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -356,16 +356,22 @@ fn append_tunnel_alerts(alerts: &mut Vec<FleetAlertView>, tunnels: &[TelemetryTu
 }
 
 fn append_source_readiness_alerts(alerts: &mut Vec<FleetAlertView>, rows: &[SourceStatusView]) {
+    let mut pending_evidence_rows = Vec::new();
     for row in rows {
-        let severity = match row.status.as_str() {
-            "degraded" | "selected_no_store" => "warning",
-            "selected_no_samples" | "selected_no_artifacts" => "info",
-            _ => continue,
-        };
+        if matches!(
+            row.status.as_str(),
+            "selected_no_samples" | "selected_no_artifacts"
+        ) {
+            pending_evidence_rows.push(row);
+            continue;
+        }
+        if !matches!(row.status.as_str(), "degraded" | "selected_no_store") {
+            continue;
+        }
         push_alert(
             alerts,
             AlertInput {
-                severity,
+                severity: "warning",
                 category: "source_readiness",
                 target_kind: "source_template",
                 target_id: &format!("{}:{}", row.client_id, row.domain),
@@ -383,6 +389,69 @@ fn append_source_readiness_alerts(alerts: &mut Vec<FleetAlertView>, rows: &[Sour
             },
         );
     }
+    if pending_evidence_rows.is_empty() {
+        return;
+    }
+
+    let affected_clients = pending_evidence_rows
+        .iter()
+        .map(|row| row.client_id.clone())
+        .collect::<BTreeSet<_>>();
+    let affected_domains = pending_evidence_rows
+        .iter()
+        .map(|row| row.domain.clone())
+        .collect::<BTreeSet<_>>();
+    let evidence_limit = 100;
+    let evidence_rows = pending_evidence_rows
+        .iter()
+        .take(evidence_limit)
+        .map(|row| {
+            json!({
+                "client_id": &row.client_id,
+                "display_name": &row.display_name,
+                "domain": &row.domain,
+                "module": &row.module,
+                "template_name": &row.template_name,
+                "source_kind": &row.source_kind,
+                "status": &row.status,
+                "status_reason": &row.status_reason,
+            })
+        })
+        .collect::<Vec<_>>();
+    let observed_at = pending_evidence_rows
+        .iter()
+        .map(|row| row.assigned_at.as_str())
+        .max()
+        .unwrap_or_default()
+        .to_string();
+    let target_id = "fleet:pending_evidence";
+    let status = "selected_pending_evidence";
+    push_alert(
+        alerts,
+        AlertInput {
+            severity: "info",
+            category: "source_readiness",
+            target_kind: "source_template_summary",
+            target_id,
+            client_id: None,
+            title: "Selected source templates await evidence",
+            detail: format!(
+                "{} selected assignments across {} VPSs and {} source domains have no retained evidence yet",
+                pending_evidence_rows.len(),
+                affected_clients.len(),
+                affected_domains.len(),
+            ),
+            status,
+            evidence: json!({
+                "assignment_count": pending_evidence_rows.len(),
+                "affected_clients": affected_clients,
+                "affected_domains": affected_domains,
+                "assignments": evidence_rows,
+                "truncated_count": pending_evidence_rows.len().saturating_sub(evidence_limit),
+            }),
+            observed_at,
+        },
+    );
 }
 
 async fn append_job_alerts(
@@ -741,6 +810,7 @@ fn severity_rank(severity: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     #[test]
     fn fleet_alert_policy_rejects_invalid_thresholds() {
@@ -799,6 +869,59 @@ mod tests {
             disk.evidence["critical_threshold"].as_f64().unwrap(),
             policy.disk_available_critical_ratio
         );
+    }
+
+    #[test]
+    fn source_readiness_aggregates_pending_evidence_but_keeps_warnings_per_vps() {
+        let mut alerts = Vec::new();
+        let rows = vec![
+            source_status("edge-a", "telemetry", "selected_no_samples"),
+            source_status("edge-a", "network", "selected_no_artifacts"),
+            source_status("edge-b", "telemetry", "selected_no_samples"),
+            source_status("edge-b", "backup", "degraded"),
+        ];
+
+        append_source_readiness_alerts(&mut alerts, &rows);
+
+        assert_eq!(alerts.len(), 2);
+        let summary = alerts
+            .iter()
+            .find(|alert| alert.severity == "info")
+            .expect("pending evidence summary");
+        assert_eq!(summary.target_kind, "source_template_summary");
+        assert_eq!(summary.client_id, None);
+        assert_eq!(summary.evidence["assignment_count"], 3);
+        assert_eq!(
+            summary.evidence["affected_clients"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        let warning = alerts
+            .iter()
+            .find(|alert| alert.severity == "warning")
+            .expect("degraded assignment warning");
+        assert_eq!(warning.client_id.as_deref(), Some("edge-b"));
+        assert_eq!(warning.status, "degraded");
+    }
+
+    fn source_status(client_id: &str, domain: &str, status: &str) -> SourceStatusView {
+        SourceStatusView {
+            client_id: client_id.to_string(),
+            display_name: client_id.to_string(),
+            client_status: "online".to_string(),
+            domain: domain.to_string(),
+            module: domain.to_string(),
+            template_id: Uuid::new_v4(),
+            template_name: format!("{domain} default"),
+            template_scope: "global".to_string(),
+            source_kind: "builtin".to_string(),
+            status: status.to_string(),
+            status_reason: format!("{domain} is {status}"),
+            evidence: json!({}),
+            assigned_at: "2026-07-13T08:00:00Z".to_string(),
+        }
     }
 
     fn find_status<'a>(alerts: &'a [FleetAlertView], status: &str) -> &'a FleetAlertView {

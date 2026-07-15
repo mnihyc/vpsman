@@ -526,7 +526,7 @@ const allViews: ScreenshotEntry[] = [
       "Data available:",
       "Sparse data:",
       "Active alerts",
-      "Warning observations",
+      "Reachability observations",
       "Top VPS",
       "Fleet grouping",
     ],
@@ -706,7 +706,7 @@ const allViews: ScreenshotEntry[] = [
       "Started",
       "Last activity",
       "Expiry",
-      "Demo/test auth signals",
+      "Authentication signals",
     ],
   },
   {
@@ -734,7 +734,7 @@ const allViews: ScreenshotEntry[] = [
       "Session scopes",
       "VPS identities",
       "Gateway sessions",
-      "Privilege state",
+      "Privilege unlock",
     ],
   },
   {
@@ -967,6 +967,9 @@ async function navigateAndScreenshot(
     await expect(
       page.getByRole("button", { name: "Close detail panel" }),
     ).toBeVisible();
+    await expectSectionBelowToolbar(
+      page.locator(".consoleDetailPanel", { hasText: "Create alert policy" }),
+    );
   }
 
   if (entry.prepare === "fleet-delete-success") {
@@ -1127,6 +1130,13 @@ async function navigateAndScreenshot(
     await expect(
       page.getByRole("button", { name: "Close detail panel" }),
     ).toBeVisible();
+    await editor.getByLabel("Webhook rule name").fill("edge-status-webhook");
+    await editor
+      .getByLabel("Webhook expression")
+      .fill("interval.30sec && tag:edge");
+    await editor
+      .getByLabel("Webhook target")
+      .fill("https://hooks.example.net/vpsman");
     await editor.getByRole("button", { name: "Test" }).click();
     await expect(editor).toContainText("Rendered message");
   }
@@ -1201,11 +1211,13 @@ async function navigateAndScreenshot(
   }
 
   await page.waitForTimeout(200);
-  const preserveWorkflowFocus = Boolean(
-    (entry.prepare && entry.prepare !== "fleet-metrics-advanced") ||
-      entry.expandVpsRow ||
-      entry.tab,
-  );
+  const preserveWorkflowFocus =
+    !projectName.startsWith("mobile") &&
+    Boolean(
+      (entry.prepare && entry.prepare !== "fleet-metrics-advanced") ||
+        entry.expandVpsRow ||
+        entry.tab,
+    );
   if (!preserveWorkflowFocus) {
     await page.evaluate(() => {
       window.scrollTo(0, 0);
@@ -1334,8 +1346,22 @@ async function scrollSectionBelowToolbar(
   });
 }
 
+async function expectSectionBelowToolbar(
+  section: import("@playwright/test").Locator,
+) {
+  await section.page().waitForTimeout(300);
+  const gap = await section.evaluate((element) => {
+    const topbar = document.querySelector<HTMLElement>(".topbar");
+    const visibleTop = topbar?.getBoundingClientRect().bottom ?? 0;
+    return Math.round(element.getBoundingClientRect().top - visibleTop);
+  });
+  expect(gap, "on-demand panel gap below sticky toolbar").toBeGreaterThanOrEqual(8);
+  expect(gap, "on-demand panel gap below sticky toolbar").toBeLessThanOrEqual(24);
+}
+
 // Install mock API before each test batch
 test.beforeEach(async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
   await installConsoleApiMock(page);
 });
 

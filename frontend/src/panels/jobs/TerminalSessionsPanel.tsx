@@ -9,13 +9,15 @@ import {
   Play,
   Radio,
   RefreshCw,
+  Send,
   ShieldCheck,
   TerminalSquare,
   XCircle,
 } from "lucide-react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { createPortal } from "react-dom";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
@@ -24,6 +26,7 @@ import {
   ActionFeedback,
   type ActionFeedbackTone,
 } from "../../components/ActionFeedback";
+import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { VpsCombobox } from "../../components/VpsCombobox";
 import { consolePalette } from "../../colorPalette";
 import { terminalSessionStateBadgeClass } from "../../jobStatusPresentation";
@@ -64,25 +67,40 @@ const TERMINAL_LAUNCH_PROFILES: Array<{
 
 type TerminalLaunchUser = "agent" | "root" | "root-fallback";
 
+const TERMINAL_UNLOCK_REQUIRED_STATUS =
+  "Unlock privilege, then open the terminal from this launcher.";
+const TERMINAL_INPUT_UNLOCK_REQUIRED_STATUS =
+  "Unlock local privilege, then send this preserved input.";
+
+type ModalSiblingState = {
+  ariaHidden: string | null;
+  element: HTMLElement;
+  inert: boolean;
+};
+
 export function TerminalSessionsPanel({
   agents,
   clientLabel,
   sessions,
   lastTerminalOutputEvent,
   loading,
+  onCloseTerminal,
   onOpenSessionEvidence,
   onOpenPrivilegeUnlock,
   onOpenTerminal,
   onPrepareAction,
+  onSendInput,
   onReplay,
   onRefresh,
   privilegeMaterial,
+  privilegeUnlockOpen,
 }: {
   agents: AgentView[];
   clientLabel: (clientId: string) => string;
   sessions: TerminalSessionRecord[];
   lastTerminalOutputEvent: WsTerminalOutputEvent | null;
   loading: boolean;
+  onCloseTerminal: (session: TerminalSessionRecord) => Promise<void>;
   onOpenSessionEvidence?: () => void;
   onOpenPrivilegeUnlock: () => void;
   onOpenTerminal: (request: {
@@ -97,9 +115,14 @@ export function TerminalSessionsPanel({
     action: TerminalAction,
     options?: Omit<TerminalComposerAction, "action" | "requestId" | "session">,
   ) => void;
+  onSendInput: (
+    session: TerminalSessionRecord,
+    text: string,
+  ) => Promise<{ input_seq: number; request_status: string }>;
   onReplay: (clientId: string, sessionId: string, fromSeq?: number) => Promise<TerminalReplayRecord>;
   onRefresh: () => void;
   privilegeMaterial: PrivilegeMaterial | null;
+  privilegeUnlockOpen: boolean;
 }) {
   const [launchTargetId, setLaunchTargetId] = useState("");
   const [launchProfile, setLaunchProfile] = useState<TerminalLaunchProfile>("posix-login");
@@ -118,10 +141,44 @@ export function TerminalSessionsPanel({
   const [followKey, setFollowKey] = useState<string | null>(null);
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [terminalFocusOpen, setTerminalFocusOpen] = useState(false);
+  const [terminalInputText, setTerminalInputText] = useState("");
+  const [appendTerminalNewline, setAppendTerminalNewline] = useState(true);
+  const [terminalInputPending, setTerminalInputPending] = useState(false);
+  const [terminalInputStatus, setTerminalInputStatus] = useState<string | null>(null);
+  const [terminalInputStatusTone, setTerminalInputStatusTone] =
+    useState<ActionFeedbackTone>("info");
+  const [closeSession, setCloseSession] =
+    useState<TerminalSessionRecord | null>(null);
+  const [closeUnlockSession, setCloseUnlockSession] =
+    useState<TerminalSessionRecord | null>(null);
+  const [closePending, setClosePending] = useState(false);
+  const [closeStatus, setCloseStatus] = useState<string | null>(null);
+  const [closeStatusTone, setCloseStatusTone] =
+    useState<ActionFeedbackTone>("info");
+  const terminalInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const focusedTerminalInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const terminalFocusRef = useRef<HTMLDivElement | null>(null);
+  const privilegeUnlockWasOpenRef = useRef(privilegeUnlockOpen);
   const launchTarget = agents.find((agent) => agent.id === launchTargetId) ?? agents[0] ?? null;
   const launchProfileRecord =
     TERMINAL_LAUNCH_PROFILES.find((profile) => profile.value === launchProfile) ?? TERMINAL_LAUNCH_PROFILES[0];
   const privilegeReady = Boolean(privilegeMaterial);
+  const launchFeedbackMessage =
+    privilegeReady && launchStatus === TERMINAL_UNLOCK_REQUIRED_STATUS
+      ? "Privilege unlocked. Terminal controls are ready."
+      : launchStatus;
+  const launchFeedbackTone =
+    privilegeReady && launchStatus === TERMINAL_UNLOCK_REQUIRED_STATUS
+      ? "success"
+      : launchStatusTone;
+  const terminalInputFeedbackMessage =
+    privilegeReady && terminalInputStatus === TERMINAL_INPUT_UNLOCK_REQUIRED_STATUS
+      ? "Privilege unlocked. Preserved input is ready to send."
+      : terminalInputStatus;
+  const terminalInputFeedbackTone =
+    privilegeReady && terminalInputStatus === TERMINAL_INPUT_UNLOCK_REQUIRED_STATUS
+      ? "success"
+      : terminalInputStatusTone;
   const launchPrivilegeTitle = privilegeReady
     ? "Local privilege is unlocked in this browser. Open submits one audited terminal_open job for the selected VPS."
     : "Terminal open requires local privilege material. Unlock once, then open the terminal from this launcher.";
@@ -131,7 +188,7 @@ export function TerminalSessionsPanel({
       ? "Terminal open request is being submitted."
       : privilegeReady
         ? `Open ${launchProfileRecord.label} on ${clientLabel(launchTarget.id)} with an audited terminal_open job.`
-        : "Open Privilege Vault; after unlock, this same launcher opens the terminal directly.";
+        : "Unlock privilege; after unlock, this same launcher opens the terminal directly.";
   const activeSession = useMemo(
     () =>
       sessions.find((session) => `${session.client_id}:${session.session_id}` === activeKey) ??
@@ -143,6 +200,10 @@ export function TerminalSessionsPanel({
   const openSessions = sessions.filter((session) => !session.session_exited && session.state !== "closed").length;
   const replayableSessions = sessions.filter((session) => session.output_next_seq !== null).length;
   const retainedBytes = sessions.reduce((total, session) => total + (session.output_retained_bytes ?? 0), 0);
+  const followedSession = followKey
+    ? sessions.find((session) => `${session.client_id}:${session.session_id}` === followKey) ?? null
+    : null;
+  const followingLive = Boolean(followedSession && isTerminalActive(followedSession));
   const terminalSummary = `${openSessions} open, ${replayableSessions} replayable, ${formatBytes(retainedBytes)} retained`;
   const terminalReplayFeedbackMessage = replayError;
   const activeReplay =
@@ -165,7 +226,7 @@ export function TerminalSessionsPanel({
               className={`linkLikeButton ${selected ? "activeAction" : ""}`}
               onClick={(event) => {
                 event.stopPropagation();
-                setActiveKey(key);
+                selectTerminalSession(key);
               }}
               type="button"
             >
@@ -234,18 +295,23 @@ export function TerminalSessionsPanel({
       cell: (session) => {
         const active = !session.session_exited && session.state !== "closed";
         const key = `${session.client_id}:${session.session_id}`;
-        const following = followKey === key;
+        const following = followingLive && followKey === key;
+        const followTitle = !active
+          ? "This session is closed. Load Replay to inspect its retained output."
+          : session.output_next_seq === null
+            ? "Live follow starts after the session reports an output sequence."
+            : "Follow persisted output as new terminal chunks arrive";
         return (
           <span className="terminalRowActions" aria-label={`Terminal session ${shortId(session.session_id)} controls`}>
             <button
               aria-label={`${following ? "Stop following" : "Follow"} terminal session ${shortId(session.session_id)}`}
               className={`terminalActionButton ${following ? "activeAction" : ""}`}
-              disabled={session.output_next_seq === null}
+              disabled={!active || session.output_next_seq === null}
               onClick={(event) => {
                 event.stopPropagation();
                 toggleFollow(session);
               }}
-              title="Follow persisted output as new terminal chunks arrive"
+              title={followTitle}
               type="button"
             >
               <Radio size={13} />
@@ -299,9 +365,9 @@ export function TerminalSessionsPanel({
               disabled={!active}
               onClick={(event) => {
                 event.stopPropagation();
-                onPrepareAction(session, "input");
+                focusTerminalInput(session);
               }}
-              title="Send input to this terminal session"
+              title="Focus the inline input composer for this exact terminal session"
               type="button"
             >
               <Keyboard size={13} />
@@ -327,7 +393,7 @@ export function TerminalSessionsPanel({
               disabled={!active}
               onClick={(event) => {
                 event.stopPropagation();
-                onPrepareAction(session, "close");
+                requestTerminalClose(session);
               }}
               title="Close this terminal session after review"
               type="button"
@@ -375,7 +441,76 @@ export function TerminalSessionsPanel({
   }, [lastTerminalOutputEvent, followKey]);
 
   useEffect(() => {
-    if (!activeSession || activeSession.output_next_seq === null) {
+    if (!followKey) {
+      return;
+    }
+    const followed = sessions.find(
+      (session) => `${session.client_id}:${session.session_id}` === followKey,
+    );
+    if (!followed || !isTerminalActive(followed)) {
+      setFollowKey(null);
+    }
+  }, [followKey, sessions]);
+
+  useEffect(() => {
+    const wasOpen = privilegeUnlockWasOpenRef.current;
+    privilegeUnlockWasOpenRef.current = privilegeUnlockOpen;
+    if (!wasOpen || privilegeUnlockOpen || !closeUnlockSession) {
+      return;
+    }
+    const requestedSession = closeUnlockSession;
+    setCloseUnlockSession(null);
+    if (!privilegeReady) {
+      setCloseStatusTone("warning");
+      setCloseStatus(
+        `Privilege unlock canceled. Terminal ${shortId(requestedSession.session_id)} remains open.`,
+      );
+      return;
+    }
+    const currentSession = sessions.find(
+      (session) =>
+        session.client_id === requestedSession.client_id &&
+        session.session_id === requestedSession.session_id,
+    );
+    if (!currentSession || !isTerminalActive(currentSession)) {
+      setCloseStatusTone("warning");
+      setCloseStatus(
+        `Terminal ${shortId(requestedSession.session_id)} closed before review; no close job was submitted.`,
+      );
+      return;
+    }
+    setCloseStatusTone("success");
+    setCloseStatus(
+      `Privilege unlocked. Review terminal ${shortId(currentSession.session_id)} before closing it.`,
+    );
+    setCloseSession(currentSession);
+  }, [closeUnlockSession, privilegeReady, privilegeUnlockOpen, sessions]);
+
+  useEffect(() => {
+    if (!closeSession || loading) {
+      return;
+    }
+    const currentSession = sessions.find(
+      (session) =>
+        session.client_id === closeSession.client_id &&
+        session.session_id === closeSession.session_id,
+    );
+    if (currentSession && isTerminalActive(currentSession)) {
+      return;
+    }
+    setCloseSession(null);
+    setCloseStatusTone("warning");
+    setCloseStatus(
+      `Terminal ${shortId(closeSession.session_id)} is already closed; no close job was submitted.`,
+    );
+  }, [closeSession, loading, sessions]);
+
+  useEffect(() => {
+    if (
+      !activeSession ||
+      !isTerminalActive(activeSession) ||
+      activeSession.output_next_seq === null
+    ) {
       return;
     }
     const key = `${activeSession.client_id}:${activeSession.session_id}`;
@@ -384,15 +519,105 @@ export function TerminalSessionsPanel({
     }
     setFollowKey(key);
     void loadDurableReplay(activeSession);
-  }, [activeSession?.client_id, activeSession?.session_id]);
+  }, [
+    activeSession?.client_id,
+    activeSession?.session_id,
+    activeSession?.output_next_seq,
+    activeSession?.session_exited,
+    activeSession?.state,
+    followKey,
+  ]);
+
+  useEffect(() => {
+    if (!terminalFocusOpen || !terminalFocusRef.current) {
+      return undefined;
+    }
+    const overlay = terminalFocusRef.current;
+    const previousFocus =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    const siblings: ModalSiblingState[] = Array.from(document.body.children)
+      .filter(
+        (element): element is HTMLElement =>
+          element instanceof HTMLElement && element !== overlay,
+      )
+      .map((element) => ({
+        ariaHidden: element.getAttribute("aria-hidden"),
+        element,
+        inert: element.inert,
+      }));
+    for (const sibling of siblings) {
+      sibling.element.inert = true;
+      sibling.element.setAttribute("aria-hidden", "true");
+    }
+    window.requestAnimationFrame(() => {
+      focusedTerminalInputRef.current?.focus({ preventScroll: true });
+    });
+    function handleFocusedTerminalKeyDown(event: KeyboardEvent) {
+      if (overlay.inert) {
+        return;
+      }
+      if (event.key === "Escape" && !terminalInputPending) {
+        event.preventDefault();
+        setTerminalFocusOpen(false);
+        return;
+      }
+      if (event.key !== "Tab") {
+        return;
+      }
+      const focusable = getFocusableElements(overlay);
+      if (focusable.length === 0) {
+        event.preventDefault();
+        overlay.focus({ preventScroll: true });
+        return;
+      }
+      const first = focusable[0]!;
+      const last = focusable[focusable.length - 1]!;
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || !overlay.contains(active))) {
+        event.preventDefault();
+        last.focus({ preventScroll: true });
+      } else if (!event.shiftKey && (active === last || !overlay.contains(active))) {
+        event.preventDefault();
+        first.focus({ preventScroll: true });
+      }
+    }
+    function handleFocusedTerminalFocus(event: FocusEvent) {
+      if (overlay.inert) {
+        return;
+      }
+      if (event.target instanceof Node && overlay.contains(event.target)) {
+        return;
+      }
+      overlay.focus({ preventScroll: true });
+    }
+    document.addEventListener("keydown", handleFocusedTerminalKeyDown, true);
+    document.addEventListener("focusin", handleFocusedTerminalFocus);
+    return () => {
+      document.removeEventListener("keydown", handleFocusedTerminalKeyDown, true);
+      document.removeEventListener("focusin", handleFocusedTerminalFocus);
+      for (const sibling of siblings) {
+        sibling.element.inert = sibling.inert;
+        if (sibling.ariaHidden === null) {
+          sibling.element.removeAttribute("aria-hidden");
+        } else {
+          sibling.element.setAttribute("aria-hidden", sibling.ariaHidden);
+        }
+      }
+      if (previousFocus?.isConnected) {
+        previousFocus.focus({ preventScroll: true });
+      }
+    };
+  }, [terminalFocusOpen, terminalInputPending]);
 
   async function loadDurableReplay(session: TerminalSessionRecord) {
     const key = `${session.client_id}:${session.session_id}`;
-    setActiveKey(key);
+    selectTerminalSession(key);
     setReplayPendingKey(key);
     setReplayError(null);
     try {
-      const fromSeq = session.output_first_seq ?? session.output_retained_first_seq ?? 1;
+      const fromSeq = session.output_retained_first_seq ?? session.output_first_seq ?? 1;
       const replay = await onReplay(session.client_id, session.session_id, fromSeq);
       setReplayPreview(toReplayPreview(replay));
     } catch (error) {
@@ -440,13 +665,175 @@ export function TerminalSessionsPanel({
 
   function toggleFollow(session: TerminalSessionRecord) {
     const key = `${session.client_id}:${session.session_id}`;
-    setActiveKey(key);
+    selectTerminalSession(key);
     if (followKey === key) {
       setFollowKey(null);
       return;
     }
+    if (!isTerminalActive(session) || session.output_next_seq === null) {
+      return;
+    }
     setFollowKey(key);
     void loadDurableReplay(session);
+  }
+
+  function focusTerminalInput(session: TerminalSessionRecord) {
+    selectTerminalSession(`${session.client_id}:${session.session_id}`);
+    window.requestAnimationFrame(() => {
+      const input = terminalFocusOpen
+        ? focusedTerminalInputRef.current
+        : terminalInputRef.current;
+      input?.focus({ preventScroll: false });
+      input?.scrollIntoView({ block: "nearest" });
+    });
+  }
+
+  async function sendTerminalInput(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (terminalInputPending) {
+      return;
+    }
+    if (!activeSession || activeSession.session_exited || activeSession.state === "closed") {
+      setTerminalInputStatusTone("warning");
+      setTerminalInputStatus("Select an open terminal session before sending input.");
+      return;
+    }
+    if (!privilegeMaterial) {
+      setTerminalInputStatusTone("warning");
+      setTerminalInputStatus(TERMINAL_INPUT_UNLOCK_REQUIRED_STATUS);
+      onOpenPrivilegeUnlock();
+      return;
+    }
+    if (!terminalInputText) {
+      setTerminalInputStatusTone("warning");
+      setTerminalInputStatus("Enter terminal input first.");
+      return;
+    }
+    const text =
+      appendTerminalNewline && !terminalInputText.endsWith("\n")
+        ? `${terminalInputText}\n`
+        : terminalInputText;
+    setTerminalInputPending(true);
+    setTerminalInputStatusTone("progress");
+    setTerminalInputStatus(`Queueing ${text.length} input byte${text.length === 1 ? "" : "s"}...`);
+    try {
+      const response = await onSendInput(activeSession, text);
+      setTerminalInputText("");
+      setTerminalInputStatusTone("success");
+      setTerminalInputStatus(
+        `Input ${response.input_seq} queued (${response.request_status}).`,
+      );
+    } catch (error) {
+      setTerminalInputStatusTone("danger");
+      setTerminalInputStatus(
+        error instanceof Error ? error.message : "Terminal input failed.",
+      );
+    } finally {
+      setTerminalInputPending(false);
+    }
+  }
+
+  async function confirmTerminalClose() {
+    const session = closeSession;
+    if (!session || closePending) return;
+    setCloseSession(null);
+    setClosePending(true);
+    setCloseStatusTone("progress");
+    setCloseStatus(
+      `Closing terminal ${shortId(session.session_id)} on ${clientLabel(session.client_id)}...`,
+    );
+    try {
+      await onCloseTerminal(session);
+      setCloseStatusTone("success");
+      setCloseStatus(
+        `Terminal ${shortId(session.session_id)} close job submitted.`,
+      );
+    } catch (error) {
+      setCloseStatusTone("danger");
+      setCloseStatus(
+        error instanceof Error ? error.message : "Terminal close failed.",
+      );
+    } finally {
+      setClosePending(false);
+    }
+  }
+
+  function requestTerminalClose(session: TerminalSessionRecord) {
+    setCloseStatus(null);
+    if (!privilegeMaterial) {
+      setCloseUnlockSession(session);
+      setCloseStatusTone("warning");
+      setCloseStatus(
+        `Unlock privilege before reviewing terminal ${shortId(session.session_id)} for close.`,
+      );
+      onOpenPrivilegeUnlock();
+      return;
+    }
+    setCloseSession(session);
+  }
+
+  function renderTerminalInputComposer(focused: boolean) {
+    const active =
+      activeSession && !activeSession.session_exited && activeSession.state !== "closed";
+    return (
+      <form
+        aria-label="Terminal input composer"
+        className={`terminalInputComposer ${focused ? "focused" : ""}`}
+        onSubmit={sendTerminalInput}
+      >
+        <label className="wideField">
+          <span>Input to {activeSession ? clientLabel(activeSession.client_id) : "selected session"}</span>
+          <textarea
+            aria-label="Terminal input bytes"
+            disabled={terminalInputPending}
+            onChange={(event) => {
+              setTerminalInputText(event.target.value);
+              setTerminalInputStatus(null);
+            }}
+            onKeyDown={(event) => {
+              if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+                event.preventDefault();
+                event.currentTarget.form?.requestSubmit();
+              }
+            }}
+            placeholder="Enter a command or exact terminal input"
+            ref={focused ? focusedTerminalInputRef : terminalInputRef}
+            rows={2}
+            value={terminalInputText}
+          />
+        </label>
+        <label
+          className="checkLine inlineCheck terminalAppendNewline"
+          title="Adds one newline only when the input does not already end with one, equivalent to pressing Enter after a command."
+        >
+          <input
+            checked={appendTerminalNewline}
+            disabled={terminalInputPending}
+            onChange={(event) => setAppendTerminalNewline(event.target.checked)}
+            type="checkbox"
+          />
+          <span>Press Enter after input</span>
+        </label>
+        <button
+          className="primaryAction compactAction"
+          disabled={!active || !terminalInputText || terminalInputPending}
+          title={
+            active
+              ? "Send input to this exact VPS and terminal session. Ctrl+Enter also submits."
+              : "Select an open terminal session first."
+          }
+          type="submit"
+        >
+          <Send size={14} />
+          <span>{terminalInputPending ? "Sending" : "Send input"}</span>
+        </button>
+        <ActionFeedback
+          className="localActionFeedback terminalInputFeedback"
+          message={terminalInputFeedbackMessage}
+          tone={terminalInputFeedbackTone}
+        />
+      </form>
+    );
   }
 
   async function openNewTerminal() {
@@ -457,7 +844,7 @@ export function TerminalSessionsPanel({
     }
     if (!privilegeMaterial) {
       setLaunchStatusTone("warning");
-      setLaunchStatus("Unlock privilege, then open the terminal from this launcher.");
+      setLaunchStatus(TERMINAL_UNLOCK_REQUIRED_STATUS);
       onOpenPrivilegeUnlock();
       return;
     }
@@ -487,6 +874,7 @@ export function TerminalSessionsPanel({
       last_job_id: "pending-review",
       last_command_type: "terminal_open",
       last_seq: 0,
+      opened_at: now,
       observed_at: now,
     };
     setLaunchPending(true);
@@ -500,6 +888,9 @@ export function TerminalSessionsPanel({
         terminalUser: launchUser === "agent" ? "" : "root",
         terminalUserPolicy: launchUser === "root-fallback" ? "fallback" : "fail",
       });
+      selectTerminalSession(`${session.client_id}:${session.session_id}`);
+      setFollowKey(null);
+      setReplayPreview(null);
       setLaunchStatusTone("success");
       setLaunchStatus(`${clientLabel(launchTarget.id)} terminal open job submitted.`);
     } catch (error) {
@@ -508,6 +899,15 @@ export function TerminalSessionsPanel({
     } finally {
       setLaunchPending(false);
     }
+  }
+
+  function selectTerminalSession(key: string) {
+    if (activeKey !== key) {
+      setTerminalInputText("");
+      setTerminalInputStatus(null);
+      setTerminalInputStatusTone("info");
+    }
+    setActiveKey(key);
   }
 
   return (
@@ -679,8 +1079,8 @@ export function TerminalSessionsPanel({
         </div>
         <ActionFeedback
           className="localActionFeedback terminalLaunchActionFeedback"
-          message={launchStatus}
-          tone={launchStatusTone}
+          message={launchFeedbackMessage}
+          tone={launchFeedbackTone}
         />
       </div>
       <div className="terminalSummaryStrip">
@@ -697,7 +1097,7 @@ export function TerminalSessionsPanel({
           <small>Retained output</small>
         </span>
         <span>
-          <strong>{followKey ? "Following" : "Not following"}</strong>
+          <strong>{followingLive ? "Following" : "Not following"}</strong>
           <small>Live follow</small>
         </span>
       </div>
@@ -745,10 +1145,10 @@ export function TerminalSessionsPanel({
             <button
               className="secondaryAction compactAction"
               disabled={!activeSession || Boolean(activeSession.session_exited) || activeSession.state === "closed"}
-              onClick={() => activeSession && onPrepareAction(activeSession, "input")}
+              onClick={() => activeSession && focusTerminalInput(activeSession)}
               title={
                 activeSession && !activeSession.session_exited && activeSession.state !== "closed"
-                  ? "Send input bytes through the advanced audited terminal input control."
+                  ? "Focus the audited input composer for this exact terminal session."
                   : "Select an open terminal session before sending input."
               }
               type="button"
@@ -799,12 +1199,16 @@ export function TerminalSessionsPanel({
                 : "No terminal session selected.\r\n"
           }
         />
+        {!terminalFocusOpen && renderTerminalInputComposer(false)}
       </div>
-      {terminalFocusOpen && activeSession && (
+      {terminalFocusOpen && activeSession && createPortal(
         <div
           aria-label="Focused terminal workspace"
+          aria-modal="true"
           className="terminalFocusOverlay"
+          ref={terminalFocusRef}
           role="dialog"
+          tabIndex={-1}
         >
           <header>
             <div>
@@ -827,10 +1231,10 @@ export function TerminalSessionsPanel({
               <button
                 className="secondaryAction compactAction"
                 disabled={Boolean(activeSession.session_exited) || activeSession.state === "closed"}
-                onClick={() => onPrepareAction(activeSession, "input")}
+                onClick={() => focusTerminalInput(activeSession)}
                 title={
                   !activeSession.session_exited && activeSession.state !== "closed"
-                    ? "Send input bytes through the advanced audited terminal input control."
+                    ? "Focus the audited input composer in this terminal workspace."
                     : "Closed terminal sessions cannot receive input."
                 }
                 type="button"
@@ -839,14 +1243,15 @@ export function TerminalSessionsPanel({
                 <span>Input</span>
               </button>
               <button
-                aria-label="Close focused terminal"
+                aria-label="Exit focused terminal view"
                 className="secondaryAction compactAction"
+                disabled={terminalInputPending}
                 onClick={() => setTerminalFocusOpen(false)}
                 title="Close focused terminal view and return to the session workspace."
                 type="button"
               >
                 <XCircle size={13} />
-                <span>Close</span>
+                <span>Exit view</span>
               </button>
             </div>
           </header>
@@ -856,10 +1261,17 @@ export function TerminalSessionsPanel({
               replayPreview && replayPreview.sessionId === activeSession.session_id
                 ? replayPreview.text
                 : "Select Replay or Follow to load retained output for this session.\r\n"
-            }
+              }
           />
-        </div>
+          {renderTerminalInputComposer(true)}
+        </div>,
+        document.body,
       )}
+      <ActionFeedback
+        className="localActionFeedback terminalCloseActionFeedback"
+        message={closeStatus}
+        tone={closeStatusTone}
+      />
       <ConsoleDataGrid
         columns={terminalColumns}
         defaultPageSize={8}
@@ -920,7 +1332,7 @@ export function TerminalSessionsPanel({
         title="Session inventory and controls"
       />
       {replayPreview && (
-        <div className="terminalReplayPreview" aria-label="Durable terminal replay preview">
+        <div className="terminalReplayPreview" aria-label="Durable terminal replay status">
           <div>
             <strong>
               Durable replay {shortId(replayPreview.sessionId)}: {replayPreview.chunkCount} chunks,{" "}
@@ -929,12 +1341,41 @@ export function TerminalSessionsPanel({
             <span>
               {formatReplaySequence(replayPreview.availableFirstSeq ?? replayPreview.fromSeq, replayPreview.nextSeq)}
               {replayPreview.truncated ? "; truncated" : ""}
-              {followKey?.endsWith(replayPreview.sessionId) ? "; following live output" : ""}
+              {followingLive &&
+              activeSession?.session_id === replayPreview.sessionId &&
+              followKey === `${activeSession.client_id}:${activeSession.session_id}`
+                ? "; following live output"
+                : "; retained replay"}
             </span>
           </div>
-          <pre>{replayPreview.text || "(no replay text)"}</pre>
         </div>
       )}
+      <ConfirmationPrompt
+        confirmLabel="Close terminal"
+        detail="Ends this exact terminal session. Retained replay remains available after the close job completes."
+        items={[
+          {
+            label: "VPS",
+            value: closeSession ? clientLabel(closeSession.client_id) : "-",
+          },
+          {
+            label: "Session",
+            value: closeSession?.session_id ?? "-",
+          },
+          {
+            label: "Command",
+            value: closeSession
+              ? formatArgv(closeSession.argv) || closeSession.last_command_type
+              : "-",
+          },
+        ]}
+        onCancel={() => setCloseSession(null)}
+        onConfirm={() => void confirmTerminalClose()}
+        open={closeSession !== null}
+        pending={closePending}
+        title="Confirm terminal close"
+        tone="danger"
+      />
     </div>
   );
 }
@@ -1001,19 +1442,25 @@ type TerminalReplayPreview = {
   byteCount: number;
   truncated: boolean;
   text: string;
+  chunks: TerminalReplayPreviewChunk[];
+};
+
+type TerminalReplayPreviewChunk = {
+  byteCount: number;
+  terminalSeq: number;
+  text: string;
 };
 
 function toReplayPreview(replay: TerminalReplayRecord): TerminalReplayPreview {
   const chunks = replay.chunks
-    .map((chunk) => (chunk.data_base64 ? base64ToBytes(chunk.data_base64) : new Uint8Array()))
-    .filter((chunk) => chunk.length > 0);
-  const totalBytes = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  const bytes = new Uint8Array(totalBytes);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.length;
-  }
+    .map((chunk) => ({
+      byteCount: chunk.size_bytes,
+      terminalSeq: chunk.terminal_seq,
+      text: chunk.data_base64
+        ? new TextDecoder().decode(base64ToBytes(chunk.data_base64))
+        : "",
+    }))
+    .sort((left, right) => left.terminalSeq - right.terminalSeq);
   return {
     sessionId: replay.session_id,
     fromSeq: replay.from_seq,
@@ -1022,7 +1469,8 @@ function toReplayPreview(replay: TerminalReplayRecord): TerminalReplayPreview {
     chunkCount: replay.chunk_count,
     byteCount: replay.byte_count,
     truncated: replay.truncated,
-    text: new TextDecoder().decode(bytes).slice(0, 2000),
+    text: chunks.map((chunk) => chunk.text).join(""),
+    chunks,
   };
 }
 
@@ -1033,16 +1481,28 @@ function mergeReplayPreview(
   if (!current || current.sessionId !== next.sessionId || next.fromSeq <= 1) {
     return next;
   }
-  const text = `${current.text}${next.text}`.slice(-32_000);
+  const chunksBySequence = new Map(
+    current.chunks.map((chunk) => [chunk.terminalSeq, chunk]),
+  );
+  for (const chunk of next.chunks) {
+    const currentChunk = chunksBySequence.get(chunk.terminalSeq);
+    if (!currentChunk || (!currentChunk.text && chunk.text)) {
+      chunksBySequence.set(chunk.terminalSeq, chunk);
+    }
+  }
+  const chunks = Array.from(chunksBySequence.values()).sort(
+    (left, right) => left.terminalSeq - right.terminalSeq,
+  );
   return {
     sessionId: next.sessionId,
-    fromSeq: current.fromSeq,
+    fromSeq: Math.min(current.fromSeq, next.fromSeq),
     availableFirstSeq: current.availableFirstSeq ?? next.availableFirstSeq,
     nextSeq: Math.max(current.nextSeq, next.nextSeq),
-    chunkCount: current.chunkCount + next.chunkCount,
-    byteCount: current.byteCount + next.byteCount,
+    chunkCount: chunks.length,
+    byteCount: chunks.reduce((total, chunk) => total + chunk.byteCount, 0),
     truncated: current.truncated || next.truncated,
-    text,
+    text: chunks.map((chunk) => chunk.text).join(""),
+    chunks,
   };
 }
 
@@ -1083,7 +1543,10 @@ function formatOutputRange(session: TerminalSessionRecord): string {
   if (session.output_next_seq === null) {
     return "No output retained";
   }
-  const first = session.output_first_seq ?? session.output_next_seq;
+  const first =
+    session.output_retained_first_seq ??
+    session.output_first_seq ??
+    session.output_next_seq;
   return formatReplaySequence(first, session.output_next_seq);
 }
 
@@ -1151,4 +1614,17 @@ function formatBytes(value: number): string {
     return `${(value / 1024).toFixed(1)} KiB`;
   }
   return `${value} B`;
+}
+
+function getFocusableElements(container: HTMLElement): HTMLElement[] {
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter(
+    (element) =>
+      !element.hidden &&
+      element.getAttribute("aria-hidden") !== "true" &&
+      element.getClientRects().length > 0,
+  );
 }

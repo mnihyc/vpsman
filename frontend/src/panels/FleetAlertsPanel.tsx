@@ -120,6 +120,7 @@ function FleetAlertList({
   );
   const criticalCount = alerts.filter((alert) => alert.severity === "critical").length;
   const warningCount = alerts.filter((alert) => alert.severity === "warning").length;
+  const infoCount = alerts.length - criticalCount - warningCount;
 
   const alertColumns = useMemo<ConsoleDataGridColumn<FleetAlertRecord>[]>(
     () => [
@@ -220,6 +221,7 @@ function FleetAlertList({
         size: 180,
         minSize: 160,
         enableHiding: false,
+        stickyEnd: true,
         cell: (alert) => {
           const operatorState = alertOperatorState(alert);
           const agent = alert.client_id ? agentById.get(alert.client_id) : null;
@@ -336,7 +338,7 @@ function FleetAlertList({
         <small>
           {alerts.length === 0
             ? "clear"
-            : `${criticalCount} critical / ${warningCount} warning / ${stateCount} triaged`}
+            : `${criticalCount} critical / ${warningCount} warning / ${infoCount} info / ${stateCount} triaged`}
         </small>
       </div>
       <ConsoleDataGrid
@@ -436,6 +438,7 @@ function FleetAlertList({
                 </button>
               )}
               <button
+                aria-label="Open VPS detail"
                 className="secondaryAction compactAction"
                 disabled={!alert.client_id || !agentById.has(alert.client_id)}
                 onClick={() => {
@@ -444,10 +447,11 @@ function FleetAlertList({
                     onOpenVpsDetail(agent);
                   }
                 }}
+                title="Open VPS detail"
                 type="button"
               >
                 <Server size={14} />
-                <span>Open VPS detail</span>
+                <span>VPS detail</span>
               </button>
               <button
                 className="secondaryAction compactAction"

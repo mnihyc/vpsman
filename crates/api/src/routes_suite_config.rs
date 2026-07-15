@@ -20,6 +20,7 @@ use crate::{
 pub(crate) struct SuiteConfigResponse {
     pub(crate) path: String,
     pub(crate) exists: bool,
+    pub(crate) effective_require_registered_agent_updates: bool,
     pub(crate) toml: String,
     pub(crate) redacted: Value,
     pub(crate) validation: SuiteConfigValidation,
@@ -72,6 +73,7 @@ pub(crate) async fn get_suite_config(
     Ok(Json(SuiteConfigResponse {
         path: state.suite_config_path.display().to_string(),
         exists,
+        effective_require_registered_agent_updates: state.require_registered_agent_updates(),
         redacted: redacted_toml_json(&text)?,
         toml: text,
         validation: config.validation_summary(),

@@ -9,6 +9,7 @@ import type {
   GeneratedJobTargetStatus,
   GeneratedJobTargetStatusClass,
 } from "./generated/protocolContracts";
+import { decodeOutputPreview } from "./utils";
 
 export type BulkFailureReason = {
   reason: string;
@@ -28,6 +29,7 @@ export type BulkJobProgress = {
   failureReasons?: BulkFailureReason[];
   in_progress: number;
   jobId: string;
+  jobIds: string[];
   queued: number;
   rejected: number;
   retrieved: number;
@@ -44,6 +46,7 @@ export const DEFAULT_BULK_PROGRESS_POLL_INTERVAL_MS = 500;
 
 export function buildBulkJobProgress({
   jobId,
+  jobIds,
   nowMs = Date.now(),
   outputs = [],
   targetCount,
@@ -52,6 +55,7 @@ export function buildBulkJobProgress({
   maxTimeoutSecs,
 }: {
   jobId: string;
+  jobIds?: string[];
   nowMs?: number;
   outputs?: JobOutputRecord[];
   targetCount?: number;
@@ -59,9 +63,18 @@ export function buildBulkJobProgress({
   targets: AgentView[];
   maxTimeoutSecs?: number;
 }): BulkJobProgress {
+  const normalizedJobIds = Array.from(
+    new Set((jobIds ?? [jobId]).map((value) => value.trim()).filter(Boolean)),
+  );
   const targetRecordByClient = new Map(targetRecords.map((target) => [target.client_id, target]));
   const targetByClient = new Map(targets.map((target) => [target.id, target]));
   const outputClientIds = new Set(outputs.filter((output) => output.done).map((output) => output.client_id));
+  const outputsByClient = new Map<string, JobOutputRecord[]>();
+  for (const output of outputs) {
+    const clientOutputs = outputsByClient.get(output.client_id) ?? [];
+    clientOutputs.push(output);
+    outputsByClient.set(output.client_id, clientOutputs);
+  }
   const total = Math.max(0, targetCount ?? targets.length, targets.length, targetRecords.length);
   const jobMaxTimeoutMs = Number.isFinite(maxTimeoutSecs ?? NaN)
     ? Math.ceil(Math.max(1, maxTimeoutSecs ?? 1)) * 1000
@@ -135,7 +148,13 @@ export function buildBulkJobProgress({
         break;
     }
     if (statusClass === "unsuccessful") {
-      failureReasons.push(targetFailureReason(target, targetRecord));
+      failureReasons.push(
+        targetFailureReason(
+          target,
+          targetRecord,
+          targetOutputFailureReason(outputsByClient.get(targetRecord.client_id) ?? []),
+        ),
+      );
     }
     if (targetRecordTerminal(targetRecord.status) || outputClientIds.has(targetRecord.client_id)) {
       retrieved += 1;
@@ -180,6 +199,7 @@ export function buildBulkJobProgress({
     failureReasons,
     in_progress,
     jobId,
+    jobIds: normalizedJobIds,
     queued,
     rejected,
     retrieved,
@@ -229,6 +249,7 @@ export async function waitForBulkJobTargets(
     targetCount?: number;
     targets: AgentView[];
     maxTimeoutSecs?: number;
+    onLoadOutputs?: (jobId: string) => Promise<JobOutputRecord[]>;
   },
 ): Promise<{ progress: BulkJobProgress; targets: JobTargetRecord[] }> {
   let lastTargets: JobTargetRecord[] = [];
@@ -255,9 +276,113 @@ export async function waitForBulkJobTargets(
     });
     options.onProgress?.(progress);
     if (progress.total === 0 || progress.terminal >= progress.total) {
+      if (options.onLoadOutputs && progress.unsuccessful > 0) {
+        try {
+          const outputs = await options.onLoadOutputs(jobId);
+          progress = buildBulkJobProgress({
+            jobId,
+            maxTimeoutSecs: options.maxTimeoutSecs,
+            outputs,
+            targetCount: options.targetCount,
+            targetRecords: lastTargets,
+            targets: options.targets,
+          });
+          options.onProgress?.(progress);
+        } catch {
+          // Target status remains useful when retained output is unavailable.
+        }
+      }
       return { progress, targets: lastTargets };
     }
-    await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
+    await new Promise((resolve) => globalThis.setTimeout(resolve, intervalMs));
+  }
+}
+
+export async function waitForBulkJobSet(
+  jobIds: string[],
+  onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>,
+  options: {
+    intervalMs?: number;
+    onProgress?: (progress: BulkJobProgress) => void;
+    operationId: string;
+    targetCount: number;
+    targets: AgentView[];
+    maxTimeoutSecs?: number;
+    onLoadOutputs?: (jobId: string) => Promise<JobOutputRecord[]>;
+  },
+): Promise<{
+  outputs: JobOutputRecord[];
+  progress: BulkJobProgress;
+  targets: JobTargetRecord[];
+}> {
+  const normalizedJobIds = Array.from(
+    new Set(jobIds.map((jobId) => jobId.trim()).filter(Boolean)),
+  );
+  const targetsByJob = new Map<string, JobTargetRecord[]>();
+  const intervalMs =
+    options.intervalMs ?? DEFAULT_BULK_PROGRESS_POLL_INTERVAL_MS;
+
+  let targetRecords: JobTargetRecord[] = [];
+  let outputs: JobOutputRecord[] = [];
+  let progress = buildBulkJobProgress({
+    jobId: options.operationId,
+    jobIds: normalizedJobIds,
+    targetCount: options.targetCount,
+    targetRecords,
+    targets: options.targets,
+    maxTimeoutSecs: options.maxTimeoutSecs,
+  });
+
+  for (;;) {
+    await Promise.all(
+      normalizedJobIds.map(async (jobId) => {
+        try {
+          targetsByJob.set(jobId, await onLoadTargets(jobId));
+        } catch {
+          // Preserve the last result for this job across transient fetch failures.
+        }
+      }),
+    );
+    targetRecords = normalizedJobIds.flatMap(
+      (jobId) => targetsByJob.get(jobId) ?? [],
+    );
+    progress = buildBulkJobProgress({
+      jobId: options.operationId,
+      jobIds: normalizedJobIds,
+      targetCount: options.targetCount,
+      targetRecords,
+      targets: options.targets,
+      maxTimeoutSecs: options.maxTimeoutSecs,
+    });
+    options.onProgress?.(progress);
+
+    if (progress.total === 0 || progress.terminal >= progress.total) {
+      if (options.onLoadOutputs) {
+        const outputsByJob = await Promise.all(
+          normalizedJobIds.map(async (jobId) => {
+            try {
+              return await options.onLoadOutputs!(jobId);
+            } catch {
+              return [];
+            }
+          }),
+        );
+        outputs = outputsByJob.flat();
+        progress = buildBulkJobProgress({
+          jobId: options.operationId,
+          jobIds: normalizedJobIds,
+          maxTimeoutSecs: options.maxTimeoutSecs,
+          outputs,
+          targetCount: options.targetCount,
+          targetRecords,
+          targets: options.targets,
+        });
+        options.onProgress?.(progress);
+      }
+      return { outputs, progress, targets: targetRecords };
+    }
+
+    await new Promise((resolve) => globalThis.setTimeout(resolve, intervalMs));
   }
 }
 
@@ -265,7 +390,7 @@ export function bulkProgressLabel(progress: BulkJobProgress): string {
   return [
     `targets ${progress.terminal}/${progress.total}`,
     `in progress ${progress.in_progress}`,
-    `retrieved ${progress.retrieved}`,
+    `reported ${progress.retrieved}`,
     `completed ${progress.completed}`,
     progress.skipped > 0 ? `skipped ${progress.skipped}` : "",
     progress.unavailable > 0 ? `unavailable ${progress.unavailable}` : "",
@@ -362,8 +487,12 @@ function parseBackendTimestampMs(value: string | null | undefined): number | nul
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function targetFailureReason(target: Pick<AgentView, "display_name" | "id" | "status">, targetRecord: JobTargetRecord): BulkFailureReason {
-  const message = targetRecord.message?.trim();
+function targetFailureReason(
+  target: Pick<AgentView, "display_name" | "id" | "status">,
+  targetRecord: JobTargetRecord,
+  outputReason: string | null,
+): BulkFailureReason {
+  const message = outputReason ?? targetRecord.message?.trim();
   const rawReason = message || targetRecord.status || "failed";
   const reason =
     target.status === "stale" && !rawReason.toLowerCase().includes("stale")
@@ -373,4 +502,49 @@ function targetFailureReason(target: Pick<AgentView, "display_name" | "id" | "st
     reason,
     target: target.display_name || target.id,
   };
+}
+
+function targetOutputFailureReason(outputs: JobOutputRecord[]): string | null {
+  const ordered = [...outputs].sort((left, right) => right.seq - left.seq);
+  for (const stream of ["stderr", "status", "stdout"]) {
+    for (const output of ordered) {
+      if (output.stream !== stream || !output.data_base64) {
+        continue;
+      }
+      const text = decodeOutputPreview(output.data_base64).trim();
+      if (!text || text === "[binary output]") {
+        continue;
+      }
+      if (stream === "status") {
+        const structured = structuredFailureReason(text);
+        if (structured) {
+          return structured.slice(0, 500);
+        }
+        continue;
+      }
+      if (stream === "stderr" || /\b(error|fail(?:ed|ure)?|not found|missing|denied|invalid)\b/i.test(text)) {
+        return text.replace(/\s+/g, " ").slice(0, 500);
+      }
+    }
+  }
+  return null;
+}
+
+function structuredFailureReason(text: string): string | null {
+  try {
+    const value = JSON.parse(text) as unknown;
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return null;
+    }
+    const record = value as Record<string, unknown>;
+    for (const key of ["error", "message", "reason", "detail"]) {
+      const candidate = record[key];
+      if (typeof candidate === "string" && candidate.trim()) {
+        return candidate.trim();
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }

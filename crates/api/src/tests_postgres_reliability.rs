@@ -132,6 +132,11 @@ async fn postgres_telemetry_ingest_is_sequence_bound_and_idempotent() {
     event.telemetry_seq = 3;
     event.telemetry.metrics.cpu.load.one = 3.0;
     assert!(db.repo.record_telemetry(&event).await.unwrap());
+    let reconnect_session_id = Uuid::new_v4();
+    event.gateway_session_id = reconnect_session_id;
+    event.telemetry_seq = 1;
+    event.telemetry.metrics.cpu.load.one = 4.0;
+    assert!(db.repo.record_telemetry(&event).await.unwrap());
 
     let sample_count: i64 = sqlx::query_scalar(
         "SELECT COALESCE(sum(sample_count), 0)::bigint FROM telemetry_rollups WHERE client_id = $1",
@@ -140,15 +145,16 @@ async fn postgres_telemetry_ingest_is_sequence_bound_and_idempotent() {
     .fetch_one(&db.pool)
     .await
     .unwrap();
-    assert_eq!(sample_count, 2);
-    let telemetry_seq: i64 = sqlx::query_scalar(
-        "SELECT telemetry_seq FROM telemetry_ingest_watermarks WHERE client_id = $1",
+    assert_eq!(sample_count, 3);
+    let (gateway_session_id, telemetry_seq): (Uuid, i64) = sqlx::query_as(
+        "SELECT gateway_session_id, telemetry_seq FROM telemetry_ingest_watermarks WHERE client_id = $1",
     )
     .bind(client_id)
     .fetch_one(&db.pool)
     .await
     .unwrap();
-    assert_eq!(telemetry_seq, 3);
+    assert_eq!(gateway_session_id, reconnect_session_id);
+    assert_eq!(telemetry_seq, 1);
     let webhook_event_count: i64 = sqlx::query_scalar(
         "SELECT count(*)::bigint FROM webhook_events WHERE kind = 'telemetry.rollup' AND event_id LIKE $1",
     )
@@ -156,7 +162,7 @@ async fn postgres_telemetry_ingest_is_sequence_bound_and_idempotent() {
     .fetch_one(&db.pool)
     .await
     .unwrap();
-    assert_eq!(webhook_event_count, 2);
+    assert_eq!(webhook_event_count, 3);
 
     db.cleanup().await;
 }

@@ -447,6 +447,7 @@ impl Repository {
                         last_job_id,
                         last_command_type,
                         last_seq,
+                        opened_at::text AS opened_at,
                         observed_at::text AS observed_at
                     FROM terminal_sessions
                     WHERE ($2::text IS NULL OR client_id = $2)
@@ -907,12 +908,13 @@ impl Repository {
                         last_job_id,
                         last_command_type,
                         last_seq,
+                        opened_at,
                         observed_at
                     )
                     VALUES (
                         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                         $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-                        $21, $22, $23, $24, $25::timestamptz
+                        $21, $22, $23, $24, $25::timestamptz, $26::timestamptz
                     )
                     ON CONFLICT (client_id, session_id)
                     DO UPDATE SET
@@ -970,6 +972,10 @@ impl Repository {
                         last_job_id = EXCLUDED.last_job_id,
                         last_command_type = EXCLUDED.last_command_type,
                         last_seq = EXCLUDED.last_seq,
+                        opened_at = COALESCE(
+                            terminal_sessions.opened_at,
+                            EXCLUDED.opened_at
+                        ),
                         observed_at = EXCLUDED.observed_at
                     "#,
                 )
@@ -997,6 +1003,10 @@ impl Repository {
                 .bind(event.job_id)
                 .bind(&event.command_type)
                 .bind(event.seq)
+                .bind(
+                    (event.event_type == "terminal_open")
+                        .then_some(event.created_at.as_str()),
+                )
                 .bind(&event.created_at)
                 .execute(pool)
                 .await?;
@@ -1038,12 +1048,13 @@ impl Repository {
                     last_job_id,
                     last_command_type,
                     last_seq,
+                    opened_at,
                     observed_at
                 )
                 VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                     $11, $12, $13, $14, $15, $16, $17, $18, $19,
-                    $20, $21, $22, $23, $24, $25::timestamptz
+                    $20, $21, $22, $23, $24, $25::timestamptz, $26::timestamptz
                 )
                 ON CONFLICT (client_id, session_id)
                 DO UPDATE SET
@@ -1069,6 +1080,10 @@ impl Repository {
                     last_job_id = EXCLUDED.last_job_id,
                     last_command_type = EXCLUDED.last_command_type,
                     last_seq = EXCLUDED.last_seq,
+                    opened_at = COALESCE(
+                        terminal_sessions.opened_at,
+                        EXCLUDED.opened_at
+                    ),
                     observed_at = EXCLUDED.observed_at
                 WHERE EXCLUDED.observed_at >= terminal_sessions.observed_at
                 "#,
@@ -1097,6 +1112,7 @@ impl Repository {
             .bind(session.last_job_id)
             .bind(&session.last_command_type)
             .bind(session.last_seq)
+            .bind(&session.opened_at)
             .bind(&session.observed_at)
             .execute(pool)
             .await?;
@@ -1184,6 +1200,7 @@ fn terminal_session_from_row(row: PgRow) -> std::result::Result<TerminalSessionV
         last_job_id: row.try_get("last_job_id")?,
         last_command_type: row.try_get("last_command_type")?,
         last_seq: row.try_get("last_seq")?,
+        opened_at: row.try_get("opened_at")?,
         observed_at: row.try_get("observed_at")?,
     })
 }
@@ -1304,6 +1321,7 @@ struct TerminalAggregate {
     output_replay_truncated: bool,
     last_input_seq: Option<i64>,
     close_reason: Option<String>,
+    opened_at: Option<String>,
 }
 
 impl TerminalAggregate {
@@ -1324,6 +1342,7 @@ impl TerminalAggregate {
             output_replay_truncated: event.output_replay_truncated,
             last_input_seq: event.input_seq,
             close_reason: event.close_reason.clone(),
+            opened_at: (event.event_type == "terminal_open").then(|| event.created_at.clone()),
             latest: event,
         }
     }
@@ -1348,6 +1367,10 @@ impl TerminalAggregate {
         self.output_replay_truncated |= event.output_replay_truncated;
         self.last_input_seq = self.last_input_seq.or(event.input_seq);
         self.close_reason = self.close_reason.take().or(event.close_reason);
+        if event.event_type == "terminal_open" {
+            self.opened_at =
+                earliest_timestamp(self.opened_at.take(), Some(event.created_at.clone()));
+        }
     }
 
     fn into_view(self) -> TerminalSessionView {
@@ -1376,6 +1399,7 @@ impl TerminalAggregate {
             last_job_id: self.latest.job_id,
             last_command_type: self.latest.command_type,
             last_seq: self.latest.seq,
+            opened_at: self.opened_at,
             observed_at: self.latest.created_at,
         }
     }
@@ -1925,9 +1949,18 @@ fn upsert_memory_terminal_session(sessions: &mut Vec<TerminalSessionView>, event
         existing.last_job_id = next.last_job_id;
         existing.last_command_type = next.last_command_type;
         existing.last_seq = next.last_seq;
+        existing.opened_at = earliest_timestamp(existing.opened_at.take(), next.opened_at);
         existing.observed_at = next.observed_at;
     } else {
         sessions.push(next);
+    }
+}
+
+fn earliest_timestamp(left: Option<String>, right: Option<String>) -> Option<String> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
     }
 }
 
@@ -2255,6 +2288,7 @@ mod tests {
         assert!(session.output_replay_truncated);
         assert_eq!(session.last_input_seq, Some(7));
         assert_eq!(session.last_job_id, poll_job);
+        assert_eq!(session.opened_at.as_deref(), Some("100"));
     }
 
     #[test]
@@ -2482,6 +2516,7 @@ mod tests {
             last_job_id: Uuid::new_v4(),
             last_command_type: "terminal_open".to_string(),
             last_seq: 0,
+            opened_at: Some("2026-06-21T00:00:00Z".to_string()),
             observed_at: "2026-06-21T00:00:00Z".to_string(),
         }
     }

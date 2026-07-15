@@ -177,6 +177,10 @@ pub(crate) fn agent_update_check(
         options.confirmed,
         "agent-update-check requires --confirmed because it may stage and activate a replacement binary"
     );
+    anyhow::ensure!(
+        !options.restart_agent || options.activate,
+        "--restart-agent requires --activate"
+    );
     if let Some(version_url) = options.version_url.as_deref() {
         anyhow::ensure!(
             version_url.starts_with("https://")

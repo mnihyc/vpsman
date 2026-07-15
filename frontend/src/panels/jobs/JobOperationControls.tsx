@@ -237,8 +237,6 @@ export function JobOperationEditor({
   setSupervisorLogBytes,
   setSupervisorName,
   setUpdateArtifactUrl,
-  setUpdateCheckActivate,
-  setUpdateCheckRestartAgent,
   setUpdateCheckVersionUrl,
   setUpdateActivationSha256Hex,
   setUpdateRestartAgent,
@@ -252,8 +250,6 @@ export function JobOperationEditor({
   supervisorName,
   shellScript,
   updateArtifactUrl,
-  updateCheckActivate,
-  updateCheckRestartAgent,
   updateCheckVersionUrl,
   updateActivationSha256Hex,
   updateRestartAgent,
@@ -340,8 +336,6 @@ export function JobOperationEditor({
   setSupervisorLogBytes: (value: number) => void;
   setSupervisorName: (value: string) => void;
   setUpdateArtifactUrl: (value: string) => void;
-  setUpdateCheckActivate: (value: boolean) => void;
-  setUpdateCheckRestartAgent: (value: boolean) => void;
   setUpdateCheckVersionUrl: (value: string) => void;
   setUpdateActivationSha256Hex: (value: string) => void;
   setUpdateRestartAgent: (value: boolean) => void;
@@ -355,8 +349,6 @@ export function JobOperationEditor({
   supervisorName: string;
   shellScript: string;
   updateArtifactUrl: string;
-  updateCheckActivate: boolean;
-  updateCheckRestartAgent: boolean;
   updateCheckVersionUrl: string;
   updateActivationSha256Hex: string;
   updateRestartAgent: boolean;
@@ -498,11 +490,13 @@ export function JobOperationEditor({
 
   if (mode === "file_transfer_upload") {
     return (
-      <div className="operationNote compactOperation">
-        <Upload size={18} />
-        <div>
-          <strong>Resumable upload</strong>
-          <span>Streamed ACK-tracked browser upload up to {formatBytes(MAX_BROWSER_RESUMABLE_UPLOAD_BYTES)}</span>
+      <div className="operationNote compactOperation fileTransferUploadOperation">
+        <div className="fileTransferOperationHeader">
+          <Upload size={18} />
+          <div>
+            <strong>Resumable upload</strong>
+            <span>Streamed ACK-tracked browser upload up to {formatBytes(MAX_BROWSER_RESUMABLE_UPLOAD_BYTES)}</span>
+          </div>
         </div>
         <label>
           <span>Source kind</span>
@@ -516,7 +510,7 @@ export function JobOperationEditor({
           </select>
         </label>
         {fileTransferUploadSourceKind === "source-artifact" ? (
-          <label className="wideField">
+          <label className="wideField transferPrimaryField">
             <span>Resumable upload source artifact</span>
             <select
               aria-label="Resumable upload source artifact"
@@ -532,21 +526,27 @@ export function JobOperationEditor({
             </select>
           </label>
         ) : (
-          <label className="wideField">
+          <div className="wideField transferPrimaryField dispatchFileSourceField">
             <span>Source file</span>
-            <input
-              aria-label="Resumable upload source"
-              onChange={(event) => setFilePushSource(event.target.files?.[0] ?? null)}
-              type="file"
-            />
-            {filePushSource ? (
-              <small className="dispatchInlineHint">
-                Selected {filePushSource.name} · {formatBytes(filePushSource.size)}
-              </small>
-            ) : null}
-          </label>
+            <div className="dispatchFileSourceControl">
+              <span className="dispatchSelectedFile" title={filePushSource?.name}>
+                {filePushSource
+                  ? `${filePushSource.name} · ${formatBytes(filePushSource.size)}`
+                  : "No local file selected"}
+              </span>
+              <label className="secondaryAction compactAction dispatchFilePicker">
+                <Upload size={14} />
+                <span>{filePushSource ? "Replace" : "Choose file"}</span>
+                <input
+                  aria-label="Resumable upload source"
+                  onChange={(event) => setFilePushSource(event.target.files?.[0] ?? null)}
+                  type="file"
+                />
+              </label>
+            </div>
+          </div>
         )}
-        <label className="wideField">
+        <label className="wideField transferPrimaryField">
           <span>Remote path</span>
           <input
             aria-label="Resumable upload path"
@@ -595,18 +595,18 @@ export function JobOperationEditor({
             <option value="replace">Replace</option>
           </select>
         </label>
-        <label>
-          <span>Policy</span>
+        <label title="Choose whether every target must resume from one shared byte offset or may resume independently.">
+          <span>Multi-VPS resume</span>
           <select
             aria-label="Resumable upload multi-target policy"
             onChange={(event) => setFileTransferMultiTargetPolicy(event.target.value as BrowserTransferMultiTargetPolicy)}
             value={fileTransferMultiTargetPolicy}
           >
-            <option value="same-offset">same-offset</option>
-            <option value="independent-offsets">independent-offsets</option>
+            <option value="same-offset">Shared offset (all targets)</option>
+            <option value="independent-offsets">Independent offsets</option>
           </select>
         </label>
-        <label className="wideField">
+        <label className="wideField transferIdentityField">
           <span>Session</span>
           <input
             aria-label="Resumable upload session"
@@ -615,7 +615,7 @@ export function JobOperationEditor({
             value={fileTransferSessionId}
           />
         </label>
-        <label className="wideField">
+        <label className="wideField transferIdentityField">
           <span>Resume token</span>
           <input
             aria-label="Resumable upload resume token"
@@ -812,7 +812,7 @@ export function JobOperationEditor({
 
   if (mode === "agent_update") {
     return (
-      <div className="operationNote compactOperation">
+      <div className="operationNote compactOperation agentUpdateOperation">
         <PackageCheck size={18} />
         <div>
           <strong>Agent binary</strong>
@@ -824,6 +824,7 @@ export function JobOperationEditor({
             aria-label="Agent update artifact URL"
             onChange={(event) => setUpdateArtifactUrl(event.target.value)}
             placeholder="https://updates.example/vpsman-agent"
+            title={updateArtifactUrl || undefined}
             value={updateArtifactUrl}
           />
         </label>
@@ -833,6 +834,7 @@ export function JobOperationEditor({
             aria-label="Agent update SHA-256"
             onChange={(event) => setUpdateSha256Hex(event.target.value)}
             placeholder="64 hex characters"
+            title={updateSha256Hex || undefined}
             value={updateSha256Hex}
           />
         </label>
@@ -842,11 +844,11 @@ export function JobOperationEditor({
 
   if (mode === "agent_update_check") {
     return (
-      <div className="operationNote compactOperation">
+      <div className="operationNote compactOperation agentUpdateOperation">
         <PackageCheck size={18} />
         <div>
           <strong>Version manifest</strong>
-          <span>Fetches version.json, uses its tag-pinned asset URL, verifies SHA256SUMS, then optionally activates</span>
+          <span>Checks version.json and stages a newer checksum-verified artifact without activating or restarting it</span>
         </div>
         <label className="wideField">
           <span>Manifest URL</span>
@@ -854,33 +856,20 @@ export function JobOperationEditor({
             aria-label="Agent update version manifest URL"
             onChange={(event) => setUpdateCheckVersionUrl(event.target.value)}
             placeholder="https://github.com/mnihyc/vpsman/releases/latest/download/version.json"
+            title={updateCheckVersionUrl || undefined}
             value={updateCheckVersionUrl}
           />
         </label>
-        <label className="checkRow">
-          <input
-            checked={updateCheckActivate}
-            onChange={(event) => setUpdateCheckActivate(event.target.checked)}
-            type="checkbox"
-          />
-          <span>Activate if newer</span>
-        </label>
-        <label className="checkRow">
-          <input
-            checked={updateCheckRestartAgent}
-            disabled={!updateCheckActivate}
-            onChange={(event) => setUpdateCheckRestartAgent(event.target.checked)}
-            type="checkbox"
-          />
-          <span>Restart agent</span>
-        </label>
+        <div className="operationSafetyNote" role="note">
+          Activation is a separate reviewed action after the staged SHA-256 is visible.
+        </div>
       </div>
     );
   }
 
   if (mode === "agent_update_activate") {
     return (
-      <div className="operationNote compactOperation">
+      <div className="operationNote compactOperation agentUpdateOperation">
         <PackageCheck size={18} />
         <div>
           <strong>Activate staged agent</strong>
@@ -892,6 +881,7 @@ export function JobOperationEditor({
             aria-label="Agent update staged SHA-256"
             onChange={(event) => setUpdateActivationSha256Hex(event.target.value)}
             placeholder="64 hex characters"
+            title={updateActivationSha256Hex || undefined}
             value={updateActivationSha256Hex}
           />
         </label>
@@ -909,7 +899,7 @@ export function JobOperationEditor({
 
   if (mode === "agent_update_rollback") {
     return (
-      <div className="operationNote compactOperation">
+      <div className="operationNote compactOperation agentUpdateOperation">
         <PackageCheck size={18} />
         <div>
           <strong>Rollback agent</strong>
@@ -921,6 +911,7 @@ export function JobOperationEditor({
             aria-label="Agent update rollback SHA-256"
             onChange={(event) => setUpdateRollbackSha256Hex(event.target.value)}
             placeholder="Optional 64 hex characters"
+            title={updateRollbackSha256Hex || undefined}
             value={updateRollbackSha256Hex}
           />
         </label>

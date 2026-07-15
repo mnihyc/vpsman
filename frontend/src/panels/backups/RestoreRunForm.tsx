@@ -14,8 +14,10 @@ type RestoreRunFormProps = {
   confirmationOpen: boolean;
   forceUnprivileged: boolean;
   onArchiveTransferChange: (value: string) => void;
+  onDownloadPackage?: () => void;
   onDryRunChange: (value: boolean) => void;
   onForceUnprivilegedChange: (value: boolean) => void;
+  onOpenTransfers?: () => void;
   onPostRestoreArgvChange: (value: string) => void;
   onRestoreMaxTimeoutSecsChange: (value: number) => void;
   onRunRestore: () => void;
@@ -36,8 +38,10 @@ export function RestoreRunForm({
   confirmationOpen,
   forceUnprivileged,
   onArchiveTransferChange,
+  onDownloadPackage,
   onDryRunChange,
   onForceUnprivilegedChange,
+  onOpenTransfers,
   onPostRestoreArgvChange,
   onRestoreMaxTimeoutSecsChange,
   onRunRestore,
@@ -57,13 +61,21 @@ export function RestoreRunForm({
     <>
       <div className="sectionHeader compact restoreFormHeader">
         <h2>Confirm restore</h2>
-        <span>Dry-run first; live restore replaces the selected destination scope</span>
+        <span>
+          Dry-run first; live restore replaces the selected destination scope
+        </span>
       </div>
-      <form className="dispatchForm" onSubmit={(event) => event.preventDefault()}>
+      <form
+        className="dispatchForm"
+        onSubmit={(event) => event.preventDefault()}
+      >
         <RestoreArchiveTransferSelect
           emptyMessage={archiveEmptyMessage}
           onChange={onArchiveTransferChange}
+          onDownloadPackage={onDownloadPackage}
+          onOpenTransfers={onOpenTransfers}
           options={archiveTransferOptions}
+          pending={pending}
           value={archiveTransferKey}
         />
         <label>
@@ -82,13 +94,19 @@ export function RestoreRunForm({
             aria-label="Restore max timeout seconds"
             max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
             min={1}
-            onChange={(event) => onRestoreMaxTimeoutSecsChange(Number(event.target.value))}
+            onChange={(event) =>
+              onRestoreMaxTimeoutSecsChange(Number(event.target.value))
+            }
             type="number"
             value={restoreMaxTimeoutSecs}
           />
         </label>
         <label className="checkLine">
-          <input checked={restoreDryRun} onChange={(event) => onDryRunChange(event.target.checked)} type="checkbox" />
+          <input
+            checked={restoreDryRun}
+            onChange={(event) => onDryRunChange(event.target.checked)}
+            type="checkbox"
+          />
           <span>Dry-run rehearsal</span>
         </label>
         <TargetImpactPreview
@@ -101,22 +119,27 @@ export function RestoreRunForm({
           <input
             aria-label="Force unprivileged restore best effort"
             checked={forceUnprivileged}
-            onChange={(event) => onForceUnprivilegedChange(event.target.checked)}
+            onChange={(event) =>
+              onForceUnprivilegedChange(event.target.checked)
+            }
             type="checkbox"
           />
           <span>Force unprivileged best effort</span>
         </label>
         {!confirmationOpen && (
           <button
-            className={restoreDryRun ? "primaryAction" : "primaryAction dangerPrimary"}
+            className={
+              restoreDryRun ? "primaryAction" : "primaryAction dangerPrimary"
+            }
             disabled={
-              pending ||
-              !privilegeReady ||
-              !restoreSourceId ||
-              !restoreTargetId ||
-              !archiveReady
+              pending || !restoreSourceId || !restoreTargetId || !archiveReady
             }
             onClick={onRunRestore}
+            title={
+              privilegeReady
+                ? "Review the frozen restore execution"
+                : "Opens privilege unlock before preparing the restore review"
+            }
             type="button"
           >
             <Play size={17} />

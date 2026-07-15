@@ -47,7 +47,6 @@ pub struct AgentConfig {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct AgentRuntimeConfig {
     pub version: u64,
     #[serde(default)]
@@ -140,7 +139,6 @@ pub struct AgentAuthConfig {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct AgentBackupConfig {
     #[serde(
         default = "default_agent_backup_max_uncompressed_bytes",

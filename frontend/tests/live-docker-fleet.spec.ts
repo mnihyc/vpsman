@@ -794,6 +794,11 @@ async function exerciseExpressionWebhooks(page: Page, projectName: string) {
     "{rule.name} {event.kind} count={matched_vps.length} [for v in matched_vps]{v.display_name} [endfor]",
   );
   await detail.getByLabel("Webhook event kind").fill("interval.30sec");
+  const enableAfterCreation = detail.getByRole("checkbox", {
+    name: "Enable after creation",
+  });
+  await expect(enableAfterCreation).not.toBeChecked();
+  await enableAfterCreation.check();
   await maybeExtendedScreenshot(
     page,
     projectName,

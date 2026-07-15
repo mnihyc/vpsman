@@ -173,6 +173,11 @@ export function AuthPanel({
             type="password"
             value={password}
           />
+          <small className="fieldHelp">
+            {isBootstrap
+              ? "Use at least 12 characters for the first admin password."
+              : "Passwords contain at least 12 characters."}
+          </small>
         </label>
         <button
           aria-describedby="auth-submit-requirements"
@@ -189,7 +194,9 @@ export function AuthPanel({
           <span>{pending ? pendingLabel : submitLabel}</span>
         </button>
         <span className="visuallyHidden" id="auth-submit-requirements">
-          Sign in and first operator creation need a username and a password of at least 12 characters.
+          {mode === "bootstrap"
+            ? "First operator creation needs a username and a password of at least 12 characters."
+            : "Sign in needs a username and a password of at least 12 characters."}
         </span>
       </form>
     </section>
@@ -201,7 +208,7 @@ function authHeaderSubtitle(mode: AuthMode): string {
     return "Set up initial admin access.";
   }
   if (mode === "login") {
-    return "Enter an existing operator session.";
+    return "Sign in with an existing operator account.";
   }
   return "Selecting the correct access screen.";
 }

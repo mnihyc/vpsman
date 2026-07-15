@@ -543,8 +543,8 @@ fn builtin_command_templates() -> Vec<CommandTemplateView> {
             "Default manual update check",
             JobCommand::AgentUpdateCheck {
                 version_url: Some(update.unmanaged_version_url),
-                activate: update.unmanaged_activate,
-                restart_agent: update.unmanaged_restart_agent,
+                activate: false,
+                restart_agent: false,
             },
             300,
         ),

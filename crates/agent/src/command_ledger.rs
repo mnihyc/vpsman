@@ -13,6 +13,8 @@ use vpsman_common::{
     OutputStream, SequencedCommandOutput,
 };
 
+use crate::state_dir::agent_state_dir;
+
 const LEDGER_SCHEMA_VERSION: u16 = 1;
 const LEDGER_RETENTION_SECS: u64 = 72 * 60 * 60;
 const LEDGER_MAX_ENTRIES: usize = 8192;
@@ -199,18 +201,6 @@ impl CommandLedger {
         }
         Ok(())
     }
-}
-
-fn agent_state_dir() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("VPSMAN_AGENT_STATE_DIR")
-        .or_else(|| std::env::var_os("VPSMAN_STATE_DIR"))
-        .filter(|value| !value.is_empty())
-    {
-        return Ok(PathBuf::from(path));
-    }
-    Ok(std::env::current_dir()
-        .context("failed to resolve agent working directory")?
-        .join("state"))
 }
 
 pub(crate) fn compact_ledger_terminal_output(

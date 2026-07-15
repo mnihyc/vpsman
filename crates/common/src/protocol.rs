@@ -1186,7 +1186,8 @@ pub struct JobCancelRequest {
 }
 
 pub fn default_command_protocol_version() -> u16 {
-    CURRENT_COMMAND_PROTOCOL_VERSION
+    // Missing means the legacy v1 wire shape, not the receiver's newest shape.
+    MIN_COMMAND_PROTOCOL_VERSION
 }
 
 pub fn default_internal_build_number() -> u64 {
@@ -2911,6 +2912,19 @@ pub fn job_command_protocol_version(command: &JobCommand) -> u16 {
     }
 }
 
+pub fn job_command_dispatch_protocol_version(command: &JobCommand) -> u16 {
+    match command {
+        // These commands are the permanent rolling-upgrade escape hatch. Their
+        // v1 wire shapes stay frozen; new semantics must use a new command
+        // variant instead of making an old agent unable to update.
+        JobCommand::UpdateAgent { .. }
+        | JobCommand::AgentUpdateActivate { .. }
+        | JobCommand::AgentUpdateRollback { .. }
+        | JobCommand::AgentUpdateCheck { .. } => MIN_COMMAND_PROTOCOL_VERSION,
+        _ => job_command_protocol_version(command),
+    }
+}
+
 pub fn job_command_min_supported_protocol_version(command: &JobCommand) -> u16 {
     match command {
         JobCommand::Shell { .. }
@@ -3269,7 +3283,7 @@ mod tests {
         terminal_session_states, terminal_session_statuses, topology_edge_health_statuses,
         topology_neighbor_states, topology_node_statuses, topology_observation_states,
         topology_probe_states, topology_runtime_states, webhook_rule_delivery_history_statuses,
-        webhook_rule_delivery_process_statuses, webhook_rule_delivery_statuses,
+        webhook_rule_delivery_process_statuses, webhook_rule_delivery_statuses, AgentHello,
         AgentUpdateReleaseStatus, BackupRequestStatus, JobCommand, JobStatus, JobStatusClass,
         JobTargetStatus, JobTargetStatusClass, MigrationLinkStatus, RestorePlanStatus, ServerHello,
         JOB_COMMAND_SAFETY_EXCLUSIVE, JOB_COMMAND_SAFETY_EXEC, JOB_COMMAND_SAFETY_READ,
@@ -3300,6 +3314,91 @@ mod tests {
         let encoded = serde_json::to_value(&hello).unwrap();
         assert_eq!(encoded["server_version"], "0.1.0");
         assert_eq!(encoded["server_build_number"], 1001);
+    }
+
+    #[test]
+    fn hello_payloads_remain_additive_across_rolling_updates() {
+        let process_incarnation_id = uuid::Uuid::new_v4();
+        let legacy_agent = serde_json::json!({
+            "client_id": "edge-a",
+            "process_incarnation_id": process_incarnation_id,
+            "agent_version": "0.1.0",
+            "os_release": "Linux",
+            "arch": "x86_64"
+        });
+        let decoded_agent: AgentHello = serde_json::from_value(legacy_agent).unwrap();
+        assert_eq!(decoded_agent.internal_build_number, 1);
+        assert!(decoded_agent.update_heartbeat.is_none());
+
+        let future_agent = serde_json::json!({
+            "client_id": "edge-a",
+            "process_incarnation_id": process_incarnation_id,
+            "agent_version": "0.2.0",
+            "internal_build_number": 2000,
+            "os_release": "Linux",
+            "arch": "x86_64",
+            "capabilities": {},
+            "future_optional_capability": { "enabled": true }
+        });
+        let decoded_agent: AgentHello = serde_json::from_value(future_agent).unwrap();
+        assert_eq!(decoded_agent.internal_build_number, 2000);
+
+        let legacy_server = serde_json::json!({
+            "server_id": "gateway-a",
+            "server_version": "0.1.0",
+            "accepted": true,
+            "message": "accepted",
+            "telemetry_interval_secs": 15
+        });
+        let decoded_server: ServerHello = serde_json::from_value(legacy_server).unwrap();
+        assert_eq!(decoded_server.server_build_number, 1);
+
+        let mut future_server = serde_json::to_value(decoded_server).unwrap();
+        future_server["future_optional_policy"] = serde_json::json!("ignored");
+        let decoded_server: ServerHello = serde_json::from_value(future_server).unwrap();
+        assert!(decoded_server.accepted);
+    }
+
+    #[test]
+    fn legacy_job_requests_default_to_the_minimum_protocol() {
+        let request: super::JobRequest = serde_json::from_value(serde_json::json!({
+            "job_id": uuid::Uuid::new_v4(),
+            "command": {
+                "type": "shell",
+                "argv": ["/bin/true"],
+                "pty": false
+            },
+            "max_timeout_secs": 30
+        }))
+        .unwrap();
+
+        assert_eq!(request.command_version, super::MIN_COMMAND_PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn update_commands_keep_the_legacy_dispatch_protocol() {
+        let command = JobCommand::AgentUpdateCheck {
+            version_url: Some("https://updates.example/version.json".to_string()),
+            activate: false,
+            restart_agent: false,
+        };
+
+        assert_eq!(
+            super::job_command_dispatch_protocol_version(&command),
+            super::MIN_COMMAND_PROTOCOL_VERSION
+        );
+    }
+
+    #[test]
+    fn update_command_wire_shape_rejects_unversioned_field_drift() {
+        let command = serde_json::from_value::<JobCommand>(serde_json::json!({
+            "type": "agent_update",
+            "artifact_url": "https://updates.example/vpsman-agent",
+            "sha256_hex": "ab".repeat(32),
+            "future_optional_policy": "must-use-a-new-command-variant"
+        }));
+
+        assert!(command.is_err());
     }
 
     #[test]

@@ -35,7 +35,7 @@ export function PrivilegeVaultBox({
   onPrivilegeMaterialChange,
   onVaultAvailabilityChange,
   privilegeMaterial,
-  unlockRedirectLabel = "Open Privilege Vault",
+  unlockRedirectLabel = "Unlock privilege",
   unlockLabel = "Unlock",
   usePrivilegeLabel = "Unlock privilege",
   showVaultClear = true,
@@ -230,17 +230,21 @@ export function PrivilegeVaultBox({
         <span>
           <strong>Local-only privilege material</strong>
           <small>
-            Saved material is encrypted in this browser with your passphrase and
-            is not shared with the server.
+            Saved material is encrypted in this browser; the API receives only
+            request-bound assertions, never this secret or vault passphrase.
           </small>
         </span>
       </div>
 
       <div className="privilegeForms">
         {vaultAvailable && (
-          <section
+          <form
             className="privilegeVaultSection"
             aria-label="Unlock saved local vault"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void unlockVault();
+            }}
           >
             <div>
               <h3>Unlock saved local vault</h3>
@@ -250,6 +254,7 @@ export function PrivilegeVaultBox({
             </div>
             <input
               aria-label={label("Vault passphrase")}
+              autoComplete="current-password"
               onChange={(event) => setUnlockPassphrase(event.target.value)}
               placeholder="local vault passphrase"
               type="password"
@@ -258,17 +263,20 @@ export function PrivilegeVaultBox({
             <button
               className="secondaryAction"
               disabled={pending || !unlockPassphrase}
-              onClick={unlockVault}
-              type="button"
+              type="submit"
             >
               <LockKeyhole size={17} />
               {unlockLabel}
             </button>
-          </section>
+          </form>
         )}
-        <section
+        <form
           className="privilegeVaultSection"
           aria-label="Unlock with privilege material"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void activateEnteredPrivilege();
+          }}
         >
           <div>
             <h3>Unlock for this browser session</h3>
@@ -282,6 +290,7 @@ export function PrivilegeVaultBox({
               <span>Privilege secret</span>
               <input
                 aria-label={label("Super password")}
+                autoComplete="current-password"
                 onChange={(event) => setSuperPassword(event.target.value)}
                 placeholder="enter privilege secret"
                 type="password"
@@ -315,6 +324,7 @@ export function PrivilegeVaultBox({
           {saveToVault && (
             <input
               aria-label={label("New vault passphrase")}
+              autoComplete="new-password"
               onChange={(event) => setVaultPassphrase(event.target.value)}
               placeholder="new local vault passphrase"
               type="password"
@@ -329,13 +339,12 @@ export function PrivilegeVaultBox({
               !superSaltHex ||
               (saveToVault && !vaultPassphrase)
             }
-            onClick={activateEnteredPrivilege}
-            type="button"
+            type="submit"
           >
             <Save size={17} />
             {usePrivilegeLabel}
           </button>
-        </section>
+        </form>
       </div>
       <ActionFeedback message={actionError} tone="danger" />
 

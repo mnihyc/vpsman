@@ -88,13 +88,6 @@ pub(crate) async fn create_migration_run(
     }
     ensure_migration_run_job_matches_plan(&request, &restore_plan)?;
     verify_migration_link_privilege(&state, &request.link, &restore_plan).await?;
-    if state
-        .repo
-        .migration_link_exists_for_restore_plan(request.link.restore_plan_id)
-        .await?
-    {
-        return Err(ApiError::conflict("migration_link_already_exists"));
-    }
     let plan = preflight_migration_restore_job(&state, &mut request).await?;
     let migration_link = state
         .repo
@@ -110,8 +103,11 @@ pub(crate) async fn create_migration_run(
         )
         .await
         .map_err(|error| {
-            if error.to_string().contains("migration_link_already_exists") {
-                ApiError::conflict("migration_link_already_exists")
+            if error
+                .to_string()
+                .contains("migration_link_conflicts_with_request")
+            {
+                ApiError::conflict("migration_link_conflicts_with_request")
             } else if error
                 .to_string()
                 .contains("job_id_reused_with_different_request")
@@ -235,6 +231,7 @@ async fn preflight_migration_restore_job(
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "gateway_control_url_missing",
             error: anyhow::anyhow!("gateway_control_url_missing"),
+            public_message: None,
         });
     }
     Ok(MigrationRestoreJobPlan {

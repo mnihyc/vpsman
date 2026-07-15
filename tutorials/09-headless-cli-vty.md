@@ -171,6 +171,9 @@ agent-update-activate --staged-sha256-hex <sha256> tag:edge --restart-agent --co
 agent-update-rollback --rollback-sha256-hex <sha256> tag:edge --confirmed
 ```
 
+`agent-update-check` stages a newer verified artifact without activation. Add
+`--activate --restart-agent` only for an explicitly reviewed immediate update.
+
 ## Headless Operating Pattern
 
 1. Inspect: `summary`, `agents`, `fleet-alerts`, `gateway-sessions`.

@@ -201,18 +201,18 @@ export async function unlockPrivilegeFromTop(page: Page) {
     return;
   }
   await activate(topbar.getByRole("button", { name: "Open privilege unlock" }));
-  await expect(
-    page.getByRole("heading", { level: 1, name: "Privilege vault" }),
-  ).toBeVisible();
-  await page.getByLabel(/privilege secret/i).fill("local-super-password");
-  await page
+  const dialog = page.getByRole("dialog", { name: "Unlock privilege" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByLabel(/privilege secret/i).fill("local-super-password");
+  await dialog
     .getByLabel(/(privilege salt|verifier salt hex)/i)
     .fill("00112233445566778899aabbccddeeff");
   await activate(
-    page
+    dialog
       .getByLabel("Unlock with privilege material")
       .getByRole("button", { name: /Unlock( privilege)?/ }),
   );
+  await expect(dialog).toBeHidden();
   await expect(
     topbar.getByRole("button", { name: "Lock privilege" }),
   ).toBeVisible();

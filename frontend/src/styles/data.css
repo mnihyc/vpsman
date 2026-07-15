@@ -3467,6 +3467,44 @@
   white-space: nowrap;
 }
 
+.consoleInlineDetailGrid:has(> strong) {
+  grid-template-columns: minmax(120px, 0.35fr) minmax(0, 1fr);
+  gap: 0;
+}
+
+.consoleInlineDetailGrid:has(> strong) > span,
+.consoleInlineDetailGrid:has(> strong) > strong {
+  min-width: 0;
+  border: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: 0;
+  background: transparent;
+  padding: 8px 10px;
+}
+
+.consoleInlineDetailGrid:has(> strong) > span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.consoleInlineDetailGrid:has(> strong) > strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  text-transform: none;
+}
+
+.gridRow[tabindex="0"]:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 0;
+  box-shadow: inset var(--focus-ring);
+}
+
 .consoleInlineDetailActions {
   display: flex;
   flex-wrap: wrap;
@@ -3966,6 +4004,7 @@
 
 .targetDetail {
   border-top: 1px solid var(--border);
+  scroll-margin-top: 12px;
 }
 
 .approvalControls {
@@ -4425,6 +4464,7 @@
   display: grid;
   gap: 12px;
   min-width: 0;
+  scroll-margin-block-start: var(--console-sticky-offset, 80px);
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);

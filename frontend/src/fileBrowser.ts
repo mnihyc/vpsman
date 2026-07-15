@@ -51,6 +51,7 @@ export type FileReadTextStatus = {
 export type FileOperationStatus = {
   type: string;
   path: string;
+  metadata?: FileBrowserEntry;
   status?: string;
   reason?: string;
   new_path?: string;

@@ -1920,6 +1920,7 @@ const backupArtifacts = [
     sha256_hex: "b".repeat(64),
     size_bytes: 512,
     status: "active",
+    content_available: true,
   },
 ];
 
@@ -2060,7 +2061,8 @@ export const tunnelPlans = [
     right_current_ospf_cost: null,
     right_ospf_job_id: null,
     connection_assessment: "connected",
-    connection_assessment_note: "Application traffic verified; provider blocks ICMP",
+    connection_assessment_note:
+      "Application traffic verified; provider blocks ICMP",
     connection_assessed_at: "2026-05-31T10:05:00Z",
     connection_assessed_by: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     ospf_status: "disabled",
@@ -2663,8 +2665,7 @@ const ospfRecommendations = [
 export const ospfUpdatePlans = [
   {
     approval_scope: ["client:agent-sfo-01", "client:agent-fra-02"],
-    change_summary:
-      "Apply cost 22 through the two declared routing adapters",
+    change_summary: "Apply cost 22 through the two declared routing adapters",
     confidence: "measured",
     control_mode: "reviewed",
     evidence: {
@@ -2717,13 +2718,16 @@ export async function installConsoleApiMock(
     agentDeleteFailedClientIds?: string[];
     agentDeleteSyncJobIds?: string[];
     auditLogsOverride?: AuditLogRecord[];
+    backupArtifactsOverride?: typeof backupArtifacts;
     dashboardLatestSampleAtOverride?: string;
     dashboardSummaryOverride?: Partial<typeof dashboardOverview.summary>;
     fileTransferSourceArtifactsOverride?: typeof fileTransferSourceArtifacts;
     fileTransfersOverride?: typeof fileTransfers;
     ospfUpdatePlansOverride?: typeof ospfUpdatePlans;
+    operatorRoleOverride?: "admin" | "operator" | "viewer";
     telemetryFailurePath?: "network-rates" | "rollups" | "tunnels";
     telemetryNetworkRateScales?: number[];
+    terminalSessionsOverride?: typeof terminalSessions;
   } = {},
 ) {
   await page.addInitScript(
@@ -2768,6 +2772,7 @@ export async function installConsoleApiMock(
       ospfUpdatePlansFixture,
       networkTrendsFixture,
       operatorPreferencesFixture,
+      operatorRoleOverrideFixture,
       processSupervisorInventoryFixture,
       schedulesFixture,
       summaryFixture,
@@ -2830,7 +2835,9 @@ export async function installConsoleApiMock(
             !deletedAgentIds.has(plan.right_client_id),
         );
       const visibleTopologyGraph = () => {
-        const visiblePlanIds = new Set(visibleTunnelPlans().map((plan) => plan.id));
+        const visiblePlanIds = new Set(
+          visibleTunnelPlans().map((plan) => plan.id),
+        );
         const edges = topologyGraphFixture.edges.filter((edge) =>
           visiblePlanIds.has(edge.plan_id),
         );
@@ -2884,6 +2891,7 @@ export async function installConsoleApiMock(
         scheduleActions: [] as unknown[],
         schedules: [] as unknown[],
         suiteConfigs: [] as unknown[],
+        suiteConfigReads: 0,
         terminalInputs: [] as unknown[],
         tunnelPlanAllocations: [] as unknown[],
         tunnelPlanEnabledMutations: [] as unknown[],
@@ -2958,6 +2966,10 @@ export async function installConsoleApiMock(
         ...record,
         preferences: currentOperatorPreferences,
       });
+      const currentOperatorRecord =
+        operatorRecords.find(
+          (record) => record.role === operatorRoleOverrideFixture,
+        ) ?? operatorRecords[0];
       const findOperator = (operatorId: string) =>
         operatorRecords.find((operator) => operator.id === operatorId) ??
         operatorRecords[0];
@@ -3692,7 +3704,9 @@ export async function installConsoleApiMock(
           const scopedAgents = agentsFixture.filter((agent) => {
             if (scopeKind === "all" || !scopeValue) return true;
             if (scopeKind === "client") {
-              return agent.id === scopeValue || agent.display_name === scopeValue;
+              return (
+                agent.id === scopeValue || agent.display_name === scopeValue
+              );
             }
             const expected =
               scopeKind === "provider" || scopeKind === "country"
@@ -3702,10 +3716,13 @@ export async function installConsoleApiMock(
                 : scopeValue;
             return agent.tags.includes(expected);
           });
-          const scopedClientIds = new Set(scopedAgents.map((agent) => agent.id));
-          const scopedResourceSeries = dashboardOverviewFixture.resource_curve.series.filter(
-            (series) => scopedClientIds.has(series.client_id),
+          const scopedClientIds = new Set(
+            scopedAgents.map((agent) => agent.id),
           );
+          const scopedResourceSeries =
+            dashboardOverviewFixture.resource_curve.series.filter((series) =>
+              scopedClientIds.has(series.client_id),
+            );
           return jsonResponse({
             ...dashboardOverviewFixture,
             group_by: requestedGroupBy,
@@ -3761,7 +3778,9 @@ export async function installConsoleApiMock(
         }
         if (pathname === "/api/v1/admin/suite-config") {
           if (method === "GET") {
+            requests.suiteConfigReads += 1;
             return jsonResponse({
+              effective_require_registered_agent_updates: false,
               exists: true,
               hot_reload_note:
                 "API dispatcher limits, gateway-control read timeout, alert thresholds, job-output artifact threshold, update-registration enforcement, gateway runtime timing, and worker tick/schedule/notification/webhook/retention controls are applied by running services after this file changes.",
@@ -3815,9 +3834,14 @@ export async function installConsoleApiMock(
           const offline = currentAgents.filter((agent) =>
             ["offline", "disconnected"].includes(agent.status),
           ).length;
-          const never = currentAgents.filter((agent) => agent.status === "never").length;
-          const stale = currentAgents.filter((agent) => agent.status === "stale").length;
-          const unknown = currentAgents.length - online - offline - never - stale;
+          const never = currentAgents.filter(
+            (agent) => agent.status === "never",
+          ).length;
+          const stale = currentAgents.filter(
+            (agent) => agent.status === "stale",
+          ).length;
+          const unknown =
+            currentAgents.length - online - offline - never - stale;
           return jsonResponse({
             ...summaryFixture,
             never,
@@ -4171,7 +4195,7 @@ export async function installConsoleApiMock(
             access_token:
               "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             expires_in_secs: 900,
-            operator: operatorView(operatorRecords[0]),
+            operator: operatorView(currentOperatorRecord),
             refresh_expires_in_secs: 1_209_600,
             refresh_token:
               "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -4179,12 +4203,12 @@ export async function installConsoleApiMock(
           });
         }
         if (pathname === "/api/v1/auth/me" && method === "GET")
-          return jsonResponse(operatorView(operatorRecords[0]));
+          return jsonResponse(operatorView(currentOperatorRecord));
         if (pathname === "/api/v1/auth/preferences" && method === "PUT") {
           const body = await readJsonBody(input, init);
           requests.operatorPreferences.push(body);
           Object.assign(currentOperatorPreferences, body);
-          return jsonResponse(operatorView(operatorRecords[0]));
+          return jsonResponse(operatorView(currentOperatorRecord));
         }
         if (pathname === "/api/v1/auth/totp/setup" && method === "POST") {
           const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
@@ -4390,7 +4414,10 @@ export async function installConsoleApiMock(
             503,
           );
         }
-        if (pathname === "/api/v1/telemetry/network-rates" && method === "GET") {
+        if (
+          pathname === "/api/v1/telemetry/network-rates" &&
+          method === "GET"
+        ) {
           const scale =
             telemetryNetworkRateScalesFixture[
               Math.min(
@@ -4622,6 +4649,55 @@ export async function installConsoleApiMock(
             id: "33333333-3333-4333-8333-333333333333",
             is_default: false,
             updated_at: "2026-06-02T10:03:00Z",
+          });
+        }
+        if (
+          pathname.startsWith("/api/v1/source-templates/") &&
+          pathname.endsWith("/clone") &&
+          method === "POST"
+        ) {
+          const body = await readJsonBody(input, init);
+          requests.sourceTemplates.push(body);
+          return jsonResponse({
+            ...(body as Record<string, unknown>),
+            assigned_client_count: 0,
+            built_in: false,
+            created_at: "2026-06-02T10:08:00Z",
+            definition: { source: "interface_counters" },
+            domain: "runtime_traffic_accounting_source",
+            id: "34343434-3434-4434-8434-343434343434",
+            is_default: false,
+            updated_at: "2026-06-02T10:08:00Z",
+          });
+        }
+        if (
+          pathname.startsWith("/api/v1/source-templates/") &&
+          pathname.endsWith("/diff") &&
+          method === "POST"
+        ) {
+          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
+          const template =
+            sourceTemplatesFixture.find((record: { id: string }) =>
+              pathname.includes(record.id),
+            ) ?? sourceTemplatesFixture[0];
+          const candidateDefinition = body.definition ?? template.definition;
+          const candidateDescription =
+            typeof body.description === "string" ? body.description : null;
+          const definitionChanged =
+            JSON.stringify(template.definition) !==
+            JSON.stringify(candidateDefinition);
+          return jsonResponse({
+            affected_client_count: template.assigned_client_count,
+            candidate_definition: candidateDefinition,
+            candidate_description: candidateDescription,
+            changed_keys: definitionChanged ? ["source"] : [],
+            current_definition: template.definition,
+            current_description: template.description,
+            definition_changed: definitionChanged,
+            description_changed: template.description !== candidateDescription,
+            domain: template.domain,
+            template_id: template.id,
+            template_name: template.name,
           });
         }
         if (
@@ -5200,7 +5276,7 @@ export async function installConsoleApiMock(
                 },
               },
             },
-            { status: 202 },
+            202,
           );
         }
         if (
@@ -5327,7 +5403,9 @@ export async function installConsoleApiMock(
           const body = await readJsonBody(input, init);
           const tagName = decodeURIComponent(tagDeleteMatch[1]);
           requests.tagDeletes.push({ body, tag: tagName });
-          const confirmed = Boolean((body as { confirmed?: boolean } | null)?.confirmed);
+          const confirmed = Boolean(
+            (body as { confirmed?: boolean } | null)?.confirmed,
+          );
           const matchedTag = tagsFixture.find((tag) => tag.name === tagName);
           const affected =
             matchedTag?.clients ??
@@ -5675,6 +5753,8 @@ export async function installConsoleApiMock(
               object_key: `backups/agent-sfo-01/${backupArtifactHandoffMatch[1]}.tar`,
               sha256_hex: "1".repeat(64),
               size_bytes: 321,
+              status: "active",
+              content_available: true,
             },
             source: "retained_job_outputs",
             source_chunk_count: 2,
@@ -5696,14 +5776,25 @@ export async function installConsoleApiMock(
         );
         if (tunnelPlanUpdateMatch && method === "PUT") {
           const planId = decodeURIComponent(tunnelPlanUpdateMatch[1]);
-          const body = (await readJsonBody(input, init)) as Record<string, unknown>;
+          const body = (await readJsonBody(input, init)) as Record<
+            string,
+            unknown
+          >;
           requests.tunnelPlans.push(body);
-          const plan = tunnelPlansFixture.find((record) => record.id === planId);
+          const plan = tunnelPlansFixture.find(
+            (record) => record.id === planId,
+          );
           if (!plan) {
-            return jsonResponse({ error: "tunnel_plan_not_found", status: 404 }, 404);
+            return jsonResponse(
+              { error: "tunnel_plan_not_found", status: 404 },
+              404,
+            );
           }
           if (body.expected_revision !== plan.revision) {
-            return jsonResponse({ error: "tunnel_plan_snapshot_stale", status: 409 }, 409);
+            return jsonResponse(
+              { error: "tunnel_plan_snapshot_stale", status: 409 },
+              409,
+            );
           }
           const {
             confirmed: _confirmed,
@@ -5729,7 +5820,8 @@ export async function installConsoleApiMock(
               (planInput.ipv6_tunnel as { left?: string } | undefined)?.left,
             recommended_ospf_cost: plan.recommended_ospf_cost,
             right_tunnel_address:
-              (planInput.ipv4_tunnel as { right?: string } | undefined)?.right ??
+              (planInput.ipv4_tunnel as { right?: string } | undefined)
+                ?.right ??
               (planInput.ipv6_tunnel as { right?: string } | undefined)?.right,
             tunnel_prefix_len:
               (planInput.ipv4_tunnel as { prefix_len?: number } | undefined)
@@ -5760,7 +5852,10 @@ export async function installConsoleApiMock(
           );
           if (plan) {
             if (body.expected_revision !== plan.revision) {
-              return jsonResponse({ error: "tunnel_plan_snapshot_stale", status: 409 }, 409);
+              return jsonResponse(
+                { error: "tunnel_plan_snapshot_stale", status: 409 },
+                409,
+              );
             }
             plan.enabled = enabled;
             plan.revision += 1;
@@ -5783,8 +5878,13 @@ export async function installConsoleApiMock(
             expected_revision?: number;
             note?: string | null;
           };
-          requests.tunnelPlanConnectionAssessments.push({ body, plan_id: planId });
-          const plan = tunnelPlansFixture.find((record) => record.id === planId);
+          requests.tunnelPlanConnectionAssessments.push({
+            body,
+            plan_id: planId,
+          });
+          const plan = tunnelPlansFixture.find(
+            (record) => record.id === planId,
+          );
           if (!plan) {
             return jsonResponse({ code: "tunnel_plan_not_found" }, 404);
           }
@@ -5793,9 +5893,14 @@ export async function installConsoleApiMock(
           }
           plan.revision += 1;
           plan.connection_assessment = body.assessment ?? "automatic";
-          plan.connection_assessment_note = body.assessment === "automatic" ? null : (body.note ?? null);
-          plan.connection_assessed_at = body.assessment === "automatic" ? null : "2026-06-02T10:10:00Z";
-          plan.connection_assessed_by = body.assessment === "automatic" ? null : "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+          plan.connection_assessment_note =
+            body.assessment === "automatic" ? null : (body.note ?? null);
+          plan.connection_assessed_at =
+            body.assessment === "automatic" ? null : "2026-06-02T10:10:00Z";
+          plan.connection_assessed_by =
+            body.assessment === "automatic"
+              ? null
+              : "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
           return jsonResponse(plan);
         }
         const tunnelPlanDeleteMatch = pathname.match(
@@ -5808,7 +5913,8 @@ export async function installConsoleApiMock(
           };
           requests.tunnelPlanDeletes.push({ plan_id: planId });
           const plan = tunnelPlansFixture.find(
-            (record) => record.id === planId && !deletedTunnelPlanIds.has(record.id),
+            (record) =>
+              record.id === planId && !deletedTunnelPlanIds.has(record.id),
           );
           if (!plan) {
             return jsonResponse({ code: "tunnel_plan_not_found" }, 404);
@@ -5817,7 +5923,10 @@ export async function installConsoleApiMock(
             return jsonResponse({ code: "tunnel_plan_snapshot_stale" }, 409);
           }
           if (plan.enabled) {
-            return jsonResponse({ code: "tunnel_plan_disable_before_delete" }, 409);
+            return jsonResponse(
+              { code: "tunnel_plan_disable_before_delete" },
+              409,
+            );
           }
           plan.revision += 1;
           plan.deleted_at = "2026-06-02T10:09:00Z";
@@ -5843,10 +5952,8 @@ export async function installConsoleApiMock(
             plan.ospf_status = "pending";
             plan.left_ospf_status = "pending";
             plan.right_ospf_status = "pending";
-            plan.left_ospf_job_id =
-              "11111111-aaaa-4bbb-8ccc-111111111111";
-            plan.right_ospf_job_id =
-              "22222222-aaaa-4bbb-8ccc-222222222222";
+            plan.left_ospf_job_id = "11111111-aaaa-4bbb-8ccc-111111111111";
+            plan.right_ospf_job_id = "22222222-aaaa-4bbb-8ccc-222222222222";
             plan.updated_at = "2026-06-02T10:08:00Z";
             const updatePlan = ospfUpdatePlansFixture.find(
               (record) => record.plan_id === planId,
@@ -5875,10 +5982,8 @@ export async function installConsoleApiMock(
             plan.ospf_status = "pending";
             plan.left_ospf_status = "pending";
             plan.right_ospf_status = "pending";
-            plan.left_ospf_job_id =
-              "33333333-aaaa-4bbb-8ccc-333333333333";
-            plan.right_ospf_job_id =
-              "44444444-aaaa-4bbb-8ccc-444444444444";
+            plan.left_ospf_job_id = "33333333-aaaa-4bbb-8ccc-333333333333";
+            plan.right_ospf_job_id = "44444444-aaaa-4bbb-8ccc-444444444444";
             plan.updated_at = "2026-06-02T10:08:00Z";
             const updatePlan = ospfUpdatePlansFixture.find(
               (record) => record.plan_id === planId,
@@ -6170,7 +6275,7 @@ export async function installConsoleApiMock(
                 created_at: "2026-05-31T10:09:00Z",
                 data_base64: btoa(
                   JSON.stringify({
-                    base_config_sha256_hex: "b".repeat(64),
+                    config_sha256_hex: "b".repeat(64),
                     toml:
                       'client_id = "' +
                       target.client_id +
@@ -6198,6 +6303,8 @@ export async function installConsoleApiMock(
         return originalFetch(input, init);
       };
 
+      const testWebSockets: TestWebSocket[] = [];
+
       class TestWebSocket extends EventTarget {
         static CONNECTING = 0;
         static OPEN = 1;
@@ -6210,6 +6317,7 @@ export async function installConsoleApiMock(
         constructor(url: string) {
           super();
           this.url = url;
+          testWebSockets.push(this);
           window.setTimeout(() => this.dispatchEvent(new Event("open")), 0);
         }
 
@@ -6227,6 +6335,10 @@ export async function installConsoleApiMock(
         configurable: true,
         value: TestWebSocket,
       });
+      Object.defineProperty(window, "__vpsmanTestWebSockets", {
+        configurable: true,
+        value: testWebSockets,
+      });
     },
     {
       agentListOverrideFixture: options.agentListOverride ?? null,
@@ -6239,7 +6351,7 @@ export async function installConsoleApiMock(
       agentsFixture: agents,
       agentUpdateReleasesFixture: agentUpdateReleases,
       auditLogsFixture: options.auditLogsOverride ?? auditLogs,
-      artifactsFixture: backupArtifacts,
+      artifactsFixture: options.backupArtifactsOverride ?? backupArtifacts,
       backupsFixture: backupRequests,
       dashboardOverviewFixture: dashboardOverview,
       dashboardLatestSampleAtOverrideFixture:
@@ -6276,6 +6388,7 @@ export async function installConsoleApiMock(
         options.ospfUpdatePlansOverride ?? ospfUpdatePlans,
       networkTrendsFixture: networkTrends,
       operatorPreferencesFixture: operatorPreferences,
+      operatorRoleOverrideFixture: options.operatorRoleOverride ?? "admin",
       processSupervisorInventoryFixture: processSupervisorInventory,
       schedulesFixture: schedules,
       summaryFixture: summary,
@@ -6284,9 +6397,11 @@ export async function installConsoleApiMock(
       suiteConfigValidationFixture: suiteConfigValidation,
       tagsFixture: tags,
       telemetryFailurePathFixture: options.telemetryFailurePath ?? null,
-      telemetryNetworkRateScalesFixture:
-        options.telemetryNetworkRateScales ?? [1],
-      terminalSessionsFixture: terminalSessions,
+      telemetryNetworkRateScalesFixture: options.telemetryNetworkRateScales ?? [
+        1,
+      ],
+      terminalSessionsFixture:
+        options.terminalSessionsOverride ?? terminalSessions,
       topologyGraphFixture: topologyGraph,
       trafficAccountingFixture: trafficAccounting,
       tunnelPlansFixture: tunnelPlans,

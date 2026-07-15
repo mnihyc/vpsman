@@ -1102,5 +1102,7 @@ pub(crate) struct CancelJobResponse {
 #[derive(Debug, Serialize)]
 pub(crate) struct ErrorResponse {
     pub(crate) error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) message: Option<String>,
     pub(crate) status: u16,
 }

@@ -15,7 +15,6 @@ import type {
   AgentView,
   AgentUpdateReleaseRecord,
   CreateAgentUpdateReleaseRequest,
-  JsonValue,
   JobHistoryRecord,
   SuiteConfigResponse,
 } from "../../types";
@@ -362,8 +361,6 @@ export function AgentUpdateReleasesPanel({
               onOpenDispatchPreset({
                 mode: "agent_update_check",
                 selectorExpression: "",
-                updateCheckActivate: true,
-                updateCheckRestartAgent: true,
                 updateCheckVersionUrl: DEFAULT_UPDATE_VERSION_URL,
               })
             }
@@ -461,18 +458,20 @@ export function AgentUpdateReleasesPanel({
           <button
             className="secondaryAction compactAction"
             onClick={onOpenJobHistory}
+            title="Open agent update job history"
             type="button"
           >
-            Open update jobs
+            Update jobs
           </button>
           {recentUpdateJob && onOpenJobDetails ? (
             <button
               className="secondaryAction compactAction"
               onClick={() => onOpenJobDetails(recentUpdateJob.id)}
+              title="Open the latest agent update job"
               type="button"
             >
               <ExternalLink size={14} />
-              <span>Open last update job</span>
+              <span>Latest job</span>
             </button>
           ) : null}
         </div>
@@ -739,10 +738,7 @@ function registeredUpdatePolicy(
       value: "Unavailable",
     };
   }
-  const enforced = readBooleanPath(suiteConfig?.redacted ?? null, [
-    "api",
-    "require_registered_agent_updates",
-  ]);
+  const enforced = suiteConfig?.effective_require_registered_agent_updates;
   if (enforced === true) {
     return {
       label: "Registered-update policy enforced",
@@ -825,18 +821,33 @@ function registryModelForPolicy(policy: {
       value: "Loading",
     };
   }
+  if (policy.value === "Unavailable") {
+    return {
+      confirmDetail:
+        "This records release metadata only. The current role cannot inspect the server enforcement policy.",
+      detail:
+        "The registered-update policy is not visible to this role. Server-side enforcement remains authoritative and is not inferred as advisory.",
+      label: "Registry policy unavailable",
+      postureDetail:
+        "Use Check update for per-VPS evidence. Ask an admin to verify Suite Config before relying on registered-artifact enforcement.",
+      registrationDetail:
+        "Recording metadata does not reveal, weaken, or override the server enforcement policy.",
+      registrationLabel: "Policy visibility requires admin",
+      value: "Admin only",
+    };
+  }
   return {
     confirmDetail:
-      "This records release metadata. Enforcement is unverified, so this does not approve, enforce, or start an update.",
+      "This records release metadata. Enforcement is unknown, so this does not approve, enforce, or start an update.",
     detail:
-      "Registry records help operators pick known artifacts. Enforcement is unverified, so this page treats them as advisory release metadata.",
-    label: "Release registry advisory",
+      "Registry records help operators pick known artifacts, but the current response does not expose whether registration is enforced.",
+    label: "Registry policy unknown",
     postureDetail:
-      "The registry is advisory release metadata until Suite Config proves registered-update enforcement is enabled.",
+      "Do not infer advisory behavior from missing policy data. Verify Suite Config before relying on registered-artifact enforcement.",
     registrationDetail:
-      "Recording metadata improves auditability and update prefills, but enforcement is not verified here.",
-    registrationLabel: "Metadata record, enforcement unverified",
-    value: "Advisory metadata",
+      "Recording metadata does not reveal or override the current server enforcement policy.",
+    registrationLabel: "Enforcement unknown",
+    value: "Unknown",
   };
 }
 
@@ -884,24 +895,4 @@ function buildFleetVersionPosture(agents: AgentView[]): {
 
 function displayCommandType(commandType: string): string {
   return commandType.replace(/_/g, " ");
-}
-
-function readBooleanPath(
-  value: JsonValue | null,
-  path: string[],
-): boolean | null {
-  let current: JsonValue | undefined | null = value;
-  for (const key of path) {
-    if (!isJsonRecord(current)) {
-      return null;
-    }
-    current = current[key];
-  }
-  return typeof current === "boolean" ? current : null;
-}
-
-function isJsonRecord(
-  value: JsonValue | undefined | null,
-): value is Record<string, JsonValue> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

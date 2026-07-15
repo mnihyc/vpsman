@@ -283,6 +283,7 @@ impl Repository {
                 preview_hash: None,
             },
             false,
+            false,
         )?;
         let agents = self.list_agents().await?;
         let matched = resolve_agents(&agents, &request.selector_expression)?;
@@ -314,7 +315,7 @@ impl Repository {
         let mut rule_previews = Vec::new();
         let mut incomplete_clients = BTreeSet::new();
         for rule in &request.rules {
-            match validate_policy_rule_request(rule) {
+            match validate_policy_rule_request_for_preview(rule) {
                 Ok(()) => {}
                 Err(error) => {
                     validation_errors.push(error.to_string());
@@ -460,7 +461,7 @@ impl Repository {
         request: &CreateFleetAlertPolicyRequest,
         operator: &AuthContext,
     ) -> Result<PolicyGroupRecord> {
-        validate_policy_group_request(request, true)?;
+        validate_policy_group_request(request, true, true)?;
         let dry_run = self
             .dry_run_fleet_alert_policy(&PolicyDryRunRequest {
                 id: request.id,
@@ -2159,6 +2160,7 @@ fn days_in_month(year: i32, month: u32) -> u32 {
 fn validate_policy_group_request(
     request: &CreateFleetAlertPolicyRequest,
     require_confirmed: bool,
+    require_names: bool,
 ) -> Result<()> {
     if require_confirmed {
         anyhow::ensure!(
@@ -2166,11 +2168,13 @@ fn validate_policy_group_request(
             "fleet_alert_policy_confirmation_required"
         );
     }
-    validate_name(
-        &request.name,
-        MAX_POLICY_NAME_BYTES,
-        "fleet alert policy name",
-    )?;
+    if require_names {
+        validate_name(
+            &request.name,
+            MAX_POLICY_NAME_BYTES,
+            "fleet alert policy name",
+        )?;
+    }
     anyhow::ensure!(
         !request.selector_expression.trim().is_empty()
             && request.selector_expression.len() <= MAX_SELECTOR_EXPRESSION_BYTES,
@@ -2190,7 +2194,11 @@ fn validate_policy_group_request(
         "fleet alert policy requires at least one rule"
     );
     for rule in &request.rules {
-        validate_policy_rule_request(rule)?;
+        if require_names {
+            validate_policy_rule_request(rule)?;
+        } else {
+            validate_policy_rule_request_for_preview(rule)?;
+        }
     }
     Ok(())
 }
@@ -2201,6 +2209,10 @@ fn validate_policy_rule_request(rule: &PolicyRuleRequest) -> Result<()> {
         MAX_RULE_NAME_BYTES,
         "fleet alert policy rule name",
     )?;
+    validate_policy_rule_request_for_preview(rule)
+}
+
+fn validate_policy_rule_request_for_preview(rule: &PolicyRuleRequest) -> Result<()> {
     anyhow::ensure!(
         matches!(rule.severity.as_str(), "info" | "warning" | "critical"),
         "fleet_alert_policy_severity_invalid"

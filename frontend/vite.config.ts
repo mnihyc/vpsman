@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const apiTarget = process.env.VPSMAN_API_PROXY ?? "http://127.0.0.1:18080";
+const apiTarget = process.env.VPSMAN_API_PROXY ?? "http://127.0.0.1:8080";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendBuildNumber = readBuildNumber("frontend");
 const apiProxy = {

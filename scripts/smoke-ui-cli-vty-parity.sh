@@ -125,7 +125,7 @@ workflows=(
   'bulk resolve|bulk-resolve|bulk-resolve|onResolveBulk|frontend/src/panels/FleetGroupsPanel.tsx'
   'template list|source-templates|source-templates|Template registry|frontend/src/panels/SourceTemplatesPanel.tsx'
   'template create|source-template-create|source-template-create|Template definition|frontend/src/panels/SourceTemplatesPanel.tsx'
-  'template assignments|source-template-assignments|source-template-assignments|template assignment records|frontend/src/panels/SourceTemplatesPanel.tsx'
+  'template assignments|source-template-assignments|source-template-assignments|effective template|frontend/src/panels/SourceTemplatesPanel.tsx'
   'source status|source-status|source-status|Active source status|frontend/src/panels/SourceTemplatesPanel.tsx'
   'template runtime config render|template-runtime-config|template-runtime-config|Render runtime config|frontend/src/panels/SourceTemplatesPanel.tsx'
   'template assign|source-template-assign|source-template-assign|Assign template|frontend/src/panels/SourceTemplatesPanel.tsx'

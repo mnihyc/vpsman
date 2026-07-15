@@ -157,6 +157,10 @@
   overscroll-behavior-x: contain;
 }
 
+.tunnelPlanTableWrap {
+  container-type: inline-size;
+}
+
 .tunnelPlanTable,
 .topologyOspfTable {
   width: 100%;
@@ -205,6 +209,21 @@
 .topologyOspfTable tbody > tr:focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: -2px;
+}
+
+.tunnelPlanTable thead th:last-child,
+.tunnelPlanTable tbody > tr:not(.tunnelPlanDetailRow) > td:last-child {
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  border-left: 1px solid var(--border-subtle);
+  background: inherit;
+  box-shadow: -8px 0 10px -10px rgba(60, 64, 67, 0.4);
+}
+
+.tunnelPlanTable thead th:last-child {
+  z-index: 3;
+  background: var(--surface-subtle);
 }
 
 .tunnelPlanTable .selectionCell {
@@ -333,6 +352,12 @@
   gap: 12px;
   min-width: 0;
   padding: 16px 52px 16px 18px;
+}
+
+.tunnelPlanDetail {
+  box-sizing: border-box;
+  width: 100cqw;
+  max-width: 100cqw;
 }
 
 .topologyDetailClose {
@@ -709,6 +734,22 @@
   .topologyOspfFacts {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+}
+
+@media (min-width: 721px) and (max-width: 1360px) {
+  .tunnelPlanTable {
+    min-width: 980px;
+  }
+
+  .tunnelPlanTable tr > :nth-child(7) {
+    display: none;
+  }
+
+  .tunnelPlanTable th:nth-child(2) { width: 17%; }
+  .tunnelPlanTable th:nth-child(3) { width: 17%; }
+  .tunnelPlanTable th:nth-child(4) { width: 17%; }
+  .tunnelPlanTable th:nth-child(5) { width: 16%; }
+  .tunnelPlanTable th:nth-child(6) { width: 20%; }
 }
 
 @media (max-width: 720px) {

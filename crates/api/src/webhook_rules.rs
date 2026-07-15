@@ -114,7 +114,17 @@ impl AppState {
         } else {
             request.limit.unwrap_or(100).clamp(1, 1000)
         };
-        let rules = self.repo.list_webhook_rules(rule_limit, Some(true)).await?;
+        let rules = self
+            .repo
+            .list_webhook_rules(
+                rule_limit,
+                if request.rule_id.is_some() {
+                    None
+                } else {
+                    Some(true)
+                },
+            )
+            .await?;
         let agents = self.repo.list_agents().await?;
         let mut candidates = Vec::new();
         let mut matched_rule_id = request.rule_id.is_none();
@@ -138,7 +148,7 @@ impl AppState {
         }
         anyhow::ensure!(
             matched_rule_id,
-            "webhook_rule_not_found_or_disabled:{}",
+            "webhook_rule_not_found:{}",
             request
                 .rule_id
                 .map(|rule_id| rule_id.to_string())
@@ -160,6 +170,9 @@ impl AppState {
             request.preview_hash.as_deref() == Some(preview_hash.as_str()),
             "webhook_rule_dispatch_preview_hash_mismatch"
         );
+        if request.rule_id.is_some() {
+            return self.repo.record_webhook_rule_deliveries(&candidates).await;
+        }
         self.repo
             .record_webhook_event(WebhookEventCandidate {
                 kind: event_kind.to_string(),
@@ -356,7 +369,7 @@ fn webhook_dispatch_preview_hash(
     candidates: &[WebhookRuleDeliveryCandidate],
 ) -> Result<String> {
     let payload = serde_json::to_vec(&json!({
-        "version": 1,
+        "version": 2,
         "kind": "webhook_rule_dispatch",
         "request": {
             "rule_id": request.rule_id,
@@ -371,9 +384,13 @@ fn webhook_dispatch_preview_hash(
                 "event_id": candidate.event_id,
                 "target": candidate.target,
                 "dedupe_key": candidate.dedupe_key,
-                "payload": candidate.payload,
-                "matched_vps": candidate.matched_vps,
-                "message": candidate.message,
+                "rule_revision_hash": candidate.rule_revision_hash,
+                "matched_vps": candidate.matched_vps.iter().map(|agent| json!({
+                    "id": agent.id,
+                    "display_name": agent.display_name,
+                    "status": agent.status,
+                    "tags": agent.tags,
+                })).collect::<Vec<_>>(),
             })
         }).collect::<Vec<_>>(),
     }))?;
@@ -496,6 +513,16 @@ pub(crate) fn webhook_candidate_for_event(
         "event_id": event_id,
     });
     let hash = payload_hash(dedupe_fingerprint.to_string().as_bytes());
+    let rule_revision_hash = payload_hash(&serde_json::to_vec(&json!({
+        "id": rule.id,
+        "name": &rule.name,
+        "enabled": rule.enabled,
+        "expression": &rule.expression,
+        "target": &rule.target,
+        "body_template": &rule.body_template,
+        "cooldown_secs": rule.cooldown_secs,
+        "signing_secret": &rule.signing_secret,
+    }))?);
     Ok(Some(WebhookRuleDeliveryCandidate {
         rule_id: rule.id,
         rule_name: rule.name.clone(),
@@ -506,6 +533,7 @@ pub(crate) fn webhook_candidate_for_event(
         payload,
         matched_vps,
         message,
+        rule_revision_hash,
         signing_secret: rule.signing_secret.clone(),
         cooldown_until_unix: (unix_now() as i64).saturating_add(rule.cooldown_secs),
         actor_id,

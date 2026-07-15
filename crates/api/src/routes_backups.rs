@@ -1053,8 +1053,8 @@ pub(crate) async fn download_backup_artifact(
         .find_backup_artifact(artifact_id)
         .await?
         .ok_or_else(|| ApiError::not_found("backup_artifact_not_found"))?;
-    if artifact.status == "deleting" || artifact.status == "creating" {
-        return Err(ApiError::conflict("backup_artifact_delete_in_progress"));
+    if !artifact.content_available {
+        return Err(ApiError::conflict("backup_artifact_not_available"));
     }
     if artifact.client_id != backup_request.client_id {
         return Err(ApiError::conflict("backup_artifact_client_mismatch"));
@@ -1255,6 +1255,7 @@ async fn reserve_backup_artifact_object(
         sha256_hex: request.sha256_hex.clone(),
         size_bytes: request.size_bytes,
         status: "creating".to_string(),
+        content_available: false,
         created_at: unix_now().to_string(),
     };
     state

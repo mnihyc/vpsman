@@ -92,8 +92,13 @@ export function RestoreRollbackForm({
         {!confirmationOpen && (
           <button
             className="secondaryAction dangerAction"
-            disabled={pending || !privilegeReady || !restoreJobId || !targetClientId}
+            disabled={pending || !restoreJobId || !targetClientId}
             onClick={onRunRestoreRollback}
+            title={
+              privilegeReady
+                ? "Review the frozen rollback source and target"
+                : "Opens privilege unlock before preparing the rollback review"
+            }
             type="button"
           >
             <RotateCcw size={17} />

@@ -219,8 +219,15 @@ async fn open_terminal_session(input: TerminalOpenInput<'_>) -> Result<Vec<Comma
     let pty = child_process::open_pty_stdio().context("failed to open terminal PTY")?;
     child_process::set_pty_window_size(&pty.master, input.cols, input.rows)
         .context("failed to set terminal PTY window size")?;
-    let reader = tokio::fs::File::from_std(pty.master.try_clone()?);
-    let writer = tokio::fs::File::from_std(pty.master);
+    let child_process::PtyStdio {
+        master,
+        control,
+        stdin,
+        stdout,
+        stderr,
+    } = pty;
+    let reader = tokio::fs::File::from_std(master.try_clone()?);
+    let writer = tokio::fs::File::from_std(master);
 
     let mut command = tokio::process::Command::new(&input.argv[0]);
     command.args(&input.argv[1..]);
@@ -233,14 +240,15 @@ async fn open_terminal_session(input: TerminalOpenInput<'_>) -> Result<Vec<Comma
         command.gid(identity.gid);
     }
     command.kill_on_drop(true);
-    command.process_group(0);
-    command.stdin(pty.stdin);
-    command.stdout(pty.stdout);
-    command.stderr(pty.stderr);
+    child_process::configure_controlling_pty(&mut command, &control);
+    command.stdin(stdin);
+    command.stdout(stdout);
+    command.stderr(stderr);
 
     let mut child = command
         .spawn()
         .context("failed to spawn terminal command")?;
+    drop(control);
     let process_group_id = child
         .id()
         .map(|pid| pid as libc::pid_t)

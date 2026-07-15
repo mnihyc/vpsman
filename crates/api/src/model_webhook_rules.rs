@@ -197,13 +197,14 @@ pub(crate) struct WebhookRuleDeliveryCandidate {
     pub(crate) payload: serde_json::Value,
     pub(crate) matched_vps: Vec<AgentView>,
     pub(crate) message: String,
+    pub(crate) rule_revision_hash: String,
     pub(crate) signing_secret: Option<String>,
     pub(crate) cooldown_until_unix: i64,
     pub(crate) actor_id: Option<Uuid>,
 }
 
 fn default_webhook_rule_enabled() -> bool {
-    true
+    false
 }
 
 fn default_webhook_dry_run_event_kind() -> String {

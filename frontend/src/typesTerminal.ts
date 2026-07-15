@@ -31,6 +31,7 @@ export type TerminalSessionRecord = {
   last_job_id: string;
   last_command_type: GeneratedTerminalCommandType;
   last_seq: number;
+  opened_at: string | null;
   observed_at: string;
 };
 

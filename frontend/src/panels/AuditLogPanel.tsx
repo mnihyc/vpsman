@@ -127,7 +127,6 @@ export function AuditLogPanel({
   const [pruneConfirmationOpen, setPruneConfirmationOpen] = useState(false);
   const [auditFilters, setAuditFilters] =
     useState<AuditFilterState>(EMPTY_AUDIT_FILTERS);
-  const [selectedAuditId, setSelectedAuditId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!selectedPolicy) {
@@ -156,10 +155,6 @@ export function AuditLogPanel({
   const filteredAudits = useMemo(
     () => audits.filter((audit) => auditMatchesFilters(audit, auditFilters)),
     [audits, auditFilters],
-  );
-  const selectedAudit = useMemo(
-    () => filteredAudits.find((audit) => audit.id === selectedAuditId) ?? null,
-    [filteredAudits, selectedAuditId],
   );
   const auditActors = useMemo(
     () =>
@@ -625,19 +620,14 @@ export function AuditLogPanel({
             }
             getRowId={(audit) => audit.id}
             itemLabel="records"
-            onOpenRow={(audit) => setSelectedAuditId(audit.id)}
-            openRowLabel="View audit"
-            openRowTitle={(audit) => `Show details for audit record ${audit.id}.`}
+            expandOnRowClick
+            renderExpandedRow={(audit) => (
+              <AuditEventDetailPanel audit={audit} />
+            )}
             rows={filteredAudits}
             storageKey="vpsman.grid.audit.events"
             title="Audit records"
           />
-          {selectedAudit ? (
-            <AuditEventDetailPanel
-              audit={selectedAudit}
-              onClose={() => setSelectedAuditId(null)}
-            />
-          ) : null}
         </div>
       )}
       {auditSubpage === "retention" && (
@@ -1038,14 +1028,12 @@ export function AuditLogPanel({
 
 function AuditEventDetailPanel({
   audit,
-  onClose,
 }: {
   audit: AuditLogRecord;
-  onClose: () => void;
 }) {
   return (
-    <section
-      className="consoleDetailPanel auditEventDetailPanel"
+    <div
+      className="auditEventDetailPanel"
       aria-label="Audit event detail"
     >
       <div className="consoleDetailPanelHeader">
@@ -1056,13 +1044,6 @@ function AuditEventDetailPanel({
             {formatFullTime(audit.created_at)}
           </small>
         </span>
-        <button
-          className="secondaryAction compactAction"
-          onClick={onClose}
-          type="button"
-        >
-          Close
-        </button>
       </div>
       <div className="consoleInlineDetailGrid">
         <span>
@@ -1121,7 +1102,7 @@ function AuditEventDetailPanel({
         </span>
       </div>
       <pre className="auditEventMetadata">{jsonText(audit.metadata)}</pre>
-    </section>
+    </div>
   );
 }
 
@@ -1577,7 +1558,7 @@ function auditFilterText(
           "remote_ip",
           "request_ip",
           "source_ip",
-        ]) ?? metadataJson
+        ]) ?? ""
       );
     case "session":
       return (
@@ -1586,7 +1567,7 @@ function auditFilterText(
           "session",
           "session_id",
           "terminal_session_id",
-        ]) ?? metadataJson
+        ]) ?? ""
       );
     case "privilege":
       return (
@@ -1598,7 +1579,7 @@ function auditFilterText(
           "required_scope",
           "role",
           "scope",
-        ]) ?? metadataJson
+        ]) ?? ""
       );
   }
 }

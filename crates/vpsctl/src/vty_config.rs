@@ -143,8 +143,8 @@ pub(crate) fn parse_vty_agent_update(tokens: &[&str]) -> Result<VtyAgentUpdateRe
 
 pub(crate) fn parse_vty_agent_update_check(tokens: &[&str]) -> Result<VtyAgentUpdateCheckRequest> {
     let mut version_url = None;
-    let mut activate = true;
-    let mut restart_agent = true;
+    let mut activate = false;
+    let mut restart_agent = false;
     let mut max_timeout_secs = 300_u64;
     let mut privilege_ttl_secs = 300_u64;
     let mut force_unprivileged = false;
@@ -165,17 +165,8 @@ pub(crate) fn parse_vty_agent_update_check(tokens: &[&str]) -> Result<VtyAgentUp
                 activate = true;
                 index += 1;
             }
-            "--no-activate" => {
-                activate = false;
-                restart_agent = false;
-                index += 1;
-            }
             "--restart-agent" => {
                 restart_agent = true;
-                index += 1;
-            }
-            "--no-restart-agent" => {
-                restart_agent = false;
                 index += 1;
             }
             "--max-timeout" => {
@@ -215,6 +206,10 @@ pub(crate) fn parse_vty_agent_update_check(tokens: &[&str]) -> Result<VtyAgentUp
     anyhow::ensure!(
         selection.confirmed,
         "agent-update-check requires --confirmed because it may stage and activate a replacement binary"
+    );
+    anyhow::ensure!(
+        !restart_agent || activate,
+        "--restart-agent requires --activate"
     );
     Ok(VtyAgentUpdateCheckRequest {
         version_url,
@@ -631,23 +626,29 @@ mod tests {
                     .to_string()
             )
         );
-        assert!(request.activate);
-        assert!(request.restart_agent);
+        assert!(!request.activate);
+        assert!(!request.restart_agent);
         assert_eq!(request.selection.tags, vec!["edge"]);
         assert_eq!(request.max_timeout_secs, 300);
         assert_eq!(request.privilege_ttl_secs, 120);
         assert!(request.force_unprivileged);
 
-        let no_activate = parse_vty_agent_update_check(&[
+        let activate = parse_vty_agent_update_check(&[
             "--version-url",
             "file:///tmp/version.json",
             "id:edge-a",
-            "--no-activate",
+            "--activate",
+            "--restart-agent",
             "--confirmed",
         ])
         .unwrap();
-        assert!(!no_activate.activate);
-        assert!(!no_activate.restart_agent);
+        assert!(activate.activate);
+        assert!(activate.restart_agent);
+
+        assert!(
+            parse_vty_agent_update_check(&["id:edge-a", "--restart-agent", "--confirmed",])
+                .is_err()
+        );
     }
 
     #[test]

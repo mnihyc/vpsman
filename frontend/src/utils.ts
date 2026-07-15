@@ -108,6 +108,7 @@ export const DEFAULT_VPS_NAME_DISPLAY_MODE: VpsNameDisplayMode =
   "name_id_suffix";
 
 export const DEFAULT_OPERATOR_PREFERENCES: OperatorPreferences = {
+  agent_install_mode: "root",
   bulk_output_compare_mode: "binary",
   dashboard_curve_exclusions: [],
   dashboard_network_top_limit: 8,
@@ -128,6 +129,12 @@ export function sanitizeOperatorPreferences(
 ): OperatorPreferences {
   const source = preferences ?? {};
   return {
+    agent_install_mode:
+      source.agent_install_mode === "root" ||
+      source.agent_install_mode === "user" ||
+      source.agent_install_mode === "staged"
+        ? source.agent_install_mode
+        : DEFAULT_OPERATOR_PREFERENCES.agent_install_mode,
     bulk_output_compare_mode:
       source.bulk_output_compare_mode ??
       DEFAULT_OPERATOR_PREFERENCES.bulk_output_compare_mode,
@@ -400,7 +407,7 @@ export function decodeOutputPreview(value: string): string {
     return "";
   }
   try {
-    const binary = window.atob(value);
+    const binary = globalThis.atob(value);
     const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
     return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
   } catch {
@@ -449,8 +456,47 @@ export function metadataOperator(metadata: JsonValue): string | null {
   if (!isJsonObject(metadata)) {
     return null;
   }
-  const username = metadata.operator_username;
-  return typeof username === "string" ? username : null;
+  return (
+    metadataIdentityLabel(metadata.operator_username) ??
+    metadataIdentityLabel(metadata.operator) ??
+    metadataIdentityLabel(metadata.actor) ??
+    metadataIdentityLabel(metadata.username)
+  );
+}
+
+function metadataIdentityLabel(value: JsonValue | undefined): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+    if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+      try {
+        return metadataIdentityLabel(JSON.parse(trimmed) as JsonValue) ?? trimmed;
+      } catch {
+        return trimmed;
+      }
+    }
+    return trimmed;
+  }
+  if (value === undefined || !isJsonObject(value)) {
+    return null;
+  }
+  for (const key of [
+    "operator_username",
+    "username",
+    "name",
+    "operator_id",
+    "actor_id",
+    "user_id",
+    "id",
+  ]) {
+    const candidate = value[key];
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return null;
 }
 
 export function metadataPreview(metadata: JsonValue): string {

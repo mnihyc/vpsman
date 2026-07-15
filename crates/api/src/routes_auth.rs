@@ -327,6 +327,12 @@ fn validate_operator_preferences(preferences: &OperatorPreferences) -> Result<()
     {
         return Err(ApiError::bad_request("invalid_gateway_endpoints"));
     }
+    if !matches!(
+        preferences.agent_install_mode.trim(),
+        "root" | "user" | "staged"
+    ) {
+        return Err(ApiError::bad_request("invalid_agent_install_mode"));
+    }
     validate_tunnel_allocation_preference(
         preferences.tunnel_ipv4_allocation_pool_cidr.trim(),
         TunnelAllocationPreferenceFamily::Ipv4,

@@ -269,12 +269,12 @@ async fn fleet_alert_policy_groups_issue_resource_alerts() {
     let dry_run = repo
         .dry_run_fleet_alert_policy(&PolicyDryRunRequest {
             id: Some(policy.id),
-            name: "edge-cpu".to_string(),
+            name: String::new(),
             enabled: true,
             selector_expression: "tag:edge".to_string(),
             rules: vec![PolicyRuleRequest {
                 id: None,
-                name: "cpu over one".to_string(),
+                name: String::new(),
                 enabled: true,
                 traffic_selector: None,
                 condition_expression: "cpu.load_1 >= (0.25 + 0.75) * 1".to_string(),
@@ -1053,6 +1053,7 @@ async fn disabled_webhook_rule_cancels_retryable_deliveries() {
                 payload: json!({"schema": "test"}),
                 matched_vps: Vec::new(),
                 message: "test".to_string(),
+                rule_revision_hash: "test-revision".to_string(),
                 signing_secret: None,
                 cooldown_until_unix: 0,
                 actor_id: Some(operator.operator.id),
@@ -1190,7 +1191,7 @@ async fn webhook_rule_dispatch_can_be_scoped_to_one_rule() {
             &crate::model_webhook_rules::CreateWebhookRuleRequest {
                 id: Some(id),
                 name: name.to_string(),
-                enabled: true,
+                enabled: id != scoped_rule_id,
                 expression: "interval.30sec && tag:edge".to_string(),
                 target: format!("http://127.0.0.1:9/{name}"),
                 body_template: "{rule.name} {event.kind}".to_string(),
@@ -1222,7 +1223,8 @@ async fn webhook_rule_dispatch_can_be_scoped_to_one_rule() {
         )
         .await
         .unwrap();
-    assert_eq!(broad_preview.len(), 2);
+    assert_eq!(broad_preview.len(), 1);
+    assert_eq!(broad_preview[0].rule_id, first_rule_id);
 
     let scoped_preview = state
         .dispatch_webhook_rules(
@@ -1265,7 +1267,7 @@ async fn webhook_rule_dispatch_can_be_scoped_to_one_rule() {
         .unwrap();
     assert_eq!(scoped_dispatch.len(), 1);
     assert_eq!(scoped_dispatch[0].rule_id, scoped_rule_id);
-    assert_eq!(scoped_dispatch[0].status, "event_logged");
+    assert_eq!(scoped_dispatch[0].status, "queued");
 }
 
 #[tokio::test]
@@ -1328,6 +1330,8 @@ async fn webhook_rule_dispatch_generated_event_id_can_be_confirmed_when_reused()
     let reviewed_event_id = preview[0].event_id.clone();
     assert!(!reviewed_event_id.is_empty());
     let reviewed_hash = preview[0].review_preview_hash.clone();
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
 
     let missing_event_id_error = state
         .dispatch_webhook_rules(

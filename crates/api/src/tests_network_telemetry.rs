@@ -159,7 +159,7 @@ async fn adapter_health_output_is_redacted_to_hashes() {
 }
 
 #[tokio::test]
-async fn telemetry_sequence_makes_retries_and_out_of_order_samples_idempotent() {
+async fn telemetry_sequence_is_idempotent_per_gateway_session() {
     let memory = MemoryState::default();
     let webhook_events = memory.webhook_events.clone();
     let repo = Repository::Memory(memory);
@@ -205,6 +205,10 @@ async fn telemetry_sequence_makes_retries_and_out_of_order_samples_idempotent() 
     assert_eq!(rollups[0].sample_count, 2);
     assert_eq!(rollups[0].cpu_load_1_avg, 2.0);
 
+    event.gateway_session_id = uuid::Uuid::new_v4();
+    event.telemetry_seq = 1;
+    assert!(repo.record_telemetry(&event).await.unwrap());
+
     event.process_incarnation_id = uuid::Uuid::new_v4();
     event.telemetry_seq = 1;
     assert!(repo.record_telemetry(&event).await.unwrap());
@@ -213,7 +217,7 @@ async fn telemetry_sequence_makes_retries_and_out_of_order_samples_idempotent() 
             .await
             .unwrap()[0]
             .sample_count,
-        3
+        4
     );
     let event_ids = webhook_events
         .read()
@@ -221,7 +225,7 @@ async fn telemetry_sequence_makes_retries_and_out_of_order_samples_idempotent() 
         .iter()
         .map(|event| event.event_id.clone())
         .collect::<Vec<_>>();
-    assert_eq!(event_ids.len(), 3);
+    assert_eq!(event_ids.len(), 4);
     assert!(event_ids.iter().any(|event_id| event_id.ends_with(":2")));
     assert!(event_ids.iter().any(|event_id| event_id.ends_with(":3")));
 }

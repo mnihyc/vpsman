@@ -22,7 +22,7 @@ const AGENT_UPDATE_USAGE: &str = concat!(
 
 const AGENT_UPDATE_CHECK_USAGE: &str = concat!(
     "usage: agent-update-check [--version-url <https-url>] <target ...> ",
-    "[--no-activate] [--no-restart-agent] [--max-timeout <secs>] ",
+    "[--activate] [--restart-agent] [--max-timeout <secs>] ",
     "[--privilege-ttl <15-300>] [--force-unprivileged] --confirmed"
 );
 

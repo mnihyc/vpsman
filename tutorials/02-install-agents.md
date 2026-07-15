@@ -24,7 +24,7 @@ VPS identities in the panel:
 
 ```sh
 cargo run -p vpsctl -- agent-identity-upsert \
-  --client-id edge-nrt-04 \
+  --client-id 1 \
   --client-public-key-hex <agent_noise_public_key_hex> \
   --display-name edge-nrt-04 \
   --tags country:JP,provider:acmecloud,role:edge \
@@ -43,7 +43,7 @@ Root service:
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-agent.sh | env \
   VPSMAN_INSTALL_MODE=root \
-  VPSMAN_AGENT_CLIENT_ID=edge-nrt-04 \
+  VPSMAN_AGENT_CLIENT_ID=1 \
   VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=<agent_noise_private_key_hex> \
   VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=<gateway_noise_public_key_hex> \
   VPSMAN_GATEWAY_ENDPOINTS='primary=gw.example.com:9443=10,backup=gw-backup.example.com:9443=20' \
@@ -55,7 +55,7 @@ Unprivileged service:
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-agent.sh | env \
   VPSMAN_INSTALL_MODE=user \
-  VPSMAN_AGENT_CLIENT_ID=edge-nrt-04 \
+  VPSMAN_AGENT_CLIENT_ID=1 \
   VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=<agent_noise_private_key_hex> \
   VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=<gateway_noise_public_key_hex> \
   VPSMAN_GATEWAY_ENDPOINTS='primary=gw.example.com:9443=10' \
@@ -66,7 +66,9 @@ curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-a
 `label=host:port=priority` entries. DNS names are supported; lower priority
 numbers are tried first. The installer enables and starts the systemd service by
 default; set `VPSMAN_AGENT_ENABLE_SERVICE=0` only for a staging-only install.
-There is no separate panel-side endpoint lookup.
+The staging-only installer prints the exact foreground start command; run that
+command explicitly in a container or other no-systemd environment. There is no
+separate panel-side endpoint lookup.
 
 ## 4. Verify connectivity
 
@@ -85,7 +87,7 @@ telemetry.
 For emergency access lockout, revoke the current client key:
 
 ```sh
-cargo run -p vpsctl -- client-key-revoke --client-id edge-nrt-04 --confirmed
+cargo run -p vpsctl -- client-key-revoke --client-id 1 --confirmed
 ```
 
 For inventory retirement, use Fleet > Instances, select exactly one VPS, then
@@ -105,7 +107,7 @@ and run:
 
 ```sh
 cargo run -p vpsctl -- agent-identity-upsert \
-  --client-id edge-nrt-04 \
+  --client-id 1 \
   --client-public-key-hex <new_agent_noise_public_key_hex> \
   --replace-existing-key \
   --confirmed

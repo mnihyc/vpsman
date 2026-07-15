@@ -41,6 +41,15 @@ pub(crate) struct OperatorAuthThrottleRecord {
     pub(crate) last_failure_reason: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct TelemetryIngestWatermark {
+    pub(crate) gateway_session_id: Uuid,
+    pub(crate) process_incarnation_id: Uuid,
+    pub(crate) telemetry_seq: u64,
+}
+
+pub(crate) type TelemetryIngestWatermarks = Arc<RwLock<HashMap<String, TelemetryIngestWatermark>>>;
+
 #[derive(Clone, Default)]
 pub(crate) struct MemoryState {
     pub(crate) agents: Arc<RwLock<Vec<AgentView>>>,
@@ -99,7 +108,7 @@ pub(crate) struct MemoryState {
     pub(crate) telemetry_rollups: Arc<RwLock<Vec<TelemetryRollupView>>>,
     pub(crate) telemetry_network_rates: Arc<RwLock<Vec<TelemetryNetworkRateView>>>,
     pub(crate) telemetry_tunnels: Arc<RwLock<Vec<TelemetryTunnelView>>>,
-    pub(crate) telemetry_ingest_watermarks: Arc<RwLock<HashMap<String, (Uuid, u64)>>>,
+    pub(crate) telemetry_ingest_watermarks: TelemetryIngestWatermarks,
     pub(crate) audits: Arc<RwLock<Vec<AuditLogView>>>,
     pub(crate) schedules: Arc<RwLock<Vec<ScheduleView>>>,
     pub(crate) backup_policies: Arc<RwLock<Vec<BackupPolicyMetadata>>>,

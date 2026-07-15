@@ -8,28 +8,47 @@ import {
 import { shortId } from "../utils";
 
 export function ExecutionResultPanel({
+  context,
   label = "Execution result",
   loading = false,
   onClearResults,
   onOpenJobDetails,
+  onOpenJobHistory,
   progress,
 }: {
+  context?: string;
   label?: string;
   loading?: boolean;
   onClearResults?: () => void;
   onOpenJobDetails?: (jobId: string) => void;
+  onOpenJobHistory?: () => void;
   progress: BulkJobProgress;
 }) {
+  const jobCount = progress.jobIds.length;
+  const hasMultipleJobs = jobCount > 1;
   return (
     <section className="executionResultPanel" aria-label={label}>
       <div className="executionResultHeader">
         <div>
           <strong>{label}</strong>
-          <span>{loading ? "Polling job status" : bulkOutcomeSummary(progress)}</span>
+          <span title={context}>
+            {context ? `${context} · ` : ""}
+            {loading ? "Polling job status" : bulkOutcomeSummary(progress)}
+          </span>
         </div>
-        {(onOpenJobDetails || onClearResults) && (
+        {(onOpenJobDetails || onOpenJobHistory || onClearResults) && (
           <div className="executionResultActions">
-            {onOpenJobDetails && (
+            {hasMultipleJobs && onOpenJobHistory ? (
+              <button
+                className="secondaryAction compactAction"
+                onClick={onOpenJobHistory}
+                title={`Open all ${jobCount} target-specific jobs in Jobs / History.`}
+                type="button"
+              >
+                <ExternalLink size={15} />
+                <span>Open job history</span>
+              </button>
+            ) : onOpenJobDetails ? (
               <button
                 className="secondaryAction compactAction"
                 onClick={() => onOpenJobDetails(progress.jobId)}
@@ -39,7 +58,7 @@ export function ExecutionResultPanel({
                 <ExternalLink size={15} />
                 <span>Open job details</span>
               </button>
-            )}
+            ) : null}
             {onClearResults && (
               <button
                 className="secondaryAction compactAction"
@@ -57,8 +76,10 @@ export function ExecutionResultPanel({
       </div>
       <div className="executionResultStats">
         <span>
-          <strong>{shortId(progress.jobId)}</strong>
-          job
+          <strong>
+            {hasMultipleJobs ? jobCount : shortId(progress.jobId)}
+          </strong>
+          {hasMultipleJobs ? "jobs" : "job"}
         </span>
         <span>
           <strong>{progress.terminal}/{progress.total}</strong>
@@ -70,7 +91,7 @@ export function ExecutionResultPanel({
         </span>
         <span>
           <strong>{progress.retrieved}</strong>
-          retrieved
+          reported
         </span>
         <span>
           <strong>{progress.completed}</strong>

@@ -24,17 +24,20 @@ async function expectAuthenticatedConsoleShell(page: Page) {
   const desktopNav = page.getByRole("navigation", {
     name: "Primary console navigation",
   });
-  const topbarRoute = page
-    .locator(".topbarActions")
-    .getByText("Home / Overview")
-    .first();
+  const mobileRoute = page.getByRole("combobox", {
+    name: "Console page",
+    exact: true,
+  });
   await expect
     .poll(
       async () =>
         (await desktopNav.isVisible().catch(() => false)) ||
-        (await topbarRoute.isVisible().catch(() => false)),
+        (await mobileRoute.isVisible().catch(() => false)),
     )
     .toBe(true);
+  if (await mobileRoute.isVisible().catch(() => false)) {
+    await expect(mobileRoute).toHaveValue("Home::overview");
+  }
   await expect(
     page.getByRole("heading", { name: "Home", exact: true }),
   ).toBeVisible();
@@ -82,6 +85,9 @@ test("keeps ordinary bearer login authenticated across browser reload", async ({
   await page.goto("/");
 
   await expectOperatorAccessShell(page);
+  await expect(
+    page.getByText("Sign in with an existing operator account."),
+  ).toBeVisible();
   await page.getByLabel("Username").fill("session-admin");
   await page.getByLabel("Password").fill("session-password-123");
   await activate(page.getByRole("button", { name: "Sign in" }));

@@ -30,6 +30,7 @@ pub(crate) struct TerminalSessionView {
     pub(crate) last_job_id: Uuid,
     pub(crate) last_command_type: String,
     pub(crate) last_seq: i32,
+    pub(crate) opened_at: Option<String>,
     pub(crate) observed_at: String,
 }
 

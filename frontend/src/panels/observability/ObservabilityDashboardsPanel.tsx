@@ -563,7 +563,7 @@ function FleetOperationsDashboard({
         {recentAlerts.slice(0, 8).map((alert) => (
           <div className="dashboardWidgetRow" key={alert.id}>
             <ConsoleStatusBadge
-              tone={alert.severity === "critical" ? "critical" : "warning"}
+              tone={alert.severity === "critical" ? "critical" : alert.severity === "warning" ? "warning" : "info"}
             >
               {alert.severity || "warning"}
             </ConsoleStatusBadge>

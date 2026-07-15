@@ -233,13 +233,12 @@ export function agentsMatchingExpression(agents: AgentView[], input: string): Ag
   return filterBySearchExpression(agents, input, agentSearchFields).items;
 }
 
-export function termMatchTitle(term: SearchToken, agents: AgentView[], expression?: string): string {
+export function termMatchTitle(term: SearchToken, agents: AgentView[]): string {
   if (term.kind !== "term" && term.kind !== "string" && term.kind !== "regex") {
     return term.raw;
   }
   const description = describeToken(term);
-  const fullParse = expression ? parseSearchExpression(expression) : null;
-  const parsed = fullParse && !fullParse.error ? fullParse.expression : expressionForToken(term);
+  const parsed = expressionForToken(term);
   const matches = agents.filter((agent) => evaluateSearchExpression(parsed, agentSearchFields(agent)));
   const labels = matches.map((agent) => `${agent.id} (${agent.display_name}; ${agent.status})`).join(", ");
   return `${description}. ${matches.length} matched target${matches.length === 1 ? "" : "s"}${labels ? `: ${labels}` : ""}`;

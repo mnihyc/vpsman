@@ -70,6 +70,11 @@ export function useDashboardData(activeView: ActiveView) {
   const inventoryReloadTimer = useRef<number | null>(null);
   const topologyReloadTimer = useRef<number | null>(null);
   const refreshAuthRef = useRef<Promise<void> | null>(null);
+  const activeViewRef = useRef(activeView);
+
+  useEffect(() => {
+    activeViewRef.current = activeView;
+  }, [activeView]);
 
   const forceAuthRequired = useCallback(() => {
     clearStoredAuthSession();
@@ -318,11 +323,13 @@ export function useDashboardData(activeView: ActiveView) {
     } else if (activeView === "Jobs") {
       void jobs.loadJobs();
       void inventory.loadTagInventory();
-      void system.loadSuiteConfig();
     } else if (activeView === "Automation") {
       void schedules.loadSchedules();
       void jobs.loadJobs();
       void inventory.loadTagInventory();
+      if (access.operator?.role === "admin") {
+        void system.loadSuiteConfig();
+      }
     } else if (activeView === "Network") {
       void inventory.loadRuntimeConfigApplyStates();
       void topology.loadTunnelPlans();
@@ -354,10 +361,13 @@ export function useDashboardData(activeView: ActiveView) {
       void access.loadCurrentOperator();
       void inventory.loadTagInventory();
       void system.loadSystemDashboard();
-      void system.loadSuiteConfig();
+      if (access.operator?.role === "admin") {
+        void system.loadSuiteConfig();
+      }
     }
   }, [
     access.loadCurrentOperator,
+    access.operator?.role,
     activeView,
     apiToken,
     audit.loadAudits,
@@ -383,88 +393,118 @@ export function useDashboardData(activeView: ActiveView) {
       return;
     }
     let disposed = false;
+    let reconnectAttempt = 0;
+    let reconnectTimer: number | null = null;
+    let socket: WebSocket | null = null;
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
-    socket.addEventListener("open", () => {
-      if (apiToken) {
-        socket.send(JSON.stringify({ type: "auth", access_token: apiToken }));
-      }
-      setWsState("connected");
-    });
-    socket.addEventListener("close", () => {
-      setWsState("closed");
-      if (!disposed && apiToken) {
-        void access.loadCurrentOperator();
-      }
-    });
-    socket.addEventListener("error", () => setWsState("error"));
-    socket.addEventListener("message", (message) => {
-      const event = parseWsEvent(message.data);
-      if (!event) {
+    const connect = () => {
+      if (disposed) {
         return;
       }
-      setLastLiveEvent(event.type);
-      if (event.type === "fleet_snapshot") {
-        fleet.replaceFleetSnapshot(event.summary, event.agents);
-        return;
-      }
-      if (event.type === "telemetry_updated") {
-        scheduleFleetTelemetryReload();
-      } else if (
-        event.type === "agent_updated" ||
-        event.type === "job_rejected"
-      ) {
-        scheduleFleetReload();
-      }
-      if (
-        (activeView === "Home" || activeView === "Observability") &&
-        (event.type === "agent_updated" ||
-          event.type === "job_rejected")
-      ) {
-        scheduleDashboardOverviewReload();
-      }
-      if (event.type === "agent_updated" && activeViewUsesInventoryData(activeView)) {
-        scheduleInventoryReload();
-      }
-      if (event.type === "job_rejected") {
-        void jobs.loadJobs();
-        void audit.loadAudits();
-      }
-      if (event.type === "job_output_recorded") {
-        setLastJobOutputEvent(event);
-        if (activeView === "Jobs" || activeView === "Remote Operations") {
-          void jobs.loadJobs();
+      setWsState(reconnectAttempt === 0 ? "connecting" : "reconnecting");
+      socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
+      socket.addEventListener("open", () => {
+        if (disposed) {
+          socket?.close();
+          return;
         }
-      }
-      if (event.type === "terminal_output_recorded") {
-        setLastTerminalOutputEvent(event);
-        void jobs.loadTerminalSessions();
-      }
-      if (event.type === "job_finished") {
-        scheduleFleetReload();
-        void jobs.loadJobs();
-        void audit.loadAudits();
-        if (activeViewUsesInventoryData(activeView)) {
+        reconnectAttempt = 0;
+        socket?.send(JSON.stringify({ type: "auth", access_token: apiToken }));
+        setWsState("connected");
+      });
+      socket.addEventListener("close", () => {
+        if (disposed) {
+          return;
+        }
+        setWsState("reconnecting");
+        void access.loadCurrentOperator();
+        const delay = Math.min(1_000 * 2 ** reconnectAttempt, 15_000);
+        reconnectAttempt += 1;
+        reconnectTimer = window.setTimeout(connect, delay);
+      });
+      socket.addEventListener("error", () => {
+        if (!disposed) {
+          setWsState("reconnecting");
+        }
+      });
+      socket.addEventListener("message", (message) => {
+        const event = parseWsEvent(message.data);
+        if (!event) {
+          return;
+        }
+        const currentView = activeViewRef.current;
+        setLastLiveEvent(event.type);
+        if (event.type === "fleet_snapshot") {
+          fleet.replaceFleetSnapshot(event.summary, event.agents);
+          return;
+        }
+        if (event.type === "telemetry_updated") {
+          scheduleFleetTelemetryReload();
+        } else if (
+          event.type === "agent_updated" ||
+          event.type === "job_rejected"
+        ) {
+          scheduleFleetReload();
+        }
+        if (
+          (currentView === "Home" || currentView === "Observability") &&
+          (event.type === "agent_updated" ||
+            event.type === "job_rejected")
+        ) {
+          scheduleDashboardOverviewReload();
+        }
+        if (
+          event.type === "agent_updated" &&
+          activeViewUsesInventoryData(currentView)
+        ) {
           scheduleInventoryReload();
         }
-        if (activeView === "Home" || activeView === "Observability") {
-          scheduleDashboardOverviewReload();
+        if (event.type === "job_rejected") {
+          void jobs.loadJobs();
+          void audit.loadAudits();
         }
-        if (activeView === "Network") {
-          scheduleTopologyReload();
+        if (event.type === "job_output_recorded") {
+          setLastJobOutputEvent(event);
+          if (currentView === "Jobs" || currentView === "Remote Operations") {
+            void jobs.loadJobs();
+          }
         }
-      }
-      if (event.type === "backup_artifact_recorded") {
-        void backups.loadBackups();
-        void audit.loadAudits();
-        if (activeView === "Home" || activeView === "Observability") {
-          scheduleDashboardOverviewReload();
+        if (event.type === "terminal_output_recorded") {
+          setLastTerminalOutputEvent(event);
+          void jobs.loadTerminalSessions();
         }
-      }
-    });
+        if (event.type === "job_finished") {
+          scheduleFleetReload();
+          void jobs.loadJobs();
+          void audit.loadAudits();
+          if (activeViewUsesInventoryData(currentView)) {
+            scheduleInventoryReload();
+          }
+          if (currentView === "Home" || currentView === "Observability") {
+            scheduleDashboardOverviewReload();
+          }
+          if (currentView === "Network") {
+            scheduleTopologyReload();
+          }
+        }
+        if (event.type === "backup_artifact_recorded") {
+          void backups.loadBackups();
+          void audit.loadAudits();
+          if (currentView === "Home" || currentView === "Observability") {
+            scheduleDashboardOverviewReload();
+          }
+        }
+      });
+    };
+    connect();
     return () => {
       disposed = true;
-      socket.close();
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+      }
+      if (socket?.readyState === WebSocket.OPEN) {
+        socket.close();
+      }
     };
   }, [
     apiToken,
@@ -480,7 +520,6 @@ export function useDashboardData(activeView: ActiveView) {
     scheduleFleetTelemetryReload,
     scheduleInventoryReload,
     scheduleTopologyReload,
-    activeView,
   ]);
 
   const handleAuth = useCallback(

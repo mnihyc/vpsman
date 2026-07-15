@@ -11,6 +11,7 @@ use crate::{
         ListQuery, NewServerArtifact, RecordBackupArtifactMetadataRequest,
     },
     repository::Repository,
+    repository_server_jobs::upsert_memory_server_artifact,
     unix_now,
     util::{limit_or_default, offset_or_default, search_pattern, sort_descending},
 };
@@ -69,12 +70,15 @@ impl Repository {
     ) -> Result<Vec<BackupArtifactView>> {
         match self {
             Self::Memory(memory) => {
-                let artifacts = memory.backup_artifacts.read().await;
+                let artifacts = memory.backup_artifacts.read().await.clone();
+                let server_artifacts = memory.server_artifacts.read().await;
                 Ok(artifacts
                     .iter()
                     .rev()
                     .take(limit as usize)
-                    .cloned()
+                    .map(|artifact| {
+                        backup_artifact_with_storage_status(artifact, &server_artifacts)
+                    })
                     .collect())
             }
             Self::Postgres(pool) => {
@@ -86,12 +90,12 @@ impl Repository {
                         artifact.object_key,
                         artifact.sha256_hex,
                         artifact.size_bytes,
-                        COALESCE(server_artifact.status, 'active') AS status,
+                        COALESCE(server_artifact.status, 'missing') AS status,
+                        COALESCE(server_artifact.status = 'active', false) AS content_available,
                         artifact.created_at::text AS created_at
                     FROM backup_artifacts artifact
                     LEFT JOIN server_artifacts server_artifact
                       ON server_artifact.object_key = artifact.object_key
-                     AND server_artifact.status <> 'deleted'
                     ORDER BY artifact.created_at DESC, artifact.id DESC
                     LIMIT $1
                     "#,
@@ -119,17 +123,18 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let q = q.map(|value| value.to_ascii_lowercase());
-                let mut artifacts = memory
-                    .backup_artifacts
-                    .read()
-                    .await
+                let backup_artifacts = memory.backup_artifacts.read().await.clone();
+                let server_artifacts = memory.server_artifacts.read().await;
+                let mut artifacts = backup_artifacts
                     .iter()
                     .filter(|artifact| {
                         q.as_deref()
                             .map(|needle| backup_artifact_matches_search(artifact, needle))
                             .unwrap_or(true)
                     })
-                    .cloned()
+                    .map(|artifact| {
+                        backup_artifact_with_storage_status(artifact, &server_artifacts)
+                    })
                     .collect::<Vec<_>>();
                 artifacts.sort_by(|left, right| {
                     compare_backup_artifact(left, right, query.sort.as_deref())
@@ -154,12 +159,12 @@ impl Repository {
                         artifact.object_key,
                         artifact.sha256_hex,
                         artifact.size_bytes,
-                        COALESCE(server_artifact.status, 'active') AS status,
+                        COALESCE(server_artifact.status, 'missing') AS status,
+                        COALESCE(server_artifact.status = 'active', false) AS content_available,
                         artifact.created_at::text AS created_at
                     FROM backup_artifacts artifact
                     LEFT JOIN server_artifacts server_artifact
                       ON server_artifact.object_key = artifact.object_key
-                     AND server_artifact.status <> 'deleted'
                     WHERE (
                         $3::text IS NULL
                         OR artifact.id::text ILIKE $3 ESCAPE '\'
@@ -187,13 +192,16 @@ impl Repository {
         artifact_id: Uuid,
     ) -> Result<Option<BackupArtifactView>> {
         match self {
-            Self::Memory(memory) => Ok(memory
-                .backup_artifacts
-                .read()
-                .await
-                .iter()
-                .find(|artifact| artifact.id == artifact_id)
-                .cloned()),
+            Self::Memory(memory) => {
+                let artifacts = memory.backup_artifacts.read().await.clone();
+                let server_artifacts = memory.server_artifacts.read().await;
+                Ok(artifacts
+                    .iter()
+                    .find(|artifact| artifact.id == artifact_id)
+                    .map(|artifact| {
+                        backup_artifact_with_storage_status(artifact, &server_artifacts)
+                    }))
+            }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -203,12 +211,12 @@ impl Repository {
                         artifact.object_key,
                         artifact.sha256_hex,
                         artifact.size_bytes,
-                        COALESCE(server_artifact.status, 'active') AS status,
+                        COALESCE(server_artifact.status, 'missing') AS status,
+                        COALESCE(server_artifact.status = 'active', false) AS content_available,
                         artifact.created_at::text AS created_at
                     FROM backup_artifacts artifact
                     LEFT JOIN server_artifacts server_artifact
                       ON server_artifact.object_key = artifact.object_key
-                     AND server_artifact.status <> 'deleted'
                     WHERE artifact.id = $1
                     "#,
                 )
@@ -234,6 +242,7 @@ impl Repository {
             sha256_hex: request.sha256_hex.clone(),
             size_bytes: request.size_bytes,
             status: "active".to_string(),
+            content_available: true,
             created_at: unix_now().to_string(),
         };
         match self {
@@ -248,6 +257,12 @@ impl Repository {
                         stored.artifact_id.is_none(),
                         "backup_artifact_already_recorded"
                     );
+                    upsert_memory_server_artifact(
+                        memory,
+                        backup_server_artifact(backup_request, &artifact),
+                        "active",
+                    )
+                    .await?;
                     stored.artifact_id = Some(artifact.id);
                     stored.status = BackupRequestStatus::ArtifactMetadataRecorded
                         .as_str()
@@ -347,8 +362,27 @@ pub(crate) fn backup_artifact_from_row(row: sqlx::postgres::PgRow) -> Result<Bac
         sha256_hex: row.try_get("sha256_hex")?,
         size_bytes: row.try_get("size_bytes")?,
         status: row.try_get("status")?,
+        content_available: row.try_get("content_available")?,
         created_at: row.try_get("created_at")?,
     })
+}
+
+fn backup_artifact_with_storage_status(
+    artifact: &BackupArtifactView,
+    server_artifacts: &[crate::model::ServerArtifactCleanupCandidate],
+) -> BackupArtifactView {
+    let mut artifact = artifact.clone();
+    if let Some(stored) = server_artifacts
+        .iter()
+        .find(|stored| stored.object_key == artifact.object_key)
+    {
+        artifact.status.clone_from(&stored.status);
+        artifact.content_available = stored.status == "active";
+    } else {
+        artifact.status = "missing".to_string();
+        artifact.content_available = false;
+    }
+    artifact
 }
 
 pub(crate) fn backup_server_artifact(
@@ -408,8 +442,8 @@ fn backup_artifact_metadata(
         "operator_username": &operator.operator.username,
         "operator_role": &operator.operator.role,
         "session_id": operator.session_id,
-        "metadata_only": true,
-        "artifact_upload_verified": false,
+        "metadata_only": !artifact.content_available,
+        "artifact_upload_verified": artifact.content_available,
         "restore_verified": false,
     })
 }

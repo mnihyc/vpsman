@@ -67,8 +67,6 @@ export function buildOperation(
   updateArtifactUrl: string,
   updateSha256Hex: string,
   updateCheckVersionUrl: string,
-  updateCheckActivate: boolean,
-  updateCheckRestartAgent: boolean,
   updateActivationSha256Hex: string,
   updateRestartAgent: boolean,
   updateRollbackSha256Hex: string,
@@ -172,13 +170,13 @@ export function buildOperation(
       ? {
           type: "agent_update_check",
           version_url: versionUrl,
-          activate: updateCheckActivate,
-          restart_agent: updateCheckRestartAgent,
+          activate: false,
+          restart_agent: false,
         }
       : {
           type: "agent_update_check",
-          activate: updateCheckActivate,
-          restart_agent: updateCheckRestartAgent,
+          activate: false,
+          restart_agent: false,
         };
   }
   if (mode === "agent_update_activate") {
@@ -244,31 +242,23 @@ export function parseBackupPaths(value: string): string[] {
 }
 
 export function operationCommandLabel(mode: DispatchMode, commandText: string): string {
-  if (mode === "shell") {
-    return commandText.trim();
-  }
-  if (mode === "shell_script") {
-    return "shell_script";
-  }
-  if (mode === "terminal_session") {
-    return "terminal_session";
-  }
-  if (mode === "agent_update_activate") {
-    return "agent_update_activate";
-  }
-  if (mode === "agent_update_rollback") {
-    return "agent_update_rollback";
-  }
-  if (mode === "agent_update_check") {
-    return "agent_update_check";
-  }
-  if (mode === "file_transfer_upload") {
-    return "file_transfer_upload";
-  }
-  if (mode === "file_transfer_download") {
-    return "file_transfer_download";
-  }
-  return mode;
+  const labels: Record<Exclude<DispatchMode, "shell">, string> = {
+    agent_update: "Install agent update",
+    agent_update_activate: "Activate staged agent update",
+    agent_update_check: "Check agent update",
+    agent_update_rollback: "Rollback agent update",
+    backup: "Create backup",
+    file_pull: "Read remote file",
+    file_push: "Write remote file",
+    file_transfer_download: "Resumable download",
+    file_transfer_upload: "Resumable upload",
+    process_list: "List processes",
+    process_supervisor: "Managed process",
+    shell_script: "Run shell script",
+    terminal_session: "Terminal session action",
+    user_sessions: "List user sessions",
+  };
+  return mode === "shell" ? commandText.trim() : labels[mode];
 }
 
 export function terminalReady(action: TerminalAction, sessionId: string, argv: string, inputText: string): boolean {

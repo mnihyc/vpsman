@@ -45,7 +45,7 @@ export function VpsCombobox({
   const inputRef = useRef<HTMLInputElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const skipBlurCommitRef = useRef(false);
-  const [activeIndex, setActiveIndex] = useState(0);
+  const [activeIndex, setActiveIndex] = useState(-1);
   const [focused, setFocused] = useState(false);
   const [menuStyle, setMenuStyle] = useState<CSSProperties | null>(null);
   const [open, setOpen] = useState(false);
@@ -63,7 +63,7 @@ export function VpsCombobox({
   }, [agents, focused, value]);
 
   useEffect(() => {
-    setActiveIndex(0);
+    setActiveIndex(query.trim() ? 0 : -1);
   }, [query]);
 
   useEffect(() => {
@@ -179,7 +179,9 @@ export function VpsCombobox({
     if (event.key === "ArrowDown") {
       event.preventDefault();
       setOpen(true);
-      setActiveIndex((current) => Math.min(current + 1, Math.max(filtered.length - 1, 0)));
+      setActiveIndex((current) =>
+        Math.min(current + 1, Math.max(filtered.length - 1, 0)),
+      );
       return;
     }
     if (event.key === "ArrowUp") {

@@ -542,6 +542,10 @@ export function useJobsData(
   const createJobApproval = useCallback(
     async (request: CreateJobApprovalRequest) => {
       const response = await apiPost<JobApprovalRecord>("/api/v1/job-approvals", apiToken, request);
+      setJobApprovals((current) => [
+        response,
+        ...current.filter((approval) => approval.id !== response.id),
+      ]);
       void Promise.allSettled([loadJobs(), onAuditChanged()]);
       return response;
     },

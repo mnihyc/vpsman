@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::{
     net::TcpStream,
@@ -18,8 +19,8 @@ use vpsman_common::CURRENT_COMMAND_PROTOCOL_VERSION;
 use vpsman_common::{
     decode_json, decode_noise_key_hex, encode_json, job_command_min_supported_protocol_version,
     job_command_protocol_version, job_command_safety, job_command_type_label,
-    maybe_compress_payload, payload_hash, runtime_config_content_hash, AgentCapabilitySnapshot,
-    AgentConfig, AgentHello, AgentPrivilegeMode, AgentRuntimeConfig,
+    maybe_compress_payload, payload_hash, runtime_config_content_hash, validate_agent_config_shape,
+    AgentCapabilitySnapshot, AgentConfig, AgentHello, AgentPrivilegeMode, AgentRuntimeConfig,
     AgentRuntimeConfigReloadRequest, AgentSessionDisconnect, AgentUpdateVerificationResult,
     CommandOutput, CommandResume, Frame, JobAck, JobCancelAck, JobCancelRequest, JobCommand,
     JobCommandSafety, JobRequest, MessageKind, NoiseFrameStream, OutputStream,
@@ -49,6 +50,7 @@ use crate::{
     network_status::{execute_network_status_command, NetworkStatusInput},
     restore::{execute_restore_command, RestoreCommandInput},
     restore_rollback::{execute_restore_rollback_command, RestoreRollbackCommandInput},
+    runtime_config_cache::RuntimeConfigCache,
     supervisor::reconcile_supervised_processes_on_start,
     telemetry::{collect_metrics_for_config, read_optional, TelemetryRuntimeState},
     terminal::{
@@ -74,11 +76,43 @@ pub(crate) async fn run_agent(
         priority: 0,
     });
     let command_ledger = CommandLedger::open_default().await?;
-    let mut command_runtime = AgentCommandRuntime::with_command_ledger(command_ledger);
+    let runtime_config_cache = RuntimeConfigCache::open_default().await?;
+    let mut loaded_cached_runtime_config = false;
+    match runtime_config_cache.load().await {
+        Ok(Some(runtime_config)) => {
+            let mut candidate = config.clone();
+            runtime_config.apply_to_agent_config(&mut candidate);
+            match validate_agent_config_shape(&candidate) {
+                Ok(()) => {
+                    info!(
+                        runtime_config_version = runtime_config.version,
+                        "loaded last accepted runtime config"
+                    );
+                    config = candidate;
+                    loaded_cached_runtime_config = true;
+                }
+                Err(error) => {
+                    warn!(%error, "ignored invalid last accepted runtime config");
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(error) => warn!(%error, "ignored unreadable last accepted runtime config"),
+    }
+    let mut command_runtime =
+        AgentCommandRuntime::with_persistence(command_ledger, runtime_config_cache);
     let process_incarnation_id = uuid::Uuid::new_v4();
     match reconcile_supervised_processes_on_start().await {
         Ok(report) => log_supervisor_startup_reconcile(&report),
         Err(error) => warn!(%error, "process supervisor startup reconcile failed"),
+    }
+    if loaded_cached_runtime_config {
+        let report =
+            reconcile_configured_runtime_tunnels(&config, "last_accepted_config_startup").await;
+        match report.get("status").and_then(serde_json::Value::as_str) {
+            Some("failed") => warn!(report = %report, "last accepted tunnel reconcile failed"),
+            _ => info!(report = %report, "last accepted tunnel reconcile completed"),
+        }
     }
     loop {
         let endpoints = override_endpoint
@@ -273,7 +307,23 @@ async fn connect_and_stream(
                             .await?;
                         }
                         CommandExecutionEvent::Finished(mut result) => {
+                            if let Some(runtime_config) = result.runtime_config_update.take() {
+                                if let Some(cache) = command_runtime.runtime_config_cache.as_ref() {
+                                    if let Err(error) = cache.store(&runtime_config).await {
+                                        result.result = Err(error.context(
+                                            "failed to persist last accepted runtime config",
+                                        ));
+                                        result.config_update = None;
+                                    }
+                                }
+                            }
                             let config_update = result.config_update.take();
+                            if let Some(next_config) = config_update {
+                                *config = next_config;
+                                ticker = time::interval(Duration::from_secs(config.telemetry_interval_secs.max(5)));
+                                unmanaged_update_schedule = UnmanagedUpdateSchedule::new(config);
+                                unmanaged_update_sleep.as_mut().reset(unmanaged_update_schedule.next_due());
+                            }
                             finish_active_command(
                                 &mut stream,
                                 &mut seq,
@@ -281,12 +331,6 @@ async fn connect_and_stream(
                                 *result,
                             )
                             .await?;
-                            if let Some(next_config) = config_update {
-                                *config = next_config;
-                                ticker = time::interval(Duration::from_secs(config.telemetry_interval_secs.max(5)));
-                                unmanaged_update_schedule = UnmanagedUpdateSchedule::new(config);
-                                unmanaged_update_sleep.as_mut().reset(unmanaged_update_schedule.next_due());
-                            }
                         }
                     }
                 }
@@ -880,6 +924,7 @@ struct CommandExecutionResult {
     max_timeout_secs: u64,
     result: Result<Vec<CommandOutput>>,
     config_update: Option<AgentConfig>,
+    runtime_config_update: Option<AgentRuntimeConfig>,
 }
 
 enum CommandExecutionEvent {
@@ -895,10 +940,33 @@ struct CommandFrameContext<'a> {
     command_runtime: &'a mut AgentCommandRuntime,
 }
 
+#[derive(Deserialize)]
+struct JobRequestWire {
+    job_id: uuid::Uuid,
+    #[serde(default = "vpsman_common::default_command_protocol_version")]
+    command_version: u16,
+    command: serde_json::Value,
+    max_timeout_secs: u64,
+}
+
+struct UnsupportedJobRequest {
+    job_id: uuid::Uuid,
+    command_version: u16,
+    command_type: String,
+    payload_hash: String,
+    message: String,
+}
+
+enum DecodedJobRequest {
+    Supported(Box<JobRequest>),
+    Unsupported(UnsupportedJobRequest),
+}
+
 struct AgentCommandRuntime {
     active_commands: HashMap<uuid::Uuid, ActiveCommand>,
     recent_commands: RecentCommandCache,
     command_ledger: Option<CommandLedger>,
+    runtime_config_cache: Option<RuntimeConfigCache>,
     command_event_tx: mpsc::Sender<CommandExecutionEvent>,
     command_event_rx: mpsc::Receiver<CommandExecutionEvent>,
     update_verification_tx: mpsc::Sender<AgentUpdateVerificationWork>,
@@ -917,6 +985,7 @@ impl Default for AgentCommandRuntime {
             active_commands: HashMap::new(),
             recent_commands: RecentCommandCache::default(),
             command_ledger: None,
+            runtime_config_cache: None,
             command_event_tx,
             command_event_rx,
             update_verification_tx,
@@ -928,9 +997,13 @@ impl Default for AgentCommandRuntime {
 }
 
 impl AgentCommandRuntime {
-    fn with_command_ledger(command_ledger: CommandLedger) -> Self {
+    fn with_persistence(
+        command_ledger: CommandLedger,
+        runtime_config_cache: RuntimeConfigCache,
+    ) -> Self {
         Self {
             command_ledger: Some(command_ledger),
+            runtime_config_cache: Some(runtime_config_cache),
             ..Self::default()
         }
     }
@@ -1119,7 +1192,7 @@ fn fallback_failed_output(job_id: uuid::Uuid, error: &anyhow::Error) -> Vec<Comm
     vec![CommandOutput {
         job_id,
         stream: OutputStream::Status,
-        data: format!("command failed: {error}").into_bytes(),
+        data: format!("command failed: {error:#}").into_bytes(),
         exit_code: Some(127),
         done: true,
     }]
@@ -1265,7 +1338,40 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         seq,
         command_runtime,
     } = ctx;
-    let request: JobRequest = decode_json(&frame.decoded_payload()?)?;
+    let payload = frame.decoded_payload()?;
+    let request = match decode_job_request_payload(&payload)? {
+        DecodedJobRequest::Supported(request) => *request,
+        DecodedJobRequest::Unsupported(unsupported) => {
+            warn!(
+                job_id = %unsupported.job_id,
+                command_version = unsupported.command_version,
+                command_type = %unsupported.command_type,
+                error = %unsupported.message,
+                "rejected unsupported command shape without dropping agent session"
+            );
+            let output = unsupported_command_shape_output(&unsupported)?;
+            let replay_outputs = sequenced_outputs_starting_at(0, std::slice::from_ref(&output));
+            let terminal_output = terminal_replay_output_from(&replay_outputs);
+            remember_completed_replay_outputs(
+                command_runtime,
+                unsupported.job_id,
+                unsupported.payload_hash,
+                replay_outputs,
+                terminal_output,
+                false,
+            )
+            .await?;
+            send_unsupported_command_version(
+                stream,
+                frame.stream_id,
+                seq,
+                unsupported.job_id,
+                output,
+            )
+            .await?;
+            return Ok(false);
+        }
+    };
     let request_payload_hash = command_payload_hash(&request.command)?;
     if !command_supports_requested_protocol(&request.command, request.command_version) {
         let current_command_protocol_version = job_command_protocol_version(&request.command);
@@ -1470,13 +1576,18 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
                 ),
             )
             .await;
-            let (result, config_update) = match result {
-                Ok(Ok(sync)) => (Ok(sync.outputs), sync.applied_config),
-                Ok(Err(error)) => (Err(error), None),
+            let (result, config_update, runtime_config_update) = match result {
+                Ok(Ok(sync)) => {
+                    let runtime_config_update =
+                        sync.applied_config.is_some().then_some(runtime_config);
+                    (Ok(sync.outputs), sync.applied_config, runtime_config_update)
+                }
+                Ok(Err(error)) => (Err(error), None, None),
                 Err(error) => {
                     task_cancel_token.cancel("runtime_config_sync_timeout".to_string());
                     (
                         Err(anyhow::anyhow!("runtime config sync timed out: {error}")),
+                        None,
                         None,
                     )
                 }
@@ -1489,6 +1600,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
                         max_timeout_secs,
                         result,
                         config_update,
+                        runtime_config_update,
                     },
                 )))
                 .await;
@@ -1529,6 +1641,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
                         max_timeout_secs,
                         result,
                         config_update: None,
+                        runtime_config_update: None,
                     },
                 )))
                 .await;
@@ -1553,6 +1666,33 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         },
     );
     Ok(false)
+}
+
+fn decode_job_request_payload(payload: &[u8]) -> Result<DecodedJobRequest> {
+    let wire: JobRequestWire = decode_json(payload)?;
+    let command_type = wire
+        .command
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let raw_command = serde_json::to_vec(&wire.command)?;
+    let raw_payload_hash = payload_hash(&raw_command);
+    match serde_json::from_value::<JobCommand>(wire.command) {
+        Ok(command) => Ok(DecodedJobRequest::Supported(Box::new(JobRequest {
+            job_id: wire.job_id,
+            command_version: wire.command_version,
+            command,
+            max_timeout_secs: wire.max_timeout_secs,
+        }))),
+        Err(error) => Ok(DecodedJobRequest::Unsupported(UnsupportedJobRequest {
+            job_id: wire.job_id,
+            command_version: wire.command_version,
+            command_type,
+            payload_hash: raw_payload_hash,
+            message: error.to_string(),
+        })),
+    }
 }
 
 async fn handle_command_cancel_frame(
@@ -1630,6 +1770,24 @@ fn unsupported_command_version_output(
     });
     Ok(CommandOutput {
         job_id,
+        stream: OutputStream::Status,
+        data: serde_json::to_vec(&status)?,
+        exit_code: Some(78),
+        done: true,
+    })
+}
+
+fn unsupported_command_shape_output(request: &UnsupportedJobRequest) -> Result<CommandOutput> {
+    let status = serde_json::json!({
+        "type": "unsupported_command_version",
+        "status": "rejected",
+        "job_id": request.job_id,
+        "command_version": request.command_version,
+        "command_type": request.command_type,
+        "reason": "agent_binary_does_not_support_command_shape",
+    });
+    Ok(CommandOutput {
+        job_id: request.job_id,
         stream: OutputStream::Status,
         data: serde_json::to_vec(&status)?,
         exit_code: Some(78),
@@ -2335,6 +2493,68 @@ mod tests {
         assert!(!command_supports_requested_protocol(&command, 0));
     }
 
+    #[test]
+    fn command_field_drift_becomes_a_terminal_rejection() {
+        let job_id = uuid::Uuid::new_v4();
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "job_id": job_id,
+            "command_version": 1,
+            "command": {
+                "type": "agent_update",
+                "artifact_url": "https://updates.example/vpsman-agent",
+                "sha256_hex": "ab".repeat(32),
+                "future_optional_policy": "must-use-a-new-command-variant"
+            },
+            "max_timeout_secs": 30,
+            "future_request_metadata": { "trace": "ignored" }
+        }))
+        .unwrap();
+
+        let decoded = decode_job_request_payload(&payload).unwrap();
+        let DecodedJobRequest::Unsupported(request) = decoded else {
+            panic!("unknown command fields must be rejected without dropping the session");
+        };
+        assert_eq!(request.job_id, job_id);
+        assert_eq!(request.command_type, "agent_update");
+
+        let output = unsupported_command_shape_output(&request).unwrap();
+        assert_eq!(output.exit_code, Some(78));
+        assert!(output.done);
+    }
+
+    #[test]
+    fn unknown_command_shape_becomes_a_terminal_rejection() {
+        let job_id = uuid::Uuid::new_v4();
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "job_id": job_id,
+            "command_version": 2,
+            "command": {
+                "type": "future_atomic_operation",
+                "required_semantics": true
+            },
+            "max_timeout_secs": 30
+        }))
+        .unwrap();
+
+        let decoded = decode_job_request_payload(&payload).unwrap();
+        let DecodedJobRequest::Unsupported(request) = decoded else {
+            panic!("unknown commands must be rejected without decoding the session frame");
+        };
+        assert_eq!(request.job_id, job_id);
+        assert_eq!(request.command_type, "future_atomic_operation");
+
+        let output = unsupported_command_shape_output(&request).unwrap();
+        assert_eq!(output.exit_code, Some(78));
+        assert!(output.done);
+        let status: serde_json::Value = serde_json::from_slice(&output.data).unwrap();
+        assert_eq!(status["type"], "unsupported_command_version");
+        assert_eq!(status["status"], "rejected");
+        assert_eq!(
+            status["reason"],
+            "agent_binary_does_not_support_command_shape"
+        );
+    }
+
     #[tokio::test]
     async fn configured_runtime_reconcile_runs_saved_telemetry_plans() {
         let root = std::env::temp_dir().join(format!(
@@ -2879,6 +3099,21 @@ mod tests {
         assert_eq!(status["type"], "command_timeout");
         assert_eq!(status["operation_type"], "runtime_config_sync");
         assert_eq!(status["max_timeout_secs"], 17);
+    }
+
+    #[test]
+    fn command_failure_output_preserves_actionable_error_causes() {
+        let job_id = uuid::Uuid::new_v4();
+        let error = anyhow::Error::new(std::io::Error::from_raw_os_error(libc::ENOENT))
+            .context("failed to spawn command");
+
+        let outputs = command_result_outputs(job_id, "shell_argv", 30, Err(error));
+
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].exit_code, Some(127));
+        let message = String::from_utf8(outputs[0].data.clone()).unwrap();
+        assert!(message.contains("failed to spawn command"));
+        assert!(message.contains("No such file or directory"));
     }
 
     fn runtime_sync_test_plan(

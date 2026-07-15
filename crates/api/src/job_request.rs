@@ -1,8 +1,8 @@
 use anyhow::Result;
 use uuid::Uuid;
 use vpsman_common::{
+    job_command_dispatch_protocol_version as common_job_command_dispatch_protocol_version,
     job_command_min_supported_protocol_version as common_job_command_min_supported_protocol_version,
-    job_command_protocol_version as common_job_command_protocol_version,
     render_tunnel_endpoint_config, validate_runtime_topology_intent,
     validate_runtime_tunnel_control, JobCommand, ProcessResourceLimits, ProcessRunPolicy,
     RestoreRollbackFile, MAX_SHELL_SCRIPT_BYTES, NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS,
@@ -105,8 +105,8 @@ pub(crate) fn job_command_type_label(command: &JobCommand) -> &'static str {
     vpsman_server_core::job_command_type_label(command)
 }
 
-pub(crate) fn job_command_protocol_version(_command: &JobCommand) -> u16 {
-    common_job_command_protocol_version(_command)
+pub(crate) fn job_command_dispatch_protocol_version(command: &JobCommand) -> u16 {
+    common_job_command_dispatch_protocol_version(command)
 }
 
 pub(crate) fn job_command_min_supported_protocol_version(_command: &JobCommand) -> u16 {

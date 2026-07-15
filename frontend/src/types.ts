@@ -932,6 +932,7 @@ export type OperatorPreferences = {
   fleet_tag_visibility_overrides: Record<string, boolean>;
   gateway_endpoints: string;
   gateway_server_public_key_hex: string | null;
+  agent_install_mode: "root" | "user" | "staged";
   sidebar_subpanel_default: "active" | "all";
   review_prompt_mode: "inline" | "overlay";
   dashboard_curve_exclusions: string[];
@@ -2210,6 +2211,7 @@ export type BackupArtifactRecord = {
   sha256_hex: string;
   size_bytes: number;
   status: string;
+  content_available: boolean;
   created_at: string;
 };
 
@@ -2683,6 +2685,7 @@ export type SuiteConfigValidationRecord = {
 export type SuiteConfigResponse = {
   path: string;
   exists: boolean;
+  effective_require_registered_agent_updates: boolean;
   toml: string;
   redacted: JsonValue;
   validation: SuiteConfigValidationRecord;

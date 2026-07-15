@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import {
@@ -11,6 +12,7 @@ import {
   Server,
   ShieldCheck,
   TerminalSquare,
+  X,
 } from "lucide-react";
 import {
   ConsoleDataGrid,
@@ -65,6 +67,7 @@ import {
 } from "../utils";
 import { parseLatestFileStatus } from "../fileBrowser";
 import { retryableLazy } from "../lazyImport";
+import { scrollIntoViewWithMotion } from "../motion";
 
 const JobDispatchPanel = retryableLazy(() =>
   import("./JobDispatchPanel").then((module) => ({
@@ -336,6 +339,7 @@ export function JobsPanel({
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
 }) {
   const { preferences, vpsNameDisplayMode } = usePanelDisplaySettings();
+  const targetDetailRef = useRef<HTMLDivElement | null>(null);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [targets, setTargets] = useState<JobTargetRecord[]>([]);
   const [outputs, setOutputs] = useState<JobOutputRecord[]>([]);
@@ -533,6 +537,20 @@ export function JobsPanel({
     [comparisonMode, onLoadOutputComparison, onLoadOutputs, onLoadTargets],
   );
 
+  function closeTargetDetails() {
+    setSelectedJobId(null);
+    setTargets([]);
+    setOutputs([]);
+    setOutputComparison(null);
+    setSelectedComparisonGroupId(null);
+    setTargetError(null);
+    setOutputError(null);
+    setComparisonError(null);
+    setTargetsLoading(false);
+    setOutputsLoading(false);
+    setComparisonLoading(false);
+  }
+
   function openSubmittedJobDetails(jobId: string) {
     onSelectSubpage?.("history");
     void openTargets(jobId);
@@ -609,6 +627,21 @@ export function JobsPanel({
     openTargets,
     pendingSelectedJobId,
   ]);
+
+  useEffect(() => {
+    if (!selectedJobId) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const detail = targetDetailRef.current;
+      if (!detail) {
+        return;
+      }
+      scrollIntoViewWithMotion(detail, { block: "start" });
+      detail.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [selectedJobId]);
 
   const jobColumns = useMemo<ConsoleDataGridColumn<JobHistoryRecord>[]>(
     () => [
@@ -714,6 +747,7 @@ export function JobsPanel({
         size: 96,
         minSize: 86,
         enableHiding: false,
+        stickyEnd: true,
         sortValue: (job) => job.created_at,
         cell: (job) => (
           <button
@@ -849,6 +883,7 @@ export function JobsPanel({
         size: 96,
         minSize: 86,
         enableHiding: false,
+        stickyEnd: true,
         sortValue: (job) => job.created_at,
         cell: (job) => (
           <button
@@ -980,6 +1015,7 @@ export function JobsPanel({
         size: 130,
         minSize: 118,
         enableHiding: false,
+        stickyEnd: true,
         cell: (approval) => (
           <span className="inlineActions">
             <button
@@ -1066,15 +1102,17 @@ export function JobsPanel({
           <span className="inlineActions">
             {onOpenVpsDetail ? (
               <button
+                aria-label="Open VPS detail"
                 className="secondaryAction compactAction"
                 onClick={(event) => {
                   event.stopPropagation();
                   onOpenVpsDetail(target.client_id);
                 }}
+                title="Open VPS detail"
                 type="button"
               >
                 <Server size={14} />
-                <span>Open VPS detail</span>
+                <span>VPS detail</span>
               </button>
             ) : null}
             {fileDownloadStatusByClient.has(target.client_id) ? (
@@ -1102,6 +1140,7 @@ export function JobsPanel({
         enableHiding: false,
         header: "Actions",
         id: "actions",
+        stickyEnd: true,
       },
     ],
     [
@@ -1134,7 +1173,9 @@ export function JobsPanel({
       {
         cell: (group) => (
           <span className="historyPrimary">
-            <strong>{group.target_count} targets</strong>
+            <strong>
+              {group.target_count} target{group.target_count === 1 ? "" : "s"}
+            </strong>
             <small>{clientLabel(group.representative_client_id)}</small>
           </span>
         ),
@@ -1354,6 +1395,12 @@ export function JobsPanel({
     approvalDecision === "reject" && !approvalDecisionReason.trim();
   const approvalDecisionNoteLabel =
     approvalDecision === "reject" ? "Rejection reason" : "Approval note";
+  const approvalReviewRisk = approvalReview
+    ? approvalReview.destructive &&
+      approvalReview.risk.trim().toLowerCase() !== "destructive"
+      ? `${approvalReview.risk} · destructive`
+      : approvalReview.risk
+    : "-";
 
   return (
     <section className="workspace singleColumn">
@@ -1376,6 +1423,7 @@ export function JobsPanel({
             dispatchPreset={dispatchPreset}
             onDispatchPresetApplied={onDispatchPresetApplied}
             onCreateJob={onCreateJob}
+            onCreateJobApproval={onCreateJobApproval}
             onDownloadFileTransferSource={onDownloadFileTransferSource}
             onDownloadOutputChunk={onDownloadOutputChunk}
             onOpenRemoteTerminal={() => onOpenRemoteOperations?.("terminal")}
@@ -1385,6 +1433,7 @@ export function JobsPanel({
             onSubmitTerminalInput={onSubmitTerminalInput}
             onOpenJobDetails={openSubmittedJobDetails}
             onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+            onApprovalRequested={() => onSelectSubpage?.("approvals")}
             onResolveTargets={onResolveTargets}
             onDeleteCommandTemplate={onDeleteCommandTemplate}
             onUpsertCommandTemplate={onUpsertCommandTemplate}
@@ -1520,14 +1569,31 @@ export function JobsPanel({
               />
             </div>
             {selectedJobId && (
-              <div className="targetDetail">
-                <div className="sectionHeader compact">
-                  <h2>Target results</h2>
-                  <span>
-                    {targetsLoading
-                      ? "Loading target records"
-                      : shortId(selectedJobId)}
-                  </span>
+              <div
+                aria-label="Job target details"
+                className="targetDetail"
+                ref={targetDetailRef}
+                role="region"
+                tabIndex={-1}
+              >
+                <div className="sectionHeader compact targetDetailHeader">
+                  <div>
+                    <h2>Target results</h2>
+                    <span>
+                      {targetsLoading
+                        ? "Loading target records"
+                        : shortId(selectedJobId)}
+                    </span>
+                  </div>
+                  <button
+                    aria-label="Close job target details"
+                    className="iconButton"
+                    onClick={closeTargetDetails}
+                    title="Close job target details"
+                    type="button"
+                  >
+                    <X size={16} />
+                  </button>
                 </div>
                 <ActionFeedback
                   className="localActionFeedback jobDetailActionFeedback"
@@ -1655,7 +1721,7 @@ export function JobsPanel({
                         {comparisonLoading
                           ? "Comparing target results"
                           : outputComparison
-                            ? `${outputComparison.group_count} groups across ${outputComparison.compared_targets} targets`
+                            ? `${outputComparison.group_count} group${outputComparison.group_count === 1 ? "" : "s"} across ${outputComparison.compared_targets} target${outputComparison.compared_targets === 1 ? "" : "s"}`
                             : "No summary loaded"}
                       </span>
                     </div>
@@ -2014,9 +2080,7 @@ export function JobsPanel({
                   },
                   {
                     label: "Risk",
-                    value: approvalReview
-                      ? `${approvalReview.risk}${approvalReview.destructive ? " · destructive" : ""}`
-                      : "-",
+                    value: approvalReviewRisk,
                   },
                   {
                     label: "Requested",

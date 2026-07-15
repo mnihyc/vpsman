@@ -33,6 +33,7 @@ pub(crate) struct BackupArtifactView {
     pub(crate) sha256_hex: String,
     pub(crate) size_bytes: i64,
     pub(crate) status: String,
+    pub(crate) content_available: bool,
     pub(crate) created_at: String,
 }
 

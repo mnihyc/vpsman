@@ -563,7 +563,8 @@ function buildClientSignal({
   transfers: FileTransferSessionRecord[];
 }): VpsMonitorCardSignal {
   const criticalAlerts = alerts.filter((alert) => alert.severity === "critical").length;
-  const warningAlerts = alerts.length - criticalAlerts;
+  const warningAlerts = alerts.filter((alert) => alert.severity === "warning").length;
+  const infoAlerts = alerts.length - criticalAlerts - warningAlerts;
   const failedBackups = backups.filter((backup) => isFailedBackupStatus(backup.status)).length;
   const failedTransfers = transfers.filter((transfer) => isFailedTransferStatus(transfer.status)).length;
   const activeTransfers = transfers.filter((transfer) => isActiveTransferStatus(transfer.status)).length;
@@ -575,14 +576,20 @@ function buildClientSignal({
         : "Fleet-wide jobs: idle";
   return {
     alertText:
-      criticalAlerts > 0 ? `${criticalAlerts} critical` : warningAlerts > 0 ? `${warningAlerts} warning` : "Clear",
-    alertTone: criticalAlerts > 0 ? "critical" : warningAlerts > 0 ? "warning" : "neutral",
+      criticalAlerts > 0
+        ? `${criticalAlerts} critical`
+        : warningAlerts > 0
+          ? `${warningAlerts} warning`
+          : infoAlerts > 0
+            ? `${infoAlerts} info`
+            : "Clear",
+    alertTone: criticalAlerts > 0 ? "critical" : warningAlerts > 0 ? "warning" : infoAlerts > 0 ? "info" : "neutral",
     backupText: failedBackups > 0 ? `${failedBackups} failed` : backups.length > 0 ? `${backups.length} recorded` : "No run",
     backupTone: failedBackups > 0 ? "critical" : "neutral",
     fleetJobText,
     statusText:
-      criticalAlerts > 0 || warningAlerts > 0 || failedBackups > 0 || failedTransfers > 0
-        ? `${criticalAlerts} critical / ${warningAlerts} warning alerts; ${failedBackups} backup failures; ${failedTransfers} transfer failures`
+      criticalAlerts > 0 || warningAlerts > 0 || infoAlerts > 0 || failedBackups > 0 || failedTransfers > 0
+        ? `${criticalAlerts} critical / ${warningAlerts} warning / ${infoAlerts} info alerts; ${failedBackups} backup failures; ${failedTransfers} transfer failures`
         : "No card-local alert, backup, or transfer warnings",
     transferText: failedTransfers > 0 ? `${failedTransfers} failed` : activeTransfers > 0 ? `${activeTransfers} active` : "Clear",
     transferTone: failedTransfers > 0 ? "critical" : activeTransfers > 0 ? "info" : "neutral",

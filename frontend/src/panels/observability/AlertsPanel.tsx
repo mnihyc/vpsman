@@ -100,7 +100,7 @@ export function AlertsPanel({
             <div className="sectionActions" aria-label="Alert action links">
               <button className="secondaryAction compactAction" onClick={onOpenFleetAlerts} type="button">
                 <ExternalLink size={14} />
-                Active triage queue
+                Open triage
               </button>
             </div>
           </div>

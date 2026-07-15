@@ -88,6 +88,7 @@ import { TopologyNetworkTestControls } from "./topology/TopologyNetworkTestContr
 import { TopologyOspfUpdateControls } from "./topology/TopologyOspfUpdateControls";
 
 const AGENT_TUNNEL_KINDS: TunnelKind[] = ["gre", "ipip", "sit", "fou"];
+type AdapterTemplateDomain = "runtime_tunnel_adapter" | "routing_cost_adapter";
 const ALL_TUNNEL_KINDS: TunnelKind[] = [
   "gre",
   "ipip",
@@ -220,6 +221,7 @@ export function TopologyPanel({
         networkTrends={networkTrends}
         onCreateJob={onCreateJob}
         onLoadNetworkTrends={onLoadNetworkTrends}
+        onLoadOutputs={onLoadOutputs}
         onLoadTargets={onLoadTargets}
         onOpenJobDetails={onOpenJobDetails}
         onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
@@ -236,7 +238,7 @@ export function TopologyPanel({
       <TopologyOspfUpdateControls
         agents={agents}
         onOpenJobDetails={onOpenJobDetails}
-        onOpenSourceTemplates={onOpenSourceTemplates}
+        onOpenSourceTemplates={() => onOpenSourceTemplates("routing_cost_adapter")}
         onOpenTunnelPlans={() => onSelectSubpage("tunnel_plans")}
         onRefresh={async () => {
           await Promise.all([onRefresh(), onLoadOspfUpdatePlans()]);
@@ -442,7 +444,7 @@ function TunnelPlansWorkspace({
   onDeleteTunnelPlan: (target: TunnelPlanRevisionTarget) => Promise<void>;
   onExportTunnelPlan: (planId: string) => Promise<TunnelPlan>;
   onInitialPlanWorkflowConsumed: () => void;
-  onOpenSourceTemplates: () => void;
+  onOpenSourceTemplates: (domain: AdapterTemplateDomain) => void;
   onRefresh: () => Promise<void>;
   onSetTunnelPlanEnabled: (targets: TunnelPlanRevisionTarget[], enabled: boolean) => Promise<void>;
   onUpdateTunnelConnectionAssessment: (planId: string, request: UpdateTunnelConnectionAssessmentRequest) => Promise<void>;
@@ -601,13 +603,17 @@ function TunnelPlansWorkspace({
   const runtimeEdgeByPlan = new Map(
     topologyGraph.edges.map((edge) => [edge.plan_id, edge]),
   );
+  const agentNameById = clientDisplayNameMap(agents);
   return (
     <div className="topologyPageStack">
       <section className="fleetPanel tunnelPlanRegistry" ref={listRef}>
         <div className="sectionHeader">
           <div>
             <h2>Tunnel plans</h2>
-            <span>{tunnelPlans.length} declared point-to-point tunnels</span>
+            <span>
+              {tunnelPlans.length} declared point-to-point tunnel
+              {tunnelPlans.length === 1 ? "" : "s"}
+            </span>
           </div>
           <div className="headerActionStack">
             <button className="secondaryAction" disabled={loading} onClick={() => void onRefresh()} type="button">
@@ -685,6 +691,7 @@ function TunnelPlansWorkspace({
                     <TunnelPlanRows
                       expanded={expanded}
                       editorOpen={editorOpen}
+                      agentNameById={agentNameById}
                       key={plan.id}
                       onExport={() => void exportPlan(plan)}
                       onEdit={() => { setEditingPlan(plan); setCreateOpen(true); }}
@@ -788,6 +795,7 @@ function TunnelPlansWorkspace({
 }
 
 function TunnelPlanRows({
+  agentNameById,
   editorOpen,
   expanded,
   onDelete,
@@ -801,6 +809,7 @@ function TunnelPlanRows({
   runtimeEdge,
   selected,
 }: {
+  agentNameById: Map<string, string>;
   editorOpen: boolean;
   expanded: boolean;
   onDelete: () => void;
@@ -822,6 +831,14 @@ function TunnelPlanRows({
     ? (runtimeEdge?.right_runtime_state ?? "unknown")
     : "disabled";
   const connectivity = tunnelConnectivityPresentation(plan, runtimeEdge);
+  const leftClientName = clientDisplayNameFromMap(
+    plan.left_client_id,
+    agentNameById,
+  );
+  const rightClientName = clientDisplayNameFromMap(
+    plan.right_client_id,
+    agentNameById,
+  );
   const [assessment, setAssessment] = useState<TunnelConnectionAssessment>(
     plan.connection_assessment ?? "automatic",
   );
@@ -887,8 +904,12 @@ function TunnelPlanRows({
         </td>
         <td>
           <span className="historyPrimary">
-            <strong title={plan.left_client_id}>{plan.left_client_id}</strong>
-            <small title={plan.right_client_id}>{plan.right_client_id}</small>
+            <strong title={`${leftClientName}; full ID ${plan.left_client_id}`}>
+              {leftClientName}
+            </strong>
+            <small title={`${rightClientName}; full ID ${plan.right_client_id}`}>
+              {rightClientName}
+            </small>
           </span>
         </td>
         <td>
@@ -933,7 +954,11 @@ function TunnelPlanRows({
               <button aria-label={`Close details for ${plan.name}`} className="iconAction topologyDetailClose" onClick={onToggle} title="Close details" type="button"><X size={15} /></button>
               <div className="tunnelPlanFacts">
                 <PlanFact label="Declaration" value={plan.enabled ? "Enabled" : "Disabled"} />
-                <PlanFact label="Endpoints" value={`${plan.left_client_id} / ${plan.right_client_id}`} />
+                <PlanFact
+                  label="Endpoints"
+                  title={`${plan.left_client_id} / ${plan.right_client_id}`}
+                  value={`${leftClientName} / ${rightClientName}`}
+                />
                 <PlanFact label="Endpoint state" value={`L ${readableTelemetryToken(leftRuntimeState)} · R ${readableTelemetryToken(rightRuntimeState)}`} />
                 <PlanFact label="Connectivity" value={`${connectivity.label} · ${connectivity.detail}`} />
                 <PlanFact label="Left outer path" value={formatEndpointUnderlay(plan.plan.left_local_underlay, plan.plan.left_remote_underlay)} />
@@ -1036,7 +1061,7 @@ function TunnelPlanComposer({
   onAllocateTunnelEndpoints: (request: AllocateTunnelEndpointsRequest) => Promise<AllocateTunnelEndpointsResponse>;
   onClose: () => void;
   onSaveTunnelPlan: (request: CreateTunnelPlanRequest) => Promise<void>;
-  onOpenSourceTemplates: () => void;
+  onOpenSourceTemplates: (domain: AdapterTemplateDomain) => void;
   sourceTemplates: SourceTemplateRecord[];
 }) {
   const [form, setForm] = useState<TunnelPlanForm>(() =>
@@ -1198,8 +1223,8 @@ function TunnelPlanComposer({
           </div>
           {form.runtimeManager === "external_managed_adapter" && (
             <div className="topologyFormGrid twoColumn adapterBindingGrid">
-              <TemplateField clientId={form.leftClientId} label="Left runtime adapter" onChange={(value) => update("leftRuntimeTemplateId", value)} onOpenSourceTemplates={onOpenSourceTemplates} templates={leftRuntimeTemplates} value={form.leftRuntimeTemplateId} />
-              <TemplateField clientId={form.rightClientId} label="Right runtime adapter" onChange={(value) => update("rightRuntimeTemplateId", value)} onOpenSourceTemplates={onOpenSourceTemplates} templates={rightRuntimeTemplates} value={form.rightRuntimeTemplateId} />
+              <TemplateField clientId={form.leftClientId} domain="runtime_tunnel_adapter" label="Left runtime adapter" onChange={(value) => update("leftRuntimeTemplateId", value)} onOpenSourceTemplates={onOpenSourceTemplates} templates={leftRuntimeTemplates} value={form.leftRuntimeTemplateId} />
+              <TemplateField clientId={form.rightClientId} domain="runtime_tunnel_adapter" label="Right runtime adapter" onChange={(value) => update("rightRuntimeTemplateId", value)} onOpenSourceTemplates={onOpenSourceTemplates} templates={rightRuntimeTemplates} value={form.rightRuntimeTemplateId} />
             </div>
           )}
           {form.runtimeManager !== "external_observed" && (
@@ -1278,8 +1303,8 @@ function TunnelPlanComposer({
           {form.ospfEnabled && (
             <>
               <div className="topologyFormGrid twoColumn adapterBindingGrid">
-                <TemplateField clientId={form.leftClientId} label="Left routing adapter" onChange={(value) => update("leftRoutingTemplateId", value)} onOpenSourceTemplates={onOpenSourceTemplates} templates={leftRoutingTemplates} value={form.leftRoutingTemplateId} />
-                <TemplateField clientId={form.rightClientId} label="Right routing adapter" onChange={(value) => update("rightRoutingTemplateId", value)} onOpenSourceTemplates={onOpenSourceTemplates} templates={rightRoutingTemplates} value={form.rightRoutingTemplateId} />
+                <TemplateField clientId={form.leftClientId} domain="routing_cost_adapter" label="Left routing adapter" onChange={(value) => update("leftRoutingTemplateId", value)} onOpenSourceTemplates={onOpenSourceTemplates} templates={leftRoutingTemplates} value={form.leftRoutingTemplateId} />
+                <TemplateField clientId={form.rightClientId} domain="routing_cost_adapter" label="Right routing adapter" onChange={(value) => update("rightRoutingTemplateId", value)} onOpenSourceTemplates={onOpenSourceTemplates} templates={rightRoutingTemplates} value={form.rightRoutingTemplateId} />
               </div>
               <div className="topologyFormGrid ospfControlGrid">
                 <Field label="Control mode" tooltip="Reviewed waits for operator confirmation. Automatic is executed only by the server controller after configured health gates."><select aria-label="OSPF control mode" onChange={(event) => update("ospfMode", event.target.value as "reviewed" | "automatic")} value={form.ospfMode}><option value="reviewed">Reviewed</option><option value="automatic">Automatic</option></select></Field>
@@ -1339,7 +1364,7 @@ function ManagerChoice({ active, detail, label, onClick }: { active: boolean; de
   );
 }
 
-function TemplateField({ clientId, label, onChange, onOpenSourceTemplates, templates, value }: { clientId: string; label: string; onChange: (value: string) => void; onOpenSourceTemplates: () => void; templates: SourceTemplateRecord[]; value: string }) {
+function TemplateField({ clientId, domain, label, onChange, onOpenSourceTemplates, templates, value }: { clientId: string; domain: AdapterTemplateDomain; label: string; onChange: (value: string) => void; onOpenSourceTemplates: (domain: AdapterTemplateDomain) => void; templates: SourceTemplateRecord[]; value: string }) {
   return (
     <div className="topologyField" title="The source template stores direct absolute argv. The agent never installs or edits the script.">
       <span>{label}</span>
@@ -1348,7 +1373,7 @@ function TemplateField({ clientId, label, onChange, onOpenSourceTemplates, templ
           <option value="">{!clientId ? "Select endpoint first" : templates.length === 0 ? "No compatible templates" : "Select template"}</option>
           {templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}
         </select>
-        <button aria-label={`Open source templates for ${label}`} className="iconAction" onClick={onOpenSourceTemplates} title="Open Automation / Source templates" type="button"><ExternalLink size={15} /></button>
+        <button aria-label={`Open source templates for ${label}`} className="iconAction" onClick={() => onOpenSourceTemplates(domain)} title={`Create or manage ${domain === "routing_cost_adapter" ? "routing cost" : "tunnel runtime"} adapters`} type="button"><ExternalLink size={15} /></button>
       </div>
     </div>
   );
@@ -1370,8 +1395,8 @@ function WorkflowLink({ detail, icon, label, onClick }: { detail: string; icon: 
   return <button onClick={onClick} type="button"><span className="workflowIcon">{icon}</span><span><strong>{label}</strong><small>{detail}</small></span><ExternalLink size={15} /></button>;
 }
 
-function PlanFact({ label, value }: { label: string; value: string }) {
-  return <span><small>{label}</small><strong title={value}>{value}</strong></span>;
+function PlanFact({ label, title, value }: { label: string; title?: string; value: string }) {
+  return <span><small>{label}</small><strong title={title ?? value}>{value}</strong></span>;
 }
 
 function endpointRuntimeTitle(
@@ -2239,7 +2264,7 @@ type TopologyPanelProps = {
   onOpenJobDetails?: (jobId: string) => void;
   onOpenCreateTunnelPlan: () => void;
   onOpenPrivilegeUnlock: () => void;
-  onOpenSourceTemplates: () => void;
+  onOpenSourceTemplates: (domain: AdapterTemplateDomain) => void;
   onOpenVpsDetail?: (clientId: string) => void;
   onRefresh: () => Promise<void>;
   onRefreshTunnelPlanOspfStatus: (planId: string) => Promise<void>;

@@ -7,6 +7,7 @@ export async function installTransferJobApiMock(page: Page) {
     const dynamicJobOutputs: Record<string, unknown[]> = {};
     const dynamicJobTargets: Record<string, unknown[]> = {};
     const dynamicArtifacts: Record<string, Uint8Array> = {};
+    const deletedPaths = new Set<string>();
     const transferSessionSizes: Record<string, number> = {};
     const transferSessionHashes: Record<string, string> = {};
     let transferJobCounter = 0;
@@ -525,21 +526,68 @@ export async function installTransferJobApiMock(page: Page) {
             type: "file_list_dir",
           };
         }
-        return {
-          entries: [
+        if (path === "/etc") {
+          const entries = [
+            entry("/etc/app.conf", "file", 25),
+            entry("/etc/nginx", "directory"),
+          ].filter((candidate) => !deletedPaths.has(candidate.path));
+          return {
+            entries,
+            limit: 250,
+            metadata: baseMetadata(path, "directory"),
+            offset: 0,
+            path,
+            status: "completed",
+            total_entries: entries.length,
+            truncated: false,
+            type: "file_list_dir",
+          };
+        }
+        if (path === "/etc/nginx") {
+          const entries = [entry("/etc/nginx/nginx.conf", "file", 128)].filter(
+            (candidate) => !deletedPaths.has(candidate.path),
+          );
+          return {
+            entries,
+            limit: 250,
+            metadata: baseMetadata(path, "directory"),
+            offset: 0,
+            path,
+            status: "completed",
+            total_entries: entries.length,
+            truncated: false,
+            type: "file_list_dir",
+          };
+        }
+        if (path === "/") {
+          const entries = [
             entry("/etc", "directory"),
             entry("/var", "directory"),
             entry("/empty", "directory"),
             entry("/large", "directory"),
             entry("/root", "directory"),
-            entry("/etc/app.conf", "file", 16),
-          ],
+            entry("/README.txt", "file", 96),
+          ].filter((candidate) => !deletedPaths.has(candidate.path));
+          return {
+            entries,
+            limit: 250,
+            metadata: baseMetadata(path, "directory"),
+            offset: 0,
+            path,
+            status: "completed",
+            total_entries: entries.length,
+            truncated: false,
+            type: "file_list_dir",
+          };
+        }
+        return {
+          entries: [],
           limit: 250,
           metadata: baseMetadata(path, "directory"),
           offset: 0,
           path,
           status: "completed",
-          total_entries: 6,
+          total_entries: 0,
           truncated: false,
           type: "file_list_dir",
         };
@@ -593,7 +641,30 @@ export async function installTransferJobApiMock(page: Page) {
             owner: operation.owner ?? null,
           };
         }
+        if (operation.type === "file_delete") {
+          deletedPaths.add(path);
+        } else if (
+          operation.type === "file_write_text" ||
+          operation.type === "file_mkdir" ||
+          operation.type === "file_push" ||
+          operation.type === "file_push_chunked"
+        ) {
+          deletedPaths.delete(path);
+        }
+        const resultingMetadata =
+          operation.type === "file_write_text"
+            ? {
+                ...entry(path, "file", operation.size_bytes ?? 0),
+                mode: operation.mode ?? 0o644,
+              }
+            : operation.type === "file_mkdir"
+              ? {
+                  ...entry(path, "directory"),
+                  mode: operation.mode ?? 0o755,
+                }
+              : undefined;
         return {
+          ...(resultingMetadata ? { metadata: resultingMetadata } : {}),
           mode: operation.mode,
           new_path: operation.new_path,
           path,

@@ -1,4 +1,11 @@
-import { Archive, CalendarClock, Download, ExternalLink, GitBranch, RotateCcw } from "lucide-react";
+import {
+  Archive,
+  CalendarClock,
+  Download,
+  ExternalLink,
+  GitBranch,
+  RotateCcw,
+} from "lucide-react";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridAction,
@@ -8,7 +15,9 @@ import {
   artifactLifecycleStatusBadgeClass,
   backupRequestStatusBadgeClass,
   migrationLinkStatusBadgeClass,
+  migrationLinkStatusLabel,
   restorePlanStatusBadgeClass,
+  restorePlanStatusLabel,
 } from "../../jobStatusPresentation";
 import type {
   BackupArtifactRecord,
@@ -178,15 +187,12 @@ function BackupPoliciesTable({
       minSize: 115,
       sortValue: (policy) => policy.next_run_at,
       searchValue: (policy) =>
-        `${policy.next_run_at} ${policyNextRunLabel(policy.next_run_at)}`,
+        `${policy.next_run_at} ${policyNextRunLabel(policy)}`,
       cell: (policy) => {
-        const nextRun = policyNextRunState(policy.next_run_at);
+        const nextRun = policyNextRunState(policy);
         return (
           <span className="historyPrimary">
-            <strong
-              className={`status ${nextRun.tone}`}
-              title={formatFullTime(policy.next_run_at)}
-            >
+            <strong className={`status ${nextRun.tone}`} title={nextRun.title}>
               {nextRun.label}
             </strong>
             <small>{nextRun.detail}</small>
@@ -285,13 +291,18 @@ function BackupPoliciesTable({
             <span>{policyScopeLabel(policy)}</span>
             <span>{describeCronExpression(policy.cron_expr)}</span>
             <span>
-              {policy.next_runs.length} next run{policy.next_runs.length === 1 ? "" : "s"} reported
+              {policy.enabled
+                ? `${policy.next_runs.length} next run${policy.next_runs.length === 1 ? "" : "s"} reported`
+                : "Paused; no scheduled runs dispatch"}
             </span>
             <span>{policy.retention_days}d retention</span>
             <span>
-              {policy.catch_up_policy}; retry {formatDuration(policy.retry_delay_secs * 1000)}
+              {policy.catch_up_policy}; retry{" "}
+              {formatDuration(policy.retry_delay_secs * 1000)}
             </span>
-            <span title={policy.schedule_id}>schedule {shortId(policy.schedule_id)}</span>
+            <span title={policy.schedule_id}>
+              schedule {shortId(policy.schedule_id)}
+            </span>
           </div>
         )}
         rows={policies}
@@ -317,7 +328,8 @@ function BackupRequestsTable({
 }) {
   const artifactForBackup = (backup: BackupRequestRecord) =>
     backup.artifact_id
-      ? artifacts.find((artifact) => artifact.id === backup.artifact_id) ?? null
+      ? (artifacts.find((artifact) => artifact.id === backup.artifact_id) ??
+        null)
       : null;
   const canOpenArtifact = (backup: BackupRequestRecord) =>
     Boolean(backup.artifact_id) && !backupRequestNeedsAttention(backup.status);
@@ -327,7 +339,8 @@ function BackupRequestsTable({
         backup
           ? "Open the artifact inventory for this backup request."
           : "Open artifact",
-      disabled: ([backup]) => !backup || !canOpenArtifact(backup) || !onOpenRequestArtifact,
+      disabled: ([backup]) =>
+        !backup || !canOpenArtifact(backup) || !onOpenRequestArtifact,
       icon: <ExternalLink size={15} />,
       label: "Open artifact",
       onSelect: ([backup]) => {
@@ -341,7 +354,8 @@ function BackupRequestsTable({
         backup
           ? "Prefill the backup request workflow from this request."
           : "Retry backup request",
-      disabled: ([backup]) => !backup || canOpenArtifact(backup) || !onRetryBackup,
+      disabled: ([backup]) =>
+        !backup || canOpenArtifact(backup) || !onRetryBackup,
       icon: <RotateCcw size={15} />,
       label: "Retry",
       onSelect: ([backup]) => {
@@ -355,8 +369,8 @@ function BackupRequestsTable({
     {
       id: "vps",
       header: "VPS",
-      size: 155,
-      minSize: 135,
+      size: 145,
+      minSize: 125,
       sortValue: (backup) => clientLabel(backup.client_id),
       searchValue: (backup) => clientLabel(backup.client_id),
       cell: (backup) => (
@@ -368,14 +382,16 @@ function BackupRequestsTable({
     {
       id: "paths",
       header: "Paths",
-      size: 175,
-      minSize: 145,
+      size: 165,
+      minSize: 140,
       sortValue: backupScopeLabel,
       searchValue: (backup) =>
         `${backupScopeLabel(backup)} ${backup.paths.join(" ")}`,
       cell: (backup) => (
         <span className="historyPrimary">
-          <strong>{backupPathSummaryLabel(backup)}</strong>
+          <strong title={backupScopeLabel(backup)}>
+            {backupPathSummaryLabel(backup)}
+          </strong>
           <small
             title={`${backupSymlinkLabel(backup)}; ${backupMissingPathLabel(backup)}; ${backup.paths.join(", ")}`}
           >
@@ -389,22 +405,28 @@ function BackupRequestsTable({
     {
       id: "status",
       header: "State",
-      size: 150,
-      minSize: 130,
+      size: 135,
+      minSize: 120,
       sortValue: (backup) => backup.status,
       searchValue: (backup) =>
         `${backup.status} ${backupStatusLabel(backup.status)}`,
       cell: (backup) => {
-        const state = backupStateParts(backup.status);
+        const artifact = artifactForBackup(backup);
+        const state = backupStateParts(backup.status, artifact);
+        const tone =
+          backup.status === "artifact_metadata_recorded" &&
+          (!artifact || !artifactPackageReady(artifact))
+            ? "warn"
+            : backupRequestStatusBadgeClass(backup.status);
         return (
           <span className="historyPrimary">
             <strong
-              className={`status ${backupRequestStatusBadgeClass(backup.status)}`}
-              title={backupStatusLabel(backup.status)}
+              className={`status ${tone}`}
+              title={`${state.label}: ${state.detail}`}
             >
               {state.label}
             </strong>
-            <small>{state.detail}</small>
+            <small title={state.detail}>{state.detail}</small>
           </span>
         );
       },
@@ -412,8 +434,8 @@ function BackupRequestsTable({
     {
       id: "size",
       header: "Size",
-      size: 80,
-      minSize: 70,
+      size: 90,
+      minSize: 80,
       sortValue: (backup) => artifactForBackup(backup)?.size_bytes ?? -1,
       searchValue: (backup) => {
         const artifact = artifactForBackup(backup);
@@ -421,40 +443,37 @@ function BackupRequestsTable({
       },
       cell: (backup) => {
         const artifact = artifactForBackup(backup);
-        return artifact ? formatBytes(artifact.size_bytes) : "not reported";
+        const label = artifact
+          ? formatBytes(artifact.size_bytes)
+          : "not reported";
+        return <span title={label}>{label}</span>;
       },
     },
     {
       id: "started",
-      header: "Started",
-      size: 90,
-      minSize: 80,
+      header: "Requested",
+      size: 100,
+      minSize: 90,
       sortValue: (backup) => backup.created_at,
       searchValue: (backup) => backup.created_at,
       cell: (backup) => (
-        <time dateTime={backup.created_at} title={formatFullTime(backup.created_at)}>
+        <time
+          dateTime={backup.created_at}
+          title={formatFullTime(backup.created_at)}
+        >
           {formatCompactTime(backup.created_at)}
         </time>
       ),
     },
     {
-      id: "duration",
-      header: "Duration",
-      size: 90,
-      minSize: 80,
-      sortValue: () => "not reported",
-      searchValue: () => "duration not reported",
-      cell: () => "not reported",
-    },
-    {
       id: "artifact",
       header: "Artifact",
-      size: 125,
-      minSize: 110,
+      size: 120,
+      minSize: 105,
       sortValue: (backup) => backup.artifact_id ?? "",
       searchValue: (backup) => {
         const artifact = artifactForBackup(backup);
-        return `${backup.artifact_id ?? ""} ${artifact?.status ?? ""} ${artifact ? artifactVerificationLabel(artifact.status) : "no package"}`;
+        return `${backup.artifact_id ?? ""} ${artifact?.status ?? ""} ${artifact ? artifactVerificationLabel(artifact) : "no package"}`;
       },
       cell: (backup) => {
         const artifact = artifactForBackup(backup);
@@ -463,9 +482,17 @@ function BackupRequestsTable({
             <strong title={backup.artifact_id ?? ""}>
               {backup.artifact_id ? shortId(backup.artifact_id) : "No package"}
             </strong>
-            <small>
+            <small
+              title={
+                artifact
+                  ? artifactVerificationLabel(artifact)
+                  : backup.artifact_id
+                    ? "Artifact metadata only"
+                    : "Artifact not recorded"
+              }
+            >
               {artifact
-                ? artifactVerificationShortLabel(artifact.status)
+                ? artifactVerificationShortLabel(artifact)
                 : backup.artifact_id
                   ? "metadata only"
                   : "not recorded"}
@@ -488,12 +515,13 @@ function BackupRequestsTable({
     {
       id: "action",
       header: "Action",
-      size: 145,
-      minSize: 135,
+      stickyEnd: true,
+      size: 135,
+      minSize: 125,
       sortValue: (backup) =>
         canOpenArtifact(backup) ? "open artifact" : "retry",
       searchValue: () => "open artifact retry",
-      cell: (backup) => (
+      cell: (backup) =>
         canOpenArtifact(backup) ? (
           <button
             className="secondaryAction compactAction"
@@ -522,8 +550,7 @@ function BackupRequestsTable({
             <RotateCcw size={15} />
             <span>Retry</span>
           </button>
-        )
-      ),
+        ),
     },
   ];
   return (
@@ -560,11 +587,27 @@ function BackupRequestsTable({
             <div className="gridDetailLine">
               <strong>{clientLabel(backup.client_id)}</strong>
               <span title={backup.id}>request {shortId(backup.id)}</span>
-              <span>{backup.actor_id ? `actor ${shortId(backup.actor_id)}` : "requester not reported"}</span>
-              <span>{backup.source_job_id ? `job ${shortId(backup.source_job_id)}` : "source job not reported"}</span>
-              <span>{backup.source_schedule_id ? `schedule ${shortId(backup.source_schedule_id)}` : "manual or source not reported"}</span>
+              <span>
+                {backup.actor_id
+                  ? `actor ${shortId(backup.actor_id)}`
+                  : "requester not reported"}
+              </span>
+              <span>
+                {backup.source_job_id
+                  ? `job ${shortId(backup.source_job_id)}`
+                  : "source job not reported"}
+              </span>
+              <span>
+                {backup.source_schedule_id
+                  ? `schedule ${shortId(backup.source_schedule_id)}`
+                  : "manual or source not reported"}
+              </span>
               <span>{backupStatusLabel(backup.status)}</span>
-              <span>{artifact ? `${formatBytes(artifact.size_bytes)} package` : "artifact size not reported"}</span>
+              <span>
+                {artifact
+                  ? `${formatBytes(artifact.size_bytes)} package`
+                  : "artifact size not reported"}
+              </span>
               <span>{shortHash(backup.payload_hash)}</span>
               <span>{formatTime(backup.created_at)}</span>
               {backup.note && <span>{backup.note}</span>}
@@ -605,8 +648,8 @@ function ArtifactHistoryTable({
     {
       id: "artifact",
       header: "Artifact",
-      size: 170,
-      minSize: 145,
+      size: 140,
+      minSize: 120,
       sortValue: (artifact) => artifact.id,
       searchValue: (artifact) => {
         const backup = backupForArtifact(artifact);
@@ -616,9 +659,13 @@ function ArtifactHistoryTable({
         <span className="historyPrimary">
           <strong title={artifact.id}>{shortId(artifact.id)}</strong>
           <small>
-            {backupForArtifact(artifact)
-              ? `request ${shortId(backupForArtifact(artifact)?.id ?? "")}`
-              : "unlinked package"}
+            {backupForArtifact(artifact) ? (
+              <span title={backupForArtifact(artifact)?.id ?? ""}>
+                request {shortId(backupForArtifact(artifact)?.id ?? "")}
+              </span>
+            ) : (
+              "unlinked package"
+            )}
           </small>
         </span>
       ),
@@ -626,8 +673,8 @@ function ArtifactHistoryTable({
     {
       id: "client",
       header: "VPS",
-      size: 180,
-      minSize: 150,
+      size: 140,
+      minSize: 125,
       sortValue: (artifact) => clientLabel(artifact.client_id),
       searchValue: (artifact) => clientLabel(artifact.client_id),
       cell: (artifact) => (
@@ -639,12 +686,15 @@ function ArtifactHistoryTable({
     {
       id: "created",
       header: "Created",
-      size: 125,
-      minSize: 115,
+      size: 105,
+      minSize: 90,
       sortValue: (artifact) => artifact.created_at,
       searchValue: (artifact) => artifact.created_at,
       cell: (artifact) => (
-        <time dateTime={artifact.created_at} title={formatFullTime(artifact.created_at)}>
+        <time
+          dateTime={artifact.created_at}
+          title={formatFullTime(artifact.created_at)}
+        >
           {formatCompactTime(artifact.created_at)}
         </time>
       ),
@@ -652,8 +702,8 @@ function ArtifactHistoryTable({
     {
       id: "size",
       header: "Size",
-      size: 100,
-      minSize: 90,
+      size: 90,
+      minSize: 80,
       sortValue: (artifact) => artifact.size_bytes,
       searchValue: (artifact) => artifact.size_bytes,
       cell: (artifact) => formatBytes(artifact.size_bytes),
@@ -661,26 +711,27 @@ function ArtifactHistoryTable({
     {
       id: "verification",
       header: "Verification",
-      size: 155,
-      minSize: 130,
-      sortValue: (artifact) => artifactVerificationLabel(artifact.status),
+      size: 135,
+      minSize: 115,
+      sortValue: (artifact) => artifactVerificationLabel(artifact),
       searchValue: (artifact) =>
-        `${artifact.status} ${artifactVerificationLabel(artifact.status)}`,
+        `${artifact.status} ${artifactVerificationLabel(artifact)}`,
       cell: (artifact) => (
         <span
           className={`status ${artifactLifecycleStatusBadgeClass(artifact.status)}`}
-          title={artifactLifecycleStatusTitle(artifact.status)}
+          title={artifactLifecycleStatusTitle(artifact)}
         >
-          {artifactVerificationLabel(artifact.status)}
+          {artifactVerificationLabel(artifact)}
         </span>
       ),
     },
     {
       id: "retention",
       header: "Retention",
-      size: 165,
-      minSize: 130,
-      sortValue: (artifact) => (backupForArtifact(artifact) ? "linked" : "unlinked"),
+      size: 130,
+      minSize: 110,
+      sortValue: (artifact) =>
+        backupForArtifact(artifact) ? "linked" : "unlinked",
       searchValue: (artifact) =>
         backupForArtifact(artifact)
           ? "linked backup request retention expiry not reported"
@@ -690,7 +741,9 @@ function ArtifactHistoryTable({
         return (
           <span className="historyPrimary">
             <strong>{backup ? "Linked" : "Unlinked"}</strong>
-            <small>expiry not reported</small>
+            <small title="A retention expiry timestamp is not reported for this package.">
+              expiry not reported
+            </small>
           </span>
         );
       },
@@ -698,8 +751,8 @@ function ArtifactHistoryTable({
     {
       id: "restore",
       header: "Restore",
-      size: 115,
-      minSize: 105,
+      size: 105,
+      minSize: 95,
       sortValue: (artifact) =>
         backupForArtifact(artifact) && artifactPackageReady(artifact)
           ? "restore"
@@ -731,8 +784,8 @@ function ArtifactHistoryTable({
     {
       id: "download",
       header: "Download",
-      size: 150,
-      minSize: 130,
+      size: 120,
+      minSize: 105,
       sortValue: (artifact) =>
         backupForArtifact(artifact) && artifactPackageReady(artifact)
           ? "download"
@@ -795,7 +848,10 @@ function ArtifactHistoryTable({
               {clientLabel(artifact.client_id)}
             </strong>
             <span title={backupForArtifact(artifact)?.id ?? ""}>
-              request {backupForArtifact(artifact) ? shortId(backupForArtifact(artifact)?.id ?? "") : "unlinked"}
+              request{" "}
+              {backupForArtifact(artifact)
+                ? shortId(backupForArtifact(artifact)?.id ?? "")
+                : "unlinked"}
             </span>
             <span title={String(artifact.size_bytes)}>
               {formatBytes(artifact.size_bytes)}
@@ -804,7 +860,7 @@ function ArtifactHistoryTable({
             <span title={artifact.sha256_hex}>
               {shortHash(artifact.sha256_hex)}
             </span>
-            <span title={artifactLifecycleStatusTitle(artifact.status)}>
+            <span title={artifactLifecycleStatusTitle(artifact)}>
               raw {artifact.status}
             </span>
             <span title={artifact.created_at}>
@@ -821,7 +877,7 @@ function ArtifactHistoryTable({
 }
 
 function artifactPackageReady(artifact: BackupArtifactRecord): boolean {
-  return artifact.status === "active";
+  return artifact.content_available && artifact.status === "active";
 }
 
 function artifactRestoreActionTitle(
@@ -865,20 +921,23 @@ function RestoreSourcesTable({
 }) {
   const artifactForBackup = (backup: BackupRequestRecord) =>
     backup.artifact_id
-      ? artifacts.find((artifact) => artifact.id === backup.artifact_id) ?? null
+      ? (artifacts.find((artifact) => artifact.id === backup.artifact_id) ??
+        null)
       : null;
   const latestPlanForBackup = (backup: BackupRequestRecord) =>
     restorePlans
       .filter((plan) => plan.source_backup_request_id === backup.id)
-      .sort((left, right) => right.created_at.localeCompare(left.created_at))[0] ??
-    null;
+      .sort((left, right) =>
+        right.created_at.localeCompare(left.created_at),
+      )[0] ?? null;
   const columns: ConsoleDataGridColumn<BackupRequestRecord>[] = [
     {
       id: "artifact",
       header: "Artifact",
       size: 180,
       minSize: 150,
-      sortValue: (backup) => artifactForBackup(backup)?.id ?? backup.artifact_id ?? "",
+      sortValue: (backup) =>
+        artifactForBackup(backup)?.id ?? backup.artifact_id ?? "",
       searchValue: (backup) => {
         const artifact = artifactForBackup(backup);
         return `${backup.id} ${backup.artifact_id ?? ""} ${artifact?.object_key ?? ""} ${artifact?.sha256_hex ?? ""}`;
@@ -909,14 +968,23 @@ function RestoreSourcesTable({
       sortValue: (backup) =>
         restoreSourceReadiness(backup, artifactForBackup(backup)).sort,
       searchValue: (backup) => {
-        const readiness = restoreSourceReadiness(backup, artifactForBackup(backup));
+        const readiness = restoreSourceReadiness(
+          backup,
+          artifactForBackup(backup),
+        );
         return `${readiness.label} ${readiness.detail}`;
       },
       cell: (backup) => {
-        const readiness = restoreSourceReadiness(backup, artifactForBackup(backup));
+        const readiness = restoreSourceReadiness(
+          backup,
+          artifactForBackup(backup),
+        );
         return (
           <span className="historyPrimary">
-            <strong className={`status ${readiness.tone}`} title={readiness.title}>
+            <strong
+              className={`status ${readiness.tone}`}
+              title={readiness.title}
+            >
               {readiness.label}
             </strong>
             <small>{readiness.detail}</small>
@@ -991,12 +1059,18 @@ function RestoreSourcesTable({
               className={`status ${
                 plan ? restorePlanStatusBadgeClass(plan.status) : "neutral"
               }`}
-              title={plan?.status ?? "No draft restore has been saved."}
+              title={
+                plan
+                  ? restorePlanStatusLabel(plan.status)
+                  : "No draft restore has been saved."
+              }
             >
-              {plan ? backupStatusLabel(plan.status) : "No draft"}
+              {plan ? restorePlanStatusLabel(plan.status) : "No draft"}
             </strong>
             <small>
-              {plan ? formatCompactTime(plan.created_at) : "save if interrupted"}
+              {plan
+                ? formatCompactTime(plan.created_at)
+                : "save if interrupted"}
             </small>
           </span>
         );
@@ -1005,12 +1079,16 @@ function RestoreSourcesTable({
     {
       id: "action",
       header: "Action",
+      stickyEnd: true,
       size: 125,
       minSize: 115,
       sortValue: () => "restore",
       searchValue: () => "restore choose artifact draft restore",
       cell: (backup) => {
-        const readiness = restoreSourceReadiness(backup, artifactForBackup(backup));
+        const readiness = restoreSourceReadiness(
+          backup,
+          artifactForBackup(backup),
+        );
         return (
           <button
             className="secondaryAction compactAction"
@@ -1109,7 +1187,8 @@ function MigrationLinksTable({
     null;
   const artifactForBackup = (backup: BackupRequestRecord | null) =>
     backup?.artifact_id
-      ? artifacts.find((artifact) => artifact.id === backup.artifact_id) ?? null
+      ? (artifacts.find((artifact) => artifact.id === backup.artifact_id) ??
+        null)
       : null;
   const restorePlanForLink = (link: MigrationLinkRecord) =>
     restorePlans.find((plan) => plan.id === link.restore_plan_id) ?? null;
@@ -1145,9 +1224,10 @@ function MigrationLinksTable({
         const readiness = backup
           ? restoreSourceReadiness(backup, artifact)
           : {
-            label: "Unverified package",
-            title: "Source backup request is not visible in the current backup records.",
-          };
+              label: "Unverified package",
+              title:
+                "Source backup request is not visible in the current backup records.",
+            };
         return (
           <span className="historyPrimary">
             <strong>{clientLabel(link.source_client_id)}</strong>
@@ -1185,14 +1265,15 @@ function MigrationLinksTable({
       size: 145,
       minSize: 125,
       sortValue: (link) => link.status,
-      searchValue: (link) => `${link.status} ${backupStatusLabel(link.status)} ${link.note ?? ""}`,
+      searchValue: (link) =>
+        `${link.status} ${migrationLinkStatusLabel(link.status)} ${link.note ?? ""}`,
       cell: (link) => (
         <span className="historyPrimary">
           <strong
             className={`status ${migrationLinkStatusBadgeClass(link.status)}`}
-            title={link.status}
+            title={migrationLinkStatusLabel(link.status)}
           >
-            {backupStatusLabel(link.status)}
+            {migrationLinkStatusLabel(link.status)}
           </strong>
           <small>{link.note ?? "no cutover notes"}</small>
         </span>
@@ -1206,7 +1287,10 @@ function MigrationLinksTable({
       sortValue: (link) => link.created_at,
       searchValue: (link) => link.created_at,
       cell: (link) => (
-        <time dateTime={link.created_at} title={formatFullTime(link.created_at)}>
+        <time
+          dateTime={link.created_at}
+          title={formatFullTime(link.created_at)}
+        >
           {formatCompactTime(link.created_at)}
         </time>
       ),
@@ -1246,11 +1330,12 @@ function MigrationLinksTable({
               draft {shortId(link.restore_plan_id)}
             </span>
             <span>{migrationScopeLabel(link)}</span>
-            <span>{backupStatusLabel(link.status)}</span>
+            <span>{migrationLinkStatusLabel(link.status)}</span>
             <span>{link.destination_root ?? "no restore path"}</span>
             <span>{link.note ?? "no cutover notes"}</span>
             <span>
-              restore draft {restorePlanForLink(link) ? "visible" : "not visible"}
+              restore draft{" "}
+              {restorePlanForLink(link) ? "visible" : "not visible"}
             </span>
             <span>{formatTime(link.created_at)}</span>
           </div>
@@ -1336,7 +1421,9 @@ function backupScopeLabel(backup: BackupRequestRecord): string {
       `${backup.paths.length} path${backup.paths.length === 1 ? "" : "s"}`,
     );
   }
-  scopes.push(backup.follow_symlinks ? "follows symlinks" : "no symlink follow");
+  scopes.push(
+    backup.follow_symlinks ? "follows symlinks" : "no symlink follow",
+  );
   scopes.push(backupMissingPathLabel(backup));
   return scopes.length > 0 ? scopes.join(" + ") : "empty";
 }
@@ -1359,19 +1446,27 @@ function backupSymlinkLabel(backup: BackupRequestRecord): string {
 }
 
 function backupMissingPathLabel(backup: BackupRequestRecord): string {
-  return backup.missing_path_policy === "skip" ? "optional roots" : "strict roots";
+  return backup.missing_path_policy === "skip"
+    ? "optional roots"
+    : "strict roots";
 }
 
 function backupRequestNeedsAttention(status: string): boolean {
-  return /fail|error|cancel|lost|timeout|expired|rejected/.test(status.toLowerCase());
+  return /fail|error|cancel|lost|timeout|expired|rejected/.test(
+    status.toLowerCase(),
+  );
 }
 
-function backupStateParts(status: string): { detail: string; label: string } {
+function backupStateParts(
+  status: string,
+  artifact: BackupArtifactRecord | null,
+): { detail: string; label: string } {
+  if (status === "artifact_metadata_recorded") {
+    return artifact && artifactPackageReady(artifact)
+      ? { detail: "verified package available", label: "Ready" }
+      : { detail: "stored package unavailable", label: "Recorded" };
+  }
   const states: Record<string, { detail: string; label: string }> = {
-    artifact_metadata_recorded: {
-      detail: "content not verified",
-      label: "Recorded",
-    },
     artifact_uploaded: {
       detail: "package uploaded",
       label: "Uploaded",
@@ -1386,10 +1481,12 @@ function backupStateParts(status: string): { detail: string; label: string } {
     restored: { detail: "restore evidence exists", label: "Restored" },
     running: { detail: "in progress", label: "Running" },
   };
-  return states[status] ?? {
-    detail: "raw status retained in details",
-    label: backupStatusLabel(status),
-  };
+  return (
+    states[status] ?? {
+      detail: "raw status retained in details",
+      label: backupStatusLabel(status),
+    }
+  );
 }
 
 function policyTargetLabel(policy: BackupPolicyRecord): string {
@@ -1407,7 +1504,9 @@ function policyTargetCountLabel(policy: BackupPolicyRecord): string {
   const count = Array.isArray(policy.target_client_ids)
     ? policy.target_client_ids.length
     : 0;
-  return count === 0 ? "No fixed targets" : `${count} VPS${count === 1 ? "" : "s"}`;
+  return count === 0
+    ? "No fixed targets"
+    : `${count} VPS${count === 1 ? "" : "s"}`;
 }
 
 function policyScopeLabel(policy: BackupPolicyRecord): string {
@@ -1420,8 +1519,12 @@ function policyScopeLabel(policy: BackupPolicyRecord): string {
       `${policy.paths.length} path${policy.paths.length === 1 ? "" : "s"}`,
     );
   }
-  scopes.push(policy.follow_symlinks ? "follows symlinks" : "no symlink follow");
-  scopes.push(policy.missing_path_policy === "skip" ? "optional roots" : "strict roots");
+  scopes.push(
+    policy.follow_symlinks ? "follows symlinks" : "no symlink follow",
+  );
+  scopes.push(
+    policy.missing_path_policy === "skip" ? "optional roots" : "strict roots",
+  );
   return scopes.length > 0 ? scopes.join(" + ") : "empty";
 }
 
@@ -1474,24 +1577,49 @@ function formatDuration(valueMs: number): string {
   return `${Math.round(hours / 24)}d`;
 }
 
-function policyNextRunLabel(value: string): string {
-  return policyNextRunState(value).label;
+function policyNextRunLabel(policy: BackupPolicyRecord): string {
+  return policyNextRunState(policy).label;
 }
 
-function policyNextRunState(value: string): {
+function policyNextRunState(policy: BackupPolicyRecord): {
   detail: string;
   label: string;
+  title: string;
   tone: "info" | "neutral" | "warn";
 } {
+  if (!policy.enabled) {
+    return {
+      detail: "policy disabled",
+      label: "Not scheduled",
+      title: "This policy is disabled and will not dispatch scheduled runs.",
+      tone: "neutral",
+    };
+  }
+  const value = policy.next_run_at;
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp)) {
-    return { detail: "next run unavailable", label: "Unknown", tone: "neutral" };
+    return {
+      detail: "next run unavailable",
+      label: "Unknown",
+      title: "The API did not report a valid next-run time.",
+      tone: "neutral",
+    };
   }
   const ageMs = timestamp - Date.now();
   if (ageMs < 0) {
-    return { detail: formatCompactTime(value), label: "Overdue", tone: "warn" };
+    return {
+      detail: formatCompactTime(value),
+      label: "Overdue",
+      title: formatFullTime(value),
+      tone: "warn",
+    };
   }
-  return { detail: formatCompactTime(value), label: "Scheduled", tone: "info" };
+  return {
+    detail: formatCompactTime(value),
+    label: "Scheduled",
+    title: formatFullTime(value),
+    tone: "info",
+  };
 }
 
 function policyLastResult(policy: BackupPolicyRecord): {
@@ -1556,30 +1684,31 @@ function restoreSourceReadiness(
   title: string;
   tone: "neutral" | "ok" | "warn";
 } {
-  if (artifact?.status === "active") {
+  if (artifact && artifactPackageReady(artifact)) {
     return {
       detail: `${formatBytes(artifact.size_bytes)} staged package record`,
       label: "Available package",
       sort: "0-available",
-      title: artifactLifecycleStatusTitle(artifact.status),
+      title: artifactLifecycleStatusTitle(artifact),
       tone: "ok",
     };
   }
   if (artifact) {
     return {
-      detail: artifactVerificationShortLabel(artifact.status),
-      label: "Unverified package",
+      detail: artifactVerificationShortLabel(artifact),
+      label: "Unavailable package",
       sort: `1-${artifact.status}`,
-      title: artifactLifecycleStatusTitle(artifact.status),
+      title: artifactLifecycleStatusTitle(artifact),
       tone: "warn",
     };
   }
   if (backup.artifact_id) {
     return {
       detail: "artifact metadata unavailable",
-      label: "Unverified package",
+      label: "Unavailable package",
       sort: "2-metadata-gap",
-      title: "This backup references an artifact ID, but the artifact record is not visible.",
+      title:
+        "This backup references an artifact ID, but the artifact record is not visible.",
       tone: "warn",
     };
   }
@@ -1587,12 +1716,16 @@ function restoreSourceReadiness(
     detail: "upload or transfer package first",
     label: "No artifact",
     sort: "3-no-artifact",
-    title: "This backup request has no artifact record and cannot run a live restore yet.",
+    title:
+      "This backup request has no artifact record and cannot run a live restore yet.",
     tone: "warn",
   };
 }
 
-function restoreSourceScopeLabel(includeConfig: boolean, paths: string[]): string {
+function restoreSourceScopeLabel(
+  includeConfig: boolean,
+  paths: string[],
+): string {
   const scopes = [];
   if (includeConfig) {
     scopes.push("config restore");
@@ -1619,7 +1752,7 @@ function migrationScopeLabel(link: MigrationLinkRecord): string {
 function backupStatusLabel(status: string): string {
   const labels: Record<string, string> = {
     accepted: "Accepted",
-    artifact_metadata_recorded: "Artifact recorded; content not verified",
+    artifact_metadata_recorded: "Package linked",
     artifact_uploaded: "Artifact uploaded",
     completed: "Completed",
     failed: "Failed",
@@ -1632,40 +1765,59 @@ function backupStatusLabel(status: string): string {
   return labels[status] ?? status.replace(/_/g, " ");
 }
 
-function artifactLifecycleStatusTitle(status: string): string {
+function artifactLifecycleStatusTitle(artifact: BackupArtifactRecord): string {
+  if (!artifact.content_available && artifact.status === "active") {
+    return "Artifact metadata exists, but stored content is not available.";
+  }
+  const status = artifact.status;
   const descriptions: Record<string, string> = {
     active: "Object bytes are owned by this artifact and available.",
     creating: "Artifact ownership is being prepared.",
-    deleting: "Object deletion is in progress; metadata remains visible until deletion finishes.",
-    delete_failed: "Object deletion failed; metadata remains visible and cleanup can be retried.",
+    deleting:
+      "Object deletion is in progress; metadata remains visible until deletion finishes.",
+    delete_failed:
+      "Object deletion failed; metadata remains visible and cleanup can be retried.",
+    missing: "Artifact metadata exists, but no stored object is available.",
     tombstoned: "Metadata was retained as a tombstone.",
     deleted: "Object bytes were deleted.",
   };
   return descriptions[status] ?? status.replace(/_/g, " ");
 }
 
-function artifactVerificationLabel(status: string): string {
+function artifactVerificationLabel(artifact: BackupArtifactRecord): string {
+  if (artifactPackageReady(artifact)) {
+    return "Available package";
+  }
+  const status = artifact.status;
   const labels: Record<string, string> = {
-    active: "Available package",
+    active: "Package unavailable",
     creating: "Preparing package",
     deleting: "Deleting package",
     delete_failed: "Delete failed",
+    missing: "Package unavailable",
     tombstoned: "Tombstone only",
     deleted: "Deleted",
   };
   return labels[status] ?? status.replace(/_/g, " ");
 }
 
-function artifactVerificationShortLabel(status: string): string {
+function artifactVerificationShortLabel(
+  artifact: BackupArtifactRecord,
+): string {
+  if (artifactPackageReady(artifact)) {
+    return "Available";
+  }
+  const status = artifact.status;
   const labels: Record<string, string> = {
-    active: "Available",
+    active: "Unavailable",
     creating: "Preparing",
     deleting: "Deleting",
     delete_failed: "Delete failed",
+    missing: "Unavailable",
     tombstoned: "Tombstone",
     deleted: "Deleted",
   };
-  return labels[status] ?? artifactVerificationLabel(status);
+  return labels[status] ?? artifactVerificationLabel(artifact);
 }
 
 function formatBytes(value: number): string {

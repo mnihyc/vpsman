@@ -171,6 +171,7 @@ export const terminalSessions = [
     last_job_id: "61616161-aaaa-4bbb-8ccc-dddddddddddd",
     last_command_type: "terminal_input",
     last_seq: 0,
+    opened_at: "2026-05-31T10:10:00Z",
     observed_at: "2026-05-31T10:12:00Z",
   },
   {
@@ -198,6 +199,7 @@ export const terminalSessions = [
     last_job_id: "71717171-aaaa-4bbb-8ccc-dddddddddddd",
     last_command_type: "terminal_close",
     last_seq: 0,
+    opened_at: "2026-05-31T10:09:00Z",
     observed_at: "2026-05-31T10:12:30Z",
   },
 ];

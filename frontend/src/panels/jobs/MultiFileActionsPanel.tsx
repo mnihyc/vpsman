@@ -184,6 +184,8 @@ export function MultiFileActionsPanel({
     invalidateReviewGeneration();
     clearPendingConfirmation();
     clearExecutionResults();
+    setActionError(null);
+    setActionMessage(null);
   }
 
   async function refreshPreview() {
@@ -402,6 +404,17 @@ export function MultiFileActionsPanel({
 
   const visibleProgress = bulkProgress ?? lastRunProgress;
   const pathReadiness = bulkPathReadiness(action, path, allowRootPath);
+  const bulkDraftError = bulkDraftValidationMessage({
+    action,
+    localMatchCount: localMatches.length,
+    mode,
+    newPath,
+    pathReadiness,
+    selectorExpression,
+    uploadFile,
+    uploadGroup,
+    uploadOwner,
+  });
   const preflightItems = buildBulkPreflightItems({
     action,
     agentCount: agents.length,
@@ -430,6 +443,7 @@ export function MultiFileActionsPanel({
   });
   const reviewButtonTitle = bulkReviewButtonTitle({
     action,
+    draftError: bulkDraftError,
     loading,
     pathReadiness,
     pending,
@@ -799,7 +813,12 @@ export function MultiFileActionsPanel({
           )}
           <button
             className={runBulkActionClass(action)}
-            disabled={pending || !privilegeMaterial || loading}
+            disabled={
+              pending ||
+              !privilegeMaterial ||
+              loading ||
+              bulkDraftError !== null
+            }
             onClick={() => void prepareBulkOperation()}
             title={reviewButtonTitle}
             type="button"
@@ -1098,7 +1117,7 @@ function groupBulkOutputs(
     const detail = unavailable
       ? `Matched by selector; agent status ${agent.status}.`
       : targetRecord?.status
-        ? `Job target ${targetRecord.status}; ${targetRecord.message ?? "structured file status not retrieved"}.`
+        ? `Job target ${targetRecord.status}; ${targetRecord.message ?? "structured file status not reported"}.`
         : "Waiting for job target or file status.";
     const key = `target:${state}:${reason}`;
     const group = groups.get(key) ?? {
@@ -1849,12 +1868,14 @@ function bulkPathReadiness(
 
 function bulkReviewButtonTitle({
   action,
+  draftError,
   loading,
   pathReadiness,
   pending,
   privilegeMaterial,
 }: {
   action: MultiFileAction;
+  draftError: string | null;
   loading: boolean;
   pathReadiness: BulkPathReadiness;
   pending: boolean;
@@ -1869,7 +1890,63 @@ function bulkReviewButtonTitle({
   if (!privilegeMaterial) {
     return "Unlock privilege before running a bulk file operation.";
   }
-  return pathReadiness.validationError ?? `Resolve the latest targets, preview impact, and open one ${bulkActionNoun(action)} confirmation.`;
+  return draftError ?? pathReadiness.validationError ?? `Resolve the latest targets, preview impact, and open one ${bulkActionNoun(action)} confirmation.`;
+}
+
+function bulkDraftValidationMessage({
+  action,
+  localMatchCount,
+  mode,
+  newPath,
+  pathReadiness,
+  selectorExpression,
+  uploadFile,
+  uploadGroup,
+  uploadOwner,
+}: {
+  action: MultiFileAction;
+  localMatchCount: number;
+  mode: string;
+  newPath: string;
+  pathReadiness: BulkPathReadiness;
+  selectorExpression: string;
+  uploadFile: File | null;
+  uploadGroup: string;
+  uploadOwner: string;
+}): string | null {
+  if (!selectorExpression.trim()) {
+    return "Enter an explicit VPS selector before reviewing a bulk operation.";
+  }
+  if (localMatchCount === 0) {
+    return "The current selector matches no VPSs.";
+  }
+  if (pathReadiness.validationError) {
+    return pathReadiness.validationError;
+  }
+  if (action === "upload_file" && !uploadFile) {
+    return "Choose a source file before reviewing the upload.";
+  }
+  if (action === "copy" || action === "rename") {
+    if (!newPath.trim()) {
+      return "Enter an absolute destination path.";
+    }
+    try {
+      normalizeAbsolutePath(newPath);
+    } catch (error) {
+      return error instanceof Error ? error.message : "Destination path is invalid.";
+    }
+  }
+  if (action === "chown" && !uploadOwner.trim() && !uploadGroup.trim()) {
+    return "Enter an owner, a group, or both.";
+  }
+  if (action === "chmod" || action === "mkdir" || action === "write_text") {
+    try {
+      parseMode(mode);
+    } catch (error) {
+      return error instanceof Error ? error.message : "Mode is invalid.";
+    }
+  }
+  return null;
 }
 
 function usesFileActionPolicy(action: MultiFileAction): boolean {

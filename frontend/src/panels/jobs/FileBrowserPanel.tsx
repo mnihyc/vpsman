@@ -53,6 +53,7 @@ import { base64ToBytes, parseFileMode } from "../../fileTransfer";
 import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../../privilege";
 import { selectorExpressionForClientIds } from "../../searchExpression";
 import { targetRecordTerminal } from "../../bulkJobProgress";
+import { scrollIntoViewWithMotion } from "../../motion";
 import type { FileTransferSessionRecord } from "../../typesFileTransfer";
 import type {
   AgentView,
@@ -65,11 +66,12 @@ import type {
   JobOutputRecord,
   JobTargetRecord,
 } from "../../types";
-import { formatTime, runPanelAction, shortId } from "../../utils";
+import { formatTime, formatVpsName, runPanelAction, shortId } from "../../utils";
 
 const STORAGE_KEY = "vpsman.fileBrowser.state";
 const DEFAULT_MODE = "0644";
 const DEFAULT_DIR_MODE = "0755";
+const FILE_BROWSER_RESULT_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
 
 type BrowserState = {
   path: string;
@@ -151,6 +153,7 @@ export function FileBrowserPanel({
   const [editorSavedContent, setEditorSavedContent] = useState("");
   const [editorSha256Hex, setEditorSha256Hex] = useState<string | null>(null);
   const [editorMode, setEditorMode] = useState(DEFAULT_MODE);
+  const [editorDiscardPromptOpen, setEditorDiscardPromptOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [staleDirectoryPath, setStaleDirectoryPath] = useState<string | null>(null);
@@ -177,6 +180,9 @@ export function FileBrowserPanel({
   const [uploadDestination, setUploadDestination] = useState("");
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [transferHandoffHint, setTransferHandoffHint] = useState<TransferHandoffHint | null>(null);
+  const workspaceRef = useRef<HTMLDivElement | null>(null);
+  const editorPaneRef = useRef<HTMLElement | null>(null);
+  const commandPopoverRef = useRef<HTMLElement | null>(null);
   const selectedAgent = useMemo(
     () => agents.find((agent) => agent.id === targetClientId) ?? null,
     [agents, targetClientId],
@@ -212,7 +218,13 @@ export function FileBrowserPanel({
     ? `${targetSummary} · ${currentEntries.length} entries loaded`
     : `${targetSummary} · unlock to read remote files`;
   const fileBrowserFeedbackMessage = actionError ?? actionMessage ?? staleMessage;
-  const fileBrowserFeedbackTone = actionError ? "danger" : staleMessage ? "warning" : "success";
+  const fileBrowserFeedbackTone = actionError
+    ? "danger"
+    : pending
+      ? "progress"
+      : staleMessage
+        ? "warning"
+        : "success";
   const selectedDownloadLabel = downloadActionLabel(selectedEntry, selectedPath);
   const editorStateText = editorPath ? `${editorContent.length} chars${editorDirty ? " · unsaved" : ""}` : "Select a text file to edit";
   const editorStatusText = editorStateText;
@@ -224,7 +236,7 @@ export function FileBrowserPanel({
       }
     : !privilegeMaterial
       ? {
-          detail: `${targetNameId(selectedAgent)} is selected. Open Privilege Vault, then refresh ${currentPath} to load its files.`,
+          detail: `${targetNameId(selectedAgent)} is selected. Unlock privilege, then refresh ${currentPath} to load its files.`,
           title: "Unlock to browse this VPS.",
         }
       : !currentDirectoryEvidence
@@ -251,6 +263,62 @@ export function FileBrowserPanel({
   useEffect(() => {
     writeBrowserState({ path: currentPath, targetClientId, showHidden });
   }, [currentPath, targetClientId, showHidden]);
+
+  useEffect(() => {
+    if (!editorPath) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const workspace = workspaceRef.current;
+      const editor = editorPaneRef.current;
+      if (!workspace || !editor) {
+        return;
+      }
+      scrollIntoViewWithMotion(workspace, { block: "start" });
+      editor.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [editorPath]);
+
+  useEffect(() => {
+    if (!fileBrowserFeedbackMessage) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const workspace = workspaceRef.current;
+      if (workspace) {
+        scrollIntoViewWithMotion(workspace, { block: "start" });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [fileBrowserFeedbackMessage]);
+
+  useEffect(() => {
+    if (!activeCommand) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const command = commandPopoverRef.current;
+      if (!command) {
+        return;
+      }
+      scrollIntoViewWithMotion(command, { block: "nearest" });
+      command.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeCommand]);
+
+  useEffect(() => {
+    if (!editorDirty) {
+      return;
+    }
+    const preventDraftLoss = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", preventDraftLoss);
+    return () => window.removeEventListener("beforeunload", preventDraftLoss);
+  }, [editorDirty]);
 
   useLayoutEffect(() => {
     setPendingConfirmation(null);
@@ -284,6 +352,12 @@ export function FileBrowserPanel({
   ]);
 
   function selectTargetClientId(value: string) {
+    if (editorDirty && value !== targetClientId) {
+      setActionError(
+        `Save or close unsaved changes in ${editorPath ?? "the open file"} before changing VPS.`,
+      );
+      return;
+    }
     setTargetClientId(value);
     setEntriesByPath({});
     setDirectoryEvidenceByPath({});
@@ -294,6 +368,7 @@ export function FileBrowserPanel({
     setEditorContent("");
     setEditorSavedContent("");
     setEditorSha256Hex(null);
+    setEditorDiscardPromptOpen(false);
     setPendingConfirmation(null);
     setActionError(null);
     setActionMessage(null);
@@ -308,6 +383,8 @@ export function FileBrowserPanel({
     if (!privilegeMaterial) {
       throw new Error("Unlock privilege before running a file operation.");
     }
+    const operationLabel = fileBrowserOperationLabel(operation);
+    setActionMessage(`Preparing ${operationLabel.toLocaleLowerCase()}`);
     const maxTimeoutSecs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
     const selectorExpression = selectorExpressionForClientIds([selectedAgent.id]);
     const built = await buildPrivilegeForJobOperation({
@@ -319,6 +396,7 @@ export function FileBrowserPanel({
       maxTimeoutSecs,
     });
     setLastPayloadHash(built.payloadHashHex);
+    setActionMessage(`Dispatching ${operationLabel.toLocaleLowerCase()}`);
     const destructive = mutatesFileSystem(operation);
     const job = await onCreateJob({
       selector_expression: selectorExpression,
@@ -334,11 +412,13 @@ export function FileBrowserPanel({
       privileged: true,
       privilege_assertion: built.privilegeAssertion,
     });
+    setActionMessage(`${operationLabel} in progress`);
     const outputs = await waitForOutputs(
       job.job_id,
       onLoadOutputs,
       onLoadTargets,
       options.expectedType,
+      FILE_BROWSER_RESULT_WAIT_TIMEOUT_MS,
     );
     return { job, outputs };
   }
@@ -362,8 +442,31 @@ export function FileBrowserPanel({
     setCurrentPath(status.path);
     setPathInput(status.path);
     setSelectedPath(status.path);
-    setExpandedPaths((current) => ({ ...current, [status.path]: true }));
-    setEntriesByPath((current) => ({ ...current, [status.path]: status.entries }));
+    const pathChain = directoryPathChain(status.path);
+    setExpandedPaths((current) => {
+      const next = { ...current };
+      for (const chainPath of pathChain) {
+        next[chainPath] = true;
+      }
+      return next;
+    });
+    setEntriesByPath((current) => {
+      const next = { ...current, [status.path]: status.entries };
+      for (let index = 0; index < pathChain.length - 1; index += 1) {
+        const parent = pathChain[index]!;
+        const child = pathChain[index + 1]!;
+        const existing = next[parent] ?? [];
+        if (!existing.some((entry) => entry.path === child)) {
+          next[parent] = [
+            ...existing,
+            child === status.path
+              ? status.metadata
+              : directoryBreadcrumbEntry(child),
+          ];
+        }
+      }
+      return next;
+    });
     setDirectoryEvidenceByPath((current) => ({
       ...current,
       [status.path]: {
@@ -382,6 +485,11 @@ export function FileBrowserPanel({
     }));
     setMetadataByPath((current) => {
       const next = { ...current, [status.path]: status.metadata };
+      for (const chainPath of pathChain) {
+        if (!next[chainPath]) {
+          next[chainPath] = directoryBreadcrumbEntry(chainPath);
+        }
+      }
       for (const entry of status.entries) {
         next[entry.path] = entry;
       }
@@ -401,6 +509,14 @@ export function FileBrowserPanel({
 
   async function openTextFile(path: string) {
     const normalized = normalizeAbsolutePath(path);
+    if (editorDirty && editorPath) {
+      setActionError(
+        normalized === editorPath
+          ? `Save or close unsaved changes in ${editorPath} before reopening it.`
+          : `Save or close unsaved changes in ${editorPath} before opening ${normalized}.`,
+      );
+      return;
+    }
     await runPanelAction(setPending, setActionError, async () => {
       const { outputs } = await runFileJob(
         {
@@ -421,6 +537,7 @@ export function FileBrowserPanel({
       setEditorSavedContent(content);
       setEditorSha256Hex(status.sha256_hex);
       setEditorMode(formatMode(status.metadata.mode));
+      setEditorDiscardPromptOpen(false);
       setSelectedPath(status.path);
       setMetadataByPath((current) => ({ ...current, [status.path]: status.metadata }));
       setActionMessage(`Opened ${status.path}`);
@@ -446,7 +563,7 @@ export function FileBrowserPanel({
         force || !editorSha256Hex
           ? `Save changes to ${editorPath}. No base hash is available, so this writes without optimistic conflict protection.`
           : `Save changes to ${editorPath}. If the file changed on the VPS, the save will be rejected.`,
-        parentPath(editorPath),
+        undefined,
         { diffPreview: textDiffPreview(editorSavedContent, editorContent) },
       );
     } catch (error) {
@@ -462,14 +579,92 @@ export function FileBrowserPanel({
       const status = parseLatestFileStatus(outputs, operation.type);
       if (operation.type === "file_write_text") {
         setEditorSavedContent(reviewedTextContent(operation));
+        setEditorDiscardPromptOpen(false);
         if (status?.sha256_hex) {
           setEditorSha256Hex(status.sha256_hex);
         }
+        if (!operation.create) {
+          const updateEntry = (entry: FileBrowserEntry): FileBrowserEntry => ({
+            ...entry,
+            mode: operation.mode,
+            mtime_unix: Math.floor(Date.now() / 1000),
+            size_bytes: status?.size_bytes ?? operation.size_bytes,
+          });
+          setMetadataByPath((current) => {
+            const existing = current[operation.path];
+            return existing
+              ? { ...current, [operation.path]: updateEntry(existing) }
+              : current;
+          });
+          setEntriesByPath((current) => {
+            const directory = parentPath(operation.path);
+            const entries = current[directory];
+            return entries
+              ? {
+                  ...current,
+                  [directory]: entries.map((entry) =>
+                    entry.path === operation.path ? updateEntry(entry) : entry,
+                  ),
+                }
+              : current;
+          });
+        }
       }
-      if (refreshPath) {
-        setStaleDirectoryPath(refreshPath);
+      if (status?.metadata) {
+        const entry = status.metadata;
+        setMetadataByPath((current) => ({
+          ...current,
+          [entry.path]: entry,
+        }));
+        setEntriesByPath((current) => {
+          const directory = parentPath(entry.path);
+          const entries = current[directory];
+          if (!entries) {
+            return current;
+          }
+          const nextEntries = entries.some((candidate) => candidate.path === entry.path)
+            ? entries.map((candidate) =>
+                candidate.path === entry.path ? entry : candidate,
+              )
+            : [...entries, entry];
+          return {
+            ...current,
+            [directory]: sortFileBrowserEntries(nextEntries),
+          };
+        });
       }
-      setActionMessage(`${fileBrowserOperationLabel(operation)} completed`);
+      let refreshWarning: string | null = null;
+      if (refreshPath && !status?.metadata) {
+        try {
+          await fetchDirectory(refreshPath, false);
+        } catch (error) {
+          setStaleDirectoryPath(refreshPath);
+          refreshWarning = actionErrorMessage(error);
+        }
+      }
+      const createdPath =
+        operation.type === "file_write_text" && operation.create
+          ? operation.path
+          : operation.type === "file_mkdir"
+            ? operation.path
+            : null;
+      if (createdPath) {
+        setSelectedPath(createdPath);
+        if (operation.type === "file_write_text") {
+          const content = reviewedTextContent(operation);
+          setEditorPath(createdPath);
+          setEditorContent(content);
+          setEditorSavedContent(content);
+          setEditorSha256Hex(status?.sha256_hex ?? null);
+          setEditorMode(formatMode(operation.mode));
+        }
+        resetCreateComposer();
+      }
+      setActionMessage(
+        refreshWarning
+          ? `${fileBrowserOperationLabel(operation)} completed; directory refresh failed: ${refreshWarning}`
+          : `${fileBrowserOperationLabel(operation)} completed`,
+      );
     });
   }
 
@@ -493,6 +688,33 @@ export function FileBrowserPanel({
 
   function reportActionError(error: unknown) {
     setActionError(actionErrorMessage(error));
+  }
+
+  function closeEditor() {
+    setEditorPath(null);
+    setEditorContent("");
+    setEditorSavedContent("");
+    setEditorSha256Hex(null);
+    setEditorDiscardPromptOpen(false);
+    setActionError(null);
+  }
+
+  function requestCloseEditor() {
+    if (editorDirty) {
+      setEditorDiscardPromptOpen(true);
+      return;
+    }
+    closeEditor();
+  }
+
+  function resetCreateComposer() {
+    setActiveCommand(null);
+    setNewName("");
+    setCreateContent("");
+    setCreateType("file");
+    setCreateMode(DEFAULT_MODE);
+    setRecursive(false);
+    setActionError(null);
   }
 
   async function createFile() {
@@ -770,12 +992,6 @@ export function FileBrowserPanel({
         </div>
       </div>
 
-      <ActionFeedback
-        className="localActionFeedback"
-        message={fileBrowserFeedbackMessage}
-        tone={fileBrowserFeedbackTone}
-      />
-
       {!privilegeMaterial && (
         <div className="fileBrowserPrivilegeRow">
           <PrivilegeVaultBox
@@ -864,7 +1080,15 @@ export function FileBrowserPanel({
         )}
       </div>
 
-      <div className={`fileBrowserWorkspace${editorPath ? " editorOpen" : " emptyWorkspace"}`}>
+      <div
+        className={`fileBrowserWorkspace${editorPath ? " editorOpen" : " emptyWorkspace"}`}
+        ref={workspaceRef}
+      >
+        <ActionFeedback
+          className="localActionFeedback fileBrowserActionFeedback"
+          message={fileBrowserFeedbackMessage}
+          tone={fileBrowserFeedbackTone}
+        />
         <aside className="fileTreePane">
           <div className="fileTreeToolbar">
             <button className="secondaryAction compactAction" disabled={pending || !privilegeMaterial} onClick={() => void loadDirectory("/")} type="button">
@@ -906,66 +1130,55 @@ export function FileBrowserPanel({
               selectedPath={selectedPath}
               setExpandedPaths={setExpandedPaths}
             />
-            {currentPath !== "/" && (
-              <div className="fileCurrentDirectory" aria-label="Current directory entries">
-                <div className="fileCurrentDirectoryHeader">
-                  <strong title={currentPath}>{currentPath}</strong>
-                  <span>{directoryEntrySummary(currentEntries.length, currentDirectoryEvidence)}</span>
-                </div>
-                {currentEntries.length === 0 ? (
-                  <div className="fileTreeEmpty" role="status">
-                    No entries under {currentPath}
-                  </div>
-                ) : (
-                  currentEntries.map((entry) => (
-                    <button
-                      className={`fileTreeRow${selectedPath === entry.path ? " selected" : ""}`}
-                      key={`current-${entry.path}`}
-                      onClick={() => setSelectedPath(entry.path)}
-                      onDoubleClick={() => void handleEntryOpen(entry)}
-                      type="button"
-                    >
-                      <span className="fileTreeExpander" />
-                      {entry.is_dir ? <Folder size={15} /> : <File size={15} />}
-                      <span>{fileName(entry.path)}</span>
-                      <small>{entry.is_dir ? "dir" : formatBytes(entry.size_bytes)}</small>
-                    </button>
-                  ))
-                )}
-              </div>
-            )}
           </div>
         </aside>
 
-        <main className={`fileEditorPane${editorPath ? "" : " emptyEditorPane"}`}>
+        <main
+          className={`fileEditorPane${editorPath ? "" : " emptyEditorPane"}`}
+          ref={editorPaneRef}
+          tabIndex={-1}
+        >
           {editorPath ? (
             <>
               <div className="fileEditorToolbar">
                 <div>
-                  <strong>{editorPath}</strong>
-                  <span>{editorStatusText}</span>
+                  <strong title={editorPath}>{editorPath}</strong>
+                  <span title={editorStatusText}>{editorStatusText}</span>
                 </div>
                 <div className="fileEditorActions">
                   <label>
                     <span>Mode</span>
                     <input onChange={(event) => setEditorMode(event.target.value)} value={editorMode} />
                   </label>
-                  <button className="primaryAction" disabled={!editorDirty || pending || !privilegeMaterial} onClick={() => void saveEditor()} type="button">
+                  <button
+                    className="primaryAction"
+                    disabled={!editorDirty || pending || !privilegeMaterial}
+                    onClick={() => void saveEditor()}
+                    title="Review file changes before saving."
+                    type="button"
+                  >
                     <Save size={14} />
                     <span>Review save</span>
                   </button>
                   <button
                     className="secondaryAction compactAction fileEditorCloseMobile"
-                    onClick={() => setEditorPath(null)}
-                    title="Close the editor and return to file browsing."
+                    onClick={requestCloseEditor}
+                    title="Close the file editor."
                     type="button"
                   >
                     <X size={14} />
-                    <span>Back to files</span>
+                    <span>Close editor</span>
                   </button>
                 </div>
               </div>
-              <CodeMirrorTextEditor onChange={setEditorContent} path={editorPath} value={editorContent} />
+              <CodeMirrorTextEditor
+                onChange={(value) => {
+                  setEditorContent(value);
+                  setEditorDiscardPromptOpen(false);
+                }}
+                path={editorPath}
+                value={editorContent}
+              />
             </>
           ) : (
             <div className="fileEditorEmptyState" role="status">
@@ -994,7 +1207,14 @@ export function FileBrowserPanel({
                 className="fileActionButton"
                 disabled={locationCommandDisabled}
                 onClick={() => {
-                  setUploadDestination(joinPath(selectedEntry?.is_dir ? selectedPath : currentPath, uploadFile?.name ?? ""));
+                  const folder = selectedEntry?.is_dir ? selectedPath : currentPath;
+                  setUploadDestination(
+                    uploadFile
+                      ? joinPath(folder, uploadFile.name)
+                      : folder === "/"
+                        ? "/"
+                        : `${folder}/`,
+                  );
                   setActiveCommand("upload");
                 }}
                 title="Upload here"
@@ -1077,18 +1297,38 @@ export function FileBrowserPanel({
             )}
 
             {activeCommand === "upload" && (
-              <section className="fileCommandPopover">
+              <section className="fileCommandPopover" ref={commandPopoverRef} tabIndex={-1}>
                 <div className="fileCommandHeader">
                   <strong>Upload file</strong>
-                  <span>{selectedEntry?.is_dir ? selectedPath : currentPath}</span>
+                  <span title={selectedEntry?.is_dir ? selectedPath : currentPath}>{selectedEntry?.is_dir ? selectedPath : currentPath}</span>
+                  <button aria-label="Close upload form" className="iconButton" onClick={() => setActiveCommand(null)} title="Close upload form" type="button">
+                    <X size={14} />
+                  </button>
                 </div>
                 <label>
                   <span>File</span>
-                  <input aria-label="Single file upload" onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)} type="file" />
+                  <input
+                    aria-label="Single file upload"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0] ?? null;
+                      setUploadFile(file);
+                      if (file) {
+                        setUploadDestination((current) =>
+                          current.endsWith("/") ? `${current}${file.name}` : current,
+                        );
+                      }
+                    }}
+                    type="file"
+                  />
                 </label>
                 <label>
                   <span>Destination</span>
-                  <input aria-label="Upload destination" onChange={(event) => setUploadDestination(event.target.value)} value={uploadDestination} />
+                  <input
+                    aria-label="Upload destination"
+                    onChange={(event) => setUploadDestination(event.target.value)}
+                    title="Absolute destination path. A trailing slash appends the selected file name."
+                    value={uploadDestination}
+                  />
                 </label>
                 <div className="fileActionGrid">
                   <label>
@@ -1120,25 +1360,34 @@ export function FileBrowserPanel({
                     <option value="ignore">Ignore chown</option>
                   </select>
                 </label>
-                <div className="fileActionGrid">
+                <div className="fileCommandActions">
                   <button className="secondaryAction" disabled={pending || !uploadFile || !privilegeMaterial} onClick={() => void uploadSelectedFile()} type="button">
                     <Upload size={14} />
                     <span>Review upload</span>
                   </button>
-                  <button className="secondaryAction" onClick={() => setActiveCommand(null)} type="button">Close upload form</button>
                 </div>
               </section>
             )}
 
             {activeCommand === "create" && (
-              <section className="fileCommandPopover">
+              <section className="fileCommandPopover" ref={commandPopoverRef} tabIndex={-1}>
                 <div className="fileCommandHeader">
                   <strong>Create file or folder</strong>
-                  <span>{selectedEntry?.is_dir ? selectedPath : currentPath}</span>
+                  <span title={selectedEntry?.is_dir ? selectedPath : currentPath}>{selectedEntry?.is_dir ? selectedPath : currentPath}</span>
+                  <button aria-label="Close create form" className="iconButton" onClick={resetCreateComposer} title="Close create form" type="button">
+                    <X size={14} />
+                  </button>
                 </div>
                 <label>
                   <span>Name</span>
-                  <input onChange={(event) => setNewName(event.target.value)} placeholder="app.conf" value={newName} />
+                  <input
+                    onChange={(event) => {
+                      setNewName(event.target.value);
+                      setActionError(null);
+                    }}
+                    placeholder="app.conf"
+                    value={newName}
+                  />
                 </label>
                 <div className="fileActionGrid">
                   <label>
@@ -1153,6 +1402,7 @@ export function FileBrowserPanel({
                         if (nextType === "file" && createMode === DEFAULT_DIR_MODE) {
                           setCreateMode(DEFAULT_MODE);
                         }
+                        setActionError(null);
                       }}
                       value={createType}
                     >
@@ -1168,7 +1418,10 @@ export function FileBrowserPanel({
                 {createType === "file" && (
                   <label>
                     <span>Content</span>
-                    <textarea aria-label="New file text content" onChange={(event) => setCreateContent(event.target.value)} rows={7} value={createContent} />
+                    <textarea aria-label="New file text content" onChange={(event) => {
+                      setCreateContent(event.target.value);
+                      setActionError(null);
+                    }} rows={7} value={createContent} />
                   </label>
                 )}
                 {createType === "directory" && (
@@ -1177,21 +1430,29 @@ export function FileBrowserPanel({
                     <span>Create parents</span>
                   </label>
                 )}
-                <div className="fileActionGrid">
-                  <button className="secondaryAction" disabled={pending || !privilegeMaterial} onClick={() => void submitCreate()} type="button">
+                <div className="fileCommandActions">
+                  <button
+                    className="secondaryAction"
+                    disabled={pending || !privilegeMaterial || !newName.trim()}
+                    onClick={() => void submitCreate()}
+                    title={newName.trim() ? "Review the exact create operation" : "Enter a name first"}
+                    type="button"
+                  >
                     {createType === "file" ? <FilePlus2 size={14} /> : <FolderPlus size={14} />}
                     <span>{createType === "file" ? "Review file write" : "Review folder create"}</span>
                   </button>
-                  <button className="secondaryAction" onClick={() => setActiveCommand(null)} type="button">Close create form</button>
                 </div>
               </section>
             )}
 
             {activeCommand === "rename" && (
-              <section className="fileCommandPopover">
+              <section className="fileCommandPopover" ref={commandPopoverRef} tabIndex={-1}>
                 <div className="fileCommandHeader">
                   <strong>Move or rename</strong>
-                  <span>{selectedPath}</span>
+                  <span title={selectedPath}>{selectedPath}</span>
+                  <button aria-label="Close move form" className="iconButton" onClick={() => setActiveCommand(null)} title="Close move form" type="button">
+                    <X size={14} />
+                  </button>
                 </div>
                 <label>
                   <span>Destination</span>
@@ -1201,21 +1462,23 @@ export function FileBrowserPanel({
                     value={renamePathValue}
                   />
                 </label>
-                <div className="fileActionGrid">
+                <div className="fileCommandActions">
                   <button className="secondaryAction" disabled={pending || !selectedPath || !privilegeMaterial} onClick={renameSelected} type="button">
                     <Scissors size={14} />
                     <span>Review move</span>
                   </button>
-                  <button className="secondaryAction" onClick={() => setActiveCommand(null)} type="button">Close move form</button>
                 </div>
               </section>
             )}
 
             {activeCommand === "chmod" && (
-              <section className="fileCommandPopover">
+              <section className="fileCommandPopover" ref={commandPopoverRef} tabIndex={-1}>
                 <div className="fileCommandHeader">
                   <strong>Change permissions</strong>
-                  <span>{selectedPath}</span>
+                  <span title={selectedPath}>{selectedPath}</span>
+                  <button aria-label="Close permission form" className="iconButton" onClick={() => setActiveCommand(null)} title="Close permission form" type="button">
+                    <X size={14} />
+                  </button>
                 </div>
                 <label>
                   <span>Mode</span>
@@ -1225,18 +1488,20 @@ export function FileBrowserPanel({
                   <input checked={recursive} onChange={(event) => setRecursive(event.target.checked)} type="checkbox" />
                   <span>Recursive</span>
                 </label>
-                <div className="fileActionGrid">
+                <div className="fileCommandActions">
                   <button className="secondaryAction" disabled={pending || !privilegeMaterial} onClick={chmodSelected} type="button">Review permission change</button>
-                  <button className="secondaryAction" onClick={() => setActiveCommand(null)} type="button">Close permission form</button>
                 </div>
               </section>
             )}
 
             {activeCommand === "chown" && (
-              <section className="fileCommandPopover">
+              <section className="fileCommandPopover" ref={commandPopoverRef} tabIndex={-1}>
                 <div className="fileCommandHeader">
                   <strong>Change owner/group</strong>
-                  <span>{selectedPath}</span>
+                  <span title={selectedPath}>{selectedPath}</span>
+                  <button aria-label="Close owner form" className="iconButton" onClick={() => setActiveCommand(null)} title="Close owner form" type="button">
+                    <X size={14} />
+                  </button>
                 </div>
                 <div className="fileActionGrid">
                   <label>
@@ -1252,9 +1517,8 @@ export function FileBrowserPanel({
                   <input checked={recursive} onChange={(event) => setRecursive(event.target.checked)} type="checkbox" />
                   <span>Recursive</span>
                 </label>
-                <div className="fileActionGrid">
+                <div className="fileCommandActions">
                   <button className="secondaryAction" disabled={pending || !privilegeMaterial} onClick={chownSelected} type="button">Review owner change</button>
-                  <button className="secondaryAction" onClick={() => setActiveCommand(null)} type="button">Close owner form</button>
                 </div>
               </section>
             )}
@@ -1307,6 +1571,19 @@ export function FileBrowserPanel({
         title={pendingConfirmation?.title ?? "Confirm file operation"}
         tone={pendingConfirmation?.operation.type === "file_delete" ? "danger" : "normal"}
       />
+      <ConfirmationPrompt
+        confirmLabel="Discard changes"
+        detail={`Discard unsaved browser edits for ${editorPath ?? "the open file"}. No remote file has been changed.`}
+        items={[
+          { label: "File", value: editorPath ?? "none" },
+          { label: "Draft", value: `${editorContent.length} characters` },
+        ]}
+        onCancel={() => setEditorDiscardPromptOpen(false)}
+        onConfirm={closeEditor}
+        open={editorDiscardPromptOpen}
+        title="Discard unsaved file changes"
+        tone="danger"
+      />
     </div>
   );
 }
@@ -1326,6 +1603,15 @@ function directoryEntrySummary(loadedCount: number, evidence: DirectoryEvidence 
   }
   const total = evidence.total_entries ?? loadedCount;
   return `${loadedCount} of ${total} entries`;
+}
+
+function sortFileBrowserEntries(entries: FileBrowserEntry[]): FileBrowserEntry[] {
+  return [...entries].sort(
+    (left, right) =>
+      Number(right.is_dir) - Number(left.is_dir) ||
+      left.name.localeCompare(right.name, undefined, { sensitivity: "base" }) ||
+      left.name.localeCompare(right.name),
+  );
 }
 
 function directoryScanSummary(evidence: DirectoryEvidence | null): string {
@@ -1608,24 +1894,56 @@ async function waitForOutputs(
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>,
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>,
   expectedType?: string,
+  timeoutMs = FILE_BROWSER_RESULT_WAIT_TIMEOUT_MS,
 ): Promise<JobOutputRecord[]> {
+  const deadline = Date.now() + timeoutMs;
   let last: JobOutputRecord[] = [];
   for (;;) {
-    let terminal = false;
+    try {
+      last = await onLoadOutputs(jobId);
+      if (
+        expectedType
+          ? Boolean(parseLatestFileStatus(last, expectedType))
+          : last.some((output) => output.done)
+      ) {
+        return last;
+      }
+    } catch {
+      // Output history can race job creation for a short period.
+    }
+
+    let terminalTarget: JobTargetRecord | null = null;
     try {
       const targets = await onLoadTargets(jobId);
-      terminal = targets.some((target) => targetRecordTerminal(target.status));
+      terminalTarget =
+        targets.find((target) => targetRecordTerminal(target.status)) ?? null;
     } catch {
       // Keep polling. Target history can race job creation for a short period.
     }
-    if (terminal) {
-      last = await onLoadOutputs(jobId);
-      if (!expectedType || parseLatestFileStatus(last, expectedType) || last.some((output) => output.done)) {
+
+    if (terminalTarget) {
+      await delay(500);
+      try {
+        last = await onLoadOutputs(jobId);
+      } catch {
+        // Report the terminal target evidence below when output remains absent.
+      }
+      if (
+        !expectedType ||
+        parseLatestFileStatus(last, expectedType)
+      ) {
         return last;
       }
-      await delay(500);
-      last = await onLoadOutputs(jobId);
-      return last;
+      throw new Error(
+        terminalTarget.message ||
+          `${expectedType.replace(/_/g, " ")} ended without structured status output`,
+      );
+    }
+
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Timed out waiting for job ${shortId(jobId)} output. The job may still be running; inspect Jobs / History.`,
+      );
     }
     await delay(500);
   }
@@ -1888,12 +2206,7 @@ function splitComparableLines(value: string): string[] {
 }
 
 function targetNameId(target: Pick<AgentView, "display_name" | "id">): string {
-  const name = target.display_name?.trim();
-  const id = shortId(target.id);
-  if (!name || name === target.id) {
-    return target.id;
-  }
-  return `${name}_${id}`;
+  return formatVpsName(target, "name_id_suffix");
 }
 
 function delay(ms: number): Promise<void> {
@@ -1914,6 +2227,25 @@ function rootEntry(): FileBrowserEntry {
     gid: 0,
     mtime_unix: 0,
     symlink_target: null,
+  };
+}
+
+function directoryPathChain(path: string): string[] {
+  if (path === "/") {
+    return ["/"];
+  }
+  const segments = path.split("/").filter(Boolean);
+  return [
+    "/",
+    ...segments.map((_, index) => `/${segments.slice(0, index + 1).join("/")}`),
+  ];
+}
+
+function directoryBreadcrumbEntry(path: string): FileBrowserEntry {
+  return {
+    ...rootEntry(),
+    name: path === "/" ? "/" : fileName(path),
+    path,
   };
 }
 

@@ -54,6 +54,7 @@ server_ext="$SMOKE_TMPDIR/update-server.ext"
 ca_key="$SMOKE_TMPDIR/update-ca.key"
 ca_cert="$SMOKE_TMPDIR/update-ca.crt"
 update_status_file="$SMOKE_TMPDIR/update-status.json"
+runtime_config_cache="$SMOKE_TMPDIR/state/runtime-config/last-accepted.json"
 mkdir -p "$artifact_dir"
 
 cp target/debug/vpsman-agent "$agent_bin"
@@ -221,7 +222,7 @@ start_agent() {
     exec env \
       VPSMAN_AGENT_CONFIG="$agent_config" \
       VPSMAN_UPDATE_ROOT_CERT_PEM="$ca_cert" \
-      RUST_LOG="${VPSMAN_SMOKE_AGENT_RUST_LOG:-vpsman_agent=warn}" \
+      RUST_LOG="${VPSMAN_SMOKE_AGENT_RUST_LOG:-vpsman_agent=warn,vpsman_agent::runtime=info}" \
       "$agent_bin" run
   ) >"$agent_log" 2>&1 &
   agent_pid="$!"
@@ -248,32 +249,20 @@ wait_agent_online() {
   done
 }
 
-wait_runtime_config_sync_after() {
-  local previous_job_id="${1:-}"
+wait_runtime_config_settled() {
   local deadline=$((SECONDS + 45))
   local applied_job_id=""
   while true; do
-    if [[ -z "$previous_job_id" ]]; then
-      applied_job_id="$(api_get "/api/v1/runtime-config/apply-state" | jq -r \
-        --arg client "$client_id" '
-          first(.[]
-            | select(.client_id == $client)
-            | select((.applied_job_id | type == "string")
-                and (.applied_content_hash | type == "string")
-                and .pending_job_id == null
-                and .pending_status == null)
-            | .applied_job_id) // ""
-        ')"
-    else
-      applied_job_id="$(api_get "/api/v1/jobs?limit=100" | jq -r \
-        --arg previous "$previous_job_id" '
-          first(.[]
-            | select(.command_type == "runtime_config_sync")
-            | select(.id != $previous)
-            | select(.status == "completed")
-            | .id) // ""
-        ')"
-    fi
+    applied_job_id="$(api_get "/api/v1/runtime-config/apply-state" | jq -r \
+      --arg client "$client_id" '
+        first(.[]
+          | select(.client_id == $client)
+          | select((.applied_job_id | type == "string")
+              and (.applied_content_hash | type == "string")
+              and .pending_job_id == null
+              and .pending_status == null)
+          | .applied_job_id) // ""
+      ')"
     if [[ -n "$applied_job_id" ]]; then
       printf '%s\n' "$applied_job_id"
       return
@@ -287,6 +276,33 @@ wait_runtime_config_sync_after() {
     fi
     sleep 0.25
   done
+}
+
+assert_runtime_config_cache_valid() {
+  if [[ ! -f "$runtime_config_cache" ]]; then
+    echo "agent did not persist the last accepted runtime config" >&2
+    return 1
+  fi
+  if [[ "$(stat -c '%a' "$runtime_config_cache")" != "600" ]]; then
+    echo "agent runtime config cache is not private" >&2
+    return 1
+  fi
+  if ! jq -e '
+    .schema_version == 1
+      and (.content_hash | type == "string" and length == 64)
+      and (.config_json | type == "string" and length > 0)
+  ' "$runtime_config_cache" >/dev/null; then
+    echo "agent runtime config cache has an invalid record shape" >&2
+    return 1
+  fi
+  local encoded_config stored_hash observed_hash
+  encoded_config="$(jq -er '.config_json | @base64' "$runtime_config_cache")"
+  stored_hash="$(jq -er '.content_hash' "$runtime_config_cache")"
+  observed_hash="$(printf '%s' "$encoded_config" | base64 -d | sha256sum | awk '{print $1}')"
+  if [[ "$observed_hash" != "$stored_hash" ]]; then
+    echo "agent runtime config cache content hash does not match" >&2
+    return 1
+  fi
 }
 
 wait_job_terminal() {
@@ -434,7 +450,8 @@ smoke_create_direct_agent_config \
 
 start_agent "initial"
 wait_agent_online
-initial_runtime_config_job_id="$(wait_runtime_config_sync_after)"
+initial_runtime_config_job_id="$(wait_runtime_config_settled)"
+assert_runtime_config_cache_valid
 
 reject_job_id="$(cat /proc/sys/kernel/random/uuid)"
 reject_body="$(jq -nc \
@@ -545,7 +562,17 @@ sleep 1
 start_agent "activated"
 wait_agent_online
 wait_update_heartbeat_observed "$activate_job_id"
-wait_runtime_config_sync_after "$initial_runtime_config_job_id" >/dev/null
+if ! grep -F "loaded last accepted runtime config" "$agent_log" >/dev/null; then
+  smoke_dump_logs "updated agent did not load its last accepted runtime config" \
+    "$SMOKE_TMPDIR"/api-*.log "$gateway_log" "$agent_log"
+  exit 1
+fi
+post_restart_runtime_config_job_id="$(wait_runtime_config_settled)"
+if [[ "$post_restart_runtime_config_job_id" != "$initial_runtime_config_job_id" ]]; then
+  echo "updated agent triggered a redundant runtime config sync after loading its cache" >&2
+  exit 1
+fi
+assert_runtime_config_cache_valid
 
 rollback_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
 VPSMAN_API_TOKEN="$access_token" \
@@ -604,6 +631,7 @@ jq -n \
     https_artifact: "trusted_private_root",
     direct_agent_update_job_flow: "stage_activate_restart_rollback",
     heartbeat: "verified_after_restart",
+    last_accepted_runtime_config: "loaded_after_restart",
     rollback: "rolled_back_recorded",
     client_id: $client_id,
     stage_job_id: $stage_job_id,

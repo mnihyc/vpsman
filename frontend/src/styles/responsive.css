@@ -348,6 +348,10 @@
 }
 
 @media (max-width: 640px) {
+  html {
+    scroll-padding-block-start: var(--console-sticky-offset, 80px);
+  }
+
   .shell {
     display: block;
     height: auto;
@@ -369,6 +373,11 @@
 
   .topbar {
     grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .scopeSelectorGroup {
+    width: 100%;
   }
 
   .search {
@@ -562,22 +571,15 @@
 
   .topbarActions {
     justify-content: flex-start;
+    gap: 8px;
     width: 100%;
   }
 
   .mobilePageMenu {
-    display: block;
-    flex: 1 1 100%;
-    width: 100%;
-  }
-
-  .mobilePageMenu summary {
+    display: flex;
+    flex: 1 1 180px;
     min-height: 44px;
-    width: 100%;
-  }
-
-  .mobilePageMenu .mobilePageSelector {
-    margin-top: 8px;
+    min-width: 150px;
   }
 
   .topbarActions > .savedViewControls {
@@ -592,6 +594,24 @@
 
   .mobileSavedViewMenu summary {
     min-height: 44px;
+  }
+
+  .mobileSavedViewMenu summary span,
+  .topbarActions .controlPlanePill span,
+  .topbarActions .sessionButton span,
+  .topbarActions > .primaryAction span,
+  .topbarActions > .secondaryAction span {
+    display: none;
+  }
+
+  .topbarActions .controlPlanePill,
+  .topbarActions .sessionButton,
+  .topbarActions > .primaryAction,
+  .topbarActions > .secondaryAction {
+    justify-content: center;
+    width: 44px;
+    min-width: 44px;
+    padding-inline: 0;
   }
 
   .mobileSavedViewMenu[open] {
@@ -648,6 +668,17 @@
 
   .sectionContext {
     text-align: left;
+  }
+
+  .fleetNodeDetailHeader {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+    padding-right: 32px;
+  }
+
+  .fleetNodeDetailHeader .sectionContext {
+    justify-self: start;
   }
 
   .gridToolbar {
@@ -983,7 +1014,6 @@
     line-height: 1.25;
   }
 
-  .consoleDetailPanelHeader,
   .consoleOperationsBar {
     align-items: flex-start;
     flex-direction: column;

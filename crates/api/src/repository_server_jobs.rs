@@ -795,7 +795,7 @@ fn artifact_cleanup_internal_domains(domains: &[String]) -> Vec<String> {
     internal
 }
 
-async fn upsert_memory_server_artifact(
+pub(crate) async fn upsert_memory_server_artifact(
     memory: &crate::repository::MemoryState,
     artifact: NewServerArtifact,
     status: &str,

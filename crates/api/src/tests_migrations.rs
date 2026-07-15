@@ -120,10 +120,89 @@ async fn migration_run_validation_failure_creates_no_link_or_job() {
 }
 
 #[tokio::test]
-async fn migration_run_existing_link_returns_conflict_without_restore_job() {
+async fn migration_run_reuses_matching_existing_link_and_records_restore_job() {
     let repo = seeded_migration_repo().await;
     let source_backup_id = create_source_backup(&repo).await;
+    let (archive_path, archive_size_bytes, archive_sha256_hex) =
+        attach_source_backup_artifact(&repo, source_backup_id).await;
+    let session_id = Uuid::new_v4();
+    seed_completed_archive_upload(
+        &repo,
+        "rebuilt-client",
+        session_id,
+        &archive_path,
+        archive_size_bytes as i64,
+        &archive_sha256_hex,
+    )
+    .await;
     let restore_plan_id = create_restore_plan_record(&repo, source_backup_id).await;
+    let mut request = migration_run_request(restore_plan_id, source_backup_id);
+    bind_migration_archive(
+        &mut request,
+        session_id,
+        archive_path,
+        archive_size_bytes,
+        archive_sha256_hex,
+    );
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+
+    let (_, Json(existing_link)) = create_migration_link(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateMigrationLinkRequest {
+            restore_plan_id,
+            confirmed: true,
+            note: Some("run migration".to_string()),
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let (status, Json(response)) = create_migration_run(State(state), headers, Json(request))
+        .await
+        .unwrap();
+
+    assert_eq!(status, axum::http::StatusCode::CREATED);
+    assert_eq!(response.migration_link.id, existing_link.id);
+    assert_eq!(repo.list_migration_links(10).await.unwrap().len(), 1);
+    assert_eq!(
+        repo.list_jobs(10)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|job| job.command_type == "restore")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn migration_run_conflicting_existing_link_creates_no_restore_job() {
+    let repo = seeded_migration_repo().await;
+    let source_backup_id = create_source_backup(&repo).await;
+    let (archive_path, archive_size_bytes, archive_sha256_hex) =
+        attach_source_backup_artifact(&repo, source_backup_id).await;
+    let session_id = Uuid::new_v4();
+    seed_completed_archive_upload(
+        &repo,
+        "rebuilt-client",
+        session_id,
+        &archive_path,
+        archive_size_bytes as i64,
+        &archive_sha256_hex,
+    )
+    .await;
+    let restore_plan_id = create_restore_plan_record(&repo, source_backup_id).await;
+    let mut request = migration_run_request(restore_plan_id, source_backup_id);
+    bind_migration_archive(
+        &mut request,
+        session_id,
+        archive_path,
+        archive_size_bytes,
+        archive_sha256_hex,
+    );
     let state = test_state(repo.clone());
     let headers = crate::test_auth_headers(&state).await;
 
@@ -140,18 +219,19 @@ async fn migration_run_existing_link_returns_conflict_without_restore_job() {
     .await
     .unwrap();
 
-    let error = create_migration_run(
-        State(state),
-        headers,
-        Json(migration_run_request(restore_plan_id, source_backup_id)),
-    )
-    .await
-    .unwrap_err();
+    let error = create_migration_run(State(state), headers, Json(request))
+        .await
+        .unwrap_err();
 
     assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
-    assert_eq!(error.code, "migration_link_already_exists");
+    assert_eq!(error.code, "migration_link_conflicts_with_request");
     assert_eq!(repo.list_migration_links(10).await.unwrap().len(), 1);
-    assert_eq!(repo.list_jobs(10).await.unwrap().len(), 0);
+    assert!(!repo
+        .list_jobs(10)
+        .await
+        .unwrap()
+        .iter()
+        .any(|job| job.command_type == "restore"));
 }
 
 #[tokio::test]
@@ -419,6 +499,29 @@ fn migration_run_request(
             privilege_assertion: None,
         },
     }
+}
+
+fn bind_migration_archive(
+    request: &mut CreateMigrationRunRequest,
+    session_id: Uuid,
+    archive_path: String,
+    archive_size_bytes: u64,
+    archive_sha256_hex: String,
+) {
+    let Some(JobCommand::Restore {
+        archive_transfer_session_id,
+        archive_path: path,
+        archive_size_bytes: size,
+        archive_sha256_hex: hash,
+        ..
+    }) = request.job.operation.as_mut()
+    else {
+        panic!("migration test request must contain a restore operation");
+    };
+    *archive_transfer_session_id = session_id;
+    *path = Some(archive_path);
+    *size = Some(archive_size_bytes);
+    *hash = Some(archive_sha256_hex);
 }
 
 fn test_state(repo: Repository) -> AppState {

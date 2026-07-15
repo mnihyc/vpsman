@@ -223,9 +223,6 @@ pub(crate) async fn apply_schedule_now(
     }
     require_schedule_confirmed(request.confirmed)?;
     let schedule = state.repo.schedule_by_id(schedule_id).await?;
-    if !schedule.enabled {
-        return Err(ApiError::conflict("schedule_apply_now_requires_enabled"));
-    }
     verify_schedule_privilege_for_view(
         &state,
         "schedule.apply_now",

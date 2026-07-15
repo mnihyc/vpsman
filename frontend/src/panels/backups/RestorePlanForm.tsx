@@ -85,8 +85,16 @@ export function RestorePlanForm({
         )}
         <div className="restoreReadOnlyField">
           <span>Source scope</span>
-          <strong title={restoreScopeTitle(restoreIncludeConfig, restorePaths)}>
-            {restoreScopeLabel(restoreIncludeConfig, restorePaths)}
+          <strong
+            title={
+              restoreSourceId
+                ? restoreScopeTitle(restoreIncludeConfig, restorePaths)
+                : "Choose a backup artifact to inspect its recorded scope."
+            }
+          >
+            {restoreSourceId
+              ? restoreScopeLabel(restoreIncludeConfig, restorePaths)
+              : "Select source artifact"}
           </strong>
         </div>
         <div className="restoreReadOnlyField">
@@ -116,10 +124,14 @@ export function RestorePlanForm({
             className="primaryAction"
             disabled={
               pending ||
-              !privilegeReady ||
               !restoreSourceId ||
               !restoreTargetId ||
               !restoreDestinationRoot
+            }
+            title={
+              privilegeReady
+                ? "Review the frozen restore source and target"
+                : "Opens privilege unlock before preparing the restore review"
             }
             type="submit"
           >

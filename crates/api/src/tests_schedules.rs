@@ -486,12 +486,12 @@ async fn scheduled_partial_success_with_failed_target_counts_as_failure() {
 }
 
 #[tokio::test]
-async fn schedule_apply_now_uses_saved_schedule_without_advancing_next_run() {
+async fn schedule_apply_now_allows_disabled_schedule_without_advancing_next_run() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = schedule_test_operator();
     seed_unprivileged_agent(&repo, "client-a").await;
 
-    let mut request = shell_schedule_request("update-window", true);
+    let mut request = shell_schedule_request("update-window", false);
     request.selector_expression = "id:client-a".to_string();
     request.operation = JobCommand::UpdateAgent {
         artifact_url: "https://updates.example/vpsman-agent".to_string(),
@@ -521,6 +521,7 @@ async fn schedule_apply_now_uses_saved_schedule_without_advancing_next_run() {
         repo.schedule_by_id(schedule.id).await.unwrap().next_run_at,
         next_run_before
     );
+    assert!(!repo.schedule_by_id(schedule.id).await.unwrap().enabled);
 
     let jobs = repo.list_jobs(10).await.unwrap();
     assert_eq!(jobs.len(), 1);

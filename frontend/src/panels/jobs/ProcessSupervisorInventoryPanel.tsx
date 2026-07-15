@@ -1,7 +1,8 @@
 import { useCallback, useMemo, useState } from "react";
-import { FileText, RefreshCw, RotateCcw, Square, TerminalSquare } from "lucide-react";
+import { FileText, Plus, RefreshCw, RotateCcw, Square, TerminalSquare } from "lucide-react";
 import { ActionFeedback } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
+import { createJobTargetCount, waitForBulkJobTargets } from "../../bulkJobProgress";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
@@ -15,36 +16,47 @@ import {
   buildPrivilegeForJobOperation,
   type PrivilegeMaterial,
 } from "../../privilege";
+import { selectorExpressionForClientIds } from "../../searchExpression";
 import type { SupervisorAction } from "../jobDispatchModel";
 import type {
   CreateJobRequest,
   CreateJobResponse,
+  AgentView,
   JobOperation,
+  JobTargetRecord,
   ProcessSupervisorInventoryRecord,
 } from "../../types";
 import { formatCompactTime, formatFullTime, statusClass } from "../../utils";
 
 export function ProcessSupervisorInventoryPanel({
+  agents,
   clientLabel,
   inventory,
   loading,
   onCreateJob,
+  onLoadTargets,
   onOpenDispatchPreset,
   onOpenPrivilegeUnlock,
   onRefresh,
   privilegeMaterial,
 }: {
+  agents: AgentView[];
   clientLabel: (clientId: string) => string;
   inventory: ProcessSupervisorInventoryRecord[];
   loading: boolean;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
+  onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenDispatchPreset: (preset: JobDispatchPresetInput) => void;
   onOpenPrivilegeUnlock: () => void;
-  onRefresh: () => void;
+  onRefresh: () => void | Promise<void>;
   privilegeMaterial: PrivilegeMaterial | null;
 }) {
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionStatus, setActionStatus] = useState<string | null>(null);
+  const [actionWarning, setActionWarning] = useState(false);
   const [actionPending, setActionPending] = useState(false);
+  const [restartProcess, setRestartProcess] =
+    useState<ProcessSupervisorInventoryRecord | null>(null);
   const [stopProcess, setStopProcess] =
     useState<ProcessSupervisorInventoryRecord | null>(null);
   const runningCount = inventory.filter((row) => row.status === "running").length;
@@ -68,6 +80,8 @@ export function ProcessSupervisorInventoryPanel({
       const selectorExpression = `id:${row.client_id}`;
       const maxTimeoutSecs = 60;
       setActionError(null);
+      setActionWarning(false);
+      setActionStatus(`${action === "restart" ? "Restarting" : "Stopping"} ${row.name} on ${clientLabel(row.client_id)}...`);
       setActionPending(true);
       try {
         const { privilegeAssertion } = await buildPrivilegeForJobOperation({
@@ -78,7 +92,7 @@ export function ProcessSupervisorInventoryPanel({
           selectorExpression,
           maxTimeoutSecs,
         });
-        await onCreateJob({
+        const job = await onCreateJob({
           job_id: crypto.randomUUID(),
           selector_expression: selectorExpression,
           target_client_ids: [row.client_id],
@@ -93,20 +107,121 @@ export function ProcessSupervisorInventoryPanel({
           privileged: true,
           privilege_assertion: privilegeAssertion,
         });
+        setRestartProcess(null);
         setStopProcess(null);
-        onRefresh();
+        const verb = action === "restart" ? "Restarting" : "Stopping";
+        setActionStatus(`${verb} ${row.name} on ${clientLabel(row.client_id)}; waiting for the VPS...`);
+        const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
+          maxTimeoutSecs,
+          onProgress: (progress) => {
+            setActionStatus(
+              `${verb} ${row.name} on ${clientLabel(row.client_id)} · ${progress.terminal}/${progress.total} VPS reported`,
+            );
+          },
+          targetCount: createJobTargetCount(job),
+          targets: agents.filter((agent) => agent.id === row.client_id),
+        });
+        await onRefresh();
+        if (result.progress.completed < result.progress.total) {
+          const reason = result.progress.failureReasons?.[0]?.reason;
+          setActionError(
+            `${action === "restart" ? "Restart" : "Stop"} failed for ${row.name} on ${clientLabel(row.client_id)}${reason ? `: ${reason}` : "."}`,
+          );
+          setActionStatus(null);
+          return;
+        }
+        setActionStatus(
+          `${action === "restart" ? "Restarted" : "Stopped"} ${row.name} on ${clientLabel(row.client_id)}.`,
+        );
       } catch (error) {
         setActionError(
           error instanceof Error
             ? error.message
             : `Could not ${action} ${row.name}`,
         );
+        setActionWarning(false);
+        setActionStatus(null);
       } finally {
         setActionPending(false);
       }
     },
-    [onCreateJob, onOpenPrivilegeUnlock, onRefresh, privilegeMaterial],
+    [agents, clientLabel, onCreateJob, onLoadTargets, onOpenPrivilegeUnlock, onRefresh, privilegeMaterial],
   );
+
+  async function refreshProcessStatus() {
+    if (loading || actionPending) {
+      return;
+    }
+    if (agents.length === 0) {
+      setActionError("No VPS is available in the current scope.");
+      setActionStatus(null);
+      setActionWarning(false);
+      return;
+    }
+    if (!privilegeMaterial) {
+      setActionError("Unlock privilege before refreshing managed process status.");
+      setActionStatus(null);
+      setActionWarning(false);
+      onOpenPrivilegeUnlock();
+      return;
+    }
+    const targets = [...agents].sort((left, right) => left.id.localeCompare(right.id));
+    const clientIds = targets.map((agent) => agent.id);
+    const selectorExpression = selectorExpressionForClientIds(clientIds);
+    const operation = { name: null, type: "process_status" } as const;
+    const commandType = JOB_COMMAND_TYPE_BY_OPERATION_TYPE[operation.type];
+    const maxTimeoutSecs = 60;
+    setActionError(null);
+    setActionWarning(false);
+    setActionStatus(`Refreshing status on ${countPhrase(targets.length, "VPS", "VPS")}...`);
+    setActionPending(true);
+    try {
+      const { privilegeAssertion } = await buildPrivilegeForJobOperation({
+        clientIds,
+        commandType,
+        maxTimeoutSecs,
+        operation,
+        privilegeMaterial,
+        selectorExpression,
+      });
+      const job = await onCreateJob({
+        argv: [],
+        command: commandType,
+        confirmed: false,
+        destructive: false,
+        force_unprivileged: false,
+        job_id: crypto.randomUUID(),
+        max_timeout_secs: maxTimeoutSecs,
+        operation,
+        privileged: true,
+        privilege_assertion: privilegeAssertion,
+        selector_expression: selectorExpression,
+        target_client_ids: clientIds,
+      });
+      const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
+        maxTimeoutSecs,
+        targetCount: createJobTargetCount(job),
+        targets,
+      });
+      await onRefresh();
+      const incomplete = Math.max(
+        0,
+        result.progress.total - result.progress.completed,
+      );
+      setActionWarning(incomplete > 0);
+      setActionStatus(
+        incomplete > 0
+          ? `Status refreshed from ${result.progress.completed}/${result.progress.total} VPS; ${countPhrase(incomplete, "VPS did", "VPS did")} not complete successfully.`
+          : `Status refreshed from ${result.progress.completed}/${result.progress.total} VPS.`,
+      );
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Process status refresh failed");
+      setActionStatus(null);
+      setActionWarning(false);
+    } finally {
+      setActionPending(false);
+    }
+  }
   const renderProcessActions = useCallback(
     (row: ProcessSupervisorInventoryRecord) => (
       <span className="processRowActions" aria-label={`Process ${row.name} actions`}>
@@ -117,7 +232,7 @@ export function ProcessSupervisorInventoryPanel({
             event.stopPropagation();
             onOpenDispatchPreset(supervisorPreset(row, "logs"));
           }}
-          title="Open Dispatch with this VPS and process preselected for a log read"
+          title="Open a log request below this inventory with the VPS and process preselected"
           type="button"
         >
           <FileText size={13} />
@@ -129,11 +244,12 @@ export function ProcessSupervisorInventoryPanel({
           disabled={actionPending}
           onClick={(event) => {
             event.stopPropagation();
-            void executeProcessAction(row, "restart");
+            setActionError(null);
+            setRestartProcess(row);
           }}
           title={
             privilegeMaterial
-              ? "Restart immediately using the unlocked process privilege"
+              ? "Review this exact process restart"
               : "Unlock privilege before restarting this process"
           }
           type="button"
@@ -175,23 +291,26 @@ export function ProcessSupervisorInventoryPanel({
         ),
         header: "Process",
         id: "process",
-        minSize: 100,
+        minSize: 132,
         searchValue: (row) => `${row.name} ${clientLabel(row.client_id)} ${row.client_id} ${formatPid(row)}`,
-        size: 110,
+        size: 132,
         sortValue: (row) => row.name,
       },
       {
-        cell: (row) => (
-          <span className="historyPrimary">
-            <strong title={clientLabel(row.client_id)}>{clientLabel(row.client_id)}</strong>
-            <small>{row.client_id}</small>
-          </span>
-        ),
+        cell: (row) => {
+          const label = clientLabel(row.client_id);
+          return (
+            <span className="historyPrimary">
+              <strong title={label}>{processVpsName(label, row.client_id)}</strong>
+              <small>{row.client_id}</small>
+            </span>
+          );
+        },
         header: "VPS",
         id: "vps",
-        minSize: 112,
+        minSize: 124,
         searchValue: (row) => `${clientLabel(row.client_id)} ${row.client_id}`,
-        size: 120,
+        size: 132,
         sortValue: (row) => clientLabel(row.client_id),
       },
       {
@@ -199,20 +318,21 @@ export function ProcessSupervisorInventoryPanel({
           <span className="historyPrimary">
             {(() => {
               const state = processStateEvidence(row);
+              const observedStateDetail = `${processTimingEvidence(row).observedLabel}; ${state.detail}`;
               return (
                 <>
                   <span className={`status ${state.tone}`}>{state.label}</span>
-                  <small title={state.detail}>{state.detail}</small>
+                  <small title={observedStateDetail}>{formatCompactHealthEvidence(row)}</small>
                 </>
               );
             })()}
           </span>
         ),
-        header: "State",
+        header: "Observed state",
         id: "state",
-        minSize: 140,
+        minSize: 148,
         searchValue: (row) => `${processStateEvidence(row).label} ${processStateEvidence(row).detail} ${formatHealthEvidence(row)} ${formatRestartEvidence(row)}`,
-        size: 148,
+        size: 156,
         sortValue: (row) => processStateEvidence(row).label,
       },
       {
@@ -224,9 +344,9 @@ export function ProcessSupervisorInventoryPanel({
         ),
         header: "CPU",
         id: "cpu",
-        minSize: 72,
+        minSize: 92,
         searchValue: (row) => `${formatCpuPrimary(row)} ${formatCpuSecondary(row)} ${formatLimitEvidence(row.limit_effectiveness_status)}`,
-        size: 84,
+        size: 100,
         sortValue: (row) => row.cgroup_cpu_weight ?? -1,
       },
       {
@@ -255,9 +375,9 @@ export function ProcessSupervisorInventoryPanel({
         },
         header: "Uptime",
         id: "uptime",
-        minSize: 128,
+        minSize: 112,
         searchValue: (row) => `${processTimingEvidence(row).uptimeLabel} ${processTimingEvidence(row).detail}`,
-        size: 138,
+        size: 120,
         sortValue: (row) => processTimingEvidence(row).uptimeMs ?? -1,
       },
       {
@@ -272,9 +392,9 @@ export function ProcessSupervisorInventoryPanel({
         },
         header: "Restarts",
         id: "restarts",
-        minSize: 114,
+        minSize: 100,
         searchValue: (row) => `${processRestartEvidence(row).primary} ${processRestartEvidence(row).detail}`,
-        size: 122,
+        size: 108,
         sortValue: (row) => row.restart_attempts ?? 0,
       },
       {
@@ -289,9 +409,9 @@ export function ProcessSupervisorInventoryPanel({
         },
         header: "Last exit",
         id: "last_exit",
-        minSize: 106,
+        minSize: 100,
         searchValue: (row) => `${processLastExitEvidence(row).primary} ${processLastExitEvidence(row).detail}`,
-        size: 114,
+        size: 108,
         sortValue: (row) => row.last_exit_unix ?? -1,
       },
       {
@@ -299,8 +419,9 @@ export function ProcessSupervisorInventoryPanel({
         enableHiding: false,
         header: "Actions",
         id: "actions",
-        minSize: 172,
-        size: 182,
+        minSize: 124,
+        size: 132,
+        stickyEnd: true,
       },
     ],
     [clientLabel, renderProcessActions],
@@ -312,20 +433,58 @@ export function ProcessSupervisorInventoryPanel({
         <div>
           <h2>Process supervisor inventory</h2>
           <span>
-            {countPhrase(runningCount, "running process", "running processes")}, {countPhrase(desiredOnlyLimitCount, "desired-only limit")}, {countPhrase(restartedCount, "process restarted", "processes restarted")}
+            {countPhrase(runningCount, "observed running process", "observed running processes")}, {countPhrase(desiredOnlyLimitCount, "desired-only limit")}, {countPhrase(restartedCount, "process restarted", "processes restarted")}
           </span>
         </div>
-        <div className="processHeaderActions">
-          <button className="secondaryAction" disabled={loading} onClick={onRefresh} type="button">
-            <RefreshCw size={14} />
-            <span>Refresh</span>
-          </button>
+        <div className="headerActionStack">
+          <div className="processHeaderActions">
+            <button
+              className="primaryAction compactAction"
+              onClick={() =>
+                onOpenDispatchPreset({
+                  mode: "process_supervisor",
+                  supervisorAction: "start",
+                })
+              }
+              type="button"
+            >
+              <Plus size={14} />
+              <span>Start process</span>
+            </button>
+            <button
+              className="secondaryAction compactAction"
+              disabled={loading || actionPending || agents.length === 0}
+              onClick={() => void refreshProcessStatus()}
+              title={
+                agents.length > 0
+                  ? `Query managed process state on ${countPhrase(agents.length, "VPS", "VPS")}`
+                  : "No VPS is available in the current scope"
+              }
+              type="button"
+            >
+              <RefreshCw size={14} />
+              <span>Refresh status</span>
+            </button>
+          </div>
+          <ActionFeedback
+            className="localActionFeedback"
+            message={!stopProcess && !restartProcess ? actionError ?? actionStatus : null}
+            tone={
+              actionError
+                ? "danger"
+                : actionPending
+                  ? "progress"
+                  : actionWarning
+                    ? "warning"
+                    : "success"
+            }
+          />
         </div>
       </div>
       <div className="processSupervisorSummaryStrip" aria-label="Process supervisor health summary">
         <span>
           <strong>{runningCount} / {inventory.length}</strong>
-          <small>Running processes</small>
+          <small>Observed running</small>
         </span>
         <span className={desiredOnlyLimitCount > 0 ? "attention" : undefined}>
           <strong>{desiredOnlyLimitCount}</strong>
@@ -348,10 +507,37 @@ export function ProcessSupervisorInventoryPanel({
           <small>With log paths</small>
         </span>
       </div>
-      <ActionFeedback
-        className="localActionFeedback processActionFeedback"
-        message={!stopProcess ? actionError : null}
-        tone="danger"
+      <ConfirmationPrompt
+        confirmLabel="Restart process"
+        detail="Restarts this exact supervised process without changing its saved supervisor definition."
+        error={actionError && restartProcess ? actionError : undefined}
+        items={
+          restartProcess
+            ? [
+                { label: "Process", value: restartProcess.name },
+                {
+                  label: "VPS",
+                  value: clientLabel(restartProcess.client_id),
+                },
+                { label: "State", value: processStateEvidence(restartProcess).label },
+                { label: "Effect", value: "Submit one privileged process_restart job" },
+              ]
+            : []
+        }
+        onCancel={() => {
+          if (!actionPending) {
+            setRestartProcess(null);
+            setActionError(null);
+          }
+        }}
+        onConfirm={() => {
+          if (restartProcess) {
+            void executeProcessAction(restartProcess, "restart");
+          }
+        }}
+        open={Boolean(restartProcess)}
+        pending={actionPending}
+        title="Confirm process restart"
       />
       <ConfirmationPrompt
         confirmLabel="Stop process"
@@ -482,14 +668,6 @@ export function ProcessSupervisorInventoryPanel({
               <strong className="processEvidenceValue" title={row.stdout_log ?? undefined}>{row.stdout_log ?? "Not reported"}</strong>
               <span>stderr log</span>
               <strong className="processEvidenceValue" title={row.stderr_log ?? undefined}>{row.stderr_log ?? "Not reported"}</strong>
-              <span>Supervisor config</span>
-              <strong>Not reported by process supervisor API</strong>
-              <span>Resource history</span>
-              <strong>Not available yet; backend process time series for CPU, memory, restart history, and recent exits are not exposed.</strong>
-              <span>Row actions</span>
-              <strong>Logs open Dispatch for retained output. Restart submits directly after privilege unlock. Stop uses one confirmation on this page.</strong>
-              <span>Related jobs and alerts</span>
-              <strong>Source job is linked by raw ID in this detail view; alert links are not reported by the process supervisor API.</strong>
               <span>Started</span>
               <strong>{formatUnixTime(row.started_unix)}</strong>
               <span>Observed</span>
@@ -552,6 +730,14 @@ function formatHealthEvidence(row: ProcessSupervisorInventoryRecord): string {
   return `${limit}; ${restart}`;
 }
 
+function formatCompactHealthEvidence(row: ProcessSupervisorInventoryRecord): string {
+  const observed = processTimingEvidence(row).observedLabel.replace(/^Observed /, "");
+  const limits = formatCompactLimitEvidence(row.limit_effectiveness_status);
+  const attempts = row.restart_attempts ?? 0;
+  const restarts = attempts > 0 ? countPhrase(attempts, "restart") : "No restarts";
+  return `${observed} · ${limits} · ${restarts}`;
+}
+
 function formatRestartCount(attempts: number): string {
   return attempts === 1 ? "Restarted 1 time" : `Restarted ${attempts} times`;
 }
@@ -564,7 +750,7 @@ function processStateEvidence(row: ProcessSupervisorInventoryRecord): {
   const timing = processTimingEvidence(row);
   if (timing.tone === "warn") {
     return {
-      detail: `Backend state ${displayToken(row.status)}; ${timing.issueLabel ?? timing.detail}`,
+      detail: `Reported state ${displayToken(row.status)}; ${timing.issueLabel ?? timing.detail}`,
       label: "Timestamp inconsistent",
       tone: "warn",
     };
@@ -639,6 +825,16 @@ function formatLimitEvidence(status: string | null): string {
   return "Limit state not reported";
 }
 
+function formatCompactLimitEvidence(status: string | null): string {
+  if (status === "degraded_desired_only") {
+    return "Limits desired";
+  }
+  if (status === "enforced" || status === "enforced_or_not_requested") {
+    return "Limits OK";
+  }
+  return "Limits unknown";
+}
+
 function formatCgroupEvidence(row: ProcessSupervisorInventoryRecord): string | null {
   if (row.cgroup_status === "available") {
     const parts = [];
@@ -666,18 +862,23 @@ function formatPid(row: ProcessSupervisorInventoryRecord): string {
   return row.pid === null ? "PID not reported" : `PID ${row.pid}`;
 }
 
+function processVpsName(label: string, clientId: string): string {
+  const idSuffix = ` (${clientId})`;
+  return label.endsWith(idSuffix) ? label.slice(0, -idSuffix.length) : label;
+}
+
 function formatCpuPrimary(row: ProcessSupervisorInventoryRecord): string {
-  return row.cgroup_cpu_weight !== null ? String(row.cgroup_cpu_weight) : "Not reported";
+  return row.cgroup_cpu_weight !== null ? String(row.cgroup_cpu_weight) : "No data";
 }
 
 function formatCpuSecondary(row: ProcessSupervisorInventoryRecord): string {
   return row.cgroup_cpu_weight !== null
-    ? `CPU weight; ${formatLimitEvidence(row.limit_effectiveness_status)}`
-    : formatLimitEvidence(row.limit_effectiveness_status);
+    ? `Weight · ${formatCompactLimitEvidence(row.limit_effectiveness_status)}`
+    : formatCompactLimitEvidence(row.limit_effectiveness_status);
 }
 
 function formatMemoryPrimary(row: ProcessSupervisorInventoryRecord): string {
-  return row.cgroup_memory_current_bytes !== null ? formatBytes(row.cgroup_memory_current_bytes) : "Not reported";
+  return row.cgroup_memory_current_bytes !== null ? formatBytes(row.cgroup_memory_current_bytes) : "No data";
 }
 
 function formatProcessCardinality(row: ProcessSupervisorInventoryRecord): string {

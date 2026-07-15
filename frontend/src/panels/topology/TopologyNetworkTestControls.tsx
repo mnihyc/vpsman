@@ -39,6 +39,7 @@ import type {
   CreateJobRequest,
   CreateJobResponse,
   JobOperation,
+  JobOutputRecord,
   JobTargetRecord,
   NetworkObservationTrendRecord,
   TunnelEndpointSide,
@@ -65,6 +66,7 @@ export function TopologyNetworkTestControls({
   networkTrends,
   onCreateJob,
   onLoadNetworkTrends,
+  onLoadOutputs,
   onLoadTargets,
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
@@ -78,6 +80,7 @@ export function TopologyNetworkTestControls({
   networkTrends: NetworkObservationTrendRecord[];
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onLoadNetworkTrends: () => Promise<void>;
+  onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails?: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
@@ -179,12 +182,12 @@ export function TopologyNetworkTestControls({
   const lastRunSummary = visibleJobProgress
     ? `${actionLabel(lastAction)} ${shortId(visibleJobProgress.jobId)} ${jobProgress ? "in progress" : bulkOutcomeSummary(visibleJobProgress)}`
     : lastJob
-      ? `${actionLabel(lastAction)} ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} targets`
+      ? `${actionLabel(lastAction)} ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} target${lastJob.target_count === 1 ? "" : "s"}`
       : "No local network test run in this view";
   const networkHeaderStatus = selectedPlan && !selectedPlan.enabled
     ? "Plan disabled; inspect only"
     : privilegeMaterial
-      ? "Ready"
+      ? "Dispatch ready"
       : "Inspect available; unlock for probe/speed";
   const networkTestFeedbackMessage =
     actionError ?? (reviewPending ? `Preparing ${actionLabel(lastAction).toLowerCase()} review` : null);
@@ -491,6 +494,7 @@ export function TopologyNetworkTestControls({
     );
     try {
       const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
+        onLoadOutputs,
         onProgress: setJobProgress,
         targetCount,
         targets,
@@ -887,6 +891,7 @@ export function TopologyNetworkTestControls({
         />
         {networkSnapshot === null && visibleJobProgress && (
           <ExecutionResultPanel
+            context={`Network ${actionLabel(lastAction).toLowerCase()}`}
             loading={jobProgress !== null}
             onClearResults={clearExecutionResults}
             onOpenJobDetails={onOpenJobDetails}

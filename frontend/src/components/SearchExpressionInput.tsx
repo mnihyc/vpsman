@@ -13,7 +13,6 @@ import {
   type MouseEvent,
   type Ref,
   type SyntheticEvent,
-  type WheelEvent,
 } from "react";
 import { createPortal } from "react-dom";
 import type { AgentView } from "../types";
@@ -150,6 +149,30 @@ export function SearchExpressionInput({
     setCaretIndex((current) => Math.min(current, value.length));
   }, [value]);
 
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+    const handleWheel = (event: globalThis.WheelEvent) => {
+      const editor = editorRef.current;
+      const preview = previewRef.current;
+      const primaryView = preview ?? editor;
+      if (!primaryView || !scrollEditorByWheelDelta(primaryView, event.deltaX, event.deltaY)) {
+        return;
+      }
+      if (preview && editor) {
+        editor.scrollLeft = Math.min(
+          editor.scrollWidth - editor.clientWidth,
+          preview.scrollLeft,
+        );
+      }
+      event.preventDefault();
+    };
+    container.addEventListener("wheel", handleWheel, { passive: false });
+    return () => container.removeEventListener("wheel", handleWheel);
+  }, []);
+
   function bindEditor(element: HTMLInputElement | null) {
     editorRef.current = element;
     assignRef(inputRef, element);
@@ -245,36 +268,6 @@ export function SearchExpressionInput({
     syncInputCaret(event.currentTarget);
   }
 
-  function handleWheel(event: WheelEvent<HTMLInputElement>) {
-    if (scrollExpressionViewsByWheelDelta(event.deltaX, event.deltaY)) {
-      event.preventDefault();
-    }
-  }
-
-  function handleContainerWheel(event: WheelEvent<HTMLDivElement>) {
-    if (event.defaultPrevented) {
-      return;
-    }
-    if (scrollExpressionViewsByWheelDelta(event.deltaX, event.deltaY)) {
-      event.preventDefault();
-    }
-  }
-
-  function scrollExpressionViewsByWheelDelta(deltaX: number, deltaY: number): boolean {
-    const editor = editorRef.current;
-    const preview = previewRef.current;
-    const editorScrolled = editor
-      ? scrollEditorByWheelDelta(editor, deltaX, deltaY)
-      : false;
-    const previewScrolled = preview
-      ? scrollEditorByWheelDelta(preview, deltaX, deltaY)
-      : false;
-    if (editor && preview) {
-      preview.scrollLeft = editor.scrollLeft;
-    }
-    return editorScrolled || previewScrolled;
-  }
-
   function applySuggestion(suggestion: CompletionOption) {
     const nextValue = applyCompletion(value, completion, suggestion);
     const nextCaretIndex = completion.start + suggestion.value.length;
@@ -290,7 +283,6 @@ export function SearchExpressionInput({
         hasTokens ? "hasTokens" : "empty"
       }`.trim()}
       ref={containerRef}
-      onWheel={handleContainerWheel}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) {
           event.preventDefault();
@@ -351,7 +343,6 @@ export function SearchExpressionInput({
           onMouseUp={handlePointerUpdate}
           onPaste={handlePaste}
           onSelect={handleSelectionUpdate}
-          onWheel={handleWheel}
           placeholder={placeholder}
           ref={bindEditor}
           role="searchbox"
@@ -433,7 +424,7 @@ function SearchExpressionTokenView({
     return <span className="searchExpressionOperator">{token.raw}</span>;
   }
   return (
-    <span className="searchExpressionChip" title={agents ? termMatchTitle(token, agents, expression) : token.raw}>
+    <span className="searchExpressionChip" title={agents ? termMatchTitle(token, agents) : token.raw}>
       <span>{token.raw}</span>
       <button
         aria-label={`Remove ${token.raw}`}

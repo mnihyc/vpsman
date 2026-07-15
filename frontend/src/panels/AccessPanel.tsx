@@ -15,6 +15,7 @@ import {
   Fingerprint,
   KeyRound,
   LockKeyhole,
+  Plus,
   RefreshCw,
   Save,
   ShieldCheck,
@@ -26,6 +27,7 @@ import {
 } from "lucide-react";
 import { ActionFeedback } from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
+import { AdminRoleBoundary } from "../components/RoleBoundary";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
@@ -134,6 +136,7 @@ type AccessPanelProps = {
   apiToken: string;
   error: string | null;
   gatewaySessions: GatewaySessionRecord[];
+  initialIdentityWorkflow: "register" | null;
   lastLiveEvent: string;
   loading: boolean;
   onClearSession: () => void;
@@ -153,6 +156,7 @@ type AccessPanelProps = {
     privilegeAssertion: PrivilegeAssertion,
   ) => Promise<void>;
   onDisableTotp: (password: string, code: string) => Promise<void>;
+  onInitialIdentityWorkflowConsumed: () => void;
   onOpenPrivilegeUnlock: () => void;
   onOpenSystemConfig: () => void;
   onOpenSystemSessions: () => void;
@@ -285,6 +289,7 @@ export function AccessPanel({
   apiToken,
   error,
   gatewaySessions,
+  initialIdentityWorkflow,
   lastLiveEvent,
   loading,
   onClearSession,
@@ -292,6 +297,7 @@ export function AccessPanel({
   onConfirmTotp,
   onCreateOperator,
   onDisableTotp,
+  onInitialIdentityWorkflowConsumed,
   onOpenPrivilegeUnlock,
   onOpenSystemConfig,
   onOpenSystemSessions,
@@ -321,6 +327,7 @@ export function AccessPanel({
   const identityFormRef = useRef<HTMLFormElement | null>(null);
   const revokeFormRef = useRef<HTMLFormElement | null>(null);
   const identityWorkflowRef = useRef<HTMLElement | null>(null);
+  const identityWorkflowIntentHandledRef = useRef(false);
   const [activeSubpage, setActiveSubpage] = useState<AccessSubpage>(
     accessSubpageFromRoute(routeSubpage),
   );
@@ -344,9 +351,14 @@ export function AccessPanel({
   const [identityPending, setIdentityPending] = useState(false);
   const [identityReviewPending, setIdentityReviewPending] = useState(false);
   const [identityError, setIdentityError] = useState<string | null>(null);
+  const [generatedPublicKeyHex, setGeneratedPublicKeyHex] = useState<
+    string | null
+  >(null);
   const [privateKeyHex, setPrivateKeyHex] = useState<string | null>(null);
   const [createdIdentity, setCreatedIdentity] =
     useState<AgentIdentityView | null>(null);
+  const [createdIdentityPrivateKeyHex, setCreatedIdentityPrivateKeyHex] =
+    useState<string | null>(null);
   const [revokeClientId, setRevokeClientId] = useState("");
   const [revokeReason, setRevokeReason] = useState("");
   const [revokePending, setRevokePending] = useState(false);
@@ -406,7 +418,8 @@ export function AccessPanel({
       : "recommended account hardening";
   const totpFeedbackMessage = totpError ?? (totpPending ? "Updating TOTP" : null);
   const totpFeedbackTone = totpError ? "danger" : "progress";
-  const gatewayInstallDefaultsNeedReview = activeGatewaySessions === 0;
+  const gatewayInstallDefaultsNeedReview =
+    canManageOperators && activeGatewaySessions === 0;
   const activeOperatorSessions = operatorSessions.filter(
     isOperatorSessionActive,
   ).length;
@@ -437,23 +450,24 @@ export function AccessPanel({
     : apiToken
       ? `This browser has a local API token loaded; console stream ${wsState || "unknown"}. Bearer-session inventory is separate.`
       : "This browser has no loaded operator or local API token; bearer-session inventory cannot prove an active console.";
-  const bearerSessionValue =
-    operatorSessions.length === 0
+  const bearerSessionValue = canManageOperators
+    ? operatorSessions.length === 0
       ? "0 listed"
-      : `${activeOperatorSessions} active / ${expiredOperatorSessions} expired`;
-  const bearerSessionDetail =
-    operatorSessions.length === 0
+      : `${activeOperatorSessions} active / ${expiredOperatorSessions} expired`
+    : "Admin only";
+  const bearerSessionDetail = canManageOperators
+    ? operatorSessions.length === 0
       ? "No API bearer-session inventory is listed for this operator account."
-      : `${activeOperatorSessions} active API bearer session${activeOperatorSessions === 1 ? "" : "s"} after expiry validation; current bearer record ${currentBearerSessionState}. Console, privilege, terminal, and gateway scopes are separate.`;
+      : `${activeOperatorSessions} active API bearer session${activeOperatorSessions === 1 ? "" : "s"} after expiry validation; current bearer record ${currentBearerSessionState}. Console, privilege, terminal, and gateway scopes are separate.`
+    : "Bearer-session inventory includes other human operators and is intentionally visible only to admins. This does not mean that zero sessions exist.";
   const terminalSessionDetail =
     terminalSessions.length === 0
       ? "No terminal session records are loaded; terminal shells are managed in Remote and audited separately."
       : `${replayableTerminalSessions} replayable terminal session${replayableTerminalSessions === 1 ? "" : "s"}; shell streams stay in Remote and audit evidence.`;
-  const canUpsertIdentity =
+  const identityDraftReady =
     canManageOperators &&
     !identityPending &&
     !identityReviewPending &&
-    Boolean(privilegeMaterial) &&
     identityClientId.trim().length > 0 &&
     isFixedHex32(identityPublicKeyHex);
   const canRevokeClientKey =
@@ -652,6 +666,19 @@ export function AccessPanel({
     setActiveSubpage(accessSubpageFromRoute(routeSubpage));
   }, [routeSubpage]);
 
+  useEffect(() => {
+    if (initialIdentityWorkflow === null) {
+      identityWorkflowIntentHandledRef.current = false;
+      return;
+    }
+    if (identityWorkflowIntentHandledRef.current) {
+      return;
+    }
+    identityWorkflowIntentHandledRef.current = true;
+    prepareNewIdentity();
+    onInitialIdentityWorkflowConsumed();
+  }, [initialIdentityWorkflow, onInitialIdentityWorkflowConsumed]);
+
   function openAccessSubpage(subpage: AccessSubpage) {
     if (subpage !== "VPS identities") {
       setIdentityWorkflow(null);
@@ -712,8 +739,10 @@ export function AccessPanel({
     setIdentityPublicKeyHex("");
     setIdentityDisplayName("");
     setIdentityTags("");
+    setGeneratedPublicKeyHex(null);
     setPrivateKeyHex(null);
     setCreatedIdentity(null);
+    setCreatedIdentityPrivateKeyHex(null);
     setIdentityError(null);
     openAccessSubpage("VPS identities");
     scrollIdentityWorkflowSoon();
@@ -728,8 +757,10 @@ export function AccessPanel({
     setIdentityPublicKeyHex("");
     setIdentityDisplayName("");
     setIdentityTags("");
+    setGeneratedPublicKeyHex(null);
     setPrivateKeyHex(null);
     setCreatedIdentity(null);
+    setCreatedIdentityPrivateKeyHex(null);
     setIdentityError(null);
     openAccessSubpage("VPS identities");
     scrollIdentityWorkflowSoon();
@@ -813,7 +844,10 @@ export function AccessPanel({
   async function handleGenerateKeypair() {
     try {
       const keypair = await generateNoiseKeypair();
+      setCreatedIdentity(null);
+      setCreatedIdentityPrivateKeyHex(null);
       setIdentityPublicKeyHex(keypair.publicKeyHex);
+      setGeneratedPublicKeyHex(keypair.publicKeyHex);
       setPrivateKeyHex(keypair.privateKeyHex);
       setIdentityError(null);
     } catch {
@@ -821,6 +855,15 @@ export function AccessPanel({
         "Key generation failed. Web Crypto X25519 JWK export is unavailable.",
       );
     }
+  }
+
+  function beginAnotherIdentityRegistration() {
+    prepareNewIdentity();
+    window.requestAnimationFrame(() => {
+      identityFormRef.current
+        ?.querySelector<HTMLElement>("input, textarea, button")
+        ?.focus({ preventScroll: true });
+    });
   }
 
   function handleCopyPrivateKey() {
@@ -832,12 +875,12 @@ export function AccessPanel({
   async function requestIdentityImport(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const clientId = identityClientId.trim();
-    if (!canUpsertIdentity) {
-      setIdentityError(
-        privilegeMaterial
-          ? "Client ID and 64-hex public key are required"
-          : "Privilege vault unlock is required",
-      );
+    if (!identityDraftReady) {
+      setIdentityError("Client ID and 64-hex public key are required");
+      return;
+    }
+    if (!privilegeMaterial) {
+      onOpenPrivilegeUnlock();
       return;
     }
     const reviewGeneration = captureReviewGeneration();
@@ -890,6 +933,11 @@ export function AccessPanel({
     setIdentityPending(true);
     setIdentityError(null);
     try {
+      const boundPrivateKeyHex =
+        !snapshot.replaceExistingKey &&
+        generatedPublicKeyHex?.toLowerCase() === snapshot.publicKeyHex
+          ? privateKeyHex
+          : null;
       const response = await onUpsertAgentIdentity({
         client_id: snapshot.clientId,
         client_public_key_hex: snapshot.publicKeyHex,
@@ -900,10 +948,13 @@ export function AccessPanel({
         privilege_assertion: snapshot.privilegeAssertion,
       });
       setCreatedIdentity(response);
+      setCreatedIdentityPrivateKeyHex(boundPrivateKeyHex);
       setIdentityClientId("");
       setIdentityPublicKeyHex("");
       setIdentityDisplayName("");
       setIdentityTags("");
+      setGeneratedPublicKeyHex(null);
+      setPrivateKeyHex(null);
       setIdentityMode("register");
       setIdentitySnapshot(null);
       setPendingConfirmation(null);
@@ -1011,7 +1062,7 @@ export function AccessPanel({
           value: "Recommended",
         }
       : null,
-    expiredOperatorSessions > 0
+    canManageOperators && expiredOperatorSessions > 0
       ? {
           action: "Manage sessions",
           detail: `${expiredOperatorSessions} listed bearer session${expiredOperatorSessions === 1 ? "" : "s"} expired and are excluded from active-session counts.`,
@@ -1022,7 +1073,7 @@ export function AccessPanel({
           value: `${expiredOperatorSessions} expired`,
         }
       : null,
-    blockedOrPendingClientCount > 0
+    canManageOperators && blockedOrPendingClientCount > 0
       ? {
           action: "Open identities",
           detail:
@@ -1046,17 +1097,6 @@ export function AccessPanel({
           value: "Review",
         }
       : null,
-    privilegeMaterial
-      ? null
-      : {
-          action: "Unlock",
-          detail: "No saved local vault; enter privilege secret when needed.",
-          icon: <LockKeyhole size={16} />,
-          label: "Privilege state",
-          onClick: () => openAccessSubpage("Privilege vault"),
-          tone: vaultAvailable ? "neutral" : "attention",
-          value: vaultState,
-        },
   ];
   const accessRequiredActions = accessRequiredActionCandidates.filter(
     (item): item is AccessOverviewItem => Boolean(item),
@@ -1065,24 +1105,37 @@ export function AccessPanel({
   const accessResponsibilityRows: AccessOverviewItem[] = [
     {
       action: "Open Operators",
-      detail: `${operators.length} operator account${operators.length === 1 ? "" : "s"}; MFA is ${adminMfaRisk ? "recommended for this admin" : "covered by loaded policy evidence"}. Bearer sessions are listed under Session scopes.`,
+      detail: canManageOperators
+        ? `${operators.length} operator account${operators.length === 1 ? "" : "s"}; MFA is ${adminMfaRisk ? "recommended for this admin" : "covered by loaded policy evidence"}. Bearer sessions are listed under Session scopes.`
+        : "Operator inventory and account governance are intentionally visible only to admins. No count is inferred from unavailable data.",
       icon: <UsersRound size={16} />,
       label: "Operators",
       onClick: () => openAccessSubpage("Operators"),
-      tone:
-        operators.length === 0 || adminMfaRisk
+      tone: canManageOperators
+        ? operators.length === 0 || adminMfaRisk
           ? "attention"
-          : "ready",
-      value: `${operators.length} operators`,
+          : "ready"
+        : "neutral",
+      value: canManageOperators
+        ? `${operators.length} operator${operators.length === 1 ? "" : "s"}`
+        : "Admin only",
     },
     {
       action: "Open identities",
-      detail: `${keyLifecycleReport?.revocation_count ?? clientKeyRevocations.length} revocation records; ${revokedClientCount} current keys blocked.`,
+      detail: canManageOperators
+        ? `${keyLifecycleReport?.revocation_count ?? clientKeyRevocations.length} revocation records; ${revokedClientCount} current keys blocked.`
+        : "VPS public-key registration, rotation, and revocation inventory are intentionally visible only to admins.",
       icon: <Fingerprint size={16} />,
       label: "VPS identities",
       onClick: () => openAccessSubpage("VPS identities"),
-      tone: blockedOrPendingClientCount > 0 ? "attention" : "ready",
-      value: `${keyLifecycleReport?.direct_identity_client_count ?? lifecycleClients.length} registered`,
+      tone: canManageOperators
+        ? blockedOrPendingClientCount > 0
+          ? "attention"
+          : "ready"
+        : "neutral",
+      value: canManageOperators
+        ? `${keyLifecycleReport?.direct_identity_client_count ?? lifecycleClients.length} registered`
+        : "Admin only",
     },
   ];
 
@@ -1102,10 +1155,11 @@ export function AccessPanel({
       icon: <Clock size={16} />,
       label: "API bearer sessions",
       onClick: onOpenSystemSessions,
-      tone:
-        operatorSessions.length === 0 || expiredOperatorSessions > 0
+      tone: canManageOperators
+        ? operatorSessions.length === 0 || expiredOperatorSessions > 0
           ? "attention"
-          : "ready",
+          : "ready"
+        : "neutral",
       value: bearerSessionValue,
     },
     {
@@ -1137,7 +1191,9 @@ export function AccessPanel({
       detail:
         activeGatewaySessions > 0
           ? `${gatewaySessions.length} recent gateway sessions; install defaults are owned by Suite Config.`
-          : "No active gateway sessions. Configure gateway endpoint and server key in Suite Config.",
+          : canManageOperators
+            ? "No active gateway sessions. Configure gateway endpoint and server key in Suite Config."
+            : "No active gateway sessions are visible. An admin manages shared gateway endpoint and server-key defaults in Suite Config.",
       icon: <Wifi size={16} />,
       label: "Gateway sessions",
       onClick: () => openAccessSubpage("Gateway sessions"),
@@ -1185,22 +1241,31 @@ export function AccessPanel({
           ))}
         </nav>
 
-        {activeSubpage === "Operators" && (
-          <SystemUsersPanel
-            authEvents={operatorAuthEvents}
-            currentOperator={operator}
-            onClearOperatorTotp={onClearOperatorTotp}
-            onCreateOperator={onCreateOperator}
-            onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
-            onResetOperatorPassword={onResetOperatorPassword}
-            onRevokeOperatorSession={onRevokeOperatorSession}
-            onSetOperatorStatus={onSetOperatorStatus}
-            onUpdateOperator={onUpdateOperator}
-            operators={operators}
-            privilegeMaterial={privilegeMaterial}
-            sessions={operatorSessions}
-          />
-        )}
+        {activeSubpage === "Operators" &&
+          (canManageOperators ? (
+            <SystemUsersPanel
+              authEvents={operatorAuthEvents}
+              currentOperator={operator}
+              onClearOperatorTotp={onClearOperatorTotp}
+              onCreateOperator={onCreateOperator}
+              onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+              onResetOperatorPassword={onResetOperatorPassword}
+              onRevokeOperatorSession={onRevokeOperatorSession}
+              onSetOperatorStatus={onSetOperatorStatus}
+              onUpdateOperator={onUpdateOperator}
+              operators={operators}
+              privilegeMaterial={privilegeMaterial}
+              sessions={operatorSessions}
+            />
+          ) : (
+            <div className="workspaceSection">
+              <AdminRoleBoundary
+                currentRole={operator?.role}
+                detail="Operator inventory, MFA posture, role grants, and bearer-session governance are intentionally visible only to admins."
+                title="Operator accounts"
+              />
+            </div>
+          ))}
 
         {activeSubpage === "Overview" && (
           <div className="workspaceSection accessOverviewFocus">
@@ -1227,9 +1292,9 @@ export function AccessPanel({
                   <span>
                     <strong>No immediate access actions</strong>
                     <small>
-                      Operators, sessions, identities, gateway, and privilege
-                      state have no visible critical warnings in the loaded
-                      evidence.
+                      {canManageOperators
+                        ? "Operators, sessions, identities, gateway, and privilege state have no visible critical warnings in the loaded evidence."
+                        : "No action is required in the access evidence visible to this role. Admin-only inventories are not counted as empty or healthy."}
                     </small>
                   </span>
                 </div>
@@ -1339,6 +1404,7 @@ export function AccessPanel({
                       <span>Current password</span>
                       <input
                         aria-label="TOTP password"
+                        autoComplete="current-password"
                         onChange={(event) => setTotpPassword(event.target.value)}
                         type="password"
                         value={totpPassword}
@@ -1348,6 +1414,8 @@ export function AccessPanel({
                       <span>Authenticator code</span>
                       <input
                         aria-label="TOTP code"
+                        autoComplete="one-time-code"
+                        inputMode="numeric"
                         onChange={(event) => setTotpCode(event.target.value)}
                         value={totpCode}
                       />
@@ -1391,6 +1459,7 @@ export function AccessPanel({
                       <span>Current password</span>
                       <input
                         aria-label="TOTP password"
+                        autoComplete="current-password"
                         onChange={(event) => setTotpPassword(event.target.value)}
                         type="password"
                         value={totpPassword}
@@ -1421,7 +1490,9 @@ export function AccessPanel({
                       <span>Authenticator code</span>
                       <input
                         aria-label="TOTP code"
+                        autoComplete="one-time-code"
                         disabled={!totpSetup}
+                        inputMode="numeric"
                         onChange={(event) => setTotpCode(event.target.value)}
                         value={totpCode}
                       />
@@ -1458,7 +1529,7 @@ export function AccessPanel({
           </div>
         )}
 
-        {activeSubpage === "VPS identities" && (
+        {activeSubpage === "VPS identities" && canManageOperators && (
           <div className="workspaceSection accessTableStack">
             <section className="controlPanel">
               <div className="sectionHeader compact">
@@ -1580,10 +1651,23 @@ export function AccessPanel({
           </div>
         )}
 
+        {activeSubpage === "VPS identities" && !canManageOperators && (
+          <div className="workspaceSection">
+            <AdminRoleBoundary
+              currentRole={operator?.role}
+              detail="VPS key registration, rotation, revocation, and private install-command handoff are intentionally visible only to admins."
+              title="VPS identities"
+            />
+          </div>
+        )}
+
         {activeSubpage === "Gateway sessions" && (
           <div className="workspaceSection">
             {gatewaySessions.length === 0 ? (
-              <GatewaySessionEmptyState onOpenGatewaySettings={onOpenSystemConfig} />
+              <GatewaySessionEmptyState
+                canConfigure={canManageOperators}
+                onOpenGatewaySettings={onOpenSystemConfig}
+              />
             ) : (
               <section className="controlPanel">
                 <div className="sectionHeader compact">
@@ -1626,6 +1710,7 @@ export function AccessPanel({
           activeSubpage === "Operators" ||
           activeSubpage === "Gateway sessions" ||
           activeSubpage === "Privilege vault" ||
+          !canManageOperators ||
           (activeSubpage === "VPS identities" && identityWorkflow === null)
         }
         ref={identityWorkflowRef}
@@ -1673,11 +1758,21 @@ export function AccessPanel({
             identityWorkflow === "revoke"
           }
         >
-          <h2>{identityMode === "rotate" ? "Rotate key" : "Register VPS"}</h2>
+          <h2>
+            {createdIdentity
+              ? "VPS registered"
+              : identityMode === "rotate"
+                ? "Rotate key"
+                : "Register VPS"}
+          </h2>
           <span>
-            {identityMode === "rotate"
-              ? "Replace the selected VPS public key"
-              : "Generate a keypair or import a public key"}
+            {createdIdentity
+              ? createdIdentityPrivateKeyHex
+                ? "Copy this VPS install command before starting another registration"
+                : "Registration is complete; use the matching private key from your secure source"
+              : identityMode === "rotate"
+                ? "Replace the selected VPS public key"
+                : "Generate a keypair or import a public key"}
           </span>
         </div>
         {activeSubpage === "VPS identities" &&
@@ -1699,164 +1794,195 @@ export function AccessPanel({
           onSubmit={requestIdentityImport}
           ref={identityFormRef}
         >
-          <div className="formNote identityFormGuide">
-            <strong>
-              {identityMode === "rotate"
-                ? "Rotation keeps the VPS identity and replaces only the key."
-                : "Register a VPS identity before installing or reconnecting the agent."}
-            </strong>
-            <span>
-              Generate a keypair for a new install, or paste a pre-generated
-              agent public key. Private key material is shown once and is never
-              saved by the panel.
-            </span>
-          </div>
-          <label>
-            <span>VPS client ID</span>
-            <input
-              aria-label="Agent identity client ID"
-              disabled={!canManageOperators || identityPending}
-              onChange={(event) => {
-                setIdentityClientId(event.target.value);
-                clearIdentityReview();
-              }}
-              placeholder={
-                identityMode === "rotate"
-                  ? "existing VPS ID"
-                  : nextIdentityClientId
-              }
-              value={identityClientId}
-            />
-            <small className="fieldHelp">
-              {identityMode === "rotate"
-                ? "Use the existing VPS ID. Only the current public key is replaced."
-                : `Defaults to the next numerical VPS ID (${nextIdentityClientId}). Editable for imported or legacy string IDs.`}
-            </small>
-          </label>
-          <label className="wideField">
-            <span>Noise public key</span>
-            <textarea
-              aria-label="Agent identity public key hex"
-              disabled={!canManageOperators || identityPending}
-              onChange={(event) => {
-                setIdentityPublicKeyHex(event.target.value);
-                clearIdentityReview();
-              }}
-              placeholder="64 hex characters"
-              rows={3}
-              value={identityPublicKeyHex}
-            />
-            <small className="fieldHelp">
-              64 hex characters. Use Generate keypair for a new install, or
-              paste the agent public key for a pre-generated identity.
-            </small>
-            <button
-              className="secondaryAction compact"
-              disabled={!canManageOperators || identityPending}
-              onClick={() => {
-                clearIdentityReview();
-                void handleGenerateKeypair();
-              }}
-              type="button"
-            >
-              <KeyRound size={15} />
-              Generate keypair
-            </button>
-          </label>
-          {privateKeyHex && (
-            <div className="inlineSecret">
-              <strong>Private key - shown once</strong>
-              <div className="secretRow">
+          {!createdIdentity && (
+            <>
+              <div className="formNote identityFormGuide">
+                <strong>
+                  {identityMode === "rotate"
+                    ? "Rotation keeps the VPS identity and replaces only the key."
+                    : "Register a VPS identity before installing or reconnecting the agent."}
+                </strong>
+                <span>
+                  Generate a keypair for a new install, or paste a pre-generated
+                  agent public key. Private key material is shown once and is
+                  never saved by the panel.
+                </span>
+              </div>
+              <label>
+                <span>VPS client ID</span>
                 <input
-                  aria-label="Agent identity private key"
-                  className="monospace"
-                  readOnly
-                  value={privateKeyHex}
+                  aria-label="Agent identity client ID"
+                  disabled={!canManageOperators || identityPending}
+                  onChange={(event) => {
+                    setIdentityClientId(event.target.value);
+                    clearIdentityReview();
+                  }}
+                  placeholder={
+                    identityMode === "rotate"
+                      ? "existing VPS ID"
+                      : nextIdentityClientId
+                  }
+                  value={identityClientId}
                 />
+                <small className="fieldHelp">
+                  {identityMode === "rotate"
+                    ? "Use the existing VPS ID. Only the current public key is replaced."
+                    : `Defaults to the next numerical VPS ID (${nextIdentityClientId}). Editable for imported or legacy string IDs.`}
+                </small>
+              </label>
+              <label className="wideField">
+                <span>Noise public key</span>
+                <textarea
+                  aria-label="Agent identity public key hex"
+                  disabled={!canManageOperators || identityPending}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setIdentityPublicKeyHex(value);
+                    if (
+                      generatedPublicKeyHex &&
+                      value.trim().toLowerCase() !==
+                        generatedPublicKeyHex.toLowerCase()
+                    ) {
+                      setGeneratedPublicKeyHex(null);
+                      setPrivateKeyHex(null);
+                    }
+                    clearIdentityReview();
+                  }}
+                  placeholder="64 hex characters"
+                  rows={3}
+                  value={identityPublicKeyHex}
+                />
+                <small className="fieldHelp">
+                  64 hex characters. Use Generate keypair for a new install, or
+                  paste the agent public key for a pre-generated identity.
+                </small>
                 <button
                   className="secondaryAction compact"
-                  onClick={handleCopyPrivateKey}
+                  disabled={!canManageOperators || identityPending}
+                  onClick={() => {
+                    clearIdentityReview();
+                    void handleGenerateKeypair();
+                  }}
                   type="button"
                 >
-                  <Copy size={15} />
-                  Copy
+                  <KeyRound size={15} />
+                  Generate keypair
                 </button>
-              </div>
-              <small>
-                Store this key securely. It is not saved by the panel and cannot
-                be recovered.
-              </small>
-            </div>
+              </label>
+              {privateKeyHex && (
+                <div className="inlineSecret">
+                  <strong>Private key - shown once</strong>
+                  <div className="secretRow">
+                    <input
+                      aria-label="Agent identity private key"
+                      className="monospace"
+                      readOnly
+                      value={privateKeyHex}
+                    />
+                    <button
+                      className="secondaryAction compact"
+                      onClick={handleCopyPrivateKey}
+                      type="button"
+                    >
+                      <Copy size={15} />
+                      Copy
+                    </button>
+                  </div>
+                  <small>
+                    Store this key securely. It is not saved by the panel and
+                    cannot be recovered.
+                  </small>
+                </div>
+              )}
+              <label>
+                <span>Display name</span>
+                <input
+                  aria-label="Agent identity display name"
+                  disabled={
+                    !canManageOperators ||
+                    identityPending ||
+                    identityMode === "rotate"
+                  }
+                  onChange={(event) => {
+                    setIdentityDisplayName(event.target.value);
+                    clearIdentityReview();
+                  }}
+                  placeholder={
+                    identityMode === "rotate" ? "unchanged" : "edge-nrt-04"
+                  }
+                  value={identityDisplayName}
+                />
+              </label>
+              <label>
+                <span>Tags</span>
+                <input
+                  aria-label="Agent identity tags"
+                  disabled={
+                    !canManageOperators ||
+                    identityPending ||
+                    identityMode === "rotate"
+                  }
+                  onChange={(event) => {
+                    setIdentityTags(event.target.value);
+                    clearIdentityReview();
+                  }}
+                  placeholder={
+                    identityMode === "rotate"
+                      ? "unchanged"
+                      : "country:JP, role:edge"
+                  }
+                  value={identityTags}
+                />
+              </label>
+              <button
+                className="secondaryAction"
+                disabled={!identityDraftReady}
+                title={
+                  identityDraftReady && !privilegeMaterial
+                    ? "Unlock local privilege; this registration draft will remain intact."
+                    : undefined
+                }
+                type="submit"
+              >
+                <Fingerprint size={17} />
+                {identityReviewPending
+                  ? "Preparing review"
+                  : !privilegeMaterial
+                    ? "Unlock to review"
+                    : identityMode === "rotate"
+                      ? "Review rotation"
+                      : "Review registration"}
+              </button>
+            </>
           )}
-          <label>
-            <span>Display name</span>
-            <input
-              aria-label="Agent identity display name"
-              disabled={
-                !canManageOperators ||
-                identityPending ||
-                identityMode === "rotate"
-              }
-              onChange={(event) => {
-                setIdentityDisplayName(event.target.value);
-                clearIdentityReview();
-              }}
-              placeholder={
-                identityMode === "rotate" ? "unchanged" : "edge-nrt-04"
-              }
-              value={identityDisplayName}
-            />
-          </label>
-          <label>
-            <span>Tags</span>
-            <input
-              aria-label="Agent identity tags"
-              disabled={
-                !canManageOperators ||
-                identityPending ||
-                identityMode === "rotate"
-              }
-              onChange={(event) => {
-                setIdentityTags(event.target.value);
-                clearIdentityReview();
-              }}
-              placeholder={
-                identityMode === "rotate"
-                  ? "unchanged"
-                  : "country:JP, role:edge"
-              }
-              value={identityTags}
-            />
-          </label>
-          <button
-            className="secondaryAction"
-            disabled={!canUpsertIdentity}
-            type="submit"
-          >
-            <Fingerprint size={17} />
-            {identityReviewPending
-              ? "Preparing review"
-              : identityMode === "rotate"
-                ? "Review rotation"
-                : "Review registration"}
-          </button>
           {createdIdentity && (
-            <div className="formNote">
-              <strong>{createdIdentity.display_name}</strong>
+            <div className="formNote identityRegistrationComplete" role="status">
+              <strong>{createdIdentity.display_name} is registered</strong>
               <span>
                 {createdIdentity.client_id} /{" "}
                 {shortHash(createdIdentity.current_public_key_sha256_hex)}
               </span>
             </div>
           )}
-          {createdIdentity && privateKeyHex && (
+          {createdIdentity && createdIdentityPrivateKeyHex && (
             <InstallCommand
               clientId={createdIdentity.client_id}
               onOpenSystemConfig={onOpenSystemConfig}
               onUpdateOperatorPreferences={onUpdateOperatorPreferences}
               operatorPreferences={operator?.preferences ?? null}
-              privateKeyHex={privateKeyHex}
+              privateKeyHex={createdIdentityPrivateKeyHex}
             />
+          )}
+          {createdIdentity && (
+            <button
+              className="secondaryAction"
+              onClick={beginAnotherIdentityRegistration}
+              title="Clear this one-time install result and start a separate VPS registration."
+              type="button"
+            >
+              <Plus size={17} />
+              Register another VPS
+            </button>
           )}
         </form>
 
@@ -1938,6 +2064,21 @@ export function AccessPanel({
             value: identitySnapshot
               ? shortHash(identitySnapshot.publicKeyHex)
               : "",
+          },
+          {
+            label: "Display name",
+            value: identitySnapshot?.replaceExistingKey
+              ? "unchanged"
+              : (identitySnapshot?.displayName ?? identitySnapshot?.clientId ?? ""),
+          },
+          {
+            label: "Tags",
+            title: identitySnapshot?.tags.join(", "),
+            value: identitySnapshot?.replaceExistingKey
+              ? "unchanged"
+              : identitySnapshot?.tags.length
+                ? identitySnapshot.tags.join(", ")
+                : "none",
           },
           {
             label: "Mode",
@@ -2040,8 +2181,10 @@ function AccessOverviewRow({ item }: { item: AccessOverviewItem }) {
 }
 
 function GatewaySessionEmptyState({
+  canConfigure,
   onOpenGatewaySettings,
 }: {
+  canConfigure: boolean;
   onOpenGatewaySettings: () => void;
 }) {
   return (
@@ -2054,18 +2197,28 @@ function GatewaySessionEmptyState({
       </div>
       <div>
         <h2>Gateway sessions</h2>
-        <p>No active gateway sessions. Configure the gateway endpoint and server key.</p>
-        <span>Gateway defaults are managed from shared system configuration.</span>
+        <p>
+          {canConfigure
+            ? "No active gateway sessions. Configure the gateway endpoint and server key."
+            : "No active gateway sessions are visible."}
+        </p>
+        <span>
+          {canConfigure
+            ? "Gateway defaults are managed from shared system configuration."
+            : "An admin manages gateway defaults in shared system configuration."}
+        </span>
       </div>
-      <div className="gatewaySessionEmptyActions">
-        <button
-          className="primaryAction compact"
-          onClick={onOpenGatewaySettings}
-          type="button"
-        >
-          Gateway settings
-        </button>
-      </div>
+      {canConfigure && (
+        <div className="gatewaySessionEmptyActions">
+          <button
+            className="primaryAction compact"
+            onClick={onOpenGatewaySettings}
+            type="button"
+          >
+            Gateway settings
+          </button>
+        </div>
+      )}
     </section>
   );
 }
@@ -2392,7 +2545,9 @@ function InstallCommand({
   operatorPreferences: OperatorPreferences | null;
   privateKeyHex: string;
 }) {
-  const [installMode, setInstallMode] = useState<AgentInstallMode>("root");
+  const [installMode, setInstallMode] = useState<AgentInstallMode>(
+    () => operatorPreferences?.agent_install_mode ?? "root",
+  );
   const [gatewayServerPublicKeyHex, setGatewayServerPublicKeyHex] = useState(
     () => operatorPreferences?.gateway_server_public_key_hex ?? "",
   );
@@ -2404,6 +2559,7 @@ function InstallCommand({
   const savedGatewayServerPublicKeyHex =
     operatorPreferences?.gateway_server_public_key_hex ?? "";
   const savedGatewayEndpoints = operatorPreferences?.gateway_endpoints ?? "";
+  const savedInstallMode = operatorPreferences?.agent_install_mode ?? "root";
   const normalizedGatewayServerPublicKeyHex =
     gatewayServerPublicKeyHex.trim();
   const normalizedGatewayEndpoints = gatewayEndpoints.trim();
@@ -2413,7 +2569,8 @@ function InstallCommand({
   const gatewayDefaultsDirty =
     normalizedGatewayServerPublicKeyHex !==
       savedGatewayServerPublicKeyHex.trim() ||
-    normalizedGatewayEndpoints !== savedGatewayEndpoints.trim();
+    normalizedGatewayEndpoints !== savedGatewayEndpoints.trim() ||
+    installMode !== savedInstallMode;
   const canSaveGatewayDefaults =
     operatorPreferences !== null &&
     gatewayDefaultsDirty &&
@@ -2427,8 +2584,8 @@ function InstallCommand({
         ? "Save defaults"
         : "Defaults saved";
   const saveGatewayDefaultsTitle = gatewayDefaultsDirty
-    ? "Save the reusable gateway key and endpoints for this operator."
-    : "The gateway key and endpoints already match the saved defaults.";
+    ? "Save the reusable gateway key, endpoints, and install mode for this operator."
+    : "The gateway key, endpoints, and install mode already match the saved defaults.";
   const installCommand = canBuildCommand
     ? buildAgentInstallCommand({
         clientId,
@@ -2441,16 +2598,22 @@ function InstallCommand({
         "Enter the gateway server public key and endpoints to generate",
         "the paste-ready latest-release agent install command.",
       ].join(" ");
+  const foregroundStartCommand =
+    'env VPSMAN_AGENT_STATE_DIR="$PWD/vpsman-agent/state" ' +
+    '"$PWD/vpsman-agent/bin/vpsman-agent" ' +
+    '--config "$PWD/vpsman-agent/config/agent.toml" run';
 
   useEffect(() => {
     setGatewayServerPublicKeyHex(
       operatorPreferences?.gateway_server_public_key_hex ?? "",
     );
     setGatewayEndpoints(operatorPreferences?.gateway_endpoints ?? "");
+    setInstallMode(operatorPreferences?.agent_install_mode ?? "root");
     setSaveError(null);
   }, [
     operatorPreferences?.gateway_endpoints,
     operatorPreferences?.gateway_server_public_key_hex,
+    operatorPreferences?.agent_install_mode,
   ]);
 
   function handleCopy() {
@@ -2469,6 +2632,7 @@ function InstallCommand({
     try {
       await onUpdateOperatorPreferences({
         ...operatorPreferences,
+        agent_install_mode: installMode,
         gateway_endpoints: normalizedGatewayEndpoints,
         gateway_server_public_key_hex: normalizedGatewayServerPublicKeyHex,
       });
@@ -2560,15 +2724,16 @@ function InstallCommand({
           <span>Install mode</span>
           <select
             aria-label="Install mode"
-            onChange={(event) =>
-              setInstallMode(event.target.value as AgentInstallMode)
-            }
-            title="Root service uses systemd by default; no systemd stages files without enabling a service."
+            onChange={(event) => {
+              setInstallMode(event.target.value as AgentInstallMode);
+              setSaveError(null);
+            }}
+            title="Root and user service modes start through systemd. Stage only writes the agent files and shows the foreground start command."
             value={installMode}
           >
             <option value="root">Root service</option>
             <option value="user">User service</option>
-            <option value="staged">No systemd</option>
+            <option value="staged">Stage only (no systemd)</option>
           </select>
         </label>
       </div>
@@ -2588,6 +2753,12 @@ function InstallCommand({
       <pre>
         <code>{installCommand}</code>
       </pre>
+      {installMode === "staged" ? (
+        <div className="installCommandFollowup" role="note">
+          <strong>Then run in foreground</strong>
+          <code title={foregroundStartCommand}>{foregroundStartCommand}</code>
+        </div>
+      ) : null}
     </div>
   );
 }

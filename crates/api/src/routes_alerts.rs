@@ -761,7 +761,17 @@ fn fleet_alert_policy_error(error: anyhow::Error) -> ApiError {
     if message.contains("fleet_alert_policy_condition_invalid")
         || message.contains("condition expression")
     {
-        return ApiError::bad_request("fleet_alert_policy_condition_invalid");
+        let reason = message
+            .split_once("fleet_alert_policy_condition_invalid:")
+            .map(|(_, reason)| reason.trim())
+            .filter(|reason| !reason.is_empty())
+            .unwrap_or("Enter a supported condition expression of 4096 bytes or fewer");
+        return ApiError::bad_request_with_message(
+            "fleet_alert_policy_condition_invalid",
+            format!(
+                "{reason}. Supported metrics include cpu.load_1, cpu.load_saturation, memory.available_ratio, disk.available_ratio, and traffic quota/cycle values"
+            ),
+        );
     }
     if message.contains("fleet_alert_policy_severity_invalid") {
         return ApiError::bad_request("fleet_alert_policy_severity_invalid");
@@ -852,5 +862,22 @@ fn validate_alert_policy_scope_kind(scope_kind: &str) -> Result<(), ApiError> {
         Err(ApiError::bad_request(
             "fleet_alert_policy_scope_kind_invalid",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn condition_parse_errors_include_operator_actionable_detail() {
+        let error = fleet_alert_policy_error(anyhow::anyhow!(
+            "fleet_alert_policy_condition_invalid: unknown metric cpu.load1"
+        ));
+
+        assert_eq!(error.code, "fleet_alert_policy_condition_invalid");
+        let message = error.public_message.expect("public condition detail");
+        assert!(message.contains("unknown metric cpu.load1"));
+        assert!(message.contains("cpu.load_1"));
     }
 }

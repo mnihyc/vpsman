@@ -37,7 +37,8 @@ test("bulk file operations remain scannable with 24 VPS targets", async ({ page 
   await expect(resultPanel).toBeVisible();
   await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "targets" }).filter({ hasText: "24/24" })).toBeVisible();
   await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "in progress" }).filter({ hasText: "0" })).toBeVisible();
-  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "retrieved" }).filter({ hasText: "24" })).toBeVisible();
+  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "reported" }).filter({ hasText: "24" })).toBeVisible();
+  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "completed" }).filter({ hasText: "22" })).toBeVisible();
 
   await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "22 VPSs" })).toBeVisible();
   await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "unsuccessful" }).filter({ hasText: "2" })).toBeVisible();

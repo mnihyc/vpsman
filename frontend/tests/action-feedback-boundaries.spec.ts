@@ -83,7 +83,10 @@ test("keeps action feedback in dedicated local containers", () => {
     "panels/jobs/ProcessSupervisorInventoryPanel.tsx",
   );
   expect(processSupervisorPanel).not.toContain("processActionNotice");
-  expect(processSupervisorPanel).toContain("processActionFeedback");
+  expect(processSupervisorPanel).toContain('className="localActionFeedback"');
+  expect(processSupervisorPanel).toContain(
+    "message={!stopProcess && !restartProcess ? actionError ?? actionStatus : null}",
+  );
 
   const fleetGroupsPanel = source("panels/FleetGroupsPanel.tsx");
   expect(fleetGroupsPanel).not.toMatch(

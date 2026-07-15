@@ -51,6 +51,7 @@ import {
   type ActionFeedbackTone,
 } from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
+import { ConsoleDetailPanel } from "../components/ConsoleDetailPanel";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridAction,
@@ -71,7 +72,6 @@ import {
   type TimeSeriesChartLine,
 } from "../components/TimeSeriesChart";
 import { fleetChartColors } from "../colorPalette";
-import { scrollIntoViewWithMotion } from "../motion";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import {
   addressFamilyLabel,
@@ -210,6 +210,8 @@ type WebhookDeliveryQueueSnapshot =
       previewHash: string;
       reviewedRows: number;
       eventLabel: string;
+      reviewedRules: string;
+      reviewedTargets: string;
     }
   | {
       action: "process";
@@ -217,6 +219,8 @@ type WebhookDeliveryQueueSnapshot =
       previewHash: string;
       reviewedRows: number;
       eventLabel: string;
+      reviewedRules: string;
+      reviewedTargets: string;
     };
 
 const detailTabs: FleetDetailTab[] = [
@@ -422,6 +426,14 @@ export function FleetWorkspace({
   const latestTunnels = useMemo(
     () => latestTelemetryTunnelsByClient(telemetryTunnels),
     [telemetryTunnels],
+  );
+  const rollupHistoryByClient = useMemo(
+    () => telemetryRecordsByClient(telemetryRollups),
+    [telemetryRollups],
+  );
+  const networkRateHistoryByClient = useMemo(
+    () => telemetryRecordsByClient(telemetryNetworkRates),
+    [telemetryNetworkRates],
   );
   const trafficByClient = useMemo(
     () =>
@@ -818,6 +830,7 @@ export function FleetWorkspace({
         size: 76,
         minSize: 68,
         enableHiding: false,
+        stickyEnd: true,
         cell: (agent) => (
           <button
             aria-label={`Open ${formatVpsName(agent, vpsNameDisplayMode)} detail`}
@@ -923,8 +936,6 @@ export function FleetWorkspace({
         rows.map((agent) => agent.id),
       ),
       maxTimeoutSecs: 300,
-      updateCheckActivate: true,
-      updateCheckRestartAgent: true,
       updateCheckVersionUrl: DEFAULT_UPDATE_VERSION_URL,
     });
   }
@@ -1189,8 +1200,10 @@ export function FleetWorkspace({
               tagVisibilityOverrides={
                 preferences.fleet_tag_visibility_overrides
               }
-              telemetryNetworkRates={telemetryNetworkRates}
-              telemetryRollups={telemetryRollups}
+              telemetryNetworkRates={
+                networkRateHistoryByClient.get(agent.id) ?? []
+              }
+              telemetryRollups={rollupHistoryByClient.get(agent.id) ?? []}
               trafficAccounting={trafficByClient.get(agent.id) ?? null}
               vpsNameDisplayMode={vpsNameDisplayMode}
               vpsRuleValues={vpsRulesByClient.get(agent.id) ?? []}
@@ -3470,55 +3483,6 @@ function ConsoleFormGroup({
   );
 }
 
-function ConsoleDetailPanel({
-  actions,
-  children,
-  description,
-  onClose,
-  title,
-}: {
-  actions?: ReactNode;
-  children: ReactNode;
-  description?: ReactNode;
-  onClose?: () => void;
-  title: ReactNode;
-}) {
-  const panelRef = useRef<HTMLElement | null>(null);
-  useEffect(() => {
-    window.requestAnimationFrame(() => {
-      const panel = panelRef.current;
-      if (!panel) {
-        return;
-      }
-      scrollIntoViewWithMotion(panel, { block: "start" });
-      panel.focus({ preventScroll: true });
-    });
-  }, []);
-  return (
-    <section className="consoleDetailPanel" ref={panelRef} tabIndex={-1}>
-      <div className="consoleDetailPanelHeader">
-        <span>
-          <strong>{title}</strong>
-          {description && <small>{description}</small>}
-        </span>
-        {onClose && (
-          <button
-            aria-label="Close detail panel"
-            className="iconButton"
-            onClick={onClose}
-            title="Close detail panel"
-            type="button"
-          >
-            <X size={16} />
-          </button>
-        )}
-      </div>
-      {children}
-      {actions && <div className="consoleFormActions">{actions}</div>}
-    </section>
-  );
-}
-
 function ConsoleFreshnessBanner({ error }: { error: string | null }) {
   if (!error) {
     return null;
@@ -3716,6 +3680,24 @@ function reviewedWebhookDispatchEventId(
     throw new Error("Webhook dispatch event ID is missing or inconsistent");
   }
   return eventIds[0];
+}
+
+function reviewedWebhookRuleSummary(
+  rows: WebhookRuleDeliveryRecord[],
+): string {
+  const rules = Array.from(
+    new Map(
+      rows.map((row) => [row.rule_id, `${row.rule_name} (${shortId(row.rule_id)})`]),
+    ).values(),
+  );
+  return rules.join(", ") || "no rules";
+}
+
+function reviewedWebhookTargetSummary(
+  rows: WebhookRuleDeliveryRecord[],
+): string {
+  const targets = Array.from(new Set(rows.map((row) => row.target)));
+  return targets.join(", ") || "no targets";
 }
 
 function shortDeliveryError(error: string | null | undefined): string {
@@ -4033,8 +4015,9 @@ function policyRequestFromRecord(
 
 function policyDraftValidationMessage(
   request: PolicyDryRunRequest | FleetAlertPolicyRequest,
+  requireLabels = true,
 ): string | null {
-  if (!request.name.trim()) {
+  if (requireLabels && !request.name.trim()) {
     return "Policy name is required";
   }
   if (!request.selector_expression.trim()) {
@@ -4045,7 +4028,7 @@ function policyDraftValidationMessage(
   }
   for (const [index, rule] of request.rules.entries()) {
     const row = index + 1;
-    if (!rule.name.trim()) {
+    if (requireLabels && !rule.name.trim()) {
       return `Rule ${row} name is required`;
     }
     if (!rule.condition_expression.trim()) {
@@ -4096,7 +4079,7 @@ export function FleetAlertPolicyManager({
   const savePendingRef = useRef(false);
   const [name, setName] = useState("");
   const [selectorExpression, setSelectorExpression] = useState("");
-  const [enabled, setEnabled] = useState(true);
+  const [enabled, setEnabled] = useState(false);
   const [notes, setNotes] = useState("");
   const [ruleDrafts, setRuleDrafts] = useState<PolicyRuleDraft[]>([
     defaultPolicyRuleDraft(),
@@ -4106,6 +4089,25 @@ export function FleetAlertPolicyManager({
   const [dryRunPending, setDryRunPending] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [statusTone, setStatusTone] = useState<ActionFeedbackTone>("info");
+  const policyDraftRequest = useMemo<PolicyDryRunRequest>(
+    () => ({
+      id: editingId ?? undefined,
+      name: name.trim(),
+      enabled,
+      selector_expression: selectorExpression.trim(),
+      rules: ruleDrafts.map(requestRuleFromDraft),
+      notes: notes.trim() || null,
+    }),
+    [editingId, enabled, name, notes, ruleDrafts, selectorExpression],
+  );
+  const policyPreviewValidation = policyDraftValidationMessage(
+    policyDraftRequest,
+    false,
+  );
+  const policySaveValidation = policyDraftValidationMessage(
+    policyDraftRequest,
+    true,
+  );
 
   const agentNameById = useMemo(
     () =>
@@ -4228,11 +4230,13 @@ export function FleetAlertPolicyManager({
 
   useEffect(() => {
     setSaveSnapshot(null);
+    setDryRunPreview(null);
+    setStatus(null);
   }, [name, selectorExpression, enabled, notes, ruleDrafts]);
 
   useEffect(() => {
-    onEditorOpenChange?.(editorOpen);
-  }, [editorOpen, onEditorOpenChange]);
+    return () => onEditorOpenChange?.(false);
+  }, [onEditorOpenChange]);
 
   useEffect(() => {
     if (!policyFocusId) {
@@ -4243,20 +4247,13 @@ export function FleetAlertPolicyManager({
       setPolicyStatus("Policy not found: " + shortId(policyFocusId), "danger");
       return;
     }
-    setEditorOpen(false);
+    updateEditorOpen(false);
     setDetailPolicyId(focused.id);
     setPolicyStatus("viewing " + focused.name, "info");
   }, [policies, policyFocusId]);
 
   function currentDryRunRequest(): PolicyDryRunRequest {
-    return {
-      id: editingId ?? undefined,
-      name: name.trim(),
-      enabled,
-      selector_expression: selectorExpression.trim(),
-      rules: ruleDrafts.map(requestRuleFromDraft),
-      notes: notes.trim() || null,
-    };
+    return policyDraftRequest;
   }
 
   function currentUpsertRequest(previewHash: string): FleetAlertPolicyRequest {
@@ -4286,11 +4283,16 @@ export function FleetAlertPolicyManager({
     setStatusTone(tone);
   }
 
+  function updateEditorOpen(open: boolean) {
+    setEditorOpen(open);
+    onEditorOpenChange?.(focusedEditor && open);
+  }
+
   function resetForm() {
     setEditingId(null);
     setName("");
     setSelectorExpression("");
-    setEnabled(true);
+    setEnabled(false);
     setNotes("");
     setRuleDrafts([defaultPolicyRuleDraft()]);
     setDryRunPreview(null);
@@ -4301,7 +4303,7 @@ export function FleetAlertPolicyManager({
   function createPolicy() {
     resetForm();
     setDetailPolicyId(null);
-    setEditorOpen(true);
+    updateEditorOpen(true);
   }
 
   function editPolicy(policy: FleetAlertPolicyRecord) {
@@ -4319,11 +4321,11 @@ export function FleetAlertPolicyManager({
     setDryRunPreview(null);
     setSaveSnapshot(null);
     setPolicyStatus("editing " + policy.name, "info");
-    setEditorOpen(true);
+    updateEditorOpen(true);
   }
 
   function openPolicyDetails(policy: FleetAlertPolicyRecord) {
-    setEditorOpen(false);
+    updateEditorOpen(false);
     setDetailPolicyId(policy.id);
     setPolicyStatus("viewing " + policy.name, "info");
   }
@@ -4348,9 +4350,11 @@ export function FleetAlertPolicyManager({
     );
   }
 
-  async function dryRunCurrentPolicy(): Promise<PolicyDryRunResponse> {
+  async function dryRunCurrentPolicy(
+    requireLabels = false,
+  ): Promise<PolicyDryRunResponse> {
     const request = currentDryRunRequest();
-    const draftError = policyDraftValidationMessage(request);
+    const draftError = policyDraftValidationMessage(request, requireLabels);
     if (draftError) {
       setDryRunPreview(null);
       setPolicyStatus(draftError, "danger");
@@ -4378,7 +4382,7 @@ export function FleetAlertPolicyManager({
 
   async function reviewSubmit() {
     try {
-      const preview = await dryRunCurrentPolicy();
+      const preview = await dryRunCurrentPolicy(true);
       setSaveSnapshot({
         request: currentUpsertRequest(preview.preview_hash),
         preview,
@@ -4405,7 +4409,7 @@ export function FleetAlertPolicyManager({
     try {
       const policy = await onUpsert(snapshot.request);
       setEditingId(policy.id);
-      setEditorOpen(true);
+      updateEditorOpen(true);
       setSaveSnapshot(null);
       setDryRunPreview(snapshot.preview);
       setPolicyStatus("saved " + policy.name, "success");
@@ -4436,7 +4440,7 @@ export function FleetAlertPolicyManager({
       }
       if (rows.some((policy) => policy.id === editingId)) {
         resetForm();
-        setEditorOpen(false);
+        updateEditorOpen(false);
       }
       if (rows.some((policy) => policy.id === detailPolicyId)) {
         setDetailPolicyId(null);
@@ -4639,7 +4643,15 @@ export function FleetAlertPolicyManager({
                 <>
                   <button
                     className="secondaryAction"
-                    disabled={dryRunPending || savePending}
+                    disabled={
+                      dryRunPending ||
+                      savePending ||
+                      policyPreviewValidation !== null
+                    }
+                    title={
+                      policyPreviewValidation ??
+                      "Preview exact VPS matches with the current draft"
+                    }
                     type="button"
                     onClick={() => void dryRunCurrentPolicy()}
                   >
@@ -4647,7 +4659,15 @@ export function FleetAlertPolicyManager({
                   </button>
                   <button
                     className="primaryAction"
-                    disabled={dryRunPending || savePending}
+                    disabled={
+                      dryRunPending ||
+                      savePending ||
+                      policySaveValidation !== null
+                    }
+                    title={
+                      policySaveValidation ??
+                      "Dry-run and review the complete policy before saving"
+                    }
                     type="button"
                     onClick={() => void reviewSubmit()}
                   >
@@ -4658,7 +4678,15 @@ export function FleetAlertPolicyManager({
                 <>
                   <button
                     className="secondaryAction"
-                    disabled={dryRunPending || savePending}
+                    disabled={
+                      dryRunPending ||
+                      savePending ||
+                      policyPreviewValidation !== null
+                    }
+                    title={
+                      policyPreviewValidation ??
+                      "Preview exact VPS matches with the current draft"
+                    }
                     type="button"
                     onClick={() => void dryRunCurrentPolicy()}
                   >
@@ -4666,7 +4694,15 @@ export function FleetAlertPolicyManager({
                   </button>
                   <button
                     className="primaryAction"
-                    disabled={dryRunPending || savePending}
+                    disabled={
+                      dryRunPending ||
+                      savePending ||
+                      policySaveValidation !== null
+                    }
+                    title={
+                      policySaveValidation ??
+                      "Dry-run and review the complete policy before saving"
+                    }
                     type="button"
                     onClick={() => void reviewSubmit()}
                   >
@@ -4687,7 +4723,7 @@ export function FleetAlertPolicyManager({
                 ? "Preview exactly which VPSs match, then save this policy group with the reviewed activation state."
                 : "Edit the selector expression, preview matched VPSs, then confirm the exact policy payload."
             }
-            onClose={() => setEditorOpen(false)}
+            onClose={() => updateEditorOpen(false)}
             title={editingId ? "Edit alert policy" : "Create alert policy"}
           >
             {focusedEditor ? (
@@ -4802,6 +4838,7 @@ export function FleetAlertPolicyManager({
                         <textarea
                           aria-label="Rule condition expression"
                           placeholder="traffic.cycle.total >= traffic.quota.total * 0.8"
+                          title="Supported metrics: traffic quota/cycle values, cpu.load_1, cpu.load_saturation, memory.available_ratio, and disk.available_ratio. Operators: >, >=, <, <=, =, !=, arithmetic, &&, ||, and parentheses."
                           value={draft.condition_expression}
                           onChange={(event) =>
                             updateRuleDraft(draft.localId, {
@@ -6432,6 +6469,43 @@ export function NotificationDeliveryHistoryGrid({
   );
 }
 
+function webhookRuleDraftValidationMessage({
+  bodyTemplate,
+  cooldownSecs,
+  eventKind,
+  expression,
+  name,
+  target,
+}: {
+  bodyTemplate: string;
+  cooldownSecs: string;
+  eventKind: string;
+  expression: string;
+  name: string;
+  target: string;
+}): string | null {
+  if (!name.trim()) return "Rule name is required";
+  if (!expression.trim()) return "Expression is required";
+  if (!target.trim()) return "Target URL is required";
+  try {
+    const parsed = new URL(target.trim());
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return "Target URL must use HTTP or HTTPS";
+    }
+  } catch {
+    return "Target URL is invalid";
+  }
+  if (!eventKind.trim()) return "Preview event kind is required";
+  if (bodyTemplate.length > 4096) return "Body template is too long";
+  if (cooldownSecs.trim()) {
+    const cooldown = Number(cooldownSecs);
+    if (!Number.isInteger(cooldown) || cooldown < 0 || cooldown > 2_592_000) {
+      return "Cooldown must be a whole number from 0 to 2592000 seconds";
+    }
+  }
+  return null;
+}
+
 export function WebhookRuleManager({
   agents,
   editorMode = "inline",
@@ -6479,19 +6553,20 @@ export function WebhookRuleManager({
   );
   const [deletePending, setDeletePending] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [enableRows, setEnableRows] = useState<WebhookRuleRecord[] | null>(
+    null,
+  );
   const [saveSnapshot, setSaveSnapshot] = useState<{
     request: WebhookRuleRequest;
     title: string;
   } | null>(null);
   const [savePending, setSavePending] = useState(false);
   const savePendingRef = useRef(false);
-  const [name, setName] = useState("edge-interval-webhook");
-  const [enabled, setEnabled] = useState(true);
-  const [expression, setExpression] = useState("interval.30sec && tag:edge");
-  const [target, setTarget] = useState("https://hooks.example/vpsman");
-  const [bodyTemplate, setBodyTemplate] = useState(
-    "{rule.name} {event.kind} {vps.id}",
-  );
+  const [name, setName] = useState("");
+  const [enabled, setEnabled] = useState(false);
+  const [expression, setExpression] = useState("");
+  const [target, setTarget] = useState("");
+  const [bodyTemplate, setBodyTemplate] = useState("");
   const [signingSecret, setSigningSecret] = useState("");
   const [clearSigningSecret, setClearSigningSecret] = useState(false);
   const [cooldownSecs, setCooldownSecs] = useState("300");
@@ -6520,10 +6595,14 @@ export function WebhookRuleManager({
     ? (rules.find((rule) => rule.id === editingId) ?? null)
     : null;
   const existingSecretConfigured = editingRule?.signing_secret_set ?? false;
-
-  useEffect(() => {
-    onEditorOpenChange?.(focusedEditorOpen);
-  }, [focusedEditorOpen, onEditorOpenChange]);
+  const webhookDraftValidation = webhookRuleDraftValidationMessage({
+    bodyTemplate,
+    cooldownSecs,
+    eventKind,
+    expression,
+    name,
+    target,
+  });
 
   useEffect(() => {
     return () => onEditorOpenChange?.(false);
@@ -6600,6 +6679,8 @@ export function WebhookRuleManager({
 
   useEffect(() => {
     setSaveSnapshot(null);
+    setEditorTestPreview(null);
+    setStatus(null);
   }, [
     name,
     enabled,
@@ -6615,11 +6696,11 @@ export function WebhookRuleManager({
   function resetForm() {
     setEditingId(null);
     setEditorTestPreview(null);
-    setName("edge-interval-webhook");
-    setEnabled(true);
-    setExpression("interval.30sec && tag:edge");
-    setTarget("https://hooks.example/vpsman");
-    setBodyTemplate("{rule.name} {event.kind} {vps.id}");
+    setName("");
+    setEnabled(false);
+    setExpression("");
+    setTarget("");
+    setBodyTemplate("");
     setSigningSecret("");
     setClearSigningSecret(false);
     setCooldownSecs("300");
@@ -6632,10 +6713,15 @@ export function WebhookRuleManager({
     setStatusTone(tone);
   }
 
+  function updateEditorOpen(open: boolean) {
+    setEditorOpen(open);
+    onEditorOpenChange?.(focusedEditorMode && open);
+  }
+
   function createRule() {
     resetForm();
     setDetailRuleId(null);
-    setEditorOpen(true);
+    updateEditorOpen(true);
   }
 
   function editRule(rule: WebhookRuleRecord) {
@@ -6652,11 +6738,11 @@ export function WebhookRuleManager({
     setCooldownSecs(String(rule.cooldown_secs));
     setNotes(rule.notes ?? "");
     setWebhookStatus(`editing ${rule.name}`, "info");
-    setEditorOpen(true);
+    updateEditorOpen(true);
   }
 
   function openRuleDetails(rule: WebhookRuleRecord) {
-    setEditorOpen(false);
+    updateEditorOpen(false);
     setDetailRuleId(rule.id);
     setWebhookStatus(`viewing ${rule.name}`, "info");
   }
@@ -6696,6 +6782,10 @@ export function WebhookRuleManager({
   }
 
   function reviewSubmit() {
+    if (webhookDraftValidation) {
+      setWebhookStatus(webhookDraftValidation, "danger");
+      return;
+    }
     const nextSigningSecret = signingSecret.trim();
     setSaveSnapshot({
       request: {
@@ -6734,7 +6824,7 @@ export function WebhookRuleManager({
       setEditingId(rule.id);
       setSigningSecret("");
       setClearSigningSecret(false);
-      setEditorOpen(true);
+      updateEditorOpen(true);
       setSaveSnapshot(null);
       setWebhookStatus(`saved ${rule.name}`, "success");
     } catch (error) {
@@ -6764,7 +6854,7 @@ export function WebhookRuleManager({
       }
       if (rows.some((rule) => rule.id === editingId)) {
         resetForm();
-        setEditorOpen(false);
+        updateEditorOpen(false);
       }
       if (rows.some((rule) => rule.id === detailRuleId)) {
         setDetailRuleId(null);
@@ -6811,8 +6901,18 @@ export function WebhookRuleManager({
     }
   }
 
+  function requestEnableRules(rows: WebhookRuleRecord[]) {
+    const disabledRows = rows.filter((rule) => !rule.enabled);
+    if (disabledRows.length === 0) return;
+    setEnableRows(disabledRows);
+  }
+
   async function dryRun(rule?: WebhookRuleRecord) {
     if (queuePending) {
+      return;
+    }
+    if (!rule && webhookDraftValidation) {
+      setWebhookStatus(webhookDraftValidation, "danger");
       return;
     }
     const request = rule
@@ -6871,11 +6971,13 @@ export function WebhookRuleManager({
 
   function setWebhookEventKind(value: string) {
     setEventKind(value);
+    setEditorTestPreview(null);
     clearWebhookQueueReview();
   }
 
   function setWebhookEventId(value: string) {
     setEventId(value);
+    setEditorTestPreview(null);
     clearWebhookQueueReview();
   }
 
@@ -6931,6 +7033,8 @@ export function WebhookRuleManager({
             previewHash,
             reviewedRows: rows.length,
             eventLabel: `${rule ? `${rule.name} / ` : ""}${frozenEventKind || "event"}${frozenEventId ? ` / ${frozenEventId}` : ""}`,
+            reviewedRules: reviewedWebhookRuleSummary(rows),
+            reviewedTargets: reviewedWebhookTargetSummary(rows),
           });
           setQueueConfirmation("dispatch");
         }
@@ -6993,6 +7097,8 @@ export function WebhookRuleManager({
             previewHash,
             reviewedRows: rows.length,
             eventLabel: isRetry ? "failed deliveries" : "queued deliveries",
+            reviewedRules: reviewedWebhookRuleSummary(rows),
+            reviewedTargets: reviewedWebhookTargetSummary(rows),
           });
           setQueueConfirmation("process");
         }
@@ -7096,11 +7202,7 @@ export function WebhookRuleManager({
       disabled: (rows) =>
         savePending || rows.filter((rule) => !rule.enabled).length === 0,
       icon: <Power size={14} />,
-      onSelect: (rows) =>
-        void setRulesEnabled(
-          rows.filter((rule) => !rule.enabled),
-          true,
-        ),
+      onSelect: requestEnableRules,
     },
     {
       label: "Disable",
@@ -7215,7 +7317,15 @@ export function WebhookRuleManager({
               <>
                 <button
                   className="secondaryAction"
-                  disabled={queuePending || savePending}
+                  disabled={
+                    queuePending ||
+                    savePending ||
+                    webhookDraftValidation !== null
+                  }
+                  title={
+                    webhookDraftValidation ??
+                    "Render a dry run from the current rule draft"
+                  }
                   type="button"
                   onClick={() => void dryRun()}
                 >
@@ -7223,7 +7333,15 @@ export function WebhookRuleManager({
                 </button>
                 <button
                   className="primaryAction"
-                  disabled={queuePending || savePending}
+                  disabled={
+                    queuePending ||
+                    savePending ||
+                    webhookDraftValidation !== null
+                  }
+                  title={
+                    webhookDraftValidation ??
+                    "Review the complete webhook rule before saving"
+                  }
                   type="button"
                   onClick={reviewSubmit}
                 >
@@ -7251,13 +7369,17 @@ export function WebhookRuleManager({
                 ? "Test the event match and rendered payload before saving the event webhook rule."
                 : "Webhook rules are saved expression records with explicit preview and delivery operations."
             }
-            onClose={() => setEditorOpen(false)}
+            onClose={() => updateEditorOpen(false)}
             title={editingId ? "Edit webhook rule" : "Create webhook rule"}
           >
-            <div className="consoleFormGrid">
+            <form
+              className="consoleFormGrid"
+              onSubmit={(event) => event.preventDefault()}
+            >
               <ConsoleField label="Rule name" className="fieldWide">
                 <input
                   aria-label="Webhook rule name"
+                  placeholder="Edge status webhook"
                   value={name}
                   onChange={(event) => setName(event.target.value)}
                 />
@@ -7303,6 +7425,7 @@ export function WebhookRuleManager({
               <ConsoleField label="Target URL" className="fieldFull">
                 <input
                   aria-label="Webhook target"
+                  placeholder="https://hooks.example.net/vpsman"
                   value={target}
                   onChange={(event) => setTarget(event.target.value)}
                 />
@@ -7384,7 +7507,7 @@ export function WebhookRuleManager({
                     "Use server dry-run for exact matches."}
                 </span>
               </ConsoleField>
-            </div>
+            </form>
           </ConsoleDetailPanel>
         ) : null}
       </div>
@@ -7517,6 +7640,14 @@ export function WebhookRuleManager({
             value: queueSnapshot?.reviewedRows ?? 0,
           },
           {
+            label: "Rules",
+            value: queueSnapshot?.reviewedRules ?? "review required",
+          },
+          {
+            label: "Targets",
+            value: queueSnapshot?.reviewedTargets ?? "review required",
+          },
+          {
             label: "Review hash",
             value: queueSnapshot
               ? `${queueSnapshot.previewHash.slice(0, 12)}...`
@@ -7543,6 +7674,40 @@ export function WebhookRuleManager({
         className="localActionFeedback fleetPolicyActionFeedback"
         message={status}
         tone={statusTone}
+      />
+      <ConfirmationPrompt
+        confirmLabel="Enable webhook rules"
+        detail="Enabling starts matching future events and can send requests to the configured external targets. Disabling remains immediate."
+        items={[
+          {
+            label: "Rules",
+            value: selectedRecordSummary(
+              enableRows,
+              "rule",
+              "rules",
+              (row) => row.name,
+              (row) => row.id,
+            ),
+          },
+          {
+            label: "Targets",
+            value: enableRows?.map((row) => row.target).join(", ") ?? "-",
+          },
+          {
+            label: "Cadence",
+            value:
+              enableRows?.map((row) => row.expression).join(", ") ?? "-",
+          },
+        ]}
+        onCancel={() => setEnableRows(null)}
+        onConfirm={() => {
+          const rows = enableRows ?? [];
+          setEnableRows(null);
+          void setRulesEnabled(rows, true);
+        }}
+        open={enableRows !== null}
+        pending={savePending}
+        title="Confirm webhook enable"
       />
       <ConfirmationPrompt
         confirmLabel={saveSnapshot?.title ?? "Save rule"}
@@ -8111,6 +8276,7 @@ function FleetAlertList({
   const warningCount = alerts.filter(
     (alert) => alert.severity === "warning",
   ).length;
+  const infoCount = alerts.length - criticalCount - warningCount;
   const nameById = useMemo(
     () => agentNamesById(agents, vpsNameDisplayMode),
     [agents, vpsNameDisplayMode],
@@ -8280,7 +8446,7 @@ function FleetAlertList({
         <small>
           {alerts.length === 0
             ? "clear"
-            : `${criticalCount} critical / ${warningCount} warning / ${stateCount} triaged`}
+            : `${criticalCount} critical / ${warningCount} warning / ${infoCount} info / ${stateCount} triaged`}
         </small>
       </div>
       <ConsoleDataGrid
@@ -8504,6 +8670,18 @@ function latestTelemetryRollupsByClient(rollups: TelemetryRollupRecord[]) {
     }
   }
   return latest;
+}
+
+function telemetryRecordsByClient<T extends { client_id: string }>(
+  records: T[],
+) {
+  const grouped = new Map<string, T[]>();
+  for (const record of records) {
+    const clientRecords = grouped.get(record.client_id) ?? [];
+    clientRecords.push(record);
+    grouped.set(record.client_id, clientRecords);
+  }
+  return grouped;
 }
 
 function latestTelemetryNetworkRatesByClient(
@@ -8996,7 +9174,7 @@ function NetworkInterfacesPanel({
               type="button"
             >
               <LockKeyhole size={15} />
-              Open Privilege Vault
+              Unlock privilege
             </button>
           )}
           {jobId && onOpenJobDetails && (

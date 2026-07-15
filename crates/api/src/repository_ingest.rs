@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
@@ -19,7 +19,7 @@ use crate::model::{
 };
 use crate::model_alert_policies::TrafficCounterSampleRecord;
 use crate::model_webhook_rules::WebhookEventCandidate;
-use crate::repository::Repository;
+use crate::repository::{Repository, TelemetryIngestWatermark, TelemetryIngestWatermarks};
 use crate::repository_jobs::{
     append_synthetic_agent_lost_output_in_tx, append_synthetic_status_output_in_tx,
     enqueue_target_terminal_event_in_tx,
@@ -817,6 +817,7 @@ impl Repository {
                 match claim_memory_telemetry_sequence(
                     &memory.telemetry_ingest_watermarks,
                     &event.telemetry.client_id,
+                    event.gateway_session_id,
                     event.process_incarnation_id,
                     event.telemetry_seq,
                 )
@@ -960,8 +961,11 @@ impl Repository {
         predicates.dedup();
         let (disk_total, disk_available, network_rx, network_tx) = telemetry_totals(metrics);
         let event_id = format!(
-            "telemetry:{}:{}:{}",
-            event.telemetry.client_id, event.process_incarnation_id, event.telemetry_seq
+            "telemetry:{}:{}:{}:{}",
+            event.telemetry.client_id,
+            event.gateway_session_id,
+            event.process_incarnation_id,
+            event.telemetry_seq
         );
         self.record_webhook_event(WebhookEventCandidate {
             kind: "telemetry.rollup".to_string(),
@@ -1156,25 +1160,32 @@ enum TelemetrySequenceClaim {
 }
 
 async fn claim_memory_telemetry_sequence(
-    watermarks: &Arc<RwLock<HashMap<String, (Uuid, u64)>>>,
+    watermarks: &TelemetryIngestWatermarks,
     client_id: &str,
+    gateway_session_id: Uuid,
     process_incarnation_id: Uuid,
     telemetry_seq: u64,
 ) -> TelemetrySequenceClaim {
     let mut watermarks = watermarks.write().await;
-    if let Some((process_id, seq)) = watermarks.get(client_id) {
-        if *process_id == process_incarnation_id {
-            if *seq == telemetry_seq {
+    if let Some(watermark) = watermarks.get(client_id) {
+        if watermark.gateway_session_id == gateway_session_id
+            && watermark.process_incarnation_id == process_incarnation_id
+        {
+            if watermark.telemetry_seq == telemetry_seq {
                 return TelemetrySequenceClaim::Duplicate;
             }
-            if *seq > telemetry_seq {
+            if watermark.telemetry_seq > telemetry_seq {
                 return TelemetrySequenceClaim::Stale;
             }
         }
     }
     watermarks.insert(
         client_id.to_string(),
-        (process_incarnation_id, telemetry_seq),
+        TelemetryIngestWatermark {
+            gateway_session_id,
+            process_incarnation_id,
+            telemetry_seq,
+        },
     );
     TelemetrySequenceClaim::Accepted
 }
@@ -1188,19 +1199,23 @@ async fn claim_postgres_telemetry_sequence(
         WITH claimed AS (
             INSERT INTO telemetry_ingest_watermarks (
                 client_id,
+                gateway_session_id,
                 process_incarnation_id,
                 telemetry_seq,
                 reported_observed_unix,
                 accepted_at
             )
-            VALUES ($1, $2, $3, $4, now())
+            VALUES ($1, $2, $3, $4, $5, now())
             ON CONFLICT (client_id) DO UPDATE SET
+                gateway_session_id = EXCLUDED.gateway_session_id,
                 process_incarnation_id = EXCLUDED.process_incarnation_id,
                 telemetry_seq = EXCLUDED.telemetry_seq,
                 reported_observed_unix = EXCLUDED.reported_observed_unix,
                 accepted_at = now()
             WHERE
-                telemetry_ingest_watermarks.process_incarnation_id
+                telemetry_ingest_watermarks.gateway_session_id
+                    <> EXCLUDED.gateway_session_id
+                OR telemetry_ingest_watermarks.process_incarnation_id
                     <> EXCLUDED.process_incarnation_id
                 OR telemetry_ingest_watermarks.telemetry_seq < EXCLUDED.telemetry_seq
             RETURNING 1
@@ -1209,6 +1224,7 @@ async fn claim_postgres_telemetry_sequence(
         "#,
     )
     .bind(&event.telemetry.client_id)
+    .bind(event.gateway_session_id)
     .bind(event.process_incarnation_id)
     .bind(event.telemetry_seq as i64)
     .bind(event.telemetry.metrics.observed_unix.min(i64::MAX as u64) as i64)
@@ -1217,9 +1233,9 @@ async fn claim_postgres_telemetry_sequence(
     if claimed == 1 {
         return Ok(TelemetrySequenceClaim::Accepted);
     }
-    let current = sqlx::query_as::<_, (Uuid, i64)>(
+    let current = sqlx::query_as::<_, (Uuid, Uuid, i64)>(
         r#"
-        SELECT process_incarnation_id, telemetry_seq
+        SELECT gateway_session_id, process_incarnation_id, telemetry_seq
         FROM telemetry_ingest_watermarks
         WHERE client_id = $1
         "#,
@@ -1228,8 +1244,10 @@ async fn claim_postgres_telemetry_sequence(
     .fetch_optional(&mut **tx)
     .await?;
     Ok(match current {
-        Some((process_id, seq))
-            if process_id == event.process_incarnation_id && seq == event.telemetry_seq as i64 =>
+        Some((session_id, process_id, seq))
+            if session_id == event.gateway_session_id
+                && process_id == event.process_incarnation_id
+                && seq == event.telemetry_seq as i64 =>
         {
             TelemetrySequenceClaim::Duplicate
         }

@@ -1,6 +1,6 @@
 use super::{
     default_agent_backup_max_archive_bytes, validate_agent_config_shape, AgentBackupConfig,
-    AgentConfig, AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource,
+    AgentConfig, AgentRuntimeConfig, AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource,
 };
 use crate::{
     plan_tunnel, RuntimeTunnelAdapterCommands, RuntimeTunnelCommand, RuntimeTunnelManager,
@@ -107,6 +107,25 @@ fn backup_limits_remain_bounded() {
         validate_agent_config_shape(&invalid).unwrap_err(),
         "backup_max_archive_bytes_below_uncompressed_limit"
     );
+}
+
+#[test]
+fn runtime_config_ignores_additive_future_fields() {
+    let config: AgentRuntimeConfig = serde_json::from_value(serde_json::json!({
+        "version": 42,
+        "display_name": "edge-a",
+        "future_runtime_section": { "enabled": true },
+        "backup": {
+            "max_uncompressed_bytes": 1024,
+            "max_archive_bytes": 4096,
+            "future_backup_policy": "incremental"
+        }
+    }))
+    .unwrap();
+
+    assert_eq!(config.version, 42);
+    assert_eq!(config.display_name, "edge-a");
+    assert_eq!(config.backup.max_archive_bytes, 4096);
 }
 
 #[test]

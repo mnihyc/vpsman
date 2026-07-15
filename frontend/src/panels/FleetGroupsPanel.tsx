@@ -637,6 +637,7 @@ function TagRegistry({
         enableHiding: false,
         header: "Action",
         id: "action",
+        stickyEnd: true,
       },
     ],
     [pending],
@@ -1513,7 +1514,7 @@ function BulkTagPanel({
           <span>{privilegeMaterial ? "Privilege unlocked for final apply" : "Preview works now; unlock only when applying."}</span>
           {!privilegeMaterial && (
             <button className="secondaryAction compactAction" onClick={onOpenPrivilegeUnlock} type="button">
-              Open Privilege Vault
+              Unlock privilege
             </button>
           )}
         </div>

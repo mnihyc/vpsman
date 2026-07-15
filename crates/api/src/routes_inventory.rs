@@ -28,6 +28,7 @@ use crate::{
         UpsertRuntimeConfigPatchGeneratorRequest, WsEvent,
     },
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
+    repository_template_runtime_config::render_template_runtime_candidate,
     runtime_config::{push_runtime_config_for_clients, validate_runtime_config_patch_toml},
     security::{SCOPE_CONFIG_READ, SCOPE_FLEET_READ},
     selector_expression::parse_selector_expression,
@@ -1178,7 +1179,28 @@ fn validate_source_template_candidate(
             "source_template_description_too_large",
         ));
     }
-    validate_template_definition(domain, definition)
+    validate_template_definition(domain, definition)?;
+    let candidate = SourceTemplateView {
+        id: uuid::Uuid::nil(),
+        domain: domain.to_string(),
+        name: "candidate".to_string(),
+        scope: "shared".to_string(),
+        built_in: false,
+        is_default: false,
+        owner_client_id: None,
+        description: description.clone(),
+        definition: definition.clone(),
+        assigned_client_count: 0,
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    render_template_runtime_candidate(&candidate).map_err(|error| {
+        ApiError::bad_request_with_message(
+            "source_template_definition_invalid_for_domain",
+            format!("Template definition is invalid for {domain}: {error}"),
+        )
+    })?;
+    Ok(())
 }
 
 fn validate_source_template_scope(
@@ -1322,13 +1344,13 @@ fn validate_domain(domain: &str) -> Result<(), ApiError> {
 }
 
 fn validate_template_name(name: &str) -> Result<(), ApiError> {
-    if name.trim().is_empty() || name.len() > MAX_TEMPLATE_NAME_BYTES {
+    if name.trim().is_empty() || name.trim() != name || name.len() > MAX_TEMPLATE_NAME_BYTES {
         return Err(ApiError::bad_request("invalid_source_template_name"));
     }
-    if !name
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'-' | b'_' | b'.'))
-    {
+    if !name.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric()
+            || matches!(byte, b':' | b'-' | b'_' | b'.' | b' ' | b'(' | b')')
+    }) {
         return Err(ApiError::bad_request("invalid_source_template_name"));
     }
     Ok(())
@@ -1753,6 +1775,7 @@ mod tests {
     use super::{
         peer_client_ids_for_deleted_agent, telemetry_network_rate_limit_or_default,
         validate_assign_source_template, validate_persisted_tag_name,
+        validate_source_template_candidate, validate_template_name,
     };
     use crate::model::AssignSourceTemplateRequest;
 
@@ -1791,6 +1814,34 @@ mod tests {
                 "source_template_adapter_requires_tunnel_plan_binding"
             );
         }
+    }
+
+    #[test]
+    fn source_template_candidates_reject_domain_values_the_renderer_cannot_use() {
+        let error = validate_source_template_candidate(
+            "runtime_traffic_accounting_source",
+            &None,
+            &serde_json::json!({"source": "custom"}),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "source_template_definition_invalid_for_domain");
+        assert!(error.public_message.as_deref().is_some_and(
+            |message| message.contains("unsupported_runtime_traffic_accounting_source:custom")
+        ));
+
+        validate_source_template_candidate(
+            "runtime_traffic_accounting_source",
+            &None,
+            &serde_json::json!({"source": "interface_counters"}),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn source_template_names_accept_the_ui_clone_suffix() {
+        validate_template_name("shared:traffic-source (cloned)").unwrap();
+        assert!(validate_template_name(" shared:traffic-source (cloned)").is_err());
+        assert!(validate_template_name("shared:traffic/source").is_err());
     }
 
     #[test]

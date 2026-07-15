@@ -543,7 +543,8 @@ function SummaryTab({
           <button className="vpsDetailRecord" onClick={() => onOpenJob(latestJob.id)} type="button">
             <strong>{displayCommandType(latestJob.command_type)}</strong>
             <span>
-              {jobStatusLabel(latestJob.status)} · {latestJob.target_count} targets ·{" "}
+              {jobStatusLabel(latestJob.status)} · {latestJob.target_count} target
+              {latestJob.target_count === 1 ? "" : "s"} ·{" "}
               <DetailTime value={latestJob.created_at} />
             </span>
           </button>
@@ -1155,7 +1156,7 @@ function buildVpsDetailContext({
       when: observation.observed_at,
     })),
     ...relatedJobs.map((job) => ({
-      detail: `${displayCommandType(job.command_type)} · ${jobStatusLabel(job.status)} · ${job.target_count} targets · ${formatCompactTime(job.created_at)}`,
+      detail: `${displayCommandType(job.command_type)} · ${jobStatusLabel(job.status)} · ${job.target_count} target${job.target_count === 1 ? "" : "s"} · ${formatCompactTime(job.created_at)}`,
       id: job.id,
       jobId: job.id,
       kind: "job" as const,
@@ -1454,12 +1455,13 @@ function backupStatusLabel(status: string): string {
   const labels: Record<string, string> = {
     accepted: "Accepted",
     active: "Available package",
-    artifact_metadata_recorded: "Artifact metadata recorded",
+    artifact_metadata_recorded: "Package linked",
     artifact_uploaded: "Artifact uploaded",
     completed: "Completed",
     creating: "Preparing package",
     deleted: "Deleted",
     delete_failed: "Delete failed",
+    missing: "Package unavailable",
     failed: "Failed",
     linked_metadata_only: "Linked metadata only",
     planned_metadata_only: "Planned metadata only",

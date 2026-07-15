@@ -318,32 +318,6 @@ export function FleetMetricsPanel({
           </details>
         </div>
 
-        <div className="metricGrid observabilityMetricsSummary" aria-label="Fleet metrics summary">
-          <MetricTile
-            label="Current metric"
-            value={resourceMetricTitle(preferences.resourceMetric)}
-            detail={`${sampledClients} charted · ${excludedClients} excluded`}
-          />
-          <MetricTile
-            label="Scope"
-            value={selectedScopeLabel}
-            detail={`${matchedClients} matched · ${sampledClients} with retained samples`}
-          />
-          <MetricTile label="Selected range" value={selectedRangeName} detail={resourceEvidence.selectedRangeLabel || timeRange} />
-          <MetricTile
-            label="Telemetry freshness"
-            value={loading ? "Refreshing" : freshness.label}
-            detail={`Data available ${resourceEvidence.dataAvailableValue} · overview ${generatedAt}`}
-          />
-          <MetricTile
-            label="Grouping"
-            value={selectedGroupLabel}
-            detail={`${overview?.label_clusters.length ?? 0} groups; ${excludedClients} excluded; fleet warning state ${overview?.summary.warnings ?? 0}`}
-          />
-        </div>
-
-        <WarningDefinitionStrip overview={overview} />
-
         <section className="dashboardSection observabilityChartSection" aria-labelledby="observability-fleet-resource-title">
           <div className="dashboardSectionHeader">
             <div>
@@ -431,6 +405,32 @@ export function FleetMetricsPanel({
           </div>
         </section>
 
+        <div className="metricGrid observabilityMetricsSummary" aria-label="Fleet metrics summary">
+          <MetricTile
+            label="Current metric"
+            value={resourceMetricTitle(preferences.resourceMetric)}
+            detail={`${sampledClients} charted · ${excludedClients} excluded`}
+          />
+          <MetricTile
+            label="Scope"
+            value={selectedScopeLabel}
+            detail={`${matchedClients} matched · ${sampledClients} with retained samples`}
+          />
+          <MetricTile label="Selected range" value={selectedRangeName} detail={resourceEvidence.selectedRangeLabel || timeRange} />
+          <MetricTile
+            label="Telemetry freshness"
+            value={loading ? "Refreshing" : freshness.label}
+            detail={`Data available ${resourceEvidence.dataAvailableValue} · overview ${generatedAt}`}
+          />
+          <MetricTile
+            label="Grouping"
+            value={selectedGroupLabel}
+            detail={`${overview?.label_clusters.length ?? 0} groups; ${excludedClients} excluded; ${vpsCountLabel((overview?.summary.offline ?? 0) + (overview?.summary.stale ?? 0))} unavailable`}
+          />
+        </div>
+
+        <WarningDefinitionStrip overview={overview} />
+
         <section className="dashboardSection observabilityGroupSection" aria-labelledby="observability-fleet-groups-title">
           <div className="dashboardSectionHeader">
             <div>
@@ -472,7 +472,7 @@ function GroupTile({ cluster }: { cluster: DashboardLabelClusterRecord }) {
       <span>{cluster.kind}</span>
       <strong>{cluster.label}</strong>
       <small>
-        {cluster.online}/{cluster.total} reported reachable, {cluster.warnings} warning observations, {formatBitsPerSecond(cluster.rx_bps + cluster.tx_bps)} aggregate interval-average rate
+        {cluster.online}/{cluster.total} reported reachable, {cluster.warnings} reachability gaps, {formatBitsPerSecond(cluster.rx_bps + cluster.tx_bps)} aggregate interval-average rate
       </small>
     </div>
   );
@@ -480,14 +480,17 @@ function GroupTile({ cluster }: { cluster: DashboardLabelClusterRecord }) {
 
 function WarningDefinitionStrip({ overview }: { overview: DashboardOverviewRecord | null }) {
   const activeAlerts = overview?.operations.active_alerts ?? 0;
+  const criticalAlerts = overview?.operations.critical_alerts ?? 0;
   const warningAlerts = overview?.operations.warning_alerts ?? 0;
+  const infoAlerts = Math.max(0, activeAlerts - criticalAlerts - warningAlerts);
   const affectedVpsCount = uniqueAffectedVpsCount(overview);
-  const warningObservations =
+  const reachabilityObservations =
     overview?.label_clusters.reduce((total, cluster) => total + cluster.warnings, 0) ?? 0;
-  const fleetWarningState = overview?.summary.warnings ?? 0;
+  const unavailableVps =
+    (overview?.summary.offline ?? 0) + (overview?.summary.stale ?? 0);
   const definitions = [
     {
-      detail: `${overview?.operations.critical_alerts ?? 0} critical, ${warningAlerts} warning`,
+      detail: `${criticalAlerts} critical, ${warningAlerts} warning, ${infoAlerts} info`,
       label: "Active alerts",
       value: String(activeAlerts),
     },
@@ -498,18 +501,18 @@ function WarningDefinitionStrip({ overview }: { overview: DashboardOverviewRecor
     },
     {
       detail: "group rows can overlap across provider, country, tag, and all-fleet buckets",
-      label: "Warning observations",
-      value: String(warningObservations),
+      label: "Reachability observations",
+      value: String(reachabilityObservations),
     },
     {
-      detail: "same scoped warning count used by the shell fleet status badge",
-      label: "Fleet warning state",
-      value: String(fleetWarningState),
+      detail: "offline and stale VPSs in the retained overview scope",
+      label: "Unavailable VPSs",
+      value: String(unavailableVps),
     },
   ];
 
   return (
-    <div className="observabilityWarningDefinitions" aria-label="Fleet metrics warning definitions">
+    <div className="observabilityWarningDefinitions" aria-label="Fleet metrics availability definitions">
       {definitions.map((definition) => (
         <div key={definition.label}>
           <span>{definition.label}</span>
@@ -519,6 +522,10 @@ function WarningDefinitionStrip({ overview }: { overview: DashboardOverviewRecor
       ))}
     </div>
   );
+}
+
+function vpsCountLabel(count: number): string {
+  return `${count} VPS${count === 1 ? "" : "s"}`;
 }
 
 function resourceChartData(series: DashboardResourceSeriesRecord[]): ResourceChartData {

@@ -151,12 +151,24 @@ export VPSMAN_POSTGRES_URL=postgres://vpsman:vpsman@127.0.0.1:5432/vpsman
 export VPSMAN_GATEWAY_BIND=127.0.0.1:9443
 export VPSMAN_GATEWAY_CONTROL_BIND=127.0.0.1:9444
 export VPSMAN_GATEWAY_CONTROL_URL=http://127.0.0.1:9444
-export VPSMAN_INTERNAL_TOKEN="$(openssl rand -hex 32)"
+export VPSMAN_GATEWAY_SPOOL_DIR=.tmp/quickstart-gateway-spool
 export VPSMAN_BACKUP_OBJECT_STORE_DIR=.tmp/objects/backups
 
-# 3. Run each service in its own shell with that environment.
+# The disposable Postgres above starts an empty control plane. Pair it with an
+# empty quickstart spool so events from an older local run cannot be replayed.
+rm -rf "$VPSMAN_GATEWAY_SPOOL_DIR"
+
+# Generate the mutually consistent gateway and privilege secrets once.
+export VPSMAN_SUPER_PASSWORD='<local_super_password>'
+cargo run -p vpsctl -- compose-secrets --secrets-dir .tmp/quickstart-secrets
+unset VPSMAN_SUPER_PASSWORD
+export VPSMAN_INTERNAL_TOKEN="$(<.tmp/quickstart-secrets/vpsman_internal_token)"
+
+# 3. In each of three shells, repeat the shared exports above, then run one service.
 cargo run -p vpsman-api
-cargo run -p vpsman-gateway
+VPSMAN_GATEWAY_PRIVATE_KEY_HEX="$(<.tmp/quickstart-secrets/vpsman_gateway_private_key_hex)" \
+VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX="$(<.tmp/quickstart-secrets/vpsman_privilege_verifier_key_hex)" \
+  cargo run -p vpsman-gateway
 cargo run -p vpsman-worker
 
 # 4. Run the console.
@@ -183,7 +195,8 @@ console:
 7. Copy the generated one-line installer to the VPS.
 
 The generated command installs the latest GitHub release by default and supports
-root service, user service, and staged no-systemd installs.
+root service, user service, and explicitly staged no-systemd installs. Staging
+prints the exact foreground command needed to start the agent.
 
 CLI/manual equivalent:
 

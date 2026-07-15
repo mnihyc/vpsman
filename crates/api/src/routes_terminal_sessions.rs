@@ -472,6 +472,7 @@ mod tests {
             last_job_id: Uuid::new_v4(),
             last_command_type: "terminal_open".to_string(),
             last_seq: 0,
+            opened_at: Some("2026-06-21T00:00:00Z".to_string()),
             observed_at: "2026-06-21T00:00:00Z".to_string(),
         }
     }

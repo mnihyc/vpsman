@@ -338,6 +338,35 @@
   overflow-wrap: anywhere;
 }
 
+.installCommandFollowup {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 6px 10px;
+  min-width: 0;
+  border: 1px solid var(--primary-border);
+  border-radius: 8px;
+  background: var(--primary-soft);
+  padding: 8px 10px;
+}
+
+.installCommandFollowup strong {
+  color: var(--primary-text);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.installCommandFollowup code {
+  min-width: 0;
+  color: var(--text);
+}
+
+@media (max-width: 700px) {
+  .installCommandFollowup {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .accessInspector .sideForm label:not(.inlineCheck) {
   display: grid;
   gap: 6px;

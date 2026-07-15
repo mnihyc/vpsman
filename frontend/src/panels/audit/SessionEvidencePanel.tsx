@@ -10,6 +10,7 @@ import type {
   JobHistoryRecord,
   JsonValue,
   OperatorAuthEventRecord,
+  OperatorView,
   OperatorSessionRecord,
 } from "../../types";
 import type { TerminalSessionRecord } from "../../typesTerminal";
@@ -51,6 +52,7 @@ export function SessionEvidencePanel({
   jobs,
   loading,
   onRefresh,
+  operator,
   operatorAuthEvents,
   operatorSessions,
   terminalSessions,
@@ -60,10 +62,12 @@ export function SessionEvidencePanel({
   jobs: JobHistoryRecord[];
   loading: boolean;
   onRefresh: () => void;
+  operator: OperatorView | null;
   operatorAuthEvents: OperatorAuthEventRecord[];
   operatorSessions: OperatorSessionRecord[];
   terminalSessions: TerminalSessionRecord[];
 }) {
+  const canInspectOperatorAuthority = operator?.role === "admin";
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const agentNameById = useMemo(
     () =>
@@ -256,10 +260,19 @@ export function SessionEvidencePanel({
         id: "expiry",
         header: "Expiry",
         minSize: 150,
-        searchValue: (row) => terminalExpiryLabel(row, operatorSessions),
+        searchValue: (row) =>
+          canInspectOperatorAuthority
+            ? terminalExpiryLabel(row, operatorSessions)
+            : "Admin-only bearer evidence",
         size: 170,
-        sortValue: (row) => terminalExpirySort(row, operatorSessions),
-        cell: (row) => terminalExpiryLabel(row, operatorSessions),
+        sortValue: (row) =>
+          canInspectOperatorAuthority
+            ? terminalExpirySort(row, operatorSessions)
+            : row.session.observed_at,
+        cell: (row) =>
+          canInspectOperatorAuthority
+            ? terminalExpiryLabel(row, operatorSessions)
+            : "Admin-only bearer evidence",
       },
       {
         id: "transcript",
@@ -285,7 +298,13 @@ export function SessionEvidencePanel({
           ),
       },
     ],
-    [agentNameById, authEventBySessionId, operatorSessions, terminalStateByKey],
+    [
+      agentNameById,
+      authEventBySessionId,
+      canInspectOperatorAuthority,
+      operatorSessions,
+      terminalStateByKey,
+    ],
   );
 
   return (
@@ -297,8 +316,9 @@ export function SessionEvidencePanel({
         <span>
           <h2>Session evidence</h2>
           <small>
-            Read-only terminal, transcript, operator-session, and authentication
-            evidence for security review.
+            {canInspectOperatorAuthority
+              ? "Read-only terminal, transcript, operator-session, and authentication evidence for security review."
+              : "Read-only terminal, transcript, and audit evidence. Operator authority correlation is admin-only."}
           </small>
         </span>
         <button
@@ -353,19 +373,25 @@ export function SessionEvidencePanel({
         <div className="metricCard">
           <KeyRound size={18} />
           <span>
-            <strong>{operatorSessions.length}</strong>
+            <strong>
+              {canInspectOperatorAuthority
+                ? operatorSessions.length
+                : "Admin only"}
+            </strong>
             <small>
-              {expiredOperatorSessions > 0
+              {canInspectOperatorAuthority && expiredOperatorSessions > 0
                 ? `${expiredOperatorSessions} expired bearer sessions`
-                : "Bearer sessions"}
+                : "Bearer-session inventory"}
             </small>
           </span>
         </div>
         <div className="metricCard">
           <KeyRound size={18} />
           <span>
-            <strong>{demoAuthSignals}</strong>
-            <small>Demo/test auth signals</small>
+            <strong>
+              {canInspectOperatorAuthority ? demoAuthSignals : "Admin only"}
+            </strong>
+            <small>Authentication signals</small>
           </span>
         </div>
       </div>
@@ -403,6 +429,7 @@ export function SessionEvidencePanel({
         <SelectedSessionEvidence
           agentNameById={agentNameById}
           authEventBySessionId={authEventBySessionId}
+          canInspectOperatorAuthority={canInspectOperatorAuthority}
           operatorSessions={operatorSessions}
           state={
             terminalStateByKey.get(terminalKey(selectedRecord.session)) ??
@@ -414,6 +441,7 @@ export function SessionEvidencePanel({
 
       <OperatorSessionEvidence
         authEventBySessionId={authEventBySessionId}
+        canInspectOperatorAuthority={canInspectOperatorAuthority}
         operatorSessions={operatorSessions}
         stateById={operatorStateById}
       />
@@ -424,12 +452,14 @@ export function SessionEvidencePanel({
 function SelectedSessionEvidence({
   agentNameById,
   authEventBySessionId,
+  canInspectOperatorAuthority,
   operatorSessions,
   record,
   state,
 }: {
   agentNameById: Map<string, string>;
   authEventBySessionId: Map<string, OperatorAuthEventRecord>;
+  canInspectOperatorAuthority: boolean;
   operatorSessions: OperatorSessionRecord[];
   record: TerminalEvidenceRecord;
   state: TerminalEvidenceState;
@@ -484,7 +514,11 @@ function SelectedSessionEvidence({
         </span>
         <span>
           <strong>Expiry</strong>
-          <span>{terminalExpiryDetail(record, operatorSessions)}</span>
+          <span>
+            {canInspectOperatorAuthority
+              ? terminalExpiryDetail(record, operatorSessions)
+              : "Bearer-session expiry is visible to admins only"}
+          </span>
         </span>
         <span>
           <strong>Transcript link</strong>
@@ -573,28 +607,36 @@ function SelectedSessionEvidence({
               {operatorSessionId ? shortId(operatorSessionId) : "not linked"}
             </small>
           </div>
-          <div className="sessionEvidenceReferenceGrid">
-            <span>
-              <strong>Operator session</strong>
-              <small>{operatorSessionId ?? "not returned"}</small>
-            </span>
-            <span>
-              <strong>Auth result</strong>
-              <small>{authEvent?.result ?? "not matched"}</small>
-            </span>
-            <span>
-              <strong>Remote IP</strong>
-              <small>{formatAuthRemoteIp(authEvent)}</small>
-            </span>
-            <span>
-              <strong>User agent</strong>
-              <small>{formatAuthUserAgent(authEvent)}</small>
-            </span>
-            <span>
-              <strong>Auth source</strong>
-              <small>{formatAuthEvidenceSource(authEvent)}</small>
-            </span>
-          </div>
+          {canInspectOperatorAuthority ? (
+            <div className="sessionEvidenceReferenceGrid">
+              <span>
+                <strong>Operator session</strong>
+                <small>{operatorSessionId ?? "not returned"}</small>
+              </span>
+              <span>
+                <strong>Auth result</strong>
+                <small>{authEvent?.result ?? "not matched"}</small>
+              </span>
+              <span>
+                <strong>Remote IP</strong>
+                <small>{formatAuthRemoteIp(authEvent)}</small>
+              </span>
+              <span>
+                <strong>User agent</strong>
+                <small>{formatAuthUserAgent(authEvent)}</small>
+              </span>
+              <span>
+                <strong>Auth source</strong>
+                <small>{formatAuthEvidenceSource(authEvent)}</small>
+              </span>
+            </div>
+          ) : (
+            <div className="dashboardWidgetEmpty">
+              Operator authentication correlation is visible to admins only.
+              Terminal lifecycle, audit links, and transcript evidence remain
+              available above.
+            </div>
+          )}
         </section>
       </div>
     </section>
@@ -603,10 +645,12 @@ function SelectedSessionEvidence({
 
 function OperatorSessionEvidence({
   authEventBySessionId,
+  canInspectOperatorAuthority,
   operatorSessions,
   stateById,
 }: {
   authEventBySessionId: Map<string, OperatorAuthEventRecord>;
+  canInspectOperatorAuthority: boolean;
   operatorSessions: OperatorSessionRecord[];
   stateById: Map<string, OperatorSessionEvidenceState>;
 }) {
@@ -618,11 +662,17 @@ function OperatorSessionEvidence({
       <div className="dashboardWidgetHeader">
         <strong>Operator session evidence</strong>
         <small>
-          {operatorSessions.length} bearer sessions · created and refresh expiry
-          shown
+          {canInspectOperatorAuthority
+            ? `${operatorSessions.length} bearer session${operatorSessions.length === 1 ? "" : "s"} · created and refresh expiry shown`
+            : "Admin only"}
         </small>
       </div>
-      {operatorSessions.length > 0 ? (
+      {!canInspectOperatorAuthority ? (
+        <div className="dashboardWidgetEmpty">
+          Bearer-session inventory and operator authentication records are
+          visible to admins only. No empty-state conclusion is inferred.
+        </div>
+      ) : operatorSessions.length > 0 ? (
         operatorSessions.slice(0, 6).map((session) => {
           const authEvent = authEventBySessionId.get(session.id);
           const state =
@@ -869,6 +919,7 @@ function terminalAuditTargetLabel(audit: AuditLogRecord): string {
 
 function terminalStartedAt(record: TerminalEvidenceRecord): string | null {
   return (
+    record.session.opened_at ??
     record.audits
       .filter((audit) => audit.action === "terminal.open")
       .map((audit) => audit.created_at)
@@ -880,14 +931,14 @@ function terminalStartedLabel(record: TerminalEvidenceRecord): string {
   const startedAt = terminalStartedAt(record);
   return startedAt
     ? formatCompactTime(startedAt)
-    : "Terminal start not reported";
+    : "Open time unavailable";
 }
 
 function terminalStartedDetail(record: TerminalEvidenceRecord): string {
   const startedAt = terminalStartedAt(record);
   return startedAt
     ? formatFullTime(startedAt)
-    : "Terminal start not reported by backend or audit ledger";
+    : "This retained session predates open-time evidence; last activity remains available.";
 }
 
 function terminalExpiryLabel(

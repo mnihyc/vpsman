@@ -67,7 +67,9 @@ if grep -q "$staged_home" "$fake_systemctl_log"; then
   echo "staging-only install must not call systemctl" >&2
   exit 1
 fi
-grep -q "staging-only installs" "$SMOKE_TMPDIR/staged-only.log"
+grep -q "staging-only install complete; no service was started" "$SMOKE_TMPDIR/staged-only.log"
+grep -Fq "start in foreground:" "$SMOKE_TMPDIR/staged-only.log"
+grep -Fq "$staged_home/bin/vpsman-agent" "$SMOKE_TMPDIR/staged-only.log"
 
 env \
   PATH="$fake_bin_dir:$PATH" \

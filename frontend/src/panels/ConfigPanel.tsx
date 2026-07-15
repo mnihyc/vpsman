@@ -31,6 +31,7 @@ import { VpsCombobox } from "../components/VpsCombobox";
 import {
   buildBulkJobProgress,
   createJobTargetCount,
+  waitForBulkJobSet,
   waitForBulkJobTargets,
   type BulkJobProgress,
 } from "../bulkJobProgress";
@@ -192,6 +193,7 @@ export function ConfigPanel({
   onLoadJobTargets,
   onDeleteRuntimeConfigPatchGenerator,
   onOpenJobDetails,
+  onOpenJobHistory,
   onOpenPrivilegeUnlock,
   onOpenSourceTemplates,
   onOpenAlerts,
@@ -235,6 +237,7 @@ export function ConfigPanel({
     request: DeleteRuntimeConfigPatchGeneratorRequest,
   ) => Promise<void>;
   onOpenJobDetails: (jobId: string) => void;
+  onOpenJobHistory: () => void;
   onOpenPrivilegeUnlock: () => void;
   onOpenSourceTemplates: () => void;
   onOpenAlerts: () => void;
@@ -330,6 +333,7 @@ export function ConfigPanel({
             onLoadJobOutputs={onLoadJobOutputs}
             onLoadJobTargets={onLoadJobTargets}
             onOpenJobDetails={onOpenJobDetails}
+            onOpenJobHistory={onOpenJobHistory}
             onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
             onRenderRuntimeConfigPatchGenerator={
               onRenderRuntimeConfigPatchGenerator
@@ -1779,6 +1783,7 @@ function BulkConfigApply({
   onLoadJobOutputs,
   onLoadJobTargets,
   onOpenJobDetails,
+  onOpenJobHistory,
   onOpenPrivilegeUnlock,
   onRenderRuntimeConfigPatchGenerator,
   onResolveBulk,
@@ -1801,6 +1806,7 @@ function BulkConfigApply({
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails: (jobId: string) => void;
+  onOpenJobHistory: () => void;
   onOpenPrivilegeUnlock: () => void;
   onRenderRuntimeConfigPatchGenerator: (
     generatorId: string,
@@ -2288,32 +2294,28 @@ function BulkConfigApply({
         toml: snapshot.toml,
         privilege_assertion: snapshot.privilegeAssertion,
       });
-      const firstJobId = response.sync_job_ids[0] ?? snapshot.jobId;
+      const jobIds = response.sync_job_ids;
+      if (jobIds.length === 0) {
+        throw new Error("Runtime config patch created no sync jobs");
+      }
       const initial = buildBulkJobProgress({
         targetCount: response.target_count,
-        jobId: firstJobId,
+        jobId: snapshot.jobId,
+        jobIds,
         targetRecords: [],
         targets: snapshot.targets,
         maxTimeoutSecs: snapshot.maxTimeoutSecs,
       });
       setProgress(initial);
-      const waited = await waitForBulkJobTargets(firstJobId, onLoadJobTargets, {
-        targetCount: 1,
+      const waited = await waitForBulkJobSet(jobIds, onLoadJobTargets, {
+        operationId: snapshot.jobId,
+        targetCount: response.target_count,
         onProgress: setProgress,
         targets: snapshot.targets,
         maxTimeoutSecs: snapshot.maxTimeoutSecs,
+        onLoadOutputs: onLoadJobOutputs,
       });
-      const outputs = await onLoadJobOutputs(firstJobId).catch(() => []);
-      setProgress(
-        buildBulkJobProgress({
-          targetCount: response.target_count,
-          jobId: firstJobId,
-          outputs,
-          targetRecords: waited.targets,
-          targets: snapshot.targets,
-          maxTimeoutSecs: snapshot.maxTimeoutSecs,
-        }),
-      );
+      setProgress(waited.progress);
       setApplySnapshot(null);
     });
   }
@@ -2537,7 +2539,7 @@ function BulkConfigApply({
             clearBulkConfigReview();
           }}
           privilegeMaterial={privilegeMaterial}
-          unlockRedirectLabel="Open Privilege Vault for runtime config"
+          unlockRedirectLabel="Unlock privilege for runtime config"
         />
         <div className="singleConfigStickyActions bulkPatchApplyActions">
           <span>
@@ -2761,6 +2763,7 @@ function BulkConfigApply({
           loading={pending}
           onClearResults={() => setProgress(null)}
           onOpenJobDetails={onOpenJobDetails}
+          onOpenJobHistory={onOpenJobHistory}
           progress={progress}
         />
       )}
@@ -2927,6 +2930,8 @@ function SingleVpsConfig({
     sections: string[];
     payloadHashHex: string;
   } | null>(null);
+  const [overrideValidationGeneration, setOverrideValidationGeneration] =
+    useState(0);
   const [applySnapshot, setApplySnapshot] =
     useState<SingleVpsConfigApplySnapshot | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -2997,7 +3002,7 @@ function SingleVpsConfig({
     return () => {
       active = false;
     };
-  }, [baseHash, overrideToml, singleTarget?.id]);
+  }, [baseHash, overrideToml, overrideValidationGeneration, singleTarget?.id]);
 
   function clearSingleConfigReview() {
     invalidateReviewGeneration();
@@ -3098,7 +3103,11 @@ function SingleVpsConfig({
         toml: snapshot.toml,
         privilege_assertion: snapshot.privilegeAssertion,
       });
-      const firstJobId = response.sync_job_ids[0] ?? crypto.randomUUID();
+      const firstJobId = response.sync_job_ids[0];
+      if (!firstJobId) {
+        throw new Error("One-VPS override created no sync job");
+      }
+      setLastJobId(firstJobId);
       const initial = buildBulkJobProgress({
         targetCount: response.target_count,
         jobId: firstJobId,
@@ -3114,17 +3123,29 @@ function SingleVpsConfig({
         maxTimeoutSecs: snapshot.maxTimeoutSecs,
       });
       const outputs = await onLoadJobOutputs(firstJobId).catch(() => []);
-      setProgress(
-        buildBulkJobProgress({
-          targetCount: response.target_count,
-          jobId: firstJobId,
-          outputs,
-          targetRecords: waited.targets,
-          targets: [snapshot.target],
-          maxTimeoutSecs: snapshot.maxTimeoutSecs,
-        }),
-      );
+      const finalProgress = buildBulkJobProgress({
+        targetCount: response.target_count,
+        jobId: firstJobId,
+        outputs,
+        targetRecords: waited.targets,
+        targets: [snapshot.target],
+        maxTimeoutSecs: snapshot.maxTimeoutSecs,
+      });
+      setProgress(finalProgress);
       setApplySnapshot(null);
+      if (
+        finalProgress.total > 0 &&
+        finalProgress.successful === finalProgress.total
+      ) {
+        setRedactedToml("");
+        setBaseHash("");
+        setOverrideToml("");
+        setOverrideValidation(null);
+        setReviewStatus(
+          "Override applied. Read current config before drafting another change.",
+        );
+        setEditorView("current");
+      }
     });
   }
 
@@ -3188,6 +3209,7 @@ function SingleVpsConfig({
       }
       setRedactedToml(config.toml);
       setBaseHash(config.baseHash);
+      setOverrideValidationGeneration((current) => current + 1);
       setEditorView("patch");
     });
   }
@@ -3302,7 +3324,7 @@ function SingleVpsConfig({
             onOpenUnlock={onOpenPrivilegeUnlock}
             onPrivilegeMaterialChange={setPrivilegeMaterial}
             privilegeMaterial={privilegeMaterial}
-            unlockRedirectLabel="Open Privilege Vault for runtime config apply"
+            unlockRedirectLabel="Unlock privilege for runtime config apply"
           />
         </section>
       )}
@@ -3342,7 +3364,7 @@ function SingleVpsConfig({
             onOpenUnlock={onOpenPrivilegeUnlock}
             onPrivilegeMaterialChange={setPrivilegeMaterial}
             privilegeMaterial={privilegeMaterial}
-            unlockRedirectLabel="Open Privilege Vault for runtime config apply"
+            unlockRedirectLabel="Unlock privilege for runtime config apply"
           />
         </section>
       )}
@@ -3445,7 +3467,7 @@ function SingleVpsConfig({
                 setPrivilegeMaterial(material);
               }}
               privilegeMaterial={privilegeMaterial}
-              unlockRedirectLabel="Open Privilege Vault for runtime config apply"
+              unlockRedirectLabel="Unlock privilege for runtime config apply"
             />
             <div className="configOverrideActions singleConfigStickyActions">
               <span
@@ -5057,14 +5079,14 @@ function extractConfigRead(outputs: JobOutputRecord[]): {
     const value = JSON.parse(base64ToText(output.data_base64)) as {
       type?: string;
       toml?: string;
-      base_config_sha256_hex?: string;
+      config_sha256_hex?: string;
     };
     if (
       value.type === "config_read" &&
       value.toml &&
-      value.base_config_sha256_hex
+      value.config_sha256_hex
     ) {
-      return { toml: value.toml, baseHash: value.base_config_sha256_hex };
+      return { toml: value.toml, baseHash: value.config_sha256_hex };
     }
   }
   throw new Error("Config read output was not available yet");

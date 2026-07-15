@@ -10,12 +10,14 @@ export class ApiUnauthorizedError extends Error {
 export class ApiResponseError extends Error {
   status: number;
   code: string;
+  detail: string | null;
 
-  constructor(status: number, code: string) {
-    super(`${humanizeApiCode(code)} (${status})`);
+  constructor(status: number, code: string, detail: string | null = null) {
+    super(`${humanizeApiCode(code)}${detail ? `: ${detail}` : ""} (${status})`);
     this.name = "ApiResponseError";
     this.status = status;
     this.code = code;
+    this.detail = detail;
   }
 }
 
@@ -231,12 +233,16 @@ export function isApiUnauthorized(error: unknown): error is ApiUnauthorizedError
 
 async function apiErrorFromResponse(response: Response): Promise<ApiResponseError> {
   let code = `http_${response.status}`;
+  let detail: string | null = null;
   try {
     const contentType = response.headers.get("content-type") ?? "";
     if (contentType.includes("application/json")) {
-      const body = (await response.json()) as { error?: unknown };
+      const body = (await response.json()) as { error?: unknown; message?: unknown };
       if (typeof body.error === "string" && body.error.trim()) {
         code = body.error;
+      }
+      if (typeof body.message === "string" && body.message.trim()) {
+        detail = body.message.trim();
       }
     } else {
       const text = (await response.text()).trim();
@@ -247,7 +253,7 @@ async function apiErrorFromResponse(response: Response): Promise<ApiResponseErro
   } catch {
     code = `http_${response.status}`;
   }
-  return new ApiResponseError(response.status, code);
+  return new ApiResponseError(response.status, code, detail);
 }
 
 function humanizeApiCode(code: string): string {

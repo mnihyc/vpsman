@@ -10,6 +10,7 @@ import {
   Play,
   ShieldAlert,
   TerminalSquare,
+  UserPlus,
 } from "lucide-react";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import { VpsCombobox } from "../components/VpsCombobox";
@@ -75,6 +76,7 @@ type HomePanelProps = {
   onOpenTerminal: (agent: AgentView) => void;
   onOpenTransfers: () => void;
   onOpenVpsDetail: (agent: AgentView) => void;
+  onRegisterVps: () => void;
 };
 
 type HomeActionItem = {
@@ -100,6 +102,7 @@ type HomeActivityItem = {
 
 export function HomePanel({
   agents,
+  allAgents,
   auditLogs,
   backupArtifacts,
   backups,
@@ -124,6 +127,7 @@ export function HomePanel({
   onOpenTerminal,
   onOpenTransfers,
   onOpenVpsDetail,
+  onRegisterVps,
 }: HomePanelProps) {
   const [quickTargetId, setQuickTargetId] = useState("");
   const quickTarget = agents.find((agent) => agent.id === quickTargetId) ?? agents[0] ?? null;
@@ -142,8 +146,12 @@ export function HomePanel({
   const failedJobs = jobs.filter((job) => isFailedJobStatus(job.status)).length;
   const failedBackups = backups.filter((backup) => isFailedBackupStatus(backup.status)).length;
   const activeTransfers = fileTransfers.filter((transfer) => isActiveTransferStatus(transfer.status)).length;
-  const criticalAlerts = fleetAlerts.filter((alert) => alert.severity === "critical" && alert.operator_state !== "acknowledged").length;
-  const warningAlerts = fleetAlerts.filter((alert) => alert.severity !== "critical" && alert.operator_state !== "acknowledged").length;
+  const activeAlerts = fleetAlerts.filter(
+    (alert) => alert.operator_state !== "acknowledged",
+  );
+  const criticalAlerts = activeAlerts.filter((alert) => alert.severity === "critical").length;
+  const warningAlerts = activeAlerts.filter((alert) => alert.severity === "warning").length;
+  const infoAlerts = activeAlerts.length - criticalAlerts - warningAlerts;
 
   useEffect(() => {
     if (agents.length === 0) {
@@ -275,8 +283,8 @@ export function HomePanel({
               <ConsoleStatusBadge tone={visibleOnline === agents.length && criticalAlerts === 0 ? "ok" : "warning"}>
                 {visibleOnline}/{agents.length} visible live
               </ConsoleStatusBadge>
-              <ConsoleStatusBadge tone={criticalAlerts > 0 ? "critical" : warningAlerts > 0 ? "warning" : "ok"}>
-                {criticalAlerts} critical / {warningAlerts} warning
+              <ConsoleStatusBadge tone={criticalAlerts > 0 ? "critical" : warningAlerts > 0 ? "warning" : infoAlerts > 0 ? "info" : "ok"}>
+                {criticalAlerts} critical / {warningAlerts} warning / {infoAlerts} info
               </ConsoleStatusBadge>
               <ConsoleStatusBadge tone={runningJobs > 0 ? "info" : "neutral"}>
                 {runningJobs} running jobs
@@ -297,54 +305,79 @@ export function HomePanel({
             <div className="homeQuickActionGrid">
               <button
                 className="primaryAction compactAction"
+                aria-label="Open terminal for selected VPS"
                 disabled={!quickTarget}
                 onClick={() => quickTarget && onOpenTerminal(quickTarget)}
+                title="Open terminal for the selected VPS"
                 type="button"
               >
                 <TerminalSquare size={16} />
-                <span>Open terminal</span>
+                <span>Terminal</span>
               </button>
               <button
                 className="secondaryAction compactAction"
+                aria-label="Browse files on selected VPS"
                 disabled={!quickTarget}
                 onClick={() => quickTarget && onOpenFiles(quickTarget)}
+                title="Browse files on the selected VPS"
                 type="button"
               >
                 <FolderOpen size={16} />
-                <span>Browse files</span>
+                <span>Files</span>
               </button>
               <button
                 className="secondaryAction compactAction"
+                aria-label="Dispatch command to selected VPS"
                 disabled={!quickTarget}
                 onClick={() => quickTarget && onOpenDispatch(quickTarget)}
+                title="Dispatch a command to the selected VPS"
                 type="button"
               >
                 <Play size={16} />
-                <span>Dispatch command</span>
+                <span>Command</span>
               </button>
               <button
                 className="secondaryAction compactAction"
+                aria-label="Run backup on selected VPS"
                 disabled={!quickTarget}
                 onClick={() => quickTarget && onOpenBackup(quickTarget)}
+                title="Run a backup on the selected VPS"
                 type="button"
               >
                 <DatabaseBackup size={16} />
-                <span>Run backup</span>
+                <span>Backup</span>
               </button>
               <button
                 className="secondaryAction compactAction"
+                aria-label="View network for selected VPS"
                 disabled={!quickTarget}
                 onClick={() => quickTarget && onOpenNetwork(quickTarget)}
+                title="View network state for the selected VPS"
                 type="button"
               >
                 <Network size={16} />
-                <span>View network</span>
+                <span>Network</span>
               </button>
             </div>
             {!quickTarget && (
               <div className="homeQuietState" aria-label="Home empty scope notice">
                 <ShieldAlert size={18} />
-                <span>No VPS in the current scope. Adjust the fleet scope or wait for agents to report telemetry.</span>
+                <span>
+                  {allAgents.length === 0
+                    ? "No VPS is registered yet. Register the first identity, then run its generated install command."
+                    : "No VPS matches the current scope. Adjust the fleet scope to restore quick actions."}
+                </span>
+                {allAgents.length === 0 ? (
+                  <button
+                    className="primaryAction compactAction"
+                    onClick={onRegisterVps}
+                    title="Open VPS identity registration"
+                    type="button"
+                  >
+                    <UserPlus size={15} />
+                    Register VPS
+                  </button>
+                ) : null}
               </div>
             )}
           </div>
@@ -364,10 +397,10 @@ export function HomePanel({
             value={String(visibleReview + visibleOffline)}
           />
           <HomePostureMetric
-            detail={`${criticalAlerts} critical, ${warningAlerts} warning`}
+            detail={`${criticalAlerts} critical, ${warningAlerts} warning, ${infoAlerts} info`}
             label="Open alerts"
-            tone={criticalAlerts ? "critical" : warningAlerts ? "warning" : "ok"}
-            value={String(criticalAlerts + warningAlerts)}
+            tone={criticalAlerts ? "critical" : warningAlerts ? "warning" : infoAlerts ? "info" : "ok"}
+            value={String(activeAlerts.length)}
           />
           <HomePostureMetric
             detail={`${failedJobs} failed in loaded history`}
@@ -589,7 +622,11 @@ function buildAttentionItems({
 }): HomeActionItem[] {
   const agentById = new Map(agents.map((agent) => [agent.id, agent]));
   const alertItems = fleetAlerts
-    .filter((alert) => alert.operator_state !== "acknowledged")
+    .filter(
+      (alert) =>
+        alert.operator_state !== "acknowledged" &&
+        (alert.severity === "critical" || alert.severity === "warning"),
+    )
     .map((alert) => {
       const alertAgent = alert.client_id ? agentById.get(alert.client_id) : undefined;
       return {
@@ -828,7 +865,11 @@ function buildRecentFailureItems({
       tone: "critical",
     }) satisfies HomeActionItem);
   const alertItems = fleetAlerts
-    .filter((alert) => alert.operator_state !== "acknowledged")
+    .filter(
+      (alert) =>
+        alert.operator_state !== "acknowledged" &&
+        (alert.severity === "critical" || alert.severity === "warning"),
+    )
     .map((alert) => ({
       detail: `${readableAlertCategory(alert.category)} / ${alert.client_id ?? alert.target_id}`,
       id: `failure-alert:${alert.id}`,
@@ -985,7 +1026,7 @@ function readableJobStatus(status: string) {
 
 function readableBackupStatus(status: string) {
   const labels: Record<string, string> = {
-    artifact_metadata_recorded: "artifact recorded; upload not verified",
+    artifact_metadata_recorded: "package linked",
     completed: "completed",
     execution_canceled: "canceled",
     execution_failed: "failed",

@@ -2,6 +2,7 @@ use std::{
     fs::File,
     io,
     os::fd::{AsRawFd, FromRawFd, RawFd},
+    os::unix::process::CommandExt,
     process::{ExitStatus, Stdio},
     time::Duration,
 };
@@ -334,18 +335,24 @@ async fn run_pty(
     sink: Option<ChildOutputSink>,
 ) -> Result<ChildRunResult> {
     command.kill_on_drop(true);
-    if cleanup_policy == ChildCleanupPolicy::ProcessGroup {
-        command.process_group(0);
-    }
     let pty = open_pty_stdio().context("failed to open PTY")?;
-    command.stdin(pty.stdin);
-    command.stdout(pty.stdout);
-    command.stderr(pty.stderr);
+    let PtyStdio {
+        master,
+        control,
+        stdin,
+        stdout,
+        stderr,
+    } = pty;
+    configure_controlling_pty(&mut command, &control);
+    command.stdin(stdin);
+    command.stdout(stdout);
+    command.stderr(stderr);
 
     let max_timeout_secs = max_timeout_secs.max(1);
     let mut child = RunningChild::spawn(command, cleanup_policy)?;
+    drop(control);
     let reader_task = tokio::spawn(read_bounded_pty_output_with_sink(
-        tokio::fs::File::from_std(pty.master),
+        tokio::fs::File::from_std(master),
         max_output_bytes,
         sink,
     ));
@@ -415,6 +422,7 @@ async fn wait_for_child(
 
 pub(crate) struct PtyStdio {
     pub(crate) master: File,
+    pub(crate) control: File,
     pub(crate) stdin: Stdio,
     pub(crate) stdout: Stdio,
     pub(crate) stderr: Stdio,
@@ -436,11 +444,20 @@ pub(crate) fn open_pty_stdio() -> io::Result<PtyStdio> {
         return Err(io::Error::last_os_error());
     }
 
+    let stdin_fd = match dup_fd(slave_fd) {
+        Ok(fd) => fd,
+        Err(error) => {
+            close_fd(master_fd);
+            close_fd(slave_fd);
+            return Err(error);
+        }
+    };
     let stdout_fd = match dup_fd(slave_fd) {
         Ok(fd) => fd,
         Err(error) => {
             close_fd(master_fd);
             close_fd(slave_fd);
+            close_fd(stdin_fd);
             return Err(error);
         }
     };
@@ -449,6 +466,7 @@ pub(crate) fn open_pty_stdio() -> io::Result<PtyStdio> {
         Err(error) => {
             close_fd(master_fd);
             close_fd(slave_fd);
+            close_fd(stdin_fd);
             close_fd(stdout_fd);
             return Err(error);
         }
@@ -457,10 +475,29 @@ pub(crate) fn open_pty_stdio() -> io::Result<PtyStdio> {
     unsafe {
         Ok(PtyStdio {
             master: File::from_raw_fd(master_fd),
-            stdin: Stdio::from(File::from_raw_fd(slave_fd)),
+            control: File::from_raw_fd(slave_fd),
+            stdin: Stdio::from(File::from_raw_fd(stdin_fd)),
             stdout: Stdio::from(File::from_raw_fd(stdout_fd)),
             stderr: Stdio::from(File::from_raw_fd(stderr_fd)),
         })
+    }
+}
+
+pub(crate) fn configure_controlling_pty(
+    command: &mut tokio::process::Command,
+    control: &impl AsRawFd,
+) {
+    let slave_fd = control.as_raw_fd();
+    unsafe {
+        command.as_std_mut().pre_exec(move || {
+            if libc::setsid() < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::ioctl(slave_fd, libc::TIOCSCTTY, 0) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
     }
 }
 
@@ -942,7 +979,9 @@ mod tests {
     async fn pty_command_reports_tty_and_streams_pty_output() {
         let job_id = uuid::Uuid::new_v4();
         let mut command = tokio::process::Command::new(TEST_SHELL);
-        command.arg("-lc").arg("test -t 1 && printf tty");
+        command
+            .arg("-lc")
+            .arg("test -t 0 && test -t 1 && test -t 2 && tty -s && printf tty");
         let (tx, mut rx) = mpsc::channel(4);
 
         let output = match run_pty_with_streaming_output(

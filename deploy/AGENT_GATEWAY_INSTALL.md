@@ -25,7 +25,8 @@ Optional values:
 - `VPSMAN_AGENT_BINARY_SHA256`: required 64-character SHA-256 hex when
   `VPSMAN_AGENT_BINARY_URL` is set.
 - `VPSMAN_AGENT_ENABLE_SERVICE=0`: staging-only install that writes files but
-  does not enable or start the service. The default is to start the service.
+  does not enable or start the service. The installer prints the exact
+  foreground command after staging. The default is to start the service.
 
 ## Register the public identity
 
@@ -82,7 +83,9 @@ curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-a
 
 The installer writes a bootstrap-only `agent.toml`, installs a systemd unit, and starts the agent
 unless `VPSMAN_AGENT_ENABLE_SERVICE=0` is set for an intentional staging-only
-install.
+install. A staging-only run prints the exact `VPSMAN_AGENT_STATE_DIR=... \
+vpsman-agent --config ... run` command needed to start the agent in the
+foreground.
 It does not call `/api`, `/.well-known`, or any panel-side lookup endpoint. The
 local file contains only the client id, gateway endpoints and priority, Noise
 key material, server trust, and gateway retry/connect timing. Display names,

@@ -922,9 +922,9 @@ pub(crate) async fn validate_restore_archive_binding(
             "restore_source_backup_artifact_client_mismatch",
         ));
     }
-    if artifact.status != "active" {
+    if !artifact.content_available {
         return Err(ApiError::conflict(
-            "restore_source_backup_artifact_not_active",
+            "restore_source_backup_artifact_not_available",
         ));
     }
     let transfers = state

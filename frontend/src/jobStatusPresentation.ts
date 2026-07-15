@@ -52,9 +52,13 @@ import type {
 } from "./generated/protocolContracts";
 import type { JobOutputComparisonStatus } from "./types";
 
-const JOB_TARGET_STATUS_SET = new Set<GeneratedJobTargetStatus>(JOB_TARGET_STATUSES);
+const JOB_TARGET_STATUS_SET = new Set<GeneratedJobTargetStatus>(
+  JOB_TARGET_STATUSES,
+);
 
-export function isJobTargetStatus(status: string): status is GeneratedJobTargetStatus {
+export function isJobTargetStatus(
+  status: string,
+): status is GeneratedJobTargetStatus {
   return JOB_TARGET_STATUS_SET.has(status as GeneratedJobTargetStatus);
 }
 
@@ -62,36 +66,80 @@ export function jobStatusBadgeClass(status: GeneratedJobStatus): string {
   return jobStatusClassBadge(JOB_STATUS_CLASS_BY_STATUS[status]);
 }
 
-export function jobTargetStatusBadgeClass(status: GeneratedJobTargetStatus): string {
+export function jobTargetStatusBadgeClass(
+  status: GeneratedJobTargetStatus,
+): string {
   return jobTargetStatusClassBadge(JOB_TARGET_STATUS_CLASS_BY_STATUS[status]);
 }
 
-export function jobOutputComparisonStatusBadgeClass(status: JobOutputComparisonStatus): string {
+export function jobOutputComparisonStatusBadgeClass(
+  status: JobOutputComparisonStatus,
+): string {
   return status === "unknown" ? "warn" : jobTargetStatusBadgeClass(status);
 }
 
-export function terminalSessionStateBadgeClass(status: GeneratedTerminalSessionState): string {
-  return workflowStatusClassBadge(TERMINAL_SESSION_STATE_CLASS_BY_STATE[status]);
+export function terminalSessionStateBadgeClass(
+  status: GeneratedTerminalSessionState,
+): string {
+  return workflowStatusClassBadge(
+    TERMINAL_SESSION_STATE_CLASS_BY_STATE[status],
+  );
 }
 
-export function terminalSessionStatusBadgeClass(status: GeneratedTerminalSessionStatus): string {
-  return workflowStatusClassBadge(TERMINAL_SESSION_STATUS_CLASS_BY_STATUS[status]);
+export function terminalSessionStatusBadgeClass(
+  status: GeneratedTerminalSessionStatus,
+): string {
+  return workflowStatusClassBadge(
+    TERMINAL_SESSION_STATUS_CLASS_BY_STATUS[status],
+  );
 }
 
-export function fileTransferSessionStatusBadgeClass(status: GeneratedFileTransferSessionStatus): string {
-  return workflowStatusClassBadge(FILE_TRANSFER_SESSION_STATUS_CLASS_BY_STATUS[status]);
+export function fileTransferSessionStatusBadgeClass(
+  status: GeneratedFileTransferSessionStatus,
+): string {
+  return workflowStatusClassBadge(
+    FILE_TRANSFER_SESSION_STATUS_CLASS_BY_STATUS[status],
+  );
 }
 
-export function backupRequestStatusBadgeClass(status: GeneratedBackupRequestStatus): string {
-  return workflowStatusClassBadge(BACKUP_REQUEST_STATUS_CLASS_BY_STATUS[status]);
+export function backupRequestStatusBadgeClass(
+  status: GeneratedBackupRequestStatus,
+): string {
+  return workflowStatusClassBadge(
+    BACKUP_REQUEST_STATUS_CLASS_BY_STATUS[status],
+  );
 }
 
-export function restorePlanStatusBadgeClass(status: GeneratedRestorePlanStatus): string {
+export function restorePlanStatusBadgeClass(
+  status: GeneratedRestorePlanStatus,
+): string {
   return workflowStatusClassBadge(RESTORE_PLAN_STATUS_CLASS_BY_STATUS[status]);
 }
 
-export function migrationLinkStatusBadgeClass(status: GeneratedMigrationLinkStatus): string {
-  return workflowStatusClassBadge(MIGRATION_LINK_STATUS_CLASS_BY_STATUS[status]);
+export function restorePlanStatusLabel(
+  status: GeneratedRestorePlanStatus,
+): string {
+  switch (status) {
+    case "planned_metadata_only":
+      return "Draft saved";
+  }
+}
+
+export function migrationLinkStatusBadgeClass(
+  status: GeneratedMigrationLinkStatus,
+): string {
+  return workflowStatusClassBadge(
+    MIGRATION_LINK_STATUS_CLASS_BY_STATUS[status],
+  );
+}
+
+export function migrationLinkStatusLabel(
+  status: GeneratedMigrationLinkStatus,
+): string {
+  switch (status) {
+    case "linked_metadata_only":
+      return "Mapping saved";
+  }
 }
 
 export function tunnelEndpointRuntimeStateBadgeClass(status: string): string {
@@ -101,24 +149,34 @@ export function tunnelEndpointRuntimeStateBadgeClass(status: string): string {
   return "info";
 }
 
-export function agentUpdateReleaseStatusBadgeClass(status: GeneratedAgentUpdateReleaseStatus): string {
-  return workflowStatusClassBadge(AGENT_UPDATE_RELEASE_STATUS_CLASS_BY_STATUS[status]);
+export function agentUpdateReleaseStatusBadgeClass(
+  status: GeneratedAgentUpdateReleaseStatus,
+): string {
+  return workflowStatusClassBadge(
+    AGENT_UPDATE_RELEASE_STATUS_CLASS_BY_STATUS[status],
+  );
 }
 
-export function serverJobStatusBadgeClass(status: GeneratedServerJobStatus): string {
+export function serverJobStatusBadgeClass(
+  status: GeneratedServerJobStatus,
+): string {
   return workflowStatusClassBadge(SERVER_JOB_STATUS_CLASS_BY_STATUS[status]);
 }
 
 export function fleetAlertNotificationDeliveryStatusBadgeClass(
   status: GeneratedFleetAlertNotificationDeliveryStatus,
 ): string {
-  return workflowStatusClassBadge(FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_CLASS_BY_STATUS[status]);
+  return workflowStatusClassBadge(
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_CLASS_BY_STATUS[status],
+  );
 }
 
 export function fleetAlertNotificationDeliveryProcessStatusBadgeClass(
   status: GeneratedFleetAlertNotificationDeliveryProcessStatus,
 ): string {
-  return workflowStatusClassBadge(FLEET_ALERT_NOTIFICATION_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS[status]);
+  return workflowStatusClassBadge(
+    FLEET_ALERT_NOTIFICATION_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS[status],
+  );
 }
 
 export function artifactLifecycleStatusBadgeClass(status: string): string {
@@ -129,6 +187,8 @@ export function artifactLifecycleStatusBadgeClass(status: string): string {
     case "deleting":
     case "delete_failed":
       return "warn";
+    case "missing":
+      return "warn";
     case "tombstoned":
     case "deleted":
       return "neutral";
@@ -137,44 +197,80 @@ export function artifactLifecycleStatusBadgeClass(status: string): string {
   }
 }
 
-export function webhookRuleDeliveryStatusBadgeClass(status: GeneratedWebhookRuleDeliveryStatus): string {
-  return workflowStatusClassBadge(WEBHOOK_RULE_DELIVERY_STATUS_CLASS_BY_STATUS[status]);
+export function webhookRuleDeliveryStatusBadgeClass(
+  status: GeneratedWebhookRuleDeliveryStatus,
+): string {
+  return workflowStatusClassBadge(
+    WEBHOOK_RULE_DELIVERY_STATUS_CLASS_BY_STATUS[status],
+  );
 }
 
-export function webhookRuleDeliveryHistoryStatusBadgeClass(status: GeneratedWebhookRuleDeliveryHistoryStatus): string {
-  return workflowStatusClassBadge(WEBHOOK_RULE_DELIVERY_HISTORY_STATUS_CLASS_BY_STATUS[status]);
+export function webhookRuleDeliveryHistoryStatusBadgeClass(
+  status: GeneratedWebhookRuleDeliveryHistoryStatus,
+): string {
+  return workflowStatusClassBadge(
+    WEBHOOK_RULE_DELIVERY_HISTORY_STATUS_CLASS_BY_STATUS[status],
+  );
 }
 
-export function webhookRuleDeliveryProcessStatusBadgeClass(status: GeneratedWebhookRuleDeliveryProcessStatus): string {
-  return workflowStatusClassBadge(WEBHOOK_RULE_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS[status]);
+export function webhookRuleDeliveryProcessStatusBadgeClass(
+  status: GeneratedWebhookRuleDeliveryProcessStatus,
+): string {
+  return workflowStatusClassBadge(
+    WEBHOOK_RULE_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS[status],
+  );
 }
 
-export function sourceReadinessStatusBadgeClass(status: GeneratedSourceReadinessStatus): string {
-  return workflowStatusClassBadge(SOURCE_READINESS_STATUS_CLASS_BY_STATUS[status]);
+export function sourceReadinessStatusBadgeClass(
+  status: GeneratedSourceReadinessStatus,
+): string {
+  return workflowStatusClassBadge(
+    SOURCE_READINESS_STATUS_CLASS_BY_STATUS[status],
+  );
 }
 
-export function topologyNodeStatusBadgeClass(status: GeneratedTopologyNodeStatus): string {
+export function topologyNodeStatusBadgeClass(
+  status: GeneratedTopologyNodeStatus,
+): string {
   return workflowStatusClassBadge(TOPOLOGY_NODE_STATUS_CLASS_BY_STATUS[status]);
 }
 
-export function topologyEdgeHealthStatusBadgeClass(status: GeneratedTopologyEdgeHealthStatus): string {
-  return workflowStatusClassBadge(TOPOLOGY_EDGE_HEALTH_STATUS_CLASS_BY_STATUS[status]);
+export function topologyEdgeHealthStatusBadgeClass(
+  status: GeneratedTopologyEdgeHealthStatus,
+): string {
+  return workflowStatusClassBadge(
+    TOPOLOGY_EDGE_HEALTH_STATUS_CLASS_BY_STATUS[status],
+  );
 }
 
-export function topologyNeighborStateBadgeClass(status: GeneratedTopologyNeighborState): string {
-  return workflowStatusClassBadge(TOPOLOGY_NEIGHBOR_STATE_CLASS_BY_STATE[status]);
+export function topologyNeighborStateBadgeClass(
+  status: GeneratedTopologyNeighborState,
+): string {
+  return workflowStatusClassBadge(
+    TOPOLOGY_NEIGHBOR_STATE_CLASS_BY_STATE[status],
+  );
 }
 
-export function topologyProbeStateBadgeClass(status: GeneratedTopologyProbeState): string {
+export function topologyProbeStateBadgeClass(
+  status: GeneratedTopologyProbeState,
+): string {
   return workflowStatusClassBadge(TOPOLOGY_PROBE_STATE_CLASS_BY_STATE[status]);
 }
 
-export function topologyRuntimeStateBadgeClass(status: GeneratedTopologyRuntimeState): string {
-  return workflowStatusClassBadge(TOPOLOGY_RUNTIME_STATE_CLASS_BY_STATE[status]);
+export function topologyRuntimeStateBadgeClass(
+  status: GeneratedTopologyRuntimeState,
+): string {
+  return workflowStatusClassBadge(
+    TOPOLOGY_RUNTIME_STATE_CLASS_BY_STATE[status],
+  );
 }
 
-export function topologyObservationStateBadgeClass(status: GeneratedTopologyObservationState): string {
-  return workflowStatusClassBadge(TOPOLOGY_OBSERVATION_STATE_CLASS_BY_STATE[status]);
+export function topologyObservationStateBadgeClass(
+  status: GeneratedTopologyObservationState,
+): string {
+  return workflowStatusClassBadge(
+    TOPOLOGY_OBSERVATION_STATE_CLASS_BY_STATE[status],
+  );
 }
 
 function jobStatusClassBadge(statusClass: GeneratedJobStatusClass): string {
@@ -191,7 +287,9 @@ function jobStatusClassBadge(statusClass: GeneratedJobStatusClass): string {
   }
 }
 
-function jobTargetStatusClassBadge(statusClass: GeneratedJobTargetStatusClass): string {
+function jobTargetStatusClassBadge(
+  statusClass: GeneratedJobTargetStatusClass,
+): string {
   switch (statusClass) {
     case "in_progress":
       return "info";
@@ -204,7 +302,9 @@ function jobTargetStatusClassBadge(statusClass: GeneratedJobTargetStatusClass): 
   }
 }
 
-function workflowStatusClassBadge(statusClass: GeneratedWorkflowStatusClass): string {
+function workflowStatusClassBadge(
+  statusClass: GeneratedWorkflowStatusClass,
+): string {
   switch (statusClass) {
     case "in_progress":
       return "info";

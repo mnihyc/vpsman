@@ -59,7 +59,7 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
 
   await selectScheduleRow(page, "edge-health-hourly");
   await chooseScheduleSelectionAction(page, "Review disable");
-  await expect(page.getByText("Confirm schedule disable")).toBeVisible();
+  await expect(page.getByText("Disable schedule")).toBeVisible();
   await activate(
     page
       .locator(".confirmationPrompt")
@@ -70,7 +70,7 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
   ).toBeVisible();
 
   await chooseScheduleSelectionAction(page, "Review enable");
-  await expect(page.getByText("Confirm schedule enable")).toBeVisible();
+  await expect(page.getByText("Enable schedule")).toBeVisible();
   await activate(
     page.locator(".confirmationPrompt").getByRole("button", { name: "Enable" }),
   );
@@ -89,7 +89,7 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
     "Schedule target expression",
     "provider:alpha && country:US",
   );
-  await expect(page.getByText("1 VPSs in local preview")).toBeVisible();
+  await expect(page.getByText("1 VPS in local preview")).toBeVisible();
   await activate(page.getByRole("button", { name: "Review update", exact: true }));
   await expect(page.getByText("Confirm schedule update")).toBeVisible();
   await activate(
@@ -109,7 +109,7 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
       .locator(".inlineOpsForm")
       .getByRole("button", { name: "Review defer", exact: true }),
   );
-  await expect(page.getByText("Confirm schedule defer")).toBeVisible();
+  await expect(page.getByText("Defer schedule")).toBeVisible();
   await expect(
     page.getByText(
       "Customer maintenance freeze for APAC packet-filter update",
@@ -133,8 +133,8 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
     )
     .toBe(4);
 
-  await chooseScheduleSelectionAction(page, "Review apply");
-  await expect(page.getByText("Confirm apply now")).toBeVisible();
+  await chooseScheduleSelectionAction(page, "Review run now");
+  await expect(page.getByText("Run schedule now")).toBeVisible();
   await expect(
     page.getByText(
       "Dispatches a normal job from the saved fixed target snapshot without changing the next scheduled run.",
@@ -143,7 +143,7 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
   await activate(
     page
       .locator(".confirmationPrompt")
-      .getByRole("button", { name: "Apply now" }),
+      .getByRole("button", { name: "Run now" }),
   );
   await expect
     .poll(() =>
@@ -161,11 +161,17 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
     .toBe(5);
 
   await chooseScheduleSelectionAction(page, "Review deletion");
-  await expect(page.getByText("Confirm schedule delete")).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Delete schedule" }),
+  ).toBeVisible();
   await activate(
     page.locator(".confirmationPrompt").getByRole("button", { name: "Delete schedule" }),
   );
-  await expect(page.getByText("edge-health-hourly")).toHaveCount(0);
+  await expect(
+    page
+      .getByLabel("Schedule records data grid")
+      .locator(".gridBody [role=row]", { hasText: "edge-health-hourly" }),
+  ).toHaveCount(0);
 
   const actions = await page.evaluate(() => {
     const requests = (
@@ -312,6 +318,8 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   await composer.getByLabel("Max timeout seconds").fill("120");
   await activate(composer.getByRole("button", { name: "Dispatch", exact: true }));
   await expect(composer.getByText("Confirm job dispatch")).toBeVisible();
+  await expect(composer.locator(".confirmationPrompt")).toHaveClass(/\bnormal\b/);
+  await expect(composer.locator(".confirmationPrompt")).not.toHaveClass(/\bdanger\b/);
   await expect(composer.locator(".dispatchActions")).toHaveCount(0);
   await expect(
     composer.getByText("24 resolved (20 online, 1 stale, 3 unavailable)"),

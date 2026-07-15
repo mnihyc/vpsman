@@ -1423,6 +1423,7 @@ async fn source_status_enriches_backup_and_update_runtime_readiness() {
                 sha256_hex: "1".repeat(64),
                 size_bytes: 4096,
                 status: "active".to_string(),
+                content_available: true,
                 created_at: "100".to_string(),
             });
         memory

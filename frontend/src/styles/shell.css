@@ -7,6 +7,26 @@
   overflow: hidden;
 }
 
+.skipLink {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: var(--z-modal);
+  transform: translateY(-160%);
+  border: 2px solid var(--primary);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--primary-text);
+  font-weight: 700;
+  padding: 8px 12px;
+}
+
+.skipLink:focus {
+  transform: translateY(0);
+  outline: 0;
+  box-shadow: var(--focus-ring);
+}
+
 .sidebar {
   align-self: stretch;
   background: var(--surface);
@@ -163,6 +183,7 @@ nav {
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
+  scroll-padding-block-start: var(--console-sticky-offset, 80px);
   scrollbar-gutter: stable;
 }
 
@@ -298,6 +319,29 @@ nav {
   display: none;
 }
 
+.mobilePageMenu {
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  padding: 0 8px;
+}
+
+.mobilePageMenu > svg {
+  flex: 0 0 auto;
+}
+
+.mobilePageMenu .mobilePageSelector {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  padding-inline: 2px;
+}
+
 .mobilePageMenu summary,
 .mobileSavedViewMenu summary {
   display: inline-flex;
@@ -377,6 +421,67 @@ nav {
   justify-content: center;
   background: rgba(32, 33, 36, 0.28);
   padding: 72px 16px 16px;
+}
+
+.privilegeUnlockOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  padding: 20px;
+  background: rgba(32, 33, 36, 0.42);
+}
+
+.privilegeUnlockDialog {
+  display: grid;
+  width: min(680px, calc(100vw - 32px));
+  max-height: min(760px, calc(100vh - 32px));
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow-drawer);
+}
+
+.privilegeUnlockDialog > header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  padding: 12px 14px;
+}
+
+.privilegeUnlockDialog > header > div,
+.privilegeUnlockDialog > header span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.privilegeUnlockDialog > header span {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.privilegeUnlockDialog > header strong,
+.privilegeUnlockDialog > header small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.privilegeUnlockDialog > header small {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .commandPalette {
@@ -1419,7 +1524,7 @@ h2 {
 }
 
 .consoleHeader .pageDescription,
-.sectionHeader span,
+.sectionHeader > div:first-child > span,
 .timeline span,
 .instance small {
   color: var(--muted);
@@ -1755,7 +1860,7 @@ h2 {
   align-items: baseline;
   flex-wrap: wrap;
   gap: 8px;
-  min-width: 0;
+  min-width: 170px;
   color: var(--muted);
   font-size: 12px;
 }
@@ -1865,6 +1970,21 @@ h2 {
   box-shadow: 0 8px 20px rgba(60, 64, 67, 0.18);
 }
 
+.gridHeaderCell.stickyEndColumn,
+.gridCell.stickyEndColumn {
+  position: sticky;
+  right: 0;
+  z-index: 1;
+  border-left: 1px solid var(--border-subtle);
+  background: inherit;
+  box-shadow: -8px 0 10px -10px rgba(60, 64, 67, 0.4);
+}
+
+.gridHeaderCell.stickyEndColumn {
+  z-index: 3;
+  background: var(--surface);
+}
+
 .gridCell {
   min-height: 58px;
   color: var(--text);
@@ -1960,6 +2080,19 @@ h2 {
 
 .gridMobileCard {
   display: none;
+}
+
+@media (max-width: 1500px) and (min-width: 641px) {
+  .gridToolbar {
+    display: grid;
+    grid-template-columns: minmax(180px, 220px) minmax(220px, 1fr);
+  }
+
+  .gridToolbarActions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
 }
 
 @media (max-width: 640px) {
@@ -2096,6 +2229,11 @@ h2 {
     font-size: 12px;
     line-height: 1.35;
     overflow-wrap: anywhere;
+  }
+
+  .gridMobileFieldValue > .gridCellContent {
+    display: block;
+    width: 100%;
   }
 
   .gridMobileFieldValue .linkButton {

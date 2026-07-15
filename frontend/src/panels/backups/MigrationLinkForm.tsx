@@ -1,5 +1,9 @@
 import { CheckCircle2, CircleDashed, TriangleAlert } from "lucide-react";
-import { restorePlanStatusBadgeClass } from "../../jobStatusPresentation";
+import {
+  migrationLinkStatusLabel,
+  restorePlanStatusBadgeClass,
+  restorePlanStatusLabel,
+} from "../../jobStatusPresentation";
 import type { MigrationLinkRecord, RestorePlanRecord } from "../../types";
 import { shortId } from "../../utils";
 import {
@@ -17,8 +21,10 @@ type MigrationLinkFormProps = {
   migrationNote: string;
   migrationRestorePlanId: string;
   onArchiveTransferChange: (value: string) => void;
+  onDownloadPackage?: () => void;
   onMigrationNoteChange: (value: string) => void;
   onMigrationRestorePlanIdChange: (value: string) => void;
+  onOpenTransfers?: () => void;
   onRunMigrationRestore: () => void | Promise<void>;
   onSubmit: () => void | Promise<void>;
   pending: boolean;
@@ -41,8 +47,10 @@ export function MigrationLinkForm({
   migrationNote,
   migrationRestorePlanId,
   onArchiveTransferChange,
+  onDownloadPackage,
   onMigrationNoteChange,
   onMigrationRestorePlanIdChange,
+  onOpenTransfers,
   onRunMigrationRestore,
   onSubmit,
   pending,
@@ -72,11 +80,13 @@ export function MigrationLinkForm({
         ? "Completed upload transfer selected on replacement"
         : "Stage the source package on the replacement before cutover restore",
       ready: archiveReady,
-      required: false,
+      required: true,
     },
     {
       label: "Privilege",
-      detail: privilegeReady ? "Ready" : "Unlock privilege before running the restore",
+      detail: privilegeReady
+        ? "Ready"
+        : "Unlock privilege before running the restore",
       ready: privilegeReady,
       required: true,
     },
@@ -94,7 +104,9 @@ export function MigrationLinkForm({
     },
     {
       label: "Identity policy",
-      detail: forceUnprivileged ? "Forced best-effort/unprivileged restore" : "Use client capability policy",
+      detail: forceUnprivileged
+        ? "Forced best-effort/unprivileged restore"
+        : "Use client capability policy",
       ready: !forceUnprivileged,
       required: false,
     },
@@ -104,20 +116,29 @@ export function MigrationLinkForm({
     <section className="backupActionPanel">
       <div className="sectionHeader compact restoreFormHeader">
         <h2>Migration mapping</h2>
-        <span>Source VPS/artifact to replacement VPS, with optional cutover notes</span>
+        <span>
+          Source VPS/artifact to replacement VPS, with optional cutover notes
+        </span>
       </div>
-      <div className="formGrid">
+      <form
+        className="dispatchForm migrationLinkForm"
+        onSubmit={(event) => event.preventDefault()}
+      >
         <label>
-          Draft restore relationship
+          <span>Draft restore relationship</span>
           <select
             aria-label="Migration draft restore"
-            onChange={(event) => onMigrationRestorePlanIdChange(event.target.value)}
+            onChange={(event) =>
+              onMigrationRestorePlanIdChange(event.target.value)
+            }
             value={migrationRestorePlanId}
           >
             <option value="">Select draft restore</option>
             {restorePlans.map((plan) => (
               <option key={plan.id} value={plan.id}>
-                {clientLabel(plan.source_client_id)} to {clientLabel(plan.target_client_id)} ({plan.status})
+                {clientLabel(plan.source_client_id)} to{" "}
+                {clientLabel(plan.target_client_id)} (
+                {restorePlanStatusLabel(plan.status)})
               </option>
             ))}
           </select>
@@ -142,11 +163,19 @@ export function MigrationLinkForm({
             </div>
             <div>
               <span>Restore state</span>
-              <strong className={`status ${restorePlanStatusBadgeClass(selectedPlan.status)}`}>{selectedPlan.status}</strong>
+              <strong
+                className={`status ${restorePlanStatusBadgeClass(selectedPlan.status)}`}
+              >
+                {restorePlanStatusLabel(selectedPlan.status)}
+              </strong>
             </div>
             <div>
               <span>Last mapping</span>
-              <strong>{lastMigrationLink ? `${shortId(lastMigrationLink.id)} ${lastMigrationLink.status}` : "none"}</strong>
+              <strong>
+                {lastMigrationLink
+                  ? `${shortId(lastMigrationLink.id)} · ${migrationLinkStatusLabel(lastMigrationLink.status)}`
+                  : "none"}
+              </strong>
             </div>
           </div>
         ) : null}
@@ -154,13 +183,32 @@ export function MigrationLinkForm({
           emptyMessage={archiveEmptyMessage}
           label="Migration staged archive"
           onChange={onArchiveTransferChange}
+          onDownloadPackage={onDownloadPackage}
+          onOpenTransfers={onOpenTransfers}
           options={archiveTransferOptions}
+          pending={pending}
           value={archiveTransferKey}
         />
-        <div className="migrationChecklist">
+        <div className="migrationChecklist" aria-label="Cutover readiness">
+          <div className="migrationChecklistHeader">
+            <strong>Cutover readiness</strong>
+            <span>
+              {checklist.filter((item) => item.required && item.ready).length}/
+              {checklist.filter((item) => item.required).length} required ready
+            </span>
+          </div>
           {checklist.map((item) => (
-            <div className={`migrationCheckItem ${item.ready ? "ready" : item.required ? "blocked" : "optional"}`} key={item.label}>
-              {item.ready ? <CheckCircle2 size={16} /> : item.required ? <TriangleAlert size={16} /> : <CircleDashed size={16} />}
+            <div
+              className={`migrationCheckItem ${item.ready ? "ready" : item.required ? "blocked" : "optional"}`}
+              key={item.label}
+            >
+              {item.ready ? (
+                <CheckCircle2 size={16} />
+              ) : item.required ? (
+                <TriangleAlert size={16} />
+              ) : (
+                <CircleDashed size={16} />
+              )}
               <span>
                 <strong>{item.label}</strong>
                 <small>{item.detail}</small>
@@ -169,7 +217,7 @@ export function MigrationLinkForm({
           ))}
         </div>
         <label>
-          Cutover notes
+          <span>Cutover notes</span>
           <input
             aria-label="Migration cutover notes"
             onChange={(event) => onMigrationNoteChange(event.target.value)}
@@ -177,29 +225,39 @@ export function MigrationLinkForm({
             value={migrationNote}
           />
         </label>
-      </div>
-      <div className="actionRow">
-        {!linkConfirmationOpen && (
-          <button
-            className="primaryAction"
-            disabled={pending || !migrationRestorePlanId || !privilegeReady}
-            onClick={() => void onSubmit()}
-            type="button"
-          >
-            Review mapping
-          </button>
-        )}
-        {!runConfirmationOpen && (
-          <button
-            className="secondaryAction"
-            disabled={pending || !migrationRestorePlanId || !privilegeReady || !archiveReady}
-            onClick={() => void onRunMigrationRestore()}
-            type="button"
-          >
-            Review cutover restore
-          </button>
-        )}
-      </div>
+        <div className="actionRow">
+          {!linkConfirmationOpen && (
+            <button
+              className="primaryAction"
+              disabled={pending || !migrationRestorePlanId}
+              onClick={() => void onSubmit()}
+              title={
+                privilegeReady
+                  ? "Review the frozen migration mapping"
+                  : "Opens privilege unlock before preparing the mapping review"
+              }
+              type="button"
+            >
+              Review mapping
+            </button>
+          )}
+          {!runConfirmationOpen && (
+            <button
+              className="secondaryAction"
+              disabled={pending || !migrationRestorePlanId || !archiveReady}
+              onClick={() => void onRunMigrationRestore()}
+              title={
+                privilegeReady
+                  ? "Review the frozen cutover restore"
+                  : "Opens privilege unlock before preparing the cutover review"
+              }
+              type="button"
+            >
+              Review cutover restore
+            </button>
+          )}
+        </div>
+      </form>
     </section>
   );
 }
@@ -210,7 +268,9 @@ function restoreScopeLabel(plan: RestorePlanRecord): string {
     parts.push("config");
   }
   if (plan.paths.length > 0) {
-    parts.push(`${plan.paths.length} path${plan.paths.length === 1 ? "" : "s"}`);
+    parts.push(
+      `${plan.paths.length} path${plan.paths.length === 1 ? "" : "s"}`,
+    );
   }
   return parts.join(", ") || "metadata only";
 }

@@ -10,6 +10,8 @@ import {
   ConsoleShell,
   type CommandPaletteItem,
 } from "./components/ConsoleShell";
+import { PrivilegeUnlockDialog } from "./components/PrivilegeUnlockDialog";
+import { AdminRoleBoundary } from "./components/RoleBoundary";
 import { WorkspaceErrorBoundary } from "./components/WorkspaceErrorBoundary";
 import { AuthPanel } from "./panels/AuthPanel";
 import { FleetAlertsPanel } from "./panels/FleetAlertsPanel";
@@ -331,6 +333,18 @@ function getScopedPageTitle(view: ActiveView, subpage: string): string {
 }
 
 function getScopedPageDescription(view: ActiveView, subpage: string): string {
+  if (view === "Automation") {
+    switch (subpage) {
+      case "runbooks":
+        return "Reusable reviewed operations, parameters, and execution handoff";
+      case "source_templates":
+        return "Persistent source templates, rendering, tests, and job handoff";
+      case "agent_updates":
+        return "Release metadata, update checks, rollout, rollback, and job evidence";
+      default:
+        return "Schedules, target previews, lifecycle controls, and run evidence";
+    }
+  }
   if (view === "System") {
     switch (subpage) {
       case "suite_config":
@@ -412,7 +426,10 @@ const ROUTE_VIEWS_BY_SLUG = Object.fromEntries(
 ) as Record<string, ActiveView>;
 
 function routeToken(value: string): string {
-  return value.trim().toLowerCase().replace(/[\s_]+/g, "-");
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, "-");
 }
 
 function consoleRouteHash(view: ActiveView, subpage: string): string {
@@ -528,9 +545,26 @@ export function App() {
   const [networkPlanWorkflowIntent, setNetworkPlanWorkflowIntent] = useState<
     "create" | null
   >(null);
+  const [transferTargetIntent, setTransferTargetIntent] = useState<
+    string | null
+  >(null);
+  const [accessIdentityWorkflowIntent, setAccessIdentityWorkflowIntent] =
+    useState<"register" | null>(null);
+  const [sourceTemplateWorkflowIntent, setSourceTemplateWorkflowIntent] =
+    useState<"runtime_tunnel_adapter" | "routing_cost_adapter" | null>(null);
   const [privilegeMaterial, setPrivilegeMaterial] =
     useState<PrivilegeMaterial | null>(null);
+  const [privilegeUnlockOpen, setPrivilegeUnlockOpen] = useState(false);
+  const closePrivilegeUnlock = useCallback(
+    () => setPrivilegeUnlockOpen(false),
+    [],
+  );
   const dashboard = useDashboardData(activeView);
+  useEffect(() => {
+    if (!dashboard.apiToken) {
+      setPrivilegeUnlockOpen(false);
+    }
+  }, [dashboard.apiToken]);
   const fleetViews = useFleetViews(dashboard.agents);
   const operatorPreferences = useMemo(
     () => sanitizeOperatorPreferences(dashboard.operator?.preferences),
@@ -551,7 +585,8 @@ export function App() {
     [dashboard.agents, selectedAgent, selectedAgentId],
   );
   const visibleSummary = useMemo(
-    () => displaySummaryForAgents(visibleAgents, dashboard.summary.running_jobs),
+    () =>
+      displaySummaryForAgents(visibleAgents, dashboard.summary.running_jobs),
     [dashboard.summary.running_jobs, visibleAgents],
   );
   const activeSubpage = normalizeSubpage(
@@ -567,6 +602,26 @@ export function App() {
       ? visibleSummary
       : dashboard.summary;
   const summaryScopeLabel = hasFleetScope ? "Current scope" : "Entire fleet";
+  const shellAlertCounts = useMemo(() => {
+    const scopedClientIds = new Set(
+      (hasFleetScope ? visibleAgents : dashboard.agents).map(
+        (agent) => agent.id,
+      ),
+    );
+    const activeAlerts = dashboard.fleetAlerts.filter(
+      (alert) =>
+        alert.operator_state !== "acknowledged" &&
+        (alert.client_id === null || scopedClientIds.has(alert.client_id)),
+    );
+    const critical = activeAlerts.filter(
+      (alert) => alert.severity === "critical",
+    ).length;
+    const warning = activeAlerts.filter(
+      (alert) => alert.severity === "warning",
+    ).length;
+    const info = activeAlerts.length - critical - warning;
+    return { critical, info, total: activeAlerts.length, warning };
+  }, [dashboard.agents, dashboard.fleetAlerts, hasFleetScope, visibleAgents]);
   const onlineRatio = useMemo(() => {
     if (shellSummary.total === 0) {
       return "0%";
@@ -615,10 +670,7 @@ export function App() {
   }
 
   function selectView(view: ActiveView, subpage?: string) {
-    const nextSubpage = normalizeSubpage(
-      view,
-      subpage ?? activeSubpages[view],
-    );
+    const nextSubpage = normalizeSubpage(view, subpage ?? activeSubpages[view]);
     setActiveView(view);
     setActiveSubpages((current) => ({
       ...current,
@@ -662,6 +714,11 @@ export function App() {
     openJobEvidence(jobId);
   }
 
+  function openJobHistory() {
+    setPendingJobDetailId(null);
+    selectView("Jobs", "history");
+  }
+
   function openJobDispatchPreset(preset: JobDispatchPresetInput) {
     setJobDispatchPreset({
       ...preset,
@@ -671,11 +728,12 @@ export function App() {
   }
 
   function openPrivilegeUnlock() {
-    selectView("Access", "privilege_vault");
+    setPrivilegeUnlockOpen(true);
   }
 
   function lockPrivilege() {
     setPrivilegeMaterial(null);
+    setPrivilegeUnlockOpen(false);
   }
 
   function openVpsDetail(target: ReleaseRouteTarget) {
@@ -927,6 +985,10 @@ export function App() {
         onOpenTerminal={releaseRoutes.openTerminal}
         onOpenTransfers={() => selectView("Remote Operations", "transfers")}
         onOpenVpsDetail={releaseRoutes.openVpsDetail}
+        onRegisterVps={() => {
+          setAccessIdentityWorkflowIntent("register");
+          selectView("Access", "vps_identities");
+        }}
       />
     );
   }
@@ -1110,6 +1172,7 @@ export function App() {
           dashboard.deleteRuntimeConfigPatchGenerator
         }
         onOpenJobDetails={openJobDetails}
+        onOpenJobHistory={openJobHistory}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
         onOpenSourceTemplates={() =>
           selectView("Automation", "source_templates")
@@ -1217,6 +1280,10 @@ export function App() {
           onCloneTemplate={dashboard.cloneSourceTemplate}
           onCreateTemplate={dashboard.createSourceTemplate}
           onDiffTemplate={dashboard.diffSourceTemplate}
+          initialCreateDomain={sourceTemplateWorkflowIntent}
+          onInitialCreateDomainConsumed={() =>
+            setSourceTemplateWorkflowIntent(null)
+          }
           onOpenTunnelPlans={() => selectView("Network", "tunnel_plans")}
           onRenderTemplateRuntimeConfig={dashboard.renderTemplateRuntimeConfig}
           onResolveBulk={dashboard.resolveBulkPreview}
@@ -1231,6 +1298,11 @@ export function App() {
   }
 
   function renderAgentUpdatesPanel() {
+    const canInspectSuitePolicy = dashboard.operator?.role === "admin";
+    const suitePolicyRoleError =
+      dashboard.operator && !canInspectSuitePolicy
+        ? "Admin role required to inspect Suite Config; the server still enforces its configured update policy."
+        : null;
     return (
       <section className="workspace singleColumn">
         <AgentUpdateReleasesPanel
@@ -1243,9 +1315,16 @@ export function App() {
           onOpenJobHistory={() => selectView("Jobs", "history")}
           onRefresh={dashboard.loadJobs}
           releases={dashboard.agentUpdateReleases}
-          suiteConfig={dashboard.suiteConfig}
-          suiteConfigError={dashboard.suiteConfigError}
-          suiteConfigLoading={dashboard.suiteConfigLoading}
+          suiteConfig={canInspectSuitePolicy ? dashboard.suiteConfig : null}
+          suiteConfigError={
+            suitePolicyRoleError ??
+            (canInspectSuitePolicy ? dashboard.suiteConfigError : null)
+          }
+          suiteConfigLoading={
+            dashboard.operator
+              ? canInspectSuitePolicy && dashboard.suiteConfigLoading
+              : dashboard.accessLoading
+          }
         />
       </section>
     );
@@ -1369,7 +1448,6 @@ export function App() {
         onLoadOutputs={dashboard.loadJobOutputs}
         onLoadTargets={dashboard.loadJobTargets}
         onLoadTerminalReplay={dashboard.loadTerminalReplay}
-        onOpenDispatchPreset={openJobDispatchPreset}
         onOpenJobDetails={openJobDetails}
         onOpenJobsDispatch={() => selectView("Jobs", "dispatch")}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
@@ -1381,18 +1459,32 @@ export function App() {
           selectReleaseDestination("Remote Operations", subpage)
         }
         onSubmitTerminalInput={dashboard.submitTerminalInput}
+        onTransferTargetConsumed={() => setTransferTargetIntent(null)}
         onUploadFileTransferSource={dashboard.uploadFileTransferSource}
         onDeleteCommandTemplate={dashboard.deleteCommandTemplate}
         onUpsertCommandTemplate={dashboard.upsertCommandTemplate}
         privilegeMaterial={privilegeMaterial}
+        privilegeUnlockOpen={privilegeUnlockOpen}
         processSupervisorInventory={dashboard.processSupervisorInventory}
         setPrivilegeMaterial={setPrivilegeMaterial}
         terminalSessions={dashboard.terminalSessions}
+        transferTargetClientId={transferTargetIntent}
       />
     );
   }
 
   function renderSystemMaintenancePanel() {
+    if (dashboard.operator?.role !== "admin") {
+      return (
+        <section className="workspace singleColumn">
+          <AdminRoleBoundary
+            currentRole={dashboard.operator?.role}
+            detail="Control-plane cleanup and maintenance jobs can remove retained data and are intentionally visible only to admins."
+            title="System maintenance"
+          />
+        </section>
+      );
+    }
     return (
       <section className="workspace singleColumn">
         <ServerJobsPanel
@@ -1464,17 +1556,20 @@ export function App() {
         onOpenCreateTunnelPlan={openCreateTunnelPlan}
         onOpenJobDetails={openJobDetails}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
-        onOpenSourceTemplates={() => selectView("Automation", "source_templates")}
+        onOpenSourceTemplates={(domain) => {
+          setSourceTemplateWorkflowIntent(domain);
+          selectView("Automation", "source_templates");
+        }}
         onOpenVpsDetail={releaseRoutes.openVpsDetail}
         onSelectSubpage={(subpage) =>
           selectReleaseDestination("Network", subpage)
         }
         onRefresh={dashboard.loadTunnelPlans}
-        onRefreshTunnelPlanOspfStatus={
-          dashboard.refreshTunnelPlanOspfStatus
-        }
+        onRefreshTunnelPlanOspfStatus={dashboard.refreshTunnelPlanOspfStatus}
         onSetTunnelPlanEnabled={dashboard.setTunnelPlanEnabled}
-        onUpdateTunnelConnectionAssessment={dashboard.updateTunnelConnectionAssessment}
+        onUpdateTunnelConnectionAssessment={
+          dashboard.updateTunnelConnectionAssessment
+        }
         onUpdateTunnelPlanOspfCost={dashboard.updateTunnelPlanOspfCost}
         onUpdateTunnelPlan={dashboard.updateTunnelPlan}
         privilegeMaterial={privilegeMaterial}
@@ -1514,11 +1609,11 @@ export function App() {
         backupPolicies={dashboard.backupPolicies}
         backups={dashboard.backups}
         fileTransfers={dashboard.fileTransfers}
+        jobs={dashboard.jobs}
         migrationLinks={dashboard.migrationLinks}
         restorePlans={dashboard.restorePlans}
         error={dashboard.backupsError}
         loading={dashboard.backupsLoading}
-        onCreateBackupRequest={dashboard.createBackupRequest}
         onCreateBackupPolicy={dashboard.createBackupPolicy}
         onCreateJob={dashboard.createJob}
         onCreateMigrationLink={dashboard.createMigrationLink}
@@ -1531,6 +1626,10 @@ export function App() {
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
         onOpenJobArtifacts={() => selectView("Jobs", "artifacts")}
         onOpenJobDetails={openJobDetails}
+        onOpenTransfers={(clientId) => {
+          setTransferTargetIntent(clientId);
+          selectView("Remote Operations", "transfers");
+        }}
         onOpenVpsDetail={releaseRoutes.openVpsDetail}
         onRefresh={dashboard.loadBackups}
         onResolveTargets={dashboard.resolveJobTargets}
@@ -1550,6 +1649,7 @@ export function App() {
         apiToken={dashboard.apiToken}
         error={dashboard.accessError}
         gatewaySessions={dashboard.gatewaySessions}
+        initialIdentityWorkflow={accessIdentityWorkflowIntent}
         lastLiveEvent={dashboard.lastLiveEvent}
         loading={dashboard.accessLoading}
         onClearSession={dashboard.clearSession}
@@ -1558,10 +1658,15 @@ export function App() {
         onCreateOperator={dashboard.createOperator}
         onUpsertAgentIdentity={dashboard.upsertAgentIdentity}
         onDisableTotp={dashboard.disableTotp}
+        onInitialIdentityWorkflowConsumed={() =>
+          setAccessIdentityWorkflowIntent(null)
+        }
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
         onOpenSystemConfig={() => selectView("System", "suite_config")}
         onOpenSystemSessions={() => selectView("Audit", "sessions")}
-        onOpenTerminalSessions={() => selectView("Remote Operations", "terminal")}
+        onOpenTerminalSessions={() =>
+          selectView("Remote Operations", "terminal")
+        }
         onRefresh={dashboard.loadCurrentOperator}
         onResetOperatorPassword={dashboard.resetOperatorPassword}
         onRevokeClientKey={dashboard.revokeClientKey}
@@ -1718,7 +1823,10 @@ export function App() {
       if (activeSubpage === "fleet_metrics") return renderFleetMetricsPanel();
       if (activeSubpage === "network_metrics")
         return renderNetworkMetricsPanel();
-      if (activeSubpage === "alerts" || activeSubpage.startsWith("alerts:policy:"))
+      if (
+        activeSubpage === "alerts" ||
+        activeSubpage.startsWith("alerts:policy:")
+      )
         return renderAlertsPanel();
       if (activeSubpage === "webhooks") return renderWebhooksPanel();
       if (activeSubpage === "dashboards")
@@ -1764,6 +1872,7 @@ export function App() {
               void dashboard.loadTerminalSessions();
               void dashboard.loadCurrentOperator();
             }}
+            operator={dashboard.operator}
             operatorAuthEvents={dashboard.operatorAuthEvents}
             operatorSessions={dashboard.operatorSessions}
             terminalSessions={dashboard.terminalSessions}
@@ -1808,48 +1917,56 @@ export function App() {
         vpsNameDisplayMode: operatorPreferences.vps_name_display_mode,
       }}
     >
-      <ConsoleShell
-        activeSavedFleetViewId={fleetViews.activeSavedViewId}
-        activeSubpage={activeSubpage}
-        activeView={activeView}
-        agents={dashboard.agents}
-        apiToken={dashboard.apiToken}
-        commandItems={commandItems}
-        onlineRatio={onlineRatio}
-        draftSavedFleetViewName={fleetViews.draftSavedViewName}
-        filteredAgentCount={visibleAgents.length}
-        fleetQuery={fleetViews.fleetQuery}
-        hideFleetStatusSummary={
-          activeView === "Fleet" && activeSubpage === "instance_detail"
-        }
-        pageDescription={pageDescription}
-        pageTitle={pageTitle}
-        onApplySavedFleetView={fleetViews.applySavedFleetView}
-        onClearFleetView={fleetViews.clearFleetView}
-        onClearSession={dashboard.clearSession}
-        onDeleteSavedFleetView={fleetViews.deleteSavedFleetView}
-        onFleetQueryChange={fleetViews.setFleetQuery}
-        onLockPrivilege={lockPrivilege}
-        onOpenAccessControls={openPrivilegeUnlock}
-        onSaveFleetView={fleetViews.saveFleetView}
-        onSelectView={selectView}
-        onSavedFleetViewNameChange={fleetViews.setDraftSavedViewName}
-        operatorPreferencesReady={dashboard.operator !== null}
-        privilegeUnlocked={privilegeMaterial !== null}
-        savedFleetViews={fleetViews.savedViews}
-        summary={shellSummary}
-        summaryScopeLabel={summaryScopeLabel}
-      >
-        <WorkspaceErrorBoundary
-          resetKey={`${activeView}:${activeSubpage}`}
-          subpageLabel={pageTitle}
-          viewLabel={activeView}
+      <>
+        <ConsoleShell
+          activeSavedFleetViewId={fleetViews.activeSavedViewId}
+          activeSubpage={activeSubpage}
+          activeView={activeView}
+          agents={dashboard.agents}
+          alertCounts={shellAlertCounts}
+          apiToken={dashboard.apiToken}
+          commandItems={commandItems}
+          onlineRatio={onlineRatio}
+          draftSavedFleetViewName={fleetViews.draftSavedViewName}
+          filteredAgentCount={visibleAgents.length}
+          fleetQuery={fleetViews.fleetQuery}
+          hideFleetStatusSummary={
+            activeView === "Fleet" && activeSubpage === "instance_detail"
+          }
+          pageDescription={pageDescription}
+          pageTitle={pageTitle}
+          onApplySavedFleetView={fleetViews.applySavedFleetView}
+          onClearFleetView={fleetViews.clearFleetView}
+          onClearSession={dashboard.clearSession}
+          onDeleteSavedFleetView={fleetViews.deleteSavedFleetView}
+          onFleetQueryChange={fleetViews.setFleetQuery}
+          onLockPrivilege={lockPrivilege}
+          onOpenAccessControls={openPrivilegeUnlock}
+          onSaveFleetView={fleetViews.saveFleetView}
+          onSelectView={selectView}
+          onSavedFleetViewNameChange={fleetViews.setDraftSavedViewName}
+          operatorPreferencesReady={dashboard.operator !== null}
+          privilegeUnlocked={privilegeMaterial !== null}
+          savedFleetViews={fleetViews.savedViews}
+          summary={shellSummary}
+          summaryScopeLabel={summaryScopeLabel}
         >
-          <Suspense fallback={<ConsolePanelFallback view={activeView} />}>
-            {renderActivePanel()}
-          </Suspense>
-        </WorkspaceErrorBoundary>
-      </ConsoleShell>
+          <WorkspaceErrorBoundary
+            resetKey={`${activeView}:${activeSubpage}`}
+            subpageLabel={pageTitle}
+            viewLabel={activeView}
+          >
+            <Suspense fallback={<ConsolePanelFallback view={activeView} />}>
+              {renderActivePanel()}
+            </Suspense>
+          </WorkspaceErrorBoundary>
+        </ConsoleShell>
+        <PrivilegeUnlockDialog
+          onClose={closePrivilegeUnlock}
+          onPrivilegeMaterialChange={setPrivilegeMaterial}
+          open={privilegeUnlockOpen}
+        />
+      </>
     </PanelDisplayProvider>
   );
 }
@@ -2022,7 +2139,9 @@ function displaySummaryForAgents(
   const states = agents.map((agent) => agentDisplayState(agent));
   const online = states.filter((state) => state.label === "Online").length;
   const offline = states.filter((state) => state.label === "Offline").length;
-  const never = states.filter((state) => state.label === "Never connected").length;
+  const never = states.filter(
+    (state) => state.label === "Never connected",
+  ).length;
   const stale = states.filter((state) => state.label === "Stale").length;
   const unknown = agents.length - online - offline - never - stale;
   return {

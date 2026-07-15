@@ -579,6 +579,7 @@ async fn execute_file_write_text(
             );
         }
     }
+    let metadata = metadata_entry_for_path(destination).await?;
     status_output(
         job_id,
         json!({
@@ -589,6 +590,7 @@ async fn execute_file_write_text(
             "sha256_hex": payload_hash(&data),
             "mode": mode,
             "atomic": true,
+            "metadata": metadata,
         }),
     )
 }
@@ -619,19 +621,23 @@ async fn execute_file_mkdir(
     validate_browser_path(path)?;
     validate_file_mode(mode).map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let target = PathBuf::from(path);
-    let created =
-        tokio::task::spawn_blocking(move || mkdir_path_blocking(&target, mode, recursive, policy))
-            .await
-            .context("mkdir worker failed")??;
+    let target_for_create = target.clone();
+    let created = tokio::task::spawn_blocking(move || {
+        mkdir_path_blocking(&target_for_create, mode, recursive, policy)
+    })
+    .await
+    .context("mkdir worker failed")??;
     if !created {
+        let metadata = metadata_entry_for_path(&target).await?;
         return status_output(
             job_id,
-            json!({"type": "file_mkdir", "path": path, "status": "unchanged"}),
+            json!({"type": "file_mkdir", "path": path, "status": "unchanged", "metadata": metadata}),
         );
     }
+    let metadata = metadata_entry_for_path(&target).await?;
     status_output(
         job_id,
-        json!({"type": "file_mkdir", "path": path, "status": "created", "mode": mode}),
+        json!({"type": "file_mkdir", "path": path, "status": "created", "mode": mode, "metadata": metadata}),
     )
 }
 
@@ -992,6 +998,23 @@ async fn metadata_entry_json(entry: &FileListEntry) -> Result<Value> {
     let mut metadata = metadata_json(path, &entry.metadata).await?;
     metadata["name"] = json!(entry.name);
     Ok(metadata)
+}
+
+async fn metadata_entry_for_path(path: &Path) -> Result<Value> {
+    let metadata = tokio::fs::symlink_metadata(path)
+        .await
+        .with_context(|| format!("failed to stat resulting path {}", path.display()))?;
+    let name = path
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string_lossy().to_string());
+    metadata_entry_json(&FileListEntry {
+        name,
+        path: path.to_string_lossy().to_string(),
+        is_dir: metadata.is_dir(),
+        metadata,
+    })
+    .await
 }
 
 async fn metadata_json(path: &Path, metadata: &std::fs::Metadata) -> Result<Value> {
@@ -2266,6 +2289,10 @@ mod tests {
         .unwrap();
         let write_status: Value = serde_json::from_slice(&write[0].data).unwrap();
         assert_eq!(write_status["status"], "updated");
+        assert_eq!(write_status["metadata"]["name"], "hello.txt");
+        assert_eq!(write_status["metadata"]["path"], file.to_str().unwrap());
+        assert_eq!(write_status["metadata"]["size_bytes"], 7);
+        assert_eq!(write_status["metadata"]["mode"], 0o640);
         assert_eq!(fs::read_to_string(&file).unwrap(), "updated");
         assert_eq!(
             fs::metadata(&file).unwrap().permissions().mode() & 0o777,
@@ -2632,6 +2659,31 @@ mod tests {
 
         assert!(result.unwrap_err().to_string().contains("real directory"));
         assert!(!real.join("child").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn mkdir_returns_resulting_entry_metadata() {
+        let root = test_root("mkdir-result-metadata");
+        fs::create_dir_all(&root).unwrap();
+        let directory = root.join("created");
+
+        let output = execute_file_mkdir(
+            Uuid::new_v4(),
+            directory.to_str().unwrap(),
+            0o750,
+            false,
+            FileActionPolicy::Fail,
+        )
+        .await
+        .unwrap();
+
+        let status: Value = serde_json::from_slice(&output[0].data).unwrap();
+        assert_eq!(status["status"], "created");
+        assert_eq!(status["metadata"]["name"], "created");
+        assert_eq!(status["metadata"]["path"], directory.to_str().unwrap());
+        assert_eq!(status["metadata"]["file_type"], "directory");
+        assert_eq!(status["metadata"]["mode"], 0o750);
         let _ = fs::remove_dir_all(&root);
     }
 

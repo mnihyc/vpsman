@@ -196,7 +196,7 @@ test("exposes hover titles for truncated grid text and editable values", async (
   ).not.toHaveAttribute("title", /.+/);
   if (testInfo.project.name.includes("mobile")) {
     await expect(
-      page.locator(".mobilePageMenu summary span"),
+      page.getByRole("combobox", { name: "Console page", exact: true }),
     ).toHaveAttribute("title", /Fleet \/ Instances/);
     const mobileCard = fleetGrid.getByLabel(
       "VPS instance records mobile card agent-sfo-01",
@@ -244,7 +244,10 @@ test("keeps VPS combobox menus above clipped workflow panels", async ({
   await expect(terminalPanel.locator(".vpsComboboxMenu")).toHaveCount(0);
   const edgeOption = menu.getByRole("option", { name: /edge-sfo-01/ });
   await expect(edgeOption).toBeVisible();
-  await expect(edgeOption).toHaveAttribute("title", /edge-sfo-01.*agent-sfo-01/);
+  await expect(edgeOption).toHaveAttribute(
+    "title",
+    /edge-sfo-01.*agent-sfo-01/,
+  );
 });
 
 test("keeps search expression autocomplete above clipped workflow panels", async ({
@@ -330,9 +333,7 @@ test("renders an operational cloud-console fleet workspace", async ({
       .filter({ has: page.getByRole("heading", { name: "Recent failures" }) })
       .getByRole("button", { name: /Tunnel adapter status failed/ }),
   ).toBeVisible();
-  await expect(
-    page.getByLabel("Home telemetry widgets"),
-  ).toHaveCount(0);
+  await expect(page.getByLabel("Home telemetry widgets")).toHaveCount(0);
   if (testInfo.project.name.includes("mobile")) {
     await openFleetFromDashboard(page);
   } else {
@@ -343,7 +344,9 @@ test("renders an operational cloud-console fleet workspace", async ({
     page.getByRole("heading", { name: "Fleet instances" }),
   ).toBeVisible();
   const fleetInstancesHeader = page.locator(".fleetInstancesHeader");
-  await expect(fleetInstancesHeader).toContainText("0 live / 2 no contact / 3 total");
+  await expect(fleetInstancesHeader).toContainText(
+    "0 live / 2 no contact / 3 total",
+  );
   await expect(fleetInstancesHeader).not.toContainText("2 online / 3 total");
   if (testInfo.project.name.includes("desktop")) {
     await expect(
@@ -354,15 +357,25 @@ test("renders an operational cloud-console fleet workspace", async ({
   const edgeRow = testInfo.project.name.includes("mobile")
     ? fleetGrid.getByLabel("VPS instance records mobile card agent-sfo-01")
     : fleetGrid
-      .locator(".gridBody [role=row]", { hasText: "edge-sfo-01" })
-      .first();
+        .locator(".gridBody [role=row]", { hasText: "edge-sfo-01" })
+        .first();
   await expect(edgeRow).toBeVisible();
   await expect(edgeRow).toContainText("edge-sfo-01 (fo01)");
   if (testInfo.project.name.includes("mobile")) {
-    for (const label of ["IP", "Last contact", "Agent", "CPU", "Memory", "Disk", "Alerts"]) {
+    for (const label of [
+      "IP",
+      "Last contact",
+      "Agent",
+      "CPU",
+      "Memory",
+      "Disk",
+      "Alerts",
+    ]) {
       await expect(edgeRow).toContainText(label);
     }
-    await expect(edgeRow.getByRole("button", { name: /Open VPS/ })).toBeVisible();
+    await expect(
+      edgeRow.getByRole("button", { name: /Open VPS/ }),
+    ).toBeVisible();
   } else {
     for (const column of [
       "VPS",
@@ -483,8 +496,8 @@ test("renders an operational cloud-console fleet workspace", async ({
   const coreRecord = testInfo.project.name.includes("mobile")
     ? fleetGrid.getByLabel("VPS instance records mobile card agent-fra-02")
     : fleetGrid
-      .locator(".gridBody [role=row]", { hasText: "core-fra-02" })
-      .first();
+        .locator(".gridBody [role=row]", { hasText: "core-fra-02" })
+        .first();
   if (testInfo.project.name.includes("mobile")) {
     await activate(coreRecord.getByRole("button", { name: /Open VPS/ }));
   } else {
@@ -542,7 +555,9 @@ test("deletes a VPS through grid actions and explicit confirmation", async ({
   const backupRow = fleetGrid
     .locator(".gridBody [role=row]", { hasText: "backup-nyc-03" })
     .first();
-  await expect(backupRow.getByRole("button", { name: /Open .* detail/ })).toBeVisible();
+  await expect(
+    backupRow.getByRole("button", { name: /Open .* detail/ }),
+  ).toBeVisible();
 
   await backupRow.getByLabel("Select VPS instance records row").check();
   await fleetGrid
@@ -705,9 +720,7 @@ test("reviews notification and webhook queue mutations before commit", async ({
   const notifications = page.locator("main");
   await activate(notifications.getByRole("tab", { name: /Destinations/ }));
 
-  await activate(
-    notifications.getByRole("button", { name: "Queue dispatch" }),
-  );
+  await activate(notifications.getByRole("button", { name: "Queue dispatch" }));
   await expect(
     notifications.getByLabel("Confirm notification queue dispatch"),
   ).toBeVisible();
@@ -731,9 +744,7 @@ test("reviews notification and webhook queue mutations before commit", async ({
     )
     .toMatchObject({ confirmed: true, dry_run: false });
 
-  await activate(
-    notifications.getByRole("button", { name: "Deliver queued" }),
-  );
+  await activate(notifications.getByRole("button", { name: "Deliver queued" }));
   await expect(
     notifications.getByLabel("Confirm notification delivery"),
   ).toBeVisible();
@@ -779,12 +790,8 @@ test("reviews notification and webhook queue mutations before commit", async ({
   await expect(webhookExpression).toHaveValue("interval.30sec");
   await activate(webhooks.getByLabel("Close detail panel"));
 
-  await activate(
-    webhookRules.getByRole("button", { name: "Send test" }),
-  );
-  await expect(
-    webhooks.getByLabel("Confirm event webhook test"),
-  ).toBeVisible();
+  await activate(webhookRules.getByRole("button", { name: "Send test" }));
+  await expect(webhooks.getByLabel("Confirm event webhook test")).toBeVisible();
   await activate(
     webhooks
       .getByLabel("Confirm event webhook test")
@@ -805,9 +812,7 @@ test("reviews notification and webhook queue mutations before commit", async ({
     )
     .toMatchObject({ confirmed: true, dry_run: false });
 
-  await activate(
-    webhookRules.getByRole("button", { name: "Retry failed" }),
-  );
+  await activate(webhookRules.getByRole("button", { name: "Retry failed" }));
   await expect(
     webhooks.getByLabel("Confirm failed webhook retry"),
   ).toBeVisible();
@@ -891,11 +896,13 @@ test("clears browser-local console selections without deleting session or privil
     ? JSON.parse(storage.sidebarSubpanels)
     : null;
   expect(storage).toMatchObject({
-    accessToken: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    accessToken:
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     dashboardPreferences: null,
     grid: null,
     privilegeVault: "preserved-privilege",
-    refreshToken: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    refreshToken:
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   });
   expect(sidebarSubpanels).toMatchObject({
     defaultMode: "active",
@@ -943,6 +950,26 @@ test("scopes duplicate sidebar subpage labels to their parent view", async ({
   await expect(observabilityAlerts).not.toHaveClass(/active/);
 });
 
+test("keeps previously visited sidebar groups expanded", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "desktop sidebar groups are replaced by the mobile page selector",
+  );
+
+  await page.goto("/");
+  const nav = page.getByRole("navigation", {
+    name: "Primary console navigation",
+  });
+  await openConsoleSubpage(page, "Fleet", "Instances");
+  await expect(nav.getByLabel("Fleet sections")).toBeVisible();
+
+  await openConsoleSubpage(page, "Automation", "Schedules");
+  await expect(nav.getByLabel("Automation sections")).toBeVisible();
+  await expect(nav.getByLabel("Fleet sections")).toBeVisible();
+});
+
 test("supports interactive fleet data grid controls", async ({
   page,
 }, testInfo) => {
@@ -955,6 +982,13 @@ test("supports interactive fleet data grid controls", async ({
 
   const grid = page.getByLabel("VPS instance records data grid");
   await expect(grid.getByText("3 of 3 instances")).toBeVisible();
+  expect(
+    await grid
+      .locator('[role="columnheader"]')
+      .first()
+      .locator(".gridHeaderButton")
+      .getAttribute("title"),
+  ).toBeNull();
   await grid.getByLabel("VPS instance records search").fill("fra");
   await expect(grid.getByText("1 of 3 instances")).toBeVisible();
   const mobileFleetGrid = testInfo.project.name.includes("mobile");
@@ -966,9 +1000,7 @@ test("supports interactive fleet data grid controls", async ({
 
   const coreRow = mobileFleetGrid
     ? grid.getByLabel("VPS instance records mobile card agent-fra-02")
-    : grid
-      .locator(".gridBody [role=row]", { hasText: "core-fra-02" })
-      .first();
+    : grid.locator(".gridBody [role=row]", { hasText: "core-fra-02" }).first();
   await coreRow.getByLabel("Select VPS instance records row").check();
   await expect(grid.getByText("1 selected", { exact: true })).toBeVisible();
   await grid
@@ -979,8 +1011,9 @@ test("supports interactive fleet data grid controls", async ({
     page.getByRole("menuitem", { name: "Copy client IDs" }),
   ).toBeVisible();
   const actionMenuLayer = await page.evaluate(() => {
-    const menu = Array.from(document.querySelectorAll<HTMLElement>(".consoleMenu"))
-      .find((element) => element.textContent?.includes("Copy client IDs"));
+    const menu = Array.from(
+      document.querySelectorAll<HTMLElement>(".consoleMenu"),
+    ).find((element) => element.textContent?.includes("Copy client IDs"));
     const topbar = document.querySelector<HTMLElement>(".topbar");
     return {
       menuZIndex: Number.parseInt(
@@ -1151,9 +1184,9 @@ test("supports Config VPS Rules dry-run, confirm, and explicit unset", async ({
   await expect(
     previewBlock.getByText("No changes detected", { exact: true }).first(),
   ).toBeVisible();
-  await expect(
-    page.getByLabel("VPS rules preview final action"),
-  ).toContainText("Apply is disabled");
+  await expect(page.getByLabel("VPS rules preview final action")).toContainText(
+    "Apply is disabled",
+  );
   await expect(
     page.locator(".confirmationPrompt", { hasText: "Confirm VPS rule write" }),
   ).toHaveCount(0);
@@ -1237,6 +1270,51 @@ test("opens manual update check dispatch from fleet selection", async ({
   ).toHaveValue(DEFAULT_UPDATE_VERSION_URL);
   await expect(page.getByLabel("Max timeout seconds")).toHaveValue("300");
   await expect(page.getByText("Version manifest")).toBeVisible();
+  await expect(
+    page.getByText(/without activating or restarting it/),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/Activation is a separate reviewed action/),
+  ).toBeVisible();
+  await expect(page.getByLabel(/activate/i)).toHaveCount(0);
+  await expect(page.getByLabel(/restart/i)).toHaveCount(0);
+
+  await unlockPrivilegeFromTop(page);
+  await expect(
+    page.getByText(/without activating or restarting it/),
+  ).toBeVisible();
+  await page
+    .locator("#console-main-content")
+    .getByRole("button", { name: "Dispatch", exact: true })
+    .click();
+  const confirmation = page.getByLabel("Confirm job dispatch");
+  await expect(confirmation).toHaveClass(/\bnormal\b/);
+  await expect(confirmation).not.toHaveClass(/\bdanger\b/);
+  await expect(confirmation).toContainText(
+    "Check and stage verified artifact only",
+  );
+  await expect(confirmation).toContainText("ActivationNo");
+  await expect(confirmation).toContainText("Agent restartNo");
+  await expect(confirmation).toContainText("Protected operation");
+  await confirmation.getByRole("button", { name: "Dispatch job" }).click();
+
+  const updateRequest = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { jobs: Array<Record<string, unknown>> };
+      }
+    ).__vpsmanTestRequests.jobs;
+    return requests.at(-1);
+  });
+  expect(updateRequest).toMatchObject({
+    command: "agent_update_check",
+    operation: {
+      activate: false,
+      restart_agent: false,
+      type: "agent_update_check",
+      version_url: DEFAULT_UPDATE_VERSION_URL,
+    },
+  });
 });
 
 test("opens dispatch from fleet selection with selected VPS ids", async ({
@@ -1302,8 +1380,8 @@ test("keeps fleet alert policy actions selection-scoped", async ({
   const policyRow = testInfo.project.name.includes("mobile")
     ? mobilePolicyCard
     : grid
-      .locator(".gridBody [role=row]", { hasText: "edge-resource-policy" })
-      .first();
+        .locator(".gridBody [role=row]", { hasText: "edge-resource-policy" })
+        .first();
   if (testInfo.project.name.includes("mobile")) {
     await activate(policyRow.getByRole("button", { name: "Details" }).first());
   } else {
@@ -1344,9 +1422,9 @@ test("keeps fleet alert policy actions selection-scoped", async ({
   const editor = page.locator(".consoleDetailPanel", {
     hasText: "Edit alert policy",
   });
-  await expect(
-    editor.getByLabel("Policy VPS selector expression"),
-  ).toHaveValue("tag:edge");
+  await expect(editor.getByLabel("Policy VPS selector expression")).toHaveValue(
+    "tag:edge",
+  );
   await expect(editor.getByLabel("Rule condition expression")).toHaveValue(
     "traffic.cycle.total >= traffic.quota.total * 0.8",
   );
@@ -1377,13 +1455,13 @@ test("keeps fleet alert policy actions selection-scoped", async ({
       }
     ).__vpsmanTestRequests.fleetAlertPolicies.length;
   });
-  expect(policyWriteCountAfterConfirm).toBe(
-    policyWriteCountBeforeConfirm + 1,
-  );
+  expect(policyWriteCountAfterConfirm).toBe(policyWriteCountBeforeConfirm + 1);
   await page.getByLabel("Close detail panel").click();
 
   if (testInfo.project.name.includes("mobile")) {
-    await expect(policyRow.getByRole("button", { name: "Details" }).first()).toBeVisible();
+    await expect(
+      policyRow.getByRole("button", { name: "Details" }).first(),
+    ).toBeVisible();
   } else {
     await policyRow.click({ button: "right" });
     await expect(page.getByText("Row actions")).toBeVisible();
@@ -1423,6 +1501,28 @@ test("exposes console route state through URL, browser history, and reload", asy
     page.getByRole("heading", { level: 1, name: "Tunnel plans" }),
   ).toBeVisible();
   await expect(page).toHaveURL(/#\/network\/tunnel-plans$/);
+});
+
+test("reconnects the live console stream after an interrupted socket", async ({
+  page,
+}) => {
+  await page.goto("/#/fleet/instances");
+  await waitForConsoleShell(page);
+  await expect(page.getByText("Console stream connected")).toBeVisible();
+
+  await page.evaluate(() => {
+    const sockets = (
+      window as typeof window & {
+        __vpsmanTestWebSockets: Array<{ close: () => void }>;
+      }
+    ).__vpsmanTestWebSockets;
+    sockets.at(-1)?.close();
+  });
+
+  await expect(page.getByText("Console stream reconnecting")).toBeVisible();
+  await expect(page.getByText("Console stream connected")).toBeVisible({
+    timeout: 5_000,
+  });
 });
 
 test("shows issued policy alerts in Fleet Alerts and webhook rule fixtures", async ({
@@ -1529,7 +1629,9 @@ test("keeps console layout usable on desktop and mobile widths", async ({
     await expect(
       page.getByRole("button", { name: "Clear fleet scope" }),
     ).toBeDisabled();
-    await expect(page.locator(".topbarActions > .savedViewControls")).toBeHidden();
+    await expect(
+      page.locator(".topbarActions > .savedViewControls"),
+    ).toBeHidden();
     const mobileSavedViews = page.locator(".mobileSavedViewMenu");
     await expect(mobileSavedViews).toBeVisible();
     const mobileSavedViewSelect = mobileSavedViews.getByRole("combobox", {
@@ -1545,8 +1647,6 @@ test("keeps console layout usable on desktop and mobile widths", async ({
       name: "Console page",
       exact: true,
     });
-    await expect(mobilePageSelector).toBeHidden();
-    await mobilePageMenu.getByLabel("Open mobile page navigation").click();
     await expect(mobilePageSelector).toBeVisible();
     await mobilePageSelector.selectOption("Config::templates");
     await expect(
@@ -1728,7 +1828,7 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
     page.getByLabel("Suite config validation and save review"),
   ).toBeVisible();
   await expect(
-    suiteConfigReview.getByText("Open Privilege Vault").first(),
+    suiteConfigReview.getByText("Unlock privilege").first(),
   ).toBeVisible();
   await expect(page.getByLabel(/super password/i)).toHaveCount(0);
   await expect(page.getByLabel(/super salt/i)).toHaveCount(0);
@@ -1748,30 +1848,29 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
   ).toHaveCount(0);
 
   await suiteConfigReview
-    .getByRole("button", { name: "Open Privilege Vault" })
+    .getByRole("button", { name: "Unlock privilege" })
     .first()
     .click();
-  await expect(
-    page.getByRole("heading", { level: 1, name: "Privilege vault" }),
-  ).toBeVisible();
-  await page.getByLabel(/privilege secret/i).fill("local-super-password");
-  await page
+  const privilegeDialog = page.getByRole("dialog", {
+    name: "Unlock privilege",
+  });
+  await expect(privilegeDialog).toBeVisible();
+  await privilegeDialog
+    .getByLabel(/privilege secret/i)
+    .fill("local-super-password");
+  await privilegeDialog
     .getByLabel(/(privilege salt|verifier salt hex)/i)
     .fill("00112233445566778899aabbccddeeff");
   await activate(
-    page
+    privilegeDialog
       .getByLabel("Unlock with privilege material")
       .getByRole("button", { name: "Unlock", exact: true }),
   );
+  await expect(privilegeDialog).toBeHidden();
   await expect(
     page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
   ).toBeVisible();
-  await openConsoleSubpage(page, "System", "Suite config");
-  await page
-    .getByLabel("Suite config sections")
-    .getByRole("button", { name: /Capacity/ })
-    .click();
-  await page.getByLabel("API DB pool").fill("40");
+  await expect(page.getByLabel("API DB pool")).toHaveValue("40");
   await expect(
     page
       .getByLabel("Suite config validation and save review")
@@ -1975,9 +2074,7 @@ test("surfaces operator users under Access and session evidence under Audit", as
   ).toHaveCount(0);
 });
 
-test("packs dense metric rows by label length", async ({
-  page,
-}, testInfo) => {
+test("packs dense metric rows by label length", async ({ page }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
     "desktop metric-row packing is the production density target",
@@ -1985,7 +2082,9 @@ test("packs dense metric rows by label length", async ({
 
   await page.goto("/");
   await openConsoleSubpage(page, "System", "Overview");
-  const metricRows = page.locator(".dashboardTopClients.systemMetricTable").first();
+  const metricRows = page
+    .locator(".dashboardTopClients.systemMetricTable")
+    .first();
   await expect(metricRows.getByText("Current")).toBeVisible();
 
   const layout = await metricRows.evaluate((container) => {
@@ -2157,6 +2256,22 @@ test("manages template assignments from automation source templates", async ({
   await expect(
     templatePanel.getByLabel("Template definition JSON"),
   ).toBeVisible();
+  await expect(
+    templatePanel.getByLabel("Template definition JSON"),
+  ).toHaveValue('{\n  "source": "interface_counters"\n}');
+  await expect(templatePanel.getByLabel("Template name")).toHaveAttribute(
+    "title",
+    "shared:runtime-traffic-accounting-source",
+  );
+  await templatePanel
+    .getByLabel("Template name")
+    .fill("shared:operator-sim-traffic");
+  await activate(templatePanel.getByRole("button", { name: "Save template" }));
+  await expect(
+    templatePanel
+      .getByLabel("New source template", { exact: true })
+      .locator(".sourceTemplateActionFeedback.actionFeedbackSuccess"),
+  ).toContainText("Created source template shared:operator-sim-traffic");
   await activate(
     templatePanel.getByRole("button", { name: "Close New source template" }),
   );
@@ -2181,6 +2296,8 @@ test("manages template assignments from automation source templates", async ({
   await expect(
     templatePanel.getByLabel("Template assignment target expression"),
   ).toBeVisible();
+  await expect(templatePanel.getByText("Add a selector")).toBeVisible();
+  await expect(templatePanel.getByText("3/3 matching VPSs")).toHaveCount(0);
   await expect(
     templatePanel.getByLabel("Template definition JSON"),
   ).toHaveCount(0);
@@ -2207,6 +2324,15 @@ test("manages template assignments from automation source templates", async ({
   await expect(
     templatePanel.getByText("Confirm template assignment"),
   ).toBeVisible();
+  const assignmentPrompt = templatePanel.getByLabel(
+    "Confirm template assignment",
+  );
+  await expect(assignmentPrompt).toContainText(
+    "Runtime Traffic Accounting Source",
+  );
+  await expect(assignmentPrompt).not.toContainText(
+    "runtime_traffic_accounting_source",
+  );
   await confirmVisiblePrompt(page, "Apply template assignment");
 
   const request = await page.evaluate(() => {
@@ -2228,8 +2354,37 @@ test("manages template assignments from automation source templates", async ({
     templatePanel.locator("> .sectionHeader .actionFeedback"),
   ).toHaveCount(0);
   await expect(
-    templatePanel.locator(".actionDrawer .sourceTemplateActionFeedback.actionFeedbackSuccess"),
-  ).toContainText("template assignments evaluated");
+    templatePanel.locator(
+      ".actionDrawer .sourceTemplateActionFeedback.actionFeedbackSuccess",
+    ),
+  ).toContainText("Applied template to 2 VPSs");
+  await expect(
+    templatePanel.getByLabel("shared:vnstat-json", { exact: true }),
+  ).toBeInViewport();
+  await activate(templatePanel.getByRole("tab", { name: "Test / update" }));
+  await expect(templatePanel.getByLabel("Clone template name")).toHaveValue(
+    "shared:vnstat-json (cloned)",
+  );
+  await activate(templatePanel.getByRole("button", { name: "Clone" }));
+  await expect(
+    templatePanel.locator(
+      ".actionDrawer .sourceTemplateActionFeedback.actionFeedbackSuccess",
+    ),
+  ).toContainText("Cloned template as shared:vnstat-json (cloned)");
+  await templatePanel
+    .getByLabel("Lifecycle template description")
+    .fill("Provider image with vnstat installed, reviewed");
+  const diffButton = templatePanel.getByRole("button", { name: "Diff" });
+  await expect(diffButton).toBeEnabled();
+  await activate(diffButton);
+  await expect(
+    templatePanel.locator(
+      ".actionDrawer .sourceTemplateActionFeedback.actionFeedbackSuccess",
+    ),
+  ).toContainText("Description changed; 1 assigned VPS affected");
+  await expect(templatePanel.locator(".lifecyclePreview")).toContainText(
+    "description changed · no definition changes",
+  );
 });
 
 test("keeps external network adapters bound only through tunnel plans", async ({
@@ -2270,13 +2425,9 @@ test("keeps external network adapters bound only through tunnel plans", async ({
     drawer.getByRole("tab", { name: "Test / update" }),
   ).toHaveAttribute("aria-selected", "true");
   await expect(drawer.getByText("Bound from tunnel plans")).toBeVisible();
-  await expect(drawer).toContainText(
-    "never ambient VPS configuration",
-  );
+  await expect(drawer).toContainText("never ambient VPS configuration");
   await activate(drawer.getByRole("button", { name: "Open tunnel plans" }));
-  await expect(
-    page.getByText("vpsman / Network / Tunnel plans"),
-  ).toBeVisible();
+  await expect(page.getByText("vpsman / Network / Tunnel plans")).toBeVisible();
 });
 
 test("keeps source template assignment review while unlocking privilege inline", async ({
@@ -2390,9 +2541,7 @@ test("prefills registered agent update shortcuts into dispatch", async ({
   await expect(
     page.locator(".releaseActionFeedback.actionFeedbackDanger"),
   ).toContainText("Artifact URL must use https://");
-  await expect(
-    page.locator(".agentReleasesPanel .inlineError"),
-  ).toHaveCount(0);
+  await expect(page.locator(".agentReleasesPanel .inlineError")).toHaveCount(0);
   await expect(
     shortcuts.getByRole("button", { name: "Rollback" }),
   ).toBeDisabled();
@@ -2459,7 +2608,9 @@ test("renders patch generators and submits explicit runtime config patch modes",
   await generatorValues.fill("{");
   await activate(bulk.getByRole("button", { name: "Preview changes" }));
   await expect(
-    page.locator(".configWorkspace > .fleetPanel > .sectionHeader .actionFeedbackDanger"),
+    page.locator(
+      ".configWorkspace > .fleetPanel > .sectionHeader .actionFeedbackDanger",
+    ),
   ).toHaveCount(0);
   await expect(
     page.locator(".configActionFeedback.actionFeedbackDanger"),
@@ -2635,7 +2786,7 @@ test("creates a cron schedule from a command template with target preview", asyn
     page.getByText("2 VPSs in local preview; server resolves before save"),
   ).toBeVisible();
   await expect(
-    page.getByText(/UTC schedule, displayed in browser timezone/),
+    page.getByText(/Every 15 minutes\. Times shown in browser timezone\./),
   ).toBeVisible();
   await expect(page.getByText("Every 15 minutes")).toBeVisible();
   await expect(
@@ -2802,13 +2953,14 @@ test("registers VPS identities and revokes current keys from the access panel", 
   await activate(
     inspector.getByRole("button", { name: "Review registration" }),
   );
-  await expect(
-    page.getByLabel("Confirm VPS identity registration"),
-  ).toBeVisible();
+  const identityConfirmation = page.getByLabel(
+    "Confirm VPS identity registration",
+  );
+  await expect(identityConfirmation).toBeVisible();
+  await expect(identityConfirmation).toContainText("edge-tokyo-04");
+  await expect(identityConfirmation).toContainText("country:JP, role:edge");
   await activate(
-    page
-      .getByLabel("Confirm VPS identity registration")
-      .getByRole("button", { name: "Register VPS" }),
+    identityConfirmation.getByRole("button", { name: "Register VPS" }),
   );
   await expect(inspector.getByText("edge-tokyo-04")).toBeVisible();
   const identityRequest = await page.evaluate(() => {
@@ -2884,6 +3036,42 @@ test("registers VPS identities and revokes current keys from the access panel", 
     "VPSMAN_INSTALL_MODE='unprivileged'",
   );
   await expect(installCommand).toContainText("VPSMAN_AGENT_ENABLE_SERVICE='0'");
+  await expect(
+    inspector.getByRole("heading", { name: "VPS registered" }),
+  ).toBeVisible();
+  await expect(
+    inspector.getByRole("button", { name: "Generate keypair" }),
+  ).toHaveCount(0);
+  await expect(installCommand).toContainText(
+    `VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX='${generatedPrivateKeyHex}'`,
+  );
+  await activate(
+    inspector.getByRole("button", { name: "Register another VPS" }),
+  );
+  await expect(installCommand).toHaveCount(0);
+  await expect(
+    inspector.getByRole("button", { name: "Generate keypair" }),
+  ).toBeVisible();
+
+  await inspector
+    .getByLabel("Agent identity client ID")
+    .fill("agent-imported-05");
+  await inspector
+    .getByLabel("Agent identity public key hex")
+    .fill("2".repeat(64));
+  await inspector.getByLabel("Agent identity display name").fill("imported-05");
+  await activate(
+    inspector.getByRole("button", { name: "Review registration" }),
+  );
+  await activate(
+    page
+      .getByLabel("Confirm VPS identity registration")
+      .getByRole("button", { name: "Register VPS" }),
+  );
+  await expect(inspector.getByLabel("Agent install command")).toHaveCount(0);
+  await expect(inspector).toContainText(
+    "Registration is complete; use the matching private key from your secure source",
+  );
 
   await selectGridRow(page, "VPS identities", "agent-sfo-01");
   await runGridAction(page, "VPS identities", "Revoke selected");
@@ -2933,10 +3121,10 @@ test("shows access posture, MFA risk, identity lifecycle, and gateway readiness"
   await expect(actions).toContainText("2 expired");
   await expect(actions).toContainText("Gateway install defaults");
   await expect(actions).toContainText("Suite Config");
-  await expect(actions).toContainText("Privilege state");
-  await expect(actions).toContainText(
-    "No saved local vault; enter privilege secret when needed.",
-  );
+  await expect(actions).not.toContainText("Privilege state");
+  const initialSessionScopes = page.getByLabel("Access session scopes");
+  await expect(initialSessionScopes).toContainText("Privilege unlock");
+  await expect(initialSessionScopes).toContainText("No saved local vault");
   await activate(actions.getByRole("button", { name: "Open Suite Config" }));
   await expect(
     page.getByRole("heading", { level: 1, name: "Suite Config" }),
@@ -2976,7 +3164,9 @@ test("shows access posture, MFA risk, identity lifecycle, and gateway readiness"
   await expect(page.getByLabel(/super salt/i)).toHaveCount(0);
   await expect(page.getByLabel(/access privilege secret/i)).toBeVisible();
   await expect(page.getByLabel(/access privilege salt/i)).toBeVisible();
-  await expect(page.getByLabel("Privilege vault state")).toContainText("Locked");
+  await expect(page.getByLabel("Privilege vault state")).toContainText(
+    "Locked",
+  );
   await expect(page.getByLabel("Privilege vault state")).toContainText(
     "Current browser only",
   );
@@ -2995,7 +3185,9 @@ test("shows access posture, MFA risk, identity lifecycle, and gateway readiness"
   await expect(
     page.getByRole("button", { name: "Set up TOTP" }),
   ).toBeDisabled();
-  await page.getByLabel(/access privilege secret/i).fill("local-super-password");
+  await page
+    .getByLabel(/access privilege secret/i)
+    .fill("local-super-password");
   await page
     .getByLabel(/access privilege salt/i)
     .fill("00112233445566778899aabbccddeeff");
@@ -3059,7 +3251,7 @@ test("shows access posture, MFA risk, identity lifecycle, and gateway readiness"
     emptyState.getByRole("button", { name: "Gateway settings" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Preferences", exact: true }),
+    emptyState.getByRole("button", { name: "Preferences", exact: true }),
   ).toHaveCount(0);
   await expect(page.getByText("No panel-side endpoint lookup")).toHaveCount(0);
   await expect(page.getByRole("columnheader", { name: "Gateway" })).toHaveCount(
@@ -3093,17 +3285,19 @@ test("keeps access action feedback out of headings and durable labels", async ({
   const privilegePanel = page.locator(".controlPanel").filter({
     has: page.getByRole("heading", { level: 2, name: "Privilege vault" }),
   });
-  await expect(privilegePanel.locator(".privilegeVaultNotice strong")).toHaveText(
-    "Local-only privilege material",
-  );
-  await page.getByLabel(/access privilege secret/i).fill("local-super-password");
+  await expect(
+    privilegePanel.locator(".privilegeVaultNotice strong"),
+  ).toHaveText("Local-only privilege material");
+  await page
+    .getByLabel(/access privilege secret/i)
+    .fill("local-super-password");
   await page.getByLabel(/access privilege salt/i).fill("not-hex");
   await activate(
     privilegePanel.getByRole("button", { name: "Unlock", exact: true }),
   );
-  await expect(privilegePanel.locator(".privilegeVaultNotice strong")).toHaveText(
-    "Local-only privilege material",
-  );
+  await expect(
+    privilegePanel.locator(".privilegeVaultNotice strong"),
+  ).toHaveText("Local-only privilege material");
   await expect(privilegePanel.locator(".actionFeedbackDanger")).toContainText(
     "Invalid hex value",
   );
@@ -3431,13 +3625,17 @@ test("authors explicit tunnel plans with endpoint-scoped adapters", async ({
   await expect(kind.locator('option[value="openvpn"]')).toHaveCount(0);
   await activate(composer.getByRole("button", { name: "External observed" }));
   await expect(kind.locator('option[value="openvpn"]')).toHaveCount(1);
-  await expect(composer.getByText("Agent-managed routes and cleanup")).toHaveCount(0);
+  await expect(
+    composer.getByText("Agent-managed routes and cleanup"),
+  ).toHaveCount(0);
 
   await composer.getByLabel("Tunnel plan name").fill("external-openvpn-ospf");
   await composer.getByLabel("Tunnel interface", { exact: true }).fill("ovpn70");
   await kind.selectOption("openvpn");
   await activate(composer.getByRole("button", { name: "Agent iproute2" }));
-  await expect(composer.getByText(/OpenVPN cannot be agent-managed/)).toBeVisible();
+  await expect(
+    composer.getByText(/OpenVPN cannot be agent-managed/),
+  ).toBeVisible();
   await expect(kind).toHaveValue("openvpn");
   await expect(
     composer.getByRole("button", { name: "External observed" }),
@@ -3454,9 +3652,13 @@ test("authors explicit tunnel plans with endpoint-scoped adapters", async ({
     "fra",
     /core-fra-02.*agent-fra-02/,
   );
-  await composer.getByLabel("Left remote underlay destination").fill("203.0.113.20");
+  await composer
+    .getByLabel("Left remote underlay destination")
+    .fill("203.0.113.20");
   await composer.getByLabel("Left local underlay source").fill("10.0.0.10");
-  await composer.getByLabel("Right remote underlay destination").fill("198.51.100.10");
+  await composer
+    .getByLabel("Right remote underlay destination")
+    .fill("198.51.100.10");
   await composer.getByLabel("Left tunnel IPv4").fill("10.255.70.0");
   await composer.getByLabel("Right tunnel IPv4").fill("10.255.70.1");
   await composer.getByLabel("Tunnel interface", { exact: true }).fill("tunab");
@@ -3540,9 +3742,7 @@ test("inspects disabled tunnel cleanup without exposing probe or speed mutations
   await page.goto("/");
   await openConsoleSubpage(page, "Network", "Tunnel plans");
   const planName = "external-openvpn-observed";
-  await activate(
-    page.getByRole("button", { name: `Disable ${planName}` }),
-  );
+  await activate(page.getByRole("button", { name: `Disable ${planName}` }));
   await confirmVisiblePrompt(page, "Disable plans");
 
   await openConsoleSubpage(page, "Network", "Tests");
@@ -3551,9 +3751,13 @@ test("inspects disabled tunnel cleanup without exposing probe or speed mutations
     has: page.getByRole("heading", { level: 2, name: "Network tests" }),
   });
   await expect(panel).toContainText("Plan disabled; inspect only");
-  await expect(page.getByRole("button", { name: "Inspect status" })).toBeEnabled();
+  await expect(
+    page.getByRole("button", { name: "Inspect status" }),
+  ).toBeEnabled();
   await expect(page.getByRole("button", { name: "Run probe" })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Review speed test" })).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Review speed test" }),
+  ).toBeDisabled();
 
   await activate(page.getByRole("button", { name: "Inspect status" }));
   const statusRequest = await page.evaluate(() => {
@@ -3584,7 +3788,9 @@ test(
 
     await page.goto("/");
     await openConsoleSubpage(page, "Network", "OSPF");
-    const table = page.getByRole("table", { name: "OSPF adapter update plans" });
+    const table = page.getByRole("table", {
+      name: "OSPF adapter update plans",
+    });
     await expect(table).toContainText("Planned baseline");
     await expect(table.getByRole("button", { name: "Apply" })).toBeEnabled();
     await activate(table.getByRole("button", { name: "Apply" }));
@@ -3611,7 +3817,10 @@ test("separates runtime reconciliation, failed probes, and operator connectivity
   await page.goto("/");
   await openConsoleSubpage(page, "Network", "Tunnel plans");
   const planTable = page.getByRole("table", { name: "Tunnel plans" });
-  const row = planTable.locator("tbody > tr").filter({ hasText: "sfo-fra-gre" }).first();
+  const row = planTable
+    .locator("tbody > tr")
+    .filter({ hasText: "sfo-fra-gre" })
+    .first();
   await expect(row).toContainText("L Healthy");
   await expect(row).toContainText("R Healthy");
   await expect(row).toContainText("Partially verified");
@@ -3635,12 +3844,13 @@ test("separates runtime reconciliation, failed probes, and operator connectivity
 
   await expect(row).toContainText("Connected");
   await expect(row).toContainText("Operator assessment");
-  const requests = await page.evaluate(() =>
-    (
-      window as unknown as {
-        __vpsmanTestRequests: { tunnelPlanConnectionAssessments: unknown[] };
-      }
-    ).__vpsmanTestRequests.tunnelPlanConnectionAssessments,
+  const requests = await page.evaluate(
+    () =>
+      (
+        window as unknown as {
+          __vpsmanTestRequests: { tunnelPlanConnectionAssessments: unknown[] };
+        }
+      ).__vpsmanTestRequests.tunnelPlanConnectionAssessments,
   );
   expect(requests).toEqual([
     {
@@ -3694,12 +3904,13 @@ test("retires only disabled tunnel plans from a frozen revision", async ({
   await expect(page.locator(".topologyPlanActionFeedback")).toContainText(
     "Deleted tunnel plan sfo-fra-gre",
   );
-  const requests = await page.evaluate(() =>
-    (
-      window as unknown as {
-        __vpsmanTestRequests: { tunnelPlanDeletes: unknown[] };
-      }
-    ).__vpsmanTestRequests.tunnelPlanDeletes,
+  const requests = await page.evaluate(
+    () =>
+      (
+        window as unknown as {
+          __vpsmanTestRequests: { tunnelPlanDeletes: unknown[] };
+        }
+      ).__vpsmanTestRequests.tunnelPlanDeletes,
   );
   expect(requests).toEqual([
     { plan_id: "dddddddd-eeee-4fff-8000-111111111111" },
@@ -3734,6 +3945,46 @@ test("shows telemetry only for explicitly saved tunnel endpoints", async ({
   const planTable = page.getByRole("table", { name: "Tunnel plans" });
   await expect(planTable.getByRole("row")).toHaveCount(3);
   await expect(page.getByText(/promotion workflow/i)).toHaveCount(0);
+});
+
+test("keeps each expanded VPS chart scoped to that VPS", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "desktop supports multiple simultaneous inline VPS details",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Fleet", "Instances");
+  const grid = page.getByLabel("VPS instance records data grid");
+  const edgeRow = grid
+    .locator(".gridBody [role=row]", { hasText: "edge-sfo-01" })
+    .first();
+  const coreRow = grid
+    .locator(".gridBody [role=row]", { hasText: "core-fra-02" })
+    .first();
+
+  await activate(edgeRow.getByLabel("Expand VPS instance records row"));
+  await activate(coreRow.getByLabel("Expand VPS instance records row"));
+
+  const edgeDetail = grid
+    .locator(".gridExpandedRow", { hasText: "edge-sfo-01" })
+    .first();
+  const coreDetail = grid
+    .locator(".gridExpandedRow", { hasText: "core-fra-02" })
+    .first();
+  const edgeChart = edgeDetail.getByRole("figure", {
+    name: /^edge-sfo-01 \(fo01\) network rate curves/,
+  });
+  const coreChart = coreDetail.getByRole("figure", {
+    name: /^core-fra-02 \(ra02\) network rate curves/,
+  });
+
+  await expect(edgeChart).toContainText("Latest values: RX 19 Mbps, TX 18 Mbps");
+  await expect(coreChart).toContainText("Latest values: RX 3.1 Mbps, TX 2.8 Mbps");
+  await expect(edgeChart).not.toContainText("RX 22 Mbps");
+  await expect(coreChart).not.toContainText("RX 22 Mbps");
 });
 
 test("shows grouped execution summaries for job output details", async ({
@@ -3811,10 +4062,14 @@ test("generates local privilege assertions before dispatching a privileged job",
     page.locator(".commandComposer").getByLabel("Super password"),
   ).toHaveCount(0);
   await expect(
-    page.locator(".commandComposer .privilegeStatus").getByText("Locked", { exact: true }),
+    page
+      .locator(".commandComposer .privilegeStatus")
+      .getByText("Locked", { exact: true }),
   ).toBeVisible();
   await expect(
-    page.locator(".commandComposer").getByRole("button", { name: "Open Privilege Vault" }),
+    page
+      .locator(".commandComposer")
+      .getByRole("button", { name: "Unlock privilege" }),
   ).toBeVisible();
   await unlockPrivilegeFor(page, "Jobs", "Dispatch");
 
@@ -3881,6 +4136,46 @@ test("generates local privilege assertions before dispatching a privileged job",
   await expect(
     page.getByRole("heading", { name: "Target results" }),
   ).toBeVisible();
+  const targetDetails = page.getByRole("region", {
+    name: "Job target details",
+  });
+  await expect(targetDetails).toBeFocused();
+  await expect
+    .poll(async () => {
+      const [detailBounds, topbarBounds] = await Promise.all([
+        targetDetails.boundingBox(),
+        topbar.boundingBox(),
+      ]);
+      if (!detailBounds || !topbarBounds) {
+        return false;
+      }
+      return (
+        detailBounds.y >= topbarBounds.y + topbarBounds.height &&
+        detailBounds.y < testInfo.project.use.viewport!.height
+      );
+    })
+    .toBe(true);
+  const targetDetailHeader = targetDetails.locator(".targetDetailHeader");
+  const targetDetailClose = targetDetails.getByRole("button", {
+    name: "Close job target details",
+  });
+  await expect
+    .poll(async () => {
+      const [headerBounds, closeBounds] = await Promise.all([
+        targetDetailHeader.boundingBox(),
+        targetDetailClose.boundingBox(),
+      ]);
+      if (!headerBounds || !closeBounds) {
+        return false;
+      }
+      return (
+        closeBounds.x + closeBounds.width <=
+          headerBounds.x + headerBounds.width + 1 &&
+        closeBounds.x >= headerBounds.x + headerBounds.width / 2 &&
+        closeBounds.y < headerBounds.y + headerBounds.height / 2
+      );
+    })
+    .toBe(true);
   const request = await page.evaluate(() => {
     const requests = (
       window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
@@ -3985,7 +4280,9 @@ test("dispatches terminal session control operations with local privilege unlock
     "sfo",
     /edge-sfo-01.*agent-sfo-01/,
   );
-  await terminalComposer.getByLabel("New terminal working directory").fill("/root");
+  await terminalComposer
+    .getByLabel("New terminal working directory")
+    .fill("/root");
   await terminalComposer
     .getByLabel("New terminal user policy")
     .selectOption("root");
@@ -4202,6 +4499,7 @@ test("shows audit filters and retention compliance posture", async ({
 test("dispatches executable restores with agent-local archive metadata only", async ({
   page,
 }, testInfo) => {
+  test.slow();
   test.skip(
     testInfo.project.name.includes("mobile"),
     "restore artifact dispatch is covered in the desktop console layout",
@@ -4247,6 +4545,21 @@ test("dispatches executable restores with agent-local archive metadata only", as
   await chooseVpsBySearch(
     restoreWorkflow,
     "Restore target client",
+    "sfo",
+    /edge-sfo-01.*agent-sfo-01/,
+  );
+  const stagedArchive = restoreWorkflow.getByLabel("Staged archive");
+  await expect(stagedArchive).toHaveValue("");
+  await expect(stagedArchive).toContainText("No matching upload");
+  await expect(
+    restoreWorkflow.getByRole("button", { name: "Download package" }),
+  ).toBeVisible();
+  await expect(
+    restoreWorkflow.getByRole("button", { name: "Open Transfers" }),
+  ).toBeVisible();
+  await chooseVpsBySearch(
+    restoreWorkflow,
+    "Restore target client",
     "fra",
     /core-fra-02.*agent-fra-02/,
   );
@@ -4256,15 +4569,13 @@ test("dispatches executable restores with agent-local archive metadata only", as
   );
   await expect(
     restoreWorkflow.getByLabel("Confirm draft restore"),
-  ).toBeVisible();
+  ).toBeVisible({ timeout: 15_000 });
   await activate(
     restoreWorkflow
       .getByLabel("Confirm draft restore")
       .getByRole("button", { name: "Save draft restore" }),
   );
-  await expect(
-    page.getByText(/Draft restore cccccccc planned_metadata_only/),
-  ).toBeVisible();
+  await expect(page.getByText(/Draft restore cccccccc saved/)).toBeVisible();
   const restorePlanRequest = await page.evaluate(() => {
     const requests = (
       window as unknown as { __vpsmanTestRequests: { restorePlans: unknown[] } }
@@ -4279,7 +4590,6 @@ test("dispatches executable restores with agent-local archive metadata only", as
     target_client_id: "agent-fra-02",
   });
   expectPrivilegeAssertion(restorePlanRequest);
-  const stagedArchive = restoreWorkflow.getByLabel("Staged archive");
   await expect(stagedArchive).toHaveValue(
     "agent-fra-02:50505050-2222-4333-8444-555555555555",
   );
@@ -4289,6 +4599,16 @@ test("dispatches executable restores with agent-local archive metadata only", as
   await expect(
     restoreWorkflow.getByRole("button", { name: "Review dry run" }),
   ).not.toHaveClass(/dangerPrimary/);
+  await activate(
+    restoreWorkflow.getByRole("button", { name: "Review dry run" }),
+  );
+  const dryRunConfirmation = restoreWorkflow.getByLabel("Confirm restore");
+  await expect(dryRunConfirmation).toContainText("Dry run");
+  await expect(dryRunConfirmation).toContainText("Simulates");
+  await expect(dryRunConfirmation).not.toContainText("Replaces");
+  await activate(
+    dryRunConfirmation.getByRole("button", { name: "Close confirmation" }),
+  );
   await dryRunToggle.setChecked(false);
   await expect(
     restoreWorkflow.getByRole("button", { name: "Review live restore" }),
@@ -4297,11 +4617,11 @@ test("dispatches executable restores with agent-local archive metadata only", as
   await activate(
     restoreWorkflow.getByRole("button", { name: "Review live restore" }),
   );
-  await expect(restoreWorkflow.getByLabel("Confirm restore")).toBeVisible();
+  const liveRestoreConfirmation = restoreWorkflow.getByLabel("Confirm restore");
+  await expect(liveRestoreConfirmation).toBeVisible();
+  await expect(liveRestoreConfirmation).toContainText("Replaces");
   await activate(
-    restoreWorkflow
-      .getByLabel("Confirm restore")
-      .getByRole("button", { name: "Run restore" }),
+    liveRestoreConfirmation.getByRole("button", { name: "Run restore" }),
   );
 
   await expect(page.getByText(/Restore job 11111111 running/)).toBeVisible();
@@ -4437,6 +4757,39 @@ test("dispatches executable restores with agent-local archive metadata only", as
   });
 });
 
+test("restore staging opens Transfers with the selected VPS", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "restore-to-transfer routing is covered in the desktop workflow",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Backups", "Restore");
+  await activate(page.getByRole("button", { name: "Choose restore artifact" }));
+  const restoreWorkflow = page.getByLabel("Choose restore artifact");
+  await restoreWorkflow
+    .getByLabel("Restore source backup request")
+    .selectOption(backupId);
+  await chooseVpsBySearch(
+    restoreWorkflow,
+    "Restore target client",
+    "sfo",
+    /edge-sfo-01.*agent-sfo-01/,
+  );
+  await activate(
+    restoreWorkflow.getByRole("button", { name: "Open Transfers" }),
+  );
+
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Transfers" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Transfer target VPS")).toHaveValue(
+    /edge-sfo-01/,
+  );
+});
+
 test("creates backup artifact transfer package from retained output", async ({
   page,
 }, testInfo) => {
@@ -4470,7 +4823,7 @@ test("creates backup artifact transfer package from retained output", async ({
       .getByRole("button", { name: "Create transfer package" }),
   );
 
-  await expect(page.getByText(/Artifact dddddddd uploaded/)).toBeVisible();
+  await expect(page.getByText(/Artifact dddddddd ready/)).toBeVisible();
   const handoffRequest = await page.evaluate(() => {
     const requests = (
       window as unknown as {
@@ -4671,7 +5024,9 @@ test("dispatches topology network tests and OSPF plan updates with local privile
   ).toBeVisible();
 
   await openConsoleSubpage(page, "Network", "OSPF");
-  await expect(page.getByRole("heading", { name: "OSPF cost control" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "OSPF cost control" }),
+  ).toBeVisible();
   const ospfTable = page.getByRole("table", {
     name: "OSPF adapter update plans",
   });
@@ -4702,7 +5057,9 @@ test("dispatches topology network tests and OSPF plan updates with local privile
   await expect(ospfPrompt).toContainText("Confirm OSPF cost update");
   await expect(ospfPrompt).toContainText("Current costs");
   await expect(ospfPrompt).toContainText("14 / 14");
-  await expect(ospfPrompt).toContainText(`r${ospfUpdatePlans[0].plan_revision}`);
+  await expect(ospfPrompt).toContainText(
+    `r${ospfUpdatePlans[0].plan_revision}`,
+  );
   await expect(ospfPrompt).toContainText("Desired cost");
   await expect(ospfPrompt).toContainText("Adapter snapshots");
   await expect(ospfPrompt).toContainText(ospfUpdatePlans[0].evidence_summary);

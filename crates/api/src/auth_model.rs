@@ -93,6 +93,8 @@ pub(crate) struct OperatorPreferences {
     pub(crate) gateway_server_public_key_hex: Option<String>,
     #[serde(default)]
     pub(crate) gateway_endpoints: String,
+    #[serde(default = "default_agent_install_mode")]
+    pub(crate) agent_install_mode: String,
     #[serde(default)]
     pub(crate) tunnel_ipv4_allocation_pool_cidr: String,
     #[serde(default)]
@@ -115,6 +117,7 @@ impl Default for OperatorPreferences {
             bulk_output_compare_mode: default_bulk_output_compare_mode(),
             gateway_server_public_key_hex: None,
             gateway_endpoints: String::new(),
+            agent_install_mode: default_agent_install_mode(),
             tunnel_ipv4_allocation_pool_cidr: String::new(),
             tunnel_ipv6_allocation_pool_cidr: String::new(),
         }
@@ -164,6 +167,11 @@ impl OperatorPreferences {
                 .map(|value| value.trim().to_ascii_lowercase())
                 .filter(|value| !value.is_empty()),
             gateway_endpoints: self.gateway_endpoints.trim().to_string(),
+            agent_install_mode: normalize_choice(
+                self.agent_install_mode,
+                "root",
+                &["root", "user", "staged"],
+            ),
             tunnel_ipv4_allocation_pool_cidr: self
                 .tunnel_ipv4_allocation_pool_cidr
                 .trim()
@@ -239,6 +247,10 @@ fn default_dashboard_top_limit() -> u8 {
 
 fn default_bulk_output_compare_mode() -> String {
     "binary".to_string()
+}
+
+fn default_agent_install_mode() -> String {
+    "root".to_string()
 }
 
 fn normalize_dashboard_top_limit(value: u8) -> u8 {

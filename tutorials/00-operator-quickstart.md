@@ -25,13 +25,25 @@ export VPSMAN_POSTGRES_URL=postgres://vpsman:vpsman@127.0.0.1:5432/vpsman
 export VPSMAN_GATEWAY_BIND=127.0.0.1:9443
 export VPSMAN_GATEWAY_CONTROL_BIND=127.0.0.1:9444
 export VPSMAN_GATEWAY_CONTROL_URL=http://127.0.0.1:9444
-export VPSMAN_INTERNAL_TOKEN="$(openssl rand -hex 32)"
+export VPSMAN_GATEWAY_SPOOL_DIR=.tmp/quickstart-gateway-spool
 export VPSMAN_BACKUP_OBJECT_STORE_DIR=.tmp/objects/backups
 export VPSMAN_ARTIFACT_MAX_BYTES=134217728
 
-# Run each service in its own shell with the same environment.
+# This tutorial uses a disposable database. Start it with a matching empty
+# gateway spool so a previous local run cannot replay events into new IDs.
+rm -rf "$VPSMAN_GATEWAY_SPOOL_DIR"
+
+# Generate one consistent secret set. Do not substitute unrelated random keys.
+export VPSMAN_SUPER_PASSWORD='<local_super_password>'
+cargo run -p vpsctl -- compose-secrets --secrets-dir .tmp/quickstart-secrets
+unset VPSMAN_SUPER_PASSWORD
+export VPSMAN_INTERNAL_TOKEN="$(<.tmp/quickstart-secrets/vpsman_internal_token)"
+
+# In each of three shells, repeat the shared exports above, then run one service.
 cargo run -p vpsman-api
-cargo run -p vpsman-gateway
+VPSMAN_GATEWAY_PRIVATE_KEY_HEX="$(<.tmp/quickstart-secrets/vpsman_gateway_private_key_hex)" \
+VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX="$(<.tmp/quickstart-secrets/vpsman_privilege_verifier_key_hex)" \
+  cargo run -p vpsman-gateway
 cargo run -p vpsman-worker
 ```
 
@@ -83,9 +95,10 @@ tunnel plans require the read scopes listed in
 Register a direct gateway agent identity:
 
 ```sh
+export EDGE_CLIENT_ID=1
 cargo run -p vpsctl -- noise-keygen
 cargo run -p vpsctl -- agent-identity-upsert \
-  --client-id edge-01 \
+  --client-id "$EDGE_CLIENT_ID" \
   --client-public-key-hex <agent_noise_public_key_hex> \
   --display-name edge-01 \
   --tags country:US,role:edge \
@@ -98,7 +111,7 @@ than allowing one agent to impersonate another.
 
 Install the agent with `deploy/install-agent.sh` or follow
 `02-install-agents.md`. After it connects, use the assigned display name in Fleet
-and target expressions.
+and the numerical client ID in exact target expressions.
 
 ## 4. Organize And Inspect
 

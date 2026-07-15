@@ -99,35 +99,6 @@ fn migration_link_order_by(sort: Option<&str>, descending: bool) -> &'static str
 }
 
 impl Repository {
-    pub(crate) async fn migration_link_exists_for_restore_plan(
-        &self,
-        restore_plan_id: Uuid,
-    ) -> Result<bool> {
-        match self {
-            Self::Memory(memory) => Ok(memory
-                .migration_links
-                .read()
-                .await
-                .iter()
-                .any(|link| link.restore_plan_id == restore_plan_id)),
-            Self::Postgres(pool) => {
-                let exists: bool = sqlx::query_scalar(
-                    r#"
-                    SELECT EXISTS (
-                        SELECT 1
-                        FROM migration_links
-                        WHERE restore_plan_id = $1
-                    )
-                    "#,
-                )
-                .bind(restore_plan_id)
-                .fetch_one(pool)
-                .await?;
-                Ok(exists)
-            }
-        }
-    }
-
     pub(crate) async fn list_migration_links(&self, limit: i64) -> Result<Vec<MigrationLinkView>> {
         match self {
             Self::Memory(memory) => {
@@ -396,7 +367,7 @@ impl Repository {
         request_fingerprint: &str,
         resolved_targets: &[String],
     ) -> Result<MigrationLinkView> {
-        let link = migration_link_view_from_request(
+        let requested_link = migration_link_view_from_request(
             link_request,
             restore_plan,
             operator,
@@ -410,36 +381,34 @@ impl Repository {
             .max_timeout_secs
             .unwrap_or(vpsman_common::DEFAULT_MAX_JOB_TIMEOUT_SECS)
             .max(1);
-        let job_audit_metadata = json!({
-            "selector_expression": job_request.selector_expression,
-            "resolved_targets": resolved_targets,
-            "destructive": job_request.destructive,
-            "confirmed": job_request.confirmed,
-            "privileged": job_request.privileged,
-            "force_unprivileged": job_request.force_unprivileged,
-            "source_schedule_id": null,
-            "operator_id": operator.operator.id,
-            "operator_username": operator.operator.username,
-            "operator_role": operator.operator.role,
-            "session_id": operator.session_id,
-            "migration_link_id": link.id,
-            "restore_plan_id": restore_plan.id,
-        });
-        match self {
+        let persisted_link = match self {
             Self::Memory(memory) => {
                 let created_at = unix_now().to_string();
                 let mut links = memory.migration_links.write().await;
                 let mut jobs = memory.jobs.write().await;
-                if links
+                let existing_link = links
                     .iter()
-                    .any(|existing| existing.restore_plan_id == link.restore_plan_id)
-                {
-                    bail!("migration_link_already_exists");
-                }
+                    .find(|existing| existing.restore_plan_id == requested_link.restore_plan_id)
+                    .cloned();
+                let (link, inserted_link) = match existing_link {
+                    Some(existing)
+                        if migration_link_matches_request(
+                            &existing,
+                            link_request,
+                            restore_plan,
+                        ) =>
+                    {
+                        (existing, false)
+                    }
+                    Some(_) => bail!("migration_link_conflicts_with_request"),
+                    None => (requested_link.clone(), true),
+                };
                 if jobs.iter().any(|job| job.id == job_id) {
                     bail!("job_id_reused_with_different_request");
                 }
-                links.push(link.clone());
+                if inserted_link {
+                    links.push(link.clone());
+                }
                 jobs.push(JobHistoryView {
                     id: job_id,
                     actor_id: Some(operator.operator.id),
@@ -489,21 +458,30 @@ impl Repository {
                             }),
                     );
                 let mut audits = memory.audits.write().await;
-                audits.push(migration_link_audit(
-                    &link,
-                    link_request.confirmed,
-                    operator,
-                    created_at.clone(),
-                ));
+                if inserted_link {
+                    audits.push(migration_link_audit(
+                        &link,
+                        link_request.confirmed,
+                        operator,
+                        created_at.clone(),
+                    ));
+                }
                 audits.push(AuditLogView {
                     id: Uuid::new_v4(),
                     actor_id: Some(operator.operator.id),
                     action: "job.dispatch_requested".to_string(),
                     target: "api:/api/v1/jobs".to_string(),
                     command_hash: Some(command_hash.to_string()),
-                    metadata: job_audit_metadata,
+                    metadata: migration_job_audit_metadata(
+                        &link,
+                        restore_plan,
+                        job_request,
+                        operator,
+                        resolved_targets,
+                    ),
                     created_at,
                 });
+                link
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
@@ -537,9 +515,9 @@ impl Repository {
                 if job_id_exists {
                     bail!("job_id_reused_with_different_request");
                 }
-                let row = sqlx::query(
+                let existing_row = sqlx::query(
                     r#"
-                    INSERT INTO migration_links (
+                    SELECT
                         id,
                         actor_id,
                         restore_plan_id,
@@ -550,32 +528,94 @@ impl Repository {
                         include_config,
                         destination_root,
                         status,
-                        note
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                    ON CONFLICT (restore_plan_id) DO NOTHING
-                    RETURNING created_at::text AS created_at
+                        note,
+                        created_at::text AS created_at
+                    FROM migration_links
+                    WHERE restore_plan_id = $1
+                    FOR UPDATE
                     "#,
                 )
-                .bind(link.id)
-                .bind(operator.operator.id)
-                .bind(link.restore_plan_id)
-                .bind(link.source_backup_request_id)
-                .bind(&link.source_client_id)
-                .bind(&link.target_client_id)
-                .bind(&link.paths)
-                .bind(link.include_config)
-                .bind(&link.destination_root)
-                .bind(&link.status)
-                .bind(&link.note)
+                .bind(restore_plan.id)
                 .fetch_optional(&mut *tx)
                 .await?;
-                let Some(row) = row else {
-                    bail!("migration_link_already_exists");
-                };
-                let persisted_link = MigrationLinkView {
-                    created_at: row.try_get("created_at")?,
-                    ..link
+                let (persisted_link, inserted_link) = if let Some(row) = existing_row {
+                    let existing = migration_link_from_row(row)?;
+                    if !migration_link_matches_request(&existing, link_request, restore_plan) {
+                        bail!("migration_link_conflicts_with_request");
+                    }
+                    (existing, false)
+                } else {
+                    let inserted_row = sqlx::query(
+                        r#"
+                        INSERT INTO migration_links (
+                            id,
+                            actor_id,
+                            restore_plan_id,
+                            source_backup_request_id,
+                            source_client_id,
+                            target_client_id,
+                            paths,
+                            include_config,
+                            destination_root,
+                            status,
+                            note
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                        ON CONFLICT (restore_plan_id) DO NOTHING
+                        RETURNING created_at::text AS created_at
+                        "#,
+                    )
+                    .bind(requested_link.id)
+                    .bind(operator.operator.id)
+                    .bind(requested_link.restore_plan_id)
+                    .bind(requested_link.source_backup_request_id)
+                    .bind(&requested_link.source_client_id)
+                    .bind(&requested_link.target_client_id)
+                    .bind(&requested_link.paths)
+                    .bind(requested_link.include_config)
+                    .bind(&requested_link.destination_root)
+                    .bind(&requested_link.status)
+                    .bind(&requested_link.note)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+                    if let Some(row) = inserted_row {
+                        (
+                            MigrationLinkView {
+                                created_at: row.try_get("created_at")?,
+                                ..requested_link.clone()
+                            },
+                            true,
+                        )
+                    } else {
+                        let row = sqlx::query(
+                            r#"
+                            SELECT
+                                id,
+                                actor_id,
+                                restore_plan_id,
+                                source_backup_request_id,
+                                source_client_id,
+                                target_client_id,
+                                paths,
+                                include_config,
+                                destination_root,
+                                status,
+                                note,
+                                created_at::text AS created_at
+                            FROM migration_links
+                            WHERE restore_plan_id = $1
+                            FOR UPDATE
+                            "#,
+                        )
+                        .bind(restore_plan.id)
+                        .fetch_one(&mut *tx)
+                        .await?;
+                        let existing = migration_link_from_row(row)?;
+                        if !migration_link_matches_request(&existing, link_request, restore_plan) {
+                            bail!("migration_link_conflicts_with_request");
+                        }
+                        (existing, false)
+                    }
                 };
                 sqlx::query(
                     r#"
@@ -614,27 +654,29 @@ impl Repository {
                     .execute(&mut *tx)
                     .await?;
                 }
-                sqlx::query(
-                    r#"
-                    INSERT INTO audit_logs (
-                        id, actor_id, action, target, command_hash, metadata
+                if inserted_link {
+                    sqlx::query(
+                        r#"
+                        INSERT INTO audit_logs (
+                            id, actor_id, action, target, command_hash, metadata
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6)
+                        "#,
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    "#,
-                )
-                .bind(Uuid::new_v4())
-                .bind(operator.operator.id)
-                .bind("migration.linked_metadata_only")
-                .bind(format!("migration_link:{}", persisted_link.id))
-                .bind(&restore_plan.payload_hash)
-                .bind(migration_link_metadata(
-                    &persisted_link,
-                    restore_plan,
-                    link_request.confirmed,
-                    operator,
-                ))
-                .execute(&mut *tx)
-                .await?;
+                    .bind(Uuid::new_v4())
+                    .bind(operator.operator.id)
+                    .bind("migration.linked_metadata_only")
+                    .bind(format!("migration_link:{}", persisted_link.id))
+                    .bind(&restore_plan.payload_hash)
+                    .bind(migration_link_metadata(
+                        &persisted_link,
+                        restore_plan,
+                        link_request.confirmed,
+                        operator,
+                    ))
+                    .execute(&mut *tx)
+                    .await?;
+                }
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (
@@ -648,7 +690,13 @@ impl Repository {
                 .bind("job.dispatch_requested")
                 .bind("api:/api/v1/jobs")
                 .bind(command_hash)
-                .bind(job_audit_metadata)
+                .bind(migration_job_audit_metadata(
+                    &persisted_link,
+                    restore_plan,
+                    job_request,
+                    operator,
+                    resolved_targets,
+                ))
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
@@ -666,7 +714,7 @@ impl Repository {
                 .await?;
                 return Ok(persisted_link);
             }
-        }
+        };
         self.record_job_created_webhook_event(JobCreatedWebhookEvent {
             job_id,
             command_type: &command_type,
@@ -679,7 +727,7 @@ impl Repository {
             operation: Some(&operation),
         })
         .await?;
-        Ok(link)
+        Ok(persisted_link)
     }
 }
 
@@ -761,6 +809,46 @@ fn migration_link_view_from_request(
         note: request.note.clone(),
         created_at: unix_now().to_string(),
     }
+}
+
+fn migration_link_matches_request(
+    existing: &MigrationLinkView,
+    request: &CreateMigrationLinkRequest,
+    restore_plan: &RestorePlanView,
+) -> bool {
+    existing.restore_plan_id == request.restore_plan_id
+        && existing.source_backup_request_id == restore_plan.source_backup_request_id
+        && existing.source_client_id == restore_plan.source_client_id
+        && existing.target_client_id == restore_plan.target_client_id
+        && existing.paths == restore_plan.paths
+        && existing.include_config == restore_plan.include_config
+        && existing.destination_root == restore_plan.destination_root
+        && existing.status == MigrationLinkStatus::LinkedMetadataOnly.as_str()
+        && existing.note == request.note
+}
+
+fn migration_job_audit_metadata(
+    link: &MigrationLinkView,
+    restore_plan: &RestorePlanView,
+    job_request: &CreateJobRequest,
+    operator: &AuthContext,
+    resolved_targets: &[String],
+) -> serde_json::Value {
+    json!({
+        "selector_expression": job_request.selector_expression,
+        "resolved_targets": resolved_targets,
+        "destructive": job_request.destructive,
+        "confirmed": job_request.confirmed,
+        "privileged": job_request.privileged,
+        "force_unprivileged": job_request.force_unprivileged,
+        "source_schedule_id": null,
+        "operator_id": operator.operator.id,
+        "operator_username": operator.operator.username,
+        "operator_role": operator.operator.role,
+        "session_id": operator.session_id,
+        "migration_link_id": link.id,
+        "restore_plan_id": restore_plan.id,
+    })
 }
 
 fn migration_link_metadata(

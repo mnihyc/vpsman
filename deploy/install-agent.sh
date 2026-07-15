@@ -274,5 +274,8 @@ if service_enable_requested; then
   log "installed and enabled direct gateway agent $VPSMAN_AGENT_CLIENT_ID using $config_file"
 else
   log "installed direct gateway agent $VPSMAN_AGENT_CLIENT_ID using $config_file"
-  log "systemd unit written to $unit_path; set VPSMAN_AGENT_ENABLE_SERVICE=0 only for staging-only installs"
+  log "staging-only install complete; no service was started"
+  printf -v foreground_command 'VPSMAN_AGENT_STATE_DIR=%q %q --config %q run' \
+    "$state_dir" "$agent_bin" "$config_file"
+  log "start in foreground: $foreground_command"
 fi

@@ -4,8 +4,11 @@
 # telemetry, tunnel, routing, traffic, template, or policy sections in this
 # file. Agents load this file only to connect and authenticate to the gateway;
 # after hello they request the server-applied runtime config state, which is
-# pushed as exclusive runtime_config_sync jobs. A failed sync does not advance
-# the server's per-VPS applied runtime config record.
+# pushed as exclusive runtime_config_sync jobs. A successfully applied config
+# is also stored atomically under the agent state directory and loaded before
+# reconnecting after a restart. A failed sync or failed local cache write does
+# not replace that last accepted config or advance the server's per-VPS applied
+# runtime config record.
 
 client_id = "agent-nrt-04"
 

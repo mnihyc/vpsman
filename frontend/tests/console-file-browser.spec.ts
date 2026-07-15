@@ -12,9 +12,48 @@ async function activate(locator: Locator) {
   await locator.evaluate((element) => (element as HTMLElement).click());
 }
 
+async function expectFocusedCommandPopover(page: Page) {
+  const popover = page.locator(".fileCommandPopover");
+  await expect(popover).toBeFocused();
+  await expect
+    .poll(async () =>
+      popover.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        const topbar = document.querySelector<HTMLElement>(".topbar");
+        const visibleTop = topbar?.getBoundingClientRect().bottom ?? 0;
+        return rect.top >= visibleTop - 1 && rect.bottom <= window.innerHeight + 1;
+      }),
+    )
+    .toBe(true);
+}
+
+async function expectWorkspaceFeedbackVisible(page: Page, message: string) {
+  const feedback = page.locator(".fileBrowserWorkspace > .fileBrowserActionFeedback");
+  await expect(feedback).toContainText(message);
+  await expect
+    .poll(async () =>
+      feedback.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        const topbar = document.querySelector<HTMLElement>(".topbar");
+        const visibleTop = topbar?.getBoundingClientRect().bottom ?? 0;
+        return rect.top >= visibleTop - 1 && rect.bottom <= window.innerHeight + 1;
+      }),
+    )
+    .toBe(true);
+}
+
 async function unlockPrivilege(page: Page, subpage: string) {
   await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, "Remote Operations", subpage);
+}
+
+async function openAppConfig(page: Page) {
+  const appConfig = page.getByRole("button", { name: /app\.conf/ });
+  if (!(await appConfig.isVisible().catch(() => false))) {
+    await page.getByRole("button", { name: /etc dir/ }).dblclick();
+    await expect(appConfig).toBeVisible();
+  }
+  await appConfig.dblclick();
 }
 
 test("browses a VPS filesystem and saves a highlighted text file", async ({ page }, testInfo) => {
@@ -40,8 +79,26 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
 
   await activate(page.getByRole("button", { name: "Refresh", exact: true }));
   await expect(page.getByRole("button", { name: /etc dir/ })).toBeVisible();
-  await page.getByRole("button", { name: /app\.conf/ }).dblclick();
+  await openAppConfig(page);
   await expect(page.locator(".codeMirrorShell")).toContainText("listen=443");
+  const editorPane = page.locator(".fileEditorPane");
+  await expect(editorPane).toBeFocused();
+  await expect(editorPane.locator("strong", { hasText: "/etc/app.conf" })).toHaveAttribute(
+    "title",
+    "/etc/app.conf",
+  );
+  await expect(page.getByRole("button", { name: "Review save", exact: true })).toHaveAttribute(
+    "title",
+    "Review file changes before saving.",
+  );
+  await expect
+    .poll(async () =>
+      editorPane.evaluate((element) => {
+        const topbar = document.querySelector<HTMLElement>(".topbar");
+        return element.getBoundingClientRect().top - (topbar?.getBoundingClientRect().bottom ?? 0);
+      }),
+    )
+    .toBeGreaterThanOrEqual(-1);
 
   const editor = page.locator(".cm-content").first();
   await editor.click();
@@ -57,10 +114,16 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
   );
 
   await expect(page.getByText("Save /etc/app.conf completed", { exact: true })).toBeVisible();
+  await expectWorkspaceFeedbackVisible(page, "Save /etc/app.conf completed");
   await activate(
     page
       .getByLabel("Selected file actions")
       .getByRole("button", { name: "Upload here" }),
+  );
+  await expectFocusedCommandPopover(page);
+  await expect(page.getByRole("button", { name: "Close upload form" })).toHaveAttribute(
+    "title",
+    "Close upload form",
   );
   await page.getByLabel("Single file upload").setInputFiles({
     name: "upload.conf",
@@ -69,20 +132,25 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
   });
   await activate(page.getByRole("button", { name: "Review upload", exact: true }));
   const uploadPrompt = page.locator(".confirmationPrompt").last();
-  await expect(uploadPrompt).toContainText("Upload file on edge-sfo-01_agent-sf");
+  await expect(uploadPrompt).toContainText("Upload file on edge-sfo-01 (fo01)");
   await expect(uploadPrompt).toContainText("Existing file");
   await expect(uploadPrompt).toContainText("Skip upload if the file already exists");
   await activate(uploadPrompt.getByRole("button", { name: "Upload file", exact: true }));
 
   await activate(page.getByTitle("Create file or folder"));
+  await expectFocusedCommandPopover(page);
+  await expect(page.getByRole("button", { name: "Close create form" })).toHaveAttribute(
+    "title",
+    "Close create form",
+  );
   await page.locator(".fileCommandPopover").getByLabel("Name").fill("new.conf");
   await expect(page.locator(".fileCommandPopover").getByLabel("Type")).toHaveValue("file");
   await expect(page.locator(".fileCommandPopover").getByRole("button", { name: "Review file write" })).toBeVisible();
   await page.getByLabel("New file text content").fill("listen=9443\n");
   await activate(page.locator(".fileCommandPopover").getByRole("button", { name: "Review file write" }));
   await expect(page.locator(".confirmationPrompt").getByText("Write text", { exact: true })).toBeVisible();
-  await expect(page.locator(".confirmationPrompt")).toContainText("Write text file on edge-sfo-01_agent-sf");
-  await expect(page.locator(".confirmationPrompt")).toContainText("/new.conf");
+  await expect(page.locator(".confirmationPrompt")).toContainText("Write text file on edge-sfo-01 (fo01)");
+  await expect(page.locator(".confirmationPrompt")).toContainText("/etc/new.conf");
   await expect(page.locator(".confirmationPrompt")).toContainText("Policy");
   await activate(
     page
@@ -90,6 +158,7 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
       .getByRole("button", { name: "Write file", exact: true }),
   );
 
+  await activate(page.getByTitle("Create file or folder"));
   await page.locator(".fileCommandPopover").getByLabel("Name").fill("conf.d");
   await page.locator(".fileCommandPopover").getByLabel("Type").selectOption("directory");
   await expect(page.locator(".fileCommandPopover").getByLabel("Mode")).toHaveValue("0755");
@@ -99,8 +168,8 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
   await expect(
     page.locator(".confirmationPrompt strong").filter({ hasText: /^Create folder$/ }),
   ).toBeVisible();
-  await expect(page.locator(".confirmationPrompt")).toContainText("Create folder on edge-sfo-01_agent-sf");
-  await expect(page.locator(".confirmationPrompt")).toContainText("/conf.d");
+  await expect(page.locator(".confirmationPrompt")).toContainText("Create folder on edge-sfo-01 (fo01)");
+  await expect(page.locator(".confirmationPrompt")).toContainText("/etc/conf.d");
   await expect(page.locator(".confirmationPrompt")).toContainText("Recursive");
   await expect(page.locator(".confirmationPrompt")).toContainText("Include child paths");
   await activate(
@@ -122,12 +191,12 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
   expect(save.operation.path).toBe("/etc/app.conf");
   expect(save.operation.expected_sha256_hex).toMatch(/^[a-f0-9]{64}$/);
   const upload = requests.find((request: any) => request.operation?.type === "file_push");
-  expect(upload.operation.path).toBe("/upload.conf");
+  expect(upload.operation.path).toBe("/etc/upload.conf");
   expect(upload.operation.existing_policy).toBe("skip");
-  const createdFile = requests.find((request: any) => request.operation?.type === "file_write_text" && request.operation?.path === "/new.conf");
+  const createdFile = requests.find((request: any) => request.operation?.type === "file_write_text" && request.operation?.path === "/etc/new.conf");
   expect(createdFile.operation.create).toBe(true);
   expect(createdFile.operation.size_bytes).toBe(12);
-  const createdFolder = requests.find((request: any) => request.operation?.type === "file_mkdir" && request.operation?.path === "/conf.d");
+  const createdFolder = requests.find((request: any) => request.operation?.type === "file_mkdir" && request.operation?.path === "/etc/conf.d");
   expect(createdFolder.operation.mode).toBe(0o755);
   expect(createdFolder.operation.recursive).toBe(true);
 });
@@ -176,6 +245,53 @@ test("single-file operation confirmation closes on operation edits", async ({ pa
   });
 });
 
+test("protects unsaved file drafts before reopening, retargeting, or closing", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "desktop draft safeguards cover the dense file browser workflow");
+
+  await page.goto("/");
+  await page.evaluate(() => localStorage.removeItem("vpsman.fileBrowser.state"));
+  await openConsoleSubpage(page, "Remote Operations", "Files");
+  await unlockPrivilege(page, "Files");
+  await activate(page.getByRole("button", { name: "Refresh", exact: true }));
+  await openAppConfig(page);
+
+  const editor = page.locator(".cm-content").first();
+  await editor.click();
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
+  await page.keyboard.type("listen=8443\n");
+  await expect(page.getByText("12 chars · unsaved", { exact: true })).toBeVisible();
+
+  await openAppConfig(page);
+  await expect(
+    page.getByText("Save or close unsaved changes in /etc/app.conf before reopening it."),
+  ).toBeVisible();
+  await expect(page.locator(".codeMirrorShell")).toContainText("listen=8443");
+
+  const targetPicker = page.getByRole("combobox", { name: "File browser target VPS" });
+  await targetPicker.fill("backup");
+  await page.getByRole("option", { name: /backup-nyc-03/ }).click();
+  await expect(targetPicker).toHaveValue("edge-sfo-01 (fo01)");
+  await expect(
+    page.getByText("Save or close unsaved changes in /etc/app.conf before changing VPS."),
+  ).toBeVisible();
+
+  await activate(page.getByRole("button", { name: "Close editor" }));
+  const discardPrompt = page.locator(".confirmationPrompt").filter({
+    has: page.getByText("Discard unsaved file changes", { exact: true }),
+  });
+  await expect(discardPrompt).toContainText("No remote file has been changed.");
+  await activate(discardPrompt.getByRole("button", { name: "Cancel" }));
+  await expect(page.locator(".codeMirrorShell")).toContainText("listen=8443");
+
+  await activate(page.getByRole("button", { name: "Close editor" }));
+  await activate(discardPrompt.getByRole("button", { name: "Discard changes" }));
+  await expect(page.getByText("Select a text file to edit.")).toBeVisible();
+
+  const requests = await page.evaluate(() => (window as any).__vpsmanTestRequests.fileBrowserJobs);
+  expect(requests.filter((request: any) => request.operation?.type === "file_read_text")).toHaveLength(1);
+  expect(requests.some((request: any) => request.operation?.type === "file_write_text")).toBe(false);
+});
+
 test("mobile file browser opens text files as a focused editor", async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.includes("mobile"), "mobile editor behavior is covered only on mobile");
 
@@ -186,16 +302,16 @@ test("mobile file browser opens text files as a focused editor", async ({ page }
   await expect(page.locator(".codeMirrorShell")).toHaveCount(0);
   await unlockPrivilege(page, "Files");
   await activate(page.getByRole("button", { name: "Refresh", exact: true }));
-  await page.getByRole("button", { name: /app\.conf/ }).dblclick();
+  await openAppConfig(page);
 
   const workspace = page.locator(".fileBrowserWorkspace.editorOpen");
   await expect(workspace).toBeVisible();
   await expect(workspace.locator(".fileTreePane")).toBeHidden();
   await expect(workspace.locator(".fileDetailsPane")).toBeHidden();
-  await expect(page.getByRole("button", { name: "Back to files" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Close editor" })).toBeVisible();
   await expect(page.locator(".codeMirrorShell")).toContainText("listen=443");
 
-  await activate(page.getByRole("button", { name: "Back to files" }));
+  await activate(page.getByRole("button", { name: "Close editor" }));
   await expect(page.getByText("Select a text file to edit.")).toBeVisible();
 });
 
@@ -218,10 +334,14 @@ test("runs bulk file download and upload workflows with grouped summaries", asyn
   await expect(preflight).toContainText("Enter an absolute path before running download.");
   await page.getByLabel("Bulk file path").fill("/");
   await expect(page.getByText("Filesystem root selected")).toBeVisible();
-  await activate(page.getByRole("button", { name: "Run download" }));
-  await expect(preflight).toContainText("Root path is blocked until you explicitly allow filesystem root operations.");
+  const runDownload = page.getByRole("button", { name: "Run download" });
+  await expect(runDownload).toBeDisabled();
+  await expect(runDownload).toHaveAttribute(
+    "title",
+    "Root path is blocked until you explicitly allow filesystem root operations.",
+  );
   await page.getByLabel("Allow filesystem root path").check();
-  await activate(page.getByRole("button", { name: "Run download" }));
+  await activate(runDownload);
   await expect(page.getByLabel("Confirm bulk file operation")).toContainText("Root path");
   await expect(page.getByLabel("Confirm bulk file operation")).toContainText("Explicitly allowed before run");
   await activate(page.getByLabel("Confirm bulk file operation").getByRole("button", { name: "Cancel" }));

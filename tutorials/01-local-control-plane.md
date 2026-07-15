@@ -95,7 +95,8 @@ docker run --rm --name vpsman-local-postgres \
   postgres:16-alpine
 ```
 
-Run each control-plane process in its own shell with the same environment:
+Run each control-plane process in its own shell. Repeat the shared export block
+in every shell before starting that shell's service:
 
 ```sh
 export VPSMAN_API_BIND=127.0.0.1:8080
@@ -104,7 +105,7 @@ export VPSMAN_POSTGRES_URL=postgres://vpsman:vpsman@127.0.0.1:5432/vpsman
 export VPSMAN_GATEWAY_BIND=127.0.0.1:9443
 export VPSMAN_GATEWAY_CONTROL_BIND=127.0.0.1:9444
 export VPSMAN_GATEWAY_CONTROL_URL=http://127.0.0.1:9444
-export VPSMAN_INTERNAL_TOKEN="$(openssl rand -hex 32)"
+export VPSMAN_GATEWAY_SPOOL_DIR=.tmp/local-control-plane-gateway-spool
 export VPSMAN_BACKUP_OBJECT_STORE_DIR=.tmp/objects/backups
 export VPSMAN_ARTIFACT_MAX_BYTES=134217728
 export VPSMAN_ALERT_MEMORY_AVAILABLE_WARNING_RATIO=0.20
@@ -117,10 +118,27 @@ export VPSMAN_ALERT_CPU_LOAD_CRITICAL=4.0
 # to use; compose sets its own container path.
 # export VPSMAN_SUITE_CONFIG=.tmp/local-vpsman.toml
 
+# Keep this spool with the database it belongs to. If you intentionally replace
+# the local database with an empty one, clear this spool before starting the
+# gateway so events from the retired control plane are not replayed.
+
+# Generate the gateway key, privilege verifier, gateway public key, operator
+# salt, and shared internal token as one consistent set.
+export VPSMAN_SUPER_PASSWORD='<local_super_password>'
+cargo run -p vpsctl -- compose-secrets --secrets-dir .tmp/local-control-plane-secrets
+unset VPSMAN_SUPER_PASSWORD
+export VPSMAN_INTERNAL_TOKEN="$(<.tmp/local-control-plane-secrets/vpsman_internal_token)"
+
 cargo run -p vpsman-api
-cargo run -p vpsman-gateway
+VPSMAN_GATEWAY_PRIVATE_KEY_HEX="$(<.tmp/local-control-plane-secrets/vpsman_gateway_private_key_hex)" \
+VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX="$(<.tmp/local-control-plane-secrets/vpsman_privilege_verifier_key_hex)" \
+  cargo run -p vpsman-gateway
 cargo run -p vpsman-worker
 ```
+
+Keep `VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX` gateway-only. The API deliberately
+rejects that verifier key in its environment. The generated gateway public-key
+file is the value operators save once in the **Agent install command** panel.
 
 In another shell:
 

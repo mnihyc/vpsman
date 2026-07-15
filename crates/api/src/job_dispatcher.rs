@@ -242,7 +242,8 @@ async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) ->
         return finish_claimed_target(state, &claimed, outcome).await;
     }
 
-    let command_version = crate::job_request::job_command_protocol_version(&claimed.operation);
+    let command_version =
+        crate::job_request::job_command_dispatch_protocol_version(&claimed.operation);
     debug_assert!(
         command_version
             >= crate::job_request::job_command_min_supported_protocol_version(&claimed.operation)

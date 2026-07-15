@@ -94,15 +94,12 @@ test("starts the default upload flow in resumable dispatch", async ({ page }, te
   await openConsoleSubpage(page, "Remote Operations", "Transfers");
 
   const panel = page.locator(".fleetPanel", { hasText: "File transfer sessions" });
-  await activate(panel.getByRole("button", { name: "Upload", exact: true }));
-  await expect(
-    panel.locator(".transferQuickUploadFeedback.actionFeedbackDanger"),
-  ).toContainText("Choose a local file before uploading");
-  await expect(
-    panel.locator(".transferQuickUploadStatus", {
-      hasText: "Choose a local file before uploading",
-    }),
-  ).toHaveCount(0);
+  const reviewUpload = panel.getByRole("button", { name: "Review upload" });
+  await expect(reviewUpload).toBeDisabled();
+  await expect(reviewUpload).toHaveAttribute(
+    "title",
+    "Choose a local file, VPS, and absolute destination path",
+  );
   const payload = Buffer.from("quick upload payload");
   await panel.getByLabel("Transfer upload local file").setInputFiles({
     name: "quick-upload.bin",
@@ -110,18 +107,61 @@ test("starts the default upload flow in resumable dispatch", async ({ page }, te
     buffer: payload,
   });
   await panel.getByLabel("Transfer upload destination path").fill("/tmp/quick-upload.bin");
-  await expect(panel.getByText("quick-upload.bin · 20 B")).toBeVisible();
-  await activate(panel.getByRole("button", { name: "Upload", exact: true }));
+  await expect(panel.getByTitle("quick-upload.bin · 20 B", { exact: true })).toBeVisible();
+  const target = panel.getByRole("combobox", { name: "Transfer target VPS" });
+  await target.fill("edge-sfo-01");
+  await page.getByRole("option", { name: /edge-sfo-01.*agent-sfo-01/ }).click();
+  await activate(reviewUpload);
 
-  await openConsoleSubpage(page, "Jobs", "Dispatch");
-  await expect(page.getByRole("heading", { level: 1, name: "Command dispatch" })).toBeVisible();
-  const composer = page.locator(".fleetPanel", { hasText: "Dispatch command" });
-  await expect(composer.getByRole("button", { name: "Resumable upload", exact: true })).toHaveClass(/selected/);
+  await expect(page.getByRole("heading", { level: 1, name: "Transfers" })).toBeVisible();
+  const composer = page.locator(".consoleDetailPanel", { hasText: "File transfer" });
+  await expect(composer.getByLabel("Dispatch mode boundary")).toContainText("File transfer mode");
   await expect(composer.getByLabel("Bulk target selector expression")).toHaveValue("id:agent-sfo-01");
   await expect(composer.getByLabel("Resumable upload path")).toHaveValue("/tmp/quick-upload.bin");
-  await expect(composer.getByLabel("Resumable upload source").locator("..")).toContainText(
-    "Selected quick-upload.bin",
+  await expect(composer.locator(".dispatchSelectedFile")).toHaveText(
+    "quick-upload.bin · 20 B",
   );
+  await expect(composer.locator(".dispatchSelectedFile")).toHaveAttribute(
+    "title",
+    "quick-upload.bin",
+  );
+  await expect(
+    composer.locator(".dispatchFilePicker").getByText("Replace", { exact: true }),
+  ).toBeVisible();
+  const transferHeader = composer.locator(".fileTransferOperationHeader");
+  await expect(transferHeader.locator("strong")).toHaveText("Resumable upload");
+  await expect(transferHeader.locator("span")).toContainText(
+    "Streamed ACK-tracked browser upload",
+  );
+  expect(
+    await transferHeader.evaluate((element) => {
+      const title = element.querySelector("strong")?.getBoundingClientRect();
+      const detail = element.querySelector("span")?.getBoundingClientRect();
+      return Boolean(title && detail && title.bottom <= detail.top + 1);
+    }),
+  ).toBe(true);
+});
+
+test("starts the default download flow with the reviewed remote path", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "desktop covers quick download dispatch handoff");
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Remote Operations", "Transfers");
+
+  const panel = page.locator(".fleetPanel", { hasText: "File transfer sessions" });
+  await activate(panel.getByRole("button", { name: "Download", exact: true }));
+  await panel.getByLabel("Transfer download source path").fill("/var/log/nginx/access.log");
+  const target = panel.getByRole("combobox", { name: "Transfer target VPS" });
+  await target.fill("edge-sfo-01");
+  await page.getByRole("option", { name: /edge-sfo-01.*agent-sfo-01/ }).click();
+  await activate(panel.getByRole("button", { name: "Review download" }));
+
+  const composer = page.locator(".consoleDetailPanel", { hasText: "File transfer" });
+  await expect(composer.getByLabel("Bulk target selector expression")).toHaveValue("id:agent-sfo-01");
+  await expect(composer.getByLabel("Resumable download path")).toHaveValue(
+    "/var/log/nginx/access.log",
+  );
+  await expect(composer.getByLabel("Resumable download filename")).toHaveValue("access.log");
 });
 
 test("opens failed transfer retry metadata in resumable dispatch", async ({ page }, testInfo) => {
@@ -150,18 +190,17 @@ test("opens failed transfer retry metadata in resumable dispatch", async ({ page
   await expect(review).toContainText("57575757");
   await expect(review).toContainText("Continue requires the original resume token");
 
-  await expect(review.getByRole("button", { name: "Continue in Dispatch" })).toBeEnabled();
-  await expect(review.getByRole("button", { name: "Start fresh in Dispatch" })).toBeEnabled();
+  await expect(review.getByRole("button", { name: "Continue transfer" })).toBeEnabled();
+  await expect(review.getByRole("button", { name: "Start fresh transfer" })).toBeEnabled();
   await page.screenshot({
     fullPage: true,
     path: testInfo.outputPath("remote-operations-transfers-failed-retry.png"),
   });
-  await activate(review.getByRole("button", { name: "Continue in Dispatch" }));
+  await activate(review.getByRole("button", { name: "Continue transfer" }));
 
-  await openConsoleSubpage(page, "Jobs", "Dispatch");
-  await expect(page.getByRole("heading", { level: 1, name: "Command dispatch" })).toBeVisible();
-  const composer = page.locator(".fleetPanel", { hasText: "Dispatch command" });
-  await expect(composer.getByRole("button", { name: "Resumable download" })).toHaveClass(/selected/);
+  await expect(page.getByRole("heading", { level: 1, name: "Transfers" })).toBeVisible();
+  const composer = page.locator(".consoleDetailPanel", { hasText: "File transfer" });
+  await expect(composer.getByLabel("Dispatch mode boundary")).toContainText("File transfer mode");
   await expect(composer.getByLabel("Bulk target selector expression")).toHaveValue("id:agent-sfo-01");
   await expect(composer.getByLabel("Resumable download path")).toHaveValue("/var/log/nginx/error.log");
   await expect(composer.getByLabel("Resumable download filename")).toHaveValue("error.log");

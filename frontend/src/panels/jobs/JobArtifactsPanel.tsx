@@ -195,6 +195,7 @@ export function JobArtifactsPanel({
       header: "Action",
       id: "action",
       minSize: 130,
+      stickyEnd: true,
       searchValue: (row) => row.actionLabel,
       size: 150,
       sortValue: (row) => row.actionLabel,

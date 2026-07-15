@@ -54,6 +54,7 @@ const TRUNCATED_TEXT_SELECTOR = [
   ".groupSummaryStrip small",
   ".historyPrimary .deliveryErrorText",
   ".historyPrimary small",
+  ".historyPrimary strong",
   ".instance small",
   ".jobEvidenceOutputRow small",
   ".jobStatusCell .status",

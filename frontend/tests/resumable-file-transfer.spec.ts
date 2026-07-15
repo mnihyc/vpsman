@@ -1,7 +1,16 @@
 import { expect, test } from "@playwright/test";
 
-import { buildBulkJobProgress, bulkProgressLabel } from "../src/bulkJobProgress";
-import type { AgentView, JobTargetRecord, JobTargetStatus } from "../src/types";
+import {
+  buildBulkJobProgress,
+  bulkProgressLabel,
+  waitForBulkJobSet,
+} from "../src/bulkJobProgress";
+import type {
+  AgentView,
+  JobOutputRecord,
+  JobTargetRecord,
+  JobTargetStatus,
+} from "../src/types";
 
 const TARGET: AgentView = {
   display_name: "vps-a",
@@ -63,4 +72,79 @@ test("bulk progress labels backend deadline overdue active targets", () => {
   expect(progress.control_grace).toBe(0);
   expect(progress.deadline_overdue).toBe(1);
   expect(bulkProgressLabel(progress)).toContain("deadline overdue 1");
+});
+
+test("bulk progress prefers retained stderr over a generic failed status", () => {
+  const target = {
+    ...runningTarget("1700000000", "1700000120"),
+    completed_at: "1700000010",
+    message: "failed",
+    status: "failed" as JobTargetStatus,
+  };
+  const output: JobOutputRecord = {
+    client_id: "client-a",
+    created_at: "1700000010",
+    data_base64: btoa("ping: connect: Network is unreachable"),
+    done: true,
+    exit_code: 2,
+    job_id: "job-a",
+    seq: 1,
+    stream: "stderr",
+  };
+
+  const progress = buildBulkJobProgress({
+    jobId: "job-a",
+    outputs: [output],
+    targetRecords: [target],
+    targets: [TARGET],
+  });
+
+  expect(progress.failureReasons).toEqual([
+    {
+      reason: "ping: connect: Network is unreachable",
+      target: "vps-a",
+    },
+  ]);
+});
+
+test("bulk progress aggregates target-specific jobs into one operation", async () => {
+  const targets = [
+    TARGET,
+    { ...TARGET, display_name: "vps-b", id: "client-b" },
+  ];
+  const records: Record<string, JobTargetRecord[]> = {
+    "job-a": [
+      {
+        ...runningTarget("1700000000", "1700000120"),
+        completed_at: "1700000010",
+        status: "completed" as JobTargetStatus,
+      },
+    ],
+    "job-b": [
+      {
+        ...runningTarget("1700000000", "1700000120"),
+        client_id: "client-b",
+        completed_at: "1700000011",
+        job_id: "job-b",
+        status: "completed" as JobTargetStatus,
+      },
+    ],
+  };
+
+  const result = await waitForBulkJobSet(
+    ["job-a", "job-b"],
+    async (jobId) => records[jobId] ?? [],
+    {
+      intervalMs: 0,
+      operationId: "operation-a",
+      targetCount: 2,
+      targets,
+    },
+  );
+
+  expect(result.progress.jobId).toBe("operation-a");
+  expect(result.progress.jobIds).toEqual(["job-a", "job-b"]);
+  expect(result.progress.completed).toBe(2);
+  expect(result.progress.terminal).toBe(2);
+  expect(result.progress.in_progress).toBe(0);
 });

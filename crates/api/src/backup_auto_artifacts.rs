@@ -166,6 +166,7 @@ async fn reserve_backup_auto_artifact(
         sha256_hex: request.sha256_hex.clone(),
         size_bytes: request.size_bytes,
         status: "creating".to_string(),
+        content_available: false,
         created_at: crate::unix_now().to_string(),
     };
     state

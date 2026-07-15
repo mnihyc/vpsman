@@ -1,4 +1,5 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { ConsoleDetailPanel } from "../components/ConsoleDetailPanel";
 import type { ArtifactDownloadMode } from "../artifactDownload";
 import {
   JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE,
@@ -6,7 +7,10 @@ import {
 } from "../generated/protocolContracts";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import {
+  buildPrivilegeAssertion,
   buildPrivilegeForJobOperation,
+  canonicalTerminalInputPrivilegeIntent,
+  textPayloadHashHex,
   type PrivilegeMaterial,
 } from "../privilege";
 import type {
@@ -41,10 +45,7 @@ import type {
   TerminalReplayRecord,
   TerminalSessionRecord,
 } from "../typesTerminal";
-import {
-  clientDisplayNameFromMap,
-  clientDisplayNameMap,
-} from "../utils";
+import { clientDisplayNameFromMap, clientDisplayNameMap } from "../utils";
 import type { TerminalComposerAction } from "./JobDispatchPanel";
 import { retryableLazy } from "../lazyImport";
 
@@ -113,7 +114,6 @@ export function RemoteOperationsPanel({
   onLoadOutputs,
   onLoadTargets,
   onLoadTerminalReplay,
-  onOpenDispatchPreset,
   onOpenJobDetails,
   onOpenJobsDispatch,
   onOpenPrivilegeUnlock,
@@ -123,13 +123,16 @@ export function RemoteOperationsPanel({
   onSaveFileTransferHandoff,
   onSelectSubpage,
   onSubmitTerminalInput,
+  onTransferTargetConsumed,
   onUploadFileTransferSource,
   onDeleteCommandTemplate,
   onUpsertCommandTemplate,
   privilegeMaterial,
+  privilegeUnlockOpen,
   processSupervisorInventory,
   setPrivilegeMaterial,
   terminalSessions,
+  transferTargetClientId,
 }: {
   activeSubpage: string;
   agents: AgentView[];
@@ -160,7 +163,6 @@ export function RemoteOperationsPanel({
     sessionId: string,
     fromSeq?: number,
   ) => Promise<TerminalReplayRecord>;
-  onOpenDispatchPreset: (preset: JobDispatchPresetInput) => void;
   onOpenJobDetails: (jobId: string) => void;
   onOpenJobsDispatch?: () => void;
   onOpenPrivilegeUnlock: () => void;
@@ -184,6 +186,7 @@ export function RemoteOperationsPanel({
     sessionId: string,
     request: TerminalInputSubmitRequest,
   ) => Promise<TerminalInputSubmitResponse>;
+  onTransferTargetConsumed?: () => void;
   onUploadFileTransferSource: (
     request: UploadFileTransferSourceArtifactRequest,
   ) => Promise<FileTransferSourceArtifactRecord>;
@@ -195,17 +198,27 @@ export function RemoteOperationsPanel({
     request: UpsertCommandTemplateRequest,
   ) => Promise<CommandTemplateRecord>;
   privilegeMaterial: PrivilegeMaterial | null;
+  privilegeUnlockOpen: boolean;
   processSupervisorInventory: ProcessSupervisorInventoryRecord[];
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
   terminalSessions: TerminalSessionRecord[];
+  transferTargetClientId?: string | null;
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [terminalComposerAction, setTerminalComposerAction] =
     useState<TerminalComposerAction | null>(null);
+  const [processComposerPreset, setProcessComposerPreset] =
+    useState<JobDispatchPreset | null>(null);
+  const [transferComposerPreset, setTransferComposerPreset] =
+    useState<JobDispatchPreset | null>(null);
   const [terminalAdvancedOpen, setTerminalAdvancedOpen] = useState(false);
   const terminalComposerRef = useRef<HTMLDivElement | null>(null);
+  const processComposerRef = useRef<HTMLDivElement | null>(null);
+  const transferComposerRef = useRef<HTMLDivElement | null>(null);
   const [multiFileInitialPath, setMultiFileInitialPath] = useState("");
-  const [transferFocusPath, setTransferFocusPath] = useState<string | null>(null);
+  const [transferFocusPath, setTransferFocusPath] = useState<string | null>(
+    null,
+  );
   const remoteSubpage = remoteOperationsPanelSubpage(activeSubpage);
   const agentNameById = useMemo(
     () => clientDisplayNameMap(agents, vpsNameDisplayMode),
@@ -217,7 +230,10 @@ export function RemoteOperationsPanel({
   function prepareTerminalSessionAction(
     session: TerminalSessionRecord,
     action: TerminalComposerAction["action"],
-    options: Omit<TerminalComposerAction, "action" | "requestId" | "session"> = {},
+    options: Omit<
+      TerminalComposerAction,
+      "action" | "requestId" | "session"
+    > = {},
   ) {
     setTerminalAdvancedOpen(true);
     setTerminalComposerAction({
@@ -228,16 +244,41 @@ export function RemoteOperationsPanel({
     });
   }
 
+  function openProcessComposer(preset: JobDispatchPresetInput) {
+    setProcessComposerPreset({ ...preset, requestId: crypto.randomUUID() });
+    window.requestAnimationFrame(() => {
+      processComposerRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+  }
+
+  function openTransferComposer(preset: JobDispatchPresetInput) {
+    setTransferComposerPreset({ ...preset, requestId: crypto.randomUUID() });
+    window.requestAnimationFrame(() => {
+      transferComposerRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+  }
+
   useEffect(() => {
     if (remoteSubpage !== "terminal" || !terminalComposerAction) {
       return;
     }
     window.requestAnimationFrame(() => {
-      terminalComposerRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+      terminalComposerRef.current?.scrollIntoView({
+        block: "start",
+        behavior: "smooth",
+      });
     });
   }, [remoteSubpage, terminalComposerAction?.requestId]);
 
-  async function openTerminalSessionDirectly(request: DirectTerminalOpenRequest) {
+  async function openTerminalSessionDirectly(
+    request: DirectTerminalOpenRequest,
+  ) {
     if (!privilegeMaterial) {
       onOpenPrivilegeUnlock();
       throw new Error("Privilege unlock required before opening a terminal.");
@@ -264,13 +305,13 @@ export function RemoteOperationsPanel({
     const selectorExpression = `id:${session.client_id}`;
     const commandType = JOB_COMMAND_TYPE_BY_OPERATION_TYPE[operation.type];
     const { privilegeAssertion } = await buildPrivilegeForJobOperation({
-        clientIds: [session.client_id],
-        commandType,
-        operation,
-        privilegeMaterial,
-        selectorExpression,
-        maxTimeoutSecs: request.maxTimeoutSecs,
-      });
+      clientIds: [session.client_id],
+      commandType,
+      operation,
+      privilegeMaterial,
+      selectorExpression,
+      maxTimeoutSecs: request.maxTimeoutSecs,
+    });
     await onCreateJob({
       job_id: crypto.randomUUID(),
       selector_expression: selectorExpression,
@@ -289,11 +330,92 @@ export function RemoteOperationsPanel({
     onRefresh();
   }
 
+  async function closeTerminalSessionDirectly(
+    session: TerminalSessionRecord,
+  ): Promise<void> {
+    if (!privilegeMaterial) {
+      onOpenPrivilegeUnlock();
+      throw new Error("Unlock local privilege before closing a terminal.");
+    }
+    const maxTimeoutSecs = 30;
+    const operation: JobOperation = {
+      type: "terminal_close",
+      session_id: session.session_id,
+      reason: "operator_closed",
+    };
+    const selectorExpression = `id:${session.client_id}`;
+    const commandType = JOB_COMMAND_TYPE_BY_OPERATION_TYPE[operation.type];
+    const { privilegeAssertion } = await buildPrivilegeForJobOperation({
+      clientIds: [session.client_id],
+      commandType,
+      operation,
+      privilegeMaterial,
+      selectorExpression,
+      maxTimeoutSecs,
+    });
+    await onCreateJob({
+      job_id: crypto.randomUUID(),
+      selector_expression: selectorExpression,
+      target_client_ids: [session.client_id],
+      destructive: true,
+      confirmed: true,
+      command: commandType,
+      argv: [],
+      operation,
+      max_timeout_secs: maxTimeoutSecs,
+      privileged: true,
+      privilege_assertion: privilegeAssertion,
+    });
+    onRefresh();
+  }
+
+  async function submitTerminalInputDirectly(
+    session: TerminalSessionRecord,
+    text: string,
+  ): Promise<TerminalInputSubmitResponse> {
+    if (!privilegeMaterial) {
+      onOpenPrivilegeUnlock();
+      throw new Error("Unlock local privilege before sending terminal input.");
+    }
+    if (!text) {
+      throw new Error("Terminal input is empty.");
+    }
+    const maxTimeoutSecs = 30;
+    const payloadHashHex = await textPayloadHashHex(text);
+    const privilegeAssertion = await buildPrivilegeAssertion({
+      intent: canonicalTerminalInputPrivilegeIntent({
+        clientId: session.client_id,
+        sessionId: session.session_id,
+        inputPayloadHash: payloadHashHex,
+        maxTimeoutSecs,
+        confirmed: true,
+      }),
+      privilegeMaterial,
+    });
+    const response = await onSubmitTerminalInput(
+      session.client_id,
+      session.session_id,
+      {
+        job_id: crypto.randomUUID(),
+        text,
+        max_timeout_secs: maxTimeoutSecs,
+        confirmed: true,
+        privilege_assertion: privilegeAssertion,
+      },
+    );
+    onRefresh();
+    return response;
+  }
+
   return (
     <section className="workspace singleColumn">
       <Suspense
         fallback={
-          <div className="emptyState compactEmpty" role="status" aria-live="polite">
+          <div
+            className="emptyState compactEmpty"
+            role="status"
+            aria-live="polite"
+          >
             Loading {displayToken(remoteSubpage)} workspace
           </div>
         }
@@ -336,33 +458,111 @@ export function RemoteOperationsPanel({
           />
         )}
         {remoteSubpage === "processes" && (
-          <ProcessSupervisorInventoryPanel
-            clientLabel={clientLabel}
-            inventory={processSupervisorInventory}
-            loading={loading}
-            onCreateJob={onCreateJob}
-            onOpenDispatchPreset={onOpenDispatchPreset}
-            onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
-            onRefresh={onRefresh}
-            privilegeMaterial={privilegeMaterial}
-          />
+          <div className="jobConsoleStack">
+            <ProcessSupervisorInventoryPanel
+              agents={agents}
+              clientLabel={clientLabel}
+              inventory={processSupervisorInventory}
+              loading={loading}
+              onCreateJob={onCreateJob}
+              onLoadTargets={onLoadTargets}
+              onOpenDispatchPreset={openProcessComposer}
+              onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+              onRefresh={onRefresh}
+              privilegeMaterial={privilegeMaterial}
+            />
+            {processComposerPreset ? (
+              <ConsoleDetailPanel
+                description="Start a process or read logs on the preselected VPS without leaving the process workspace."
+                onClose={() => setProcessComposerPreset(null)}
+                title="Process operation"
+              >
+                <div
+                  className="terminalComposerAnchor"
+                  ref={processComposerRef}
+                >
+                  <JobDispatchPanel
+                    agents={agents}
+                    fileTransferSources={fileTransferSources}
+                    commandTemplates={commandTemplates}
+                    dispatchPreset={processComposerPreset}
+                    fixedMode="process_supervisor"
+                    onCreateJob={onCreateJob}
+                    onDeleteCommandTemplate={onDeleteCommandTemplate}
+                    onDownloadFileTransferSource={onDownloadFileTransferSource}
+                    onDownloadOutputChunk={onDownloadOutputChunk}
+                    onLoadJob={onLoadJob}
+                    onLoadOutputs={onLoadOutputs}
+                    onLoadTargets={onLoadTargets}
+                    onOpenJobDetails={onOpenJobDetails}
+                    onOpenJobsDispatch={onOpenJobsDispatch}
+                    onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+                    onResolveTargets={onResolveTargets}
+                    onSubmitTerminalInput={onSubmitTerminalInput}
+                    onUpsertCommandTemplate={onUpsertCommandTemplate}
+                    privilegeMaterial={privilegeMaterial}
+                    setPrivilegeMaterial={setPrivilegeMaterial}
+                  />
+                </div>
+              </ConsoleDetailPanel>
+            ) : null}
+          </div>
         )}
         {remoteSubpage === "transfers" && (
-          <FileTransferSessionsPanel
-            agents={agents}
-            clientLabel={clientLabel}
-            focusPath={transferFocusPath}
-            transfers={fileTransfers}
-            sources={fileTransferSources}
-            loading={loading}
-            onCreateHandoff={onCreateFileTransferHandoff}
-            onDownloadSource={onDownloadFileTransferSource}
-            onOpenDispatchPreset={onOpenDispatchPreset}
-            onOpenJobDetails={onOpenJobDetails}
-            onRefresh={onRefresh}
-            onSaveHandoff={onSaveFileTransferHandoff}
-            onUploadSource={onUploadFileTransferSource}
-          />
+          <div className="jobConsoleStack">
+            <FileTransferSessionsPanel
+              agents={agents}
+              clientLabel={clientLabel}
+              focusPath={transferFocusPath}
+              initialUploadTargetClientId={transferTargetClientId}
+              transfers={fileTransfers}
+              sources={fileTransferSources}
+              loading={loading}
+              onCreateHandoff={onCreateFileTransferHandoff}
+              onDownloadSource={onDownloadFileTransferSource}
+              onOpenDispatchPreset={openTransferComposer}
+              onOpenJobDetails={onOpenJobDetails}
+              onRefresh={onRefresh}
+              onSaveHandoff={onSaveFileTransferHandoff}
+              onInitialUploadTargetConsumed={onTransferTargetConsumed}
+              onUploadSource={onUploadFileTransferSource}
+            />
+            {transferComposerPreset ? (
+              <ConsoleDetailPanel
+                description="Review and run the prefilled transfer without leaving transfer history."
+                onClose={() => setTransferComposerPreset(null)}
+                title="File transfer"
+              >
+                <div
+                  className="terminalComposerAnchor"
+                  ref={transferComposerRef}
+                >
+                  <JobDispatchPanel
+                    agents={agents}
+                    fileTransferSources={fileTransferSources}
+                    commandTemplates={commandTemplates}
+                    dispatchPreset={transferComposerPreset}
+                    fixedMode={transferComposerPreset.mode}
+                    onCreateJob={onCreateJob}
+                    onDeleteCommandTemplate={onDeleteCommandTemplate}
+                    onDownloadFileTransferSource={onDownloadFileTransferSource}
+                    onDownloadOutputChunk={onDownloadOutputChunk}
+                    onLoadJob={onLoadJob}
+                    onLoadOutputs={onLoadOutputs}
+                    onLoadTargets={onLoadTargets}
+                    onOpenJobDetails={onOpenJobDetails}
+                    onOpenJobsDispatch={onOpenJobsDispatch}
+                    onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+                    onResolveTargets={onResolveTargets}
+                    onSubmitTerminalInput={onSubmitTerminalInput}
+                    onUpsertCommandTemplate={onUpsertCommandTemplate}
+                    privilegeMaterial={privilegeMaterial}
+                    setPrivilegeMaterial={setPrivilegeMaterial}
+                  />
+                </div>
+              </ConsoleDetailPanel>
+            ) : null}
+          </div>
         )}
         {remoteSubpage === "terminal" && (
           <div className="jobConsoleStack">
@@ -372,13 +572,16 @@ export function RemoteOperationsPanel({
               sessions={terminalSessions}
               lastTerminalOutputEvent={lastTerminalOutputEvent}
               loading={loading}
+              onCloseTerminal={closeTerminalSessionDirectly}
               onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
               onOpenTerminal={openTerminalSessionDirectly}
               onPrepareAction={prepareTerminalSessionAction}
+              onSendInput={submitTerminalInputDirectly}
               onReplay={onLoadTerminalReplay}
               onRefresh={onRefresh}
               onOpenSessionEvidence={onOpenSessionEvidence}
               privilegeMaterial={privilegeMaterial}
+              privilegeUnlockOpen={privilegeUnlockOpen}
             />
             <details
               className="terminalAdvancedComposer"
@@ -423,7 +626,9 @@ export function RemoteOperationsPanel({
   );
 }
 
-function remoteOperationsPanelSubpage(subpage: string): RemoteOperationsSubpage {
+function remoteOperationsPanelSubpage(
+  subpage: string,
+): RemoteOperationsSubpage {
   if (
     subpage === "files" ||
     subpage === "multi_files" ||

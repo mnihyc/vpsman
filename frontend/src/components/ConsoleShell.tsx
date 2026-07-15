@@ -46,6 +46,7 @@ type ConsoleShellProps = {
   activeSubpage: string;
   activeView: ActiveView;
   agents: AgentView[];
+  alertCounts: { critical: number; info: number; total: number; warning: number };
   apiToken: string;
   children: ReactNode;
   commandItems: CommandPaletteItem[];
@@ -78,6 +79,7 @@ export function ConsoleShell({
   activeSubpage,
   activeView,
   agents,
+  alertCounts,
   apiToken,
   children,
   commandItems,
@@ -113,6 +115,8 @@ export function ConsoleShell({
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState("");
   const commandInputRef = useRef<HTMLInputElement | null>(null);
+  const contentRef = useRef<HTMLElement | null>(null);
+  const topbarRef = useRef<HTMLElement | null>(null);
   const hasFleetScope = fleetQuery.trim().length > 0 || activeSavedFleetViewId !== null;
   const activeSavedFleetView = savedFleetViews.find((view) => view.id === activeSavedFleetViewId) ?? null;
   const draftSavedFleetViewMatchesExisting = Boolean(
@@ -138,7 +142,7 @@ export function ConsoleShell({
     summary.offline > 0 ? `${summary.offline} offline` : null,
     summary.stale > 0 ? `${summary.stale} stale` : null,
     noContactCount > 0 ? `${noContactCount} no contact` : null,
-    `${summary.running_jobs} jobs`,
+    `${summary.running_jobs} running job${summary.running_jobs === 1 ? "" : "s"}`,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -326,6 +330,54 @@ export function ConsoleShell({
   }, [manualSubpanelState, operatorPreferencesReady, preferences.sidebar_subpanel_default]);
 
   useEffect(() => {
+    if ((viewSubpages[activeView] ?? []).length <= 1) {
+      return;
+    }
+    setManualSubpanelState((current) => {
+      if (current[activeView] === true) {
+        return current;
+      }
+      const next = { ...current, [activeView]: true };
+      writeSidebarSubpanelPreferences(preferences.sidebar_subpanel_default, next);
+      return next;
+    });
+  }, [activeView, preferences.sidebar_subpanel_default]);
+
+  useEffect(() => {
+    const content = contentRef.current;
+    const topbar = topbarRef.current;
+    if (!content || !topbar) {
+      return;
+    }
+    const root = document.documentElement;
+    const previousRootScrollOffset = root.style.getPropertyValue(
+      "--console-sticky-offset",
+    );
+    const updateScrollOffset = () => {
+      const height = Math.ceil(topbar.getBoundingClientRect().height);
+      const offset = `${height + 16}px`;
+      content.style.setProperty("--console-sticky-offset", offset);
+      root.style.setProperty("--console-sticky-offset", offset);
+    };
+    updateScrollOffset();
+    const observer = new ResizeObserver(updateScrollOffset);
+    observer.observe(topbar);
+    window.addEventListener("resize", updateScrollOffset);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", updateScrollOffset);
+      if (previousRootScrollOffset) {
+        root.style.setProperty(
+          "--console-sticky-offset",
+          previousRootScrollOffset,
+        );
+      } else {
+        root.style.removeProperty("--console-sticky-offset");
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLocaleLowerCase() === "k") {
         event.preventDefault();
@@ -348,8 +400,18 @@ export function ConsoleShell({
     window.setTimeout(() => commandInputRef.current?.focus(), 0);
   }, [commandPaletteOpen]);
 
+  useEffect(() => {
+    if (contentRef.current) {
+      contentRef.current.scrollTop = 0;
+    }
+    window.scrollTo({ left: 0, top: 0, behavior: "auto" });
+  }, [activeSubpage, activeView]);
+
   return (
     <div className="shell">
+      <a className="skipLink" href="#console-main-content">
+        Skip to page content
+      </a>
       <aside className="sidebar">
         <div className="brand">
           <Cloud size={24} />
@@ -423,11 +485,11 @@ export function ConsoleShell({
         </nav>
       </aside>
 
-      <main className="content">
-        <header className="topbar">
+      <main className="content" id="console-main-content" ref={contentRef} tabIndex={-1}>
+        <header className="topbar" ref={topbarRef}>
           <div className="scopeSelectorGroup">
             <button
-              aria-label={`Edit fleet scope: ${scopeName}, ${filteredAgentCount} of ${summary.total} resources`}
+              aria-label={`Edit fleet scope: ${scopeName}. ${filteredAgentCount} of ${summary.total} resources shown`}
               className="scopeSelector"
               onClick={openFleetScopeEditor}
               title="Edit fleet scope in search"
@@ -463,15 +525,14 @@ export function ConsoleShell({
             value={fleetQuery}
           />
           <div className="topbarActions">
-            <details className="mobilePageMenu">
-              <summary aria-label="Open mobile page navigation">
-                <FolderKanban size={17} />
-                <span>{activeViewLabel} / {activeSubpageLabel}</span>
-              </summary>
+            <label className="mobilePageMenu" title="Choose console page">
+              <FolderKanban aria-hidden="true" size={17} />
+              <span className="visuallyHidden">Console page</span>
               <select
                 aria-label="Console page"
                 className="mobilePageSelector"
                 onChange={(event) => selectMobilePage(event.target.value)}
+                title={`${activeViewLabel} / ${activeSubpageLabel}`}
                 value={mobilePageValue}
               >
                 {navSections.map((section) => (
@@ -486,7 +547,7 @@ export function ConsoleShell({
                   </optgroup>
                 ))}
               </select>
-            </details>
+            </label>
             {renderSavedFleetViewControls()}
             <details className="mobileSavedViewMenu">
               <summary aria-label="Open saved fleet views menu">
@@ -511,7 +572,13 @@ export function ConsoleShell({
               <Command size={19} />
             </button>
             {apiToken && (
-              <button className="sessionButton" onClick={onClearSession} type="button">
+              <button
+                aria-label="Clear operator session"
+                className="sessionButton"
+                onClick={onClearSession}
+                title="Sign out of the current operator session"
+                type="button"
+              >
                 <KeyRound size={18} />
                 <span>Session</span>
               </button>
@@ -577,8 +644,24 @@ export function ConsoleShell({
                 value={String(summary.never + summary.unknown)}
                 tone="yellow"
               />
-              <Metric label="Warnings" value={String(summary.warnings)} tone="yellow" />
-              <Metric label="Jobs" value={String(summary.running_jobs)} tone="blue" />
+              <Metric
+                label="Unavailable"
+                title="Offline, stale, never-connected, and contact-unknown VPSs"
+                value={String(unavailableCount)}
+                tone="yellow"
+              />
+              <Metric
+                label="Alerts"
+                title={`${alertCounts.critical} critical, ${alertCounts.warning} warning, ${alertCounts.info} info`}
+                value={String(alertCounts.total)}
+                tone={alertCounts.total > 0 ? "yellow" : "green"}
+              />
+              <Metric
+                label="Running jobs"
+                title="Jobs that have not reached a terminal state"
+                value={String(summary.running_jobs)}
+                tone="blue"
+              />
             </div>
           ) : (
             <div className="fleetStatusStrip" aria-label="Fleet status summary">
@@ -586,12 +669,12 @@ export function ConsoleShell({
                 {fleetStatusText}
               </strong>
               <strong className="fleetStatusCompact" title={fleetStatusTitle}>
-                {summary.total} VPS · {summary.online} online · {unavailableCount} unavailable · {summary.running_jobs} jobs
+                {summary.total} VPS · {summary.online} online · {unavailableCount} unavailable · {summary.running_jobs} running
               </strong>
-              <span className={summary.warnings > 0 ? "warn" : "ok"}>
-                {summary.warnings > 0
-                  ? `${summary.warnings} warnings`
-                  : "No fleet warnings"}
+              <span className={alertCounts.critical > 0 || alertCounts.warning > 0 ? "warn" : "ok"}>
+                {alertCounts.total > 0
+                  ? `${alertCounts.critical} critical · ${alertCounts.warning} warning · ${alertCounts.info} info`
+                  : "No active alerts"}
               </span>
               <small>{onlineRatio} online</small>
             </div>

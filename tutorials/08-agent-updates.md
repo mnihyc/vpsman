@@ -23,6 +23,36 @@ The release tag owns the shipped version. Release binaries embed the same
 tag-derived version that appears in `version.json`, so an agent reports
 `current` only when its embedded release version matches the manifest.
 
+## Rolling Update Contract
+
+The control plane and agents may be updated in either order. Non-breaking wire
+changes are additive, omitted command versions always mean the original v1
+shape, and each command family rejects unsupported versions as a completed
+`rejected` target instead of terminating the agent process. An unknown future
+command is rejected for that job while the existing gateway session and other
+supported operations remain available.
+
+The direct `agent_update` command is the permanent recovery path. It always
+uses the v1 command contract containing the complete HTTPS artifact URL and
+SHA-256 digest. Future incompatible update behavior must use a new command
+variant; required fields must never be added to the existing update variants.
+The published `version.json` schema 2 fields needed by existing agents are also
+additive-only. This keeps these two orders valid:
+
+- Control plane first: old agents continue telemetry and supported jobs; newer
+  command versions are visibly rejected until those agents are updated.
+- Agent first: the new agent continues using the v1 frame and hello contracts,
+  so an older gateway/API can accept it and dispatch the v1 update commands.
+
+After a runtime config sync succeeds, the agent atomically records the last
+accepted config at
+`<agent-state-dir>/runtime-config/last-accepted.json`. It loads and reconciles
+that config before reconnecting after an update or ordinary restart. An
+unavailable or incompatible control plane therefore does not erase the last
+accepted telemetry, update, execution, backup, or managed-tunnel settings.
+Corrupt cache data is ignored with a warning and never replaces bootstrap
+identity or gateway trust settings.
+
 Operators can enable or disable autonomous updates from the dashboard under
 Config > Bulk patch with the built-in updater patch generators.
 These templates are ordinary operator-managed records once cloned: they can be
@@ -119,6 +149,11 @@ cargo run -p vpsctl -- agent-update-check \
   --tags edge \
   --confirmed
 ```
+
+This default checks and stages only, matching the dashboard. Add both
+`--activate --restart-agent` only when the same reviewed job should promote the
+staged binary and restart immediately; otherwise use the separate activation
+command after inspecting the staged SHA-256.
 
 Manual update jobs download from the supplied external HTTPS URL, verify
 SHA-256, stage the binary, and create local rollback material. Use Jobs >

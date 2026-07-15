@@ -61,11 +61,14 @@ import type {
   AgentView,
   BulkResolveResponse,
   CommandTemplateRecord,
+  CreateJobApprovalRequest,
   CreateJobRequest,
   CreateJobResponse,
   DeleteCommandTemplateRequest,
   FileExistingPolicy,
   JobHistoryRecord,
+  JobApprovalRecord,
+  JobOperation,
   JobOutputRecord,
   JobTargetRecord,
   JobTargetSelection,
@@ -193,6 +196,7 @@ type DispatchConfirmationSnapshot = {
       chunkSizeBytes: number;
       existingPolicy: FileExistingPolicy;
       file: File | null;
+      fileSha256Hex: string;
       modeText: string;
       multiTargetPolicy: BrowserTransferMultiTargetPolicy;
       path: string;
@@ -214,6 +218,28 @@ type DispatchConfirmationSnapshot = {
       sessionId: string;
     }
 );
+
+function jobRequestFromConfirmation(
+  snapshot: Extract<DispatchConfirmationSnapshot, { kind: "job" }>,
+  confirmed: boolean,
+): CreateJobRequest {
+  return {
+    job_id: snapshot.jobId,
+    selector_expression: snapshot.selectorExpression,
+    target_client_ids: snapshot.targets.map((target) => target.id),
+    destructive: snapshot.destructive,
+    confirmed,
+    command: snapshot.commandType,
+    argv: snapshot.argv,
+    operation: snapshot.operation,
+    ...(snapshot.maxTimeoutOverrideSecs !== undefined
+      ? { max_timeout_secs: snapshot.maxTimeoutOverrideSecs }
+      : {}),
+    force_unprivileged: snapshot.forceUnprivileged,
+    privileged: true,
+    privilege_assertion: snapshot.privilegeAssertion,
+  };
+}
 
 async function loadUploadSourceArtifactFile(
   sources: FileTransferSourceArtifactRecord[],
@@ -248,6 +274,7 @@ export function JobDispatchPanel({
   terminalComposerAction,
   onDispatchPresetApplied,
   onCreateJob,
+  onCreateJobApproval,
   onDownloadFileTransferSource,
   onDownloadOutputChunk,
   onOpenJobsDispatch,
@@ -258,6 +285,7 @@ export function JobDispatchPanel({
   onSubmitTerminalInput,
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
+  onApprovalRequested,
   onResolveTargets,
   onDeleteCommandTemplate,
   onUpsertCommandTemplate,
@@ -273,6 +301,9 @@ export function JobDispatchPanel({
   terminalComposerAction?: TerminalComposerAction | null;
   onDispatchPresetApplied?: () => void;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
+  onCreateJobApproval?: (
+    request: CreateJobApprovalRequest,
+  ) => Promise<JobApprovalRecord>;
   onDownloadFileTransferSource: (downloadPath: string) => Promise<Blob>;
   onDownloadOutputChunk: (jobId: string, clientId: string, seq: number) => Promise<Blob>;
   onOpenJobsDispatch?: () => void;
@@ -287,6 +318,7 @@ export function JobDispatchPanel({
   ) => Promise<TerminalInputSubmitResponse>;
   onOpenJobDetails?: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
+  onApprovalRequested?: (approval: JobApprovalRecord) => void;
   onResolveTargets: (selection: JobTargetSelection) => Promise<BulkResolveResponse>;
   onDeleteCommandTemplate: (
     templateId: string,
@@ -346,8 +378,6 @@ export function JobDispatchPanel({
   const [updateArtifactUrl, setUpdateArtifactUrl] = useState("");
   const [updateSha256Hex, setUpdateSha256Hex] = useState("");
   const [updateCheckVersionUrl, setUpdateCheckVersionUrl] = useState(DEFAULT_UPDATE_VERSION_URL);
-  const [updateCheckActivate, setUpdateCheckActivate] = useState(true);
-  const [updateCheckRestartAgent, setUpdateCheckRestartAgent] = useState(true);
   const [updateActivationSha256Hex, setUpdateActivationSha256Hex] = useState("");
   const [updateRestartAgent, setUpdateRestartAgent] = useState(false);
   const [updateRollbackSha256Hex, setUpdateRollbackSha256Hex] = useState("");
@@ -371,11 +401,16 @@ export function JobDispatchPanel({
   const [lastJob, setLastJob] = useState<CreateJobResponse | null>(null);
   const [dispatchProgress, setDispatchProgress] = useState<BulkJobProgress | null>(null);
   const [lastDispatchProgress, setLastDispatchProgress] = useState<BulkJobProgress | null>(null);
+  const [lastDispatchContext, setLastDispatchContext] = useState<string | null>(null);
   const [lastPayloadHash, setLastPayloadHash] = useState<string | null>(null);
   const [transferProgress, setTransferProgress] = useState<ResumableUploadProgress | ResumableDownloadProgress | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [dispatchPromptOpen, setDispatchPromptOpen] = useState(false);
   const [dispatchConfirmation, setDispatchConfirmation] = useState<DispatchConfirmationSnapshot | null>(null);
+  const [dispatchReviewIntent, setDispatchReviewIntent] = useState<
+    "dispatch" | "approval"
+  >("dispatch");
+  const [approvalRequestReason, setApprovalRequestReason] = useState("");
   const [selectorVerification, setSelectorVerification] = useState<"checking" | "invalid" | "neutral" | "valid">("neutral");
   const [selectorVerificationMessage, setSelectorVerificationMessage] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
@@ -436,8 +471,6 @@ export function JobDispatchPanel({
     }
     if (dispatchPreset.mode === "agent_update_check") {
       setUpdateCheckVersionUrl(dispatchPreset.updateCheckVersionUrl ?? DEFAULT_UPDATE_VERSION_URL);
-      setUpdateCheckActivate(dispatchPreset.updateCheckActivate ?? true);
-      setUpdateCheckRestartAgent(dispatchPreset.updateCheckRestartAgent ?? true);
     }
     if (dispatchPreset.mode === "agent_update_activate") {
       setUpdateActivationSha256Hex(dispatchPreset.updateActivationSha256Hex ?? "");
@@ -605,8 +638,6 @@ export function JobDispatchPanel({
     maxTimeoutSecs,
     updateActivationSha256Hex,
     updateArtifactUrl,
-    updateCheckActivate,
-    updateCheckRestartAgent,
     updateCheckVersionUrl,
     updateRestartAgent,
     updateRollbackSha256Hex,
@@ -703,6 +734,12 @@ export function JobDispatchPanel({
   const impactMode = targetImpactModeForDispatch(mode);
   const supportsForceUnprivileged = impactMode !== "generic";
   const operationNeedsConfirmation = generatedConfirmationRequiredForMode(mode, supervisorAction, terminalAction);
+  const approvalRequestSupported = Boolean(
+    !terminalSurface &&
+      onCreateJobApproval &&
+      mode !== "file_transfer_upload" &&
+      mode !== "file_transfer_download",
+  );
   const impactTargets = preview?.targets ?? expressionTargets;
   const activeDispatchConfirmation = dispatchPromptOpen ? dispatchConfirmation : null;
   const dispatchConfirmationSelector =
@@ -716,10 +753,18 @@ export function JobDispatchPanel({
     (supportsForceUnprivileged ? forceUnprivileged : false);
   const dispatchConfirmationOperationLabel =
     activeDispatchConfirmation?.operationLabel ?? operationCommandLabel(mode, commandText);
+  const dispatchConfirmationTargetNames = dispatchTargetIdentitySummary(
+    dispatchConfirmationTargets,
+  );
+  const focusedModeBoundary = fixedMode
+    ? fixedModeBoundaryCopy(fixedMode)
+    : null;
   const dispatchConfirmationDestructive =
     activeDispatchConfirmation?.kind === "job"
-      ? activeDispatchConfirmation.destructive
-      : operationNeedsConfirmation;
+      ? operationUsesDangerTone(activeDispatchConfirmation.operation)
+      : activeDispatchConfirmation?.kind === "transfer_upload"
+        ? activeDispatchConfirmation.existingPolicy === "replace"
+        : false;
   const dispatchConfirmationFollowSymlinks =
     activeDispatchConfirmation?.kind === "transfer_download"
       ? activeDispatchConfirmation.followSymlinks
@@ -739,7 +784,15 @@ export function JobDispatchPanel({
   const visibleDispatchProgress = dispatchProgress ?? lastDispatchProgress;
   const dispatchConfirmationItems = [
     { label: "Operation", value: dispatchConfirmationOperationLabel },
-    ...processOperationReviewItems(
+    {
+      label: "Submission",
+      value:
+        dispatchReviewIntent === "approval"
+          ? "Approval queue; no execution until approved"
+          : "Dispatch immediately after confirmation",
+    },
+    ...transferReviewItems(activeDispatchConfirmation),
+    ...operationReviewItems(
       activeDispatchConfirmation?.kind === "job" ? activeDispatchConfirmation.operation : undefined,
     ),
     ...(dispatchConfirmationFollowSymlinks === null
@@ -755,6 +808,11 @@ export function JobDispatchPanel({
       label: "Targets",
       value: formatTargetAvailabilitySummary(dispatchConfirmationTargets),
     },
+    {
+      label: "Resolved VPS",
+      title: dispatchConfirmationTargetNames.full,
+      value: dispatchConfirmationTargetNames.visible,
+    },
     { label: "Max timeout", value: `${dispatchConfirmationMaxTimeoutSecs}s` },
     {
       label: "Privilege",
@@ -762,7 +820,11 @@ export function JobDispatchPanel({
     },
     {
       label: "Execution",
-      value: dispatchConfirmationForceUnprivileged ? "Forced best effort" : operationNeedsConfirmation ? "Privileged mutation" : "Standard",
+      value: dispatchConfirmationForceUnprivileged
+        ? "Forced best effort"
+        : operationNeedsConfirmation
+          ? "Protected operation"
+          : "Standard",
     },
   ];
   const dispatchHeaderStatus = privilegeMaterial ? "Ready" : "Locked";
@@ -778,6 +840,7 @@ export function JobDispatchPanel({
   function clearExecutionResults() {
     setDispatchProgress(null);
     setLastDispatchProgress(null);
+    setLastDispatchContext(null);
     setLastJob(null);
     setTransferProgress(null);
   }
@@ -786,6 +849,8 @@ export function JobDispatchPanel({
     invalidateReviewGeneration();
     setDispatchPromptOpen(false);
     setDispatchConfirmation(null);
+    setDispatchReviewIntent("dispatch");
+    setApprovalRequestReason("");
     setReviewStatus(null);
   }
 
@@ -815,7 +880,15 @@ export function JobDispatchPanel({
 
   async function submitJob(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    await prepareJobReview("dispatch");
+  }
+
+  async function prepareJobReview(intent: "dispatch" | "approval") {
     setActionError(null);
+    if (intent === "approval" && !approvalRequestSupported) {
+      setActionError("This operation must be dispatched directly");
+      return;
+    }
     if (!privilegeMaterial) {
       setActionError("Privilege unlock is locked");
       return;
@@ -831,7 +904,11 @@ export function JobDispatchPanel({
     blurActiveElement();
     const reviewGeneration = captureReviewGeneration();
     const selection = targetSelection();
-    setReviewStatus("Preparing dispatch confirmation");
+    setReviewStatus(
+      intent === "approval"
+        ? "Preparing approval request"
+        : "Preparing dispatch confirmation",
+    );
     try {
       await runPanelAction(setPending, setActionError, async () => {
         await waitForReviewRender();
@@ -848,6 +925,8 @@ export function JobDispatchPanel({
         }
         setPreview(resolved);
         setDispatchConfirmation(snapshot);
+        setDispatchReviewIntent(intent);
+        setApprovalRequestReason("");
         setDispatchPromptOpen(true);
       });
     } finally {
@@ -883,11 +962,18 @@ export function JobDispatchPanel({
               onDownloadFileTransferSource,
             )
           : filePushSource;
+      if (!uploadSourceFile) {
+        throw new Error("Choose an upload source before review");
+      }
+      const uploadSourceBytes = new Uint8Array(
+        await uploadSourceFile.arrayBuffer(),
+      );
       return {
         ...base,
         chunkSizeBytes: fileTransferChunkSize,
         existingPolicy: fileTransferExistingPolicy,
         file: uploadSourceFile,
+        fileSha256Hex: await sha256Hex(uploadSourceBytes),
         kind: "transfer_upload",
         modeText: filePushMode,
         multiTargetPolicy: fileTransferMultiTargetPolicy,
@@ -941,7 +1027,7 @@ export function JobDispatchPanel({
         clientId,
         jobId: crypto.randomUUID(),
         kind: "terminal_input",
-        operationLabel: "terminal_input",
+        operationLabel: "Send terminal input",
         payloadHashHex,
         privilegeAssertion,
         sessionId,
@@ -979,8 +1065,6 @@ export function JobDispatchPanel({
       updateArtifactUrl,
       updateSha256Hex,
       updateCheckVersionUrl,
-      updateCheckActivate,
-      updateCheckRestartAgent,
       updateActivationSha256Hex,
       updateRestartAgent,
       updateRollbackSha256Hex,
@@ -1015,6 +1099,7 @@ export function JobDispatchPanel({
       jobId: crypto.randomUUID(),
       kind: "job",
       operation,
+      operationLabel: jobOperationLabel(operation, operationLabel),
       payloadHashHex,
       privilegeAssertion,
     };
@@ -1103,8 +1188,6 @@ export function JobDispatchPanel({
       case "agent_update_check":
         setMode("agent_update_check");
         setUpdateCheckVersionUrl(operation.version_url ?? DEFAULT_UPDATE_VERSION_URL);
-        setUpdateCheckActivate(operation.activate ?? true);
-        setUpdateCheckRestartAgent(operation.restart_agent ?? true);
         return;
       case "agent_update_activate":
         setMode("agent_update_activate");
@@ -1159,8 +1242,6 @@ export function JobDispatchPanel({
       updateArtifactUrl,
       updateSha256Hex,
       updateCheckVersionUrl,
-      updateCheckActivate,
-      updateCheckRestartAgent,
       updateActivationSha256Hex,
       updateRestartAgent,
       updateRollbackSha256Hex,
@@ -1245,6 +1326,7 @@ export function JobDispatchPanel({
       if (!confirmed?.targets.length) {
         throw new Error("Confirmed target snapshot is missing; review the targets again");
       }
+      setLastDispatchContext(confirmed.operationLabel);
       if (confirmed.kind === "transfer_upload") {
         const clientIds = confirmed.targets.map((target) => target.id);
         const commitJob = await runBrowserResumableUpload({
@@ -1320,24 +1402,35 @@ export function JobDispatchPanel({
         await trackDispatchProgress(response.job, confirmed.targets, confirmed.maxTimeoutSecs);
         return;
       }
-      const clientIds = confirmed.targets.map((target) => target.id);
-      const nextJob = await onCreateJob({
-        job_id: confirmed.jobId,
-        selector_expression: confirmed.selectorExpression,
-        target_client_ids: clientIds,
-        destructive: confirmed.destructive,
-        confirmed: confirmed.destructive,
-        command: confirmed.commandType,
-        argv: confirmed.argv,
-        operation: confirmed.operation,
-        ...(confirmed.maxTimeoutOverrideSecs !== undefined ? { max_timeout_secs: confirmed.maxTimeoutOverrideSecs } : {}),
-        force_unprivileged: confirmed.forceUnprivileged,
-        privileged: true,
-        privilege_assertion: confirmed.privilegeAssertion,
-      });
+      const nextJob = await onCreateJob(
+        jobRequestFromConfirmation(confirmed, confirmed.destructive),
+      );
       setLastJob(nextJob);
       setLastPayloadHash(confirmed.payloadHashHex);
       await trackDispatchProgress(nextJob, confirmed.targets, confirmed.maxTimeoutSecs);
+    });
+  }
+
+  async function requestJobApproval() {
+    setDispatchPromptOpen(false);
+    clearExecutionResults();
+    await runPanelAction(setPending, setActionError, async () => {
+      if (!onCreateJobApproval) {
+        throw new Error("Approval requests are unavailable");
+      }
+      const confirmed = dispatchConfirmation;
+      if (confirmed?.kind !== "job" || !confirmed.targets.length) {
+        throw new Error(
+          "Confirmed job snapshot is missing; review the targets again",
+        );
+      }
+      const approval = await onCreateJobApproval({
+        job: jobRequestFromConfirmation(confirmed, true),
+        reason: approvalRequestReason.trim() || null,
+      });
+      setDispatchConfirmation(null);
+      setApprovalRequestReason("");
+      onApprovalRequested?.(approval);
     });
   }
 
@@ -1354,6 +1447,7 @@ export function JobDispatchPanel({
     }));
     try {
       const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
+        onLoadOutputs,
         onProgress: setDispatchProgress,
         targetCount,
         targets,
@@ -1563,8 +1657,8 @@ export function JobDispatchPanel({
         )}
         {fixedMode ? (
           <div className="dispatchModeNotice" aria-label="Dispatch mode boundary">
-            <strong>Terminal mode only</strong>
-            <span>Shell, backup, file transfer, update, and process dispatch remain in Jobs / Dispatch.</span>
+            <strong>{focusedModeBoundary?.label}</strong>
+            <span>{focusedModeBoundary?.detail}</span>
             {onOpenJobsDispatch ? (
               <button className="secondaryAction compactAction" onClick={onOpenJobsDispatch} type="button">
                 Jobs / Dispatch
@@ -1658,8 +1752,6 @@ export function JobDispatchPanel({
           setSupervisorLogBytes={setSupervisorLogBytes}
           setSupervisorName={setSupervisorName}
           setUpdateArtifactUrl={setUpdateArtifactUrl}
-          setUpdateCheckActivate={setUpdateCheckActivate}
-          setUpdateCheckRestartAgent={setUpdateCheckRestartAgent}
           setUpdateCheckVersionUrl={setUpdateCheckVersionUrl}
           setUpdateActivationSha256Hex={setUpdateActivationSha256Hex}
           setUpdateRestartAgent={setUpdateRestartAgent}
@@ -1676,8 +1768,6 @@ export function JobDispatchPanel({
           supervisorLogBytes={supervisorLogBytes}
           supervisorName={supervisorName}
           updateArtifactUrl={updateArtifactUrl}
-          updateCheckActivate={updateCheckActivate}
-          updateCheckRestartAgent={updateCheckRestartAgent}
           updateCheckVersionUrl={updateCheckVersionUrl}
           updateActivationSha256Hex={updateActivationSha256Hex}
           updateRestartAgent={updateRestartAgent}
@@ -1731,22 +1821,57 @@ export function JobDispatchPanel({
         </details>
 
         <ConfirmationPrompt
-          confirmLabel="Dispatch job"
-          detail={`${dispatchConfirmationOperationLabel} on ${vpsCountLabel(dispatchConfirmationTargets.length)}.`}
+          confirmLabel={
+            dispatchReviewIntent === "approval"
+              ? "Request approval"
+              : "Dispatch job"
+          }
+          detail={
+            dispatchReviewIntent === "approval"
+              ? `Queues ${dispatchConfirmationOperationLabel} on ${vpsCountLabel(dispatchConfirmationTargets.length)} for review. Nothing runs until a pending request is approved.`
+              : `${dispatchConfirmationOperationLabel} on ${vpsCountLabel(dispatchConfirmationTargets.length)}.`
+          }
           items={dispatchConfirmationItems}
-          onCancel={() => {
-            setDispatchPromptOpen(false);
-            setDispatchConfirmation(null);
-          }}
-          onConfirm={() => void dispatchJobNow()}
+          onCancel={clearDispatchReview}
+          onConfirm={() =>
+            void (dispatchReviewIntent === "approval"
+              ? requestJobApproval()
+              : dispatchJobNow())
+          }
           open={dispatchPromptOpen}
           pending={pending}
-          title="Confirm job dispatch"
-          tone={dispatchConfirmationDestructive ? "danger" : "normal"}
-        />
+          title={
+            dispatchReviewIntent === "approval"
+              ? "Confirm approval request"
+              : "Confirm job dispatch"
+          }
+          tone={
+            dispatchReviewIntent === "dispatch" && dispatchConfirmationDestructive
+              ? "danger"
+              : "normal"
+          }
+        >
+          {dispatchReviewIntent === "approval" ? (
+            <label className="confirmationTypedInput">
+              <span>Request reason (optional)</span>
+              <textarea
+                aria-label="Approval request reason"
+                disabled={pending}
+                maxLength={1024}
+                onChange={(event) =>
+                  setApprovalRequestReason(event.target.value)
+                }
+                placeholder="Maintenance window, incident, or change reference"
+                rows={3}
+                value={approvalRequestReason}
+              />
+            </label>
+          ) : null}
+        </ConfirmationPrompt>
 
         {!dispatchPromptOpen && visibleDispatchProgress && (
           <ExecutionResultPanel
+            context={lastDispatchContext ? `Dispatch: ${lastDispatchContext}` : undefined}
             loading={dispatchProgress !== null}
             onClearResults={clearExecutionResults}
             onOpenJobDetails={onOpenJobDetails}
@@ -1765,6 +1890,18 @@ export function JobDispatchPanel({
               <CheckCircle2 size={17} />
               Refresh target preview
             </button>
+            {approvalRequestSupported ? (
+              <button
+                className="secondaryAction"
+                disabled={pending || !operationReady || !privilegeMaterial}
+                onClick={() => void prepareJobReview("approval")}
+                title="Queue the frozen job request for approval without dispatching it"
+                type="button"
+              >
+                <ShieldCheck size={17} />
+                Request approval
+              </button>
+            ) : null}
             <button
               className="primaryAction"
               disabled={pending || !operationReady || !privilegeMaterial}
@@ -1810,8 +1947,64 @@ function vpsCountLabel(count: number): string {
   return `${count} VPS${count === 1 ? "" : "s"}`;
 }
 
-function processOperationReviewItems(operation: CreateJobRequest["operation"] | undefined) {
-  if (!operation || !operation.type.startsWith("process_")) {
+function dispatchTargetIdentitySummary(targets: AgentView[]): {
+  full: string;
+  visible: string;
+} {
+  if (targets.length === 0) {
+    return { full: "No VPS resolved", visible: "No VPS resolved" };
+  }
+  const labels = targets.map(
+    (target) => `${target.display_name.trim() || "Unnamed VPS"} (${target.id})`,
+  );
+  const visibleLimit = 8;
+  return {
+    full: labels.join(", "),
+    visible:
+      labels.length > visibleLimit
+        ? `${labels.slice(0, visibleLimit).join(", ")} +${labels.length - visibleLimit} more`
+        : labels.join(", "),
+  };
+}
+
+function operationReviewItems(
+  operation: CreateJobRequest["operation"] | undefined,
+): Array<{ label: string; title?: string; value: string }> {
+  if (!operation) {
+    return [];
+  }
+  if (operation.type === "agent_update_check") {
+    return [
+      { label: "Effect", value: "Check and stage verified artifact only" },
+      { label: "Activation", value: "No" },
+      { label: "Agent restart", value: "No" },
+      { label: "Manifest", value: operation.version_url ?? "Agent default" },
+    ];
+  }
+  if (operation.type === "agent_update_activate") {
+    return [
+      { label: "Staged SHA-256", value: operation.staged_sha256_hex },
+      { label: "Agent restart", value: operation.restart_agent ? "Yes" : "No" },
+    ];
+  }
+  if (operation.type === "agent_update_rollback") {
+    return [
+      {
+        label: "Rollback artifact",
+        value: operation.rollback_sha256_hex ?? "Agent-managed previous artifact",
+      },
+    ];
+  }
+  if (operation.type.startsWith("terminal_")) {
+    return [
+      {
+        label: "Session",
+        value: "session_id" in operation ? operation.session_id : "Not reported",
+      },
+      { label: "Effect", value: jobOperationLabel(operation, operation.type) },
+    ];
+  }
+  if (!operation.type.startsWith("process_")) {
     return [];
   }
   const processName =
@@ -1825,14 +2018,152 @@ function processOperationReviewItems(operation: CreateJobRequest["operation"] | 
     process_status: "Refresh process status",
     process_stop: "Stop supervised process",
   };
-  const items = [
+  const items: Array<{ label: string; title?: string; value: string }> = [
     { label: "Process", value: processName },
     { label: "Effect", value: effectByType[operation.type] ?? operation.type },
   ];
+  if (operation.type === "process_start") {
+    const command = formatArgvForInput(operation.argv);
+    const environmentNames = Object.keys(operation.env).sort();
+    const environment =
+      environmentNames.length > 0
+        ? `${environmentNames.join(", ")} (values hidden)`
+        : "No overrides";
+    items.push(
+      { label: "Command argv", title: command, value: command },
+      {
+        label: "Working directory",
+        title: operation.cwd ?? "Agent default",
+        value: operation.cwd ?? "Agent default",
+      },
+      { label: "Environment", title: environment, value: environment },
+    );
+  }
   if (operation.type === "process_logs") {
     items.push({ label: "Log bytes", value: String(operation.max_bytes) });
   }
   return items;
+}
+
+function transferReviewItems(snapshot: DispatchConfirmationSnapshot | null) {
+  if (snapshot?.kind === "transfer_upload") {
+    return [
+      { label: "Local source", value: snapshot.file?.name ?? "Not selected" },
+      {
+        label: "Source size",
+        value: snapshot.file
+          ? formatTransferBytes(snapshot.file.size)
+          : "Not reported",
+      },
+      {
+        label: "Source SHA-256",
+        title: snapshot.fileSha256Hex,
+        value: `${snapshot.fileSha256Hex.slice(0, 12)}...${snapshot.fileSha256Hex.slice(-8)}`,
+      },
+      { label: "Destination", title: snapshot.path, value: snapshot.path },
+      {
+        label: "Existing path",
+        value:
+          snapshot.existingPolicy === "replace"
+            ? "Replace the existing file"
+            : "Skip upload if the file already exists",
+      },
+      { label: "File mode", value: snapshot.modeText },
+      {
+        label: "Multi-VPS resume",
+        value:
+          snapshot.multiTargetPolicy === "same-offset"
+            ? "Shared offset across all targets"
+            : "Independent offset per target",
+      },
+      {
+        label: "Transfer limits",
+        value: `${formatTransferBytes(snapshot.chunkSizeBytes)} chunks · ${formatTransferRate(snapshot.rateLimitKbps)}`,
+      },
+    ];
+  }
+  if (snapshot?.kind === "transfer_download") {
+    return [
+      { label: "Remote source", title: snapshot.path, value: snapshot.path },
+      {
+        label: "Local file",
+        title: snapshot.downloadName,
+        value: snapshot.downloadName,
+      },
+      { label: "Save method", value: snapshot.downloadSink },
+      {
+        label: "Transfer limits",
+        value: `${formatTransferBytes(snapshot.chunkSizeBytes)} chunks · ${formatTransferRate(snapshot.rateLimitKbps)}`,
+      },
+    ];
+  }
+  return [];
+}
+
+function formatTransferBytes(value: number): string {
+  if (value < 1024) {
+    return `${value} B`;
+  }
+  if (value < 1024 * 1024) {
+    return `${Math.round(value / 1024)} KiB`;
+  }
+  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+function formatTransferRate(value: number): string {
+  return value > 0 ? `${value} KiB/s cap` : "no rate cap";
+}
+
+function fixedModeBoundaryCopy(mode: DispatchMode): {
+  detail: string;
+  label: string;
+} {
+  if (mode === "terminal_session") {
+    return {
+      detail:
+        "This focused composer controls one terminal workflow from Remote / Terminal. Other operations remain in Jobs / Dispatch.",
+      label: "Terminal session mode",
+    };
+  }
+  if (mode === "file_transfer_upload" || mode === "file_transfer_download") {
+    return {
+      detail:
+        "This focused composer reviews one resumable transfer from Remote / Transfers. Other operations remain in Jobs / Dispatch.",
+      label: "File transfer mode",
+    };
+  }
+  if (mode === "process_supervisor" || mode === "process_list") {
+    return {
+      detail:
+        "This focused composer reviews one process operation from Remote / Processes. Other operations remain in Jobs / Dispatch.",
+      label: "Process operation mode",
+    };
+  }
+  return {
+    detail:
+      "This focused composer keeps the selected operation fixed. Other operations remain in Jobs / Dispatch.",
+    label: "Focused operation mode",
+  };
+}
+
+function jobOperationLabel(
+  operation: NonNullable<CreateJobRequest["operation"]>,
+  fallback: string,
+): string {
+  const labels: Partial<
+    Record<NonNullable<CreateJobRequest["operation"]>["type"], string>
+  > = {
+    agent_update_activate: "Activate staged agent update",
+    agent_update_check: "Check agent update",
+    agent_update_rollback: "Rollback agent update",
+    backup: "Run backup",
+    terminal_close: "Close terminal session",
+    terminal_input: "Send terminal input",
+    terminal_open: "Open or attach terminal session",
+    terminal_poll: "Poll terminal output",
+    terminal_resize: "Resize terminal session",
+  };
+  return labels[operation.type] ?? fallback;
 }
 
 function generatedConfirmationRequiredForMode(
@@ -1866,6 +2197,36 @@ function generatedConfirmationRequiredForMode(
                     : "process_status"
             : mode;
   return JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE[operationType];
+}
+
+function operationUsesDangerTone(
+  operation: JobOperation | undefined,
+): boolean {
+  if (!operation) {
+    return false;
+  }
+
+  switch (operation.type) {
+    case "agent_update_activate":
+    case "agent_update_rollback":
+    case "file_delete":
+    case "network_routing_apply":
+    case "restore_rollback":
+      return true;
+    case "agent_update_check":
+      return Boolean(operation.activate || operation.restart_agent);
+    case "file_copy":
+    case "file_rename":
+      return Boolean(operation.overwrite);
+    case "file_push":
+    case "file_push_chunked":
+    case "file_transfer_start":
+      return operation.existing_policy === "replace";
+    case "restore":
+      return !operation.dry_run;
+    default:
+      return false;
+  }
 }
 
 function blurActiveElement() {

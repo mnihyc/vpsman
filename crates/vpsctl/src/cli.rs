@@ -435,9 +435,9 @@ pub(crate) enum Command {
     AgentUpdateCheck {
         #[arg(long)]
         version_url: Option<String>,
-        #[arg(long, default_value_t = true)]
+        #[arg(long, default_value_t = false)]
         activate: bool,
-        #[arg(long, default_value_t = true)]
+        #[arg(long, default_value_t = false)]
         restart_agent: bool,
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
@@ -1056,7 +1056,57 @@ impl Command {
 mod tests {
     use clap::Parser;
 
-    use super::Args;
+    use super::{Args, Command};
+
+    #[test]
+    fn agent_update_check_activation_is_explicit() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let parsed = Args::try_parse_from([
+                    "vpsctl",
+                    "agent-update-check",
+                    "--clients",
+                    "edge-a",
+                    "--confirmed",
+                ])
+                .unwrap();
+                let Command::AgentUpdateCheck {
+                    activate,
+                    restart_agent,
+                    ..
+                } = parsed.command
+                else {
+                    panic!("expected agent-update-check command");
+                };
+                assert!(!activate);
+                assert!(!restart_agent);
+
+                let parsed = Args::try_parse_from([
+                    "vpsctl",
+                    "agent-update-check",
+                    "--activate",
+                    "--restart-agent",
+                    "--clients",
+                    "edge-a",
+                    "--confirmed",
+                ])
+                .unwrap();
+                let Command::AgentUpdateCheck {
+                    activate,
+                    restart_agent,
+                    ..
+                } = parsed.command
+                else {
+                    panic!("expected agent-update-check command");
+                };
+                assert!(activate);
+                assert!(restart_agent);
+            })
+            .expect("spawn CLI parser test")
+            .join()
+            .expect("CLI parser test panicked");
+    }
 
     #[test]
     fn tunnel_plan_defaults_do_not_enable_or_require_ospf() {
