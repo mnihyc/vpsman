@@ -1,14 +1,15 @@
 # Bootstrap-only agent config.
 #
 # The API owns runtime config. Do not put backup, update, execution,
-# telemetry, tunnel, routing, traffic, template, or policy sections in this
+# telemetry, tunnel, routing, port-forwarding, traffic, template, or policy sections in this
 # file. Agents load this file only to connect and authenticate to the gateway;
 # after hello they request the server-applied runtime config state, which is
 # pushed as exclusive runtime_config_sync jobs. A successfully applied config
 # is also stored atomically under the agent state directory and loaded before
 # reconnecting after a restart. A failed sync or failed local cache write does
 # not replace that last accepted config or advance the server's per-VPS applied
-# runtime config record.
+# runtime config record. A local port-forwarding block is rejected rather than
+# applied outside the control plane.
 
 client_id = "agent-nrt-04"
 

@@ -7,6 +7,7 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
+use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
     allocate_tunnel_endpoints as allocate_tunnel_endpoint_pairs, payload_hash, plan_tunnel,
@@ -20,14 +21,15 @@ use crate::{
     model::{
         AllocateTunnelEndpointsRequest, AllocateTunnelEndpointsResponse, CreateJobRequest,
         CreateJobResponse, CreateTunnelPlanRequest, HistoryQuery, NetworkOspfRecommendationView,
-        NetworkOspfUpdatePlanView, RefreshTunnelPlanOspfStatusRequest, TunnelPlanOspfJobsResponse,
-        TunnelPlanView, UpdateTunnelConnectionAssessmentRequest, UpdateTunnelPlanOspfCostRequest,
+        NetworkOspfUpdatePlanView, RefreshTunnelPlanOspfStatusRequest, TunnelPlanMutationResponse,
+        TunnelPlanOspfDispatchView, TunnelPlanOspfJobsResponse, TunnelPlanView,
+        UpdateTunnelConnectionAssessmentRequest, UpdateTunnelPlanOspfCostRequest,
         UpdateTunnelPlanRequest,
     },
     model_topology::TopologyGraphView,
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
     routes_jobs::create_job_from_internal_operator_mutation,
-    runtime_config::push_runtime_config_for_clients,
+    runtime_config::{dispatch_runtime_config_for_clients, operator_dispatch_error},
     security::{SCOPE_FLEET_READ, SCOPE_NETWORK_READ},
     state::AppState,
     util::limit_or_default,
@@ -55,7 +57,7 @@ pub(crate) async fn create_tunnel_plan(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<CreateTunnelPlanRequest>,
-) -> Result<(StatusCode, Json<TunnelPlanView>), ApiError> {
+) -> Result<(StatusCode, Json<TunnelPlanMutationResponse>), ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "network:write")
         .await?;
@@ -89,16 +91,21 @@ pub(crate) async fn create_tunnel_plan(
         sync_client_ids.push(view.left_client_id.clone());
         sync_client_ids.push(view.right_client_id.clone());
     }
-    if !sync_client_ids.is_empty() {
+    let sync = if !sync_client_ids.is_empty() {
         let reason = if view.enabled {
             "tunnel_plan_saved_enabled"
         } else {
             "tunnel_plan_saved_disabled"
         };
-        let _sync_jobs =
-            push_runtime_config_for_clients(&state, &operator, sync_client_ids, reason).await?;
-    }
-    Ok((StatusCode::CREATED, Json(view)))
+        dispatch_runtime_config_for_clients(&state, &operator, sync_client_ids, reason).await
+    } else {
+        Vec::new()
+    };
+    let plan = state.repo.get_tunnel_plan(view.id).await?.unwrap_or(view);
+    Ok((
+        StatusCode::CREATED,
+        Json(TunnelPlanMutationResponse { plan, sync }),
+    ))
 }
 
 pub(crate) async fn update_tunnel_plan(
@@ -106,7 +113,7 @@ pub(crate) async fn update_tunnel_plan(
     headers: HeaderMap,
     Path(plan_id): Path<Uuid>,
     Json(request): Json<UpdateTunnelPlanRequest>,
-) -> Result<Json<TunnelPlanView>, ApiError> {
+) -> Result<Json<TunnelPlanMutationResponse>, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "network:write")
         .await?;
@@ -126,7 +133,10 @@ pub(crate) async fn update_tunnel_plan(
     let plan = plan_tunnel(&request.input)
         .map_err(|error| ApiError::bad_request(tunnel_plan_error_code(error)))?;
     if existing.enabled == enabled && existing.input == request.input {
-        return Ok(Json(existing));
+        return Ok(Json(TunnelPlanMutationResponse {
+            plan: existing,
+            sync: Vec::new(),
+        }));
     }
     require_tunnel_endpoint_agents(
         &state,
@@ -157,16 +167,19 @@ pub(crate) async fn update_tunnel_plan(
         sync_client_ids.push(view.left_client_id.clone());
         sync_client_ids.push(view.right_client_id.clone());
     }
-    if !sync_client_ids.is_empty() {
-        let _sync_jobs = push_runtime_config_for_clients(
+    let sync = if !sync_client_ids.is_empty() {
+        dispatch_runtime_config_for_clients(
             &state,
             &operator,
             sync_client_ids,
             "tunnel_plan_updated",
         )
-        .await?;
-    }
-    Ok(Json(view))
+        .await
+    } else {
+        Vec::new()
+    };
+    let plan = state.repo.get_tunnel_plan(view.id).await?.unwrap_or(view);
+    Ok(Json(TunnelPlanMutationResponse { plan, sync }))
 }
 
 pub(crate) async fn allocate_tunnel_endpoints(
@@ -252,7 +265,7 @@ pub(crate) async fn enable_tunnel_plan(
     headers: HeaderMap,
     Path(plan_id): Path<Uuid>,
     Json(request): Json<TunnelPlanMutationRequest>,
-) -> Result<Json<TunnelPlanView>, ApiError> {
+) -> Result<Json<TunnelPlanMutationResponse>, ApiError> {
     mutate_tunnel_plan_enabled(state, headers, plan_id, request, true).await
 }
 
@@ -261,7 +274,7 @@ pub(crate) async fn disable_tunnel_plan(
     headers: HeaderMap,
     Path(plan_id): Path<Uuid>,
     Json(request): Json<TunnelPlanMutationRequest>,
-) -> Result<Json<TunnelPlanView>, ApiError> {
+) -> Result<Json<TunnelPlanMutationResponse>, ApiError> {
     mutate_tunnel_plan_enabled(state, headers, plan_id, request, false).await
 }
 
@@ -270,7 +283,7 @@ pub(crate) async fn delete_tunnel_plan(
     headers: HeaderMap,
     Path(plan_id): Path<Uuid>,
     Json(request): Json<TunnelPlanMutationRequest>,
-) -> Result<Json<TunnelPlanView>, ApiError> {
+) -> Result<Json<TunnelPlanMutationResponse>, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "network:write")
         .await?;
@@ -286,22 +299,20 @@ pub(crate) async fn delete_tunnel_plan(
     if existing.enabled {
         return Err(ApiError::conflict("tunnel_plan_disable_before_delete"));
     }
-    let _sync_jobs = push_runtime_config_for_clients(
-        &state,
-        &operator,
-        vec![
-            existing.left_client_id.clone(),
-            existing.right_client_id.clone(),
-        ],
-        "tunnel_plan_delete_reconcile",
-    )
-    .await?;
+    if !existing.left_runtime_config.cleanup_confirmed
+        || !existing.right_runtime_config.cleanup_confirmed
+    {
+        return Err(ApiError::conflict("tunnel_plan_cleanup_not_confirmed"));
+    }
     let deleted = state
         .repo
         .delete_tunnel_plan(plan_id, request.expected_revision, &operator)
         .await
         .map_err(tunnel_plan_repository_error)?;
-    Ok(Json(deleted))
+    Ok(Json(TunnelPlanMutationResponse {
+        plan: deleted,
+        sync: Vec::new(),
+    }))
 }
 
 pub(crate) async fn update_tunnel_connection_assessment(
@@ -416,7 +427,7 @@ pub(crate) async fn update_tunnel_plan_ospf_cost(
         )
         .await
         .map_err(tunnel_plan_mutation_error)?;
-    let jobs = dispatch_routing_jobs(
+    let (jobs, dispatch) = dispatch_routing_jobs(
         &state,
         &operator,
         &plan,
@@ -430,8 +441,13 @@ pub(crate) async fn update_tunnel_plan_ospf_cost(
             request.desired_ospf_cost,
         )),
     )
-    .await?;
-    Ok(Json(TunnelPlanOspfJobsResponse { plan, jobs }))
+    .await;
+    let plan = state.repo.get_tunnel_plan(plan.id).await?.unwrap_or(plan);
+    Ok(Json(TunnelPlanOspfJobsResponse {
+        plan,
+        jobs,
+        dispatch,
+    }))
 }
 
 pub(crate) async fn refresh_tunnel_plan_ospf_status(
@@ -468,7 +484,7 @@ pub(crate) async fn refresh_tunnel_plan_ospf_status(
         )
         .await
         .map_err(tunnel_plan_mutation_error)?;
-    let jobs = dispatch_routing_jobs(
+    let (jobs, dispatch) = dispatch_routing_jobs(
         &state,
         &operator,
         &plan,
@@ -478,8 +494,13 @@ pub(crate) async fn refresh_tunnel_plan_ospf_status(
         right_adapter,
         None,
     )
-    .await?;
-    Ok(Json(TunnelPlanOspfJobsResponse { plan, jobs }))
+    .await;
+    let plan = state.repo.get_tunnel_plan(plan.id).await?.unwrap_or(plan);
+    Ok(Json(TunnelPlanOspfJobsResponse {
+        plan,
+        jobs,
+        dispatch,
+    }))
 }
 
 async fn mutate_tunnel_plan_enabled(
@@ -488,7 +509,7 @@ async fn mutate_tunnel_plan_enabled(
     plan_id: Uuid,
     request: TunnelPlanMutationRequest,
     enabled: bool,
-) -> Result<Json<TunnelPlanView>, ApiError> {
+) -> Result<Json<TunnelPlanMutationResponse>, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "network:write")
         .await?;
@@ -501,32 +522,40 @@ async fn mutate_tunnel_plan_enabled(
     if existing.revision != request.expected_revision {
         return Err(ApiError::conflict("tunnel_plan_snapshot_stale"));
     }
-    if existing.enabled == enabled {
-        return Ok(Json(existing));
+    if existing.enabled == enabled && enabled {
+        return Ok(Json(TunnelPlanMutationResponse {
+            plan: existing,
+            sync: Vec::new(),
+        }));
     }
     if enabled {
         require_tunnel_endpoint_agents(&state, &existing.left_client_id, &existing.right_client_id)
             .await?;
         validate_tunnel_plan_adapter_bindings(&state, &existing.plan).await?;
     }
-    let view = state
-        .repo
-        .set_tunnel_plan_enabled(plan_id, request.expected_revision, enabled, &operator)
-        .await
-        .map_err(tunnel_plan_repository_error)?;
+    let view = if existing.enabled == enabled {
+        existing
+    } else {
+        state
+            .repo
+            .set_tunnel_plan_enabled(plan_id, request.expected_revision, enabled, &operator)
+            .await
+            .map_err(tunnel_plan_repository_error)?
+    };
     let reason = if enabled {
         "tunnel_plan_enabled"
     } else {
         "tunnel_plan_disabled"
     };
-    let _sync_jobs = push_runtime_config_for_clients(
+    let sync = dispatch_runtime_config_for_clients(
         &state,
         &operator,
         vec![view.left_client_id.clone(), view.right_client_id.clone()],
         reason,
     )
-    .await?;
-    Ok(Json(view))
+    .await;
+    let plan = state.repo.get_tunnel_plan(view.id).await?.unwrap_or(view);
+    Ok(Json(TunnelPlanMutationResponse { plan, sync }))
 }
 
 fn require_tunnel_plan_confirmed(confirmed: bool) -> Result<(), ApiError> {
@@ -898,7 +927,7 @@ pub(crate) async fn dispatch_routing_jobs(
     left_adapter: RoutingCostAdapterCommands,
     right_adapter: RoutingCostAdapterCommands,
     apply: Option<(Option<u16>, Option<u16>, u16)>,
-) -> Result<Vec<CreateJobResponse>, ApiError> {
+) -> (Vec<CreateJobResponse>, Vec<TunnelPlanOspfDispatchView>) {
     let specs = [
         (
             TunnelEndpointSide::Left,
@@ -916,6 +945,7 @@ pub(crate) async fn dispatch_routing_jobs(
         ),
     ];
     let mut jobs = Vec::with_capacity(specs.len());
+    let mut dispatch = Vec::with_capacity(specs.len());
     for (side, client_id, job_id, adapter, endpoint_apply) in specs {
         let operation = if let Some((expected_current_cost, desired_cost)) = endpoint_apply {
             JobCommand::NetworkRoutingApply {
@@ -947,7 +977,7 @@ pub(crate) async fn dispatch_routing_jobs(
         let request = CreateJobRequest {
             job_id: Some(job_id),
             selector_expression: vpsman_common::id_selector_expression(&client_id),
-            target_client_ids: vec![client_id],
+            target_client_ids: vec![client_id.clone()],
             destructive: false,
             confirmed: endpoint_apply.is_some(),
             command: vpsman_common::job_command_type_label(&operation).to_string(),
@@ -960,27 +990,47 @@ pub(crate) async fn dispatch_routing_jobs(
         };
         match create_job_from_internal_operator_mutation(state, operator, request).await {
             Ok((_status, Json(response))) => {
-                if response.target_counts.queued == 0
-                    && response.target_counts.dispatching == 0
-                    && response.target_counts.running == 0
-                {
-                    let _ = state
+                let queued = response.target_counts.queued > 0
+                    || response.target_counts.dispatching > 0
+                    || response.target_counts.running > 0;
+                if !queued {
+                    if let Err(error) = state
                         .repo
                         .record_tunnel_plan_ospf_job_result(plan.id, side, job_id, None, false)
-                        .await;
+                        .await
+                    {
+                        warn!(?error, plan_id = %plan.id, %job_id, ?side, "failed to persist unqueued OSPF endpoint state");
+                    }
                 }
-                jobs.push(response)
+                dispatch.push(TunnelPlanOspfDispatchView {
+                    endpoint_side: side,
+                    client_id,
+                    job_id,
+                    status: if queued { "queued" } else { "not_queued" }.to_string(),
+                    error: (!queued)
+                        .then(|| format!("job was not queued (status={})", response.status)),
+                });
+                jobs.push(response);
             }
             Err(error) => {
-                let _ = state
+                if let Err(record_error) = state
                     .repo
                     .record_tunnel_plan_ospf_job_result(plan.id, side, job_id, None, false)
-                    .await;
-                return Err(error);
+                    .await
+                {
+                    warn!(?record_error, plan_id = %plan.id, %job_id, ?side, "failed to persist OSPF queue failure state");
+                }
+                dispatch.push(TunnelPlanOspfDispatchView {
+                    endpoint_side: side,
+                    client_id,
+                    job_id,
+                    status: "queue_failed".to_string(),
+                    error: Some(operator_dispatch_error(&error, "Routing adapter job")),
+                });
             }
         }
     }
-    Ok(jobs)
+    (jobs, dispatch)
 }
 
 fn normalize_optional_string(value: Option<String>) -> Option<String> {

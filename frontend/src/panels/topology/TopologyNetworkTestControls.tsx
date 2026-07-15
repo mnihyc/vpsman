@@ -631,7 +631,7 @@ export function TopologyNetworkTestControls({
                   ))}
                 </select>
               </label>
-              <label title="Maximum wall-clock job runtime sent to the backend for each reviewed network job.">
+              <label title="Maximum wall-clock runtime included in each reviewed network job.">
                 <span>Max timeout</span>
                 <input
                   aria-label="Network test max timeout seconds"

@@ -75,6 +75,7 @@ async fn fleet_alerts_derive_actionable_current_status() {
             can_attempt_privileged_ops: true,
             can_manage_runtime_tunnels: false,
             can_apply_process_limits: false,
+            port_forwarding: Default::default(),
             unprivileged_hint: Some("agent is running without root".to_string()),
         },
     };

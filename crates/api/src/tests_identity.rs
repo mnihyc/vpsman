@@ -585,6 +585,7 @@ async fn memory_agent_inventory_preserves_unprivileged_capability_snapshot() {
                     can_attempt_privileged_ops: true,
                     can_manage_runtime_tunnels: false,
                     can_apply_process_limits: false,
+                    port_forwarding: Default::default(),
                     unprivileged_hint: Some(
                         "root-only operations require forced best-effort or a root agent"
                             .to_string(),
@@ -658,8 +659,14 @@ async fn deleting_tunnel_endpoint_queues_empty_desired_state_for_surviving_peer(
     .unwrap();
 
     assert!(response.deleted);
-    assert_eq!(response.runtime_sync_job_ids.len(), 1);
-    assert!(response.runtime_sync_failed_client_ids.is_empty());
+    assert_eq!(response.runtime_sync.len(), 1);
+    assert_eq!(response.runtime_sync[0].client_id, "client-b");
+    assert_eq!(response.runtime_sync[0].status, "queued");
+    assert!(response.runtime_sync[0].error.is_none());
+    assert!(response
+        .post_commit
+        .iter()
+        .all(|outcome| outcome.status == "completed"));
     assert!(state.repo.list_tunnel_plans().await.unwrap().is_empty());
     let pending = state
         .repo
@@ -669,7 +676,10 @@ async fn deleting_tunnel_endpoint_queues_empty_desired_state_for_surviving_peer(
         .expect("surviving tunnel peer must receive an explicit cleanup snapshot");
     assert_eq!(
         pending.pending_job_id,
-        response.runtime_sync_job_ids.first().copied()
+        response
+            .runtime_sync
+            .first()
+            .and_then(|outcome| outcome.job_id)
     );
 }
 

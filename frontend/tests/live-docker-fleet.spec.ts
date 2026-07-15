@@ -566,7 +566,7 @@ async function expectLiveSystemDashboardTelemetry(
     page,
     projectName,
     "page-system-capacity",
-    "System / Capacity page with live database, dispatch, gateway, and storage capacity telemetry.",
+    "System / Capacity page with live database, dispatch, and gateway telemetry.",
   );
 }
 

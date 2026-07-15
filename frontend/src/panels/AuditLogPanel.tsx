@@ -363,9 +363,9 @@ export function AuditLogPanel({
   const currentRecordDetail =
     selectedDomainLabel === "audit_logs"
       ? audits.length === 0
-        ? "Audit API returned no rows; privileged activity is not evidenced in the table."
-        : "Visible audit rows only; retention total is not exposed separately."
-      : "Retention API does not expose current rows for this history domain.";
+        ? "No audit rows are loaded; privileged activity is not evidenced in the table."
+        : "Visible audit rows only; the full retained total is unavailable."
+      : "Current row count is unavailable for this history domain.";
   const cleanupReviewLabel = pruneSnapshot
     ? `${pruneSnapshot.reviewedRows} matched rows / ${pruneSnapshot.objectCount} objects`
     : historyPruneResult
@@ -385,7 +385,7 @@ export function AuditLogPanel({
   const complianceWarning =
     selectedDomainLabel === "audit_logs" && audits.length === 0
       ? "No audit events are visible for privileged control-plane workflows."
-      : "Record totals and storage size need backend evidence for compliance-grade retention.";
+      : "Compliance-grade record totals and storage size are unavailable.";
   const auditFeedbackMessage =
     error ?? (loading ? "Refreshing audit records" : null);
 
@@ -929,17 +929,17 @@ export function AuditLogPanel({
               </span>
               <span>
                 <strong>Storage size</strong>
-                <small>Not reported by the retention API.</small>
+                <small>Unavailable.</small>
               </span>
               <span>
                 <strong>Policy updated</strong>
                 <small>{policyUpdatedLabel}</small>
               </span>
               <span>
-                <strong>API export window</strong>
+                <strong>Export scope</strong>
                 <small>
-                  Domain and limit are supported; custom date-window export is
-                  not exposed.
+                  Domain and row limit are supported; custom date windows are
+                  unavailable.
                 </small>
               </span>
               <span>

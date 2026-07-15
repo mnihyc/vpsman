@@ -150,6 +150,447 @@
   font-weight: 700;
 }
 
+.portForwardSummary,
+.portForwardRegistry,
+.portForwardDetails,
+.portForwardEditor {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.portForwardActionFeedback {
+  margin: 0 18px 14px;
+}
+
+.portForwardRegistryFeedback,
+.portForwardDetailFeedback {
+  margin: 10px 18px;
+}
+
+.portForwardSummary .headerActionStack {
+  flex-direction: row;
+  align-items: center;
+  min-width: 0;
+}
+
+.portForwardToolbar {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.6fr) repeat(5, minmax(112px, 0.8fr));
+  gap: 8px;
+  align-items: center;
+  padding: 8px 18px;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-subtle);
+}
+
+.portForwardToolbar .compactSearch,
+.portForwardToolbar .compactFilter,
+.portForwardToolbar select {
+  width: 100%;
+  min-width: 0;
+}
+
+.portForwardToolbar select {
+  height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0 28px 0 9px;
+}
+
+.portForwardToolbar select:focus-visible {
+  border-color: var(--primary);
+  outline: 2px solid var(--primary-soft);
+  outline-offset: 1px;
+}
+
+.portForwardBulkBar {
+  width: 100%;
+  min-height: 44px;
+  margin: 0;
+  padding: 5px 18px;
+  border-bottom: 1px solid var(--primary-border);
+  background: var(--primary-selected);
+}
+
+.portForwardTableWrap {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+.portForwardTable {
+  width: 100%;
+  min-width: 1120px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.portForwardTable th,
+.portForwardTable td {
+  min-width: 0;
+  padding: 8px 11px;
+  border-bottom: 1px solid var(--border-subtle);
+  vertical-align: middle;
+  text-align: left;
+}
+
+.portForwardTable th {
+  height: 40px;
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.portForwardTable tbody tr {
+  height: 58px;
+  cursor: pointer;
+}
+
+.portForwardTable tbody tr:hover {
+  background: var(--surface-subtle);
+}
+
+.portForwardTable tbody tr.expanded {
+  background: var(--primary-selected);
+}
+
+.portForwardTable tbody tr:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+.portForwardTable td:nth-child(2) {
+  display: grid;
+  align-content: center;
+  gap: 3px;
+  height: 58px;
+}
+
+.portForwardTable td:nth-child(2) > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.portForwardTable .truncateValue {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.portForwardTable td:nth-child(4) {
+  white-space: nowrap;
+}
+
+.portForwardTable .selectionCell {
+  width: 42px;
+  padding-right: 4px;
+  text-align: center;
+}
+
+.portForwardTable th:nth-child(2) { width: 16%; }
+.portForwardTable th:nth-child(3) { width: 27%; }
+.portForwardTable th:nth-child(4) { width: 12%; }
+.portForwardTable th:nth-child(5) { width: 10%; }
+.portForwardTable th:nth-child(6) { width: 10%; }
+.portForwardTable th:nth-child(7) { width: 9%; }
+.portForwardTable th:last-child { width: 208px; }
+
+.portForwardTable thead th:last-child,
+.portForwardTable tbody td:last-child {
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  border-left: 1px solid var(--border-subtle);
+  background: inherit;
+  box-shadow: -8px 0 10px -10px rgba(60, 64, 67, 0.4);
+}
+
+.portForwardTable thead th:last-child {
+  z-index: 3;
+  background: var(--surface-subtle);
+}
+
+.portForwardTable .rowActions {
+  white-space: nowrap;
+}
+
+.portForwardTable .rowActions .iconButton {
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+}
+
+.portForwardTable .rowActions .iconButton + .iconButton {
+  margin-left: 3px;
+}
+
+.portForwardMobileDetailsButton,
+.portForwardMobileStatus,
+.portForwardDetailActions {
+  display: none;
+}
+
+.mappingValue {
+  display: block;
+}
+
+.portForwardStatus {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-height: 24px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 4px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.portForwardStatus.status-enabled,
+.portForwardStatus.status-applied {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+  color: var(--success-text);
+}
+
+.portForwardStatus.status-removal_pending,
+.portForwardStatus.status-pending,
+.portForwardStatus.status-applied_warning,
+.portForwardStatus.status-drifted,
+.portForwardStatus.status-unknown {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+  color: var(--warning-text);
+}
+
+.portForwardStatus.status-failed,
+.portForwardStatus.status-unsupported {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+  color: var(--danger-text);
+}
+
+.portForwardDetailGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.portForwardDetailGrid > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 13px 18px;
+  border-right: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.portForwardDetailGrid > div:nth-child(3n) {
+  border-right: 0;
+}
+
+.portForwardDetailGrid dt {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.portForwardDetailGrid dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.portForwardDetailGrid > .hasAttention dd {
+  color: var(--warning-text);
+  font-weight: 700;
+}
+
+.portForwardRemovalNotice,
+.portForwardCapabilityNotice,
+.portMappingPreview {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  border: 1px solid var(--warning-border);
+  background: var(--warning-soft);
+  color: var(--warning-text);
+  padding: 9px 12px;
+}
+
+.portForwardRemovalNotice {
+  flex-wrap: wrap;
+  margin: 14px 18px;
+  border-radius: 6px;
+}
+
+.portForwardRemovalNotice > span {
+  flex: 1 1 320px;
+}
+
+.forgetReasonField {
+  flex: 1 1 220px;
+  max-width: 360px;
+}
+
+.forgetReasonField input {
+  width: 100%;
+}
+
+.portForwardForm {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 16px;
+  padding: 16px 18px 18px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.portForwardForm > label,
+.targetAddressField label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.portForwardForm input:not([type="checkbox"]):not([type="radio"]),
+.portForwardForm select {
+  width: 100%;
+  min-width: 0;
+}
+
+.portForwardForm input[type="checkbox"],
+.portForwardForm input[type="radio"] {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+}
+
+.portForwardForm .segmentedControl {
+  display: flex;
+  width: 100%;
+  flex-wrap: nowrap;
+}
+
+.portForwardForm small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.compactFieldset {
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.compactFieldset > legend,
+.dnsCandidateList > legend {
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.targetAddressField {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.targetAddressField > label {
+  min-width: 0;
+}
+
+.dnsCandidateList {
+  grid-column: 1 / -1;
+  display: grid;
+  min-width: 0;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+}
+
+.dnsCandidateList > label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 7px 5px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.dnsCandidateList > label:last-child {
+  border-bottom: 0;
+}
+
+.dnsCandidateList > label > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.portMappingPreview,
+.portForwardCapabilityNotice,
+.portForwardForm > .localActionFeedback,
+.portForwardForm > .formActions {
+  grid-column: 1 / -1;
+}
+
+.portMappingPreview {
+  border-radius: 6px;
+}
+
+.portMappingPreview.valid {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+  color: var(--success-text);
+}
+
+.portMappingPreview.invalid {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+  color: var(--danger-text);
+}
+
+.portMappingPreview > span,
+.portForwardCapabilityNotice > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.portForwardEnabled {
+  align-self: end;
+  width: fit-content;
+  min-height: 34px;
+}
+
 .tunnelPlanTableWrap,
 .topologyOspfTableWrap {
   max-width: 100%;
@@ -734,6 +1175,14 @@
   .topologyOspfFacts {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .portForwardToolbar {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .portForwardToolbar .compactSearch {
+    grid-column: span 2;
+  }
 }
 
 @media (min-width: 721px) and (max-width: 1360px) {
@@ -813,6 +1262,27 @@
     border-bottom: 0;
   }
 
+  .portForwardSummary .networkMetricStrip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .portForwardSummary .networkMetricStrip > span {
+    padding: 10px 14px;
+  }
+
+  .portForwardSummary .networkMetricStrip > span:nth-child(odd) {
+    border-right: 1px solid var(--border-subtle);
+  }
+
+  .portForwardSummary .networkMetricStrip > span:nth-last-child(-n + 2) {
+    border-bottom: 0;
+  }
+
+  .portForwardSummary .headerActionStack {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
   .runtimeManagerSegments {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -849,6 +1319,118 @@
   .tunnelConnectionAssessment > button {
     grid-column: auto;
     width: 100%;
+  }
+
+  .portForwardToolbar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding-inline: 12px;
+  }
+
+  .portForwardToolbar .compactSearch {
+    grid-column: 1 / -1;
+  }
+
+  .portForwardTable {
+    min-width: 100%;
+    table-layout: auto;
+  }
+
+  .portForwardTable tr > :nth-child(n + 3):nth-child(-n + 7) {
+    display: none;
+  }
+
+  .portForwardTable th:nth-child(2) {
+    width: auto;
+  }
+
+  .portForwardTable td:nth-child(2) {
+    display: table-cell;
+    height: auto;
+  }
+
+  .portForwardTable th:last-child {
+    width: 52px;
+  }
+
+  .portForwardTable thead th:last-child,
+  .portForwardTable tbody td:last-child {
+    position: static;
+    border-left: 0;
+    box-shadow: none;
+  }
+
+  .portForwardTable .portForwardDesktopActions {
+    display: none;
+  }
+
+  .portForwardTable .portForwardMobileDetailsButton {
+    display: inline-flex;
+  }
+
+  .portForwardTable .portForwardMobileStatus {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 3px;
+  }
+
+  .portForwardMobileStatus .portForwardStatus {
+    min-height: 20px;
+    padding: 3px 6px;
+    font-size: 10px;
+  }
+
+  .portForwardTable .rowActions {
+    width: 52px;
+    padding-inline: 5px;
+    text-align: center;
+  }
+
+  .portForwardDetailActions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    padding: 12px;
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  .portForwardDetailActions > button {
+    width: 100%;
+  }
+
+  .portForwardDetailActions > .dangerAction:last-child {
+    grid-column: 1 / -1;
+  }
+
+  .portForwardDetailGrid,
+  .portForwardForm {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .portForwardDetailGrid > div,
+  .portForwardDetailGrid > div:nth-child(3n) {
+    border-right: 0;
+  }
+
+  .targetAddressField,
+  .portForwardToolbar {
+    align-items: stretch;
+  }
+
+  .targetAddressField {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .targetAddressField > button {
+    width: 100%;
+  }
+
+  .portForwardForm > *,
+  .portMappingPreview,
+  .portForwardCapabilityNotice,
+  .portForwardForm > .formActions {
+    grid-column: 1;
   }
 }
 

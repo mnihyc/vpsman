@@ -631,10 +631,10 @@ test(
       ".fleetInstancesPanel > .actionFeedbackWarning",
     );
     await expect(warning).toContainText(
-      "tunnel cleanup failed to queue for 1 surviving peer: agent-fra-02",
+      "Tunnel cleanup for agent-fra-02",
     );
     await expect(warning).toContainText(
-      "Review runtime config state before trusting those interfaces.",
+      "Desired state remains saved; inspect API logs and retry",
     );
   },
 );
@@ -1721,7 +1721,7 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
   await expect(systemCapacity).toContainText("Suite Config fields");
   await expect(
     page.getByLabel("dispatch capacity health factors"),
-  ).toContainText("queue is growing");
+  ).toContainText(/queue is growing/i);
   await expect(
     page.getByRole("heading", { name: "Dispatch capacity", exact: true }),
   ).toBeVisible();
@@ -1732,9 +1732,6 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
     page.getByRole("button", { name: /Dispatcher in-flight/ }),
   ).toBeVisible();
   await expect(page.getByText("capacity.dispatcher_in_flight")).toBeVisible();
-  await expect(
-    page.getByLabel("System capacity unavailable telemetry"),
-  ).toContainText("Artifact bytes");
 
   await openConsoleSubpage(page, "System", "Suite config");
   await expect(
@@ -1914,7 +1911,7 @@ test("surfaces operator users under Access and session evidence under Audit", as
   const governance = page.getByLabel("Operator governance overview");
   await expect(governance).toContainText("MFA policy");
   await expect(governance).toContainText("1 admin needs MFA");
-  await expect(governance).toContainText("recommended instead of enforced");
+  await expect(governance).toContainText("recommended rather than enforced");
   await expect(governance).toContainText("Refresh TTL policy");
   await expect(governance).toContainText("1 admin over target");
   await expect(governance).toContainText("Role model");
@@ -1956,7 +1953,7 @@ test("surfaces operator users under Access and session evidence under Audit", as
   await expect(adminEvidence).toContainText("Policy recommends MFA");
   await expect(adminEvidence).toContainText("365d - over admin target");
   await expect(adminEvidence).toContainText(
-    "not exposed by the current operator API",
+    "unavailable for this operator",
   );
   const revokeAdminSessions = adminEvidence.getByRole("button", {
     name: "Revoke sessions",
@@ -2355,9 +2352,11 @@ test("manages template assignments from automation source templates", async ({
   ).toHaveCount(0);
   await expect(
     templatePanel.locator(
-      ".actionDrawer .sourceTemplateActionFeedback.actionFeedbackSuccess",
+      ".actionDrawer .sourceTemplateActionFeedback.actionFeedbackProgress",
     ),
-  ).toContainText("Applied template to 2 VPSs");
+  ).toContainText(
+    "Template assignment saved for 2 VPSs; runtime apply queued for 2 endpoints",
+  );
   await expect(
     templatePanel.getByLabel("shared:vnstat-json", { exact: true }),
   ).toBeInViewport();
@@ -2962,6 +2961,7 @@ test("registers VPS identities and revokes current keys from the access panel", 
   await activate(
     identityConfirmation.getByRole("button", { name: "Register VPS" }),
   );
+  await expect(inspector).toContainText("VPS identity registered.");
   await expect(inspector.getByText("edge-tokyo-04")).toBeVisible();
   const identityRequest = await page.evaluate(() => {
     const requests = (
@@ -3088,6 +3088,7 @@ test("registers VPS identities and revokes current keys from the access panel", 
       .getByLabel("Confirm current key revocation")
       .getByRole("button", { name: "Revoke key" }),
   );
+  await expect(inspector).toContainText("VPS key revoked.");
   const revokeRequest = await page.evaluate(() => {
     const requests = (
       window as unknown as {
@@ -3264,6 +3265,34 @@ test("shows access posture, MFA risk, identity lifecycle, and gateway readiness"
   await expect(
     page.getByRole("heading", { level: 2, name: "Suite config" }),
   ).toBeVisible();
+});
+
+test("keeps clipboard failures visible beside the copied identity value", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "identity hash copy behavior is shared with the mobile registry",
+  );
+  await page.goto("/");
+  await openConsoleSubpage(page, "Access", "VPS identities");
+  await page.evaluate(() => {
+    Object.defineProperty(navigator.clipboard, "writeText", {
+      configurable: true,
+      value: async () => {
+        throw new Error("Clipboard permission denied");
+      },
+    });
+  });
+
+  const copy = page
+    .getByRole("button", { name: /Copy current key fingerprint/ })
+    .first();
+  await copy.click();
+
+  await expect(copy).toContainText("Copy failed");
+  await expect(copy).toHaveAttribute("title", /Clipboard permission denied/);
+  await expect(copy).toHaveAttribute("title", /Allow clipboard access/);
 });
 
 test("keeps access action feedback out of headings and durable labels", async ({
@@ -4529,7 +4558,7 @@ test("dispatches executable restores with agent-local archive metadata only", as
   await expect(posture).toContainText("Restore test");
   await expect(posture).toContainText("Not tested");
   await expect(posture).toContainText("Retention/security");
-  await expect(posture).toContainText("API gap");
+  await expect(posture).toContainText("No retention");
 
   await openConsoleSubpage(page, "Backups", "Restore");
   await unlockPrivilegeFor(page, "Backups", "Restore");

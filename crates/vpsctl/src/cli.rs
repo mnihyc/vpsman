@@ -25,6 +25,10 @@ use crate::commands_network::{
     TunnelPlanCommand, TunnelPlanExportCommand, TunnelPlanMutationCommand, TunnelProbeCommand,
     TunnelSpeedTestCommand, TunnelStatusCommand,
 };
+use crate::commands_port_forwarding::{
+    PortForwardBulkCommand, PortForwardCreateCommand, PortForwardMutationCommand,
+    PortForwardResolveCommand, PortForwardUpdateCommand,
+};
 use crate::commands_terminal::{
     TerminalCloseCommand, TerminalInputCommand, TerminalOpenCommand, TerminalPollCommand,
     TerminalResizeCommand,
@@ -1031,6 +1035,16 @@ pub(crate) enum Command {
     },
     BulkResolve(BulkResolveCommand),
     TunnelPlans,
+    PortForwards,
+    PortForwardCreate(PortForwardCreateCommand),
+    PortForwardUpdate(PortForwardUpdateCommand),
+    PortForwardEnable(PortForwardMutationCommand),
+    PortForwardDisable(PortForwardMutationCommand),
+    PortForwardDelete(PortForwardMutationCommand),
+    PortForwardForget(PortForwardMutationCommand),
+    PortForwardReapply(PortForwardMutationCommand),
+    PortForwardResolve(PortForwardResolveCommand),
+    PortForwardBulk(PortForwardBulkCommand),
     TunnelAllocate(TunnelAllocateCommand),
     TunnelPlan(Box<TunnelPlanCommand>),
     TunnelPlanExport(TunnelPlanExportCommand),

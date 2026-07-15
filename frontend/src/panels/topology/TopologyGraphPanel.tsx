@@ -25,6 +25,7 @@ import type {
   TopologyGraphNode,
 } from "../../types";
 import {
+  dispatchFailureReason,
   formatCompactTime,
   formatFullTime,
   formatTime,
@@ -578,11 +579,15 @@ function runtimeConfigApplyStateDetail(
     return "no server state";
   }
   if (state.pending_status === "failed") {
+    const job = state.pending_job_id
+      ? ` Job ${shortId(state.pending_job_id)}.`
+      : "";
     return (
-      state.pending_error ||
-      (state.pending_job_id
-        ? `job ${shortId(state.pending_job_id)}`
-        : "manual review")
+      dispatchFailureReason(
+        state.pending_error,
+        state.pending_status,
+        "Runtime config apply",
+      ) + job
     );
   }
   if (state.pending_status === "queued") {

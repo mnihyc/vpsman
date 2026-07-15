@@ -1,5 +1,5 @@
 use anyhow::Result;
-use sqlx::Row;
+use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
 use vpsman_common::AgentRuntimeConfig;
 
@@ -8,15 +8,119 @@ use crate::{
         AuthContext, RuntimeConfigApplyStateRecord, RuntimeConfigApplyStateView,
         RuntimeConfigOverrideView,
     },
-    repository::Repository,
+    repository::{MemoryState, Repository},
     unix_now,
 };
 
+pub(crate) async fn queue_runtime_config_apply_memory_state(
+    memory: &MemoryState,
+    client_id: &str,
+    version: u64,
+    content_hash: &str,
+    config: &AgentRuntimeConfig,
+    job_id: Uuid,
+    reason: &str,
+) {
+    let now = unix_now().to_string();
+    let reason = reason.chars().take(4096).collect::<String>();
+    let mut states = memory.runtime_config_apply_states.write().await;
+    if let Some(state) = states.iter_mut().find(|state| state.client_id == client_id) {
+        let newest_recorded_version = [state.applied_version, state.pending_version]
+            .into_iter()
+            .flatten()
+            .max()
+            .unwrap_or(0);
+        if version <= newest_recorded_version {
+            return;
+        }
+        state.pending_version = Some(version);
+        state.pending_content_hash = Some(content_hash.to_string());
+        state.pending_config = Some(config.clone());
+        state.pending_job_id = Some(job_id);
+        state.pending_reason = Some(reason);
+        state.pending_status = Some("queued".to_string());
+        state.pending_error = None;
+        state.pending_updated_at = Some(now.clone());
+        state.updated_at = now;
+    } else {
+        states.push(RuntimeConfigApplyStateRecord {
+            client_id: client_id.to_string(),
+            applied_version: None,
+            applied_content_hash: None,
+            applied_config: None,
+            applied_job_id: None,
+            applied_at: None,
+            pending_version: Some(version),
+            pending_content_hash: Some(content_hash.to_string()),
+            pending_config: Some(config.clone()),
+            pending_job_id: Some(job_id),
+            pending_reason: Some(reason),
+            pending_status: Some("queued".to_string()),
+            pending_error: None,
+            pending_updated_at: Some(now.clone()),
+            updated_at: now,
+        });
+    }
+}
+
+pub(crate) async fn queue_runtime_config_apply_postgres_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+    version: u64,
+    content_hash: &str,
+    config: &AgentRuntimeConfig,
+    job_id: Uuid,
+    reason: &str,
+) -> Result<()> {
+    let reason = reason.chars().take(4096).collect::<String>();
+    sqlx::query(
+        r#"
+        INSERT INTO client_runtime_config_apply_state (
+            client_id,
+            pending_version,
+            pending_content_hash,
+            pending_config,
+            pending_job_id,
+            pending_reason,
+            pending_status,
+            pending_error,
+            pending_updated_at,
+            updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, 'queued', NULL, now(), now())
+        ON CONFLICT (client_id)
+        DO UPDATE SET
+            pending_version = EXCLUDED.pending_version,
+            pending_content_hash = EXCLUDED.pending_content_hash,
+            pending_config = EXCLUDED.pending_config,
+            pending_job_id = EXCLUDED.pending_job_id,
+            pending_reason = EXCLUDED.pending_reason,
+            pending_status = 'queued',
+            pending_error = NULL,
+            pending_updated_at = now(),
+            updated_at = now()
+        WHERE EXCLUDED.pending_version > GREATEST(
+            COALESCE(client_runtime_config_apply_state.applied_version, 0),
+            COALESCE(client_runtime_config_apply_state.pending_version, 0)
+        )
+        "#,
+    )
+    .bind(client_id)
+    .bind(version as i64)
+    .bind(content_hash)
+    .bind(sqlx::types::Json(config.clone()))
+    .bind(job_id)
+    .bind(reason)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 impl Repository {
-    pub(crate) async fn list_runtime_config_apply_states(
+    pub(crate) async fn list_runtime_config_apply_records(
         &self,
         client_id: Option<&str>,
-    ) -> Result<Vec<RuntimeConfigApplyStateView>> {
+    ) -> Result<Vec<RuntimeConfigApplyStateRecord>> {
         match self {
             Self::Memory(memory) => {
                 let mut states = memory
@@ -29,7 +133,7 @@ impl Repository {
                             .map(|client_id| state.client_id == client_id)
                             .unwrap_or(true)
                     })
-                    .map(RuntimeConfigApplyStateRecord::view)
+                    .cloned()
                     .collect::<Vec<_>>();
                 states.sort_by(|left, right| left.client_id.cmp(&right.client_id));
                 Ok(states)
@@ -41,10 +145,12 @@ impl Repository {
                         client_id,
                         applied_version,
                         applied_content_hash,
+                        applied_config,
                         applied_job_id,
                         applied_at::text AS applied_at,
                         pending_version,
                         pending_content_hash,
+                        pending_config,
                         pending_job_id,
                         pending_reason,
                         pending_status,
@@ -63,14 +169,20 @@ impl Repository {
                     .map(|row| {
                         let applied_version: Option<i64> = row.try_get("applied_version")?;
                         let pending_version: Option<i64> = row.try_get("pending_version")?;
-                        Ok(RuntimeConfigApplyStateView {
+                        let applied_config: Option<sqlx::types::Json<AgentRuntimeConfig>> =
+                            row.try_get("applied_config")?;
+                        let pending_config: Option<sqlx::types::Json<AgentRuntimeConfig>> =
+                            row.try_get("pending_config")?;
+                        Ok(RuntimeConfigApplyStateRecord {
                             client_id: row.try_get("client_id")?,
                             applied_version: applied_version.map(|value| value as u64),
                             applied_content_hash: row.try_get("applied_content_hash")?,
+                            applied_config: applied_config.map(|config| config.0),
                             applied_job_id: row.try_get("applied_job_id")?,
                             applied_at: row.try_get("applied_at")?,
                             pending_version: pending_version.map(|value| value as u64),
                             pending_content_hash: row.try_get("pending_content_hash")?,
+                            pending_config: pending_config.map(|config| config.0),
                             pending_job_id: row.try_get("pending_job_id")?,
                             pending_reason: row.try_get("pending_reason")?,
                             pending_status: row.try_get("pending_status")?,
@@ -84,6 +196,19 @@ impl Repository {
         }
     }
 
+    pub(crate) async fn list_runtime_config_apply_states(
+        &self,
+        client_id: Option<&str>,
+    ) -> Result<Vec<RuntimeConfigApplyStateView>> {
+        Ok(self
+            .list_runtime_config_apply_records(client_id)
+            .await?
+            .iter()
+            .map(RuntimeConfigApplyStateRecord::view)
+            .collect())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn runtime_config_applied_state_for_client(
         &self,
         client_id: &str,
@@ -140,6 +265,7 @@ impl Repository {
             .filter(|state| state.pending_status.is_some()))
     }
 
+    #[cfg(test)]
     pub(crate) async fn queue_runtime_config_apply(
         &self,
         client_id: &str,
@@ -149,83 +275,38 @@ impl Repository {
         job_id: Uuid,
         reason: &str,
     ) -> Result<()> {
-        let reason = reason.chars().take(4096).collect::<String>();
         match self {
             Self::Memory(memory) => {
-                let now = unix_now().to_string();
-                let mut states = memory.runtime_config_apply_states.write().await;
-                if let Some(state) = states.iter_mut().find(|state| state.client_id == client_id) {
-                    state.pending_version = Some(version);
-                    state.pending_content_hash = Some(content_hash.to_string());
-                    state.pending_config = Some(config.clone());
-                    state.pending_job_id = Some(job_id);
-                    state.pending_reason = Some(reason);
-                    state.pending_status = Some("queued".to_string());
-                    state.pending_error = None;
-                    state.pending_updated_at = Some(now.clone());
-                    state.updated_at = now;
-                } else {
-                    states.push(RuntimeConfigApplyStateRecord {
-                        client_id: client_id.to_string(),
-                        applied_version: None,
-                        applied_content_hash: None,
-                        applied_config: None,
-                        applied_job_id: None,
-                        applied_at: None,
-                        pending_version: Some(version),
-                        pending_content_hash: Some(content_hash.to_string()),
-                        pending_config: Some(config.clone()),
-                        pending_job_id: Some(job_id),
-                        pending_reason: Some(reason),
-                        pending_status: Some("queued".to_string()),
-                        pending_error: None,
-                        pending_updated_at: Some(now.clone()),
-                        updated_at: now,
-                    });
-                }
+                queue_runtime_config_apply_memory_state(
+                    memory,
+                    client_id,
+                    version,
+                    content_hash,
+                    config,
+                    job_id,
+                    reason,
+                )
+                .await;
             }
             Self::Postgres(pool) => {
-                sqlx::query(
-                    r#"
-                    INSERT INTO client_runtime_config_apply_state (
-                        client_id,
-                        pending_version,
-                        pending_content_hash,
-                        pending_config,
-                        pending_job_id,
-                        pending_reason,
-                        pending_status,
-                        pending_error,
-                        pending_updated_at,
-                        updated_at
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6, 'queued', NULL, now(), now())
-                    ON CONFLICT (client_id)
-                    DO UPDATE SET
-                        pending_version = EXCLUDED.pending_version,
-                        pending_content_hash = EXCLUDED.pending_content_hash,
-                        pending_config = EXCLUDED.pending_config,
-                        pending_job_id = EXCLUDED.pending_job_id,
-                        pending_reason = EXCLUDED.pending_reason,
-                        pending_status = 'queued',
-                        pending_error = NULL,
-                        pending_updated_at = now(),
-                        updated_at = now()
-                    "#,
+                let mut tx = pool.begin().await?;
+                queue_runtime_config_apply_postgres_in_tx(
+                    &mut tx,
+                    client_id,
+                    version,
+                    content_hash,
+                    config,
+                    job_id,
+                    reason,
                 )
-                .bind(client_id)
-                .bind(version as i64)
-                .bind(content_hash)
-                .bind(sqlx::types::Json(config.clone()))
-                .bind(job_id)
-                .bind(reason)
-                .execute(pool)
                 .await?;
+                tx.commit().await?;
             }
         }
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) async fn mark_runtime_config_apply_job_create_failed(
         &self,
         client_id: &str,
@@ -234,6 +315,75 @@ impl Repository {
     ) -> Result<()> {
         self.mark_runtime_config_apply_failed_for_job(job_id, client_id, error)
             .await
+    }
+
+    pub(crate) async fn promote_runtime_config_apply_from_agent_hash(
+        &self,
+        client_id: &str,
+        content_hash: &str,
+    ) -> Result<()> {
+        match self {
+            Self::Memory(memory) => {
+                let now = unix_now().to_string();
+                if let Some(state) = memory
+                    .runtime_config_apply_states
+                    .write()
+                    .await
+                    .iter_mut()
+                    .find(|state| {
+                        state.client_id == client_id
+                            && state
+                                .pending_content_hash
+                                .as_deref()
+                                .is_some_and(|hash| hash.eq_ignore_ascii_case(content_hash))
+                    })
+                {
+                    state.applied_version = state.pending_version;
+                    state.applied_content_hash = state.pending_content_hash.clone();
+                    state.applied_config = state.pending_config.clone();
+                    state.applied_job_id = state.pending_job_id;
+                    state.applied_at = Some(now.clone());
+                    state.pending_version = None;
+                    state.pending_content_hash = None;
+                    state.pending_config = None;
+                    state.pending_job_id = None;
+                    state.pending_reason = None;
+                    state.pending_status = None;
+                    state.pending_error = None;
+                    state.pending_updated_at = None;
+                    state.updated_at = now;
+                }
+            }
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+                    UPDATE client_runtime_config_apply_state
+                    SET
+                        applied_version = pending_version,
+                        applied_content_hash = pending_content_hash,
+                        applied_config = pending_config,
+                        applied_job_id = pending_job_id,
+                        applied_at = now(),
+                        pending_version = NULL,
+                        pending_content_hash = NULL,
+                        pending_config = NULL,
+                        pending_job_id = NULL,
+                        pending_reason = NULL,
+                        pending_status = NULL,
+                        pending_error = NULL,
+                        pending_updated_at = NULL,
+                        updated_at = now()
+                    WHERE client_id = $1
+                      AND lower(pending_content_hash) = lower($2)
+                    "#,
+                )
+                .bind(client_id)
+                .bind(content_hash)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) async fn record_runtime_config_apply_terminal_for_target_status(

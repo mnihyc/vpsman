@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use vpsman_common::{AgentRuntimeConfig, PrivilegeAssertion};
 
+use crate::model::RuntimeConfigDispatchView;
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct SourceTemplateView {
     pub(crate) id: Uuid,
@@ -117,6 +119,7 @@ pub(crate) struct UpdateSourceTemplateResponse {
     pub(crate) affected_client_count: i64,
     pub(crate) confirmation_required: bool,
     pub(crate) preview_hash: Option<String>,
+    pub(crate) sync: Vec<RuntimeConfigDispatchView>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -159,6 +162,7 @@ pub(crate) struct AssignSourceTemplateResponse {
     pub(crate) confirmation_required: bool,
     pub(crate) assignments: Vec<SourceTemplateAssignmentView>,
     pub(crate) preview_hash: Option<String>,
+    pub(crate) sync: Vec<RuntimeConfigDispatchView>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -255,6 +259,7 @@ pub(crate) struct RuntimeConfigPatchResponse {
     pub(crate) target_count: usize,
     pub(crate) overrides: Vec<RuntimeConfigOverrideView>,
     pub(crate) sync_job_ids: Vec<Uuid>,
+    pub(crate) sync: Vec<RuntimeConfigDispatchView>,
 }
 
 #[derive(Clone, Debug, Serialize)]

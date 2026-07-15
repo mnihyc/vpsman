@@ -3013,46 +3013,6 @@ button.vpsDetailRecord:hover {
   text-overflow: ellipsis;
 }
 
-.systemCapacityUnavailableBanner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  border-color: var(--warning-border);
-  background: var(--warning-soft);
-  padding: 12px 16px;
-}
-
-.systemCapacityUnavailableBanner > div {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  min-width: 0;
-}
-
-.systemCapacityUnavailableBanner svg {
-  color: var(--warning-text);
-  flex: 0 0 auto;
-}
-
-.systemCapacityUnavailableBanner strong,
-.systemCapacityUnavailableBanner span {
-  display: block;
-  min-width: 0;
-}
-
-.systemCapacityUnavailableBanner strong {
-  color: var(--warning-text);
-  font-size: 13px;
-}
-
-.systemCapacityUnavailableBanner span {
-  margin-top: 2px;
-  color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.35;
-}
-
 .systemOverviewKpis {
   padding: 12px 16px 0;
 }

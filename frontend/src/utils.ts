@@ -1,6 +1,7 @@
 import type {
   ActiveView,
   JsonValue,
+  LifecycleOutcomeRecord,
   OperatorPreferences,
   WsEvent,
 } from "./types";
@@ -30,7 +31,11 @@ export async function runPanelAction(
   try {
     await action();
   } catch (error) {
-    setError(error instanceof Error ? error.message : "Panel action failed");
+    setError(
+      error instanceof Error
+        ? error.message
+        : "The panel action returned no diagnostic detail. No success is assumed; refresh current state and inspect the browser console or API logs before retrying.",
+    );
   } finally {
     setPending(false);
   }
@@ -80,7 +85,7 @@ export function getPageDescription(view: ActiveView): string {
     case "Automation":
       return "Schedules, runbooks, source templates, and agent update workflows";
     case "Network":
-      return "Topology graph, tunnel plans, tests, OSPF, and evidence";
+      return "Topology, tunnels, port forwarding, tests, routing, and evidence";
     case "Config":
       return "Runtime config patches, persistent templates, and guarded per-VPS reads";
     case "Observability":
@@ -100,6 +105,38 @@ export function getPageDescription(view: ActiveView): string {
 
 export function shortId(value: string | null | undefined): string {
   return value ? value.slice(0, 8) : "-";
+}
+
+export function dispatchFailureReason(
+  error: string | null | undefined,
+  status: string,
+  operation: string,
+): string {
+  const detail = error?.trim();
+  if (detail) {
+    return detail;
+  }
+  const readableStatus = status.trim().replace(/_/g, " ") || "not queued";
+  return `${operation} was ${readableStatus}, but the server returned no target-specific reason. Refresh current state, inspect API logs, and retry.`;
+}
+
+export function lifecycleOutcomeFailureReason(
+  outcome: LifecycleOutcomeRecord,
+  committedAction: string,
+): string {
+  const detail = outcome.error?.trim();
+  if (detail) {
+    return detail;
+  }
+  if (outcome.operation === "gateway_session_disconnect") {
+    return `${committedAction} is saved, but the gateway session disconnect did not complete. Retry from Access > Gateway sessions and inspect API/gateway logs.`;
+  }
+  if (outcome.operation === "job_terminal_reconciliation") {
+    return `${committedAction} is saved, but related job terminal events were not fully reconciled. Durable results remain intact; refresh Jobs and inspect API logs.`;
+  }
+  const operation =
+    outcome.operation.trim().replace(/_/g, " ") || "Post-commit operation";
+  return `${committedAction} is saved, but ${operation} did not complete. Refresh the affected state and inspect server logs.`;
 }
 
 export type VpsNameDisplayMode = "name" | "name_id_suffix";

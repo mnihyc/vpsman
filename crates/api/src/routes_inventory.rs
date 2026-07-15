@@ -10,6 +10,7 @@ use serde::Serialize;
 use crate::{
     error::ApiError,
     job_request::{fixed_target_selection, normalized_target_client_ids},
+    lifecycle_outcome::{gateway_disconnect_outcome, terminal_reconciliation_outcome},
     model::{
         AgentView, AssignSourceTemplateRequest, AssignTagRequest, BulkResolveRequest,
         BulkResolveResponse, BulkTagMutationRequest, CloneSourceTemplateRequest,
@@ -29,14 +30,13 @@ use crate::{
     },
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
     repository_template_runtime_config::render_template_runtime_candidate,
-    runtime_config::{push_runtime_config_for_clients, validate_runtime_config_patch_toml},
+    runtime_config::{dispatch_runtime_config_for_clients, validate_runtime_config_patch_toml},
     security::{SCOPE_CONFIG_READ, SCOPE_FLEET_READ},
     selector_expression::parse_selector_expression,
     source_template_builtins::SOURCE_TEMPLATE_DOMAINS,
     state::AppState,
     util::limit_or_default,
 };
-use tracing::warn;
 use vpsman_common::{payload_hash, MAX_RUNTIME_CONFIG_FIELD_BYTES};
 
 const MAX_TEMPLATE_NAME_BYTES: usize = 128;
@@ -109,56 +109,37 @@ pub(crate) async fn delete_agent(
         .delete_agent(&client_id, &request, &operator)
         .await
         .map_err(agent_mutation_error)?;
-    let mut response = deleted.response;
     let tunnel_peer_client_ids =
         peer_client_ids_for_deleted_agent(&client_id, deleted.retired_tunnel_endpoint_pairs);
-    if let Err(error) = state
-        .disconnect_gateway_session_for_lifecycle(&client_id, "vps_deleted")
-        .await
-    {
-        warn!(
-            ?error,
-            client_id, "post-commit gateway disconnect failed after agent delete"
-        );
-    }
-    for peer_client_id in tunnel_peer_client_ids {
-        match push_runtime_config_for_clients(
-            &state,
-            &operator,
-            [peer_client_id.clone()],
-            "agent_deleted_tunnel_peer_cleanup",
-        )
-        .await
-        {
-            Ok(sync_jobs) => response
-                .runtime_sync_job_ids
-                .extend(sync_jobs.into_iter().map(|job| job.job_id)),
-            Err(error) => {
-                warn!(
-                    ?error,
-                    deleted_client_id = client_id,
-                    peer_client_id,
-                    "post-commit tunnel peer cleanup sync failed to queue"
-                );
-                response.runtime_sync_failed_client_ids.push(peer_client_id);
-            }
-        }
-    }
-    response.runtime_sync_job_ids.sort_unstable();
-    response.runtime_sync_job_ids.dedup();
-    response.runtime_sync_failed_client_ids.sort();
-    response.runtime_sync_failed_client_ids.dedup();
+    let gateway_disconnect = gateway_disconnect_outcome(
+        state
+            .disconnect_gateway_session_for_lifecycle(&client_id, "vps_deleted")
+            .await,
+        &client_id,
+        "VPS deletion",
+    );
+    let runtime_sync = dispatch_runtime_config_for_clients(
+        &state,
+        &operator,
+        tunnel_peer_client_ids,
+        "agent_deleted_tunnel_peer_cleanup",
+    )
+    .await;
     state.publish(WsEvent::AgentUpdated {
-        client_id,
+        client_id: client_id.clone(),
         gateway_id: "inventory_delete".to_string(),
     });
-    if let Err(error) = state.process_job_terminal_events(500).await {
-        warn!(
-            ?error,
-            "post-commit terminal event processing failed after agent delete"
-        );
-    }
-    Ok(Json(response))
+    let terminal_reconciliation = terminal_reconciliation_outcome(
+        state.process_job_terminal_events(500).await,
+        "VPS deletion",
+    );
+    Ok(Json(DeleteAgentResponse {
+        client_id: deleted.client_id,
+        deleted: true,
+        deleted_at: deleted.deleted_at,
+        post_commit: vec![gateway_disconnect, terminal_reconciliation],
+        runtime_sync,
+    }))
 }
 
 pub(crate) async fn list_gateway_sessions(
@@ -548,13 +529,13 @@ pub(crate) async fn update_source_template(
             affected.clone()
         };
         if !sync_clients.is_empty() {
-            let _sync_jobs = push_runtime_config_for_clients(
+            response.sync = dispatch_runtime_config_for_clients(
                 &state,
                 &operator,
                 sync_clients,
                 "source_template_updated",
             )
-            .await?;
+            .await;
         }
         return Ok(Json(response));
     }
@@ -717,17 +698,18 @@ pub(crate) async fn create_server_runtime_config_patch_request(
             &operator,
         )
         .await?;
-    let sync_jobs = push_runtime_config_for_clients(
+    let sync = dispatch_runtime_config_for_clients(
         &state,
         &operator,
         request.target_client_ids.clone(),
         &reason,
     )
-    .await?;
+    .await;
     Ok(Json(RuntimeConfigPatchResponse {
         target_count: request.target_client_ids.len(),
         overrides,
-        sync_job_ids: sync_jobs.into_iter().map(|job| job.job_id).collect(),
+        sync_job_ids: sync.iter().filter_map(|outcome| outcome.job_id).collect(),
+        sync,
     }))
 }
 
@@ -795,13 +777,13 @@ pub(crate) async fn assign_source_template(
             .iter()
             .map(|assignment| assignment.client_id.clone())
             .collect::<Vec<_>>();
-        let _sync_jobs = push_runtime_config_for_clients(
+        response.sync = dispatch_runtime_config_for_clients(
             &state,
             &operator,
             affected,
             "source_template_assigned",
         )
-        .await?;
+        .await;
     }
     Ok(Json(response))
 }
@@ -1711,6 +1693,8 @@ fn agent_mutation_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
     if message.contains("agent_not_found") {
         ApiError::not_found("agent_not_found")
+    } else if message.contains("agent_port_forwarding_cleanup_required") {
+        ApiError::conflict("agent_port_forwarding_cleanup_required")
     } else if message.contains("display_name_already_exists")
         || message.contains("clients_visible_display_name_key_idx")
     {

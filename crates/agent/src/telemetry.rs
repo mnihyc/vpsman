@@ -24,6 +24,7 @@ use vpsman_common::{
 
 use crate::child_process::{run_child_with_bounded_output, ChildCleanupPolicy, ChildRunResult};
 use crate::network_runtime::render_runtime_adapter_command;
+use crate::port_forwarding::inspect_port_forwarding;
 use crate::telemetry_custom::{
     apply_custom_metrics_if_configured, custom_metrics_replaces_linux,
     empty_custom_metrics_snapshot,
@@ -62,6 +63,7 @@ fn collect_linux_metrics(config: &AgentConfig) -> Result<AgentMetrics> {
         disks: disk_stats(proc_root).unwrap_or_default(),
         networks,
         tunnels: Vec::new(),
+        port_forwarding: None,
     })
 }
 
@@ -84,6 +86,7 @@ pub(crate) async fn collect_metrics_for_config(
         .tunnels
         .truncate(MAX_TELEMETRY_TUNNELS - reserved_runtime_tunnels);
     collect_runtime_status_telemetry(config, &mut metrics, runtime_state).await;
+    metrics.port_forwarding = Some(inspect_port_forwarding(&config.network.port_forwarding).await);
     metrics.disks.truncate(MAX_TELEMETRY_DISKS);
     metrics.networks.truncate(MAX_TELEMETRY_NETWORKS);
     metrics.tunnels.truncate(MAX_TELEMETRY_TUNNELS);

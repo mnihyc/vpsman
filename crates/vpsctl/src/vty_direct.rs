@@ -56,6 +56,11 @@ pub(crate) fn submit_vty_direct_command(
         "restore-plans" => Ok(Some(http_get(api_url, "/api/v1/restore-plans", token)?)),
         "migration-links" => Ok(Some(http_get(api_url, "/api/v1/migration-links", token)?)),
         "tunnel-plans" => Ok(Some(http_get(api_url, "/api/v1/tunnel-plans", token)?)),
+        "port-forwards" => Ok(Some(http_get(
+            api_url,
+            "/api/v1/port-forward-rules",
+            token,
+        )?)),
         command if command.starts_with("agent-identity-upsert ") => Ok(Some(
             submit_agent_identity_upsert(api_url, token, command, privilege_context)?,
         )),

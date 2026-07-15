@@ -156,6 +156,7 @@ pub(crate) fn empty_custom_metrics_snapshot(observed_unix: u64) -> AgentMetrics 
         disks: Vec::new(),
         networks: Vec::new(),
         tunnels: Vec::new(),
+        port_forwarding: None,
     }
 }
 

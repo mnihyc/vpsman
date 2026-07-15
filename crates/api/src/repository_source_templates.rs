@@ -464,6 +464,7 @@ impl Repository {
         let changed = diff.description_changed || diff.definition_changed;
         if !changed {
             return Ok(UpdateSourceTemplateResponse {
+                sync: Vec::new(),
                 template,
                 affected_client_count: diff.affected_client_count,
                 affected_client_ids: Vec::new(),
@@ -474,6 +475,7 @@ impl Repository {
         }
         if !request.confirmed {
             return Ok(UpdateSourceTemplateResponse {
+                sync: Vec::new(),
                 template,
                 affected_client_count: diff.affected_client_count,
                 affected_client_ids: Vec::new(),
@@ -539,6 +541,7 @@ impl Repository {
         )
         .await?;
         Ok(UpdateSourceTemplateResponse {
+            sync: Vec::new(),
             template: updated,
             affected_client_count: diff.affected_client_count,
             affected_client_ids: Vec::new(),
@@ -739,6 +742,7 @@ impl Repository {
                 .list_source_template_assignments_for_clients(&client_ids, Some(&request.domain))
                 .await?;
             return Ok(AssignSourceTemplateResponse {
+                sync: Vec::new(),
                 template,
                 target_count: targets.len(),
                 confirmation_required: true,
@@ -811,6 +815,7 @@ impl Repository {
         )
         .await?;
         Ok(AssignSourceTemplateResponse {
+            sync: Vec::new(),
             template,
             target_count: client_ids.len(),
             confirmation_required: false,

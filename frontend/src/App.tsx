@@ -241,6 +241,8 @@ function getScopedPageTitle(view: ActiveView, subpage: string): string {
         return "Network graph";
       case "tunnel_plans":
         return "Tunnel plans";
+      case "port_forwards":
+        return "Port forwarding";
       case "tests":
         return "Network tests";
       case "ospf":
@@ -350,7 +352,7 @@ function getScopedPageDescription(view: ActiveView, subpage: string): string {
       case "suite_config":
         return "Suite settings, validation, save review, and reload impact";
       case "capacity":
-        return "Limits, queues, artifact pressure, and worker lag";
+        return "Database pressure, dispatch limits, and gateway queue health";
       case "maintenance":
         return "Cleanup, object-store health, and maintenance jobs";
       case "preferences":
@@ -1539,6 +1541,10 @@ export function App() {
         onInitialPlanWorkflowConsumed={() => setNetworkPlanWorkflowIntent(null)}
         ospfRecommendations={dashboard.ospfRecommendations}
         ospfUpdatePlans={dashboard.ospfUpdatePlans}
+        operator={dashboard.operator}
+        portForwardError={dashboard.portForwardError}
+        portForwardLoading={dashboard.portForwardLoading}
+        portForwardRules={dashboard.portForwardRules}
         runtimeConfigApplyStates={dashboard.runtimeConfigApplyStates}
         onAllocateTunnelEndpoints={dashboard.allocateTunnelEndpoints}
         onCreateJob={dashboard.createJob}
@@ -1561,6 +1567,12 @@ export function App() {
           selectView("Automation", "source_templates");
         }}
         onOpenVpsDetail={releaseRoutes.openVpsDetail}
+        onBulkMutatePortForwardRules={dashboard.bulkMutatePortForwardRules}
+        onCreatePortForwardRule={dashboard.createPortForwardRule}
+        onLoadPortForwardRules={dashboard.loadPortForwardRules}
+        onMutatePortForwardRule={dashboard.mutatePortForwardRule}
+        onResolvePortForwardHostname={dashboard.resolvePortForwardHostname}
+        onUpdatePortForwardRule={dashboard.updatePortForwardRule}
         onSelectSubpage={(subpage) =>
           selectReleaseDestination("Network", subpage)
         }
@@ -2046,7 +2058,7 @@ function jobReleaseDestination(subpage: string): {
 
 function networkReleaseSubpage(subpage: string) {
   if (
-    ["overview", "graph", "tunnel_plans", "tests", "ospf", "evidence"].includes(
+    ["overview", "graph", "tunnel_plans", "port_forwards", "tests", "ospf", "evidence"].includes(
       subpage,
     )
   ) {
@@ -2198,7 +2210,7 @@ function jobSubpage(subpage: string) {
 
 function networkSubpage(subpage: string) {
   if (
-    ["overview", "graph", "tunnel_plans", "tests", "ospf", "evidence"].includes(
+    ["overview", "graph", "tunnel_plans", "port_forwards", "tests", "ospf", "evidence"].includes(
       subpage,
     )
   ) {

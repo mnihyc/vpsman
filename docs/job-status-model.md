@@ -85,8 +85,10 @@ Target statuses are:
   `runtime_config_sync` jobs. A target that completes promotes only that
   client's matching pending config to applied; skipped, failed, canceled, or
   timed-out targets mark pending state failed and leave the previous applied
-  config unchanged. Agent reconnect reload checks compare against applied
-  config, not failed pending desired state.
+  config unchanged. Agent reconnect reload checks compare the agent's reported
+  content hash with freshly composed database desired state. A failed pending
+  record remains failure evidence; it does not become desired state or suppress
+  a later repair.
 - Final output must be durably recorded before a target is marked terminal.
   Job-finished side effects are published only after both output and terminal
   target state are durable. Backup artifact auto-recording from async gateway
@@ -129,6 +131,67 @@ Target statuses are:
   `agent_timeout`, or `control_timeout`, in which case the schedule records the
   operational failure instead of treating the run as healthy.
 - Frontend TypeScript status unions come from `vpsman_common` via `frontend/src/generated/protocolContracts.ts`; frontend code must not maintain separate status alias lists.
+
+## Desired-State Reconciliation
+
+Runtime config, managed tunnels, port forwarding, and source-template/config
+changes use one operator model:
+
+1. **Desired saved** means the control plane durably accepted the requested
+   state. It does not mean the VPS changed.
+2. **Dispatch outcome** records, per VPS, whether an apply job was queued. A
+   partial queue failure returns the saved desired state and the affected VPS,
+   reason, and recovery guidance instead of converting the whole response into
+   an ambiguous error.
+3. **Job outcome** records whether the agent accepted and completed the exact
+   generation. Queued and running are progress states, never success.
+4. **Applied evidence** is promoted only for the matching generation and
+   content hash. Delayed jobs cannot overwrite or falsely confirm newer state.
+5. **Runtime observation** reports host evidence separately from apply status.
+   A matching apply is not a tunnel reachability test, and observed drift is
+   not silently repaired during an otherwise stable session.
+
+The agent keeps its hash-verified last accepted config across API/gateway
+disconnects and reconciles it on process or system restart. On reconnect it
+requests only declared resources that have explicit drift or incomplete-startup
+evidence; it does not discover or adopt unmanaged host resources. The API then
+supplies current database desired state. Resource deletion remains pending until
+the agent reports matching absence; an explicit administrative forget action is
+the only override for a permanently unreachable or decommissioned VPS.
+
+Operator surfaces must state all four relevant facts when they differ: what was
+saved, which targets queued, what has applied, and what the agent currently
+observes. Failures include the affected target and a reason or, when internal
+details cannot be exposed safely, an explicit statement that no success is
+assumed plus where to inspect and how to retry. A status code or a bare
+`error`/`failed` label is not sufficient action feedback.
+
+Durable identity mutations use the same boundary. VPS deletion, key rotation,
+and key revocation return the committed primary record plus typed `post_commit`
+outcomes for gateway-session disconnect and terminal-event reconciliation.
+Deleting a tunnel endpoint additionally returns per-peer runtime cleanup
+dispatch outcomes. A failed post-commit operation must not turn a committed
+mutation into an HTTP error that invites duplicate submission; the response
+states the remaining exposure and the exact recovery surface. Normal job
+acceptance and agent hello ingest likewise remain accepted after their durable
+write if terminal-event publication must be retried by the durable dispatcher.
+
+### Operator-visible error contract
+
+Every application-generated non-success API response carries three distinct
+fields: a stable `error` code for automation, an operator-safe `message`
+describing the cause or impact, and `recovery` guidance for the next safe
+action. Framework-level request parsing errors retain their explicit parser
+reason and receive the same status-aware recovery guidance in frontend and CLI
+clients. Internal server details remain in API logs; a 5xx response explicitly
+says that no success is assumed instead of leaking database, filesystem, or
+credential material. The frontend and `vpsctl` preserve this information rather
+than reducing failures to a status code.
+
+Successful HTTP responses with unreadable JSON are also failures at the client
+boundary. The frontend says that current state cannot be inferred and directs
+the operator to refresh before repeating a mutation, which avoids accidental
+duplicate submissions after a malformed proxy or server response.
 
 ## Download Archives
 

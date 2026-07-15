@@ -4,6 +4,7 @@ pub mod expression;
 pub mod file_transfer;
 pub mod metrics;
 pub mod network;
+pub mod port_forwarding;
 pub mod private_file;
 pub mod protocol;
 pub mod release_identity;
@@ -12,6 +13,8 @@ pub mod template;
 pub mod tlv;
 pub mod transport;
 pub mod update_manifest;
+
+pub use port_forwarding::*;
 
 pub use auth::*;
 pub use config::*;

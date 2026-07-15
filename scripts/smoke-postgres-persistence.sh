@@ -344,8 +344,9 @@ api_get "/api/v1/agents" | jq -e '
     (.tags | sort == ["bgp", "country:US", "direct:first", "direct:initial", "edge"]))
 ' >/dev/null
 
+port_forwarding_capabilities='{"privilege_mode":"root","effective_uid":0,"can_attempt_privileged_ops":true,"can_manage_runtime_tunnels":true,"can_apply_process_limits":true,"port_forwarding":{"status":"supported","nft_version":"nftables postgres smoke"}}'
 unprivileged_capabilities='{"privilege_mode":"unprivileged","effective_uid":1000,"can_attempt_privileged_ops":true,"can_manage_runtime_tunnels":false,"can_apply_process_limits":false,"unprivileged_hint":"postgres smoke agent is running without root"}'
-seed_agent "pg-agent-a" "" "$first_public_key_hex"
+seed_agent "pg-agent-a" "$port_forwarding_capabilities" "$first_public_key_hex"
 seed_agent "pg-agent-b" "$unprivileged_capabilities"
 api_post "/api/v1/agents/pg-agent-b/alias" '{"display_name":"pg-edge-b","confirmed":true}' >/dev/null
 vpsctl_json agent-tag --client-id pg-agent-b --tag edge --confirmed >/dev/null
@@ -448,7 +449,7 @@ vpsctl_json key-lifecycle-report | jq -e '
   all(.clients[]; .client_id != "pg-revoked-agent")
 ' >/dev/null
 api_get "/api/v1/agents" | jq -e 'all(.[]; .id != "pg-revoked-agent")' >/dev/null
-seed_agent "pg-agent-a" "" "$second_public_key_hex"
+seed_agent "pg-agent-a" "$port_forwarding_capabilities" "$second_public_key_hex"
 
 plan_json="$(api_post "/api/v1/tunnel-plans" '{
   "name": "pg-gre-a-b",
@@ -494,6 +495,107 @@ plan_json="$(api_put "/api/v1/tunnel-plans/$plan_id" '{
   "confirmed": true
 }')"
 jq -e '.revision == 2 and .enabled == false and .plan.bandwidth_mbps == 1500' <<<"$plan_json" >/dev/null
+
+port_forward_json="$(api_post "/api/v1/port-forward-rules" '{
+  "client_id": "pg-agent-a",
+  "name": "pg-public-web",
+  "protocol": "both",
+  "target_ip": "192.0.2.44",
+  "mappings": [
+    {
+      "incoming": {"start": 8080, "end": 8081},
+      "target": {"start": 80, "end": 81}
+    }
+  ],
+  "masquerade": true,
+  "enabled": true,
+  "confirmed": true
+}')"
+jq -e '
+  .rule.client_id == "pg-agent-a" and
+  .rule.name == "pg-public-web" and
+  .rule.protocol == "both" and
+  .rule.target_ip == "192.0.2.44" and
+  .rule.revision == 1 and
+  .rule.enabled == true and
+  .rule.masquerade == true and
+  .rule.runtime_status == "pending" and
+  .rule.mappings == [{"incoming":{"start":8080,"end":8081},"target":{"start":80,"end":81}}] and
+  .sync.status == "queued" and
+  (.sync.job_id | type == "string")
+' <<<"$port_forward_json" >/dev/null
+port_forward_rule_id="$(jq -r '.rule.id' <<<"$port_forward_json")"
+port_forward_json="$(api_put "/api/v1/port-forward-rules/$port_forward_rule_id" '{
+  "expected_revision": 1,
+  "name": "pg-public-web",
+  "protocol": "both",
+  "target_ip": "192.0.2.45",
+  "mappings": [
+    {
+      "incoming": {"start": 8080, "end": 8081},
+      "target": {"start": 9080, "end": 9081}
+    }
+  ],
+  "masquerade": false,
+  "enabled": true,
+  "confirmed": true
+}')"
+jq -e --arg id "$port_forward_rule_id" '
+  .rule.id == $id and
+  .rule.revision == 2 and
+  .rule.target_ip == "192.0.2.45" and
+  .rule.masquerade == false and
+  .rule.runtime_status == "pending" and
+  .sync.status == "queued"
+' <<<"$port_forward_json" >/dev/null
+api_get "/api/v1/port-forward-rules" | jq -e --arg id "$port_forward_rule_id" '
+  any(.[];
+    .id == $id and
+    .client_id == "pg-agent-a" and
+    .revision == 2 and
+    .enabled == true and
+    .target_ip == "192.0.2.45" and
+    .masquerade == false)
+' >/dev/null
+forget_active_response="$(api_post_expect_status "/api/v1/port-forward-rules/$port_forward_rule_id/forget" '{
+  "expected_revision": 2,
+  "confirmed": true,
+  "reason": "must already be removal pending"
+}' "409")"
+jq -e '.error == "port_forward_rule_not_removal_pending" and .status == 409' \
+  <<<"$forget_active_response" >/dev/null
+port_forward_delete_proof="$(api_post "/api/v1/port-forward-rules" '{
+  "client_id": "pg-agent-a",
+  "name": "pg-delete-proof",
+  "protocol": "tcp",
+  "target_ip": "192.0.2.46",
+  "mappings": [
+    {
+      "incoming": {"start": 18080, "end": 18080},
+      "target": {"start": 8080, "end": 8080}
+    }
+  ],
+  "masquerade": true,
+  "enabled": false,
+  "confirmed": false
+}')"
+port_forward_delete_proof_id="$(jq -r '.rule.id' <<<"$port_forward_delete_proof")"
+jq -e '.rule.revision == 1 and .rule.enabled == false and .sync.status == "saved_disabled"' \
+  <<<"$port_forward_delete_proof" >/dev/null
+port_forward_delete_proof="$(api_post "/api/v1/port-forward-rules/$port_forward_delete_proof_id/delete" '{
+  "expected_revision": 1,
+  "confirmed": true,
+  "reason": "postgres delete lifecycle proof"
+}')"
+jq -e '.rule.revision == 2 and .rule.desired_status == "removal_pending" and .sync.status == "queued"' \
+  <<<"$port_forward_delete_proof" >/dev/null
+port_forward_delete_proof="$(api_post "/api/v1/port-forward-rules/$port_forward_delete_proof_id/forget" '{
+  "expected_revision": 2,
+  "confirmed": true,
+  "reason": "postgres forget lifecycle proof"
+}')"
+jq -e '.rule.revision == 3 and .sync.status == "forgotten_without_host_cleanup"' \
+  <<<"$port_forward_delete_proof" >/dev/null
 
 schedule_json="$(vpsctl_json schedule-create \
   --name pg-hourly-uptime \
@@ -969,6 +1071,8 @@ jq -e '
   any(.[]; .action == "client_key.revoked" and .target == "client:pg-revoked-agent") and
   any(.[]; .action == "network.tunnel_plan_created") and
   any(.[]; .action == "network.tunnel_plan_updated") and
+  any(.[]; .action == "network.port_forward_rule_created") and
+  any(.[]; .action == "network.port_forward_rule_updated") and
   any(.[]; .action == "schedule.created") and
   any(.[]; .action == "fleet.alert_notification_deliveries_worker_processed") and
   any(.[]; .action == "fleet.alert_notification_deliveries_pruned") and
@@ -1021,6 +1125,18 @@ api_post "/api/v1/bulk/resolve" '{"selector_expression":"tag:edge"}' \
   | jq -e '.target_count == 2 and (.targets | map(.id) | sort == ["pg-agent-a","pg-agent-b"])' >/dev/null
 api_get "/api/v1/tunnel-plans" | jq -e '
   any(.[]; .name == "pg-gre-a-b" and .revision == 2 and .enabled == false and .plan.kind == "gre" and .plan.bandwidth_mbps == 1500 and (.plan | has("mutates_host") | not) and .plan.recommended_ospf_cost == null)
+' >/dev/null
+api_get "/api/v1/port-forward-rules" | jq -e --arg id "$port_forward_rule_id" '
+  any(.[];
+    .id == $id and
+    .client_id == "pg-agent-a" and
+    .name == "pg-public-web" and
+    .protocol == "both" and
+    .revision == 2 and
+    .enabled == true and
+    .target_ip == "192.0.2.45" and
+    .masquerade == false and
+    .runtime_status == "pending")
 ' >/dev/null
 api_get "/api/v1/schedules" | jq -e --arg schedule_id "$schedule_id" '
   any(.[]; .id == $schedule_id and .name == "pg-hourly-uptime" and .enabled == true and .command_type == "shell_argv" and .selector_expression == "tag:edge" and (.target_client_ids | sort == ["pg-agent-a","pg-agent-b"]))
@@ -1084,6 +1200,8 @@ jq -e '
   any(.[]; .action == "agent_identity.upserted" and .target == "client:pg-agent-a") and
   any(.[]; .action == "network.tunnel_plan_created") and
   any(.[]; .action == "network.tunnel_plan_updated") and
+  any(.[]; .action == "network.port_forward_rule_created") and
+  any(.[]; .action == "network.port_forward_rule_updated") and
   any(.[]; .action == "schedule.created") and
   any(.[]; .action == "backup_policy.upserted") and
   any(.[]; .action == "backup_policy.retention_pruned") and
@@ -1102,5 +1220,5 @@ jq -n \
   '{
     postgres_persistence_smoke: "ok",
     api_url: $api_url,
-    checks: ["auth_session", "agents", "direct_identity_key_rotation", "client_key_revocation", "telemetry_minute_rollups", "telemetry_minute_network_rates", "tag_bulk", "tunnel_plan", "schedule", "backup_policy", "backup_policy_retention_prune", "worker_leases", "alert_notification_worker", "missing_privilege_rejection", "capability_degraded_update", "capability_degraded_process_limit", "backup_artifact_metadata", "backup_restore_metadata", "audit", "api_restart"]
+    checks: ["auth_session", "agents", "direct_identity_key_rotation", "client_key_revocation", "telemetry_minute_rollups", "telemetry_minute_network_rates", "tag_bulk", "tunnel_plan", "port_forwarding", "schedule", "backup_policy", "backup_policy_retention_prune", "worker_leases", "alert_notification_worker", "missing_privilege_rejection", "capability_degraded_update", "capability_degraded_process_limit", "backup_artifact_metadata", "backup_restore_metadata", "audit", "api_restart"]
   }'

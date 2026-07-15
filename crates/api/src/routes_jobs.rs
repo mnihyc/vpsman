@@ -22,7 +22,7 @@ use vpsman_server_core::{
 };
 
 use crate::{
-    error::ApiError,
+    error::{public_recovery, ApiError},
     internal_operator::server_issued_job_actor,
     model::{
         AgentView, AuthContext, CancelJobRequest, CancelJobResponse, CancelJobTargetResult,
@@ -547,6 +547,7 @@ async fn create_job_inner(
             &request_fingerprint,
             operator,
             JOB_STATUS_REJECTED,
+            "job_privilege_unlock_required",
             "job requires privilege unlock",
             StatusCode::FORBIDDEN,
         )
@@ -561,6 +562,7 @@ async fn create_job_inner(
             &request_fingerprint,
             operator,
             JOB_STATUS_SKIPPED,
+            "job_no_resolved_targets",
             "job has no resolved targets",
             StatusCode::UNPROCESSABLE_ENTITY,
         )
@@ -627,6 +629,7 @@ async fn create_job_inner(
             &request_fingerprint,
             operator,
             "failed",
+            "agent_update_release_missing",
             "registered agent update release missing",
             StatusCode::CONFLICT,
         )
@@ -650,6 +653,7 @@ async fn create_job_inner(
             &request_fingerprint,
             operator,
             JOB_STATUS_FAILED,
+            "gateway_control_url_missing",
             "gateway control URL missing",
             StatusCode::SERVICE_UNAVAILABLE,
         )
@@ -697,7 +701,13 @@ async fn create_job_inner(
         .terminal_job_status_after_refresh(job_id, refreshed)
         .await?
         .unwrap_or_else(|| JOB_STATUS_RUNNING.to_string());
-    state.process_job_terminal_events(500).await?;
+    if let Err(error) = state.process_job_terminal_events(500).await {
+        warn!(
+            ?error,
+            %job_id,
+            "job was accepted, but terminal event reconciliation was deferred to the durable dispatcher"
+        );
+    }
     crate::job_dispatcher::wake_job_dispatcher(state.clone());
     let target_counts = create_job_target_counts(state, job_id).await?;
     let control_deadline_extra_secs = state
@@ -715,6 +725,9 @@ async fn create_job_inner(
             max_job_timeout_secs: state.max_job_timeout_secs(),
             control_deadline_extra_secs,
             target_counts,
+            error: None,
+            message: None,
+            recovery: None,
         }),
     ))
 }
@@ -1124,6 +1137,9 @@ async fn existing_job_response_for_id(
             .dispatcher_runtime_config()
             .control_deadline_extra_secs(),
         target_counts: create_job_target_counts(state, existing.id).await?,
+        error: None,
+        message: None,
+        recovery: None,
     }))
 }
 
@@ -1531,6 +1547,7 @@ async fn reject_job(
     request_fingerprint: &str,
     operator: &AuthContext,
     status: &'static str,
+    error_code: &'static str,
     reason: &'static str,
     response_status: StatusCode,
 ) -> Result<(StatusCode, Json<CreateJobResponse>), ApiError> {
@@ -1579,6 +1596,9 @@ async fn reject_job(
                 .dispatcher_runtime_config()
                 .control_deadline_extra_secs(),
             target_counts,
+            error: Some(error_code.to_string()),
+            message: Some(reason.to_string()),
+            recovery: Some(public_recovery(response_status, error_code).to_string()),
         }),
     ))
 }

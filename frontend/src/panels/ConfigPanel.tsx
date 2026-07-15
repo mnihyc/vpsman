@@ -65,6 +65,7 @@ import type {
   SourceStatusRecord,
   DeleteRuntimeConfigPatchGeneratorRequest,
   RuntimeConfigApplyStateRecord,
+  RuntimeConfigDispatchRecord,
   RuntimeConfigPatchGeneratorRecord,
   RuntimeConfigPatchGeneratorRenderResponse,
   TrafficAccountingRecord,
@@ -82,6 +83,7 @@ import type {
   UpsertRuntimeConfigPatchGeneratorRequest,
 } from "../types";
 import {
+  dispatchFailureReason,
   formatTime,
   formatVpsName,
   runPanelAction,
@@ -104,7 +106,7 @@ const CONFIG_HELP = {
   targetSelector:
     "Selector expressions freeze the exact VPS set for preview and review so later fleet changes cannot silently expand scope.",
   maxTimeout:
-    "Per-target command timeout bounded by the backend so slow agents cannot hold config work indefinitely.",
+    "Per-target command timeout enforced by the control plane so slow agents cannot hold config work indefinitely.",
   redactedRuntimeToml:
     "Runtime config returned by the agent with secret material removed; the base hash is used to detect stale overrides.",
   guardedOverride:
@@ -120,11 +122,11 @@ const CONFIG_HELP = {
   ruleSelector:
     "Fleet selector used for the dry-run and final reviewed VPS rule mutation.",
   ruleSetValues:
-    "Key=value lines become typed VPS rule values after backend validation and dry-run diffing.",
+    "Key=value lines become typed VPS rule values after control-plane validation and dry-run diffing.",
   ruleUnsetValues:
     "Explicit rule keys removed from every matched VPS after dry-run review.",
   previewHash:
-    "Backend hash of the dry-run diff that the apply request must echo to prevent stale writes.",
+    "Server-issued hash of the dry-run diff that the apply request must echo to prevent stale writes.",
 } as const;
 const VPS_RULE_KEYS = [
   "traffic.reset_day",
@@ -1849,6 +1851,9 @@ function BulkConfigApply({
   );
   const [progress, setProgress] = useState<BulkJobProgress | null>(null);
   const [reviewStatus, setReviewStatus] = useState<string | null>(null);
+  const reviewFeedbackTone: ActionFeedbackTone = reviewStatus?.startsWith("Desired")
+    ? "warning"
+    : "progress";
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
@@ -2294,6 +2299,15 @@ function BulkConfigApply({
         toml: snapshot.toml,
         privilege_assertion: snapshot.privilegeAssertion,
       });
+      const dispatchWarning = runtimeConfigDispatchWarning(
+        response.sync,
+        "Desired patch saved",
+      );
+      if (dispatchWarning) {
+        setReviewStatus(dispatchWarning);
+        setApplySnapshot(null);
+        return;
+      }
       const jobIds = response.sync_job_ids;
       if (jobIds.length === 0) {
         throw new Error("Runtime config patch created no sync jobs");
@@ -2497,7 +2511,7 @@ function BulkConfigApply({
         <ActionFeedback
           className="localActionFeedback configReviewFeedback"
           message={reviewStatus}
-          tone="progress"
+          tone={reviewFeedbackTone}
         />
         <BulkPatchChangeSummary
           patchMode={patchMode}
@@ -2829,6 +2843,22 @@ function detailField(label: string, value: string, pre = false) {
   );
 }
 
+function runtimeConfigDispatchWarning(
+  sync: RuntimeConfigDispatchRecord[],
+  savedMessage: string,
+): string | null {
+  const failures = sync.filter((outcome) => outcome.status !== "queued");
+  if (failures.length === 0 && sync.length > 0) return null;
+  const queued = sync.length - failures.length;
+  const failedTargets = failures
+    .map(
+      (outcome) =>
+        `${outcome.client_id}: ${dispatchFailureReason(outcome.error, outcome.status, "Runtime apply job")}`,
+    )
+    .join("; ");
+  return `${savedMessage}. ${queued > 0 ? `${queued} runtime apply job${queued === 1 ? " was" : "s were"} queued; ` : ""}${failures.length > 0 ? `apply was not queued for ${failedTargets}. ` : "No runtime apply job was queued. "}Review runtime apply state before treating the change as active.`;
+}
+
 function BulkPatchChangeSummary({
   patchMode,
   patchName,
@@ -2966,6 +2996,8 @@ function SingleVpsConfig({
   );
   const reviewFeedbackTone = reviewStatus?.startsWith("Patch preview ready")
     ? "success"
+    : reviewStatus?.startsWith("Desired")
+      ? "warning"
     : "progress";
 
   useEffect(() => {
@@ -3103,6 +3135,15 @@ function SingleVpsConfig({
         toml: snapshot.toml,
         privilege_assertion: snapshot.privilegeAssertion,
       });
+      const dispatchWarning = runtimeConfigDispatchWarning(
+        response.sync,
+        "Desired one-VPS override saved",
+      );
+      if (dispatchWarning) {
+        setReviewStatus(dispatchWarning);
+        setApplySnapshot(null);
+        return;
+      }
       const firstJobId = response.sync_job_ids[0];
       if (!firstJobId) {
         throw new Error("One-VPS override created no sync job");
@@ -3122,7 +3163,17 @@ function SingleVpsConfig({
         targets: [snapshot.target],
         maxTimeoutSecs: snapshot.maxTimeoutSecs,
       });
-      const outputs = await onLoadJobOutputs(firstJobId).catch(() => []);
+      let outputs: JobOutputRecord[] = [];
+      let outputLoadWarning: string | null = null;
+      try {
+        outputs = await onLoadJobOutputs(firstJobId);
+      } catch (error) {
+        outputLoadWarning = `Final job output could not be loaded: ${
+          error instanceof Error
+            ? error.message
+            : "the browser returned no failure detail."
+        } Open job ${firstJobId} before retrying the override.`;
+      }
       const finalProgress = buildBulkJobProgress({
         targetCount: response.target_count,
         jobId: firstJobId,
@@ -3142,9 +3193,15 @@ function SingleVpsConfig({
         setOverrideToml("");
         setOverrideValidation(null);
         setReviewStatus(
-          "Override applied. Read current config before drafting another change.",
+          outputLoadWarning
+            ? `Desired one-VPS override saved and the target completed, but ${outputLoadWarning}`
+            : "Override applied. Read current config before drafting another change.",
         );
         setEditorView("current");
+      } else if (outputLoadWarning) {
+        setReviewStatus(
+          `Desired one-VPS override saved, but ${outputLoadWarning}`,
+        );
       }
     });
   }
@@ -4698,7 +4755,7 @@ function VpsRulesPanel({
             ? `Apply ${reviewSnapshot.preview.changed_row_count} ${reviewSnapshot.preview.changed_row_count === 1 ? "change" : "changes"}`
             : "Apply changes"
         }
-        detail="Applies the reviewed preview by selector and backend preview hash."
+        detail="Applies the reviewed preview bound to its selector and server-issued preview hash."
         items={[
           {
             label: "Selector",
@@ -4855,7 +4912,7 @@ function VpsRulesPreviewTable({
         <span>
           <strong>Preview details</strong>
           <details className="vpsRulesPreviewDetails">
-            <summary>Backend binding</summary>
+            <summary>Preview binding</summary>
             <span className="monoValue" title={CONFIG_HELP.previewHash}>
               {preview.preview_hash}
             </span>

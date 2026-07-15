@@ -21,12 +21,15 @@ import {
 import type {
   AgentView,
   NetworkOspfUpdatePlanRecord,
+  TunnelPlanOspfDispatchRecord,
+  TunnelPlanOspfJobsResponse,
   TunnelPlanRecord,
   UpdateTunnelPlanOspfCostRequest,
 } from "../../types";
 import {
   clientDisplayNameFromMap,
   clientDisplayNameMap,
+  dispatchFailureReason,
   formatCompactTime,
   shortId,
 } from "../../utils";
@@ -52,11 +55,11 @@ export function TopologyOspfUpdateControls({
   onOpenSourceTemplates: () => void;
   onOpenTunnelPlans: () => void;
   onRefresh: () => Promise<void>;
-  onRefreshTunnelPlanOspfStatus: (planId: string) => Promise<void>;
+  onRefreshTunnelPlanOspfStatus: (planId: string) => Promise<TunnelPlanOspfJobsResponse>;
   onUpdateTunnelPlanOspfCost: (
     planId: string,
     request: UpdateTunnelPlanOspfCostRequest,
-  ) => Promise<void>;
+  ) => Promise<TunnelPlanOspfJobsResponse>;
   privilegeMaterial: PrivilegeMaterial | null;
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
   tunnelPlans: TunnelPlanRecord[];
@@ -110,11 +113,11 @@ export function TopologyOspfUpdateControls({
     setFeedback(null);
     setPendingPlanId(plan.plan_id);
     try {
-      await onRefreshTunnelPlanOspfStatus(plan.plan_id);
-      setFeedback({
-        message: `Routing adapter checks queued for ${plan.plan_name}`,
-        tone: "success",
-      });
+      const response = await onRefreshTunnelPlanOspfStatus(plan.plan_id);
+      setFeedback(ospfDispatchFeedback(
+        response.dispatch,
+        `Routing adapter checks for ${plan.plan_name}`,
+      ));
     } catch (error) {
       setFeedback({
         message: error instanceof Error ? error.message : "Adapter status check failed",
@@ -175,15 +178,15 @@ export function TopologyOspfUpdateControls({
         }),
         privilegeMaterial,
       });
-      await onUpdateTunnelPlanOspfCost(active.plan.plan_id, {
+      const response = await onUpdateTunnelPlanOspfCost(active.plan.plan_id, {
         ...active.request,
         privilege_assertion: privilegeAssertion,
       });
       setSnapshot(null);
-      setFeedback({
-        message: `Routing cost update queued for ${active.plan.plan_name}`,
-        tone: "success",
-      });
+      setFeedback(ospfDispatchFeedback(
+        response.dispatch,
+        `Routing cost update for ${active.plan.plan_name}`,
+      ));
     } catch (error) {
       setSnapshot(null);
       setFeedback({
@@ -230,7 +233,10 @@ export function TopologyOspfUpdateControls({
       <div className="sectionHeader">
         <div>
           <h2>OSPF cost control</h2>
-          <span>{ospfUpdatePlans.length} explicit routing adapter workflows</span>
+          <span>
+            {ospfUpdatePlans.length} explicit routing adapter workflow
+            {ospfUpdatePlans.length === 1 ? "" : "s"}
+          </span>
         </div>
         <div className="headerActionStack">
           <ShieldCheck aria-hidden="true" size={20} />
@@ -625,6 +631,35 @@ function controllerSummary(plan: NetworkOspfUpdatePlanRecord): string {
     default:
       return `Automatic controller: ${formatUpdateStatus(plan.status)}`;
   }
+}
+
+function ospfDispatchFeedback(
+  dispatch: TunnelPlanOspfDispatchRecord[],
+  action: string,
+): Feedback {
+  const failures = dispatch.filter((outcome) => outcome.status !== "queued");
+  if (failures.length > 0) {
+    const reason = failures
+      .map(
+        (outcome) =>
+          `${outcome.endpoint_side} ${outcome.client_id}: ${dispatchFailureReason(outcome.error, outcome.status, "Routing adapter job")}`,
+      )
+      .join("; ");
+    return {
+      message: `${action} saved, but ${failures.length} endpoint job${failures.length === 1 ? " was" : "s were"} not queued: ${reason}. Review the endpoint state before retrying.`,
+      tone: "warning",
+    };
+  }
+  if (dispatch.length === 0) {
+    return {
+      message: `${action} did not queue an endpoint job. Refresh the plan state before retrying.`,
+      tone: "warning",
+    };
+  }
+  return {
+    message: `${action} queued for ${dispatch.length} endpoint${dispatch.length === 1 ? "" : "s"}.`,
+    tone: "progress",
+  };
 }
 
 function formatUpdateStatus(status: string): string {

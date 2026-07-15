@@ -29,6 +29,14 @@ pub fn validate_agent_config_shape(config: &AgentConfig) -> Result<(), String> {
     Ok(())
 }
 
+pub fn validate_agent_bootstrap_config_shape(config: &AgentConfig) -> Result<(), String> {
+    validate_agent_config_shape(config)?;
+    if config.network.port_forwarding != crate::AgentPortForwardingConfig::default() {
+        return Err("network_port_forwarding_server_managed".to_string());
+    }
+    Ok(())
+}
+
 pub fn validate_incremental_config_patch_section(section: &str) -> Result<(), String> {
     if INCREMENTAL_CONFIG_PATCH_SECTIONS.contains(&section) {
         Ok(())
@@ -314,6 +322,8 @@ fn validate_network_config(config: &AgentNetworkConfig) -> Result<(), String> {
         return Err("network_latency_down_windows_out_of_range".to_string());
     }
     validate_runtime_status_telemetry_plans(&config.runtime_status_telemetry_plans)?;
+    crate::validate_port_forwarding_config(&config.port_forwarding)
+        .map_err(|error| format!("network_port_forwarding_invalid:{error}"))?;
     Ok(())
 }
 

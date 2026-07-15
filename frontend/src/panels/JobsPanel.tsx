@@ -157,12 +157,6 @@ function scheduledRunScheduleLabel(
     : "Scheduled run";
 }
 
-function scheduledRunAgainDescription(job: JobHistoryRecord): string {
-  return job.status === "completed"
-    ? "Run again needs a replay endpoint that preserves schedule source, due time, targets, and privilege review."
-    : "Run again is available only after the scheduled run reaches a terminal result.";
-}
-
 function describeCronExpression(expr: string): string {
   const fields = expr.trim().split(/\s+/);
   if (fields.length !== 5) {
@@ -2354,14 +2348,6 @@ export function JobsPanel({
                       </div>
                     );
                   }}
-                  rowActions={[
-                    {
-                      label: "Run again",
-                      disabled: () => true,
-                      description: ([job]) => scheduledRunAgainDescription(job),
-                      onSelect: () => undefined,
-                    },
-                  ]}
                   rows={scheduleRunJobs}
                   searchPlaceholder="Search scheduled runs"
                   selectable={false}

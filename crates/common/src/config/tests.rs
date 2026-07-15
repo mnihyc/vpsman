@@ -1,10 +1,13 @@
 use super::{
-    default_agent_backup_max_archive_bytes, validate_agent_config_shape, AgentBackupConfig,
-    AgentConfig, AgentRuntimeConfig, AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource,
+    default_agent_backup_max_archive_bytes, validate_agent_bootstrap_config_shape,
+    validate_agent_config_shape, AgentBackupConfig, AgentConfig, AgentRuntimeConfig,
+    AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource,
 };
 use crate::{
-    plan_tunnel, RuntimeTunnelAdapterCommands, RuntimeTunnelCommand, RuntimeTunnelManager,
-    TunnelAddressFamily, TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelPlanInput,
+    pair_port_expressions, plan_tunnel, port_forwarding_desired_hash, AgentPortForwardingConfig,
+    PortForwardProtocol, PortForwardRule, RuntimeTunnelAdapterCommands, RuntimeTunnelCommand,
+    RuntimeTunnelManager, TunnelAddressFamily, TunnelAddressPair, TunnelEndpointSide, TunnelKind,
+    TunnelPlanInput,
 };
 
 fn explicit_plan(manager: RuntimeTunnelManager) -> crate::TunnelPlan {
@@ -72,6 +75,32 @@ fn runtime_adapter() -> RuntimeTunnelAdapterCommands {
 #[test]
 fn validates_default_agent_config_shape() {
     validate_agent_config_shape(&AgentConfig::default()).unwrap();
+    validate_agent_bootstrap_config_shape(&AgentConfig::default()).unwrap();
+}
+
+#[test]
+fn bootstrap_config_rejects_server_managed_port_forwarding() {
+    let rules = vec![PortForwardRule {
+        id: uuid::Uuid::parse_str("018f89ac-a5ec-7d71-a249-7ccddc0a0001").unwrap(),
+        revision: 1,
+        name: "web".to_string(),
+        protocol: PortForwardProtocol::Tcp,
+        target_ip: "192.0.2.10".parse().unwrap(),
+        mappings: pair_port_expressions("443", "8443").unwrap(),
+        masquerade: true,
+    }];
+    let mut config = AgentConfig::default();
+    config.network.port_forwarding = AgentPortForwardingConfig {
+        desired_hash: port_forwarding_desired_hash(&rules),
+        rules,
+        ..AgentPortForwardingConfig::default()
+    };
+
+    validate_agent_config_shape(&config).unwrap();
+    assert_eq!(
+        validate_agent_bootstrap_config_shape(&config).unwrap_err(),
+        "network_port_forwarding_server_managed"
+    );
 }
 
 #[test]

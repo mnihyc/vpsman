@@ -1,4 +1,9 @@
-import { ApiUnauthorizedError, buildAuthHeaders } from "./api";
+import {
+  ApiUnauthorizedError,
+  apiErrorFromResponse,
+  apiFetch,
+  buildAuthHeaders,
+} from "./api";
 import { bytesToHex, createSha256Accumulator } from "./fileTransfer";
 
 export type ArtifactDownloadMode = "browser-download" | "stream-to-file";
@@ -23,12 +28,14 @@ type SaveFilePickerWindow = Window & {
 };
 
 export async function downloadVerifiedArtifact(request: VerifiedArtifactDownloadRequest): Promise<void> {
-  const response = await fetch(request.path, { headers: buildAuthHeaders(request.apiToken) });
+  const response = await apiFetch(request.path, {
+    headers: buildAuthHeaders(request.apiToken),
+  });
   if (response.status === 401) {
     throw new ApiUnauthorizedError();
   }
   if (!response.ok) {
-    throw new Error(`API ${response.status}`);
+    throw await apiErrorFromResponse(response);
   }
   const expectedSha256Hex = expectedHash(request.expectedSha256Hex, response);
   const expectedSizeBytes = expectedSize(request.expectedSizeBytes, response);

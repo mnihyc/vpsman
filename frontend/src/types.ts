@@ -746,8 +746,8 @@ export type DeleteAgentResponse = {
   client_id: string;
   deleted: boolean;
   deleted_at: string;
-  runtime_sync_job_ids: string[];
-  runtime_sync_failed_client_ids: string[];
+  post_commit: LifecycleOutcomeRecord[];
+  runtime_sync: RuntimeConfigDispatchRecord[];
 };
 
 export type AgentCapabilitySnapshot = {
@@ -757,7 +757,119 @@ export type AgentCapabilitySnapshot = {
   can_attempt_privileged_ops: boolean;
   can_manage_runtime_tunnels: boolean;
   can_apply_process_limits: boolean;
+  port_forwarding?: PortForwardCapability;
   unprivileged_hint?: string | null;
+};
+
+export type PortForwardCapabilityStatus =
+  | "supported"
+  | "nft_missing"
+  | "insufficient_privilege"
+  | "inet_nat_unsupported"
+  | "probe_failed"
+  | "unknown";
+
+export type PortForwardCapability = {
+  status: PortForwardCapabilityStatus;
+  nft_version?: string | null;
+  reason?: string | null;
+};
+
+export type PortForwardProtocol = "tcp" | "udp" | "both";
+
+export type PortRange = {
+  start: number;
+  end: number;
+};
+
+export type PortForwardMapping = {
+  incoming: PortRange;
+  target: PortRange;
+};
+
+export type PortForwardRuleRecord = {
+  id: string;
+  client_id: string;
+  name: string;
+  protocol: PortForwardProtocol;
+  target_ip: string;
+  mappings: PortForwardMapping[];
+  masquerade: boolean;
+  enabled: boolean;
+  revision: number;
+  desired_status: "enabled" | "disabled" | "removal_pending";
+  runtime_status:
+    | "absent"
+    | "applied"
+    | "applied_warning"
+    | "pending"
+    | "drifted"
+    | "unsupported"
+    | "failed"
+    | "unknown"
+    | "disabled"
+    | "removal_pending";
+  nat_matches: number;
+  desired_hash?: string | null;
+  agent_desired_hash?: string | null;
+  observed_hash?: string | null;
+  nft_version?: string | null;
+  forwarding_enabled?: boolean | null;
+  runtime_observed_unix?: number | null;
+  runtime_error_code?: string | null;
+  runtime_error?: string | null;
+  created_at: string;
+  updated_at: string;
+  deleted_at?: string | null;
+  removal_confirmed_at?: string | null;
+  forgotten_at?: string | null;
+};
+
+export type PortForwardRuleInput = {
+  name: string;
+  protocol: PortForwardProtocol;
+  target_ip: string;
+  mappings: PortForwardMapping[];
+  masquerade: boolean;
+  enabled: boolean;
+  confirmed: boolean;
+};
+
+export type CreatePortForwardRuleRequest = PortForwardRuleInput & {
+  client_id: string;
+};
+
+export type UpdatePortForwardRuleRequest = PortForwardRuleInput & {
+  expected_revision: number;
+};
+
+export type PortForwardMutationRequest = {
+  expected_revision: number;
+  confirmed: boolean;
+  reason?: string | null;
+};
+
+export type PortForwardSyncRecord = {
+  status: string;
+  job_id?: string | null;
+  error?: string | null;
+};
+
+export type PortForwardMutationResponse = {
+  rule: PortForwardRuleRecord;
+  sync: PortForwardSyncRecord;
+};
+
+export type PortForwardBulkAction = "enable" | "disable" | "reapply" | "delete";
+
+export type PortForwardBulkResponse = {
+  rules: PortForwardRuleRecord[];
+  sync: Array<{ client_id: string; sync: PortForwardSyncRecord }>;
+};
+
+export type ResolveHostnameResponse = {
+  hostname: string;
+  candidates: Array<{ address: string; family: "ipv4" | "ipv6" }>;
 };
 
 export type GatewaySessionRecord = {
@@ -1329,6 +1441,8 @@ export type TunnelPlanRecord = {
   connection_assessment_note: string | null;
   connection_assessed_at: string | null;
   connection_assessed_by: string | null;
+  left_runtime_config: TunnelPlanEndpointRuntimeConfig;
+  right_runtime_config: TunnelPlanEndpointRuntimeConfig;
   input: TunnelPlanInput;
   plan: TunnelPlan;
   created_at: string;
@@ -1336,6 +1450,44 @@ export type TunnelPlanRecord = {
   deleted_at: string | null;
   deleted_by: string | null;
   deleted_reason: string | null;
+};
+
+export type TunnelPlanEndpointRuntimeConfig = {
+  client_id: string;
+  desired: "present" | "absent" | string;
+  status:
+    | "queued"
+    | "pending"
+    | "failed"
+    | "applied"
+    | "removed"
+    | "not_applied"
+    | "removal_required"
+    | "not_dispatched"
+    | "stale_pending"
+    | string;
+  cleanup_confirmed: boolean;
+  job_id: string | null;
+  error: string | null;
+  updated_at: string | null;
+};
+
+export type RuntimeConfigDispatchRecord = {
+  client_id: string;
+  status: "queued" | "not_queued" | "queue_failed" | string;
+  job_id: string | null;
+  error: string | null;
+};
+
+export type LifecycleOutcomeRecord = {
+  operation: string;
+  status: "completed" | "failed" | string;
+  error: string | null;
+};
+
+export type TunnelPlanMutationResponse = {
+  plan: TunnelPlanRecord;
+  sync: RuntimeConfigDispatchRecord[];
 };
 
 export type TopologyGraphNode = {
@@ -1995,6 +2147,9 @@ export type CreateJobResponse = {
   max_timeout_secs: number;
   max_job_timeout_secs: number;
   control_deadline_extra_secs: number;
+  error?: string | null;
+  message?: string | null;
+  recovery?: string | null;
   target_counts: {
     total: number;
     queued: number;
@@ -2138,6 +2293,15 @@ export type UpdateTunnelPlanOspfCostRequest = {
 export type TunnelPlanOspfJobsResponse = {
   plan: TunnelPlanRecord;
   jobs: CreateJobResponse[];
+  dispatch: TunnelPlanOspfDispatchRecord[];
+};
+
+export type TunnelPlanOspfDispatchRecord = {
+  endpoint_side: "left" | "right";
+  client_id: string;
+  job_id: string;
+  status: "queued" | "not_queued" | "queue_failed" | string;
+  error: string | null;
 };
 
 export type AllocateTunnelEndpointsRequest = {
@@ -2557,6 +2721,7 @@ export type UpdateSourceTemplateResponse = {
   affected_client_count: number;
   confirmation_required: boolean;
   preview_hash?: string | null;
+  sync: RuntimeConfigDispatchRecord[];
 };
 
 export type AssignSourceTemplateRequest = {
@@ -2575,6 +2740,7 @@ export type AssignSourceTemplateResponse = {
   confirmation_required: boolean;
   assignments: SourceTemplateAssignmentRecord[];
   preview_hash?: string | null;
+  sync: RuntimeConfigDispatchRecord[];
 };
 
 export type TemplateRuntimeConfigResponse = {
@@ -2606,6 +2772,7 @@ export type RuntimeConfigPatchResponse = {
     updated_by: string | null;
   }>;
   sync_job_ids: string[];
+  sync: RuntimeConfigDispatchRecord[];
 };
 
 export type RuntimeConfigApplyStateRecord = {

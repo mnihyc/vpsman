@@ -38,6 +38,7 @@ import type {
   VpsRuleValueRecord,
 } from "../types";
 import {
+  dispatchFailureReason,
   displayNameOrUnnamed,
   formatCompactTime,
   formatFullTime,
@@ -331,7 +332,7 @@ export function VpsDetailPanel({
               icon={<Server size={16} />}
               label="Agent version"
               value={agentVersionLabel(agent)}
-              detail={agent.arch ? `Architecture ${agent.arch}` : "Version not exposed by inventory"}
+              detail={agent.arch ? `Architecture ${agent.arch}` : "Architecture unavailable"}
             />
             <VpsResourceFact
               icon={<AlertTriangle size={16} />}
@@ -1020,7 +1021,7 @@ function DetailState({
   return (
     <span className="vpsDetailState">
       <strong>{loading ? "Loading evidence" : title}</strong>
-      <small>{loading ? "The backend request is still in progress for this page cache." : detail}</small>
+      <small>{loading ? "Refresh is still in progress for this detail view." : detail}</small>
     </span>
   );
 }
@@ -1217,7 +1218,13 @@ function buildConfigPosture(related: VpsDetailContext): ConfigPostureItem[] {
   const ruleErrors = related.vpsRules.flatMap((rule) => rule.validation_errors);
   const applyState = related.runtimeApplyState;
   const lastError =
-    applyState?.pending_error ||
+    (applyState?.pending_status === "failed"
+      ? dispatchFailureReason(
+          applyState.pending_error,
+          applyState.pending_status,
+          "Runtime config apply",
+        )
+      : null) ||
     ruleErrors[0] ||
     sourceIssues[0]?.status_reason ||
     null;
@@ -1330,7 +1337,13 @@ function configDriftDetail(
   sourceIssueCount: number,
   ruleErrorCount: number,
 ): string {
-  if (state?.pending_status === "failed") return state.pending_error ?? "Runtime config apply failed";
+  if (state?.pending_status === "failed") {
+    return dispatchFailureReason(
+      state.pending_error,
+      state.pending_status,
+      "Runtime config apply",
+    );
+  }
   if (state?.pending_status === "queued") return state.pending_reason ?? "Runtime config apply is queued";
   if (ruleErrorCount > 0) return `${ruleErrorCount} VPS rule validation issue${ruleErrorCount === 1 ? "" : "s"}`;
   if (sourceIssueCount > 0) return `${sourceIssueCount} source readiness issue${sourceIssueCount === 1 ? "" : "s"}`;
@@ -1370,7 +1383,13 @@ function runtimeApplyStatusLabel(state: RuntimeConfigApplyStateRecord | null): s
 
 function runtimeApplyDetail(state: RuntimeConfigApplyStateRecord | null): string {
   if (!state) return "No server-applied runtime sync recorded";
-  if (state.pending_status === "failed") return state.pending_error ?? "Runtime config apply failed";
+  if (state.pending_status === "failed") {
+    return dispatchFailureReason(
+      state.pending_error,
+      state.pending_status,
+      "Runtime config apply",
+    );
+  }
   if (state.pending_status === "queued") return state.pending_reason ?? "Runtime config apply queued";
   if (state.applied_content_hash) {
     const job = state.applied_job_id ? `; job ${shortId(state.applied_job_id)}` : "";

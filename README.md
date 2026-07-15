@@ -50,7 +50,7 @@ UIs. `vpsman` targets a different operating model:
 | Remote work | Reviewed shell/script jobs, interactive terminal sessions, file browser, file transfer, process supervision, and schedules. |
 | Backups | Bounded recursive configuration snapshots, chunked artifacts, restore plans, rollback, migration links, and object-store retention. |
 | Runtime config | Source templates, per-VPS overrides, bulk config patches, and visible runtime config sync jobs. |
-| Network | Explicit NAT-safe tunnel plans, exact endpoint evidence, topology, bounded network tests, and optional daemon-neutral routing-cost adapters. |
+| Network | Explicit NAT-safe tunnel plans, per-VPS owned nftables port forwarding, exact endpoint evidence, topology, bounded network tests, and optional daemon-neutral routing-cost adapters. |
 | Observability | Current fleet monitor cards, scoped retained resource/network charts, explicit freshness and coverage, alert policies, event webhooks, and bounded automatic telemetry retention. |
 | Access and audit | Operator roles/scopes, sessions, TOTP, direct gateway identities, key rotation/revocation, audit logs, and evidence views. |
 | Releases | GitHub release assets, checksum manifests, compose updater, agent update jobs, and rollback-friendly deployment layout. |
@@ -286,8 +286,8 @@ Update an existing deployment:
 cd deploy
 ./update.sh latest
 
-# or pin a tag:
-./update.sh v0.1.3
+# or pin any published tag (replace vX.Y.Z):
+./update.sh vX.Y.Z
 ```
 
 Rollback swaps server, frontend, and CLI payload directories back together:
@@ -299,6 +299,20 @@ cd deploy
 
 The updater verifies checksums and does not delete PostgreSQL or object-store
 data.
+
+### Desired state and runtime evidence
+
+Host-managed configuration separates durable desired state, per-VPS dispatch,
+matching applied evidence, and current runtime observation. Saving a tunnel,
+port-forward rule, source template, or config patch never implies that every
+target has applied it. The console reports partial queue failures by VPS and
+keeps removals pending until the agent confirms cleanup. Agents continue using
+their last accepted config through control-plane outages and reconcile current
+database desired state on reconnect. Identity deletion, key rotation, and key
+revocation similarly report the committed change separately from gateway
+disconnect and peer-cleanup outcomes, preventing ambiguous retries after a
+successful durable mutation. See
+[docs/job-status-model.md](docs/job-status-model.md#desired-state-reconciliation).
 
 ## Development
 
@@ -372,6 +386,7 @@ before any release artifacts or GitHub release are published.
 - [Operator access scopes](docs/operator-access-scopes.md)
 - [Job status model](docs/job-status-model.md)
 - [Telemetry metric definitions](docs/telemetry-metrics.md)
+- [Port forwarding](docs/port-forwarding.md)
 - [Build notes](docs/build.md)
 
 ## Project Status

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use vpsman_common::{validate_agent_config_shape, AgentConfig};
+use vpsman_common::{validate_agent_bootstrap_config_shape, AgentConfig};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -43,7 +43,7 @@ pub(crate) fn load_config(path: &Path) -> Result<AgentConfig> {
         .with_context(|| format!("failed to read agent config {}", path.display()))?;
     let config: AgentConfig = toml::from_str(&contents)
         .with_context(|| format!("failed to parse agent config {}", path.display()))?;
-    validate_agent_config_shape(&config)
+    validate_agent_bootstrap_config_shape(&config)
         .map_err(|message| anyhow::anyhow!("invalid agent config: {message}"))?;
     Ok(config)
 }

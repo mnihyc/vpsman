@@ -33,7 +33,8 @@ role receives the scopes needed for normal daily operation. The default
   rendered incremental config patches, per-VPS rule values, Config > Rules
   dry-runs, and private agent-update release metadata.
 - `network:read`: full tunnel plans, exportable runtime `plan.json` details,
-  OSPF update plans, raw network observations, and topology history exports.
+  OSPF update plans, port-forward desired/runtime state, hostname-resolution
+  candidates, raw network observations, and topology history exports.
 - `audit:read`: audit logs and audit history exports.
 
 ## Write Scopes
@@ -47,6 +48,10 @@ operator is an admin with `*`.
 
 Config > Rules writes require `config:write`. Alert policy group and notification
 channel writes require `integrations:write`.
+
+Port-forward create, update, enable, disable, reapply, bulk, and delete actions
+require `network:write`. Forgetting an unconfirmed removal tombstone additionally
+requires the `admin` role because it discards host-cleanup evidence.
 
 History retention writes require `history:write` plus authority for the selected
 domain. Audit retention requires `audit:read`; job-output retention requires
@@ -81,6 +86,15 @@ revocation under Access > Operators. Audit > Sessions holds operator and
 terminal session evidence, while Access > Gateway sessions shows live and ended
 agent streams. Access > VPS identities owns agent key lifecycle, and Access >
 Privilege vault owns local privilege unlock state.
+
+Identity registration, key rotation, key revocation, and VPS deletion separate
+the durable identity change from follow-up work. The API returns explicit
+gateway-disconnect and terminal-reconciliation outcomes after the committed
+record. The console keeps the completion panel open and shows a warning when an
+old gateway session may remain active, including the recovery path under
+Access > Gateway sessions. VPS deletion also names every surviving tunnel peer
+whose cleanup apply could not be queued. Operators must not repeat the primary
+mutation merely because a follow-up outcome failed.
 
 Operator usernames are immutable. Disabling or deleting an operator blocks
 login, revokes that operator's sessions, preserves audit history, and prevents

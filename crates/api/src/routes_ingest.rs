@@ -128,7 +128,12 @@ pub(crate) async fn ingest_agent_hello(
         client_id: event.hello.client_id,
         gateway_id: event.gateway_id,
     });
-    state.process_job_terminal_events(500).await?;
+    if let Err(error) = state.process_job_terminal_events(500).await {
+        warn!(
+            ?error,
+            "agent hello was accepted, but terminal event reconciliation was deferred to the durable dispatcher"
+        );
+    }
     Ok(Json(IngestResponse {
         accepted: true,
         message: "agent hello recorded".to_string(),
@@ -157,11 +162,14 @@ pub(crate) async fn request_runtime_config_reload(
             message: "gateway session not active".to_string(),
         }));
     }
+    let reconcile_scope =
+        vpsman_common::RuntimeConfigReconcileScope::from_reload_request(&event.request);
     let sync_jobs = request_runtime_config_reload_for_agent(
         &state,
         &event.request.client_id,
         &event.request.current_content_hash,
         event.request.reason.trim(),
+        reconcile_scope,
     )
     .await?;
     Ok(Json(IngestResponse {
@@ -997,6 +1005,27 @@ fn valid_agent_metrics(metrics: &vpsman_common::AgentMetrics) -> bool {
     }) {
         return false;
     }
+    if metrics.port_forwarding.as_ref().is_some_and(|snapshot| {
+        snapshot.rules.len() > vpsman_common::MAX_PORT_FORWARD_RULES
+            || snapshot
+                .desired_hash
+                .as_deref()
+                .is_some_and(|value| !valid_sha256(value))
+            || snapshot
+                .observed_hash
+                .as_deref()
+                .is_some_and(|value| !valid_sha256(value))
+            || snapshot
+                .error_code
+                .as_deref()
+                .is_some_and(|value| value.len() > 128)
+            || snapshot
+                .error_message
+                .as_deref()
+                .is_some_and(|value| value.len() > 1024)
+    }) {
+        return false;
+    }
     let mut interfaces = std::collections::HashSet::new();
     if metrics.networks.iter().any(|network| {
         network.interface.is_empty()
@@ -1017,6 +1046,10 @@ fn valid_agent_metrics(metrics: &vpsman_common::AgentMetrics) -> bool {
                 .packet_loss_ratio
                 .is_none_or(|value| value.is_finite() && (0.0..=1.0).contains(&value))
     })
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn validate_agent_update_verification_event(

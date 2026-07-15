@@ -102,9 +102,11 @@ import { selectorExpressionForClientIds } from "../searchExpression";
 import { WEBHOOK_EXPRESSION_SUGGESTIONS } from "../webhookExpressionSuggestions";
 import {
   decodeOutputPreview,
+  dispatchFailureReason,
   formatCompactTime,
   formatTime,
   formatVpsName,
+  lifecycleOutcomeFailureReason,
   runPanelAction,
   shortId,
   type VpsNameDisplayMode,
@@ -996,17 +998,41 @@ export function FleetWorkspace({
         privilege_assertion: deleteSnapshot.privilegeAssertion,
         reason: "Deleted from fleet inventory selection action",
       });
-      const failedSyncs = response.runtime_sync_failed_client_ids.length;
-      const queuedSyncs = response.runtime_sync_job_ids.length;
+      const failedSyncs = response.runtime_sync.filter(
+        (outcome) => outcome.status !== "queued",
+      );
+      const queuedSyncs = response.runtime_sync.filter(
+        (outcome) => outcome.status === "queued",
+      );
+      const failedPostCommit = response.post_commit.filter(
+        (outcome) => outcome.status !== "completed",
+      );
+      const failureReasons = [
+        ...failedSyncs.map(
+          (outcome) =>
+            `Tunnel cleanup for ${outcome.client_id}: ${dispatchFailureReason(
+              outcome.error,
+              outcome.status,
+              "Runtime apply job",
+            )}`,
+        ),
+        ...failedPostCommit.map((outcome) =>
+          lifecycleOutcomeFailureReason(outcome, "VPS deletion"),
+        ),
+      ];
       setDeleteFeedback({
         message:
-          failedSyncs > 0
-            ? `VPS deleted; tunnel cleanup failed to queue for ${failedSyncs} surviving ${failedSyncs === 1 ? "peer" : "peers"}: ${response.runtime_sync_failed_client_ids.join(", ")}. Review runtime config state before trusting those interfaces.`
-            : queuedSyncs > 0
-              ? `VPS deleted; tunnel cleanup queued for ${queuedSyncs} surviving ${queuedSyncs === 1 ? "peer" : "peers"}.`
+          failureReasons.length > 0
+            ? `VPS deleted. ${failureReasons.join(" ")}`
+            : queuedSyncs.length > 0
+              ? `VPS deleted; tunnel cleanup queued for ${queuedSyncs.length} surviving ${queuedSyncs.length === 1 ? "peer" : "peers"}.`
               : "VPS deleted; no surviving tunnel peer required cleanup.",
         tone:
-          failedSyncs > 0 ? "warning" : queuedSyncs > 0 ? "progress" : "success",
+          failureReasons.length > 0
+            ? "warning"
+            : queuedSyncs.length > 0
+              ? "progress"
+              : "success",
       });
       clearDeleteReview();
       onSelectAgent(null);

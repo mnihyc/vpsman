@@ -3,9 +3,10 @@ use super::*;
 use axum::{extract::State, Json};
 use tokio::sync::broadcast;
 use vpsman_common::{
-    plan_tunnel, JobCommand, OspfControlMode, OspfCostPolicy, RuntimeTunnelAdapterCommands,
-    RuntimeTunnelCommand, RuntimeTunnelControl, RuntimeTunnelManager, TunnelAddressFamily,
-    TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelOspfConfig, TunnelPlanInput,
+    plan_tunnel, JobCommand, OspfControlMode, OspfCostPolicy, RoutingCostAdapterCommands,
+    RuntimeTunnelAdapterCommands, RuntimeTunnelCommand, RuntimeTunnelControl, RuntimeTunnelManager,
+    TunnelAddressFamily, TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelOspfConfig,
+    TunnelPlanInput,
 };
 
 use crate::{gateway_client::GatewayDispatchClient, job_request::validate_job_command};
@@ -206,6 +207,60 @@ async fn enabled_ospf_plan_starts_unverified_and_stages_exact_endpoint_jobs() {
 }
 
 #[tokio::test]
+async fn ospf_dispatch_reports_each_endpoint_when_one_target_disappears() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_online_agent(&repo, "client-a").await;
+    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);
+    let plan = plan_tunnel(&input).unwrap();
+    let saved = repo
+        .record_tunnel_plan(&input, &plan, true, &network_test_operator())
+        .await
+        .unwrap();
+    let left_job_id = Uuid::new_v4();
+    let right_job_id = Uuid::new_v4();
+    let staged = repo
+        .stage_tunnel_plan_ospf_jobs(
+            saved.id,
+            saved.revision,
+            None,
+            None,
+            None,
+            left_job_id,
+            right_job_id,
+            &network_test_operator(),
+        )
+        .await
+        .unwrap();
+    let state = test_state(repo.clone());
+
+    let (jobs, dispatch) = crate::routes_network::dispatch_routing_jobs(
+        &state,
+        &network_test_operator(),
+        &staged,
+        left_job_id,
+        right_job_id,
+        routing_adapter(LEFT_ROUTING_ADAPTER),
+        routing_adapter(RIGHT_ROUTING_ADAPTER),
+        None,
+    )
+    .await;
+
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(dispatch.len(), 2);
+    assert_eq!(dispatch[0].client_id, "client-a");
+    assert_eq!(dispatch[0].status, "queued");
+    assert_eq!(dispatch[1].client_id, "client-b");
+    assert_eq!(dispatch[1].status, "queue_failed");
+    assert!(dispatch[1]
+        .error
+        .as_deref()
+        .is_some_and(|message| message.contains("server rejected it")));
+    let refreshed = repo.get_tunnel_plan(saved.id).await.unwrap().unwrap();
+    assert_eq!(refreshed.left_ospf_status, "pending");
+    assert_eq!(refreshed.right_ospf_status, "failed");
+}
+
+#[tokio::test]
 async fn routing_template_update_marks_only_bound_endpoint_state_stale() {
     let repo = Repository::Memory(MemoryState::default());
     let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);
@@ -332,6 +387,7 @@ async fn tunnel_plan_create_rejects_duplicates_and_update_rejects_stale_revision
     )
     .await
     .unwrap();
+    let created = created.plan;
     assert_eq!(created.revision, 1);
 
     let audit_count_before_noops = repo.list_audit_logs(100).await.unwrap().len();
@@ -348,7 +404,12 @@ async fn tunnel_plan_create_rejects_duplicates_and_update_rejects_stale_revision
     )
     .await
     .unwrap();
+    let unchanged = unchanged.plan;
     assert_eq!(unchanged.revision, created.revision);
+    assert_eq!(
+        repo.list_audit_logs(100).await.unwrap().len(),
+        audit_count_before_noops
+    );
     let Json(still_disabled) = crate::routes_network::disable_tunnel_plan(
         State(state.clone()),
         headers.clone(),
@@ -360,11 +421,12 @@ async fn tunnel_plan_create_rejects_duplicates_and_update_rejects_stale_revision
     )
     .await
     .unwrap();
-    assert_eq!(still_disabled.revision, created.revision);
-    assert_eq!(
-        repo.list_audit_logs(100).await.unwrap().len(),
-        audit_count_before_noops
-    );
+    assert_eq!(still_disabled.plan.revision, created.revision);
+    assert_eq!(still_disabled.sync.len(), 2);
+    assert!(still_disabled
+        .sync
+        .iter()
+        .all(|outcome| outcome.status == "queued"));
 
     let duplicate = crate::routes_network::create_tunnel_plan(
         State(state.clone()),
@@ -394,6 +456,7 @@ async fn tunnel_plan_create_rejects_duplicates_and_update_rejects_stale_revision
     )
     .await
     .unwrap();
+    let updated = updated.plan;
     assert_eq!(updated.id, created.id);
     assert_eq!(updated.revision, 2);
     assert_eq!(updated.plan.bandwidth_mbps, 2500);
@@ -505,6 +568,7 @@ async fn disabled_tunnel_plan_can_be_revision_bound_retired_and_recreated() {
     )
     .await
     .unwrap();
+    let created = created.plan;
 
     let stale = crate::routes_network::delete_tunnel_plan(
         State(state.clone()),
@@ -530,6 +594,7 @@ async fn disabled_tunnel_plan_can_be_revision_bound_retired_and_recreated() {
     )
     .await
     .unwrap();
+    let deleted = deleted.plan;
     assert_eq!(deleted.deleted_reason.as_deref(), Some("operator_retired"));
     assert!(deleted.deleted_at.is_some());
     assert!(repo.list_tunnel_plans().await.unwrap().is_empty());
@@ -545,6 +610,7 @@ async fn disabled_tunnel_plan_can_be_revision_bound_retired_and_recreated() {
     )
     .await
     .unwrap();
+    let recreated = recreated.plan;
     let enabled = crate::routes_network::delete_tunnel_plan(
         State(state),
         headers,
@@ -557,6 +623,88 @@ async fn disabled_tunnel_plan_can_be_revision_bound_retired_and_recreated() {
     .await
     .unwrap_err();
     assert_eq!(enabled.code, "tunnel_plan_disable_before_delete");
+}
+
+#[tokio::test]
+async fn tunnel_plan_delete_waits_for_both_endpoint_cleanup_snapshots() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_online_agent(&repo, "client-a").await;
+    seed_online_agent(&repo, "client-b").await;
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let (_, Json(created)) = crate::routes_network::create_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateTunnelPlanRequest {
+            input,
+            enabled: true,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let Json(disabled) = crate::routes_network::disable_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(created.plan.id),
+        Json(crate::routes_network::TunnelPlanMutationRequest {
+            confirmed: true,
+            expected_revision: created.plan.revision,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!disabled.plan.left_runtime_config.cleanup_confirmed);
+    assert!(!disabled.plan.right_runtime_config.cleanup_confirmed);
+
+    let pending_delete = crate::routes_network::delete_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(disabled.plan.id),
+        Json(crate::routes_network::TunnelPlanMutationRequest {
+            confirmed: true,
+            expected_revision: disabled.plan.revision,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(pending_delete.code, "tunnel_plan_cleanup_not_confirmed");
+
+    for client_id in ["client-a", "client-b"] {
+        let pending = repo
+            .runtime_config_pending_state_for_client(client_id)
+            .await
+            .unwrap()
+            .unwrap();
+        repo.promote_runtime_config_apply_from_agent_hash(
+            client_id,
+            pending.pending_content_hash.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+    let cleaned = repo
+        .get_tunnel_plan(disabled.plan.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(cleaned.left_runtime_config.cleanup_confirmed);
+    assert!(cleaned.right_runtime_config.cleanup_confirmed);
+
+    let Json(deleted) = crate::routes_network::delete_tunnel_plan(
+        State(state),
+        headers,
+        axum::extract::Path(cleaned.id),
+        Json(crate::routes_network::TunnelPlanMutationRequest {
+            confirmed: true,
+            expected_revision: cleaned.revision,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(deleted.plan.deleted_at.is_some());
 }
 
 #[tokio::test]
@@ -578,6 +726,7 @@ async fn tunnel_plan_update_preserves_enabled_state_when_omitted() {
     )
     .await
     .unwrap();
+    let created = created.plan;
     let mut replacement = input;
     replacement.bandwidth_mbps = 2500;
 
@@ -594,6 +743,7 @@ async fn tunnel_plan_update_preserves_enabled_state_when_omitted() {
     )
     .await
     .unwrap();
+    let updated = updated.plan;
 
     assert!(updated.enabled);
     assert_eq!(updated.revision, 2);
@@ -830,6 +980,21 @@ fn runtime_adapter(template_id: &str) -> RuntimeTunnelAdapterCommands {
     }
 }
 
+fn routing_adapter(template_id: &str) -> RoutingCostAdapterCommands {
+    let command = |verb: &str| RuntimeTunnelCommand {
+        argv: vec!["/opt/vpsman-adapters/routing".to_string(), verb.to_string()],
+        max_timeout_secs: 10,
+        max_output_bytes: 16 * 1024,
+    };
+    RoutingCostAdapterCommands {
+        template_id: template_id.to_string(),
+        template_name: "routing-adapter".to_string(),
+        definition_hash: "cd".repeat(32),
+        status: command("status"),
+        update: command("update"),
+    }
+}
+
 async fn seed_online_agent(repo: &Repository, client_id: &str) {
     let Repository::Memory(memory) = repo else {
         panic!("memory repository required");
@@ -857,7 +1022,7 @@ fn test_state(repo: Repository) -> AppState {
         repo,
         events,
         internal_token: None,
-        gateway: GatewayDispatchClient::new(None, None),
+        gateway: GatewayDispatchClient::new(Some("http://127.0.0.1:1".to_string()), None),
         backup_object_store: None,
         update_release_policy: crate::state::UpdateReleasePolicy::default(),
         fleet_alert_policy: crate::fleet_alerts::FleetAlertPolicy::default(),

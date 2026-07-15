@@ -213,7 +213,7 @@ export function TerminalSessionsPanel({
   const transcriptUnavailableReason = activeSession
     ? activeReplay?.text
       ? null
-      : "Load Replay first; full transcript export endpoint is not exposed by the terminal API."
+      : "Load Replay first; transcript export uses the retained replay loaded in this browser."
     : "Select a terminal session before copying or downloading transcript text.";
   const terminalColumns: ConsoleDataGridColumn<TerminalSessionRecord>[] = [
     {
@@ -1000,7 +1000,7 @@ export function TerminalSessionsPanel({
               ))}
             </select>
           </label>
-          <label title="Blank uses the agent default working directory reported by the backend.">
+          <label title="Blank uses the agent's reported default working directory.">
             <span>Working directory</span>
             <input
               aria-label="New terminal working directory"

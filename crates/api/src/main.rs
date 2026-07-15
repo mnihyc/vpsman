@@ -16,6 +16,7 @@ mod job_dispatcher;
 mod job_files;
 mod job_request;
 mod job_terminal;
+mod lifecycle_outcome;
 mod model;
 mod model_agent_updates;
 mod model_alert_notifications;
@@ -26,6 +27,7 @@ mod model_command_templates;
 mod model_dashboard;
 mod model_file_transfer;
 mod model_history;
+mod model_port_forwarding;
 mod model_server_jobs;
 mod model_source_templates;
 mod model_terminal;
@@ -63,6 +65,7 @@ mod repository_network_adapters;
 mod repository_network_observations;
 mod repository_network_recommendations;
 mod repository_operator_totp;
+mod repository_port_forwarding;
 mod repository_restores;
 mod repository_runtime_config;
 mod repository_runtime_config_patch_generators;
@@ -92,6 +95,7 @@ mod routes_jobs;
 mod routes_key_lifecycle;
 mod routes_migrations;
 mod routes_network;
+mod routes_port_forwarding;
 mod routes_restores;
 mod routes_schedules;
 mod routes_server_jobs;
@@ -815,6 +819,8 @@ mod tests_network_ospf_updates;
 mod tests_network_telemetry;
 #[cfg(test)]
 mod tests_object_store;
+#[cfg(test)]
+mod tests_port_forwarding;
 #[cfg(test)]
 mod tests_postgres_reliability;
 #[cfg(test)]

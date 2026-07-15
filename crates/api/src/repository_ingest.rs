@@ -825,6 +825,11 @@ impl Repository {
                 {
                     TelemetrySequenceClaim::Accepted => {}
                     TelemetrySequenceClaim::Duplicate => {
+                        self.record_port_forward_runtime_from_telemetry(
+                            &event.telemetry.client_id,
+                            &received_metrics,
+                        )
+                        .await?;
                         self.record_telemetry_webhook_event(event).await?;
                         return Ok(false);
                     }
@@ -897,6 +902,11 @@ impl Repository {
                     TelemetrySequenceClaim::Accepted => {}
                     TelemetrySequenceClaim::Duplicate => {
                         tx.commit().await?;
+                        self.record_port_forward_runtime_from_telemetry(
+                            &event.telemetry.client_id,
+                            &received_metrics,
+                        )
+                        .await?;
                         self.record_telemetry_webhook_event(event).await?;
                         return Ok(false);
                     }
@@ -944,8 +954,27 @@ impl Repository {
         if !recorded {
             return Ok(false);
         }
+        self.record_port_forward_runtime_from_telemetry(
+            &event.telemetry.client_id,
+            &received_metrics,
+        )
+        .await?;
         self.record_telemetry_webhook_event(event).await?;
         Ok(true)
+    }
+
+    async fn record_port_forward_runtime_from_telemetry(
+        &self,
+        client_id: &str,
+        metrics: &vpsman_common::AgentMetrics,
+    ) -> Result<()> {
+        if let Some(snapshot) = metrics.port_forwarding.as_ref() {
+            let mut snapshot = snapshot.clone();
+            snapshot.observed_unix = metrics.observed_unix;
+            self.record_port_forward_runtime_snapshot(client_id, &snapshot)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn record_telemetry_webhook_event(&self, event: &GatewayTelemetryIngest) -> Result<()> {

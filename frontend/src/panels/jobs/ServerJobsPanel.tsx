@@ -109,7 +109,7 @@ export function ServerJobsPanel({
     : previewEmpty
       ? "Preview is current. No artifacts match the cleanup criteria."
     : previewFresh
-      ? "Preview is current, but deletion is blocked until the backend reports age range, retention/protection, and affected objects."
+      ? "Preview is current, but deletion is blocked until age range, retention/protection, and affected-object evidence are available."
     : preview
       ? "Preview is stale; rerun Preview before deletion."
       : "Preview required before deletion.";
@@ -531,7 +531,7 @@ export function ServerJobsPanel({
               <p>
                 {previewEmpty
                   ? "Object-level evidence is required only when the preview contains artifacts."
-                  : "Backend preview must expose oldest/newest object age, retained/reference-protected counts, and a representative object list or download."}
+                  : "The preview must include oldest/newest object age, retained/reference-protected counts, and a representative object list or download."}
               </p>
             </div>
           </div>

@@ -11,6 +11,10 @@ fn test_plan(manager: RuntimeTunnelManager) -> TunnelPlan {
         kind: TunnelKind::Gre,
         runtime_control: RuntimeTunnelControl {
             manager,
+            left_adapter_template_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+                .then(|| "11111111-1111-4111-8111-111111111111".to_string()),
+            right_adapter_template_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+                .then(|| "22222222-2222-4222-8222-222222222222".to_string()),
             ..RuntimeTunnelControl::default()
         },
         runtime_topology: Default::default(),
@@ -34,6 +38,37 @@ fn test_plan(manager: RuntimeTunnelManager) -> TunnelPlan {
         ospf: None,
     })
     .unwrap()
+}
+
+#[test]
+fn reconnect_repair_uses_only_declared_managed_runtime_evidence() {
+    let managed = test_plan(RuntimeTunnelManager::AgentIproute2Managed);
+    let interface = serde_json::json!({ "exists": true, "operstate": "up" });
+    let desired = vec![serde_json::json!({ "exists": true, "operstate": "up" })];
+    let stale = Vec::new();
+    let adapter = serde_json::json!({ "configured": false });
+    assert!(
+        runtime_reconcile_reasons(&managed, &interface, &desired, &stale, &adapter,).is_empty()
+    );
+
+    let missing_interface = serde_json::json!({ "exists": false });
+    assert_eq!(
+        runtime_reconcile_reasons(&managed, &missing_interface, &desired, &stale, &adapter,),
+        vec!["runtime_interface_missing"]
+    );
+
+    let adapter_managed = test_plan(RuntimeTunnelManager::ExternalManagedAdapter);
+    let adapter_failed = serde_json::json!({ "configured": true, "success": false });
+    assert_eq!(
+        runtime_reconcile_reasons(
+            &adapter_managed,
+            &interface,
+            &desired,
+            &stale,
+            &adapter_failed,
+        ),
+        vec!["adapter_status_failed"]
+    );
 }
 
 #[tokio::test]

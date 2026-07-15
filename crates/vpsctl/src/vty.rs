@@ -41,6 +41,7 @@ use crate::vty_network_dispatch::{
 use crate::vty_network_observations::{
     is_vty_network_evidence_command, submit_vty_network_evidence_command,
 };
+use crate::vty_port_forwarding::{is_vty_port_forward_command, submit_vty_port_forward_command};
 use crate::vty_privilege::{
     render_vty_capabilities, render_vty_degraded_policy, render_vty_privilege_status,
     vty_privilege_help,
@@ -136,6 +137,9 @@ Backups, restores, and migrations:
 
 Network and topology:
   tunnel-plans | tunnel-plan | tunnel-plan-export | tunnel-allocate
+  port-forwards | port-forward-create | port-forward-update | port-forward-resolve
+  port-forward-enable | port-forward-disable | port-forward-reapply
+  port-forward-delete | port-forward-forget | port-forward-bulk
   tunnel-plan-enable | tunnel-plan-disable | tunnel-plan-delete
   tunnel-ospf-status-refresh
   tunnel-ospf-cost-update | tunnel-status | tunnel-probe | tunnel-speed-test
@@ -902,6 +906,13 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
                         request,
                     )?
                 );
+            }
+            command if is_vty_port_forward_command(command) => {
+                if let Err(error) =
+                    submit_vty_port_forward_command(api_url, token.as_deref(), command)
+                {
+                    println!("usage error: {error}");
+                }
             }
             command if is_vty_network_dispatch_command(command) => {
                 submit_vty_network_dispatch_command(

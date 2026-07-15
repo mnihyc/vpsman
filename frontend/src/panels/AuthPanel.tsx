@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { KeyRound } from "lucide-react";
+import { apiErrorFromResponse, apiFetch, apiJsonFromResponse } from "../api";
 import type { AuthResponse } from "../types";
 
 type AuthMode = "checking" | "login" | "bootstrap";
@@ -34,22 +35,29 @@ export function AuthPanel({
     let canceled = false;
     async function loadBootstrapStatus() {
       try {
-        const response = await fetch("/api/v1/auth/bootstrap-status", {
+        const response = await apiFetch("/api/v1/auth/bootstrap-status", {
           headers: { Accept: "application/json" },
         });
         if (!response.ok) {
-          throw new Error("bootstrap_status_unavailable");
+          throw await apiErrorFromResponse(response);
         }
-        const status = (await response.json()) as BootstrapStatusResponse;
+        const status = await apiJsonFromResponse<BootstrapStatusResponse>(
+          response,
+          "GET /api/v1/auth/bootstrap-status",
+        );
         if (!canceled) {
           setMode(status.bootstrap_required ? "bootstrap" : "login");
           setError(null);
         }
-      } catch (_) {
+      } catch (bootstrapError) {
         if (!canceled) {
           setMode("login");
           setError(
-            "Could not verify first-run state. Sign in if this control plane is already initialized.",
+            `Could not verify first-run state. ${
+              bootstrapError instanceof Error
+                ? bootstrapError.message
+                : "The browser returned no failure detail. Check API availability and refresh."
+            } Sign in only if this control plane is already initialized.`,
           );
         }
       }
@@ -80,7 +88,7 @@ export function AuthPanel({
       if (mode === "login" && totpCode.trim()) {
         body.totp_code = totpCode.trim();
       }
-      const response = await fetch(
+      const response = await apiFetch(
         mode === "login" ? "/api/v1/auth/login" : "/api/v1/auth/bootstrap",
         {
           method: "POST",
@@ -89,13 +97,25 @@ export function AuthPanel({
         },
       );
       if (!response.ok) {
-        throw new Error(authErrorMessage(response.status, mode));
+        const message = authErrorMessage(response.status, mode);
+        throw message
+          ? new Error(message)
+          : await apiErrorFromResponse(response);
       }
-      await onAuth((await response.json()) as AuthResponse);
+      await onAuth(
+        await apiJsonFromResponse<AuthResponse>(
+          response,
+          `${mode === "login" ? "POST /api/v1/auth/login" : "POST /api/v1/auth/bootstrap"}`,
+        ),
+      );
       setPassword("");
       setTotpCode("");
     } catch (authError) {
-      setError(authError instanceof Error ? authError.message : "Authentication failed");
+      setError(
+        authError instanceof Error
+          ? authError.message
+          : "Authentication did not return a usable result. Refresh first-run state and inspect the browser console or API logs before retrying.",
+      );
     } finally {
       pendingRef.current = false;
       setPending(false);
@@ -243,7 +263,7 @@ function authModeSummaryDetail(mode: AuthMode): string {
   return "The console is asking the API which authentication screen is appropriate.";
 }
 
-function authErrorMessage(status: number, mode: AuthMode): string {
+function authErrorMessage(status: number, mode: AuthMode): string | null {
   if (mode === "bootstrap" && status === 409) {
     return "First operator already exists. Refresh and sign in.";
   }
@@ -253,7 +273,5 @@ function authErrorMessage(status: number, mode: AuthMode): string {
   if (status === 429) {
     return "Too many authentication attempts. Wait before trying again.";
   }
-  return mode === "bootstrap"
-    ? "First operator creation failed."
-    : "Sign in failed.";
+  return null;
 }

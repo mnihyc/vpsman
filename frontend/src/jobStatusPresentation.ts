@@ -143,9 +143,16 @@ export function migrationLinkStatusLabel(
 }
 
 export function tunnelEndpointRuntimeStateBadgeClass(status: string): string {
-  if (status === "healthy") return "ok";
-  if (status === "degraded" || status === "stale") return "warn";
-  if (status === "disabled") return "neutral";
+  if (status === "healthy" || status === "applied" || status === "removed") return "ok";
+  if (
+    status === "degraded"
+    || status === "stale"
+    || status === "apply_failed"
+    || status === "removal_failed"
+    || status === "removal_required"
+    || status === "sync_required"
+  ) return "warn";
+  if (status === "disabled" || status === "not_applied") return "neutral";
   return "info";
 }
 

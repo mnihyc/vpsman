@@ -144,7 +144,9 @@ export function FailureReasonGroups({ reasons }: { reasons: BulkFailureReason[] 
 function groupFailureReasons(reasons: BulkFailureReason[]): Array<{ reason: string; targets: string[] }> {
   const groups = new Map<string, string[]>();
   for (const failure of reasons) {
-    const reason = failure.reason.trim() || "failed";
+    const reason =
+      failure.reason.trim() ||
+      "Target was unsuccessful without retained output detail. Open the job and inspect target evidence before retrying.";
     const target = failure.target.trim() || "target";
     const targets = groups.get(reason) ?? [];
     targets.push(target);

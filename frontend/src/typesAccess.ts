@@ -1,4 +1,5 @@
 import type { PrivilegeAssertion } from "./privilege";
+import type { LifecycleOutcomeRecord } from "./types";
 
 export type AgentIdentityView = {
   client_id: string;
@@ -6,6 +7,11 @@ export type AgentIdentityView = {
   status: string;
   current_public_key_sha256_hex: string;
   tags: string[];
+};
+
+export type AgentIdentityMutationResponse = {
+  identity: AgentIdentityView;
+  post_commit: LifecycleOutcomeRecord[];
 };
 
 export type UpsertAgentIdentityRequest = {
@@ -25,6 +31,11 @@ export type ClientKeyRevocationView = {
   reason: string | null;
   revoked_by: string | null;
   created_at: string;
+};
+
+export type ClientKeyRevocationMutationResponse = {
+  revocation: ClientKeyRevocationView;
+  post_commit: LifecycleOutcomeRecord[];
 };
 
 export type KeyLifecycleClientView = {

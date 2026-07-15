@@ -15,6 +15,8 @@ import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "./privile
 import { selectorExpressionForClientIds } from "./searchExpression";
 import type { CreateJobRequest, CreateJobResponse, FileExistingPolicy, JobHistoryRecord, JobOutputRecord, JobOperation } from "./types";
 
+const TRANSFER_EVIDENCE_OUTAGE_LIMIT_MS = 30_000;
+
 export const MAX_BROWSER_RESUMABLE_DOWNLOAD_BYTES = 128 * 1024 * 1024;
 export const MAX_RESUMABLE_FILE_PUSH_BYTES = 1024 * 1024 * 1024;
 export const MAX_RESUMABLE_FILE_DOWNLOAD_BYTES = 1024 * 1024 * 1024;
@@ -522,9 +524,23 @@ async function waitForTransferStatus(
   const expectedClientSet = expectedClientIds ? new Set(expectedClientIds) : null;
   const expectedStatusCount = expectedClientIds?.length ?? expectedTargets;
   const startedAt = Date.now();
+  let lastOutputReadAt = startedAt;
+  let lastJobReadAt = startedAt;
+  let outputReadError: string | null = null;
+  let jobReadError: string | null = null;
   for (;;) {
-    const outputs = await request.loadOutputs(jobId).catch(() => null);
-    if (outputs) {
+    let outputs: JobOutputRecord[] | null = null;
+    try {
+      outputs = await request.loadOutputs(jobId);
+      lastOutputReadAt = Date.now();
+      outputReadError = null;
+    } catch (error) {
+      outputReadError =
+        error instanceof Error
+          ? error.message
+          : "the browser returned no output-read failure detail";
+    }
+    if (outputs !== null) {
       for (const output of outputs) {
         const payload = parseTransferStatus(output, sessionId, expectedType);
         if (payload && (!expectedClientSet || expectedClientSet.has(output.client_id))) {
@@ -535,8 +551,13 @@ async function waitForTransferStatus(
     let job: JobHistoryRecord | null = null;
     try {
       job = await request.loadJob(jobId);
-    } catch {
-      // Keep polling. Job history can be temporarily unavailable while the backend recovers.
+      lastJobReadAt = Date.now();
+      jobReadError = null;
+    } catch (error) {
+      jobReadError =
+        error instanceof Error
+          ? error.message
+          : "the browser returned no job-read failure detail";
     }
     if (job && isTerminalJobStatus(job.status)) {
       if (job.status !== "completed") {
@@ -545,12 +566,27 @@ async function waitForTransferStatus(
       if (statuses.size !== expectedStatusCount) {
         const missing = expectedClientIds?.filter((clientId) => !statuses.has(clientId)) ?? [];
         const missingText = missing.length > 0 ? `; missing ${missing.join(", ")}` : "";
-        throw new Error(`${expectedType} job returned ${statuses.size} of ${expectedStatusCount} ACKs${missingText}`);
+        const outputErrorText = outputReadError
+          ? `; output evidence read failed: ${outputReadError}`
+          : "";
+        throw new Error(`${expectedType} job returned ${statuses.size} of ${expectedStatusCount} ACKs${missingText}${outputErrorText}`);
       }
       return [...statuses.values()];
     }
-    const elapsedMs = Date.now() - startedAt;
-    const pollIntervalMs = elapsedMs < 30_000 ? 250 : 1_000;
+    const now = Date.now();
+    if (now - lastOutputReadAt >= TRANSFER_EVIDENCE_OUTAGE_LIMIT_MS) {
+      throw new Error(
+        `${expectedType} output evidence for job ${jobId} was unavailable for 30 seconds: ${outputReadError ?? "no response detail"}. The agent job may still be running; inspect Jobs before retrying to avoid a duplicate transfer.`,
+      );
+    }
+    if (now - lastJobReadAt >= TRANSFER_EVIDENCE_OUTAGE_LIMIT_MS) {
+      throw new Error(
+        `${expectedType} status for job ${jobId} was unavailable for 30 seconds: ${jobReadError ?? "no response detail"}. The agent job may still be running; inspect Jobs before retrying to avoid a duplicate transfer.`,
+      );
+    }
+    const elapsedMs = now - startedAt;
+    const pollIntervalMs =
+      outputReadError || jobReadError || elapsedMs >= 30_000 ? 1_000 : 250;
     await sleep(pollIntervalMs);
   }
 }

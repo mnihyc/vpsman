@@ -20,6 +20,7 @@ mod network_runtime;
 mod network_speed;
 mod network_status;
 mod platform_accounts;
+mod port_forwarding;
 mod process;
 mod process_cleanup;
 mod restore;

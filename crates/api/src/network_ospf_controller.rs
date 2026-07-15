@@ -122,7 +122,7 @@ pub(crate) async fn run_controller_sweep(state: &AppState) -> Result<usize> {
                 desired,
             )
         });
-        match dispatch_routing_jobs(
+        let (jobs, dispatch) = dispatch_routing_jobs(
             state,
             &operator,
             &staged,
@@ -132,12 +132,19 @@ pub(crate) async fn run_controller_sweep(state: &AppState) -> Result<usize> {
             right_adapter,
             apply,
         )
-        .await
+        .await;
+        dispatched += jobs.len();
+        for outcome in dispatch
+            .into_iter()
+            .filter(|outcome| outcome.status != "queued")
         {
-            Ok(jobs) => dispatched += jobs.len(),
-            Err(error) => {
-                warn!(?error, plan_id = %plan.id, "automatic OSPF dispatch failed");
-            }
+            warn!(
+                plan_id = %plan.id,
+                client_id = outcome.client_id,
+                endpoint_side = ?outcome.endpoint_side,
+                error = outcome.error.as_deref().unwrap_or("job_not_queued"),
+                "automatic OSPF endpoint dispatch was not queued"
+            );
         }
     }
     Ok(dispatched)

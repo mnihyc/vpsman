@@ -25,7 +25,10 @@ import {
   Wifi,
   X,
 } from "lucide-react";
-import { ActionFeedback } from "../components/ActionFeedback";
+import {
+  ActionFeedback,
+  type ActionFeedbackTone,
+} from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { AdminRoleBoundary } from "../components/RoleBoundary";
 import {
@@ -45,6 +48,7 @@ import { scrollIntoViewWithMotion } from "../motion";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import type {
   GatewaySessionRecord,
+  LifecycleOutcomeRecord,
   OperatorAuthEventRecord,
   OperatorPreferences,
   OperatorView,
@@ -52,7 +56,9 @@ import type {
   TotpSetupResponse,
 } from "../types";
 import type {
+  AgentIdentityMutationResponse,
   AgentIdentityView,
+  ClientKeyRevocationMutationResponse,
   ClientKeyRevocationView,
   KeyLifecycleClientView,
   KeyLifecycleReportView,
@@ -70,6 +76,7 @@ import {
   clientLifecycleNameMap,
   formatTime,
   formatVpsName,
+  lifecycleOutcomeFailureReason,
   shortHash,
   statusClass,
 } from "../utils";
@@ -101,6 +108,10 @@ type AccessConfirmationAction =
 type AccessOverviewTone = "attention" | "neutral" | "ready";
 type IdentityWorkflow = "register" | "rotate" | "revoke" | null;
 type AgentInstallMode = "root" | "user" | "staged";
+type LocalActionFeedback = {
+  message: string;
+  tone: ActionFeedbackTone;
+};
 
 const AGENT_INSTALL_SCRIPT_URL =
   "https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-agent.sh";
@@ -130,6 +141,30 @@ type KeyRevokeConfirmationSnapshot = {
   reason: string | null;
   privilegeAssertion: PrivilegeAssertion;
 };
+
+function lifecycleCompletionFeedback(
+  outcomes: LifecycleOutcomeRecord[],
+  successMessage: string,
+): LocalActionFeedback {
+  const failures = outcomes.filter((outcome) => outcome.status !== "completed");
+  if (failures.length === 0) {
+    return { message: successMessage, tone: "success" };
+  }
+  return {
+    message: `${successMessage} ${failures
+      .map((outcome) => lifecycleOutcomeFailureReason(outcome, "Identity change"))
+      .join(" ")}`,
+    tone: "warning",
+  };
+}
+
+function clipboardFailureMessage(error: unknown): string {
+  const detail =
+    error instanceof Error && error.message.trim()
+      ? ` Browser reported: ${error.message.trim()}.`
+      : "";
+  return `Clipboard copy failed.${detail} Allow clipboard access for this origin, or select and copy the value manually.`;
+}
 
 type AccessPanelProps = {
   activeSubpage: string;
@@ -173,7 +208,7 @@ type AccessPanelProps = {
     reason: string | null,
     confirmed: boolean,
     privilegeAssertion: PrivilegeAssertion | null,
-  ) => Promise<void>;
+  ) => Promise<ClientKeyRevocationMutationResponse>;
   onRevokeOperatorSession: (
     sessionId: string,
     adminRiskAcknowledged: boolean,
@@ -200,7 +235,7 @@ type AccessPanelProps = {
   ) => Promise<void>;
   onUpsertAgentIdentity: (
     request: UpsertAgentIdentityRequest,
-  ) => Promise<AgentIdentityView>;
+  ) => Promise<AgentIdentityMutationResponse>;
   operator: OperatorView | null;
   operatorAuthEvents: OperatorAuthEventRecord[];
   operatorSessions: OperatorSessionRecord[];
@@ -357,13 +392,20 @@ export function AccessPanel({
   const [privateKeyHex, setPrivateKeyHex] = useState<string | null>(null);
   const [createdIdentity, setCreatedIdentity] =
     useState<AgentIdentityView | null>(null);
+  const [createdIdentityOperation, setCreatedIdentityOperation] = useState<
+    "register" | "rotate" | null
+  >(null);
   const [createdIdentityPrivateKeyHex, setCreatedIdentityPrivateKeyHex] =
     useState<string | null>(null);
+  const [identityCompletion, setIdentityCompletion] =
+    useState<LocalActionFeedback | null>(null);
   const [revokeClientId, setRevokeClientId] = useState("");
   const [revokeReason, setRevokeReason] = useState("");
   const [revokePending, setRevokePending] = useState(false);
   const [revokeReviewPending, setRevokeReviewPending] = useState(false);
   const [revokeError, setRevokeError] = useState<string | null>(null);
+  const [revokeCompletion, setRevokeCompletion] =
+    useState<LocalActionFeedback | null>(null);
   const [pendingConfirmation, setPendingConfirmation] =
     useState<AccessConfirmationAction | null>(null);
   const [identitySnapshot, setIdentitySnapshot] =
@@ -477,8 +519,25 @@ export function AccessPanel({
     !revokePending &&
     !revokeReviewPending;
   const revokeFeedbackMessage =
-    revokeError ?? (revokeReviewPending ? "Preparing key revoke review" : null);
-  const revokeFeedbackTone = revokeError ? "danger" : "progress";
+    revokeError ??
+    (revokeReviewPending
+      ? "Preparing key revoke review"
+      : revokeCompletion?.message);
+  const revokeFeedbackTone: ActionFeedbackTone = revokeError
+    ? "danger"
+    : revokeReviewPending
+      ? "progress"
+      : (revokeCompletion?.tone ?? "progress");
+  const identityFeedbackMessage =
+    identityError ??
+    (identityReviewPending
+      ? "Preparing identity review"
+      : identityCompletion?.message);
+  const identityFeedbackTone: ActionFeedbackTone = identityError
+    ? "danger"
+    : identityReviewPending
+      ? "progress"
+      : (identityCompletion?.tone ?? "progress");
   const identityColumns = useMemo<
     ConsoleDataGridColumn<KeyLifecycleClientView>[]
   >(
@@ -706,6 +765,7 @@ export function AccessPanel({
     invalidateReviewGeneration();
     setIdentitySnapshot(null);
     setIdentityReviewPending(false);
+    setIdentityCompletion(null);
     setPendingConfirmation((current) =>
       current === "agent-identity" ? null : current,
     );
@@ -715,6 +775,7 @@ export function AccessPanel({
     invalidateReviewGeneration();
     setRevokeSnapshot(null);
     setRevokeReviewPending(false);
+    setRevokeCompletion(null);
     setPendingConfirmation((current) =>
       current === "key-revoke" ? null : current,
     );
@@ -742,6 +803,7 @@ export function AccessPanel({
     setGeneratedPublicKeyHex(null);
     setPrivateKeyHex(null);
     setCreatedIdentity(null);
+    setCreatedIdentityOperation(null);
     setCreatedIdentityPrivateKeyHex(null);
     setIdentityError(null);
     openAccessSubpage("VPS identities");
@@ -760,6 +822,7 @@ export function AccessPanel({
     setGeneratedPublicKeyHex(null);
     setPrivateKeyHex(null);
     setCreatedIdentity(null);
+    setCreatedIdentityOperation(null);
     setCreatedIdentityPrivateKeyHex(null);
     setIdentityError(null);
     openAccessSubpage("VPS identities");
@@ -773,6 +836,7 @@ export function AccessPanel({
     setRevokeClientId(clientId);
     setRevokeReason(reason);
     setRevokeError(null);
+    setRevokeCompletion(null);
     openAccessSubpage("VPS identities");
     scrollIdentityWorkflowSoon();
   }
@@ -866,9 +930,22 @@ export function AccessPanel({
     });
   }
 
-  function handleCopyPrivateKey() {
-    if (privateKeyHex) {
-      navigator.clipboard.writeText(privateKeyHex).catch(() => {});
+  async function handleCopyPrivateKey() {
+    if (!privateKeyHex) {
+      return;
+    }
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("Clipboard API is unavailable");
+      }
+      await navigator.clipboard.writeText(privateKeyHex);
+      setIdentityError(null);
+      setIdentityCompletion({
+        message: "Private key copied to the clipboard.",
+        tone: "success",
+      });
+    } catch (error) {
+      setIdentityError(clipboardFailureMessage(error));
     }
   }
 
@@ -947,18 +1024,30 @@ export function AccessPanel({
         confirmed: true,
         privilege_assertion: snapshot.privilegeAssertion,
       });
-      setCreatedIdentity(response);
+      const completedOperation = snapshot.replaceExistingKey
+        ? "rotate"
+        : "register";
+      setCreatedIdentity(response.identity);
+      setCreatedIdentityOperation(completedOperation);
       setCreatedIdentityPrivateKeyHex(boundPrivateKeyHex);
+      setIdentityCompletion(
+        lifecycleCompletionFeedback(
+          response.post_commit,
+          snapshot.replaceExistingKey
+            ? "VPS key rotated."
+            : "VPS identity registered.",
+        ),
+      );
       setIdentityClientId("");
       setIdentityPublicKeyHex("");
       setIdentityDisplayName("");
       setIdentityTags("");
       setGeneratedPublicKeyHex(null);
       setPrivateKeyHex(null);
-      setIdentityMode("register");
+      setIdentityMode(completedOperation);
       setIdentitySnapshot(null);
       setPendingConfirmation(null);
-      setIdentityWorkflow(snapshot.replaceExistingKey ? null : "register");
+      setIdentityWorkflow(completedOperation);
     } catch (actionError) {
       setIdentityError(
         actionError instanceof Error
@@ -1027,17 +1116,23 @@ export function AccessPanel({
     setRevokePending(true);
     setRevokeError(null);
     try {
-      await onRevokeClientKey(
+      const response = await onRevokeClientKey(
         snapshot.clientId,
         snapshot.reason,
         true,
         snapshot.privilegeAssertion,
       );
+      setRevokeCompletion(
+        lifecycleCompletionFeedback(
+          response.post_commit,
+          "VPS key revoked.",
+        ),
+      );
       setRevokeClientId("");
       setRevokeReason("");
       setRevokeSnapshot(null);
       setPendingConfirmation(null);
-      setIdentityWorkflow(null);
+      setIdentityWorkflow("revoke");
     } catch (actionError) {
       setRevokeError(
         actionError instanceof Error
@@ -1054,7 +1149,7 @@ export function AccessPanel({
       ? {
           action: "Set up MFA",
           detail:
-            "Admin MFA is recommended; policy enforcement is not exposed by the API.",
+            "Admin MFA is recommended; this page cannot verify role-based enforcement.",
           icon: <ShieldCheck size={16} />,
           label: "Policy recommends MFA",
           onClick: () => openAccessSubpage("Privilege vault"),
@@ -1760,14 +1855,18 @@ export function AccessPanel({
         >
           <h2>
             {createdIdentity
-              ? "VPS registered"
+              ? createdIdentityOperation === "rotate"
+                ? "VPS key rotated"
+                : "VPS registered"
               : identityMode === "rotate"
                 ? "Rotate key"
                 : "Register VPS"}
           </h2>
           <span>
             {createdIdentity
-              ? createdIdentityPrivateKeyHex
+              ? createdIdentityOperation === "rotate"
+                ? "The new public key is saved; review gateway disconnect status below"
+                : createdIdentityPrivateKeyHex
                 ? "Copy this VPS install command before starting another registration"
                 : "Registration is complete; use the matching private key from your secure source"
               : identityMode === "rotate"
@@ -1780,8 +1879,8 @@ export function AccessPanel({
           identityWorkflow !== "revoke" && (
             <ActionFeedback
               className="localActionFeedback identityActionFeedback"
-              message={identityError}
-              tone="danger"
+              message={identityFeedbackMessage}
+              tone={identityFeedbackTone}
             />
           )}
         <form
@@ -1881,7 +1980,7 @@ export function AccessPanel({
                     />
                     <button
                       className="secondaryAction compact"
-                      onClick={handleCopyPrivateKey}
+                      onClick={() => void handleCopyPrivateKey()}
                       type="button"
                     >
                       <Copy size={15} />
@@ -1957,7 +2056,12 @@ export function AccessPanel({
           )}
           {createdIdentity && (
             <div className="formNote identityRegistrationComplete" role="status">
-              <strong>{createdIdentity.display_name} is registered</strong>
+              <strong>
+                {createdIdentity.display_name}{" "}
+                {createdIdentityOperation === "rotate"
+                  ? "key is rotated"
+                  : "is registered"}
+              </strong>
               <span>
                 {createdIdentity.client_id} /{" "}
                 {shortHash(createdIdentity.current_public_key_sha256_hex)}
@@ -1973,7 +2077,7 @@ export function AccessPanel({
               privateKeyHex={createdIdentityPrivateKeyHex}
             />
           )}
-          {createdIdentity && (
+          {createdIdentity && createdIdentityOperation === "register" && (
             <button
               className="secondaryAction"
               onClick={beginAnotherIdentityRegistration}
@@ -2406,20 +2510,42 @@ function GatewaySessionDetailGrid({
 }
 
 function CopyableHash({ label, value }: { label: string; value: string }) {
-  function handleCopy(event: MouseEvent<HTMLButtonElement>) {
+  const [copyState, setCopyState] = useState<{
+    message: string;
+    status: "copied" | "failed";
+  } | null>(null);
+
+  async function handleCopy(event: MouseEvent<HTMLButtonElement>) {
     event.stopPropagation();
-    navigator.clipboard.writeText(value).catch(() => {});
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("Clipboard API is unavailable");
+      }
+      await navigator.clipboard.writeText(value);
+      setCopyState({ message: `${label} copied.`, status: "copied" });
+    } catch (error) {
+      setCopyState({
+        message: clipboardFailureMessage(error),
+        status: "failed",
+      });
+    }
   }
 
   return (
     <button
       aria-label={`Copy ${label}`}
       className="copyHashButton"
-      onClick={handleCopy}
-      title={value}
+      onClick={(event) => void handleCopy(event)}
+      title={copyState ? `${copyState.message} Full value: ${value}` : value}
       type="button"
     >
-      <span>{shortHash(value)}</span>
+      <span>
+        {copyState?.status === "copied"
+          ? "Copied"
+          : copyState?.status === "failed"
+            ? "Copy failed"
+            : shortHash(value)}
+      </span>
       <Copy size={13} />
     </button>
   );
@@ -2555,7 +2681,8 @@ function InstallCommand({
     () => operatorPreferences?.gateway_endpoints ?? "",
   );
   const [savePending, setSavePending] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  const [installFeedback, setInstallFeedback] =
+    useState<LocalActionFeedback | null>(null);
   const savedGatewayServerPublicKeyHex =
     operatorPreferences?.gateway_server_public_key_hex ?? "";
   const savedGatewayEndpoints = operatorPreferences?.gateway_endpoints ?? "";
@@ -2609,18 +2736,32 @@ function InstallCommand({
     );
     setGatewayEndpoints(operatorPreferences?.gateway_endpoints ?? "");
     setInstallMode(operatorPreferences?.agent_install_mode ?? "root");
-    setSaveError(null);
+    setInstallFeedback(null);
   }, [
     operatorPreferences?.gateway_endpoints,
     operatorPreferences?.gateway_server_public_key_hex,
     operatorPreferences?.agent_install_mode,
   ]);
 
-  function handleCopy() {
+  async function handleCopy() {
     if (!canBuildCommand) {
       return;
     }
-    navigator.clipboard.writeText(installCommand).catch(() => {});
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("Clipboard API is unavailable");
+      }
+      await navigator.clipboard.writeText(installCommand);
+      setInstallFeedback({
+        message: "Agent install command copied to the clipboard.",
+        tone: "success",
+      });
+    } catch (error) {
+      setInstallFeedback({
+        message: clipboardFailureMessage(error),
+        tone: "danger",
+      });
+    }
   }
 
   async function handleSaveGatewayDefaults() {
@@ -2628,7 +2769,7 @@ function InstallCommand({
       return;
     }
     setSavePending(true);
-    setSaveError(null);
+    setInstallFeedback(null);
     try {
       await onUpdateOperatorPreferences({
         ...operatorPreferences,
@@ -2636,12 +2777,18 @@ function InstallCommand({
         gateway_endpoints: normalizedGatewayEndpoints,
         gateway_server_public_key_hex: normalizedGatewayServerPublicKeyHex,
       });
+      setInstallFeedback({
+        message: "Gateway install defaults saved for this operator.",
+        tone: "success",
+      });
     } catch (error) {
-      setSaveError(
-        error instanceof Error
-          ? error.message
-          : "Gateway install defaults were not saved",
-      );
+      setInstallFeedback({
+        message:
+          error instanceof Error
+            ? error.message
+            : "Gateway install defaults were not saved because the browser returned no failure detail. Refresh preferences and retry.",
+        tone: "danger",
+      });
     } finally {
       setSavePending(false);
     }
@@ -2683,7 +2830,7 @@ function InstallCommand({
           <button
             className="secondaryAction compact"
             disabled={!canBuildCommand}
-            onClick={handleCopy}
+            onClick={() => void handleCopy()}
             title="Copy the complete one-line install command."
             type="button"
           >
@@ -2700,7 +2847,7 @@ function InstallCommand({
             className="monospace"
             onChange={(event) => {
               setGatewayServerPublicKeyHex(event.target.value);
-              setSaveError(null);
+              setInstallFeedback(null);
             }}
             placeholder="64 hex characters"
             title="Gateway server public key hex used by the agent to authenticate the gateway."
@@ -2713,7 +2860,7 @@ function InstallCommand({
             aria-label="Gateway endpoints"
             onChange={(event) => {
               setGatewayEndpoints(event.target.value);
-              setSaveError(null);
+              setInstallFeedback(null);
             }}
             placeholder="primary=gw.example.com:9443=10"
             title="Comma-separated gateway endpoints accepted by the installer."
@@ -2726,7 +2873,7 @@ function InstallCommand({
             aria-label="Install mode"
             onChange={(event) => {
               setInstallMode(event.target.value as AgentInstallMode);
-              setSaveError(null);
+              setInstallFeedback(null);
             }}
             title="Root and user service modes start through systemd. Stage only writes the agent files and shows the foreground start command."
             value={installMode}
@@ -2747,9 +2894,13 @@ function InstallCommand({
           Gateway endpoints are required before copying the command.
         </small>
       ) : null}
-      {saveError ? (
-        <small className="installCommandHint warn">{saveError}</small>
-      ) : null}
+      <ActionFeedback
+        className="localActionFeedback"
+        message={
+          savePending ? "Saving gateway install defaults" : installFeedback?.message
+        }
+        tone={savePending ? "progress" : installFeedback?.tone}
+      />
       <pre>
         <code>{installCommand}</code>
       </pre>

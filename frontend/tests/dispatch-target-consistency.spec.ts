@@ -121,6 +121,28 @@ function expectPrivilegeAssertion(request: unknown) {
   ).toMatch(/^[0-9a-f]+$/);
 }
 
+test("job target verification distinguishes API outage from invalid syntax", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "target verification semantics are shared with the mobile composer",
+  );
+  await installConsoleApiMock(page, { bulkResolveFailure: true });
+  await page.goto("/");
+  await openConsoleSubpage(page, "Jobs", "Dispatch");
+
+  await page
+    .getByLabel("Bulk target selector expression")
+    .fill("id:agent-sfo-01");
+
+  await expect(page.getByText("Unavailable", { exact: true })).toBeVisible();
+  const feedback = page.locator(".commandComposer .actionFeedbackDanger");
+  await expect(feedback).toContainText("Target inventory could not be read");
+  await expect(feedback).toContainText("no success is assumed");
+  await expect(feedback).not.toContainText("Invalid");
+});
+
 test("job dispatch submits backend-resolved targets when dashboard inventory is stale", async ({
   page,
 }, testInfo) => {

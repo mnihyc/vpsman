@@ -350,6 +350,8 @@ pub struct AgentNetworkConfig {
     pub latency_down_windows: u8,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runtime_status_telemetry_plans: Vec<AgentRuntimeStatusTelemetryPlan>,
+    #[serde(default)]
+    pub port_forwarding: crate::AgentPortForwardingConfig,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -457,6 +459,7 @@ impl Default for AgentNetworkConfig {
             latency_monitoring_interval_secs: default_network_latency_monitoring_interval_secs(),
             latency_down_windows: default_network_latency_down_windows(),
             runtime_status_telemetry_plans: Vec::new(),
+            port_forwarding: crate::AgentPortForwardingConfig::default(),
         }
     }
 }

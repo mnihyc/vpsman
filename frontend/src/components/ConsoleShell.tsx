@@ -612,11 +612,11 @@ export function ConsoleShell({
           className={`consoleHeader${hideFleetStatusSummary ? " withoutFleetStatus" : ""}`}
         >
           <div className="titleBlock">
-            <span className="breadcrumb">
+            <span className="breadcrumb" title={`vpsman / ${activeViewLabel} / ${activeSubpageLabel}`}>
               vpsman / {activeViewLabel} / {activeSubpageLabel}
             </span>
             <h1>{pageTitle}</h1>
-            <p className="pageDescription">{pageDescription || activeSubpageDescription}</p>
+            <p className="pageDescription" title={pageDescription || activeSubpageDescription}>{pageDescription || activeSubpageDescription}</p>
             <div className="pageHeaderContext" aria-label="Page operational context">
               <span>
                 <strong>Scope</strong>

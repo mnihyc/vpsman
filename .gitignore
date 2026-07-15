@@ -1,6 +1,5 @@
 /target/
 /AGENTS.md
-/DESIGN.md
 /frontend/node_modules/
 /frontend/dist/
 /frontend/tmp/
@@ -34,3 +33,6 @@
 /DESIGN.md
 /tmp/
 *.patch
+
+# Local snapshots of intermediary agent/design notes.
+/.local-backups/

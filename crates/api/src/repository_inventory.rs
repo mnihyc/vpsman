@@ -14,6 +14,10 @@ use crate::repository_jobs::{
 use crate::repository_key_lifecycle::{
     lock_postgres_agent_identity_lifecycle, public_key_sha256_hex,
 };
+use crate::repository_port_forwarding::{
+    archive_postgres_port_forwarding_for_agent_delete, lock_postgres_port_forward_client,
+    postgres_port_forwarding_blocks_agent_delete,
+};
 use crate::selector_expression::{agent_matches_selector_expression, parse_selector_expression};
 use crate::unix_now;
 
@@ -861,6 +865,11 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let _key_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
+                let _port_forward_lifecycle_guard = memory.port_forward_lifecycle.lock().await;
+                anyhow::ensure!(
+                    !self.port_forwarding_blocks_agent_delete(client_id).await?,
+                    "agent_port_forwarding_cleanup_required"
+                );
                 let deleted_at = unix_now().to_string();
                 let already_hidden = {
                     let mut hidden = memory.hidden_clients.write().await;
@@ -878,6 +887,35 @@ impl Repository {
                 agents.retain(|agent| agent.id != client_id);
                 drop(agents);
                 anyhow::ensure!(found || already_hidden, "agent_not_found");
+                let archived_port_forward_rule_count = {
+                    let deleted_reason = reason
+                        .as_deref()
+                        .map(|reason| format!("vps_deleted: {reason}"))
+                        .unwrap_or_else(|| "vps_deleted".to_string());
+                    let mut count = 0usize;
+                    for rule in memory
+                        .port_forward_rules
+                        .write()
+                        .await
+                        .iter_mut()
+                        .filter(|rule| {
+                            rule.client_id == client_id
+                                && rule.deleted_at.is_none()
+                                && !rule.enabled
+                        })
+                    {
+                        rule.revision += 1;
+                        rule.enabled = false;
+                        rule.deleted_at = Some(deleted_at.clone());
+                        rule.deleted_by = Some(operator.operator.id);
+                        rule.deleted_reason = Some(deleted_reason.clone());
+                        rule.removal_confirmed_at = Some(deleted_at.clone());
+                        rule.updated_at = deleted_at.clone();
+                        count += 1;
+                    }
+                    memory.port_forward_runtime.write().await.remove(client_id);
+                    count
+                };
                 if let Some(public_key) = memory.client_public_keys.write().await.remove(client_id)
                 {
                     if !public_key.is_empty() {
@@ -960,25 +998,26 @@ impl Repository {
                         "frontend_visible": false,
                         "access_deactivated": true,
                         "soft_deleted_tunnel_plan_count": soft_deleted_tunnel_plan_count,
+                        "archived_port_forward_rule_count": archived_port_forward_rule_count,
                         "agent_lost_job_ids": agent_lost_job_ids,
                         "skipped_unstarted_job_ids": skipped_job_ids,
                     }),
                     created_at: deleted_at.clone(),
                 });
                 Ok(DeleteAgentResult {
-                    response: DeleteAgentResponse {
-                        client_id: client_id.to_string(),
-                        deleted: true,
-                        deleted_at,
-                        runtime_sync_job_ids: Vec::new(),
-                        runtime_sync_failed_client_ids: Vec::new(),
-                    },
+                    client_id: client_id.to_string(),
+                    deleted_at,
                     retired_tunnel_endpoint_pairs,
                 })
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 lock_postgres_agent_identity_lifecycle(&mut tx).await?;
+                lock_postgres_port_forward_client(&mut tx, client_id).await?;
+                anyhow::ensure!(
+                    !postgres_port_forwarding_blocks_agent_delete(&mut tx, client_id).await?,
+                    "agent_port_forwarding_cleanup_required"
+                );
                 let client_row = sqlx::query(
                     r#"
                     SELECT process_incarnation_id, public_key
@@ -1036,6 +1075,14 @@ impl Repository {
                     anyhow::bail!("agent_not_found");
                 };
                 let deleted_at: String = row.try_get("deleted_at")?;
+                let archived_port_forward_rule_count =
+                    archive_postgres_port_forwarding_for_agent_delete(
+                        &mut tx,
+                        client_id,
+                        operator.operator.id,
+                        reason.as_deref(),
+                    )
+                    .await?;
                 let agent_lost_job_ids =
                     if let Some(old_process_incarnation_id) = old_process_incarnation_id {
                         mark_active_targets_agent_lost_for_client_in_tx(
@@ -1116,6 +1163,7 @@ impl Repository {
                     "frontend_visible": false,
                     "access_deactivated": true,
                     "soft_deleted_tunnel_plan_count": soft_deleted_tunnel_plan_count,
+                    "archived_port_forward_rule_count": archived_port_forward_rule_count,
                     "agent_lost_job_ids": agent_lost_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
                     "skipped_unstarted_job_ids": skipped_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>()
                 })))
@@ -1130,13 +1178,8 @@ impl Repository {
                     self.refresh_job_status_from_targets(job_id).await?;
                 }
                 Ok(DeleteAgentResult {
-                    response: DeleteAgentResponse {
-                        client_id: client_id.to_string(),
-                        deleted: true,
-                        deleted_at,
-                        runtime_sync_job_ids: Vec::new(),
-                        runtime_sync_failed_client_ids: Vec::new(),
-                    },
+                    client_id: client_id.to_string(),
+                    deleted_at,
                     retired_tunnel_endpoint_pairs,
                 })
             }

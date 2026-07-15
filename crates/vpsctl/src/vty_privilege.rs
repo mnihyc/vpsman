@@ -32,6 +32,8 @@ const READ_ONLY_COMMANDS: &[&str] = &[
     "restore-plans",
     "migration-links",
     "tunnel-plans",
+    "port-forwards",
+    "port-forward-resolve",
     "tunnel-plan-export",
     "network-observations",
     "network-trends",

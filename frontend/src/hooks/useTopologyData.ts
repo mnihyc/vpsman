@@ -12,6 +12,7 @@ import type {
   TopologyGraph,
   TunnelPlanOspfJobsResponse,
   TunnelPlanRecord,
+  TunnelPlanMutationResponse,
   TunnelPlanRevisionTarget,
   UpdateTunnelConnectionAssessmentRequest,
   UpdateTunnelPlanOspfCostRequest,
@@ -22,6 +23,7 @@ export function useTopologyData(
   apiToken: string,
   onUnauthorized: () => void,
   onAuditChanged: () => Promise<void>,
+  onRuntimeConfigChanged: () => Promise<void>,
 ) {
   const [tunnelPlans, setTunnelPlans] = useState<TunnelPlanRecord[]>([]);
   const [networkObservations, setNetworkObservations] = useState<NetworkObservationRecord[]>([]);
@@ -128,22 +130,24 @@ export function useTopologyData(
 
   const createTunnelPlan = useCallback(
     async (request: CreateTunnelPlanRequest) => {
-      await apiPost<TunnelPlanRecord>("/api/v1/tunnel-plans", apiToken, request);
-      await Promise.all([loadTunnelPlans(), loadTopologyGraph(), loadOspfUpdatePlans(), onAuditChanged()]);
+      const response = await apiPost<TunnelPlanMutationResponse>("/api/v1/tunnel-plans", apiToken, request);
+      await Promise.all([loadTunnelPlans(), loadTopologyGraph(), loadOspfUpdatePlans(), onAuditChanged(), onRuntimeConfigChanged()]);
+      return response;
     },
-    [apiToken, loadOspfUpdatePlans, loadTopologyGraph, loadTunnelPlans, onAuditChanged],
+    [apiToken, loadOspfUpdatePlans, loadTopologyGraph, loadTunnelPlans, onAuditChanged, onRuntimeConfigChanged],
   );
 
   const updateTunnelPlan = useCallback(
     async (planId: string, request: UpdateTunnelPlanRequest) => {
-      await apiPut<TunnelPlanRecord>(
+      const response = await apiPut<TunnelPlanMutationResponse>(
         `/api/v1/tunnel-plans/${encodeURIComponent(planId)}`,
         apiToken,
         request,
       );
-      await Promise.all([loadTunnelPlans(), loadTopologyGraph(), loadOspfUpdatePlans(), onAuditChanged()]);
+      await Promise.all([loadTunnelPlans(), loadTopologyGraph(), loadOspfUpdatePlans(), onAuditChanged(), onRuntimeConfigChanged()]);
+      return response;
     },
-    [apiToken, loadOspfUpdatePlans, loadTopologyGraph, loadTunnelPlans, onAuditChanged],
+    [apiToken, loadOspfUpdatePlans, loadTopologyGraph, loadTunnelPlans, onAuditChanged, onRuntimeConfigChanged],
   );
 
   const allocateTunnelEndpoints = useCallback(
@@ -160,30 +164,32 @@ export function useTopologyData(
 
   const setTunnelPlanEnabled = useCallback(
     async (targets: TunnelPlanRevisionTarget[], enabled: boolean) => {
-      await Promise.all(
+      const responses = await Promise.all(
         targets.map((target) =>
-          apiPost<TunnelPlanRecord>(
+          apiPost<TunnelPlanMutationResponse>(
             `/api/v1/tunnel-plans/${encodeURIComponent(target.plan_id)}/${enabled ? "enable" : "disable"}`,
             apiToken,
             { confirmed: true, expected_revision: target.expected_revision },
           ),
         ),
       );
-      await Promise.all([loadTunnelPlans(), loadTopologyGraph(), loadOspfUpdatePlans(), onAuditChanged()]);
+      await Promise.all([loadTunnelPlans(), loadTopologyGraph(), loadOspfUpdatePlans(), onAuditChanged(), onRuntimeConfigChanged()]);
+      return responses;
     },
-    [apiToken, loadOspfUpdatePlans, loadTopologyGraph, loadTunnelPlans, onAuditChanged],
+    [apiToken, loadOspfUpdatePlans, loadTopologyGraph, loadTunnelPlans, onAuditChanged, onRuntimeConfigChanged],
   );
 
   const deleteTunnelPlan = useCallback(
     async (target: TunnelPlanRevisionTarget) => {
-      await apiPost<TunnelPlanRecord>(
+      const response = await apiPost<TunnelPlanMutationResponse>(
         `/api/v1/tunnel-plans/${encodeURIComponent(target.plan_id)}/delete`,
         apiToken,
         { confirmed: true, expected_revision: target.expected_revision },
       );
-      await Promise.all([loadTunnelPlans(), loadTopologyGraph(), loadOspfUpdatePlans(), onAuditChanged()]);
+      await Promise.all([loadTunnelPlans(), loadTopologyGraph(), loadOspfUpdatePlans(), onAuditChanged(), onRuntimeConfigChanged()]);
+      return response;
     },
-    [apiToken, loadOspfUpdatePlans, loadTopologyGraph, loadTunnelPlans, onAuditChanged],
+    [apiToken, loadOspfUpdatePlans, loadTopologyGraph, loadTunnelPlans, onAuditChanged, onRuntimeConfigChanged],
   );
 
   const updateTunnelConnectionAssessment = useCallback(
@@ -200,24 +206,26 @@ export function useTopologyData(
 
   const updateTunnelPlanOspfCost = useCallback(
     async (planId: string, request: UpdateTunnelPlanOspfCostRequest) => {
-      await apiPost<TunnelPlanOspfJobsResponse>(
+      const response = await apiPost<TunnelPlanOspfJobsResponse>(
         `/api/v1/tunnel-plans/${encodeURIComponent(planId)}/ospf-cost`,
         apiToken,
         request,
       );
       await Promise.all([loadTunnelPlans(), loadTopologyGraph(), loadOspfUpdatePlans(), onAuditChanged()]);
+      return response;
     },
     [apiToken, loadOspfUpdatePlans, loadTopologyGraph, loadTunnelPlans, onAuditChanged],
   );
 
   const refreshTunnelPlanOspfStatus = useCallback(
     async (planId: string) => {
-      await apiPost<TunnelPlanOspfJobsResponse>(
+      const response = await apiPost<TunnelPlanOspfJobsResponse>(
         `/api/v1/tunnel-plans/${encodeURIComponent(planId)}/ospf-status`,
         apiToken,
         {},
       );
       await Promise.all([loadTunnelPlans(), loadTopologyGraph(), loadOspfUpdatePlans(), onAuditChanged()]);
+      return response;
     },
     [apiToken, loadOspfUpdatePlans, loadTopologyGraph, loadTunnelPlans, onAuditChanged],
   );

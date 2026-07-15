@@ -51,10 +51,17 @@ import type {
   SourceTemplateTestResponse,
   SourceStatusRecord,
   JsonValue,
+  RuntimeConfigDispatchRecord,
   UpdateSourceTemplateRequest,
   UpdateSourceTemplateResponse,
 } from "../types";
-import { formatTime, formatVpsName, runPanelAction, shortId } from "../utils";
+import {
+  dispatchFailureReason,
+  formatTime,
+  formatVpsName,
+  runPanelAction,
+  shortId,
+} from "../utils";
 
 const SOURCE_TEMPLATE_DOMAINS = [
   "telemetry_metrics_source",
@@ -261,7 +268,7 @@ export function SourceTemplatePanel({
   const lifecycleStatus = lastUpdate?.confirmation_required
     ? `${sourceTemplateDiffSummary(lastUpdate.diff)}; ${lastUpdate.affected_client_count} ${sourceTemplateUsageLabel(planBoundAdapter, lastUpdate.affected_client_count)} require confirmation`
     : lastUpdate
-      ? `${sourceTemplateDiffSummary(lastUpdate.diff)}; ${lastUpdate.affected_client_count} ${sourceTemplateUsageLabel(planBoundAdapter, lastUpdate.affected_client_count)} updated`
+      ? `${sourceTemplateDiffSummary(lastUpdate.diff)}; desired state updated for ${lastUpdate.affected_client_count} ${sourceTemplateUsageLabel(planBoundAdapter, lastUpdate.affected_client_count)}; ${runtimeDispatchSummary(lastUpdate.sync)}`
       : lastTest
         ? lastTest.valid
           ? `${lastTest.renderable ? "Renderable" : "Workflow"} template test passed for ${lastTest.domain}`
@@ -275,8 +282,13 @@ export function SourceTemplatePanel({
   const assignmentStatus = lastAssignment
     ? lastAssignment.confirmation_required
       ? `Reviewed ${lastAssignment.target_count} ${lastAssignment.target_count === 1 ? "VPS" : "VPSs"}; confirmation required`
-      : `Applied template to ${lastAssignment.target_count} ${lastAssignment.target_count === 1 ? "VPS" : "VPSs"}`
+      : `Template assignment saved for ${lastAssignment.target_count} ${lastAssignment.target_count === 1 ? "VPS" : "VPSs"}; ${runtimeDispatchSummary(lastAssignment.sync)}`
     : null;
+  const sourceWorkflowDispatch = lifecycleStatus && lastUpdate
+    ? lastUpdate.sync
+    : assignmentStatus && lastAssignment
+      ? lastAssignment.sync
+      : [];
   const sourceWorkflowFeedbackMessage =
     actionError ??
     reviewStatus ??
@@ -286,11 +298,15 @@ export function SourceTemplatePanel({
   const sourceWorkflowFeedbackTone =
     actionError || lifecycleStatus?.startsWith("Template test failed")
       ? "danger"
-      : lifecycleStatus ||
+      : sourceWorkflowDispatch.some((outcome) => outcome.status !== "queued")
+        ? "warning"
+        : sourceWorkflowDispatch.length > 0
+          ? "progress"
+          : lifecycleStatus ||
           lastCloneName ||
           (lastAssignment && !lastAssignment.confirmation_required)
-        ? "success"
-        : "progress";
+            ? "success"
+            : "progress";
   const sourceTemplateListFeedbackMessage =
     drawerMode === null ? actionError : null;
   const sourceStatusColumns = useMemo<
@@ -557,6 +573,10 @@ export function SourceTemplatePanel({
         if (!isReviewGenerationCurrent(reviewGeneration)) {
           return;
         }
+        setLastCloneName(null);
+        setLastDiff(null);
+        setLastTest(null);
+        setLastUpdate(null);
         setLastAssignment(preview);
         setAssignmentSnapshot({
           assignments: preview.assignments,
@@ -604,6 +624,10 @@ export function SourceTemplatePanel({
         selector_expression: snapshot.selectorExpression,
         target_client_ids: snapshot.targetClientIds,
       });
+      setLastCloneName(null);
+      setLastDiff(null);
+      setLastTest(null);
+      setLastUpdate(null);
       setLastAssignment(response);
       setAssignmentSnapshot(null);
       setPendingConfirmation(null);
@@ -650,6 +674,8 @@ export function SourceTemplatePanel({
           description: lifecycleDescription.trim() || null,
         }),
       );
+      setLastAssignment(null);
+      setLastCloneName(null);
       setLastTest(null);
       setLastUpdate(null);
     });
@@ -665,6 +691,8 @@ export function SourceTemplatePanel({
           definition: parseDefinition(lifecycleDefinitionText),
         }),
       );
+      setLastAssignment(null);
+      setLastCloneName(null);
       setLastDiff(null);
       setLastUpdate(null);
     });
@@ -686,6 +714,7 @@ export function SourceTemplatePanel({
       setLastDiff(null);
       setLastTest(null);
       setLastUpdate(null);
+      setLastAssignment(null);
       setLastCloneName(cloneName);
       await waitForReviewRender();
       scrollIntoViewSoon(
@@ -708,6 +737,8 @@ export function SourceTemplatePanel({
         definition,
         description,
       });
+      setLastAssignment(null);
+      setLastCloneName(null);
       setLastUpdate(preview);
       setLastDiff(preview.diff);
       setLastTest(null);
@@ -751,6 +782,8 @@ export function SourceTemplatePanel({
         preview_hash: snapshot.previewHash,
         privilege_assertion: privilegeAssertion,
       });
+      setLastAssignment(null);
+      setLastCloneName(null);
       setLastUpdate(response);
       setLastDiff(response.diff);
       setLastTest(null);
@@ -970,6 +1003,8 @@ export function SourceTemplatePanel({
   function prepareTemplateLifecycle(template: SourceTemplateRecord) {
     clearLifecycleUpdateConfirmation();
     setLifecycleTemplateId(template.id);
+    setLastAssignment(null);
+    setLastCloneName(null);
     setLastDiff(null);
     setLastTest(null);
     setLastUpdate(null);
@@ -1838,6 +1873,15 @@ function assignmentSummary(
   return domains.size === 0
     ? "No effective VPS template assignments loaded"
     : `${domains.size} source domains active across scoped VPSs`;
+}
+
+function runtimeDispatchSummary(sync: RuntimeConfigDispatchRecord[]): string {
+  if (sync.length === 0) return "no runtime apply required";
+  const failures = sync.filter((outcome) => outcome.status !== "queued");
+  if (failures.length === 0) {
+    return `runtime apply queued for ${sync.length} endpoint${sync.length === 1 ? "" : "s"}`;
+  }
+  return `desired state saved; runtime apply was not queued for ${failures.map((outcome) => `${outcome.client_id}: ${dispatchFailureReason(outcome.error, outcome.status, "Runtime apply job")}`).join("; ")}`;
 }
 
 function sourceEvidenceSummary(row: SourceStatusRecord): string {

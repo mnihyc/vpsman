@@ -342,7 +342,7 @@ fn write_request_and_stream_response_to_file(
         );
         anyhow::bail!(
             "API request {method} {request_path} failed: {status_line}: {}",
-            String::from_utf8_lossy(&body).trim()
+            operator_api_error_detail(status_code, &body)
         );
     }
 
@@ -528,9 +528,98 @@ fn decode_api_response_bytes(method: &str, request_path: &str, response: &[u8]) 
     anyhow::ensure!(
         status_code.starts_with('2'),
         "API request {method} {request_path} failed: {status_line}: {}",
-        String::from_utf8_lossy(body).trim()
+        operator_api_error_detail(status_code, body)
     );
     Ok(body.to_vec())
+}
+
+fn operator_api_error_detail(status_code: &str, body: &[u8]) -> String {
+    let status = status_code.parse::<u16>().unwrap_or_default();
+    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
+        let code = value
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("request_failed");
+        let public_message = value
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let recovery = value
+            .get("recovery")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| api_error_guidance(status, code));
+        let summary = humanize_api_code(code);
+        let detail = public_message
+            .map(|message| format!("{summary}: {message}"))
+            .unwrap_or(summary);
+        return format!("{detail}. {recovery}");
+    }
+    let raw = String::from_utf8_lossy(body).trim().to_string();
+    if raw.is_empty() {
+        return format!(
+            "The API returned no error detail. {}",
+            api_error_guidance(status, "request_failed")
+        );
+    }
+    format!("{raw}. {}", api_error_guidance(status, "request_failed"))
+}
+
+fn humanize_api_code(code: &str) -> String {
+    let mut words = code
+        .split('_')
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            if word.eq_ignore_ascii_case("api") {
+                "API".to_string()
+            } else if word.eq_ignore_ascii_case("http") {
+                "HTTP".to_string()
+            } else {
+                word.to_string()
+            }
+        })
+        .collect::<Vec<_>>();
+    if words.is_empty() {
+        return "Request failed".to_string();
+    }
+    if let Some(first) = words.first_mut() {
+        if first != "API" && first != "HTTP" {
+            let mut chars = first.chars();
+            if let Some(initial) = chars.next() {
+                *first = initial.to_uppercase().collect::<String>() + chars.as_str();
+            }
+        }
+    }
+    words.join(" ")
+}
+
+fn api_error_guidance(status: u16, code: &str) -> &'static str {
+    if code.contains("snapshot_stale") || code.contains("confirmation_stale") {
+        return "The reviewed state changed; refresh it and review the action again";
+    }
+    if code.contains("confirmation") || code.contains("preview_hash") {
+        return "Review the current action snapshot before submitting it again";
+    }
+    if code.contains("capability") || code.contains("unsupported") {
+        return "The selected VPS does not advertise the required capability; inspect agent status before retrying";
+    }
+    match status {
+        400 => "Review the submitted values and correct the invalid field before retrying",
+        401 => "Authenticate again before retrying this action",
+        403 => "The current operator scope or privilege assertion does not permit this action",
+        404 => "The target no longer exists or is outside the current operator scope; refresh current state",
+        409 => "The change conflicts with current state; refresh and review before retrying",
+        413 => "Reduce the request or artifact size and retry",
+        429 => "Wait for the active limit or cooldown to clear before retrying",
+        500..=599 => {
+            "The server did not complete the action and no success is assumed; inspect API logs and retry"
+        }
+        _ => "The action did not complete; refresh current state before retrying",
+    }
 }
 
 fn parse_api_url(base_url: &str) -> Result<ParsedApiUrl> {
@@ -667,6 +756,15 @@ mod tests {
             .to_string();
         assert!(message.contains("403 Forbidden"));
         assert!(message.contains("not allowed"));
+        assert!(message.contains("operator scope or privilege assertion"));
+
+        let conflict = b"HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: 88\r\n\r\n{\"error\":\"confirmation_snapshot_stale\",\"message\":\"Target set changed after review\",\"status\":409}";
+        let message = decode_api_response("POST", "/api/v1/jobs", conflict)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("Confirmation snapshot stale"));
+        assert!(message.contains("Target set changed after review"));
+        assert!(message.contains("refresh it and review the action again"));
     }
 
     #[test]

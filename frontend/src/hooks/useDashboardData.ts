@@ -19,6 +19,7 @@ import { useDashboardOverviewData } from "./useDashboardOverviewData";
 import { useFleetData } from "./useFleetData";
 import { useInventoryData } from "./useInventoryData";
 import { useJobsData } from "./useJobsData";
+import { usePortForwardingData } from "./usePortForwardingData";
 import { useSchedulesData } from "./useSchedulesData";
 import { useSystemData } from "./useSystemData";
 import { useTopologyData } from "./useTopologyData";
@@ -128,7 +129,17 @@ export function useDashboardData(activeView: ActiveView) {
   );
   const schedules = useSchedulesData(apiToken, requireAuth, audit.loadAudits);
   const system = useSystemData(apiToken, requireAuth);
-  const topology = useTopologyData(apiToken, requireAuth, audit.loadAudits);
+  const topology = useTopologyData(
+    apiToken,
+    requireAuth,
+    audit.loadAudits,
+    inventory.loadRuntimeConfigApplyStates,
+  );
+  const portForwarding = usePortForwardingData(
+    apiToken,
+    requireAuth,
+    audit.loadAudits,
+  );
   const backups = useBackupsData(apiToken, requireAuth, audit.loadAudits);
   const scheduleDashboardOverviewReload = useCallback(() => {
     if (dashboardOverviewReloadTimer.current !== null) {
@@ -187,6 +198,7 @@ export function useDashboardData(activeView: ActiveView) {
         topology.loadNetworkTrends(),
         topology.loadOspfRecommendations(),
         topology.loadOspfUpdatePlans(),
+        portForwarding.loadPortForwardRules(),
       ]);
     }, 500);
   }, [
@@ -196,6 +208,7 @@ export function useDashboardData(activeView: ActiveView) {
     topology.loadOspfUpdatePlans,
     topology.loadTopologyGraph,
     topology.loadTunnelPlans,
+    portForwarding.loadPortForwardRules,
   ]);
 
   useEffect(
@@ -385,6 +398,7 @@ export function useDashboardData(activeView: ActiveView) {
     topology.loadOspfUpdatePlans,
     topology.loadTopologyGraph,
     topology.loadTunnelPlans,
+    portForwarding.loadPortForwardRules,
   ]);
 
   useEffect(() => {
@@ -520,6 +534,7 @@ export function useDashboardData(activeView: ActiveView) {
     scheduleFleetTelemetryReload,
     scheduleInventoryReload,
     scheduleTopologyReload,
+    portForwarding.loadPortForwardRules,
   ]);
 
   const handleAuth = useCallback(
@@ -606,6 +621,11 @@ export function useDashboardData(activeView: ActiveView) {
     updateTagOrder: inventory.updateTagOrder,
     allocateTunnelEndpoints: topology.allocateTunnelEndpoints,
     createTunnelPlan: topology.createTunnelPlan,
+    createPortForwardRule: portForwarding.createPortForwardRule,
+    updatePortForwardRule: portForwarding.updatePortForwardRule,
+    mutatePortForwardRule: portForwarding.mutatePortForwardRule,
+    bulkMutatePortForwardRules: portForwarding.bulkMutatePortForwardRules,
+    resolvePortForwardHostname: portForwarding.resolvePortForwardHostname,
     deleteTunnelPlan: topology.deleteTunnelPlan,
     exportTunnelPlan: topology.exportTunnelPlan,
     refreshTunnelPlanOspfStatus: topology.refreshTunnelPlanOspfStatus,
@@ -688,6 +708,7 @@ export function useDashboardData(activeView: ActiveView) {
     loadOspfUpdatePlans: topology.loadOspfUpdatePlans,
     loadTopologyGraph: topology.loadTopologyGraph,
     loadTunnelPlans: topology.loadTunnelPlans,
+    loadPortForwardRules: portForwarding.loadPortForwardRules,
     setTunnelPlanEnabled: topology.setTunnelPlanEnabled,
     updateTunnelConnectionAssessment: topology.updateTunnelConnectionAssessment,
     updateTunnelPlanOspfCost: topology.updateTunnelPlanOspfCost,
@@ -758,6 +779,9 @@ export function useDashboardData(activeView: ActiveView) {
     topologyGraph: topology.topologyGraph,
     topologyLoading: topology.topologyLoading,
     tunnelPlans: topology.tunnelPlans,
+    portForwardRules: portForwarding.portForwardRules,
+    portForwardError: portForwarding.portForwardError,
+    portForwardLoading: portForwarding.portForwardLoading,
     updateSourceTemplate: inventory.updateSourceTemplate,
     updateOperator: access.updateOperator,
     upsertRuntimeConfigPatchGenerator: inventory.upsertRuntimeConfigPatchGenerator,

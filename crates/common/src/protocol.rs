@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use uuid::Uuid;
@@ -863,6 +863,8 @@ pub struct AgentCapabilitySnapshot {
     #[serde(default)]
     pub can_apply_process_limits: bool,
     #[serde(default)]
+    pub port_forwarding: crate::PortForwardCapability,
+    #[serde(default)]
     pub unprivileged_hint: Option<String>,
 }
 
@@ -875,6 +877,7 @@ impl Default for AgentCapabilitySnapshot {
             can_attempt_privileged_ops: false,
             can_manage_runtime_tunnels: false,
             can_apply_process_limits: false,
+            port_forwarding: crate::PortForwardCapability::default(),
             unprivileged_hint: None,
         }
     }
@@ -934,6 +937,93 @@ pub struct AgentRuntimeConfigReloadRequest {
     pub client_id: String,
     pub current_content_hash: String,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub requires_authoritative_sync: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reconcile_resources: Vec<RuntimeConfigReconcileResource>,
+    // Kept on the wire while older APIs only understand the forwarding-specific flag.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub requires_port_forwarding_sync: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeConfigReconcileResource {
+    RuntimeTunnels,
+    PortForwarding,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RuntimeConfigReconcileScope {
+    pub authoritative: bool,
+    pub resources: BTreeSet<RuntimeConfigReconcileResource>,
+}
+
+impl RuntimeConfigReconcileScope {
+    pub fn from_reload_request(request: &AgentRuntimeConfigReloadRequest) -> Self {
+        let mut resources = request
+            .reconcile_resources
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if request.requires_port_forwarding_sync {
+            resources.insert(RuntimeConfigReconcileResource::PortForwarding);
+        }
+        Self {
+            authoritative: request.requires_authoritative_sync,
+            resources,
+        }
+    }
+
+    pub fn requires_reconcile(&self) -> bool {
+        self.authoritative || !self.resources.is_empty()
+    }
+
+    pub fn includes(&self, resource: RuntimeConfigReconcileResource) -> bool {
+        self.authoritative || self.resources.contains(&resource)
+    }
+
+    pub fn covers(&self, requested: &Self) -> bool {
+        self.authoritative
+            || (!requested.authoritative && requested.resources.is_subset(&self.resources))
+    }
+}
+
+pub fn runtime_config_reconcile_scope_from_reason(reason: &str) -> RuntimeConfigReconcileScope {
+    let mut scope = RuntimeConfigReconcileScope::default();
+    match reason {
+        "agent_reconnect_authoritative_sync" => {
+            scope.authoritative = true;
+        }
+        "agent_reconnect_authoritative_port_forwarding_sync" => {
+            scope.authoritative = true;
+            scope
+                .resources
+                .insert(RuntimeConfigReconcileResource::PortForwarding);
+        }
+        "port_forward_table_reapply"
+        | "port_forward_bulk_reapply"
+        | "agent_reconnect_port_forwarding_sync" => {
+            scope
+                .resources
+                .insert(RuntimeConfigReconcileResource::PortForwarding);
+        }
+        "agent_reconnect_runtime_tunnels_sync" => {
+            scope
+                .resources
+                .insert(RuntimeConfigReconcileResource::RuntimeTunnels);
+        }
+        "agent_reconnect_network_resources_sync" => {
+            scope
+                .resources
+                .insert(RuntimeConfigReconcileResource::RuntimeTunnels);
+            scope
+                .resources
+                .insert(RuntimeConfigReconcileResource::PortForwarding);
+        }
+        _ => {}
+    }
+    scope
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -3284,11 +3374,12 @@ mod tests {
         topology_neighbor_states, topology_node_statuses, topology_observation_states,
         topology_probe_states, topology_runtime_states, webhook_rule_delivery_history_statuses,
         webhook_rule_delivery_process_statuses, webhook_rule_delivery_statuses, AgentHello,
-        AgentUpdateReleaseStatus, BackupRequestStatus, JobCommand, JobStatus, JobStatusClass,
-        JobTargetStatus, JobTargetStatusClass, MigrationLinkStatus, RestorePlanStatus, ServerHello,
-        JOB_COMMAND_SAFETY_EXCLUSIVE, JOB_COMMAND_SAFETY_EXEC, JOB_COMMAND_SAFETY_READ,
-        JOB_COMMAND_SAFETY_WRITE, JOB_STATUS_CLASSES, JOB_STATUS_PARTIAL_SUCCESS,
-        JOB_STATUS_SKIPPED, JOB_TARGET_STATUS_CLASSES, TARGET_STATUS_SKIPPED,
+        AgentRuntimeConfigReloadRequest, AgentUpdateReleaseStatus, BackupRequestStatus, JobCommand,
+        JobStatus, JobStatusClass, JobTargetStatus, JobTargetStatusClass, MigrationLinkStatus,
+        RestorePlanStatus, ServerHello, JOB_COMMAND_SAFETY_EXCLUSIVE, JOB_COMMAND_SAFETY_EXEC,
+        JOB_COMMAND_SAFETY_READ, JOB_COMMAND_SAFETY_WRITE, JOB_STATUS_CLASSES,
+        JOB_STATUS_PARTIAL_SUCCESS, JOB_STATUS_SKIPPED, JOB_TARGET_STATUS_CLASSES,
+        TARGET_STATUS_SKIPPED,
     };
 
     #[test]
@@ -3314,6 +3405,37 @@ mod tests {
         let encoded = serde_json::to_value(&hello).unwrap();
         assert_eq!(encoded["server_version"], "0.1.0");
         assert_eq!(encoded["server_build_number"], 1001);
+    }
+
+    #[test]
+    fn legacy_runtime_reload_request_does_not_force_a_sync() {
+        let request: AgentRuntimeConfigReloadRequest = serde_json::from_value(serde_json::json!({
+            "client_id": "edge-a",
+            "current_content_hash": "ab",
+            "reason": "legacy-agent"
+        }))
+        .unwrap();
+
+        assert!(!request.requires_authoritative_sync);
+        assert!(request.reconcile_resources.is_empty());
+        assert!(!request.requires_port_forwarding_sync);
+    }
+
+    #[test]
+    fn runtime_reload_scope_is_additive_and_accepts_legacy_forwarding_requests() {
+        let request: AgentRuntimeConfigReloadRequest = serde_json::from_value(serde_json::json!({
+            "client_id": "edge-a",
+            "current_content_hash": "ab",
+            "reason": "reconnect",
+            "reconcile_resources": ["runtime_tunnels"],
+            "requires_port_forwarding_sync": true
+        }))
+        .unwrap();
+        let scope = super::RuntimeConfigReconcileScope::from_reload_request(&request);
+
+        assert!(scope.includes(super::RuntimeConfigReconcileResource::RuntimeTunnels));
+        assert!(scope.includes(super::RuntimeConfigReconcileResource::PortForwarding));
+        assert!(!scope.authoritative);
     }
 
     #[test]

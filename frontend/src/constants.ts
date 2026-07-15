@@ -243,6 +243,12 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
         "Explicit tunnel declarations, runtime ownership, endpoint state, and optional routing adapters",
     },
     {
+      id: "port_forwards",
+      label: "Port forwards",
+      description:
+        "Per-VPS nftables DNAT rules, desired state, runtime drift, and counters",
+    },
+    {
       id: "tests",
       label: "Tests",
       description: "Tunnel status, probes, and bounded throughput tests",
@@ -384,7 +390,7 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
       id: "capacity",
       label: "Capacity",
       description:
-        "Queue depth, dispatch capacity, artifact storage, and worker lag",
+        "Database pressure, dispatch limits, and gateway queue health",
     },
     {
       id: "suite_config",

@@ -413,6 +413,8 @@ export function JobDispatchPanel({
   const [approvalRequestReason, setApprovalRequestReason] = useState("");
   const [selectorVerification, setSelectorVerification] = useState<"checking" | "invalid" | "neutral" | "valid">("neutral");
   const [selectorVerificationMessage, setSelectorVerificationMessage] = useState<string | null>(null);
+  const [selectorVerificationError, setSelectorVerificationError] =
+    useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [reviewStatus, setReviewStatus] = useState<string | null>(null);
   const {
@@ -649,12 +651,14 @@ export function JobDispatchPanel({
     if (selectorParse.error) {
       setSelectorVerification("invalid");
       setSelectorVerificationMessage("Invalid");
+      setSelectorVerificationError(null);
       setPreview(null);
       return;
     }
     let disposed = false;
     setSelectorVerification("checking");
     setSelectorVerificationMessage("Checking");
+    setSelectorVerificationError(null);
     const timeout = window.setTimeout(() => {
       void onResolveTargets({
         selector_expression: normalizedSelectorExpression,
@@ -666,14 +670,22 @@ export function JobDispatchPanel({
           setPreview(response);
           setSelectorVerification("valid");
           setSelectorVerificationMessage(`${response.target_count}/${agents.length}`);
+          setSelectorVerificationError(null);
         })
-        .catch(() => {
+        .catch((error) => {
           if (disposed) {
             return;
           }
           setPreview(null);
           setSelectorVerification("invalid");
-          setSelectorVerificationMessage("Invalid");
+          setSelectorVerificationMessage("Unavailable");
+          setSelectorVerificationError(
+            `Target verification could not complete: ${
+              error instanceof Error
+                ? error.message
+                : "the browser returned no failure detail. Check API availability and retry."
+            }`,
+          );
         });
     }, 300);
     return () => {
@@ -828,8 +840,10 @@ export function JobDispatchPanel({
     },
   ];
   const dispatchHeaderStatus = privilegeMaterial ? "Ready" : "Locked";
-  const dispatchFeedbackMessage = actionError ?? reviewStatus;
-  const dispatchFeedbackTone = actionError ? "danger" : "progress";
+  const dispatchFeedbackMessage =
+    actionError ?? selectorVerificationError ?? reviewStatus;
+  const dispatchFeedbackTone =
+    actionError || selectorVerificationError ? "danger" : "progress";
 
   function lockPrivilege() {
     setPrivilegeMaterial(null);

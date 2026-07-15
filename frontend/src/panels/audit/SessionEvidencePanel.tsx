@@ -722,7 +722,7 @@ function terminalEvidenceState(
   const observedMs = parseTimeMs(session.observed_at);
   if (observedMs === null) {
     return {
-      detail: "The backend did not provide a valid last-activity timestamp.",
+      detail: "No valid last-activity timestamp is available.",
       label: "State unknown",
       open: false,
       tone: "warn",
@@ -732,7 +732,7 @@ function terminalEvidenceState(
   const staleAfterMs = Math.max(idleTimeoutMs * 2, TERMINAL_STALE_FLOOR_MS);
   if (Date.now() - observedMs > staleAfterMs) {
     return {
-      detail: `Last activity was ${formatTime(session.observed_at)}; raw backend state is ${session.state}.`,
+      detail: `Last activity was ${formatTime(session.observed_at)}; reported state is ${session.state}.`,
       label: "Stale state",
       open: false,
       tone: "warn",
@@ -959,7 +959,7 @@ function terminalExpiryDetail(
 ): string {
   const operatorSession = operatorSessionForTerminal(record, operatorSessions);
   if (!operatorSession) {
-    return "Terminal expiry not reported by backend; linked bearer expiry unavailable";
+    return "Terminal expiry and linked bearer expiry are unavailable";
   }
   const state = operatorSessionEvidenceState(operatorSession);
   return `${state.label} bearer session; access ${formatFullTime(operatorSession.expires_at)}; refresh ${formatFullTime(operatorSession.refresh_expires_at)}`;

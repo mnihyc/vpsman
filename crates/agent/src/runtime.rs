@@ -1,7 +1,8 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeSet, HashMap, VecDeque},
     net::SocketAddr,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -10,7 +11,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::{
     net::TcpStream,
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, Semaphore},
+    task::JoinSet,
     time,
 };
 use tracing::{debug, info, warn};
@@ -19,13 +21,15 @@ use vpsman_common::CURRENT_COMMAND_PROTOCOL_VERSION;
 use vpsman_common::{
     decode_json, decode_noise_key_hex, encode_json, job_command_min_supported_protocol_version,
     job_command_protocol_version, job_command_safety, job_command_type_label,
-    maybe_compress_payload, payload_hash, runtime_config_content_hash, validate_agent_config_shape,
+    maybe_compress_payload, payload_hash, runtime_config_content_hash,
+    runtime_config_reconcile_scope_from_reason, validate_agent_config_shape,
     AgentCapabilitySnapshot, AgentConfig, AgentHello, AgentPrivilegeMode, AgentRuntimeConfig,
     AgentRuntimeConfigReloadRequest, AgentSessionDisconnect, AgentUpdateVerificationResult,
     CommandOutput, CommandResume, Frame, JobAck, JobCancelAck, JobCancelRequest, JobCommand,
     JobCommandSafety, JobRequest, MessageKind, NoiseFrameStream, OutputStream,
-    SequencedCommandOutput, ServerEndpoint, ServerHello, TelemetryEnvelope, TerminalStreamOutput,
-    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
+    PortForwardRuntimeSnapshot, PortForwardRuntimeStatus, RuntimeConfigReconcileResource,
+    RuntimeConfigReconcileScope, SequencedCommandOutput, ServerEndpoint, ServerHello,
+    TelemetryEnvelope, TerminalStreamOutput, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
 };
 
 use crate::{
@@ -47,7 +51,12 @@ use crate::{
         NetworkRuntimeRemoveInput,
     },
     network_speed::{execute_network_speed_test_command, NetworkSpeedTestInput},
-    network_status::{execute_network_status_command, NetworkStatusInput},
+    network_status::{
+        execute_network_status_command, runtime_tunnel_requires_reconnect_sync, NetworkStatusInput,
+    },
+    port_forwarding::{
+        inspect_port_forwarding, probe_port_forwarding_capability, reconcile_port_forwarding,
+    },
     restore::{execute_restore_command, RestoreCommandInput},
     restore_rollback::{execute_restore_rollback_command, RestoreRollbackCommandInput},
     runtime_config_cache::RuntimeConfigCache,
@@ -77,7 +86,7 @@ pub(crate) async fn run_agent(
     });
     let command_ledger = CommandLedger::open_default().await?;
     let runtime_config_cache = RuntimeConfigCache::open_default().await?;
-    let mut loaded_cached_runtime_config = false;
+    let mut loaded_cached_runtime_config_version = None;
     match runtime_config_cache.load().await {
         Ok(Some(runtime_config)) => {
             let mut candidate = config.clone();
@@ -89,7 +98,7 @@ pub(crate) async fn run_agent(
                         "loaded last accepted runtime config"
                     );
                     config = candidate;
-                    loaded_cached_runtime_config = true;
+                    loaded_cached_runtime_config_version = Some(runtime_config.version);
                 }
                 Err(error) => {
                     warn!(%error, "ignored invalid last accepted runtime config");
@@ -99,21 +108,51 @@ pub(crate) async fn run_agent(
         Ok(None) => {}
         Err(error) => warn!(%error, "ignored unreadable last accepted runtime config"),
     }
-    let mut command_runtime =
-        AgentCommandRuntime::with_persistence(command_ledger, runtime_config_cache);
+    let mut command_runtime = AgentCommandRuntime::with_persistence(
+        command_ledger,
+        runtime_config_cache,
+        loaded_cached_runtime_config_version,
+    );
+    let startup_runtime_config_requires_sync = loaded_cached_runtime_config_version.is_none();
+    let mut startup_reconcile_resources = BTreeSet::new();
     let process_incarnation_id = uuid::Uuid::new_v4();
     match reconcile_supervised_processes_on_start().await {
         Ok(report) => log_supervisor_startup_reconcile(&report),
         Err(error) => warn!(%error, "process supervisor startup reconcile failed"),
     }
-    if loaded_cached_runtime_config {
+    if loaded_cached_runtime_config_version.is_some() {
+        match reconcile_port_forwarding(
+            &config.network.port_forwarding,
+            !config.network.port_forwarding.rules.is_empty(),
+            CommandCancelToken::default(),
+        )
+        .await
+        {
+            Ok(snapshot) => info!(?snapshot.status, "startup port-forwarding reconcile completed"),
+            Err(error) => {
+                startup_reconcile_resources.insert(RuntimeConfigReconcileResource::PortForwarding);
+                warn!(%error, "startup port-forwarding reconcile failed; last accepted desired state remains cached")
+            }
+        }
+    } else {
+        info!(
+            "no accepted runtime config is cached; preserving existing port-forwarding host state until an explicit sync"
+        );
+    }
+    if loaded_cached_runtime_config_version.is_some() {
         let report =
             reconcile_configured_runtime_tunnels(&config, "last_accepted_config_startup").await;
         match report.get("status").and_then(serde_json::Value::as_str) {
-            Some("failed") => warn!(report = %report, "last accepted tunnel reconcile failed"),
+            Some("failed") => {
+                startup_reconcile_resources.insert(RuntimeConfigReconcileResource::RuntimeTunnels);
+                warn!(report = %report, "last accepted tunnel reconcile failed");
+            }
             _ => info!(report = %report, "last accepted tunnel reconcile completed"),
         }
     }
+    command_runtime.requires_authoritative_runtime_config_sync =
+        startup_runtime_config_requires_sync;
+    command_runtime.pending_reconcile_resources = startup_reconcile_resources;
     loop {
         let endpoints = override_endpoint
             .as_ref()
@@ -171,6 +210,7 @@ async fn connect_and_stream(
     let tcp = connect_tcp_endpoint(endpoint, config.auth.gateway_connect_timeout_secs).await?;
     let mut stream = connect_noise_stream(tcp, config).await?;
 
+    let port_forwarding_capability = probe_port_forwarding_capability().await;
     let hello = AgentHello {
         client_id: config.client_id.clone(),
         process_incarnation_id,
@@ -187,7 +227,7 @@ async fn connect_and_stream(
             warn!(%error, "failed to read update activation heartbeat marker");
             None
         }),
-        capabilities: agent_capabilities(config),
+        capabilities: agent_capabilities(config, port_forwarding_capability),
     };
     send_json_frame(&mut stream, MessageKind::ClientHello, 0, 1, &hello).await?;
 
@@ -203,8 +243,29 @@ async fn connect_and_stream(
     );
     mark_gateway_connected().await;
 
+    let mut reconcile_resources = command_runtime.pending_reconcile_resources.clone();
+    let port_forwarding_snapshot = inspect_port_forwarding(&config.network.port_forwarding).await;
+    if port_forwarding_snapshot_requires_reconnect_sync(&port_forwarding_snapshot) {
+        info!(
+            status = ?port_forwarding_snapshot.status,
+            error_code = port_forwarding_snapshot.error_code.as_deref(),
+            "owned port-forwarding state requires reconnect reconciliation"
+        );
+        reconcile_resources.insert(RuntimeConfigReconcileResource::PortForwarding);
+    }
+    if configured_runtime_tunnels_require_reconnect_sync(config).await {
+        info!("declared managed tunnel state requires reconnect reconciliation");
+        reconcile_resources.insert(RuntimeConfigReconcileResource::RuntimeTunnels);
+    }
     let mut seq = 2_u64;
-    request_runtime_config_reload(&mut stream, &mut seq, config).await?;
+    request_runtime_config_reload(
+        &mut stream,
+        &mut seq,
+        config,
+        command_runtime.requires_authoritative_runtime_config_sync,
+        reconcile_resources,
+    )
+    .await?;
     for output in drain_pending_terminal_final_events().await {
         send_json_frame(
             &mut stream,
@@ -307,14 +368,39 @@ async fn connect_and_stream(
                             .await?;
                         }
                         CommandExecutionEvent::Finished(mut result) => {
+                            let mut accepted_runtime_config_persisted = false;
                             if let Some(runtime_config) = result.runtime_config_update.take() {
+                                let accepted_version = runtime_config.version;
                                 if let Some(cache) = command_runtime.runtime_config_cache.as_ref() {
                                     if let Err(error) = cache.store(&runtime_config).await {
                                         result.result = Err(error.context(
                                             "failed to persist last accepted runtime config",
                                         ));
                                         result.config_update = None;
+                                    } else {
+                                        command_runtime.accepted_runtime_config_version =
+                                            Some(accepted_version);
+                                        accepted_runtime_config_persisted = true;
                                     }
+                                } else {
+                                    command_runtime.accepted_runtime_config_version =
+                                        Some(accepted_version);
+                                    accepted_runtime_config_persisted = true;
+                                }
+                            }
+                            if result.runtime_config_fully_applied
+                                && accepted_runtime_config_persisted
+                            {
+                                if result.runtime_config_reconcile_scope.authoritative {
+                                    command_runtime.requires_authoritative_runtime_config_sync = false;
+                                    command_runtime.pending_reconcile_resources.clear();
+                                } else {
+                                    command_runtime.pending_reconcile_resources.retain(|resource| {
+                                        !result
+                                            .runtime_config_reconcile_scope
+                                            .resources
+                                            .contains(resource)
+                                    });
                                 }
                             }
                             let config_update = result.config_update.take();
@@ -395,6 +481,8 @@ async fn request_runtime_config_reload(
     stream: &mut NoiseFrameStream<TcpStream>,
     seq: &mut u64,
     config: &AgentConfig,
+    requires_authoritative_sync: bool,
+    reconcile_resources: BTreeSet<RuntimeConfigReconcileResource>,
 ) -> Result<()> {
     let runtime_config = AgentRuntimeConfig::from_agent_config(0, config);
     let current_content_hash = runtime_config_content_hash(&runtime_config)
@@ -403,10 +491,83 @@ async fn request_runtime_config_reload(
         client_id: config.client_id.clone(),
         current_content_hash,
         reason: "agent_reconnect_runtime_config_check".to_string(),
+        requires_authoritative_sync,
+        reconcile_resources: reconcile_resources.iter().copied().collect(),
+        // New agents keep this compatibility projection until old APIs no longer
+        // need the forwarding-only reconnect signal.
+        requires_port_forwarding_sync: reconcile_resources
+            .contains(&RuntimeConfigReconcileResource::PortForwarding),
     };
     send_json_frame(stream, MessageKind::ConfigUpdate, 0, *seq, &request).await?;
     *seq += 1;
     Ok(())
+}
+
+async fn configured_runtime_tunnels_require_reconnect_sync(config: &AgentConfig) -> bool {
+    let managed = config
+        .network
+        .runtime_status_telemetry_plans
+        .iter()
+        .filter(|plan| {
+            plan.plan.runtime_control.manager
+                != vpsman_common::RuntimeTunnelManager::ExternalObserved
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if managed.is_empty() {
+        return false;
+    }
+
+    let permits = Arc::new(Semaphore::new(4));
+    let mut inspections = JoinSet::new();
+    for telemetry_plan in managed {
+        let permit = permits.clone();
+        let config = config.clone();
+        inspections.spawn(async move {
+            let _permit = permit.acquire_owned().await;
+            let plan_id = telemetry_plan.plan_id.clone();
+            let result = runtime_tunnel_requires_reconnect_sync(&config, &telemetry_plan).await;
+            (plan_id, result)
+        });
+    }
+
+    let inspection_budget =
+        Duration::from_secs(config.network.status_probe_timeout_secs.clamp(1, 30));
+    let outcome = time::timeout(inspection_budget, async {
+        while let Some(result) = inspections.join_next().await {
+            match result {
+                Ok((plan_id, Ok(true))) => {
+                    debug!(plan_id, "managed tunnel reconnect inspection found drift");
+                    inspections.abort_all();
+                    return true;
+                }
+                Ok((_plan_id, Ok(false))) => {}
+                Ok((plan_id, Err(error))) => {
+                    warn!(plan_id, %error, "managed tunnel reconnect inspection failed");
+                    inspections.abort_all();
+                    return true;
+                }
+                Err(error) => {
+                    warn!(%error, "managed tunnel reconnect inspection task failed");
+                    inspections.abort_all();
+                    return true;
+                }
+            }
+        }
+        false
+    })
+    .await;
+    match outcome {
+        Ok(requires_sync) => requires_sync,
+        Err(_) => {
+            inspections.abort_all();
+            warn!(
+                max_wait_secs = inspection_budget.as_secs(),
+                "managed tunnel reconnect inspection timed out; requesting declared tunnel reconciliation"
+            );
+            true
+        }
+    }
 }
 
 async fn connect_tcp_endpoint(endpoint: &str, max_timeout_secs: u64) -> Result<TcpStream> {
@@ -603,6 +764,8 @@ async fn reconcile_configured_runtime_tunnels_cancelable(
 struct RuntimeConfigSyncResult {
     outputs: Vec<CommandOutput>,
     applied_config: Option<AgentConfig>,
+    accepted_runtime_config: Option<AgentRuntimeConfig>,
+    fully_applied: bool,
 }
 
 async fn apply_runtime_config_sync(
@@ -617,13 +780,58 @@ async fn apply_runtime_config_sync(
         runtime_config.version == desired_version,
         "runtime config version mismatch"
     );
+    let mut candidate_config = config.clone();
+    runtime_config.apply_to_agent_config(&mut candidate_config);
     let previous_tunnels = config.network.runtime_status_telemetry_plans.clone();
-    let desired_tunnels = runtime_config
+    let previous_port_forwarding = config.network.port_forwarding.clone();
+    let desired_tunnels = candidate_config
         .network
         .runtime_status_telemetry_plans
         .clone();
+    let tunnels_changed = previous_tunnels != desired_tunnels;
+    let port_forwarding_changed =
+        previous_port_forwarding != candidate_config.network.port_forwarding;
+    let reconcile_scope = runtime_config_reconcile_scope_from_reason(reason);
+    let port_forwarding_reapply =
+        reconcile_scope.includes(RuntimeConfigReconcileResource::PortForwarding);
+    let tunnel_reapply = reconcile_scope.includes(RuntimeConfigReconcileResource::RuntimeTunnels);
+    let port_forwarding = if port_forwarding_changed || port_forwarding_reapply {
+        let require_table_access = port_forwarding_table_access_required(
+            !previous_port_forwarding.rules.is_empty(),
+            !candidate_config.network.port_forwarding.rules.is_empty(),
+            reason,
+        );
+        match reconcile_port_forwarding(
+            &candidate_config.network.port_forwarding,
+            require_table_access,
+            cancel_token.clone(),
+        )
+        .await
+        {
+            Ok(snapshot) => serde_json::to_value(snapshot).unwrap_or_else(|error| {
+                serde_json::json!({
+                    "status": "failed",
+                    "error": error.to_string(),
+                })
+            }),
+            Err(error) => serde_json::json!({
+                "status": "failed",
+                "error": error.to_string(),
+            }),
+        }
+    } else {
+        serde_json::json!({
+            "status": "unchanged",
+        })
+    };
+    let port_forwarding_failed = port_forwarding
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        == Some("failed");
+
     let stale_tunnels = previous_tunnels
         .iter()
+        .filter(|_| tunnels_changed)
         .filter(|previous| {
             !desired_tunnels
                 .iter()
@@ -671,15 +879,20 @@ async fn apply_runtime_config_sync(
         }
     }
 
-    let mut candidate_config = config.clone();
-    runtime_config.apply_to_agent_config(&mut candidate_config);
     cancel_token.check("runtime_config_sync")?;
-    let reconcile = reconcile_configured_runtime_tunnels_cancelable(
-        &candidate_config,
-        "runtime_config_sync",
-        cancel_token,
-    )
-    .await;
+    let reconcile = if tunnels_changed || tunnel_reapply {
+        reconcile_configured_runtime_tunnels_cancelable(
+            &candidate_config,
+            "runtime_config_sync",
+            cancel_token.clone(),
+        )
+        .await
+    } else {
+        serde_json::json!({
+            "status": "unchanged",
+            "total": desired_tunnels.len(),
+        })
+    };
     let removal_failed = removals.iter().any(|removal| {
         !matches!(
             removal.get("status").and_then(serde_json::Value::as_str),
@@ -688,11 +901,23 @@ async fn apply_runtime_config_sync(
     });
     let reconcile_failed =
         reconcile.get("status").and_then(serde_json::Value::as_str) == Some("failed");
-    let status = if removal_failed || reconcile_failed {
+    let status = if removal_failed || reconcile_failed || port_forwarding_failed {
         "failed"
     } else {
         "applied"
     };
+    let (applied_config, accepted_scope) = accepted_config_after_network_sync(
+        config,
+        &candidate_config,
+        status == "applied",
+        tunnels_changed,
+        port_forwarding_changed,
+        removal_failed || reconcile_failed,
+        port_forwarding_failed,
+    );
+    let accepted_runtime_config = applied_config
+        .as_ref()
+        .map(|config| AgentRuntimeConfig::from_agent_config(desired_version, config));
     let body = serde_json::json!({
         "type": "runtime_config_sync",
         "status": status,
@@ -703,6 +928,8 @@ async fn apply_runtime_config_sync(
         "removed_tunnel_count": removals.len(),
         "removals": removals,
         "reconcile": reconcile,
+        "port_forwarding": port_forwarding,
+        "accepted_scope": accepted_scope,
         "bootstrap_config_persisted": false,
     });
     let output = CommandOutput {
@@ -714,8 +941,88 @@ async fn apply_runtime_config_sync(
     };
     Ok(RuntimeConfigSyncResult {
         outputs: vec![output],
-        applied_config: (status == "applied").then_some(candidate_config),
+        applied_config,
+        accepted_runtime_config,
+        fully_applied: status == "applied",
     })
+}
+
+#[cfg(test)]
+fn runtime_config_reason_requires_full_reconcile(reason: &str) -> bool {
+    runtime_config_reconcile_scope_from_reason(reason).authoritative
+}
+
+fn runtime_config_reason_requires_port_forwarding_table_access(reason: &str) -> bool {
+    runtime_config_reconcile_scope_from_reason(reason)
+        .resources
+        .contains(&RuntimeConfigReconcileResource::PortForwarding)
+}
+
+#[cfg(test)]
+fn runtime_config_reason_requires_tunnel_reconcile(reason: &str) -> bool {
+    runtime_config_reconcile_scope_from_reason(reason)
+        .includes(RuntimeConfigReconcileResource::RuntimeTunnels)
+}
+
+fn port_forwarding_table_access_required(
+    previous_rules_present: bool,
+    desired_rules_present: bool,
+    reason: &str,
+) -> bool {
+    previous_rules_present
+        || desired_rules_present
+        || runtime_config_reason_requires_port_forwarding_table_access(reason)
+}
+
+fn port_forwarding_snapshot_requires_reconnect_sync(snapshot: &PortForwardRuntimeSnapshot) -> bool {
+    match snapshot.status {
+        PortForwardRuntimeStatus::Drifted => true,
+        PortForwardRuntimeStatus::Failed => {
+            snapshot.error_code.as_deref() != Some("table_ownership_conflict")
+        }
+        PortForwardRuntimeStatus::Absent
+        | PortForwardRuntimeStatus::Applied
+        | PortForwardRuntimeStatus::Unsupported
+        | PortForwardRuntimeStatus::Unknown => false,
+    }
+}
+
+fn accepted_config_after_network_sync(
+    current: &AgentConfig,
+    candidate: &AgentConfig,
+    fully_applied: bool,
+    tunnels_changed: bool,
+    port_forwarding_changed: bool,
+    tunnel_failed: bool,
+    port_forwarding_failed: bool,
+) -> (Option<AgentConfig>, &'static str) {
+    if fully_applied {
+        return (Some(candidate.clone()), "full");
+    }
+    let mut partial = current.clone();
+    let mut accepted_tunnels = false;
+    let mut accepted_port_forwarding = false;
+    if tunnels_changed && !tunnel_failed {
+        let previous_port_forwarding = partial.network.port_forwarding.clone();
+        partial.network = candidate.network.clone();
+        if port_forwarding_failed {
+            partial.network.port_forwarding = previous_port_forwarding;
+        }
+        accepted_tunnels = true;
+    }
+    if port_forwarding_changed && !port_forwarding_failed {
+        partial.network.port_forwarding = candidate.network.port_forwarding.clone();
+        accepted_port_forwarding = true;
+    }
+    if partial == *current {
+        (None, "none")
+    } else if accepted_port_forwarding && !accepted_tunnels {
+        (Some(partial), "port_forwarding")
+    } else if accepted_tunnels && !accepted_port_forwarding {
+        (Some(partial), "tunnels")
+    } else {
+        (Some(partial), "network")
+    }
 }
 
 fn runtime_tunnel_identity_matches(
@@ -744,6 +1051,25 @@ fn runtime_tunnel_identity_matches(
             &left.plan.runtime_control,
             &right.plan.runtime_control,
         )
+}
+
+fn runtime_config_snapshot_is_stale(
+    accepted_version: Option<u64>,
+    current: &AgentConfig,
+    desired_version: u64,
+    incoming: &AgentRuntimeConfig,
+) -> Result<bool> {
+    let Some(accepted_version) = accepted_version else {
+        return Ok(false);
+    };
+    if desired_version < accepted_version {
+        return Ok(true);
+    }
+    if desired_version > accepted_version {
+        return Ok(false);
+    }
+    let current = AgentRuntimeConfig::from_agent_config(0, current);
+    Ok(runtime_config_content_hash(&current)? != runtime_config_content_hash(incoming)?)
 }
 
 fn runtime_tunnel_control_identity_matches(
@@ -882,7 +1208,10 @@ fn unmanaged_update_jitter(config: &AgentConfig) -> Duration {
     Duration::from_secs(u64::from_le_bytes(first) % jitter_secs)
 }
 
-fn agent_capabilities(config: &AgentConfig) -> AgentCapabilitySnapshot {
+fn agent_capabilities(
+    config: &AgentConfig,
+    port_forwarding: vpsman_common::PortForwardCapability,
+) -> AgentCapabilitySnapshot {
     let effective_uid = unsafe { libc::geteuid() } as u32;
     let root = effective_uid == 0;
     AgentCapabilitySnapshot {
@@ -896,6 +1225,7 @@ fn agent_capabilities(config: &AgentConfig) -> AgentCapabilitySnapshot {
         can_attempt_privileged_ops: true,
         can_manage_runtime_tunnels: root,
         can_apply_process_limits: root,
+        port_forwarding,
         unprivileged_hint: (!root).then(|| {
             "agent is not running as root; root-only network, update, restore, and limit operations may report ineffective or require forced best-effort mode".to_string()
         }),
@@ -925,6 +1255,8 @@ struct CommandExecutionResult {
     result: Result<Vec<CommandOutput>>,
     config_update: Option<AgentConfig>,
     runtime_config_update: Option<AgentRuntimeConfig>,
+    runtime_config_fully_applied: bool,
+    runtime_config_reconcile_scope: RuntimeConfigReconcileScope,
 }
 
 enum CommandExecutionEvent {
@@ -967,6 +1299,9 @@ struct AgentCommandRuntime {
     recent_commands: RecentCommandCache,
     command_ledger: Option<CommandLedger>,
     runtime_config_cache: Option<RuntimeConfigCache>,
+    accepted_runtime_config_version: Option<u64>,
+    requires_authoritative_runtime_config_sync: bool,
+    pending_reconcile_resources: BTreeSet<RuntimeConfigReconcileResource>,
     command_event_tx: mpsc::Sender<CommandExecutionEvent>,
     command_event_rx: mpsc::Receiver<CommandExecutionEvent>,
     update_verification_tx: mpsc::Sender<AgentUpdateVerificationWork>,
@@ -986,6 +1321,9 @@ impl Default for AgentCommandRuntime {
             recent_commands: RecentCommandCache::default(),
             command_ledger: None,
             runtime_config_cache: None,
+            accepted_runtime_config_version: None,
+            requires_authoritative_runtime_config_sync: true,
+            pending_reconcile_resources: BTreeSet::new(),
             command_event_tx,
             command_event_rx,
             update_verification_tx,
@@ -1000,10 +1338,12 @@ impl AgentCommandRuntime {
     fn with_persistence(
         command_ledger: CommandLedger,
         runtime_config_cache: RuntimeConfigCache,
+        accepted_runtime_config_version: Option<u64>,
     ) -> Self {
         Self {
             command_ledger: Some(command_ledger),
             runtime_config_cache: Some(runtime_config_cache),
+            accepted_runtime_config_version,
             ..Self::default()
         }
     }
@@ -1493,6 +1833,35 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
             return Ok(false);
         }
     }
+    if let JobCommand::RuntimeConfigSync {
+        desired_version,
+        config: runtime_config,
+        ..
+    } = &request.command
+    {
+        let rejection = if runtime_config.version != *desired_version {
+            Some("runtime_config_version_mismatch")
+        } else if runtime_config_snapshot_is_stale(
+            command_runtime.accepted_runtime_config_version,
+            config,
+            *desired_version,
+            runtime_config,
+        )? {
+            Some("runtime_config_snapshot_stale")
+        } else {
+            None
+        };
+        if let Some(message) = rejection {
+            let ack = JobAck {
+                job_id: request.job_id,
+                accepted: false,
+                message: message.to_string(),
+            };
+            send_json_frame(stream, MessageKind::CommandAck, frame.stream_id, *seq, &ack).await?;
+            *seq += 1;
+            return Ok(false);
+        }
+    }
     let safety = job_command_safety(&request.command);
     let active_exclusive = command_runtime
         .active_commands
@@ -1559,6 +1928,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
     let update_verification_tx = command_runtime.update_verification_tx.clone();
     let task_cancel_token = cancel_token.clone();
     let task = if let Some((desired_version, reason, runtime_config)) = runtime_sync {
+        let runtime_config_reconcile_scope = runtime_config_reconcile_scope_from_reason(&reason);
         tokio::spawn(async move {
             let result = time::timeout(
                 Duration::from_secs(max_timeout_secs.max(1)),
@@ -1576,22 +1946,25 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
                 ),
             )
             .await;
-            let (result, config_update, runtime_config_update) = match result {
-                Ok(Ok(sync)) => {
-                    let runtime_config_update =
-                        sync.applied_config.is_some().then_some(runtime_config);
-                    (Ok(sync.outputs), sync.applied_config, runtime_config_update)
-                }
-                Ok(Err(error)) => (Err(error), None, None),
-                Err(error) => {
-                    task_cancel_token.cancel("runtime_config_sync_timeout".to_string());
-                    (
-                        Err(anyhow::anyhow!("runtime config sync timed out: {error}")),
-                        None,
-                        None,
-                    )
-                }
-            };
+            let (result, config_update, runtime_config_update, runtime_config_fully_applied) =
+                match result {
+                    Ok(Ok(sync)) => (
+                        Ok(sync.outputs),
+                        sync.applied_config,
+                        sync.accepted_runtime_config,
+                        sync.fully_applied,
+                    ),
+                    Ok(Err(error)) => (Err(error), None, None, false),
+                    Err(error) => {
+                        task_cancel_token.cancel("runtime_config_sync_timeout".to_string());
+                        (
+                            Err(anyhow::anyhow!("runtime config sync timed out: {error}")),
+                            None,
+                            None,
+                            false,
+                        )
+                    }
+                };
             let _ = event_tx
                 .send(CommandExecutionEvent::Finished(Box::new(
                     CommandExecutionResult {
@@ -1601,6 +1974,8 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
                         result,
                         config_update,
                         runtime_config_update,
+                        runtime_config_fully_applied,
+                        runtime_config_reconcile_scope,
                     },
                 )))
                 .await;
@@ -1642,6 +2017,8 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
                         result,
                         config_update: None,
                         runtime_config_update: None,
+                        runtime_config_fully_applied: false,
+                        runtime_config_reconcile_scope: RuntimeConfigReconcileScope::default(),
                     },
                 )))
                 .await;
@@ -2654,6 +3031,197 @@ mod tests {
         let applied = result.applied_config.expect("sync should apply");
         assert_eq!(applied.display_name, "new-name");
         assert_eq!(applied.telemetry_interval_secs, 30);
+        assert_eq!(
+            result
+                .accepted_runtime_config
+                .expect("accepted snapshot should be persisted")
+                .version,
+            9
+        );
+    }
+
+    #[test]
+    fn runtime_config_generation_is_monotonic_and_exact_replays_are_content_bound() {
+        let current = AgentConfig {
+            display_name: "current".to_string(),
+            ..AgentConfig::default()
+        };
+        let same = AgentRuntimeConfig::from_agent_config(9, &current);
+        let different = AgentRuntimeConfig {
+            version: 9,
+            display_name: "obsolete".to_string(),
+            ..AgentRuntimeConfig::from_agent_config(9, &current)
+        };
+
+        assert!(runtime_config_snapshot_is_stale(Some(10), &current, 9, &same).unwrap());
+        assert!(runtime_config_snapshot_is_stale(Some(10), &current, 9, &different).unwrap());
+        assert!(!runtime_config_snapshot_is_stale(Some(10), &current, 10, &same).unwrap());
+        assert!(runtime_config_snapshot_is_stale(Some(10), &current, 10, &different).unwrap());
+        assert!(!runtime_config_snapshot_is_stale(Some(10), &current, 11, &different).unwrap());
+        assert!(!runtime_config_snapshot_is_stale(None, &current, 1, &different).unwrap());
+    }
+
+    #[test]
+    fn authoritative_reconnect_is_the_only_full_reconcile_reason() {
+        assert!(runtime_config_reason_requires_full_reconcile(
+            "agent_reconnect_authoritative_sync"
+        ));
+        assert!(!runtime_config_reason_requires_full_reconcile(
+            "agent_reconnect_runtime_config_check"
+        ));
+        assert!(!runtime_config_reason_requires_full_reconcile(
+            "agent_reconnect_port_forwarding_sync"
+        ));
+        assert!(runtime_config_reason_requires_full_reconcile(
+            "agent_reconnect_authoritative_port_forwarding_sync"
+        ));
+        assert!(runtime_config_reason_requires_port_forwarding_table_access(
+            "agent_reconnect_port_forwarding_sync"
+        ));
+        assert!(
+            !runtime_config_reason_requires_port_forwarding_table_access(
+                "agent_reconnect_authoritative_sync"
+            )
+        );
+        assert!(runtime_config_reason_requires_port_forwarding_table_access(
+            "agent_reconnect_authoritative_port_forwarding_sync"
+        ));
+        assert!(runtime_config_reason_requires_tunnel_reconcile(
+            "agent_reconnect_runtime_tunnels_sync"
+        ));
+        assert!(runtime_config_reason_requires_tunnel_reconcile(
+            "agent_reconnect_authoritative_sync"
+        ));
+        assert!(!runtime_config_reason_requires_tunnel_reconcile(
+            "agent_reconnect_port_forwarding_sync"
+        ));
+        assert!(!port_forwarding_table_access_required(
+            false,
+            false,
+            "agent_reconnect_authoritative_sync"
+        ));
+        assert!(port_forwarding_table_access_required(
+            false,
+            false,
+            "agent_reconnect_authoritative_port_forwarding_sync"
+        ));
+        assert!(port_forwarding_table_access_required(
+            true,
+            false,
+            "unrelated_config_update"
+        ));
+    }
+
+    #[test]
+    fn reconnect_reconciles_only_repairable_owned_table_states() {
+        for status in [
+            PortForwardRuntimeStatus::Absent,
+            PortForwardRuntimeStatus::Applied,
+            PortForwardRuntimeStatus::Unsupported,
+            PortForwardRuntimeStatus::Unknown,
+        ] {
+            assert!(!port_forwarding_snapshot_requires_reconnect_sync(
+                &PortForwardRuntimeSnapshot {
+                    status,
+                    ..PortForwardRuntimeSnapshot::default()
+                }
+            ));
+        }
+
+        assert!(port_forwarding_snapshot_requires_reconnect_sync(
+            &PortForwardRuntimeSnapshot {
+                status: PortForwardRuntimeStatus::Drifted,
+                ..PortForwardRuntimeSnapshot::default()
+            }
+        ));
+        assert!(port_forwarding_snapshot_requires_reconnect_sync(
+            &PortForwardRuntimeSnapshot {
+                status: PortForwardRuntimeStatus::Failed,
+                error_code: Some("inspection_failed".to_string()),
+                ..PortForwardRuntimeSnapshot::default()
+            }
+        ));
+        assert!(!port_forwarding_snapshot_requires_reconnect_sync(
+            &PortForwardRuntimeSnapshot {
+                status: PortForwardRuntimeStatus::Failed,
+                error_code: Some("table_ownership_conflict".to_string()),
+                ..PortForwardRuntimeSnapshot::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn successful_forwarding_is_retained_when_an_independent_tunnel_change_fails() {
+        let current = AgentConfig::default();
+        let mut candidate = current.clone();
+        candidate.network.port_forwarding.desired_hash = "new-forwarding-state".to_string();
+        candidate
+            .network
+            .runtime_status_telemetry_plans
+            .push(runtime_sync_test_telemetry_plan(runtime_sync_test_plan(
+                "203.0.113.20",
+                "10.255.0.0",
+                "10.255.0.1",
+            )));
+
+        let (accepted, scope) = accepted_config_after_network_sync(
+            &current, &candidate, false, true, true, true, false,
+        );
+
+        let accepted = accepted.expect("successful forwarding should be retained");
+        assert_eq!(scope, "port_forwarding");
+        assert_eq!(
+            accepted.network.port_forwarding.desired_hash,
+            "new-forwarding-state"
+        );
+        assert!(accepted.network.runtime_status_telemetry_plans.is_empty());
+    }
+
+    #[tokio::test]
+    async fn runtime_config_sync_skips_unchanged_tunnel_commands() {
+        let plan = runtime_sync_test_telemetry_plan(runtime_sync_test_plan(
+            "203.0.113.20",
+            "10.255.0.0",
+            "10.255.0.1",
+        ));
+        let base = AgentConfig {
+            client_id: "left-a".to_string(),
+            display_name: "before".to_string(),
+            network: vpsman_common::AgentNetworkConfig {
+                apply_enabled: true,
+                runtime_reconcile_enabled: true,
+                runtime_ip_argv: vec!["/bin/false".to_string()],
+                runtime_tc_argv: vec!["/bin/false".to_string()],
+                runtime_status_telemetry_plans: vec![plan],
+                ..Default::default()
+            },
+            ..AgentConfig::default()
+        };
+        let mut desired = AgentRuntimeConfig::from_agent_config(10, &base);
+        desired.display_name = "after".to_string();
+
+        let result = apply_runtime_config_sync(
+            uuid::Uuid::new_v4(),
+            &base,
+            &desired,
+            10,
+            "unrelated_config_update",
+            CommandCancelToken::default(),
+        )
+        .await
+        .unwrap();
+
+        let body: serde_json::Value = serde_json::from_slice(&result.outputs[0].data).unwrap();
+        assert_eq!(body["status"], "applied");
+        assert_eq!(body["reconcile"]["status"], "unchanged");
+        assert_eq!(body["port_forwarding"]["status"], "unchanged");
+        assert_eq!(
+            result
+                .applied_config
+                .expect("config should apply")
+                .display_name,
+            "after"
+        );
     }
 
     #[test]

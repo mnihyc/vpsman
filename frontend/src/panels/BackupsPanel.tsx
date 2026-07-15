@@ -3933,14 +3933,14 @@ function buildBackupPostureItems({
     {
       detail:
         retentionDays.length > 0
-          ? `Enabled policies retain ${Math.min(...retentionDays)}-${Math.max(...retentionDays)} days; encryption and immutability are not exposed by the current artifact API.`
-          : "No policy retention is visible; encryption and immutability are not exposed by the current artifact API.",
+          ? `Enabled policies retain ${Math.min(...retentionDays)}-${Math.max(...retentionDays)} days. Artifact encryption and immutability evidence is unavailable.`
+          : "No enabled retention policy is visible. Artifact encryption and immutability evidence is unavailable.",
       label: "Retention/security",
       tone: retentionDays.length > 0 ? "ready" : "attention",
       value:
         retentionDays.length > 0
           ? `${Math.min(...retentionDays)}-${Math.max(...retentionDays)}d`
-          : "API gap",
+          : "No retention",
     },
   ];
 }

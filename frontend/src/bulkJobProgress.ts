@@ -493,7 +493,10 @@ function targetFailureReason(
   outputReason: string | null,
 ): BulkFailureReason {
   const message = outputReason ?? targetRecord.message?.trim();
-  const rawReason = message || targetRecord.status || "failed";
+  const status = targetRecord.status?.trim().replace(/_/g, " ") || "unsuccessful";
+  const rawReason =
+    message ||
+    `Target ended ${status} without retained output detail. Open job ${targetRecord.job_id} and inspect target evidence before retrying.`;
   const reason =
     target.status === "stale" && !rawReason.toLowerCase().includes("stale")
       ? `stale: ${rawReason}`

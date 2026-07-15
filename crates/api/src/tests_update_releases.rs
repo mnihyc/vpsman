@@ -187,6 +187,18 @@ async fn strict_agent_update_release_policy_rejects_unregistered_update_before_g
 
     assert_eq!(status, axum::http::StatusCode::CONFLICT);
     assert_eq!(response.status, "failed");
+    assert_eq!(
+        response.error.as_deref(),
+        Some("agent_update_release_missing")
+    );
+    assert_eq!(
+        response.message.as_deref(),
+        Some("registered agent update release missing")
+    );
+    assert!(response
+        .recovery
+        .as_deref()
+        .is_some_and(|recovery| recovery.contains("Refresh current state")));
     let jobs = repo.list_jobs(10).await.unwrap();
     assert_eq!(jobs[0].payload_hash, command_hash);
     let audits = repo.list_audit_logs(10).await.unwrap();

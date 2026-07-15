@@ -957,6 +957,11 @@ const rootCapabilities = {
   can_manage_runtime_tunnels: true,
   effective_uid: 0,
   privilege_mode: "root",
+  port_forwarding: {
+    nft_version: "nftables v1.1.3",
+    reason: null,
+    status: "supported",
+  },
   unprivileged_hint: null,
 };
 
@@ -966,6 +971,11 @@ const unprivilegedCapabilities = {
   can_manage_runtime_tunnels: false,
   effective_uid: 1000,
   privilege_mode: "unprivileged",
+  port_forwarding: {
+    nft_version: "nftables v1.0.9",
+    reason: "Agent lacks CAP_NET_ADMIN in the host network namespace",
+    status: "insufficient_privilege",
+  },
   unprivileged_hint:
     "agent is not running as root; root-only network, update, restore, and limit operations may report ineffective or require forced best-effort mode",
 };
@@ -997,6 +1007,129 @@ const agents = [
     registration_ip: "192.0.2.30",
     status: "stale",
     tags: ["country:US"],
+  },
+];
+
+const portForwardRules = [
+  {
+    agent_desired_hash: "a".repeat(64),
+    client_id: "agent-sfo-01",
+    created_at: "2026-06-02T09:00:00Z",
+    deleted_at: null,
+    desired_hash: "a".repeat(64),
+    desired_status: "enabled",
+    enabled: true,
+    forwarding_enabled: true,
+    forgotten_at: null,
+    id: "4f000000-0000-4000-8000-000000000001",
+    mappings: [
+      { incoming: { end: 80, start: 80 }, target: { end: 8080, start: 8080 } },
+      { incoming: { end: 443, start: 443 }, target: { end: 8443, start: 8443 } },
+    ],
+    masquerade: true,
+    name: "Public web ingress",
+    nat_matches: 12_482,
+    nft_version: "nftables v1.1.3",
+    observed_hash: "b".repeat(64),
+    protocol: "both",
+    removal_confirmed_at: null,
+    revision: 3,
+    runtime_error: null,
+    runtime_error_code: null,
+    runtime_observed_unix: 1_780_386_360,
+    runtime_status: "applied",
+    target_ip: "10.20.0.15",
+    updated_at: "2026-06-02T10:00:00Z",
+  },
+  {
+    agent_desired_hash: "a".repeat(64),
+    client_id: "agent-fra-02",
+    created_at: "2026-06-02T09:10:00Z",
+    deleted_at: null,
+    desired_hash: "a".repeat(64),
+    desired_status: "enabled",
+    enabled: true,
+    forwarding_enabled: false,
+    forgotten_at: null,
+    id: "4f000000-0000-4000-8000-000000000002",
+    mappings: [
+      {
+        incoming: { end: 10_010, start: 10_000 },
+        target: { end: 20_010, start: 20_000 },
+      },
+    ],
+    masquerade: false,
+    name: "IPv6 service range",
+    nat_matches: 392,
+    nft_version: "nftables v1.1.3",
+    observed_hash: "c".repeat(64),
+    protocol: "tcp",
+    removal_confirmed_at: null,
+    revision: 2,
+    runtime_error: null,
+    runtime_error_code: null,
+    runtime_observed_unix: 1_780_386_300,
+    runtime_status: "applied_warning",
+    target_ip: "2001:db8:20::15",
+    updated_at: "2026-06-02T09:58:00Z",
+  },
+  {
+    agent_desired_hash: null,
+    client_id: "agent-nyc-03",
+    created_at: "2026-06-02T09:20:00Z",
+    deleted_at: null,
+    desired_hash: null,
+    desired_status: "disabled",
+    enabled: false,
+    forwarding_enabled: null,
+    forgotten_at: null,
+    id: "4f000000-0000-4000-8000-000000000003",
+    mappings: [
+      { incoming: { end: 2222, start: 2222 }, target: { end: 22, start: 22 } },
+    ],
+    masquerade: true,
+    name: "Staged SSH alternate",
+    nat_matches: 0,
+    nft_version: "nftables v1.0.9",
+    observed_hash: null,
+    protocol: "tcp",
+    removal_confirmed_at: null,
+    revision: 1,
+    runtime_error: null,
+    runtime_error_code: null,
+    runtime_observed_unix: null,
+    runtime_status: "disabled",
+    target_ip: "10.30.0.8",
+    updated_at: "2026-06-02T09:20:00Z",
+  },
+  {
+    agent_desired_hash: "d".repeat(64),
+    client_id: "agent-fra-02",
+    created_at: "2026-06-01T14:00:00Z",
+    deleted_at: "2026-06-02T09:55:00Z",
+    desired_hash: "a".repeat(64),
+    desired_status: "removal_pending",
+    enabled: false,
+    forwarding_enabled: true,
+    forgotten_at: null,
+    id: "4f000000-0000-4000-8000-000000000004",
+    mappings: [
+      { incoming: { end: 53, start: 53 }, target: { end: 53, start: 53 } },
+    ],
+    masquerade: true,
+    name: "Retired DNS relay",
+    nat_matches: 81,
+    nft_version: "nftables v1.1.3",
+    observed_hash: "e".repeat(64),
+    protocol: "udp",
+    removal_confirmed_at: null,
+    revision: 5,
+    runtime_error: null,
+    runtime_error_code: null,
+    runtime_observed_unix: 1_780_386_240,
+    runtime_status: "removal_pending",
+    target_ip: "10.20.0.53",
+    updated_at: "2026-06-02T09:55:00Z",
   },
 ];
 
@@ -1924,6 +2057,18 @@ const backupArtifacts = [
   },
 ];
 
+function tunnelRuntimeConfigFixture(clientId: string, enabled: boolean) {
+  return {
+    cleanup_confirmed: !enabled,
+    client_id: clientId,
+    desired: enabled ? "present" : "absent",
+    error: null,
+    job_id: "4f200000-0000-4000-8000-000000000001",
+    status: enabled ? "applied" : "removed",
+    updated_at: "2026-05-31T10:09:00Z",
+  };
+}
+
 export const tunnelPlans = [
   {
     created_at: "2026-05-31T10:03:00Z",
@@ -1945,6 +2090,8 @@ export const tunnelPlans = [
     connection_assessment_note: null,
     connection_assessed_at: null,
     connection_assessed_by: null,
+    left_runtime_config: tunnelRuntimeConfigFixture("agent-sfo-01", true),
+    right_runtime_config: tunnelRuntimeConfigFixture("agent-fra-02", true),
     ospf_status: "review_required",
     desired_ospf_cost: 22,
     updated_at: "2026-05-31T10:09:00Z",
@@ -2065,6 +2212,8 @@ export const tunnelPlans = [
       "Application traffic verified; provider blocks ICMP",
     connection_assessed_at: "2026-05-31T10:05:00Z",
     connection_assessed_by: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    left_runtime_config: tunnelRuntimeConfigFixture("agent-sfo-01", true),
+    right_runtime_config: tunnelRuntimeConfigFixture("agent-fra-02", true),
     ospf_status: "disabled",
     desired_ospf_cost: null,
     updated_at: "2026-05-31T10:04:00Z",
@@ -2719,6 +2868,7 @@ export async function installConsoleApiMock(
     agentDeleteSyncJobIds?: string[];
     auditLogsOverride?: AuditLogRecord[];
     backupArtifactsOverride?: typeof backupArtifacts;
+    bulkResolveFailure?: boolean;
     dashboardLatestSampleAtOverride?: string;
     dashboardSummaryOverride?: Partial<typeof dashboardOverview.summary>;
     fileTransferSourceArtifactsOverride?: typeof fileTransferSourceArtifacts;
@@ -2741,6 +2891,7 @@ export async function installConsoleApiMock(
       auditLogsFixture,
       artifactsFixture,
       backupsFixture,
+      bulkResolveFailureFixture,
       dashboardOverviewFixture,
       dashboardLatestSampleAtOverrideFixture,
       dashboardSummaryOverrideFixture,
@@ -2761,6 +2912,7 @@ export async function installConsoleApiMock(
       fleetAlertsFixture,
       policyAlertsFixture,
       policyDryRunFixture,
+      portForwardRulesFixture,
       fileTransferSourceArtifactsFixture,
       fileTransfersFixture,
       historyRetentionPoliciesFixture,
@@ -2791,6 +2943,38 @@ export async function installConsoleApiMock(
       webhookRulesFixture,
     }) => {
       const originalFetch = window.fetch.bind(window);
+      const runtimeTunnelConfig = (clientId: string, enabled: boolean) => ({
+        cleanup_confirmed: !enabled,
+        client_id: clientId,
+        desired: enabled ? "present" : "absent",
+        error: null,
+        job_id: enabled ? "4f100000-0000-4000-8000-000000000001" : null,
+        status: enabled ? "queued" : "removed",
+        updated_at: "2026-05-31T10:09:00Z",
+      });
+      const runtimeTunnelDispatch = (
+        leftClientId: string,
+        rightClientId: string,
+      ) =>
+        [leftClientId, rightClientId].map((clientId, index) => ({
+          client_id: clientId,
+          error: null,
+          job_id: `4f200000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+          status: "queued",
+        }));
+      const setRuntimeTunnelConfig = (
+        plan: Record<string, unknown>,
+        enabled: boolean,
+      ) => {
+        const leftClientId = String(plan.left_client_id ?? "");
+        const rightClientId = String(plan.right_client_id ?? "");
+        plan.left_runtime_config = runtimeTunnelConfig(leftClientId, enabled);
+        plan.right_runtime_config = runtimeTunnelConfig(
+          rightClientId,
+          enabled,
+        );
+        return runtimeTunnelDispatch(leftClientId, rightClientId);
+      };
       const targetCountsFromStatuses = (statuses: string[]) => {
         const counts = {
           agent_lost: 0,
@@ -2819,6 +3003,13 @@ export async function installConsoleApiMock(
       let currentSuiteConfigToml = suiteConfigTomlFixture;
       const deletedAgentIds = new Set<string>();
       const deletedTunnelPlanIds = new Set<string>();
+      let mutablePortForwardRules = portForwardRulesFixture.map((rule) => ({
+        ...rule,
+        mappings: rule.mappings.map((mapping) => ({
+          incoming: { ...mapping.incoming },
+          target: { ...mapping.target },
+        })),
+      }));
       let telemetryNetworkRateRequestCount = 0;
       const backendAgents = () =>
         agentsFixture.filter((agent) => !deletedAgentIds.has(agent.id));
@@ -2887,6 +3078,7 @@ export async function installConsoleApiMock(
         migrationLinks: [] as unknown[],
         operatorActions: [] as unknown[],
         operatorPreferences: [] as unknown[],
+        portForwardRules: [] as unknown[],
         restorePlans: [] as unknown[],
         scheduleActions: [] as unknown[],
         schedules: [] as unknown[],
@@ -4172,8 +4364,33 @@ export async function installConsoleApiMock(
             client_id: clientId,
             deleted: true,
             deleted_at: "2026-06-02T10:07:00Z",
-            runtime_sync_job_ids: agentDeleteSyncJobIdsFixture,
-            runtime_sync_failed_client_ids: agentDeleteFailedClientIdsFixture,
+            post_commit: [
+              {
+                error: null,
+                operation: "gateway_session_disconnect",
+                status: "completed",
+              },
+              {
+                error: null,
+                operation: "job_terminal_reconciliation",
+                status: "completed",
+              },
+            ],
+            runtime_sync: [
+              ...agentDeleteSyncJobIdsFixture.map((jobId, index) => ({
+                client_id: index === 0 ? "agent-fra-02" : `peer-${index + 1}`,
+                error: null,
+                job_id: jobId,
+                status: "queued",
+              })),
+              ...agentDeleteFailedClientIdsFixture.map((failedClientId) => ({
+                client_id: failedClientId,
+                error:
+                  "Runtime apply job could not be queued because the server failed while creating it. Desired state remains saved; inspect API logs and retry",
+                job_id: null,
+                status: "queue_failed",
+              })),
+            ],
           });
         }
         if (pathname === "/api/v1/agents") {
@@ -4370,12 +4587,26 @@ export async function installConsoleApiMock(
           const body = await readJsonBody(input, init);
           requests.clientKeyRevocations.push(body);
           return jsonResponse({
-            client_id: decodeURIComponent(pathname.split("/")[4] ?? ""),
-            created_at: "2026-06-02T10:06:00Z",
-            id: "edededed-1111-4111-8111-111111111111",
-            public_key_sha256_hex: "d".repeat(64),
-            reason: (body as { reason?: string | null }).reason ?? null,
-            revoked_by: "99999999-aaaa-4bbb-8ccc-000000000001",
+            post_commit: [
+              {
+                error: null,
+                operation: "gateway_session_disconnect",
+                status: "completed",
+              },
+              {
+                error: null,
+                operation: "job_terminal_reconciliation",
+                status: "completed",
+              },
+            ],
+            revocation: {
+              client_id: decodeURIComponent(pathname.split("/")[4] ?? ""),
+              created_at: "2026-06-02T10:06:00Z",
+              id: "edededed-1111-4111-8111-111111111111",
+              public_key_sha256_hex: "d".repeat(64),
+              reason: (body as { reason?: string | null }).reason ?? null,
+              revoked_by: "99999999-aaaa-4bbb-8ccc-000000000001",
+            },
           });
         }
         if (pathname === "/api/v1/agent-identities" && method === "POST") {
@@ -4383,16 +4614,35 @@ export async function installConsoleApiMock(
             client_id?: string;
             client_public_key_hex?: string;
             display_name?: string | null;
+            replace_existing_key?: boolean;
             tags?: string[];
           };
           requests.agentIdentities.push(body);
           return jsonResponse({
-            client_id: body.client_id ?? "agent-new-direct-01",
-            current_public_key_sha256_hex: "e".repeat(64),
-            display_name:
-              body.display_name || body.client_id || "agent-new-direct-01",
-            status: "offline",
-            tags: body.tags ?? [],
+            identity: {
+              client_id: body.client_id ?? "agent-new-direct-01",
+              current_public_key_sha256_hex: "e".repeat(64),
+              display_name:
+                body.display_name || body.client_id || "agent-new-direct-01",
+              status: "offline",
+              tags: body.tags ?? [],
+            },
+            post_commit: [
+              ...(body.replace_existing_key
+                ? [
+                    {
+                      error: null,
+                      operation: "gateway_session_disconnect",
+                      status: "completed",
+                    },
+                  ]
+                : []),
+              {
+                error: null,
+                operation: "job_terminal_reconciliation",
+                status: "completed",
+              },
+            ],
           });
         }
         if (
@@ -4672,6 +4922,60 @@ export async function installConsoleApiMock(
         }
         if (
           pathname.startsWith("/api/v1/source-templates/") &&
+          pathname.endsWith("/update") &&
+          method === "POST"
+        ) {
+          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
+          const template =
+            sourceTemplatesFixture.find((record: { id: string }) =>
+              pathname.includes(record.id),
+            ) ?? sourceTemplatesFixture[0];
+          const affectedClientIds = sourceTemplateAssignmentsFixture
+            .filter((assignment) => assignment.template_id === template.id)
+            .map((assignment) => assignment.client_id);
+          const confirmed = body.confirmed === true;
+          const currentDefinition = template.definition;
+          const currentDescription = template.description;
+          const definition = body.definition ?? template.definition;
+          const description =
+            typeof body.description === "string" ? body.description : null;
+          if (confirmed) {
+            template.definition = definition;
+            template.description = description;
+            template.updated_at = "2026-06-02T10:08:00Z";
+          }
+          return jsonResponse({
+            affected_client_count: affectedClientIds.length,
+            affected_client_ids: affectedClientIds,
+            confirmation_required: !confirmed,
+            diff: {
+              affected_client_count: affectedClientIds.length,
+              candidate_definition: definition,
+              candidate_description: description,
+              changed_keys: ["source"],
+              current_definition: currentDefinition,
+              current_description: currentDescription,
+              definition_changed:
+                JSON.stringify(currentDefinition) !== JSON.stringify(definition),
+              description_changed: currentDescription !== description,
+              domain: template.domain,
+              template_id: template.id,
+              template_name: template.name,
+            },
+            preview_hash: String(body.preview_hash ?? "8".repeat(64)),
+            sync: confirmed
+              ? affectedClientIds.map((clientId, index) => ({
+                  client_id: clientId,
+                  error: null,
+                  job_id: `4f300000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+                  status: "queued",
+                }))
+              : [],
+            template,
+          });
+        }
+        if (
+          pathname.startsWith("/api/v1/source-templates/") &&
           pathname.endsWith("/diff") &&
           method === "POST"
         ) {
@@ -4817,10 +5121,30 @@ export async function installConsoleApiMock(
                   ),
                 ).length
               : 0;
+          const targetClientIds = Array.isArray(request.target_client_ids)
+            ? request.target_client_ids
+            : request.selector_expression
+              ? visibleAgents()
+                  .filter((agent) =>
+                    expressionMatchesAgent(
+                      agent,
+                      request.selector_expression ?? "",
+                    ),
+                  )
+                  .map((agent) => agent.id)
+              : [];
           return jsonResponse({
             assignments: sourceTemplateAssignmentsFixture,
             confirmation_required: !request.confirmed,
             preview_hash: request.preview_hash ?? "8".repeat(64),
+            sync: request.confirmed
+              ? targetClientIds.map((clientId, index) => ({
+                  client_id: clientId,
+                  error: null,
+                  job_id: `4f400000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+                  status: "queued",
+                }))
+              : [],
             template,
             target_count: targetCount,
           });
@@ -5768,6 +6092,173 @@ export async function installConsoleApiMock(
         if (pathname === "/api/v1/migration-links" && method === "GET") {
           return emptyArrayResponse();
         }
+        if (
+          pathname === "/api/v1/network/resolve-hostname" &&
+          method === "POST"
+        ) {
+          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
+          return jsonResponse({
+            candidates: [
+              { address: "10.20.0.21", family: "ipv4" },
+              { address: "2001:db8:20::21", family: "ipv6" },
+            ],
+            hostname: String(body.hostname ?? "app.internal"),
+          });
+        }
+        if (pathname === "/api/v1/port-forward-rules" && method === "GET") {
+          return jsonResponse(mutablePortForwardRules);
+        }
+        if (pathname === "/api/v1/port-forward-rules" && method === "POST") {
+          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
+          requests.portForwardRules.push({ action: "create", body });
+          const enabled = body.enabled !== false;
+          const rule = {
+            ...body,
+            agent_desired_hash: null,
+            created_at: "2026-06-02T10:10:00Z",
+            deleted_at: null,
+            desired_hash: enabled ? "f".repeat(64) : null,
+            desired_status: enabled ? "enabled" : "disabled",
+            enabled,
+            forgotten_at: null,
+            forwarding_enabled: null,
+            id: `4f000000-0000-4000-8000-${String(mutablePortForwardRules.length + 10).padStart(12, "0")}`,
+            nat_matches: 0,
+            nft_version: null,
+            observed_hash: null,
+            removal_confirmed_at: null,
+            revision: 1,
+            runtime_error: null,
+            runtime_error_code: null,
+            runtime_observed_unix: null,
+            runtime_status: enabled ? "pending" : "disabled",
+            updated_at: "2026-06-02T10:10:00Z",
+          };
+          mutablePortForwardRules = [rule, ...mutablePortForwardRules];
+          return jsonResponse(
+            {
+              rule,
+              sync: {
+                error: null,
+                job_id: enabled
+                  ? "4f100000-0000-4000-8000-000000000001"
+                  : null,
+                status: enabled ? "queued" : "saved_disabled",
+              },
+            },
+            201,
+          );
+        }
+        if (pathname === "/api/v1/port-forward-rules/bulk" && method === "POST") {
+          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
+          requests.portForwardRules.push({ action: "bulk", body });
+          const action = String(body.action ?? "reapply");
+          const selected = new Set(
+            Array.isArray(body.items)
+              ? body.items.map((item) => String(asFixtureRecord(item)?.id ?? ""))
+              : [],
+          );
+          const affectedClients = new Set<string>();
+          mutablePortForwardRules = mutablePortForwardRules.flatMap((rule) => {
+            if (!selected.has(rule.id)) return [rule];
+            affectedClients.add(rule.client_id);
+            if (action === "reapply") return [rule];
+            const next = {
+              ...rule,
+              desired_status:
+                action === "delete"
+                  ? "removal_pending"
+                  : action === "enable"
+                    ? "enabled"
+                    : "disabled",
+              enabled: action === "enable",
+              revision: rule.revision + 1,
+              runtime_status:
+                action === "delete" ? "removal_pending" : "pending",
+              updated_at: "2026-06-02T10:11:00Z",
+              ...(action === "delete"
+                ? { deleted_at: "2026-06-02T10:11:00Z" }
+                : {}),
+            };
+            return [next];
+          });
+          return jsonResponse({
+            rules: mutablePortForwardRules.filter((rule) => selected.has(rule.id)),
+            sync: [...affectedClients].map((clientId, index) => ({
+              client_id: clientId,
+              sync: {
+                error: null,
+                job_id: `4f100000-0000-4000-8000-${String(index + 20).padStart(12, "0")}`,
+                status: "queued",
+              },
+            })),
+          });
+        }
+        const portForwardRuleMatch = pathname.match(
+          /^\/api\/v1\/port-forward-rules\/([^/]+)(?:\/([^/]+))?$/,
+        );
+        if (portForwardRuleMatch && (method === "PUT" || method === "POST")) {
+          const ruleId = decodeURIComponent(portForwardRuleMatch[1]);
+          const operation = portForwardRuleMatch[2] ?? "update";
+          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
+          requests.portForwardRules.push({ action: operation, body, rule_id: ruleId });
+          const index = mutablePortForwardRules.findIndex((rule) => rule.id === ruleId);
+          if (index < 0) return jsonResponse({ code: "port_forward_rule_not_found" }, 404);
+          const current = mutablePortForwardRules[index];
+          if (Number(body.expected_revision) !== current.revision) {
+            return jsonResponse({ code: "port_forward_rule_snapshot_stale" }, 409);
+          }
+          const enabled =
+            operation === "enable"
+              ? true
+              : operation === "disable" || operation === "delete"
+                ? false
+                : Boolean(body.enabled ?? current.enabled);
+          const next = {
+            ...current,
+            ...(operation === "update" ? body : {}),
+            desired_status:
+              operation === "delete"
+                ? "removal_pending"
+                : enabled
+                  ? "enabled"
+                  : "disabled",
+            enabled,
+            revision: operation === "reapply" ? current.revision : current.revision + 1,
+            runtime_status:
+              operation === "delete"
+                ? "removal_pending"
+                : operation === "reapply"
+                  ? current.runtime_status
+                  : "pending",
+            updated_at: "2026-06-02T10:12:00Z",
+            ...(operation === "delete"
+              ? { deleted_at: "2026-06-02T10:12:00Z" }
+              : {}),
+            ...(operation === "forget"
+              ? { forgotten_at: "2026-06-02T10:12:00Z" }
+              : {}),
+          };
+          if (operation === "forget") {
+            mutablePortForwardRules.splice(index, 1);
+          } else {
+            mutablePortForwardRules[index] = next;
+          }
+          return jsonResponse({
+            rule: next,
+            sync: {
+              error: null,
+              job_id:
+                operation === "forget"
+                  ? null
+                  : "4f100000-0000-4000-8000-000000000002",
+              status:
+                operation === "forget"
+                  ? "forgotten_without_host_cleanup"
+                  : "queued",
+            },
+          });
+        }
         if (pathname === "/api/v1/tunnel-plans" && method === "GET") {
           return jsonResponse(visibleTunnelPlans());
         }
@@ -5832,7 +6323,11 @@ export async function installConsoleApiMock(
           mutablePlan.revision = plan.revision + 1;
           mutablePlan.right_client_id = planInput.right_client_id;
           mutablePlan.updated_at = "2026-06-02T10:08:00Z";
-          return jsonResponse(mutablePlan);
+          const sync = setRuntimeTunnelConfig(
+            mutablePlan,
+            mutablePlan.enabled === true,
+          );
+          return jsonResponse({ plan: mutablePlan, sync });
         }
         const tunnelPlanEnabledMatch = pathname.match(
           /^\/api\/v1\/tunnel-plans\/([^/]+)\/(enable|disable)$/,
@@ -5864,7 +6359,11 @@ export async function installConsoleApiMock(
             plan.connection_assessed_at = null;
             plan.connection_assessed_by = null;
             plan.updated_at = "2026-06-02T10:08:00Z";
-            return jsonResponse(plan);
+            const sync = setRuntimeTunnelConfig(
+              plan as unknown as Record<string, unknown>,
+              enabled,
+            );
+            return jsonResponse({ plan, sync });
           }
           return jsonResponse({ code: "tunnel_plan_not_found" }, 400);
         }
@@ -5928,13 +6427,22 @@ export async function installConsoleApiMock(
               409,
             );
           }
+          if (
+            !plan.left_runtime_config.cleanup_confirmed ||
+            !plan.right_runtime_config.cleanup_confirmed
+          ) {
+            return jsonResponse(
+              { code: "tunnel_plan_cleanup_not_confirmed" },
+              409,
+            );
+          }
           plan.revision += 1;
           plan.deleted_at = "2026-06-02T10:09:00Z";
           plan.deleted_by = "99999999-aaaa-4bbb-8ccc-000000000001";
           plan.deleted_reason = "operator_retired";
           plan.updated_at = "2026-06-02T10:09:00Z";
           deletedTunnelPlanIds.add(plan.id);
-          return jsonResponse(plan);
+          return jsonResponse({ plan, sync: [] });
         }
         const tunnelPlanOspfCostMatch = pathname.match(
           /^\/api\/v1\/tunnel-plans\/([^/]+)\/ospf-cost$/,
@@ -5963,7 +6471,17 @@ export async function installConsoleApiMock(
               updatePlan.right_ospf_status = "pending";
               updatePlan.status = "in_progress";
             }
-            return jsonResponse({ plan, jobs: [] });
+            return jsonResponse({
+              plan,
+              jobs: [],
+              dispatch: runtimeTunnelDispatch(
+                plan.left_client_id,
+                plan.right_client_id,
+              ).map((outcome, index) => ({
+                ...outcome,
+                endpoint_side: index === 0 ? "left" : "right",
+              })),
+            });
           }
           return jsonResponse({ code: "tunnel_plan_not_found" }, 400);
         }
@@ -5993,7 +6511,17 @@ export async function installConsoleApiMock(
               updatePlan.right_ospf_status = "pending";
               updatePlan.status = "in_progress";
             }
-            return jsonResponse({ plan, jobs: [] });
+            return jsonResponse({
+              plan,
+              jobs: [],
+              dispatch: runtimeTunnelDispatch(
+                plan.left_client_id,
+                plan.right_client_id,
+              ).map((outcome, index) => ({
+                ...outcome,
+                endpoint_side: index === 0 ? "left" : "right",
+              })),
+            });
           }
           return jsonResponse({ code: "tunnel_plan_not_found" }, 400);
         }
@@ -6032,10 +6560,11 @@ export async function installConsoleApiMock(
             unknown
           >;
           requests.tunnelPlans.push(body);
-          return jsonResponse({
+          const enabled = (body.enabled as boolean | undefined) ?? false;
+          const plan = {
             ...tunnelPlansFixture[0],
             desired_ospf_cost: null,
-            enabled: (body.enabled as boolean | undefined) ?? false,
+            enabled,
             id: "bbbbbbbb-aaaa-4bbb-8ccc-eeeeeeeeeeee",
             revision: 1,
             input: body,
@@ -6072,7 +6601,20 @@ export async function installConsoleApiMock(
             right_ospf_job_id: null,
             right_ospf_status: body.ospf ? "needs_status" : "disabled",
             updated_at: "2026-06-02T10:08:00Z",
-          });
+          };
+          const sync = enabled
+            ? setRuntimeTunnelConfig(
+                plan as unknown as Record<string, unknown>,
+                true,
+              )
+            : [];
+          if (!enabled) {
+            setRuntimeTunnelConfig(
+              plan as unknown as Record<string, unknown>,
+              false,
+            );
+          }
+          return jsonResponse({ plan, sync });
         }
         if (pathname === "/api/v1/restore-plans" && method === "POST") {
           const body = await readJsonBody(input, init);
@@ -6208,6 +6750,16 @@ export async function installConsoleApiMock(
         if (pathname === "/api/v1/bulk/resolve" && method === "POST") {
           const body = await readJsonBody(input, init);
           requests.bulkResolve.push(body);
+          if (bulkResolveFailureFixture) {
+            return jsonResponse(
+              {
+                error: "target_resolver_unavailable",
+                message: "Target inventory could not be read",
+                status: 503,
+              },
+              503,
+            );
+          }
           const targets = resolveBulkTargets(body);
           return jsonResponse({
             target_count: targets.length,
@@ -6233,6 +6785,12 @@ export async function installConsoleApiMock(
               (_, index) =>
                 `99999999-9999-4999-8999-${String(index + 1).padStart(12, "0")}`,
             ),
+            sync: targets.map((agent, index) => ({
+              client_id: agent.id,
+              error: null,
+              job_id: `99999999-9999-4999-8999-${String(index + 1).padStart(12, "0")}`,
+              status: "queued",
+            })),
           });
         }
         if (pathname === "/api/v1/jobs" && method === "POST") {
@@ -6353,6 +6911,7 @@ export async function installConsoleApiMock(
       auditLogsFixture: options.auditLogsOverride ?? auditLogs,
       artifactsFixture: options.backupArtifactsOverride ?? backupArtifacts,
       backupsFixture: backupRequests,
+      bulkResolveFailureFixture: options.bulkResolveFailure ?? false,
       dashboardOverviewFixture: dashboardOverview,
       dashboardLatestSampleAtOverrideFixture:
         options.dashboardLatestSampleAtOverride ?? null,
@@ -6374,6 +6933,7 @@ export async function installConsoleApiMock(
       fleetAlertsFixture: fleetAlerts,
       policyAlertsFixture: policyAlerts,
       policyDryRunFixture,
+      portForwardRulesFixture: portForwardRules,
       fileTransferSourceArtifactsFixture:
         options.fileTransferSourceArtifactsOverride ??
         fileTransferSourceArtifacts,

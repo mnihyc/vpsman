@@ -85,6 +85,12 @@ use crate::{
         refresh_tunnel_plan_ospf_status, update_tunnel_connection_assessment, update_tunnel_plan,
         update_tunnel_plan_ospf_cost,
     },
+    routes_port_forwarding::{
+        bulk_mutate_port_forward_rules, create_port_forward_rule, delete_port_forward_rule,
+        disable_port_forward_rule, enable_port_forward_rule, forget_port_forward_rule,
+        list_port_forward_rules, reapply_port_forward_rule, resolve_network_hostname,
+        update_port_forward_rule,
+    },
     routes_restores::{create_restore_plan, list_restore_plans},
     routes_schedules::{
         apply_schedule_now, create_schedule, defer_schedule, delete_schedule, disable_schedule,
@@ -548,6 +554,42 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/tunnel-plans/{plan_id}/ospf-status",
             post(refresh_tunnel_plan_ospf_status),
+        )
+        .route(
+            "/api/v1/port-forward-rules",
+            get(list_port_forward_rules).post(create_port_forward_rule),
+        )
+        .route(
+            "/api/v1/port-forward-rules/bulk",
+            post(bulk_mutate_port_forward_rules),
+        )
+        .route(
+            "/api/v1/port-forward-rules/{rule_id}",
+            put(update_port_forward_rule),
+        )
+        .route(
+            "/api/v1/port-forward-rules/{rule_id}/enable",
+            post(enable_port_forward_rule),
+        )
+        .route(
+            "/api/v1/port-forward-rules/{rule_id}/disable",
+            post(disable_port_forward_rule),
+        )
+        .route(
+            "/api/v1/port-forward-rules/{rule_id}/delete",
+            post(delete_port_forward_rule),
+        )
+        .route(
+            "/api/v1/port-forward-rules/{rule_id}/forget",
+            post(forget_port_forward_rule),
+        )
+        .route(
+            "/api/v1/port-forward-rules/{rule_id}/reapply",
+            post(reapply_port_forward_rule),
+        )
+        .route(
+            "/api/v1/network/resolve-hostname",
+            post(resolve_network_hostname),
         )
         .route(
             "/api/v1/backups",

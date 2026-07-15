@@ -1,59 +1,125 @@
 use std::{
     collections::BTreeSet,
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
-use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
-    runtime_config_content_hash, validate_agent_config_shape, AgentConfig, AgentRuntimeConfig,
-    AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource, JobCommand, RuntimeTunnelManager,
-    TunnelEndpointSide,
+    runtime_config_content_hash, runtime_config_reconcile_scope_from_reason,
+    validate_agent_config_shape, AgentConfig, AgentRuntimeConfig, AgentRuntimeStatusTelemetryPlan,
+    AgentRuntimeTrafficSource, JobCommand, RuntimeConfigReconcileResource,
+    RuntimeConfigReconcileScope, RuntimeTunnelManager, TunnelEndpointSide,
 };
 
 use crate::{
     error::ApiError,
     internal_operator::system_operator,
-    model::{AuthContext, CreateJobRequest, CreateJobResponse},
+    model::{AuthContext, CreateJobRequest, CreateJobResponse, RuntimeConfigDispatchView},
     routes_jobs::create_job_from_internal_operator_mutation,
     state::AppState,
 };
 
-pub(crate) async fn push_runtime_config_for_clients(
+static LAST_RUNTIME_CONFIG_VERSION: AtomicU64 = AtomicU64::new(0);
+const AUTHORITATIVE_RUNTIME_CONFIG_SYNC_REASON: &str = "agent_reconnect_authoritative_sync";
+const AUTHORITATIVE_PORT_FORWARDING_SYNC_REASON: &str =
+    "agent_reconnect_authoritative_port_forwarding_sync";
+const PORT_FORWARDING_RECONNECT_SYNC_REASON: &str = "agent_reconnect_port_forwarding_sync";
+const RUNTIME_TUNNELS_RECONNECT_SYNC_REASON: &str = "agent_reconnect_runtime_tunnels_sync";
+
+pub(crate) async fn dispatch_runtime_config_for_clients(
     state: &AppState,
     operator: &AuthContext,
     client_ids: impl IntoIterator<Item = String>,
     reason: &str,
-) -> Result<Vec<CreateJobResponse>, ApiError> {
-    let clients = client_ids
-        .into_iter()
-        .filter(|client_id| !client_id.trim().is_empty())
-        .collect::<BTreeSet<_>>();
-    let known_clients = state
-        .repo
-        .list_agents()
-        .await?
-        .into_iter()
-        .map(|agent| agent.id)
-        .collect::<BTreeSet<_>>();
-    let mut responses = Vec::with_capacity(clients.len());
+) -> Vec<RuntimeConfigDispatchView> {
+    let clients = normalized_runtime_config_clients(client_ids);
+    let known_clients = match state.repo.list_agents().await {
+        Ok(agents) => agents
+            .into_iter()
+            .map(|agent| agent.id)
+            .collect::<BTreeSet<_>>(),
+        Err(error) => {
+            let error = ApiError::from(error);
+            let message = operator_dispatch_error(&error, "Runtime apply target lookup");
+            return clients
+                .into_iter()
+                .map(|client_id| RuntimeConfigDispatchView {
+                    client_id,
+                    status: "queue_failed".to_string(),
+                    job_id: None,
+                    error: Some(message.clone()),
+                })
+                .collect();
+        }
+    };
+
+    let mut outcomes = Vec::with_capacity(clients.len());
     for client_id in clients {
         if !known_clients.contains(&client_id) {
-            warn!(
+            outcomes.push(RuntimeConfigDispatchView {
                 client_id,
-                reason, "skipping runtime config sync for unknown agent"
-            );
+                status: "not_queued".to_string(),
+                job_id: None,
+                error: Some("VPS is no longer available".to_string()),
+            });
             continue;
         }
-        let version = runtime_config_version();
-        let config = compose_runtime_config(state, &client_id, version).await?;
-        responses.push(
-            push_runtime_config_job(state, operator, client_id, reason, version, config, true)
-                .await?,
+        match push_runtime_config_for_known_client(state, operator, client_id.clone(), reason).await
+        {
+            Ok(job) => outcomes.push(RuntimeConfigDispatchView {
+                client_id,
+                status: "queued".to_string(),
+                job_id: Some(job.job_id),
+                error: None,
+            }),
+            Err(error) => outcomes.push(RuntimeConfigDispatchView {
+                client_id,
+                status: "queue_failed".to_string(),
+                job_id: None,
+                error: Some(operator_dispatch_error(&error, "Runtime apply job")),
+            }),
+        }
+    }
+    outcomes
+}
+
+pub(crate) fn operator_dispatch_error(error: &ApiError, operation: &str) -> String {
+    if let Some(message) = error.public_message.as_deref() {
+        return format!(
+            "{operation} could not be queued: {message}. Desired state remains saved; refresh target state and retry"
         );
     }
-    Ok(responses)
+    if error.status.is_server_error() {
+        return format!(
+            "{operation} could not be queued because the server failed while creating it. Desired state remains saved; inspect API logs and retry"
+        );
+    }
+    format!(
+        "{operation} could not be queued because the server rejected it: {}. Desired state remains saved; refresh target state, correct the reported conflict, and retry",
+        error.code.replace('_', " ")
+    )
+}
+
+fn normalized_runtime_config_clients(
+    client_ids: impl IntoIterator<Item = String>,
+) -> BTreeSet<String> {
+    client_ids
+        .into_iter()
+        .filter(|client_id| !client_id.trim().is_empty())
+        .collect()
+}
+
+async fn push_runtime_config_for_known_client(
+    state: &AppState,
+    operator: &AuthContext,
+    client_id: String,
+    reason: &str,
+) -> Result<CreateJobResponse, ApiError> {
+    let version = next_runtime_config_version(state, &client_id).await?;
+    let config = compose_runtime_config(state, &client_id, version).await?;
+    push_runtime_config_job(state, operator, client_id, reason, version, config).await
 }
 
 pub(crate) async fn request_runtime_config_reload_for_agent(
@@ -61,56 +127,84 @@ pub(crate) async fn request_runtime_config_reload_for_agent(
     client_id: &str,
     current_content_hash: &str,
     reason: &str,
+    reconcile_scope: RuntimeConfigReconcileScope,
 ) -> Result<Vec<CreateJobResponse>, ApiError> {
-    if let Some((version, applied_content_hash, applied_config)) = state
-        .repo
-        .runtime_config_applied_state_for_client(client_id)
-        .await?
+    let mut config = compose_runtime_config(state, client_id, 1).await?;
+    let desired_content_hash = runtime_config_content_hash(&config)
+        .map_err(|error| ApiError::from(anyhow::anyhow!("runtime config hash failed: {error}")))?;
+    if !reconcile_scope.requires_reconcile()
+        && desired_content_hash.eq_ignore_ascii_case(current_content_hash.trim())
     {
-        if applied_content_hash.eq_ignore_ascii_case(current_content_hash.trim()) {
-            return Ok(Vec::new());
-        }
-        let operator = system_operator("runtime-config-agent-request");
-        return push_runtime_config_job(
-            state,
-            &operator,
-            client_id.to_string(),
-            reason,
-            version,
-            applied_config,
-            false,
-        )
-        .await
-        .map(|response| vec![response]);
+        state
+            .repo
+            .promote_runtime_config_apply_from_agent_hash(client_id, &desired_content_hash)
+            .await?;
+        return Ok(Vec::new());
     }
     if let Some(pending) = state
         .repo
         .runtime_config_pending_state_for_client(client_id)
         .await?
     {
-        if matches!(pending.pending_status.as_deref(), Some("queued" | "failed")) {
+        let same_queued_content = pending.pending_status.as_deref() == Some("queued")
+            && pending
+                .pending_content_hash
+                .as_deref()
+                .is_some_and(|hash| hash.eq_ignore_ascii_case(&desired_content_hash));
+        let pending_scope = pending
+            .pending_reason
+            .as_deref()
+            .map(runtime_config_reconcile_scope_from_reason)
+            .unwrap_or_default();
+        if same_queued_content
+            && (!reconcile_scope.requires_reconcile() || pending_scope.covers(&reconcile_scope))
+        {
             return Ok(Vec::new());
         }
     }
-    let version = runtime_config_version();
-    let config = compose_runtime_config(state, client_id, version).await?;
-    let desired_content_hash = runtime_config_content_hash(&config)
-        .map_err(|error| ApiError::from(anyhow::anyhow!("runtime config hash failed: {error}")))?;
-    if desired_content_hash.eq_ignore_ascii_case(current_content_hash.trim()) {
-        return Ok(Vec::new());
-    }
+    let version = next_runtime_config_version(state, client_id).await?;
+    config.version = version;
     let operator = system_operator("runtime-config-agent-request");
+    let sync_reason = runtime_config_reload_reason(&reconcile_scope, reason);
     push_runtime_config_job(
         state,
         &operator,
         client_id.to_string(),
-        reason,
+        sync_reason,
         version,
         config,
-        true,
     )
     .await
     .map(|response| vec![response])
+}
+
+fn runtime_config_reload_reason<'a>(
+    scope: &RuntimeConfigReconcileScope,
+    fallback: &'a str,
+) -> &'a str {
+    if (scope.authoritative || scope.resources.len() > 1)
+        && scope
+            .resources
+            .contains(&RuntimeConfigReconcileResource::PortForwarding)
+    {
+        AUTHORITATIVE_PORT_FORWARDING_SYNC_REASON
+    } else if scope.authoritative || scope.resources.len() > 1 {
+        // The legacy command wire has no scope field. A full reconcile is the safe
+        // superset when an older agent receives a multi-resource repair request.
+        AUTHORITATIVE_RUNTIME_CONFIG_SYNC_REASON
+    } else if scope
+        .resources
+        .contains(&RuntimeConfigReconcileResource::PortForwarding)
+    {
+        PORT_FORWARDING_RECONNECT_SYNC_REASON
+    } else if scope
+        .resources
+        .contains(&RuntimeConfigReconcileResource::RuntimeTunnels)
+    {
+        RUNTIME_TUNNELS_RECONNECT_SYNC_REASON
+    } else {
+        fallback
+    }
 }
 
 pub(crate) async fn compose_runtime_config(
@@ -144,6 +238,10 @@ pub(crate) async fn compose_runtime_config(
             .context("runtime_config_override_merge_failed")?;
     }
     apply_enabled_tunnel_plans(state, client_id, &mut effective).await?;
+    effective.network.port_forwarding = state
+        .repo
+        .port_forwarding_config_for_client(client_id)
+        .await?;
     validate_agent_config_shape(&effective)
         .map_err(|error| anyhow::anyhow!("composed_runtime_config_invalid:{error}"))?;
 
@@ -167,16 +265,8 @@ async fn push_runtime_config_job(
     reason: &str,
     version: u64,
     config: AgentRuntimeConfig,
-    queue_pending_apply: bool,
 ) -> Result<CreateJobResponse, ApiError> {
     let job_id = Uuid::new_v4();
-    let pending_content_hash = if queue_pending_apply {
-        Some(runtime_config_content_hash(&config).map_err(|error| {
-            ApiError::from(anyhow::anyhow!("runtime config hash failed: {error}"))
-        })?)
-    } else {
-        None
-    };
     let request = CreateJobRequest {
         job_id: Some(job_id),
         selector_expression: String::new(),
@@ -195,25 +285,22 @@ async fn push_runtime_config_job(
         privileged: true,
         privilege_assertion: None,
     };
-    let response = match create_job_from_internal_operator_mutation(state, operator, request).await
-    {
-        Ok((_, response)) => response.0,
-        Err(error) => {
-            if queue_pending_apply {
-                let error_message = format!("{}: {}", error.code, error.error);
-                let _ = state
-                    .repo
-                    .mark_runtime_config_apply_job_create_failed(&client_id, job_id, &error_message)
-                    .await;
-            }
-            return Err(error);
-        }
-    };
-    if let Some(content_hash) = pending_content_hash {
-        state
-            .repo
-            .queue_runtime_config_apply(&client_id, version, &content_hash, &config, job_id, reason)
-            .await?;
+    let (status, response) =
+        create_job_from_internal_operator_mutation(state, operator, request).await?;
+    let response = response.0;
+    if !status.is_success() {
+        return Err(ApiError {
+            status,
+            code: "runtime_config_job_not_queued",
+            error: anyhow::anyhow!(
+                "runtime config apply job was not queued (status={})",
+                response.status
+            ),
+            public_message: Some(format!(
+                "Runtime configuration was saved, but its apply job was not queued ({})",
+                response.status
+            )),
+        });
     }
     Ok(response)
 }
@@ -340,6 +427,13 @@ fn reject_server_managed_runtime_config_keys(patch: &toml::Value) -> Result<()> 
     {
         anyhow::bail!("runtime_config_patch_managed_tunnel_plans_forbidden");
     }
+    if table
+        .get("network")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|network| network.contains_key("port_forwarding"))
+    {
+        anyhow::bail!("runtime_config_patch_managed_port_forwarding_forbidden");
+    }
     Ok(())
 }
 
@@ -362,10 +456,125 @@ fn merge_toml_value(target: &mut toml::Value, patch: toml::Value) -> Result<()> 
     }
 }
 
-fn runtime_config_version() -> u64 {
-    SystemTime::now()
+async fn next_runtime_config_version(state: &AppState, client_id: &str) -> Result<u64, ApiError> {
+    let floor = state
+        .repo
+        .list_runtime_config_apply_states(Some(client_id))
+        .await?
+        .into_iter()
+        .flat_map(|record| [record.applied_version, record.pending_version])
+        .flatten()
+        .max()
+        .unwrap_or(0);
+    runtime_config_version_after(floor).map_err(ApiError::from)
+}
+
+fn runtime_config_version_after(floor: u64) -> Result<u64> {
+    const MAX_PERSISTED_VERSION: u64 = i64::MAX as u64;
+    anyhow::ensure!(
+        floor < MAX_PERSISTED_VERSION,
+        "runtime config version space exhausted"
+    );
+    let wall_clock = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .map(|duration| duration.as_micros().min(u128::from(MAX_PERSISTED_VERSION)) as u64)
         .unwrap_or(1)
-        .max(1)
+        .max(1);
+    let minimum = wall_clock.max(floor + 1);
+    loop {
+        let previous = LAST_RUNTIME_CONFIG_VERSION.load(Ordering::Relaxed);
+        let candidate = minimum.max(previous.saturating_add(1));
+        anyhow::ensure!(
+            candidate <= MAX_PERSISTED_VERSION,
+            "runtime config version space exhausted"
+        );
+        if LAST_RUNTIME_CONFIG_VERSION
+            .compare_exchange(previous, candidate, Ordering::SeqCst, Ordering::Relaxed)
+            .is_ok()
+        {
+            return Ok(candidate);
+        }
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::{
+        operator_dispatch_error, runtime_config_reload_reason, runtime_config_version_after,
+    };
+    use crate::error::ApiError;
+    use vpsman_common::{RuntimeConfigReconcileResource, RuntimeConfigReconcileScope};
+
+    fn scope(
+        authoritative: bool,
+        resources: &[RuntimeConfigReconcileResource],
+    ) -> RuntimeConfigReconcileScope {
+        RuntimeConfigReconcileScope {
+            authoritative,
+            resources: resources.iter().copied().collect(),
+        }
+    }
+
+    #[test]
+    fn runtime_config_versions_are_strictly_monotonic_above_the_persisted_floor() {
+        let first = runtime_config_version_after(100).unwrap();
+        let second = runtime_config_version_after(first).unwrap();
+        assert!(first > 100);
+        assert!(second > first);
+    }
+
+    #[test]
+    fn reconnect_reason_projects_typed_scope_onto_the_rolling_update_wire() {
+        assert_eq!(
+            runtime_config_reload_reason(
+                &scope(true, &[RuntimeConfigReconcileResource::PortForwarding],),
+                "fallback",
+            ),
+            "agent_reconnect_authoritative_port_forwarding_sync"
+        );
+        assert_eq!(
+            runtime_config_reload_reason(&scope(true, &[]), "fallback"),
+            "agent_reconnect_authoritative_sync"
+        );
+        assert_eq!(
+            runtime_config_reload_reason(
+                &scope(false, &[RuntimeConfigReconcileResource::PortForwarding],),
+                "fallback",
+            ),
+            "agent_reconnect_port_forwarding_sync"
+        );
+        assert_eq!(
+            runtime_config_reload_reason(
+                &scope(false, &[RuntimeConfigReconcileResource::RuntimeTunnels],),
+                "fallback",
+            ),
+            "agent_reconnect_runtime_tunnels_sync"
+        );
+        assert_eq!(
+            runtime_config_reload_reason(&scope(false, &[]), "fallback"),
+            "fallback"
+        );
+    }
+
+    #[test]
+    fn dispatch_errors_explain_impact_and_recovery_without_leaking_internal_details() {
+        let internal = ApiError::from(anyhow::anyhow!("private database detail"));
+        let internal_message = operator_dispatch_error(&internal, "Runtime apply job");
+        assert!(internal_message.contains("Desired state remains saved"));
+        assert!(internal_message.contains("inspect API logs and retry"));
+        assert!(!internal_message.contains("private database detail"));
+
+        let conflict = ApiError::conflict("agent_command_queue_full");
+        let conflict_message = operator_dispatch_error(&conflict, "Runtime apply job");
+        assert!(conflict_message.contains("agent command queue full"));
+        assert!(conflict_message.contains("refresh target state"));
+
+        let public = ApiError::bad_request_with_message(
+            "runtime_config_invalid",
+            "The rendered config is invalid for this VPS",
+        );
+        let public_message = operator_dispatch_error(&public, "Runtime apply job");
+        assert!(public_message.contains("The rendered config is invalid for this VPS"));
+        assert!(public_message.contains("Desired state remains saved"));
+    }
 }

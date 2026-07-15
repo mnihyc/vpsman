@@ -347,8 +347,8 @@ async fn deleting_memory_agent_removes_inventory_access_and_bulk_targets() {
         .await
         .unwrap();
 
-    assert!(response.response.deleted);
-    assert_eq!(response.response.client_id, "client-delete");
+    assert_eq!(response.client_id, "client-delete");
+    assert!(!response.deleted_at.is_empty());
     assert!(repo.list_agents().await.unwrap().is_empty());
     assert_eq!(repo.fleet_summary().await.unwrap().total, 0);
     assert!(repo.list_gateway_sessions(10).await.unwrap().is_empty());
@@ -496,6 +496,37 @@ async fn create_job_requires_client_supplied_job_id() {
     assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
     assert_eq!(error.code, "job_id_required");
     assert!(state.repo.list_jobs(10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn rejected_job_response_keeps_job_identity_and_operator_error_detail() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_never_connected_memory_agent(&repo, "client-a").await;
+    let state = test_app_state(repo);
+    let operator = test_operator();
+    let mut request = route_job_request(Some(Uuid::new_v4()), "uptime");
+    request.privileged = false;
+
+    let (status, axum::Json(response)) =
+        routes_jobs::create_job_with_operator(&state, &operator, request)
+            .await
+            .unwrap();
+
+    assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+    assert_eq!(response.status, "rejected");
+    assert_eq!(
+        response.error.as_deref(),
+        Some("job_privilege_unlock_required")
+    );
+    assert_eq!(
+        response.message.as_deref(),
+        Some("job requires privilege unlock")
+    );
+    assert!(response
+        .recovery
+        .as_deref()
+        .is_some_and(|recovery| recovery.contains("operator scope and privilege assertion")));
+    assert_eq!(state.repo.list_jobs(10).await.unwrap().len(), 1);
 }
 
 #[tokio::test]

@@ -6,21 +6,22 @@ use axum::{
 
 use crate::{
     error::ApiError,
+    lifecycle_outcome::{gateway_disconnect_outcome, terminal_reconciliation_outcome},
     model::{
-        AgentIdentityView, ClientKeyRevocationView, CreateClientKeyRevocationRequest, HistoryQuery,
+        AgentIdentityMutationResponse, ClientKeyRevocationMutationResponse,
+        ClientKeyRevocationView, CreateClientKeyRevocationRequest, HistoryQuery,
         KeyLifecycleReportView, UpsertAgentIdentityRequest, WsEvent,
     },
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
     state::AppState,
     util::limit_or_default,
 };
-use tracing::warn;
 
 pub(crate) async fn upsert_agent_identity(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<UpsertAgentIdentityRequest>,
-) -> Result<(StatusCode, Json<AgentIdentityView>), ApiError> {
+) -> Result<(StatusCode, Json<AgentIdentityMutationResponse>), ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
@@ -49,23 +50,35 @@ pub(crate) async fn upsert_agent_identity(
         .upsert_agent_identity(&request, &operator)
         .await
         .map_err(agent_identity_mutation_error)?;
+    let mut post_commit = Vec::new();
     if request.replace_existing_key {
-        if let Err(error) = state
-            .disconnect_gateway_session_for_lifecycle(client_id, "client_key_replaced")
-            .await
-        {
-            warn!(
-                ?error,
-                client_id, "post-commit gateway disconnect failed after client key replacement"
-            );
-        }
+        post_commit.push(gateway_disconnect_outcome(
+            state
+                .disconnect_gateway_session_for_lifecycle(client_id, "client_key_replaced")
+                .await,
+            client_id,
+            "VPS key rotation",
+        ));
     }
     state.publish(WsEvent::AgentUpdated {
         client_id: view.client_id.clone(),
         gateway_id: "identity".to_string(),
     });
-    state.process_job_terminal_events(500).await?;
-    Ok((StatusCode::CREATED, Json(view)))
+    post_commit.push(terminal_reconciliation_outcome(
+        state.process_job_terminal_events(500).await,
+        if request.replace_existing_key {
+            "VPS key rotation"
+        } else {
+            "VPS identity registration"
+        },
+    ));
+    Ok((
+        StatusCode::CREATED,
+        Json(AgentIdentityMutationResponse {
+            identity: view,
+            post_commit,
+        }),
+    ))
 }
 
 pub(crate) async fn list_client_key_revocations(
@@ -87,7 +100,7 @@ pub(crate) async fn revoke_current_client_key(
     headers: HeaderMap,
     Path(client_id): Path<String>,
     Json(request): Json<CreateClientKeyRevocationRequest>,
-) -> Result<(StatusCode, Json<ClientKeyRevocationView>), ApiError> {
+) -> Result<(StatusCode, Json<ClientKeyRevocationMutationResponse>), ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
@@ -109,21 +122,28 @@ pub(crate) async fn revoke_current_client_key(
         .repo
         .revoke_current_client_key(&client_id, &request, &operator)
         .await?;
-    if let Err(error) = state
-        .disconnect_gateway_session_for_lifecycle(&client_id, "client_key_revoked")
-        .await
-    {
-        warn!(
-            ?error,
-            client_id, "post-commit gateway disconnect failed after client key revocation"
-        );
-    }
+    let gateway_disconnect = gateway_disconnect_outcome(
+        state
+            .disconnect_gateway_session_for_lifecycle(&client_id, "client_key_revoked")
+            .await,
+        &client_id,
+        "VPS key revocation",
+    );
     state.publish(WsEvent::AgentUpdated {
         client_id,
         gateway_id: "key_lifecycle".to_string(),
     });
-    state.process_job_terminal_events(500).await?;
-    Ok((StatusCode::CREATED, Json(record)))
+    let terminal_reconciliation = terminal_reconciliation_outcome(
+        state.process_job_terminal_events(500).await,
+        "VPS key revocation",
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(ClientKeyRevocationMutationResponse {
+            revocation: record,
+            post_commit: vec![gateway_disconnect, terminal_reconciliation],
+        }),
+    ))
 }
 
 fn agent_identity_mutation_error(error: anyhow::Error) -> ApiError {

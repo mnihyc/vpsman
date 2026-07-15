@@ -113,6 +113,11 @@ pub(crate) struct MemoryState {
     pub(crate) schedules: Arc<RwLock<Vec<ScheduleView>>>,
     pub(crate) backup_policies: Arc<RwLock<Vec<BackupPolicyMetadata>>>,
     pub(crate) tunnel_plans: Arc<RwLock<Vec<TunnelPlanView>>>,
+    pub(crate) port_forward_rules:
+        Arc<RwLock<Vec<crate::model_port_forwarding::PortForwardRuleRecord>>>,
+    pub(crate) port_forward_runtime:
+        Arc<RwLock<HashMap<String, crate::model_port_forwarding::PortForwardRuntimeRecord>>>,
+    pub(crate) port_forward_lifecycle: Arc<Mutex<()>>,
     pub(crate) backup_requests: Arc<RwLock<Vec<BackupRequestView>>>,
     pub(crate) backup_artifacts: Arc<RwLock<Vec<BackupArtifactView>>>,
     pub(crate) restore_plans: Arc<RwLock<Vec<RestorePlanView>>>,

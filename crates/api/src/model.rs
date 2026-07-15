@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use vpsman_common::{
     AgentCapabilitySnapshot, JobCommand, PrivilegeAssertion, TunnelAddressFamily,
-    TunnelAddressPair, TunnelKind, TunnelPlan, TunnelPlanInput,
+    TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
 };
 
 pub(crate) use crate::auth_model::*;
@@ -86,14 +86,42 @@ pub(crate) struct DeleteAgentResponse {
     pub(crate) client_id: String,
     pub(crate) deleted: bool,
     pub(crate) deleted_at: String,
-    pub(crate) runtime_sync_job_ids: Vec<Uuid>,
-    pub(crate) runtime_sync_failed_client_ids: Vec<String>,
+    pub(crate) post_commit: Vec<LifecycleOutcomeView>,
+    pub(crate) runtime_sync: Vec<RuntimeConfigDispatchView>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct DeleteAgentResult {
-    pub(crate) response: DeleteAgentResponse,
+    pub(crate) client_id: String,
+    pub(crate) deleted_at: String,
     pub(crate) retired_tunnel_endpoint_pairs: Vec<(String, String)>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct LifecycleOutcomeView {
+    pub(crate) operation: String,
+    pub(crate) status: String,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RuntimeConfigDispatchView {
+    pub(crate) client_id: String,
+    pub(crate) status: String,
+    pub(crate) job_id: Option<Uuid>,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct AgentIdentityMutationResponse {
+    pub(crate) identity: AgentIdentityView,
+    pub(crate) post_commit: Vec<LifecycleOutcomeView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct ClientKeyRevocationMutationResponse {
+    pub(crate) revocation: ClientKeyRevocationView,
+    pub(crate) post_commit: Vec<LifecycleOutcomeView>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -465,6 +493,8 @@ pub(crate) struct TunnelPlanView {
     pub(crate) connection_assessment_note: Option<String>,
     pub(crate) connection_assessed_at: Option<String>,
     pub(crate) connection_assessed_by: Option<Uuid>,
+    pub(crate) left_runtime_config: TunnelPlanEndpointRuntimeConfigView,
+    pub(crate) right_runtime_config: TunnelPlanEndpointRuntimeConfigView,
     pub(crate) input: TunnelPlanInput,
     pub(crate) plan: TunnelPlan,
     pub(crate) created_at: String,
@@ -472,6 +502,23 @@ pub(crate) struct TunnelPlanView {
     pub(crate) deleted_at: Option<String>,
     pub(crate) deleted_by: Option<Uuid>,
     pub(crate) deleted_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct TunnelPlanEndpointRuntimeConfigView {
+    pub(crate) client_id: String,
+    pub(crate) desired: String,
+    pub(crate) status: String,
+    pub(crate) cleanup_confirmed: bool,
+    pub(crate) job_id: Option<Uuid>,
+    pub(crate) error: Option<String>,
+    pub(crate) updated_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct TunnelPlanMutationResponse {
+    pub(crate) plan: TunnelPlanView,
+    pub(crate) sync: Vec<RuntimeConfigDispatchView>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -598,6 +645,16 @@ pub(crate) struct RefreshTunnelPlanOspfStatusRequest {}
 pub(crate) struct TunnelPlanOspfJobsResponse {
     pub(crate) plan: TunnelPlanView,
     pub(crate) jobs: Vec<CreateJobResponse>,
+    pub(crate) dispatch: Vec<TunnelPlanOspfDispatchView>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct TunnelPlanOspfDispatchView {
+    pub(crate) endpoint_side: TunnelEndpointSide,
+    pub(crate) client_id: String,
+    pub(crate) job_id: Uuid,
+    pub(crate) status: String,
+    pub(crate) error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1006,6 +1063,12 @@ pub(crate) struct CreateJobResponse {
     pub(crate) max_job_timeout_secs: u64,
     pub(crate) control_deadline_extra_secs: u64,
     pub(crate) target_counts: CreateJobTargetCounts,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) recovery: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1104,5 +1167,6 @@ pub(crate) struct ErrorResponse {
     pub(crate) error: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) message: Option<String>,
+    pub(crate) recovery: String,
     pub(crate) status: u16,
 }

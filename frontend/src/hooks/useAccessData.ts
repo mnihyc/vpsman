@@ -9,7 +9,8 @@ import type {
   TotpSetupResponse,
 } from "../types";
 import type {
-  AgentIdentityView,
+  AgentIdentityMutationResponse,
+  ClientKeyRevocationMutationResponse,
   ClientKeyRevocationView,
   KeyLifecycleReportView,
   UpsertAgentIdentityRequest,
@@ -239,10 +240,12 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
   );
 
   const upsertAgentIdentity = useCallback(
-    async (request: UpsertAgentIdentityRequest): Promise<AgentIdentityView> => {
+    async (
+      request: UpsertAgentIdentityRequest,
+    ): Promise<AgentIdentityMutationResponse> => {
       setAccessError(null);
       try {
-        const response = await apiPost<AgentIdentityView>(
+        const response = await apiPost<AgentIdentityMutationResponse>(
           "/api/v1/agent-identities",
           apiToken,
           request,
@@ -532,18 +535,19 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     ) => {
       setAccessError(null);
       try {
-        await apiPost<ClientKeyRevocationView>(
+        const response = await apiPost<ClientKeyRevocationMutationResponse>(
           `/api/v1/clients/${encodeURIComponent(clientId)}/key-revocations`,
           apiToken,
           { confirmed, reason, privilege_assertion: privilegeAssertion },
         );
         await loadCurrentOperator();
+        return response;
       } catch (error) {
         if (isApiUnauthorized(error)) {
           onUnauthorized();
           resetAccessRecords();
           setAccessError("Operator login required");
-          return;
+          throw error;
         }
         setAccessError(
           error instanceof Error ? error.message : "Client key revoke failed",

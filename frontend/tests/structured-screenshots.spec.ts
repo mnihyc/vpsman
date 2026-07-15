@@ -29,6 +29,9 @@ interface ScreenshotEntry {
     | "fleet-metrics-chart"
     | "network-latency-chart"
     | "network-throughput-chart"
+    | "port-forward-confirmation"
+    | "port-forward-create"
+    | "port-forward-details"
     | "source-template-adapter-detail"
     | "tunnel-plan-assessment"
     | "tunnel-plan-create"
@@ -303,6 +306,60 @@ const allViews: ScreenshotEntry[] = [
   },
   {
     view: "Network",
+    subpage: "Port forwards",
+    heading: "Port forwarding",
+    id: "25g-network-port-forwarding",
+    requiredText: [
+      "Create rule",
+      "Public web ingress",
+      "IPv6 service range",
+      "Retired DNS relay",
+    ],
+  },
+  {
+    view: "Network",
+    subpage: "Port forwards",
+    heading: "Port-forward rule details",
+    id: "25h-network-port-forwarding-details",
+    prepare: "port-forward-details",
+    requiredText: [
+      "Control desired",
+      "Agent desired",
+      "Observed table",
+      "Listener scope",
+      "NAT matches",
+    ],
+  },
+  {
+    view: "Network",
+    subpage: "Port forwards",
+    heading: "Create port-forward rule",
+    id: "25i-network-port-forwarding-create",
+    prepare: "port-forward-create",
+    requiredText: [
+      "Create port-forward rule",
+      "Incoming ports",
+      "Target ports",
+      "Target IP or hostname",
+      "Return path",
+    ],
+  },
+  {
+    view: "Network",
+    subpage: "Port forwards",
+    heading: "Confirm port-forward rule",
+    id: "25j-network-port-forwarding-confirmation",
+    prepare: "port-forward-confirmation",
+    requiredText: [
+      "Confirm rule creation",
+      "Listener scope",
+      "Claimed ports",
+      "Target",
+      "Return",
+    ],
+  },
+  {
+    view: "Network",
     subpage: "Tunnel plans",
     heading: "Tunnel plans",
     id: "25f-network-tunnel-connectivity-assessment",
@@ -362,7 +419,8 @@ const allViews: ScreenshotEntry[] = [
     prepare: "tunnel-plan-delete-review",
     requiredText: [
       "Confirm tunnel plan deletion",
-      "Already disabled and omitted from desired config",
+      "Permanently retire this disabled declaration",
+      "Left Removed; right Removed",
       "audit history remains",
     ],
   },
@@ -745,7 +803,7 @@ const allViews: ScreenshotEntry[] = [
     requiredText: [
       "Operator access policy",
       "MFA policy",
-      "recommended instead of enforced",
+      "recommended rather than enforced",
       "Operator accounts",
       "Policy recommends MFA",
       "Revoke sessions",
@@ -813,7 +871,7 @@ const allViews: ScreenshotEntry[] = [
       "Subsystem capacity",
       "Queue growth",
       "Suite Config fields",
-      "Optional storage telemetry not reported",
+      "Dispatch capacity",
     ],
   },
   {
@@ -1036,6 +1094,36 @@ async function navigateAndScreenshot(
     await expect(chartSection.locator(".timeSeriesChartShell")).toBeVisible();
   }
 
+  if (
+    entry.prepare === "port-forward-details" ||
+    entry.prepare === "port-forward-create" ||
+    entry.prepare === "port-forward-confirmation"
+  ) {
+    await closePortForwardWorkflow(page);
+    if (entry.prepare === "port-forward-details") {
+      await page
+        .getByRole("row", { name: /Public web ingress/ })
+        .click();
+      await expect(
+        page.getByRole("region", { name: "Details for Public web ingress" }),
+      ).toBeVisible({ timeout: 5_000 });
+    } else {
+      await page.getByRole("button", { name: "Create rule" }).click();
+      const editor = page.locator(".portForwardEditor");
+      await expect(editor).toBeVisible({ timeout: 5_000 });
+      if (entry.prepare === "port-forward-confirmation") {
+        await editor.getByLabel("Name", { exact: true }).fill("Audit web ingress");
+        await editor.getByLabel("Incoming ports").fill("8443");
+        await editor.getByLabel("Target ports").fill("443");
+        await editor.getByLabel("Target IP or hostname").fill("10.20.0.25");
+        await editor.getByRole("button", { name: "Create rule" }).click();
+        await expect(page.getByLabel("Confirm rule creation")).toBeVisible({
+          timeout: 5_000,
+        });
+      }
+    }
+  }
+
   if (entry.prepare === "source-template-adapter-detail") {
     const registry = page.getByLabel("Template registry data grid");
     const adapterRow = registry
@@ -1211,8 +1299,9 @@ async function navigateAndScreenshot(
   }
 
   await page.waitForTimeout(200);
+  const portForwardWorkflow = entry.prepare?.startsWith("port-forward-") ?? false;
   const preserveWorkflowFocus =
-    !projectName.startsWith("mobile") &&
+    (!projectName.startsWith("mobile") || portForwardWorkflow) &&
     Boolean(
       (entry.prepare && entry.prepare !== "fleet-metrics-advanced") ||
         entry.expandVpsRow ||
@@ -1249,7 +1338,7 @@ async function navigateAndScreenshot(
 
   const filename = `${entry.id}-${projectName}.png`;
   const screenshotPath = join(projectDir, filename);
-  await page.screenshot({ fullPage: true, path: screenshotPath });
+  await page.screenshot({ fullPage: !portForwardWorkflow, path: screenshotPath });
 
   return {
     id: entry.id,
@@ -1322,6 +1411,25 @@ async function closeTunnelPlanWorkflow(page: import("@playwright/test").Page) {
     if (await button.isVisible().catch(() => false)) {
       await button.click();
     }
+  }
+}
+
+async function closePortForwardWorkflow(page: import("@playwright/test").Page) {
+  const prompt = page.getByLabel("Confirm rule creation");
+  if (await prompt.isVisible().catch(() => false)) {
+    await prompt.getByRole("button", { name: "Cancel" }).click();
+  }
+  const closeEditor = page.getByRole("button", {
+    name: "Close port-forward editor",
+  });
+  if (await closeEditor.isVisible().catch(() => false)) {
+    await closeEditor.click();
+  }
+  const closeDetails = page.getByRole("button", {
+    name: "Close port-forward details",
+  });
+  if (await closeDetails.isVisible().catch(() => false)) {
+    await closeDetails.click();
   }
 }
 

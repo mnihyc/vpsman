@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::{
     cli::Command, commands::CommandContext, commands_backups, commands_keys, commands_migrations,
-    commands_network, vty::run_vty,
+    commands_network, commands_port_forwarding, vty::run_vty,
 };
 
 pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<Command>> {
@@ -343,6 +343,46 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
         }
         Command::TunnelPlans => {
             commands_network::tunnel_plans(api_url, token)?;
+            Ok(None)
+        }
+        Command::PortForwards => {
+            commands_port_forwarding::list(api_url, token)?;
+            Ok(None)
+        }
+        Command::PortForwardCreate(request) => {
+            commands_port_forwarding::create(api_url, token, request)?;
+            Ok(None)
+        }
+        Command::PortForwardUpdate(request) => {
+            commands_port_forwarding::update(api_url, token, request)?;
+            Ok(None)
+        }
+        Command::PortForwardEnable(request) => {
+            commands_port_forwarding::mutate(api_url, token, request, "enable")?;
+            Ok(None)
+        }
+        Command::PortForwardDisable(request) => {
+            commands_port_forwarding::mutate(api_url, token, request, "disable")?;
+            Ok(None)
+        }
+        Command::PortForwardDelete(request) => {
+            commands_port_forwarding::mutate(api_url, token, request, "delete")?;
+            Ok(None)
+        }
+        Command::PortForwardForget(request) => {
+            commands_port_forwarding::mutate(api_url, token, request, "forget")?;
+            Ok(None)
+        }
+        Command::PortForwardReapply(request) => {
+            commands_port_forwarding::mutate(api_url, token, request, "reapply")?;
+            Ok(None)
+        }
+        Command::PortForwardResolve(request) => {
+            commands_port_forwarding::resolve(api_url, token, request)?;
+            Ok(None)
+        }
+        Command::PortForwardBulk(request) => {
+            commands_port_forwarding::bulk(api_url, token, request)?;
             Ok(None)
         }
         Command::TunnelAllocate(request) => {

@@ -473,7 +473,8 @@ async fn source_template_update_route_binds_confirmed_apply_to_preview() {
         }
     }
     let mut state = source_template_test_state(repo.clone(), None);
-    state.gateway = GatewayDispatchClient::test_privilege_auto_approve();
+    state.gateway = GatewayDispatchClient::new(Some("http://127.0.0.1:1".to_string()), None)
+        .with_test_privilege_auto_approve();
     let headers = crate::test_auth_headers(&state).await;
     let operator = memory_admin();
     let template = repo
@@ -602,7 +603,8 @@ async fn source_template_assignment_route_binds_confirmed_apply_to_preview() {
         }
     }
     let mut state = source_template_test_state(repo.clone(), None);
-    state.gateway = GatewayDispatchClient::test_privilege_auto_approve();
+    state.gateway = GatewayDispatchClient::new(Some("http://127.0.0.1:1".to_string()), None)
+        .with_test_privilege_auto_approve();
     let headers = crate::test_auth_headers(&state).await;
     let template = repo
         .create_source_template(
@@ -1054,6 +1056,7 @@ async fn source_status_links_selected_templates_to_live_source_evidence() {
                     can_attempt_privileged_ops: true,
                     can_manage_runtime_tunnels: true,
                     can_apply_process_limits: true,
+                    port_forwarding: Default::default(),
                     unprivileged_hint: None,
                 },
             },
@@ -1076,6 +1079,7 @@ async fn source_status_links_selected_templates_to_live_source_evidence() {
                     can_attempt_privileged_ops: true,
                     can_manage_runtime_tunnels: false,
                     can_apply_process_limits: false,
+                    port_forwarding: Default::default(),
                     unprivileged_hint: Some("running without root in test".to_string()),
                 },
             },

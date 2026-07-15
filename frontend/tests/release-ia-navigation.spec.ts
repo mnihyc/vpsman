@@ -2347,11 +2347,9 @@ test("jobs approvals and scheduled runs stay separate", async ({
   ).toHaveCount(0);
   await expect(scheduledRunsGrid).not.toContainText("Not reported");
   await expect(scheduledRunsGrid).toContainText("completed");
-  if (testInfo.project.name.includes("mobile")) {
-    await expect(
-      scheduledRunsGrid.getByRole("button", { name: "Run again" }),
-    ).toBeDisabled();
-  }
+  await expect(
+    scheduledRunsGrid.getByRole("button", { name: "Run again" }),
+  ).toHaveCount(0);
   await expect(page.getByText("Schedule link not exposed")).toHaveCount(0);
   await expect(page.getByText("due not exposed")).toHaveCount(0);
   await expect(page.getByText("Retry/worker health not exposed")).toHaveCount(
@@ -5847,7 +5845,7 @@ test("system overview keeps platform health separate from fleet monitoring", asy
   ).toHaveCount(3);
 });
 
-test("system capacity focuses on control-plane limits and API gaps", async ({
+test("system capacity focuses on telemetry-backed control-plane limits", async ({
   page,
 }) => {
   await gotoConsoleHome(page);
@@ -5865,10 +5863,11 @@ test("system capacity focuses on control-plane limits and API gaps", async ({
   await expect(posture).toContainText("Database");
   await expect(posture).toContainText("Dispatch");
   await expect(posture).toContainText("Gateway");
-  await expect(posture).toContainText("Storage");
+  await expect(posture.getByRole("tab")).toHaveCount(3);
   await expect(posture).toContainText("Queue growth");
   await expect(posture).toContainText("Worker availability");
   await expect(posture).toContainText("Suite Config fields");
+  await expect(posture).not.toContainText("Telemetry gaps");
 
   await expect(
     page.getByRole("heading", { name: "Dispatch capacity", exact: true }),
@@ -5885,19 +5884,7 @@ test("system capacity focuses on control-plane limits and API gaps", async ({
     page.getByRole("heading", { name: "Database capacity", exact: true }),
   ).toBeVisible();
   await expect(page.getByText("capacity.api_db_pool")).toBeVisible();
-  await posture.getByRole("tab", { name: /Storage/ }).click();
-  await expect(
-    page.getByRole("heading", { name: "Storage capacity", exact: true }),
-  ).toBeVisible();
-  await expect(
-    page.getByLabel("storage capacity unavailable factors"),
-  ).toContainText("Artifact storage");
-
-  const gaps = page.getByLabel("System capacity unavailable telemetry");
-  await expect(gaps).toContainText("Artifact bytes");
-  await expect(gaps).toContainText("retention prune backlog");
-  await expect(gaps).toContainText("worker lag");
-  await expect(gaps).toContainText("System / Maintenance");
+  await expect(page.getByText(/dashboard API|backend fields/i)).toHaveCount(0);
 
   const main = page.getByRole("main");
   await expect(main.locator(".vpsMonitorGrid")).toHaveCount(0);

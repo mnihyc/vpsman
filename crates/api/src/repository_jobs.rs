@@ -9,8 +9,9 @@ use sqlx::{postgres::PgRow, Postgres, Row, Transaction};
 use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
-    job_command_safety, job_command_safety_by_operation_type, payload_hash, CommandOutput,
-    JobCommand, JobCommandSafety, DEFAULT_MAX_JOB_TIMEOUT_SECS, JOB_COMMAND_SAFETY_EXCLUSIVE,
+    job_command_safety, job_command_safety_by_operation_type, payload_hash,
+    runtime_config_content_hash, AgentRuntimeConfig, CommandOutput, JobCommand, JobCommandSafety,
+    DEFAULT_MAX_JOB_TIMEOUT_SECS, JOB_COMMAND_SAFETY_EXCLUSIVE,
 };
 use vpsman_server_core::{
     target_status_is_active, JOB_STATUS_CANCELED, JOB_STATUS_COMPLETED, JOB_STATUS_PARTIAL_SUCCESS,
@@ -28,6 +29,9 @@ use crate::model::*;
 use crate::model_webhook_rules::WebhookEventCandidate;
 use crate::repository::Repository;
 use crate::repository_job_outputs::append_lock_keys;
+use crate::repository_runtime_config::{
+    queue_runtime_config_apply_memory_state, queue_runtime_config_apply_postgres_in_tx,
+};
 use crate::repository_terminal_sessions::finalize_active_terminal_input_request_for_terminal_target_in_tx;
 use crate::util::{
     limit_or_default, offset_or_default, output_stream_name, search_pattern, sort_descending,
@@ -38,6 +42,44 @@ use crate::{unix_now, TargetDispatchOutcome};
 pub(crate) struct PrecompletedJobTarget {
     pub(crate) client_id: String,
     pub(crate) outcome: TargetDispatchOutcome,
+}
+
+#[derive(Clone, Debug)]
+struct PendingRuntimeConfigApply {
+    client_id: String,
+    version: u64,
+    content_hash: String,
+    config: AgentRuntimeConfig,
+    reason: String,
+}
+
+fn pending_runtime_config_apply(
+    operation: &JobCommand,
+    resolved_targets: &[String],
+) -> Result<Option<PendingRuntimeConfigApply>> {
+    let JobCommand::RuntimeConfigSync {
+        desired_version,
+        reason,
+        config,
+    } = operation
+    else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        resolved_targets.len() == 1,
+        "runtime_config_sync_requires_single_target"
+    );
+    anyhow::ensure!(
+        config.version == *desired_version,
+        "runtime_config_version_mismatch"
+    );
+    Ok(Some(PendingRuntimeConfigApply {
+        client_id: resolved_targets[0].clone(),
+        version: *desired_version,
+        content_hash: runtime_config_content_hash(config)?,
+        config: (**config).clone(),
+        reason: reason.clone(),
+    }))
 }
 
 #[derive(Clone, Debug)]
@@ -2380,6 +2422,7 @@ impl Repository {
         let actor_id = job_actor_id(operator);
         let precompleted_by_client =
             precompleted_targets_by_client(resolved_targets, precompleted_targets)?;
+        let pending_runtime_config = pending_runtime_config_apply(&operation, resolved_targets)?;
         let mut finished_status = None::<String>;
         match self {
             Self::Memory(memory) => {
@@ -2423,6 +2466,18 @@ impl Repository {
                         .write()
                         .await
                         .insert(job_id, schedule_id);
+                }
+                if let Some(pending) = pending_runtime_config.as_ref() {
+                    queue_runtime_config_apply_memory_state(
+                        memory,
+                        &pending.client_id,
+                        pending.version,
+                        &pending.content_hash,
+                        &pending.config,
+                        job_id,
+                        &pending.reason,
+                    )
+                    .await;
                 }
                 memory
                     .job_targets
@@ -2564,6 +2619,18 @@ impl Repository {
                 .bind(request.max_timeout_secs.unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS) as i64)
                 .execute(&mut *tx)
                 .await?;
+                if let Some(pending) = pending_runtime_config.as_ref() {
+                    queue_runtime_config_apply_postgres_in_tx(
+                        &mut tx,
+                        &pending.client_id,
+                        pending.version,
+                        &pending.content_hash,
+                        &pending.config,
+                        job_id,
+                        &pending.reason,
+                    )
+                    .await?;
+                }
                 for client_id in resolved_targets {
                     if let Some(outcome) = precompleted_by_client.get(client_id.as_str()) {
                         sqlx::query(

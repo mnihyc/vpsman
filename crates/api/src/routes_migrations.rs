@@ -258,6 +258,9 @@ async fn migration_restore_job_response(
             .dispatcher_runtime_config()
             .control_deadline_extra_secs(),
         target_counts,
+        error: None,
+        message: None,
+        recovery: None,
     })
 }
 

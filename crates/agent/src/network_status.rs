@@ -118,6 +118,46 @@ async fn inspect_runtime_status(
     }))
 }
 
+pub(crate) async fn runtime_tunnel_requires_reconnect_sync(
+    config: &AgentConfig,
+    telemetry_plan: &vpsman_common::AgentRuntimeStatusTelemetryPlan,
+) -> Result<bool> {
+    if telemetry_plan.plan.runtime_control.manager == RuntimeTunnelManager::ExternalObserved {
+        return Ok(false);
+    }
+    let endpoint =
+        render_tunnel_endpoint_config(&telemetry_plan.plan, telemetry_plan.endpoint_side)
+            .map_err(|error| anyhow::anyhow!("invalid tunnel endpoint config: {error}"))?;
+    if endpoint.local_client_id != config.client_id {
+        anyhow::bail!(
+            "runtime tunnel side targets {}, but this agent is {}",
+            endpoint.local_client_id,
+            config.client_id
+        );
+    }
+    let root = Path::new(&config.network.root_dir);
+    let interface = inspect_interface_sysfs(root, &telemetry_plan.plan.interface_name).await;
+    let desired_interfaces = inspect_desired_interfaces(root, &telemetry_plan.plan).await;
+    let declared_stale_interfaces =
+        inspect_declared_stale_interfaces(root, &telemetry_plan.plan).await;
+    let adapter = inspect_runtime_adapter_status(
+        &config.network,
+        &telemetry_plan.plan,
+        telemetry_plan.runtime_adapter.as_ref(),
+        &endpoint,
+        CommandCancelToken::default(),
+    )
+    .await?;
+    Ok(!runtime_reconcile_reasons(
+        &telemetry_plan.plan,
+        &interface,
+        &desired_interfaces,
+        &declared_stale_interfaces,
+        &adapter,
+    )
+    .is_empty())
+}
+
 async fn inspect_interface_sysfs(root: &Path, interface_name: &str) -> serde_json::Value {
     let base = root.join("sys/class/net").join(interface_name);
     let Ok(metadata) = tokio::fs::metadata(&base).await else {
@@ -399,30 +439,23 @@ fn summarize_runtime_status(
     kernel: &serde_json::Value,
     adapter: &serde_json::Value,
 ) -> serde_json::Value {
-    let mut reasons = Vec::new();
     let interface_exists = interface["exists"].as_bool().unwrap_or(false);
     let interface_operstate = interface["operstate"].as_str();
-    if !interface_exists {
-        reasons.push("runtime_interface_missing");
-    } else if matches!(interface_operstate, Some("down")) {
-        reasons.push("runtime_interface_down");
-    }
-
     let desired_missing_count = desired_interfaces
         .iter()
         .filter(|report| report["exists"].as_bool() != Some(true))
         .count();
-    if desired_missing_count > 0 {
-        reasons.push("desired_interface_missing");
-    }
     let stale_present_count = declared_stale_interfaces
         .iter()
         .filter(|report| report["exists"].as_bool() == Some(true))
         .count();
-    if stale_present_count > 0 {
-        reasons.push("stale_interface_present");
-    }
-
+    let reasons = runtime_reconcile_reasons(
+        plan,
+        interface,
+        desired_interfaces,
+        declared_stale_interfaces,
+        adapter,
+    );
     let adapter_state = match plan.runtime_control.manager {
         RuntimeTunnelManager::AgentIproute2Managed => "not_applicable",
         RuntimeTunnelManager::ExternalObserved => "observed_only",
@@ -430,10 +463,8 @@ fn summarize_runtime_status(
             if adapter["success"].as_bool() == Some(true) {
                 "healthy"
             } else if adapter["configured"].as_bool() == Some(false) {
-                reasons.push("adapter_status_unconfigured");
                 "unknown"
             } else {
-                reasons.push("adapter_status_failed");
                 "unhealthy"
             }
         }
@@ -476,6 +507,41 @@ fn summarize_runtime_status(
         "route_probe_state": probe_state(&kernel["routes"]),
         "topology_version": &plan.runtime_topology.version,
     })
+}
+
+fn runtime_reconcile_reasons(
+    plan: &TunnelPlan,
+    interface: &serde_json::Value,
+    desired_interfaces: &[serde_json::Value],
+    declared_stale_interfaces: &[serde_json::Value],
+    adapter: &serde_json::Value,
+) -> Vec<&'static str> {
+    let mut reasons = Vec::new();
+    if interface["exists"].as_bool() != Some(true) {
+        reasons.push("runtime_interface_missing");
+    } else if interface["operstate"].as_str() == Some("down") {
+        reasons.push("runtime_interface_down");
+    }
+    if desired_interfaces
+        .iter()
+        .any(|report| report["exists"].as_bool() != Some(true))
+    {
+        reasons.push("desired_interface_missing");
+    }
+    if declared_stale_interfaces
+        .iter()
+        .any(|report| report["exists"].as_bool() == Some(true))
+    {
+        reasons.push("stale_interface_present");
+    }
+    if plan.runtime_control.manager == RuntimeTunnelManager::ExternalManagedAdapter {
+        if adapter["configured"].as_bool() == Some(false) {
+            reasons.push("adapter_status_unconfigured");
+        } else if adapter["success"].as_bool() != Some(true) {
+            reasons.push("adapter_status_failed");
+        }
+    }
+    reasons
 }
 
 fn probe_state(report: &serde_json::Value) -> &'static str {

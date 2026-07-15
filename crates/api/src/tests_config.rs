@@ -13,7 +13,7 @@ use crate::{
     repository_ingest::upsert_memory_agent,
     routes_jobs::create_job,
     runtime_config::{
-        compose_runtime_config, push_runtime_config_for_clients,
+        compose_runtime_config, dispatch_runtime_config_for_clients,
         request_runtime_config_reload_for_agent,
     },
     state::AppState,
@@ -21,9 +21,22 @@ use crate::{
 use uuid::Uuid;
 use vpsman_common::{
     runtime_config_content_hash, AgentCapabilitySnapshot, AgentHello, AgentPrivilegeMode,
-    AgentRuntimeConfig, AgentUpdateConfig, JobCommand, MAX_RUNTIME_CONFIG_FIELD_BYTES,
-    MAX_RUNTIME_CONFIG_REASON_BYTES,
+    AgentRuntimeConfig, AgentUpdateConfig, JobCommand, RuntimeConfigReconcileResource,
+    RuntimeConfigReconcileScope, MAX_RUNTIME_CONFIG_FIELD_BYTES, MAX_RUNTIME_CONFIG_REASON_BYTES,
 };
+
+fn reconnect_scope(authoritative: bool, port_forwarding: bool) -> RuntimeConfigReconcileScope {
+    let mut scope = RuntimeConfigReconcileScope {
+        authoritative,
+        ..RuntimeConfigReconcileScope::default()
+    };
+    if port_forwarding {
+        scope
+            .resources
+            .insert(RuntimeConfigReconcileResource::PortForwarding);
+    }
+    scope
+}
 
 async fn wait_for_job_status(
     repo: &crate::repository::Repository,
@@ -105,6 +118,7 @@ async fn agent_requested_runtime_config_reload_compares_hash_before_queuing() {
         "client-a",
         &current_hash,
         "agent_reconnect_runtime_config_check",
+        reconnect_scope(false, false),
     )
     .await
     .unwrap();
@@ -124,6 +138,7 @@ async fn agent_requested_runtime_config_reload_compares_hash_before_queuing() {
         "client-a",
         &current_hash,
         "agent_reconnect_runtime_config_check",
+        reconnect_scope(false, false),
     )
     .await
     .unwrap();
@@ -134,6 +149,484 @@ async fn agent_requested_runtime_config_reload_compares_hash_before_queuing() {
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].actor_id, None);
     assert_eq!(jobs[0].target_count, 1);
+}
+
+#[tokio::test]
+async fn cacheless_agent_forces_authoritative_runtime_config_sync() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        upsert_memory_agent(
+            &memory.agents,
+            &AgentHello {
+                client_id: "client-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
+                agent_version: "test".to_string(),
+                os_release: "test".to_string(),
+                arch: "x86_64".to_string(),
+                update_heartbeat: None,
+                internal_build_number: 1,
+                capabilities: AgentCapabilitySnapshot::default(),
+            },
+        )
+        .await;
+    }
+    let state = test_state(repo.clone());
+    let desired = compose_runtime_config(&state, "client-a", 7).await.unwrap();
+    let matching_hash = runtime_config_content_hash(&desired).unwrap();
+
+    let queued = request_runtime_config_reload_for_agent(
+        &state,
+        "client-a",
+        &matching_hash,
+        "agent_reconnect_runtime_config_check",
+        reconnect_scope(true, false),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].target_count, 1);
+    assert_eq!(repo.list_jobs(10).await.unwrap().len(), 1);
+    let pending = repo
+        .runtime_config_pending_state_for_client("client-a")
+        .await
+        .unwrap()
+        .expect("authoritative sync should remain pending until the agent accepts it");
+    assert_eq!(
+        pending.pending_reason.as_deref(),
+        Some("agent_reconnect_authoritative_sync")
+    );
+}
+
+#[tokio::test]
+async fn matching_config_hash_still_repairs_port_forwarding_drift_on_reconnect() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        upsert_memory_agent(
+            &memory.agents,
+            &AgentHello {
+                client_id: "client-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
+                agent_version: "test".to_string(),
+                os_release: "test".to_string(),
+                arch: "x86_64".to_string(),
+                update_heartbeat: None,
+                internal_build_number: 1,
+                capabilities: AgentCapabilitySnapshot::default(),
+            },
+        )
+        .await;
+    }
+    let state = test_state(repo.clone());
+    let desired = compose_runtime_config(&state, "client-a", 7).await.unwrap();
+    let matching_hash = runtime_config_content_hash(&desired).unwrap();
+
+    let queued = request_runtime_config_reload_for_agent(
+        &state,
+        "client-a",
+        &matching_hash,
+        "agent_reconnect_runtime_config_check",
+        reconnect_scope(false, true),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(queued.len(), 1);
+    let pending = repo
+        .runtime_config_pending_state_for_client("client-a")
+        .await
+        .unwrap()
+        .expect("port-forwarding reconnect repair should remain pending until accepted");
+    assert_eq!(
+        pending.pending_reason.as_deref(),
+        Some("agent_reconnect_port_forwarding_sync")
+    );
+}
+
+#[tokio::test]
+async fn forced_reconcile_is_not_hidden_by_an_ordinary_same_hash_pending_sync() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        upsert_memory_agent(
+            &memory.agents,
+            &AgentHello {
+                client_id: "client-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
+                agent_version: "test".to_string(),
+                os_release: "test".to_string(),
+                arch: "x86_64".to_string(),
+                update_heartbeat: None,
+                internal_build_number: 1,
+                capabilities: AgentCapabilitySnapshot::default(),
+            },
+        )
+        .await;
+    }
+    let state = test_state(repo.clone());
+    let desired = compose_runtime_config(&state, "client-a", 1).await.unwrap();
+    let desired_hash = runtime_config_content_hash(&desired).unwrap();
+
+    let ordinary = request_runtime_config_reload_for_agent(
+        &state,
+        "client-a",
+        &"00".repeat(32),
+        "agent_reconnect_runtime_config_check",
+        reconnect_scope(false, false),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ordinary.len(), 1);
+
+    let repair = request_runtime_config_reload_for_agent(
+        &state,
+        "client-a",
+        &desired_hash,
+        "agent_reconnect_runtime_config_check",
+        reconnect_scope(false, true),
+    )
+    .await
+    .unwrap();
+    assert_eq!(repair.len(), 1);
+    assert_eq!(repo.list_jobs(10).await.unwrap().len(), 2);
+    let pending = repo
+        .runtime_config_pending_state_for_client("client-a")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        pending.pending_reason.as_deref(),
+        Some("agent_reconnect_port_forwarding_sync")
+    );
+
+    let duplicate_repair = request_runtime_config_reload_for_agent(
+        &state,
+        "client-a",
+        &desired_hash,
+        "agent_reconnect_runtime_config_check",
+        reconnect_scope(false, true),
+    )
+    .await
+    .unwrap();
+    assert!(duplicate_repair.is_empty());
+}
+
+#[tokio::test]
+async fn runtime_config_pending_evidence_never_regresses_to_an_older_generation() {
+    let repo = Repository::Memory(MemoryState::default());
+    let newer = AgentRuntimeConfig {
+        version: 22,
+        display_name: "newer".to_string(),
+        ..AgentRuntimeConfig::default()
+    };
+    let older = AgentRuntimeConfig {
+        version: 21,
+        display_name: "older".to_string(),
+        ..AgentRuntimeConfig::default()
+    };
+    let newer_hash = runtime_config_content_hash(&newer).unwrap();
+    let older_hash = runtime_config_content_hash(&older).unwrap();
+    let newer_job = Uuid::new_v4();
+
+    repo.queue_runtime_config_apply(
+        "client-a",
+        newer.version,
+        &newer_hash,
+        &newer,
+        newer_job,
+        "newer",
+    )
+    .await
+    .unwrap();
+    repo.queue_runtime_config_apply(
+        "client-a",
+        older.version,
+        &older_hash,
+        &older,
+        Uuid::new_v4(),
+        "older-arrived-late",
+    )
+    .await
+    .unwrap();
+
+    let pending = repo
+        .runtime_config_pending_state_for_client("client-a")
+        .await
+        .unwrap()
+        .expect("newer pending state should remain recorded");
+    assert_eq!(pending.pending_version, Some(newer.version));
+    assert_eq!(pending.pending_job_id, Some(newer_job));
+
+    repo.promote_runtime_config_apply_from_agent_hash("client-a", &newer_hash)
+        .await
+        .unwrap();
+    repo.queue_runtime_config_apply(
+        "client-a",
+        older.version,
+        &older_hash,
+        &older,
+        Uuid::new_v4(),
+        "older-after-apply",
+    )
+    .await
+    .unwrap();
+
+    let applied = repo
+        .runtime_config_applied_state_for_client("client-a")
+        .await
+        .unwrap()
+        .expect("newer applied state should remain recorded");
+    assert_eq!(applied.0, newer.version);
+    assert!(repo
+        .runtime_config_pending_state_for_client("client-a")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn runtime_config_push_does_not_report_a_rejected_job_as_queued() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        upsert_memory_agent(
+            &memory.agents,
+            &AgentHello {
+                client_id: "client-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
+                agent_version: "test".to_string(),
+                os_release: "test".to_string(),
+                arch: "x86_64".to_string(),
+                update_heartbeat: None,
+                internal_build_number: 1,
+                capabilities: AgentCapabilitySnapshot::default(),
+            },
+        )
+        .await;
+    }
+    let mut state = test_state(repo.clone());
+    state.gateway = GatewayDispatchClient::default();
+
+    let outcomes = dispatch_runtime_config_for_clients(
+        &state,
+        &memory_admin(),
+        ["client-a".to_string()],
+        "test_gateway_missing",
+    )
+    .await;
+
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].client_id, "client-a");
+    assert_eq!(outcomes[0].status, "queue_failed");
+    assert!(outcomes[0].job_id.is_none());
+    assert!(outcomes[0]
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("Desired state remains saved")));
+    assert!(repo
+        .runtime_config_pending_state_for_client("client-a")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn reconnect_hash_promotes_matching_pending_runtime_config() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        upsert_memory_agent(
+            &memory.agents,
+            &AgentHello {
+                client_id: "client-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
+                agent_version: "test".to_string(),
+                os_release: "test".to_string(),
+                arch: "x86_64".to_string(),
+                update_heartbeat: None,
+                internal_build_number: 1,
+                capabilities: AgentCapabilitySnapshot::default(),
+            },
+        )
+        .await;
+    }
+    let state = test_state(repo.clone());
+    let desired = compose_runtime_config(&state, "client-a", 17)
+        .await
+        .unwrap();
+    let hash = runtime_config_content_hash(&desired).unwrap();
+    let job_id = Uuid::new_v4();
+    repo.queue_runtime_config_apply(
+        "client-a",
+        desired.version,
+        &hash,
+        &desired,
+        job_id,
+        "connection-lost-after-apply",
+    )
+    .await
+    .unwrap();
+
+    let queued = request_runtime_config_reload_for_agent(
+        &state,
+        "client-a",
+        &hash,
+        "agent_reconnect_runtime_config_check",
+        reconnect_scope(false, false),
+    )
+    .await
+    .unwrap();
+
+    assert!(queued.is_empty());
+    assert!(repo.list_jobs(10).await.unwrap().is_empty());
+    let applied = repo
+        .runtime_config_applied_state_for_client("client-a")
+        .await
+        .unwrap()
+        .expect("matching agent hash should promote pending state");
+    assert_eq!(applied.0, 17);
+    assert_eq!(applied.1, hash);
+    assert!(repo
+        .runtime_config_pending_state_for_client("client-a")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn reconnect_queues_current_desired_state_instead_of_stale_applied_snapshot() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        upsert_memory_agent(
+            &memory.agents,
+            &AgentHello {
+                client_id: "client-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
+                agent_version: "test".to_string(),
+                os_release: "test".to_string(),
+                arch: "x86_64".to_string(),
+                update_heartbeat: None,
+                internal_build_number: 1,
+                capabilities: AgentCapabilitySnapshot::default(),
+            },
+        )
+        .await;
+    }
+    let state = test_state(repo.clone());
+    let applied = compose_runtime_config(&state, "client-a", 18)
+        .await
+        .unwrap();
+    let applied_hash = runtime_config_content_hash(&applied).unwrap();
+    repo.queue_runtime_config_apply(
+        "client-a",
+        applied.version,
+        &applied_hash,
+        &applied,
+        Uuid::new_v4(),
+        "previous-apply",
+    )
+    .await
+    .unwrap();
+    repo.promote_runtime_config_apply_from_agent_hash("client-a", &applied_hash)
+        .await
+        .unwrap();
+    repo.upsert_runtime_config_overrides(
+        &["client-a".to_string()],
+        "telemetry_interval_secs = 30\n",
+        "new desired state",
+        &memory_admin(),
+    )
+    .await
+    .unwrap();
+    let expected = compose_runtime_config(&state, "client-a", 1).await.unwrap();
+    let expected_hash = runtime_config_content_hash(&expected).unwrap();
+
+    let queued = request_runtime_config_reload_for_agent(
+        &state,
+        "client-a",
+        &applied_hash,
+        "agent_reconnect_runtime_config_check",
+        reconnect_scope(false, false),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(queued.len(), 1);
+    let pending = repo
+        .runtime_config_pending_state_for_client("client-a")
+        .await
+        .unwrap()
+        .expect("new desired state should be queued");
+    assert_eq!(
+        pending.pending_content_hash.as_deref(),
+        Some(expected_hash.as_str())
+    );
+    assert_ne!(
+        pending.pending_content_hash.as_deref(),
+        Some(applied_hash.as_str())
+    );
+    assert!(pending.pending_version.unwrap() > 18);
+}
+
+#[tokio::test]
+async fn reconnect_retries_a_failed_pending_runtime_config() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        upsert_memory_agent(
+            &memory.agents,
+            &AgentHello {
+                client_id: "client-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
+                agent_version: "test".to_string(),
+                os_release: "test".to_string(),
+                arch: "x86_64".to_string(),
+                update_heartbeat: None,
+                internal_build_number: 1,
+                capabilities: AgentCapabilitySnapshot::default(),
+            },
+        )
+        .await;
+    }
+    let state = test_state(repo.clone());
+    let desired = compose_runtime_config(&state, "client-a", 19)
+        .await
+        .unwrap();
+    let hash = runtime_config_content_hash(&desired).unwrap();
+    let failed_job_id = Uuid::new_v4();
+    repo.queue_runtime_config_apply(
+        "client-a",
+        desired.version,
+        &hash,
+        &desired,
+        failed_job_id,
+        "failed-apply",
+    )
+    .await
+    .unwrap();
+    repo.mark_runtime_config_apply_job_create_failed(
+        "client-a",
+        failed_job_id,
+        "gateway unavailable",
+    )
+    .await
+    .unwrap();
+
+    let queued = request_runtime_config_reload_for_agent(
+        &state,
+        "client-a",
+        &"00".repeat(32),
+        "agent_reconnect_runtime_config_check",
+        reconnect_scope(false, false),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(queued.len(), 1);
+    let pending = repo
+        .runtime_config_pending_state_for_client("client-a")
+        .await
+        .unwrap()
+        .expect("failed desired state should be retried");
+    assert_eq!(pending.pending_status.as_deref(), Some("queued"));
+    assert_ne!(pending.pending_job_id, Some(failed_job_id));
+    assert!(pending.pending_version.unwrap() > 19);
 }
 
 #[tokio::test]
@@ -279,16 +772,17 @@ async fn runtime_config_push_creates_pending_apply_state() {
     }
     let state = test_state(repo.clone());
 
-    let responses = push_runtime_config_for_clients(
+    let outcomes = dispatch_runtime_config_for_clients(
         &state,
         &memory_admin(),
         ["client-a".to_string()],
         "operator runtime config update",
     )
-    .await
-    .unwrap();
+    .await;
 
-    assert_eq!(responses.len(), 1);
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].status, "queued");
+    let job_id = outcomes[0].job_id.expect("queued runtime apply job");
     let states = repo
         .list_runtime_config_apply_states(Some("client-a"))
         .await
@@ -297,7 +791,7 @@ async fn runtime_config_push_creates_pending_apply_state() {
     assert_eq!(states[0].applied_version, None);
     assert!(states[0].pending_version.is_some());
     assert!(states[0].pending_content_hash.is_some());
-    assert_eq!(states[0].pending_job_id, Some(responses[0].job_id));
+    assert_eq!(states[0].pending_job_id, Some(job_id));
     assert_eq!(states[0].pending_status.as_deref(), Some("queued"));
     assert_eq!(
         states[0].pending_reason.as_deref(),
@@ -879,7 +1373,7 @@ fn test_state(repo: Repository) -> AppState {
         repo,
         events,
         internal_token: None,
-        gateway: GatewayDispatchClient::default(),
+        gateway: GatewayDispatchClient::new(Some("http://127.0.0.1:1".to_string()), None),
         backup_object_store: None,
         update_release_policy: Default::default(),
         fleet_alert_policy: Default::default(),

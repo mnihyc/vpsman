@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use sqlx::{types::Json as SqlJson, Row};
 use uuid::Uuid;
@@ -84,7 +86,7 @@ impl Repository {
     }
 
     pub(crate) async fn list_tunnel_plans(&self) -> Result<Vec<TunnelPlanView>> {
-        match self {
+        let mut plans = match self {
             Self::Memory(memory) => {
                 let mut plans = memory
                     .tunnel_plans
@@ -95,7 +97,7 @@ impl Repository {
                     .cloned()
                     .collect::<Vec<_>>();
                 plans.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-                Ok(plans)
+                plans
             }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
@@ -123,9 +125,30 @@ impl Repository {
                 rows.into_iter()
                     .map(tunnel_plan_from_row)
                     .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(Into::into)
+                    .map_err(anyhow::Error::from)?
             }
+        };
+        let apply_states = self
+            .list_runtime_config_apply_records(None)
+            .await?
+            .into_iter()
+            .map(|state| (state.client_id.clone(), state))
+            .collect::<HashMap<_, _>>();
+        for plan in &mut plans {
+            plan.left_runtime_config = tunnel_endpoint_runtime_config_state(
+                plan.id,
+                &plan.left_client_id,
+                plan.enabled,
+                apply_states.get(&plan.left_client_id),
+            );
+            plan.right_runtime_config = tunnel_endpoint_runtime_config_state(
+                plan.id,
+                &plan.right_client_id,
+                plan.enabled,
+                apply_states.get(&plan.right_client_id),
+            );
         }
+        Ok(plans)
     }
 
     pub(crate) async fn get_tunnel_plan(&self, id: Uuid) -> Result<Option<TunnelPlanView>> {
@@ -169,6 +192,8 @@ impl Repository {
             connection_assessment_note: None,
             connection_assessed_at: None,
             connection_assessed_by: None,
+            left_runtime_config: untracked_tunnel_runtime_config(&plan.left_client_id, enabled),
+            right_runtime_config: untracked_tunnel_runtime_config(&plan.right_client_id, enabled),
             input: input.clone(),
             plan: plan.clone(),
             created_at: unix_now().to_string(),
@@ -308,6 +333,14 @@ impl Repository {
                     connection_assessment_note: None,
                     connection_assessed_at: None,
                     connection_assessed_by: None,
+                    left_runtime_config: untracked_tunnel_runtime_config(
+                        &plan.left_client_id,
+                        enabled,
+                    ),
+                    right_runtime_config: untracked_tunnel_runtime_config(
+                        &plan.right_client_id,
+                        enabled,
+                    ),
                     input: input.clone(),
                     plan: plan.clone(),
                     created_at: existing.created_at.clone(),
@@ -395,6 +428,14 @@ impl Repository {
                     connection_assessment_note: None,
                     connection_assessed_at: None,
                     connection_assessed_by: None,
+                    left_runtime_config: untracked_tunnel_runtime_config(
+                        &plan.left_client_id,
+                        enabled,
+                    ),
+                    right_runtime_config: untracked_tunnel_runtime_config(
+                        &plan.right_client_id,
+                        enabled,
+                    ),
                     input: input.clone(),
                     plan: plan.clone(),
                     created_at: row.try_get("created_at")?,
@@ -935,6 +976,14 @@ fn tunnel_plan_from_row(row: sqlx::postgres::PgRow) -> Result<TunnelPlanView, sq
         connection_assessment_note: row.try_get("connection_assessment_note")?,
         connection_assessed_at: row.try_get("connection_assessed_at")?,
         connection_assessed_by: row.try_get("connection_assessed_by")?,
+        left_runtime_config: untracked_tunnel_runtime_config(
+            row.try_get::<String, _>("left_client_id")?.as_str(),
+            row.try_get("enabled")?,
+        ),
+        right_runtime_config: untracked_tunnel_runtime_config(
+            row.try_get::<String, _>("right_client_id")?.as_str(),
+            row.try_get("enabled")?,
+        ),
         input: input.0,
         plan: plan.0,
         created_at: row.try_get("created_at")?,
@@ -943,6 +992,98 @@ fn tunnel_plan_from_row(row: sqlx::postgres::PgRow) -> Result<TunnelPlanView, sq
         deleted_by: row.try_get("deleted_by")?,
         deleted_reason: row.try_get("deleted_reason")?,
     })
+}
+
+fn untracked_tunnel_runtime_config(
+    client_id: &str,
+    enabled: bool,
+) -> TunnelPlanEndpointRuntimeConfigView {
+    TunnelPlanEndpointRuntimeConfigView {
+        client_id: client_id.to_string(),
+        desired: if enabled { "present" } else { "absent" }.to_string(),
+        status: "not_dispatched".to_string(),
+        cleanup_confirmed: !enabled,
+        job_id: None,
+        error: None,
+        updated_at: None,
+    }
+}
+
+fn tunnel_endpoint_runtime_config_state(
+    plan_id: Uuid,
+    client_id: &str,
+    enabled: bool,
+    state: Option<&RuntimeConfigApplyStateRecord>,
+) -> TunnelPlanEndpointRuntimeConfigView {
+    let Some(state) = state else {
+        return untracked_tunnel_runtime_config(client_id, enabled);
+    };
+    let desired = if enabled { "present" } else { "absent" };
+    if let Some(pending_status) = state.pending_status.as_deref() {
+        let pending_matches = state
+            .pending_config
+            .as_ref()
+            .map(|config| runtime_config_contains_tunnel(config, plan_id) == enabled);
+        if pending_matches != Some(false) {
+            let status = match pending_status {
+                "failed" => "failed",
+                "queued" => "queued",
+                _ => "pending",
+            };
+            return TunnelPlanEndpointRuntimeConfigView {
+                client_id: client_id.to_string(),
+                desired: desired.to_string(),
+                status: status.to_string(),
+                cleanup_confirmed: false,
+                job_id: state.pending_job_id,
+                error: state.pending_error.clone(),
+                updated_at: state.pending_updated_at.clone(),
+            };
+        }
+        return TunnelPlanEndpointRuntimeConfigView {
+            client_id: client_id.to_string(),
+            desired: desired.to_string(),
+            status: "stale_pending".to_string(),
+            cleanup_confirmed: false,
+            job_id: state.pending_job_id,
+            error: state.pending_error.clone(),
+            updated_at: state.pending_updated_at.clone(),
+        };
+    }
+
+    let status = match state.applied_config.as_ref() {
+        Some(config) if runtime_config_contains_tunnel(config, plan_id) == enabled => {
+            if enabled {
+                "applied"
+            } else {
+                "removed"
+            }
+        }
+        Some(_) if enabled => "not_applied",
+        Some(_) => "removal_required",
+        None => "not_dispatched",
+    };
+    TunnelPlanEndpointRuntimeConfigView {
+        client_id: client_id.to_string(),
+        desired: desired.to_string(),
+        status: status.to_string(),
+        cleanup_confirmed: !enabled && matches!(status, "removed" | "not_dispatched"),
+        job_id: state.applied_job_id,
+        error: None,
+        updated_at: state.applied_at.clone(),
+    }
+}
+
+fn runtime_config_contains_tunnel(
+    config: &vpsman_common::AgentRuntimeConfig,
+    plan_id: Uuid,
+) -> bool {
+    let plan_id = plan_id.to_string();
+    config
+        .network
+        .runtime_status_telemetry_plans
+        .iter()
+        .any(|plan| plan.plan_id.as_deref() == Some(plan_id.as_str()))
 }
 
 async fn lock_visible_postgres_tunnel_endpoints(

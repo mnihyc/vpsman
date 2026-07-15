@@ -174,7 +174,7 @@ type SystemThresholdItem = {
   value: string;
 };
 
-type CapacitySubsystem = "database" | "dispatch" | "gateway" | "storage";
+type CapacitySubsystem = "database" | "dispatch" | "gateway";
 
 type CapacityFactorItem = {
   detail: string;
@@ -235,7 +235,7 @@ const operatorHelpText = {
   disable:
     "Block login and revoke existing sessions without deleting the operator record.",
   delete:
-    "Delete this operator record for login purposes, block login, and revoke existing sessions. The backend keeps the username reserved.",
+    "Delete this operator record for login purposes, block login, and revoke existing sessions. The username remains reserved.",
   create:
     "Create the operator record. Password is required for creation and is not shown in the confirmation message.",
   sessionAccessExpires: "Short access-token expiry for this bearer session.",
@@ -299,7 +299,7 @@ const suiteConfigSections: ConfigSectionSpec[] = [
       },
       {
         defaultValue: "unset",
-        help: "Maximum accepted artifact size for API-managed artifacts when configured by the backend.",
+        help: "Maximum accepted artifact size for API-managed artifacts when configured by the control plane.",
         kind: "number",
         label: "Artifact max bytes",
         path: "api.artifact_max_bytes",
@@ -1551,7 +1551,7 @@ export function SystemUsersPanel({
         </div>
         <div className="systemPostureGrid operatorPostureGrid operatorPolicyGrid">
           <SystemPostureTile
-            detail="This console can see each operator's TOTP state. Server-side MFA enforcement policy is not exposed by the current API, so the page says recommended instead of enforced."
+            detail="This console reports each operator's TOTP state. It cannot verify role-based enforcement, so the page reports MFA as recommended rather than enforced."
             icon={<ShieldCheck size={18} />}
             label="MFA policy"
             tone={adminWithoutMfaCount > 0 ? "warning" : "ok"}
@@ -1602,8 +1602,8 @@ export function SystemUsersPanel({
           <strong>Policy evidence boundary</strong>
           <span>
             Password age, invite state, locked state, and API-token inventory
-            are not part of the current operator API. They are not counted as
-            healthy or unhealthy posture here.
+            are unavailable. They are not counted as healthy or unhealthy
+            posture here.
           </span>
         </div>
         <div className="operatorRoleMatrix" aria-label="RBAC role model">
@@ -1636,7 +1636,7 @@ export function SystemUsersPanel({
                 <strong>{operatorRoleLabel(role)}</strong>
                 <span>{roleDescription(role)}</span>
                 <small>
-                  {roleCount} user{roleCount === 1 ? "" : "s"} · custom backend role
+                  {roleCount} user{roleCount === 1 ? "" : "s"} · custom role
                 </small>
               </div>
             );
@@ -2537,11 +2537,11 @@ function SystemSessionsPanel({
               value={`${enrichedSessions}/${activeSessions.length} enriched`}
             />
             <SystemPostureTile
-              detail={`${uniqueRemoteIps} remote IPs are visible. Geo lookup and impossible-travel detection need backend location enrichment.`}
+              detail={`${uniqueRemoteIps} remote IPs are visible. IP locations are unavailable, so impossible-travel detection is not evaluated.`}
               icon={<ServerCog size={18} />}
               label="Location enrichment"
-              tone="warning"
-              value="Geo not exposed"
+              tone="neutral"
+              value="Unavailable"
             />
             <SystemPostureTile
               detail={`${authFailureCount} non-success authentication events across ${failureGroups.length} grouped failure patterns.`}
@@ -2823,7 +2823,7 @@ function OperatorAccessEvidencePanel({
       <div className="operatorEvidenceFooter">
         <span>
           Password age, invite state, locked state, and API-token inventory are
-          not exposed by the current operator API.
+          unavailable for this operator.
         </span>
         <button
           className="secondaryAction compactAction"
@@ -3021,7 +3021,7 @@ function SessionNetworkCell({
   enrichment?: SessionEnrichment;
 }) {
   const remoteIp = enrichment?.remoteIp ?? "IP not recorded";
-  const location = enrichment?.location ?? "Geo not exposed";
+  const location = enrichment?.location ?? "Location unavailable";
   return (
     <span className="sessionNetworkCell" title={`${remoteIp} / ${location}`}>
       <strong>{remoteIp}</strong>
@@ -3123,7 +3123,7 @@ function SessionDetailGrid({
       </span>
       <span>
         <strong>Location</strong>
-        <span>{enrichment?.location ?? "Geo not exposed"}</span>
+        <span>{enrichment?.location ?? "Location unavailable"}</span>
       </span>
       <span>
         <strong>Browser</strong>
@@ -3331,7 +3331,7 @@ function buildSessionEnrichmentMap(
           browser: parsed.browser,
           device: parsed.device,
           location: authEvent?.remote_ip
-            ? "Geo not exposed"
+            ? "Location unavailable"
             : "Location not recorded",
           remoteIp,
           riskDetail: risk.detail,
@@ -3749,7 +3749,7 @@ function roleDescription(role: string): string {
   if (role === "viewer") {
     return "Read-oriented inspection role for dashboards, history, and evidence.";
   }
-  return "Custom backend role visible in operator records.";
+  return "Custom role retained from operator records.";
 }
 
 function parseScopeList(value: string): string[] {
@@ -4192,9 +4192,9 @@ function SystemDashboardPanel({
                 value={`${valueOrNotConfigured(dispatcherInFlight)} in-flight / ${valueOrNotConfigured(dispatcherBatch)} batch`}
               />
               <SystemDiagnosticsRow
-                detail="Raw alert overlays and per-series log links need backend event/log endpoints."
-                label="Drilldown gaps"
-                value={`${series.length} rollup series`}
+                detail="Series-level alert overlays and linked logs are unavailable."
+                label="Chart drilldowns"
+                value={`${series.length} rollup series only`}
               />
               <SystemDiagnosticsRow
                 detail={dashboard?.notes.join("; ") || "No dashboard notes."}
@@ -4300,12 +4300,10 @@ function SystemCapacityPanel({
     profileLimit && dispatcherInFlight
       ? Math.round((dispatcherInFlight / profileLimit) * 100)
       : null;
-  const storageGapTone: SystemHealthTone = "warning";
   const capacityTone = mostSevereTone([
     dbTone,
     dispatchModel.tone,
     gatewayModel.tone,
-    storageGapTone,
   ]);
   const configuredLimit = `${valueOrNotConfigured(dispatcherInFlight)} in-flight / ${valueOrNotConfigured(dispatcherBatch)} batch`;
   const capacityForecast =
@@ -4313,7 +4311,7 @@ function SystemCapacityPanel({
       ? `${profileLimit}-VPS profile; ${dispatcherInFlight} in-flight (${profileRatio}% of profile) and ${dispatcherBatch} batch.`
       : profileLimit
         ? `${profileLimit}-VPS profile detected; set dispatcher limits in Suite config to complete the plan.`
-        : "Capacity profile is not declared in the current system dashboard notes.";
+        : "No fleet capacity profile is configured.";
   const activeChart =
     activeSubsystem === "database" ? (
       <SystemMetricSection
@@ -4409,7 +4407,7 @@ function SystemCapacityPanel({
         ])}
         valueFormatter={(value) => formatNumber(value)}
       />
-    ) : activeSubsystem === "storage" ? null : (
+    ) : (
       <SystemMetricSection
         badge={`${queueDepth} queued`}
         badgeTone={dispatchModel.tone}
@@ -4490,12 +4488,6 @@ function SystemCapacityPanel({
       tone: gatewayModel.tone,
       value: gatewayEvents?.status ?? "unavailable",
     },
-    {
-      id: "storage",
-      label: "Storage",
-      tone: storageGapTone,
-      value: "Telemetry gaps",
-    },
   ];
   const selectedFactors: CapacityFactorItem[] =
     activeSubsystem === "database"
@@ -4555,64 +4547,43 @@ function SystemCapacityPanel({
               value: systemToneLabel(gatewayModel.tone),
             },
           ]
-        : activeSubsystem === "storage"
-          ? [
-              {
-                detail: "Object-store bytes are not exposed by the system dashboard API yet.",
-                label: "Artifact storage",
-                tone: "warning",
-                value: "Not reported",
-              },
-              {
-                detail: "Retention prune backlog and oldest object age need backend fields.",
-                label: "Retention pressure",
-                tone: "warning",
-                value: "Not reported",
-              },
-              {
-                detail: "Worker lag seconds are not available; dispatch and timeout curves are proxies only.",
-                label: "Worker lag",
-                tone: "warning",
-                value: "Not reported",
-              },
-              {
-                detail: "Cleanup previews and retained maintenance jobs remain in System / Maintenance.",
-                label: "Action owner",
-                tone: "info",
-                value: "System / Maintenance",
-              },
-            ]
-          : [
-              {
-                detail: "Oldest queued dispatch age is not reported by the dashboard API yet.",
-                label: "Oldest item age",
-                tone: "info",
-                value: "Not reported",
-              },
-              {
-                detail:
-                  dispatchQueueGrowth.delta && dispatchQueueGrowth.delta > 0
-                    ? "queue is growing across the available samples."
-                    : "Change in dispatch queue depth across the available samples.",
-                label: "Queue growth",
-                tone: dispatchQueueGrowth.delta && dispatchQueueGrowth.delta > 0 ? "warning" : "ok",
-                value: formatDelta(dispatchQueueGrowth.delta),
-              },
-              {
-                detail: "Queue warning threshold from configured dispatcher in-flight capacity.",
-                label: "Warning threshold",
-                tone: "warning",
-                value: dispatchModel.warningThreshold,
-              },
-              {
-                detail: "Dispatcher capacity is considered available when in-flight capacity is configured.",
-                label: "Worker availability",
-                tone: dispatcherInFlight ? "ok" : "critical",
-                value: dispatcherInFlight
-                  ? `${dispatcherInFlight} in-flight configured`
-                  : "Not configured",
-              },
-            ];
+        : [
+            {
+              detail:
+                "Queue age is unavailable; use queue growth and configured limits to assess pressure.",
+              label: "Queue age",
+              tone: "info",
+              value: "Unavailable",
+            },
+            {
+              detail:
+                dispatchQueueGrowth.delta && dispatchQueueGrowth.delta > 0
+                  ? "Queue is growing across the available samples."
+                  : "Change in dispatch queue depth across the available samples.",
+              label: "Queue growth",
+              tone:
+                dispatchQueueGrowth.delta && dispatchQueueGrowth.delta > 0
+                  ? "warning"
+                  : "ok",
+              value: formatDelta(dispatchQueueGrowth.delta),
+            },
+            {
+              detail:
+                "Queue warning threshold from configured dispatcher in-flight capacity.",
+              label: "Warning threshold",
+              tone: "warning",
+              value: dispatchModel.warningThreshold,
+            },
+            {
+              detail:
+                "Dispatcher capacity is considered available when in-flight capacity is configured.",
+              label: "Worker availability",
+              tone: dispatcherInFlight ? "ok" : "critical",
+              value: dispatcherInFlight
+                ? `${dispatcherInFlight} in-flight configured`
+                : "Not configured",
+            },
+          ];
   const selectedConfigLinks =
     activeSubsystem === "database"
       ? [
@@ -4624,15 +4595,10 @@ function SystemCapacityPanel({
             ["Dispatcher in-flight", "capacity.dispatcher_in_flight"],
             ["Dispatcher batch", "capacity.dispatcher_batch"],
           ]
-        : activeSubsystem === "gateway"
-          ? [
-              ["Event post seconds", "timeouts.event_post_secs"],
-              ["Internal HTTP read", "timeouts.internal_http_read_secs"],
-            ]
-          : [
-              ["Artifact max bytes", "storage.artifact_max_bytes"],
-              ["Maintenance cleanup", "system.maintenance"],
-            ];
+        : [
+            ["Event post seconds", "timeouts.event_post_secs"],
+            ["Internal HTTP read", "timeouts.internal_http_read_secs"],
+          ];
   return (
     <div className="workspace singleColumn systemWorkspace">
       <div className="workspaceStack">
@@ -4705,8 +4671,8 @@ function SystemCapacityPanel({
             <div>
               <h2>Subsystem capacity</h2>
               <span>
-                Database, dispatch, gateway, and storage capacity. Select one
-                subsystem to inspect its thresholds and chart.
+                Database, dispatch, and gateway capacity. Select one subsystem
+                to inspect its thresholds and chart.
               </span>
             </div>
             <ConsoleStatusBadge tone={capacityTone}>
@@ -4783,44 +4749,7 @@ function SystemCapacityPanel({
           </div>
         </section>
 
-        <section
-          className="dashboardSection systemCapacityUnavailableBanner"
-          aria-label="System capacity unavailable telemetry"
-        >
-          <div>
-            <AlertTriangle size={17} />
-            <div>
-              <strong>Optional storage telemetry not reported</strong>
-              <span>
-                Artifact bytes, retention prune backlog, and worker lag are
-                not reported by the current dashboard API. Cleanup previews
-                remain in System / Maintenance.
-              </span>
-            </div>
-          </div>
-          <ConsoleStatusBadge tone="warning">Not reported</ConsoleStatusBadge>
-        </section>
-
-        {activeSubsystem === "storage" ? (
-          <section className="dashboardSection">
-            <div className="dashboardSectionHeader">
-              <div>
-                <h2>Storage capacity</h2>
-                <span>
-                  Storage posture is intentionally compact until object-store
-                  bytes, retained age, and prune backlog are exposed.
-                </span>
-              </div>
-              <ConsoleStatusBadge tone="warning">Not reported</ConsoleStatusBadge>
-            </div>
-            <CapacityFactorGrid
-              ariaLabel="storage capacity unavailable factors"
-              items={selectedFactors}
-            />
-          </section>
-        ) : (
-          activeChart
-        )}
+        {activeChart}
       </div>
     </div>
   );

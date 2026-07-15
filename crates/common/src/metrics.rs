@@ -139,4 +139,6 @@ pub struct AgentMetrics {
     pub networks: Vec<NetworkStat>,
     #[serde(default)]
     pub tunnels: Vec<RuntimeTunnelStat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port_forwarding: Option<crate::PortForwardRuntimeSnapshot>,
 }

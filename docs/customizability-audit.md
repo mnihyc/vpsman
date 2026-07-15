@@ -264,6 +264,12 @@ binary path, or one accounting source is not enough.
 - Telemetry promotion and inferred tunnel import are intentionally absent.
   Operators create declarations with explicit bandwidth, ownership, endpoints,
   and optional routing policy.
+- Port forwarding is a typed, event-driven desired-state model rather than an
+  adapter or discovery source. Operators explicitly claim ports, pin one
+  literal same-family target address, and choose targeted masquerade or source
+  preservation. The agent owns only `inet vpsman_port_forward`, never discovers
+  external DNAT rules, never edits another nftables/iptables table, and never
+  installs nftables or changes forwarding sysctls.
 - Product-code hotspot: frontend topology controls contain fixed probe/speed
   defaults. These should evolve into saved operator templates with source/provider
   visibility and per-VPS selected-template display, while keeping safe bounded
@@ -313,6 +319,19 @@ binary path, or one accounting source is not enough.
   source template assumptions.
 - Current result: `total_matches=543`, `classified_matches=543`,
   `open_candidates=0`.
+
+2026-07-15 port-forwarding ownership review:
+
+- The only fixed system identifier is the deliberately exclusive nftables
+  table name `inet vpsman_port_forward`. It is the cleanup and drift boundary,
+  not an operator-customizable integration path.
+- Interface names and local destination addresses are intentionally absent.
+  Rules match only destinations the kernel classifies as local, so changing
+  cloud addresses and interfaces does not require rule rewrites and transit
+  forwarding traffic is not intercepted.
+- Hostnames remain an authoring convenience. The control plane returns current
+  candidates for an operator to select; desired state stores only the selected
+  literal address and never changes it through background DNS heuristics.
 - This closes the current hardcode-audit open-candidate backlog, but not the
   broader customizability program. Semantic gaps remain for speed-test provider
   templates, restore path mapping templates, terminal/PTY policy templates, richer

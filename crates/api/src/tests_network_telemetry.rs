@@ -1,9 +1,10 @@
 use super::*;
 use sha2::{Digest, Sha256};
 use vpsman_common::{
-    plan_tunnel, AgentMetrics, GatewayTelemetryIngest, RuntimeTunnelAdapterHealthStat,
-    RuntimeTunnelControl, RuntimeTunnelManager, RuntimeTunnelStat, TelemetryEnvelope,
-    TunnelAddressPair, TunnelKind, TunnelPlanInput,
+    plan_tunnel, AgentMetrics, GatewayTelemetryIngest, PortForwardRuntimeSnapshot,
+    PortForwardRuntimeStatus, RuntimeTunnelAdapterHealthStat, RuntimeTunnelControl,
+    RuntimeTunnelManager, RuntimeTunnelStat, TelemetryEnvelope, TunnelAddressPair, TunnelKind,
+    TunnelPlanInput,
 };
 
 #[tokio::test]
@@ -162,6 +163,7 @@ async fn adapter_health_output_is_redacted_to_hashes() {
 async fn telemetry_sequence_is_idempotent_per_gateway_session() {
     let memory = MemoryState::default();
     let webhook_events = memory.webhook_events.clone();
+    let port_forward_runtime = memory.port_forward_runtime.clone();
     let repo = Repository::Memory(memory);
     let process_incarnation_id = uuid::Uuid::new_v4();
     let mut event = GatewayTelemetryIngest {
@@ -183,13 +185,20 @@ async fn telemetry_sequence_is_idempotent_per_gateway_session() {
                     },
                     cores: 2,
                 },
+                port_forwarding: Some(PortForwardRuntimeSnapshot {
+                    status: PortForwardRuntimeStatus::Absent,
+                    observed_unix: 1_800_000_000,
+                    ..PortForwardRuntimeSnapshot::default()
+                }),
                 ..AgentMetrics::default()
             },
         },
     };
 
     assert!(repo.record_telemetry(&event).await.unwrap());
+    port_forward_runtime.write().await.clear();
     assert!(!repo.record_telemetry(&event).await.unwrap());
+    assert!(port_forward_runtime.read().await.contains_key("edge-a"));
     event.telemetry_seq = 1;
     event.telemetry.metrics.cpu.load.one = 99.0;
     assert!(!repo.record_telemetry(&event).await.unwrap());
