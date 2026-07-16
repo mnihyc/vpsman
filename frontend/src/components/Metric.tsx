@@ -7,7 +7,7 @@ export function Metric({
   label: string;
   title?: string;
   value: string;
-  tone: "blue" | "green" | "yellow";
+  tone: "blue" | "green" | "neutral" | "yellow";
 }) {
   return (
     <div className={`metric ${tone}`} title={title}>

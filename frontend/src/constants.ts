@@ -19,6 +19,7 @@ export type ConsoleSubpage = {
   id: string;
   label: string;
   description: string;
+  route?: string;
 };
 
 export const navItems: readonly { view: ActiveView; icon: LucideIcon }[] = [
@@ -98,11 +99,13 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
       id: "group_assignments",
       label: "Assignments",
       description: "VPS-centric group/tag assignment",
+      route: "assignments",
     },
     {
       id: "group_bulk",
       label: "Bulk groups",
       description: "Selector-based group/tag mutations with review",
+      route: "bulk-groups",
     },
     {
       id: "alerts",
@@ -216,6 +219,7 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
       label: "Template coverage",
       description:
         "Runtime template coverage summary with links to source templates",
+      route: "template-coverage",
     },
     {
       id: "rules",
@@ -320,6 +324,7 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
       label: "Event webhooks",
       description:
         "Event webhook rules, tests, deliveries, and maintenance separate from alert destinations",
+      route: "event-webhooks",
     },
     {
       id: "dashboards",
@@ -348,6 +353,7 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
       id: "retention_export",
       label: "Retention & export",
       description: "History export, retention policy, and prune preview",
+      route: "retention-export",
     },
   ],
   Access: [

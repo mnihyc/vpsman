@@ -29,7 +29,7 @@ test.beforeEach(async ({ page }, testInfo) => {
         }
       : testInfo.title.includes("full retained terminal range")
         ? { terminalSessionsOverride: retainedRangeSessions }
-      : {},
+        : {},
   );
 });
 
@@ -46,6 +46,15 @@ async function dispatchWithPrompt(composer: Locator) {
 async function unlockTerminalPrivilege(page: Page) {
   await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, "Remote Operations", "Terminal");
+}
+
+async function selectNewTerminalTarget(page: Page) {
+  const target = page.getByRole("combobox", { name: "New terminal target" });
+  await target.fill("edge-sfo-01");
+  await page
+    .getByRole("option", { name: /edge-sfo-01.*agent-sfo-01/ })
+    .click();
+  await expect(target).toHaveValue("edge-sfo-01 (fo01)");
 }
 
 test("prepares terminal reconnect actions from retained session inventory", async ({ page }, testInfo) => {
@@ -112,7 +121,7 @@ test("prepares terminal reconnect actions from retained session inventory", asyn
 
   await inputBytes.fill("uptime");
   await terminalInput.getByRole("button", { name: "Send input" }).click();
-  await expect(terminalInput).toContainText("Input 3 queued (queued)");
+  await expect(terminalInput).toContainText("Input 3 queued.");
 
   const request = await page.evaluate(() => {
     const requests = (window as unknown as { __vpsmanTestRequests: { terminalInputs: Array<Record<string, unknown>> } })
@@ -182,6 +191,7 @@ test("clears stale terminal input when the operator changes or opens a session",
   await inventory.getByRole("button", { name: /core-fra-02/ }).click();
   await expect(input).toHaveValue("");
 
+  await selectNewTerminalTarget(page);
   await input.fill("another stale draft");
   await panel.getByRole("button", { name: "Open terminal" }).click();
   await expect(panel).toContainText("terminal open job submitted");
@@ -200,6 +210,7 @@ test("reconciles terminal launcher and input feedback after privilege unlock", a
   await openConsoleSubpage(page, "Remote Operations", "Terminal");
 
   const panel = page.locator(".terminalSessionsPanel");
+  await selectNewTerminalTarget(page);
   await panel.getByRole("button", { name: "Unlock privilege" }).click();
   await expect(panel).toContainText("Unlock privilege, then open the terminal from this launcher.");
 
@@ -468,7 +479,7 @@ test("keeps focused terminal input modal, unlockable, and bound to the active se
   await expect(focusedSurface).not.toHaveAttribute("inert", "");
   await expect(input).toHaveValue("hostname");
   await focused.getByRole("button", { name: "Send input" }).click();
-  await expect(focused).toContainText("Input 3 queued (queued)");
+  await expect(focused).toContainText("Input 3 queued.");
 
   await focused.getByRole("button", { name: "Exit focused terminal view" }).click();
   await expect(focused).toBeHidden();

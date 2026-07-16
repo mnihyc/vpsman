@@ -414,7 +414,10 @@ identity_json="$(vpsctl_auth agent-identity-upsert \
   --tags edge,bgp \
   --confirmed)"
 jq -e \
-  '.client_id == "cli-direct-agent" and .display_name == "cli-direct-agent" and (.tags | sort == ["bgp", "edge"])' \
+  '.identity.client_id == "cli-direct-agent" and
+   .identity.display_name == "cli-direct-agent" and
+   (.identity.tags | sort == ["bgp", "edge"]) and
+   any(.post_commit[]; .operation == "job_terminal_reconciliation" and (.status == "completed" or .status == "failed"))' \
   <<<"$identity_json" >/dev/null
 key_report_json="$(vpsctl_auth key-lifecycle-report)"
 jq -e '.direct_identity_client_count >= 1' <<<"$key_report_json" >/dev/null
@@ -487,16 +490,21 @@ plan_json="$(vpsctl_auth tunnel-plan \
   --bandwidth-mbps 100 \
   --save \
   --confirmed)"
-jq -e '.name == "cli-gre-a-b" and .revision == 1 and .enabled == false and .plan.kind == "gre" and (.plan | has("mutates_host") | not) and .plan.recommended_ospf_cost == null' \
+jq -e '.plan.name == "cli-gre-a-b" and .plan.revision == 1 and .plan.enabled == false and .plan.plan.kind == "gre" and (.plan.plan | has("mutates_host") | not) and .plan.plan.recommended_ospf_cost == null and .sync == []' \
   <<<"$plan_json" >/dev/null
-plan_id="$(jq -r '.id' <<<"$plan_json")"
-plan_revision="$(jq -r '.revision' <<<"$plan_json")"
+plan_id="$(jq -r '.plan.id' <<<"$plan_json")"
+plan_revision="$(jq -r '.plan.revision' <<<"$plan_json")"
 enabled_plan_json="$(vpsctl_auth tunnel-plan-enable \
   --plan-id "$plan_id" \
   --expected-revision "$plan_revision" \
   --confirmed)"
-jq -e '.enabled == true and .revision == 2' <<<"$enabled_plan_json" >/dev/null
-plan_revision="$(jq -r '.revision' <<<"$enabled_plan_json")"
+jq -e '
+  .plan.enabled == true and
+  .plan.revision == 2 and
+  ([.sync[].client_id] | sort == ["cli-agent-a", "cli-agent-b"]) and
+  all(.sync[]; .status == "queued" and .job_id != null and .error == null)
+' <<<"$enabled_plan_json" >/dev/null
+plan_revision="$(jq -r '.plan.revision' <<<"$enabled_plan_json")"
 seed_tunnel_telemetry cli-agent-a left cli-agent-b
 seed_tunnel_telemetry cli-agent-b right cli-agent-a
 network_status_seed_job_json="$(vpsctl_auth tunnel-status \
@@ -820,7 +828,13 @@ updated_plan_json="$(vpsctl_auth tunnel-plan \
   --update-plan-id "$plan_id" \
   --expected-revision "$plan_revision" \
   --confirmed)"
-jq -e '.revision == 3 and .enabled == true and .plan.bandwidth_mbps == 250' <<<"$updated_plan_json" >/dev/null
+jq -e '
+  .plan.revision == 3 and
+  .plan.enabled == true and
+  .plan.plan.bandwidth_mbps == 250 and
+  ([.sync[].client_id] | sort == ["cli-agent-a", "cli-agent-b"]) and
+  all(.sync[]; .status == "queued" and .job_id != null and .error == null)
+' <<<"$updated_plan_json" >/dev/null
 if stale_plan_output="$(vpsctl_auth tunnel-plan \
   --name cli-gre-a-b \
   --interface-name grecli \
@@ -838,21 +852,48 @@ if stale_plan_output="$(vpsctl_auth tunnel-plan \
   --confirmed 2>&1)"; then
   fail "tunnel-plan update accepted a stale declaration revision"
 fi
-[[ "$stale_plan_output" == *"tunnel_plan_snapshot_stale"* ]] \
-  || fail "stale tunnel plan update did not report tunnel_plan_snapshot_stale: $stale_plan_output"
+[[ "$stale_plan_output" == *"Tunnel plan snapshot stale"* && "$stale_plan_output" == *"Refresh current state"* ]] \
+  || fail "stale tunnel plan update did not explain the stale snapshot and recovery: $stale_plan_output"
 
-plan_revision="$(jq -r '.revision' <<<"$updated_plan_json")"
+plan_revision="$(jq -r '.plan.revision' <<<"$updated_plan_json")"
 disabled_plan_json="$(vpsctl_auth tunnel-plan-disable \
   --plan-id "$plan_id" \
   --expected-revision "$plan_revision" \
   --confirmed)"
-jq -e '.enabled == false and .revision == 4' <<<"$disabled_plan_json" >/dev/null
-plan_revision="$(jq -r '.revision' <<<"$disabled_plan_json")"
+jq -e '
+  .plan.enabled == false and
+  .plan.revision == 4 and
+  ([.sync[].client_id] | sort == ["cli-agent-a", "cli-agent-b"]) and
+  all(.sync[]; .status == "queued" and .job_id != null and .error == null)
+' <<<"$disabled_plan_json" >/dev/null
+plan_revision="$(jq -r '.plan.revision' <<<"$disabled_plan_json")"
+reenabled_plan_json="$(vpsctl_auth tunnel-plan-enable \
+  --plan-id "$plan_id" \
+  --expected-revision "$plan_revision" \
+  --confirmed)"
+jq -e '
+  .plan.enabled == true and
+  .plan.revision == 5 and
+  ([.sync[].client_id] | sort == ["cli-agent-a", "cli-agent-b"]) and
+  all(.sync[]; .status == "queued" and .job_id != null and .error == null)
+' <<<"$reenabled_plan_json" >/dev/null
+plan_revision="$(jq -r '.plan.revision' <<<"$reenabled_plan_json")"
 deleted_plan_json="$(vpsctl_auth tunnel-plan-delete \
   --plan-id "$plan_id" \
   --expected-revision "$plan_revision" \
   --confirmed)"
-jq -e '.deleted_reason == "operator_retired" and .deleted_at != null and .revision == 5' \
+jq -e '
+  .plan.enabled == false and
+  .plan.deleted_reason == "operator_retired" and
+  .plan.deleted_at != null and
+  .plan.revision == 6 and
+  .plan.left_runtime_config.desired == "absent" and
+  .plan.right_runtime_config.desired == "absent" and
+  .plan.left_runtime_config.status == "queued" and
+  .plan.right_runtime_config.status == "queued" and
+  ([.sync[].client_id] | sort == ["cli-agent-a", "cli-agent-b"]) and
+  all(.sync[]; .status == "queued" and .job_id != null and .error == null)
+' \
   <<<"$deleted_plan_json" >/dev/null
 jq -e 'length == 0' <<<"$(vpsctl_auth tunnel-plans)" >/dev/null
 
@@ -899,7 +940,7 @@ jq -e --arg backup_id "$backup_id" 'any(.[]; .source_backup_request_id == $backu
   <<<"$restores_json" >/dev/null
 
 audit_json="$(vpsctl_auth audit --limit 100)"
-jq -e 'any(.[]; .action == "operator.created") and any(.[]; .action == "operator_session.revoked") and any(.[]; .action == "backup.requested_metadata_only") and any(.[]; .action == "restore.planned_metadata_only") and any(.[]; .action == "network.tunnel_plan_created") and any(.[]; .action == "network.tunnel_plan_deleted")' \
+jq -e 'any(.[]; .action == "operator.created") and any(.[]; .action == "operator_session.revoked") and any(.[]; .action == "backup.requested_metadata_only") and any(.[]; .action == "restore.planned_metadata_only") and any(.[]; .action == "network.tunnel_plan_created") and any(.[]; .action == "network.tunnel_plan_deleted" and .metadata.was_enabled == true)' \
   <<<"$audit_json" >/dev/null
 
 history_retention_json="$(vpsctl_auth history-retention)"

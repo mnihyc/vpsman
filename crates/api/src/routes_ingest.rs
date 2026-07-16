@@ -812,16 +812,49 @@ fn command_output_received_at(received_unix: Option<u64>) -> String {
     received_at.to_rfc3339()
 }
 
-fn status_output_message(output: &CommandOutput) -> Option<String> {
+pub(crate) fn status_output_message(output: &CommandOutput) -> Option<String> {
     if output.stream != OutputStream::Status {
         return None;
     }
-    let value = serde_json::from_slice::<serde_json::Value>(&output.data).ok()?;
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.data) else {
+        let message = String::from_utf8_lossy(&output.data)
+            .chars()
+            .map(|character| {
+                if character.is_control() {
+                    ' '
+                } else {
+                    character
+                }
+            })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        return (!message.is_empty()).then_some(message);
+    };
     let kind = value
         .get("type")
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    if kind == Some("command_timeout") {
+        let operation = value
+            .get("operation_type")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("command")
+            .replace('_', " ");
+        let duration = value
+            .get("max_timeout_secs")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|seconds| *seconds > 0)
+            .map(|seconds| format!(" after {seconds} seconds"))
+            .unwrap_or_default();
+        return Some(format!(
+            "{operation} exceeded its agent execution timeout{duration} (command_timeout)"
+        ));
+    }
     let primary = ["message", "error", "reason", "hint", "status"]
         .iter()
         .find_map(|field| {
@@ -1296,6 +1329,29 @@ mod tests {
         assert_eq!(
             outcome.message,
             crate::routes_jobs::COMMAND_COMPLETED_WITHOUT_EXIT_CODE_MESSAGE
+        );
+    }
+
+    #[test]
+    fn ingest_timeout_output_reports_operation_and_duration() {
+        let output = CommandOutput {
+            job_id: uuid::Uuid::new_v4(),
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&serde_json::json!({
+                "type": "command_timeout",
+                "operation_type": "network_speed_test",
+                "max_timeout_secs": 60,
+            }))
+            .unwrap(),
+            exit_code: Some(124),
+            done: true,
+        };
+
+        assert_eq!(
+            status_output_message(&output).as_deref(),
+            Some(
+                "network speed test exceeded its agent execution timeout after 60 seconds (command_timeout)"
+            )
         );
     }
 }

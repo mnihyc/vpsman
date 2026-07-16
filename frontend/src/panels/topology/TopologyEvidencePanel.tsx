@@ -581,7 +581,9 @@ export function TopologyEvidencePanel({
             <span>Target</span>
             <span>Created</span>
           </div>
-          {rows.map((row) => (
+          {rows.map((row) => {
+            const signalLabel = row.signalLabel ?? humanStatus(row.signalStatus);
+            return (
             <div className="historyRow topologyEvidenceGrid" key={row.job.id}>
               <span className="historyPrimary">
                 <strong>{humanStatus(row.job.command_type)}</strong>
@@ -597,8 +599,12 @@ export function TopologyEvidencePanel({
                   </button>
                 ) : null}
               </span>
-              <span className={`status ${evidenceStatusBadgeClass(row)}`}>
-                {row.signalLabel ?? humanStatus(row.signalStatus)}
+              <span
+                className={`status ${evidenceStatusBadgeClass(row)}`}
+                data-value-tooltip="true"
+                title={signalLabel}
+              >
+                {signalLabel}
               </span>
               <span className="topologyMetric">
                 <strong>{row.metric}</strong>
@@ -610,7 +616,8 @@ export function TopologyEvidencePanel({
               </span>
               <EvidenceTime value={row.job.created_at} />
             </div>
-          ))}
+            );
+          })}
           {rows.length === 0 && (
             <div className="emptyState">
               <Activity size={22} />

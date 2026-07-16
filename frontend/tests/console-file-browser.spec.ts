@@ -132,7 +132,8 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
   });
   await activate(page.getByRole("button", { name: "Review upload", exact: true }));
   const uploadPrompt = page.locator(".confirmationPrompt").last();
-  await expect(uploadPrompt).toContainText("Upload file on edge-sfo-01 (fo01)");
+  await expect(uploadPrompt).toContainText("Target VPS");
+  await expect(uploadPrompt).toContainText("edge-sfo-01 (fo01)");
   await expect(uploadPrompt).toContainText("Existing file");
   await expect(uploadPrompt).toContainText("Skip upload if the file already exists");
   await activate(uploadPrompt.getByRole("button", { name: "Upload file", exact: true }));
@@ -148,10 +149,12 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
   await expect(page.locator(".fileCommandPopover").getByRole("button", { name: "Review file write" })).toBeVisible();
   await page.getByLabel("New file text content").fill("listen=9443\n");
   await activate(page.locator(".fileCommandPopover").getByRole("button", { name: "Review file write" }));
-  await expect(page.locator(".confirmationPrompt").getByText("Write text", { exact: true })).toBeVisible();
-  await expect(page.locator(".confirmationPrompt")).toContainText("Write text file on edge-sfo-01 (fo01)");
-  await expect(page.locator(".confirmationPrompt")).toContainText("/etc/new.conf");
-  await expect(page.locator(".confirmationPrompt")).toContainText("Policy");
+  const writePrompt = page.locator(".confirmationPrompt");
+  await expect(writePrompt.getByText("Write text", { exact: true })).toBeVisible();
+  await expect(writePrompt).toContainText("Target VPS");
+  await expect(writePrompt).toContainText("edge-sfo-01 (fo01)");
+  await expect(writePrompt).toContainText("/etc/new.conf");
+  await expect(writePrompt).toContainText("Policy");
   await activate(
     page
       .locator(".confirmationPrompt")
@@ -168,10 +171,12 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
   await expect(
     page.locator(".confirmationPrompt strong").filter({ hasText: /^Create folder$/ }),
   ).toBeVisible();
-  await expect(page.locator(".confirmationPrompt")).toContainText("Create folder on edge-sfo-01 (fo01)");
-  await expect(page.locator(".confirmationPrompt")).toContainText("/etc/conf.d");
-  await expect(page.locator(".confirmationPrompt")).toContainText("Recursive");
-  await expect(page.locator(".confirmationPrompt")).toContainText("Include child paths");
+  const folderPrompt = page.locator(".confirmationPrompt");
+  await expect(folderPrompt).toContainText("Target VPS");
+  await expect(folderPrompt).toContainText("edge-sfo-01 (fo01)");
+  await expect(folderPrompt).toContainText("/etc/conf.d");
+  await expect(folderPrompt).toContainText("Recursive");
+  await expect(folderPrompt).toContainText("Include child paths");
   await activate(
     page
       .locator(".confirmationPrompt")

@@ -74,6 +74,7 @@ type VpsDetailPanelProps = {
   onOpenAlertPolicies: (policyId?: string) => void;
   onOpenBackup: (agent: AgentView) => void;
   onOpenConfig: (agent: AgentView) => void;
+  onOpenDispatch: (agent: AgentView) => void;
   onOpenFiles: (agent: AgentView) => void;
   onOpenFleetAlerts: () => void;
   onOpenFleetMetrics: (agent: AgentView) => void;
@@ -124,6 +125,7 @@ export function VpsDetailPanel({
   onOpenAlertPolicies,
   onOpenBackup,
   onOpenConfig,
+  onOpenDispatch,
   onOpenFiles,
   onOpenFleetAlerts,
   onOpenFleetMetrics,
@@ -260,7 +262,7 @@ export function VpsDetailPanel({
               <Activity size={14} />
               <span>Processes</span>
             </button>
-            <button className="secondaryAction compactAction" onClick={onOpenJobs} type="button">
+            <button className="secondaryAction compactAction" onClick={() => onOpenDispatch(agent)} type="button">
               <Play size={14} />
               <span>Run command</span>
             </button>
@@ -804,8 +806,13 @@ function NetworkTab({
         <button className="primaryAction compactAction" onClick={onOpenNetwork} type="button">
           <span>Open network graph</span>
         </button>
-        <button className="secondaryAction compactAction" onClick={onOpenNetworkEvidence} type="button">
-          <span>Open network evidence</span>
+        <button
+          className="secondaryAction compactAction"
+          onClick={onOpenNetworkEvidence}
+          title="Open fleet-wide retained network evidence; use the selected graph node for this VPS context."
+          type="button"
+        >
+          <span>Fleet evidence</span>
         </button>
         <VpsFact label="Observed interfaces" value={String(related.networkRates.length)} />
         <VpsFact label="Tunnel records" value={String(related.tunnels.length)} />
@@ -1433,7 +1440,7 @@ function isActiveJobStatus(status: string): boolean {
 function displayCommandType(value: string): string {
   switch (value) {
     case "shell_argv":
-      return "Shell command";
+      return "Argv command";
     case "scheduled_shell_argv":
       return "Scheduled shell command";
     case "shell_pty":

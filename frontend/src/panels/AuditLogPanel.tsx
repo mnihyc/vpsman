@@ -7,7 +7,10 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { ActionFeedback } from "../components/ActionFeedback";
+import {
+  ActionFeedback,
+  type ActionFeedbackTone,
+} from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import {
@@ -95,7 +98,7 @@ export function AuditLogPanel({
   historyPruneResult: HistoryRetentionPruneResponse | null;
   historyRetentionPolicies: HistoryRetentionPolicyRecord[];
   loading: boolean;
-  onExportHistory: (domains?: string) => Promise<void>;
+  onExportHistory: (domains?: string) => Promise<HistoryExportRecord>;
   onPruneHistoryRetention: (
     request: HistoryRetentionPruneRequest,
   ) => Promise<HistoryRetentionPruneResponse>;
@@ -125,6 +128,9 @@ export function AuditLogPanel({
     reviewedRows: number;
   } | null>(null);
   const [pruneConfirmationOpen, setPruneConfirmationOpen] = useState(false);
+  const [retentionStatus, setRetentionStatus] = useState<string | null>(null);
+  const [retentionStatusTone, setRetentionStatusTone] =
+    useState<ActionFeedbackTone>("info");
   const [auditFilters, setAuditFilters] =
     useState<AuditFilterState>(EMPTY_AUDIT_FILTERS);
 
@@ -205,16 +211,16 @@ export function AuditLogPanel({
       },
       {
         id: "operator",
-        header: "Operator",
+        header: "Actor",
         size: 170,
         minSize: 150,
-        sortValue: (audit) => auditActor(audit) ?? "",
+        sortValue: (audit) => auditActor(audit),
         searchValue: (audit) =>
-          `${auditActor(audit) ?? ""} ${audit.actor_id ?? ""} ${auditMetadataValue(audit, ["operator_role", "role"]) ?? ""}`,
+          `${auditActor(audit)} ${audit.actor_id ?? ""} ${auditMetadataValue(audit, ["operator_role", "role"]) ?? ""}`,
         cell: (audit) => (
           <span className="historyPrimary">
-            <strong>{auditActor(audit) ?? "Unknown operator"}</strong>
-            <small>{auditOperatorDetail(audit)}</small>
+            <strong>{auditActor(audit)}</strong>
+            <small>{auditActorDetail(audit)}</small>
           </span>
         ),
       },
@@ -285,6 +291,8 @@ export function AuditLogPanel({
   }
 
   const submitPolicy = async () => {
+    setRetentionStatus("Saving history retention policy");
+    setRetentionStatusTone("progress");
     try {
       await onUpsertHistoryRetentionPolicy({
         domain: selectedPolicy?.domain ?? selectedDomain,
@@ -294,8 +302,11 @@ export function AuditLogPanel({
         export_enabled: exportEnabled,
         confirmed: true,
       });
-    } catch {
-      // The data hook owns the visible error state for this panel.
+      setRetentionStatus(`Saved ${selectedDomainName} retention policy`);
+      setRetentionStatusTone("success");
+    } catch (actionError) {
+      setRetentionStatus(actionError instanceof Error ? actionError.message : "History retention policy update failed");
+      setRetentionStatusTone("danger");
     }
   };
 
@@ -307,6 +318,8 @@ export function AuditLogPanel({
   });
 
   const previewPrune = async () => {
+    setRetentionStatus(`Previewing ${selectedDomainName} cleanup`);
+    setRetentionStatusTone("progress");
     try {
       const preview = await onPruneHistoryRetention({
         ...pruneRequest(true),
@@ -331,8 +344,13 @@ export function AuditLogPanel({
         reviewedRows,
       });
       setPruneConfirmationOpen(false);
-    } catch {
-      // The data hook owns the visible error state for this panel.
+      setRetentionStatus(reviewedRows > 0
+        ? `Cleanup preview matched ${reviewedRows} row${reviewedRows === 1 ? "" : "s"}`
+        : "Cleanup preview matched no rows; deletion is not needed");
+      setRetentionStatusTone(reviewedRows > 0 ? "warning" : "success");
+    } catch (actionError) {
+      setRetentionStatus(actionError instanceof Error ? actionError.message : "History cleanup preview failed");
+      setRetentionStatusTone("danger");
     }
   };
 
@@ -340,11 +358,38 @@ export function AuditLogPanel({
     if (!pruneSnapshot) {
       return;
     }
+    setRetentionStatus(`Deleting ${pruneSnapshot.reviewedRows} reviewed history row${pruneSnapshot.reviewedRows === 1 ? "" : "s"}`);
+    setRetentionStatusTone("progress");
     try {
       await onPruneHistoryRetention(pruneSnapshot.request);
+      setRetentionStatus(`Deleted reviewed ${selectedDomainName} history rows`);
+      setRetentionStatusTone("success");
       clearPruneConfirmation();
-    } catch {
-      // The data hook owns the visible error state for this panel.
+    } catch (actionError) {
+      setRetentionStatus(actionError instanceof Error ? actionError.message : "History cleanup failed");
+      setRetentionStatusTone("danger");
+    }
+  };
+
+  const exportSelectedHistory = async () => {
+    setRetentionStatus(`Exporting ${selectedDomainName} history`);
+    setRetentionStatusTone("progress");
+    try {
+      const exported = await onExportHistory(selectedDomainLabel);
+      const blob = new Blob([JSON.stringify(exported, null, 2)], {
+        type: "application/json",
+      });
+      const href = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = href;
+      anchor.download = `vpsman-history-${selectedDomainLabel.replace(/[^a-z0-9_-]+/gi, "-")}.json`;
+      anchor.click();
+      URL.revokeObjectURL(href);
+      setRetentionStatus(`Downloaded ${selectedDomainName} history export`);
+      setRetentionStatusTone("success");
+    } catch (actionError) {
+      setRetentionStatus(actionError instanceof Error ? actionError.message : "History export failed");
+      setRetentionStatusTone("danger");
     }
   };
 
@@ -440,7 +485,7 @@ export function AuditLogPanel({
               <p>Job, terminal, session, or schedule references in metadata.</p>
             </div>
             <div className="auditEventMetric">
-              <span>Known operators</span>
+              <span>Known actors</span>
               <strong>{auditActors.length || "None"}</strong>
               <p>
                 {auditActors.length > 0
@@ -649,6 +694,11 @@ export function AuditLogPanel({
               Refresh
             </button>
           </div>
+          <ActionFeedback
+            className="localActionFeedback"
+            message={error ?? retentionStatus}
+            tone={error ? "danger" : retentionStatusTone}
+          />
           <div
             className="retentionSummaryStrip"
             aria-label="History retention summary"
@@ -855,8 +905,9 @@ export function AuditLogPanel({
                 </button>
                 <button
                   className="dangerAction"
-                  disabled={!pruneSnapshot}
+                  disabled={!pruneSnapshot || pruneSnapshot.reviewedRows === 0}
                   onClick={() => setPruneConfirmationOpen(true)}
+                  title={!pruneSnapshot ? "Preview cleanup first" : pruneSnapshot.reviewedRows === 0 ? "No reviewed rows match; deletion is not needed" : `Review deletion of ${pruneSnapshot.reviewedRows} matched rows`}
                   type="button"
                 >
                   <Scissors size={16} />
@@ -902,7 +953,7 @@ export function AuditLogPanel({
               <button
                 className="secondaryAction"
                 disabled={!exportEnabled}
-                onClick={() => void onExportHistory(selectedDomainLabel)}
+                onClick={() => void exportSelectedHistory()}
                 type="button"
               >
                 <Download size={16} />
@@ -1052,7 +1103,7 @@ function AuditEventDetailPanel({
         </span>
         <span>
           <strong>Actor</strong>
-          <span>{auditActor(audit) ?? "unknown"}</span>
+          <span>{auditActor(audit)}</span>
         </span>
         <span>
           <strong>Action</strong>
@@ -1270,7 +1321,7 @@ function auditTargetDetail(audit: AuditLogRecord): string {
   return shortId(audit.target);
 }
 
-function auditOperatorDetail(audit: AuditLogRecord): string {
+function auditActorDetail(audit: AuditLogRecord): string {
   const role = auditMetadataValue(audit, ["operator_role", "role"]);
   const ip = auditMetadataValue(audit, [
     "client_ip",
@@ -1289,7 +1340,7 @@ function auditOperatorDetail(audit: AuditLogRecord): string {
   if (ip) {
     return ip;
   }
-  return audit.actor_id ? shortId(audit.actor_id) : "system";
+  return audit.actor_id ? shortId(audit.actor_id) : "system event";
 }
 
 function auditResultLabel(audit: AuditLogRecord): string {
@@ -1447,7 +1498,7 @@ function auditMatchesFilters(
   filters: AuditFilterState,
 ): boolean {
   const checks: Array<[string, string]> = [
-    [filters.actor, auditActor(audit) ?? ""],
+    [filters.actor, auditActor(audit)],
     [filters.action, auditFilterText(audit, "action")],
     [filters.resource, auditFilterText(audit, "resource")],
     [filters.result, auditFilterText(audit, "result")],
@@ -1485,7 +1536,7 @@ function latestAuditRecord(audits: AuditLogRecord[]): AuditLogRecord | null {
   return latestRecord;
 }
 
-function auditActor(audit: AuditLogRecord): string | null {
+function auditActor(audit: AuditLogRecord): string {
   return (
     metadataOperator(audit.metadata) ??
     metadataFieldText(audit.metadata, [
@@ -1497,7 +1548,8 @@ function auditActor(audit: AuditLogRecord): string | null {
       "user_id",
       "username",
     ]) ??
-    audit.actor_id
+    audit.actor_id ??
+    "Control plane"
   );
 }
 

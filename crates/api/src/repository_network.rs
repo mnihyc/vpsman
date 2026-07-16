@@ -688,9 +688,7 @@ impl Repository {
             .get_tunnel_plan(plan_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("tunnel_plan_not_found"))?;
-        if existing.enabled {
-            anyhow::bail!("tunnel_plan_disable_before_delete");
-        }
+        let was_enabled = existing.enabled;
         match self {
             Self::Memory(memory) => {
                 let now = unix_now().to_string();
@@ -703,10 +701,16 @@ impl Repository {
                     if plan.revision != expected_revision {
                         anyhow::bail!("tunnel_plan_snapshot_stale");
                     }
-                    if plan.enabled {
-                        anyhow::bail!("tunnel_plan_disable_before_delete");
-                    }
                     plan.revision += 1;
+                    plan.enabled = false;
+                    plan.left_runtime_config = retired_tunnel_runtime_config(
+                        plan.left_runtime_config.clone(),
+                        was_enabled,
+                    );
+                    plan.right_runtime_config = retired_tunnel_runtime_config(
+                        plan.right_runtime_config.clone(),
+                        was_enabled,
+                    );
                     plan.deleted_at = Some(now.clone());
                     plan.deleted_by = persisted_actor_id(operator);
                     plan.deleted_reason = Some("operator_retired".to_string());
@@ -719,7 +723,7 @@ impl Repository {
                     action: "network.tunnel_plan_deleted".to_string(),
                     target: format!("tunnel_plan:{plan_id}"),
                     command_hash: None,
-                    metadata: tunnel_plan_delete_metadata(&deleted, operator),
+                    metadata: tunnel_plan_delete_metadata(&deleted, was_enabled, operator),
                     created_at: now,
                 });
                 Ok(deleted)
@@ -731,13 +735,13 @@ impl Repository {
                     UPDATE tunnel_plans
                     SET actor_id = $2,
                         revision = revision + 1,
+                        enabled = FALSE,
                         deleted_at = now(),
                         deleted_by = $2,
                         deleted_reason = 'operator_retired',
                         updated_at = now()
                     WHERE id = $1
                       AND deleted_at IS NULL
-                      AND enabled = FALSE
                       AND revision = $3
                     RETURNING revision, updated_at::text AS updated_at,
                               deleted_at::text AS deleted_at
@@ -750,6 +754,15 @@ impl Repository {
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("tunnel_plan_snapshot_stale"))?;
                 let deleted = TunnelPlanView {
+                    enabled: false,
+                    left_runtime_config: retired_tunnel_runtime_config(
+                        existing.left_runtime_config.clone(),
+                        was_enabled,
+                    ),
+                    right_runtime_config: retired_tunnel_runtime_config(
+                        existing.right_runtime_config.clone(),
+                        was_enabled,
+                    ),
                     revision: row.try_get("revision")?,
                     updated_at: row.try_get("updated_at")?,
                     deleted_at: row.try_get("deleted_at")?,
@@ -762,7 +775,7 @@ impl Repository {
                     operator,
                     "network.tunnel_plan_deleted",
                     &deleted,
-                    tunnel_plan_delete_metadata(&deleted, operator),
+                    tunnel_plan_delete_metadata(&deleted, was_enabled, operator),
                 )
                 .await?;
                 tx.commit().await?;
@@ -1002,11 +1015,23 @@ fn untracked_tunnel_runtime_config(
         client_id: client_id.to_string(),
         desired: if enabled { "present" } else { "absent" }.to_string(),
         status: "not_dispatched".to_string(),
-        cleanup_confirmed: !enabled,
         job_id: None,
         error: None,
         updated_at: None,
     }
+}
+
+fn retired_tunnel_runtime_config(
+    mut state: TunnelPlanEndpointRuntimeConfigView,
+    was_enabled: bool,
+) -> TunnelPlanEndpointRuntimeConfigView {
+    state.desired = "absent".to_string();
+    if was_enabled {
+        state.status = "removal_required".to_string();
+        state.job_id = None;
+        state.error = None;
+    }
+    state
 }
 
 fn tunnel_endpoint_runtime_config_state(
@@ -1034,7 +1059,6 @@ fn tunnel_endpoint_runtime_config_state(
                 client_id: client_id.to_string(),
                 desired: desired.to_string(),
                 status: status.to_string(),
-                cleanup_confirmed: false,
                 job_id: state.pending_job_id,
                 error: state.pending_error.clone(),
                 updated_at: state.pending_updated_at.clone(),
@@ -1044,7 +1068,6 @@ fn tunnel_endpoint_runtime_config_state(
             client_id: client_id.to_string(),
             desired: desired.to_string(),
             status: "stale_pending".to_string(),
-            cleanup_confirmed: false,
             job_id: state.pending_job_id,
             error: state.pending_error.clone(),
             updated_at: state.pending_updated_at.clone(),
@@ -1067,7 +1090,6 @@ fn tunnel_endpoint_runtime_config_state(
         client_id: client_id.to_string(),
         desired: desired.to_string(),
         status: status.to_string(),
-        cleanup_confirmed: !enabled && matches!(status, "removed" | "not_dispatched"),
         job_id: state.applied_job_id,
         error: None,
         updated_at: state.applied_at.clone(),
@@ -1301,10 +1323,15 @@ fn tunnel_connection_assessment_metadata(
     })
 }
 
-fn tunnel_plan_delete_metadata(view: &TunnelPlanView, operator: &AuthContext) -> serde_json::Value {
+fn tunnel_plan_delete_metadata(
+    view: &TunnelPlanView,
+    was_enabled: bool,
+    operator: &AuthContext,
+) -> serde_json::Value {
     serde_json::json!({
         "name": &view.name,
         "revision": view.revision,
+        "was_enabled": was_enabled,
         "left_client_id": &view.left_client_id,
         "right_client_id": &view.right_client_id,
         "interface_name": &view.plan.interface_name,

@@ -25,6 +25,8 @@ test("shows restart and desired-only limit evidence in process supervisor invent
   await expect(grid.getByText("ospf-worker")).toBeVisible();
   await expect(summary.getByText("1 / 1")).toBeVisible();
   await expect(summary.getByText("Desired-only limits")).toBeVisible();
+  await expect(summary.getByText("With automatic restarts")).toBeVisible();
+  await expect(inventory.getByText("1 process with automatic restarts")).toBeVisible();
   await expect(summary.getByText("1 warning")).toBeVisible();
   await expect(grid.getByText("Timestamp inconsistent")).toBeVisible();
   await expect(grid.getByText("Unknown", { exact: true })).toBeVisible();

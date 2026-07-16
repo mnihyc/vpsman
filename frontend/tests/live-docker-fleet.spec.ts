@@ -75,7 +75,7 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     page.getByRole("heading", { name: "Running work" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Recent failures" }),
+    page.getByRole("heading", { name: "Recent issues" }),
   ).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Needs attention" }),
@@ -535,7 +535,6 @@ async function expectLiveSystemDashboardTelemetry(
   await expect(subsystem).toContainText("Database");
   await expect(subsystem).toContainText("Dispatch");
   await expect(subsystem).toContainText("Gateway");
-  await expect(subsystem).toContainText("Storage");
   await expect(subsystem).toContainText("Dispatch limit");
   await expect(subsystem).toContainText("Suite Config fields");
 

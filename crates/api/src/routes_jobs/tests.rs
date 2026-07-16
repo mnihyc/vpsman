@@ -100,6 +100,32 @@ fn gateway_failed_status_output_sets_target_message_from_agent_reason() {
 }
 
 #[test]
+fn gateway_failed_plain_status_output_preserves_agent_reason() {
+    let job_id = Uuid::new_v4();
+    let outcome = target_outcome_from_gateway(GatewayCommandDispatchResult {
+        client_id: "client-a".to_string(),
+        job_id,
+        command_version: 1,
+        accepted: true,
+        message: "failed".to_string(),
+        outputs: vec![CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: b"command failed: file changed since it was opened".to_vec(),
+            exit_code: Some(127),
+            done: true,
+        }],
+    });
+
+    assert_eq!(outcome.status, "failed");
+    assert_eq!(outcome.exit_code, Some(127));
+    assert_eq!(
+        outcome.message,
+        "command failed: file changed since it was opened"
+    );
+}
+
+#[test]
 fn busy_update_skip_uses_shared_reason_code() {
     let job_id = Uuid::new_v4();
     let outcome = busy_update_skip_outcome(

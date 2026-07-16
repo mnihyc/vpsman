@@ -53,7 +53,7 @@ test("captures network telemetry placements", async ({ page }, testInfo) => {
   } else {
     await expect(coreDetail).toContainText("core-fra-02 (ra02)");
     await expect(coreDetail.getByText("Runtime tunnels", { exact: true })).toBeVisible();
-    await expect(coreDetail.getByText("Latency Down")).toBeVisible();
+    await expect(coreDetail.getByText("Latency Probe failed")).toBeVisible();
     await expect(coreDetail.getByText("sfo-fra-gre", { exact: true })).toBeVisible();
     const declaredGre = coreDetail
       .locator(".telemetryTunnelRow", { hasText: "sfo-fra-gre" })

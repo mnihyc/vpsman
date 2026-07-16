@@ -23,6 +23,7 @@ export function AuthPanel({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(apiError);
   const pendingRef = useRef(false);
+  const passwordInputRef = useRef<HTMLInputElement | null>(null);
   const usernameInputRef = useRef<HTMLInputElement | null>(null);
   const isBootstrap = mode === "bootstrap";
   const isChecking = mode === "checking";
@@ -116,6 +117,10 @@ export function AuthPanel({
           ? authError.message
           : "Authentication did not return a usable result. Refresh first-run state and inspect the browser console or API logs before retrying.",
       );
+      window.requestAnimationFrame(() => {
+        passwordInputRef.current?.focus();
+        passwordInputRef.current?.select();
+      });
     } finally {
       pendingRef.current = false;
       setPending(false);
@@ -190,13 +195,12 @@ export function AuthPanel({
             autoComplete={mode === "login" ? "current-password" : "new-password"}
             disabled={isChecking}
             onChange={(event) => setPassword(event.target.value)}
+            ref={passwordInputRef}
             type="password"
             value={password}
           />
           <small className="fieldHelp">
-            {isBootstrap
-              ? "Use at least 12 characters for the first admin password."
-              : "Passwords contain at least 12 characters."}
+            {passwordRequirementMessage(password, isBootstrap)}
           </small>
         </label>
         <button
@@ -231,6 +235,22 @@ function authHeaderSubtitle(mode: AuthMode): string {
     return "Sign in with an existing operator account.";
   }
   return "Selecting the correct access screen.";
+}
+
+function passwordRequirementMessage(
+  password: string,
+  isBootstrap: boolean,
+): string {
+  if (password.length === 0) {
+    return isBootstrap
+      ? "Use at least 12 characters for the first admin password."
+      : "Enter the operator password (at least 12 characters).";
+  }
+  if (password.length < 12) {
+    const remaining = 12 - password.length;
+    return `${remaining} more character${remaining === 1 ? "" : "s"} required.`;
+  }
+  return "Password length requirement met.";
 }
 
 function authScreenStatus(mode: AuthMode): string {

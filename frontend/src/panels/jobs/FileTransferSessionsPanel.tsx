@@ -78,6 +78,8 @@ export function FileTransferSessionsPanel({
   agents,
   clientLabel,
   focusPath,
+  initialUploadContext,
+  initialUploadPath,
   initialUploadTargetClientId,
   transfers,
   sources,
@@ -94,6 +96,8 @@ export function FileTransferSessionsPanel({
   agents: AgentView[];
   clientLabel: (clientId: string) => string;
   focusPath?: string | null;
+  initialUploadContext?: string | null;
+  initialUploadPath?: string | null;
   initialUploadTargetClientId?: string | null;
   transfers: FileTransferSessionRecord[];
   sources: FileTransferSourceArtifactRecord[];
@@ -139,6 +143,9 @@ export function FileTransferSessionsPanel({
     useState("");
   const [quickUploadFile, setQuickUploadFile] = useState<File | null>(null);
   const [quickUploadPath, setQuickUploadPath] = useState("");
+  const [quickUploadContext, setQuickUploadContext] = useState<string | null>(
+    null,
+  );
   const [quickUploadError, setQuickUploadError] = useState<string | null>(null);
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [sourceFile, setSourceFile] = useState<File | null>(null);
@@ -159,8 +166,17 @@ export function FileTransferSessionsPanel({
     }
     setQuickTransferMode("upload");
     setQuickUploadTargetClientId(initialUploadTargetClientId);
+    setQuickUploadPath(initialUploadPath ?? "");
+    setQuickUploadContext(initialUploadContext ?? null);
+    setQuickUploadError(null);
     onInitialUploadTargetConsumed?.();
-  }, [agents, initialUploadTargetClientId, onInitialUploadTargetConsumed]);
+  }, [
+    agents,
+    initialUploadContext,
+    initialUploadPath,
+    initialUploadTargetClientId,
+    onInitialUploadTargetConsumed,
+  ]);
   const quickTransferReady =
     Boolean(quickUploadTargetClientId) &&
     quickUploadPath.startsWith("/") &&
@@ -852,6 +868,12 @@ export function FileTransferSessionsPanel({
           </div>
         </div>
         <div className="transferQuickUploadControls">
+          {quickUploadContext ? (
+            <div className="formNote transferHandoffContext" role="note">
+              <strong>Restore staging handoff</strong>
+              <span>{quickUploadContext}</span>
+            </div>
+          ) : null}
           {quickTransferMode === "upload" ? (
             <div className="transferQuickFileField">
               <span>Local file</span>

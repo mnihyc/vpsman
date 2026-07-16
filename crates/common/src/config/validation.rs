@@ -337,11 +337,13 @@ fn validate_runtime_status_telemetry_plans(
         if let Some(plan_id) = &plan.plan_id {
             validate_identifier(plan_id, "network_runtime_status_telemetry_plan_id", 128)?;
         }
-        validate_identifier(
-            &plan.plan.name,
-            "network_runtime_status_telemetry_plan_name",
-            128,
-        )?;
+        let plan_name = plan.plan.name.trim();
+        if plan_name.is_empty()
+            || plan.plan.name.len() > 128
+            || plan.plan.name.chars().any(char::is_control)
+        {
+            return Err("network_runtime_status_telemetry_plan_name_invalid".to_string());
+        }
         validate_runtime_tunnel_control(&plan.plan.runtime_control)
             .map_err(|_| "network_runtime_status_telemetry_control_invalid".to_string())?;
         validate_runtime_topology_intent(&plan.plan.runtime_topology, &plan.plan.interface_name)

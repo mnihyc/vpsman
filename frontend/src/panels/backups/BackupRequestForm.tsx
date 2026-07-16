@@ -60,6 +60,7 @@ export function BackupRequestForm({
           <VpsCombobox
             agents={agents}
             ariaLabel="Backup client"
+            className="actionDrawerInitialFocus"
             onChange={onClientIdChange}
             placeholder="Select VPS"
             value={clientId}

@@ -337,22 +337,24 @@ plan_json="$(VPSMAN_API_TOKEN="$access_token" \
     --save \
     --enabled \
     --confirmed)"
-plan_id="$(jq -r '.id' <<<"$plan_json")"
-plan_revision="$(jq -r '.revision' <<<"$plan_json")"
+plan_id="$(jq -er '.plan.id' <<<"$plan_json")"
+plan_revision="$(jq -er '.plan.revision' <<<"$plan_json")"
 jq -e \
   --arg id "$plan_id" \
   --arg left "$client_id" \
   --arg right "$peer_client_id" \
   --argjson bandwidth "$initial_bandwidth_mbps" '
-    .id == $id
-      and .enabled == true
-      and .revision == 1
-      and .left_client_id == $left
-      and .right_client_id == $right
-      and .plan.runtime_control.manager == "external_observed"
-      and .plan.bandwidth_mbps == $bandwidth
-      and .plan.ospf == null
-      and .recommended_ospf_cost == null
+    .plan.id == $id
+      and .plan.enabled == true
+      and .plan.revision == 1
+      and .plan.left_client_id == $left
+      and .plan.right_client_id == $right
+      and .plan.plan.runtime_control.manager == "external_observed"
+      and .plan.plan.bandwidth_mbps == $bandwidth
+      and .plan.plan.ospf == null
+      and .plan.recommended_ospf_cost == null
+      and (.sync | length) == 2
+      and all(.sync[]; .status == "queued")
   ' <<<"$plan_json" >/dev/null
 
 wait_config_contains_plan "$client_id" "$initial_bandwidth_mbps"
@@ -375,33 +377,36 @@ updated_plan_json="$(VPSMAN_API_TOKEN="$access_token" \
     --update-plan-id "$plan_id" \
     --expected-revision "$plan_revision" \
     --confirmed)"
-plan_revision="$(jq -r '.revision' <<<"$updated_plan_json")"
+plan_revision="$(jq -er '.plan.revision' <<<"$updated_plan_json")"
 jq -e \
   --arg id "$plan_id" \
   --argjson bandwidth "$updated_bandwidth_mbps" '
-    .id == $id
-      and .enabled == true
-      and .revision == 2
-      and .plan.runtime_control.manager == "external_observed"
-      and .plan.bandwidth_mbps == $bandwidth
-      and .plan.ospf == null
-      and .recommended_ospf_cost == null
+    .plan.id == $id
+      and .plan.enabled == true
+      and .plan.revision == 2
+      and .plan.plan.runtime_control.manager == "external_observed"
+      and .plan.plan.bandwidth_mbps == $bandwidth
+      and .plan.plan.ospf == null
+      and .plan.recommended_ospf_cost == null
+      and (.sync | length) == 2
+      and all(.sync[]; .status == "queued")
   ' <<<"$updated_plan_json" >/dev/null
 wait_config_contains_plan "$client_id" "$updated_bandwidth_mbps"
 wait_config_contains_plan "$peer_client_id" "$updated_bandwidth_mbps"
 
-disabled_json="$(api_post \
-  "/api/v1/tunnel-plans/$plan_id/disable" \
-  "$(jq -nc --argjson revision "$plan_revision" '{confirmed: true, expected_revision: $revision}')")"
-jq -e '.enabled == false' <<<"$disabled_json" >/dev/null
-wait_config_omits_plan "$client_id"
-wait_config_omits_plan "$peer_client_id"
-
-plan_revision="$(jq -r '.revision' <<<"$disabled_json")"
 deleted_json="$(api_post \
   "/api/v1/tunnel-plans/$plan_id/delete" \
   "$(jq -nc --argjson revision "$plan_revision" '{confirmed: true, expected_revision: $revision}')")"
-jq -e '.deleted_reason == "operator_retired" and .deleted_at != null' <<<"$deleted_json" >/dev/null
+jq -e '
+  .plan.enabled == false and
+  .plan.revision == 3 and
+  .plan.deleted_reason == "operator_retired" and
+  .plan.deleted_at != null and
+  .plan.left_runtime_config.desired == "absent" and
+  .plan.right_runtime_config.desired == "absent" and
+  (.sync | length) == 2 and
+  all(.sync[]; .status == "queued")
+' <<<"$deleted_json" >/dev/null
 jq -e 'length == 0' <<<"$(api_get "/api/v1/tunnel-plans")" >/dev/null
 wait_config_omits_plan "$client_id"
 wait_config_omits_plan "$peer_client_id"
@@ -442,5 +447,5 @@ jq -n \
     updated_bandwidth_mbps: $updated_bandwidth_mbps,
     config_read_job_id: $config_read_job_id,
     peer_config_read_job_id: $peer_config_read_job_id,
-    explicit_create_update_disable_delete_pushed_runtime_config_sync: true
+    explicit_create_update_direct_delete_pushed_runtime_config_sync: true
   }'

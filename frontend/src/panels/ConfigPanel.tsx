@@ -7,7 +7,14 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { FileSliders, Play, RefreshCw, ServerCog, Trash2, X } from "lucide-react";
+import {
+  FileSliders,
+  Play,
+  RefreshCw,
+  ServerCog,
+  Trash2,
+  X,
+} from "lucide-react";
 import {
   ActionFeedback,
   type ActionFeedbackTone,
@@ -439,8 +446,12 @@ function ConfigOverview({
     agents,
     runtimeConfigApplyStates,
   );
-  const currentStateRows = allConfigStateRows.filter((row) => row.resourceAvailable);
-  const historicalStateRows = allConfigStateRows.filter((row) => !row.resourceAvailable);
+  const currentStateRows = allConfigStateRows.filter(
+    (row) => row.resourceAvailable,
+  );
+  const historicalStateRows = allConfigStateRows.filter(
+    (row) => !row.resourceAvailable,
+  );
   const pendingSyncs = currentStateRows.filter(
     (row) => row.statusKind === "queued",
   ).length;
@@ -475,6 +486,9 @@ function ConfigOverview({
   const applyAttentionCount = currentStateRows.filter((row) =>
     ["failed", "stale", "queued", "unknown"].includes(row.statusKind),
   ).length;
+  const attentionStateRows = currentStateRows.filter((row) =>
+    ["failed", "stale", "queued", "unknown"].includes(row.statusKind),
+  );
   const retryableApplyRows = currentStateRows.filter(
     (row) => row.actionKind === "retry",
   );
@@ -491,8 +505,9 @@ function ConfigOverview({
   });
   const latestApplyStates = runtimeConfigApplyStates
     .slice()
-    .sort((left, right) =>
-      configApplyStateSortValue(right) - configApplyStateSortValue(left),
+    .sort(
+      (left, right) =>
+        configApplyStateSortValue(right) - configApplyStateSortValue(left),
     )
     .slice(0, 4);
   const recentChanges = [
@@ -572,23 +587,23 @@ function ConfigOverview({
             {configHealth.label}
           </ConsoleStatusBadge>
         </div>
-          <div className="configHealthSummary">
-            <span>
-              <strong>
-                {appliedClientIds.size}/{currentStateRows.length || 0}
-              </strong>
-              <small>current resources</small>
-            </span>
-            <span>
-              <strong>{applyAttentionCount}</strong>
-              <small>need attention</small>
-            </span>
-            <span>
-              <strong>{historicalStateRows.length}</strong>
-              <small>historical records</small>
-            </span>
-            <span>
-              <strong>
+        <div className="configHealthSummary">
+          <span>
+            <strong>
+              {appliedClientIds.size}/{currentStateRows.length || 0}
+            </strong>
+            <small>current resources</small>
+          </span>
+          <span>
+            <strong>{applyAttentionCount}</strong>
+            <small>need attention</small>
+          </span>
+          <span>
+            <strong>{historicalStateRows.length}</strong>
+            <small>historical records</small>
+          </span>
+          <span>
+            <strong>
               {sourceReadyRows}/{sourceStatus.length || 0}
             </strong>
             <small>source checks ready</small>
@@ -617,8 +632,16 @@ function ConfigOverview({
         </div>
         <ConfigCurrentStateRowsList
           onOpenAction={openCurrentStateAction}
-          rows={currentStateRows}
+          rows={attentionStateRows}
         />
+        {attentionStateRows.length === 0 ? (
+          <div className="emptyState compactEmptyState">
+            <strong>All current VPS config states are healthy</strong>
+            <span>
+              No queued, stale, failed, or unknown apply states need action.
+            </span>
+          </div>
+        ) : null}
       </section>
 
       {historicalStateRows.length > 0 && (
@@ -719,7 +742,7 @@ function ConfigOverview({
             </span>
             <span>
               <strong>{missingTemplateCoverage}</strong>
-              <small>VPSs without assignment evidence</small>
+              <small>VPS without assignment evidence</small>
             </span>
           </div>
           <p>
@@ -764,19 +787,24 @@ function ConfigOverview({
             <span>Detail</span>
             <span>Updated</span>
           </div>
-          {recentChanges.map((change) => (
+          {recentChanges.map((change) => {
+            const updated = change.time
+              ? formatTime(change.time)
+              : "No timestamp";
+            return (
             <div className="historyRow configRecentGrid" key={change.id}>
-              <span>{change.target}</span>
-              <span>{change.operation}</span>
-              <span>
+              <span title={change.target}>{change.target}</span>
+              <span title={change.operation}>{change.operation}</span>
+              <span title={change.status}>
                 <ConsoleStatusBadge tone={change.tone}>
                   {change.status}
                 </ConsoleStatusBadge>
               </span>
-              <span>{change.detail}</span>
-              <span>{change.time ? formatTime(change.time) : "No timestamp"}</span>
+              <span title={change.detail}>{change.detail}</span>
+              <span title={updated}>{updated}</span>
             </div>
-          ))}
+            );
+          })}
           {recentChanges.length === 0 && (
             <div className="emptyState compactEmpty">
               No recent config changes.
@@ -820,10 +848,7 @@ function ConfigCurrentStateRowsList({
   return (
     <div className="configCurrentStateList">
       {rows.map((row) => (
-        <div
-          className={`configCurrentStateRow ${row.statusKind}`}
-          key={row.id}
-        >
+        <div className={`configCurrentStateRow ${row.statusKind}`} key={row.id}>
           <span className="configCurrentTarget">
             <strong title={row.targetTitle}>{row.targetLabel}</strong>
             <small>{row.targetDetail}</small>
@@ -1187,9 +1212,7 @@ function ConfigTemplateSummary({
       ).length;
       const primaryStatus = attentionRows[0] ?? domainStatus[0] ?? null;
       const desiredSource =
-        primaryStatus?.template_name ??
-        defaultTemplate ??
-        "No selected source";
+        primaryStatus?.template_name ?? defaultTemplate ?? "No selected source";
       const desiredDetail = primaryStatus
         ? `${sourceDomainLabel(domain)} uses ${sourceTokenLabel(
             primaryStatus.source_kind,
@@ -1322,7 +1345,7 @@ function ConfigTemplateSummary({
             <small>{row.assignments} assignment rows</small>
           </span>
         ),
-        header: "Assigned VPSs",
+        header: "Assigned VPS",
         id: "assignments",
         minSize: 150,
         searchValue: (row) =>
@@ -1427,7 +1450,7 @@ function ConfigTemplateSummary({
             <strong>
               {assignedClientIds.size}/{agents.length}
             </strong>
-            <small>VPSs covered</small>
+            <small>VPS coverage</small>
           </span>
           <span>
             <strong>{readyStatusCount}</strong>
@@ -1485,7 +1508,7 @@ function ConfigTemplateSummary({
               <span>{row.storedDetail}</span>
             </span>
             <span>
-              <strong>Assigned VPSs</strong>
+              <strong>Assigned VPS</strong>
               <span>
                 {row.assignedClients}/{agents.length} VPSs from{" "}
                 {row.assignments} assignments
@@ -1506,7 +1529,9 @@ function ConfigTemplateSummary({
             <span>
               <strong>Latest evidence</strong>
               <span>
-                {row.updatedAt ? formatTime(row.updatedAt) : "No update evidence"}
+                {row.updatedAt
+                  ? formatTime(row.updatedAt)
+                  : "No update evidence"}
               </span>
             </span>
             <span>
@@ -1632,11 +1657,11 @@ function sourceStatusLabel(status: SourceStatusRecord["status"]): string {
     case "selected_no_store":
       return "Server storage missing";
     case "selected_no_artifacts":
-      return "Artifacts missing";
+      return "No artifacts yet";
     case "selected_no_limits":
-      return "Limits unavailable";
+      return "No limits planned";
     case "selected_no_samples":
-      return "Samples missing";
+      return "Awaiting first sample";
     case "degraded":
       return "Degraded";
     default:
@@ -1663,7 +1688,17 @@ function sourceTokenLabel(value: string | null | undefined): string {
 }
 
 function isReadySourceStatus(status: SourceStatusRecord["status"]): boolean {
-  return ["ok", "ready", "ready_on_demand", "selected"].includes(status);
+  return [
+    "ok",
+    "ready",
+    "ready_on_demand",
+    "selected",
+    "selected_workflow",
+    "metadata_only",
+    "selected_no_artifacts",
+    "selected_no_limits",
+    "selected_no_samples",
+  ].includes(status);
 }
 
 function configHealthStatus({
@@ -1726,7 +1761,9 @@ function configApplyStateTime(
   );
 }
 
-function configApplyStateSortValue(state: RuntimeConfigApplyStateRecord): number {
+function configApplyStateSortValue(
+  state: RuntimeConfigApplyStateRecord,
+): number {
   const time = configApplyStateTime(state);
   if (!time) {
     return 0;
@@ -1842,16 +1879,20 @@ function BulkConfigApply({
   const [manageGeneratorsOpen, setManageGeneratorsOpen] = useState(false);
   const [patchGeneratorEditor, setPatchGeneratorEditor] =
     useState<PatchGeneratorEditorState | null>(null);
-  const [patchGeneratorStatus, setPatchGeneratorStatus] =
-    useState<string | null>(null);
+  const [patchGeneratorStatus, setPatchGeneratorStatus] = useState<
+    string | null
+  >(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const generatorManagementRef = useRef<HTMLDetailsElement | null>(null);
+  const generatorManagementRef = useRef<HTMLElement | null>(null);
+  const patchGeneratorEditorRef = useRef<HTMLElement | null>(null);
   const [maxTimeoutSecs, setMaxTimeoutSecs] = useState(
     DEFAULT_MAX_JOB_TIMEOUT_SECS,
   );
   const [progress, setProgress] = useState<BulkJobProgress | null>(null);
   const [reviewStatus, setReviewStatus] = useState<string | null>(null);
-  const reviewFeedbackTone: ActionFeedbackTone = reviewStatus?.startsWith("Desired")
+  const reviewFeedbackTone: ActionFeedbackTone = reviewStatus?.startsWith(
+    "Desired",
+  )
     ? "warning"
     : "progress";
   const {
@@ -1863,6 +1904,9 @@ function BulkConfigApply({
     (generator) =>
       generator.id === (generatorId || runtimeConfigPatchGenerators[0]?.id),
   );
+  const patchGeneratorDraftError = patchGeneratorEditor
+    ? validatePatchGeneratorEditor(patchGeneratorEditor)
+    : null;
   const selectorParse = useMemo(
     () => parseSearchExpression(selectorExpression),
     [selectorExpression],
@@ -2001,6 +2045,22 @@ function BulkConfigApply({
     }
   }, [selectedGenerator?.id]);
 
+  useLayoutEffect(() => {
+    if (!patchGeneratorEditor) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      const editor = patchGeneratorEditorRef.current;
+      if (!editor) {
+        return;
+      }
+      scrollIntoViewWithMotion(editor, { block: "start" });
+      editor.querySelector<HTMLInputElement>("input")?.focus({
+        preventScroll: true,
+      });
+    });
+  }, [patchGeneratorEditor?.id, patchGeneratorEditor?.mode]);
+
   function clearBulkConfigReview() {
     invalidateReviewGeneration();
     setApplySnapshot(null);
@@ -2078,10 +2138,10 @@ function BulkConfigApply({
             category: "",
             domain: "",
             description: "",
-            fieldSchemaText: "{\n  \"fields\": {}\n}",
+            fieldSchemaText: '{\n  "fields": {}\n}',
             rawGeneratorBody: "",
             docsMetadataText:
-              "{\n  \"expandable\": true,\n  \"affected_sections\": [],\n  \"patch_only\": true\n}",
+              '{\n  "expandable": true,\n  "affected_sections": [],\n  "patch_only": true\n}',
           },
     );
     openGeneratorManagement();
@@ -2097,7 +2157,7 @@ function BulkConfigApply({
 
   async function savePatchGeneratorEditor() {
     const editor = patchGeneratorEditor;
-    if (!editor) {
+    if (!editor || validatePatchGeneratorEditor(editor)) {
       return;
     }
     await runAction(async () => {
@@ -2579,15 +2639,25 @@ function BulkConfigApply({
           </button>
         </div>
       </section>
-      <details
-        className="bulkGeneratorManagement"
-        ref={generatorManagementRef}
-        open={manageGeneratorsOpen}
-        onToggle={(event) => setManageGeneratorsOpen(event.currentTarget.open)}
-        tabIndex={-1}
-      >
-        <summary>Patch generator registry</summary>
-        {manageGeneratorsOpen && (
+      {manageGeneratorsOpen && (
+        <section
+          aria-label="Patch generator registry"
+          className="bulkGeneratorManagement"
+          ref={generatorManagementRef}
+          tabIndex={-1}
+        >
+          <div className="bulkGeneratorManagementHeader">
+            <strong>Patch generator registry</strong>
+            <button
+              aria-label="Close patch generator registry"
+              className="iconButton"
+              onClick={() => setManageGeneratorsOpen(false)}
+              title="Close generator registry"
+              type="button"
+            >
+              <X size={17} />
+            </button>
+          </div>
           <>
             <ConsoleDataGrid
               actions={patchGeneratorActions}
@@ -2644,6 +2714,7 @@ function BulkConfigApply({
             {patchGeneratorEditor ? (
               <section
                 className="compactForm patchGeneratorEditor"
+                ref={patchGeneratorEditorRef}
                 aria-label={
                   patchGeneratorEditor.mode === "edit"
                     ? "Edit patch generator"
@@ -2669,6 +2740,7 @@ function BulkConfigApply({
                   <label className="consoleField fieldWide">
                     <span>Name</span>
                     <input
+                      required
                       value={patchGeneratorEditor.name}
                       onChange={(event) =>
                         updatePatchGeneratorEditor({ name: event.target.value })
@@ -2679,6 +2751,7 @@ function BulkConfigApply({
                   <label className="consoleField">
                     <span>Category</span>
                     <input
+                      required
                       value={patchGeneratorEditor.category}
                       onChange={(event) =>
                         updatePatchGeneratorEditor({
@@ -2691,6 +2764,7 @@ function BulkConfigApply({
                   <label className="consoleField">
                     <span>Domain</span>
                     <input
+                      required
                       value={patchGeneratorEditor.domain}
                       onChange={(event) =>
                         updatePatchGeneratorEditor({
@@ -2703,6 +2777,7 @@ function BulkConfigApply({
                   <label className="consoleField fieldFull">
                     <span>Description</span>
                     <input
+                      required
                       value={patchGeneratorEditor.description}
                       onChange={(event) =>
                         updatePatchGeneratorEditor({
@@ -2715,6 +2790,7 @@ function BulkConfigApply({
                   <label className="consoleField fieldFull">
                     <span>Field schema JSON</span>
                     <textarea
+                      required
                       rows={7}
                       value={patchGeneratorEditor.fieldSchemaText}
                       onChange={(event) =>
@@ -2727,6 +2803,7 @@ function BulkConfigApply({
                   <label className="consoleField fieldFull">
                     <span>Generator body</span>
                     <textarea
+                      required
                       rows={8}
                       value={patchGeneratorEditor.rawGeneratorBody}
                       onChange={(event) =>
@@ -2740,6 +2817,7 @@ function BulkConfigApply({
                   <label className="consoleField fieldFull">
                     <span>Docs metadata JSON</span>
                     <textarea
+                      required
                       rows={6}
                       value={patchGeneratorEditor.docsMetadataText}
                       onChange={(event) =>
@@ -2750,6 +2828,11 @@ function BulkConfigApply({
                     />
                   </label>
                 </div>
+                <ActionFeedback
+                  className="localActionFeedback patchGeneratorEditorFeedback"
+                  message={patchGeneratorDraftError}
+                  tone="warning"
+                />
                 <div className="consoleFormActions">
                   <button
                     className="secondaryAction"
@@ -2760,8 +2843,9 @@ function BulkConfigApply({
                   </button>
                   <button
                     className="primaryAction"
-                    disabled={pending}
+                    disabled={pending || Boolean(patchGeneratorDraftError)}
                     onClick={() => void savePatchGeneratorEditor()}
+                    title={patchGeneratorDraftError ?? "Save custom generator"}
                     type="button"
                   >
                     Save generator
@@ -2770,8 +2854,8 @@ function BulkConfigApply({
               </section>
             ) : null}
           </>
-        )}
-      </details>
+        </section>
+      )}
       {progress && (
         <ExecutionResultPanel
           loading={pending}
@@ -2783,7 +2867,7 @@ function BulkConfigApply({
       )}
       <ConfirmationPrompt
         confirmLabel="Apply runtime config patch"
-        detail={`Apply one generated incremental patch to ${applySnapshot?.clientIds.length ?? 0} frozen VPS targets.`}
+        detail={`Apply one generated incremental patch to ${bulkVpsCountLabel(applySnapshot?.clientIds.length ?? 0)}.`}
         expiresAtUnix={applySnapshot?.privilegeAssertion.expires_unix}
         items={[
           {
@@ -2998,7 +3082,7 @@ function SingleVpsConfig({
     ? "success"
     : reviewStatus?.startsWith("Desired")
       ? "warning"
-    : "progress";
+      : "progress";
 
   useEffect(() => {
     clientIdRef.current = clientId;
@@ -3993,14 +4077,12 @@ function VpsRulesPanel({
   const [selectorExpression, setSelectorExpression] = useState(
     () =>
       initialSelectorExpression ??
-      (readLocalString(CONFIG_VPS_RULES_SELECTOR_STORAGE_KEY) || "tag:edge"),
+      readLocalString(CONFIG_VPS_RULES_SELECTOR_STORAGE_KEY),
   );
   const [keyFilter, setKeyFilter] = useState("");
   const [stateFilter, setStateFilter] = useState("");
   const [showIncompleteOnly, setShowIncompleteOnly] = useState(false);
-  const [valuesText, setValuesText] = useState(
-    "traffic.reset_day=14\ntraffic.quota.total=3TB\ntraffic.selectors=eth0+tx,ens3",
-  );
+  const [valuesText, setValuesText] = useState("");
   const [unsetKeys, setUnsetKeys] = useState<string[]>([]);
   const [editMode, setEditMode] = useState<VpsRulesEditMode>("upsert");
   const [preview, setPreview] = useState<VpsRulesOperatorPreview | null>(null);
@@ -4447,7 +4529,7 @@ function VpsRulesPanel({
           <span>{trafficAccounting.length}</span>
         </span>
         <span>
-          <strong>Incomplete VPSs</strong>
+          <strong>Incomplete VPS</strong>
           <span>{incompleteClients.size}</span>
         </span>
         <span>
@@ -4771,7 +4853,7 @@ function VpsRulesPanel({
             value: reviewSnapshot?.keys.join(", ") || "-",
           },
           {
-            label: "Matched VPSs",
+            label: "Matched VPS",
             value: reviewSnapshot?.preview.matched_vps_count ?? 0,
           },
           {
@@ -4894,7 +4976,7 @@ function VpsRulesPreviewTable({
     <div className="vpsRulesPreviewBlock">
       <div className="consoleInlineDetailGrid">
         <span>
-          <strong>Matched VPSs</strong>
+          <strong>Matched VPS</strong>
           <span>{preview.matched_vps_count}</span>
         </span>
         <span>
@@ -5044,6 +5126,34 @@ function parseJsonObject(value: string): JsonValue {
   return parsed;
 }
 
+function validatePatchGeneratorEditor(
+  editor: PatchGeneratorEditorState,
+): string | null {
+  const requiredFields: Array<[string, string]> = [
+    ["name", editor.name],
+    ["category", editor.category],
+    ["domain", editor.domain],
+    ["description", editor.description],
+    ["generator body", editor.rawGeneratorBody],
+  ];
+  const missing = requiredFields.find(([, value]) => !value.trim());
+  if (missing) {
+    return `Enter a ${missing[0]} before saving.`;
+  }
+  for (const [label, value] of [
+    ["Field schema", editor.fieldSchemaText],
+    ["Docs metadata", editor.docsMetadataText],
+  ] as const) {
+    try {
+      parseJsonObject(value);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "invalid JSON";
+      return `${label} must be a JSON object: ${reason}.`;
+    }
+  }
+  return null;
+}
+
 function inferTomlSections(toml: string): string[] {
   const sections = Array.from(
     new Set(
@@ -5138,11 +5248,7 @@ function extractConfigRead(outputs: JobOutputRecord[]): {
       toml?: string;
       config_sha256_hex?: string;
     };
-    if (
-      value.type === "config_read" &&
-      value.toml &&
-      value.config_sha256_hex
-    ) {
+    if (value.type === "config_read" && value.toml && value.config_sha256_hex) {
       return { toml: value.toml, baseHash: value.config_sha256_hex };
     }
   }

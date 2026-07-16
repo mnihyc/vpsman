@@ -534,6 +534,7 @@ test("artifact cleanup async preview ignores stale expression edits", async ({
   await expect(cleanupPanel.getByLabel("Cleanup preview result")).toContainText(
     "1 artifacts / 22 B",
   );
+  await expect(cleanupPanel.getByLabel("Cleanup preview result")).toBeFocused();
   await expect(
     cleanupPanel.getByLabel("Artifact cleanup readiness"),
   ).toContainText("Ready for confirmation");
@@ -1064,6 +1065,71 @@ test("overlay confirmations trap focus and close before accepted delete settles"
       }),
     )
     .toBe(1);
+});
+
+test("overlay confirmations restore focus after asynchronous review preparation", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "overlay modal focus behavior is covered in desktop workflow tests",
+  );
+  await installConsoleApiMock(page);
+  await page.goto("/");
+  await openConsoleSubpage(page, "System", "Preferences");
+  await page.getByLabel("Review prompt display mode").selectOption("overlay");
+  await page.getByRole("button", { name: "Save preferences" }).click();
+  await openConsoleSubpage(page, "Fleet", "Bulk groups");
+
+  await page.getByLabel("Bulk tag", { exact: true }).fill("maintenance:test");
+  await page
+    .getByRole("searchbox", { name: "Bulk tag selector expression" })
+    .fill("id:agent-sfo-01");
+  await includeBulkTagReviewTargets(page);
+  const reviewButton = page
+    .locator(".bulkTagApplyGrid")
+    .getByRole("button", { name: "Add maintenance:test to 1 VPS" });
+  await reviewButton.focus();
+  await reviewButton.click();
+
+  const dialog = page.getByRole("dialog", { name: "Confirm tag mutation" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(reviewButton).toBeFocused();
+});
+
+test("overlay confirmations restore focus when the prompt mounts synchronously", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "overlay modal focus behavior is covered in desktop workflow tests",
+  );
+  await installConsoleApiMock(page);
+  await page.goto("/");
+  await openConsoleSubpage(page, "System", "Preferences");
+  await page.getByLabel("Review prompt display mode").selectOption("overlay");
+  await page.getByRole("button", { name: "Save preferences" }).click();
+  await unlockPrivilegeFor(page, "Jobs", "Dispatch");
+
+  const main = page.locator("#console-main-content");
+  await main.getByLabel("Command argv").fill("/bin/echo focus-check");
+  await main
+    .getByRole("searchbox", { name: "Bulk target selector expression" })
+    .fill("id:agent-sfo-01");
+  const reviewButton = main.getByRole("button", {
+    name: "Dispatch",
+    exact: true,
+  });
+  await reviewButton.focus();
+  await reviewButton.click();
+
+  const dialog = page.getByRole("dialog", { name: "Confirm job dispatch" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(reviewButton).toBeFocused();
 });
 
 test("topology network test confirmation closes on edit and submits a fresh snapshot", async ({

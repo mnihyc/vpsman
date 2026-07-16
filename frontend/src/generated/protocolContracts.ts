@@ -806,7 +806,7 @@ export const SOURCE_READINESS_STATUS_CLASS_BY_STATUS = {
   "selected_no_store": "warning",
   "selected_no_artifacts": "warning",
   "selected_no_limits": "warning",
-  "selected_no_samples": "warning",
+  "selected_no_samples": "neutral",
   "ok": "successful",
   "degraded": "warning",
 } as const satisfies Record<GeneratedSourceReadinessStatus, GeneratedWorkflowStatusClass>;

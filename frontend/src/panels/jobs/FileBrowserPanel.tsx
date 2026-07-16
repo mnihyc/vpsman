@@ -153,6 +153,7 @@ export function FileBrowserPanel({
   const [editorSavedContent, setEditorSavedContent] = useState("");
   const [editorSha256Hex, setEditorSha256Hex] = useState<string | null>(null);
   const [editorMode, setEditorMode] = useState(DEFAULT_MODE);
+  const [editorConflictDetected, setEditorConflictDetected] = useState(false);
   const [editorDiscardPromptOpen, setEditorDiscardPromptOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
@@ -215,7 +216,9 @@ export function FileBrowserPanel({
   const pathRefreshTarget = typedPathChanged ? pathInput : staleDirectoryPath ?? pathInput;
   const targetSummary = selectedAgent ? `target ${targetNameId(selectedAgent)}` : "No target VPS";
   const summary = privilegeMaterial
-    ? `${targetSummary} · ${currentEntries.length} entries loaded`
+    ? currentDirectoryEvidence
+      ? `${targetSummary} · ${currentEntries.length} ${currentEntries.length === 1 ? "entry" : "entries"} loaded`
+      : `${targetSummary} · directory not loaded`
     : `${targetSummary} · unlock to read remote files`;
   const fileBrowserFeedbackMessage = actionError ?? actionMessage ?? staleMessage;
   const fileBrowserFeedbackTone = actionError
@@ -250,7 +253,7 @@ export function FileBrowserPanel({
               title: "No files in this directory.",
             }
           : {
-              detail: `${currentEntries.length} ${currentEntries.length === 1 ? "entry is" : "entries are"} loaded from ${currentPath}. Double-click a text file to open it; other actions remain available from the tree and Actions panel.`,
+              detail: `${currentEntries.length} ${currentEntries.length === 1 ? "entry is" : "entries are"} loaded from ${currentPath}. Double-click an entry to open it; single-click selects it for the Actions panel.`,
               title: "Select a text file to edit.",
             };
 
@@ -368,6 +371,7 @@ export function FileBrowserPanel({
     setEditorContent("");
     setEditorSavedContent("");
     setEditorSha256Hex(null);
+    setEditorConflictDetected(false);
     setEditorDiscardPromptOpen(false);
     setPendingConfirmation(null);
     setActionError(null);
@@ -429,7 +433,7 @@ export function FileBrowserPanel({
     });
   }
 
-  async function fetchDirectory(path: string, announce = true) {
+  async function fetchDirectory(path: string, announce = true, preserveSelection = false) {
     const normalized = normalizeAbsolutePath(path);
     const { outputs } = await runFileJob(
       { type: "file_list_dir", path: normalized, offset: 0, limit: FILE_BROWSER_LIST_LIMIT, show_hidden: showHidden },
@@ -441,7 +445,12 @@ export function FileBrowserPanel({
     }
     setCurrentPath(status.path);
     setPathInput(status.path);
-    setSelectedPath(status.path);
+    setSelectedPath((current) =>
+      preserveSelection &&
+      (current === status.path || status.entries.some((entry) => entry.path === current))
+        ? current
+        : status.path,
+    );
     const pathChain = directoryPathChain(status.path);
     setExpandedPaths((current) => {
       const next = { ...current };
@@ -537,6 +546,7 @@ export function FileBrowserPanel({
       setEditorSavedContent(content);
       setEditorSha256Hex(status.sha256_hex);
       setEditorMode(formatMode(status.metadata.mode));
+      setEditorConflictDetected(false);
       setEditorDiscardPromptOpen(false);
       setSelectedPath(status.path);
       setMetadataByPath((current) => ({ ...current, [status.path]: status.metadata }));
@@ -559,10 +569,10 @@ export function FileBrowserPanel({
       });
       confirmOperation(
         operation,
-        "Save file",
+        force ? "Overwrite newer remote file" : "Save file",
         force || !editorSha256Hex
-          ? `Save changes to ${editorPath}. No base hash is available, so this writes without optimistic conflict protection.`
-          : `Save changes to ${editorPath}. If the file changed on the VPS, the save will be rejected.`,
+          ? `Overwrite the newer contents of ${editorPath} with this preserved draft.`
+          : `Save changes to ${editorPath}.`,
         undefined,
         { diffPreview: textDiffPreview(editorSavedContent, editorContent) },
       );
@@ -572,13 +582,16 @@ export function FileBrowserPanel({
   }
 
   async function executeConfirmedOperation(operation: JobOperation, refreshPath?: string) {
-    await runPanelAction(setPending, setActionError, async () => {
+    setPending(true);
+    setActionError(null);
+    try {
       const { outputs } = await runFileJob(operation, {
         expectedType: operation.type,
       });
       const status = parseLatestFileStatus(outputs, operation.type);
       if (operation.type === "file_write_text") {
         setEditorSavedContent(reviewedTextContent(operation));
+        setEditorConflictDetected(false);
         setEditorDiscardPromptOpen(false);
         if (status?.sha256_hex) {
           setEditorSha256Hex(status.sha256_hex);
@@ -634,9 +647,9 @@ export function FileBrowserPanel({
         });
       }
       let refreshWarning: string | null = null;
-      if (refreshPath && !status?.metadata) {
+      if (refreshPath) {
         try {
-          await fetchDirectory(refreshPath, false);
+          await fetchDirectory(refreshPath, false, true);
         } catch (error) {
           setStaleDirectoryPath(refreshPath);
           refreshWarning = actionErrorMessage(error);
@@ -665,7 +678,31 @@ export function FileBrowserPanel({
           ? `${fileBrowserOperationLabel(operation)} completed; directory refresh failed: ${refreshWarning}`
           : `${fileBrowserOperationLabel(operation)} completed`,
       );
-    });
+    } catch (error) {
+      const message = actionErrorMessage(error);
+      if (
+        operation.type === "file_write_text" &&
+        !operation.create &&
+        isFileChangedConflict(message)
+      ) {
+        setEditorConflictDetected(true);
+      }
+      const affectedDirectory = refreshPath ?? parentPath(operationTargetPath(operation));
+      let refreshWarning: string | null = null;
+      setStaleDirectoryPath(affectedDirectory);
+      try {
+        await fetchDirectory(affectedDirectory, false, true);
+      } catch (refreshError) {
+        refreshWarning = actionErrorMessage(refreshError);
+      }
+      setActionError(
+        refreshWarning
+          ? `${message}. Current directory state could not be refreshed: ${refreshWarning}`
+          : message,
+      );
+    } finally {
+      setPending(false);
+    }
   }
 
   function confirmOperation(
@@ -695,6 +732,7 @@ export function FileBrowserPanel({
     setEditorContent("");
     setEditorSavedContent("");
     setEditorSha256Hex(null);
+    setEditorConflictDetected(false);
     setEditorDiscardPromptOpen(false);
     setActionError(null);
   }
@@ -1151,27 +1189,32 @@ export function FileBrowserPanel({
                     <input onChange={(event) => setEditorMode(event.target.value)} value={editorMode} />
                   </label>
                   <button
-                    className="primaryAction"
+                    aria-label={editorConflictDetected ? "Review overwrite" : "Review save"}
+                    className={editorConflictDetected ? "dangerAction" : "primaryAction"}
                     disabled={!editorDirty || pending || !privilegeMaterial}
-                    onClick={() => void saveEditor()}
-                    title="Review file changes before saving."
+                    onClick={() => void saveEditor(editorConflictDetected)}
+                    title={
+                      editorConflictDetected
+                        ? "Review overwriting the newer remote file with this preserved draft."
+                        : "Review file changes before saving."
+                    }
                     type="button"
                   >
                     <Save size={14} />
-                    <span>Review save</span>
                   </button>
                   <button
+                    aria-label="Close editor"
                     className="secondaryAction compactAction fileEditorCloseMobile"
                     onClick={requestCloseEditor}
                     title="Close the file editor."
                     type="button"
                   >
                     <X size={14} />
-                    <span>Close editor</span>
                   </button>
                 </div>
               </div>
               <CodeMirrorTextEditor
+                ariaLabel={`File contents for ${editorPath}`}
                 onChange={(value) => {
                   setEditorContent(value);
                   setEditorDiscardPromptOpen(false);
@@ -1569,7 +1612,12 @@ export function FileBrowserPanel({
         open={pendingConfirmation !== null}
         pending={pending}
         title={pendingConfirmation?.title ?? "Confirm file operation"}
-        tone={pendingConfirmation?.operation.type === "file_delete" ? "danger" : "normal"}
+        tone={
+          pendingConfirmation?.operation.type === "file_delete" ||
+          isUnprotectedTextOverwrite(pendingConfirmation?.operation)
+            ? "danger"
+            : "normal"
+        }
       />
       <ConfirmationPrompt
         confirmLabel="Discard changes"
@@ -1601,7 +1649,10 @@ function directoryEntrySummary(loadedCount: number, evidence: DirectoryEvidence 
   if (evidence.status && evidence.status !== "completed") {
     return evidence.status.replace(/_/g, " ");
   }
-  const total = evidence.total_entries ?? loadedCount;
+  const total = Math.max(evidence.total_entries ?? loadedCount, loadedCount);
+  if (total === loadedCount) {
+    return `${loadedCount} ${loadedCount === 1 ? "entry" : "entries"}`;
+  }
   return `${loadedCount} of ${total} entries`;
 }
 
@@ -1827,7 +1878,17 @@ function TreeNode({
   );
 }
 
-function CodeMirrorTextEditor({ onChange, path, value }: { onChange: (value: string) => void; path: string; value: string }) {
+function CodeMirrorTextEditor({
+  ariaLabel,
+  onChange,
+  path,
+  value,
+}: {
+  ariaLabel: string;
+  onChange: (value: string) => void;
+  path: string;
+  value: string;
+}) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
   const onChangeRef = useRef(onChange);
@@ -1841,6 +1902,7 @@ function CodeMirrorTextEditor({ onChange, path, value }: { onChange: (value: str
       basicSetup,
       languageExtension(path),
       EditorView.lineWrapping,
+      EditorView.contentAttributes.of({ "aria-label": ariaLabel }),
       EditorView.updateListener.of((update) => {
         if (update.docChanged) {
           onChangeRef.current(update.state.doc.toString());
@@ -1857,7 +1919,7 @@ function CodeMirrorTextEditor({ onChange, path, value }: { onChange: (value: str
       view.destroy();
       viewRef.current = null;
     };
-  }, [path]);
+  }, [ariaLabel, path]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -1986,10 +2048,26 @@ function actionErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isFileChangedConflict(message: string): boolean {
+  return message.toLocaleLowerCase().includes("file changed since it was opened");
+}
+
+function isUnprotectedTextOverwrite(operation: JobOperation | undefined): boolean {
+  return Boolean(
+    operation?.type === "file_write_text" &&
+      !operation.create &&
+      !operation.expected_sha256_hex,
+  );
+}
+
 function fileConfirmationConfirmLabel(operation: JobOperation): string {
   switch (operation.type) {
     case "file_write_text":
-      return operation.create ? "Write file" : "Save file";
+      return operation.create
+        ? "Write file"
+        : isUnprotectedTextOverwrite(operation)
+          ? "Overwrite file"
+          : "Save file";
     case "file_mkdir":
       return "Create folder";
     case "file_rename":
@@ -2043,9 +2121,9 @@ function fileOperationSummary(operation: JobOperation): string {
 }
 
 function fileConfirmationDetail(confirmation: PendingConfirmation): string {
-  const target = confirmation.target ? targetNameId(confirmation.target) : "selected VPS";
   const policy = fileConfirmationPolicyText(confirmation.operation);
-  return `${fileOperationSummary(confirmation.operation)} on ${target}${policy ? `. ${policy}` : ""}`;
+  const detail = confirmation.detail.trim();
+  return `${detail || fileOperationSummary(confirmation.operation)}${policy ? ` ${policy}` : ""}`;
 }
 
 function fileConfirmationItems(confirmation: PendingConfirmation): Array<{ label: string; value: ReactNode }> {
@@ -2093,7 +2171,12 @@ function fileConfirmationItems(confirmation: PendingConfirmation): Array<{ label
     items.push({ label: "Overwrite", value: operation.overwrite ? "May overwrite destination" : "Destination must be new" });
   }
   if ("policy" in operation && (typeof operation.policy === "string" || typeof operation.policy === "undefined")) {
-    items.push({ label: "Policy", value: fileActionPolicyLabel(operation.policy ?? "fail") });
+    items.push({
+      label: "Policy",
+      value: isUnprotectedTextOverwrite(operation)
+        ? "Overwrite current file contents"
+        : fileActionPolicyLabel(operation.policy ?? "fail"),
+    });
   }
   if ("existing_policy" in operation) {
     items.push({ label: "Existing file", value: existingFilePolicyLabel(operation.existing_policy ?? "skip") });
@@ -2109,9 +2192,12 @@ function fileConfirmationPolicyText(operation: JobOperation): string {
     return "";
   }
   if (operation.type === "file_write_text") {
-    return operation.expected_sha256_hex
-      ? "Save rejects the write if the VPS file changed since it was opened."
-      : `${fileActionPolicyLabel(operation.policy ?? "fail")}.`;
+    if (operation.expected_sha256_hex) {
+      return "Save rejects the write if the VPS file changed since it was opened.";
+    }
+    return operation.create
+      ? `${fileActionPolicyLabel(operation.policy ?? "fail")}.`
+      : "This overwrite is not protected by a base hash and replaces the newer remote contents.";
   }
   if (operation.type === "file_push" || operation.type === "file_push_chunked") {
     return `${existingFilePolicyLabel(operation.existing_policy ?? "skip")}; ${ownershipPolicyLabel(operation.ownership_policy ?? "fail")}.`;

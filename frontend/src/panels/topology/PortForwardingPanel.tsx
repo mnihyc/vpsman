@@ -4,6 +4,7 @@ import {
   ChevronUp,
   CirclePlus,
   Copy,
+  Info,
   Pencil,
   Power,
   PowerOff,
@@ -105,7 +106,7 @@ type Feedback = FeedbackContent & {
 
 const EMPTY_DRAFT: EditorDraft = {
   clientId: "",
-  enabled: true,
+  enabled: false,
   incoming: "",
   masquerade: true,
   name: "",
@@ -223,7 +224,7 @@ export function PortForwardingPanel({
         scrollIntoViewWithMotion(editorRef.current, { block: "start" });
       }
       editorRef.current
-        ?.querySelector<HTMLElement>("input, select, button")
+        ?.querySelector<HTMLElement>("form input, form select, form button")
         ?.focus({ preventScroll: true });
     }, 0);
   }, [Boolean(editor), editor?.editing?.id]);
@@ -244,17 +245,11 @@ export function PortForwardingPanel({
 
   function openCreate() {
     if (!canWrite) return;
-    const defaultAgent =
-      agents.find((agent) => agent.capabilities.port_forwarding?.status === "supported") ??
-      agents[0];
     setExpandedId(null);
     setFeedback(null);
     setEditor({
       editing: null,
-      draft: {
-        ...EMPTY_DRAFT,
-        clientId: defaultAgent?.id ?? "",
-      },
+      draft: { ...EMPTY_DRAFT },
     });
   }
 
@@ -454,7 +449,13 @@ export function PortForwardingPanel({
         <div className="sectionHeader">
           <div>
             <h2>Port forwarding</h2>
-            <span>{rules.length} rules across {new Set(rules.map((rule) => rule.client_id)).size} VPSs</span>
+            <span>
+              {rules.length} {rules.length === 1 ? "rule" : "rules"} across{" "}
+              {new Set(rules.map((rule) => rule.client_id)).size}{" "}
+              {new Set(rules.map((rule) => rule.client_id)).size === 1
+                ? "VPS"
+                : "VPSs"}
+            </span>
           </div>
           <div className="headerActionStack">
             <button aria-busy={loading} className="secondaryAction" disabled={loading || pending} onClick={() => void refreshRules()} title="Reload latest stored desired state and agent evidence; this does not request a live agent inspection" type="button">
@@ -472,7 +473,7 @@ export function PortForwardingPanel({
           <Metric label="Applied" value={appliedCount} />
           <Metric label="Pending" value={pendingCount} />
           <Metric label="Attention" tone={attentionCount > 0 ? "warning" : "normal"} value={attentionCount} />
-          <Metric label="Capable VPSs" tone={supportedAgents < agents.length ? "warning" : "normal"} value={`${supportedAgents}/${agents.length}`} />
+          <Metric label="NFT-capable" tone={supportedAgents < agents.length ? "warning" : "normal"} value={`${supportedAgents}/${agents.length}`} />
         </div>
       </section>
 
@@ -661,6 +662,7 @@ const PortForwardEditor = forwardRef<HTMLElement, {
   const draftRef = useRef(draft);
   targetInputRef.current = draft.targetInput;
   draftRef.current = draft;
+  const mappingStarted = Boolean(draft.incoming.trim() || draft.target.trim());
   const mappingPreview = useMemo(() => {
     try {
       return { error: null, mappings: pairPortExpressions(draft.incoming, draft.target) };
@@ -732,8 +734,12 @@ const PortForwardEditor = forwardRef<HTMLElement, {
           <button aria-pressed={!draft.masquerade} className={!draft.masquerade ? "active" : ""} disabled={pending} onClick={() => onChange({ ...draft, masquerade: false })} title="Keep source addresses; the target must have a valid return route" type="button">Preserve source</button>
         </div></fieldset>
         <label className="compactCheckbox portForwardEnabled"><input checked={draft.enabled} disabled={pending} onChange={(event) => onChange({ ...draft, enabled: event.target.checked })} type="checkbox" /><span>Enabled</span></label>
-        <div className={`portMappingPreview ${mappingPreview.error ? "invalid" : "valid"}`}>
-          {mappingPreview.error ? <><ShieldAlert size={16} /><span>{mappingPreview.error}</span></> : <><CheckCircle2 size={16} /><span title={formatPortMappings(mappingPreview.mappings)}>{formatPortMappings(mappingPreview.mappings)} · {draft.targetIp || "select target IP"}</span></>}
+        <div className={`portMappingPreview ${!mappingStarted ? "idle" : mappingPreview.error ? "invalid" : "valid"}`}>
+          {!mappingStarted
+            ? <><Info size={16} /><span title="Enter incoming and target ports to preview the exact mappings">Enter incoming and target ports to preview the exact mappings</span></>
+            : mappingPreview.error
+              ? <><ShieldAlert size={16} /><span title={mappingPreview.error}>{mappingPreview.error}</span></>
+              : <><CheckCircle2 size={16} /><span title={formatPortMappings(mappingPreview.mappings)}>{formatPortMappings(mappingPreview.mappings)} · {draft.targetIp || "select target IP"}</span></>}
         </div>
         {selectedAgent && capability?.status !== "supported" && <div className="portForwardCapabilityNotice"><ShieldAlert size={16} /><span title={capability?.reason ?? capability?.status ?? "unknown"}>{capabilityLabel(capability?.status, capability?.reason)}</span></div>}
         <div className="formActions"><button className="secondaryAction" disabled={pending} onClick={onClose} type="button">Cancel</button><button className="primaryAction" disabled={saveDisabled} title={saveDisabledReason ?? (editing ? "Review rule update" : "Review rule creation")} type="submit">{editing ? "Save changes" : "Create rule"}</button></div>

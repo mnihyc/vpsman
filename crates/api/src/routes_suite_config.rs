@@ -251,9 +251,10 @@ fn collect_changed_paths(prefix: &str, old: &Value, new: &Value, changed: &mut B
                 };
                 match (left.get(key), right.get(key)) {
                     (Some(left), Some(right)) => collect_changed_paths(&path, left, right, changed),
-                    _ => {
-                        changed.insert(path);
+                    (Some(value), None) | (None, Some(value)) => {
+                        collect_leaf_paths(&path, value, changed)
                     }
+                    (None, None) => {}
                 }
             }
         }
@@ -262,6 +263,20 @@ fn collect_changed_paths(prefix: &str, old: &Value, new: &Value, changed: &mut B
         }
         _ => {}
     }
+}
+
+fn collect_leaf_paths(prefix: &str, value: &Value, changed: &mut BTreeSet<String>) {
+    if let Value::Object(object) = value {
+        if object.is_empty() {
+            changed.insert(prefix.to_string());
+            return;
+        }
+        for (key, child) in object {
+            collect_leaf_paths(&format!("{prefix}.{key}"), child, changed);
+        }
+        return;
+    }
+    changed.insert(prefix.to_string());
 }
 
 #[cfg(test)]
@@ -302,6 +317,28 @@ expect_client_public_key_hex = "new"
                 "gateway.expect_client_public_key_hex".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn added_and_removed_tables_report_leaf_keys() {
+        let base = toml_json("version = 1\n").unwrap();
+        let with_api = toml_json(
+            r#"
+version = 1
+
+[api]
+job_output_artifact_min_bytes = 4096
+gateway_control_read_timeout_ms = 2500
+"#,
+        )
+        .unwrap();
+
+        let expected = vec![
+            "api.gateway_control_read_timeout_ms".to_string(),
+            "api.job_output_artifact_min_bytes".to_string(),
+        ];
+        assert_eq!(changed_json_paths(&base, &with_api), expected);
+        assert_eq!(changed_json_paths(&with_api, &base), expected);
     }
 
     #[test]

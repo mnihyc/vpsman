@@ -21,7 +21,8 @@ use crate::{
     model::{
         AllocateTunnelEndpointsRequest, AllocateTunnelEndpointsResponse, CreateJobRequest,
         CreateJobResponse, CreateTunnelPlanRequest, HistoryQuery, NetworkOspfRecommendationView,
-        NetworkOspfUpdatePlanView, RefreshTunnelPlanOspfStatusRequest, TunnelPlanMutationResponse,
+        NetworkOspfUpdatePlanView, RefreshTunnelPlanOspfStatusRequest, RuntimeConfigDispatchView,
+        TunnelPlanEndpointRuntimeConfigView, TunnelPlanMutationResponse,
         TunnelPlanOspfDispatchView, TunnelPlanOspfJobsResponse, TunnelPlanView,
         UpdateTunnelConnectionAssessmentRequest, UpdateTunnelPlanOspfCostRequest,
         UpdateTunnelPlanRequest,
@@ -296,23 +297,52 @@ pub(crate) async fn delete_tunnel_plan(
     if existing.revision != request.expected_revision {
         return Err(ApiError::conflict("tunnel_plan_snapshot_stale"));
     }
-    if existing.enabled {
-        return Err(ApiError::conflict("tunnel_plan_disable_before_delete"));
-    }
-    if !existing.left_runtime_config.cleanup_confirmed
-        || !existing.right_runtime_config.cleanup_confirmed
-    {
-        return Err(ApiError::conflict("tunnel_plan_cleanup_not_confirmed"));
-    }
-    let deleted = state
+    let mut deleted = state
         .repo
         .delete_tunnel_plan(plan_id, request.expected_revision, &operator)
         .await
         .map_err(tunnel_plan_repository_error)?;
+    let sync = dispatch_runtime_config_for_clients(
+        &state,
+        &operator,
+        vec![
+            deleted.left_client_id.clone(),
+            deleted.right_client_id.clone(),
+        ],
+        "tunnel_plan_deleted",
+    )
+    .await;
+    deleted.left_runtime_config =
+        retired_endpoint_runtime_config(&deleted.left_client_id, &sync, &deleted.updated_at);
+    deleted.right_runtime_config =
+        retired_endpoint_runtime_config(&deleted.right_client_id, &sync, &deleted.updated_at);
     Ok(Json(TunnelPlanMutationResponse {
         plan: deleted,
-        sync: Vec::new(),
+        sync,
     }))
+}
+
+fn retired_endpoint_runtime_config(
+    client_id: &str,
+    sync: &[RuntimeConfigDispatchView],
+    updated_at: &str,
+) -> TunnelPlanEndpointRuntimeConfigView {
+    let outcome = sync.iter().find(|outcome| outcome.client_id == client_id);
+    TunnelPlanEndpointRuntimeConfigView {
+        client_id: client_id.to_string(),
+        desired: "absent".to_string(),
+        status: outcome
+            .map(|outcome| match outcome.status.as_str() {
+                "queue_failed" => "failed",
+                "not_queued" => "not_dispatched",
+                status => status,
+            })
+            .unwrap_or("not_dispatched")
+            .to_string(),
+        job_id: outcome.and_then(|outcome| outcome.job_id),
+        error: outcome.and_then(|outcome| outcome.error.clone()),
+        updated_at: Some(updated_at.to_string()),
+    }
 }
 
 pub(crate) async fn update_tunnel_connection_assessment(
@@ -521,12 +551,6 @@ async fn mutate_tunnel_plan_enabled(
         .ok_or_else(|| ApiError::bad_request("tunnel_plan_not_found"))?;
     if existing.revision != request.expected_revision {
         return Err(ApiError::conflict("tunnel_plan_snapshot_stale"));
-    }
-    if existing.enabled == enabled && enabled {
-        return Ok(Json(TunnelPlanMutationResponse {
-            plan: existing,
-            sync: Vec::new(),
-        }));
     }
     if enabled {
         require_tunnel_endpoint_agents(&state, &existing.left_client_id, &existing.right_client_id)
@@ -767,8 +791,6 @@ fn tunnel_plan_repository_error(error: anyhow::Error) -> ApiError {
         ApiError::conflict("tunnel_plan_endpoint_agent_not_found")
     } else if message.contains("tunnel_plan_endpoints_must_differ") {
         ApiError::bad_request("tunnel_plan_endpoints_must_differ")
-    } else if message.contains("tunnel_plan_disable_before_delete") {
-        ApiError::conflict("tunnel_plan_disable_before_delete")
     } else if message.contains("tunnel_connection_assessment_requires_enabled_plan") {
         ApiError::conflict("tunnel_connection_assessment_requires_enabled_plan")
     } else if message.contains("invalid_tunnel_connection_assessment") {

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { CheckCircle2, LockKeyhole, Play, ShieldCheck } from "lucide-react";
 import {
   buildBulkJobProgress,
@@ -328,6 +328,7 @@ export function JobDispatchPanel({
   privilegeMaterial: PrivilegeMaterial | null;
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
 }) {
+  const appliedDispatchPresetRequestId = useRef<string | null>(null);
   const [mode, setModeState] = useState<DispatchMode>(fixedMode ?? "shell");
   const [commandText, setCommandText] = useState("");
   const [shellPty, setShellPty] = useState(false);
@@ -446,9 +447,21 @@ export function JobDispatchPanel({
   }, [fixedMode, mode, terminalSurface]);
 
   useEffect(() => {
-    if (!dispatchPreset) {
+    if (
+      !dispatchPreset ||
+      appliedDispatchPresetRequestId.current === dispatchPreset.requestId
+    ) {
       return;
     }
+    if (
+      dispatchPreset.commandTemplateId &&
+      !commandTemplates.some(
+        (template) => template.id === dispatchPreset.commandTemplateId,
+      )
+    ) {
+      return;
+    }
+    appliedDispatchPresetRequestId.current = dispatchPreset.requestId;
     if (fixedMode && dispatchPreset.mode !== fixedMode) {
       onDispatchPresetApplied?.();
       return;

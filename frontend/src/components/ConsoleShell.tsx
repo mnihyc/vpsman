@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
 import {
   BookmarkPlus,
   ChevronDown,
@@ -114,7 +121,9 @@ export function ConsoleShell({
   );
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState("");
+  const commandButtonRef = useRef<HTMLButtonElement | null>(null);
   const commandInputRef = useRef<HTMLInputElement | null>(null);
+  const commandReturnFocusRef = useRef<HTMLElement | null>(null);
   const contentRef = useRef<HTMLElement | null>(null);
   const topbarRef = useRef<HTMLElement | null>(null);
   const hasFleetScope = fleetQuery.trim().length > 0 || activeSavedFleetViewId !== null;
@@ -147,9 +156,10 @@ export function ConsoleShell({
     .filter(Boolean)
     .join(" · ");
   const activeViewLabel = viewLabel(activeView);
+  const activeSubpageBase = activeSubpage.split(":")[0];
   const activeSubpageLabel = subpageLabel(activeView, activeSubpage);
   const activeSubpageDescription = subpageDescription(activeView, activeSubpage);
-  const mobilePageValue = `${activeView}::${activeSubpage}`;
+  const mobilePageValue = `${activeView}::${activeSubpageBase}`;
   const selectMobilePage = (value: string) => {
     const option = navSections
       .flatMap((section) =>
@@ -230,13 +240,35 @@ export function ConsoleShell({
     }
     return groups;
   }, [filteredCommandItems]);
-  const closeCommandPalette = () => {
+  const openCommandPalette = () => {
+    commandReturnFocusRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : commandButtonRef.current;
+    setCommandPaletteOpen(true);
+  };
+  const closeCommandPalette = (restoreFocus = true) => {
     setCommandPaletteOpen(false);
     setCommandQuery("");
+    if (restoreFocus) {
+      window.requestAnimationFrame(() => {
+        (commandReturnFocusRef.current ?? commandButtonRef.current)?.focus({
+          preventScroll: true,
+        });
+      });
+    }
   };
   const selectCommandItem = (item: CommandPaletteItem) => {
+    closeCommandPalette(false);
     item.onSelect();
-    closeCommandPalette();
+    window.requestAnimationFrame(() =>
+      contentRef.current?.focus({ preventScroll: true }),
+    );
+  };
+  const skipToPageContent = (event: MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault();
+    contentRef.current?.focus({ preventScroll: true });
+    contentRef.current?.scrollTo({ top: 0, behavior: "auto" });
   };
   const openFleetScopeEditor = () => {
     const search = document.getElementById("fleet-search");
@@ -381,7 +413,7 @@ export function ConsoleShell({
     const handleKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLocaleLowerCase() === "k") {
         event.preventDefault();
-        setCommandPaletteOpen(true);
+        openCommandPalette();
         return;
       }
       if (event.key === "Escape" && commandPaletteOpen) {
@@ -409,7 +441,11 @@ export function ConsoleShell({
 
   return (
     <div className="shell">
-      <a className="skipLink" href="#console-main-content">
+      <a
+        className="skipLink"
+        href="#console-main-content"
+        onClick={skipToPageContent}
+      >
         Skip to page content
       </a>
       <aside className="sidebar">
@@ -457,7 +493,7 @@ export function ConsoleShell({
                         {subpages.map((subpage) => {
                           const active =
                             activeView === item.view &&
-                            activeSubpage === subpage.id;
+                            activeSubpageBase === subpage.id;
                           return (
                             <button
                               aria-current={active ? "page" : undefined}
@@ -565,7 +601,8 @@ export function ConsoleShell({
             <button
               className="iconButton"
               aria-label="Open command palette"
-              onClick={() => setCommandPaletteOpen(true)}
+              onClick={openCommandPalette}
+              ref={commandButtonRef}
               title="Open command palette"
               type="button"
             >
@@ -636,19 +673,27 @@ export function ConsoleShell({
             <div className="quickStats" aria-label="Fleet status summary">
               <span className="summaryScopeLabel">{summaryScopeLabel}</span>
               <Metric label="Online" value={String(summary.online)} tone="green" />
-              <Metric label="Offline" value={String(summary.offline)} tone="yellow" />
-              <Metric label="Stale" value={String(summary.stale)} tone="yellow" />
+              <Metric
+                label="Offline"
+                value={String(summary.offline)}
+                tone={summary.offline > 0 ? "yellow" : "neutral"}
+              />
+              <Metric
+                label="Stale"
+                value={String(summary.stale)}
+                tone={summary.stale > 0 ? "yellow" : "neutral"}
+              />
               <Metric
                 label="No contact"
                 title="Never-connected VPSs plus records whose reported online state lacks trustworthy gateway contact evidence"
                 value={String(summary.never + summary.unknown)}
-                tone="yellow"
+                tone={summary.never + summary.unknown > 0 ? "yellow" : "neutral"}
               />
               <Metric
                 label="Unavailable"
                 title="Offline, stale, never-connected, and contact-unknown VPSs"
                 value={String(unavailableCount)}
-                tone="yellow"
+                tone={unavailableCount > 0 ? "yellow" : "neutral"}
               />
               <Metric
                 label="Alerts"

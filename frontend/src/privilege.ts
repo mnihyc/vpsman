@@ -91,10 +91,28 @@ export function parseCommandArgv(input: string): string[] {
   let current = "";
   let quote: "'" | "\"" | null = null;
   let escaping = false;
+  let tokenStarted = false;
 
-  for (const char of input.trim()) {
+  for (const char of input) {
+    if (quote === "'") {
+      if (char === "'") {
+        quote = null;
+      } else {
+        current += char;
+      }
+      continue;
+    }
     if (escaping) {
-      current += char;
+      if (char === "\n") {
+        escaping = false;
+        continue;
+      }
+      if (quote === "\"" && !["$", "`", "\"", "\\"].includes(char)) {
+        current += `\\${char}`;
+      } else {
+        current += char;
+      }
+      tokenStarted = true;
       escaping = false;
       continue;
     }
@@ -102,8 +120,8 @@ export function parseCommandArgv(input: string): string[] {
       escaping = true;
       continue;
     }
-    if (quote) {
-      if (char === quote) {
+    if (quote === "\"") {
+      if (char === "\"") {
         quote = null;
       } else {
         current += char;
@@ -112,25 +130,28 @@ export function parseCommandArgv(input: string): string[] {
     }
     if (char === "'" || char === "\"") {
       quote = char;
+      tokenStarted = true;
       continue;
     }
     if (/\s/.test(char)) {
-      if (current) {
+      if (tokenStarted) {
         argv.push(current);
         current = "";
+        tokenStarted = false;
       }
       continue;
     }
     current += char;
+    tokenStarted = true;
   }
 
   if (escaping) {
-    current += "\\";
+    throw new Error("Trailing escape in command argv");
   }
   if (quote) {
     throw new Error("Unterminated quoted argument");
   }
-  if (current) {
+  if (tokenStarted) {
     argv.push(current);
   }
   return argv;

@@ -10,6 +10,7 @@ import {
 } from "../../bulkJobProgress";
 import { ActionFeedback } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
+import { ConsoleStatusBadge } from "../../components/ConsoleLayout";
 import { ExecutionResultPanel } from "../../components/ExecutionResultPanel";
 import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
 import {
@@ -49,6 +50,7 @@ import { networkObservationMetricDefinition } from "../../telemetryMetrics";
 import {
   clientDisplayNameFromMap,
   clientDisplayNameMap,
+  decodeOutputPreview,
   runPanelAction,
   shortId,
   timestampMillis,
@@ -115,9 +117,11 @@ export function TopologyNetworkTestControls({
   const [jobProgress, setJobProgress] = useState<BulkJobProgress | null>(null);
   const [lastJobProgress, setLastJobProgress] =
     useState<BulkJobProgress | null>(null);
+  const [lastOutputs, setLastOutputs] = useState<JobOutputRecord[]>([]);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [reviewPending, setReviewPending] = useState(false);
+  const [reviewAction, setReviewAction] = useState<NetworkAction | null>(null);
   const selectedPlan =
     tunnelPlans.find((plan) => plan.id === selectedPlanId) ??
     tunnelPlans[0] ??
@@ -190,7 +194,9 @@ export function TopologyNetworkTestControls({
       ? "Dispatch ready"
       : "Inspect available; unlock for probe/speed";
   const networkTestFeedbackMessage =
-    actionError ?? (reviewPending ? `Preparing ${actionLabel(lastAction).toLowerCase()} review` : null);
+    actionError ?? (reviewPending && reviewAction
+      ? `Preparing ${actionLabel(reviewAction).toLowerCase()} review`
+      : null);
 
   useEffect(() => {
     if (tunnelPlans.length === 0) {
@@ -221,7 +227,7 @@ export function TopologyNetworkTestControls({
 
   async function openNetworkPrompt(mode: NetworkAction) {
     setActionError(null);
-    setLastAction(mode);
+    setReviewAction(mode);
     const reviewGeneration = captureReviewGeneration();
     setReviewPending(true);
     try {
@@ -237,6 +243,7 @@ export function TopologyNetworkTestControls({
       });
     } finally {
       setReviewPending(false);
+      setReviewAction(null);
     }
   }
 
@@ -380,7 +387,9 @@ export function TopologyNetworkTestControls({
         { label: "Plans", value: planLabel },
         {
           label: "Endpoint",
-          value: submissions.length > 1 ? "Both endpoints" : side,
+          value: mode === "speed_test" || submissions.length > 1
+            ? "Both endpoints"
+            : side,
         },
         { label: "Baseline", value: formatPlanBaseline(selectedPlan) },
         { label: "Recent evidence", value: evidenceSummary },
@@ -422,6 +431,7 @@ export function TopologyNetworkTestControls({
   function clearExecutionResults() {
     setJobProgress(null);
     setLastJobProgress(null);
+    setLastOutputs([]);
     setLastJob(null);
   }
 
@@ -438,6 +448,7 @@ export function TopologyNetworkTestControls({
       job: CreateJobResponse;
       submission: NetworkJobSubmission;
     }> = [];
+    const outputs: JobOutputRecord[] = [];
     for (const submission of snapshot.submissions) {
       const job = await onCreateJob({
         argv: [],
@@ -461,11 +472,12 @@ export function TopologyNetworkTestControls({
     setLastAction(snapshot.action);
     for (const { job, submission } of jobs) {
       setLastJob(job);
-      await trackNetworkProgress(
+      outputs.push(...await trackNetworkProgress(
         job,
         submission.targets,
         submission.maxTimeoutSecs,
-      );
+      ));
+      setLastOutputs(outputs.slice());
     }
     try {
       await onLoadNetworkTrends();
@@ -480,7 +492,7 @@ export function TopologyNetworkTestControls({
     job: CreateJobResponse,
     targets: AgentView[],
     maxTimeoutSecsForSnapshot: number,
-  ) {
+  ): Promise<JobOutputRecord[]> {
     const targetCount = createJobTargetCount(job);
     setLastJobProgress(null);
     setJobProgress(
@@ -501,6 +513,7 @@ export function TopologyNetworkTestControls({
         maxTimeoutSecs: maxTimeoutSecsForSnapshot,
       });
       setLastJobProgress(result.progress);
+      return await loadCompletedNetworkOutputs(job.job_id, onLoadOutputs);
     } finally {
       setJobProgress(null);
     }
@@ -896,7 +909,12 @@ export function TopologyNetworkTestControls({
             onClearResults={clearExecutionResults}
             onOpenJobDetails={onOpenJobDetails}
             progress={visibleJobProgress}
-          />
+          >
+            <NetworkExecutionEvidence
+              clientLabel={clientLabel}
+              outputs={lastOutputs}
+            />
+          </ExecutionResultPanel>
         )}
       </form>
       <PrivilegeVaultBox
@@ -910,6 +928,180 @@ export function TopologyNetworkTestControls({
       />
     </section>
   );
+}
+
+async function loadCompletedNetworkOutputs(
+  jobId: string,
+  onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>,
+): Promise<JobOutputRecord[]> {
+  let outputs: JobOutputRecord[] = [];
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      outputs = await onLoadOutputs(jobId);
+    } catch {
+      // The terminal target result remains visible while retained output catches up.
+    }
+    if (outputs.some((output) => output.stream === "status" && output.done)) {
+      break;
+    }
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 250));
+  }
+  return outputs;
+}
+
+function NetworkExecutionEvidence({
+  clientLabel,
+  outputs,
+}: {
+  clientLabel: (clientId: string) => string;
+  outputs: JobOutputRecord[];
+}) {
+  const rows = networkExecutionRows(outputs, clientLabel);
+  return (
+    <div className="topologyNetworkResultEvidence" aria-label="Per-endpoint network test evidence">
+      <div className="topologyNetworkResultHeader">
+        <strong>Endpoint evidence</strong>
+        <span>{rows.length > 0 ? `${rows.length} retained result${rows.length === 1 ? "" : "s"}` : "No retained status output"}</span>
+      </div>
+      {rows.length > 0 ? rows.map((row) => (
+        <div className="topologyNetworkResultRow" key={row.id}>
+          <span className="historyPrimary">
+            <strong title={row.target}>{row.target}</strong>
+            <small title={row.detail}>{row.detail}</small>
+          </span>
+          <span className="historyPrimary topologyNetworkResultMetric">
+            <strong title={row.metric}>{row.metric}</strong>
+            <small>{row.kind}</small>
+          </span>
+          <ConsoleStatusBadge tone={row.tone}>{row.status}</ConsoleStatusBadge>
+        </div>
+      )) : (
+        <span className="topologyNetworkResultEmpty">
+          The job is terminal, but no structured status output is retained. Open job details for target state and raw output evidence.
+        </span>
+      )}
+    </div>
+  );
+}
+
+type NetworkExecutionRow = {
+  detail: string;
+  id: string;
+  kind: string;
+  metric: string;
+  status: string;
+  target: string;
+  tone: "ok" | "warning" | "critical" | "info";
+};
+
+function networkExecutionRows(
+  outputs: JobOutputRecord[],
+  clientLabel: (clientId: string) => string,
+): NetworkExecutionRow[] {
+  return outputs.flatMap<NetworkExecutionRow>((output, index) => {
+    if (output.stream !== "status") return [];
+    let parsed: Record<string, unknown>;
+    try {
+      const value = JSON.parse(decodeOutputPreview(output.data_base64));
+      if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+      parsed = value as Record<string, unknown>;
+    } catch {
+      return [];
+    }
+    const type = stringValue(parsed.type) ?? "network_result";
+    const clientId = stringValue(parsed.client_id) ?? output.client_id;
+    const peerId = stringValue(parsed.peer_client_id);
+    const target = peerId
+      ? `${clientLabel(clientId)} -> ${clientLabel(peerId)}`
+      : clientLabel(clientId);
+    if (type === "network_status") {
+      const runtime = recordValue(parsed.runtime);
+      const summary = recordValue(runtime.summary);
+      const reasons = stringArrayValue(summary.reasons);
+      const status = stringValue(summary.status) ?? "unknown";
+      const healthy = summary.healthy === true;
+      return [{
+        detail: reasons.length > 0
+          ? reasons.map(readableNetworkToken).join(", ")
+          : `Interface ${stringValue(parsed.interface) ?? "unknown"}; no runtime drift reason reported`,
+        id: `${output.client_id}:${type}:${index}`,
+        kind: "Runtime status",
+        metric: `${stringValue(parsed.interface) ?? "interface"} · ${readableNetworkToken(status)}`,
+        status: healthy ? "Healthy" : readableNetworkToken(status),
+        target,
+        tone: healthy ? "ok" : "warning",
+      }];
+    }
+    if (type === "network_probe") {
+      const probe = recordValue(parsed.parsed);
+      const latency = numberValue(probe.latency_avg_ms);
+      const loss = numberValue(probe.packet_loss_ratio);
+      const healthy = probe.healthy === true || parsed.success === true;
+      return [{
+        detail: `${loss === null ? "Loss unavailable" : `${formatMetric(loss * 100)}% loss`}; target ${stringValue(parsed.target) ?? "peer tunnel address"}`,
+        id: `${output.client_id}:${type}:${index}`,
+        kind: "Probe",
+        metric: latency === null ? "Latency unavailable" : `${formatMetric(latency)} ms average`,
+        status: healthy ? "Healthy" : "Probe failed",
+        target,
+        tone: healthy ? "ok" : "critical",
+      }];
+    }
+    if (type === "network_speed_test") {
+      const throughput = numberValue(parsed.throughput_mbps);
+      const bytes = numberValue(parsed.bytes);
+      const success = parsed.success === true;
+      const message = stringValue(parsed.message);
+      return [{
+        detail: `${readableNetworkToken(stringValue(parsed.role) ?? "endpoint")} role; ${bytes === null ? "bytes unavailable" : `${formatNetworkBytes(bytes)} transferred`}${message ? `; ${message}` : ""}`,
+        id: `${output.client_id}:${type}:${index}`,
+        kind: "Speed test",
+        metric: throughput === null ? "Throughput unavailable" : `${formatMetric(throughput)} Mbps`,
+        status: success ? "Completed" : "Failed",
+        target,
+        tone: success ? "ok" : "critical",
+      }];
+    }
+    return [{
+      detail: stringValue(parsed.message) ?? "Structured network status output retained",
+      id: `${output.client_id}:${type}:${index}`,
+      kind: readableNetworkToken(type),
+      metric: "Result retained",
+      status: output.exit_code === 0 ? "Completed" : "Needs review",
+      target,
+      tone: output.exit_code === 0 ? "ok" : "warning",
+    }];
+  });
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function stringArrayValue(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.length > 0)
+    : [];
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function readableNetworkToken(value: string): string {
+  return value.replace(/_/g, " ").replace(/^./, (letter: string) => letter.toUpperCase());
+}
+
+function formatNetworkBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${formatMetric(value / 1024)} KiB`;
+  return `${formatMetric(value / (1024 * 1024))} MiB`;
 }
 
 function NetworkTestTrendCharts({

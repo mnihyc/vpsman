@@ -1210,7 +1210,7 @@
 
 .fileEditorActions {
   display: grid;
-  grid-template-columns: 84px auto auto;
+  grid-template-columns: 84px 36px 36px;
   align-items: end;
   gap: 8px;
 }
@@ -3289,6 +3289,27 @@
   background: var(--surface-subtle);
 }
 
+.processTargetScope {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--info-soft);
+  color: var(--text-secondary);
+}
+
+.processTargetScope span,
+.processTargetScope strong {
+  min-width: 0;
+}
+
+.processTargetScope strong {
+  color: var(--text);
+}
+
 .processHeaderActions {
   display: flex;
   align-items: center;
@@ -4576,6 +4597,12 @@
 
   .processSupervisorSummaryStrip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding: 10px 14px;
+  }
+
+  .processTargetScope {
+    align-items: flex-start;
+    flex-direction: column;
     padding: 10px 14px;
   }
 

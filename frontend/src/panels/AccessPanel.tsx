@@ -1486,7 +1486,25 @@ export function AccessPanel({
                 tone={totpFeedbackTone}
               />
               {operator?.totp_enabled ? (
-                <div className="totpDisablePanel">
+                <form
+                  aria-label="Disable TOTP"
+                  className="totpDisablePanel"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    if (!totpPending && totpPassword && totpCode) {
+                      setPendingConfirmation("totp-disable");
+                    }
+                  }}
+                >
+                  <input
+                    aria-hidden="true"
+                    autoComplete="username"
+                    className="srOnly"
+                    name="username"
+                    readOnly
+                    tabIndex={-1}
+                    value={operator?.username ?? ""}
+                  />
                   <div>
                     <strong>TOTP is enabled</strong>
                     <span>
@@ -1518,35 +1536,60 @@ export function AccessPanel({
                     <button
                       className="secondaryAction dangerAction"
                       disabled={totpPending || !totpPassword || !totpCode}
-                      onClick={() => setPendingConfirmation("totp-disable")}
-                      type="button"
+                      type="submit"
                     >
                       <Trash2 size={17} />
                       Review disable
                     </button>
                   </div>
-                </div>
+                </form>
               ) : (
-                <div
+                <form
                   aria-label="TOTP enrollment sequence"
                   className="totpWorkflow"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    if (totpPending || !totpPassword) {
+                      return;
+                    }
+                    if (totpSetup) {
+                      if (totpCode) {
+                        void confirmTotp();
+                      }
+                      return;
+                    }
+                    void setupTotp();
+                  }}
                 >
+                  <input
+                    aria-hidden="true"
+                    autoComplete="username"
+                    className="srOnly"
+                    name="username"
+                    readOnly
+                    tabIndex={-1}
+                    value={operator?.username ?? ""}
+                  />
                   <ol className="totpStepList">
                     <li className={totpPassword ? "ready" : "active"}>
                       <span>1</span>
-                      <strong>Password</strong>
+                      <strong title="Enter the current account password">
+                        Password
+                      </strong>
                     </li>
                     <li className={totpSetup ? "ready" : ""}>
                       <span>2</span>
-                      <strong>QR/secret</strong>
+                      <strong title="Scan the QR code or enter the secret">
+                        Secret
+                      </strong>
                     </li>
                     <li className={totpCode ? "ready" : ""}>
                       <span>3</span>
-                      <strong>Enter code</strong>
+                      <strong title="Enter the authenticator code">Code</strong>
                     </li>
                     <li>
                       <span>4</span>
-                      <strong>Complete</strong>
+                      <strong title="Finish TOTP setup">Complete</strong>
                     </li>
                   </ol>
                   <div className="totpActionGrid">
@@ -1563,8 +1606,8 @@ export function AccessPanel({
                     <button
                       className="secondaryAction"
                       disabled={totpPending || !totpPassword}
-                      onClick={() => void setupTotp()}
-                      type="button"
+                      onClick={totpSetup ? () => void setupTotp() : undefined}
+                      type={totpSetup ? "button" : "submit"}
                     >
                       <ShieldCheck size={17} />
                       Set up TOTP
@@ -1595,14 +1638,13 @@ export function AccessPanel({
                     <button
                       className="primaryAction"
                       disabled={totpPending || !totpPassword || !totpCode}
-                      onClick={() => void confirmTotp()}
-                      type="button"
+                      type={totpSetup ? "submit" : "button"}
                     >
                       <Save size={17} />
                       Complete setup
                     </button>
                   </div>
-                </div>
+                </form>
               )}
               {!operator?.totp_enabled && (
                 <div className="totpDisablePanel disabled">
@@ -2071,7 +2113,6 @@ export function AccessPanel({
           {createdIdentity && createdIdentityPrivateKeyHex && (
             <InstallCommand
               clientId={createdIdentity.client_id}
-              onOpenSystemConfig={onOpenSystemConfig}
               onUpdateOperatorPreferences={onUpdateOperatorPreferences}
               operatorPreferences={operator?.preferences ?? null}
               privateKeyHex={createdIdentityPrivateKeyHex}
@@ -2658,13 +2699,11 @@ function scrollIntoViewSoon(element: HTMLElement | null) {
 
 function InstallCommand({
   clientId,
-  onOpenSystemConfig,
   onUpdateOperatorPreferences,
   operatorPreferences,
   privateKeyHex,
 }: {
   clientId: string;
-  onOpenSystemConfig: () => void;
   onUpdateOperatorPreferences: (
     preferences: OperatorPreferences,
   ) => Promise<void>;
@@ -2804,19 +2843,11 @@ function InstallCommand({
           <strong>Agent install command</strong>
           <span>
             Builds a paste-ready latest-release install line. The private key is
-            still shown once and is not saved.
+            still shown once and is not saved. Gateway values can be saved as
+            this operator's reusable installer defaults.
           </span>
         </div>
         <div className="sectionActions">
-          <button
-            className="secondaryAction compact"
-            onClick={onOpenSystemConfig}
-            title="Open shared suite configuration for gateway runtime settings."
-            type="button"
-          >
-            <Save size={15} />
-            Open Suite Config
-          </button>
           <button
             className="secondaryAction compact"
             disabled={!canSaveGatewayDefaults}
@@ -2884,9 +2915,11 @@ function InstallCommand({
           </select>
         </label>
       </div>
-      {!gatewayKeyValid && normalizedGatewayServerPublicKeyHex.length > 0 ? (
+      {!gatewayKeyValid ? (
         <small className="installCommandHint warn">
-          Gateway public key must be exactly 64 hex characters.
+          {normalizedGatewayServerPublicKeyHex.length === 0
+            ? "Gateway public key is required before copying the command."
+            : "Gateway public key must be exactly 64 hex characters."}
         </small>
       ) : null}
       {normalizedGatewayEndpoints.length === 0 ? (

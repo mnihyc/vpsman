@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { createPortal } from "react-dom";
 import { AlertTriangle, X } from "lucide-react";
 import { usePanelDisplaySettings } from "../panelDisplay";
@@ -8,6 +14,73 @@ type ModalSiblingState = {
   element: HTMLElement;
   inert: boolean;
 };
+
+type ConfirmationFocusState = {
+  focusHistory: HTMLElement[];
+  installed: boolean;
+  lastExternalFocus: HTMLElement | null;
+};
+
+type ConfirmationFocusTarget = {
+  ariaLabel: string | null;
+  element: HTMLElement;
+  name: string | null;
+  scope: HTMLElement | null;
+  tagName: string;
+  text: string;
+  title: string | null;
+  type: string | null;
+};
+
+declare global {
+  interface Window {
+    __vpsmanConfirmationFocusState?: ConfirmationFocusState;
+  }
+}
+
+function confirmationFocusState(): ConfirmationFocusState | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  window.__vpsmanConfirmationFocusState ??= {
+    focusHistory: [],
+    installed: false,
+    lastExternalFocus: null,
+  };
+  window.__vpsmanConfirmationFocusState.focusHistory ??= [];
+  return window.__vpsmanConfirmationFocusState;
+}
+
+function trackExternalFocus(event: Event) {
+  const target = event.target;
+  if (
+    target instanceof HTMLElement &&
+    target !== document.body &&
+    target !== document.documentElement &&
+    !target.closest(".confirmationPrompt")
+  ) {
+    const state = confirmationFocusState();
+    if (state) {
+      state.lastExternalFocus = target;
+      state.focusHistory = [
+        target,
+        ...state.focusHistory.filter((element) => element !== target),
+      ].slice(0, 8);
+    }
+  }
+}
+
+function installExternalFocusTracker() {
+  const state = confirmationFocusState();
+  if (!state || state.installed || typeof document === "undefined") {
+    return;
+  }
+  state.installed = true;
+  document.addEventListener("focusin", trackExternalFocus, true);
+  document.addEventListener("pointerdown", trackExternalFocus, true);
+}
+
+installExternalFocusTracker();
 
 export function ConfirmationPrompt({
   cancelLabel = "Cancel",
@@ -51,6 +124,8 @@ export function ConfirmationPrompt({
   const observedPendingRef = useRef(false);
   const onCancelRef = useRef(onCancel);
   const pendingRef = useRef(pending);
+  const previousFocusRef = useRef<ConfirmationFocusTarget[]>([]);
+  const previouslyOpenRef = useRef(false);
   const [typedConfirmation, setTypedConfirmation] = useState("");
   const [confirmLatched, setConfirmLatched] = useState(false);
   const typedConfirmationRequired = Boolean(typedConfirmationText);
@@ -60,6 +135,26 @@ export function ConfirmationPrompt({
     preferences.review_prompt_mode === "overlay" ? "overlay" : "inline";
   const confirmBlocked =
     pending || confirmLatched || confirmDisabled || !typedConfirmationMatches;
+
+  if (open && !previouslyOpenRef.current) {
+    const activeElement =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    const state = confirmationFocusState();
+    const primary =
+      activeElement &&
+      activeElement !== document.body &&
+      activeElement !== document.documentElement &&
+      !activeElement.closest(".confirmationPrompt")
+        ? activeElement
+        : state?.lastExternalFocus ?? null;
+    previousFocusRef.current = captureConfirmationFocusTargets([
+      primary,
+      ...(state?.focusHistory ?? []),
+    ]);
+  }
+  previouslyOpenRef.current = open;
 
   useEffect(() => {
     onCancelRef.current = onCancel;
@@ -116,15 +211,12 @@ export function ConfirmationPrompt({
     };
   }, [displayMode, open]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open || displayMode !== "overlay" || !overlayRef.current) {
       return undefined;
     }
     const overlay = overlayRef.current;
-    const previousFocus =
-      document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null;
+    const previousFocusTargets = previousFocusRef.current;
     const siblings: ModalSiblingState[] = Array.from(
       document.body.children,
     ).flatMap((element) => {
@@ -152,9 +244,9 @@ export function ConfirmationPrompt({
           sibling.element.setAttribute("aria-hidden", sibling.ariaHidden);
         }
       }
-      if (previousFocus?.isConnected) {
-        previousFocus.focus({ preventScroll: true });
-      }
+      window.requestAnimationFrame(() => {
+        restoreConfirmationFocus(previousFocusTargets);
+      });
     };
   }, [displayMode, open]);
 
@@ -474,6 +566,90 @@ function getFocusableElements(container: HTMLElement): HTMLElement[] {
       !element.hasAttribute("hidden") &&
       element.getAttribute("aria-hidden") !== "true",
   );
+}
+
+function captureConfirmationFocusTargets(
+  elements: Array<HTMLElement | null>,
+): ConfirmationFocusTarget[] {
+  const seen = new Set<HTMLElement>();
+  return elements.flatMap((element) => {
+    if (!element || seen.has(element)) {
+      return [];
+    }
+    seen.add(element);
+    return [
+      {
+        ariaLabel: element.getAttribute("aria-label"),
+        element,
+        name: element.getAttribute("name"),
+        scope: element.closest<HTMLElement>(
+          "#console-main-content, .actionDrawer, .sidebar, main",
+        ),
+        tagName: element.tagName.toLocaleLowerCase(),
+        text: normalizeFocusText(element.textContent ?? ""),
+        title: element.getAttribute("title"),
+        type: element.getAttribute("type"),
+      },
+    ];
+  });
+}
+
+function restoreConfirmationFocus(
+  targets: ConfirmationFocusTarget[],
+  attempt = 0,
+) {
+  for (const target of targets) {
+    const element = resolveConfirmationFocusTarget(target);
+    if (!element) {
+      continue;
+    }
+    const unavailable =
+      element.matches(":disabled") ||
+      element.getAttribute("aria-disabled") === "true";
+    if (unavailable) {
+      continue;
+    }
+    element.focus({ preventScroll: true });
+    if (document.activeElement === element) {
+      return;
+    }
+  }
+  if (attempt >= 10) {
+    return;
+  }
+  window.setTimeout(() => restoreConfirmationFocus(targets, attempt + 1), 50);
+}
+
+function resolveConfirmationFocusTarget(
+  target: ConfirmationFocusTarget,
+): HTMLElement | null {
+  if (target.element.isConnected) {
+    return target.element;
+  }
+  const scope = target.scope?.isConnected ? target.scope : document.body;
+  const candidates = Array.from(
+    scope.querySelectorAll<HTMLElement>(target.tagName),
+  ).filter(
+    (element) =>
+      !element.closest(".confirmationPrompt") &&
+      element.getClientRects().length > 0,
+  );
+  return (
+    candidates.find(
+      (element) =>
+        (!target.ariaLabel ||
+          element.getAttribute("aria-label") === target.ariaLabel) &&
+        (!target.name || element.getAttribute("name") === target.name) &&
+        (!target.title || element.getAttribute("title") === target.title) &&
+        (!target.type || element.getAttribute("type") === target.type) &&
+        (!target.text ||
+          normalizeFocusText(element.textContent ?? "") === target.text),
+    ) ?? null
+  );
+}
+
+function normalizeFocusText(value: string) {
+  return value.replace(/\s+/g, " ").trim();
 }
 
 function confirmationItemTitle(value: ReactNode): string | undefined {

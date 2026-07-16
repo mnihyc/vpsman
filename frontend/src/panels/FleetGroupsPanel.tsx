@@ -213,7 +213,7 @@ function GroupSummaryStrip({ summary }: { summary: GroupSummary }) {
       </span>
       <span>
         <strong>{summary.assignedVpsCount}</strong>
-        <small>assigned VPSs</small>
+        <small>assigned VPS</small>
       </span>
       <span>
         <strong>{summary.reachableCount}/{summary.contactReviewCount}/{summary.offlineCount}</strong>
@@ -614,7 +614,7 @@ function TagRegistry({
       },
       {
         cell: (tag) => tag.clients.length,
-        header: "Assigned VPSs",
+        header: "Assigned VPS",
         id: "assigned",
         searchValue: (tag) => tag.clients.length,
         sortValue: (tag) => tag.clients.length,

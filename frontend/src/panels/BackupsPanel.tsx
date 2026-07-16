@@ -1,6 +1,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
   type ReactNode,
@@ -12,6 +13,7 @@ import {
   ExternalLink,
   RefreshCw,
   RotateCcw,
+  Scissors,
   Server,
   ShieldCheck,
 } from "lucide-react";
@@ -106,6 +108,10 @@ type BackupsPanelProps = {
   backups: BackupRequestRecord[];
   fileTransfers: FileTransferSessionRecord[];
   jobs: JobHistoryRecord[];
+  initialTargetIntent?: {
+    clientId: string;
+    requestId: string;
+  } | null;
   migrationLinks: MigrationLinkRecord[];
   restorePlans: RestorePlanRecord[];
   error: string | null;
@@ -129,6 +135,7 @@ type BackupsPanelProps = {
     request: BackupArtifactHandoffRequest,
   ) => Promise<BackupArtifactHandoffRecord>;
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
+  onInitialTargetIntentConsumed?: (requestId: string) => void;
   onPruneBackupPolicies: (
     request: BackupPolicyPruneRequest,
   ) => Promise<BackupPolicyPruneResponse>;
@@ -148,7 +155,7 @@ type BackupsPanelProps = {
   onOpenPrivilegeUnlock: () => void;
   onOpenJobArtifacts: () => void;
   onOpenJobDetails?: (jobId: string) => void;
-  onOpenTransfers: (clientId: string) => void;
+  onOpenTransfers: (clientId: string, path: string, context: string) => void;
   onOpenVpsDetail?: (clientId: string) => void;
   onRefresh: () => Promise<void>;
   onSelectSubpage: (subpage: string) => void;
@@ -335,6 +342,7 @@ export function BackupsPanel({
   backups,
   fileTransfers,
   jobs,
+  initialTargetIntent,
   migrationLinks,
   restorePlans,
   error,
@@ -347,6 +355,7 @@ export function BackupsPanel({
   onDownloadBackupArtifact,
   onHandoffBackupArtifact,
   onLoadJobOutputs,
+  onInitialTargetIntentConsumed,
   onPruneBackupPolicies,
   onResolveTargets,
   onOpenPrivilegeUnlock,
@@ -368,6 +377,7 @@ export function BackupsPanel({
     isReviewGenerationCurrent,
   } = useReviewGenerationGuard();
   const [clientId, setClientId] = useState("");
+  const appliedInitialTargetRequestRef = useRef<string | null>(null);
   const [pathsText, setPathsText] = useState(DEFAULT_BACKUP_SELECTED_PATHS);
   const [includeConfig, setIncludeConfig] = useState(true);
   const [followSymlinks, setFollowSymlinks] = useState(false);
@@ -434,6 +444,11 @@ export function BackupsPanel({
   const [migrationArchiveTransferKey, setMigrationArchiveTransferKey] =
     useState("");
   const [migrationNote, setMigrationNote] = useState("");
+  const [migrationDryRun, setMigrationDryRun] = useState(true);
+  const [migrationPostRestoreArgv, setMigrationPostRestoreArgv] = useState("");
+  const [migrationMaxTimeoutSecs, setMigrationMaxTimeoutSecs] = useState(60);
+  const [migrationForceUnprivileged, setMigrationForceUnprivileged] =
+    useState(false);
   const [lastMigrationLink, setLastMigrationLink] =
     useState<MigrationLinkRecord | null>(null);
   const [lastWorkflowAction, setLastWorkflowAction] =
@@ -448,6 +463,10 @@ export function BackupsPanel({
   const [pending, setPending] = useState(false);
   const [reviewStatus, setReviewStatus] = useState<string | null>(null);
   const [workflowOpen, setWorkflowOpen] = useState(false);
+  const workflowOwnerSubpageRef = useRef<string | null>(null);
+  const [policyWorkflowMode, setPolicyWorkflowMode] = useState<
+    "create" | "prune"
+  >("create");
   const paths = useMemo(() => parseBackupPaths(pathsText), [pathsText]);
   const policyPaths = useMemo(
     () => parseBackupPaths(policyPathsText),
@@ -472,12 +491,68 @@ export function BackupsPanel({
     [agents, vpsNameDisplayMode],
   );
   const selectedAgent = agents.find((agent) => agent.id === clientId) ?? null;
+
+  useEffect(() => {
+    if (
+      !initialTargetIntent ||
+      appliedInitialTargetRequestRef.current === initialTargetIntent.requestId ||
+      agents.length === 0
+    ) {
+      return;
+    }
+    appliedInitialTargetRequestRef.current = initialTargetIntent.requestId;
+    setClientId(
+      agents.some((agent) => agent.id === initialTargetIntent.clientId)
+        ? initialTargetIntent.clientId
+        : "",
+    );
+    workflowOwnerSubpageRef.current = "requests";
+    setWorkflowOpen(true);
+    onInitialTargetIntentConsumed?.(initialTargetIntent.requestId);
+  }, [agents, initialTargetIntent, onInitialTargetIntentConsumed]);
   const restoreTarget =
     agents.find((agent) => agent.id === restoreTargetId) ?? null;
   const rollbackTarget =
     agents.find((agent) => agent.id === rollbackTargetId) ?? null;
+  const migrationRestorePlans = useMemo(
+    () =>
+      restorePlans.filter(
+        (plan) =>
+          plan.status === "planned_metadata_only" &&
+          plan.source_client_id !== plan.target_client_id,
+      ),
+    [restorePlans],
+  );
+  const sameVpsRestoreDraftCount = useMemo(
+    () =>
+      restorePlans.filter(
+        (plan) =>
+          plan.status === "planned_metadata_only" &&
+          plan.source_client_id === plan.target_client_id,
+      ).length,
+    [restorePlans],
+  );
   const selectedMigrationRestorePlan =
-    restorePlans.find((plan) => plan.id === migrationRestorePlanId) ?? null;
+    migrationRestorePlans.find((plan) => plan.id === migrationRestorePlanId) ??
+    null;
+  const persistedSelectedMigrationLink = useMemo(
+    () =>
+      latestByIso(
+        migrationLinks.filter(
+          (link) => link.restore_plan_id === selectedMigrationRestorePlan?.id,
+        ),
+        (link) => link.created_at,
+      ),
+    [migrationLinks, selectedMigrationRestorePlan?.id],
+  );
+  const selectedMigrationLink =
+    lastMigrationLink?.restore_plan_id === selectedMigrationRestorePlan?.id
+      ? lastMigrationLink
+      : persistedSelectedMigrationLink;
+  const selectedMigrationTarget =
+    agents.find(
+      (agent) => agent.id === selectedMigrationRestorePlan?.target_client_id,
+    ) ?? null;
   const selectedRestoreSourceBackup =
     backups.find((backup) => backup.id === restoreSourceId) ?? null;
   const restorePaths = selectedRestoreSourceBackup?.paths ?? [];
@@ -565,6 +640,14 @@ export function BackupsPanel({
   ].includes(activeSubpage)
     ? activeSubpage
     : "requests";
+  function openBackupWorkflow(ownerSubpage = backupSubpage) {
+    workflowOwnerSubpageRef.current = ownerSubpage;
+    setWorkflowOpen(true);
+  }
+  function closeBackupWorkflow() {
+    workflowOwnerSubpageRef.current = null;
+    setWorkflowOpen(false);
+  }
   useEffect(() => {
     invalidateReviewGeneration();
     setActionError(null);
@@ -573,6 +656,13 @@ export function BackupsPanel({
     setPendingPolicySnapshot(null);
     setPendingActionSnapshot(null);
     setLastWorkflowAction(null);
+    setWorkflowOpen((open) => {
+      if (!open || workflowOwnerSubpageRef.current === backupSubpage) {
+        return open;
+      }
+      workflowOwnerSubpageRef.current = null;
+      return false;
+    });
   }, [backupSubpage, invalidateReviewGeneration]);
   const backupSubpageMeta = backupSubpageSummaries[backupSubpage];
   const jobStatusById = useMemo(
@@ -590,7 +680,7 @@ export function BackupsPanel({
     : null;
   const status = `${backupPolicies.length} polic${backupPolicies.length === 1 ? "y" : "ies"}, ${backups.length} backup request${
     backups.length === 1 ? "" : "s"
-  }, ${artifacts.length} artifact${artifacts.length === 1 ? "" : "s"}, ${restorePlans.length} draft restore${
+  }, ${artifacts.length} artifact${artifacts.length === 1 ? "" : "s"}, ${restorePlans.length} restore plan${
     restorePlans.length === 1 ? "" : "s"
   }, ${migrationLinks.length} migration mapping${migrationLinks.length === 1 ? "" : "s"}`;
   const backupPageFeedbackMessage =
@@ -734,7 +824,7 @@ export function BackupsPanel({
             items={backupPostureItems}
             migrationLinks={migrationLinks}
             onStartBackup={() => {
-              setWorkflowOpen(true);
+              openBackupWorkflow("requests");
               onSelectSubpage("requests");
             }}
             onSelectSubpage={onSelectSubpage}
@@ -1140,7 +1230,7 @@ export function BackupsPanel({
     setRestoreArchiveTransferKey("");
     setActionError(null);
     onSelectSubpage("restore");
-    setWorkflowOpen(true);
+    openBackupWorkflow("restore");
   }
 
   function openBackupRestore(backup: BackupRequestRecord) {
@@ -1149,7 +1239,7 @@ export function BackupsPanel({
     setRestoreArchiveTransferKey("");
     setActionError(null);
     onSelectSubpage("restore");
-    setWorkflowOpen(true);
+    openBackupWorkflow("restore");
   }
 
   async function downloadArtifactPackage(
@@ -1188,7 +1278,7 @@ export function BackupsPanel({
     setMissingPathPolicy(backup.missing_path_policy);
     setActionError(null);
     onSelectSubpage("requests");
-    setWorkflowOpen(true);
+    openBackupWorkflow("requests");
   }
 
   function selectArtifactBackupId(backupId: string) {
@@ -1523,7 +1613,7 @@ export function BackupsPanel({
       onOpenPrivilegeUnlock();
       throw new Error("Privilege unlock is locked");
     }
-    const note = migrationNote.trim() || null;
+    const note = (selectedMigrationLink?.note ?? migrationNote.trim()) || null;
     const payloadHashHex = await migrationLinkPayloadHashHex(restorePlan, note);
     return {
       payloadHashHex,
@@ -1560,6 +1650,11 @@ export function BackupsPanel({
         const restorePlan = selectedMigrationRestorePlan;
         if (!restorePlan) {
           throw new Error("Select a draft restore relationship");
+        }
+        if (restorePlan.source_client_id === restorePlan.target_client_id) {
+          throw new Error(
+            "Migration requires a replacement VPS different from the source. Use Restore for same-VPS recovery.",
+          );
         }
         const review = await buildMigrationLinkReview(restorePlan);
         requireCurrentBackupReview(reviewGeneration);
@@ -1603,6 +1698,11 @@ export function BackupsPanel({
         if (!restorePlan) {
           throw new Error("Select a draft restore relationship");
         }
+        if (restorePlan.source_client_id === restorePlan.target_client_id) {
+          throw new Error(
+            "Migration requires a replacement VPS different from the source. Use Restore for same-VPS recovery.",
+          );
+        }
         const input: RestoreRunInput = {
           sourceBackupRequestId: restorePlan.source_backup_request_id,
           targetClientId: restorePlan.target_client_id,
@@ -1610,10 +1710,10 @@ export function BackupsPanel({
           includeConfig: restorePlan.include_config,
           destinationRoot: restorePlan.destination_root ?? "",
           archiveTransfer: selectedMigrationArchiveTransfer,
-          dryRun: restoreDryRun,
-          postRestoreArgv: restorePostRestoreArgv,
-          maxTimeoutSecs: restoreMaxTimeoutSecs,
-          forceUnprivileged: restoreForceUnprivileged,
+          dryRun: migrationDryRun,
+          postRestoreArgv: migrationPostRestoreArgv,
+          maxTimeoutSecs: migrationMaxTimeoutSecs,
+          forceUnprivileged: migrationForceUnprivileged,
         };
         const run = await buildRestoreRunJobSnapshot(input);
         const linkReview = await buildMigrationLinkReview(restorePlan);
@@ -1672,6 +1772,9 @@ export function BackupsPanel({
     const archiveTransferSessionId =
       restoreOperation?.archive_transfer_session_id ??
       fallbackArchive?.sessionId;
+    const postRestoreArgv = restoreOperation?.post_restore_argv ?? [];
+    const postRestoreArgvLabel =
+      postRestoreArgv.length > 0 ? JSON.stringify(postRestoreArgv) : "none";
     return [
       {
         label: "Archive transfer",
@@ -1680,7 +1783,11 @@ export function BackupsPanel({
           : "missing",
         title: archiveTransferSessionId ?? "missing",
       },
-      { label: "Archive path", value: archivePath || "missing" },
+      {
+        label: "Archive path",
+        value: archivePath || "missing",
+        title: archivePath || "missing",
+      },
       {
         label: "Archive size",
         value: archiveSizeBytes ? formatBytes(archiveSizeBytes) : "missing",
@@ -1689,6 +1796,23 @@ export function BackupsPanel({
         label: "Archive SHA-256",
         value: archiveSha256Hex ? shortHash(archiveSha256Hex) : "missing",
         title: archiveSha256Hex ?? "missing",
+      },
+      {
+        label: "Post-restore argv",
+        value: postRestoreArgvLabel,
+        title: postRestoreArgvLabel,
+      },
+      {
+        label: "Max timeout",
+        value: run?.request.max_timeout_secs
+          ? `${run.request.max_timeout_secs}s`
+          : "server default",
+      },
+      {
+        label: "Privilege mode",
+        value: run?.request.force_unprivileged
+          ? "Forced best effort / unprivileged"
+          : "Agent capability policy",
       },
     ];
   }
@@ -1715,8 +1839,8 @@ export function BackupsPanel({
           {
             label: "Fixed targets",
             value: policySnapshot
-              ? `${policySnapshot.targetClientIds.length} VPSs resolved and saved`
-              : `${policyTargetCount} VPSs resolved and saved`,
+              ? `${policySnapshot.targetClientIds.length} VPS${policySnapshot.targetClientIds.length === 1 ? "" : "s"} resolved and saved`
+              : `${policyTargetCount} VPS${policyTargetCount === 1 ? "" : "s"} resolved and saved`,
           },
           {
             label: "Scope",
@@ -2010,7 +2134,7 @@ export function BackupsPanel({
                 : "none"),
           },
           {
-            label: "Cutover notes",
+            label: "Mapping notes",
             value: snapshot?.noteLabel ?? (migrationNote.trim() || "none"),
           },
           {
@@ -2018,6 +2142,7 @@ export function BackupsPanel({
             value: snapshot
               ? `${snapshot.payloadHashHex.slice(0, 12)}...`
               : "review required",
+            title: snapshot?.payloadHashHex ?? "review required",
           },
         ];
       }
@@ -2047,7 +2172,7 @@ export function BackupsPanel({
             label: "Mode",
             value:
               snapshot?.modeLabel ??
-              (restoreDryRun ? "Dry run" : "Live cutover restore"),
+              (migrationDryRun ? "Dry run" : "Live cutover restore"),
           },
           {
             label: "Path behavior",
@@ -2070,6 +2195,7 @@ export function BackupsPanel({
             value: snapshot
               ? `${snapshot.linkPayloadHashHex.slice(0, 12)}...`
               : "review required",
+            title: snapshot?.linkPayloadHashHex ?? "review required",
           },
         ];
       }
@@ -2114,7 +2240,7 @@ export function BackupsPanel({
         return (
           pendingActionSnapshot?.action === "migration-run"
             ? !pendingActionSnapshot.run.request.destructive
-            : restoreDryRun
+            : migrationDryRun
         )
           ? "Confirm saving the mapping and running a dry-run cutover restore."
           : "Confirm saving the mapping and running the live cutover restore.";
@@ -2274,7 +2400,7 @@ export function BackupsPanel({
                       : (
                             pendingActionSnapshot?.action === "migration-run"
                               ? !pendingActionSnapshot.run.request.destructive
-                              : restoreDryRun
+                              : migrationDryRun
                           )
                         ? "Run dry run"
                         : "Run cutover restore";
@@ -2291,13 +2417,15 @@ export function BackupsPanel({
     (pendingConfirmation === "migration-run" &&
       (pendingActionSnapshot?.action === "migration-run"
         ? pendingActionSnapshot.run.request.destructive
-        : !restoreDryRun))
+        : !migrationDryRun))
       ? "danger"
       : "normal";
 
   const backupWorkflowLabel =
     backupSubpage === "policies"
-      ? "Create policy"
+      ? policyWorkflowMode === "prune"
+        ? "Prune policies"
+        : "Create policy"
       : backupSubpage === "artifacts"
         ? "Open artifact workflow"
         : backupSubpage === "restore"
@@ -2305,6 +2433,12 @@ export function BackupsPanel({
           : backupSubpage === "migration"
             ? "Create migration mapping"
             : "Run backup";
+  const backupWorkflowDescription =
+    backupSubpage === "policies"
+      ? policyWorkflowMode === "prune"
+        ? "Preview retention candidates before applying policy-scoped metadata or object cleanup."
+        : "Define one recurring backup policy and freeze its resolved VPS targets during review."
+      : "One-time backup, restore, artifact, and migration inputs stay out of the data table until needed.";
 
   return (
     <section className="workspace singleColumn backupWorkspace backupSingleWorkspace">
@@ -2326,11 +2460,33 @@ export function BackupsPanel({
               </button>
               <button
                 className="primaryAction"
-                onClick={() => setWorkflowOpen(true)}
+                onClick={() => {
+                  if (backupSubpage === "policies") {
+                    setPolicyWorkflowMode("create");
+                    clearBackupConfirmations(["policy", "policy-prune"]);
+                  }
+                  openBackupWorkflow();
+                }}
                 type="button"
               >
-                {backupWorkflowLabel}
+                {backupSubpage === "policies"
+                  ? "Create policy"
+                  : backupWorkflowLabel}
               </button>
+              {backupSubpage === "policies" && (
+                <button
+                  className="secondaryAction"
+                  onClick={() => {
+                    setPolicyWorkflowMode("prune");
+                    clearBackupConfirmations(["policy", "policy-prune"]);
+                    openBackupWorkflow();
+                  }}
+                  type="button"
+                >
+                  <Scissors size={17} />
+                  Prune policies
+                </button>
+              )}
             </div>
             <ActionFeedback
               message={backupPageFeedbackMessage}
@@ -2371,7 +2527,8 @@ export function BackupsPanel({
             clientLabel={clientLabel}
             lastMigrationLink={lastMigrationLink}
             migrationLinks={migrationLinks}
-            restorePlans={restorePlans}
+            restorePlans={migrationRestorePlans}
+            sameVpsRestoreDraftCount={sameVpsRestoreDraftCount}
             selectedPlan={selectedMigrationRestorePlan}
             selectedSourceArtifact={selectedMigrationSourceArtifact}
           />
@@ -2418,7 +2575,11 @@ export function BackupsPanel({
             migrationLinks={migrationLinks}
             onCreatePolicy={
               backupSubpage === "policies"
-                ? () => setWorkflowOpen(true)
+                ? () => {
+                    setPolicyWorkflowMode("create");
+                    clearBackupConfirmations(["policy", "policy-prune"]);
+                    openBackupWorkflow("policies");
+                  }
                 : undefined
             }
             onOpenRequestArtifact={openBackupRequestArtifact}
@@ -2429,9 +2590,11 @@ export function BackupsPanel({
         )}
       </div>
       <ConsoleActionDrawer
-        description="One-time backup, restore, artifact, and migration inputs stay out of the data table until needed."
-        onClose={() => setWorkflowOpen(false)}
-        open={workflowOpen}
+        description={backupWorkflowDescription}
+        onClose={closeBackupWorkflow}
+        open={
+          workflowOpen && workflowOwnerSubpageRef.current === backupSubpage
+        }
         title={backupWorkflowLabel}
       >
         <div className="backupInspector backupWorkflowBody">
@@ -2459,7 +2622,7 @@ export function BackupsPanel({
             tone={backupConfirmationTone}
           />
           {backupSubpage === "policies" && (
-            <>
+            policyWorkflowMode === "create" ? (
               <BackupPolicyForm
                 agents={agents}
                 confirmationOpen={pendingConfirmation === "policy"}
@@ -2528,6 +2691,7 @@ export function BackupsPanel({
                 targetExpressionValid={!policyTargetParse.error}
                 targetsText={policyTargetsText}
               />
+            ) : (
               <BackupPolicyPruneForm
                 confirmationOpen={pendingConfirmation === "policy-prune"}
                 dryRun={policyPruneDryRun}
@@ -2550,7 +2714,7 @@ export function BackupsPanel({
                 result={lastPolicyPrune}
                 scheduleId={policyPruneScheduleId}
               />
-            </>
+            )
           )}
           {backupSubpage === "requests" && (
             <>
@@ -2759,7 +2923,14 @@ export function BackupsPanel({
                   restoreTargetId &&
                   selectedRestoreSourceArtifact &&
                   backupArtifactContentAvailable(selectedRestoreSourceArtifact)
-                    ? () => onOpenTransfers(restoreTargetId)
+                    ? () =>
+                        onOpenTransfers(
+                          restoreTargetId,
+                          restoreArchiveStagingPath(
+                            selectedRestoreSourceBackup?.id ?? "package",
+                          ),
+                          `Stage backup ${shortId(selectedRestoreSourceBackup?.id ?? "package")} on ${clientLabel(restoreTargetId)}, then return to Restore and select the completed upload.`,
+                        )
                     : undefined
                 }
                 onRestoreMaxTimeoutSecsChange={(value) => {
@@ -2831,8 +3002,8 @@ export function BackupsPanel({
                 archiveTransferKey={activeMigrationArchiveTransferKey}
                 archiveTransferOptions={migrationArchiveTransferOptions}
                 clientLabel={clientLabel}
-                forceUnprivileged={restoreForceUnprivileged}
-                lastMigrationLink={lastMigrationLink}
+                forceUnprivileged={migrationForceUnprivileged}
+                existingLink={selectedMigrationLink}
                 linkConfirmationOpen={pendingConfirmation === "migration-link"}
                 migrationNote={migrationNote}
                 migrationRestorePlanId={migrationRestorePlanId}
@@ -2861,7 +3032,22 @@ export function BackupsPanel({
                 onMigrationRestorePlanIdChange={(value) => {
                   setMigrationRestorePlanId(value);
                   setMigrationArchiveTransferKey("");
+                  const existingLink = latestByIso(
+                    migrationLinks.filter(
+                      (link) => link.restore_plan_id === value,
+                    ),
+                    (link) => link.created_at,
+                  );
+                  setMigrationNote(existingLink?.note ?? "");
                   clearBackupConfirmations(["migration-link", "migration-run"]);
+                }}
+                onDryRunChange={(value) => {
+                  setMigrationDryRun(value);
+                  clearBackupConfirmations(["migration-run"]);
+                }}
+                onForceUnprivilegedChange={(value) => {
+                  setMigrationForceUnprivileged(value);
+                  clearBackupConfirmations(["migration-run"]);
                 }}
                 onOpenTransfers={
                   selectedMigrationRestorePlan?.target_client_id &&
@@ -2872,18 +3058,34 @@ export function BackupsPanel({
                     ? () =>
                         onOpenTransfers(
                           selectedMigrationRestorePlan.target_client_id,
+                          restoreArchiveStagingPath(
+                            selectedMigrationSourceBackup?.id ?? "package",
+                          ),
+                          `Stage backup ${shortId(selectedMigrationSourceBackup?.id ?? "package")} on replacement ${clientLabel(selectedMigrationRestorePlan.target_client_id)}, then return to Migration and select the completed upload.`,
                         )
                     : undefined
                 }
+                onOpenRestore={() => onSelectSubpage("restore")}
+                onPostRestoreArgvChange={(value) => {
+                  setMigrationPostRestoreArgv(value);
+                  clearBackupConfirmations(["migration-run"]);
+                }}
+                onRestoreMaxTimeoutSecsChange={(value) => {
+                  setMigrationMaxTimeoutSecs(value);
+                  clearBackupConfirmations(["migration-run"]);
+                }}
                 onRunMigrationRestore={submitMigrationRun}
                 onSubmit={submitMigrationLink}
                 pending={pending}
-                postRestoreArgv={restorePostRestoreArgv}
+                postRestoreArgv={migrationPostRestoreArgv}
                 privilegeReady={Boolean(privilegeMaterial)}
-                restoreDryRun={restoreDryRun}
-                restorePlans={restorePlans}
+                restoreDryRun={migrationDryRun}
+                restoreMaxTimeoutSecs={migrationMaxTimeoutSecs}
+                restorePlans={migrationRestorePlans}
                 runConfirmationOpen={pendingConfirmation === "migration-run"}
+                sameVpsRestoreDraftCount={sameVpsRestoreDraftCount}
                 selectedPlan={selectedMigrationRestorePlan}
+                targetAgent={selectedMigrationTarget}
               />
               <PrivilegeVaultBox
                 lastPayloadHash={lastPayloadHash}
@@ -3107,6 +3309,7 @@ function BackupMigrationSummary({
   lastMigrationLink,
   migrationLinks,
   restorePlans,
+  sameVpsRestoreDraftCount,
   selectedPlan,
   selectedSourceArtifact,
 }: {
@@ -3116,11 +3319,18 @@ function BackupMigrationSummary({
   lastMigrationLink: MigrationLinkRecord | null;
   migrationLinks: MigrationLinkRecord[];
   restorePlans: RestorePlanRecord[];
+  sameVpsRestoreDraftCount: number;
   selectedPlan: RestorePlanRecord | null;
   selectedSourceArtifact: BackupArtifactRecord | null;
 }) {
   const latestMapping =
-    lastMigrationLink ?? latestByIso(migrationLinks, (link) => link.created_at);
+    lastMigrationLink ??
+    latestByIso(
+      migrationLinks.filter(
+        (link) => link.source_client_id !== link.target_client_id,
+      ),
+      (link) => link.created_at,
+    );
   const relationship = selectedPlan ?? latestMapping ?? restorePlans[0] ?? null;
   const sourceBackup =
     backups.find(
@@ -3147,7 +3357,8 @@ function BackupMigrationSummary({
     ? clientLabel(relationship.target_client_id)
     : "Choose replacement VPS";
   const replacementDetail =
-    relationship?.destination_root ?? "destination comes from a draft restore";
+    relationship?.destination_root ??
+    "create a replacement-target draft restore";
   const mappingDetail = latestMapping
     ? `mapping ${shortId(latestMapping.id)} · ${migrationLinkStatusLabel(latestMapping.status)}`
     : `${migrationLinks.length} saved mapping${migrationLinks.length === 1 ? "" : "s"}`;
@@ -3174,6 +3385,12 @@ function BackupMigrationSummary({
           {restorePlans.length} draft restore
           {restorePlans.length === 1 ? "" : "s"}
         </span>
+        {sameVpsRestoreDraftCount > 0 && (
+          <span>
+            {sameVpsRestoreDraftCount} same-VPS restore draft
+            {sameVpsRestoreDraftCount === 1 ? "" : "s"} excluded
+          </span>
+        )}
         <span>{mappingDetail}</span>
         <span>
           identity, service checks, and cutover notes stay optional until
@@ -4280,6 +4497,11 @@ function migrationLinkPayloadHashHex(
       version: 1,
     }),
   );
+}
+
+function restoreArchiveStagingPath(backupRequestId: string): string {
+  const safeId = backupRequestId.replace(/[^a-zA-Z0-9-]/g, "-");
+  return `/tmp/vpsman-restore-${safeId}.tar`;
 }
 
 function buildRestoreArchiveTransferOptions(

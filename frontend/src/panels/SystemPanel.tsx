@@ -897,6 +897,8 @@ export function SystemUsersPanel({
   const [actionStatus, setActionStatus] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
   const [reviewPending, setReviewPending] = useState(false);
+  const operatorEditorRef = useRef<HTMLElement | null>(null);
+  const operatorUsernameRef = useRef<HTMLInputElement | null>(null);
   const canManageUsers = currentOperator?.role === "admin";
   const accessSummaries = useMemo(
     () => buildOperatorAccessSummaries(operators, sessions, authEvents),
@@ -955,6 +957,38 @@ export function SystemUsersPanel({
     invalidateReviewGeneration,
     isReviewGenerationCurrent,
   } = useReviewGenerationGuard();
+  const createDraftError =
+    editorMode === "create"
+      ? !draftUsername.trim()
+        ? "Enter a username"
+        : draftPassword.length < 12
+          ? "Enter a password with at least 12 characters"
+          : !Number.isFinite(draftSessionTtlDays) ||
+              draftSessionTtlDays < 1 ||
+              draftSessionTtlDays > 3650
+            ? "Session TTL must be from 1 to 3650 days"
+            : null
+      : null;
+
+  useEffect(() => {
+    if (editorMode === "closed") return;
+    const timeout = window.setTimeout(() => {
+      operatorEditorRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+      if (editorMode === "create") {
+        operatorUsernameRef.current?.focus();
+      } else {
+        operatorEditorRef.current
+          ?.querySelector<HTMLElement>(
+            "form input:not(:disabled), form select:not(:disabled), form textarea:not(:disabled), form button:not(:disabled)",
+          )
+          ?.focus();
+      }
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [editorMode, selectedId]);
 
   useEffect(() => {
     if (editorMode !== "edit" || !selectedOperator) {
@@ -1648,7 +1682,8 @@ export function SystemUsersPanel({
           <div>
             <h2>Operator accounts</h2>
             <span>
-              {operators.length} operator record{operators.length === 1 ? "" : "s"}
+              {operators.length} operator record
+              {operators.length === 1 ? "" : "s"}
             </span>
           </div>
           <span className="sectionContext">
@@ -1778,11 +1813,14 @@ export function SystemUsersPanel({
         <section
           className="controlPanel operatorEditorPanel"
           aria-label="Operator user editor"
+          ref={operatorEditorRef}
         >
           <div className="sectionHeader fleetInstancesHeader">
             <div>
               <h2>{selectedOperator ? "Edit user" : "Create user"}</h2>
-              <span>{canManageUsers ? "Ready" : "Admin role required for changes"}</span>
+              <span>
+                {canManageUsers ? "Ready" : "Admin role required for changes"}
+              </span>
             </div>
             <div className="sectionActions">
               {selectedOperator && (
@@ -1803,7 +1841,10 @@ export function SystemUsersPanel({
               </button>
             </div>
           </div>
-          <div className="operatorEditorBody">
+          <form
+            className="operatorEditorBody"
+            onSubmit={(event) => event.preventDefault()}
+          >
             <ActionFeedback
               className="localActionFeedback"
               message={
@@ -1847,12 +1888,14 @@ export function SystemUsersPanel({
                 <FieldLabel help={operatorHelpText.username} label="Username" />
                 <input
                   aria-label="Operator username"
+                  autoComplete="username"
                   disabled={Boolean(selectedOperator)}
                   onChange={(event) => {
                     invalidateUserReview();
                     setDraftUsername(event.target.value);
                   }}
                   title={operatorHelpText.username}
+                  ref={operatorUsernameRef}
                   value={draftUsername}
                 />
               </label>
@@ -2084,9 +2127,14 @@ export function SystemUsersPanel({
               ) : (
                 <button
                   className="secondaryAction"
-                  disabled={!canManageUsers || reviewPending || actionPending}
+                  disabled={
+                    !canManageUsers ||
+                    reviewPending ||
+                    actionPending ||
+                    Boolean(createDraftError)
+                  }
                   onClick={() => void submitCreate()}
-                  title={operatorHelpText.create}
+                  title={createDraftError ?? operatorHelpText.create}
                   type="button"
                 >
                   <UserPlus size={17} />
@@ -2094,7 +2142,7 @@ export function SystemUsersPanel({
                 </button>
               )}
             </div>
-          </div>
+          </form>
         </section>
       )}
       <ConfirmationPrompt
@@ -4129,11 +4177,11 @@ function SystemDashboardPanel({
               value={`${queueDepth} queued`}
             />
             <SystemPostureTile
-              detail={`${dashboard?.current.targets.deadline_expired_active ?? 0} active expired; ${lifecycleFailures} timeout or loss events in the last 24h.`}
+              detail={`${dashboard?.current.targets.deadline_expired_active ?? 0} active expired; ${lifecycleFailures} timeout or loss event${lifecycleFailures === 1 ? "" : "s"} in the last 24h.`}
               icon={<TimerReset size={18} />}
               label="Worker"
               tone={deadlineTone}
-              value={`${lifecycleFailures} failures`}
+              value={`${lifecycleFailures} failure${lifecycleFailures === 1 ? "" : "s"}`}
             />
             <SystemPostureTile
               detail={`${gatewayQueueDepth} queued / ${gatewayOldestAgeLabel}; ${gatewayDropped} dropped, ${gatewayRetries} retries, ${gatewayRejected} rejected connects.`}
@@ -4152,7 +4200,7 @@ function SystemDashboardPanel({
               <strong>What needs attention</strong>
               <span>
                 {attentionItems.length
-                  ? `${attentionItems.length} signals`
+                  ? `${attentionItems.length} signal${attentionItems.length === 1 ? "" : "s"}`
                   : "No active signals"}
               </span>
             </div>
@@ -4493,7 +4541,8 @@ function SystemCapacityPanel({
     activeSubsystem === "database"
       ? [
           {
-            detail: "Current database usage compared with the dashboard pool ceiling.",
+            detail:
+              "Current database usage compared with the dashboard pool ceiling.",
             label: "Pool pressure",
             tone: dbTone,
             value: `${dbPressurePercent}%`,
@@ -4526,10 +4575,13 @@ function SystemCapacityPanel({
               value: valueOrNotConfigured(gatewayEvents?.current_queue_depth),
             },
             {
-              detail: "Oldest queued event age; missing age is not treated as pressure.",
+              detail:
+                "Oldest queued event age; missing age is not treated as pressure.",
               label: "Oldest event age",
               tone: gatewayEvents?.oldest_event_age_secs ? "warning" : "ok",
-              value: secondsOrNotConfigured(gatewayEvents?.oldest_event_age_secs),
+              value: secondsOrNotConfigured(
+                gatewayEvents?.oldest_event_age_secs,
+              ),
             },
             {
               detail:
@@ -4537,7 +4589,10 @@ function SystemCapacityPanel({
                   ? "gateway queue is growing across the available samples."
                   : "Change in gateway queue depth across the available samples.",
               label: "Queue growth",
-              tone: gatewayQueueGrowth.delta && gatewayQueueGrowth.delta > 0 ? "warning" : "ok",
+              tone:
+                gatewayQueueGrowth.delta && gatewayQueueGrowth.delta > 0
+                  ? "warning"
+                  : "ok",
               value: formatDelta(gatewayQueueGrowth.delta),
             },
             {
@@ -4728,8 +4783,8 @@ function SystemCapacityPanel({
           >
             <strong>Suite Config fields</strong>
             <span>
-              Limits shown here are edited in System / Suite config; each
-              action keeps the field key visible.
+              Limits shown here are edited in System / Suite config; each action
+              keeps the field key visible.
             </span>
             <div>
               {selectedConfigLinks.map(([label, key]) => (
@@ -5071,7 +5126,9 @@ function SystemConfigPanel({
   useEffect(() => {
     if (
       filteredConfigSections.length > 0 &&
-      !filteredConfigSections.some((section) => section.id === activeConfigSection)
+      !filteredConfigSections.some(
+        (section) => section.id === activeConfigSection,
+      )
     ) {
       setActiveConfigSection(filteredConfigSections[0].id);
     }
@@ -5195,7 +5252,9 @@ function SystemConfigPanel({
       return;
     }
     if (!activeResult.validation.valid) {
-      setConfigError("Fix validation errors before reviewing suite config save");
+      setConfigError(
+        "Fix validation errors before reviewing suite config save",
+      );
       return;
     }
     setConfigError(null);
@@ -5298,7 +5357,13 @@ function SystemConfigPanel({
                       ? "validating"
                       : "not validated"
                 }
-                tone={validation ? "info" : validationPending ? "warning" : "neutral"}
+                tone={
+                  validation
+                    ? "info"
+                    : validationPending
+                      ? "warning"
+                      : "neutral"
+                }
               />
               <SystemConfigStatusItem
                 icon={<RefreshCw size={17} />}
@@ -5474,7 +5539,7 @@ function SystemConfigPanel({
                   <span>
                     {editorMode === "form"
                       ? "Structured sections with help, defaults, current value, validation rule, and reload impact."
-                        : "Advanced TOML editor for settings not covered by structured controls."}
+                      : "Advanced TOML editor for settings not covered by structured controls."}
                   </span>
                 </div>
                 <div className="editorModeGroup">
@@ -5603,8 +5668,8 @@ function SystemConfigPanel({
                 <div>
                   <h2>Review and save</h2>
                   <span>
-                    Edit, auto-validate, unlock, review diff, save, then
-                    follow reload/restart and audit evidence.
+                    Edit, auto-validate, unlock, review diff, save, then follow
+                    reload/restart and audit evidence.
                   </span>
                 </div>
                 <ConsoleStatusBadge
@@ -5974,6 +6039,7 @@ function ConfigFieldControl({
         {field.kind === "checkbox" ? (
           <label className="checkLine inlineCheck">
             <input
+              aria-label={field.label}
               checked={draftValue === true}
               disabled={!parsedDraft.ok}
               id={controlId}
@@ -5984,6 +6050,7 @@ function ConfigFieldControl({
           </label>
         ) : (
           <input
+            aria-label={field.label}
             aria-describedby={`${controlId}-meta`}
             disabled={!parsedDraft.ok}
             id={controlId}
@@ -6018,7 +6085,9 @@ function ConfigFieldControl({
         <div className="systemConfigFieldActions">
           <button
             className="secondaryAction compactAction"
-            disabled={!parsedDraft.ok || configValuesEqual(draftValue, currentValue)}
+            disabled={
+              !parsedDraft.ok || configValuesEqual(draftValue, currentValue)
+            }
             onClick={() => onChange(field.path, currentValue)}
             title={`Reset ${field.label} to loaded value: ${currentLabel}`}
             type="button"
@@ -6028,9 +6097,9 @@ function ConfigFieldControl({
           </button>
           <button
             className="secondaryAction compactAction"
-            disabled={!parsedDraft.ok || configValuesEqual(draftValue, defaultValue)}
-            onClick={() => onChange(field.path, defaultValue)}
-            title={`Use default for ${field.label}: ${defaultLabel}`}
+            disabled={!parsedDraft.ok || draftValue === undefined}
+            onClick={() => onChange(field.path, undefined)}
+            title={`Use inherited default for ${field.label}: ${defaultLabel}. Removes the explicit value.`}
             type="button"
           >
             <SlidersHorizontal size={14} />
@@ -6340,7 +6409,6 @@ function gatewayHealthTone(
   }
   const softSignals =
     (gatewayEvents.dropped_events ?? 0) +
-    (gatewayEvents.retry_attempts ?? 0) +
     (gatewayEvents.telemetry_dropped_events ?? 0) +
     (gatewayEvents.retained_output_truncated_events ?? 0) +
     (gatewayEvents.rejected_agent_connections ?? 0) +
@@ -6429,9 +6497,7 @@ function gatewayCapacityHealth({
   gatewayEvents,
   queueGrowth,
 }: {
-  gatewayEvents:
-    | SystemDashboardRecord["current"]["gateway_events"]
-    | undefined;
+  gatewayEvents: SystemDashboardRecord["current"]["gateway_events"] | undefined;
   queueGrowth: number | null;
 }): { reason: string; tone: SystemHealthTone } {
   if (!gatewayEvents || gatewayEvents.status !== "live") {
@@ -6446,7 +6512,10 @@ function gatewayCapacityHealth({
     gatewayEvents.dropped_by_reason.target_queue_full +
     (gatewayEvents.expired_events ?? 0);
   if (hardFailures > 0) {
-    return { reason: "queue-full or expired gateway failures", tone: "critical" };
+    return {
+      reason: "queue-full or expired gateway failures",
+      tone: "critical",
+    };
   }
   const queueDepth = gatewayEvents.current_queue_depth ?? 0;
   const oldestAgeSecs = gatewayEvents.oldest_event_age_secs;
@@ -6546,7 +6615,7 @@ function buildSystemAttentionItems({
         "Control, agent timeout, or lost-agent outcomes were recorded in the last 24 hours.",
       label: "Deadline timeouts",
       tone: "warning",
-      value: `${lifecycleFailures} events`,
+      value: `${lifecycleFailures} event${lifecycleFailures === 1 ? "" : "s"}`,
     });
   }
   if (gatewayTone !== "ok") {
@@ -6591,7 +6660,9 @@ function formatDelta(value: number | null): string {
   return formatNumber(value);
 }
 
-function systemSeriesCoverageSummary(series: SystemMetricSeriesRecord[]): string {
+function systemSeriesCoverageSummary(
+  series: SystemMetricSeriesRecord[],
+): string {
   const times = Array.from(
     new Set(
       series.flatMap((entry) =>
@@ -6615,7 +6686,9 @@ function systemSeriesCoverageSummary(series: SystemMetricSeriesRecord[]): string
     hour: "numeric",
     minute: "2-digit",
   });
-  const duration = formatDurationLabel(Math.max(0, Math.round((last - first) / 1000)));
+  const duration = formatDurationLabel(
+    Math.max(0, Math.round((last - first) / 1000)),
+  );
   return `${times.length} sample buckets from ${firstLabel} to ${lastLabel} (${duration})`;
 }
 
@@ -6685,6 +6758,34 @@ function getTomlPath(table: TomlTable, path: string[]): unknown {
 }
 
 function setTomlPath(table: TomlTable, path: string[], value: unknown) {
+  if (value === undefined || value === null || value === "") {
+    let current = table as Record<string, unknown>;
+    const ancestors: Array<{
+      child: Record<string, unknown>;
+      key: string;
+      parent: Record<string, unknown>;
+    }> = [];
+    for (const part of path.slice(0, -1)) {
+      const child = current[part];
+      if (!child || typeof child !== "object" || Array.isArray(child)) {
+        return;
+      }
+      ancestors.push({
+        child: child as Record<string, unknown>,
+        key: part,
+        parent: current,
+      });
+      current = child as Record<string, unknown>;
+    }
+    delete current[path[path.length - 1]];
+    for (const { child, key, parent } of ancestors.reverse()) {
+      if (Object.keys(child).length > 0) {
+        break;
+      }
+      delete parent[key];
+    }
+    return;
+  }
   let current = table as Record<string, unknown>;
   for (const part of path.slice(0, -1)) {
     if (
@@ -6697,11 +6798,7 @@ function setTomlPath(table: TomlTable, path: string[], value: unknown) {
     current = current[part] as Record<string, unknown>;
   }
   const key = path[path.length - 1];
-  if (value === undefined || value === null || value === "") {
-    delete current[key];
-  } else {
-    current[key] = value;
-  }
+  current[key] = value;
 }
 
 function formatNumber(value: number | null | undefined): string {
@@ -6715,7 +6812,9 @@ function valueOrUnset(value: number | null | undefined): string {
 }
 
 function valueOrNotConfigured(value: number | null | undefined): string {
-  return value === null || value === undefined ? "Not configured" : String(value);
+  return value === null || value === undefined
+    ? "Not configured"
+    : String(value);
 }
 
 function secondsOrUnset(value: number | null | undefined): string {
@@ -6723,9 +6822,7 @@ function secondsOrUnset(value: number | null | undefined): string {
 }
 
 function secondsOrNotConfigured(value: number | null | undefined): string {
-  return value === null || value === undefined
-    ? "Not configured"
-    : `${value}s`;
+  return value === null || value === undefined ? "Not configured" : `${value}s`;
 }
 
 function formatJson(value: JsonValue | null): string {

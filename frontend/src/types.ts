@@ -1466,7 +1466,6 @@ export type TunnelPlanEndpointRuntimeConfig = {
     | "not_dispatched"
     | "stale_pending"
     | string;
-  cleanup_confirmed: boolean;
   job_id: string | null;
   error: string | null;
   updated_at: string | null;

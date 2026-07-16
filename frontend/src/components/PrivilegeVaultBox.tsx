@@ -45,7 +45,9 @@ export function PrivilegeVaultBox({
   const [vaultPassphrase, setVaultPassphrase] = useState("");
   const [unlockPassphrase, setUnlockPassphrase] = useState("");
   const [saveToVault, setSaveToVault] = useState(false);
-  const [vaultAvailable, setVaultAvailable] = useState(() => hasPrivilegeVault());
+  const [vaultAvailable, setVaultAvailable] = useState(() =>
+    hasPrivilegeVault(),
+  );
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [clearVaultPromptOpen, setClearVaultPromptOpen] = useState(false);
@@ -67,7 +69,7 @@ export function PrivilegeVaultBox({
         return "Privilege secret";
       }
       if (value === "Super salt hex") {
-        return "Verifier salt hex";
+        return "Privilege salt";
       }
       return value;
     }
@@ -213,7 +215,11 @@ export function PrivilegeVaultBox({
             </span>
           </div>
         </div>
-        <button className="secondaryAction" onClick={onOpenUnlock} type="button">
+        <button
+          className="secondaryAction"
+          onClick={onOpenUnlock}
+          type="button"
+        >
           <LockKeyhole size={17} />
           {unlockRedirectLabel}
         </button>
@@ -241,6 +247,7 @@ export function PrivilegeVaultBox({
           <form
             className="privilegeVaultSection"
             aria-label="Unlock saved local vault"
+            autoComplete="off"
             onSubmit={(event) => {
               event.preventDefault();
               void unlockVault();
@@ -248,13 +255,11 @@ export function PrivilegeVaultBox({
           >
             <div>
               <h3>Unlock saved local vault</h3>
-              <p>
-                Use the browser-local vault passphrase to unlock this tab.
-              </p>
+              <p>Use the browser-local vault passphrase to unlock this tab.</p>
             </div>
             <input
               aria-label={label("Vault passphrase")}
-              autoComplete="current-password"
+              autoComplete="off"
               onChange={(event) => setUnlockPassphrase(event.target.value)}
               placeholder="local vault passphrase"
               type="password"
@@ -273,6 +278,7 @@ export function PrivilegeVaultBox({
         <form
           className="privilegeVaultSection"
           aria-label="Unlock with privilege material"
+          autoComplete="off"
           onSubmit={(event) => {
             event.preventDefault();
             void activateEnteredPrivilege();
@@ -290,19 +296,20 @@ export function PrivilegeVaultBox({
               <span>Privilege secret</span>
               <input
                 aria-label={label("Super password")}
-                autoComplete="current-password"
+                autoComplete="off"
                 onChange={(event) => setSuperPassword(event.target.value)}
                 placeholder="enter privilege secret"
                 type="password"
                 value={superPassword}
               />
             </label>
-            <label>
-              <span>Privilege verifier</span>
+            <label title="The 64-character hex salt from operator-privilege.env (VPSMAN_SUPER_SALT_HEX).">
+              <span>Privilege salt</span>
               <input
                 aria-label={label("Super salt hex")}
+                autoComplete="off"
                 onChange={(event) => setSuperSaltHex(event.target.value)}
-                placeholder="hex verifier"
+                placeholder="paste 64-character hex salt"
                 value={superSaltHex}
               />
             </label>
@@ -324,7 +331,7 @@ export function PrivilegeVaultBox({
           {saveToVault && (
             <input
               aria-label={label("New vault passphrase")}
-              autoComplete="new-password"
+              autoComplete="off"
               onChange={(event) => setVaultPassphrase(event.target.value)}
               placeholder="new local vault passphrase"
               type="password"
@@ -349,7 +356,9 @@ export function PrivilegeVaultBox({
       <ActionFeedback message={actionError} tone="danger" />
 
       {showVaultClear && (
-        <div className="privilegeActionRow">{vaultClearButton(!vaultAvailable)}</div>
+        <div className="privilegeActionRow">
+          {vaultClearButton(!vaultAvailable)}
+        </div>
       )}
       {clearVaultConfirmation()}
     </div>

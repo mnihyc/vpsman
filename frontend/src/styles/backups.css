@@ -888,6 +888,11 @@
   font-size: 12px;
 }
 
+.restoreArtifactWarning > .compactAction {
+  justify-self: start;
+  width: auto;
+}
+
 .backupMigrationSummary {
   display: grid;
   gap: 10px;

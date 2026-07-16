@@ -855,8 +855,16 @@ export function MultiFileActionsPanel({
           <div className="bulkSummaryList">
             {lastSummary.length === 0 && (visibleProgress || postRunItems.length > 0) ? (
               <div className="bulkNoResultsState" aria-label="Bulk file pending output placeholder">
-                <strong>No per-target results yet</strong>
-                <p>Run a bulk action to populate output groups, failure reasons, download bundle status, and retained artifact evidence.</p>
+                <strong>
+                  {visibleProgress
+                    ? `${visibleProgress.terminal} of ${visibleProgress.total} targets reported`
+                    : "No per-target results retained"}
+                </strong>
+                <p>
+                  {visibleProgress && visibleProgress.terminal < visibleProgress.total
+                    ? "Waiting for remaining targets; completed outcomes appear here as their evidence is retained."
+                    : "The run reached a terminal state without grouped output evidence. Open job details for target status and retained output."}
+                </p>
               </div>
             ) : lastSummary.length > 0 ? (
               lastSummary.map((group) => (
@@ -2129,6 +2137,13 @@ function confirmationItems(confirmation: PendingBulkConfirmation): Array<{ label
   }
   if ("existing_policy" in operation) {
     items.push({ label: "Existing file", value: existingFilePolicyLabel(operation.existing_policy ?? "skip") });
+  }
+  if (operation.type === "file_push" || operation.type === "file_push_chunked") {
+    items.push(
+      { label: "Payload size", value: formatBytes(operation.size_bytes) },
+      { label: "Payload SHA-256", value: operation.sha256_hex },
+      { label: "File mode", value: formatMode(operation.mode) },
+    );
   }
   if ("ownership_policy" in operation) {
     items.push({ label: "Owner/group", value: ownershipPolicyLabel(operation.ownership_policy ?? "fail") });

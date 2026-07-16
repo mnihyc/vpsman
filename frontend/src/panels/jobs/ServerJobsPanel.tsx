@@ -1,5 +1,5 @@
 import { RefreshCw, ShieldCheck, Trash2, XCircle } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ActionFeedback } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import {
@@ -78,6 +78,7 @@ export function ServerJobsPanel({
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [previewStatus, setPreviewStatus] = useState<string | null>(null);
   const [cancelJobSnapshot, setCancelJobSnapshot] = useState<ServerJobRecord | null>(null);
+  const previewResultRef = useRef<HTMLDivElement>(null);
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
@@ -113,6 +114,20 @@ export function ServerJobsPanel({
     : preview
       ? "Preview is stale; rerun Preview before deletion."
       : "Preview required before deletion.";
+
+  useEffect(() => {
+    if (!preview) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      previewResultRef.current?.scrollIntoView({
+        block: "nearest",
+        inline: "nearest",
+      });
+      previewResultRef.current?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [preview]);
   const serverJobColumns = useMemo<ConsoleDataGridColumn<ServerJobRecord>[]>(
     () => [
       {
@@ -440,7 +455,12 @@ export function ServerJobsPanel({
               <code>{expressionValid ? expression : "Invalid criteria"}</code>
             </div>
           </details>
-          <div className="cleanupPreviewFacts" aria-label="Cleanup preview result">
+          <div
+            aria-label="Cleanup preview result"
+            className="cleanupPreviewFacts"
+            ref={previewResultRef}
+            tabIndex={-1}
+          >
             <div>
               <span>Matched</span>
               <strong>

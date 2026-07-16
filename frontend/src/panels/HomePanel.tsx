@@ -77,6 +77,7 @@ type HomePanelProps = {
   onOpenTransfers: () => void;
   onOpenVpsDetail: (agent: AgentView) => void;
   onRegisterVps: () => void;
+  scopeFiltered: boolean;
 };
 
 type HomeActionItem = {
@@ -110,6 +111,7 @@ export function HomePanel({
   fleetAlerts,
   jobs,
   schedules,
+  scopeFiltered,
   summary,
   systemDashboard,
   onOpenAudit,
@@ -178,6 +180,7 @@ export function HomePanel({
         onOpenTransfers,
         onOpenSystemCapacity,
         onOpenVpsDetail,
+        scopeFiltered,
         systemDashboard,
       }),
     [
@@ -193,6 +196,7 @@ export function HomePanel({
       onOpenTransfers,
       onOpenSystemCapacity,
       onOpenVpsDetail,
+      scopeFiltered,
       systemDashboard,
     ],
   );
@@ -209,6 +213,7 @@ export function HomePanel({
         onOpenSchedule,
         onOpenTransfers,
         schedules,
+        scopeFiltered,
       }),
     [
       auditLogs,
@@ -221,6 +226,7 @@ export function HomePanel({
       onOpenSchedule,
       onOpenTransfers,
       schedules,
+      scopeFiltered,
     ],
   );
   const runningWorkItems = useMemo(
@@ -234,6 +240,7 @@ export function HomePanel({
         onOpenJobDetails,
         onOpenTransfers,
         runningJobCount: runningJobs,
+        scopeFiltered,
       }),
     [
       backups,
@@ -244,6 +251,7 @@ export function HomePanel({
       onOpenJobs,
       onOpenTransfers,
       runningJobs,
+      scopeFiltered,
     ],
   );
   const recentFailureItems = useMemo(
@@ -257,6 +265,7 @@ export function HomePanel({
         onOpenFleetAlerts,
         onOpenJobDetails,
         onOpenTransfers,
+        scopeFiltered,
       }),
     [
       backups,
@@ -267,6 +276,7 @@ export function HomePanel({
       onOpenFleetAlerts,
       onOpenJobDetails,
       onOpenTransfers,
+      scopeFiltered,
     ],
   );
 
@@ -287,7 +297,7 @@ export function HomePanel({
                 {criticalAlerts} critical / {warningAlerts} warning / {infoAlerts} info
               </ConsoleStatusBadge>
               <ConsoleStatusBadge tone={runningJobs > 0 ? "info" : "neutral"}>
-                {runningJobs} running jobs
+                {runningJobs} {scopeFiltered ? "fleet " : ""}running jobs
               </ConsoleStatusBadge>
             </div>
           </div>
@@ -403,8 +413,8 @@ export function HomePanel({
             value={String(activeAlerts.length)}
           />
           <HomePostureMetric
-            detail={`${failedJobs} failed in loaded history`}
-            label="Running jobs"
+            detail={`${failedJobs} failed in ${scopeFiltered ? "fleet " : ""}loaded history`}
+            label={scopeFiltered ? "Fleet jobs" : "Running jobs"}
             tone={failedJobs ? "critical" : runningJobs ? "info" : "ok"}
             value={String(runningJobs)}
           />
@@ -429,17 +439,25 @@ export function HomePanel({
             emptyText="No running jobs, transfers, or backup requests in loaded records."
             id="home-running-work-title"
             items={runningWorkItems}
-            subtitle="Long-running jobs and transfer work that may need follow-up."
-            title="Running work"
+            subtitle={
+              scopeFiltered
+                ? "Scoped backup and transfer work, plus fleet-wide jobs that may need follow-up."
+                : "Long-running jobs and transfer work that may need follow-up."
+            }
+            title={scopeFiltered ? "Running work and fleet jobs" : "Running work"}
           />
           <HomeActionPanel
             badge={`${recentFailureItems.length} recent`}
             emptyIcon={<ShieldAlert size={18} />}
-            emptyText="No recent failures or unacknowledged alerts in loaded records."
-            id="home-recent-failures-title"
+            emptyText="No recent failures or unacknowledged warning alerts in loaded records."
+            id="home-recent-issues-title"
             items={recentFailureItems}
-            subtitle="Failed jobs, transfers, backups, and active alerts routed to their owner pages."
-            title="Recent failures"
+            subtitle={
+              scopeFiltered
+                ? "Scoped failures and alerts, plus fleet-wide failed jobs routed to their owner pages."
+                : "Failed work and active warning alerts routed to their owner pages."
+            }
+            title="Recent issues"
           />
         </div>
 
@@ -448,7 +466,11 @@ export function HomePanel({
             <div className="homePanelHeader">
               <div>
                 <h2 id="home-attention-title">Needs attention</h2>
-                <span>Failed work, stale agents, backup risk, degraded network, and access capability gaps.</span>
+                <span>
+                  {scopeFiltered
+                    ? "Scoped VPS evidence plus fleet-wide job and control-plane risks."
+                    : "Failed work, stale agents, backup risk, degraded network, and access capability gaps."}
+                </span>
               </div>
               <ConsoleStatusBadge tone={attentionItems.length ? "warning" : "ok"}>
                 {attentionItems.length} item{attentionItems.length === 1 ? "" : "s"}
@@ -484,7 +506,11 @@ export function HomePanel({
             <div className="homePanelHeader">
               <div>
                 <h2 id="home-activity-title">Recent activity</h2>
-                <span>Audit, job, backup, transfer, and schedule evidence from loaded records.</span>
+                <span>
+                  {scopeFiltered
+                    ? "Scoped backup, transfer, and schedule evidence plus fleet-wide audit and job activity."
+                    : "Audit, job, backup, transfer, and schedule evidence from loaded records."}
+                </span>
               </div>
               <ConsoleStatusBadge tone="neutral">{activityItems.length} shown</ConsoleStatusBadge>
             </div>
@@ -604,6 +630,7 @@ function buildAttentionItems({
   onOpenTransfers,
   onOpenSystemCapacity,
   onOpenVpsDetail,
+  scopeFiltered,
   systemDashboard,
 }: {
   agents: AgentView[];
@@ -618,6 +645,7 @@ function buildAttentionItems({
   onOpenTransfers: () => void;
   onOpenSystemCapacity: () => void;
   onOpenVpsDetail: (agent: AgentView) => void;
+  scopeFiltered: boolean;
   systemDashboard: SystemDashboardRecord | null;
 }): HomeActionItem[] {
   const agentById = new Map(agents.map((agent) => [agent.id, agent]));
@@ -666,7 +694,7 @@ function buildAttentionItems({
     .map((job) => ({
       detail: `${job.command_type} / ${job.target_count} target${job.target_count === 1 ? "" : "s"}`,
       id: `job:${job.id}`,
-      label: `Job ${shortId(job.id)} failed`,
+      label: `${scopeFiltered ? "Fleet job" : "Job"} ${shortId(job.id)} failed`,
       meta: formatCompactTime(job.completed_at ?? job.created_at),
       metaTitle: formatFullTime(job.completed_at ?? job.created_at),
       onOpen: () => onOpenJobDetails(job.id),
@@ -748,6 +776,7 @@ function buildRunningWorkItems({
   onOpenJobs,
   onOpenTransfers,
   runningJobCount,
+  scopeFiltered,
 }: {
   backups: BackupRequestRecord[];
   fileTransfers: FileTransferSessionRecord[];
@@ -757,13 +786,14 @@ function buildRunningWorkItems({
   onOpenJobs: () => void;
   onOpenTransfers: () => void;
   runningJobCount: number;
+  scopeFiltered: boolean;
 }): HomeActionItem[] {
   const jobItems = jobs
     .filter((job) => isActiveJobStatus(job.status))
     .map((job) => ({
       detail: `${readableJobCommand(job.command_type)} / ${job.target_count} target${job.target_count === 1 ? "" : "s"}`,
       id: `running-job:${job.id}`,
-      label: `Job ${shortId(job.id)} ${readableJobStatus(job.status)}`,
+      label: `${scopeFiltered ? "Fleet job" : "Job"} ${shortId(job.id)} ${readableJobStatus(job.status)}`,
       meta: formatCompactTime(job.created_at),
       metaTitle: formatFullTime(job.created_at),
       onOpen: () => onOpenJobDetails(job.id),
@@ -821,6 +851,7 @@ function buildRecentFailureItems({
   onOpenFleetAlerts,
   onOpenJobDetails,
   onOpenTransfers,
+  scopeFiltered,
 }: {
   backups: BackupRequestRecord[];
   fileTransfers: FileTransferSessionRecord[];
@@ -830,13 +861,14 @@ function buildRecentFailureItems({
   onOpenFleetAlerts: () => void;
   onOpenJobDetails: (jobId: string) => void;
   onOpenTransfers: () => void;
+  scopeFiltered: boolean;
 }): HomeActionItem[] {
   const jobItems = jobs
     .filter((job) => isFailedJobStatus(job.status))
     .map((job) => ({
       detail: `${readableJobCommand(job.command_type)} / ${job.target_count} target${job.target_count === 1 ? "" : "s"}`,
       id: `failed-job:${job.id}`,
-      label: `Job ${shortId(job.id)} ${readableJobStatus(job.status)}`,
+      label: `${scopeFiltered ? "Fleet job" : "Job"} ${shortId(job.id)} ${readableJobStatus(job.status)}`,
       meta: formatCompactTime(job.completed_at ?? job.created_at),
       metaTitle: formatFullTime(job.completed_at ?? job.created_at),
       onOpen: () => onOpenJobDetails(job.id),
@@ -895,6 +927,7 @@ function buildActivityItems({
   onOpenSchedule,
   onOpenTransfers,
   schedules,
+  scopeFiltered,
 }: {
   auditLogs: AuditLogRecord[];
   backups: BackupRequestRecord[];
@@ -906,6 +939,7 @@ function buildActivityItems({
   onOpenSchedule: () => void;
   onOpenTransfers: () => void;
   schedules: ScheduleRecord[];
+  scopeFiltered: boolean;
 }): HomeActivityItem[] {
   const jobItems = jobs.map((job) => ({
     id: `job:${job.id}`,
@@ -913,7 +947,7 @@ function buildActivityItems({
     meta: `${job.target_count} target${job.target_count === 1 ? "" : "s"}`,
     onOpen: () => onOpenJobDetails(job.id),
     time: job.completed_at ?? job.created_at,
-    type: "Job",
+    type: scopeFiltered ? "Fleet job" : "Job",
   }));
   const backupItems = backups.map((backup) => ({
     id: `backup:${backup.id}`,
@@ -937,7 +971,7 @@ function buildActivityItems({
     meta: audit.target,
     onOpen: onOpenAudit,
     time: audit.created_at,
-    type: "Audit",
+    type: scopeFiltered ? "Fleet audit" : "Audit",
   }));
   const scheduleItems = schedules.map((schedule) => ({
     id: `schedule:${schedule.id}`,
@@ -991,7 +1025,7 @@ function isActiveTransferStatus(status: string) {
 
 function readableJobCommand(commandType: string) {
   if (commandType === "shell_argv") {
-    return "Shell command";
+    return "Argv command";
   }
   if (commandType === "scheduled_shell_argv") {
     return "Scheduled shell command";

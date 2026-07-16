@@ -31,7 +31,7 @@ use crate::{
     },
     privilege::{verify_privilege_intent, JobPrivilegeIntent, JobPrivilegeIntentInput},
     repository_jobs::PrecompletedJobTarget,
-    routes_ingest::record_network_routing_terminal_result,
+    routes_ingest::{record_network_routing_terminal_result, status_output_message},
     security::SCOPE_JOBS_READ,
     state::AppState,
     unix_now,
@@ -1317,37 +1317,6 @@ pub(crate) fn target_message_for_status(
         return COMMAND_COMPLETED_WITHOUT_EXIT_CODE_MESSAGE.to_string();
     }
     target_message_from_outputs(outputs, fallback, status)
-}
-
-fn status_output_message(output: &CommandOutput) -> Option<String> {
-    if output.stream != OutputStream::Status {
-        return None;
-    }
-    let value = serde_json::from_slice::<serde_json::Value>(&output.data).ok()?;
-    status_value_message(&value)
-}
-
-fn status_value_message(value: &serde_json::Value) -> Option<String> {
-    let kind = value
-        .get("type")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let primary = ["message", "error", "reason", "hint", "status"]
-        .iter()
-        .find_map(|field| {
-            value
-                .get(*field)
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-        });
-    match (kind, primary) {
-        (Some(kind), Some(primary)) if kind != primary => Some(format!("{kind}: {primary}")),
-        (Some(kind), _) => Some(kind.to_string()),
-        (_, Some(primary)) => Some(primary.to_string()),
-        _ => None,
-    }
 }
 
 pub(crate) fn target_capabilities_from_agents(agents: &[AgentView]) -> Vec<TargetCapability> {

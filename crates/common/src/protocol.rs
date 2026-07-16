@@ -306,7 +306,7 @@ pub const SOURCE_READINESS_STATUS_CLASS_BY_STATUS: [(&str, &str); 13] = [
     ("selected_no_store", WORKFLOW_STATUS_CLASS_WARNING),
     ("selected_no_artifacts", WORKFLOW_STATUS_CLASS_WARNING),
     ("selected_no_limits", WORKFLOW_STATUS_CLASS_WARNING),
-    ("selected_no_samples", WORKFLOW_STATUS_CLASS_WARNING),
+    ("selected_no_samples", WORKFLOW_STATUS_CLASS_NEUTRAL),
     ("ok", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
     ("degraded", WORKFLOW_STATUS_CLASS_WARNING),
 ];
@@ -1008,7 +1008,12 @@ pub fn runtime_config_reconcile_scope_from_reason(reason: &str) -> RuntimeConfig
                 .resources
                 .insert(RuntimeConfigReconcileResource::PortForwarding);
         }
-        "agent_reconnect_runtime_tunnels_sync" => {
+        "tunnel_plan_saved_enabled"
+        | "tunnel_plan_updated"
+        | "tunnel_plan_enabled"
+        | "tunnel_plan_disabled"
+        | "tunnel_plan_deleted"
+        | "agent_reconnect_runtime_tunnels_sync" => {
             scope
                 .resources
                 .insert(RuntimeConfigReconcileResource::RuntimeTunnels);
@@ -3435,6 +3440,14 @@ mod tests {
 
         assert!(scope.includes(super::RuntimeConfigReconcileResource::RuntimeTunnels));
         assert!(scope.includes(super::RuntimeConfigReconcileResource::PortForwarding));
+        assert!(!scope.authoritative);
+    }
+
+    #[test]
+    fn tunnel_deletion_reason_covers_runtime_tunnel_reconciliation() {
+        let scope = super::runtime_config_reconcile_scope_from_reason("tunnel_plan_deleted");
+
+        assert!(scope.includes(super::RuntimeConfigReconcileResource::RuntimeTunnels));
         assert!(!scope.authoritative);
     }
 

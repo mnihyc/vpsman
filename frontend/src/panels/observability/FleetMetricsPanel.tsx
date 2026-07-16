@@ -472,7 +472,7 @@ function GroupTile({ cluster }: { cluster: DashboardLabelClusterRecord }) {
       <span>{cluster.kind}</span>
       <strong>{cluster.label}</strong>
       <small>
-        {cluster.online}/{cluster.total} reported reachable, {cluster.warnings} reachability gaps, {formatBitsPerSecond(cluster.rx_bps + cluster.tx_bps)} aggregate interval-average rate
+        {cluster.online}/{cluster.total} currently reachable, {cluster.warnings} historical interval gap{cluster.warnings === 1 ? "" : "s"}, {formatBitsPerSecond(cluster.rx_bps + cluster.tx_bps)} aggregate interval-average rate
       </small>
     </div>
   );
@@ -496,7 +496,7 @@ function WarningDefinitionStrip({ overview }: { overview: DashboardOverviewRecor
     },
     {
       detail: "unique VPSs named by recent alerts or degraded-agent evidence",
-      label: "Affected VPSs",
+      label: "Affected VPS",
       value: String(affectedVpsCount),
     },
     {
@@ -506,7 +506,7 @@ function WarningDefinitionStrip({ overview }: { overview: DashboardOverviewRecor
     },
     {
       detail: "offline and stale VPSs in the retained overview scope",
-      label: "Unavailable VPSs",
+      label: "Unavailable VPS",
       value: String(unavailableVps),
     },
   ];

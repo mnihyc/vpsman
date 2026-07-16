@@ -3,6 +3,7 @@ import * as Collapsible from "@radix-ui/react-collapsible";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { ChevronDown, GripVertical, MoreVertical, X } from "lucide-react";
+import { scrollIntoViewWithMotion } from "../motion";
 
 export function ConsoleActionDrawer({
   children,
@@ -27,11 +28,21 @@ export function ConsoleActionDrawer({
       return;
     }
     const frame = window.requestAnimationFrame(() => {
-      drawerRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
-      closeButtonRef.current?.focus({ preventScroll: true });
+      if (drawerRef.current) {
+        scrollIntoViewWithMotion(drawerRef.current, { block: "start" });
+      }
+      const preferredControl = drawerRef.current?.querySelector<HTMLElement>(
+        ".actionDrawerBody .actionDrawerInitialFocus input:not([disabled]), .actionDrawerBody .actionDrawerInitialFocus select:not([disabled]), .actionDrawerBody .actionDrawerInitialFocus textarea:not([disabled]), .actionDrawerBody .actionDrawerInitialFocus button:not([disabled]), .actionDrawerBody [data-action-drawer-initial-focus='true']:not([disabled])",
+      );
+      const firstControl = drawerRef.current?.querySelector<HTMLElement>(
+        ".actionDrawerBody input:not([disabled]), .actionDrawerBody select:not([disabled]), .actionDrawerBody textarea:not([disabled]), .actionDrawerBody button:not([disabled]), .actionDrawerBody [tabindex]:not([tabindex='-1'])",
+      );
+      (preferredControl ?? firstControl ?? closeButtonRef.current)?.focus({
+        preventScroll: true,
+      });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [open]);
+  }, [open, title]);
 
   if (!open) {
     return null;

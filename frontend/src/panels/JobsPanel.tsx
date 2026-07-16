@@ -85,7 +85,7 @@ function displayToken(value: string): string {
 function displayCommandType(value: string): string {
   switch (value) {
     case "shell_argv":
-      return "Shell command";
+      return "Argv command";
     case "scheduled_shell_argv":
       return "Scheduled shell command";
     case "shell_pty":
@@ -1066,15 +1066,26 @@ export function JobsPanel({
         sortValue: (target) => target.status,
       },
       {
-        cell: (target) => (
-          <span title={target.message ?? undefined}>
-            {target.message ?? "-"}
-          </span>
-        ),
+        cell: (target) => {
+          const reason = jobTargetReason(target);
+          const rawReason = target.message?.trim();
+          return (
+            <span
+              title={
+                rawReason && rawReason !== reason
+                  ? `${reason} Raw agent reason: ${rawReason}`
+                  : reason
+              }
+            >
+              {reason}
+            </span>
+          );
+        },
         header: "Reason",
         id: "reason",
-        searchValue: (target) => target.message ?? "",
-        sortValue: (target) => target.message ?? "",
+        searchValue: (target) =>
+          `${jobTargetReason(target)} ${target.message ?? ""}`,
+        sortValue: jobTargetReason,
       },
       {
         cell: (target) => target.exit_code ?? "-",
@@ -1618,7 +1629,14 @@ export function JobsPanel({
                       <span>Status</span>
                       <strong>{target.status}</strong>
                       <span>Reason</span>
-                      <strong>{target.message ?? "None"}</strong>
+                      <strong>{jobTargetReason(target)}</strong>
+                      {target.message?.trim() &&
+                      target.message.trim() !== jobTargetReason(target) ? (
+                        <>
+                          <span>Raw agent reason</span>
+                          <strong>{target.message.trim()}</strong>
+                        </>
+                      ) : null}
                       <span>Completed</span>
                       <strong>
                         {target.completed_at
@@ -1803,7 +1821,9 @@ export function JobsPanel({
                           setSelectedComparisonGroupId(group.group_id)
                         }
                         openRowLabel="Select group"
-                        openRowTitle={(group) => `Select comparison group ${group.group_id}.`}
+                        openRowTitle={(group) =>
+                          `Select comparison group ${group.group_id}.`
+                        }
                         renderExpandedRow={(group) => (
                           <div className="consoleInlineDetailGrid">
                             <span>Group</span>
@@ -2003,7 +2023,8 @@ export function JobsPanel({
                         <TerminalSquare size={22} />
                         <strong>No output chunks</strong>
                         <span>
-                          This job has no retained stdout, stderr, or status output.
+                          This job has no retained stdout, stderr, or status
+                          output.
                         </span>
                       </div>
                     )}
@@ -2020,8 +2041,8 @@ export function JobsPanel({
                 <div>
                   <h2>Approvals</h2>
                   <span>
-                    {pendingApprovalCount} pending · {jobApprovals.length}{" "}
-                    reviewed requests
+                    {pendingApprovalCount} pending · {jobApprovals.length} total
+                    request{jobApprovals.length === 1 ? "" : "s"}
                   </span>
                 </div>
                 <div className="inlineActions">
@@ -2286,7 +2307,9 @@ export function JobsPanel({
                   itemLabel="runs"
                   onOpenRow={(job) => void openTargets(job.id)}
                   openRowLabel="Open targets"
-                  openRowTitle={(job) => `Load target results for scheduled run ${job.id}.`}
+                  openRowTitle={(job) =>
+                    `Load target results for scheduled run ${job.id}.`
+                  }
                   renderExpandedRow={(job) => {
                     const schedule = job.source_schedule_id
                       ? scheduleById.get(job.source_schedule_id)
@@ -2377,7 +2400,7 @@ export function JobsPanel({
                       onClick={onRefresh}
                       type="button"
                     >
-                      Check worker
+                      Refresh runs
                     </button>
                   </div>
                 </div>
@@ -2388,6 +2411,37 @@ export function JobsPanel({
       </Suspense>
     </section>
   );
+}
+
+function jobTargetReason(target: JobTargetRecord): string {
+  const raw = target.message?.trim();
+  if (raw && raw !== target.status) {
+    if (raw === "command_timeout") {
+      return "Agent stopped the command after its configured execution timeout.";
+    }
+    return raw;
+  }
+  switch (target.status) {
+    case "completed":
+      return "-";
+    case "running":
+    case "dispatching":
+      return "Waiting for a terminal result.";
+    case "agent_timeout":
+      return "Agent stopped the command after its configured execution timeout.";
+    case "control_timeout":
+      return "The control plane did not receive a terminal result before the job deadline.";
+    case "agent_lost":
+      return "The agent disconnected before reporting a terminal result.";
+    case "canceled":
+      return "The command was canceled before completion.";
+    case "rejected":
+      return "The agent rejected the command without an additional reason.";
+    case "failed":
+      return "The command failed without an additional reason.";
+    default:
+      return raw || "No failure reason reported.";
+  }
 }
 
 async function copyText(value: string) {

@@ -21,6 +21,7 @@ gateway_addr="127.0.0.1:$gateway_port"
 gateway_control_url="http://127.0.0.1:$gateway_control_port"
 internal_token="backup-smoke-internal-$(date +%s%N)"
 client_id="backup-smoke-$(date +%s)"
+replacement_client_id="$client_id-replacement"
 super_password="smoke-super-password"
 super_salt_hex="00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 privilege_verifier_key_hex="$(smoke_privilege_verifier_key_hex "$super_password" "$super_salt_hex")"
@@ -33,6 +34,8 @@ api_log="$SMOKE_TMPDIR/api.log"
 gateway_log="$SMOKE_TMPDIR/gateway.log"
 agent_log="$SMOKE_TMPDIR/agent.log"
 agent_config="$SMOKE_TMPDIR/agent.toml"
+replacement_agent_log="$SMOKE_TMPDIR/agent-replacement.log"
+replacement_agent_config="$SMOKE_TMPDIR/agent-replacement.toml"
 object_store_dir="$SMOKE_TMPDIR/object-store"
 backup_source_dir="$SMOKE_TMPDIR/source"
 selected_file="$backup_source_dir/selected.txt"
@@ -101,17 +104,33 @@ smoke_create_direct_agent_config \
   "$gateway_public_hex" \
   "primary=$gateway_addr=10"
 
-if grep -q '^\[backup\]' "$agent_config"; then
-  sed -i "/^\[backup\]/a max_archive_bytes = 2097152\\
-max_uncompressed_bytes = 1048576" "$agent_config"
-else
-  cat >>"$agent_config" <<EOF
+smoke_create_direct_agent_config \
+  "$api_url" \
+  "$access_token" \
+  "$replacement_agent_config" \
+  "$replacement_client_id" \
+  "$replacement_client_id" \
+  "backup-smoke-replacement" \
+  "$gateway_public_hex" \
+  "primary=$gateway_addr=10"
+
+configure_backup_limits() {
+  local config_path="$1"
+  if grep -q '^\[backup\]' "$config_path"; then
+    sed -i "/^\[backup\]/a max_archive_bytes = 2097152\\
+max_uncompressed_bytes = 1048576" "$config_path"
+  else
+    cat >>"$config_path" <<EOF
 
 [backup]
 max_uncompressed_bytes = 1048576
 max_archive_bytes = 2097152
 EOF
-fi
+  fi
+}
+
+configure_backup_limits "$agent_config"
+configure_backup_limits "$replacement_agent_config"
 
 smoke_start_local_agent \
   "$agent_config" \
@@ -119,17 +138,25 @@ smoke_start_local_agent \
   "$SMOKE_TMPDIR/agent-work" \
   "vpsman_agent=warn"
 
-deadline=$((SECONDS + 30))
-status=""
-until [[ "$status" == "online" ]]; do
-  if (( SECONDS >= deadline )); then
-    smoke_dump_logs "agent did not become online for live backup smoke" \
-      "$api_log" "$gateway_log" "$agent_log"
-    exit 1
-  fi
-  agents_json="$(api_auth_get "/api/v1/agents" || printf '[]')"
-  status="$(jq -r --arg id "$client_id" '.[] | select(.id == $id) | .status // empty' <<<"$agents_json")"
-  sleep 0.25
+smoke_start_local_agent \
+  "$replacement_agent_config" \
+  "$replacement_agent_log" \
+  "$SMOKE_TMPDIR/agent-replacement-work" \
+  "vpsman_agent=warn"
+
+for expected_client_id in "$client_id" "$replacement_client_id"; do
+  deadline=$((SECONDS + 30))
+  status=""
+  until [[ "$status" == "online" ]]; do
+    if (( SECONDS >= deadline )); then
+      smoke_dump_logs "agent did not become online for live backup smoke" \
+        "$api_log" "$gateway_log" "$agent_log" "$replacement_agent_log"
+      exit 1
+    fi
+    agents_json="$(api_auth_get "/api/v1/agents" || printf '[]')"
+    status="$(jq -r --arg id "$expected_client_id" '.[] | select(.id == $id) | .status // empty' <<<"$agents_json")"
+    sleep 0.25
+  done
 done
 
 reject_job_id="$(python3 - <<'PY'
@@ -258,6 +285,23 @@ if [[ -z "$restore_archive_transfer_session_id" || "$restore_archive_transfer_se
   exit 1
 fi
 
+migration_archive_remote="/tmp/vpsman-migration-${backup_request_id}.tar"
+migration_upload_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
+  target/debug/vpsctl --api-url "$api_url" file-transfer-upload \
+    --source "$restore_archive" \
+    --path "$migration_archive_remote" \
+    --mode 0600 \
+    --clients "$replacement_client_id" \
+    --super-salt-hex "$super_salt_hex" \
+    --max-timeout-secs 30 \
+    --confirmed)"
+migration_archive_transfer_session_id="$(jq -r 'select(.event == "file_transfer_upload_complete") | .session_id' <<<"$migration_upload_json" | tail -1)"
+if [[ -z "$migration_archive_transfer_session_id" || "$migration_archive_transfer_session_id" == "null" ]]; then
+  echo "migration archive staging did not produce a replacement transfer session id" >&2
+  printf '%s\n' "$migration_upload_json" >&2
+  exit 1
+fi
+
 restore_root_base="$SMOKE_TMPDIR/restores"
 restore_root="$restore_root_base/$backup_request_id/$client_id"
 restored_selected="$restore_root${selected_file}"
@@ -339,17 +383,17 @@ smoke_wait_api_job_status "$api_url" "$vty_restore_job_id" completed 45 >/dev/nu
 vty_restored_selected="$vty_restore_root${selected_file}"
 cmp -s "$selected_file" "$vty_restored_selected"
 
-migration_restore_root="$restore_root"
+migration_restore_root="$restore_root_base/$backup_request_id/$replacement_client_id"
 migration_plan_json="$(VPSMAN_RESTORE_DESTINATION_ROOT_BASE="$restore_root_base" \
   VPSMAN_SUPER_PASSWORD="$super_password" \
   target/debug/vpsctl --api-url "$api_url" restore-plan \
     --source-backup-request-id "$backup_request_id" \
-    --target-client-id "$client_id" \
+    --target-client-id "$replacement_client_id" \
     --super-salt-hex "$super_salt_hex" \
     --note "live executable migration" \
     --confirmed)"
 migration_restore_plan_id="$(jq -r '.id' <<<"$migration_plan_json")"
-jq -e --arg id "$backup_request_id" --arg target "$client_id" '
+jq -e --arg id "$backup_request_id" --arg target "$replacement_client_id" '
   .source_backup_request_id == $id
   and .target_client_id == $target
   and .status == "planned_metadata_only"
@@ -359,7 +403,7 @@ migration_json="$(VPSMAN_RESTORE_DESTINATION_ROOT_BASE="$restore_root_base" \
   VPSMAN_SUPER_PASSWORD="$super_password" \
   target/debug/vpsctl --api-url "$api_url" migration-run \
     --restore-plan-id "$migration_restore_plan_id" \
-    --archive-transfer-session-id "$restore_archive_transfer_session_id" \
+    --archive-transfer-session-id "$migration_archive_transfer_session_id" \
     --super-salt-hex "$super_salt_hex" \
     --max-timeout-secs 30 \
     --force-unprivileged \
@@ -367,7 +411,7 @@ migration_json="$(VPSMAN_RESTORE_DESTINATION_ROOT_BASE="$restore_root_base" \
     --confirmed)"
 migration_job_id="$(jq -r '.migration_run.restore_job.job_id' <<<"$migration_json")"
 migration_link_id="$(jq -r '.migration_run.migration_link.id' <<<"$migration_json")"
-jq -e --arg plan "$migration_restore_plan_id" --arg target "$client_id" '
+jq -e --arg plan "$migration_restore_plan_id" --arg target "$replacement_client_id" '
   .restore_plan_id == $plan
   and .target_client_id == $target
   and .migration_run.migration_link.status == "linked_metadata_only"
@@ -383,6 +427,7 @@ jq -e --arg migration_link_id "$migration_link_id" '
 
 jq -n \
   --arg client_id "$client_id" \
+  --arg replacement_client_id "$replacement_client_id" \
   --arg job_id "$job_id" \
   --arg restore_job_id "$restore_job_id" \
   --arg rollback_job_id "$rollback_job_id" \
@@ -401,6 +446,7 @@ jq -n \
     live_backup_smoke: "ok",
     no_privilege_unlock_rejected: true,
     client_id: $client_id,
+    replacement_client_id: $replacement_client_id,
     job_id: $job_id,
     restore_job_id: $restore_job_id,
     rollback_job_id: $rollback_job_id,

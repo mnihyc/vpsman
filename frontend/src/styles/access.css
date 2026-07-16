@@ -993,7 +993,7 @@
 
 .totpStepList {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   margin: 0;
   padding: 0;
@@ -1003,14 +1003,14 @@
 .totpStepList li {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
   min-height: 36px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--canvas);
   color: var(--text-secondary);
-  padding: 7px 9px;
+  padding: 7px;
   font-size: 12px;
   font-weight: 800;
 }
@@ -1024,6 +1024,7 @@
 
 .totpStepList li span {
   display: inline-flex;
+  flex: 0 0 18px;
   align-items: center;
   justify-content: center;
   width: 18px;

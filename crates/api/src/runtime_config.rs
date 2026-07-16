@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
     runtime_config_content_hash, runtime_config_reconcile_scope_from_reason,
@@ -74,12 +75,20 @@ pub(crate) async fn dispatch_runtime_config_for_clients(
                 job_id: Some(job.job_id),
                 error: None,
             }),
-            Err(error) => outcomes.push(RuntimeConfigDispatchView {
-                client_id,
-                status: "queue_failed".to_string(),
-                job_id: None,
-                error: Some(operator_dispatch_error(&error, "Runtime apply job")),
-            }),
+            Err(error) => {
+                warn!(
+                    ?error,
+                    %client_id,
+                    %reason,
+                    "failed to queue composed runtime configuration"
+                );
+                outcomes.push(RuntimeConfigDispatchView {
+                    client_id,
+                    status: "queue_failed".to_string(),
+                    job_id: None,
+                    error: Some(operator_dispatch_error(&error, "Runtime apply job")),
+                });
+            }
         }
     }
     outcomes

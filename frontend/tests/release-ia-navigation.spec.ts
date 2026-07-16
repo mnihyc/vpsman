@@ -40,6 +40,7 @@ const releaseAccessibilityRoutes: Array<{ view: ActiveView; subpage: string }> =
   ];
 const customMockTests = new Set([
   "audit latest visible event uses newest timestamp instead of row order",
+  "audit identifies control-plane events without inventing an unknown actor",
   "observability dashboards use safe labels when summary counts are missing",
   "home shows a useful empty state when no VPS agents are loaded",
   "fleet monitor cards remain readable for 0 generated VPS fixtures",
@@ -452,6 +453,102 @@ test("fleet scope selector edits scope and clear is explicit", async ({
   );
 });
 
+test("invalid hash changes replace stale content with the canonical home route", async ({
+  page,
+}) => {
+  await gotoConsoleHome(page);
+  await openConsoleSubpage(page, "Fleet", "Instance detail");
+  await expect(
+    page.getByRole("heading", { name: "Instance detail", exact: true }),
+  ).toBeVisible();
+
+  await page.evaluate(() => {
+    window.location.hash = "#/remote-work/terminal";
+  });
+
+  await expect(page).toHaveURL(/#\/home\/overview$/);
+  await expect(
+    page.getByRole("heading", { name: "Home", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Instance detail", exact: true }),
+  ).toHaveCount(0);
+});
+
+test("invalid subpage hashes replace the URL with the rendered canonical route", async ({
+  page,
+}) => {
+  await gotoConsoleHome(page);
+
+  await page.evaluate(() => {
+    window.location.hash = "#/fleet/not-a-page";
+  });
+
+  await expect(page).toHaveURL(/#\/fleet\/instances$/);
+  await expect(
+    page.getByRole("heading", { name: "Fleet instances", exact: true }),
+  ).toBeVisible();
+});
+
+test("visible navigation labels use readable canonical routes", async ({
+  page,
+}) => {
+  await gotoConsoleHome(page);
+
+  await page.evaluate(() => {
+    window.location.hash = "#/fleet/assignments";
+  });
+  await expect(page).toHaveURL(/#\/fleet\/assignments$/);
+  await expect(
+    page.getByRole("heading", { name: "Group assignments", exact: true }),
+  ).toBeVisible();
+
+  await page.evaluate(() => {
+    window.location.hash = "#/remote/terminal";
+  });
+  await expect(page).toHaveURL(/#\/remote\/terminal$/);
+  await expect(
+    page.getByRole("heading", { name: "Terminal", exact: true }),
+  ).toBeVisible();
+});
+
+test("home applies fleet scope to target-bound records and labels fleet-wide evidence", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "desktop scope editing provides the clearest coverage for mixed scoped and fleet-wide evidence",
+  );
+
+  await gotoConsoleHome(page);
+  await page.getByRole("searchbox", { name: "Search fleet" }).fill("sfo");
+
+  const posture = page.getByLabel("Home posture strip");
+  const alertMetric = posture.locator(".homePostureMetric").filter({
+    hasText: "Open alerts",
+  });
+  await expect(alertMetric.locator("strong")).toHaveText("1");
+  await expect(alertMetric.locator("small")).toHaveText(
+    "0 critical, 1 warning, 0 info",
+  );
+  await expect(
+    posture.locator(".homePostureMetric").filter({ hasText: "Backups" }).locator("strong"),
+  ).toHaveText("1");
+  await expect(
+    posture.locator(".homePostureMetric").filter({ hasText: "Transfers" }).locator("strong"),
+  ).toHaveText("3");
+  await expect(page.getByLabel("Home fleet posture")).toContainText(
+    "0 critical / 1 warning / 0 info",
+  );
+  await expect(
+    page.getByRole("button", { name: /Tunnel adapter status failed/ }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "Running work and fleet jobs" }),
+  ).toBeVisible();
+  await expect(page.getByText("Fleet audit").first()).toBeVisible();
+});
+
 test("release IA reaches every configured page and subpage", async ({
   page,
 }) => {
@@ -834,7 +931,9 @@ test("terminal open and resume stay in Remote Operations without Jobs", async ({
   await expect(
     launcher.getByRole("heading", { name: "New terminal" }),
   ).toBeVisible();
-  await expect(launcher.getByLabel("New terminal target")).toBeVisible();
+  const terminalTarget = launcher.getByLabel("New terminal target");
+  await expect(terminalTarget).toBeVisible();
+  await expect(terminalTarget).toHaveValue("");
   await expect(
     launcher.getByRole("button", { name: "Unlock privilege" }),
   ).toBeVisible();
@@ -846,8 +945,16 @@ test("terminal open and resume stay in Remote Operations without Jobs", async ({
   await launcher.getByText("Advanced terminal options").click();
   await expect(launcher.getByLabel("New terminal columns")).toBeVisible();
 
+  await chooseVpsBySearch(
+    launcher,
+    "New terminal target",
+    "sfo",
+    /edge-sfo-01.*agent-sfo-01/,
+  );
+
   await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, "Remote Operations", "Terminal");
+  await expect(terminalTarget).toHaveValue(/edge-sfo-01/);
   await page.getByRole("button", { name: "Open terminal" }).click();
   await expect(launcher).toContainText("terminal open job submitted");
   const terminalOpenRequest = await page.evaluate(() => {
@@ -1064,7 +1171,7 @@ test("file browser reads a selected VPS path from Remote Operations without Jobs
     "/",
   );
   await expect(page.getByLabel("File browser directory state")).toContainText(
-    "6 of 6 entries",
+    "6 entries",
   );
   await expect(page.getByLabel("File browser directory state")).toContainText(
     "Complete",
@@ -1168,7 +1275,7 @@ test("file browser reads a selected VPS path from Remote Operations without Jobs
   await activate(page.getByRole("button", { name: "Refresh", exact: true }));
   await expect(page.getByText("No entries under /empty").first()).toBeVisible();
   await expect(page.getByLabel("File browser directory state")).toContainText(
-    "0 of 0 entries",
+    "0 entries",
   );
 
   await page.getByLabel("Remote path").fill("/large");
@@ -1323,7 +1430,7 @@ test("home exposes quick actions, availability, running work, failures, attentio
   ).toBeVisible();
   await expect(runningPanel).toContainText("Fleet summary");
 
-  const failurePanel = homePanel(page, "Recent failures");
+  const failurePanel = homePanel(page, "Recent issues");
   await expect(failurePanel).toBeVisible();
   await expect(
     failurePanel.getByRole("button", {
@@ -1499,7 +1606,7 @@ test("home overview text fits desktop tablet and mobile widths", async ({
       page.getByRole("heading", { name: "Fleet command home" }),
     ).toBeVisible();
     await expect(homePanel(page, "Running work")).toBeVisible();
-    await expect(homePanel(page, "Recent failures")).toBeVisible();
+    await expect(homePanel(page, "Recent issues")).toBeVisible();
     await expectHomeOverviewToFit(page, viewport.label);
   }
 });
@@ -1910,6 +2017,17 @@ test("fleet groups expose registry assignments and reviewed bulk mutation eviden
   await page
     .getByRole("searchbox", { name: "Bulk tag selector expression" })
     .fill("id:agent-sfo-01");
+  const selectorStatus = page
+    .locator(".searchExpressionInput", {
+      has: page.getByRole("searchbox", {
+        name: "Bulk tag selector expression",
+      }),
+    })
+    .locator(".searchExpressionMeta");
+  await expect(selectorStatus).toHaveAttribute(
+    "title",
+    "Local match 1 VPS · 0 ready · 1 needs review · review targets excluded",
+  );
   const resolution = page.getByLabel("Bulk group target resolution");
   await expect(resolution).toContainText("Local match 1 VPS");
   await expect(resolution).toContainText("0 ready");
@@ -2007,8 +2125,157 @@ test("fleet instance row actions expose release VPS workflows", async ({
         exact: true,
       }),
     ).toBeVisible();
-    await expect(page.locator("body")).toContainText("edge-sfo-01");
+    if (action.label === "Open detail") {
+      await expect(page).toHaveURL(
+        /#\/fleet\/instance-detail\/agent-sfo-01$/,
+      );
+      await expect(
+        page.getByLabel("Canonical VPS detail").getByLabel("Selected VPS identity"),
+      ).toContainText("edge-sfo-01");
+    } else if (action.label === "Open terminal") {
+      await expect(page.getByLabel("New terminal target")).toHaveValue(
+        /edge-sfo-01/,
+      );
+    } else if (action.label === "Open files") {
+      await expect(
+        page.getByRole("combobox", { name: "File browser target VPS" }),
+      ).toHaveValue(/edge-sfo-01/);
+    } else if (action.label === "Open processes") {
+      await expect(page.getByLabel("Process VPS focus")).toContainText(
+        "edge-sfo-01",
+      );
+    } else if (action.label === "Open backups") {
+      const workflow = page.getByRole("complementary", { name: "Run backup" });
+      const target = workflow.getByRole("combobox", { name: "Backup client" });
+      await expect(workflow).toBeVisible();
+      await expect(target).toHaveValue(/edge-sfo-01/);
+      await expect(target).toBeFocused();
+    } else if (action.label === "Open network") {
+      await expect(page.locator(".topologyNodeInspector")).toContainText(
+        "edge-sfo-01",
+      );
+    }
   }
+});
+
+test("resource-specific VPS detail routes survive hard refresh", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the desktop fleet grid is the canonical resource-detail entry point",
+  );
+  await gotoConsoleHome(page);
+  await openConsoleSubpage(page, "Fleet", "Instances");
+
+  const grid = page.getByLabel("VPS instance records data grid");
+  const edgeRow = grid
+    .locator(".gridBody [role=row]", { hasText: "edge-sfo-01" })
+    .first();
+  await edgeRow.getByLabel("Select VPS instance records row").check();
+  await grid.getByRole("button", { name: /^Actions$/ }).click();
+  await page.getByRole("menuitem", { name: "Open detail" }).click();
+  await expect(page).toHaveURL(/#\/fleet\/instance-detail\/agent-sfo-01$/);
+
+  await page.reload();
+  await waitForConsoleShell(page);
+  await expect(page).toHaveURL(/#\/fleet\/instance-detail\/agent-sfo-01$/);
+  await expect(
+    page.getByLabel("Canonical VPS detail").getByLabel("Selected VPS identity"),
+  ).toContainText("edge-sfo-01");
+});
+
+test("resource-specific VPS detail routes keep navigation context", async ({
+  page,
+}) => {
+  await page.goto("/#/fleet/instance-detail/agent-sfo-01");
+  await waitForConsoleShell(page);
+
+  const pageSelector = page.locator(".mobilePageSelector");
+  await expect(pageSelector).toHaveValue("Fleet::instance_detail");
+  await expect(pageSelector.locator("option:checked")).toHaveText(
+    "Fleet / Instance detail",
+  );
+
+  const fleetSections = page.getByLabel("Fleet sections");
+  if (await fleetSections.isVisible()) {
+    await expect(
+      fleetSections.getByRole("button", { name: "Instance detail" }),
+    ).toHaveAttribute("aria-current", "page");
+  }
+});
+
+test("VPS detail workflow actions preserve the exact resource target", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "dense detail actions are covered through the desktop resource workflow",
+  );
+  const openDetail = async () => {
+    await page.goto("/#/fleet/instance-detail/agent-sfo-01");
+    await waitForConsoleShell(page);
+    await expect(
+      page.getByLabel("Canonical VPS detail").getByLabel("Selected VPS identity"),
+    ).toContainText("edge-sfo-01");
+    return page.getByLabel("Canonical VPS detail");
+  };
+
+  let detail = await openDetail();
+  await detail.getByRole("button", { name: "Run command", exact: true }).click();
+  await expect(
+    page.getByRole("searchbox", { name: "Bulk target selector expression" }),
+  ).toHaveValue("id:agent-sfo-01");
+
+  detail = await openDetail();
+  await detail.getByRole("button", { name: "Files", exact: true }).click();
+  await expect(
+    page.getByRole("combobox", { name: "File browser target VPS" }),
+  ).toHaveValue(/edge-sfo-01/);
+
+  detail = await openDetail();
+  await detail.getByRole("button", { name: "Processes", exact: true }).click();
+  await expect(page.getByLabel("Process VPS focus")).toContainText(
+    "edge-sfo-01",
+  );
+
+  detail = await openDetail();
+  await detail.getByRole("button", { name: "Back up", exact: true }).click();
+  const backupWorkflow = page.getByRole("complementary", { name: "Run backup" });
+  const backupTarget = backupWorkflow.getByRole("combobox", {
+    name: "Backup client",
+  });
+  await expect(backupTarget).toHaveValue(/edge-sfo-01/);
+  await expect(backupTarget).toBeFocused();
+
+  detail = await openDetail();
+  await detail.getByRole("button", { name: "Config", exact: true }).click();
+  await expect(
+    page.getByRole("combobox", { name: "VPS config target" }),
+  ).toHaveValue(/edge-sfo-01/);
+});
+
+test("network graph handoffs never substitute a different VPS", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the desktop fleet grid exposes the direct network handoff",
+  );
+  await gotoConsoleHome(page);
+  await openConsoleSubpage(page, "Fleet", "Instances");
+
+  const grid = page.getByLabel("VPS instance records data grid");
+  const backupRow = grid
+    .locator(".gridBody [role=row]", { hasText: "backup-nyc-03" })
+    .first();
+  await backupRow.getByLabel("Select VPS instance records row").check();
+  await grid.getByRole("button", { name: /^Actions$/ }).click();
+  await page.getByRole("menuitem", { name: "Open network" }).click();
+
+  await expect(page.getByText("VPS not in the managed graph")).toBeVisible();
+  await expect(page.getByText("No different VPS was selected.")).toBeVisible();
+  await expect(page.locator(".topologyNodeInspector")).toHaveCount(0);
 });
 
 test("fleet instance detail is the canonical VPS route from release workflows", async ({
@@ -2288,7 +2555,7 @@ test("jobs approvals and scheduled runs stay separate", async ({
   await expect(
     page.getByRole("heading", { level: 1, name: "Approvals" }),
   ).toBeVisible();
-  await expect(page.getByText("1 pending · 1 reviewed requests")).toBeVisible();
+  await expect(page.getByText("1 pending · 1 total request")).toBeVisible();
   await expect(page.getByText("Job approval queue")).toBeVisible();
   await expect(page.getByText("noc-operator")).toBeVisible();
   await expect(page.getByText("destructive")).toBeVisible();
@@ -2299,7 +2566,7 @@ test("jobs approvals and scheduled runs stay separate", async ({
     name: "Review job approval",
   });
   await expect(reviewPrompt).toBeVisible();
-  await expect(reviewPrompt).toContainText("Shell command");
+  await expect(reviewPrompt).toContainText("Argv command");
   await expect(reviewPrompt).toContainText("noc-operator (operator)");
   await expect(reviewPrompt).toContainText("Request reason");
   await expect(reviewPrompt).toContainText("destructive");
@@ -2370,7 +2637,7 @@ test("jobs approvals and scheduled runs stay separate", async ({
   );
   await expect(schedulesGrid).toContainText("edge-health-hourly");
   await expect(schedulesGrid).toContainText("Hourly at minute 0");
-  await expect(schedulesGrid).toContainText("Shell command");
+  await expect(schedulesGrid).toContainText("Argv command");
   await expect(schedulesGrid).toContainText("Automatic runs authorized");
   await expect(schedulesGrid).toContainText("Overdue");
   await expect(schedulesGrid).toContainText(/Overdue by \d+[wdh]/);
@@ -2419,7 +2686,7 @@ test("dispatch can queue a frozen request for approval without running it", asyn
   await expect(
     page.getByRole("heading", { level: 1, name: "Approvals" }),
   ).toBeVisible();
-  await expect(page.getByText("2 pending · 2 reviewed requests")).toBeVisible();
+  await expect(page.getByText("2 pending · 2 total requests")).toBeVisible();
   const grid = page.getByLabel("Job approval queue data grid");
   await expect(grid).toContainText("console-admin");
   const createdRow = grid
@@ -2472,7 +2739,7 @@ test("generic data grids become actionable mobile cards", async ({
   await expect(cards.first()).toBeVisible();
   await expect(grid.locator(".gridHeaderGroup")).toBeHidden();
 
-  const pendingCard = cards.filter({ hasText: "Shell command" }).first();
+  const pendingCard = cards.filter({ hasText: "Argv command" }).first();
   await expect(pendingCard).toContainText("pending");
   await expect(pendingCard).toContainText("Scope");
   await expect(
@@ -2588,8 +2855,8 @@ test("automation runbooks promotes command templates into reviewed catalog", asy
   const catalog = page.getByLabel("Runbook catalog", { exact: true });
   await expect(catalog).toContainText("Default shell command");
   await expect(catalog).toContainText("edge-health-check");
-  await expect(catalog).toContainText("Shell command");
-  await expect(catalog).toContainText("Last result");
+  await expect(catalog).toContainText("Argv command");
+  await expect(catalog).toContainText("Latest same operation");
   await expect(catalog).toContainText("No run found for this runbook");
   await expect(catalog).not.toContainText("No loaded run");
   await expect(catalog).not.toContainText("shell_argv");
@@ -2650,6 +2917,9 @@ test("jobs artifacts is read-only inventory linked to source workflows", async (
   await expect(
     page.getByRole("heading", { level: 2, name: "Job artifacts" }),
   ).toBeVisible();
+
+  await page.reload();
+  await waitForConsoleShell(page);
 
   const summary = page.getByLabel("Job artifact inventory summary");
   await expect(summary).toContainText("Artifact types");
@@ -2837,6 +3107,12 @@ test("config overview focuses on drift risk and routes to config workflows", asy
   await expect(page.getByLabel("Recent config changes")).toContainText(
     "Apply state",
   );
+  const recentConfigCells = page
+    .getByLabel("Recent config changes")
+    .locator(".configRecentGrid:not(.heading) > span");
+  for (let index = 0; index < await recentConfigCells.count(); index += 1) {
+    await expect(recentConfigCells.nth(index)).toHaveAttribute("title");
+  }
   await expect(page.getByLabel("Bulk patch target expression")).toHaveCount(0);
   await expect(page.getByLabel("VPS config target")).toHaveCount(0);
   await expect(page.getByLabel("Patch generators data grid")).toHaveCount(0);
@@ -2912,7 +3188,7 @@ test("config templates summarizes coverage and links to canonical automation aut
   if (testInfo.project.name.includes("mobile")) {
     for (const label of [
       "Desired source",
-      "Assigned VPSs",
+      "Assigned VPS",
       "Ready",
       "Attention",
       "Fix",
@@ -2923,7 +3199,7 @@ test("config templates summarizes coverage and links to canonical automation aut
     for (const label of [
       "Desired source",
       "Stored/available",
-      "Assigned VPSs",
+      "Assigned VPS",
       "Ready",
       "Attention",
       "Fix",
@@ -3274,7 +3550,15 @@ test("observability alert policy editor is a focused create flow", async ({
     0,
   );
 
-  await editor.getByLabel("Policy VPS selector expression").fill("tag:edge");
+  const policySelector = editor.getByLabel("Policy VPS selector expression");
+  await policySelector.fill("fo01");
+  await activate(
+    page.getByRole("option", {
+      name: /edge-sfo-01.*ID.*agent-sfo-01/,
+    }),
+  );
+  await expect(policySelector).toHaveValue("id:agent-sfo-01");
+  await policySelector.fill("tag:edge");
   await editor
     .getByLabel("Rule condition expression")
     .fill("traffic.cycle.total >= traffic.quota.total * 0.8");
@@ -3294,7 +3578,7 @@ test("observability alert policy editor is a focused create flow", async ({
   await activate(editor.getByRole("button", { name: "Create policy" }));
   const confirmation = page.getByLabel("Confirm alert policy save");
   await expect(confirmation).toBeVisible();
-  await expect(confirmation).toContainText("Matched VPSs");
+  await expect(confirmation).toContainText("Matched VPS");
   await activate(confirmation.getByRole("button", { name: "Cancel" }));
   await activate(editor.getByRole("button", { name: "Close detail panel" }));
   await expect(page.getByLabel("Alert routing summary")).toBeVisible();
@@ -3319,6 +3603,9 @@ test("observability webhook rule editor is a focused create flow", async ({
   await expect(editor).toContainText("Signing secret");
   await expect(editor).toContainText("Sample payload");
   await expect(editor).toContainText("Test before saving");
+  await expect(
+    editor.getByRole("textbox", { name: "Webhook body template" }),
+  ).toBeVisible();
   await editor
     .getByLabel("Webhook signing secret")
     .fill("fixture-webhook-secret");
@@ -3614,9 +3901,9 @@ test("observability fleet metrics owns resource charts and read-only analysis co
 
   const definitions = page.getByLabel("Fleet metrics availability definitions");
   await expect(definitions).toContainText("Active alerts");
-  await expect(definitions).toContainText("Affected VPSs");
+  await expect(definitions).toContainText("Affected VPS");
   await expect(definitions).toContainText("Reachability observations");
-  await expect(definitions).toContainText("Unavailable VPSs");
+  await expect(definitions).toContainText("Unavailable VPS");
 
   await expect(page.locator(".timeSeriesChartShell")).toBeVisible();
   await expect(page.locator(".timeSeriesChartShell").first()).toHaveAttribute(
@@ -3652,10 +3939,10 @@ test("observability fleet metrics owns resource charts and read-only analysis co
     "country:US",
   );
   await expect(page.getByLabel("Fleet metrics group breakdown")).toContainText(
-    "reachability gaps",
+    "historical interval gaps",
   );
   await expect(page.getByLabel("Fleet metrics group breakdown")).toContainText(
-    "reported reachable",
+    "currently reachable",
   );
 
   await controls.getByRole("button", { name: "Memory" }).click();
@@ -3758,6 +4045,7 @@ test("observability network metrics is chart-first and mutation-free", async ({
 }) => {
   await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Observability", "Network metrics");
+  await page.reload();
 
   await expect(
     page.getByRole("heading", { level: 1, name: "Network metrics" }),
@@ -3825,6 +4113,12 @@ test("observability network metrics is chart-first and mutation-free", async ({
   ).not.toContainText("wg-import");
   await expect(panel.getByLabel("Network endpoint comparison")).toContainText(
     /no measurement/i,
+  );
+  await expect(panel.getByLabel("Network endpoint comparison")).toContainText(
+    "Unverified",
+  );
+  await expect(panel.getByLabel("Network endpoint comparison")).not.toContainText(
+    "Down",
   );
   await expect(
     panel.getByLabel("Network metrics review signals"),
@@ -3962,29 +4256,41 @@ test("observability dashboards manages read-only dashboard presets", async ({
   await expect(
     panel.getByLabel("Group posture dashboard widgets"),
   ).toContainText("country:US");
+  await expect(page).toHaveURL(/\?dashboard=group_posture#\/observability\/dashboards$/);
+  await page.reload();
+  await expect(
+    page
+      .locator(".observabilityDashboardsPanel")
+      .getByLabel("Group posture dashboard widgets"),
+  ).toContainText("country:US");
 
   await expect(
-    panel.getByRole("button", { exact: true, name: "Copy link" }),
+    page
+      .locator(".observabilityDashboardsPanel")
+      .getByRole("button", { exact: true, name: "Copy link" }),
   ).toBeVisible();
   await expect(
-    panel.getByRole("button", { name: "Export JSON" }),
+    page
+      .locator(".observabilityDashboardsPanel")
+      .getByRole("button", { name: "Export JSON" }),
   ).toBeVisible();
-  await panel
+  const reloadedPanel = page.locator(".observabilityDashboardsPanel");
+  await reloadedPanel
     .getByLabel("Dashboard section selector")
     .getByRole("button", { name: /Copy \/ Export/ })
     .click();
   await expect(
-    panel.getByLabel("Dashboard copy and export details"),
+    reloadedPanel.getByLabel("Dashboard copy and export details"),
   ).toContainText("Read-only");
   const downloadPromise = page.waitForEvent("download");
-  await panel.getByRole("button", { name: "Export JSON" }).click();
+  await reloadedPanel.getByRole("button", { name: "Export JSON" }).click();
   await downloadPromise;
   await expect(
-    panel.locator(".dashboardActionFeedback.actionFeedbackSuccess"),
+    reloadedPanel.locator(".dashboardActionFeedback.actionFeedbackSuccess"),
   ).toContainText("Exported Group posture");
-  await expect(panel.locator(".dashboardManagerStatus")).toHaveCount(0);
+  await expect(reloadedPanel.locator(".dashboardManagerStatus")).toHaveCount(0);
   await expect(
-    panel.getByRole("button", {
+    reloadedPanel.getByRole("button", {
       name: /Open terminal|Run backup|Dispatch|Apply|Delete|Restart|Stop|Create/,
     }),
   ).toHaveCount(0);
@@ -4046,7 +4352,7 @@ test("audit events stays read-only with filters and event detail", async ({
   );
   for (const header of [
     "Time",
-    "Operator",
+    "Actor",
     "Action",
     "Target",
     "Result",
@@ -4169,6 +4475,47 @@ test("audit latest visible event uses newest timestamp instead of row order", as
   await expect(auditSummary).not.toContainText(olderTime);
 });
 
+test("audit identifies control-plane events without inventing an unknown actor", async ({
+  page,
+}, testInfo) => {
+  await installConsoleApiMock(page, {
+    auditLogsOverride: [
+      {
+        action: "job.target_result",
+        actor_id: null,
+        command_hash: "9".repeat(64),
+        created_at: "2026-06-02T11:30:00Z",
+        id: "audit-control-plane-0001",
+        metadata: {
+          job_id: "job-control-plane-0001",
+          result: "succeeded",
+        },
+        target: "job:job-control-plane-0001",
+      },
+    ],
+  });
+  await gotoConsoleHome(page);
+  await openConsoleSubpage(page, "Audit", "Events");
+
+  const grid = page.getByLabel("Audit records data grid");
+  await expect(grid).toContainText("Control plane");
+  await expect(grid).toContainText("system event");
+  await expect(grid).not.toContainText("Unknown actor");
+  if (testInfo.project.name.includes("mobile")) {
+    await grid
+      .getByRole("button", {
+        name: "Show details for Audit records row audit-control-plane-0001",
+      })
+      .click();
+  } else {
+    await grid.getByText("Job target result").click();
+  }
+
+  const detail = page.getByLabel("Audit event detail");
+  await expect(detail).toContainText("Control plane");
+  await expect(detail).not.toContainText("unknown");
+});
+
 test("audit job evidence proves who ran what without leaving Audit", async ({
   page,
 }) => {
@@ -4216,6 +4563,7 @@ test("audit job evidence proves who ran what without leaving Audit", async ({
   detail = panel.getByLabel("Selected job evidence detail");
   await expect(detail).toContainText("console-admin");
   await expect(detail).toContainText("privileged command");
+  await expect(detail).toContainText("1 matched");
   await expect(detail).toContainText("Inline output");
   await expect(detail).toContainText("no approval record exposed");
   await expect(
@@ -4293,7 +4641,7 @@ test("audit sessions correlates terminal and auth evidence without emulator cont
   ).toContainText("Stale state");
   await expect(
     panel.getByLabel("Terminal session evidence data grid"),
-  ).toContainText("Trace only; small retained transcript");
+  ).toContainText("Replayable transcript");
 
   const detail = panel.getByLabel("Selected terminal session evidence");
   await expect(detail).toContainText("Started");
@@ -4413,18 +4761,15 @@ test("audit retention explains export scope and prune impact separately from mai
   await page.getByRole("button", { name: "Preview cleanup" }).click();
   await expect(summary).toContainText("0 matched rows / 0 objects");
   await expect(cleanup).toContainText("Would delete 0 metadata rows");
-  await expect(
-    page.getByRole("button", { name: "Delete reviewed rows" }),
-  ).toBeEnabled();
-
-  await page.getByRole("button", { name: "Delete reviewed rows" }).click();
-  const prunePrompt = page.getByLabel("Confirm history prune");
-  await expect(prunePrompt).toBeVisible();
-  await expect(prunePrompt).toContainText("Reviewed rows");
-  await expect(prunePrompt).toContainText("Objects");
-  await expect(prunePrompt).toContainText("Effect");
-  await expect(prunePrompt).toContainText("Would delete 0 metadata rows");
-  await prunePrompt.getByRole("button", { name: "Cancel" }).click();
+  const deleteReviewedRows = page.getByRole("button", {
+    name: "Delete reviewed rows",
+  });
+  await expect(deleteReviewedRows).toBeDisabled();
+  await expect(deleteReviewedRows).toHaveAttribute(
+    "title",
+    "No reviewed rows match; deletion is not needed",
+  );
+  await expect(page.getByLabel("Confirm history prune")).toHaveCount(0);
 });
 
 test("access overview routes to release authority pages", async ({ page }) => {
@@ -4978,6 +5323,12 @@ test("backups requests keep request review separate from policy and restore work
 
   await activate(page.getByRole("button", { name: "Run backup", exact: true }));
   const drawer = page.getByRole("complementary", { name: "Run backup" });
+  await expect
+    .poll(async () => {
+      const box = await drawer.boundingBox();
+      return box?.y ?? Number.POSITIVE_INFINITY;
+    })
+    .toBeLessThan(280);
   await expect(
     drawer.getByRole("heading", { name: "Backup scope" }),
   ).toBeVisible();
@@ -5066,6 +5417,34 @@ test("backup request presets keep collection policy compact and explicit", async
   ).not.toBeChecked();
 });
 
+test("backup action drawers stay owned by the subpage that opened them", async ({
+  page,
+}) => {
+  await gotoConsoleHome(page);
+  await openConsoleSubpage(page, "Backups", "Requests");
+  await activate(page.getByRole("button", { name: "Run backup", exact: true }));
+  await expect(
+    page.getByRole("complementary", { name: "Run backup" }),
+  ).toBeVisible();
+
+  await openConsoleSubpage(page, "Backups", "Policies");
+  await expect(
+    page.getByRole("complementary", { name: "Create policy" }),
+  ).toHaveCount(0);
+
+  await activate(
+    page.getByRole("button", { name: "Create policy", exact: true }).first(),
+  );
+  await expect(
+    page.getByRole("complementary", { name: "Create policy" }),
+  ).toBeVisible();
+
+  await openConsoleSubpage(page, "Backups", "Artifacts");
+  await expect(
+    page.getByRole("complementary", { name: "Open artifact workflow" }),
+  ).toHaveCount(0);
+});
+
 test("backups policies keep authoring separate and review prune preview before apply", async ({
   page,
 }, testInfo) => {
@@ -5131,7 +5510,7 @@ test("backups policies keep authoring separate and review prune preview before a
   ).toBeVisible();
   await expect(
     drawer.getByRole("heading", { name: "Policy prune" }),
-  ).toBeVisible();
+  ).toHaveCount(0);
   await expect(drawer.getByLabel("Backup policy name")).toHaveValue("");
   await expect(
     drawer.getByRole("searchbox", {
@@ -5142,9 +5521,6 @@ test("backups policies keep authoring separate and review prune preview before a
     drawer.getByRole("button", { name: "Review policy" }),
   ).toBeDisabled();
   await expect(
-    drawer.getByLabel("Backup policy prune review state"),
-  ).toContainText("Preview only");
-  await expect(
     drawer.getByRole("heading", { name: "Backup scope" }),
   ).toHaveCount(0);
   await expect(
@@ -5154,12 +5530,37 @@ test("backups policies keep authoring separate and review prune preview before a
     drawer.getByRole("heading", { name: "Artifact upload" }),
   ).toHaveCount(0);
 
-  await drawer.getByLabel("Dry run").uncheck();
+  await activate(
+    drawer.getByRole("button", { name: "Close Create policy" }),
+  );
+  await activate(
+    page.getByRole("button", { name: "Prune policies", exact: true }),
+  );
+  const pruneDrawer = page.getByLabel("Prune policies");
   await expect(
-    drawer.getByLabel("Backup policy prune review state"),
+    page.getByRole("button", { name: "Create policy", exact: true }),
+  ).toHaveCount(2);
+  await expect(
+    page.getByRole("button", { name: "Prune policies", exact: true }),
+  ).toHaveCount(1);
+  await expect(
+    pruneDrawer.getByRole("heading", { name: "Backup policy" }),
+  ).toHaveCount(0);
+  await expect(
+    pruneDrawer.getByRole("heading", { name: "Policy prune" }),
+  ).toBeVisible();
+  await expect(
+    pruneDrawer.getByLabel("Backup policy prune review state"),
+  ).toContainText("Preview only");
+
+  await pruneDrawer.getByLabel("Dry run").uncheck();
+  await expect(
+    pruneDrawer.getByLabel("Backup policy prune review state"),
   ).toContainText("Preview required before apply");
-  await activate(drawer.getByRole("button", { name: "Review prune apply" }));
-  const confirmation = drawer.getByLabel("Confirm policy prune apply");
+  await activate(
+    pruneDrawer.getByRole("button", { name: "Review prune apply" }),
+  );
+  const confirmation = pruneDrawer.getByLabel("Confirm policy prune apply");
   await expect(confirmation).toBeVisible();
   await expect(confirmation).toContainText("Preview hash");
   await expect(confirmation).toContainText("Reviewed rows");
@@ -5305,9 +5706,7 @@ test("backups migration starts from source artifact to replacement mapping", asy
   await expect(
     drawer.getByRole("button", { name: "Review mapping" }),
   ).toBeVisible();
-  await expect(
-    drawer.getByRole("button", { name: "Review cutover restore" }),
-  ).toBeVisible();
+  await expect(drawer.getByRole("button", { name: "Review dry run" })).toBeVisible();
 });
 
 test("network overview links to release network workflows", async ({
@@ -5339,6 +5738,18 @@ test("network overview links to release network workflows", async ({
   await expect(
     page.getByRole("heading", { name: "Create tunnel plan" }),
   ).toBeVisible();
+  const tunnelPlanName = page.getByLabel("Tunnel plan name");
+  await expect(tunnelPlanName).toBeFocused();
+  await expect(tunnelPlanName).toHaveCSS("border-radius", "6px");
+  const tunnelControlHeights = await page
+    .locator(
+      '.tunnelPlanComposer .topologyFormGrid input:not([type="checkbox"]):not([type="radio"]), .tunnelPlanComposer .topologyFormGrid select',
+    )
+    .evaluateAll((controls) =>
+      controls.map((control) => control.getBoundingClientRect().height),
+    );
+  expect(tunnelControlHeights.length).toBeGreaterThan(0);
+  expect(Math.min(...tunnelControlHeights)).toBeGreaterThanOrEqual(36);
 
   await openConsoleSubpage(page, "Network", "Overview");
   const links = page.getByLabel("Network overview workflow links");
@@ -5960,6 +6371,26 @@ test("system suite config owns control-plane config and excludes per-VPS editors
   await page.getByLabel("Search suite config settings").fill("");
   await expect(page.getByLabel("Capacity suite config fields")).toBeVisible();
 
+  await sections.getByRole("button", { name: /API/ }).click();
+  const artifactMaxBytesField = page.locator(".systemConfigFieldRow", {
+    has: page.getByLabel("Artifact max bytes"),
+  });
+  await expect(
+    artifactMaxBytesField.getByRole("button", { name: "Use default" }),
+  ).toBeDisabled();
+  await page.getByLabel("Artifact max bytes").fill("1048576");
+  await expect(
+    artifactMaxBytesField.getByRole("button", { name: "Use default" }),
+  ).toBeEnabled();
+  await artifactMaxBytesField
+    .getByRole("button", { name: "Use default" })
+    .click();
+  await expect(page.getByLabel("Artifact max bytes")).toHaveValue("");
+  await expect(page.getByLabel("Suite config sticky save bar")).toContainText(
+    "No draft changes",
+  );
+
+  await sections.getByRole("button", { name: /Capacity/ }).click();
   const apiDbField = page.locator(".systemConfigFieldRow", {
     has: page.getByLabel("API DB pool"),
   });
@@ -5972,7 +6403,8 @@ test("system suite config owns control-plane config and excludes per-VPS editors
     apiDbField.getByRole("button", { name: "Use default" }),
   ).toBeEnabled();
   await apiDbField.getByRole("button", { name: "Use default" }).click();
-  await expect(page.getByLabel("API DB pool")).toHaveValue("32");
+  await expect(page.getByLabel("API DB pool")).toHaveValue("");
+  await expect(apiDbField).toContainText("Default 32");
   await page.getByLabel("API DB pool").fill("40");
   await expect(
     apiDbField.getByRole("button", { name: "Reset current" }),
@@ -6107,6 +6539,7 @@ test("system maintenance presents an empty cleanup preview as a neutral no-op", 
   await expect(cleanupPanel.getByLabel("Cleanup preview result")).toContainText(
     "No matching artifacts",
   );
+  await expect(cleanupPanel.getByLabel("Cleanup preview result")).toBeFocused();
   const readiness = cleanupPanel.getByLabel("Artifact cleanup readiness");
   await expect(readiness).toContainText("Nothing to delete");
   await expect(readiness).toContainText("No artifacts match");

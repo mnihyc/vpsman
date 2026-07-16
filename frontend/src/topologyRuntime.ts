@@ -178,9 +178,9 @@ export function latencyStatusLabel(status: string | null | undefined): string {
     case "healthy":
       return "Healthy";
     case "down":
-      return "Down";
+      return "Probe failed";
     case "missed":
-      return "Missing";
+      return "Probe missed";
     case "unconfigured":
       return "Not configured";
     case "disabled":

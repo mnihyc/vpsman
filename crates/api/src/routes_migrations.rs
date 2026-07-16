@@ -52,6 +52,7 @@ pub(crate) async fn create_migration_link(
         .find_restore_plan(request.restore_plan_id)
         .await?
         .ok_or_else(|| ApiError::bad_request("migration_restore_plan_not_found"))?;
+    validate_migration_route(&restore_plan)?;
     if restore_plan.status != RestorePlanStatus::PlannedMetadataOnly.as_str() {
         return Err(ApiError::conflict(
             "migration_restore_plan_not_metadata_only",
@@ -81,6 +82,7 @@ pub(crate) async fn create_migration_run(
         .find_restore_plan(request.link.restore_plan_id)
         .await?
         .ok_or_else(|| ApiError::bad_request("migration_restore_plan_not_found"))?;
+    validate_migration_route(&restore_plan)?;
     if restore_plan.status != RestorePlanStatus::PlannedMetadataOnly.as_str() {
         return Err(ApiError::conflict(
             "migration_restore_plan_not_metadata_only",
@@ -276,6 +278,15 @@ pub(crate) fn validate_create_migration_link(
         .is_some_and(|note| note.len() > MAX_MIGRATION_NOTE_BYTES)
     {
         return Err(ApiError::bad_request("migration_note_too_long"));
+    }
+    Ok(())
+}
+
+fn validate_migration_route(restore_plan: &MigrationLinkRestorePlan) -> Result<(), ApiError> {
+    if restore_plan.source_client_id == restore_plan.target_client_id {
+        return Err(ApiError::bad_request(
+            "migration_source_and_replacement_must_differ",
+        ));
     }
     Ok(())
 }

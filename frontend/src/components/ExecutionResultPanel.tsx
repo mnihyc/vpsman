@@ -1,10 +1,12 @@
 import { ExternalLink, X } from "lucide-react";
+import { useEffect, useRef, type ReactNode } from "react";
 import {
   bulkOutcomeSummary,
   bulkProgressLabel,
   type BulkFailureReason,
   type BulkJobProgress,
 } from "../bulkJobProgress";
+import { scrollIntoViewWithMotion } from "../motion";
 import { shortId } from "../utils";
 
 export function ExecutionResultPanel({
@@ -15,7 +17,9 @@ export function ExecutionResultPanel({
   onOpenJobDetails,
   onOpenJobHistory,
   progress,
+  children,
 }: {
+  children?: ReactNode;
   context?: string;
   label?: string;
   loading?: boolean;
@@ -24,10 +28,26 @@ export function ExecutionResultPanel({
   onOpenJobHistory?: () => void;
   progress: BulkJobProgress;
 }) {
+  const panelRef = useRef<HTMLElement | null>(null);
   const jobCount = progress.jobIds.length;
   const hasMultipleJobs = jobCount > 1;
+
+  useEffect(() => {
+    window.requestAnimationFrame(() => {
+      const panel = panelRef.current;
+      if (!panel) return;
+      scrollIntoViewWithMotion(panel, { block: "start" });
+      panel.focus({ preventScroll: true });
+    });
+  }, []);
+
   return (
-    <section className="executionResultPanel" aria-label={label}>
+    <section
+      aria-label={label}
+      className="executionResultPanel"
+      ref={panelRef}
+      tabIndex={-1}
+    >
       <div className="executionResultHeader">
         <div>
           <strong>{label}</strong>
@@ -112,6 +132,7 @@ export function ExecutionResultPanel({
       </div>
       <p>{bulkProgressLabel(progress)}</p>
       <FailureReasonGroups reasons={progress.failureReasons ?? []} />
+      {children}
     </section>
   );
 }

@@ -521,6 +521,7 @@ async function waitForTransferStatus(
   expectedClientIds?: string[],
 ): Promise<TransferClientStatus[]> {
   const statuses = new Map<string, TransferClientStatus>();
+  const failureReasons = new Map<string, string>();
   const expectedClientSet = expectedClientIds ? new Set(expectedClientIds) : null;
   const expectedStatusCount = expectedClientIds?.length ?? expectedTargets;
   const startedAt = Date.now();
@@ -542,9 +543,16 @@ async function waitForTransferStatus(
     }
     if (outputs !== null) {
       for (const output of outputs) {
-        const payload = parseTransferStatus(output, sessionId, expectedType);
-        if (payload && (!expectedClientSet || expectedClientSet.has(output.client_id))) {
-          statuses.set(output.client_id, { clientId: output.client_id, payload });
+        try {
+          const payload = parseTransferStatus(output, sessionId, expectedType);
+          if (payload && (!expectedClientSet || expectedClientSet.has(output.client_id))) {
+            statuses.set(output.client_id, { clientId: output.client_id, payload });
+          }
+        } catch (error) {
+          failureReasons.set(
+            output.client_id,
+            error instanceof Error ? error.message : "agent returned unusable transfer status",
+          );
         }
       }
     }
@@ -561,7 +569,12 @@ async function waitForTransferStatus(
     }
     if (job && isTerminalJobStatus(job.status)) {
       if (job.status !== "completed") {
-        throw new Error(`${expectedType} job ${jobId} ended ${job.status}`);
+        const reasons = [...failureReasons.entries()]
+          .map(([clientId, reason]) => `${clientId}: ${reason}`)
+          .join("; ");
+        throw new Error(
+          `${expectedType} job ${jobId} ended ${job.status}${reasons ? `; ${reasons}` : "; inspect job targets and retained status output for the agent reason"}`,
+        );
       }
       if (statuses.size !== expectedStatusCount) {
         const missing = expectedClientIds?.filter((clientId) => !statuses.has(clientId)) ?? [];
@@ -596,8 +609,32 @@ function parseTransferStatus(output: JobOutputRecord, sessionId: string, expecte
     return null;
   }
   const text = atob(output.data_base64);
-  const value = JSON.parse(text) as Partial<TransferStatusPayload>;
-  if (value.type !== expectedType || value.session_id !== sessionId) {
+  let value: Partial<TransferStatusPayload> & Record<string, unknown>;
+  try {
+    value = JSON.parse(text) as Partial<TransferStatusPayload> &
+      Record<string, unknown>;
+  } catch {
+    const reason = text.trim();
+    throw new Error(reason || "agent returned an empty transfer status");
+  }
+  if (value.session_id && value.session_id !== sessionId) {
+    return null;
+  }
+  if (value.type !== expectedType) {
+    const reason = [
+      value.error,
+      value.message,
+      value.reason,
+      value.status_reason,
+    ].find((candidate): candidate is string =>
+      typeof candidate === "string" && candidate.trim().length > 0,
+    );
+    if (reason) {
+      throw new Error(reason.trim());
+    }
+    return null;
+  }
+  if (value.session_id !== sessionId) {
     return null;
   }
   const nextOffset = value.next_offset;

@@ -1448,6 +1448,28 @@ const fleetAlertNotifications = [
     target: "https://hooks.example/vpsman/fleet",
     updated_at: "2026-06-02T10:01:05Z",
   },
+  {
+    alert_category: "resource",
+    alert_id: "fleet-alert-resource-agent-sfo-01-cpu",
+    alert_severity: "warning",
+    attempt_count: 0,
+    channel_id: "fcfcfcfc-1111-4111-8111-111111111111",
+    channel_name: "edge-webhook-channel",
+    cooldown_until_unix: 0,
+    created_at: "2026-06-02T10:02:00Z",
+    dedupe_key: "edge-webhook-channel:fleet-alert-resource-agent-sfo-01-cpu",
+    delivery_kind: "webhook",
+    delivered_at: null,
+    error: null,
+    id: "fdfdfdfd-2222-4222-8222-222222222222",
+    last_attempt_at: null,
+    next_attempt_at: null,
+    payload: { alert_id: "fleet-alert-resource-agent-sfo-01-cpu" },
+    review_preview_hash: null,
+    status: "queued",
+    target: "https://hooks.example/vpsman/fleet",
+    updated_at: "2026-06-02T10:02:00Z",
+  },
 ];
 
 const webhookRules = [
@@ -1500,6 +1522,50 @@ const webhookDeliveries = [
     rule_id: "fefefefe-1111-4111-8111-111111111111",
     rule_name: "edge-interval-webhook",
     status: "delivered",
+    target: "https://hooks.example/vpsman/edge-capacity",
+  },
+  {
+    actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+    attempt_count: 1,
+    cooldown_until_unix: 0,
+    created_at: "2026-06-02T10:02:00Z",
+    dedupe_key: "edge-interval-webhook:interval.30sec:q2-edge-failed",
+    delivered_at: null,
+    error: "fixture receiver returned 503",
+    event_id: "q2-edge-failed",
+    event_kind: "interval.30sec",
+    id: "abababab-2222-4222-8222-222222222222",
+    last_attempt_at: "2026-06-02T10:02:04Z",
+    matched_vps: [],
+    message: "edge-interval-webhook failed test",
+    next_attempt_at: "2026-06-02T10:07:04Z",
+    payload: { event_kind: "interval.30sec", matched_count: 0 },
+    review_preview_hash: null,
+    rule_id: "fefefefe-1111-4111-8111-111111111111",
+    rule_name: "edge-interval-webhook",
+    status: "failed",
+    target: "https://hooks.example/vpsman/edge-capacity",
+  },
+  {
+    actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+    attempt_count: 0,
+    cooldown_until_unix: 0,
+    created_at: "2026-06-02T10:03:00Z",
+    dedupe_key: "edge-interval-webhook:interval.30sec:q2-edge-queued",
+    delivered_at: null,
+    error: null,
+    event_id: "q2-edge-queued",
+    event_kind: "interval.30sec",
+    id: "abababab-3333-4333-8333-333333333333",
+    last_attempt_at: null,
+    matched_vps: [],
+    message: "edge-interval-webhook queued test",
+    next_attempt_at: null,
+    payload: { event_kind: "interval.30sec", matched_count: 0 },
+    review_preview_hash: null,
+    rule_id: "fefefefe-1111-4111-8111-111111111111",
+    rule_name: "edge-interval-webhook",
+    status: "queued",
     target: "https://hooks.example/vpsman/edge-capacity",
   },
 ];
@@ -1660,6 +1726,23 @@ const auditLogs = [
       resolved_targets: ["agent-sfo-01", "agent-fra-02"],
       session_id: "88888888-aaaa-4bbb-8ccc-000000000001",
       target_count: 2,
+    },
+    target: "api:/api/v1/jobs",
+  },
+  {
+    action: "job.dispatch_requested",
+    actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+    command_hash: "7".repeat(64),
+    created_at: "2026-05-31T09:08:55Z",
+    id: "audit-job-dispatch-repeated-payload-0001",
+    metadata: {
+      command_type: "network_speed_test",
+      job_id: "11111111-2222-4333-8444-555555555555",
+      operator_role: "admin",
+      operator_username: "console-admin",
+      privileged: true,
+      resolved_targets: ["agent-sfo-01"],
+      target_count: 1,
     },
     target: "api:/api/v1/jobs",
   },
@@ -2059,7 +2142,6 @@ const backupArtifacts = [
 
 function tunnelRuntimeConfigFixture(clientId: string, enabled: boolean) {
   return {
-    cleanup_confirmed: !enabled,
     client_id: clientId,
     desired: enabled ? "present" : "absent",
     error: null,
@@ -2944,7 +3026,6 @@ export async function installConsoleApiMock(
     }) => {
       const originalFetch = window.fetch.bind(window);
       const runtimeTunnelConfig = (clientId: string, enabled: boolean) => ({
-        cleanup_confirmed: !enabled,
         client_id: clientId,
         desired: enabled ? "present" : "absent",
         error: null,
@@ -6410,7 +6491,10 @@ export async function installConsoleApiMock(
           const body = (await readJsonBody(input, init)) as {
             expected_revision?: number;
           };
-          requests.tunnelPlanDeletes.push({ plan_id: planId });
+          requests.tunnelPlanDeletes.push({
+            expected_revision: body.expected_revision,
+            plan_id: planId,
+          });
           const plan = tunnelPlansFixture.find(
             (record) =>
               record.id === planId && !deletedTunnelPlanIds.has(record.id),
@@ -6421,28 +6505,30 @@ export async function installConsoleApiMock(
           if (body.expected_revision !== plan.revision) {
             return jsonResponse({ code: "tunnel_plan_snapshot_stale" }, 409);
           }
-          if (plan.enabled) {
-            return jsonResponse(
-              { code: "tunnel_plan_disable_before_delete" },
-              409,
-            );
-          }
-          if (
-            !plan.left_runtime_config.cleanup_confirmed ||
-            !plan.right_runtime_config.cleanup_confirmed
-          ) {
-            return jsonResponse(
-              { code: "tunnel_plan_cleanup_not_confirmed" },
-              409,
-            );
-          }
+          const sync = runtimeTunnelDispatch(
+            plan.left_client_id,
+            plan.right_client_id,
+          );
           plan.revision += 1;
+          plan.enabled = false;
+          plan.left_runtime_config = runtimeTunnelConfig(
+            plan.left_client_id,
+            false,
+          );
+          plan.right_runtime_config = runtimeTunnelConfig(
+            plan.right_client_id,
+            false,
+          );
+          plan.left_runtime_config.status = "queued";
+          plan.right_runtime_config.status = "queued";
+          plan.left_runtime_config.job_id = sync[0].job_id;
+          plan.right_runtime_config.job_id = sync[1].job_id;
           plan.deleted_at = "2026-06-02T10:09:00Z";
           plan.deleted_by = "99999999-aaaa-4bbb-8ccc-000000000001";
           plan.deleted_reason = "operator_retired";
           plan.updated_at = "2026-06-02T10:09:00Z";
           deletedTunnelPlanIds.add(plan.id);
-          return jsonResponse({ plan, sync: [] });
+          return jsonResponse({ plan, sync });
         }
         const tunnelPlanOspfCostMatch = pathname.match(
           /^\/api\/v1\/tunnel-plans\/([^/]+)\/ospf-cost$/,

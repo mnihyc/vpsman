@@ -2151,6 +2151,7 @@ impl Repository {
     ) -> Result<Uuid> {
         let resolved_targets = request.fixed_target_ids().unwrap_or_default();
         let metadata = json!({
+            "job_id": job_id,
             "selector_expression": request.selector_expression,
             "resolved_targets": &resolved_targets,
             "destructive": request.destructive,
@@ -2404,6 +2405,7 @@ impl Repository {
     ) -> Result<Uuid> {
         let command_type = request.command_type_label().to_string();
         let metadata = json!({
+            "job_id": job_id,
             "selector_expression": request.selector_expression,
             "resolved_targets": resolved_targets,
             "destructive": request.destructive,

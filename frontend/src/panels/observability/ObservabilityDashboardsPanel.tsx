@@ -125,6 +125,31 @@ const dashboardSections: Array<{
   },
 ];
 
+function readDashboardPresetFromLocation(): DashboardPresetId {
+  if (typeof window === "undefined") {
+    return "fleet_operations";
+  }
+  const requested = new URLSearchParams(window.location.search).get(
+    "dashboard",
+  );
+  return dashboardPresets.some((preset) => preset.id === requested)
+    ? (requested as DashboardPresetId)
+    : "fleet_operations";
+}
+
+function writeDashboardPresetToLocation(presetId: DashboardPresetId) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  const url = new URL(window.location.href);
+  url.searchParams.set("dashboard", presetId);
+  window.history.replaceState(
+    null,
+    "",
+    `${url.pathname}${url.search}${url.hash}`,
+  );
+}
+
 export function ObservabilityDashboardsPanel({
   error,
   loading,
@@ -135,8 +160,9 @@ export function ObservabilityDashboardsPanel({
   preferences,
   window,
 }: ObservabilityDashboardsPanelProps) {
-  const [selectedId, setSelectedId] =
-    useState<DashboardPresetId>("fleet_operations");
+  const [selectedId, setSelectedId] = useState<DashboardPresetId>(
+    readDashboardPresetFromLocation,
+  );
   const [selectedSection, setSelectedSection] =
     useState<DashboardSectionId>("widgets");
   const [status, setStatus] = useState<string | null>(null);
@@ -167,6 +193,12 @@ export function ObservabilityDashboardsPanel({
     setStatusTone(tone);
   }
 
+  function selectDashboardPreset(presetId: DashboardPresetId) {
+    setSelectedId(presetId);
+    setSelectedSection("widgets");
+    writeDashboardPresetToLocation(presetId);
+  }
+
   function exportDashboard() {
     const payload = JSON.stringify(exportPayload, null, 2);
     const blob = new Blob([payload], { type: "application/json" });
@@ -181,9 +213,29 @@ export function ObservabilityDashboardsPanel({
 
   async function copyPresetLink() {
     const url = new URL(globalThis.window.location.href);
-    url.hash = `observability/dashboards/${selectedPreset.id}`;
+    url.hash = "#/observability/dashboards";
     url.searchParams.set("dashboard", selectedPreset.id);
     url.searchParams.set("window", window);
+    url.searchParams.set("scope_kind", preferences.scopeKind);
+    if (preferences.scopeKind === "all" || !preferences.scopeValue.trim()) {
+      url.searchParams.delete("scope_value");
+    } else {
+      url.searchParams.set("scope_value", preferences.scopeValue.trim());
+    }
+    url.searchParams.set("group_by", preferences.groupBy);
+    url.searchParams.set("resource_metric", preferences.resourceMetric);
+    url.searchParams.set("network_view", preferences.networkView);
+    url.searchParams.set("traffic_sort", preferences.trafficSort);
+    if (preferences.startAt.trim()) {
+      url.searchParams.set("start_at", preferences.startAt.trim());
+    } else {
+      url.searchParams.delete("start_at");
+    }
+    if (preferences.endAt.trim()) {
+      url.searchParams.set("end_at", preferences.endAt.trim());
+    } else {
+      url.searchParams.delete("end_at");
+    }
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(url.toString());
       setDashboardStatus(`Copied ${selectedPreset.label} link`, "success");
@@ -239,8 +291,8 @@ export function ObservabilityDashboardsPanel({
 
         <ActionFeedback
           className="localActionFeedback dashboardActionFeedback dashboardPageActionFeedback"
-          message={error}
-          tone="danger"
+          message={error ?? status}
+          tone={error ? "danger" : statusTone}
         />
 
         <div
@@ -258,9 +310,9 @@ export function ObservabilityDashboardsPanel({
             value={selectedPreset.label}
           />
           <MetricTile
-            detail={`${dashboardScope}; ${dashboardRange}`}
-            label="Scope and range"
-            value={windowLabel(window)}
+            detail={`${windowLabel(window)}; ${dashboardRange}`}
+            label="Telemetry query"
+            value={dashboardScope}
           />
           <MetricTile
             detail={freshness.detail}
@@ -281,13 +333,13 @@ export function ObservabilityDashboardsPanel({
           aria-labelledby="dashboard-presets-title"
         >
           <div className="dashboardSectionHeader">
-              <div>
-                <h2 id="dashboard-presets-title">Available presets</h2>
-                <span>
-                  Select a predefined layout; this page does not create, edit,
-                  or delete dashboards.
-                </span>
-              </div>
+            <div>
+              <h2 id="dashboard-presets-title">Available presets</h2>
+              <span>
+                Select a predefined layout; this page does not create, edit, or
+                delete dashboards.
+              </span>
+            </div>
             <ConsoleStatusBadge tone="info">Read-only</ConsoleStatusBadge>
           </div>
           <label className="dashboardPresetMobileMenu">
@@ -295,8 +347,9 @@ export function ObservabilityDashboardsPanel({
             <select
               aria-label="Dashboard preset"
               onChange={(event) => {
-                setSelectedId(event.target.value as DashboardPresetId);
-                setSelectedSection("widgets");
+                selectDashboardPreset(
+                  event.target.value as DashboardPresetId,
+                );
               }}
               value={selectedId}
             >
@@ -320,10 +373,7 @@ export function ObservabilityDashboardsPanel({
                     : "dashboardPresetTile"
                 }
                 key={preset.id}
-                onClick={() => {
-                  setSelectedId(preset.id);
-                  setSelectedSection("widgets");
-                }}
+                onClick={() => selectDashboardPreset(preset.id)}
                 type="button"
               >
                 <span className="dashboardPresetIcon">
@@ -432,11 +482,6 @@ export function ObservabilityDashboardsPanel({
                 </small>
               </span>
             </div>
-            <ActionFeedback
-              className="localActionFeedback dashboardActionFeedback"
-              message={status}
-              tone={statusTone}
-            />
           </section>
         )}
       </div>
@@ -563,7 +608,13 @@ function FleetOperationsDashboard({
         {recentAlerts.slice(0, 8).map((alert) => (
           <div className="dashboardWidgetRow" key={alert.id}>
             <ConsoleStatusBadge
-              tone={alert.severity === "critical" ? "critical" : alert.severity === "warning" ? "warning" : "info"}
+              tone={
+                alert.severity === "critical"
+                  ? "critical"
+                  : alert.severity === "warning"
+                    ? "warning"
+                    : "info"
+              }
             >
               {alert.severity || "warning"}
             </ConsoleStatusBadge>
@@ -776,7 +827,10 @@ function NetworkDashboard({
           title="Network rate chart"
           detail="Interval-average ingress and egress bps over time"
         />
-        <p className="observabilityMetricDefinition" title={INTERFACE_RATE_DEFINITION}>
+        <p
+          className="observabilityMetricDefinition"
+          title={INTERFACE_RATE_DEFINITION}
+        >
           Metric definition: {INTERFACE_RATE_DEFINITION}
         </p>
         <WidgetCoverageNote note={rateCoverage} />

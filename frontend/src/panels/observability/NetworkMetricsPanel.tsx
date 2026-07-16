@@ -7,11 +7,13 @@ import type {
   NetworkObservationTrendRecord,
   NetworkOspfRecommendationRecord,
   TelemetryTunnelRecord,
+  TunnelPlanRecord,
 } from "../../types";
 import {
   networkObservationMetricDefinition,
   type NetworkObservationMetric,
 } from "../../telemetryMetrics";
+import { latencyStatusLabel, telemetryReasonLabel } from "../../topologyRuntime";
 import { formatCompactTime, timestampMillis } from "../../utils";
 
 type NetworkMetricsPanelProps = {
@@ -22,6 +24,7 @@ type NetworkMetricsPanelProps = {
   onOpenTests: () => void;
   ospfRecommendations: NetworkOspfRecommendationRecord[];
   telemetryTunnels: TelemetryTunnelRecord[];
+  tunnelPlans: TunnelPlanRecord[];
 };
 
 type NetworkMetricGroup = {
@@ -67,13 +70,33 @@ export function NetworkMetricsPanel({
   onOpenTests,
   ospfRecommendations,
   telemetryTunnels,
+  tunnelPlans,
 }: NetworkMetricsPanelProps) {
   const [selectedMetric, setSelectedMetric] = useState<NetworkChartMetric>("latency");
-  const declaredObservations = networkObservations.filter((observation) => Boolean(observation.plan_id));
-  const declaredTrends = networkTrends.filter((trend) => Boolean(trend.plan_id));
-  const declaredTunnels = telemetryTunnels.filter((tunnel) => Boolean(tunnel.plan_id));
+  const enabledPlanIds = new Set(
+    tunnelPlans
+      .filter((plan) => plan.enabled && !plan.deleted_at)
+      .map((plan) => plan.id),
+  );
+  const declaredObservations = networkObservations.filter(
+    (observation) =>
+      Boolean(observation.plan_id) && enabledPlanIds.has(observation.plan_id ?? ""),
+  );
+  const declaredTrends = networkTrends.filter(
+    (trend) => Boolean(trend.plan_id) && enabledPlanIds.has(trend.plan_id ?? ""),
+  );
+  const declaredTunnels = telemetryTunnels.filter(
+    (tunnel) => Boolean(tunnel.plan_id) && enabledPlanIds.has(tunnel.plan_id ?? ""),
+  );
+  const declaredOspfRecommendations = ospfRecommendations.filter(
+    (recommendation) => enabledPlanIds.has(recommendation.plan_id),
+  );
   const groups = buildMetricGroups(declaredTrends, declaredObservations, declaredTunnels);
-  const overlays = buildOverlayRows(declaredObservations, declaredTunnels, ospfRecommendations);
+  const overlays = buildOverlayRows(
+    declaredObservations,
+    declaredTunnels,
+    declaredOspfRecommendations,
+  );
   const latencyChart = buildObservationChart(
     declaredObservations,
     (observation) => observation.latency_avg_ms,
@@ -93,7 +116,9 @@ export function NetworkMetricsPanel({
   const degradedCount =
     groups.reduce((total, group) => total + group.degradedCount, 0) +
     declaredTunnels.filter((tunnel) => isTunnelDegraded(tunnel)).length;
-  const ospfDeltaCount = ospfRecommendations.filter((recommendation) => recommendation.cost_delta !== 0).length;
+  const ospfDeltaCount = declaredOspfRecommendations.filter(
+    (recommendation) => recommendation.cost_delta !== 0,
+  ).length;
   const observationCount = declaredObservations.length;
   const chartOptions = [
     {
@@ -132,7 +157,9 @@ export function NetworkMetricsPanel({
     latestTime(selectedChart.chart.times),
     selectedChart.chart,
   );
-  const throughputBenchmark = buildThroughputBenchmark(ospfRecommendations);
+  const throughputBenchmark = buildThroughputBenchmark(
+    declaredOspfRecommendations,
+  );
 
   return (
     <section className="workspace singleColumn observabilityNetworkMetricsWorkspace">
@@ -140,7 +167,7 @@ export function NetworkMetricsPanel({
         <div className="sectionHeader">
           <div>
             <h2>Network metrics</h2>
-            <span>Read-only tunnel latency, loss, throughput, endpoint comparison, and OSPF evidence overlays.</span>
+            <span>Read-only metrics for enabled declared tunnels. Retained evidence for disabled plans remains available on Network / Evidence.</span>
           </div>
           <div className="sectionActions" aria-label="Network metrics action links">
             <button className="secondaryAction compactAction" onClick={onOpenTests} type="button">
@@ -279,7 +306,7 @@ export function NetworkMetricsPanel({
           <div className="dashboardSectionHeader">
             <div>
               <h2 id="observability-network-endpoints-title">Endpoint comparison</h2>
-              <span>Endpoint telemetry covers only declared plans and highlights managed or observed tunnel sides.</span>
+              <span>Endpoint telemetry covers only declared plans. Failed or absent reachability probes remain unverified and do not assert that a tunnel is disconnected.</span>
             </div>
           </div>
           <div className="observabilityEndpointTable" aria-label="Network endpoint comparison">
@@ -457,12 +484,13 @@ type NetworkEvidence = {
 
 function EndpointRow({ tunnel }: { tunnel: TelemetryTunnelRecord }) {
   const traffic = `${formatBytes(tunnel.rx_bytes)} RX / ${formatBytes(tunnel.tx_bytes)} TX`;
+  const reachability = formatEndpointLatency(tunnel);
   return (
     <div className="observabilityEndpointRow">
       <strong>{endpointDirectionLabel(tunnel.client_id, tunnel.peer_client_id)}</strong>
       <span>{tunnel.plan_name ?? tunnel.interface}</span>
       <span>{formatEndpointRuntime(tunnel)}</span>
-      <span>{formatEndpointLatency(tunnel)}</span>
+      <span title={endpointLatencyTitle(tunnel, reachability)}>{reachability}</span>
       <span>{traffic}</span>
     </div>
   );
@@ -584,13 +612,16 @@ function buildOverlayRows(
     }));
   const tunnelRows = tunnels
     .filter(isTunnelDegraded)
-    .map((tunnel) => ({
-      detail: `${endpointDirectionLabel(tunnel.client_id, tunnel.peer_client_id)} ${tunnel.interface}: ${formatEndpointRuntime(tunnel)}`,
-      key: `tunnel:${tunnel.client_id}:${tunnel.interface}:${tunnel.observed_at}`,
-      label: tunnel.plan_name ?? tunnel.interface,
-      severity: "critical" as const,
-      source: "Declared endpoint degraded",
-    }));
+    .map((tunnel) => {
+      const runtimeDegraded = isTunnelRuntimeDegraded(tunnel);
+      return {
+        detail: `${endpointDirectionLabel(tunnel.client_id, tunnel.peer_client_id)} ${tunnel.interface}: ${runtimeDegraded ? formatEndpointRuntime(tunnel) : formatEndpointLatency(tunnel)}`,
+        key: `tunnel:${tunnel.client_id}:${tunnel.interface}:${tunnel.observed_at}`,
+        label: tunnel.plan_name ?? tunnel.interface,
+        severity: runtimeDegraded ? "critical" as const : "warning" as const,
+        source: runtimeDegraded ? "Declared endpoint degraded" : "Reachability needs review",
+      };
+    });
   const ospfRows = recommendations
     .filter((recommendation) => recommendation.cost_delta !== 0)
     .map((recommendation) => ({
@@ -605,12 +636,18 @@ function buildOverlayRows(
 
 function isTunnelDegraded(tunnel: TelemetryTunnelRecord): boolean {
   return (
-    tunnel.operstate !== null && tunnel.operstate !== "up" ||
+    isTunnelRuntimeDegraded(tunnel) ||
     tunnel.latency_status === "down" ||
     tunnel.latency_status === "missed" ||
-    tunnel.adapter_health?.success === false ||
-    Boolean(tunnel.traffic_status && tunnel.traffic_status !== "ok") ||
     tunnel.packet_loss_ratio !== null && tunnel.packet_loss_ratio !== undefined && tunnel.packet_loss_ratio > 0
+  );
+}
+
+function isTunnelRuntimeDegraded(tunnel: TelemetryTunnelRecord): boolean {
+  return (
+    tunnel.operstate !== null && tunnel.operstate !== "up" ||
+    tunnel.adapter_health?.configured === true && tunnel.adapter_health.success === false ||
+    Boolean(tunnel.traffic_status && tunnel.traffic_status !== "ok")
   );
 }
 
@@ -720,9 +757,28 @@ function formatEndpointLatency(tunnel: TelemetryTunnelRecord): string {
   if (typeof tunnel.latency_avg_ms === "number") {
     return `${formatMetric(tunnel.latency_avg_ms)} ms, ${formatLoss(tunnel.packet_loss_ratio)}`;
   }
-  return tunnel.latency_status
-    ? `${readableNetworkToken(tunnel.latency_status)}; no measurement`
-    : "No measurement";
+  switch (tunnel.latency_status) {
+    case "down":
+    case "missed":
+    case "failed":
+      return `Unverified; ${latencyStatusLabel(tunnel.latency_status).toLowerCase()}, no measurement`;
+    case "disabled":
+      return "Unverified; probe disabled";
+    case "unconfigured":
+      return "Unverified; probe not configured";
+    default:
+      return "Unverified; no measurement";
+  }
+}
+
+function endpointLatencyTitle(
+  tunnel: TelemetryTunnelRecord,
+  reachability: string,
+): string {
+  const reason = tunnel.latency_reason
+    ? ` Reason: ${telemetryReasonLabel(tunnel.latency_reason)}.`
+    : "";
+  return `${reachability}.${reason} A failed or absent probe is not proof that the tunnel is disconnected.`;
 }
 
 function formatNullableMetric(value: number | null, unit: string): string {

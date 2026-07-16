@@ -509,7 +509,6 @@ pub(crate) struct TunnelPlanEndpointRuntimeConfigView {
     pub(crate) client_id: String,
     pub(crate) desired: String,
     pub(crate) status: String,
-    pub(crate) cleanup_confirmed: bool,
     pub(crate) job_id: Option<Uuid>,
     pub(crate) error: Option<String>,
     pub(crate) updated_at: Option<String>,

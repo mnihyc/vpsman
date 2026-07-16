@@ -280,7 +280,7 @@ export function RunbooksPanel({
                     <dd>{runbook.operationKind}</dd>
                   </div>
                   <div>
-                    <dt>Last result</dt>
+                    <dt>Latest same operation</dt>
                     <dd>
                       <span
                         className={`runbookLastResult ${runbook.lastEvidence.tone}`}
@@ -681,9 +681,9 @@ function lastRunEvidenceForTemplate(
   if (lastRun) {
     const timestamp = lastRun.completed_at ?? lastRun.created_at;
     return {
-      detail: `${formatCompactTime(timestamp)} · ${lastRun.target_count} ${lastRun.target_count === 1 ? "VPS" : "VPSs"}`,
+      detail: `${formatCompactTime(timestamp)} · not attributed to this runbook`,
       label: jobResultLabel(lastRun.status),
-      title: `Job ${lastRun.id} · ${formatTime(timestamp)}`,
+      title: `Latest loaded ${operationTypeLabel(template.command_type).toLowerCase()} job ${lastRun.id}; job history does not retain command-template attribution. ${lastRun.target_count} ${lastRun.target_count === 1 ? "VPS" : "VPSs"}; ${formatTime(timestamp)}`,
       tone: jobResultTone(lastRun.status),
     };
   }
@@ -716,7 +716,7 @@ function jobTimeMs(job: JobHistoryRecord): number {
 function operationTypeLabel(commandType: string): string {
   switch (commandType) {
     case "shell_argv":
-      return "Shell command";
+      return "Argv command";
     case "scheduled_shell_argv":
       return "Scheduled shell command";
     case "shell_pty":

@@ -335,6 +335,7 @@ export function useDashboardData(activeView: ActiveView) {
       void inventory.loadTagInventory();
     } else if (activeView === "Jobs") {
       void jobs.loadJobs();
+      void backups.loadBackups();
       void inventory.loadTagInventory();
     } else if (activeView === "Automation") {
       void schedules.loadSchedules();
@@ -357,6 +358,7 @@ export function useDashboardData(activeView: ActiveView) {
       void jobs.loadJobs();
     } else if (activeView === "Observability") {
       void inventory.loadTagInventory();
+      void topology.loadTunnelPlans();
       void topology.loadNetworkObservations();
       void topology.loadNetworkTrends();
       void topology.loadOspfRecommendations();

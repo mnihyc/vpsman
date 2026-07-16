@@ -473,6 +473,7 @@ impl Repository {
                     target: "api:/api/v1/jobs".to_string(),
                     command_hash: Some(command_hash.to_string()),
                     metadata: migration_job_audit_metadata(
+                        job_id,
                         &link,
                         restore_plan,
                         job_request,
@@ -691,6 +692,7 @@ impl Repository {
                 .bind("api:/api/v1/jobs")
                 .bind(command_hash)
                 .bind(migration_job_audit_metadata(
+                    job_id,
                     &persisted_link,
                     restore_plan,
                     job_request,
@@ -828,6 +830,7 @@ fn migration_link_matches_request(
 }
 
 fn migration_job_audit_metadata(
+    job_id: Uuid,
     link: &MigrationLinkView,
     restore_plan: &RestorePlanView,
     job_request: &CreateJobRequest,
@@ -835,6 +838,7 @@ fn migration_job_audit_metadata(
     resolved_targets: &[String],
 ) -> serde_json::Value {
     json!({
+        "job_id": job_id,
         "selector_expression": job_request.selector_expression,
         "resolved_targets": resolved_targets,
         "destructive": job_request.destructive,

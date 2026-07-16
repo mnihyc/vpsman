@@ -1737,7 +1737,7 @@ function formatCatchUpPolicy(policy: string): string {
 function scheduleCommandTypeLabel(commandType: string): string {
   switch (commandType) {
     case "shell_argv":
-      return "Shell command";
+      return "Argv command";
     case "scheduled_shell_argv":
       return "Scheduled shell command";
     case "backup":

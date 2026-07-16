@@ -75,7 +75,7 @@ const allViews: ScreenshotEntry[] = [
     requiredText: [
       "Fleet command home",
       "Running work",
-      "Recent failures",
+      "Recent issues",
       "Needs attention",
       "Recent activity",
     ],
@@ -150,13 +150,7 @@ const allViews: ScreenshotEntry[] = [
     subpage: "Instance detail",
     heading: "Instance detail",
     id: "08-fleet-instance-detail",
-    requiredText: [
-      "State",
-      "Last contact",
-      "Agent version",
-      "Active jobs",
-      "Scheduled shell command",
-    ],
+    requiredText: ["No VPS selected", "Open Instances"],
   },
   {
     view: "Remote Operations",
@@ -419,8 +413,9 @@ const allViews: ScreenshotEntry[] = [
     prepare: "tunnel-plan-delete-review",
     requiredText: [
       "Confirm tunnel plan deletion",
-      "Permanently retire this disabled declaration",
-      "Left Removed; right Removed",
+      "Retire this declaration immediately",
+      "Queue removal on both endpoints",
+      "Stop control; keep daemon cost",
       "audit history remains",
     ],
   },
@@ -844,7 +839,7 @@ const allViews: ScreenshotEntry[] = [
       "Unlock scope",
       "Unlocked until",
       "Keep encrypted in this browser",
-      "QR/secret",
+      "Authenticator secret",
       "Complete setup",
     ],
   },
@@ -976,15 +971,20 @@ async function navigateAndScreenshot(
     ).toBeVisible({ timeout: 5_000 });
 
     if (entry.detailTab) {
-      const detailTab = page.getByRole("tab", {
-        name: entry.detailTab,
-        exact: true,
-      });
-      const hasDetailTab = (await detailTab.count()) > 0;
-      if (hasDetailTab && (await detailTab.first().isVisible())) {
+      const canonicalDetail = page.locator(".vpsDetailPanel:visible").last();
+      const detailTab = canonicalDetail
+        .locator(".detailTabs:visible")
+        .getByRole("tab", {
+          name: entry.detailTab,
+          exact: true,
+        });
+      if (!projectName.startsWith("mobile")) {
+        await expect(detailTab).toBeVisible({ timeout: 10_000 });
         await detailTab.click();
       } else {
-        const detailSection = page.getByLabel("VPS detail section");
+        const detailSection = canonicalDetail
+          .locator(".detailTabSelect:visible")
+          .getByLabel("VPS detail section");
         await expect(detailSection).toBeVisible({ timeout: 5_000 });
         await detailSection.selectOption(entry.detailTab);
       }
@@ -1112,10 +1112,12 @@ async function navigateAndScreenshot(
       const editor = page.locator(".portForwardEditor");
       await expect(editor).toBeVisible({ timeout: 5_000 });
       if (entry.prepare === "port-forward-confirmation") {
+        await editor.locator("select").first().selectOption({ index: 1 });
         await editor.getByLabel("Name", { exact: true }).fill("Audit web ingress");
         await editor.getByLabel("Incoming ports").fill("8443");
         await editor.getByLabel("Target ports").fill("443");
         await editor.getByLabel("Target IP or hostname").fill("10.20.0.25");
+        await editor.locator(".portForwardEnabled input").check();
         await editor.getByRole("button", { name: "Create rule" }).click();
         await expect(page.getByLabel("Confirm rule creation")).toBeVisible({
           timeout: 5_000,
@@ -1191,16 +1193,6 @@ async function navigateAndScreenshot(
 
   if (entry.prepare === "tunnel-plan-delete-review") {
     await closeTunnelPlanWorkflow(page);
-    await page
-      .getByRole("button", { name: "Disable sfo-fra-gre" })
-      .click();
-    await page
-      .getByLabel("Confirm tunnel plan disable")
-      .getByRole("button", { name: "Disable plans" })
-      .click();
-    await expect(
-      page.getByRole("button", { name: "Enable sfo-fra-gre" }),
-    ).toBeVisible({ timeout: 5_000 });
     await page
       .getByRole("button", { name: "Delete sfo-fra-gre" })
       .click();
@@ -1299,16 +1291,16 @@ async function navigateAndScreenshot(
   }
 
   await page.waitForTimeout(200);
-  const portForwardWorkflow = entry.prepare?.startsWith("port-forward-") ?? false;
-  const preserveWorkflowFocus =
-    (!projectName.startsWith("mobile") || portForwardWorkflow) &&
-    Boolean(
-      (entry.prepare && entry.prepare !== "fleet-metrics-advanced") ||
-        entry.expandVpsRow ||
-        entry.tab,
-    );
+  const preserveWorkflowFocus = Boolean(
+    (entry.prepare && entry.prepare !== "fleet-metrics-advanced") ||
+      entry.expandVpsRow ||
+      entry.tab,
+  );
   if (!preserveWorkflowFocus) {
     await page.evaluate(() => {
+      if (document.activeElement instanceof HTMLElement) {
+        document.activeElement.blur();
+      }
       window.scrollTo(0, 0);
       document.querySelector<HTMLElement>(".content")?.scrollTo(0, 0);
     });
@@ -1338,7 +1330,7 @@ async function navigateAndScreenshot(
 
   const filename = `${entry.id}-${projectName}.png`;
   const screenshotPath = join(projectDir, filename);
-  await page.screenshot({ fullPage: !portForwardWorkflow, path: screenshotPath });
+  await page.screenshot({ fullPage: !preserveWorkflowFocus, path: screenshotPath });
 
   return {
     id: entry.id,

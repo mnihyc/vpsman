@@ -550,7 +550,7 @@ async fn tunnel_plan_create_rejects_endpoint_interface_and_address_collisions() 
 }
 
 #[tokio::test]
-async fn disabled_tunnel_plan_can_be_revision_bound_retired_and_recreated() {
+async fn tunnel_plan_can_be_revision_bound_retired_and_recreated() {
     let repo = Repository::Memory(MemoryState::default());
     seed_online_agent(&repo, "client-a").await;
     seed_online_agent(&repo, "client-b").await;
@@ -611,7 +611,7 @@ async fn disabled_tunnel_plan_can_be_revision_bound_retired_and_recreated() {
     .await
     .unwrap();
     let recreated = recreated.plan;
-    let enabled = crate::routes_network::delete_tunnel_plan(
+    let Json(deleted_enabled) = crate::routes_network::delete_tunnel_plan(
         State(state),
         headers,
         axum::extract::Path(recreated.id),
@@ -621,12 +621,18 @@ async fn disabled_tunnel_plan_can_be_revision_bound_retired_and_recreated() {
         }),
     )
     .await
-    .unwrap_err();
-    assert_eq!(enabled.code, "tunnel_plan_disable_before_delete");
+    .unwrap();
+    assert!(!deleted_enabled.plan.enabled);
+    assert!(deleted_enabled.plan.deleted_at.is_some());
+    assert_eq!(deleted_enabled.sync.len(), 2);
+    assert!(deleted_enabled
+        .sync
+        .iter()
+        .all(|outcome| outcome.status == "queued"));
 }
 
 #[tokio::test]
-async fn tunnel_plan_delete_waits_for_both_endpoint_cleanup_snapshots() {
+async fn tunnel_plan_delete_commits_immediately_and_queues_absent_desired_state() {
     let repo = Repository::Memory(MemoryState::default());
     seed_online_agent(&repo, "client-a").await;
     seed_online_agent(&repo, "client-b").await;
@@ -645,7 +651,7 @@ async fn tunnel_plan_delete_waits_for_both_endpoint_cleanup_snapshots() {
     .await
     .unwrap();
 
-    let Json(disabled) = crate::routes_network::disable_tunnel_plan(
+    let Json(deleted) = crate::routes_network::delete_tunnel_plan(
         State(state.clone()),
         headers.clone(),
         axum::extract::Path(created.plan.id),
@@ -656,55 +662,36 @@ async fn tunnel_plan_delete_waits_for_both_endpoint_cleanup_snapshots() {
     )
     .await
     .unwrap();
-    assert!(!disabled.plan.left_runtime_config.cleanup_confirmed);
-    assert!(!disabled.plan.right_runtime_config.cleanup_confirmed);
-
-    let pending_delete = crate::routes_network::delete_tunnel_plan(
-        State(state.clone()),
-        headers.clone(),
-        axum::extract::Path(disabled.plan.id),
-        Json(crate::routes_network::TunnelPlanMutationRequest {
-            confirmed: true,
-            expected_revision: disabled.plan.revision,
-        }),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(pending_delete.code, "tunnel_plan_cleanup_not_confirmed");
+    assert!(!deleted.plan.enabled);
+    assert!(deleted.plan.deleted_at.is_some());
+    assert_eq!(deleted.sync.len(), 2);
+    assert!(deleted
+        .sync
+        .iter()
+        .all(|outcome| outcome.status == "queued"));
+    assert!(repo.list_tunnel_plans().await.unwrap().is_empty());
+    let deleted_plan_id = deleted.plan.id.to_string();
 
     for client_id in ["client-a", "client-b"] {
         let pending = repo
-            .runtime_config_pending_state_for_client(client_id)
+            .list_runtime_config_apply_records(Some(client_id))
             .await
             .unwrap()
+            .into_iter()
+            .next()
             .unwrap();
-        repo.promote_runtime_config_apply_from_agent_hash(
-            client_id,
-            pending.pending_content_hash.as_deref().unwrap(),
-        )
-        .await
-        .unwrap();
+        assert_eq!(
+            pending.pending_reason.as_deref(),
+            Some("tunnel_plan_deleted")
+        );
+        assert!(pending
+            .pending_config
+            .unwrap()
+            .network
+            .runtime_status_telemetry_plans
+            .iter()
+            .all(|plan| plan.plan_id.as_deref() != Some(deleted_plan_id.as_str())));
     }
-    let cleaned = repo
-        .get_tunnel_plan(disabled.plan.id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(cleaned.left_runtime_config.cleanup_confirmed);
-    assert!(cleaned.right_runtime_config.cleanup_confirmed);
-
-    let Json(deleted) = crate::routes_network::delete_tunnel_plan(
-        State(state),
-        headers,
-        axum::extract::Path(cleaned.id),
-        Json(crate::routes_network::TunnelPlanMutationRequest {
-            confirmed: true,
-            expected_revision: cleaned.revision,
-        }),
-    )
-    .await
-    .unwrap();
-    assert!(deleted.plan.deleted_at.is_some());
 }
 
 #[tokio::test]
@@ -751,11 +738,49 @@ async fn tunnel_plan_update_preserves_enabled_state_when_omitted() {
 }
 
 #[tokio::test]
+async fn enabling_an_enabled_tunnel_plan_requeues_its_current_desired_state() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_online_agent(&repo, "client-a").await;
+    seed_online_agent(&repo, "client-b").await;
+    let state = test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
+    let (_, Json(created)) = crate::routes_network::create_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateTunnelPlanRequest {
+            input: test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false),
+            enabled: true,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let Json(reapplied) = crate::routes_network::enable_tunnel_plan(
+        State(state),
+        headers,
+        axum::extract::Path(created.plan.id),
+        Json(crate::routes_network::TunnelPlanMutationRequest {
+            confirmed: true,
+            expected_revision: created.plan.revision,
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert!(reapplied.plan.enabled);
+    assert_eq!(reapplied.plan.revision, created.plan.revision);
+    assert_eq!(reapplied.sync.len(), 2);
+    assert!(reapplied.sync.iter().all(|entry| entry.status == "queued"));
+}
+
+#[tokio::test]
 async fn external_observed_plan_enables_evidence_without_enabling_mutation() {
     let repo = Repository::Memory(MemoryState::default());
     seed_online_agent(&repo, "client-a").await;
     seed_online_agent(&repo, "client-b").await;
-    let input = test_plan_input(RuntimeTunnelManager::ExternalObserved, false);
+    let mut input = test_plan_input(RuntimeTunnelManager::ExternalObserved, false);
+    input.name = "Operator observed link".to_string();
     let plan = plan_tunnel(&input).unwrap();
     repo.record_tunnel_plan(&input, &plan, true, &network_test_operator())
         .await

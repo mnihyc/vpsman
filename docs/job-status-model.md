@@ -155,9 +155,14 @@ The agent keeps its hash-verified last accepted config across API/gateway
 disconnects and reconciles it on process or system restart. On reconnect it
 requests only declared resources that have explicit drift or incomplete-startup
 evidence; it does not discover or adopt unmanaged host resources. The API then
-supplies current database desired state. Resource deletion remains pending until
-the agent reports matching absence; an explicit administrative forget action is
-the only override for a permanently unreachable or decommissioned VPS.
+supplies current database desired state. Runtime convergence after deletion
+remains pending until the agent reports matching absence, even when its
+desired-state declaration has already been retired. Tunnel-plan deletion commits
+immediately and queues the complete plan-free desired state for both endpoints;
+an offline endpoint removes the old declaration on reconnect. Domains that
+intentionally retain a removal-pending record, such as port forwarding, expose
+their own explicit administrative forget action for a permanently unreachable or
+decommissioned VPS.
 
 Operator surfaces must state all four relevant facts when they differ: what was
 saved, which targets queued, what has applied, and what the agent currently

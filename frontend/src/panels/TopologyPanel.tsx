@@ -121,6 +121,7 @@ export function TopologyPanel({
   agents,
   error,
   initialPlanWorkflow,
+  initialTargetIntent,
   jobs,
   loading,
   networkObservations,
@@ -131,6 +132,7 @@ export function TopologyPanel({
   onDeleteTunnelPlan,
   onExportTunnelPlan,
   onInitialPlanWorkflowConsumed,
+  onInitialTargetIntentConsumed,
   onLoadNetworkObservations,
   onLoadNetworkTrends,
   onLoadOspfRecommendations,
@@ -250,7 +252,10 @@ export function TopologyPanel({
       <TopologyGraphPanel
         agents={agents}
         graph={topologyGraph}
+        initialSelectedClientId={initialTargetIntent?.clientId ?? null}
+        initialSelectionRequestId={initialTargetIntent?.requestId ?? null}
         loading={loading}
+        onInitialSelectionConsumed={onInitialTargetIntentConsumed}
         onOpenVpsDetail={onOpenVpsDetail}
         onRefresh={onLoadTopologyGraph}
         runtimeConfigApplyStates={runtimeConfigApplyStates}
@@ -540,19 +545,33 @@ function TunnelPlansWorkspace({
     if (!createOpen) return;
     window.setTimeout(() => {
       createRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-      createRef.current?.querySelector<HTMLElement>("input, select, button")?.focus();
+      const preferredControl = createRef.current?.querySelector<HTMLElement>(
+        'input:not([type="hidden"]):not([disabled]):not([readonly]), select:not([disabled]), textarea:not([disabled])',
+      );
+      const closeControl = createRef.current?.querySelector<HTMLElement>(
+        '[aria-label="Close tunnel plan editor"]',
+      );
+      (preferredControl ?? closeControl)?.focus({ preventScroll: true });
     }, 0);
   }, [createOpen, editingPlan?.id]);
 
-  function requestLifecycle(ids: string[], enabled: boolean, retryCleanup = false) {
+  function requestLifecycle(
+    ids: string[],
+    enabled: boolean,
+    retryCleanup = false,
+    retryApply = false,
+  ) {
     const targets = [...new Set(ids)]
       .map((id) => tunnelPlans.find((plan) => plan.id === id))
       .filter(
         (plan): plan is TunnelPlanRecord =>
           Boolean(plan)
-            && (plan?.enabled !== enabled || (retryCleanup && !enabled && plan?.enabled === false)),
+            && (plan?.enabled !== enabled
+              || (retryCleanup && !enabled && plan?.enabled === false)
+              || (retryApply && enabled && plan?.enabled === true)),
       )
       .map((plan) => ({
+        declaration: `${runtimeManagerLabel(plan.plan.runtime_control?.manager)} · ${formatTunnelKind(plan.kind)} · ${plan.plan.interface_name} · ${plan.plan.bandwidth_mbps} Mbps`,
         expected_revision: plan.revision,
         name: plan.name,
         ospfEnabled: Boolean(plan.plan.ospf),
@@ -561,6 +580,7 @@ function TunnelPlansWorkspace({
     if (targets.length === 0) return;
     setLifecycleSnapshot({
       enabled,
+      retryApply,
       retryCleanup,
       targets,
     });
@@ -577,6 +597,8 @@ function TunnelPlansWorkspace({
         responses.flatMap((response) => response.sync),
         snapshot.retryCleanup
           ? `Cleanup requested for ${snapshot.targets.length} tunnel plan${snapshot.targets.length === 1 ? "" : "s"}`
+          : snapshot.retryApply
+            ? `Runtime reapply requested for ${snapshot.targets.length} tunnel plan${snapshot.targets.length === 1 ? "" : "s"}`
           : `${snapshot.targets.length} tunnel plan${snapshot.targets.length === 1 ? "" : "s"} ${snapshot.enabled ? "enabled" : "disabled"}`,
       ));
     } catch (actionError) {
@@ -594,7 +616,7 @@ function TunnelPlansWorkspace({
     setPending(true);
     setFeedback(null);
     try {
-      await onDeleteTunnelPlan(snapshot.target);
+      const response = await onDeleteTunnelPlan(snapshot.target);
       setDeleteSnapshot(null);
       setSelected((current) => {
         const next = new Set(current);
@@ -606,10 +628,10 @@ function TunnelPlansWorkspace({
         setEditingPlan(null);
       }
       setExpandedId((current) => current === snapshot.target.plan_id ? null : current);
-      setFeedback({
-        message: `Deleted tunnel plan ${snapshot.plan.name}`,
-        tone: "success",
-      });
+      setFeedback(tunnelRetirementFeedback(
+        response.sync,
+        `Deleted tunnel plan ${snapshot.plan.name}`,
+      ));
     } catch (actionError) {
       setDeleteSnapshot(null);
       setFeedback({
@@ -751,6 +773,7 @@ function TunnelPlansWorkspace({
                       })}
                       onLifecycle={(enabled) => requestLifecycle([plan.id], enabled)}
                       onRetryCleanup={() => requestLifecycle([plan.id], false, true)}
+                      onRetryApply={() => requestLifecycle([plan.id], true, false, true)}
                       onUpdateConnectionAssessment={onUpdateTunnelConnectionAssessment}
                       onSelect={(checked) => {
                         const next = new Set(selected);
@@ -803,15 +826,18 @@ function TunnelPlansWorkspace({
         </div>
       )}
       <ConfirmationPrompt
-        confirmLabel={lifecycleSnapshot?.retryCleanup ? "Retry removal" : lifecycleSnapshot?.enabled ? "Enable plans" : "Disable plans"}
+        confirmLabel={lifecycleSnapshot?.retryCleanup ? "Retry removal" : lifecycleSnapshot?.retryApply ? "Retry apply" : lifecycleSnapshot?.enabled ? "Enable plans" : "Disable plans"}
         detail={lifecycleSnapshot?.retryCleanup
           ? "Push the current disabled desired state to both endpoints again. The plan remains disabled; deletion stays unavailable until both agents acknowledge removal."
+          : lifecycleSnapshot?.retryApply
+            ? "Push the current enabled declaration to both endpoints again without changing its revision or runtime ownership."
           : lifecycleSnapshot?.enabled
           ? `Enable these declared plans and push their exact desired state to both endpoints.${lifecycleIncludesOspf ? " OSPF control resumes as unverified; existing external daemon costs remain unchanged until a verified update." : ""}`
           : `Disable these plans and push runtime config that removes their managed state from both endpoints. External observed plans are no longer observed.${lifecycleIncludesOspf ? " OSPF control stops; existing external daemon costs are not reverted." : ""}`}
         items={lifecycleSnapshot ? [
-          { label: "Action", value: lifecycleSnapshot.retryCleanup ? "Retry runtime removal" : lifecycleSnapshot.enabled ? "Enable" : "Disable" },
+          { label: "Action", value: lifecycleSnapshot.retryCleanup ? "Retry runtime removal" : lifecycleSnapshot.retryApply ? "Retry runtime apply" : lifecycleSnapshot.enabled ? "Enable" : "Disable" },
           { label: "Plans", value: lifecycleSnapshot.targets.map((target) => `${target.name} (r${target.expected_revision})`).join(", ") },
+          { label: "Declared state", value: lifecycleSnapshot.targets.map((target) => `${target.name}: ${target.declaration}`).join("; ") },
           { label: "Endpoints", value: `${lifecycleSnapshot.targets.length * 2} endpoint configurations` },
           ...(lifecycleIncludesOspf ? [{
             label: "Routing cost",
@@ -824,17 +850,22 @@ function TunnelPlansWorkspace({
         onConfirm={() => lifecycleSnapshot && void applyLifecycle(lifecycleSnapshot)}
         open={lifecycleSnapshot !== null}
         pending={pending}
-        title={lifecycleSnapshot?.retryCleanup ? "Confirm tunnel cleanup retry" : lifecycleSnapshot?.enabled ? "Confirm tunnel plan enable" : "Confirm tunnel plan disable"}
+        title={lifecycleSnapshot?.retryCleanup ? "Confirm tunnel cleanup retry" : lifecycleSnapshot?.retryApply ? "Confirm tunnel runtime reapply" : lifecycleSnapshot?.enabled ? "Confirm tunnel plan enable" : "Confirm tunnel plan disable"}
         tone={lifecycleSnapshot?.enabled ? "normal" : "danger"}
       />
       <ConfirmationPrompt
         confirmLabel="Delete plan"
-        detail="Permanently retire this disabled declaration. Its name, interface reservation, and tunnel addresses become available for a new plan; audit history remains."
+        detail="Retire this declaration immediately. It is removed from desired state now; both endpoints receive runtime removal jobs, and offline agents reconcile it on reconnect. Reservations become available immediately and audit history remains."
         items={deleteSnapshot ? [
           { label: "Plan", value: `${deleteSnapshot.plan.name} (r${deleteSnapshot.target.expected_revision})` },
           { label: "Endpoints", value: `${deleteSnapshot.plan.left_client_id} / ${deleteSnapshot.plan.right_client_id}` },
-          { label: "Desired state", value: "Already disabled and omitted from desired config" },
-          { label: "Runtime state", value: `Left ${tunnelRuntimeConfigLabel(deleteSnapshot.plan.left_runtime_config)}; right ${tunnelRuntimeConfigLabel(deleteSnapshot.plan.right_runtime_config)}` },
+          { label: "Current state", value: deleteSnapshot.plan.enabled ? "Enabled" : "Disabled" },
+          { label: "Runtime effect", value: "Queue removal on both endpoints" },
+          { label: "Current evidence", value: `Left ${tunnelRuntimeConfigLabel(deleteSnapshot.plan.left_runtime_config)}; right ${tunnelRuntimeConfigLabel(deleteSnapshot.plan.right_runtime_config)}` },
+          ...(deleteSnapshot.plan.plan.ospf ? [{
+            label: "Routing cost",
+            value: "Stop control; keep daemon cost",
+          }] : []),
         ] : []}
         onCancel={() => setDeleteSnapshot(null)}
         onConfirm={() => deleteSnapshot && void applyDelete(deleteSnapshot)}
@@ -856,6 +887,7 @@ function TunnelPlanRows({
   onExport,
   onLifecycle,
   onRetryCleanup,
+  onRetryApply,
   onUpdateConnectionAssessment,
   onSelect,
   onToggle,
@@ -871,6 +903,7 @@ function TunnelPlanRows({
   onExport: () => void;
   onLifecycle: (enabled: boolean) => void;
   onRetryCleanup: () => void;
+  onRetryApply: () => void;
   onUpdateConnectionAssessment: (planId: string, request: UpdateTunnelConnectionAssessmentRequest) => Promise<void>;
   onSelect: (checked: boolean) => void;
   onToggle: () => void;
@@ -889,9 +922,14 @@ function TunnelPlanRows({
     plan.right_runtime_config,
     runtimeEdge?.right_runtime_state,
   );
-  const cleanupConfirmed = plan.left_runtime_config.cleanup_confirmed
-    && plan.right_runtime_config.cleanup_confirmed;
-  const cleanupRetryNeeded = !plan.enabled && !cleanupConfirmed;
+  const cleanupRetryNeeded = !plan.enabled && [
+    plan.left_runtime_config.status,
+    plan.right_runtime_config.status,
+  ].some((status) => !["removed", "not_dispatched"].includes(status));
+  const applyRetryNeeded = plan.enabled && [
+    plan.left_runtime_config.status,
+    plan.right_runtime_config.status,
+  ].some((status) => ["failed", "not_applied", "not_dispatched", "stale_pending"].includes(status));
   const connectivity = tunnelConnectivityPresentation(plan, runtimeEdge);
   const leftClientName = clientDisplayNameFromMap(
     plan.left_client_id,
@@ -1008,7 +1046,10 @@ function TunnelPlanRows({
             {cleanupRetryNeeded && (
               <button aria-label={`Retry runtime removal for ${plan.name}`} className="iconAction" onClick={onRetryCleanup} title="Retry removal on both endpoints" type="button"><RefreshCcw size={15} /></button>
             )}
-            <button aria-label={`Delete ${plan.name}`} className="iconAction isDeleteAction" disabled={plan.enabled || !cleanupConfirmed} onClick={onDelete} title={plan.enabled ? "Disable this plan before deleting it" : !cleanupConfirmed ? "Deletion unlocks after both endpoints confirm runtime removal" : "Delete this disabled plan"} type="button"><Trash2 size={15} /></button>
+            {applyRetryNeeded && (
+              <button aria-label={`Retry runtime apply for ${plan.name}`} className="iconAction" onClick={onRetryApply} title="Retry the saved desired state on both endpoints" type="button"><RefreshCcw size={15} /></button>
+            )}
+            <button aria-label={`Delete ${plan.name}`} className="iconAction isDeleteAction" onClick={onDelete} title="Delete this plan and queue runtime removal" type="button"><Trash2 size={15} /></button>
           </div>
         </td>
       </tr>
@@ -1524,27 +1565,40 @@ function tunnelEndpointStateTitle(
 function tunnelDispatchFeedback(
   sync: RuntimeConfigDispatchRecord[],
   savedMessage: string,
+  runtimeAction = "Runtime apply",
 ): Feedback {
   const failures = sync.filter((outcome) => outcome.status !== "queued");
   if (failures.length > 0) {
-  const details = failures
+    const details = failures
       .map(
         (outcome) =>
-          `${outcome.client_id}: ${dispatchFailureReason(outcome.error, outcome.status, "Tunnel runtime apply")}`,
+          `${outcome.client_id}: ${dispatchFailureReason(outcome.error, outcome.status, runtimeAction)}`,
       )
       .join("; ");
     return {
-      message: `${savedMessage}. Desired state was saved, but runtime apply was not queued for ${failures.length} endpoint${failures.length === 1 ? "" : "s"}: ${details}`,
+      message: `${savedMessage}. Desired state was saved, but ${runtimeAction.toLowerCase()} was not queued for ${failures.length} endpoint${failures.length === 1 ? "" : "s"}: ${details}`,
       tone: "warning",
     };
   }
   if (sync.length > 0) {
     return {
-      message: `${savedMessage}. Runtime apply queued for ${sync.length} endpoint${sync.length === 1 ? "" : "s"}.`,
+      message: `${savedMessage}. ${runtimeAction} queued for ${sync.length} endpoint${sync.length === 1 ? "" : "s"}.`,
       tone: "progress",
     };
   }
   return { message: savedMessage, tone: "success" };
+}
+
+function tunnelRetirementFeedback(
+  sync: RuntimeConfigDispatchRecord[],
+  savedMessage: string,
+): Feedback {
+  const feedback = tunnelDispatchFeedback(sync, savedMessage, "Runtime removal");
+  if (feedback.tone !== "warning") return feedback;
+  return {
+    ...feedback,
+    message: `${feedback.message} The plan remains deleted; affected agents reconcile current desired state on reconnect. Inspect Config > Overview if an online endpoint remains pending.`,
+  };
 }
 
 function tunnelConnectivityPresentation(
@@ -2176,6 +2230,7 @@ function createConfirmationItems(
       value: cleanupSummary,
     }] : []),
     { label: "Addresses", value: [request.ipv4_tunnel ? `${request.ipv4_tunnel.left}/${request.ipv4_tunnel.prefix_len} / ${request.ipv4_tunnel.right}/${request.ipv4_tunnel.prefix_len}` : null, request.ipv6_tunnel ? `${request.ipv6_tunnel.left}/${request.ipv6_tunnel.prefix_len} / ${request.ipv6_tunnel.right}/${request.ipv6_tunnel.prefix_len}` : null].filter(Boolean).join("; ") },
+    { label: "Planning bandwidth", value: `${request.bandwidth_mbps} Mbps` },
     { label: "OSPF", value: request.ospf ? `${formatOspfMode(request.ospf.mode)} · planned cost ${calculateOspfCostPreview({ bandwidthMbps: request.bandwidth_mbps, latencyMs: request.ospf.planned_latency_ms, packetLossRatio: request.ospf.planned_packet_loss_ratio, policy: request.ospf.policy, preference: request.ospf.preference })}` : "Off" },
     ...(request.ospf ? [
       {
@@ -2228,12 +2283,6 @@ function tunnelPlanDeleteError(error: unknown): string {
   if (error instanceof ApiResponseError) {
     if (error.code === "tunnel_plan_snapshot_stale") {
       return "This tunnel plan changed after the delete review opened. Refresh the registry and review it again.";
-    }
-    if (error.code === "tunnel_plan_disable_before_delete") {
-      return "Disable the tunnel plan and let its desired runtime state be removed before deleting it.";
-    }
-    if (error.code === "tunnel_plan_cleanup_not_confirmed") {
-      return "Both endpoints must confirm runtime removal before this plan can release its interface and address reservations. Retry removal from the plan row, then delete after both endpoint states show Removed.";
     }
   }
   return error instanceof Error ? error.message : "Tunnel plan deletion failed";
@@ -2365,8 +2414,13 @@ type TunnelPlanForm = {
 type Feedback = { message: string; tone: ActionFeedbackTone };
 type LifecycleSnapshot = {
   enabled: boolean;
+  retryApply: boolean;
   retryCleanup: boolean;
-  targets: Array<TunnelPlanRevisionTarget & { name: string; ospfEnabled: boolean }>;
+  targets: Array<TunnelPlanRevisionTarget & {
+    declaration: string;
+    name: string;
+    ospfEnabled: boolean;
+  }>;
 };
 type DeleteSnapshot = {
   plan: TunnelPlanRecord;
@@ -2378,6 +2432,10 @@ type TopologyPanelProps = {
   agents: AgentView[];
   error: string | null;
   initialPlanWorkflow: "create" | null;
+  initialTargetIntent?: {
+    clientId: string;
+    requestId: string;
+  } | null;
   jobs: JobHistoryRecord[];
   loading: boolean;
   networkObservations: NetworkObservationRecord[];
@@ -2388,6 +2446,7 @@ type TopologyPanelProps = {
   onDeleteTunnelPlan: (target: TunnelPlanRevisionTarget) => Promise<TunnelPlanMutationResponse>;
   onExportTunnelPlan: (planId: string) => Promise<TunnelPlan>;
   onInitialPlanWorkflowConsumed: () => void;
+  onInitialTargetIntentConsumed?: (requestId: string) => void;
   onLoadNetworkObservations: () => Promise<void>;
   onLoadNetworkTrends: () => Promise<void>;
   onLoadOspfRecommendations: () => Promise<void>;

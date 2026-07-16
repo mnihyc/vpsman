@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   GitGraph,
   Maximize2,
@@ -20,6 +20,7 @@ import {
 import type {
   AgentView,
   RuntimeConfigApplyStateRecord,
+  TopologyEdgeHealthStatus,
   TopologyGraph,
   TopologyGraphEdge,
   TopologyGraphNode,
@@ -45,7 +46,7 @@ type GraphLayout = {
   nodes: PositionedNode[];
 };
 
-type HealthFilter = "all" | "attention" | "healthy" | "unknown";
+type HealthFilter = "all" | "attention" | "healthy" | "unknown" | "disabled";
 type GraphPan = {
   x: number;
   y: number;
@@ -56,25 +57,47 @@ type GraphLegendItem = {
   tone?: "attention" | "ready";
   value: string;
 };
+type NodeTunnelStats = {
+  attention: number;
+  disabled: number;
+  enabled: number;
+  healthy: number;
+  total: number;
+};
+
+const EMPTY_NODE_TUNNEL_STATS: NodeTunnelStats = {
+  attention: 0,
+  disabled: 0,
+  enabled: 0,
+  healthy: 0,
+  total: 0,
+};
 
 const healthFilters: { label: string; value: HealthFilter }[] = [
   { label: "All", value: "all" },
   { label: "Attention", value: "attention" },
   { label: "Healthy", value: "healthy" },
   { label: "Unknown", value: "unknown" },
+  { label: "Disabled", value: "disabled" },
 ];
 
 export function TopologyGraphPanel({
   agents,
   graph,
+  initialSelectedClientId,
+  initialSelectionRequestId,
   loading,
+  onInitialSelectionConsumed,
   onOpenVpsDetail,
   onRefresh,
   runtimeConfigApplyStates,
 }: {
   agents: AgentView[];
   graph: TopologyGraph;
+  initialSelectedClientId?: string | null;
+  initialSelectionRequestId?: string | null;
   loading: boolean;
+  onInitialSelectionConsumed?: (requestId: string) => void;
   onOpenVpsDetail?: (clientId: string) => void;
   onRefresh: () => Promise<void>;
   runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
@@ -83,6 +106,7 @@ export function TopologyGraphPanel({
   const [query, setQuery] = useState("");
   const [healthFilter, setHealthFilter] = useState<HealthFilter>("all");
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
+  const appliedInitialSelectionRequestRef = useRef<string | null>(null);
   const [graphZoom, setGraphZoom] = useState(1);
   const [graphPan, setGraphPan] = useState<GraphPan>({ x: 0, y: 0 });
   const [mobileGraphOpen, setMobileGraphOpen] = useState(false);
@@ -97,10 +121,11 @@ export function TopologyGraphPanel({
   const layout = useMemo(() => positionNodes(filtered.nodes), [filtered.nodes]);
   const nodes = layout.nodes;
   const nodeById = new Map(nodes.map((node) => [node.client_id, node]));
+  const nodeStatsById = buildNodeTunnelStats(filtered.edges);
   const selectedNode =
-    nodes.find((node) => node.client_id === selectedClientId) ??
-    nodes[0] ??
-    null;
+    selectedClientId === null
+      ? nodes[0] ?? null
+      : nodes.find((node) => node.client_id === selectedClientId) ?? null;
   const selectedEdges = selectedNode
     ? filtered.edges.filter(
         (edge) =>
@@ -108,6 +133,9 @@ export function TopologyGraphPanel({
           edge.right_client_id === selectedNode.client_id,
       )
     : [];
+  const selectedNodeStats = selectedNode
+    ? (nodeStatsById.get(selectedNode.client_id) ?? EMPTY_NODE_TUNNEL_STATS)
+    : EMPTY_NODE_TUNNEL_STATS;
   const runtimeStateByClientId = useMemo(
     () =>
       new Map(
@@ -128,12 +156,31 @@ export function TopologyGraphPanel({
     [graph],
   );
   const latestTopologyEvidenceStale = isStaleEvidence(latestTopologyEvidence);
+
+  useEffect(() => {
+    if (
+      !initialSelectionRequestId ||
+      appliedInitialSelectionRequestRef.current === initialSelectionRequestId ||
+      (loading && graph.nodes.length === 0)
+    ) {
+      return;
+    }
+    appliedInitialSelectionRequestRef.current = initialSelectionRequestId;
+    setSelectedClientId(initialSelectedClientId ?? null);
+    onInitialSelectionConsumed?.(initialSelectionRequestId);
+  }, [
+    graph.nodes,
+    initialSelectedClientId,
+    initialSelectionRequestId,
+    loading,
+    onInitialSelectionConsumed,
+  ]);
   const legendItems = useMemo(
     () => buildGraphLegendItems(filtered.edges),
     [filtered.edges],
   );
   const hasVisibleOspfCost = filtered.edges.some(
-    (edge) => edge.recommended_ospf_cost !== null,
+    (edge) => edge.enabled && edge.recommended_ospf_cost !== null,
   );
   const showMinimap = filtered.edges.length > 10 || nodes.length > 8;
   const status =
@@ -339,7 +386,7 @@ export function TopologyGraphPanel({
                   }
                   return (
                     <g
-                      className={`topologyGraphEdge ${edge.health}`}
+                      className={`topologyGraphEdge ${effectiveEdgeHealth(edge)}`}
                       key={edge.plan_id}
                     >
                       <title>
@@ -381,10 +428,13 @@ export function TopologyGraphPanel({
                     </g>
                   );
                 })}
-                {nodes.map((node) => (
+                {nodes.map((node) => {
+                  const stats =
+                    nodeStatsById.get(node.client_id) ?? EMPTY_NODE_TUNNEL_STATS;
+                  return (
                   <g
                     aria-label={`Select ${nodeLabel(node, vpsNameDisplayMode)}`}
-                    className={`topologyGraphNode ${selectedNode?.client_id === node.client_id ? "selected" : ""} ${node.degraded_tunnel_count > 0 ? "degraded" : nodeStatusClass(node, agentById)}`}
+                    className={`topologyGraphNode ${selectedNode?.client_id === node.client_id ? "selected" : ""} ${stats.attention > 0 ? "degraded" : nodeStatusClass(node, agentById)}`}
                     key={node.client_id}
                     onClick={() => setSelectedClientId(node.client_id)}
                     onKeyDown={(event) => {
@@ -395,7 +445,7 @@ export function TopologyGraphPanel({
                     role="button"
                     tabIndex={0}
                   >
-                    <title>{nodeHoverDetail(node, vpsNameDisplayMode, agentById)}</title>
+                    <title>{nodeHoverDetail(node, vpsNameDisplayMode, agentById, stats)}</title>
                     <circle cx={node.x} cy={node.y} r="42" />
                     <text x={node.x} y={node.y - 8}>
                       {graphNodeLabel(node, vpsNameDisplayMode)}
@@ -412,10 +462,11 @@ export function TopologyGraphPanel({
                       x={node.x}
                       y={node.y + 26}
                     >
-                      {node.healthy_tunnel_count}/{node.tunnel_count} healthy
+                      {stats.healthy}/{stats.enabled} active
                     </text>
                   </g>
-                ))}
+                  );
+                })}
               </g>
             </svg>
             {showMinimap ? (
@@ -440,7 +491,9 @@ export function TopologyGraphPanel({
                 {nodes.map((node) => (
                   <circle
                     className={
-                      node.degraded_tunnel_count > 0 ? "attention" : undefined
+                      (nodeStatsById.get(node.client_id)?.attention ?? 0) > 0
+                        ? "attention"
+                        : undefined
                     }
                     cx={node.x}
                     cy={node.y}
@@ -451,6 +504,21 @@ export function TopologyGraphPanel({
               </svg>
             ) : null}
           </div>
+          {selectedClientId && !selectedNode ? (
+            <div className="emptyState compactEmpty topologySelectionEmpty" role="status">
+              <Server size={20} />
+              <strong>VPS not in the managed graph</strong>
+              <span>
+                {graphSelectionTargetLabel(
+                  selectedClientId,
+                  agentById,
+                  vpsNameDisplayMode,
+                )} has no
+                visible managed tunnel declaration in the current graph or
+                filter. No different VPS was selected.
+              </span>
+            </div>
+          ) : null}
           {selectedNode && (
             <div className="topologyNodeInspector">
               <span className="historyPrimary">
@@ -470,14 +538,15 @@ export function TopologyGraphPanel({
               </span>
               <span className="topologyMetric">
                 <strong>
-                  {selectedNode.healthy_tunnel_count}/
-                  {selectedNode.tunnel_count}
+                  {selectedNodeStats.healthy}/{selectedNodeStats.enabled}
                 </strong>
-                <small>healthy tunnels</small>
+                <small>healthy enabled tunnels</small>
               </span>
               <span className="topologyMetric">
-                <strong>{selectedNode.degraded_tunnel_count}</strong>
-                <small>degraded tunnels</small>
+                <strong>{selectedNodeStats.attention}</strong>
+                <small>
+                  need attention; {selectedNodeStats.disabled} disabled
+                </small>
               </span>
               <span className="topologyMetric">
                 <strong>
@@ -516,9 +585,9 @@ export function TopologyGraphPanel({
                 </span>
                 <span className="topologySummaryCell" data-label="Health">
                   <span
-                    className={`status ${topologyEdgeHealthStatusBadgeClass(edge.health)}`}
+                    className={`status ${topologyEdgeHealthStatusBadgeClass(effectiveEdgeHealth(edge))}`}
                   >
-                    {humanStatus(edge.health)}
+                    {humanStatus(effectiveEdgeHealth(edge))}
                   </span>
                 </span>
                 <span className="topologyMetric" data-label="Metric">
@@ -654,6 +723,7 @@ function isStaleEvidence(value: string | null): boolean {
 }
 
 function buildGraphLegendItems(edges: TopologyGraphEdge[]): GraphLegendItem[] {
+  const enabledEdges = edges.filter((edge) => edge.enabled);
   const attentionCount = edges.filter((edge) =>
     edgeMatchesHealth(edge, "attention"),
   ).length;
@@ -663,19 +733,20 @@ function buildGraphLegendItems(edges: TopologyGraphEdge[]): GraphLegendItem[] {
   const unknownCount = edges.filter((edge) =>
     edgeMatchesHealth(edge, "unknown"),
   ).length;
+  const disabledCount = edges.filter((edge) => !edge.enabled).length;
   const latestMeasuredEdge =
-    edges.find(
+    enabledEdges.find(
       (edge) =>
         typeof edge.latency_avg_ms === "number" ||
         typeof edge.throughput_avg_mbps === "number",
     ) ??
-    edges[0] ??
+    enabledEdges[0] ??
     null;
   const latestOspfEdge =
-    edges.find((edge) => edge.recommended_ospf_cost !== null) ?? null;
+    enabledEdges.find((edge) => edge.recommended_ospf_cost !== null) ?? null;
   const items: GraphLegendItem[] = [
     {
-      detail: `${healthyCount} healthy, ${unknownCount} unknown, ${attentionCount} attention`,
+      detail: `${healthyCount} healthy, ${unknownCount} unknown, ${attentionCount} attention, ${disabledCount} disabled`,
       label: "Layers",
       tone: attentionCount > 0 ? "attention" : "ready",
       value: `${edges.length} visible tunnel${edges.length === 1 ? "" : "s"}`,
@@ -798,6 +869,12 @@ function edgeMatchesHealth(
   if (filter === "all") {
     return true;
   }
+  if (filter === "disabled") {
+    return !edge.enabled;
+  }
+  if (!edge.enabled) {
+    return false;
+  }
   if (filter === "attention") {
     return (
       edge.health === "degraded" ||
@@ -810,7 +887,40 @@ function edgeMatchesHealth(
   if (filter === "healthy") {
     return edge.health === "healthy";
   }
-  return edge.health === "unknown" || edge.health === "disabled";
+  return edge.health === "unknown";
+}
+
+function effectiveEdgeHealth(
+  edge: TopologyGraphEdge,
+): TopologyEdgeHealthStatus {
+  return edge.enabled ? edge.health : "disabled";
+}
+
+function buildNodeTunnelStats(
+  edges: TopologyGraphEdge[],
+): Map<string, NodeTunnelStats> {
+  const statsByClientId = new Map<string, NodeTunnelStats>();
+  for (const edge of edges) {
+    for (const clientId of [edge.left_client_id, edge.right_client_id]) {
+      const stats = statsByClientId.get(clientId) ?? {
+        ...EMPTY_NODE_TUNNEL_STATS,
+      };
+      stats.total += 1;
+      if (!edge.enabled) {
+        stats.disabled += 1;
+      } else {
+        stats.enabled += 1;
+        if (edgeMatchesHealth(edge, "healthy")) {
+          stats.healthy += 1;
+        }
+        if (edgeMatchesHealth(edge, "attention")) {
+          stats.attention += 1;
+        }
+      }
+      statsByClientId.set(clientId, stats);
+    }
+  }
+  return statsByClientId;
 }
 
 function edgeSearchText(edge: TopologyGraphEdge): string {
@@ -867,6 +977,9 @@ function edgeMetric(edge: TopologyGraphEdge): string {
 }
 
 function edgeInlineMetric(edge: TopologyGraphEdge): string {
+  if (!edge.enabled) {
+    return "disabled plan";
+  }
   return `${latencyLabel(edge)} / ${formatLoss(edge.packet_loss_avg_ratio)} / ${bandwidthLabel(edge)}`;
 }
 
@@ -1008,6 +1121,15 @@ function nodeLabel(
   return formatVpsName(node, mode);
 }
 
+function graphSelectionTargetLabel(
+  clientId: string,
+  agentById: Map<string, AgentView>,
+  mode: VpsNameDisplayMode,
+): string {
+  const agent = agentById.get(clientId);
+  return agent ? formatVpsName(agent, mode) : clientId;
+}
+
 function graphNodeLabel(
   node: Pick<TopologyGraphNode, "client_id" | "display_name">,
   mode: VpsNameDisplayMode,
@@ -1058,6 +1180,7 @@ function nodeHoverDetail(
   node: TopologyGraphNode,
   mode: VpsNameDisplayMode,
   agentById: Map<string, AgentView>,
+  stats: NodeTunnelStats,
 ): string {
   const displayState = nodeDisplayState(node, agentById);
   const statusDetail = displayState
@@ -1066,8 +1189,9 @@ function nodeHoverDetail(
   return [
     nodeLabel(node, mode),
     `status ${statusDetail}`,
-    `${node.healthy_tunnel_count}/${node.tunnel_count} healthy`,
-    `${node.degraded_tunnel_count} degraded`,
+    `${stats.healthy}/${stats.enabled} enabled tunnels healthy`,
+    `${stats.attention} need attention`,
+    `${stats.disabled} disabled`,
     `region ${regionLabel(node)}`,
     node.latest_observed_at
       ? `observed ${formatTime(node.latest_observed_at)}`

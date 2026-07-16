@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FileText, Plus, RefreshCw, RotateCcw, Square, TerminalSquare } from "lucide-react";
 import { ActionFeedback } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
@@ -31,22 +31,28 @@ import { formatCompactTime, formatFullTime, statusClass } from "../../utils";
 export function ProcessSupervisorInventoryPanel({
   agents,
   clientLabel,
+  initialTargetClientId,
+  initialTargetRequestId,
   inventory,
   loading,
   onCreateJob,
   onLoadTargets,
   onOpenDispatchPreset,
+  onInitialTargetConsumed,
   onOpenPrivilegeUnlock,
   onRefresh,
   privilegeMaterial,
 }: {
   agents: AgentView[];
   clientLabel: (clientId: string) => string;
+  initialTargetClientId?: string | null;
+  initialTargetRequestId?: string | null;
   inventory: ProcessSupervisorInventoryRecord[];
   loading: boolean;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenDispatchPreset: (preset: JobDispatchPresetInput) => void;
+  onInitialTargetConsumed?: (requestId: string) => void;
   onOpenPrivilegeUnlock: () => void;
   onRefresh: () => void | Promise<void>;
   privilegeMaterial: PrivilegeMaterial | null;
@@ -55,16 +61,48 @@ export function ProcessSupervisorInventoryPanel({
   const [actionStatus, setActionStatus] = useState<string | null>(null);
   const [actionWarning, setActionWarning] = useState(false);
   const [actionPending, setActionPending] = useState(false);
+  const [focusedClientId, setFocusedClientId] = useState<string | null>(null);
+  const appliedInitialTargetRequestRef = useRef<string | null>(null);
   const [restartProcess, setRestartProcess] =
     useState<ProcessSupervisorInventoryRecord | null>(null);
   const [stopProcess, setStopProcess] =
     useState<ProcessSupervisorInventoryRecord | null>(null);
-  const runningCount = inventory.filter((row) => row.status === "running").length;
-  const desiredOnlyLimitCount = inventory.filter((row) => row.limit_effectiveness_status === "degraded_desired_only").length;
-  const restartedCount = inventory.filter((row) => (row.restart_attempts ?? 0) > 0).length;
-  const logBackedCount = inventory.filter((row) => row.stdout_log || row.stderr_log).length;
-  const chronologyWarningCount = inventory.filter((row) => processTimingEvidence(row).tone === "warn").length;
-  const retainedMemoryBytes = inventory.reduce((total, row) => total + (row.cgroup_memory_current_bytes ?? 0), 0);
+  const focusedAgent = focusedClientId
+    ? agents.find((agent) => agent.id === focusedClientId) ?? null
+    : null;
+  const scopedAgents = focusedAgent ? [focusedAgent] : agents;
+  const scopedInventory = focusedAgent
+    ? inventory.filter((row) => row.client_id === focusedAgent.id)
+    : inventory;
+  const runningCount = scopedInventory.filter((row) => row.status === "running").length;
+  const desiredOnlyLimitCount = scopedInventory.filter((row) => row.limit_effectiveness_status === "degraded_desired_only").length;
+  const restartedCount = scopedInventory.filter((row) => (row.restart_attempts ?? 0) > 0).length;
+  const logBackedCount = scopedInventory.filter((row) => row.stdout_log || row.stderr_log).length;
+  const chronologyWarningCount = scopedInventory.filter((row) => processTimingEvidence(row).tone === "warn").length;
+  const retainedMemoryBytes = scopedInventory.reduce((total, row) => total + (row.cgroup_memory_current_bytes ?? 0), 0);
+
+  useEffect(() => {
+    if (
+      !initialTargetRequestId ||
+      appliedInitialTargetRequestRef.current === initialTargetRequestId ||
+      agents.length === 0
+    ) {
+      return;
+    }
+    appliedInitialTargetRequestRef.current = initialTargetRequestId;
+    setFocusedClientId(
+      initialTargetClientId &&
+        agents.some((agent) => agent.id === initialTargetClientId)
+        ? initialTargetClientId
+        : null,
+    );
+    onInitialTargetConsumed?.(initialTargetRequestId);
+  }, [
+    agents,
+    initialTargetClientId,
+    initialTargetRequestId,
+    onInitialTargetConsumed,
+  ]);
   const executeProcessAction = useCallback(
     async (
       row: ProcessSupervisorInventoryRecord,
@@ -152,7 +190,7 @@ export function ProcessSupervisorInventoryPanel({
     if (loading || actionPending) {
       return;
     }
-    if (agents.length === 0) {
+    if (scopedAgents.length === 0) {
       setActionError("No VPS is available in the current scope.");
       setActionStatus(null);
       setActionWarning(false);
@@ -165,7 +203,7 @@ export function ProcessSupervisorInventoryPanel({
       onOpenPrivilegeUnlock();
       return;
     }
-    const targets = [...agents].sort((left, right) => left.id.localeCompare(right.id));
+    const targets = [...scopedAgents].sort((left, right) => left.id.localeCompare(right.id));
     const clientIds = targets.map((agent) => agent.id);
     const selectorExpression = selectorExpressionForClientIds(clientIds);
     const operation = { name: null, type: "process_status" } as const;
@@ -390,7 +428,7 @@ export function ProcessSupervisorInventoryPanel({
             </span>
           );
         },
-        header: "Restarts",
+        header: "Auto restarts",
         id: "restarts",
         minSize: 100,
         searchValue: (row) => `${processRestartEvidence(row).primary} ${processRestartEvidence(row).detail}`,
@@ -433,7 +471,7 @@ export function ProcessSupervisorInventoryPanel({
         <div>
           <h2>Process supervisor inventory</h2>
           <span>
-            {countPhrase(runningCount, "observed running process", "observed running processes")}, {countPhrase(desiredOnlyLimitCount, "desired-only limit")}, {countPhrase(restartedCount, "process restarted", "processes restarted")}
+            {countPhrase(runningCount, "observed running process", "observed running processes")}, {countPhrase(desiredOnlyLimitCount, "desired-only limit")}, {countPhrase(restartedCount, "process with automatic restarts", "processes with automatic restarts")}
           </span>
         </div>
         <div className="headerActionStack">
@@ -443,6 +481,9 @@ export function ProcessSupervisorInventoryPanel({
               onClick={() =>
                 onOpenDispatchPreset({
                   mode: "process_supervisor",
+                  selectorExpression: focusedAgent
+                    ? `id:${focusedAgent.id}`
+                    : "",
                   supervisorAction: "start",
                 })
               }
@@ -453,11 +494,11 @@ export function ProcessSupervisorInventoryPanel({
             </button>
             <button
               className="secondaryAction compactAction"
-              disabled={loading || actionPending || agents.length === 0}
+              disabled={loading || actionPending || scopedAgents.length === 0}
               onClick={() => void refreshProcessStatus()}
               title={
-                agents.length > 0
-                  ? `Query managed process state on ${countPhrase(agents.length, "VPS", "VPS")}`
+                scopedAgents.length > 0
+                  ? `Query managed process state on ${countPhrase(scopedAgents.length, "VPS", "VPS")}`
                   : "No VPS is available in the current scope"
               }
               type="button"
@@ -481,9 +522,24 @@ export function ProcessSupervisorInventoryPanel({
           />
         </div>
       </div>
+      {focusedAgent ? (
+        <div className="processTargetScope" aria-label="Process VPS focus">
+          <span>
+            Showing managed processes for{" "}
+            <strong>{clientLabel(focusedAgent.id)}</strong>
+          </span>
+          <button
+            className="secondaryAction compactAction"
+            onClick={() => setFocusedClientId(null)}
+            type="button"
+          >
+            Show all VPSs
+          </button>
+        </div>
+      ) : null}
       <div className="processSupervisorSummaryStrip" aria-label="Process supervisor health summary">
         <span>
-          <strong>{runningCount} / {inventory.length}</strong>
+          <strong>{runningCount} / {scopedInventory.length}</strong>
           <small>Observed running</small>
         </span>
         <span className={desiredOnlyLimitCount > 0 ? "attention" : undefined}>
@@ -492,7 +548,7 @@ export function ProcessSupervisorInventoryPanel({
         </span>
         <span className={restartedCount > 0 ? "attention" : undefined}>
           <strong>{restartedCount}</strong>
-          <small>{restartedCount === 1 ? "Process restarted" : "Processes restarted"}</small>
+          <small>With automatic restarts</small>
         </span>
         <span>
           <strong>{formatBytes(retainedMemoryBytes)}</strong>
@@ -570,14 +626,18 @@ export function ProcessSupervisorInventoryPanel({
         tone="danger"
       />
       <div className="processMobileList" aria-label="Process supervisor mobile cards">
-        {inventory.length === 0 ? (
+        {scopedInventory.length === 0 ? (
           <div className="emptyState compactEmpty">
             <TerminalSquare size={22} />
             <strong>No supervised processes</strong>
-            <span>Process start, status, restart, log, and stop jobs populate this inventory.</span>
+            <span>
+              {focusedAgent
+                ? `No supervised process is retained for ${clientLabel(focusedAgent.id)}.`
+                : "Process start, status, restart, log, and stop jobs populate this inventory."}
+            </span>
           </div>
         ) : (
-          inventory.map((row) => {
+          scopedInventory.map((row) => {
             const state = processStateEvidence(row);
             const timing = processTimingEvidence(row);
             const restart = processRestartEvidence(row);
@@ -631,7 +691,11 @@ export function ProcessSupervisorInventoryPanel({
             <div className="emptyState">
               <TerminalSquare size={22} />
               <strong>No supervised processes</strong>
-              <span>Process start, status, restart, log, and stop jobs populate this inventory.</span>
+              <span>
+                {focusedAgent
+                  ? `No supervised process is retained for ${clientLabel(focusedAgent.id)}.`
+                  : "Process start, status, restart, log, and stop jobs populate this inventory."}
+              </span>
             </div>
           }
           renderExpandedRow={(row) => (
@@ -656,7 +720,7 @@ export function ProcessSupervisorInventoryPanel({
               <strong>{processTimingEvidence(row).detail}</strong>
               <span>Resource snapshot</span>
               <strong>{formatResourceSecondary(row)}</strong>
-              <span>Restart attempts</span>
+              <span>Automatic restart attempts</span>
               <strong>{processRestartEvidence(row).primary}</strong>
               <span>Last exit</span>
               <strong>{processLastExitEvidence(row).primary}; {processLastExitEvidence(row).detail}</strong>
@@ -674,7 +738,7 @@ export function ProcessSupervisorInventoryPanel({
               <strong>{formatObservedTime(row.observed_at)}</strong>
             </div>
           )}
-          rows={inventory}
+          rows={scopedInventory}
           searchPlaceholder="Search processes"
           selectable={false}
           storageKey="vpsman.jobs.processSupervisorInventory"

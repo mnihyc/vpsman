@@ -179,6 +179,7 @@ export function AlertsPanel({
             <FleetAlertNotificationManager
               agents={agents}
               channels={fleetAlertNotificationChannels}
+              deliveries={fleetAlertNotifications}
               onDelete={onDeleteFleetAlertNotificationChannel}
               onDispatch={onDispatchFleetAlertNotifications}
               onOpenDeliveries={openDeliveryEvidence}

@@ -4,6 +4,7 @@ import {
   buildPrivilegeForJobOperation,
   canonicalDbPrivilegeIntent,
   canonicalOperationJson,
+  parseCommandArgv,
   textPayloadHashHex,
 } from "../src/privilege";
 import type { JobOperation } from "../src/types";
@@ -73,6 +74,38 @@ test("frontend operation canonicalization matches Rust-generated golden vectors"
     const operation = JSON.parse(vector.input_json) as JobOperation;
     expect(canonicalOperationJson(operation), vector.command_type).toBe(vector.canonical_json);
   }
+});
+
+test("command argv parsing preserves shell-style quote boundaries", () => {
+  const shellCommand = String.raw`/bin/sh -c 'printf "fresh-round-ok\nfresh-round-second\n"'`;
+  expect(parseCommandArgv(shellCommand)).toEqual([
+    "/bin/sh",
+    "-c",
+    String.raw`printf "fresh-round-ok\nfresh-round-second\n"`,
+  ]);
+  expect(
+    parseCommandArgv(
+      String.raw`/bin/printf '' "" alpha\ beta "gamma\ndelta" 'epsilon\nzeta'`,
+    ),
+  ).toEqual([
+    "/bin/printf",
+    "",
+    "",
+    "alpha beta",
+    String.raw`gamma\ndelta`,
+    String.raw`epsilon\nzeta`,
+  ]);
+  expect(parseCommandArgv(String.raw`/bin/printf "a\"b" c\\d`)).toEqual([
+    "/bin/printf",
+    'a"b',
+    String.raw`c\d`,
+  ]);
+  expect(() => parseCommandArgv("/bin/echo trailing\\")).toThrow(
+    "Trailing escape in command argv",
+  );
+  expect(() => parseCommandArgv("/bin/echo 'unterminated")).toThrow(
+    "Unterminated quoted argument",
+  );
 });
 
 test("canonical privilege payload omits skipped optional fields", () => {

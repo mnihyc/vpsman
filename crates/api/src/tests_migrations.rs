@@ -317,6 +317,33 @@ async fn migration_link_rejects_missing_restore_plan() {
     assert_eq!(error.code, "migration_restore_plan_not_found");
 }
 
+#[tokio::test]
+async fn migration_link_rejects_same_source_and_replacement() {
+    let repo = seeded_migration_repo().await;
+    let source_backup_id = create_source_backup(&repo).await;
+    let restore_plan_id =
+        create_restore_plan_record_for_target(&repo, source_backup_id, "source-client").await;
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+
+    let error = create_migration_link(
+        State(state),
+        headers,
+        Json(CreateMigrationLinkRequest {
+            restore_plan_id,
+            confirmed: true,
+            note: None,
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(error.code, "migration_source_and_replacement_must_differ");
+    assert!(repo.list_migration_links(10).await.unwrap().is_empty());
+}
+
 async fn seeded_migration_repo() -> Repository {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
@@ -443,9 +470,17 @@ async fn seed_completed_archive_upload(
 }
 
 async fn create_restore_plan_record(repo: &Repository, source_backup_id: Uuid) -> Uuid {
+    create_restore_plan_record_for_target(repo, source_backup_id, "rebuilt-client").await
+}
+
+async fn create_restore_plan_record_for_target(
+    repo: &Repository,
+    source_backup_id: Uuid,
+    target_client_id: &str,
+) -> Uuid {
     let request = CreateRestorePlanRequest {
         source_backup_request_id: source_backup_id,
-        target_client_id: "rebuilt-client".to_string(),
+        target_client_id: target_client_id.to_string(),
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
         destination_root: Some("/restore".to_string()),

@@ -46,7 +46,7 @@ import type {
   TerminalSessionRecord,
 } from "../typesTerminal";
 import { clientDisplayNameFromMap, clientDisplayNameMap } from "../utils";
-import type { TerminalComposerAction } from "./JobDispatchPanel";
+import { JobDispatchPanel, type TerminalComposerAction } from "./JobDispatchPanel";
 import { retryableLazy } from "../lazyImport";
 
 export type DirectTerminalOpenRequest = {
@@ -57,11 +57,6 @@ export type DirectTerminalOpenRequest = {
   terminalUserPolicy: "fail" | "fallback";
 };
 
-const JobDispatchPanel = retryableLazy(() =>
-  import("./JobDispatchPanel").then((module) => ({
-    default: module.JobDispatchPanel,
-  })),
-);
 const FileBrowserPanel = retryableLazy(() =>
   import("./jobs/FileBrowserPanel").then((module) => ({
     default: module.FileBrowserPanel,
@@ -102,6 +97,7 @@ export function RemoteOperationsPanel({
   dispatchPreset,
   fileTransfers,
   fileTransferSources,
+  initialTargetIntent,
   lastTerminalOutputEvent,
   loading,
   onCreateFileTransferHandoff,
@@ -114,6 +110,7 @@ export function RemoteOperationsPanel({
   onLoadOutputs,
   onLoadTargets,
   onLoadTerminalReplay,
+  onInitialTargetIntentConsumed,
   onOpenJobDetails,
   onOpenJobsDispatch,
   onOpenPrivilegeUnlock,
@@ -132,7 +129,7 @@ export function RemoteOperationsPanel({
   processSupervisorInventory,
   setPrivilegeMaterial,
   terminalSessions,
-  transferTargetClientId,
+  transferTargetIntent,
 }: {
   activeSubpage: string;
   agents: AgentView[];
@@ -140,6 +137,11 @@ export function RemoteOperationsPanel({
   dispatchPreset?: JobDispatchPreset | null;
   fileTransfers: FileTransferSessionRecord[];
   fileTransferSources: FileTransferSourceArtifactRecord[];
+  initialTargetIntent?: {
+    clientId: string;
+    destination: "processes" | "terminal";
+    requestId: string;
+  } | null;
   lastTerminalOutputEvent: WsTerminalOutputEvent | null;
   loading: boolean;
   onCreateFileTransferHandoff: (
@@ -163,6 +165,7 @@ export function RemoteOperationsPanel({
     sessionId: string,
     fromSeq?: number,
   ) => Promise<TerminalReplayRecord>;
+  onInitialTargetIntentConsumed?: (requestId: string) => void;
   onOpenJobDetails: (jobId: string) => void;
   onOpenJobsDispatch?: () => void;
   onOpenPrivilegeUnlock: () => void;
@@ -202,7 +205,11 @@ export function RemoteOperationsPanel({
   processSupervisorInventory: ProcessSupervisorInventoryRecord[];
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
   terminalSessions: TerminalSessionRecord[];
-  transferTargetClientId?: string | null;
+  transferTargetIntent?: {
+    clientId: string;
+    context: string;
+    path: string;
+  } | null;
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [terminalComposerAction, setTerminalComposerAction] =
@@ -213,8 +220,6 @@ export function RemoteOperationsPanel({
     useState<JobDispatchPreset | null>(null);
   const [terminalAdvancedOpen, setTerminalAdvancedOpen] = useState(false);
   const terminalComposerRef = useRef<HTMLDivElement | null>(null);
-  const processComposerRef = useRef<HTMLDivElement | null>(null);
-  const transferComposerRef = useRef<HTMLDivElement | null>(null);
   const [multiFileInitialPath, setMultiFileInitialPath] = useState("");
   const [transferFocusPath, setTransferFocusPath] = useState<string | null>(
     null,
@@ -246,22 +251,10 @@ export function RemoteOperationsPanel({
 
   function openProcessComposer(preset: JobDispatchPresetInput) {
     setProcessComposerPreset({ ...preset, requestId: crypto.randomUUID() });
-    window.requestAnimationFrame(() => {
-      processComposerRef.current?.scrollIntoView({
-        behavior: "smooth",
-        block: "start",
-      });
-    });
   }
 
   function openTransferComposer(preset: JobDispatchPresetInput) {
     setTransferComposerPreset({ ...preset, requestId: crypto.randomUUID() });
-    window.requestAnimationFrame(() => {
-      transferComposerRef.current?.scrollIntoView({
-        behavior: "smooth",
-        block: "start",
-      });
-    });
   }
 
   useEffect(() => {
@@ -462,12 +455,23 @@ export function RemoteOperationsPanel({
             <ProcessSupervisorInventoryPanel
               agents={agents}
               clientLabel={clientLabel}
+              initialTargetClientId={
+                initialTargetIntent?.destination === "processes"
+                  ? initialTargetIntent.clientId
+                  : null
+              }
+              initialTargetRequestId={
+                initialTargetIntent?.destination === "processes"
+                  ? initialTargetIntent.requestId
+                  : null
+              }
               inventory={processSupervisorInventory}
               loading={loading}
               onCreateJob={onCreateJob}
               onLoadTargets={onLoadTargets}
               onOpenDispatchPreset={openProcessComposer}
               onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+              onInitialTargetConsumed={onInitialTargetIntentConsumed}
               onRefresh={onRefresh}
               privilegeMaterial={privilegeMaterial}
             />
@@ -477,10 +481,7 @@ export function RemoteOperationsPanel({
                 onClose={() => setProcessComposerPreset(null)}
                 title="Process operation"
               >
-                <div
-                  className="terminalComposerAnchor"
-                  ref={processComposerRef}
-                >
+                <div className="terminalComposerAnchor">
                   <JobDispatchPanel
                     agents={agents}
                     fileTransferSources={fileTransferSources}
@@ -514,7 +515,9 @@ export function RemoteOperationsPanel({
               agents={agents}
               clientLabel={clientLabel}
               focusPath={transferFocusPath}
-              initialUploadTargetClientId={transferTargetClientId}
+              initialUploadContext={transferTargetIntent?.context}
+              initialUploadPath={transferTargetIntent?.path}
+              initialUploadTargetClientId={transferTargetIntent?.clientId}
               transfers={fileTransfers}
               sources={fileTransferSources}
               loading={loading}
@@ -533,10 +536,7 @@ export function RemoteOperationsPanel({
                 onClose={() => setTransferComposerPreset(null)}
                 title="File transfer"
               >
-                <div
-                  className="terminalComposerAnchor"
-                  ref={transferComposerRef}
-                >
+                <div className="terminalComposerAnchor">
                   <JobDispatchPanel
                     agents={agents}
                     fileTransferSources={fileTransferSources}
@@ -569,11 +569,22 @@ export function RemoteOperationsPanel({
             <TerminalSessionsPanel
               agents={agents}
               clientLabel={clientLabel}
+              initialTargetClientId={
+                initialTargetIntent?.destination === "terminal"
+                  ? initialTargetIntent.clientId
+                  : null
+              }
+              initialTargetRequestId={
+                initialTargetIntent?.destination === "terminal"
+                  ? initialTargetIntent.requestId
+                  : null
+              }
               sessions={terminalSessions}
               lastTerminalOutputEvent={lastTerminalOutputEvent}
               loading={loading}
               onCloseTerminal={closeTerminalSessionDirectly}
               onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+              onInitialTargetConsumed={onInitialTargetIntentConsumed}
               onOpenTerminal={openTerminalSessionDirectly}
               onPrepareAction={prepareTerminalSessionAction}
               onSendInput={submitTerminalInputDirectly}

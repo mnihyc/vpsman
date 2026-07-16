@@ -591,12 +591,14 @@ api_post "/api/v1/tunnel-plans" "$(jq -n \
   "enabled": true,
   "confirmed": true
 }')" | jq -e '
-  .name == "docker-fleet-gre"
-    and .enabled == true
-    and .revision == 1
-    and .plan.runtime_control.manager == "external_observed"
-    and .plan.ospf == null
-    and .recommended_ospf_cost == null
+  .plan.name == "docker-fleet-gre"
+    and .plan.enabled == true
+    and .plan.revision == 1
+    and .plan.plan.runtime_control.manager == "external_observed"
+    and .plan.plan.ospf == null
+    and .plan.recommended_ospf_cost == null
+    and (.sync | length) == 2
+    and all(.sync[]; .status == "queued")
 ' >/dev/null
 
 backup_json="$(vpsctl_json backup-request \

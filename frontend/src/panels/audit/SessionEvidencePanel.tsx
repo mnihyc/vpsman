@@ -790,15 +790,8 @@ function transcriptEvidenceState(session: TerminalSessionRecord): {
   if (session.output_next_seq == null) {
     return { label: "No transcript range", replayable: false };
   }
-  const retainedBytes = session.output_retained_bytes ?? 0;
   if (session.output_replay_truncated) {
     return { label: "Transcript truncated", replayable: true };
-  }
-  if (retainedBytes < 128) {
-    return {
-      label: "Trace only; small retained transcript",
-      replayable: false,
-    };
   }
   return { label: "Replayable transcript", replayable: true };
 }

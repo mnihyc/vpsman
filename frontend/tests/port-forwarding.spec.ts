@@ -36,6 +36,13 @@ test("port-forward registry, details, and reviewed create stay revision-bound", 
   await page.getByRole("button", { name: "Create rule" }).click();
   const editor = page.locator(".portForwardEditor");
   await expect(editor).toBeVisible();
+  await expect(editor.getByLabel("VPS")).toBeFocused();
+  await expect(editor.getByLabel("Enabled")).not.toBeChecked();
+  await expect(editor.locator(".portMappingPreview")).toHaveClass(/idle/);
+  await expect(editor.locator(".portMappingPreview")).toContainText(
+    "Enter incoming and target ports to preview the exact mappings",
+  );
+  await editor.getByLabel("VPS").selectOption({ index: 1 });
   await editor.getByLabel("Name", { exact: true }).fill("Internal application");
   await editor.getByRole("button", { name: "Both" }).click();
   await editor.getByLabel("Incoming ports").fill("8080,10000-10010");
@@ -46,6 +53,7 @@ test("port-forward registry, details, and reviewed create stay revision-bound", 
     .getByRole("group", { name: "Resolved addresses" })
     .getByRole("radio", { name: /10\.20\.0\.21/ })
     .check();
+  await editor.getByLabel("Enabled").check();
   await editor.getByRole("button", { name: "Create rule" }).click();
 
   const confirmation = page.getByLabel("Confirm rule creation");
@@ -81,6 +89,7 @@ test("unsupported agents allow disabled drafts but not enabled apply", async ({ 
   await editor.getByLabel("Incoming ports").fill("8443");
   await editor.getByLabel("Target ports").fill("443");
   await editor.getByLabel("Target IP or hostname").fill("10.30.0.9");
+  await editor.getByLabel("Enabled").check();
   await expect(editor).toContainText(
     "Agent lacks CAP_NET_ADMIN in the host network namespace",
   );
@@ -177,7 +186,43 @@ test("mobile port-forward workflow has no page-level horizontal overflow", async
   await expect(details.getByLabel("Actions for Public web ingress")).toBeVisible();
   await details.getByRole("button", { name: "Close port-forward details" }).click();
   await page.getByRole("button", { name: "Create rule" }).click();
-  await expect(page.locator(".portForwardEditor")).toBeVisible();
+  const editor = page.locator(".portForwardEditor");
+  await expect(editor).toBeVisible();
+  const previewText = editor.locator(".portMappingPreview > span");
+  await expect(previewText).toHaveAttribute(
+    "title",
+    "Enter incoming and target ports to preview the exact mappings",
+  );
+  expect(
+    await previewText.evaluate((element) => element.scrollWidth - element.clientWidth),
+  ).toBeLessThanOrEqual(1);
+  for (const control of [
+    editor.getByLabel("VPS"),
+    editor.getByLabel("Name", { exact: true }),
+    editor.getByLabel("Incoming ports"),
+    editor.getByLabel("Target ports"),
+    editor.getByLabel("Target IP or hostname"),
+  ]) {
+    const box = await control.boundingBox();
+    expect(box?.height ?? 0).toBeGreaterThanOrEqual(36);
+  }
+  const enabledLabel = editor.locator(".portForwardEnabled");
+  await expect(enabledLabel).toHaveCSS("display", "flex");
+  const enabledGeometry = await enabledLabel.evaluate((label) => {
+    const checkbox = label.querySelector("input");
+    const text = label.querySelector("span");
+    if (!checkbox || !text) return null;
+    const checkboxBox = checkbox.getBoundingClientRect();
+    const textBox = text.getBoundingClientRect();
+    return {
+      horizontalGap: textBox.left - checkboxBox.right,
+      verticalCenterDelta: Math.abs(
+        textBox.top + textBox.height / 2 - (checkboxBox.top + checkboxBox.height / 2),
+      ),
+    };
+  });
+  expect(enabledGeometry?.horizontalGap ?? 0).toBeGreaterThan(0);
+  expect(enabledGeometry?.verticalCenterDelta ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(2);
   const overflow = await page.evaluate(
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
   );

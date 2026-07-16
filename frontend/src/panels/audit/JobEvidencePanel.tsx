@@ -449,7 +449,7 @@ function JobEvidenceDetail({
             ))
           ) : (
             <div className="dashboardWidgetEmpty">
-              Audit event missing. No matching audit row was returned for this payload hash or job ID; job, target, and output evidence remains visible here.
+              Audit event missing. No audit row with this exact job ID was returned; job, target, and output evidence remains visible here.
             </div>
           )}
         </section>
@@ -530,14 +530,26 @@ function JobEvidenceDetail({
 }
 
 function auditMatchesJob(audit: AuditLogRecord, job: JobHistoryRecord): boolean {
-  if (audit.command_hash && audit.command_hash === job.payload_hash) {
+  const jobId = job.id.toLowerCase();
+  if (audit.target.toLowerCase() === `job:${jobId}`) {
     return true;
   }
-  const metadata = JSON.stringify(audit.metadata).toLowerCase();
-  return (
-    metadata.includes(job.id.toLowerCase()) ||
-    metadata.includes(job.payload_hash.toLowerCase())
-  );
+  return jsonValueContainsExactText(audit.metadata, jobId);
+}
+
+function jsonValueContainsExactText(value: JsonValue, expected: string): boolean {
+  if (typeof value === "string") {
+    return value.toLowerCase() === expected;
+  }
+  if (Array.isArray(value)) {
+    return value.some((entry) => jsonValueContainsExactText(entry, expected));
+  }
+  if (value && typeof value === "object") {
+    return Object.values(value).some((entry) =>
+      jsonValueContainsExactText(entry, expected),
+    );
+  }
+  return false;
 }
 
 function auditEvidenceState(record: EvidenceRecord): EvidenceStateLabel {
@@ -551,7 +563,7 @@ function auditEvidenceState(record: EvidenceRecord): EvidenceStateLabel {
     };
   }
   return {
-    detail: "No audit row matched this job ID or payload hash",
+    detail: "No audit row matched this exact job ID",
     label: "Audit event missing",
     searchText: "audit event missing audit gap",
     tone: "warn",

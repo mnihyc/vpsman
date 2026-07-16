@@ -105,7 +105,7 @@ target/debug/vpsctl --api-url "$api_url" tunnel-plan \
   --save \
   --enabled \
   --confirmed)"
-network_plan_id="$(jq -r '.id' <<<"$network_plan_json")"
+network_plan_id="$(jq -er '.plan.id' <<<"$network_plan_json")"
 
 shell_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
 VPSMAN_API_TOKEN="$access_token" \

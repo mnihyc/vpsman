@@ -329,9 +329,10 @@ vpsctl_json agent-identity-upsert \
   --display-name pg-edge-a-direct \
   --tags direct:first,direct:initial,edge,bgp,country:US \
   --confirmed | jq -e '
-    .client_id == "pg-agent-a" and
-    .display_name == "pg-edge-a-direct" and
-    (.tags | sort == ["bgp", "country:US", "direct:first", "direct:initial", "edge"])
+    .identity.client_id == "pg-agent-a" and
+    .identity.display_name == "pg-edge-a-direct" and
+    (.identity.tags | sort == ["bgp", "country:US", "direct:first", "direct:initial", "edge"]) and
+    any(.post_commit[]; .operation == "job_terminal_reconciliation" and (.status == "completed" or .status == "failed"))
   ' >/dev/null
 first_stored_key_hex="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT encode(public_key, 'hex') FROM clients WHERE id = 'pg-agent-a'")"
 if [[ "$first_stored_key_hex" != "$first_public_key_hex" ]]; then
@@ -392,7 +393,10 @@ vpsctl_json agent-identity-upsert \
   --client-id pg-agent-a \
   --client-public-key-hex "$second_public_key_hex" \
   --replace-existing-key \
-  --confirmed | jq -e '.client_id == "pg-agent-a"' >/dev/null
+  --confirmed | jq -e '
+    .identity.client_id == "pg-agent-a" and
+    any(.post_commit[]; .operation == "job_terminal_reconciliation" and (.status == "completed" or .status == "failed"))
+  ' >/dev/null
 api_post "/api/v1/agents/pg-agent-a/alias" '{"display_name":"pg-edge-a-rotated","confirmed":true}' >/dev/null
 vpsctl_json agent-tag --client-id pg-agent-a --tag rotated --confirmed >/dev/null
 vpsctl_json agent-tag --client-id pg-agent-a --tag os:debian --confirmed >/dev/null
@@ -422,15 +426,20 @@ vpsctl_json agent-identity-upsert \
   --client-public-key-hex "$third_public_key_hex" \
   --display-name pg-revoked-agent \
   --tags revoked-test \
-  --confirmed | jq -e '.client_id == "pg-revoked-agent"' >/dev/null
+  --confirmed | jq -e '
+    .identity.client_id == "pg-revoked-agent" and
+    any(.post_commit[]; .operation == "job_terminal_reconciliation" and (.status == "completed" or .status == "failed"))
+  ' >/dev/null
 validate_agent_identity pg-revoked-agent "$third_public_key_hex" | jq -e '.accepted == true' >/dev/null
 vpsctl_json client-key-revoke \
   --client-id pg-revoked-agent \
   --reason postgres-smoke-revoke \
   --confirmed | jq -e '
-    .client_id == "pg-revoked-agent" and
-    .reason == "postgres-smoke-revoke" and
-    (.public_key_sha256_hex | length == 64)
+    .revocation.client_id == "pg-revoked-agent" and
+    .revocation.reason == "postgres-smoke-revoke" and
+    (.revocation.public_key_sha256_hex | length == 64) and
+    any(.post_commit[]; .operation == "gateway_session_disconnect" and (.status == "completed" or .status == "failed")) and
+    any(.post_commit[]; .operation == "job_terminal_reconciliation" and (.status == "completed" or .status == "failed"))
   ' >/dev/null
 validate_agent_identity pg-revoked-agent "$third_public_key_hex" | jq -e '.accepted == false' >/dev/null
 if vpsctl_json agent-identity-upsert \
@@ -471,8 +480,16 @@ plan_json="$(api_post "/api/v1/tunnel-plans" '{
   "bandwidth_mbps": 1000,
   "confirmed": true
 }')"
-jq -e '.name == "pg-gre-a-b" and .revision == 1 and .enabled == false and .plan.kind == "gre" and (.plan | has("mutates_host") | not) and .plan.recommended_ospf_cost == null' <<<"$plan_json" >/dev/null
-plan_id="$(jq -r '.id' <<<"$plan_json")"
+jq -e '
+  .plan.name == "pg-gre-a-b" and
+  .plan.revision == 1 and
+  .plan.enabled == false and
+  .plan.plan.kind == "gre" and
+  (.plan.plan | has("mutates_host") | not) and
+  .plan.plan.recommended_ospf_cost == null and
+  .sync == []
+' <<<"$plan_json" >/dev/null
+plan_id="$(jq -r '.plan.id' <<<"$plan_json")"
 plan_json="$(api_put "/api/v1/tunnel-plans/$plan_id" '{
   "name": "pg-gre-a-b",
   "interface_name": "gre77",
@@ -494,7 +511,12 @@ plan_json="$(api_put "/api/v1/tunnel-plans/$plan_id" '{
   "expected_revision": 1,
   "confirmed": true
 }')"
-jq -e '.revision == 2 and .enabled == false and .plan.bandwidth_mbps == 1500' <<<"$plan_json" >/dev/null
+jq -e '
+  .plan.revision == 2 and
+  .plan.enabled == false and
+  .plan.plan.bandwidth_mbps == 1500 and
+  .sync == []
+' <<<"$plan_json" >/dev/null
 
 port_forward_json="$(api_post "/api/v1/port-forward-rules" '{
   "client_id": "pg-agent-a",

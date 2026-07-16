@@ -51,13 +51,16 @@ update, enable, disable, retirement, and agent reconnect. The agent reconciles
 only those declarations and their previous exact snapshots. It never scans the
 host to decide what belongs to vpsman.
 
-When a disabled plan is retired, both endpoints receive the final desired state
-without that plan. Agent iproute2 removes only the old declared interface and
-routes; an external runtime adapter runs only its bound stop/cleanup command;
-external observed mode stops observation without mutating the external tunnel.
-If managed cleanup is blocked or fails, the agent retains the old snapshot and
-reports degraded sync so the same cleanup can be retried. An omitted plan is not
-reported as converged until its declared cleanup succeeds.
+Retiring a plan removes its declaration from control-plane desired state
+immediately, whether the plan is currently enabled or disabled. Both endpoints
+receive the complete desired state without that plan. Agent iproute2 removes
+only the old declared interface and routes; an external runtime adapter runs
+only its bound stop/cleanup command; external observed mode stops observation
+without mutating the external tunnel. If an endpoint is offline or managed
+cleanup fails, the retirement remains committed and runtime convergence remains
+visible in Jobs and **Config > Overview**. The agent reconciles the
+current plan-free desired state on reconnect; an omitted plan is not reported as
+converged until its declared cleanup succeeds.
 
 ## Outer Address Semantics (NAT-Safe)
 
@@ -148,23 +151,27 @@ cargo run -p vpsctl -- tunnel-plan-enable \
 ```
 
 Deletion is a separate retirement step, not another spelling of disable. It is
-accepted only for a disabled plan at the exact reviewed revision. Retirement
-keeps audit history, pushes the empty desired state to both endpoints once more,
-and releases the plan name, per-VPS interface reservation, and endpoint
-addresses for reuse:
+accepted for an enabled or disabled plan at the exact reviewed revision.
+Retirement commits immediately, records whether the plan was active in audit
+metadata, queues the complete plan-free desired state for both endpoints, and
+releases the plan name, per-VPS interface reservation, and endpoint addresses
+for reuse:
 
 ```sh
 cargo run -p vpsctl -- tunnel-plan-delete \
   --plan-id <plan_uuid> \
-  --expected-revision <disabled_plan_revision> \
+  --expected-revision <reviewed_plan_revision> \
   --confirmed
 ```
 
-The console exposes the same sequence: disable the row, verify the disabled
-state, then use its delete action. An enabled plan cannot be deleted directly.
-If a local mutation gate or insufficient privilege blocks managed cleanup, the
-sync fails and the agent retains the old plan snapshot so cleanup can be retried;
-do not treat retirement as converged until both endpoint sync jobs succeed.
+The console exposes the same direct delete action for either lifecycle state and
+shows the frozen revision, endpoints, current state, runtime effect, and OSPF
+impact before confirmation. Deletion does not wait for an endpoint response. If
+a local mutation gate or insufficient privilege blocks managed cleanup, the
+agent retains the old plan snapshot and reports the failed removal job; the plan
+remains retired, and the endpoint retries against current desired state on its
+next reconnect or authoritative sync. Do not treat runtime removal as converged
+until both endpoint sync jobs succeed.
 
 Changing an immutable runtime identity, such as interface, kind, underlay, or
 endpoint address, removes the old declared state before reconciling the new

@@ -323,7 +323,11 @@ export function FleetWorkspace({
   onBulkMutateTags: (
     request: BulkTagMutationRequest,
   ) => Promise<TagMutationResponse>;
-  onNavigatePanel?: (view: ActiveView, subpage: string) => void;
+  onNavigatePanel?: (
+    view: ActiveView,
+    subpage: string,
+    targetClientId?: string,
+  ) => void;
   onOpenJobDispatchPreset: (preset: JobDispatchPresetInput) => void;
   onRenderTemplateRuntimeConfig: (
     clientId: string,
@@ -905,7 +909,11 @@ export function FleetWorkspace({
     if (rows.length === 1) {
       onSelectAgent(rows[0].id);
     }
-    onNavigatePanel?.(view, subpage);
+    onNavigatePanel?.(
+      view,
+      subpage,
+      rows.length === 1 ? rows[0].id : undefined,
+    );
   }
 
   function openFileBrowserWorkflow(rows: AgentView[]) {
@@ -914,7 +922,7 @@ export function FleetWorkspace({
       return;
     }
     seedSingleFileBrowser(rows[0]);
-    onNavigatePanel?.("Remote Operations", "files");
+    onNavigatePanel?.("Remote Operations", "files", rows[0].id);
   }
 
   function openSingleReleaseWorkflow(
@@ -927,7 +935,7 @@ export function FleetWorkspace({
       return;
     }
     onSelectAgent(rows[0].id);
-    onNavigatePanel?.(view, subpage);
+    onNavigatePanel?.(view, subpage, rows[0].id);
   }
 
   function openUpdateCheckWorkflow(rows: AgentView[]) {
@@ -1522,7 +1530,11 @@ function FleetInstanceDetail({
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails?: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
-  onNavigatePanel?: (view: ActiveView, subpage: string) => void;
+  onNavigatePanel?: (
+    view: ActiveView,
+    subpage: string,
+    targetClientId?: string,
+  ) => void;
   onRenderTemplateRuntimeConfig: (
     clientId: string,
   ) => Promise<TemplateRuntimeConfigResponse>;
@@ -2283,7 +2295,11 @@ function TrafficRulesDetail({
   vpsRuleValues,
 }: {
   agent: AgentView;
-  onNavigatePanel?: (view: ActiveView, subpage: string) => void;
+  onNavigatePanel?: (
+    view: ActiveView,
+    subpage: string,
+    targetClientId?: string,
+  ) => void;
   policyAlerts: PolicyAlertRecord[];
   policies: FleetAlertPolicyRecord[];
   trafficAccounting: TrafficAccountingRecord | null;
@@ -3804,7 +3820,7 @@ function PolicyDetailGrid({ policy }: { policy: FleetAlertPolicyRecord }) {
         <span>{policyRulesSummary(policy)}</span>
       </span>
       <span>
-        <strong>Matched VPSs</strong>
+        <strong>Matched VPS</strong>
         <span>{policy.matched_vps_count}</span>
       </span>
       <span>
@@ -3812,7 +3828,7 @@ function PolicyDetailGrid({ policy }: { policy: FleetAlertPolicyRecord }) {
         <span>{policyActiveSummary(policy)}</span>
       </span>
       <span>
-        <strong>Incomplete VPSs</strong>
+        <strong>Incomplete VPS</strong>
         <span>{policy.incomplete_vps_count}</span>
       </span>
       <span>
@@ -4199,7 +4215,7 @@ export function FleetAlertPolicyManager({
       },
       {
         id: "matched",
-        header: "Matched VPSs",
+        header: "Matched VPS",
         size: 120,
         minSize: 95,
         sortValue: (policy) => policy.matched_vps_count,
@@ -4225,7 +4241,7 @@ export function FleetAlertPolicyManager({
       },
       {
         id: "incomplete",
-        header: "Incomplete VPSs",
+        header: "Incomplete VPS",
         size: 135,
         minSize: 110,
         sortValue: (policy) => policy.incomplete_vps_count,
@@ -4790,6 +4806,7 @@ export function FleetAlertPolicyManager({
                 label="VPS selector expression"
               >
                 <SearchExpressionInput
+                  agents={agents}
                   ariaLabel="Policy VPS selector expression"
                   onChange={setSelectorExpression}
                   placeholder="tag:edge && provider:hetzner"
@@ -4808,7 +4825,9 @@ export function FleetAlertPolicyManager({
               <div className="sectionHeader compactHeader">
                 <div>
                   <h4>Rule rows</h4>
-                  <span>{ruleDrafts.length} rule rows</span>
+                  <span>
+                    {ruleDrafts.length} {ruleDrafts.length === 1 ? "rule row" : "rule rows"}
+                  </span>
                 </div>
                 <button
                   className="secondaryAction compactAction"
@@ -4951,7 +4970,7 @@ export function FleetAlertPolicyManager({
             value: saveSnapshot?.request.selector_expression ?? "-",
           },
           {
-            label: "Matched VPSs",
+            label: "Matched VPS",
             value: saveSnapshot
               ? String(saveSnapshot.preview.matched_vps_count)
               : "-",
@@ -5017,11 +5036,11 @@ function PolicyDryRunPreview({
       <h4>{title}</h4>
       <div className="consoleInlineDetailGrid">
         <span>
-          <strong>Matched VPSs</strong>
+          <strong>Matched VPS</strong>
           <span>{preview.matched_vps_count}</span>
         </span>
         <span>
-          <strong>Incomplete VPSs</strong>
+          <strong>Incomplete VPS</strong>
           <span>{preview.incomplete_vps_count}</span>
         </span>
         <span>
@@ -5260,6 +5279,7 @@ export function FleetNotificationsHub({
         <FleetAlertNotificationManager
           agents={agents}
           channels={alertChannels}
+          deliveries={alertDeliveries}
           onDelete={onDeleteAlertChannel}
           onDispatch={onDispatchAlertNotifications}
           onOpenDeliveries={openDeliveries}
@@ -5271,6 +5291,7 @@ export function FleetNotificationsHub({
       {tab === "webhooks" && (
         <WebhookRuleManager
           agents={agents}
+          deliveries={webhookDeliveries}
           onDelete={onDeleteWebhookRule}
           onDispatch={onDispatchWebhookRules}
           onDryRun={onDryRunWebhookRule}
@@ -5368,6 +5389,7 @@ export function DeliveryPreviewSection({
 export function FleetAlertNotificationManager({
   agents,
   channels,
+  deliveries,
   onDelete,
   onDispatch,
   onOpenDeliveries,
@@ -5378,6 +5400,7 @@ export function FleetAlertNotificationManager({
 }: {
   agents: AgentView[];
   channels: FleetAlertNotificationChannelRecord[];
+  deliveries: FleetAlertNotificationDeliveryRecord[];
   onDelete: (channelId: string, reviewedName: string) => Promise<void>;
   onDispatch: (
     request: FleetAlertNotificationDispatchRequest,
@@ -5406,7 +5429,7 @@ export function FleetAlertNotificationManager({
   } | null>(null);
   const [savePending, setSavePending] = useState(false);
   const savePendingRef = useRef(false);
-  const [name, setName] = useState("critical-webhook-channel");
+  const [name, setName] = useState("");
   const [scopeKind, setScopeKind] = useState("global");
   const [scopeValue, setScopeValue] = useState("");
   const [minSeverity, setMinSeverity] = useState("critical");
@@ -5425,6 +5448,10 @@ export function FleetAlertNotificationManager({
   const [queueSnapshot, setQueueSnapshot] =
     useState<AlertDeliveryQueueSnapshot | null>(null);
   const [queuePending, setQueuePending] = useState(false);
+  const hasEnabledChannels = channels.some((channel) => channel.enabled);
+  const hasQueuedDeliveries = deliveries.some(
+    (delivery) => delivery.status === "queued",
+  );
 
   const categoryTokens = useMemo(() => csvValues(categories), [categories]);
   const operatorStateTokens = useMemo(
@@ -5550,7 +5577,7 @@ export function FleetAlertNotificationManager({
 
   function resetForm() {
     setEditingId(null);
-    setName("critical-webhook-channel");
+    setName("");
     setScopeKind("global");
     setScopeValue("");
     setMinSeverity("critical");
@@ -5638,6 +5665,14 @@ export function FleetAlertNotificationManager({
   }
 
   function reviewSubmit() {
+    if (!name.trim()) {
+      setChannelStatus("Enter a channel name before review", "warning");
+      return;
+    }
+    if (!target.trim()) {
+      setChannelStatus("Enter a delivery target before review", "warning");
+      return;
+    }
     setSaveSnapshot({
       request: {
         id: editingId ?? undefined,
@@ -5755,6 +5790,13 @@ export function FleetAlertNotificationManager({
     if (queuePending) {
       return;
     }
+    if (!hasEnabledChannels) {
+      setChannelStatus(
+        "Create and enable a notification channel before matching alerts",
+        "warning",
+      );
+      return;
+    }
     setChannelStatus(
       dryRun ? "matching alerts" : "queueing alert notifications",
       "progress",
@@ -5806,6 +5848,10 @@ export function FleetAlertNotificationManager({
 
   async function process(dryRun: boolean, openConfirmation = false) {
     if (queuePending) {
+      return;
+    }
+    if (!hasQueuedDeliveries) {
+      setChannelStatus("No queued notification deliveries are available", "info");
       return;
     }
     setChannelStatus(
@@ -6032,7 +6078,8 @@ export function FleetAlertNotificationManager({
               <>
                 <button
                   className="primaryAction"
-                  disabled={savePending}
+                  disabled={savePending || !name.trim() || !target.trim()}
+                  title={!name.trim() ? "Enter a channel name" : !target.trim() ? "Enter a delivery target" : editingId ? "Review the channel update" : "Review the new channel"}
                   type="button"
                   onClick={reviewSubmit}
                 >
@@ -6059,6 +6106,7 @@ export function FleetAlertNotificationManager({
               <ConsoleField label="Channel name" className="fieldWide">
                 <input
                   aria-label="Notification channel name"
+                  placeholder="e.g. Production alerts"
                   value={name}
                   onChange={(event) => setName(event.target.value)}
                 />
@@ -6162,7 +6210,7 @@ export function FleetAlertNotificationManager({
               <ConsoleField
                 label="Delivery target"
                 className="fieldWide"
-                hint="Use HTTPS, or local HTTP for agent-local receivers."
+                hint="Delivery is sent by the vpsman server. Use HTTPS unless the receiver is deliberately local to that server."
               >
                 <input
                   aria-label="Delivery target"
@@ -6193,7 +6241,9 @@ export function FleetAlertNotificationManager({
         <span>
           <strong>Alert delivery queue</strong>
           <small>
-            {queueMode === "configuration"
+            {!hasEnabledChannels
+              ? "Create and enable a destination before previewing or queueing alert notifications."
+              : queueMode === "configuration"
               ? "Preview matching alerts, queue or deliver reviewed records, or open delivery evidence."
               : "Review matching or process queued deliveries without leaving the registry."}
           </small>
@@ -6201,7 +6251,12 @@ export function FleetAlertNotificationManager({
         <div className="consoleOperationsActions">
           <button
             className="secondaryAction"
-            disabled={queuePending}
+            disabled={queuePending || !hasEnabledChannels}
+            title={
+              hasEnabledChannels
+                ? "Preview active alerts matched by enabled notification channels"
+                : "Create and enable a notification channel first"
+            }
             type="button"
             onClick={() => void dispatch(true)}
           >
@@ -6211,7 +6266,12 @@ export function FleetAlertNotificationManager({
           </button>
           <button
             className="secondaryAction"
-            disabled={queuePending}
+            disabled={queuePending || !hasEnabledChannels}
+            title={
+              hasEnabledChannels
+                ? "Review matching alerts before queueing notification deliveries"
+                : "Create and enable a notification channel first"
+            }
             type="button"
             onClick={() => void dispatch(true, true)}
           >
@@ -6221,7 +6281,12 @@ export function FleetAlertNotificationManager({
             <>
               <button
                 className="secondaryAction"
-                disabled={queuePending}
+                disabled={queuePending || !hasQueuedDeliveries}
+                title={
+                  hasQueuedDeliveries
+                    ? "Preview queued notification deliveries"
+                    : "No queued notification deliveries are available"
+                }
                 type="button"
                 onClick={() => void process(true)}
               >
@@ -6240,7 +6305,12 @@ export function FleetAlertNotificationManager({
           )}
           <button
             className="primaryAction"
-            disabled={queuePending}
+            disabled={queuePending || !hasQueuedDeliveries}
+            title={
+              hasQueuedDeliveries
+                ? "Review queued notification deliveries before sending"
+                : "No queued notification deliveries are available"
+            }
             type="button"
             onClick={() => void process(true, true)}
           >
@@ -6534,6 +6604,7 @@ function webhookRuleDraftValidationMessage({
 
 export function WebhookRuleManager({
   agents,
+  deliveries,
   editorMode = "inline",
   onDelete,
   onDispatch,
@@ -6548,6 +6619,7 @@ export function WebhookRuleManager({
   rules,
 }: {
   agents: AgentView[];
+  deliveries: WebhookRuleDeliveryRecord[];
   editorMode?: "inline" | "focused";
   onDelete: (ruleId: string, reviewedName: string) => Promise<void>;
   onDispatch: (
@@ -6607,6 +6679,13 @@ export function WebhookRuleManager({
   const [queueSnapshot, setQueueSnapshot] =
     useState<WebhookDeliveryQueueSnapshot | null>(null);
   const [queuePending, setQueuePending] = useState(false);
+  const hasEnabledRules = rules.some((rule) => rule.enabled);
+  const hasFailedDeliveries = deliveries.some((delivery) =>
+    ["failed", "permanently_failed"].includes(delivery.status),
+  );
+  const hasQueuedDeliveries = deliveries.some(
+    (delivery) => delivery.status === "queued",
+  );
 
   const selectedPreviewNames = useMemo(() => {
     return agents
@@ -7015,6 +7094,13 @@ export function WebhookRuleManager({
     if (queuePending) {
       return;
     }
+    if (!rule && !hasEnabledRules) {
+      setWebhookStatus(
+        "Create and enable a webhook rule before matching test events",
+        "warning",
+      );
+      return;
+    }
     setWebhookStatus(
       dryRunMode
         ? rule
@@ -7088,6 +7174,18 @@ export function WebhookRuleManager({
       return;
     }
     const isRetry = deliveryStatus === "failed";
+    const hasProcessableDeliveries = isRetry
+      ? hasFailedDeliveries
+      : hasQueuedDeliveries;
+    if (!hasProcessableDeliveries) {
+      setWebhookStatus(
+        isRetry
+          ? "No failed event webhook deliveries are available"
+          : "No queued event webhook deliveries are available",
+        "info",
+      );
+      return;
+    }
     setWebhookStatus(
       dryRunMode
         ? `previewing ${isRetry ? "failed" : "queued"} webhook deliveries`
@@ -7544,7 +7642,9 @@ export function WebhookRuleManager({
               {configurationQueue ? "Event webhook tests" : "Webhook queue"}
             </strong>
             <small>
-              {configurationQueue
+              {!hasEnabledRules && !hasFailedDeliveries
+                ? "Create and enable a rule before previewing or sending test events."
+                : configurationQueue
                 ? "Preview and send reviewed test events, or retry failed event webhook deliveries."
                 : "Review first; retained deliveries stay in the Deliveries tab."}
             </small>
@@ -7571,7 +7671,12 @@ export function WebhookRuleManager({
               <>
                 <button
                   className="secondaryAction"
-                  disabled={queuePending}
+                  disabled={queuePending || !hasEnabledRules}
+                  title={
+                    hasEnabledRules
+                      ? "Preview enabled rules matched by this test event"
+                      : "Create and enable a webhook rule first"
+                  }
                   type="button"
                   onClick={() => void dispatch(true)}
                 >
@@ -7579,7 +7684,12 @@ export function WebhookRuleManager({
                 </button>
                 <button
                   className="primaryAction"
-                  disabled={queuePending}
+                  disabled={queuePending || !hasEnabledRules}
+                  title={
+                    hasEnabledRules
+                      ? "Review an event webhook test before queueing it"
+                      : "Create and enable a webhook rule first"
+                  }
                   type="button"
                   onClick={() => void dispatch(true, true)}
                 >
@@ -7587,7 +7697,12 @@ export function WebhookRuleManager({
                 </button>
                 <button
                   className="secondaryAction"
-                  disabled={queuePending}
+                  disabled={queuePending || !hasFailedDeliveries}
+                  title={
+                    hasFailedDeliveries
+                      ? "Review failed event webhook deliveries before retrying"
+                      : "No failed event webhook deliveries are available"
+                  }
                   type="button"
                   onClick={() => void process(true, true, "failed")}
                 >
@@ -7598,7 +7713,12 @@ export function WebhookRuleManager({
               <>
                 <button
                   className="secondaryAction"
-                  disabled={queuePending}
+                  disabled={queuePending || !hasEnabledRules}
+                  title={
+                    hasEnabledRules
+                      ? "Preview enabled rules matched by this event"
+                      : "Create and enable a webhook rule first"
+                  }
                   type="button"
                   onClick={() => void dispatch(true)}
                 >
@@ -7606,7 +7726,12 @@ export function WebhookRuleManager({
                 </button>
                 <button
                   className="secondaryAction"
-                  disabled={queuePending}
+                  disabled={queuePending || !hasEnabledRules}
+                  title={
+                    hasEnabledRules
+                      ? "Review matching rules before queueing deliveries"
+                      : "Create and enable a webhook rule first"
+                  }
                   type="button"
                   onClick={() => void dispatch(true, true)}
                 >
@@ -7614,7 +7739,12 @@ export function WebhookRuleManager({
                 </button>
                 <button
                   className="secondaryAction"
-                  disabled={queuePending}
+                  disabled={queuePending || !hasQueuedDeliveries}
+                  title={
+                    hasQueuedDeliveries
+                      ? "Preview queued event webhook deliveries"
+                      : "No queued event webhook deliveries are available"
+                  }
                   type="button"
                   onClick={() => void process(true)}
                 >
@@ -7622,7 +7752,12 @@ export function WebhookRuleManager({
                 </button>
                 <button
                   className="primaryAction"
-                  disabled={queuePending}
+                  disabled={queuePending || !hasQueuedDeliveries}
+                  title={
+                    hasQueuedDeliveries
+                      ? "Review queued event webhook deliveries before sending"
+                      : "No queued event webhook deliveries are available"
+                  }
                   type="button"
                   onClick={() => void process(true, true)}
                 >
@@ -7816,7 +7951,10 @@ export function WebhookDryRunNotice({
     .join(", ");
   return (
     <div className="consoleInlineNotice">
-      <strong>{preview.matched_vps.length} VPSs matched webhook dry run</strong>
+      <strong>
+        {preview.matched_vps.length}{" "}
+        {preview.matched_vps.length === 1 ? "VPS" : "VPSs"} matched webhook dry run
+      </strong>
       <small>{matchedNames || "No VPSs matched this rule."}</small>
       {preview.validation_errors.length > 0 && (
         <small>{preview.validation_errors.join(" · ")}</small>
@@ -7850,7 +7988,10 @@ function WebhookRuleSamplePreview({
   return (
     <div className="webhookRuleSamplePreview">
       <div className="consoleInlineNotice">
-        <strong>{preview.matched_vps.length} VPSs matched</strong>
+        <strong>
+          {preview.matched_vps.length}{" "}
+          {preview.matched_vps.length === 1 ? "VPS" : "VPSs"} matched
+        </strong>
         <small>{matchedNames || "No VPSs matched this test event."}</small>
         {preview.validation_errors.length > 0 ? (
           <small>{preview.validation_errors.join(" · ")}</small>
@@ -7931,7 +8072,7 @@ export function WebhookDeliveryHistoryGrid({
       },
       {
         id: "matched",
-        header: "Matched VPSs",
+        header: "Matched VPS",
         size: 160,
         minSize: 130,
         sortValue: (delivery) => delivery.matched_vps.length,
@@ -8250,6 +8391,9 @@ function WebhookTemplateEditor({
       extensions: [
         basicSetup,
         EditorView.lineWrapping,
+        EditorView.contentAttributes.of({
+          "aria-label": "Webhook body template",
+        }),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
             onChangeRef.current(update.state.doc.toString());
@@ -9464,12 +9608,13 @@ function TelemetryStack({
 
 function tunnelRowClass(tunnel: TelemetryTunnelRecord): string {
   if (
-    tunnel.latency_status === "down" ||
-    tunnel.adapter_health?.success === false
+    tunnel.adapter_health?.configured === true &&
+    tunnel.adapter_health.success === false
   ) {
     return "telemetryRowCritical";
   }
   if (
+    tunnel.latency_status === "down" ||
     tunnel.latency_status === "missed"
   ) {
     return "telemetryRowWarn";
@@ -9540,7 +9685,7 @@ function latencyTone(
   status: string | null | undefined,
 ): "critical" | "neutral" | "ok" | "warn" {
   if (status === "down") {
-    return "critical";
+    return "warn";
   }
   if (
     status === "missed" ||
@@ -9558,7 +9703,10 @@ function latencyTone(
 function adapterTone(
   tunnel: TelemetryTunnelRecord,
 ): "critical" | "neutral" | "ok" | "warn" {
-  if (tunnel.adapter_health?.success === false) {
+  if (
+    tunnel.adapter_health?.configured === true &&
+    tunnel.adapter_health.success === false
+  ) {
     return "critical";
   }
   if (tunnel.adapter_health?.success === true || tunnel.ownership_mode === "external_observed") {
@@ -9578,7 +9726,7 @@ function formatTunnelPolicy(tunnel: TelemetryTunnelRecord) {
 
 function formatAdapterHealth(tunnel: TelemetryTunnelRecord) {
   const health = tunnel.adapter_health;
-  if (!health) {
+  if (!health?.configured) {
     return "";
   }
   if (health.success) {

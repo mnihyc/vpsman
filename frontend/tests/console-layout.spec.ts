@@ -316,7 +316,7 @@ test("renders an operational cloud-console fleet workspace", async ({
     page.getByRole("heading", { name: "Running work" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Recent failures" }),
+    page.getByRole("heading", { name: "Recent issues" }),
   ).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Needs attention" }),
@@ -330,7 +330,7 @@ test("renders an operational cloud-console fleet workspace", async ({
   await expect(
     page
       .locator(".homeReviewPanel")
-      .filter({ has: page.getByRole("heading", { name: "Recent failures" }) })
+      .filter({ has: page.getByRole("heading", { name: "Recent issues" }) })
       .getByRole("button", { name: /Tunnel adapter status failed/ }),
   ).toBeVisible();
   await expect(page.getByLabel("Home telemetry widgets")).toHaveCount(0);
@@ -529,7 +529,7 @@ test("renders an operational cloud-console fleet workspace", async ({
     coreDetail.getByRole("button", { name: "Open network graph" }),
   ).toBeVisible();
   await expect(
-    coreDetail.getByRole("button", { name: "Open network evidence" }),
+    coreDetail.getByRole("button", { name: "Fleet evidence" }),
   ).toBeVisible();
   await expect(coreDetail).toContainText("Latest observations");
 
@@ -1574,6 +1574,14 @@ test("keeps console layout usable on desktop and mobile widths", async ({
     await expect(
       page.getByRole("navigation", { name: "Primary console navigation" }),
     ).toBeVisible();
+    const quickStatLabelOverflow = await page
+      .locator(".quickStats .metric span")
+      .evaluateAll((labels) =>
+        labels
+          .filter((label) => label.scrollWidth > label.clientWidth + 1)
+          .map((label) => label.textContent?.trim() ?? ""),
+      );
+    expect(quickStatLabelOverflow).toEqual([]);
     const sidebarBox = await page.locator(".sidebar").boundingBox();
     expect(sidebarBox?.x).toBe(0);
     expect(sidebarBox?.y).toBe(0);
@@ -2059,7 +2067,7 @@ test("surfaces operator users under Access and session evidence under Audit", as
   ).toContainText("Stale state");
   await expect(
     auditSessions.getByLabel("Terminal session evidence data grid"),
-  ).toContainText("Trace only; small retained transcript");
+  ).toContainText("Replayable transcript");
   await expect(
     auditSessions.getByLabel("Operator session evidence"),
   ).toContainText("Expired");
@@ -2247,9 +2255,7 @@ test("manages template assignments from automation source templates", async ({
   await expect(
     templatePanel.getByLabel("New source template", { exact: true }),
   ).toBeVisible();
-  await expect(
-    templatePanel.getByRole("button", { name: "Close New source template" }),
-  ).toBeFocused();
+  await expect(templatePanel.getByLabel("Template domain")).toBeFocused();
   await expect(
     templatePanel.getByLabel("Template definition JSON"),
   ).toBeVisible();
@@ -2576,6 +2582,10 @@ test("renders patch generators and submits explicit runtime config patch modes",
   await activate(page.getByRole("button", { name: "Manage generators" }));
   const templateGrid = page.getByLabel("Patch generators data grid");
   await expect(templateGrid).toBeVisible();
+  const registry = page.getByLabel("Patch generator registry");
+  await expect(
+    registry.getByRole("button", { name: "Close patch generator registry" }),
+  ).toBeVisible();
   await expect(
     templateGrid
       .locator(".gridBody .gridRow")
@@ -3181,8 +3191,20 @@ test("shows access posture, MFA risk, identity lifecycle, and gateway readiness"
     "Password",
   );
   await expect(page.getByLabel("TOTP enrollment sequence")).toContainText(
-    "QR/secret",
+    "Secret",
   );
+  await expect(
+    page.getByTitle("Scan the QR code or enter the secret"),
+  ).toBeVisible();
+  await expect(page.getByLabel("TOTP enrollment sequence")).toHaveJSProperty(
+    "tagName",
+    "FORM",
+  );
+  await expect(
+    page
+      .getByLabel("TOTP enrollment sequence")
+      .locator('input[autocomplete="username"]'),
+  ).toHaveValue("console-admin");
   await expect(
     page.getByRole("button", { name: "Set up TOTP" }),
   ).toBeDisabled();
@@ -3338,7 +3360,7 @@ test("keeps access action feedback out of headings and durable labels", async ({
     "admin MFA required",
   );
   await page.getByLabel("TOTP password").fill("short");
-  await activate(totpPanel.getByRole("button", { name: "Set up TOTP" }));
+  await page.getByLabel("TOTP password").press("Enter");
   await expect(totpPanel.locator(".sectionHeader")).toContainText(
     "admin MFA required",
   );
@@ -3595,6 +3617,13 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   await expect(evidence.getByLabel("Related command jobs")).toContainText(
     "Stale sample · degraded throughput",
   );
+  const commandSignals = evidence
+    .getByLabel("Related command jobs")
+    .locator(".status");
+  for (let index = 0; index < await commandSignals.count(); index += 1) {
+    const signal = commandSignals.nth(index);
+    await expect(signal).toHaveAttribute("title", await signal.innerText());
+  }
   await expect(evidence).toContainText(
     "Runtime status evidence is available in observations or retained command output.",
   );
@@ -3789,6 +3818,7 @@ test("inspects disabled tunnel cleanup without exposing probe or speed mutations
   ).toBeDisabled();
 
   await activate(page.getByRole("button", { name: "Inspect status" }));
+  await expect(page.getByLabel("Execution result")).toBeFocused();
   const statusRequest = await page.evaluate(() => {
     const requests = (
       window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
@@ -3893,7 +3923,7 @@ test("separates runtime reconciliation, failed probes, and operator connectivity
   ]);
 });
 
-test("retires only disabled tunnel plans from a frozen revision", async ({
+test("retires an enabled tunnel plan immediately from a frozen revision", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -3907,31 +3937,29 @@ test("retires only disabled tunnel plans from a frozen revision", async ({
   const deleteButton = planTable.getByRole("button", {
     name: "Delete sfo-fra-gre",
   });
-  await expect(deleteButton).toBeDisabled();
+  await expect(deleteButton).toBeEnabled();
   await expect(deleteButton).toHaveAttribute(
     "title",
-    "Disable this plan before deleting it",
+    "Delete this plan and queue runtime removal",
   );
-
-  await activate(
-    planTable.getByRole("button", { name: "Disable sfo-fra-gre" }),
-  );
-  await confirmVisiblePrompt(page, "Disable plans");
-  await expect(deleteButton).toBeEnabled();
 
   await activate(deleteButton);
   const confirmation = page.locator(".confirmationPrompt", {
     hasText: "Confirm tunnel plan deletion",
   });
-  await expect(confirmation).toContainText("sfo-fra-gre (r4)");
+  await expect(confirmation).toContainText("sfo-fra-gre (r3)");
   await expect(confirmation).toContainText(
-    "Already disabled and omitted from desired config",
+    "Queue removal on both endpoints",
+  );
+  await expect(confirmation).toContainText("Current stateEnabled");
+  await expect(confirmation).toContainText(
+    "Stop control; keep daemon cost",
   );
   await confirmVisiblePrompt(page, "Delete plan");
 
   await expect(planTable).not.toContainText("sfo-fra-gre");
   await expect(page.locator(".topologyPlanActionFeedback")).toContainText(
-    "Deleted tunnel plan sfo-fra-gre",
+    "Deleted tunnel plan sfo-fra-gre. Runtime removal queued for 2 endpoints.",
   );
   const requests = await page.evaluate(
     () =>
@@ -3942,7 +3970,10 @@ test("retires only disabled tunnel plans from a frozen revision", async ({
       ).__vpsmanTestRequests.tunnelPlanDeletes,
   );
   expect(requests).toEqual([
-    { plan_id: "dddddddd-eeee-4fff-8000-111111111111" },
+    {
+      expected_revision: 3,
+      plan_id: "dddddddd-eeee-4fff-8000-111111111111",
+    },
   ]);
 });
 
@@ -4515,14 +4546,15 @@ test("shows audit filters and retention compliance posture", async ({
   await expect(retentionSummary).toContainText("0 matched rows / 0 objects");
   await expect(cleanup).toContainText("Would delete 0 metadata rows");
 
-  await activate(page.getByRole("button", { name: "Delete reviewed rows" }));
-  const prunePrompt = page.getByLabel("Confirm history prune");
-  await expect(prunePrompt).toBeVisible();
-  await expect(prunePrompt).toContainText("Reviewed rows");
-  await expect(prunePrompt).toContainText("Objects");
-  await expect(prunePrompt).toContainText("Effect");
-  await expect(prunePrompt).toContainText("Would delete 0 metadata rows");
-  await activate(prunePrompt.getByRole("button", { name: "Cancel" }));
+  const deleteReviewedRows = page.getByRole("button", {
+    name: "Delete reviewed rows",
+  });
+  await expect(deleteReviewedRows).toBeDisabled();
+  await expect(deleteReviewedRows).toHaveAttribute(
+    "title",
+    "No reviewed rows match; deletion is not needed",
+  );
+  await expect(page.getByLabel("Confirm history prune")).toHaveCount(0);
 });
 
 test("dispatches executable restores with agent-local archive metadata only", async ({

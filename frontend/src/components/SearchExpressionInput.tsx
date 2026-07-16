@@ -77,6 +77,11 @@ export function SearchExpressionInput({
     [agents, caretIndex, suggestions, value, vpsNameDisplayMode],
   );
   const matchTitle = agents && !parsed.error ? agentListTitle(matchedAgents) : undefined;
+  const matchSummary = parsed.error
+    ? parsed.error
+    : `${matchedAgents.length}/${agents?.length ?? 0}`;
+  const metaText = verificationMessage ?? matchSummary;
+  const metaTitle = verificationMessage ?? matchTitle ?? matchSummary;
   const autocompleteVisible =
     (focused || autocompleteOpen) && completion.filtered.length > 0 && completion.fragment.trim().length > 0;
 
@@ -363,9 +368,9 @@ export function SearchExpressionInput({
             {completion.filtered.slice(0, 8).map((suggestion) => (
               <button
                 key={`${suggestion.value}:${suggestion.label}`}
+                onClick={() => applySuggestion(suggestion)}
                 onMouseDown={(event) => {
                   event.preventDefault();
-                  applySuggestion(suggestion);
                 }}
                 role="option"
                 title={`${suggestion.label} ${suggestion.detail ?? ""}`.trim()}
@@ -380,8 +385,8 @@ export function SearchExpressionInput({
         )
         : null}
       {showMatchCount && agents && (
-        <span className={parsed.error ? "searchExpressionMeta errorText" : "searchExpressionMeta"} title={matchTitle}>
-          {verificationMessage ?? (parsed.error ? parsed.error : `${matchedAgents.length}/${agents.length}`)}
+        <span className={parsed.error ? "searchExpressionMeta errorText" : "searchExpressionMeta"} title={metaTitle}>
+          {metaText}
         </span>
       )}
     </div>

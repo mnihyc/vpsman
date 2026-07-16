@@ -55,6 +55,7 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
         await loadAudits();
       } catch (error) {
         handleAuditError(error, "History retention policy update failed");
+        throw error;
       }
     },
     [apiToken, handleAuditError, loadAudits],
@@ -86,14 +87,15 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
     ) => {
       setAuditError(null);
       try {
-        setHistoryExport(
-          await apiGet<HistoryExportRecord>(
-            `/api/v1/history/export?limit=1000&domains=${encodeURIComponent(domains)}`,
-            apiToken,
-          ),
+        const response = await apiGet<HistoryExportRecord>(
+          `/api/v1/history/export?limit=1000&domains=${encodeURIComponent(domains)}`,
+          apiToken,
         );
+        setHistoryExport(response);
+        return response;
       } catch (error) {
         handleAuditError(error, "History export unavailable");
+        throw error;
       }
     },
     [apiToken, handleAuditError],

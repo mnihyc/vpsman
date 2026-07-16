@@ -81,12 +81,15 @@ type ModalSiblingState = {
 export function TerminalSessionsPanel({
   agents,
   clientLabel,
+  initialTargetClientId,
+  initialTargetRequestId,
   sessions,
   lastTerminalOutputEvent,
   loading,
   onCloseTerminal,
   onOpenSessionEvidence,
   onOpenPrivilegeUnlock,
+  onInitialTargetConsumed,
   onOpenTerminal,
   onPrepareAction,
   onSendInput,
@@ -97,12 +100,15 @@ export function TerminalSessionsPanel({
 }: {
   agents: AgentView[];
   clientLabel: (clientId: string) => string;
+  initialTargetClientId?: string | null;
+  initialTargetRequestId?: string | null;
   sessions: TerminalSessionRecord[];
   lastTerminalOutputEvent: WsTerminalOutputEvent | null;
   loading: boolean;
   onCloseTerminal: (session: TerminalSessionRecord) => Promise<void>;
   onOpenSessionEvidence?: () => void;
   onOpenPrivilegeUnlock: () => void;
+  onInitialTargetConsumed?: (requestId: string) => void;
   onOpenTerminal: (request: {
     maxTimeoutSecs: number;
     session: TerminalSessionRecord;
@@ -158,8 +164,9 @@ export function TerminalSessionsPanel({
   const terminalInputRef = useRef<HTMLTextAreaElement | null>(null);
   const focusedTerminalInputRef = useRef<HTMLTextAreaElement | null>(null);
   const terminalFocusRef = useRef<HTMLDivElement | null>(null);
+  const appliedInitialTargetRequestRef = useRef<string | null>(null);
   const privilegeUnlockWasOpenRef = useRef(privilegeUnlockOpen);
-  const launchTarget = agents.find((agent) => agent.id === launchTargetId) ?? agents[0] ?? null;
+  const launchTarget = agents.find((agent) => agent.id === launchTargetId) ?? null;
   const launchProfileRecord =
     TERMINAL_LAUNCH_PROFILES.find((profile) => profile.value === launchProfile) ?? TERMINAL_LAUNCH_PROFILES[0];
   const privilegeReady = Boolean(privilegeMaterial);
@@ -424,10 +431,29 @@ export function TerminalSessionsPanel({
       setLaunchTargetId("");
       return;
     }
-    if (!agents.some((agent) => agent.id === launchTargetId)) {
-      setLaunchTargetId(agents[0].id);
+    if (launchTargetId && !agents.some((agent) => agent.id === launchTargetId)) {
+      setLaunchTargetId("");
     }
   }, [agents, launchTargetId]);
+
+  useEffect(() => {
+    if (
+      !initialTargetClientId ||
+      !initialTargetRequestId ||
+      appliedInitialTargetRequestRef.current === initialTargetRequestId ||
+      !agents.some((agent) => agent.id === initialTargetClientId)
+    ) {
+      return;
+    }
+    appliedInitialTargetRequestRef.current = initialTargetRequestId;
+    setLaunchTargetId(initialTargetClientId);
+    onInitialTargetConsumed?.(initialTargetRequestId);
+  }, [
+    agents,
+    initialTargetClientId,
+    initialTargetRequestId,
+    onInitialTargetConsumed,
+  ]);
 
   useEffect(() => {
     if (!lastTerminalOutputEvent || !followKey) {
@@ -721,7 +747,7 @@ export function TerminalSessionsPanel({
       setTerminalInputText("");
       setTerminalInputStatusTone("success");
       setTerminalInputStatus(
-        `Input ${response.input_seq} queued (${response.request_status}).`,
+        `Input ${response.input_seq} ${terminalInputRequestStatusLabel(response.request_status)}.`,
       );
     } catch (error) {
       setTerminalInputStatusTone("danger");
@@ -1520,6 +1546,17 @@ function clampNumber(value: number, min: number, max: number): number {
     return min;
   }
   return Math.trunc(Math.min(Math.max(value, min), max));
+}
+
+function terminalInputRequestStatusLabel(status: string): string {
+  const normalized = status.trim().toLowerCase();
+  if (normalized === "completed") {
+    return "completed";
+  }
+  if (normalized === "queued" || normalized === "pending") {
+    return "queued";
+  }
+  return `accepted (${status || "status unavailable"})`;
 }
 
 function formatArgv(argv: string[]): string {

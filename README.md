@@ -306,12 +306,15 @@ Host-managed configuration separates durable desired state, per-VPS dispatch,
 matching applied evidence, and current runtime observation. Saving a tunnel,
 port-forward rule, source template, or config patch never implies that every
 target has applied it. The console reports partial queue failures by VPS and
-keeps removals pending until the agent confirms cleanup. Agents continue using
-their last accepted config through control-plane outages and reconcile current
-database desired state on reconnect. Identity deletion, key rotation, and key
-revocation similarly report the committed change separately from gateway
-disconnect and peer-cleanup outcomes, preventing ambiguous retries after a
-successful durable mutation. See
+keeps runtime removal visible as pending until the agent confirms cleanup.
+Deleting a tunnel plan retires its desired-state declaration immediately and
+returns per-endpoint removal queue outcomes; offline agents remove it when they
+next reconcile current desired state. Agents continue using their last accepted
+config through control-plane outages and reconcile current database desired
+state on reconnect. Identity deletion, key rotation, and key revocation
+similarly report the committed change separately from gateway disconnect and
+peer-cleanup outcomes, preventing ambiguous retries after a successful durable
+mutation. See
 [docs/job-status-model.md](docs/job-status-model.md#desired-state-reconciliation).
 
 ## Development

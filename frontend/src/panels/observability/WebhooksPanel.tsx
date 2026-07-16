@@ -143,6 +143,7 @@ export function WebhooksPanel({
             </div>
             <WebhookRuleManager
               agents={agents}
+              deliveries={webhookRuleDeliveries}
               onDelete={onDeleteWebhookRule}
               onDispatch={onDispatchWebhookRules}
               onDryRun={onDryRunWebhookRule}

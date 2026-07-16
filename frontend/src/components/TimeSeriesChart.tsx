@@ -89,7 +89,7 @@ export function TimeSeriesChart({
           },
           {
             grid: { stroke: consolePalette.neutral.borderSubtle, width: 1 },
-            size: narrow ? 62 : 78,
+            size: narrow ? 84 : 96,
             stroke: consolePalette.neutral.muted,
             values: (_plot, ticks) => ticks.map((tick) => valueFormatter(tick)),
           },
@@ -348,8 +348,10 @@ function formatAxisTicks(
   width: number,
   unixTimes: number[],
 ): string[] {
-  const maxLabels =
-    width < 420 ? 2 : width < 560 ? 3 : width < 760 ? 4 : ticks.length;
+  const maxLabels = Math.max(
+    2,
+    Math.min(ticks.length, Math.floor(width / 110)),
+  );
   if (ticks.length <= maxLabels) {
     return ticks.map((tick) => formatAxisTime(tick, unixTimes));
   }

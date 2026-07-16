@@ -53,6 +53,12 @@ type ConsoleRouteState = {
   view: ActiveView;
 };
 
+type WorkflowTargetIntent = {
+  clientId: string;
+  destination: "backup_requests" | "network_graph" | "processes" | "terminal";
+  requestId: string;
+};
+
 type ReleaseRouteHelpers = {
   openAuditEvidence: (auditId?: string) => void;
   openFiles: (target: ReleaseRouteTarget, path?: string) => void;
@@ -254,6 +260,9 @@ function getScopedPageTitle(view: ActiveView, subpage: string): string {
     }
   }
   if (view === "Fleet") {
+    if (subpage.startsWith("instance_detail:")) {
+      return "Instance detail";
+    }
     switch (subpage) {
       case "monitor":
         return "Fleet monitor";
@@ -420,7 +429,7 @@ function ConsolePanelFallback({ view }: { view: ActiveView }) {
 }
 
 const VIEW_ROUTE_SLUGS: Record<ActiveView, string> = Object.fromEntries(
-  navItems.map((item) => [item.view, routeToken(item.view)]),
+  navItems.map((item) => [item.view, routeToken(viewLabel(item.view))]),
 ) as Record<ActiveView, string>;
 
 const ROUTE_VIEWS_BY_SLUG = Object.fromEntries(
@@ -451,7 +460,11 @@ function parseConsoleRouteHash(hash: string): ConsoleRouteState | null {
   if (!view) {
     return null;
   }
-  const subpage = routeSegmentSubpage(view, segments[1] ?? "");
+  const subpage = routeSegmentSubpage(
+    view,
+    segments[1] ?? "",
+    segments[2] ?? "",
+  );
   return {
     subpage: normalizeSubpage(view, subpage),
     view,
@@ -477,7 +490,23 @@ function writeConsoleRoute(
   if (window.location.hash === hash) {
     return;
   }
-  const url = `${window.location.pathname}${window.location.search}${hash}`;
+  const searchParams = new URLSearchParams(window.location.search);
+  if (!(view === "Observability" && subpage === "dashboards")) {
+    [
+      "dashboard",
+      "window",
+      "scope_kind",
+      "scope_value",
+      "group_by",
+      "resource_metric",
+      "network_view",
+      "traffic_sort",
+      "start_at",
+      "end_at",
+    ].forEach((key) => searchParams.delete(key));
+  }
+  const search = searchParams.toString();
+  const url = `${window.location.pathname}${search ? `?${search}` : ""}${hash}`;
   if (mode === "replace") {
     window.history.replaceState(null, "", url);
     return;
@@ -486,18 +515,31 @@ function writeConsoleRoute(
 }
 
 function subpageRouteSegment(view: ActiveView, subpage: string): string {
+  if (view === "Fleet" && subpage.startsWith("instance_detail:")) {
+    const clientId = subpage.slice("instance_detail:".length).trim();
+    return `instance-detail/${encodeURIComponent(clientId)}`;
+  }
   const subpages = viewSubpages[view] ?? [];
   const known = subpages.find((entry) => entry.id === subpage);
   if (known) {
-    return routeToken(known.id);
+    return known.route ?? routeToken(known.id);
   }
   return encodeURIComponent(subpage);
 }
 
-function routeSegmentSubpage(view: ActiveView, segment: string): string {
+function routeSegmentSubpage(
+  view: ActiveView,
+  segment: string,
+  resourceSegment = "",
+): string {
   const decoded = decodeRouteSegment(segment);
+  if (view === "Fleet" && decoded === "instance-detail" && resourceSegment) {
+    return `instance_detail:${decodeRouteSegment(resourceSegment)}`;
+  }
   const subpages = viewSubpages[view] ?? [];
-  const known = subpages.find((entry) => routeToken(entry.id) === decoded);
+  const known = subpages.find(
+    (entry) => (entry.route ?? routeToken(entry.id)) === decoded,
+  );
   if (known) {
     return known.id;
   }
@@ -510,6 +552,13 @@ function decodeRouteSegment(segment: string): string {
   } catch {
     return segment;
   }
+}
+
+function fleetDetailClientId(subpage: string): string | null {
+  if (!subpage.startsWith("instance_detail:")) {
+    return null;
+  }
+  return subpage.slice("instance_detail:".length).trim() || null;
 }
 
 function shortCommandId(id: string) {
@@ -539,6 +588,8 @@ export function App() {
       : {}),
   }));
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [workflowTargetIntent, setWorkflowTargetIntent] =
+    useState<WorkflowTargetIntent | null>(null);
   const [pendingJobDetailId, setPendingJobDetailId] = useState<string | null>(
     null,
   );
@@ -547,9 +598,11 @@ export function App() {
   const [networkPlanWorkflowIntent, setNetworkPlanWorkflowIntent] = useState<
     "create" | null
   >(null);
-  const [transferTargetIntent, setTransferTargetIntent] = useState<
-    string | null
-  >(null);
+  const [transferTargetIntent, setTransferTargetIntent] = useState<{
+    clientId: string;
+    context: string;
+    path: string;
+  } | null>(null);
   const [accessIdentityWorkflowIntent, setAccessIdentityWorkflowIntent] =
     useState<"register" | null>(null);
   const [sourceTemplateWorkflowIntent, setSourceTemplateWorkflowIntent] =
@@ -573,6 +626,10 @@ export function App() {
     [dashboard.operator?.preferences],
   );
   const visibleAgents = fleetViews.filteredAgents;
+  const activeSubpage = normalizeSubpage(
+    activeView,
+    activeSubpages[activeView],
+  );
   const selectedAgent = useMemo(
     () =>
       visibleAgents.find((agent) => agent.id === selectedAgentId) ??
@@ -580,20 +637,17 @@ export function App() {
       null,
     [selectedAgentId, visibleAgents],
   );
-  const selectedAgentForDetail = useMemo(
-    () =>
-      dashboard.agents.find((agent) => agent.id === selectedAgentId) ??
-      selectedAgent,
-    [dashboard.agents, selectedAgent, selectedAgentId],
-  );
+  const selectedAgentForDetail = useMemo(() => {
+    const clientId =
+      activeView === "Fleet" ? fleetDetailClientId(activeSubpage) : null;
+    return clientId
+      ? dashboard.agents.find((agent) => agent.id === clientId) ?? null
+      : null;
+  }, [activeSubpage, activeView, dashboard.agents]);
   const visibleSummary = useMemo(
     () =>
       displaySummaryForAgents(visibleAgents, dashboard.summary.running_jobs),
     [dashboard.summary.running_jobs, visibleAgents],
-  );
-  const activeSubpage = normalizeSubpage(
-    activeView,
-    activeSubpages[activeView],
   );
   const pageTitle = getScopedPageTitle(activeView, activeSubpage);
   const hasFleetScope =
@@ -624,6 +678,46 @@ export function App() {
     const info = activeAlerts.length - critical - warning;
     return { critical, info, total: activeAlerts.length, warning };
   }, [dashboard.agents, dashboard.fleetAlerts, hasFleetScope, visibleAgents]);
+  const homeScopedRecords = useMemo(() => {
+    if (!hasFleetScope) {
+      return {
+        backupArtifacts: dashboard.backupArtifacts,
+        backups: dashboard.backups,
+        fileTransfers: dashboard.fileTransfers,
+        fleetAlerts: dashboard.fleetAlerts,
+        schedules: dashboard.schedules,
+      };
+    }
+    const scopedClientIds = new Set(visibleAgents.map((agent) => agent.id));
+    return {
+      backupArtifacts: dashboard.backupArtifacts.filter((artifact) =>
+        scopedClientIds.has(artifact.client_id),
+      ),
+      backups: dashboard.backups.filter((backup) =>
+        scopedClientIds.has(backup.client_id),
+      ),
+      fileTransfers: dashboard.fileTransfers.filter((transfer) =>
+        scopedClientIds.has(transfer.client_id),
+      ),
+      fleetAlerts: dashboard.fleetAlerts.filter(
+        (alert) =>
+          alert.client_id === null || scopedClientIds.has(alert.client_id),
+      ),
+      schedules: dashboard.schedules.filter((schedule) =>
+        schedule.target_client_ids.some((clientId) =>
+          scopedClientIds.has(clientId),
+        ),
+      ),
+    };
+  }, [
+    dashboard.backupArtifacts,
+    dashboard.backups,
+    dashboard.fileTransfers,
+    dashboard.fleetAlerts,
+    dashboard.schedules,
+    hasFleetScope,
+    visibleAgents,
+  ]);
   const onlineRatio = useMemo(() => {
     if (shellSummary.total === 0) {
       return "0%";
@@ -642,12 +736,28 @@ export function App() {
   }, [operatorPreferences.timezone]);
 
   useEffect(() => {
-    if (!readConsoleRouteFromLocation()) {
+    const initialLocationRoute = readConsoleRouteFromLocation();
+    if (!initialLocationRoute) {
       writeConsoleRoute(activeView, activeSubpage, "replace");
+    } else if (
+      window.location.hash !==
+      consoleRouteHash(initialLocationRoute.view, initialLocationRoute.subpage)
+    ) {
+      writeConsoleRoute(
+        initialLocationRoute.view,
+        initialLocationRoute.subpage,
+        "replace",
+      );
     }
     const applyLocationRoute = () => {
       const route = readConsoleRouteFromLocation();
       if (!route) {
+        setActiveView("Home");
+        setActiveSubpages((current) => ({
+          ...current,
+          Home: "overview",
+        }));
+        writeConsoleRoute("Home", "overview", "replace");
         return;
       }
       setActiveView(route.view);
@@ -655,6 +765,11 @@ export function App() {
         ...current,
         [route.view]: route.subpage,
       }));
+      if (
+        window.location.hash !== consoleRouteHash(route.view, route.subpage)
+      ) {
+        writeConsoleRoute(route.view, route.subpage, "replace");
+      }
     };
     window.addEventListener("hashchange", applyLocationRoute);
     window.addEventListener("popstate", applyLocationRoute);
@@ -671,8 +786,15 @@ export function App() {
     });
   }
 
-  function selectView(view: ActiveView, subpage?: string) {
+  function selectView(
+    view: ActiveView,
+    subpage?: string,
+    preserveWorkflowTargetIntent = false,
+  ) {
     const nextSubpage = normalizeSubpage(view, subpage ?? activeSubpages[view]);
+    if (!preserveWorkflowTargetIntent) {
+      setWorkflowTargetIntent(null);
+    }
     setActiveView(view);
     setActiveSubpages((current) => ({
       ...current,
@@ -683,6 +805,7 @@ export function App() {
 
   function selectSubpage(subpage: string) {
     const nextSubpage = normalizeSubpage(activeView, subpage);
+    setWorkflowTargetIntent(null);
     setActiveSubpages((current) => ({
       ...current,
       [activeView]: nextSubpage,
@@ -690,8 +813,51 @@ export function App() {
     writeConsoleRoute(activeView, nextSubpage);
   }
 
-  function selectReleaseDestination(view: ActiveView, subpage?: string) {
+  function selectReleaseDestination(
+    view: ActiveView,
+    subpage?: string,
+    targetClientId?: string,
+  ) {
     const destination = releaseDestination(view, subpage);
+    if (targetClientId) {
+      if (destination.view === "Fleet" && destination.subpage === "instance_detail") {
+        openVpsDetail(targetClientId);
+        return;
+      }
+      if (
+        destination.view === "Remote Operations" &&
+        destination.subpage === "terminal"
+      ) {
+        openRemoteTerminal(targetClientId);
+        return;
+      }
+      if (
+        destination.view === "Remote Operations" &&
+        destination.subpage === "files"
+      ) {
+        openRemoteFiles(targetClientId);
+        return;
+      }
+      if (
+        destination.view === "Remote Operations" &&
+        destination.subpage === "processes"
+      ) {
+        openRemoteProcesses(targetClientId);
+        return;
+      }
+      if (destination.view === "Backups" && destination.subpage === "requests") {
+        openBackupWorkflowById(targetClientId);
+        return;
+      }
+      if (destination.view === "Network" && destination.subpage === "graph") {
+        openNetworkWorkflowById(targetClientId);
+        return;
+      }
+      if (destination.view === "Config" && destination.subpage === "per_vps") {
+        openConfigWorkflowById(targetClientId);
+        return;
+      }
+    }
     selectView(destination.view, destination.subpage);
   }
 
@@ -739,13 +905,21 @@ export function App() {
   }
 
   function openVpsDetail(target: ReleaseRouteTarget) {
-    setSelectedAgentId(releaseTargetId(target));
-    selectView("Fleet", "instance_detail");
+    const clientId = releaseTargetId(target);
+    setSelectedAgentId(clientId);
+    setWorkflowTargetIntent(null);
+    selectView("Fleet", `instance_detail:${clientId}`);
   }
 
   function openRemoteTerminal(target: ReleaseRouteTarget) {
-    setSelectedAgentId(releaseTargetId(target));
-    selectView("Remote Operations", "terminal");
+    const clientId = releaseTargetId(target);
+    setSelectedAgentId(clientId);
+    setWorkflowTargetIntent({
+      clientId,
+      destination: "terminal",
+      requestId: crypto.randomUUID(),
+    });
+    selectView("Remote Operations", "terminal", true);
   }
 
   function openRemoteFiles(target: ReleaseRouteTarget, path = "/") {
@@ -759,18 +933,42 @@ export function App() {
   }
 
   function openRemoteProcesses(target: ReleaseRouteTarget) {
-    setSelectedAgentId(releaseTargetId(target));
-    selectView("Remote Operations", "processes");
+    const clientId = releaseTargetId(target);
+    setSelectedAgentId(clientId);
+    setWorkflowTargetIntent({
+      clientId,
+      destination: "processes",
+      requestId: crypto.randomUUID(),
+    });
+    selectView("Remote Operations", "processes", true);
   }
 
   function openBackupWorkflow(agent: AgentView) {
-    setSelectedAgentId(agent.id);
-    selectView("Backups", "requests");
+    openBackupWorkflowById(agent.id);
+  }
+
+  function openBackupWorkflowById(clientId: string) {
+    setSelectedAgentId(clientId);
+    setWorkflowTargetIntent({
+      clientId,
+      destination: "backup_requests",
+      requestId: crypto.randomUUID(),
+    });
+    selectView("Backups", "requests", true);
   }
 
   function openNetworkWorkflow(agent: AgentView) {
-    setSelectedAgentId(agent.id);
-    selectView("Network", "graph");
+    openNetworkWorkflowById(agent.id);
+  }
+
+  function openNetworkWorkflowById(clientId: string) {
+    setSelectedAgentId(clientId);
+    setWorkflowTargetIntent({
+      clientId,
+      destination: "network_graph",
+      requestId: crypto.randomUUID(),
+    });
+    selectView("Network", "graph", true);
   }
 
   const openCreateTunnelPlan = useCallback(() => {
@@ -779,16 +977,23 @@ export function App() {
   }, []);
 
   function openConfigWorkflow(agent: AgentView) {
-    setSelectedAgentId(agent.id);
-    window.localStorage.setItem("vpsman.config.single.clientId", agent.id);
+    openConfigWorkflowById(agent.id);
+  }
+
+  function openConfigWorkflowById(clientId: string) {
+    setSelectedAgentId(clientId);
+    window.localStorage.setItem("vpsman.config.single.clientId", clientId);
     selectView("Config", "per_vps");
   }
 
-  function openNetworkEvidence(target?: ReleaseRouteTarget) {
-    if (target) {
-      setSelectedAgentId(releaseTargetId(target));
-    }
+  function openNetworkEvidence(_target?: ReleaseRouteTarget) {
     selectView("Network", "evidence");
+  }
+
+  function consumeWorkflowTargetIntent(requestId: string) {
+    setWorkflowTargetIntent((current) =>
+      current?.requestId === requestId ? null : current,
+    );
   }
 
   function openAuditEvidence(_auditId?: string) {
@@ -951,17 +1156,18 @@ export function App() {
         agents={visibleAgents}
         allAgents={dashboard.agents}
         auditLogs={dashboard.audits}
-        backupArtifacts={dashboard.backupArtifacts}
-        backups={dashboard.backups}
+        backupArtifacts={homeScopedRecords.backupArtifacts}
+        backups={homeScopedRecords.backups}
         dashboardError={dashboard.dashboardOverviewError}
         dashboardLoading={dashboard.dashboardOverviewLoading}
         dashboardOverview={dashboard.dashboardOverview}
         dashboardPreferences={dashboard.dashboardPreferences}
         dashboardWindow={dashboard.dashboardOverviewWindow}
-        fileTransfers={dashboard.fileTransfers}
-        fleetAlerts={dashboard.fleetAlerts}
+        fileTransfers={homeScopedRecords.fileTransfers}
+        fleetAlerts={homeScopedRecords.fleetAlerts}
         jobs={dashboard.jobs}
-        schedules={dashboard.schedules}
+        schedules={homeScopedRecords.schedules}
+        scopeFiltered={hasFleetScope}
         summary={visibleSummary}
         systemDashboard={dashboard.systemDashboard}
         telemetryNetworkRates={dashboard.telemetryNetworkRates}
@@ -1119,6 +1325,7 @@ export function App() {
         }
         onOpenBackup={openBackupWorkflow}
         onOpenConfig={openConfigWorkflow}
+        onOpenDispatch={openHomeDispatch}
         onOpenFiles={releaseRoutes.openFiles}
         onOpenFleetAlerts={() => selectView("Fleet", "alerts")}
         onOpenFleetMetrics={(agent) => {
@@ -1375,6 +1582,7 @@ export function App() {
         onOpenTests={() => selectView("Network", "tests")}
         ospfRecommendations={dashboard.ospfRecommendations}
         telemetryTunnels={dashboard.telemetryTunnels}
+        tunnelPlans={dashboard.tunnelPlans}
       />
     );
   }
@@ -1440,6 +1648,16 @@ export function App() {
         fileTransferSources={dashboard.fileTransferSources}
         lastTerminalOutputEvent={dashboard.lastTerminalOutputEvent}
         loading={dashboard.jobsLoading}
+        initialTargetIntent={
+          workflowTargetIntent?.destination === "terminal" ||
+          workflowTargetIntent?.destination === "processes"
+            ? {
+                clientId: workflowTargetIntent.clientId,
+                destination: workflowTargetIntent.destination,
+                requestId: workflowTargetIntent.requestId,
+              }
+            : null
+        }
         onCreateFileTransferHandoff={dashboard.createFileTransferHandoff}
         onCreateJob={dashboard.createJob}
         onDownloadFileBundle={dashboard.downloadFileDownloadBundle}
@@ -1450,6 +1668,7 @@ export function App() {
         onLoadOutputs={dashboard.loadJobOutputs}
         onLoadTargets={dashboard.loadJobTargets}
         onLoadTerminalReplay={dashboard.loadTerminalReplay}
+        onInitialTargetIntentConsumed={consumeWorkflowTargetIntent}
         onOpenJobDetails={openJobDetails}
         onOpenJobsDispatch={() => selectView("Jobs", "dispatch")}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
@@ -1470,7 +1689,7 @@ export function App() {
         processSupervisorInventory={dashboard.processSupervisorInventory}
         setPrivilegeMaterial={setPrivilegeMaterial}
         terminalSessions={dashboard.terminalSessions}
-        transferTargetClientId={transferTargetIntent}
+        transferTargetIntent={transferTargetIntent}
       />
     );
   }
@@ -1536,9 +1755,15 @@ export function App() {
         jobs={dashboard.jobs}
         loading={dashboard.topologyLoading}
         initialPlanWorkflow={networkPlanWorkflowIntent}
+        initialTargetIntent={
+          workflowTargetIntent?.destination === "network_graph"
+            ? workflowTargetIntent
+            : null
+        }
         networkObservations={dashboard.networkObservations}
         networkTrends={dashboard.networkTrends}
         onInitialPlanWorkflowConsumed={() => setNetworkPlanWorkflowIntent(null)}
+        onInitialTargetIntentConsumed={consumeWorkflowTargetIntent}
         ospfRecommendations={dashboard.ospfRecommendations}
         ospfUpdatePlans={dashboard.ospfUpdatePlans}
         operator={dashboard.operator}
@@ -1625,6 +1850,11 @@ export function App() {
         migrationLinks={dashboard.migrationLinks}
         restorePlans={dashboard.restorePlans}
         error={dashboard.backupsError}
+        initialTargetIntent={
+          workflowTargetIntent?.destination === "backup_requests"
+            ? workflowTargetIntent
+            : null
+        }
         loading={dashboard.backupsLoading}
         onCreateBackupPolicy={dashboard.createBackupPolicy}
         onCreateJob={dashboard.createJob}
@@ -1634,12 +1864,13 @@ export function App() {
         onDownloadBackupArtifact={dashboard.downloadBackupArtifact}
         onHandoffBackupArtifact={dashboard.handoffBackupArtifact}
         onLoadJobOutputs={dashboard.loadJobOutputs}
+        onInitialTargetIntentConsumed={consumeWorkflowTargetIntent}
         onPruneBackupPolicies={dashboard.pruneBackupPolicies}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
         onOpenJobArtifacts={() => selectView("Jobs", "artifacts")}
         onOpenJobDetails={openJobDetails}
-        onOpenTransfers={(clientId) => {
-          setTransferTargetIntent(clientId);
+        onOpenTransfers={(clientId, path, context) => {
+          setTransferTargetIntent({ clientId, context, path });
           selectView("Remote Operations", "transfers");
         }}
         onOpenVpsDetail={releaseRoutes.openVpsDetail}
@@ -1743,7 +1974,7 @@ export function App() {
       return renderHomePanel();
     }
     if (activeView === "Fleet") {
-      if (activeSubpage === "instance_detail") {
+      if (activeSubpage.startsWith("instance_detail")) {
         return renderVpsDetailPanel();
       }
       if (activeSubpage === "monitor") {
@@ -1943,7 +2174,7 @@ export function App() {
           filteredAgentCount={visibleAgents.length}
           fleetQuery={fleetViews.fleetQuery}
           hideFleetStatusSummary={
-            activeView === "Fleet" && activeSubpage === "instance_detail"
+            activeView === "Fleet" && activeSubpage.startsWith("instance_detail")
           }
           pageDescription={pageDescription}
           pageTitle={pageTitle}
@@ -2011,6 +2242,9 @@ function releaseDestination(
 }
 
 function normalizeFleetReleaseSubpage(subpage: string) {
+  if (subpage.startsWith("instance_detail:")) {
+    return subpage;
+  }
   if (
     [
       "instances",
@@ -2058,9 +2292,15 @@ function jobReleaseDestination(subpage: string): {
 
 function networkReleaseSubpage(subpage: string) {
   if (
-    ["overview", "graph", "tunnel_plans", "port_forwards", "tests", "ospf", "evidence"].includes(
-      subpage,
-    )
+    [
+      "overview",
+      "graph",
+      "tunnel_plans",
+      "port_forwards",
+      "tests",
+      "ospf",
+      "evidence",
+    ].includes(subpage)
   ) {
     return subpage;
   }
@@ -2210,9 +2450,15 @@ function jobSubpage(subpage: string) {
 
 function networkSubpage(subpage: string) {
   if (
-    ["overview", "graph", "tunnel_plans", "port_forwards", "tests", "ospf", "evidence"].includes(
-      subpage,
-    )
+    [
+      "overview",
+      "graph",
+      "tunnel_plans",
+      "port_forwards",
+      "tests",
+      "ospf",
+      "evidence",
+    ].includes(subpage)
   ) {
     return subpage;
   }
