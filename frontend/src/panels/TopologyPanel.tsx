@@ -828,7 +828,7 @@ function TunnelPlansWorkspace({
       <ConfirmationPrompt
         confirmLabel={lifecycleSnapshot?.retryCleanup ? "Retry removal" : lifecycleSnapshot?.retryApply ? "Retry apply" : lifecycleSnapshot?.enabled ? "Enable plans" : "Disable plans"}
         detail={lifecycleSnapshot?.retryCleanup
-          ? "Push the current disabled desired state to both endpoints again. The plan remains disabled; deletion stays unavailable until both agents acknowledge removal."
+          ? "Push the current disabled desired state to both endpoints again. The plan remains disabled; deletion remains available and retires the declaration immediately."
           : lifecycleSnapshot?.retryApply
             ? "Push the current enabled declaration to both endpoints again without changing its revision or runtime ownership."
           : lifecycleSnapshot?.enabled

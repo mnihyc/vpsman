@@ -62,10 +62,13 @@ for file in "${expected_files[@]}"; do
       grep -qi 'external observed' "$path" || fail "$path must cover explicit observed tunnels"
       grep -qi 'routing.cost adapter' "$path" || fail "$path must cover routing-cost adapter operations"
       grep -qi 'never installs' "$path" || fail "$path must document external ownership boundaries"
+      grep -qi 'enabled or disabled plan' "$path" || fail "$path must document direct tunnel-plan retirement"
       ;;
     09-headless-cli-vty.md)
       grep -qi 'VTY' "$path" || fail "$path must cover headless VTY operations"
       grep -qi 'enable' "$path" || fail "$path must cover privileged mode"
+      grep -qi 'not a deletion prerequisite' "$path" || fail "$path must not imply disable-before-delete"
+      ! grep -qi 'disabled_revision' "$path" || fail "$path contains the removed disable-before-delete model"
       ;;
   esac
 done

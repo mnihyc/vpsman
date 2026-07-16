@@ -153,7 +153,7 @@ process-start edge-worker --argv /usr/bin/sleep --argv 60 tag:edge
 tunnel-plans
 tunnel-plan-export --plan-id <saved_plan_uuid> --output-file ./plan.json
 tunnel-plan-disable --plan-id <saved_plan_uuid> --expected-revision <revision> --confirmed
-tunnel-plan-delete --plan-id <saved_plan_uuid> --expected-revision <disabled_revision> --confirmed
+tunnel-plan-delete --plan-id <saved_plan_uuid> --expected-revision <reviewed_plan_revision> --confirmed
 topology-graph --limit 50
 backups
 backup-policies
@@ -170,6 +170,9 @@ agent-update --artifact-url https://github.com/<owner>/vpsman/releases/download/
 agent-update-activate --staged-sha256-hex <sha256> tag:edge --restart-agent --confirmed
 agent-update-rollback --rollback-sha256-hex <sha256> tag:edge --confirmed
 ```
+
+`tunnel-plan-delete` accepts the exact reviewed revision of an enabled or
+disabled plan. `tunnel-plan-disable` is separate and not a deletion prerequisite.
 
 `agent-update-check` stages a newer verified artifact without activation. Add
 `--activate --restart-agent` only for an explicitly reviewed immediate update.
