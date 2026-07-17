@@ -609,15 +609,22 @@ port_forward_delete_proof="$(api_post "/api/v1/port-forward-rules/$port_forward_
   "confirmed": true,
   "reason": "postgres delete lifecycle proof"
 }')"
-jq -e '.rule.revision == 2 and .rule.desired_status == "removal_pending" and .sync.status == "queued"' \
+jq -e '
+  .rule.revision == 2 and
+  .rule.desired_status == "removal_pending" and
+  .rule.runtime_status == "removal_pending" and
+  .sync.status == "retired_disabled_draft" and
+  .sync.job_id == null
+' \
   <<<"$port_forward_delete_proof" >/dev/null
-port_forward_delete_proof="$(api_post "/api/v1/port-forward-rules/$port_forward_delete_proof_id/forget" '{
-  "expected_revision": 2,
-  "confirmed": true,
-  "reason": "postgres forget lifecycle proof"
-}')"
-jq -e '.rule.revision == 3 and .sync.status == "forgotten_without_host_cleanup"' \
-  <<<"$port_forward_delete_proof" >/dev/null
+api_get "/api/v1/port-forward-rules" | jq -e --arg id "$port_forward_delete_proof_id" \
+  'all(.[]; .id != $id)' >/dev/null
+retired_disabled_draft_state="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc \
+  "SELECT revision = 2 AND deleted_at IS NOT NULL AND removal_confirmed_at IS NOT NULL AND forgotten_at IS NULL FROM port_forward_rules WHERE id = '$port_forward_delete_proof_id'")"
+if [[ "$retired_disabled_draft_state" != "t" ]]; then
+  echo "expected never-applied disabled port-forward draft to retire without host cleanup" >&2
+  exit 1
+fi
 
 schedule_json="$(vpsctl_json schedule-create \
   --name pg-hourly-uptime \
@@ -1095,6 +1102,7 @@ jq -e '
   any(.[]; .action == "network.tunnel_plan_updated") and
   any(.[]; .action == "network.port_forward_rule_created") and
   any(.[]; .action == "network.port_forward_rule_updated") and
+  any(.[]; .action == "network.port_forward_rule_deleted") and
   any(.[]; .action == "schedule.created") and
   any(.[]; .action == "fleet.alert_notification_deliveries_worker_processed") and
   any(.[]; .action == "fleet.alert_notification_deliveries_pruned") and

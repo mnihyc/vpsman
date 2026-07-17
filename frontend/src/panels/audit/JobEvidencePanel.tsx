@@ -4,6 +4,7 @@ import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
+import { ActionFeedback } from "../../components/ActionFeedback";
 import {
   jobStatusBadgeClass,
   jobTargetStatusBadgeClass,
@@ -269,7 +270,11 @@ export function JobEvidencePanel({
         </button>
       </div>
 
-      {error && <div className="errorBanner">{error}</div>}
+      <ActionFeedback
+        className="localActionFeedback jobEvidencePageActionFeedback"
+        message={error}
+        tone="danger"
+      />
 
       <div className="metricGrid" aria-label="Job evidence summary">
         <div className="metricCard">
@@ -418,7 +423,11 @@ function JobEvidenceDetail({
         </span>
       </div>
 
-      {evidence.error && <div className="errorBanner">{evidence.error}</div>}
+      <ActionFeedback
+        className="jobEvidenceDetailActionFeedback"
+        message={evidence.error}
+        tone="danger"
+      />
 
       <div className="jobEvidenceSections">
         <section className="dashboardWidgetTable" aria-label="Audit context for selected job">

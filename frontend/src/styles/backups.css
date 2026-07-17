@@ -108,7 +108,7 @@
 }
 
 .backupPruneReviewState strong {
-  color: var(--text-primary);
+  color: var(--text);
   font-size: 13px;
 }
 
@@ -261,7 +261,7 @@
 }
 
 .migrationChecklistHeader strong {
-  color: var(--text-primary);
+  color: var(--text);
   font-size: 13px;
 }
 
@@ -375,7 +375,7 @@
 
 .backupRecoveryMetrics {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 130px), 1fr));
   gap: 8px;
 }
 
@@ -529,7 +529,7 @@
 }
 
 .backupRecordLink:focus-visible {
-  outline: 2px solid var(--focus-ring);
+  outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
 
@@ -579,7 +579,7 @@
 }
 
 .backupWorkflowLink:focus-visible {
-  outline: 2px solid var(--focus-ring);
+  outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
 
@@ -639,7 +639,7 @@
 
 .backupWorkflowSteps {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
   gap: 10px;
 }
 

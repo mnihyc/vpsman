@@ -1096,7 +1096,7 @@ function TunnelPlanRows({
                   </select>
                 </label>
                 {assessment !== "automatic" && (
-                  <label className="tunnelAssessmentNote">
+                  <label>
                     <span>Evidence note</span>
                     <input
                       aria-label={`Connectivity assessment note for ${plan.name}`}

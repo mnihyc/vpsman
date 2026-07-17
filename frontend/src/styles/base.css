@@ -41,6 +41,7 @@
   --muted: var(--cloud-gray-700);
   --placeholder: var(--cloud-gray-500);
   --border: var(--cloud-gray-200);
+  --border-strong: var(--cloud-gray-500);
   --border-subtle: var(--cloud-gray-100);
   --line: var(--cloud-gray-200);
   --line-subtle: var(--cloud-gray-100);
@@ -71,7 +72,10 @@
   --chart-amber: var(--cloud-amber-800);
   --terminal-bg: var(--cloud-gray-900);
   --terminal-fg: var(--cloud-gray-100);
+  --focus: var(--cloud-blue-600);
   --focus-ring: 0 0 0 2px rgba(26, 115, 232, 0.14);
+  --font-mono: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas,
+    "Liberation Mono", monospace;
   --shadow-menu: 0 12px 30px rgba(60, 64, 67, 0.18);
   --shadow-drawer: 0 8px 24px rgba(60, 64, 67, 0.14);
   --shadow-raised: 0 8px 20px rgba(60, 64, 67, 0.12);
@@ -104,6 +108,10 @@ input,
 select,
 textarea {
   font: inherit;
+}
+
+.monospace {
+  font-family: var(--font-mono);
 }
 
 .srOnly {

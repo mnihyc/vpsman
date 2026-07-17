@@ -1581,14 +1581,14 @@ h2 {
 .quickStats,
 .signalGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(94px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 94px), 1fr));
   gap: 12px;
   min-width: 0;
 }
 
 .quickStats {
   gap: 8px;
-  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 96px), 1fr));
   justify-self: stretch;
   width: 100%;
 }
@@ -2205,7 +2205,7 @@ h2 {
 
   .gridMobileFields {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 118px), 1fr));
     gap: 8px 12px;
     min-width: 0;
   }

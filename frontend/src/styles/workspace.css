@@ -197,7 +197,7 @@
 
 .homeQuickActionGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
   gap: 8px;
   min-width: 0;
 }
@@ -213,7 +213,7 @@
 
 .homePostureStrip {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
   overflow: hidden;
 }
 
@@ -579,7 +579,7 @@
 }
 
 .fleetMetricsAdvancedFilters > summary:focus-visible {
-  outline: 2px solid var(--focus-ring);
+  outline: 2px solid var(--focus);
   outline-offset: 3px;
 }
 
@@ -612,7 +612,7 @@
 
 .observabilityWarningDefinitions {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
   gap: 1px;
   min-width: 0;
   border-bottom: 1px solid var(--border);
@@ -720,7 +720,7 @@
 }
 
 .observabilityWorkflowTabs button:focus-visible {
-  outline: 2px solid var(--focus-ring);
+  outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
 
@@ -874,7 +874,7 @@
 
 .observabilityNetworkChartGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
   gap: 12px;
   min-width: 0;
   padding: 16px;
@@ -886,7 +886,7 @@
 
 .observabilityNetworkGroupGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
   gap: 10px;
   min-width: 0;
   padding: 16px;
@@ -1053,7 +1053,7 @@
 
 .dashboardSourceStrip {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
   gap: 10px;
   min-width: 0;
   border-top: 1px solid var(--border-subtle);
@@ -1092,7 +1092,7 @@
 
 .dashboardPresetGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
   gap: 10px;
   min-width: 0;
   padding: 16px;
@@ -1124,7 +1124,7 @@
 
 .dashboardPresetTile:focus-visible {
   border-color: var(--primary);
-  outline: 2px solid var(--focus-ring);
+  outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
 
@@ -1200,7 +1200,7 @@
 
 .dashboardSectionSelector button:focus-visible {
   border-color: var(--primary);
-  outline: 2px solid var(--focus-ring);
+  outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
 
@@ -1223,7 +1223,7 @@
 
 .dashboardWidgetGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
   gap: 10px;
   min-width: 0;
   padding: 16px;
@@ -1327,7 +1327,7 @@
 
 .groupDashboardGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
   gap: 10px;
   min-width: 0;
   padding: 16px;
@@ -1411,7 +1411,7 @@
 
 .dashboardHandoffPanel {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
   gap: 10px;
   min-width: 0;
   padding: 16px;
@@ -1519,7 +1519,7 @@
 
 .dashboardControlBar {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 145px), 1fr));
   gap: 10px;
   align-items: end;
   min-width: 0;
@@ -1588,7 +1588,7 @@
 
 .releaseStatusGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
   gap: 12px;
   padding: 16px;
 }
@@ -1717,12 +1717,12 @@
 
 .vpsMonitorGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr));
   gap: 12px;
 }
 
 .vpsMonitorGrid.compact {
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
   gap: 8px;
 }
 
@@ -1904,7 +1904,7 @@
 
 .vpsMonitorSignals {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 88px), 1fr));
   gap: 6px;
 }
 
@@ -2210,7 +2210,7 @@
 
 .vpsDetailPosture {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
   overflow: hidden;
 }
 
@@ -2345,7 +2345,7 @@
 
 .vpsDetailGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
   gap: 14px;
   min-width: 0;
 }
@@ -2468,7 +2468,7 @@ button.vpsDetailRecord:hover {
 .vpsDetailDisclosure code {
   overflow-wrap: anywhere;
   color: var(--text);
-  font-family: var(--mono-font);
+  font-family: var(--font-mono);
 }
 
 .vpsDetailDisclosure small {
@@ -4880,7 +4880,7 @@ button.vpsDetailRecord:hover {
 
 .runbookSummary {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 148px), 1fr));
   gap: 10px;
   border-bottom: 1px solid var(--border-subtle);
   padding: 14px 16px;
@@ -6587,17 +6587,17 @@ button.vpsDetailRecord:hover {
 }
 
 .fleetNodeDetailCard .detailTabs {
-  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 96px), 1fr));
   margin: 0;
 }
 
 .fleetSignalGrid {
   margin: 0;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
 }
 
 .fleetDetailPane {
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
   gap: 0;
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
@@ -6618,6 +6618,43 @@ button.vpsDetailRecord:hover {
   border-radius: 8px;
   background: var(--canvas);
   padding: 12px;
+}
+
+.fleetConfigRows .detailLine {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.fleetConfigRows .detailLine > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.fleetConfigRows .detailLine > svg {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.fleetConfigRows .detailLine span,
+.fleetConfigRows .detailLine small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.fleetConfigRows .detailLine strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.fleetConfigRows .compactConfigLine {
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 8px;
 }
 
 .fleetConfigRowsHeader {
@@ -6694,7 +6731,7 @@ button.vpsDetailRecord:hover {
 
 .fleetCurveGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
   gap: 12px;
   min-width: 0;
 }
@@ -6707,6 +6744,11 @@ button.vpsDetailRecord:hover {
   border-radius: 8px;
   background: var(--surface);
   padding: 10px;
+}
+
+.fleetCurveCard > strong {
+  color: var(--text);
+  font-size: 13px;
 }
 
 .gridSelectionPanel {
@@ -6784,6 +6826,22 @@ button.vpsDetailRecord:hover {
 
 .configPreviewBlock .configPreviewActionFeedback.localActionFeedback {
   margin: 8px 0 0;
+}
+
+.configPreviewToml {
+  min-width: 0;
+  max-height: 280px;
+  margin: 8px 0 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-neutral);
+  padding: 10px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre;
 }
 
 .selectionStatsTabs button {

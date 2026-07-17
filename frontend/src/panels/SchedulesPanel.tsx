@@ -1196,7 +1196,7 @@ export function SchedulesPanel({
         />
       </section>
 
-      <section className="scheduleComposer">
+      <section>
         <ConsoleCollapsibleSection
           forceOpenKey={editingScheduleId}
           defaultOpen={schedules.length === 0}

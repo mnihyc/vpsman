@@ -2853,38 +2853,47 @@ function FleetNodeCharts({
   const cpuChart = cpuLoadChartData(rollups);
   const networkChart = networkRateChartData(networkRates);
   return (
-    <div className="fleetNodeCharts">
-      <div className="fleetNodeChartsHeader">
+    <div className="fleetCurveSection">
+      <div className="fleetCurveHeader">
         <span>
           <BarChart3 size={16} /> Overview curves
         </span>
         <small>{title}</small>
       </div>
-      <div className="fleetNodeChartGrid">
-        <TimeSeriesChart
-          ariaLabel={`${title} resource percentage curves`}
-          emptyLabel="No resource rollup history"
-          height={210}
-          lines={resourceChart.lines}
-          times={resourceChart.times}
-          valueFormatter={formatChartPercent}
-        />
-        <TimeSeriesChart
-          ariaLabel={`${title} CPU load curve`}
-          emptyLabel="No CPU rollup history"
-          height={210}
-          lines={cpuChart.lines}
-          times={cpuChart.times}
-          valueFormatter={formatChartLoad}
-        />
-        <TimeSeriesChart
-          ariaLabel={`${title} network rate curves`}
-          emptyLabel="No network rate history"
-          height={210}
-          lines={networkChart.lines}
-          times={networkChart.times}
-          valueFormatter={formatChartBitsPerSecond}
-        />
+      <div className="fleetCurveGrid">
+        <div className="fleetCurveCard">
+          <strong>Resource use</strong>
+          <TimeSeriesChart
+            ariaLabel={`${title} resource percentage curves`}
+            emptyLabel="No resource rollup history"
+            height={210}
+            lines={resourceChart.lines}
+            times={resourceChart.times}
+            valueFormatter={formatChartPercent}
+          />
+        </div>
+        <div className="fleetCurveCard">
+          <strong>CPU load</strong>
+          <TimeSeriesChart
+            ariaLabel={`${title} CPU load curve`}
+            emptyLabel="No CPU rollup history"
+            height={210}
+            lines={cpuChart.lines}
+            times={cpuChart.times}
+            valueFormatter={formatChartLoad}
+          />
+        </div>
+        <div className="fleetCurveCard">
+          <strong>Network rate</strong>
+          <TimeSeriesChart
+            ariaLabel={`${title} network rate curves`}
+            emptyLabel="No network rate history"
+            height={210}
+            lines={networkChart.lines}
+            times={networkChart.times}
+            valueFormatter={formatChartBitsPerSecond}
+          />
+        </div>
       </div>
     </div>
   );
@@ -4638,11 +4647,14 @@ export function FleetAlertPolicyManager({
     >
       <div className="consoleResourceLayout fullWidth">
         {showPolicyList && policyFilterClientId ? (
-          <div className="notice infoNotice">
-            Focused VPS:{" "}
-            <span className="monoValue">{policyFilterClientId}</span>. Policy
-            rows show server-evaluated match counts; open a policy dry-run to
-            inspect exact matched VPSs.
+          <div className="consoleInlineNotice policyFocusNotice">
+            <strong>
+              Focused VPS: <span className="monoValue">{policyFilterClientId}</span>
+            </strong>
+            <small>
+              Policy rows show server-evaluated match counts; open a policy
+              dry-run to inspect exact matched VPSs.
+            </small>
           </div>
         ) : null}
         {showPolicyList ? (
@@ -5067,11 +5079,15 @@ function PolicyDryRunPreview({
           <span className="monoValue">{preview.preview_hash}</span>
         </span>
       </div>
-      {preview.validation_errors.length > 0 ? (
-        <div className="notice warningNotice">
-          {preview.validation_errors.join(" · ")}
-        </div>
-      ) : null}
+      <ActionFeedback
+        className="policyDryRunValidationFeedback"
+        message={
+          preview.validation_errors.length > 0
+            ? preview.validation_errors.join(" · ")
+            : null
+        }
+        tone="warning"
+      />
       <div className="miniTable">
         {preview.rule_previews.map((rule) => (
           <div
@@ -8729,22 +8745,30 @@ function FleetAlertList({
         itemLabel="alerts"
         renderExpandedRow={(alert) => (
           <div className="consoleGridDetails">
-            <span>
-              <strong>Status:</strong> {alert.status}
-            </span>
-            <span>
-              <strong>Target:</strong> {alert.target_kind}:{alert.target_id}
-            </span>
-            {alert.muted_until_unix && (
+            <div className="consoleInlineDetailGrid">
               <span>
-                <strong>Muted until:</strong>{" "}
-                {formatUnixTime(alert.muted_until_unix)}
+                <strong>Status</strong>
+                <span>{alert.status}</span>
               </span>
-            )}
-            <span>
-              <strong>Escalation:</strong> {alert.escalation_level ?? 0}
-            </span>
-            <pre>{JSON.stringify(alert.evidence, null, 2)}</pre>
+              <span>
+                <strong>Target</strong>
+                <span>{alert.target_kind}:{alert.target_id}</span>
+              </span>
+              {alert.muted_until_unix && (
+                <span>
+                  <strong>Muted until</strong>
+                  <span>{formatUnixTime(alert.muted_until_unix)}</span>
+                </span>
+              )}
+              <span>
+                <strong>Escalation</strong>
+                <span>{alert.escalation_level ?? 0}</span>
+              </span>
+              <span>
+                <strong>Evidence</strong>
+                <pre>{JSON.stringify(alert.evidence, null, 2)}</pre>
+              </span>
+            </div>
           </div>
         )}
         rowActions={[

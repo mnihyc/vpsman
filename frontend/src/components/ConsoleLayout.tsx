@@ -22,6 +22,34 @@ export function ConsoleActionDrawer({
 }) {
   const drawerRef = useRef<HTMLElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      return undefined;
+    }
+    const activeElement =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    returnFocusRef.current =
+      activeElement &&
+      activeElement !== document.body &&
+      activeElement !== document.documentElement &&
+      !drawerRef.current?.contains(activeElement)
+        ? activeElement
+        : null;
+
+    return () => {
+      const returnTarget = returnFocusRef.current;
+      returnFocusRef.current = null;
+      window.requestAnimationFrame(() => {
+        if (returnTarget?.isConnected) {
+          returnTarget.focus({ preventScroll: true });
+        }
+      });
+    };
+  }, [open]);
 
   useEffect(() => {
     if (!open) {

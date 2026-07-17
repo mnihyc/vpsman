@@ -25,11 +25,118 @@ use crate::{
         CreateScheduleRequest, DeleteAgentRequest, JobOutputView, LoginRequest, NewServerArtifact,
         WsEvent,
     },
+    model_alert_notifications::{
+        CreateFleetAlertNotificationChannelRequest, FleetAlertNotificationCandidate,
+    },
+    model_webhook_rules::{CreateWebhookRuleRequest, WebhookRuleDeliveryCandidate},
     repository::Repository,
     repository_backups::BackupRequestSourceLink,
     repository_job_outputs::{JobOutputPersistConfig, JobOutputWriteResult},
     state::{AppState, DispatcherRuntimeConfig, DEFAULT_ARTIFACT_MAX_BYTES},
 };
+
+#[tokio::test]
+async fn postgres_deleted_delivery_owners_reject_stale_dispatch_snapshots() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+
+    let channel_id = Uuid::new_v4();
+    db.repo
+        .upsert_fleet_alert_notification_channel(
+            &CreateFleetAlertNotificationChannelRequest {
+                id: Some(channel_id),
+                name: "deleted-channel".to_string(),
+                scope_kind: "global".to_string(),
+                scope_value: None,
+                min_severity: Some("warning".to_string()),
+                categories: Some(vec!["agent_status".to_string()]),
+                operator_states: Some(vec!["open".to_string()]),
+                delivery_kind: "webhook".to_string(),
+                target: "http://127.0.0.1:9/fleet".to_string(),
+                cooldown_secs: Some(60),
+                enabled: Some(true),
+                notes: None,
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    db.repo
+        .delete_fleet_alert_notification_channel(channel_id, &operator)
+        .await
+        .unwrap();
+    let notification_deliveries = db
+        .repo
+        .record_fleet_alert_notification_deliveries(
+            &[FleetAlertNotificationCandidate {
+                channel_id,
+                channel_name: "deleted-channel".to_string(),
+                alert_id: "agent_status:stale".to_string(),
+                alert_severity: "critical".to_string(),
+                alert_category: "agent_status".to_string(),
+                status: "queued".to_string(),
+                delivery_kind: "webhook".to_string(),
+                target: "http://127.0.0.1:9/fleet".to_string(),
+                dedupe_key: "deleted-channel-stale-dispatch".to_string(),
+                payload: serde_json::json!({"schema": "test"}),
+                cooldown_until_unix: 0,
+            }],
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert!(notification_deliveries.is_empty());
+
+    let rule_id = Uuid::new_v4();
+    db.repo
+        .upsert_webhook_rule(
+            &CreateWebhookRuleRequest {
+                id: Some(rule_id),
+                name: "deleted-rule".to_string(),
+                enabled: true,
+                expression: "interval.1min".to_string(),
+                target: "http://127.0.0.1:9/webhook".to_string(),
+                body_template: String::new(),
+                signing_secret: None,
+                clear_signing_secret: false,
+                cooldown_secs: Some(60),
+                notes: None,
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    db.repo
+        .delete_webhook_rule(rule_id, &operator)
+        .await
+        .unwrap();
+    let webhook_deliveries = db
+        .repo
+        .record_webhook_rule_deliveries(&[WebhookRuleDeliveryCandidate {
+            rule_id,
+            rule_name: "deleted-rule".to_string(),
+            event_kind: "manual.test".to_string(),
+            event_id: "deleted-rule-stale-event".to_string(),
+            target: "http://127.0.0.1:9/webhook".to_string(),
+            dedupe_key: "deleted-rule-stale-dispatch".to_string(),
+            payload: serde_json::json!({"schema": "test"}),
+            matched_vps: Vec::new(),
+            message: "test".to_string(),
+            rule_revision_hash: "deleted-rule-revision".to_string(),
+            signing_secret: None,
+            cooldown_until_unix: 0,
+            actor_id: Some(operator.operator.id),
+        }])
+        .await
+        .unwrap();
+    assert!(webhook_deliveries.is_empty());
+
+    db.cleanup().await;
+}
 
 struct PgReliabilityTestDb {
     repo: Repository,

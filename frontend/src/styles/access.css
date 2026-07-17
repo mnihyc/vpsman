@@ -112,7 +112,7 @@
 }
 
 .accessInspector .sideForm {
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
   align-items: end;
   padding: 0 18px 18px;
 }
@@ -209,7 +209,7 @@
 }
 
 .copyHashButton:focus-visible {
-  outline: 2px solid var(--focus-ring);
+  outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
 
@@ -244,6 +244,18 @@
 .inlineSecret small {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.secretRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.secretRow > input {
+  min-width: 0;
 }
 
 .formNote {
@@ -314,7 +326,7 @@
 
 .installCommandControls {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
   gap: 8px;
   align-items: end;
 }
@@ -362,6 +374,14 @@
 }
 
 @media (max-width: 700px) {
+  .secretRow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .secretRow > button {
+    justify-self: start;
+  }
+
   .installCommandFollowup {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -383,7 +403,7 @@
 
 .accessSummaryCards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr));
   gap: 10px;
   padding: 14px 18px;
   border-top: 1px solid var(--border-subtle);
@@ -536,7 +556,7 @@
 .subpanelTabs.accessTabs,
 .accessSubnav {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr));
   gap: 0;
   width: auto;
   margin: 14px 18px 0;
@@ -624,7 +644,7 @@
 
 .accessOverviewGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
   gap: 14px;
 }
 
@@ -812,7 +832,7 @@
 }
 
 .accessWorkflowLink:focus-visible {
-  outline: 2px solid var(--focus-ring);
+  outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
 

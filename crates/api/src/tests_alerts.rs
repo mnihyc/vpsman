@@ -1068,6 +1068,27 @@ async fn deleted_alert_notification_channel_preserves_and_cancels_delivery_histo
         .await
         .unwrap();
 
+    let stale_dispatch = repo
+        .record_fleet_alert_notification_deliveries(
+            &[FleetAlertNotificationCandidate {
+                channel_id,
+                channel_name: "deleted-edge-webhook".to_string(),
+                alert_id: "agent_status:agent:edge-b".to_string(),
+                alert_severity: "critical".to_string(),
+                alert_category: "agent_status".to_string(),
+                status: "queued".to_string(),
+                delivery_kind: "webhook".to_string(),
+                target: "http://127.0.0.1:9/fleet".to_string(),
+                dedupe_key: "fleet-alert-notification:stale-deleted-test".to_string(),
+                payload: json!({"schema": "test"}),
+                cooldown_until_unix: 0,
+            }],
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert!(stale_dispatch.is_empty());
+
     assert!(repo
         .list_fleet_alert_notification_channels(20, None, None, None, None)
         .await
@@ -1222,6 +1243,28 @@ async fn deleted_webhook_rule_preserves_and_cancels_delivery_history() {
         .unwrap();
 
     repo.delete_webhook_rule(rule_id, &operator).await.unwrap();
+
+    let stale_dispatch = repo
+        .record_webhook_rule_deliveries(&[
+            crate::model_webhook_rules::WebhookRuleDeliveryCandidate {
+                rule_id,
+                rule_name: "deleted-edge-rule".to_string(),
+                event_kind: "manual.test".to_string(),
+                event_id: "deleted-event-2".to_string(),
+                target: "http://127.0.0.1:9/webhook".to_string(),
+                dedupe_key: "webhook-rule:stale-deleted-test".to_string(),
+                payload: json!({"schema": "test"}),
+                matched_vps: Vec::new(),
+                message: "test".to_string(),
+                rule_revision_hash: "deleted-test-revision".to_string(),
+                signing_secret: None,
+                cooldown_until_unix: 0,
+                actor_id: Some(operator.operator.id),
+            },
+        ])
+        .await
+        .unwrap();
+    assert!(stale_dispatch.is_empty());
 
     assert!(repo.list_webhook_rules(20, None).await.unwrap().is_empty());
     let retained = repo

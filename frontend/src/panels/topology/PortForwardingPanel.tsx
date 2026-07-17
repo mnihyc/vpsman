@@ -719,8 +719,8 @@ const PortForwardEditor = forwardRef<HTMLElement, {
         <fieldset className="compactFieldset"><legend>Protocol</legend><div className="segmentedControl" role="group" aria-label="Protocol">
           {(["tcp", "udp", "both"] as const).map((protocol) => <button aria-pressed={draft.protocol === protocol} className={draft.protocol === protocol ? "active" : ""} disabled={pending} key={protocol} onClick={() => onChange({ ...draft, protocol })} type="button">{protocol === "both" ? "Both" : protocol.toUpperCase()}</button>)}
         </div></fieldset>
-        <label className="portExpressionField"><span>Incoming ports</span><input disabled={pending} onChange={(event) => onChange({ ...draft, incoming: event.target.value })} placeholder="80,443,10000-10010" required title={draft.incoming} value={draft.incoming} /><small>PORT or START-END, comma separated</small></label>
-        <label className="portExpressionField"><span>Target ports</span><input disabled={pending} onChange={(event) => onChange({ ...draft, target: event.target.value })} placeholder="8080 or 8080,20000-20010" required title={draft.target} value={draft.target} /><small>One port for all, or corresponding items</small></label>
+        <label><span>Incoming ports</span><input disabled={pending} onChange={(event) => onChange({ ...draft, incoming: event.target.value })} placeholder="80,443,10000-10010" required title={draft.incoming} value={draft.incoming} /><small>PORT or START-END, comma separated</small></label>
+        <label><span>Target ports</span><input disabled={pending} onChange={(event) => onChange({ ...draft, target: event.target.value })} placeholder="8080 or 8080,20000-20010" required title={draft.target} value={draft.target} /><small>One port for all, or corresponding items</small></label>
         <div className="targetAddressField">
           <label><span>Target IP or hostname</span><input disabled={pending} onChange={(event) => {
             const value = event.target.value; const literal = literalIpFamily(value); setResolution(null); setResolveError(null); onChange({ ...draft, targetInput: value, targetIp: literal ? value.trim() : "" });

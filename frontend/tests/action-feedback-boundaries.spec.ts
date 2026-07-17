@@ -70,6 +70,10 @@ test("keeps action feedback in dedicated local containers", () => {
   );
   expect(fleetWorkspace).toContain("<span>Live control-plane inventory</span>");
   expect(fleetWorkspace).toContain("networkInterfacesActionFeedback");
+  expect(fleetWorkspace).not.toContain('className="notice infoNotice"');
+  expect(fleetWorkspace).not.toContain('className="notice warningNotice"');
+  expect(fleetWorkspace).toContain("policyFocusNotice");
+  expect(fleetWorkspace).toContain("policyDryRunValidationFeedback");
 
   const vpsDetailPanel = source("panels/VpsDetailPanel.tsx");
   expect(vpsDetailPanel).not.toMatch(
@@ -135,6 +139,11 @@ test("keeps action feedback in dedicated local containers", () => {
   expect(auditLogPanel).not.toMatch(
     /error\s*\?\?\s*\(\s*hasAuditFilters/,
   );
+
+  const jobEvidencePanel = source("panels/audit/JobEvidencePanel.tsx");
+  expect(jobEvidencePanel).not.toContain('className="errorBanner"');
+  expect(jobEvidencePanel).toContain("jobEvidencePageActionFeedback");
+  expect(jobEvidencePanel).toContain("jobEvidenceDetailActionFeedback");
 
   const homeTelemetryPanel = source("panels/HomeTelemetryPanel.tsx");
   expect(homeTelemetryPanel).not.toContain(

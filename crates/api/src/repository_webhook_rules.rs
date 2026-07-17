@@ -272,6 +272,14 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                let rule_exists = sqlx::query_scalar::<_, Uuid>(
+                    "SELECT id FROM webhook_rules WHERE id = $1 FOR UPDATE",
+                )
+                .bind(rule_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_some();
+                anyhow::ensure!(rule_exists, "webhook_rule_not_found:{rule_id}");
                 sqlx::query(
                     r#"
                     UPDATE webhook_rule_deliveries
@@ -412,8 +420,12 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let mut persisted = Vec::new();
+                let rules = memory.webhook_rules.read().await;
                 let mut deliveries = memory.webhook_rule_deliveries.write().await;
                 for candidate in candidates {
+                    if !rules.iter().any(|rule| rule.id == candidate.rule_id) {
+                        continue;
+                    }
                     if deliveries.iter().any(|stored| {
                         stored.rule_id == candidate.rule_id && stored.event_id == candidate.event_id
                     }) {
@@ -426,12 +438,38 @@ impl Repository {
                     deliveries.push(delivery.clone());
                     persisted.push(delivery);
                 }
+                drop(deliveries);
+                drop(rules);
                 Ok(persisted)
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                let mut rule_ids = candidates
+                    .iter()
+                    .map(|candidate| candidate.rule_id)
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                rule_ids.sort_unstable();
+                let existing_rule_ids = sqlx::query_scalar::<_, Uuid>(
+                    r#"
+                    SELECT id
+                    FROM webhook_rules
+                    WHERE id = ANY($1)
+                    ORDER BY id
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(&rule_ids)
+                .fetch_all(&mut *tx)
+                .await?
+                .into_iter()
+                .collect::<HashSet<_>>();
                 let mut persisted = Vec::new();
                 for candidate in candidates {
+                    if !existing_rule_ids.contains(&candidate.rule_id) {
+                        continue;
+                    }
                     let duplicate = sqlx::query_scalar::<_, i64>(
                         r#"
                         SELECT 1::bigint

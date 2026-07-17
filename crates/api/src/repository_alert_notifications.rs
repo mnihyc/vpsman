@@ -313,6 +313,17 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                let channel_exists = sqlx::query_scalar::<_, Uuid>(
+                    "SELECT id FROM fleet_alert_notification_channels WHERE id = $1 FOR UPDATE",
+                )
+                .bind(channel_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_some();
+                anyhow::ensure!(
+                    channel_exists,
+                    "fleet_alert_notification_channel_not_found:{channel_id}"
+                );
                 sqlx::query(
                     r#"
                     UPDATE fleet_alert_notification_deliveries
@@ -458,8 +469,15 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let mut persisted = Vec::new();
+                let channels = memory.fleet_alert_notification_channels.read().await;
                 let mut deliveries = memory.fleet_alert_notification_deliveries.write().await;
                 for candidate in candidates {
+                    if !channels
+                        .iter()
+                        .any(|channel| channel.id == candidate.channel_id && channel.enabled)
+                    {
+                        continue;
+                    }
                     if deliveries.iter().any(|stored| {
                         stored.dedupe_key == candidate.dedupe_key
                             && stored.cooldown_until_unix > now as i64
@@ -471,6 +489,7 @@ impl Repository {
                     persisted.push(delivery);
                 }
                 drop(deliveries);
+                drop(channels);
                 if !persisted.is_empty() {
                     memory
                         .audits
@@ -486,8 +505,32 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                let mut channel_ids = candidates
+                    .iter()
+                    .map(|candidate| candidate.channel_id)
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                channel_ids.sort_unstable();
+                let enabled_channel_ids = sqlx::query_scalar::<_, Uuid>(
+                    r#"
+                    SELECT id
+                    FROM fleet_alert_notification_channels
+                    WHERE id = ANY($1) AND enabled = TRUE
+                    ORDER BY id
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(&channel_ids)
+                .fetch_all(&mut *tx)
+                .await?
+                .into_iter()
+                .collect::<HashSet<_>>();
                 let mut persisted = Vec::new();
                 for candidate in candidates {
+                    if !enabled_channel_ids.contains(&candidate.channel_id) {
+                        continue;
+                    }
                     let duplicate = sqlx::query_scalar::<_, i64>(
                         r#"
                         SELECT 1::bigint

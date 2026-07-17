@@ -2249,9 +2249,11 @@ test("manages template assignments from automation source templates", async ({
   await expect(
     templateRows.filter({ hasText: "shared:vnstat-json" }),
   ).toBeVisible();
-  await activate(
-    templateRegistryGrid.getByRole("button", { name: "New template" }),
-  );
+  const newTemplateButton = templateRegistryGrid.getByRole("button", {
+    name: "New template",
+  });
+  await newTemplateButton.focus();
+  await activate(newTemplateButton);
   await expect(
     templatePanel.getByLabel("New source template", { exact: true }),
   ).toBeVisible();
@@ -2281,6 +2283,7 @@ test("manages template assignments from automation source templates", async ({
   await expect(
     templatePanel.getByLabel("New source template", { exact: true }),
   ).toHaveCount(0);
+  await expect(newTemplateButton).toBeFocused();
 
   await activate(
     templateRows.filter({ hasText: "shared:vnstat-json" }).first(),

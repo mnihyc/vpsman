@@ -672,11 +672,16 @@ async fn insert_delivery_candidate(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     candidate: &DeliveryCandidate,
 ) -> Result<bool> {
-    sqlx::query_scalar::<_, Uuid>("SELECT id FROM webhook_rules WHERE id = $1 FOR UPDATE")
-        .bind(candidate.rule_id)
-        .fetch_optional(&mut **tx)
-        .await?
-        .context("webhook rule disappeared before delivery materialization")?;
+    let rule_enabled = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM webhook_rules WHERE id = $1 AND enabled = TRUE FOR UPDATE",
+    )
+    .bind(candidate.rule_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .is_some();
+    if !rule_enabled {
+        return Ok(false);
+    }
     let suppression = sqlx::query(
         r#"
         SELECT

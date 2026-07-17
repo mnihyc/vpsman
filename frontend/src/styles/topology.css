@@ -379,7 +379,7 @@
 .portForwardStatus.status-unsupported {
   border-color: var(--danger-border);
   background: var(--danger-soft);
-  color: var(--danger-text);
+  color: var(--danger-strong);
 }
 
 .portForwardDetailGrid {
@@ -494,7 +494,7 @@
 
 .portForwardForm input:not([type="checkbox"]):not([type="radio"]):disabled,
 .portForwardForm select:disabled {
-  background: var(--surface-muted);
+  background: var(--surface-neutral);
   color: var(--muted);
 }
 
@@ -600,14 +600,14 @@
 
 .portMappingPreview.idle {
   border-color: var(--border-strong);
-  background: var(--surface-muted);
+  background: var(--surface-neutral);
   color: var(--text-secondary);
 }
 
 .portMappingPreview.invalid {
   border-color: var(--danger-border);
   background: var(--danger-soft);
-  color: var(--danger-text);
+  color: var(--danger-strong);
 }
 
 .portMappingPreview > span,
@@ -808,11 +808,11 @@
 }
 
 .isDisableAction {
-  color: var(--danger-text);
+  color: var(--danger-strong);
 }
 
 .isDeleteAction:not(:disabled) {
-  color: var(--danger-text);
+  color: var(--danger-strong);
 }
 
 .isDeleteAction:disabled {
@@ -996,7 +996,7 @@
 .topologyAdvancedFields input:not([type="checkbox"]):not([type="radio"]):read-only,
 .topologyAdvancedFields select:disabled,
 .topologyAdvancedFields textarea:disabled {
-  background: var(--surface-muted);
+  background: var(--surface-neutral);
   color: var(--muted);
 }
 
@@ -1524,7 +1524,7 @@
 
 .networkWorkflowGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
   gap: 10px;
   padding: 0 18px 18px;
 }
@@ -1660,10 +1660,10 @@
   display: inline-flex;
   align-items: center;
   min-height: 24px;
-  border: 1px solid var(--info-border);
+  border: 1px solid var(--primary-border);
   border-radius: 999px;
-  background: var(--info-soft);
-  color: var(--info-text);
+  background: var(--primary-soft);
+  color: var(--primary-text);
   padding: 3px 8px;
   font-size: 12px;
   font-weight: 800;
@@ -2329,7 +2329,7 @@
 
 .topologyNetworkResultHeader span,
 .topologyNetworkResultEmpty {
-  color: var(--text-muted);
+  color: var(--muted);
   font-size: 12px;
 }
 

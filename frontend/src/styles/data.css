@@ -215,6 +215,13 @@
   gap: 10px;
 }
 
+.consoleGridDetails,
+.auditEventDetailPanel {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
 .fleetAlertPolicyHint {
   color: var(--text-secondary);
   font-size: 12px;
@@ -625,7 +632,7 @@
 
 .retentionPolicyRow:focus-visible {
   border-color: var(--primary);
-  outline: 2px solid var(--focus-ring);
+  outline: 2px solid var(--focus);
   outline-offset: -2px;
 }
 
@@ -1322,7 +1329,7 @@
 
 .fleetPolicyGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 112px), 1fr));
   gap: 8px;
   align-items: center;
   min-width: 0;
@@ -1487,7 +1494,7 @@
 
 .consoleFormGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
   gap: 12px;
   align-items: start;
   min-width: 0;
@@ -1571,7 +1578,7 @@
 }
 
 .notificationGrid {
-  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 112px), 1fr));
 }
 
 .notificationRows span {
@@ -1610,7 +1617,7 @@
 
 .webhookRuleSampleGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
   gap: 8px;
   min-width: 0;
 }
@@ -2033,7 +2040,7 @@
 
 .metricGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr));
   gap: 12px;
   padding: 18px;
   border-bottom: 1px solid var(--border-subtle);
@@ -2130,7 +2137,7 @@
 .configHealthSummary,
 .configCoverageGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 145px), 1fr));
   gap: 8px;
   min-width: 0;
 }
@@ -2166,7 +2173,7 @@
 .configWorkflowLinks {
   display: grid;
   gap: 12px;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
   min-width: 0;
 }
 
@@ -2252,7 +2259,7 @@
 }
 
 .configWorkflowLink:focus-visible {
-  outline: 2px solid var(--focus-ring);
+  outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
 
@@ -2401,7 +2408,7 @@
 
 .groupSummaryStrip {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 138px), 1fr));
   gap: 8px;
   min-width: 0;
   padding: 0 18px 14px;
@@ -2844,7 +2851,7 @@
 .singleConfigViewTabs button:focus-visible {
   position: relative;
   z-index: 1;
-  outline: 2px solid var(--focus-ring);
+  outline: 2px solid var(--focus);
   outline-offset: -2px;
 }
 
@@ -2865,7 +2872,7 @@
 
 .configOverrideSummary {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 130px), 1fr));
   gap: 8px;
   min-width: 0;
 }
@@ -2952,6 +2959,16 @@
 
 .tagScheduleImpactRow > span {
   min-width: 0;
+}
+
+.tagScheduleManualAction {
+  display: grid;
+  gap: 6px;
+  align-items: start;
+}
+
+.tagScheduleManualAction .compactAction {
+  justify-self: start;
 }
 
 .mutedText {
@@ -3289,7 +3306,7 @@
 }
 
 .templateLifecycleActions {
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 120px), 1fr));
 }
 
 .templateForm input,
@@ -4426,7 +4443,7 @@
 
 .bulkTagPreviewStats {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 112px), 1fr));
   gap: 8px;
   min-width: 0;
 }
