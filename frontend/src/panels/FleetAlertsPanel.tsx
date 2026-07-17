@@ -255,6 +255,7 @@ function FleetAlertList({
                 </button>
               )}
               <button
+                aria-label={`Open VPS detail for ${agent ? formatVpsName(agent, vpsNameDisplayMode) : "unavailable VPS"}`}
                 className="secondaryAction compactAction"
                 disabled={!agent}
                 onClick={(event) => {
@@ -263,17 +264,18 @@ function FleetAlertList({
                     onOpenVpsDetail(agent);
                   }
                 }}
+                title={agent ? `Open VPS detail for ${formatVpsName(agent, vpsNameDisplayMode)}.` : "VPS detail is unavailable for this alert."}
                 type="button"
               >
                 <Server size={13} />
-                <span>Open</span>
+                <span>VPS detail</span>
               </button>
             </span>
           );
         },
       },
     ],
-    [agentById, nameById, onOpenVpsDetail, pending],
+    [agentById, nameById, onOpenVpsDetail, pending, vpsNameDisplayMode],
   );
 
   useEffect(() => {

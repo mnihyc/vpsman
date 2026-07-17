@@ -87,14 +87,12 @@ export function WebhooksPanel({
   return (
     <section className="workspace singleColumn observabilityWebhooksWorkspace">
       <div className="fleetPanel observabilityWebhooksPanel">
-        {!ruleEditorOpen ? (
-          <div className="sectionHeader">
-            <div>
-              <h2>Event webhooks</h2>
-              <span>Event webhooks are independent from alert notification destinations.</span>
-            </div>
+        <div className="sectionHeader">
+          <div>
+            <h2>Event webhooks</h2>
+            <span>Event webhooks are independent from alert notification destinations.</span>
           </div>
-        ) : null}
+        </div>
 
         <ActionFeedback
           className="localActionFeedback dashboardActionFeedback webhooksActionFeedback"
@@ -102,36 +100,38 @@ export function WebhooksPanel({
           tone="danger"
         />
 
-        {!ruleEditorOpen ? (
-          <>
-            <div className="metricGrid observabilityMetricsSummary" aria-label="Webhook routing summary">
-              <MetricTile actionLabel="Rules" detail={`${disabledRules} disabled rules`} label="Event webhook rules" onAction={() => setActiveTab("rules")} value={String(webhookRules.length)} />
-              <MetricTile actionLabel="Deliveries" detail="Queued event webhook rows awaiting processing" label="Queued" onAction={openDeliveryEvidence} value={String(queuedDeliveries)} />
-              <MetricTile actionLabel="Open failed deliveries" detail="Failed event webhook deliveries, separate from alert notification failures" label="Failures" onAction={openDeliveryEvidence} value={String(failedDeliveries)} />
-              <MetricTile actionLabel="History" detail="Retained event webhook delivery rows" label="Deliveries" onAction={openDeliveryEvidence} value={String(webhookRuleDeliveries.length)} />
-            </div>
+        <div className="metricGrid observabilityMetricsSummary" aria-label="Webhook routing summary">
+          <MetricTile
+            actionLabel="Rules"
+            detail={`${disabledRules} disabled ${disabledRules === 1 ? "rule" : "rules"}`}
+            label="Event webhook rules"
+            onAction={() => setActiveTab("rules")}
+            value={String(webhookRules.length)}
+          />
+          <MetricTile actionLabel="Deliveries" detail="Queued event webhook rows awaiting processing" label="Queued" onAction={openDeliveryEvidence} value={String(queuedDeliveries)} />
+          <MetricTile actionLabel="Open failed deliveries" detail="Failed event webhook deliveries, separate from alert notification failures" label="Failures" onAction={openDeliveryEvidence} value={String(failedDeliveries)} />
+          <MetricTile actionLabel="History" detail="Retained event webhook delivery rows" label="Deliveries" onAction={openDeliveryEvidence} value={String(webhookRuleDeliveries.length)} />
+        </div>
 
-            <div className="observabilityWorkflowTabs" role="tablist" aria-label="Event webhook sections">
-              {[
-                ["rules", "Rules", "Create rules, send tests, and retry failed deliveries"],
-                ["deliveries", "Deliveries", "Previewed, queued, failed, and retained event webhooks"],
-                ["maintenance", "Maintenance", "Reviewed retention cleanup"],
-              ].map(([id, label, detail]) => (
-                <button
-                  aria-selected={activeTab === id}
-                  className={activeTab === id ? "active" : ""}
-                  key={id}
-                  onClick={() => setActiveTab(id as WebhookConfigTab)}
-                  role="tab"
-                  type="button"
-                >
-                  <strong>{label}</strong>
-                  <span>{detail}</span>
-                </button>
-              ))}
-            </div>
-          </>
-        ) : null}
+        <div className="observabilityWorkflowTabs" role="tablist" aria-label="Event webhook sections">
+          {[
+            ["rules", "Rules", "Create rules, send tests, and retry failed deliveries"],
+            ["deliveries", "Deliveries", "Previewed, queued, failed, and retained event webhooks"],
+            ["maintenance", "Maintenance", "Reviewed retention cleanup"],
+          ].map(([id, label, detail]) => (
+            <button
+              aria-selected={activeTab === id}
+              className={activeTab === id ? "active" : ""}
+              key={id}
+              onClick={() => setActiveTab(id as WebhookConfigTab)}
+              role="tab"
+              type="button"
+            >
+              <strong>{label}</strong>
+              <span>{detail}</span>
+            </button>
+          ))}
+        </div>
 
         {activeTab === "rules" ? (
           <section className="dashboardSection observabilityGroupSection" aria-labelledby="observability-webhook-rules-title">

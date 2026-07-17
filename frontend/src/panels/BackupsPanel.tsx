@@ -703,12 +703,7 @@ export function BackupsPanel({
             }
           : null;
       case "migration-link":
-        return lastMigrationLink
-          ? {
-              message: `Migration mapping ${shortId(lastMigrationLink.id)} saved`,
-              tone: "success" as const,
-            }
-          : null;
+        return null;
       case "migration-run":
         return lastRestoreJob
           ? {

@@ -28,6 +28,7 @@ use crate::{
 
 const WEBHOOK_PROCESS_DRY_RUN_STATUS: &str = "delivery_dry_run";
 const WEBHOOK_DELIVERY_LEASE_SECS: i64 = 300;
+const MAX_WEBHOOK_ERROR_BYTES: usize = 1024;
 const MAX_WEBHOOK_DELIVERY_ATTEMPTS: i32 = 4;
 const WEBHOOK_RETRY_BACKOFF_SECS: [i64; 3] = [60, 300, 1800];
 const WEBHOOK_SIGNATURE_HEADER: &str = "X-Vpsman-Webhook-Signature";
@@ -308,7 +309,7 @@ impl AppState {
                         } else {
                             WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED
                         },
-                        Some(error.to_string()),
+                        Some(format_delivery_error(&error)),
                     )
                 }
             };
@@ -589,6 +590,13 @@ fn webhook_next_retry_after_secs(attempt_count: i32) -> Option<i64> {
     )
 }
 
+fn format_delivery_error(error: &anyhow::Error) -> String {
+    format!("{error:#}")
+        .chars()
+        .take(MAX_WEBHOOK_ERROR_BYTES)
+        .collect()
+}
+
 fn render_message_from_payload(rule: &WebhookRuleView, payload: &Value) -> Result<String> {
     if rule.body_template.trim().is_empty() {
         let matched_vps_count = payload
@@ -706,5 +714,16 @@ mod tests {
             signature,
             "sha256=2677ad3e7c090b2fa2c0fb13020d66d5420879b8316eb356a2d60fb9073bc778"
         );
+    }
+
+    #[test]
+    fn delivery_error_keeps_nested_transport_cause_and_is_bounded() {
+        let error = anyhow::anyhow!("connection refused").context("webhook request failed");
+        assert_eq!(
+            format_delivery_error(&error),
+            "webhook request failed: connection refused"
+        );
+        let long = anyhow::anyhow!("x".repeat(MAX_WEBHOOK_ERROR_BYTES + 100));
+        assert_eq!(format_delivery_error(&long).len(), MAX_WEBHOOK_ERROR_BYTES);
     }
 }

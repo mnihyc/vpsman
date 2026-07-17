@@ -1020,6 +1020,83 @@ async fn disabled_alert_notification_channel_cancels_retryable_deliveries() {
 }
 
 #[tokio::test]
+async fn deleted_alert_notification_channel_preserves_and_cancels_delivery_history() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    let channel_id = Uuid::new_v4();
+    repo.upsert_fleet_alert_notification_channel(
+        &CreateFleetAlertNotificationChannelRequest {
+            id: Some(channel_id),
+            name: "deleted-edge-webhook".to_string(),
+            scope_kind: "global".to_string(),
+            scope_value: None,
+            min_severity: Some("warning".to_string()),
+            categories: Some(vec!["agent_status".to_string()]),
+            operator_states: Some(vec!["open".to_string()]),
+            delivery_kind: "webhook".to_string(),
+            target: "http://127.0.0.1:9/fleet".to_string(),
+            cooldown_secs: Some(900),
+            enabled: Some(true),
+            notes: None,
+            confirmed: true,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+    let created = repo
+        .record_fleet_alert_notification_deliveries(
+            &[FleetAlertNotificationCandidate {
+                channel_id,
+                channel_name: "deleted-edge-webhook".to_string(),
+                alert_id: "agent_status:agent:edge-a".to_string(),
+                alert_severity: "critical".to_string(),
+                alert_category: "agent_status".to_string(),
+                status: "queued".to_string(),
+                delivery_kind: "webhook".to_string(),
+                target: "http://127.0.0.1:9/fleet".to_string(),
+                dedupe_key: "fleet-alert-notification:deleted-test".to_string(),
+                payload: json!({"schema": "test"}),
+                cooldown_until_unix: 0,
+            }],
+            &operator,
+        )
+        .await
+        .unwrap();
+
+    repo.delete_fleet_alert_notification_channel(channel_id, &operator)
+        .await
+        .unwrap();
+
+    assert!(repo
+        .list_fleet_alert_notification_channels(20, None, None, None, None)
+        .await
+        .unwrap()
+        .is_empty());
+    let retained = repo
+        .list_fleet_alert_notification_deliveries(20, Some(channel_id), None, None)
+        .await
+        .unwrap();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].id, created[0].id);
+    assert_eq!(retained[0].status, "canceled_disabled");
+    assert_eq!(
+        retained[0].error.as_deref(),
+        Some("fleet alert notification channel deleted")
+    );
+    assert!(
+        repo.claim_fleet_alert_notification_deliveries_for_process(
+            &[created[0].id],
+            Uuid::new_v4(),
+            60,
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn disabled_webhook_rule_cancels_retryable_deliveries() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = test_operator();
@@ -1098,6 +1175,68 @@ async fn disabled_webhook_rule_cancels_retryable_deliveries() {
         .await
         .unwrap();
     assert!(claimed.is_empty());
+}
+
+#[tokio::test]
+async fn deleted_webhook_rule_preserves_and_cancels_delivery_history() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    let rule_id = Uuid::new_v4();
+    repo.upsert_webhook_rule(
+        &crate::model_webhook_rules::CreateWebhookRuleRequest {
+            id: Some(rule_id),
+            name: "deleted-edge-rule".to_string(),
+            enabled: true,
+            expression: "status = stale".to_string(),
+            target: "http://127.0.0.1:9/webhook".to_string(),
+            body_template: String::new(),
+            signing_secret: None,
+            clear_signing_secret: false,
+            cooldown_secs: Some(60),
+            notes: None,
+            confirmed: true,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+    let created = repo
+        .record_webhook_rule_deliveries(&[
+            crate::model_webhook_rules::WebhookRuleDeliveryCandidate {
+                rule_id,
+                rule_name: "deleted-edge-rule".to_string(),
+                event_kind: "manual.test".to_string(),
+                event_id: "deleted-event-1".to_string(),
+                target: "http://127.0.0.1:9/webhook".to_string(),
+                dedupe_key: "webhook-rule:deleted-test".to_string(),
+                payload: json!({"schema": "test"}),
+                matched_vps: Vec::new(),
+                message: "test".to_string(),
+                rule_revision_hash: "deleted-test-revision".to_string(),
+                signing_secret: None,
+                cooldown_until_unix: 0,
+                actor_id: Some(operator.operator.id),
+            },
+        ])
+        .await
+        .unwrap();
+
+    repo.delete_webhook_rule(rule_id, &operator).await.unwrap();
+
+    assert!(repo.list_webhook_rules(20, None).await.unwrap().is_empty());
+    let retained = repo
+        .list_webhook_rule_deliveries(20, Some(rule_id), None, None)
+        .await
+        .unwrap();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].id, created[0].id);
+    assert_eq!(retained[0].status, "canceled_disabled");
+    assert_eq!(retained[0].error.as_deref(), Some("webhook rule deleted"));
+    assert!(repo
+        .claim_webhook_rule_deliveries_for_process(&[created[0].id], Uuid::new_v4(), 60)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]

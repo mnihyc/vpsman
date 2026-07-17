@@ -212,6 +212,31 @@ async fn disable_waits_for_current_cleanup_and_tombstones_cannot_reapply() {
 }
 
 #[tokio::test]
+async fn deleting_never_enabled_draft_requires_no_agent_cleanup_evidence() {
+    let repo = port_forward_repo().await;
+    let operator = port_forward_operator();
+    let draft = repo
+        .create_port_forward_rule(
+            &create_request("unsupported-draft", "8443", "443", false),
+            &operator,
+        )
+        .await
+        .unwrap();
+
+    let deleted = repo
+        .delete_port_forward_rule(draft.id, draft.revision, None, &operator)
+        .await
+        .unwrap();
+
+    assert!(deleted.removal_confirmed_at.is_some());
+    assert!(repo.list_port_forward_rules().await.unwrap().is_empty());
+    assert!(!repo
+        .port_forwarding_blocks_agent_delete("edge-a")
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
 async fn rejected_memory_bulk_mutation_rolls_back_every_rule() {
     let repo = port_forward_repo().await;
     let operator = port_forward_operator();

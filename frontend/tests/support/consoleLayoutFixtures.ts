@@ -4248,6 +4248,37 @@ export async function installConsoleApiMock(
             updated_at: "2026-06-02T10:02:00Z",
           });
         }
+        const notificationChannelMatch = pathname.match(
+          /^\/api\/v1\/fleet-alert-notification-channels\/([^/]+)$/,
+        );
+        if (notificationChannelMatch && method === "DELETE") {
+          const channelId = decodeURIComponent(notificationChannelMatch[1]);
+          const channelIndex = (
+            fleetAlertNotificationChannelsFixture as Array<
+              Record<string, unknown>
+            >
+          ).findIndex((channel) => channel.id === channelId);
+          if (channelIndex >= 0) {
+            fleetAlertNotificationChannelsFixture.splice(channelIndex, 1);
+          }
+          for (const delivery of fleetAlertNotificationsFixture as Array<
+            Record<string, unknown>
+          >) {
+            if (
+              delivery.channel_id === channelId &&
+              ["queued", "failed", "in_progress"].includes(
+                String(delivery.status),
+              )
+            ) {
+              delivery.status = "canceled_disabled";
+              delivery.error = "fleet alert notification channel deleted";
+              delivery.next_attempt_at = null;
+              delivery.delivered_at = null;
+            }
+          }
+          requests.fleetAlertNotificationChannels.push({ delete: channelId });
+          return jsonResponse({ deleted: true, id: channelId });
+        }
         if (
           pathname === "/api/v1/fleet-alert-notifications" &&
           method === "GET"
@@ -4317,7 +4348,7 @@ export async function installConsoleApiMock(
             clear_signing_secret: _clear,
             ...redactedBody
           } = body;
-          return jsonResponse({
+          const storedRule = {
             ...redactedBody,
             actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
             created_at: "2026-06-02T10:04:00Z",
@@ -4327,7 +4358,16 @@ export async function installConsoleApiMock(
                 : "adadadad-1111-4111-8111-111111111111",
             signing_secret_set: signingSecretSet,
             updated_at: "2026-06-02T10:04:00Z",
-          });
+          };
+          const storedIndex = webhookRulesFixture.findIndex(
+            (rule: Record<string, unknown>) => rule.id === storedRule.id,
+          );
+          if (storedIndex >= 0) {
+            webhookRulesFixture.splice(storedIndex, 1, storedRule);
+          } else {
+            webhookRulesFixture.push(storedRule);
+          }
+          return jsonResponse(storedRule);
         }
         if (pathname === "/api/v1/webhook-rules/dry-run" && method === "POST") {
           const body = (await readJsonBody(input, init)) as Record<
@@ -4380,6 +4420,27 @@ export async function installConsoleApiMock(
         );
         if (webhookRuleMatch && method === "DELETE") {
           const ruleId = decodeURIComponent(webhookRuleMatch[1]);
+          const ruleIndex = (
+            webhookRulesFixture as Array<Record<string, unknown>>
+          ).findIndex((rule) => rule.id === ruleId);
+          if (ruleIndex >= 0) {
+            webhookRulesFixture.splice(ruleIndex, 1);
+          }
+          for (const delivery of webhookDeliveriesFixture as Array<
+            Record<string, unknown>
+          >) {
+            if (
+              delivery.rule_id === ruleId &&
+              ["queued", "failed", "in_progress"].includes(
+                String(delivery.status),
+              )
+            ) {
+              delivery.status = "canceled_disabled";
+              delivery.error = "webhook rule deleted";
+              delivery.next_attempt_at = null;
+              delivery.delivered_at = null;
+            }
+          }
           requests.webhookRules.push({ delete: ruleId });
           return jsonResponse({ deleted: true, id: ruleId });
         }
@@ -6187,7 +6248,11 @@ export async function installConsoleApiMock(
           });
         }
         if (pathname === "/api/v1/port-forward-rules" && method === "GET") {
-          return jsonResponse(mutablePortForwardRules);
+          return jsonResponse(
+            mutablePortForwardRules.filter(
+              (rule) => !(rule.deleted_at && rule.removal_confirmed_at),
+            ),
+          );
         }
         if (pathname === "/api/v1/port-forward-rules" && method === "POST") {
           const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
@@ -6240,9 +6305,19 @@ export async function installConsoleApiMock(
               : [],
           );
           const affectedClients = new Set<string>();
+          const immediateRetiredClients = new Set<string>();
           mutablePortForwardRules = mutablePortForwardRules.flatMap((rule) => {
             if (!selected.has(rule.id)) return [rule];
-            affectedClients.add(rule.client_id);
+            const retireImmediately =
+              action === "delete" &&
+              !rule.enabled &&
+              rule.revision === 1 &&
+              !rule.deleted_at;
+            if (retireImmediately) {
+              immediateRetiredClients.add(rule.client_id);
+            } else {
+              affectedClients.add(rule.client_id);
+            }
             if (action === "reapply") return [rule];
             const next = {
               ...rule,
@@ -6258,21 +6333,38 @@ export async function installConsoleApiMock(
                 action === "delete" ? "removal_pending" : "pending",
               updated_at: "2026-06-02T10:11:00Z",
               ...(action === "delete"
-                ? { deleted_at: "2026-06-02T10:11:00Z" }
+                ? {
+                    deleted_at: "2026-06-02T10:11:00Z",
+                    removal_confirmed_at: retireImmediately
+                      ? "2026-06-02T10:11:00Z"
+                      : null,
+                  }
                 : {}),
             };
             return [next];
           });
           return jsonResponse({
             rules: mutablePortForwardRules.filter((rule) => selected.has(rule.id)),
-            sync: [...affectedClients].map((clientId, index) => ({
-              client_id: clientId,
-              sync: {
-                error: null,
-                job_id: `4f100000-0000-4000-8000-${String(index + 20).padStart(12, "0")}`,
-                status: "queued",
-              },
-            })),
+            sync: [
+              ...[...affectedClients].map((clientId, index) => ({
+                client_id: clientId,
+                sync: {
+                  error: null,
+                  job_id: `4f100000-0000-4000-8000-${String(index + 20).padStart(12, "0")}`,
+                  status: "queued",
+                },
+              })),
+              ...[...immediateRetiredClients]
+                .filter((clientId) => !affectedClients.has(clientId))
+                .map((clientId) => ({
+                  client_id: clientId,
+                  sync: {
+                    error: null,
+                    job_id: null,
+                    status: "retired_disabled_draft",
+                  },
+                })),
+            ],
           });
         }
         const portForwardRuleMatch = pathname.match(
@@ -6289,6 +6381,11 @@ export async function installConsoleApiMock(
           if (Number(body.expected_revision) !== current.revision) {
             return jsonResponse({ code: "port_forward_rule_snapshot_stale" }, 409);
           }
+          const retireImmediately =
+            operation === "delete" &&
+            !current.enabled &&
+            current.revision === 1 &&
+            !current.deleted_at;
           const enabled =
             operation === "enable"
               ? true
@@ -6314,7 +6411,12 @@ export async function installConsoleApiMock(
                   : "pending",
             updated_at: "2026-06-02T10:12:00Z",
             ...(operation === "delete"
-              ? { deleted_at: "2026-06-02T10:12:00Z" }
+              ? {
+                  deleted_at: "2026-06-02T10:12:00Z",
+                  removal_confirmed_at: retireImmediately
+                    ? "2026-06-02T10:12:00Z"
+                    : null,
+                }
               : {}),
             ...(operation === "forget"
               ? { forgotten_at: "2026-06-02T10:12:00Z" }
@@ -6330,12 +6432,14 @@ export async function installConsoleApiMock(
             sync: {
               error: null,
               job_id:
-                operation === "forget"
+                operation === "forget" || retireImmediately
                   ? null
                   : "4f100000-0000-4000-8000-000000000002",
               status:
                 operation === "forget"
                   ? "forgotten_without_host_cleanup"
+                  : retireImmediately
+                    ? "retired_disabled_draft"
                   : "queued",
             },
           });

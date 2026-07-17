@@ -477,7 +477,7 @@ export function RemoteOperationsPanel({
             />
             {processComposerPreset ? (
               <ConsoleDetailPanel
-                description="Start a process or read logs on the preselected VPS without leaving the process workspace."
+                description="Start a process or read logs on the selected VPS without leaving the process workspace."
                 onClose={() => setProcessComposerPreset(null)}
                 title="Process operation"
               >

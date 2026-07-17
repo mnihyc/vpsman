@@ -93,6 +93,7 @@ export function FleetGroupsPanel({
 }) {
   const subpage = ["registry", "assignments", "bulk"].includes(activeSubpage) ? activeSubpage : "registry";
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionStatus, setActionStatus] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [lastMutation, setLastMutation] = useState<TagMutationResponse | null>(null);
   const groupSummary = useMemo(() => buildGroupSummary(tags, agents), [agents, tags]);
@@ -104,10 +105,16 @@ export function FleetGroupsPanel({
   const groupsPageFeedbackTone = error ? "danger" : "progress";
   const groupsActionFeedbackMessage =
     actionError ??
+    actionStatus ??
     (lastMutation
       ? `Group ${lastMutation.tag}: ${lastMutation.changed_count} changed, ${lastMutation.skipped_count} skipped`
       : null);
   const groupsActionFeedbackTone = actionError ? "danger" : "success";
+  const runGroupAction = (action: () => Promise<void>) => {
+    setActionStatus(null);
+    setLastMutation(null);
+    return runPanelAction(setPending, setActionError, action);
+  };
 
   return (
     <section className="workspace singleColumn">
@@ -139,7 +146,8 @@ export function FleetGroupsPanel({
             onUpdateTagOrder={onUpdateTagOrder}
             pending={pending}
             privilegeMaterial={privilegeMaterial}
-            runAction={(action) => runPanelAction(setPending, setActionError, action)}
+            runAction={runGroupAction}
+            setActionStatus={setActionStatus}
             setLastMutation={setLastMutation}
             summary={groupSummary}
             tags={tags}
@@ -154,7 +162,7 @@ export function FleetGroupsPanel({
             onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
             pending={pending}
             privilegeMaterial={privilegeMaterial}
-            runAction={(action) => runPanelAction(setPending, setActionError, action)}
+            runAction={runGroupAction}
             schedules={schedules}
             setLastMutation={setLastMutation}
             tags={tags}
@@ -171,7 +179,7 @@ export function FleetGroupsPanel({
             onResolveBulk={onResolveBulk}
             pending={pending}
             privilegeMaterial={privilegeMaterial}
-            runAction={(action) => runPanelAction(setPending, setActionError, action)}
+            runAction={runGroupAction}
             setLastMutation={setLastMutation}
             tags={tags}
           />
@@ -197,11 +205,11 @@ function GroupSummaryStrip({ summary }: { summary: GroupSummary }) {
     <div className="groupSummaryStrip" aria-label="Fleet group counts">
       <span>
         <strong>{summary.providerGroupCount}</strong>
-        <small>provider metadata</small>
+        <small>provider groups</small>
       </span>
       <span>
         <strong>{summary.countryGroupCount}</strong>
-        <small>country metadata</small>
+        <small>country groups</small>
       </span>
       <span>
         <strong>{summary.customGroupCount}</strong>
@@ -276,8 +284,8 @@ function groupKind(tag: string): "country" | "custom" | "provider" {
 
 function groupKindLabel(tag: string) {
   const kind = groupKind(tag);
-  if (kind === "provider") return "Provider metadata";
-  if (kind === "country") return "Country metadata";
+  if (kind === "provider") return "Provider group";
+  if (kind === "country") return "Country group";
   return "Operator group";
 }
 
@@ -288,12 +296,12 @@ function groupKindTone(tag: string) {
 function groupKindDetail(tag: string) {
   const kind = groupKind(tag);
   if (kind === "provider") {
-    return "Managed from VPS provider metadata; useful for scoped filters.";
+    return "Structured provider group for scoped filters and recurring targets.";
   }
   if (kind === "country") {
-    return "Managed from VPS location metadata; useful for regional targeting.";
+    return "Structured country group for regional filters and recurring targets.";
   }
-  return "Created by operators for recurring VPS targeting.";
+  return "Custom group for recurring VPS targeting.";
 }
 
 function groupDisplayName(tag: string) {
@@ -503,6 +511,7 @@ function TagRegistry({
   pending,
   privilegeMaterial,
   runAction,
+  setActionStatus,
   setLastMutation,
   summary,
   tags,
@@ -520,6 +529,7 @@ function TagRegistry({
   pending: boolean;
   privilegeMaterial: PrivilegeMaterial | null;
   runAction: (action: () => Promise<void>) => Promise<void>;
+  setActionStatus: (status: string | null) => void;
   setLastMutation: (response: TagMutationResponse | null) => void;
   summary: GroupSummary;
   tags: TagView[];
@@ -548,6 +558,7 @@ function TagRegistry({
       await onCreateTag(tag, privilegeAssertion);
       setTagName("");
       setLastMutation(null);
+      setActionStatus(`Created group ${tag}`);
     });
   }
 
@@ -648,8 +659,8 @@ function TagRegistry({
       <form className="compactForm tagCreateForm" onSubmit={submitTag}>
         <strong>Create group</strong>
         <span className="formHint">
-          Add one operator-managed group per submission. Provider and country
-          metadata are read from VPS records.
+          Add one fleet group per submission. Use provider: and country:
+          prefixes for structured targeting.
         </span>
         <div className="formRow">
           <input
@@ -714,7 +725,7 @@ function TagRegistry({
           },
         ]}
         rows={tags}
-        searchPlaceholder="Search groups or metadata"
+        searchPlaceholder="Search groups or namespaces"
         selectable={false}
         storageKey="vpsman.tags.registry"
         title="Group registry"
@@ -727,7 +738,7 @@ function TagRegistry({
       />
       <ConfirmationPrompt
         confirmLabel="Delete group"
-        detail="Delete this group and remove it from assigned VPSs. Managed metadata can reappear when VPS records report it again."
+        detail="Delete this group and remove it from assigned VPSs. Recreate and reassign it to use the group again."
         items={[
           { label: "Group", value: deleteCandidate?.name ?? "-" },
           {
@@ -1057,19 +1068,6 @@ function TagAssignments({
               const dependencies = groupDependencySummary(tag, schedules, fleetAlertPolicies);
               const dependencyLabel = dependencySummaryText(dependencies);
               const hasDependencies = dependencies.total > 0;
-              if (groupKind(tag) !== "custom") {
-                return (
-                  <span
-                    className="tagRemoveChip managed"
-                    key={tag}
-                    title={`${groupKindLabel(tag)}. ${dependencyLabel}`}
-                  >
-                    <ShieldCheck size={12} />
-                    <span>{tag}</span>
-                    {hasDependencies && <small>{dependencyLabel}</small>}
-                  </span>
-                );
-              }
               return (
                 <button
                   aria-label={`Remove ${tag} from ${formatVpsName(agent, vpsNameDisplayMode)}`}
@@ -1080,7 +1078,7 @@ function TagAssignments({
                     event.stopPropagation();
                     void removeTag(agent, tag);
                   }}
-                  title={`Remove ${tag}. ${dependencyLabel}`}
+                  title={`Remove ${tag} (${groupKindLabel(tag).toLowerCase()}). ${dependencyLabel}`}
                   type="button"
                 >
                   <span>{tag}</span>
@@ -1367,11 +1365,11 @@ function BulkTagPanel({
     setConfirmOpen(false);
     await runAction(async () => {
       if (!snapshot) {
-        throw new Error("Tag mutation confirmation snapshot is missing; preview the mutation again");
+        throw new Error("Group mutation confirmation snapshot is missing; preview the mutation again");
       }
       if (!privilegeMaterial) {
         onOpenPrivilegeUnlock();
-        throw new Error("Privilege unlock is required before bulk tag mutation");
+        throw new Error("Privilege unlock is required before bulk group mutation");
       }
       if (snapshot.action === "delete") {
         const targetIds = snapshot.preview.affected.map((client) => client.id);
@@ -1429,26 +1427,26 @@ function BulkTagPanel({
   return (
     <div className="configApplyGrid bulkTagApplyGrid">
       <div className="compactForm bulkTagMutationForm">
-        <strong>Bulk tag mutation</strong>
+        <strong>Bulk group mutation</strong>
         <label>
           <span>Mutation</span>
           <select
-            aria-label="Bulk tag action"
+            aria-label="Bulk group action"
             onChange={(event) => {
               setAction(event.target.value as "add" | "remove" | "delete");
               clearMutationPreview();
             }}
             value={action}
           >
-            <option value="add">Add tag by selector</option>
-            <option value="remove">Remove tag by selector</option>
-            <option value="delete">Delete tag globally</option>
+            <option value="add">Add group by selector</option>
+            <option value="remove">Remove group by selector</option>
+            <option value="delete">Delete group globally</option>
           </select>
         </label>
         <label>
-          <span>Tag</span>
+          <span>Group</span>
           <input
-            aria-label="Bulk tag"
+            aria-label="Bulk group"
             list="bulk-tag-options"
             onChange={(event) => {
               setTag(event.target.value);
@@ -1467,7 +1465,7 @@ function BulkTagPanel({
           <>
             <SearchExpressionInput
               agents={agents}
-              ariaLabel="Bulk tag selector expression"
+              ariaLabel="Bulk group selector expression"
               className="targetExpressionBar"
               onChange={(value) => {
                 setSelectorExpression(value);
@@ -1543,7 +1541,7 @@ function BulkTagPanel({
         />
       </div>
       {preview && (
-        <section className="bulkTagPreviewPanel" aria-label="Bulk tag target preview">
+        <section className="bulkTagPreviewPanel" aria-label="Bulk group target preview">
           <div className="bulkTagPreviewHeader">
             <div>
               <strong>Server preview</strong>
@@ -1593,7 +1591,7 @@ function BulkTagPanel({
         detail={confirmationSnapshot?.action === "delete" ? "Delete this tag and all assignments." : "Apply this selector-based tag mutation."}
         items={[
           { label: "Action", value: confirmationSnapshot?.action ?? action },
-          { label: "Tag", value: confirmationSnapshot?.tag || tag || "-" },
+          { label: "Group", value: confirmationSnapshot?.tag || tag || "-" },
           {
             label: "Selector",
             value:

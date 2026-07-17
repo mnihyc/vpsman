@@ -20,6 +20,10 @@ test("shows restart and desired-only limit evidence in process supervisor invent
   const grid = inventory.getByLabel("Process health inventory data");
   const summary = inventory.getByLabel("Process supervisor health summary");
   const startProcess = inventory.getByRole("button", { name: "Start process", exact: true });
+  await expect(startProcess).toBeDisabled();
+  await inventory.getByLabel("Process target VPS").fill("edge-sfo-01");
+  await page.getByRole("option", { name: /edge-sfo-01/ }).click();
+  await expect(startProcess).toBeEnabled();
   await expect(startProcess).toHaveCSS("color", "rgb(255, 255, 255)");
   await expect(startProcess.locator("span")).toHaveCSS("color", "rgb(255, 255, 255)");
   await expect(grid.getByText("ospf-worker")).toBeVisible();
@@ -168,8 +172,16 @@ test("reviews the exact process start command without exposing environment value
   await openConsoleSubpage(page, "Remote Operations", "Processes");
 
   const inventory = page.locator(".fleetPanel", { hasText: "Process supervisor inventory" });
+  await expect(
+    inventory.getByRole("button", { name: "Start process", exact: true }),
+  ).toBeDisabled();
+  await inventory.getByLabel("Process target VPS").fill("edge-sfo-01");
+  await page.getByRole("option", { name: /edge-sfo-01/ }).click();
   await activate(inventory.getByRole("button", { name: "Start process", exact: true }));
   const composer = page.locator(".consoleDetailPanel", { hasText: "Process operation" });
+  await expect(
+    composer.getByLabel("Bulk target selector expression"),
+  ).toHaveValue("id:agent-sfo-01");
   await composer.getByLabel("Supervisor process name").fill("report-worker");
   await composer
     .getByLabel("Supervisor command argv")

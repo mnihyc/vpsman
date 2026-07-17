@@ -235,7 +235,7 @@ async fn process_queued_deliveries(
                     } else {
                         FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_PERMANENTLY_FAILED
                     },
-                    Some(truncate_error(&error.to_string())),
+                    Some(format_delivery_error(&error)),
                     next_attempt_after_secs,
                 )
             }
@@ -527,6 +527,10 @@ fn truncate_error(error: &str) -> String {
     error.chars().take(MAX_ERROR_BYTES).collect()
 }
 
+fn format_delivery_error(error: &anyhow::Error) -> String {
+    truncate_error(&format!("{error:#}"))
+}
+
 fn next_retry_after_secs(attempt_count: i32) -> Option<i64> {
     let next_attempt_count = attempt_count.saturating_add(1);
     if next_attempt_count >= MAX_DELIVERY_ATTEMPTS {
@@ -580,5 +584,14 @@ mod tests {
     fn delivery_error_is_bounded() {
         let error = "x".repeat(MAX_ERROR_BYTES + 100);
         assert_eq!(truncate_error(&error).len(), MAX_ERROR_BYTES);
+    }
+
+    #[test]
+    fn delivery_error_keeps_nested_transport_cause() {
+        let error = anyhow::anyhow!("connection refused").context("webhook request failed");
+        assert_eq!(
+            format_delivery_error(&error),
+            "webhook request failed: connection refused"
+        );
     }
 }

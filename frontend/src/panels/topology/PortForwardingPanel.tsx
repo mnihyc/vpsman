@@ -858,15 +858,23 @@ function utf8ByteLength(value: string) {
 function syncFeedback(response: PortForwardMutationResponse, success: string): FeedbackContent {
   if (response.sync.status === "queue_failed" || response.sync.status === "not_queued") return { message: `${success}; desired state saved, but apply was not queued: ${dispatchFailureReason(response.sync.error, response.sync.status, "Port-forward apply job")}`, tone: "warning" };
   if (response.sync.status === "queued") return { message: `${success}; apply job ${shortId(response.sync.job_id ?? "")} queued`, tone: "progress" };
+  if (["already_in_requested_state", "forgotten_without_host_cleanup", "retired_disabled_draft", "saved_disabled"].includes(response.sync.status)) {
+    return { message: `${success}; no host apply required`, tone: "success" };
+  }
   return { message: success, tone: "success" };
 }
 
 function bulkSyncFeedback(response: PortForwardBulkResponse, action: PortForwardBulkAction, count: number): FeedbackContent {
-  const failed = response.sync.filter((item) => item.sync.status !== "queued");
+  const failed = response.sync.filter((item) => ["queue_failed", "not_queued"].includes(item.sync.status));
+  const queued = response.sync.filter((item) => item.sync.status === "queued").length;
   const pastAction = action === "reapply" ? "reapplied" : `${action}d`;
-  return failed.length > 0
-    ? { message: `${count} rules ${pastAction}; desired state saved, ${failed.length} VPS apply${failed.length === 1 ? "" : "s"} not queued: ${failed.map((item) => `${item.client_id}: ${dispatchFailureReason(item.sync.error, item.sync.status, "Port-forward apply job")}`).join("; ")}`, tone: "warning" }
-    : { message: `${count} rules ${pastAction}; ${response.sync.length} VPS apply job${response.sync.length === 1 ? "" : "s"} queued`, tone: "progress" };
+  if (failed.length > 0) {
+    return { message: `${count} rules ${pastAction}; desired state saved, ${failed.length} VPS apply${failed.length === 1 ? "" : "s"} not queued: ${failed.map((item) => `${item.client_id}: ${dispatchFailureReason(item.sync.error, item.sync.status, "Port-forward apply job")}`).join("; ")}`, tone: "warning" };
+  }
+  if (queued > 0) {
+    return { message: `${count} rules ${pastAction}; ${queued} VPS apply job${queued === 1 ? "" : "s"} queued`, tone: "progress" };
+  }
+  return { message: `${count} rules ${pastAction}; no host apply required`, tone: "success" };
 }
 
 function actionProgressLabel(snapshot: ConfirmationState) {
@@ -897,11 +905,29 @@ function confirmationLabel(state: ConfirmationState | null) {
 function confirmationDetail(state: ConfirmationState | null) {
   if (!state) return "Review the current action.";
   if (state.kind === "save") return "This saves desired state and replaces the VPS's complete vpsman-owned nftables table atomically. Claimed ports take precedence over conventional Docker or system DNAT for new connections.";
-  if (state.kind === "single" && state.operation === "delete") return "The rule is omitted from desired state immediately and remains visible as Removal pending until the agent confirms cleanup. Existing conntrack entries may continue.";
+  if (state.kind === "single" && state.operation === "delete") {
+    return isNeverAppliedDisabledDraft(state.rule)
+      ? "This disabled draft has never been applied. It is removed immediately; no agent cleanup or apply job is required."
+      : "The rule is omitted from desired state immediately and remains visible as Removal pending until the agent confirms cleanup. Existing conntrack entries may continue.";
+  }
   if (state.kind === "single" && state.operation === "forget") return "This removes the cleanup tombstone without confirming host state. Use it only for a permanently unreachable or decommissioned VPS; nftables state may remain on that host.";
   if (state.kind === "single" && state.operation === "reapply") return "Reapply replaces this VPS's complete vpsman-owned forwarding table. It does not change system, Docker, or unrelated nftables tables.";
+  if (state.kind === "bulk" && state.action === "delete") {
+    const immediateDrafts = state.rules.filter(isNeverAppliedDisabledDraft).length;
+    const cleanupRules = state.rules.length - immediateDrafts;
+    if (cleanupRules === 0) {
+      return `This removes ${immediateDrafts} never-applied disabled draft${immediateDrafts === 1 ? "" : "s"} immediately. No agent cleanup or apply job is required.`;
+    }
+    if (immediateDrafts > 0) {
+      return `${immediateDrafts} never-applied disabled draft${immediateDrafts === 1 ? "" : "s"} will be removed immediately. ${cleanupRules} rule${cleanupRules === 1 ? "" : "s"} will remain Removal pending until the affected agents confirm cleanup.`;
+    }
+  }
   if (state.kind === "bulk") return `This applies one ${state.action} decision to ${state.rules.length} exact rule revisions and reconciles each affected VPS once.`;
   return "This updates desired state and queues an atomic apply for the affected VPS.";
+}
+
+function isNeverAppliedDisabledDraft(rule: PortForwardRuleRecord) {
+  return !rule.enabled && rule.revision === 1 && !rule.deleted_at;
 }
 
 function confirmationItems(state: ConfirmationState | null, agents: Map<string, AgentView>) {

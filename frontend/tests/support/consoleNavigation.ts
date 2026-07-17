@@ -3,6 +3,7 @@ import { defaultSubpages, viewLabel, viewSubpages } from "../../src/constants";
 import type { ActiveView } from "../../src/types";
 
 const WORKSPACE_ROUTE_READY_TIMEOUT_MS = 60_000;
+const CONSOLE_SHELL_LOAD_ATTEMPTS = 3;
 
 export async function activate(locator: Locator) {
   await expect(locator).toBeVisible({ timeout: 10_000 });
@@ -15,8 +16,15 @@ export async function waitForConsoleShell(page: Page, timeout = 10_000) {
     await reloadConsole(page);
   }
   let lastError: unknown;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  let startupRecoveryUsed = false;
+  for (let attempt = 0; attempt < CONSOLE_SHELL_LOAD_ATTEMPTS; attempt += 1) {
     try {
+      if (
+        await recoverTransientStartupFailure(page, !startupRecoveryUsed)
+      ) {
+        startupRecoveryUsed = true;
+        continue;
+      }
       if (await isOperatorAccessVisible(page)) {
         if (await loginMockConsoleSession(page)) {
           return;
@@ -37,7 +45,16 @@ export async function waitForConsoleShell(page: Page, timeout = 10_000) {
           "Console shell is unavailable because the authenticated session was lost",
         );
       }
-      if (attempt === 0 && (await isBlankConsoleDocument(page))) {
+      if (
+        await recoverTransientStartupFailure(page, !startupRecoveryUsed)
+      ) {
+        startupRecoveryUsed = true;
+        continue;
+      }
+      if (
+        attempt + 1 < CONSOLE_SHELL_LOAD_ATTEMPTS &&
+        (await isBlankConsoleDocument(page))
+      ) {
         await reloadConsole(page);
         continue;
       }
@@ -45,6 +62,36 @@ export async function waitForConsoleShell(page: Page, timeout = 10_000) {
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+async function recoverTransientStartupFailure(
+  page: Page,
+  allowRecovery: boolean,
+) {
+  const recovery = page.locator("#boot-recovery[data-state=error]");
+  if (!(await recovery.isVisible().catch(() => false))) {
+    return false;
+  }
+
+  const detail =
+    (await recovery.locator("#boot-error").textContent().catch(() => null))
+      ?.trim() ?? "";
+  const transient =
+    /failed to fetch dynamically imported module/i.test(detail) ||
+    /error loading dynamically imported module/i.test(detail) ||
+    /importing a module script failed/i.test(detail) ||
+    /unable to preload (?:css|module)/i.test(detail) ||
+    /console startup timed out/i.test(detail) ||
+    /^load failed$/i.test(detail);
+  if (!transient || !allowRecovery) {
+    throw new Error(
+      `Console startup failed${detail ? `: ${detail}` : " without technical details"}`,
+    );
+  }
+
+  await recovery.getByRole("link", { name: "Reload console" }).click();
+  await page.waitForLoadState("domcontentloaded").catch(() => undefined);
+  return true;
 }
 
 async function isOperatorAccessVisible(page: Page) {

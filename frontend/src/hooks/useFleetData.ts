@@ -599,9 +599,6 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       setWebhookRules((current) =>
         current.filter((rule) => rule.id !== ruleId),
       );
-      setWebhookRuleDeliveries((current) =>
-        current.filter((delivery) => delivery.rule_id !== ruleId),
-      );
       await loadFleet();
     },
     [apiToken, loadFleet],

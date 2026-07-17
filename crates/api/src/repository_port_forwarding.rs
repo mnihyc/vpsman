@@ -330,13 +330,15 @@ impl Repository {
                         record.revision == expected_revision,
                         "port_forward_rule_snapshot_stale"
                     );
+                    let retire_immediately = is_never_applied_disabled_draft(record);
                     record.enabled = false;
                     record.revision += 1;
                     record.updated_at = unix_now().to_string();
                     record.deleted_at = Some(record.updated_at.clone());
                     record.deleted_by = persisted_actor_id(operator);
                     record.deleted_reason = reason;
-                    record.removal_confirmed_at = None;
+                    record.removal_confirmed_at =
+                        retire_immediately.then(|| record.updated_at.clone());
                     record.clone()
                 };
                 memory.audits.write().await.push(port_forward_audit_view(
@@ -360,6 +362,7 @@ impl Repository {
                     current.revision == expected_revision,
                     "port_forward_rule_snapshot_stale"
                 );
+                let retire_immediately = is_never_applied_disabled_draft(&current);
                 let row = sqlx::query(
                     r#"
                     UPDATE port_forward_rules
@@ -368,7 +371,7 @@ impl Repository {
                         deleted_at = now(),
                         deleted_by = $3,
                         deleted_reason = $4,
-                        removal_confirmed_at = NULL,
+                        removal_confirmed_at = CASE WHEN $5 THEN now() ELSE NULL END,
                         updated_at = now()
                     WHERE id = $1 AND revision = $2 AND deleted_at IS NULL
                     RETURNING id, actor_id, client_id, name, protocol,
@@ -383,6 +386,7 @@ impl Repository {
                 .bind(expected_revision)
                 .bind(persisted_actor_id(operator))
                 .bind(reason)
+                .bind(retire_immediately)
                 .fetch_optional(&mut *tx)
                 .await?
                 .context("port_forward_rule_snapshot_stale")?;
@@ -665,7 +669,7 @@ impl Repository {
                             deleted_at = CASE WHEN $5 THEN now() ELSE NULL END,
                             deleted_by = $6,
                             deleted_reason = $7,
-                            removal_confirmed_at = NULL,
+                            removal_confirmed_at = CASE WHEN $8 THEN now() ELSE NULL END,
                             updated_at = now()
                         WHERE id = $1 AND revision = $2
                         "#,
@@ -677,6 +681,7 @@ impl Repository {
                     .bind(matches!(action, PortForwardBulkAction::Delete))
                     .bind(candidate.deleted_by)
                     .bind(&candidate.deleted_reason)
+                    .bind(candidate.removal_confirmed_at.is_some())
                     .execute(&mut *tx)
                     .await?;
                     anyhow::ensure!(
@@ -1097,6 +1102,7 @@ fn apply_bulk_action(
     operator: &AuthContext,
 ) -> Result<()> {
     anyhow::ensure!(record.deleted_at.is_none(), "port_forward_rule_not_active");
+    let retire_immediately = is_never_applied_disabled_draft(record);
     record.actor_id = persisted_actor_id(operator);
     record.revision += 1;
     record.updated_at = now.to_string();
@@ -1108,11 +1114,15 @@ fn apply_bulk_action(
             record.deleted_at = Some(now.to_string());
             record.deleted_by = persisted_actor_id(operator);
             record.deleted_reason = normalize_reason(reason);
-            record.removal_confirmed_at = None;
+            record.removal_confirmed_at = retire_immediately.then(|| now.to_string());
         }
         PortForwardBulkAction::Reapply => unreachable!("reapply does not mutate records"),
     }
     Ok(())
+}
+
+fn is_never_applied_disabled_draft(record: &PortForwardRuleRecord) -> bool {
+    !record.enabled && record.revision == 1 && record.deleted_at.is_none()
 }
 
 fn validate_bulk_snapshots(

@@ -486,7 +486,11 @@ test("invalid subpage hashes replace the URL with the rendered canonical route",
 
   await expect(page).toHaveURL(/#\/fleet\/instances$/);
   await expect(
-    page.getByRole("heading", { name: "Fleet instances", exact: true }),
+    page.getByRole("heading", {
+      name: "Fleet instances",
+      exact: true,
+      level: 1,
+    }),
   ).toBeVisible();
 });
 
@@ -500,7 +504,11 @@ test("visible navigation labels use readable canonical routes", async ({
   });
   await expect(page).toHaveURL(/#\/fleet\/assignments$/);
   await expect(
-    page.getByRole("heading", { name: "Group assignments", exact: true }),
+    page.getByRole("heading", {
+      name: "Group assignments",
+      exact: true,
+      level: 1,
+    }),
   ).toBeVisible();
 
   await page.evaluate(() => {
@@ -508,7 +516,11 @@ test("visible navigation labels use readable canonical routes", async ({
   });
   await expect(page).toHaveURL(/#\/remote\/terminal$/);
   await expect(
-    page.getByRole("heading", { name: "Terminal", exact: true }),
+    page.getByRole("heading", {
+      name: "Terminal",
+      exact: true,
+      level: 1,
+    }),
   ).toBeVisible();
 });
 
@@ -1875,22 +1887,22 @@ test("fleet groups expose registry assignments and reviewed bulk mutation eviden
   await expect(page.getByText("Group registry")).toBeVisible();
   await expect(page.getByLabel("Group registry search")).toBeVisible();
   await expect(page.getByLabel("Fleet group counts")).toContainText(
-    "provider metadata",
+    "provider groups",
   );
   await expect(
     page
       .getByLabel("Fleet group counts")
       .locator("span")
-      .filter({ hasText: "provider metadata" }),
+      .filter({ hasText: "provider groups" }),
   ).toContainText("1");
   await expect(page.getByLabel("Fleet group counts")).toContainText(
-    "country metadata",
+    "country groups",
   );
   await expect(
     page
       .getByLabel("Fleet group counts")
       .locator("span")
-      .filter({ hasText: "country metadata" }),
+      .filter({ hasText: "country groups" }),
   ).toContainText("2");
   await expect(page.getByLabel("Fleet group counts")).toContainText(
     "operator groups",
@@ -1948,22 +1960,20 @@ test("fleet groups expose registry assignments and reviewed bulk mutation eviden
   ).toHaveCount(0);
   await expect(
     sfoAssignmentRow
-      .locator(".tagRemoveChip.managed")
-      .filter({ hasText: "provider:alpha" }),
+      .getByRole("button", { name: "Remove provider:alpha" }),
   ).toBeVisible();
   await expect(
     sfoAssignmentRow
-      .locator(".tagRemoveChip.managed")
-      .filter({ hasText: "country:US" }),
+      .getByRole("button", { name: "Remove country:US" }),
   ).toBeVisible();
   await expect(
     page.getByRole("button", {
       name: "Remove provider:alpha from edge-sfo-01",
     }),
-  ).toHaveCount(0);
+  ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Remove country:US from edge-sfo-01" }),
-  ).toHaveCount(0);
+  ).toBeVisible();
   await expect(sfoAssignmentRow).toContainText("Used by 1 schedule");
   await expect(sfoAssignmentRow).toContainText("Suggestions: edge (2 VPSs)");
   await expect(
@@ -2012,15 +2022,15 @@ test("fleet groups expose registry assignments and reviewed bulk mutation eviden
   await expect(
     page.getByRole("heading", { level: 1, name: "Bulk groups" }),
   ).toBeVisible();
-  await page.getByLabel("Bulk tag", { exact: true }).fill("maintenance:test");
-  await expect(page.getByLabel("Bulk tag target preview")).toHaveCount(0);
+  await page.getByLabel("Bulk group", { exact: true }).fill("maintenance:test");
+  await expect(page.getByLabel("Bulk group target preview")).toHaveCount(0);
   await page
-    .getByRole("searchbox", { name: "Bulk tag selector expression" })
+    .getByRole("searchbox", { name: "Bulk group selector expression" })
     .fill("id:agent-sfo-01");
   const selectorStatus = page
     .locator(".searchExpressionInput", {
       has: page.getByRole("searchbox", {
-        name: "Bulk tag selector expression",
+        name: "Bulk group selector expression",
       }),
     })
     .locator(".searchExpressionMeta");
@@ -2317,7 +2327,11 @@ test("fleet instance detail is the canonical VPS route from release workflows", 
       "Expand Fleet alerts row fleet-alert-network-agent-fra-02-tun0",
     ),
   );
-  await activate(page.getByRole("button", { name: "Open VPS detail" }));
+  await activate(
+    page
+      .locator(".fleetAlertDetail")
+      .getByRole("button", { name: "Open VPS detail" }),
+  );
   await expectCanonicalVpsDetail(page, "core-fra-02");
 
   await openConsoleSubpage(page, "Network", "Graph");
@@ -3299,7 +3313,7 @@ test("observability alerts and webhooks are explicit separate pages", async ({
     criticalAlertRow.getByRole("button", { name: "Acknowledge" }),
   ).toBeVisible();
   await expect(
-    criticalAlertRow.getByRole("button", { name: "Open" }),
+    criticalAlertRow.getByRole("button", { name: /Open VPS detail/ }),
   ).toBeVisible();
   const alertObservedTime = page
     .getByLabel("Fleet alerts", { exact: true })
@@ -3367,7 +3381,11 @@ test("observability alerts and webhooks are explicit separate pages", async ({
       "Expand Fleet alerts row fleet-alert-network-agent-fra-02-tun0",
     ),
   );
-  await activate(page.getByRole("button", { name: "Open VPS detail" }));
+  await activate(
+    page
+      .locator(".fleetAlertDetail")
+      .getByRole("button", { name: "Open VPS detail" }),
+  );
   await expect(
     page.getByRole("heading", { level: 1, name: "Instance detail" }),
   ).toBeVisible();
@@ -3567,7 +3585,8 @@ test("observability alert policy editor is a focused create flow", async ({
   await expect(editor).toContainText("Match preview");
   await expect(
     page.locator(".fleetPolicyActionFeedback.actionFeedbackSuccess"),
-  ).toContainText("dry-run matched 1 VPS");
+  ).toHaveText("dry-run matched 1 VPS");
+  await expect(editor).toContainText("0 incomplete VPSs; 0 invalid rule rows.");
   await expect(
     page.locator(".observabilityAlertsPanel > .fleetPolicyStatus"),
   ).toHaveCount(0);
@@ -3584,7 +3603,7 @@ test("observability alert policy editor is a focused create flow", async ({
   await expect(page.getByLabel("Alert routing summary")).toBeVisible();
 });
 
-test("observability webhook rule editor is a focused create flow", async ({
+test("observability webhook rule editor retains registry and navigation context", async ({
   page,
 }) => {
   await gotoConsoleHome(page);
@@ -3594,10 +3613,21 @@ test("observability webhook rule editor is a focused create flow", async ({
   const editor = page.locator(".consoleDetailPanel", {
     hasText: "Create webhook rule",
   });
+  const ruleGrid = page.getByLabel("Webhook rules data grid");
   await expect(editor).toBeVisible();
-  await expect(page.getByLabel("Webhook routing summary")).toHaveCount(0);
-  await expect(page.getByLabel("Event webhook sections")).toHaveCount(0);
-  await expect(page.getByLabel("Webhook rules data grid")).toHaveCount(0);
+  await expect(page.getByLabel("Webhook routing summary")).toBeVisible();
+  await expect(page.getByLabel("Event webhook sections")).toBeVisible();
+  await expect(ruleGrid).toBeVisible();
+  expect(
+    await ruleGrid.evaluate(
+      (grid, detail) =>
+        Boolean(
+          grid.compareDocumentPosition(detail as Node) &
+            Node.DOCUMENT_POSITION_FOLLOWING,
+        ),
+      await editor.elementHandle(),
+    ),
+  ).toBe(true);
   await expect(page.getByText("Event webhook tests")).toHaveCount(0);
   await expect(editor).toContainText("Enable after creation");
   await expect(editor).toContainText("Signing secret");
@@ -3629,10 +3659,27 @@ test("observability webhook rule editor is a focused create flow", async ({
   await expect(editor).toContainText("VPSs matched");
   await expect(editor).toContainText("Rendered message");
   await expect(editor).toContainText("Delivery status");
-  await expect(page.getByLabel("Webhook routing summary")).toHaveCount(0);
+  await expect(page.getByLabel("Webhook routing summary")).toBeVisible();
 
   await activate(editor.getByRole("button", { name: "Close detail panel" }));
   await expect(page.getByLabel("Webhook routing summary")).toBeVisible();
+
+  await ruleGrid
+    .getByLabel(
+      "Select Webhook rules row fefefefe-1111-4111-8111-111111111111",
+    )
+    .check();
+  await ruleGrid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  await page.getByRole("menuitem", { name: "Disable" }).click();
+  await expect(
+    page.locator(".fleetPolicyActionFeedback.actionFeedbackSuccess"),
+  ).toHaveText("Disabled 1 webhook rule");
+  await expect(page.getByLabel("Webhook routing summary")).toContainText(
+    "1 disabled rule",
+  );
 });
 
 test("config bulk patch requires reviewed scope and privilege before apply", async ({
@@ -4903,7 +4950,7 @@ test("access privilege vault is the locked handoff for privileged workflows", as
       heading: "Bulk groups",
       subpage: "Bulk groups",
       view: "Fleet",
-      evidence: /Bulk tag mutation/i,
+      evidence: /Bulk group mutation/i,
     },
     {
       heading: "Per-VPS config",

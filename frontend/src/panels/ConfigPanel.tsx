@@ -4323,14 +4323,18 @@ function VpsRulesPanel({
 
   useEffect(() => {
     writeLocalString(CONFIG_VPS_RULES_SELECTOR_STORAGE_KEY, selectorExpression);
+    setPreview(null);
     setReviewSnapshot(null);
     setReviewPromptOpen(false);
+    setStatus(null);
   }, [selectorExpression]);
 
   useEffect(() => {
+    setPreview(null);
     setReviewSnapshot(null);
     setReviewPromptOpen(false);
-  }, [valuesText, unsetKeys]);
+    setStatus(null);
+  }, [editMode, valuesText, unsetKeys]);
 
   function parseSetValues(): Record<string, string> {
     const values: Record<string, string> = {};
@@ -4653,7 +4657,6 @@ function VpsRulesPanel({
                 className={editMode === "upsert" ? "selected" : ""}
                 onClick={() => {
                   setEditMode("upsert");
-                  setReviewSnapshot(null);
                 }}
                 type="button"
               >
@@ -4664,7 +4667,6 @@ function VpsRulesPanel({
                 className={editMode === "unset" ? "selected" : ""}
                 onClick={() => {
                   setEditMode("unset");
-                  setReviewSnapshot(null);
                 }}
                 type="button"
               >

@@ -298,11 +298,13 @@ impl Repository {
                     })?;
                 let channel = channels.remove(index);
                 drop(channels);
-                memory
-                    .fleet_alert_notification_deliveries
-                    .write()
-                    .await
-                    .retain(|delivery| delivery.channel_id != channel_id);
+                let mut deliveries = memory.fleet_alert_notification_deliveries.write().await;
+                cancel_memory_fleet_alert_notification_deliveries(
+                    &mut deliveries,
+                    channel_id,
+                    "fleet alert notification channel deleted",
+                );
+                drop(deliveries);
                 let mut audit =
                     notification_channel_audit(&channel, operator, unix_now().to_string());
                 audit.action = "fleet.alert_notification_channel_deleted".to_string();
@@ -311,6 +313,24 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                sqlx::query(
+                    r#"
+                    UPDATE fleet_alert_notification_deliveries
+                    SET
+                        status = 'canceled_disabled',
+                        error = $2,
+                        delivery_lease_id = NULL,
+                        delivery_lease_until = NULL,
+                        next_attempt_at = NULL,
+                        delivered_at = NULL
+                    WHERE channel_id = $1
+                      AND status IN ('queued', 'failed', 'in_progress')
+                    "#,
+                )
+                .bind(channel_id)
+                .bind("fleet alert notification channel deleted")
+                .execute(&mut *tx)
+                .await?;
                 let row = sqlx::query(
                     r#"
                     DELETE FROM fleet_alert_notification_channels

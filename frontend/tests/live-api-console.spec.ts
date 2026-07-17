@@ -1,4 +1,4 @@
-import { expect, test, type Locator } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { openConsoleSubpage } from "./support/consoleNavigation";
 
 test.skip(
@@ -20,24 +20,31 @@ async function chooseVpsBySearch(
   await option.click();
 }
 
+async function ensureAuthenticated(page: Page) {
+  const shell = page.locator(".shell");
+  const signIn = page.getByRole("heading", {
+    exact: true,
+    name: "Sign in",
+  });
+
+  await expect(shell.or(signIn).first()).toBeVisible({ timeout: 20_000 });
+  if (await shell.isVisible()) return;
+
+  await page
+    .getByLabel("Username")
+    .fill(process.env.VPSMAN_LIVE_API_USERNAME ?? "frontend-live-admin");
+  await page
+    .getByLabel("Password")
+    .fill(process.env.VPSMAN_LIVE_API_PASSWORD ?? "frontend-live-password");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(shell).toBeVisible({ timeout: 30_000 });
+}
+
 test("uses the real API proxy for fleet, topology planning, and audit visibility", async ({
   page,
 }) => {
-  await page.goto("/");
-  if (
-    await page
-      .getByRole("heading", { exact: true, name: "Sign in" })
-      .isVisible()
-  ) {
-    await page
-      .getByLabel("Username")
-      .fill(process.env.VPSMAN_LIVE_API_USERNAME ?? "frontend-live-admin");
-    await page
-      .getByLabel("Password")
-      .fill(process.env.VPSMAN_LIVE_API_PASSWORD ?? "frontend-live-password");
-    await page.getByRole("button", { name: "Sign in" }).click();
-    await expect(page.locator(".shell")).toBeVisible({ timeout: 10_000 });
-  }
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await ensureAuthenticated(page);
 
   await openConsoleSubpage(page, "Fleet", "Instances");
   await expect(

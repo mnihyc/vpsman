@@ -333,66 +333,52 @@ export function SessionEvidencePanel({
       <div className="metricGrid" aria-label="Session evidence summary">
         <div className="metricCard">
           <TerminalSquare size={18} />
-          <span>
-            <strong>{terminalSessions.length}</strong>
-            <small>Terminal sessions</small>
-          </span>
+          <strong>{terminalSessions.length}</strong>
+          <small>Terminal sessions</small>
         </div>
         <div className="metricCard">
           <Link2 size={18} />
-          <span>
-            <strong>{matchedSessions}</strong>
-            <small>Audit-linked terminals</small>
-          </span>
+          <strong>{matchedSessions}</strong>
+          <small>Audit-linked terminals</small>
         </div>
         <div className="metricCard">
           <TerminalSquare size={18} />
-          <span>
-            <strong>{openSessions}</strong>
-            <small>
-              {staleTerminalSessions > 0
-                ? `${staleTerminalSessions} stale terminal states hidden from open count`
-                : "Open terminals"}
-            </small>
-          </span>
+          <strong>{openSessions}</strong>
+          <small>
+            {staleTerminalSessions > 0
+              ? `${staleTerminalSessions} stale terminal states hidden from open count`
+              : "Open terminals"}
+          </small>
         </div>
         <div className="metricCard">
           <History size={18} />
-          <span>
-            <strong>{replayableSessions}</strong>
-            <small>Replayable transcripts</small>
-          </span>
+          <strong>{replayableSessions}</strong>
+          <small>Replayable transcripts</small>
         </div>
         <div className="metricCard">
           <History size={18} />
-          <span>
-            <strong>{formatBytes(retainedBytes)}</strong>
-            <small>Retained transcript bytes</small>
-          </span>
+          <strong>{formatBytes(retainedBytes)}</strong>
+          <small>Retained transcript bytes</small>
         </div>
         <div className="metricCard">
           <KeyRound size={18} />
-          <span>
-            <strong>
-              {canInspectOperatorAuthority
-                ? operatorSessions.length
-                : "Admin only"}
-            </strong>
-            <small>
-              {canInspectOperatorAuthority && expiredOperatorSessions > 0
-                ? `${expiredOperatorSessions} expired bearer sessions`
-                : "Bearer-session inventory"}
-            </small>
-          </span>
+          <strong>
+            {canInspectOperatorAuthority
+              ? operatorSessions.length
+              : "Admin only"}
+          </strong>
+          <small>
+            {canInspectOperatorAuthority && expiredOperatorSessions > 0
+              ? `${expiredOperatorSessions} expired bearer sessions`
+              : "Bearer-session inventory"}
+          </small>
         </div>
         <div className="metricCard">
           <KeyRound size={18} />
-          <span>
-            <strong>
-              {canInspectOperatorAuthority ? demoAuthSignals : "Admin only"}
-            </strong>
-            <small>Authentication signals</small>
-          </span>
+          <strong>
+            {canInspectOperatorAuthority ? demoAuthSignals : "Admin only"}
+          </strong>
+          <small>Authentication signals</small>
         </div>
       </div>
 
@@ -760,13 +746,18 @@ function operatorSessionEvidenceState(
   }
   const accessExpired = isPast(session.expires_at);
   const refreshExpired = isPast(session.refresh_expires_at);
-  if (accessExpired || refreshExpired) {
+  if (refreshExpired) {
     return {
-      detail: refreshExpired
-        ? `Refresh expired at ${formatTime(session.refresh_expires_at)}.`
-        : `Access expired at ${formatTime(session.expires_at)}.`,
+      detail: `Refresh expired at ${formatTime(session.refresh_expires_at)}.`,
       label: "Expired",
       tone: "warn",
+    };
+  }
+  if (accessExpired) {
+    return {
+      detail: `Access expired at ${formatTime(session.expires_at)}; refresh remains available until ${formatTime(session.refresh_expires_at)}.`,
+      label: "Refreshable",
+      tone: "info",
     };
   }
   if (session.current) {

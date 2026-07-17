@@ -742,7 +742,22 @@ function buildSystemAttentionItems(
   const gateway = systemDashboard.current.gateway_events;
   const droppedEvents = (gateway.dropped_events ?? 0) + (gateway.telemetry_dropped_events ?? 0);
   const criticalGatewayFailures = gateway.critical_failures ?? 0;
-  const queueDepth = dispatch.queue_depth + (gateway.current_queue_depth ?? 0);
+  const dispatchQueueDepth = dispatch.queue_depth;
+  const gatewayQueueDepth = gateway.current_queue_depth ?? 0;
+  const dispatchWarningThreshold = systemDashboard.capacity.dispatcher_in_flight
+    ? Math.ceil(systemDashboard.capacity.dispatcher_in_flight * 0.5)
+    : null;
+  const dispatchHardThreshold =
+    systemDashboard.capacity.dispatcher_batch ??
+    systemDashboard.capacity.dispatcher_in_flight;
+  const gatewayOldestAgeSecs = gateway.oldest_event_age_secs;
+  const dispatchQueueNeedsAttention =
+    (dispatchHardThreshold !== null &&
+      dispatchQueueDepth >= dispatchHardThreshold) ||
+    (dispatchWarningThreshold !== null &&
+      dispatchQueueDepth >= dispatchWarningThreshold);
+  const gatewayQueueNeedsAttention =
+    gatewayOldestAgeSecs !== null && gatewayOldestAgeSecs >= 60;
   const items: HomeActionItem[] = [];
   if (criticalGatewayFailures > 0 || droppedEvents > 0) {
     items.push({
@@ -754,14 +769,18 @@ function buildSystemAttentionItems(
       tone: criticalGatewayFailures > 0 ? "critical" : "warning",
     });
   }
-  if (queueDepth > 0) {
+  if (dispatchQueueNeedsAttention || gatewayQueueNeedsAttention) {
+    const critical =
+      (dispatchHardThreshold !== null &&
+        dispatchQueueDepth >= dispatchHardThreshold) ||
+      (gatewayOldestAgeSecs !== null && gatewayOldestAgeSecs >= 300);
     items.push({
-      detail: `${dispatch.active_jobs} active jobs, ${queueDepth} queued dispatch/gateway events`,
+      detail: `${dispatch.active_jobs} active jobs, ${dispatchQueueDepth} dispatch queued, ${gatewayQueueDepth} gateway queued${gatewayOldestAgeSecs === null ? "" : `, oldest gateway event ${gatewayOldestAgeSecs}s`}`,
       id: "system:dispatch-queue",
       label: "Control-plane queue pressure",
       meta: "System / Capacity",
       onOpen: onOpenSystemCapacity,
-      tone: queueDepth > 10 ? "critical" : "warning",
+      tone: critical ? "critical" : "warning",
     });
   }
   return items;

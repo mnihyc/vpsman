@@ -7,6 +7,7 @@ import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
+import { VpsCombobox } from "../../components/VpsCombobox";
 import {
   JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE,
   JOB_COMMAND_TYPE_BY_OPERATION_TYPE,
@@ -476,16 +477,32 @@ export function ProcessSupervisorInventoryPanel({
         </div>
         <div className="headerActionStack">
           <div className="processHeaderActions">
+            <label className="processTargetPicker">
+              <span>VPS focus</span>
+              <VpsCombobox
+                agents={agents}
+                ariaLabel="Process target VPS"
+                disabled={agents.length === 0}
+                onChange={(value) => setFocusedClientId(value || null)}
+                placeholder="Choose one VPS"
+                value={focusedClientId ?? ""}
+              />
+            </label>
             <button
               className="primaryAction compactAction"
+              disabled={!focusedAgent}
               onClick={() =>
+                focusedAgent &&
                 onOpenDispatchPreset({
                   mode: "process_supervisor",
-                  selectorExpression: focusedAgent
-                    ? `id:${focusedAgent.id}`
-                    : "",
+                  selectorExpression: `id:${focusedAgent.id}`,
                   supervisorAction: "start",
                 })
+              }
+              title={
+                focusedAgent
+                  ? `Start a managed process on ${clientLabel(focusedAgent.id)}`
+                  : "Choose one VPS before starting a managed process"
               }
               type="button"
             >

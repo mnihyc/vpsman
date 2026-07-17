@@ -121,6 +121,7 @@ struct DeliveryCandidate {
     payload: Value,
     matched_vps: Vec<VpsRow>,
     message: String,
+    occurred_at_unix: i64,
     cooldown_until_unix: i64,
 }
 
@@ -585,6 +586,7 @@ fn event_candidate_for_rule(
         payload,
         matched_vps,
         message,
+        occurred_at_unix: event.occurred_at_unix,
         cooldown_until_unix: event.occurred_at_unix.saturating_add(rule.cooldown_secs),
     }))
 }
@@ -670,21 +672,29 @@ async fn insert_delivery_candidate(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     candidate: &DeliveryCandidate,
 ) -> Result<bool> {
-    let duplicate = sqlx::query_scalar::<_, i64>(
+    sqlx::query_scalar::<_, Uuid>("SELECT id FROM webhook_rules WHERE id = $1 FOR UPDATE")
+        .bind(candidate.rule_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .context("webhook rule disappeared before delivery materialization")?;
+    let suppression = sqlx::query(
         r#"
-        SELECT 1::bigint
+        SELECT
+            COALESCE(BOOL_OR(event_id = $2), FALSE) AS duplicate,
+            COALESCE(MAX(cooldown_until_unix), 0) AS latest_cooldown_until_unix
         FROM webhook_rule_deliveries
         WHERE rule_id = $1
-          AND event_id = $2
-        LIMIT 1
         "#,
     )
     .bind(candidate.rule_id)
     .bind(&candidate.event_id)
-    .fetch_optional(&mut **tx)
-    .await?
-    .is_some();
-    if duplicate {
+    .fetch_one(&mut **tx)
+    .await?;
+    if delivery_candidate_is_suppressed(
+        suppression.try_get("duplicate")?,
+        suppression.try_get("latest_cooldown_until_unix")?,
+        candidate.occurred_at_unix,
+    ) {
         return Ok(false);
     }
     let inserted = sqlx::query(
@@ -727,6 +737,14 @@ async fn insert_delivery_candidate(
     .execute(&mut **tx)
     .await?;
     Ok(inserted.rows_affected() > 0)
+}
+
+fn delivery_candidate_is_suppressed(
+    duplicate: bool,
+    latest_cooldown_until_unix: i64,
+    occurred_at_unix: i64,
+) -> bool {
+    duplicate || latest_cooldown_until_unix > occurred_at_unix
 }
 
 async fn process_queued_deliveries(
@@ -842,12 +860,12 @@ async fn process_queued_deliveries(
             ),
             Err(error) if next_attempt_count >= MAX_DELIVERY_ATTEMPTS => (
                 WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
-                Some(truncate_error(&error.to_string())),
+                Some(format_delivery_error(&error)),
                 None,
             ),
             Err(error) => (
                 WEBHOOK_RULE_DELIVERY_STATUS_FAILED,
-                Some(truncate_error(&error.to_string())),
+                Some(format_delivery_error(&error)),
                 retry_backoff_secs(next_attempt_count),
             ),
         };
@@ -1353,6 +1371,10 @@ fn truncate_error(error: &str) -> String {
     error.chars().take(MAX_ERROR_BYTES).collect()
 }
 
+fn format_delivery_error(error: &anyhow::Error) -> String {
+    truncate_error(&format!("{error:#}"))
+}
+
 fn render_message(rule: &RuleRow, payload: &Value) -> Result<String> {
     if rule.body_template.trim().is_empty() {
         let matched_vps_count = payload
@@ -1408,6 +1430,22 @@ mod tests {
     fn delivery_error_is_bounded() {
         let error = "x".repeat(MAX_ERROR_BYTES + 100);
         assert_eq!(truncate_error(&error).len(), MAX_ERROR_BYTES);
+    }
+
+    #[test]
+    fn delivery_error_keeps_nested_transport_cause() {
+        let error = anyhow::anyhow!("connection refused").context("webhook request failed");
+        assert_eq!(
+            format_delivery_error(&error),
+            "webhook request failed: connection refused"
+        );
+    }
+
+    #[test]
+    fn automatic_delivery_cooldown_blocks_new_events_but_not_boundary_event() {
+        assert!(delivery_candidate_is_suppressed(false, 1_300, 1_299));
+        assert!(!delivery_candidate_is_suppressed(false, 1_300, 1_300));
+        assert!(delivery_candidate_is_suppressed(true, 0, 1_300));
     }
 
     #[test]

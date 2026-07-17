@@ -274,31 +274,23 @@ export function JobEvidencePanel({
       <div className="metricGrid" aria-label="Job evidence summary">
         <div className="metricCard">
           <ClipboardCheck size={18} />
-          <span>
-            <strong>{jobs.length}</strong>
-            <small>Jobs in ledger</small>
-          </span>
+          <strong>{jobs.length}</strong>
+          <small>Jobs in ledger</small>
         </div>
         <div className="metricCard">
           <ShieldCheck size={18} />
-          <span>
-            <strong>{privilegedJobs}</strong>
-            <small>Privileged jobs</small>
-          </span>
+          <strong>{privilegedJobs}</strong>
+          <small>Privileged jobs</small>
         </div>
         <div className="metricCard">
           <Link2 size={18} />
-          <span>
-            <strong>{matchedJobs}</strong>
-            <small>Jobs with audit rows</small>
-          </span>
+          <strong>{matchedJobs}</strong>
+          <small>Jobs with audit rows</small>
         </div>
         <div className={`metricCard ${auditGapCount > 0 ? "attention" : ""}`}>
           <FileText size={18} />
-          <span>
-            <strong>{auditGapCount}</strong>
-            <small>Audit gaps</small>
-          </span>
+          <strong>{auditGapCount}</strong>
+          <small>Audit gaps</small>
         </div>
       </div>
 

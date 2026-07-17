@@ -258,10 +258,10 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     page.getByRole("heading", { level: 1, name: "Bulk groups" }),
   ).toBeVisible();
   await page
-    .getByLabel("Bulk tag", { exact: true })
+    .getByLabel("Bulk group", { exact: true })
     .fill("maintenance:2026-q2-patch");
   await page
-    .getByRole("searchbox", { name: "Bulk tag selector expression" })
+    .getByRole("searchbox", { name: "Bulk group selector expression" })
     .fill("provider:alpha && country:US");
   await page.keyboard.press("Escape");
   const bulkTagResolution = page.getByLabel("Bulk group target resolution");
@@ -278,7 +278,7 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   });
   await expect(bulkTagAction).toBeEnabled();
   await activate(bulkTagAction);
-  await expect(page.getByLabel("Bulk tag target preview")).toContainText(
+  await expect(page.getByLabel("Bulk group target preview")).toContainText(
     "Server preview",
   );
   await expect(page.getByLabel("Bulk group preview evidence")).toBeVisible({

@@ -139,13 +139,17 @@ pub(crate) async fn delete_port_forward_rule(
         )
         .await
         .map_err(port_forward_repository_error)?;
-    let sync = sync_client(
-        &state,
-        &operator,
-        &existing.client_id,
-        "port_forward_rule_deleted",
-    )
-    .await;
+    let sync = if is_never_applied_disabled_draft(&existing) {
+        no_sync("retired_disabled_draft")
+    } else {
+        sync_client(
+            &state,
+            &operator,
+            &existing.client_id,
+            "port_forward_rule_deleted",
+        )
+        .await
+    };
     let rule = state
         .repo
         .get_port_forward_rule(rule_id)
@@ -255,13 +259,21 @@ pub(crate) async fn bulk_mutate_port_forward_rules(
         .collect::<BTreeSet<_>>();
     let mut sync = Vec::with_capacity(client_ids.len());
     for client_id in client_ids {
-        let result = sync_client(
-            &state,
-            &operator,
-            &client_id,
-            bulk_sync_reason(request.action),
-        )
-        .await;
+        let requires_sync = !matches!(request.action, PortForwardBulkAction::Delete)
+            || selected
+                .iter()
+                .any(|rule| rule.client_id == client_id && !is_never_applied_disabled_draft(rule));
+        let result = if requires_sync {
+            sync_client(
+                &state,
+                &operator,
+                &client_id,
+                bulk_sync_reason(request.action),
+            )
+            .await
+        } else {
+            no_sync("retired_disabled_draft")
+        };
         sync.push(PortForwardClientSyncView {
             client_id,
             sync: result,
@@ -435,6 +447,10 @@ fn no_sync(status: &str) -> PortForwardSyncView {
         job_id: None,
         error: None,
     }
+}
+
+fn is_never_applied_disabled_draft(rule: &PortForwardRuleView) -> bool {
+    !rule.enabled && rule.revision == 1 && rule.deleted_at.is_none()
 }
 
 fn require_confirmed(confirmed: bool) -> Result<(), ApiError> {

@@ -251,11 +251,13 @@ impl Repository {
                     .ok_or_else(|| anyhow::anyhow!("webhook_rule_not_found:{rule_id}"))?;
                 let rule = rules.remove(position);
                 drop(rules);
-                memory
-                    .webhook_rule_deliveries
-                    .write()
-                    .await
-                    .retain(|delivery| delivery.rule_id != rule_id);
+                let mut deliveries = memory.webhook_rule_deliveries.write().await;
+                cancel_memory_webhook_rule_deliveries(
+                    &mut deliveries,
+                    rule_id,
+                    "webhook rule deleted",
+                );
+                drop(deliveries);
                 memory
                     .audits
                     .write()
@@ -270,6 +272,24 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                sqlx::query(
+                    r#"
+                    UPDATE webhook_rule_deliveries
+                    SET
+                        status = 'canceled_disabled',
+                        error = $2,
+                        delivery_lease_id = NULL,
+                        delivery_lease_until = NULL,
+                        next_attempt_at = NULL,
+                        delivered_at = NULL
+                    WHERE rule_id = $1
+                      AND status IN ('queued', 'failed', 'in_progress')
+                    "#,
+                )
+                .bind(rule_id)
+                .bind("webhook rule deleted")
+                .execute(&mut *tx)
+                .await?;
                 let row = sqlx::query(
                     r#"
                     DELETE FROM webhook_rules

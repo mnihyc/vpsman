@@ -138,6 +138,64 @@ test("submits the privilege unlock form with Enter", async ({ page }, testInfo) 
   ).toBeVisible();
 });
 
+test("privilege unlock reaches refreshable session actions while Audit stays read-only", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "privileged table action state is covered in the desktop console",
+  );
+  await installConsoleApiMock(page);
+  await page.clock.setFixedTime(new Date("2026-01-02T12:00:00Z"));
+  await page.goto("/");
+  await waitForConsoleShell(page);
+  await openConsoleSubpage(page, "Access", "Operators");
+
+  const unlockCurrentDialog = async () => {
+    const dialog = page.getByRole("dialog", { name: "Unlock privilege" });
+    await expect(dialog).toBeVisible();
+    await dialog
+      .getByLabel(/privilege secret/i)
+      .fill("local-super-password");
+    await dialog
+      .getByLabel(/(privilege salt|verifier salt hex)/i)
+      .fill("00112233445566778899aabbccddeeff");
+    await activate(
+      dialog
+        .getByLabel("Unlock with privilege material")
+        .getByRole("button", { name: /Unlock( privilege)?/ }),
+    );
+    await expect(dialog).toBeHidden();
+  };
+
+  const operatorRevoke = page
+    .getByLabel("Operator accounts data grid")
+    .getByRole("button", { name: "Revoke sessions" })
+    .first();
+  await expect(operatorRevoke).toBeEnabled();
+  await activate(operatorRevoke);
+  await unlockCurrentDialog();
+  await activate(operatorRevoke);
+  await expect(page.getByLabel("Confirm admin user action")).toBeVisible();
+  await activate(
+    page
+      .getByLabel("Confirm admin user action")
+      .getByRole("button", { name: "Cancel" }),
+  );
+
+  await activate(
+    page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
+  );
+  await openConsoleSubpage(page, "Audit", "Sessions");
+  await expect(
+    page.getByRole("button", { name: "Revoke session for console-admin" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByLabel("Operator session evidence").getByText("Refreshable"),
+  ).toHaveCount(2);
+  await expect(page.getByText("2 expired bearer sessions")).toHaveCount(0);
+});
+
 test("keeps cross-route job evidence below the mobile toolbar", async ({
   page,
 }, testInfo) => {
@@ -362,6 +420,156 @@ test("keeps focused transfer review local, explicit, and frozen", async ({
   await expect(hashValue).toHaveAttribute("title", /^[0-9a-f]{64}$/);
   await expect(hashValue).toContainText("...");
   await expect(prompt.getByText("Symlinks", { exact: true })).toHaveCount(0);
+});
+
+test("invalidates a VPS rules preview as soon as its draft changes", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "preview invalidation is viewport-independent",
+  );
+  await installConsoleApiMock(page);
+  await page.goto("/");
+  await waitForConsoleShell(page);
+  await openConsoleSubpage(page, "Config", "Rules");
+
+  const editor = page.locator(".consoleDetailPanel", {
+    hasText: "Bulk rule editor",
+  });
+  await editor.getByLabel("Total quota").fill("4TB");
+  await activate(
+    editor.getByRole("button", { name: "Preview changes", exact: true }),
+  );
+  await expect(page.locator(".vpsRulesPreviewBlock")).toBeVisible();
+
+  await editor.getByLabel("Total quota").fill("5TB");
+  await expect(page.locator(".vpsRulesPreviewBlock")).toHaveCount(0);
+  await expect(page.locator(".vpsRulesActionFeedback")).toHaveCount(0);
+});
+
+test("keeps compact fleet and transfer controls usable on mobile", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    !testInfo.project.name.includes("mobile"),
+    "this regression is specific to the compact viewport",
+  );
+  await installConsoleApiMock(page);
+  await page.goto("/");
+  await waitForConsoleShell(page);
+
+  await openConsoleSubpage(page, "Fleet", "Assignments");
+  const addGroup = page.locator(".inlineTagAdd").first();
+  await expect(addGroup.getByRole("button")).toBeVisible();
+  const addGroupBounds = await addGroup.boundingBox();
+  const addGroupContainerBounds = await addGroup.locator("..").boundingBox();
+  expect(addGroupBounds).not.toBeNull();
+  expect(addGroupContainerBounds).not.toBeNull();
+  expect(addGroupBounds!.width).toBeLessThanOrEqual(
+    addGroupContainerBounds!.width + 1,
+  );
+  expect(addGroupBounds!.x + addGroupBounds!.width).toBeLessThanOrEqual(
+    addGroupContainerBounds!.x + addGroupContainerBounds!.width + 1,
+  );
+  expect(
+    await addGroup.evaluate(
+      (element) => element.scrollWidth - element.clientWidth,
+    ),
+  ).toBeLessThanOrEqual(1);
+
+  await openConsoleSubpage(page, "Fleet", "Bulk groups");
+  const reviewCheck = page.getByLabel("Include targets needing review");
+  await expect(reviewCheck).toBeVisible();
+  const reviewCheckBounds = await reviewCheck.boundingBox();
+  expect(reviewCheckBounds?.width ?? 0).toBeLessThanOrEqual(20);
+  expect(reviewCheckBounds?.height ?? 0).toBeLessThanOrEqual(20);
+
+  await openConsoleSubpage(page, "Remote Operations", "Transfers");
+  const direction = page.getByLabel("Transfer direction");
+  await expect(direction.getByRole("button", { name: "Download" })).toBeVisible();
+  const transferHeader = direction.locator("..");
+  const transferHeadingBounds = await transferHeader
+    .getByRole("heading")
+    .boundingBox();
+  const directionBounds = await direction.boundingBox();
+  expect(transferHeadingBounds).not.toBeNull();
+  expect(directionBounds).not.toBeNull();
+  expect(directionBounds!.y).toBeGreaterThanOrEqual(
+    transferHeadingBounds!.y + transferHeadingBounds!.height,
+  );
+  expect(
+    await direction.evaluate(
+      (element) => element.scrollWidth - element.clientWidth,
+    ),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    await page.evaluate(
+      () =>
+        document.documentElement.scrollWidth -
+        document.documentElement.clientWidth,
+    ),
+  ).toBeLessThanOrEqual(1);
+});
+
+test("reports group creation beside the registry action", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the mutation feedback contract is viewport-independent",
+  );
+  await installConsoleApiMock(page);
+  await page.goto("/");
+  await waitForConsoleShell(page);
+  await unlockPrivilegeFromTop(page);
+  await openConsoleSubpage(page, "Fleet", "Groups");
+
+  await page.getByLabel("Group name").fill("simulation:created");
+  await activate(page.getByRole("button", { name: "Create group" }));
+  await expect(page.getByText("Created group simulation:created")).toBeVisible();
+});
+
+test("deleting a webhook rule retains its delivery evidence", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the retained-history mutation contract is viewport-independent",
+  );
+  await installConsoleApiMock(page);
+  await page.goto("/");
+  await waitForConsoleShell(page);
+  await unlockPrivilegeFromTop(page);
+  await openConsoleSubpage(page, "Observability", "Event webhooks");
+
+  const ruleGrid = page.getByLabel("Webhook rules data grid");
+  const ruleRow = ruleGrid.locator(".gridBody [role=row]", {
+    hasText: "edge-interval-webhook",
+  });
+  await ruleRow
+    .getByRole("checkbox", { name: /Select Webhook rules row/ })
+    .check();
+  await ruleGrid.getByRole("button", { name: /Actions/ }).click();
+  await page
+    .getByRole("menuitem", { name: "Review deletion", exact: true })
+    .click();
+  const confirmation = page.getByLabel("Delete webhook rules");
+  await expect(confirmation).toContainText(
+    "Retained delivery history is not removed.",
+  );
+  await activate(
+    confirmation.getByRole("button", { name: "Delete webhook rules" }),
+  );
+  await expect(ruleRow).toHaveCount(0);
+  await expect(page.getByText("Deleted 1 webhook rule")).toBeVisible();
+
+  await activate(page.getByRole("tab", { name: /Deliveries/ }));
+  const deliveryGrid = page.getByLabel("Webhook delivery history data grid");
+  await expect(deliveryGrid.locator(".gridBody [role=row]")).toHaveCount(3);
+  await expect(deliveryGrid).toContainText("edge-interval-webhook");
+  await expect(deliveryGrid).toContainText("canceled disabled");
+  await expect(deliveryGrid).toContainText("webhook rule deleted");
 });
 
 async function suiteConfigReadCount(page: Page): Promise<number> {

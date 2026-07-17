@@ -129,7 +129,7 @@ const allViews: ScreenshotEntry[] = [
     heading: "Bulk groups",
     id: "06-fleet-bulk-groups",
     requiredText: [
-      "Bulk tag mutation",
+      "Bulk group mutation",
       "Server resolution runs before confirmation",
     ],
   },

@@ -2598,10 +2598,17 @@
 }
 
 .transferWorkflowHeader > .segmentedControl {
-  display: inline-flex;
+  display: inline-grid;
   flex: 0 0 auto;
-  flex-wrap: nowrap;
+  grid-template-columns: repeat(2, minmax(96px, 1fr));
   gap: 0;
+  min-width: 194px;
+  max-width: 100%;
+}
+
+.transferWorkflowHeader > .segmentedControl button {
+  min-width: 0;
+  padding-inline: 12px;
 }
 
 .transferWorkflowHeader h3 {
@@ -2675,6 +2682,16 @@
 
   .transferQuickUpload {
     margin-inline: 12px;
+  }
+
+  .transferWorkflowHeader {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .transferWorkflowHeader > .segmentedControl {
+    width: 100%;
+    min-width: 0;
   }
 }
 
@@ -3316,6 +3333,25 @@
   justify-content: flex-end;
   gap: 8px;
   min-width: 0;
+}
+
+.processTargetPicker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.processTargetPicker > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.processTargetPicker .vpsCombobox {
+  width: min(260px, 30vw);
 }
 
 .processSupervisorSummaryStrip span {
@@ -4604,6 +4640,21 @@
     align-items: flex-start;
     flex-direction: column;
     padding: 10px 14px;
+  }
+
+  .processHeaderActions,
+  .processTargetPicker {
+    align-items: stretch;
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .processTargetPicker .vpsCombobox {
+    width: 100%;
+  }
+
+  .processHeaderActions > button {
+    width: 100%;
   }
 
   .processMobileCard .processRowActions {

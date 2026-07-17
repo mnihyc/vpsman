@@ -101,6 +101,39 @@ test("unsupported agents allow disabled drafts but not enabled apply", async ({ 
   await expect(page.getByText("Future service", { exact: true })).toBeVisible();
 });
 
+test("never-applied disabled drafts explain and complete immediate deletion", async ({
+  page,
+}, testInfo) => {
+  const row = page.getByRole("row", { name: /Staged SSH alternate/ });
+  if (testInfo.project.name.startsWith("mobile")) {
+    await row
+      .getByRole("button", { name: "Expand Staged SSH alternate rule details" })
+      .click();
+    await page
+      .getByRole("region", { name: "Details for Staged SSH alternate" })
+      .getByRole("button", { name: "Delete", exact: true })
+      .click();
+  } else {
+    await row.getByTitle("Delete rule").click();
+  }
+
+  const confirmation = page.getByLabel("Confirm delete");
+  await expect(confirmation).toContainText(
+    "This disabled draft has never been applied.",
+  );
+  await expect(confirmation).toContainText(
+    "no agent cleanup or apply job is required",
+  );
+  await confirmation.getByRole("button", { name: "Delete rule" }).click();
+
+  await expect(
+    page.getByRole("row", { name: /Staged SSH alternate/ }),
+  ).toHaveCount(0);
+  await expect(
+    page.locator(".portForwardRegistryFeedback"),
+  ).toContainText("no host apply required");
+});
+
 test("operators without network write scope keep read-only inspection", async ({
   page,
 }, testInfo) => {

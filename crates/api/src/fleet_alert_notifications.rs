@@ -31,6 +31,7 @@ use crate::{
 const NOTIFICATION_WEBHOOK_TIMEOUT_SECS: u64 = 5;
 const NOTIFICATION_PROCESS_DRY_RUN_STATUS: &str = "delivery_dry_run";
 const NOTIFICATION_DELIVERY_LEASE_SECS: i64 = 300;
+const MAX_NOTIFICATION_ERROR_BYTES: usize = 1024;
 const MAX_NOTIFICATION_DELIVERY_ATTEMPTS: i32 = 4;
 const NOTIFICATION_RETRY_BACKOFF_SECS: [i64; 3] = [60, 300, 1800];
 
@@ -208,7 +209,7 @@ impl AppState {
                         } else {
                             FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_PERMANENTLY_FAILED
                         },
-                        Some(error.to_string()),
+                        Some(format_delivery_error(&error)),
                         next_attempt_after_secs,
                     )
                 }
@@ -539,6 +540,13 @@ fn notification_next_retry_after_secs(attempt_count: i32) -> Option<i64> {
     )
 }
 
+fn format_delivery_error(error: &anyhow::Error) -> String {
+    format!("{error:#}")
+        .chars()
+        .take(MAX_NOTIFICATION_ERROR_BYTES)
+        .collect()
+}
+
 async fn deliver_webhook_payload(
     client: &reqwest::Client,
     delivery: &FleetAlertNotificationDeliveryView,
@@ -612,5 +620,19 @@ mod tests {
         assert!(validate_webhook_url("http://127.0.0.1:9000/hook").is_ok());
         assert!(validate_webhook_url("http://example.com/hook").is_err());
         assert!(validate_webhook_url("https://user:secret@example.com/hook").is_err());
+    }
+
+    #[test]
+    fn delivery_error_keeps_nested_transport_cause_and_is_bounded() {
+        let error = anyhow::anyhow!("connection refused").context("webhook request failed");
+        assert_eq!(
+            format_delivery_error(&error),
+            "webhook request failed: connection refused"
+        );
+        let long = anyhow::anyhow!("x".repeat(MAX_NOTIFICATION_ERROR_BYTES + 100));
+        assert_eq!(
+            format_delivery_error(&long).len(),
+            MAX_NOTIFICATION_ERROR_BYTES
+        );
     }
 }

@@ -372,16 +372,16 @@ test("bulk tag mutation requires a fresh preview after selector edits", async ({
   await openConsoleSubpage(page, "Fleet", "Bulk groups");
   await unlockPrivilegeFor(page, "Fleet", "Bulk groups");
 
-  await page.getByLabel("Bulk tag", { exact: true }).fill("maintenance:test");
+  await page.getByLabel("Bulk group", { exact: true }).fill("maintenance:test");
   await page
-    .getByRole("searchbox", { name: "Bulk tag selector expression" })
+    .getByRole("searchbox", { name: "Bulk group selector expression" })
     .fill("id:agent-sfo-01");
   await includeBulkTagReviewTargets(page);
   await reviewBulkTagMutation(page);
   await expect(page.locator(".bulkTagPreview")).toContainText("edge-sfo-01");
   await expect(page.getByText("Confirm tag mutation")).toBeVisible();
   await page
-    .getByRole("searchbox", { name: "Bulk tag selector expression" })
+    .getByRole("searchbox", { name: "Bulk group selector expression" })
     .fill("id:agent-fra-02");
   await expect(page.getByText("Confirm tag mutation")).toBeHidden();
   await reviewBulkTagMutation(page);
@@ -470,9 +470,9 @@ test("bulk tag async preview ignores stale selector edits", async ({
   await openConsoleSubpage(page, "Fleet", "Bulk groups");
   await unlockPrivilegeFor(page, "Fleet", "Bulk groups");
 
-  await page.getByLabel("Bulk tag", { exact: true }).fill("maintenance:test");
+  await page.getByLabel("Bulk group", { exact: true }).fill("maintenance:test");
   const selector = page.getByRole("searchbox", {
-    name: "Bulk tag selector expression",
+    name: "Bulk group selector expression",
   });
   await selector.fill("id:agent-sfo-01");
   await includeBulkTagReviewTargets(page);
@@ -1081,9 +1081,9 @@ test("overlay confirmations restore focus after asynchronous review preparation"
   await page.getByRole("button", { name: "Save preferences" }).click();
   await openConsoleSubpage(page, "Fleet", "Bulk groups");
 
-  await page.getByLabel("Bulk tag", { exact: true }).fill("maintenance:test");
+  await page.getByLabel("Bulk group", { exact: true }).fill("maintenance:test");
   await page
-    .getByRole("searchbox", { name: "Bulk tag selector expression" })
+    .getByRole("searchbox", { name: "Bulk group selector expression" })
     .fill("id:agent-sfo-01");
   await includeBulkTagReviewTargets(page);
   const reviewButton = page

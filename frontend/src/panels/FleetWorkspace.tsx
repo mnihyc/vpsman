@@ -3664,6 +3664,14 @@ function actionTargetDescription(
   return detail ? `${action} ${target}. ${detail}` : `${action} ${target}.`;
 }
 
+function resourceCount(
+  count: number,
+  singular: string,
+  plural = `${singular}s`,
+): string {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
 function selectedRecordSummary<T>(
   rows: T[] | null,
   singularLabel: string,
@@ -4408,7 +4416,11 @@ export function FleetAlertPolicyManager({
       const preview = await onDryRun(request);
       setDryRunPreview(preview);
       setPolicyStatus(
-        "dry-run matched " + preview.matched_vps_count + " VPSs",
+        `dry-run matched ${resourceCount(
+          preview.matched_vps_count,
+          "VPS",
+          "VPSs",
+        )}`,
         "success",
       );
       return preview;
@@ -4488,7 +4500,10 @@ export function FleetAlertPolicyManager({
         setDetailPolicyId(null);
       }
       setDeleteRows(null);
-      setPolicyStatus("deleted " + rows.length, "success");
+      setPolicyStatus(
+        `Deleted ${resourceCount(rows.length, "alert policy", "alert policies")}`,
+        "success",
+      );
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "policy delete failed";
@@ -4525,7 +4540,7 @@ export function FleetAlertPolicyManager({
         await onUpsert({ ...base, preview_hash: preview.preview_hash });
       }
       setPolicyStatus(
-        (nextEnabled ? "enabled " : "disabled ") + rows.length,
+        `${nextEnabled ? "Enabled" : "Disabled"} ${resourceCount(rows.length, "alert policy", "alert policies")}`,
         "success",
       );
     } catch (error) {
@@ -5113,7 +5128,15 @@ function PolicyMatchSummary({
       </strong>
       <small>
         {preview
-          ? `${preview.incomplete_vps_count} incomplete VPSs; ${preview.invalid_rule_count} invalid rule rows.`
+          ? `${resourceCount(
+              preview.incomplete_vps_count,
+              "incomplete VPS",
+              "incomplete VPSs",
+            )}; ${resourceCount(
+              preview.invalid_rule_count,
+              "invalid rule row",
+              "invalid rule rows",
+            )}.`
           : "Use Preview matches to verify the selector and rule conditions against current fleet data."}
       </small>
       <small>
@@ -5745,7 +5768,10 @@ export function FleetAlertNotificationManager({
         setDetailChannelId(null);
       }
       setDeleteRows(null);
-      setChannelStatus(`deleted ${rows.length}`, "success");
+      setChannelStatus(
+        `Deleted ${resourceCount(rows.length, "notification channel")}`,
+        "success",
+      );
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "channel delete failed";
@@ -5773,7 +5799,7 @@ export function FleetAlertNotificationManager({
         await onUpsert(requestFromChannel(channel, { enabled: nextEnabled }));
       }
       setChannelStatus(
-        `${nextEnabled ? "enabled" : "disabled"} ${rows.length}`,
+        `${nextEnabled ? "Enabled" : "Disabled"} ${resourceCount(rows.length, "notification channel")}`,
         "success",
       );
     } catch (error) {
@@ -5833,7 +5859,9 @@ export function FleetAlertNotificationManager({
         }
       }
       setChannelStatus(
-        `${dryRun ? "matched" : "queued"} ${rows.length}`,
+        dryRun
+          ? `Matched ${resourceCount(rows.length, "alert")}`
+          : `Queued ${resourceCount(rows.length, "notification delivery", "notification deliveries")}`,
         "success",
       );
     } catch (error) {
@@ -5892,7 +5920,7 @@ export function FleetAlertNotificationManager({
         }
       }
       setChannelStatus(
-        `${dryRun ? "previewed" : "processed"} ${rows.length}`,
+        `${dryRun ? "Previewed" : "Processed"} ${resourceCount(rows.length, "notification delivery", "notification deliveries")}`,
         "success",
       );
     } catch (error) {
@@ -5925,7 +5953,9 @@ export function FleetAlertNotificationManager({
           ? await onDispatch(snapshot.request)
           : await onProcess(snapshot.request);
       setChannelStatus(
-        `${snapshot.action === "dispatch" ? "queued" : "processed"} ${rows.length}`,
+        snapshot.action === "dispatch"
+          ? `Queued ${resourceCount(rows.length, "notification delivery", "notification deliveries")}`
+          : `Processed ${resourceCount(rows.length, "notification delivery", "notification deliveries")}`,
         "success",
       );
       setQueueConfirmation(null);
@@ -6673,6 +6703,9 @@ export function WebhookRuleManager({
   const [eventId, setEventId] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [statusTone, setStatusTone] = useState<ActionFeedbackTone>("info");
+  const [statusScope, setStatusScope] = useState<"queue" | "resource">(
+    "resource",
+  );
   const [queueConfirmation, setQueueConfirmation] = useState<
     "dispatch" | "process" | null
   >(null);
@@ -6695,7 +6728,6 @@ export function WebhookRuleManager({
       .join(", ");
   }, [agents, expression]);
   const focusedEditorOpen = focusedEditorMode && editorOpen;
-  const showRuleList = !focusedEditorOpen;
   const editingRule = editingId
     ? (rules.find((rule) => rule.id === editingId) ?? null)
     : null;
@@ -6813,9 +6845,14 @@ export function WebhookRuleManager({
     setStatus(null);
   }
 
-  function setWebhookStatus(message: string, tone: ActionFeedbackTone) {
+  function setWebhookStatus(
+    message: string,
+    tone: ActionFeedbackTone,
+    scope: "queue" | "resource" = "resource",
+  ) {
     setStatus(message);
     setStatusTone(tone);
+    setStatusScope(scope);
   }
 
   function updateEditorOpen(open: boolean) {
@@ -6965,7 +7002,10 @@ export function WebhookRuleManager({
         setDetailRuleId(null);
       }
       setDeleteRows(null);
-      setWebhookStatus(`deleted ${rows.length}`, "success");
+      setWebhookStatus(
+        `Deleted ${resourceCount(rows.length, "webhook rule")}`,
+        "success",
+      );
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "rule delete failed";
@@ -6993,7 +7033,7 @@ export function WebhookRuleManager({
         await onUpsert(requestFromRule(rule, { enabled: nextEnabled }));
       }
       setWebhookStatus(
-        `${nextEnabled ? "enabled" : "disabled"} ${rows.length}`,
+        `${nextEnabled ? "Enabled" : "Disabled"} ${resourceCount(rows.length, "webhook rule")}`,
         "success",
       );
     } catch (error) {
@@ -7098,6 +7138,7 @@ export function WebhookRuleManager({
       setWebhookStatus(
         "Create and enable a webhook rule before matching test events",
         "warning",
+        "queue",
       );
       return;
     }
@@ -7110,6 +7151,7 @@ export function WebhookRuleManager({
           ? `queueing webhook test for ${rule.name}`
           : "queueing webhooks",
       "progress",
+      "queue",
     );
     setQueuePending(true);
     try {
@@ -7152,13 +7194,17 @@ export function WebhookRuleManager({
         }
       }
       setWebhookStatus(
-        `${dryRunMode ? "matched" : "queued"} ${rows.length}`,
+        dryRunMode
+          ? `Matched ${resourceCount(rows.length, "webhook delivery", "webhook deliveries")}`
+          : `Queued ${resourceCount(rows.length, "webhook delivery", "webhook deliveries")}`,
         "success",
+        "queue",
       );
     } catch (error) {
       setWebhookStatus(
         error instanceof Error ? error.message : "webhook dispatch failed",
         "danger",
+        "queue",
       );
     } finally {
       setQueuePending(false);
@@ -7183,6 +7229,7 @@ export function WebhookRuleManager({
           ? "No failed event webhook deliveries are available"
           : "No queued event webhook deliveries are available",
         "info",
+        "queue",
       );
       return;
     }
@@ -7193,6 +7240,7 @@ export function WebhookRuleManager({
           ? "retrying failed webhooks"
           : "delivering webhooks",
       "progress",
+      "queue",
     );
     setQueuePending(true);
     try {
@@ -7228,13 +7276,15 @@ export function WebhookRuleManager({
         }
       }
       setWebhookStatus(
-        `${dryRunMode ? "previewed" : isRetry ? "retried" : "processed"} ${rows.length}`,
+        `${dryRunMode ? "Previewed" : isRetry ? "Retried" : "Processed"} ${resourceCount(rows.length, "webhook delivery", "webhook deliveries")}`,
         "success",
+        "queue",
       );
     } catch (error) {
       setWebhookStatus(
         error instanceof Error ? error.message : "webhook processing failed",
         "danger",
+        "queue",
       );
     } finally {
       setQueuePending(false);
@@ -7252,6 +7302,7 @@ export function WebhookRuleManager({
         ? "queueing reviewed webhooks"
         : "delivering reviewed webhooks",
       "progress",
+      "queue",
     );
     try {
       const rows =
@@ -7259,14 +7310,16 @@ export function WebhookRuleManager({
           ? await onDispatch(snapshot.request)
           : await onProcess(snapshot.request);
       setWebhookStatus(
-        `${snapshot.action === "dispatch" ? "queued" : "processed"} ${rows.length}`,
+        `${snapshot.action === "dispatch" ? "Queued" : "Processed"} ${resourceCount(rows.length, "webhook delivery", "webhook deliveries")}`,
         "success",
+        "queue",
       );
       clearWebhookQueueReview();
     } catch (error) {
       setWebhookStatus(
         error instanceof Error ? error.message : "webhook queue action failed",
         "danger",
+        "queue",
       );
     } finally {
       setQueuePending(false);
@@ -7355,33 +7408,38 @@ export function WebhookRuleManager({
   return (
     <div className="consoleCrudPanel">
       <div className="consoleResourceLayout fullWidth">
-        {showRuleList ? (
-          <ConsoleDataGrid
-            actions={ruleActions}
-            columns={ruleColumns}
-            defaultPageSize={10}
-            empty="No webhook rules saved."
-            getRowId={(rule) => rule.id}
-            itemLabel="rules"
-            renderExpandedRow={(rule) => <WebhookRuleDetailGrid rule={rule} />}
-            rowActions={ruleActions}
-            rows={rules}
-            searchPlaceholder="Search webhook rules by name, expression, target, or notes"
-            storageKey="vpsman.grid.fleet.webhookRules.v2"
-            title="Webhook rules"
-            toolbarActions={
-              <button
-                className="primaryAction compactAction"
-                onClick={createRule}
-                type="button"
-              >
-                <Plus size={16} />
-                <span>Create rule</span>
-              </button>
-            }
+        {statusScope === "resource" ? (
+          <ActionFeedback
+            className="localActionFeedback fleetPolicyActionFeedback"
+            message={status}
+            tone={statusTone}
           />
         ) : null}
-        {showRuleList && detailRuleId && !editorOpen ? (
+        <ConsoleDataGrid
+          actions={ruleActions}
+          columns={ruleColumns}
+          defaultPageSize={10}
+          empty="No webhook rules saved."
+          getRowId={(rule) => rule.id}
+          itemLabel="rules"
+          renderExpandedRow={(rule) => <WebhookRuleDetailGrid rule={rule} />}
+          rowActions={ruleActions}
+          rows={rules}
+          searchPlaceholder="Search webhook rules by name, expression, target, or notes"
+          storageKey="vpsman.grid.fleet.webhookRules.v2"
+          title="Webhook rules"
+          toolbarActions={
+            <button
+              className="primaryAction compactAction"
+              onClick={createRule}
+              type="button"
+            >
+              <Plus size={16} />
+              <span>Create rule</span>
+            </button>
+          }
+        />
+        {detailRuleId && !editorOpen ? (
           <ConsoleDetailPanel
             actions={
               <>
@@ -7524,9 +7582,15 @@ export function WebhookRuleManager({
                   </span>
                 </label>
               </ConsoleField>
-              <ConsoleField label="Cooldown seconds">
+              <ConsoleField
+                label="Cooldown seconds"
+                hint="Minimum seconds between new automatic deliveries for this rule. Retries are controlled separately."
+              >
                 <input
                   aria-label="Webhook cooldown seconds"
+                  min={0}
+                  title="Minimum seconds between new automatic deliveries for this rule. Retries are controlled separately."
+                  type="number"
                   value={cooldownSecs}
                   onChange={(event) => setCooldownSecs(event.target.value)}
                 />
@@ -7831,11 +7895,13 @@ export function WebhookRuleManager({
         }
         tone={queueConfirmation === "process" ? "danger" : "normal"}
       />
-      <ActionFeedback
-        className="localActionFeedback fleetPolicyActionFeedback"
-        message={status}
-        tone={statusTone}
-      />
+      {statusScope === "queue" ? (
+        <ActionFeedback
+          className="localActionFeedback fleetPolicyActionFeedback"
+          message={status}
+          tone={statusTone}
+        />
+      ) : null}
       <ConfirmationPrompt
         confirmLabel="Enable webhook rules"
         detail="Enabling starts matching future events and can send requests to the configured external targets. Disabling remains immediate."

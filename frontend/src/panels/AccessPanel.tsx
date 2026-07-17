@@ -2620,9 +2620,7 @@ function isTerminalOpen(session: TerminalSessionRecord): boolean {
 }
 
 function isOperatorSessionExpired(session: OperatorSessionRecord): boolean {
-  return (
-    isPastTime(session.expires_at) || isPastTime(session.refresh_expires_at)
-  );
+  return isPastTime(session.refresh_expires_at);
 }
 
 function operatorSessionStateLabel(session: OperatorSessionRecord): string {
@@ -2633,7 +2631,7 @@ function operatorSessionStateLabel(session: OperatorSessionRecord): string {
     return "Expired";
   }
   if (isPastTime(session.expires_at)) {
-    return "Access expired";
+    return "Refresh available";
   }
   return session.current ? "Current" : "Active";
 }

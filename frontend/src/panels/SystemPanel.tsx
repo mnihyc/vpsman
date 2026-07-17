@@ -969,6 +969,18 @@ export function SystemUsersPanel({
             ? "Session TTL must be from 1 to 3650 days"
             : null
       : null;
+  const operatorActionFeedbackMessage =
+    actionError ??
+    (reviewPending
+      ? "Preparing review"
+      : actionPending
+        ? "Applying user action"
+        : actionStatus);
+  const operatorActionFeedbackTone = actionError
+    ? "danger"
+    : reviewPending || actionPending
+      ? "progress"
+      : "success";
 
   useEffect(() => {
     if (editorMode === "closed") return;
@@ -1145,7 +1157,13 @@ export function SystemUsersPanel({
         minSize: 210,
       },
     ],
-    [accessSummaries, actionPending, canManageUsers, reviewPending],
+    [
+      accessSummaries,
+      actionPending,
+      canManageUsers,
+      privilegeMaterial,
+      reviewPending,
+    ],
   );
 
   function invalidateUserReview() {
@@ -1694,6 +1712,13 @@ export function SystemUsersPanel({
                 : "Use New or row actions"}
           </span>
         </div>
+        {editorMode === "closed" ? (
+          <ActionFeedback
+            className="localActionFeedback"
+            message={operatorActionFeedbackMessage}
+            tone={operatorActionFeedbackTone}
+          />
+        ) : null}
         <ConsoleDataGrid
           actions={[
             {
@@ -1847,21 +1872,8 @@ export function SystemUsersPanel({
           >
             <ActionFeedback
               className="localActionFeedback"
-              message={
-                actionError ??
-                (reviewPending
-                  ? "Preparing review"
-                  : actionPending
-                    ? "Applying user action"
-                    : actionStatus)
-              }
-              tone={
-                actionError
-                  ? "danger"
-                  : reviewPending || actionPending
-                    ? "progress"
-                    : "success"
-              }
+              message={operatorActionFeedbackMessage}
+              tone={operatorActionFeedbackTone}
             />
             {selectedOperator && selectedAccessSummary ? (
               <OperatorAccessEvidencePanel
@@ -2186,6 +2198,7 @@ function SystemSessionsPanel({
   const [pending, setPending] = useState(false);
   const [reviewPending, setReviewPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sessionStatus, setSessionStatus] = useState<string | null>(null);
   const [authFilter, setAuthFilter] = useState<
     "all" | "failures" | "success" | "suspicious"
   >("all");
@@ -2239,8 +2252,12 @@ function SystemSessionsPanel({
       ? "Preparing session revoke review"
       : pending
         ? "Revoking sessions"
-        : null);
-  const sessionActionFeedbackTone = error ? "danger" : "progress";
+        : sessionStatus);
+  const sessionActionFeedbackTone = error
+    ? "danger"
+    : reviewPending || pending
+      ? "progress"
+      : "success";
   const uniqueRemoteIps = new Set(
     authEvents
       .map((event) => event.remote_ip)
@@ -2373,7 +2390,7 @@ function SystemSessionsPanel({
         ),
       },
     ],
-    [pending, reviewPending, sessionEnrichment],
+    [pending, privilegeMaterial, reviewPending, sessionEnrichment],
   );
   const eventColumns = useMemo<
     ConsoleDataGridColumn<OperatorAuthEventRecord>[]
@@ -2442,6 +2459,7 @@ function SystemSessionsPanel({
   }, [sessions, invalidateReviewGeneration]);
 
   async function requestSessionRevoke(rows: OperatorSessionRecord[]) {
+    setSessionStatus(null);
     const sessionsToRevoke = rows.filter(
       (session) => !session.current && isOperatorSessionUsable(session),
     );
@@ -2514,6 +2532,7 @@ function SystemSessionsPanel({
     setPending(true);
     setError(null);
     try {
+      const revokedCount = pendingRevoke.sessions.length;
       for (const session of pendingRevoke.sessions) {
         await onRevokeOperatorSession(
           session.id,
@@ -2521,6 +2540,9 @@ function SystemSessionsPanel({
           pendingRevoke.privileges[session.id].privilegeAssertion,
         );
       }
+      setSessionStatus(
+        `Revoked ${revokedCount} bearer session${revokedCount === 1 ? "" : "s"}`,
+      );
       setPendingRevoke(null);
     } catch (actionError) {
       setError(
@@ -3654,7 +3676,7 @@ function operatorSessionStateLabel(session: OperatorSessionRecord): string {
     return "refresh expired";
   }
   if (isPastTime(session.expires_at)) {
-    return "access expired";
+    return "refreshable";
   }
   return session.current ? "current" : "active";
 }
@@ -3674,9 +3696,7 @@ function isOperatorSessionUsable(session: OperatorSessionRecord): boolean {
 }
 
 function isOperatorSessionExpired(session: OperatorSessionRecord): boolean {
-  return (
-    isPastTime(session.expires_at) || isPastTime(session.refresh_expires_at)
-  );
+  return isPastTime(session.refresh_expires_at);
 }
 
 function isPastTime(value: string): boolean {
@@ -6407,14 +6427,23 @@ function gatewayHealthTone(
   if (criticalFailures > 0 || hardDrops > 0) {
     return "critical";
   }
-  const softSignals =
+  const warningSignals =
     (gatewayEvents.dropped_events ?? 0) +
     (gatewayEvents.telemetry_dropped_events ?? 0) +
     (gatewayEvents.retained_output_truncated_events ?? 0) +
     (gatewayEvents.rejected_agent_connections ?? 0) +
-    (gatewayEvents.current_queue_depth ?? 0) +
-    Math.min(1, gatewayEvents.oldest_event_age_secs ?? 0);
-  return softSignals > 0 ? "warning" : "ok";
+    (gatewayEvents.retry_attempts ?? 0);
+  if (warningSignals > 0) {
+    return "warning";
+  }
+  const oldestAgeSecs = gatewayEvents.oldest_event_age_secs;
+  if (oldestAgeSecs !== null && oldestAgeSecs >= 300) {
+    return "critical";
+  }
+  if (oldestAgeSecs !== null && oldestAgeSecs >= 60) {
+    return "warning";
+  }
+  return (gatewayEvents.current_queue_depth ?? 0) > 0 ? "info" : "ok";
 }
 
 function dispatchCapacityHealth({
@@ -6600,7 +6629,7 @@ function buildSystemAttentionItems({
       value: `${dbPressurePercent}%`,
     });
   }
-  if (dispatchTone !== "ok") {
+  if (dispatchTone === "warning" || dispatchTone === "critical") {
     items.push({
       detail:
         "Queued dispatch work exists in the current sample; confirm the queue is draining and retries are not climbing.",
@@ -6618,7 +6647,7 @@ function buildSystemAttentionItems({
       value: `${lifecycleFailures} event${lifecycleFailures === 1 ? "" : "s"}`,
     });
   }
-  if (gatewayTone !== "ok") {
+  if (gatewayTone === "warning" || gatewayTone === "critical") {
     items.push({
       detail: `${gatewayQueueDepth} queued, ${gatewayOldestAgeLabel}, ${gatewayDropped} dropped, ${gatewayRetries} retries, ${gatewayRejected} rejected connects.`,
       label: "Gateway delivery",
