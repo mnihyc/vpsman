@@ -42,7 +42,9 @@ export function ProcessSupervisorInventoryPanel({
   onInitialTargetConsumed,
   onOpenPrivilegeUnlock,
   onRefresh,
+  onSelectedClientIdChange,
   privilegeMaterial,
+  selectedClientId,
 }: {
   agents: AgentView[];
   clientLabel: (clientId: string) => string;
@@ -56,13 +58,26 @@ export function ProcessSupervisorInventoryPanel({
   onInitialTargetConsumed?: (requestId: string) => void;
   onOpenPrivilegeUnlock: () => void;
   onRefresh: () => void | Promise<void>;
+  onSelectedClientIdChange?: (clientId: string | null) => void;
   privilegeMaterial: PrivilegeMaterial | null;
+  selectedClientId?: string | null;
 }) {
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionStatus, setActionStatus] = useState<string | null>(null);
   const [actionWarning, setActionWarning] = useState(false);
   const [actionPending, setActionPending] = useState(false);
-  const [focusedClientId, setFocusedClientId] = useState<string | null>(null);
+  const [localFocusedClientId, setLocalFocusedClientId] = useState<string | null>(
+    null,
+  );
+  const focusedClientId =
+    selectedClientId === undefined ? localFocusedClientId : selectedClientId;
+  const setFocusedClientId = useCallback(
+    (clientId: string | null) => {
+      setLocalFocusedClientId(clientId);
+      onSelectedClientIdChange?.(clientId);
+    },
+    [onSelectedClientIdChange],
+  );
   const appliedInitialTargetRequestRef = useRef<string | null>(null);
   const [restartProcess, setRestartProcess] =
     useState<ProcessSupervisorInventoryRecord | null>(null);

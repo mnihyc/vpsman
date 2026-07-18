@@ -387,7 +387,9 @@ export function ConsoleShell({
     );
     const updateScrollOffset = () => {
       const height = Math.ceil(topbar.getBoundingClientRect().height);
-      const offset = `${height + 16}px`;
+      const offset = getComputedStyle(topbar).position === "sticky"
+        ? `${height + 16}px`
+        : "16px";
       content.style.setProperty("--console-sticky-offset", offset);
       root.style.setProperty("--console-sticky-offset", offset);
     };

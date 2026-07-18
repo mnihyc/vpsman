@@ -1,10 +1,10 @@
 use std::{path::Path, process::Stdio, time::Duration};
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 use tokio::{process::Command, time};
 use vpsman_common::{
-    AgentConfig, AgentProcessInventorySource, CommandOutput, OutputStream, RuntimeTunnelCommand,
+    AgentConfig, AgentProcessInventorySource, CommandOutput, HostProcessSnapshot, HostProcessView,
+    OutputStream, RuntimeTunnelCommand,
 };
 
 use crate::{
@@ -41,35 +41,12 @@ pub(crate) async fn execute_process_list(
     Ok(outputs)
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-struct ProcessSnapshot {
-    #[serde(default = "default_process_list_type")]
-    r#type: String,
-    #[serde(default)]
-    source: String,
-    #[serde(default)]
-    truncated: bool,
-    #[serde(default)]
-    processes: Vec<ProcessView>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct ProcessView {
-    pid: u32,
-    ppid: u32,
-    uid: u32,
-    state: String,
-    name: String,
-    command: String,
-    rss_kib: u64,
-}
-
 async fn collect_process_snapshot_for_config(
     config: &AgentConfig,
     limit: u16,
     max_timeout_secs: u64,
     cancel_token: CommandCancelToken,
-) -> Result<ProcessSnapshot> {
+) -> Result<HostProcessSnapshot> {
     cancel_token.check("process_list")?;
     match config.execution.process_inventory_source {
         AgentProcessInventorySource::LinuxProcfs => {
@@ -98,7 +75,7 @@ async fn collect_process_snapshot_for_config(
     }
 }
 
-fn collect_linux_procfs_snapshot(proc_root: &str, limit: u16) -> Result<ProcessSnapshot> {
+fn collect_linux_procfs_snapshot(proc_root: &str, limit: u16) -> Result<HostProcessSnapshot> {
     let proc_root = Path::new(proc_root);
     let mut processes = Vec::new();
     for entry in std::fs::read_dir(proc_root)
@@ -126,7 +103,7 @@ fn collect_linux_procfs_snapshot(proc_root: &str, limit: u16) -> Result<ProcessS
     let limit = limit as usize;
     let truncated = processes.len() > limit;
     processes.truncate(limit);
-    Ok(ProcessSnapshot {
+    Ok(HostProcessSnapshot {
         r#type: default_process_list_type(),
         source: "linux_procfs".to_string(),
         truncated,
@@ -140,7 +117,7 @@ async fn collect_custom_process_snapshot(
     limit: u16,
     max_timeout_secs: u64,
     cancel_token: CommandCancelToken,
-) -> Result<ProcessSnapshot> {
+) -> Result<HostProcessSnapshot> {
     let argv = render_process_inventory_argv(config, command, limit)?;
     let output = run_json_command(
         &argv,
@@ -152,7 +129,7 @@ async fn collect_custom_process_snapshot(
         cancel_token,
     )
     .await?;
-    let mut snapshot: ProcessSnapshot = serde_json::from_slice(&output)
+    let mut snapshot: HostProcessSnapshot = serde_json::from_slice(&output)
         .context("custom process inventory returned invalid JSON")?;
     snapshot.r#type = default_process_list_type();
     snapshot.source = "custom_command".to_string();
@@ -168,7 +145,7 @@ async fn collect_custom_process_snapshot(
     Ok(snapshot)
 }
 
-fn read_process_view(proc_root: &Path, pid: u32) -> Option<ProcessView> {
+fn read_process_view(proc_root: &Path, pid: u32) -> Option<HostProcessView> {
     let status = std::fs::read_to_string(proc_root.join(pid.to_string()).join("status")).ok()?;
     let mut ppid = 0_u32;
     let mut uid = 0_u32;
@@ -205,7 +182,7 @@ fn read_process_view(proc_root: &Path, pid: u32) -> Option<ProcessView> {
     if name.is_empty() {
         name = format!("pid-{pid}");
     }
-    Some(ProcessView {
+    Some(HostProcessView {
         pid,
         ppid,
         uid,

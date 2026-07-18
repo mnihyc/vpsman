@@ -26,6 +26,9 @@ use crate::{
         execute_file_push, execute_file_push_chunked, execute_file_transfer_abort,
         execute_file_transfer_chunk, execute_file_transfer_commit, execute_file_transfer_start,
     },
+    host_packages::{execute_package_update_apply, execute_package_update_plan},
+    host_services::{execute_service_action, execute_service_inventory, execute_service_logs},
+    host_storage::execute_storage_inventory,
     network_interfaces::{execute_network_interfaces_command, NetworkInterfacesInput},
     process::execute_process_list,
     supervisor::execute_process_supervisor_command,
@@ -363,6 +366,19 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
         JobCommand::ProcessList { limit } => {
             execute_process_list(config, job_id, *limit, max_timeout_secs, cancel_token).await
         }
+        JobCommand::StorageInventory {
+            include_pseudo_mounts,
+            limit,
+        } => {
+            execute_storage_inventory(
+                job_id,
+                *include_pseudo_mounts,
+                *limit,
+                max_timeout_secs,
+                cancel_token,
+            )
+            .await
+        }
         JobCommand::NetworkInterfaces => {
             execute_network_interfaces_command(NetworkInterfacesInput {
                 job_id,
@@ -377,6 +393,79 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
         | JobCommand::ProcessStatus { .. }
         | JobCommand::ProcessLogs { .. } => {
             execute_process_supervisor_command(job_id, command, max_timeout_secs).await
+        }
+        JobCommand::ServiceInventory {
+            expected_provider,
+            limit,
+        } => {
+            execute_service_inventory(
+                job_id,
+                *expected_provider,
+                *limit,
+                max_timeout_secs,
+                cancel_token,
+            )
+            .await
+        }
+        JobCommand::ServiceAction {
+            provider,
+            service,
+            action,
+            expected_active_state,
+            expected_enabled_state,
+        } => {
+            execute_service_action(
+                job_id,
+                *provider,
+                service,
+                *action,
+                expected_active_state,
+                expected_enabled_state,
+                max_timeout_secs,
+                cancel_token,
+            )
+            .await
+        }
+        JobCommand::ServiceLogs {
+            provider,
+            service,
+            max_lines,
+        } => {
+            execute_service_logs(
+                job_id,
+                *provider,
+                service,
+                *max_lines,
+                max_timeout_secs,
+                cancel_token,
+            )
+            .await
+        }
+        JobCommand::PackageUpdatePlan {
+            expected_provider,
+            refresh_metadata,
+        } => {
+            execute_package_update_plan(
+                job_id,
+                *expected_provider,
+                *refresh_metadata,
+                max_timeout_secs,
+                cancel_token,
+            )
+            .await
+        }
+        JobCommand::PackageUpdateApply {
+            provider,
+            plan_hash,
+        } => {
+            execute_package_update_apply(
+                job_id,
+                *provider,
+                plan_hash,
+                max_timeout_secs,
+                cancel_token,
+            )
+            .await
         }
         JobCommand::UpdateAgent {
             artifact_url,

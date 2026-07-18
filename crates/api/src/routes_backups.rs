@@ -567,6 +567,7 @@ pub(crate) async fn create_backup_request(
         selector_expression: &selector_expression,
         command_type: "backup",
         operation_payload_hash: &command_hash,
+        rollout_policy_hash: None,
         resolved_targets: &resolved_targets,
         max_timeout_secs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
         force_unprivileged: false,

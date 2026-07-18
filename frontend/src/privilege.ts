@@ -1,4 +1,4 @@
-import type { JobOperation } from "./types";
+import type { JobOperation, JobRolloutPolicy } from "./types";
 import { clampJobMaxTimeoutSecs } from "./jobMaxTimeout";
 import { FILE_BROWSER_ARCHIVE_LIMIT_BYTES } from "./fileBrowser";
 import {
@@ -33,6 +33,7 @@ export type JobPrivilegeIntentInput = {
   selectorExpression: string;
   commandType: string;
   operationPayloadHash: string;
+  rolloutPolicyHash?: string | null;
   resolvedTargets: string[];
   maxTimeoutSecs: number;
   forceUnprivileged: boolean;
@@ -260,6 +261,20 @@ export async function operationPayloadHashHex(operation: JobOperation): Promise<
   return sha256Hex(operationPayloadBytes(operation));
 }
 
+export async function rolloutPolicyHashHex(
+  rollout: JobRolloutPolicy | null | undefined,
+): Promise<string | null> {
+  if (!rollout) return null;
+  const payload = ordered([
+    ["canary_client_ids", [...rollout.canary_client_ids]],
+    ["batch_size", rollout.batch_size],
+    ["max_failures", rollout.max_failures],
+    ["pause_after_canary", rollout.pause_after_canary],
+    ["batch_delay_secs", rollout.batch_delay_secs],
+  ]);
+  return sha256Hex(encoder.encode(JSON.stringify(payload)));
+}
+
 export async function textPayloadHashHex(text: string): Promise<string> {
   return sha256Hex(encoder.encode(text));
 }
@@ -319,6 +334,12 @@ export function canonicalJobPrivilegeIntent(input: JobPrivilegeIntentInput): str
     ["selector_expression", input.selectorExpression.trim()],
     ["command_type", input.commandType],
     ["operation_payload_hash", normalizeSha256Hex(input.operationPayloadHash)],
+    [
+      "rollout_policy_hash",
+      input.rolloutPolicyHash
+        ? normalizeSha256Hex(input.rolloutPolicyHash)
+        : null,
+    ],
     ["resolved_targets", [...input.resolvedTargets].sort()],
     ["max_timeout_secs", clampJobMaxTimeoutSecs(input.maxTimeoutSecs)],
     ["force_unprivileged", input.forceUnprivileged],
@@ -615,6 +636,12 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
       return ordered([["type", operation.type]]);
     case "process_list":
       return ordered([["type", operation.type], ["limit", operation.limit]]);
+    case "storage_inventory":
+      return ordered([
+        ["type", operation.type],
+        ["include_pseudo_mounts", operation.include_pseudo_mounts],
+        ["limit", operation.limit],
+      ]);
     case "process_start":
       return ordered([
         ["type", operation.type],
@@ -632,6 +659,40 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
       return ordered([["type", operation.type], ["name", operation.name ?? null]]);
     case "process_logs":
       return ordered([["type", operation.type], ["name", operation.name], ["max_bytes", operation.max_bytes]]);
+    case "service_inventory":
+      return ordered([
+        ["type", operation.type],
+        ["expected_provider", optional(operation.expected_provider)],
+        ["limit", operation.limit],
+      ]);
+    case "service_action":
+      return ordered([
+        ["type", operation.type],
+        ["provider", operation.provider],
+        ["service", operation.service],
+        ["action", operation.action],
+        ["expected_active_state", operation.expected_active_state],
+        ["expected_enabled_state", operation.expected_enabled_state],
+      ]);
+    case "service_logs":
+      return ordered([
+        ["type", operation.type],
+        ["provider", operation.provider],
+        ["service", operation.service],
+        ["max_lines", operation.max_lines],
+      ]);
+    case "package_update_plan":
+      return ordered([
+        ["type", operation.type],
+        ["expected_provider", optional(operation.expected_provider)],
+        ["refresh_metadata", operation.refresh_metadata],
+      ]);
+    case "package_update_apply":
+      return ordered([
+        ["type", operation.type],
+        ["provider", operation.provider],
+        ["plan_hash", operation.plan_hash],
+      ]);
     case "backup":
       return ordered([
         ["type", operation.type],

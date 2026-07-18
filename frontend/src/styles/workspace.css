@@ -4286,6 +4286,13 @@ button.vpsDetailRecord:hover {
 .timeSeriesChart {
   min-width: 0;
   min-height: 236px;
+  border-radius: 4px;
+  cursor: crosshair;
+  outline: none;
+}
+
+.timeSeriesChart:focus-visible {
+  box-shadow: var(--focus-ring);
 }
 
 .timeSeriesChart .u-wrap {
@@ -4297,31 +4304,96 @@ button.vpsDetailRecord:hover {
   display: none;
 }
 
-.timeSeriesLegend {
+.timeSeriesLegendToolbar {
   display: flex;
   flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
   gap: 7px;
   margin-top: 8px;
+}
+
+.timeSeriesLegend {
+  display: flex;
+  flex: 1 1 360px;
+  flex-wrap: wrap;
+  gap: 7px;
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 700;
 }
 
-.timeSeriesLegend span,
+.timeSeriesLegend button,
 .timeSeriesHover span {
   display: inline-flex;
   align-items: center;
   gap: 6px;
 }
 
-.timeSeriesLegend span {
+.timeSeriesLegend button {
   max-width: 100%;
   min-height: 24px;
   border: 1px solid var(--border-subtle);
-  border-radius: 999px;
+  border-radius: 6px;
   background: var(--surface-subtle);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
   overflow-wrap: anywhere;
   padding: 3px 8px;
+  text-align: left;
+}
+
+.timeSeriesLegend button:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-neutral);
+}
+
+.timeSeriesLegend button:focus-visible,
+.timeSeriesLegendAction:focus-visible {
+  box-shadow: var(--focus-ring);
+  outline: none;
+}
+
+.timeSeriesLegend button.hidden {
+  color: var(--muted);
+  opacity: 0.7;
+  text-decoration: line-through;
+}
+
+.timeSeriesLegend button[aria-disabled="true"] {
+  cursor: default;
+}
+
+.timeSeriesLegendActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.timeSeriesLegendAction {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 7px;
+}
+
+.timeSeriesLegendAction:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-neutral);
 }
 
 .timeSeriesCoverage {
@@ -4354,6 +4426,16 @@ button.vpsDetailRecord:hover {
   font-size: 12px;
   padding: 8px 10px;
   pointer-events: none;
+}
+
+.timeSeriesHover.left {
+  right: auto;
+  left: 12px;
+}
+
+.timeSeriesHover.right {
+  right: 12px;
+  left: auto;
 }
 
 .timeSeriesHover strong {

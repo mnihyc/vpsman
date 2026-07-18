@@ -45,8 +45,36 @@ pub(crate) fn build_privilege_for_job_command(
     force_unprivileged: bool,
     privileged: bool,
 ) -> Result<BuiltJobPrivilege> {
+    build_privilege_for_job_command_with_rollout_hash(
+        client_ids,
+        command,
+        command_type,
+        selector_expression,
+        password,
+        salt_hex,
+        ttl_secs,
+        max_timeout_secs,
+        force_unprivileged,
+        privileged,
+        None,
+    )
+}
+
+pub(crate) fn build_privilege_for_job_command_with_rollout_hash(
+    client_ids: &[String],
+    command: &JobCommand,
+    command_type: &str,
+    selector_expression: &str,
+    password: &str,
+    salt_hex: &str,
+    ttl_secs: u64,
+    max_timeout_secs: u64,
+    force_unprivileged: bool,
+    privileged: bool,
+    rollout_policy_hash: Option<&str>,
+) -> Result<BuiltJobPrivilege> {
     let payload_hash_hex = payload_hash(&encode_json(command)?);
-    build_privilege_for_payload_hash(
+    build_privilege_for_payload_hash_with_rollout_hash(
         client_ids,
         &payload_hash_hex,
         command_type,
@@ -57,10 +85,11 @@ pub(crate) fn build_privilege_for_job_command(
         max_timeout_secs,
         force_unprivileged,
         privileged,
+        rollout_policy_hash,
     )
 }
 
-pub(crate) fn build_privilege_for_payload_hash(
+pub(crate) fn build_privilege_for_payload_hash_with_rollout_hash(
     client_ids: &[String],
     payload_hash_hex: &str,
     command_type: &str,
@@ -71,6 +100,7 @@ pub(crate) fn build_privilege_for_payload_hash(
     max_timeout_secs: u64,
     force_unprivileged: bool,
     privileged: bool,
+    rollout_policy_hash: Option<&str>,
 ) -> Result<BuiltJobPrivilege> {
     anyhow::ensure!(
         !client_ids.is_empty(),
@@ -81,6 +111,7 @@ pub(crate) fn build_privilege_for_payload_hash(
         selector_expression,
         command_type,
         operation_payload_hash: &payload_hash_hex,
+        rollout_policy_hash,
         resolved_targets: client_ids,
         max_timeout_secs,
         force_unprivileged,
@@ -272,6 +303,7 @@ mod tests {
             selector_expression: "id:client-a || id:client-b",
             command_type: "shell_argv",
             operation_payload_hash: &payload_hash_hex,
+            rollout_policy_hash: None,
             resolved_targets: &clients,
             max_timeout_secs: 30,
             force_unprivileged: false,

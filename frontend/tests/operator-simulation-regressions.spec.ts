@@ -201,7 +201,7 @@ test("keeps cross-route job evidence below the mobile toolbar", async ({
 }, testInfo) => {
   test.skip(
     !testInfo.project.name.includes("mobile"),
-    "mobile sticky-offset and compact-card behavior is viewport-specific",
+    "mobile action-panel offset and compact-card behavior is viewport-specific",
   );
   await installConsoleApiMock(page);
   await page.goto("/");

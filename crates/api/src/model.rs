@@ -11,6 +11,7 @@ pub(crate) use crate::model_backups::*;
 pub(crate) use crate::model_dashboard::*;
 pub(crate) use crate::model_server_jobs::*;
 pub(crate) use crate::model_source_templates::*;
+pub(crate) use vpsman_common::JobRolloutPolicy;
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct FleetSummary {
@@ -1035,6 +1036,59 @@ pub(crate) struct CreateJobRequest {
     pub(crate) privileged: bool,
     #[serde(default)]
     pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+    #[serde(default)]
+    pub(crate) rollout: Option<JobRolloutPolicy>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct JobRolloutTargetView {
+    pub(crate) client_id: String,
+    pub(crate) batch_index: u16,
+    pub(crate) status: String,
+    pub(crate) message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct JobRolloutView {
+    pub(crate) job_id: Uuid,
+    pub(crate) status: String,
+    pub(crate) canary_client_ids: Vec<String>,
+    pub(crate) batch_size: u16,
+    pub(crate) max_failures: u16,
+    pub(crate) pause_after_canary: bool,
+    pub(crate) batch_delay_secs: u32,
+    pub(crate) current_batch: u16,
+    pub(crate) total_batches: u16,
+    pub(crate) failure_baseline: u16,
+    pub(crate) pause_reason: Option<String>,
+    pub(crate) next_batch_at: String,
+    pub(crate) created_at: String,
+    pub(crate) updated_at: String,
+    pub(crate) completed_at: Option<String>,
+    pub(crate) targets: Vec<JobRolloutTargetView>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MemoryJobRolloutRecord {
+    pub(crate) job_id: Uuid,
+    pub(crate) status: String,
+    pub(crate) policy: JobRolloutPolicy,
+    pub(crate) current_batch: u16,
+    pub(crate) total_batches: u16,
+    pub(crate) failure_baseline: u16,
+    pub(crate) pause_reason: Option<String>,
+    pub(crate) next_batch_unix: u64,
+    pub(crate) created_at: String,
+    pub(crate) updated_at: String,
+    pub(crate) completed_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UpdateJobRolloutRequest {
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    pub(crate) reason: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

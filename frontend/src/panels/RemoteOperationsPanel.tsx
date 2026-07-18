@@ -29,6 +29,9 @@ import type {
   JobOutputRecord,
   JobTargetRecord,
   JobTargetSelection,
+  HostProcessInventoryRecord,
+  HostServiceInventoryRecord,
+  HostStorageInventoryRecord,
   ProcessSupervisorInventoryRecord,
   UpsertCommandTemplateRequest,
   WsTerminalOutputEvent,
@@ -77,6 +80,21 @@ const ProcessSupervisorInventoryPanel = retryableLazy(() =>
     default: module.ProcessSupervisorInventoryPanel,
   })),
 );
+const HostProcessInventoryPanel = retryableLazy(() =>
+  import("./jobs/HostProcessInventoryPanel").then((module) => ({
+    default: module.HostProcessInventoryPanel,
+  })),
+);
+const HostServicesPanel = retryableLazy(() =>
+  import("./jobs/HostServicesPanel").then((module) => ({
+    default: module.HostServicesPanel,
+  })),
+);
+const HostStoragePanel = retryableLazy(() =>
+  import("./jobs/HostStoragePanel").then((module) => ({
+    default: module.HostStoragePanel,
+  })),
+);
 const TerminalSessionsPanel = retryableLazy(() =>
   import("./jobs/TerminalSessionsPanel").then((module) => ({
     default: module.TerminalSessionsPanel,
@@ -88,7 +106,9 @@ type RemoteOperationsSubpage =
   | "files"
   | "multi_files"
   | "transfers"
-  | "processes";
+  | "processes"
+  | "services"
+  | "storage";
 
 export function RemoteOperationsPanel({
   activeSubpage,
@@ -105,8 +125,12 @@ export function RemoteOperationsPanel({
   onDownloadFileBundle,
   onDownloadFileTransferSource,
   onDownloadOutputChunk,
+  onDownloadOutputStream,
   onDispatchPresetApplied,
   onLoadJob,
+  onLoadHostProcessInventory,
+  onLoadHostServiceInventory,
+  onLoadHostStorageInventory,
   onLoadOutputs,
   onLoadTargets,
   onLoadTerminalReplay,
@@ -156,8 +180,25 @@ export function RemoteOperationsPanel({
     clientId: string,
     seq: number,
   ) => Promise<Blob>;
+  onDownloadOutputStream: (
+    jobId: string,
+    clientId: string,
+    stream: "stdout" | "stderr" | "combined",
+  ) => Promise<Blob>;
   onDispatchPresetApplied?: () => void;
   onLoadJob: (jobId: string) => Promise<JobHistoryRecord>;
+  onLoadHostProcessInventory: (
+    clientId: string,
+    limit?: number,
+  ) => Promise<HostProcessInventoryRecord>;
+  onLoadHostServiceInventory: (
+    clientId: string,
+    limit?: number,
+  ) => Promise<HostServiceInventoryRecord>;
+  onLoadHostStorageInventory: (
+    clientId: string,
+    limit?: number,
+  ) => Promise<HostStorageInventoryRecord>;
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onLoadTerminalReplay: (
@@ -224,6 +265,8 @@ export function RemoteOperationsPanel({
   const [transferFocusPath, setTransferFocusPath] = useState<string | null>(
     null,
   );
+  const [processRoute, setProcessRoute] = useState(readProcessWorkspaceRoute);
+  const routedProcessIntentRef = useRef<string | null>(null);
   const remoteSubpage = remoteOperationsPanelSubpage(activeSubpage);
   const agentNameById = useMemo(
     () => clientDisplayNameMap(agents, vpsNameDisplayMode),
@@ -231,6 +274,45 @@ export function RemoteOperationsPanel({
   );
   const clientLabel = (clientId: string) =>
     clientDisplayNameFromMap(clientId, agentNameById);
+
+  useEffect(() => {
+    const applyRoute = () => setProcessRoute(readProcessWorkspaceRoute());
+    window.addEventListener("popstate", applyRoute);
+    window.addEventListener("hashchange", applyRoute);
+    return () => {
+      window.removeEventListener("popstate", applyRoute);
+      window.removeEventListener("hashchange", applyRoute);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      remoteSubpage !== "processes" ||
+      initialTargetIntent?.destination !== "processes" ||
+      routedProcessIntentRef.current === initialTargetIntent.requestId
+    ) {
+      return;
+    }
+    routedProcessIntentRef.current = initialTargetIntent.requestId;
+    setProcessWorkspaceRoute("host", initialTargetIntent.clientId, "replace");
+    setProcessRoute({
+      clientId: initialTargetIntent.clientId,
+      mode: "host",
+    });
+    onInitialTargetIntentConsumed?.(initialTargetIntent.requestId);
+  }, [
+    initialTargetIntent,
+    onInitialTargetIntentConsumed,
+    remoteSubpage,
+  ]);
+
+  function updateProcessRoute(
+    mode: ProcessWorkspaceMode,
+    clientId = processRoute.clientId,
+  ) {
+    setProcessWorkspaceRoute(mode, clientId, "push");
+    setProcessRoute({ clientId, mode });
+  }
 
   function prepareTerminalSessionAction(
     session: TerminalSessionRecord,
@@ -452,30 +534,82 @@ export function RemoteOperationsPanel({
         )}
         {remoteSubpage === "processes" && (
           <div className="jobConsoleStack">
-            <ProcessSupervisorInventoryPanel
-              agents={agents}
-              clientLabel={clientLabel}
-              initialTargetClientId={
-                initialTargetIntent?.destination === "processes"
-                  ? initialTargetIntent.clientId
-                  : null
-              }
-              initialTargetRequestId={
-                initialTargetIntent?.destination === "processes"
-                  ? initialTargetIntent.requestId
-                  : null
-              }
-              inventory={processSupervisorInventory}
-              loading={loading}
-              onCreateJob={onCreateJob}
-              onLoadTargets={onLoadTargets}
-              onOpenDispatchPreset={openProcessComposer}
-              onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
-              onInitialTargetConsumed={onInitialTargetIntentConsumed}
-              onRefresh={onRefresh}
-              privilegeMaterial={privilegeMaterial}
-            />
-            {processComposerPreset ? (
+            <div className="processWorkspaceModeBar">
+              <div>
+                <strong>Process scope</strong>
+                <span>
+                  {processRoute.mode === "host"
+                    ? "Linux host inventory"
+                    : "vpsman-managed lifecycle"}
+                </span>
+              </div>
+              <div
+                aria-label="Process scope"
+                className="segmented"
+                role="group"
+              >
+                <button
+                  aria-pressed={processRoute.mode === "host"}
+                  className={processRoute.mode === "host" ? "selected" : ""}
+                  onClick={() => updateProcessRoute("host")}
+                  title="Read processes reported by the selected Linux host"
+                  type="button"
+                >
+                  Host
+                </button>
+                <button
+                  aria-pressed={processRoute.mode === "managed"}
+                  className={processRoute.mode === "managed" ? "selected" : ""}
+                  onClick={() => updateProcessRoute("managed")}
+                  title="Operate only processes started and supervised by vpsman"
+                  type="button"
+                >
+                  Managed
+                </button>
+              </div>
+            </div>
+            {processRoute.mode === "host" ? (
+              <HostProcessInventoryPanel
+                agents={agents}
+                clientLabel={clientLabel}
+                onCreateJob={onCreateJob}
+                onLoadInventory={onLoadHostProcessInventory}
+                onLoadTargets={onLoadTargets}
+                onSelectedClientIdChange={(clientId) =>
+                  updateProcessRoute("host", clientId)
+                }
+                selectedClientId={processRoute.clientId}
+              />
+            ) : (
+              <ProcessSupervisorInventoryPanel
+                agents={agents}
+                clientLabel={clientLabel}
+                initialTargetClientId={
+                  initialTargetIntent?.destination === "processes"
+                    ? initialTargetIntent.clientId
+                    : null
+                }
+                initialTargetRequestId={
+                  initialTargetIntent?.destination === "processes"
+                    ? initialTargetIntent.requestId
+                    : null
+                }
+                inventory={processSupervisorInventory}
+                loading={loading}
+                onCreateJob={onCreateJob}
+                onLoadTargets={onLoadTargets}
+                onOpenDispatchPreset={openProcessComposer}
+                onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+                onInitialTargetConsumed={onInitialTargetIntentConsumed}
+                onRefresh={onRefresh}
+                onSelectedClientIdChange={(clientId) =>
+                  updateProcessRoute("managed", clientId)
+                }
+                privilegeMaterial={privilegeMaterial}
+                selectedClientId={processRoute.clientId}
+              />
+            )}
+            {processRoute.mode === "managed" && processComposerPreset ? (
               <ConsoleDetailPanel
                 description="Start a process or read logs on the selected VPS without leaving the process workspace."
                 onClose={() => setProcessComposerPreset(null)}
@@ -508,6 +642,27 @@ export function RemoteOperationsPanel({
               </ConsoleDetailPanel>
             ) : null}
           </div>
+        )}
+        {remoteSubpage === "services" && (
+          <HostServicesPanel
+            agents={agents}
+            clientLabel={clientLabel}
+            onCreateJob={onCreateJob}
+            onDownloadOutputStream={onDownloadOutputStream}
+            onLoadInventory={onLoadHostServiceInventory}
+            onLoadTargets={onLoadTargets}
+            onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+            privilegeMaterial={privilegeMaterial}
+          />
+        )}
+        {remoteSubpage === "storage" && (
+          <HostStoragePanel
+            agents={agents}
+            clientLabel={clientLabel}
+            onCreateJob={onCreateJob}
+            onLoadInventory={onLoadHostStorageInventory}
+            onLoadTargets={onLoadTargets}
+          />
         )}
         {remoteSubpage === "transfers" && (
           <div className="jobConsoleStack">
@@ -645,11 +800,58 @@ function remoteOperationsPanelSubpage(
     subpage === "multi_files" ||
     subpage === "transfers" ||
     subpage === "processes" ||
+    subpage === "services" ||
+    subpage === "storage" ||
     subpage === "terminal"
   ) {
     return subpage;
   }
   return "terminal";
+}
+
+type ProcessWorkspaceMode = "host" | "managed";
+
+function readProcessWorkspaceRoute(): {
+  clientId: string | null;
+  mode: ProcessWorkspaceMode;
+} {
+  if (typeof window === "undefined") {
+    return { clientId: null, mode: "host" };
+  }
+  const params = new URLSearchParams(window.location.search);
+  const mode = params.get("process_mode") === "managed" ? "managed" : "host";
+  const clientId = params.get("process_client")?.trim() || null;
+  return { clientId, mode };
+}
+
+function setProcessWorkspaceRoute(
+  mode: ProcessWorkspaceMode,
+  clientId: string | null,
+  historyMode: "push" | "replace",
+) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  const url = new URL(window.location.href);
+  if (mode === "managed") {
+    url.searchParams.set("process_mode", mode);
+  } else {
+    url.searchParams.delete("process_mode");
+  }
+  if (clientId) {
+    url.searchParams.set("process_client", clientId);
+  } else {
+    url.searchParams.delete("process_client");
+  }
+  const next = `${url.pathname}${url.search}${url.hash}`;
+  if (`${window.location.pathname}${window.location.search}${window.location.hash}` === next) {
+    return;
+  }
+  if (historyMode === "replace") {
+    window.history.replaceState(null, "", next);
+  } else {
+    window.history.pushState(null, "", next);
+  }
 }
 
 function displayToken(value: string): string {

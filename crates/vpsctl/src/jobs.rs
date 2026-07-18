@@ -106,3 +106,34 @@ pub(crate) fn submit_privileged_operation(
         }),
     )
 }
+
+pub(crate) fn submit_unprivileged_operation(
+    api_url: &str,
+    token: Option<&str>,
+    operation: &JobCommand,
+    command_label: &str,
+    clients: &[String],
+    tags: &[String],
+    max_timeout_secs: u64,
+) -> Result<String> {
+    let selector_expression = selector_expression_from_targets(clients, tags);
+    let target_ids = resolve_target_ids(api_url, token, clients, tags)?;
+    http_post_json(
+        api_url,
+        "/api/v1/jobs",
+        token,
+        &serde_json::json!({
+            "job_id": Uuid::new_v4(),
+            "command": command_label,
+            "argv": [],
+            "operation": operation,
+            "selector_expression": selector_expression,
+            "target_client_ids": target_ids,
+            "privileged": false,
+            "destructive": job_command_requires_confirmation(operation),
+            "confirmed": false,
+            "force_unprivileged": false,
+            "max_timeout_secs": max_timeout_secs,
+        }),
+    )
+}

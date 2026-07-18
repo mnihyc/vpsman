@@ -4,12 +4,14 @@ import { downloadVerifiedArtifact, type ArtifactDownloadMode } from "../artifact
 import type {
   AgentUpdateReleaseRecord,
   CommandTemplateRecord,
+  CancelJobResponse,
   CreateJobApprovalRequest,
   CreateAgentUpdateReleaseRequest,
   CreateJobRequest,
   CreateJobResponse,
   DecideJobApprovalRequest,
   JobHistoryRecord,
+  JobRolloutRecord,
   JobApprovalDecisionResponse,
   JobApprovalRecord,
   JobOutputListPageRecord,
@@ -17,11 +19,16 @@ import type {
   JobOutputComparisonRecord,
   JobOutputRecord,
   JobTargetRecord,
+  HostProcessInventoryRecord,
+  HostPackageUpdatePlanRecord,
+  HostServiceInventoryRecord,
+  HostStorageInventoryRecord,
   ProcessSupervisorInventoryRecord,
   ArtifactCleanupPreviewRecord,
   ServerJobRecord,
   DeleteCommandTemplateRequest,
   UpsertCommandTemplateRequest,
+  UpdateJobRolloutRequest,
 } from "../types";
 import type {
   FileTransferHandoffRecord,
@@ -44,6 +51,7 @@ export function useJobsData(
 ) {
   const [jobs, setJobs] = useState<JobHistoryRecord[]>([]);
   const [jobApprovals, setJobApprovals] = useState<JobApprovalRecord[]>([]);
+  const [jobRollouts, setJobRollouts] = useState<JobRolloutRecord[]>([]);
   const [agentUpdateReleases, setAgentUpdateReleases] = useState<AgentUpdateReleaseRecord[]>([]);
   const [processSupervisorInventory, setProcessSupervisorInventory] = useState<ProcessSupervisorInventoryRecord[]>([]);
   const [fileTransfers, setFileTransfers] = useState<FileTransferSessionRecord[]>([]);
@@ -61,6 +69,7 @@ export function useJobsData(
       const [
         jobsResult,
         jobApprovalsResult,
+        jobRolloutsResult,
         releasesResult,
         processSupervisorInventoryResult,
         fileTransfersResult,
@@ -71,6 +80,7 @@ export function useJobsData(
       ] = await Promise.allSettled([
         apiGet<JobHistoryRecord[]>(buildListPath("/api/v1/jobs", { limit: 1000, sort: "created_at", dir: "desc" }), apiToken),
         apiGet<JobApprovalRecord[]>(buildListPath("/api/v1/job-approvals", { limit: 200, sort: "requested_at", dir: "desc" }), apiToken),
+        apiGet<JobRolloutRecord[]>("/api/v1/job-rollouts?limit=200", apiToken),
         apiGet<AgentUpdateReleaseRecord[]>("/api/v1/agent-update-releases?limit=200", apiToken),
         apiGet<ProcessSupervisorInventoryRecord[]>("/api/v1/process-supervisor/inventory?limit=200", apiToken),
         apiGet<FileTransferSessionRecord[]>("/api/v1/file-transfers?limit=200", apiToken),
@@ -82,6 +92,7 @@ export function useJobsData(
       const settledResults = [
         jobsResult,
         jobApprovalsResult,
+        jobRolloutsResult,
         releasesResult,
         processSupervisorInventoryResult,
         fileTransfersResult,
@@ -97,6 +108,7 @@ export function useJobsData(
         onUnauthorized();
         setJobs([]);
         setJobApprovals([]);
+        setJobRollouts([]);
         setAgentUpdateReleases([]);
         setProcessSupervisorInventory([]);
         setFileTransfers([]);
@@ -109,6 +121,7 @@ export function useJobsData(
       }
       if (jobsResult.status === "fulfilled") setJobs(jobsResult.value);
       if (jobApprovalsResult.status === "fulfilled") setJobApprovals(jobApprovalsResult.value);
+      if (jobRolloutsResult.status === "fulfilled") setJobRollouts(jobRolloutsResult.value);
       if (releasesResult.status === "fulfilled") setAgentUpdateReleases(releasesResult.value);
       if (processSupervisorInventoryResult.status === "fulfilled") {
         setProcessSupervisorInventory(processSupervisorInventoryResult.value);
@@ -140,6 +153,76 @@ export function useJobsData(
     }
   }, [apiToken, onUnauthorized]);
 
+  const loadJobRollouts = useCallback(async () => {
+    try {
+      const records = await apiGet<JobRolloutRecord[]>(
+        "/api/v1/job-rollouts?limit=200",
+        apiToken,
+      );
+      setJobRollouts(records);
+      return records;
+    } catch (error) {
+      if (isApiUnauthorized(error)) {
+        onUnauthorized();
+        setJobRollouts([]);
+        throw new Error("Operator login required");
+      }
+      throw error;
+    }
+  }, [apiToken, onUnauthorized]);
+
+  const loadJobRollout = useCallback(
+    async (jobId: string) => {
+      try {
+        return await apiGet<JobRolloutRecord>(
+          `/api/v1/job-rollouts/${encodeURIComponent(jobId)}`,
+          apiToken,
+        );
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          onUnauthorized();
+          throw new Error("Operator login required");
+        }
+        throw error;
+      }
+    },
+    [apiToken, onUnauthorized],
+  );
+
+  const updateJobRollout = useCallback(
+    async (
+      jobId: string,
+      action: "pause" | "resume",
+      request: UpdateJobRolloutRequest,
+    ) => {
+      const record = await apiPost<JobRolloutRecord>(
+        `/api/v1/job-rollouts/${encodeURIComponent(jobId)}/${action}`,
+        apiToken,
+        request,
+      );
+      setJobRollouts((current) => [
+        record,
+        ...current.filter((rollout) => rollout.job_id !== record.job_id),
+      ]);
+      void onAuditChanged();
+      return record;
+    },
+    [apiToken, onAuditChanged],
+  );
+
+  const cancelJob = useCallback(
+    async (jobId: string, reason: string) => {
+      const response = await apiPost<CancelJobResponse>(
+        `/api/v1/jobs/${encodeURIComponent(jobId)}/cancel`,
+        apiToken,
+        { confirmed: true, reason },
+      );
+      void Promise.allSettled([loadJobs(), onAuditChanged()]);
+      return response;
+    },
+    [apiToken, loadJobs, onAuditChanged],
+  );
+
   const loadTerminalSessions = useCallback(async () => {
     try {
       setTerminalSessions(await apiGet<TerminalSessionRecord[]>("/api/v1/terminal-sessions?limit=200", apiToken));
@@ -149,6 +232,93 @@ export function useJobsData(
       }
     }
   }, [apiToken, onUnauthorized]);
+
+  const loadHostProcessInventory = useCallback(
+    async (clientId: string, limit = 512) => {
+      try {
+        return await apiGet<HostProcessInventoryRecord>(
+          `/api/v1/host-processes/${encodeURIComponent(clientId)}?limit=${Math.max(1, Math.min(512, Math.trunc(limit)))}`,
+          apiToken,
+        );
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          onUnauthorized();
+          throw new Error("Operator login required");
+        }
+        throw error;
+      }
+    },
+    [apiToken, onUnauthorized],
+  );
+
+  const loadHostServiceInventory = useCallback(
+    async (clientId: string, limit = 1024) => {
+      try {
+        return await apiGet<HostServiceInventoryRecord>(
+          `/api/v1/host-services/${encodeURIComponent(clientId)}?limit=${Math.max(1, Math.min(1024, Math.trunc(limit)))}`,
+          apiToken,
+        );
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          onUnauthorized();
+          throw new Error("Operator login required");
+        }
+        throw error;
+      }
+    },
+    [apiToken, onUnauthorized],
+  );
+
+  const loadHostStorageInventory = useCallback(
+    async (clientId: string, limit = 2048) => {
+      try {
+        return await apiGet<HostStorageInventoryRecord>(
+          `/api/v1/host-storage/${encodeURIComponent(clientId)}?limit=${Math.max(1, Math.min(2048, Math.trunc(limit)))}`,
+          apiToken,
+        );
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          onUnauthorized();
+          throw new Error("Operator login required");
+        }
+        throw error;
+      }
+    },
+    [apiToken, onUnauthorized],
+  );
+
+  const loadHostPackageUpdatePlans = useCallback(async () => {
+    try {
+      return await apiGet<HostPackageUpdatePlanRecord[]>(
+        "/api/v1/os-updates",
+        apiToken,
+      );
+    } catch (error) {
+      if (isApiUnauthorized(error)) {
+        onUnauthorized();
+        throw new Error("Operator login required");
+      }
+      throw error;
+    }
+  }, [apiToken, onUnauthorized]);
+
+  const loadHostPackageUpdatePlan = useCallback(
+    async (clientId: string) => {
+      try {
+        return await apiGet<HostPackageUpdatePlanRecord>(
+          `/api/v1/os-updates/${encodeURIComponent(clientId)}`,
+          apiToken,
+        );
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          onUnauthorized();
+          throw new Error("Operator login required");
+        }
+        throw error;
+      }
+    },
+    [apiToken, onUnauthorized],
+  );
 
   const loadServerJobs = useCallback(async () => {
     try {
@@ -662,6 +832,7 @@ export function useJobsData(
     fileTransfers,
     fileTransferSources,
     jobApprovals,
+    jobRollouts,
     jobs,
     jobsError,
     jobsLoading,
@@ -669,7 +840,10 @@ export function useJobsData(
     serverJobs,
     terminalSessions,
     cancelServerJob,
+    cancelJob,
     loadJob,
+    loadJobRollout,
+    loadJobRollouts,
     createArtifactCleanupJob,
     createFileTransferHandoff,
     previewArtifactCleanup,
@@ -686,12 +860,18 @@ export function useJobsData(
     downloadFileDownloadBundle,
     loadJobOutputComparison,
     loadJobTargets,
+    loadHostProcessInventory,
+    loadHostPackageUpdatePlan,
+    loadHostPackageUpdatePlans,
+    loadHostServiceInventory,
+    loadHostStorageInventory,
     loadJobs,
     loadAgentUpdateReleases,
     loadServerJobs,
     loadTerminalReplay,
     submitTerminalInput,
     loadTerminalSessions,
+    updateJobRollout,
     deleteCommandTemplate,
     upsertCommandTemplate,
   };

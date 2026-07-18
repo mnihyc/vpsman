@@ -87,6 +87,7 @@ intent = {
     "selector_expression": selector.strip(),
     "command_type": command_type,
     "operation_payload_hash": operation_hash,
+    "rollout_policy_hash": None,
     "resolved_targets": targets,
     "max_timeout_secs": max_timeout_secs,
     "force_unprivileged": force_unprivileged,

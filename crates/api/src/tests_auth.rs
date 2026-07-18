@@ -2149,6 +2149,7 @@ async fn memory_repository_routes_require_bearer_tokens() {
                 force_unprivileged: false,
                 privileged: false,
                 privilege_assertion: None,
+                rollout: None,
             }),
         )
         .await

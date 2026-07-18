@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Activity, GitBranch, Route } from "lucide-react";
 import { TimeSeriesChart, type TimeSeriesChartLine } from "../../components/TimeSeriesChart";
 import { consolePalette, dashboardChartColors } from "../../colorPalette";
@@ -72,7 +72,27 @@ export function NetworkMetricsPanel({
   telemetryTunnels,
   tunnelPlans,
 }: NetworkMetricsPanelProps) {
-  const [selectedMetric, setSelectedMetric] = useState<NetworkChartMetric>("latency");
+  const [selectedMetric, setSelectedMetric] = useState<NetworkChartMetric>(
+    readNetworkMetricRoute,
+  );
+
+  useEffect(() => {
+    const applyRoute = () => setSelectedMetric(readNetworkMetricRoute());
+    window.addEventListener("popstate", applyRoute);
+    window.addEventListener("hashchange", applyRoute);
+    return () => {
+      window.removeEventListener("popstate", applyRoute);
+      window.removeEventListener("hashchange", applyRoute);
+    };
+  }, []);
+
+  function selectMetric(metric: NetworkChartMetric) {
+    if (metric === selectedMetric) {
+      return;
+    }
+    writeNetworkMetricRoute(metric);
+    setSelectedMetric(metric);
+  }
   const enabledPlanIds = new Set(
     tunnelPlans
       .filter((plan) => plan.enabled && !plan.deleted_at)
@@ -233,7 +253,7 @@ export function NetworkMetricsPanel({
                   aria-pressed={selectedMetric === option.key}
                   className={selectedMetric === option.key ? "active" : ""}
                   key={option.key}
-                  onClick={() => setSelectedMetric(option.key)}
+                  onClick={() => selectMetric(option.key)}
                   title={option.definition}
                   type="button"
                 >
@@ -247,6 +267,7 @@ export function NetworkMetricsPanel({
               emptyLabel={selectedChart.emptyLabel}
               definition={selectedChart.definition}
               evidence={evidence}
+              exportFileName={`network-${selectedMetric}`}
               lines={selectedChart.chart.lines}
               observedPoints={selectedChart.chart.observedPoints}
               pointsOnly={evidence.isSparse}
@@ -352,10 +373,40 @@ export function NetworkMetricsPanel({
   );
 }
 
+function readNetworkMetricRoute(): NetworkChartMetric {
+  if (typeof window === "undefined") {
+    return "latency";
+  }
+  const metric = new URLSearchParams(window.location.search).get(
+    "network_metric",
+  );
+  return metric === "loss" || metric === "throughput" ? metric : "latency";
+}
+
+function writeNetworkMetricRoute(metric: NetworkChartMetric) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  const url = new URL(window.location.href);
+  if (metric === "latency") {
+    url.searchParams.delete("network_metric");
+  } else {
+    url.searchParams.set("network_metric", metric);
+  }
+  const next = `${url.pathname}${url.search}${url.hash}`;
+  if (
+    `${window.location.pathname}${window.location.search}${window.location.hash}` !==
+    next
+  ) {
+    window.history.pushState(null, "", next);
+  }
+}
+
 function NetworkChartCard({
   definition,
   emptyLabel,
   evidence,
+  exportFileName,
   lines,
   observedPoints,
   pointsOnly,
@@ -367,6 +418,7 @@ function NetworkChartCard({
   definition: string;
   emptyLabel: string;
   evidence: NetworkEvidence;
+  exportFileName: string;
   lines: TimeSeriesChartLine[];
   observedPoints: number;
   pointsOnly: boolean;
@@ -412,6 +464,7 @@ function NetworkChartCard({
       <TimeSeriesChart
         ariaLabel={`Network metrics ${title.toLowerCase()} chart`}
         emptyLabel={emptyLabel}
+        exportFileName={exportFileName}
         height={170}
         lines={lines}
         pointsOnly={pointsOnly}

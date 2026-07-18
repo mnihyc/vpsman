@@ -63,43 +63,6 @@ pub(crate) fn user_sessions(
     Ok(())
 }
 
-pub(crate) fn process_list(
-    api_url: &str,
-    token: Option<&str>,
-    limit: u16,
-    clients: Vec<String>,
-    tags: Vec<String>,
-    password_env: String,
-    super_salt_hex: Option<String>,
-    privilege_ttl_secs: u64,
-    max_timeout_secs: u64,
-    confirmed: bool,
-) -> Result<()> {
-    anyhow::ensure!(
-        (1..=512).contains(&limit),
-        "process list limit must be between 1 and 512"
-    );
-    let operation = JobCommand::ProcessList { limit };
-    println!(
-        "{}",
-        submit_privileged_operation(PrivilegedOperationRequest {
-            api_url,
-            token,
-            operation: &operation,
-            command_label: "process_list",
-            clients: &clients,
-            tags: &tags,
-            password_env: &password_env,
-            super_salt_hex: super_salt_hex.as_deref(),
-            privilege_ttl_secs,
-            max_timeout_secs,
-            confirmed,
-            force_unprivileged: false,
-        })?
-    );
-    Ok(())
-}
-
 pub(crate) fn process_start(
     api_url: &str,
     token: Option<&str>,

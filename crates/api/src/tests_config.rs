@@ -1345,6 +1345,7 @@ async fn agent_update_degrades_unprivileged_target_after_privilege_verification(
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
+        rollout: None,
     };
 
     let state = test_state_with_privilege_auto_approve(repo.clone());

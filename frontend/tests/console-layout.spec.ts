@@ -1631,6 +1631,16 @@ test("keeps console layout usable on desktop and mobile widths", async ({
     ).toBeVisible();
   } else {
     await expect(page.locator(".sidebar")).toBeHidden();
+    await expect(page.locator(".topbar")).toHaveCSS("position", "static");
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          document.documentElement.style.getPropertyValue(
+            "--console-sticky-offset",
+          ),
+        ),
+      )
+      .toBe("16px");
     await expect(
       page.getByRole("button", { name: /Edit fleet scope: All VPS resources/ }),
     ).toBeVisible();

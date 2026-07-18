@@ -39,11 +39,11 @@ use vpsman_common::{
     webhook_rule_delivery_process_status_class_by_status, webhook_rule_delivery_process_statuses,
     webhook_rule_delivery_status_class_by_status, webhook_rule_delivery_statuses,
     workflow_status_classes, FileActionPolicy, FileExistingPolicy, FileOwnershipPolicy,
-    FilePushChunk, JobCommand, ProcessResourceLimits, ProcessRestartPolicy, ProcessRunPolicy,
-    RestoreRollbackFile, RoutingCostAdapterCommands, RuntimeTunnelCommand, TerminalUserPolicy,
-    TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelPlanInput,
-    CURRENT_COMMAND_PROTOCOL_VERSION, MAX_TERMINAL_INPUT_BYTES, MIN_TERMINAL_COLS,
-    MIN_TERMINAL_ROWS,
+    FilePushChunk, HostPackageProvider, HostServiceAction, HostServiceProvider, JobCommand,
+    ProcessResourceLimits, ProcessRestartPolicy, ProcessRunPolicy, RestoreRollbackFile,
+    RoutingCostAdapterCommands, RuntimeTunnelCommand, TerminalUserPolicy, TunnelAddressPair,
+    TunnelEndpointSide, TunnelKind, TunnelPlanInput, CURRENT_COMMAND_PROTOCOL_VERSION,
+    MAX_TERMINAL_INPUT_BYTES, MIN_TERMINAL_COLS, MIN_TERMINAL_ROWS,
 };
 
 fn main() -> io::Result<()> {
@@ -1233,6 +1233,13 @@ fn contract_golden_vectors() -> io::Result<Vec<ContractGoldenVector>> {
         golden_vector("user_sessions", JobCommand::UserSessions),
         golden_vector("process_list", JobCommand::ProcessList { limit: 25 }),
         golden_vector(
+            "storage_inventory",
+            JobCommand::StorageInventory {
+                include_pseudo_mounts: false,
+                limit: 512,
+            },
+        ),
+        golden_vector(
             "process_start",
             JobCommand::ProcessStart {
                 name: "app".to_string(),
@@ -1261,6 +1268,45 @@ fn contract_golden_vectors() -> io::Result<Vec<ContractGoldenVector>> {
             JobCommand::ProcessLogs {
                 name: "app".to_string(),
                 max_bytes: 4096,
+            },
+        ),
+        golden_vector(
+            "service_inventory",
+            JobCommand::ServiceInventory {
+                expected_provider: Some(HostServiceProvider::Systemd),
+                limit: 256,
+            },
+        ),
+        golden_vector(
+            "service_action",
+            JobCommand::ServiceAction {
+                provider: HostServiceProvider::Systemd,
+                service: "sshd.service".to_string(),
+                action: HostServiceAction::Restart,
+                expected_active_state: "active".to_string(),
+                expected_enabled_state: "enabled".to_string(),
+            },
+        ),
+        golden_vector(
+            "service_logs",
+            JobCommand::ServiceLogs {
+                provider: HostServiceProvider::Systemd,
+                service: "sshd.service".to_string(),
+                max_lines: 200,
+            },
+        ),
+        golden_vector(
+            "package_update_plan",
+            JobCommand::PackageUpdatePlan {
+                expected_provider: Some(HostPackageProvider::Apt),
+                refresh_metadata: true,
+            },
+        ),
+        golden_vector(
+            "package_update_apply",
+            JobCommand::PackageUpdateApply {
+                provider: HostPackageProvider::Apt,
+                plan_hash: "ab".repeat(32),
             },
         ),
         golden_vector(

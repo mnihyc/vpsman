@@ -142,6 +142,58 @@ pub(crate) fn vty_submit_operation(
     )
 }
 
+pub(crate) fn vty_submit_read_only_operation(
+    api_url: &str,
+    token: Option<&str>,
+    command_label: &str,
+    operation: &JobCommand,
+    selection: VtyJobSelection,
+    max_timeout_secs: u64,
+) -> Result<String> {
+    anyhow::ensure!(
+        !selection.destructive && !selection.confirmed,
+        "{command_label} is read-only; omit destructive and confirmation flags"
+    );
+    let resolved = http_post_json(
+        api_url,
+        "/api/v1/bulk/resolve",
+        token,
+        &serde_json::json!({
+            "selector_expression": selector_expression_from_targets(&selection.clients, &selection.tags),
+        }),
+    )?;
+    let resolved: VtyBulkResolveResponse =
+        serde_json::from_str(&resolved).context("failed to parse bulk target response")?;
+    let client_ids = resolved
+        .targets
+        .into_iter()
+        .map(|target| target.id)
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        !client_ids.is_empty(),
+        "{command_label} resolved no targets; provide at least one matching target"
+    );
+    let selector_expression = selector_expression_from_targets(&selection.clients, &selection.tags);
+    http_post_json(
+        api_url,
+        "/api/v1/jobs",
+        token,
+        &serde_json::json!({
+            "job_id": Uuid::new_v4(),
+            "command": command_label,
+            "argv": [],
+            "operation": operation,
+            "selector_expression": selector_expression,
+            "target_client_ids": client_ids,
+            "privileged": false,
+            "destructive": false,
+            "confirmed": false,
+            "force_unprivileged": false,
+            "max_timeout_secs": max_timeout_secs,
+        }),
+    )
+}
+
 pub(crate) fn vty_submit_operation_with_force(
     api_url: &str,
     token: Option<&str>,

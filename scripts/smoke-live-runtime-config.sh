@@ -184,7 +184,7 @@ assert_runtime_config_sync_persisted() {
 }
 
 submit_config_read() {
-  local read_job_id read_body read_json privilege_assertion
+  local read_job_id read_body read_json read_response read_status privilege_assertion
   read_job_id="$(python3 - <<'PY'
 import uuid
 print(uuid.uuid4())
@@ -220,11 +220,18 @@ PY
       max_timeout_secs: 30,
       privilege_assertion: $privilege_assertion
     }')"
-  read_json="$(curl -fsS \
+  read_response="$SMOKE_TMPDIR/config-read-$read_job_id.json"
+  read_status="$(curl -sS -o "$read_response" -w '%{http_code}' \
     -H 'content-type: application/json' \
     -H "Authorization: Bearer $access_token" \
     -d "$read_body" \
     "$api_url/api/v1/jobs")"
+  if [[ "$read_status" != 2* ]]; then
+    echo "config_read submission failed with HTTP $read_status" >&2
+    sed -n '1,120p' "$read_response" >&2 || true
+    return 1
+  fi
+  read_json="$(<"$read_response")"
   smoke_assert_job_create_queued "$read_json" 1 >/dev/null
   smoke_wait_api_job_status "$api_url" "$read_job_id" completed 45 >/dev/null
   printf '%s\n' "$read_job_id"

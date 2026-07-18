@@ -182,6 +182,7 @@ async fn run_dispatcher_sweep(state: &AppState) -> Result<usize> {
 pub(crate) async fn dispatch_due_job_targets(state: &AppState) -> Result<usize> {
     expire_control_timeout_targets(state).await?;
     state.process_job_terminal_events(500).await?;
+    state.repo.reconcile_job_rollouts(500).await?;
     let dispatcher_config = state.dispatcher_runtime_config();
     let claimed = state
         .repo
@@ -210,6 +211,7 @@ pub(crate) async fn dispatch_due_job_targets(state: &AppState) -> Result<usize> 
         })
         .await;
     state.process_job_terminal_events(500).await?;
+    state.repo.reconcile_job_rollouts(500).await?;
     Ok(claimed_count)
 }
 

@@ -29,7 +29,7 @@ pub const MIN_TERMINAL_IDLE_TIMEOUT_SECS: u32 = 10;
 pub const MAX_TERMINAL_IDLE_TIMEOUT_SECS: u32 = 86_400;
 pub const MIN_TERMINAL_FLOW_WINDOW_BYTES: u32 = 4 * 1024;
 pub const MAX_TERMINAL_FLOW_WINDOW_BYTES: u32 = 1024 * 1024;
-pub const CURRENT_COMMAND_PROTOCOL_VERSION: u16 = 1;
+pub const CURRENT_COMMAND_PROTOCOL_VERSION: u16 = 2;
 pub const MIN_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const SHELL_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const SHELL_SCRIPT_COMMAND_PROTOCOL_VERSION: u16 = 1;
@@ -39,6 +39,9 @@ pub const CONFIG_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const AGENT_UPDATE_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const USER_SESSIONS_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const PROCESS_COMMAND_PROTOCOL_VERSION: u16 = 1;
+pub const HOST_SERVICE_COMMAND_PROTOCOL_VERSION: u16 = 2;
+pub const HOST_PACKAGE_COMMAND_PROTOCOL_VERSION: u16 = 2;
+pub const HOST_STORAGE_COMMAND_PROTOCOL_VERSION: u16 = 2;
 pub const BACKUP_COMMAND_PROTOCOL_VERSION: u16 = 3;
 pub const RESTORE_COMMAND_PROTOCOL_VERSION: u16 = 2;
 pub const NETWORK_COMMAND_PROTOCOL_VERSION: u16 = 1;
@@ -1327,11 +1330,17 @@ pub fn job_command_variant_names() -> &'static [&'static str] {
         "file_archive_tar",
         "user_sessions",
         "process_list",
+        "storage_inventory",
         "process_start",
         "process_stop",
         "process_restart",
         "process_status",
         "process_logs",
+        "service_inventory",
+        "service_action",
+        "service_logs",
+        "package_update_plan",
+        "package_update_apply",
         "backup",
         "restore",
         "restore_rollback",
@@ -1349,7 +1358,7 @@ pub const JOB_COMMAND_SAFETY_WRITE: &str = "write";
 pub const JOB_COMMAND_SAFETY_EXEC: &str = "exec";
 pub const JOB_COMMAND_SAFETY_EXCLUSIVE: &str = "exclusive";
 
-pub const JOB_COMMAND_TYPE_LABELS: [&str; 51] = [
+pub const JOB_COMMAND_TYPE_LABELS: [&str; 57] = [
     "shell_argv",
     "shell_pty",
     "shell_script",
@@ -1387,11 +1396,17 @@ pub const JOB_COMMAND_TYPE_LABELS: [&str; 51] = [
     "file_archive_tar",
     "user_sessions",
     "process_list",
+    "storage_inventory",
     "process_start",
     "process_stop",
     "process_restart",
     "process_status",
     "process_logs",
+    "service_inventory",
+    "service_action",
+    "service_logs",
+    "package_update_plan",
+    "package_update_apply",
     "backup",
     "restore",
     "restore_rollback",
@@ -1403,7 +1418,7 @@ pub const JOB_COMMAND_TYPE_LABELS: [&str; 51] = [
     "network_routing_apply",
 ];
 
-pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 50] = [
+pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 56] = [
     ("shell", JOB_COMMAND_SAFETY_EXEC),
     ("shell_script", JOB_COMMAND_SAFETY_EXEC),
     ("terminal_open", JOB_COMMAND_SAFETY_EXEC),
@@ -1440,11 +1455,17 @@ pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 50] = [
     ("file_archive_tar", JOB_COMMAND_SAFETY_READ),
     ("user_sessions", JOB_COMMAND_SAFETY_READ),
     ("process_list", JOB_COMMAND_SAFETY_READ),
+    ("storage_inventory", JOB_COMMAND_SAFETY_READ),
     ("process_start", JOB_COMMAND_SAFETY_EXEC),
     ("process_stop", JOB_COMMAND_SAFETY_EXEC),
     ("process_restart", JOB_COMMAND_SAFETY_EXEC),
     ("process_status", JOB_COMMAND_SAFETY_READ),
     ("process_logs", JOB_COMMAND_SAFETY_READ),
+    ("service_inventory", JOB_COMMAND_SAFETY_READ),
+    ("service_action", JOB_COMMAND_SAFETY_EXEC),
+    ("service_logs", JOB_COMMAND_SAFETY_READ),
+    ("package_update_plan", JOB_COMMAND_SAFETY_EXEC),
+    ("package_update_apply", JOB_COMMAND_SAFETY_EXCLUSIVE),
     ("backup", JOB_COMMAND_SAFETY_READ),
     ("restore", JOB_COMMAND_SAFETY_WRITE),
     ("restore_rollback", JOB_COMMAND_SAFETY_WRITE),
@@ -1456,7 +1477,7 @@ pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 50] = [
     ("network_routing_apply", JOB_COMMAND_SAFETY_EXEC),
 ];
 
-pub const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE: [(&str, bool); 50] = [
+pub const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE: [(&str, bool); 56] = [
     ("shell", true),
     ("shell_script", true),
     ("terminal_open", true),
@@ -1493,11 +1514,17 @@ pub const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE: [(&str, bool); 50
     ("file_archive_tar", false),
     ("user_sessions", false),
     ("process_list", false),
+    ("storage_inventory", false),
     ("process_start", true),
     ("process_stop", true),
     ("process_restart", true),
     ("process_status", false),
     ("process_logs", false),
+    ("service_inventory", false),
+    ("service_action", true),
+    ("service_logs", false),
+    ("package_update_plan", false),
+    ("package_update_apply", true),
     ("backup", true),
     ("restore", true),
     ("restore_rollback", true),
@@ -1509,7 +1536,7 @@ pub const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE: [(&str, bool); 50
     ("network_routing_apply", true),
 ];
 
-pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 50] = [
+pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 56] = [
     ("shell", "shell_argv"),
     ("shell_script", "shell_script"),
     ("terminal_open", "terminal_open"),
@@ -1552,11 +1579,17 @@ pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 50] = [
     ("file_archive_tar", "file_archive_tar"),
     ("user_sessions", "user_sessions"),
     ("process_list", "process_list"),
+    ("storage_inventory", "storage_inventory"),
     ("process_start", "process_start"),
     ("process_stop", "process_stop"),
     ("process_restart", "process_restart"),
     ("process_status", "process_status"),
     ("process_logs", "process_logs"),
+    ("service_inventory", "service_inventory"),
+    ("service_action", "service_action"),
+    ("service_logs", "service_logs"),
+    ("package_update_plan", "package_update_plan"),
+    ("package_update_apply", "package_update_apply"),
     ("backup", "backup"),
     ("restore", "restore"),
     ("restore_rollback", "restore_rollback"),
@@ -1568,7 +1601,7 @@ pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 50] = [
     ("network_routing_apply", "network_routing_apply"),
 ];
 
-pub const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE: [(&str, &str); 51] = [
+pub const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE: [(&str, &str); 57] = [
     ("shell_argv", "shell"),
     ("shell_pty", "shell"),
     ("shell_script", "shell"),
@@ -1606,11 +1639,17 @@ pub const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE: [(&str, &str); 51] = [
     ("file_archive_tar", "file"),
     ("user_sessions", "inventory"),
     ("process_list", "process"),
+    ("storage_inventory", "storage"),
     ("process_start", "process"),
     ("process_stop", "process"),
     ("process_restart", "process"),
     ("process_status", "process"),
     ("process_logs", "process"),
+    ("service_inventory", "service"),
+    ("service_action", "service"),
+    ("service_logs", "service"),
+    ("package_update_plan", "os_update"),
+    ("package_update_apply", "os_update"),
     ("backup", "backup"),
     ("restore", "restore"),
     ("restore_rollback", "restore"),
@@ -1667,6 +1706,7 @@ pub fn job_privilege_intent_fields() -> &'static [&'static str] {
         "selector_expression",
         "command_type",
         "operation_payload_hash",
+        "rollout_policy_hash",
         "resolved_targets",
         "max_timeout_secs",
         "force_unprivileged",
@@ -1688,7 +1728,18 @@ pub fn create_job_request_fields() -> &'static [&'static str] {
         "force_unprivileged",
         "privileged",
         "privilege_assertion",
+        "rollout",
     ]
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobRolloutPolicy {
+    pub canary_client_ids: Vec<String>,
+    pub batch_size: u16,
+    pub max_failures: u16,
+    pub pause_after_canary: bool,
+    pub batch_delay_secs: u32,
 }
 
 pub fn schedule_privilege_intent_fields() -> &'static [&'static str] {
@@ -1744,6 +1795,7 @@ pub struct JobPrivilegeIntent<'a> {
     selector_expression: &'a str,
     command_type: &'a str,
     operation_payload_hash: &'a str,
+    rollout_policy_hash: Option<&'a str>,
     resolved_targets: Vec<&'a str>,
     max_timeout_secs: u64,
     force_unprivileged: bool,
@@ -1758,6 +1810,7 @@ impl<'a> JobPrivilegeIntent<'a> {
             selector_expression: input.selector_expression.trim(),
             command_type: input.command_type,
             operation_payload_hash: input.operation_payload_hash,
+            rollout_policy_hash: input.rollout_policy_hash,
             resolved_targets: sorted_str_refs(input.resolved_targets),
             max_timeout_secs: input.max_timeout_secs.max(1),
             force_unprivileged: input.force_unprivileged,
@@ -1770,6 +1823,7 @@ pub struct JobPrivilegeIntentInput<'a> {
     pub selector_expression: &'a str,
     pub command_type: &'a str,
     pub operation_payload_hash: &'a str,
+    pub rollout_policy_hash: Option<&'a str>,
     pub resolved_targets: &'a [String],
     pub max_timeout_secs: u64,
     pub force_unprivileged: bool,
@@ -2860,6 +2914,11 @@ pub enum JobCommand {
     ProcessList {
         limit: u16,
     },
+    StorageInventory {
+        #[serde(default)]
+        include_pseudo_mounts: bool,
+        limit: u16,
+    },
     ProcessStart {
         name: String,
         argv: Vec<String>,
@@ -2882,6 +2941,32 @@ pub enum JobCommand {
     ProcessLogs {
         name: String,
         max_bytes: u32,
+    },
+    ServiceInventory {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_provider: Option<crate::HostServiceProvider>,
+        limit: u16,
+    },
+    ServiceAction {
+        provider: crate::HostServiceProvider,
+        service: String,
+        action: crate::HostServiceAction,
+        expected_active_state: String,
+        expected_enabled_state: String,
+    },
+    ServiceLogs {
+        provider: crate::HostServiceProvider,
+        service: String,
+        max_lines: u16,
+    },
+    PackageUpdatePlan {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_provider: Option<crate::HostPackageProvider>,
+        refresh_metadata: bool,
+    },
+    PackageUpdateApply {
+        provider: crate::HostPackageProvider,
+        plan_hash: String,
     },
     Backup {
         paths: Vec<String>,
@@ -2994,6 +3079,13 @@ pub fn job_command_protocol_version(command: &JobCommand) -> u16 {
         | JobCommand::ProcessRestart { .. }
         | JobCommand::ProcessStatus { .. }
         | JobCommand::ProcessLogs { .. } => PROCESS_COMMAND_PROTOCOL_VERSION,
+        JobCommand::StorageInventory { .. } => HOST_STORAGE_COMMAND_PROTOCOL_VERSION,
+        JobCommand::ServiceInventory { .. }
+        | JobCommand::ServiceAction { .. }
+        | JobCommand::ServiceLogs { .. } => HOST_SERVICE_COMMAND_PROTOCOL_VERSION,
+        JobCommand::PackageUpdatePlan { .. } | JobCommand::PackageUpdateApply { .. } => {
+            HOST_PACKAGE_COMMAND_PROTOCOL_VERSION
+        }
         JobCommand::Backup { .. } => BACKUP_COMMAND_PROTOCOL_VERSION,
         JobCommand::Restore { .. } | JobCommand::RestoreRollback { .. } => {
             RESTORE_COMMAND_PROTOCOL_VERSION
@@ -3072,6 +3164,13 @@ pub fn job_command_min_supported_protocol_version(command: &JobCommand) -> u16 {
         | JobCommand::NetworkSpeedTest { .. }
         | JobCommand::NetworkRoutingStatus { .. }
         | JobCommand::NetworkRoutingApply { .. } => MIN_COMMAND_PROTOCOL_VERSION,
+        JobCommand::StorageInventory { .. } => HOST_STORAGE_COMMAND_PROTOCOL_VERSION,
+        JobCommand::ServiceInventory { .. }
+        | JobCommand::ServiceAction { .. }
+        | JobCommand::ServiceLogs { .. } => HOST_SERVICE_COMMAND_PROTOCOL_VERSION,
+        JobCommand::PackageUpdatePlan { .. } | JobCommand::PackageUpdateApply { .. } => {
+            HOST_PACKAGE_COMMAND_PROTOCOL_VERSION
+        }
     }
 }
 
@@ -3114,11 +3213,17 @@ pub fn job_command_type_label(command: &JobCommand) -> &'static str {
         JobCommand::FileArchiveTar { .. } => "file_archive_tar",
         JobCommand::UserSessions => "user_sessions",
         JobCommand::ProcessList { .. } => "process_list",
+        JobCommand::StorageInventory { .. } => "storage_inventory",
         JobCommand::ProcessStart { .. } => "process_start",
         JobCommand::ProcessStop { .. } => "process_stop",
         JobCommand::ProcessRestart { .. } => "process_restart",
         JobCommand::ProcessStatus { .. } => "process_status",
         JobCommand::ProcessLogs { .. } => "process_logs",
+        JobCommand::ServiceInventory { .. } => "service_inventory",
+        JobCommand::ServiceAction { .. } => "service_action",
+        JobCommand::ServiceLogs { .. } => "service_logs",
+        JobCommand::PackageUpdatePlan { .. } => "package_update_plan",
+        JobCommand::PackageUpdateApply { .. } => "package_update_apply",
         JobCommand::Backup { .. } => "backup",
         JobCommand::Restore { .. } => "restore",
         JobCommand::RestoreRollback { .. } => "restore_rollback",
@@ -3155,7 +3260,14 @@ pub fn scheduled_command_type_label(command: &JobCommand, fallback: &str) -> Str
         | JobCommand::UpdateAgent { .. }
         | JobCommand::AgentUpdateActivate { .. }
         | JobCommand::AgentUpdateRollback { .. }
-        | JobCommand::AgentUpdateCheck { .. } => job_command_type_label(command).to_string(),
+        | JobCommand::AgentUpdateCheck { .. }
+        | JobCommand::ServiceInventory { .. }
+        | JobCommand::ServiceAction { .. }
+        | JobCommand::ServiceLogs { .. } => job_command_type_label(command).to_string(),
+        JobCommand::StorageInventory { .. } => job_command_type_label(command).to_string(),
+        JobCommand::PackageUpdatePlan { .. } | JobCommand::PackageUpdateApply { .. } => {
+            job_command_type_label(command).to_string()
+        }
         _ => fallback.to_string(),
     }
 }
@@ -3184,6 +3296,9 @@ pub fn job_command_safety(command: &JobCommand) -> JobCommandSafety {
         | JobCommand::ProcessList { .. }
         | JobCommand::ProcessStatus { .. }
         | JobCommand::ProcessLogs { .. }
+        | JobCommand::StorageInventory { .. }
+        | JobCommand::ServiceInventory { .. }
+        | JobCommand::ServiceLogs { .. }
         | JobCommand::NetworkStatus { .. }
         | JobCommand::NetworkInterfaces
         | JobCommand::NetworkProbe { .. }
@@ -3194,12 +3309,14 @@ pub fn job_command_safety(command: &JobCommand) -> JobCommandSafety {
         | JobCommand::TerminalInput { .. }
         | JobCommand::TerminalPoll { .. }
         | JobCommand::TerminalResize { .. }
-        | JobCommand::TerminalClose { .. } => JobCommandSafety::Exec,
+        | JobCommand::TerminalClose { .. }
+        | JobCommand::PackageUpdatePlan { .. } => JobCommandSafety::Exec,
         JobCommand::RuntimeConfigSync { .. }
         | JobCommand::UpdateAgent { .. }
         | JobCommand::AgentUpdateActivate { .. }
         | JobCommand::AgentUpdateRollback { .. }
-        | JobCommand::AgentUpdateCheck { .. } => JobCommandSafety::Exclusive,
+        | JobCommand::AgentUpdateCheck { .. }
+        | JobCommand::PackageUpdateApply { .. } => JobCommandSafety::Exclusive,
         JobCommand::FilePush { .. }
         | JobCommand::FilePushChunked { .. }
         | JobCommand::FileTransferStart { .. }
@@ -3218,6 +3335,7 @@ pub fn job_command_safety(command: &JobCommand) -> JobCommandSafety {
         JobCommand::ProcessStart { .. }
         | JobCommand::ProcessStop { .. }
         | JobCommand::ProcessRestart { .. }
+        | JobCommand::ServiceAction { .. }
         | JobCommand::NetworkSpeedTest { .. }
         | JobCommand::NetworkRoutingApply { .. } => JobCommandSafety::Exec,
         JobCommand::Backup { .. } => JobCommandSafety::Read,
@@ -4003,6 +4121,7 @@ mod tests {
             selector_expression: "tag:prod",
             command_type: "shell",
             operation_payload_hash: "ab",
+            rollout_policy_hash: None,
             resolved_targets: &resolved_targets,
             max_timeout_secs: 7_200,
             force_unprivileged: false,
@@ -4022,6 +4141,27 @@ mod tests {
         )
         .unwrap();
         assert!(terminal_intent.contains(r#""max_timeout_secs":7200"#));
+    }
+
+    #[test]
+    fn job_privilege_intent_binds_rollout_policy_hash() {
+        let resolved_targets = vec!["client-b".to_string(), "client-a".to_string()];
+        let intent = super::canonical_job_privilege_intent(super::JobPrivilegeIntentInput {
+            selector_expression: " tag:prod ",
+            command_type: "shell_argv",
+            operation_payload_hash: "ab",
+            rollout_policy_hash: Some("cd"),
+            resolved_targets: &resolved_targets,
+            max_timeout_secs: 30,
+            force_unprivileged: false,
+            privileged: true,
+        })
+        .unwrap();
+
+        assert_eq!(
+            intent,
+            r#"{"version":1,"action":"job.dispatch","selector_expression":"tag:prod","command_type":"shell_argv","operation_payload_hash":"ab","rollout_policy_hash":"cd","resolved_targets":["client-a","client-b"],"max_timeout_secs":30,"force_unprivileged":false,"privileged":true}"#
+        );
     }
 
     #[test]

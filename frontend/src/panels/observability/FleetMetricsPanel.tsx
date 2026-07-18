@@ -365,6 +365,7 @@ export function FleetMetricsPanel({
               <TimeSeriesChart
                 ariaLabel="Fleet resource usage curve"
                 emptyLabel="No resource telemetry after current filters and exclusions"
+                exportFileName={`fleet-${preferences.resourceMetric.replace(/_/g, "-")}`}
                 lines={resourceChart.lines}
                 pointsOnly={resourceEvidence.isSparse}
                 times={resourceChart.times}

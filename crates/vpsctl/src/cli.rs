@@ -20,6 +20,11 @@ use crate::cli_access::{
     TemplateRuntimeConfigCommand, TotpConfirmCommand, TotpPasswordCommand, VpsRulesCommand,
 };
 use crate::cli_update::{AgentUpdateReleaseLatestArgs, AgentUpdateReleaseRecordArgs};
+use crate::commands_host_management::{
+    HostProcessRefreshCommand, HostProcessViewCommand, HostServiceActionCommand,
+    HostServiceLogsCommand, HostServiceRefreshCommand, HostServiceViewCommand,
+    OsUpdateApplyCommand, OsUpdateCheckCommand, OsUpdatePlanCommand, OsUpdateRefreshCommand,
+};
 use crate::commands_network::{
     TunnelAllocateCommand, TunnelOspfCostUpdateCommand, TunnelOspfStatusRefreshCommand,
     TunnelPlanCommand, TunnelPlanExportCommand, TunnelPlanMutationCommand, TunnelProbeCommand,
@@ -125,6 +130,36 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 50)]
         limit: u16,
     },
+    JobRollouts {
+        #[arg(long, default_value_t = 50)]
+        limit: u16,
+    },
+    JobRollout {
+        #[arg(long)]
+        job_id: String,
+    },
+    JobRolloutPause {
+        #[arg(long)]
+        job_id: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    JobRolloutResume {
+        #[arg(long)]
+        job_id: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long, default_value_t = false)]
+        confirmed: bool,
+    },
+    JobCancel {
+        #[arg(long)]
+        job_id: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long, default_value_t = false)]
+        confirmed: bool,
+    },
     Schedules,
     ScheduleCreate(ScheduleCreateCommand),
     ScheduleUpdate(ScheduleUpdateCommand),
@@ -160,6 +195,16 @@ pub(crate) enum Command {
         confirmed: bool,
         #[arg(long, default_value_t = false)]
         force_unprivileged: bool,
+        #[arg(long = "rollout-canary", value_delimiter = ',')]
+        rollout_canary_clients: Vec<String>,
+        #[arg(long)]
+        rollout_batch_size: Option<u16>,
+        #[arg(long)]
+        rollout_max_failures: Option<u16>,
+        #[arg(long)]
+        rollout_batch_delay_secs: Option<u32>,
+        #[arg(long, default_value_t = false)]
+        rollout_continue_after_canary: bool,
     },
     JobShell {
         #[arg(long)]
@@ -508,24 +553,17 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 25)]
         limit: u16,
     },
-    ProcessList {
-        #[arg(long, default_value_t = 50)]
-        limit: u16,
-        #[arg(long, value_delimiter = ',')]
-        clients: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
-        tags: Vec<String>,
-        #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
-        password_env: String,
-        #[arg(long)]
-        super_salt_hex: Option<String>,
-        #[arg(long, default_value_t = 300)]
-        privilege_ttl_secs: u64,
-        #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-        max_timeout_secs: u64,
-        #[arg(long, default_value_t = false)]
-        confirmed: bool,
-    },
+    HostProcessRefresh(HostProcessRefreshCommand),
+    HostProcesses(HostProcessViewCommand),
+    HostServiceRefresh(HostServiceRefreshCommand),
+    HostServices(HostServiceViewCommand),
+    HostServiceLogs(HostServiceLogsCommand),
+    HostServiceAction(HostServiceActionCommand),
+    OsUpdateCheck(OsUpdateCheckCommand),
+    OsUpdateRefresh(OsUpdateRefreshCommand),
+    OsUpdatePlans,
+    OsUpdatePlan(OsUpdatePlanCommand),
+    OsUpdateApply(OsUpdateApplyCommand),
     ProcessStart {
         #[arg(long)]
         name: String,
@@ -646,6 +684,24 @@ pub(crate) enum Command {
     },
     ProcessSupervisorInventory {
         #[arg(long, default_value_t = 50)]
+        limit: u16,
+    },
+    HostStorageRefresh {
+        #[arg(long, default_value_t = 2048)]
+        limit: u16,
+        #[arg(long, default_value_t = false)]
+        include_system_mounts: bool,
+        #[arg(long, value_delimiter = ',')]
+        clients: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
+        #[arg(long, default_value_t = 60)]
+        max_timeout_secs: u64,
+    },
+    HostStorage {
+        #[arg(long)]
+        client_id: String,
+        #[arg(long, default_value_t = 2048)]
         limit: u16,
     },
     JobTargets {

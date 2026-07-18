@@ -194,6 +194,14 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
             }
             Ok(())
         }
+        JobCommand::StorageInventory { limit, .. } => {
+            if *limit == 0 || *limit > 2048 {
+                return Err(ApiError::bad_request(
+                    "storage_inventory_limit_out_of_range",
+                ));
+            }
+            Ok(())
+        }
         JobCommand::ProcessStart {
             name,
             argv,
@@ -217,6 +225,45 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
                 return Err(ApiError::bad_request("process_logs_max_bytes_out_of_range"));
             }
             Ok(())
+        }
+        JobCommand::ServiceInventory {
+            expected_provider: _,
+            limit,
+        } => {
+            if *limit == 0 || *limit > 1024 {
+                return Err(ApiError::bad_request(
+                    "service_inventory_limit_out_of_range",
+                ));
+            }
+            Ok(())
+        }
+        JobCommand::ServiceAction {
+            provider,
+            service,
+            expected_active_state,
+            expected_enabled_state,
+            ..
+        } => {
+            validate_host_service_name(*provider, service)?;
+            validate_observed_service_state(expected_active_state)?;
+            validate_observed_service_state(expected_enabled_state)
+        }
+        JobCommand::ServiceLogs {
+            provider,
+            service,
+            max_lines,
+        } => {
+            validate_host_service_name(*provider, service)?;
+            if *max_lines == 0 || *max_lines > 2000 {
+                return Err(ApiError::bad_request(
+                    "service_logs_line_limit_out_of_range",
+                ));
+            }
+            Ok(())
+        }
+        JobCommand::PackageUpdatePlan { .. } => Ok(()),
+        JobCommand::PackageUpdateApply { plan_hash, .. } => {
+            validate_sha256_hex(plan_hash, "package_update_plan_hash_invalid")
         }
         JobCommand::ConfigRead => Ok(()),
         JobCommand::RuntimeConfigSync {
@@ -348,6 +395,41 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
             Some(*desired_cost),
         ),
     }
+}
+
+fn validate_host_service_name(
+    provider: vpsman_common::HostServiceProvider,
+    service: &str,
+) -> Result<(), ApiError> {
+    let service = service.trim();
+    let valid = !service.is_empty()
+        && service.len() <= 255
+        && service.chars().enumerate().all(|(index, ch)| {
+            ch.is_ascii_alphanumeric()
+                || (index > 0 && matches!(ch, '.' | '_' | '@' | ':' | '+' | '-' | '\\'))
+        });
+    if !valid {
+        return Err(ApiError::bad_request("host_service_name_invalid"));
+    }
+    if provider == vpsman_common::HostServiceProvider::Systemd && !service.ends_with(".service") {
+        return Err(ApiError::bad_request(
+            "systemd_service_unit_suffix_required",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_observed_service_state(value: &str) -> Result<(), ApiError> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 64
+        || value
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace())
+    {
+        return Err(ApiError::bad_request("host_service_expected_state_invalid"));
+    }
+    Ok(())
 }
 
 fn validate_restore_rollback_operation(

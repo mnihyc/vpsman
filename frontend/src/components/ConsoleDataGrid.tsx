@@ -103,6 +103,7 @@ export function ConsoleDataGrid<T>({
   getRowId,
   itemLabel = "rows",
   mobileFieldLayout = "auto",
+  mobileRowActionLimit = 3,
   expandOnRowClick,
   mobileLayout = "cards",
   onExpandedRowChange,
@@ -132,6 +133,7 @@ export function ConsoleDataGrid<T>({
   getRowId: (row: T) => string;
   itemLabel?: string;
   mobileFieldLayout?: "auto" | "stacked";
+  mobileRowActionLimit?: number;
   mobileLayout?: "cards" | "table";
   onExpandedRowChange?: (row: T | null) => void;
   onOpenRow?: (row: T) => void;
@@ -503,7 +505,7 @@ export function ConsoleDataGrid<T>({
       null;
     const primaryRowActions = rowActions
       .filter((action) => !action.hidden?.([row.original]))
-      .slice(0, 3);
+      .slice(0, Math.max(1, Math.min(6, Math.trunc(mobileRowActionLimit))));
     const showOpenRowAction = Boolean(onOpenRow && showMobileOpenRowAction);
     const hasCardActions =
       primaryRowActions.length > 0 ||

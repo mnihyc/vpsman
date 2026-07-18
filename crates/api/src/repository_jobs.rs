@@ -53,6 +53,58 @@ struct PendingRuntimeConfigApply {
     reason: String,
 }
 
+#[derive(Clone, Debug)]
+struct PreparedJobRollout {
+    policy: JobRolloutPolicy,
+    target_batches: HashMap<String, u16>,
+    total_batches: u16,
+}
+
+fn prepare_job_rollout(
+    policy: Option<&JobRolloutPolicy>,
+    resolved_targets: &[String],
+) -> Result<Option<PreparedJobRollout>> {
+    let Some(policy) = policy else {
+        return Ok(None);
+    };
+    let canary_set = policy
+        .canary_client_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let mut remaining = resolved_targets
+        .iter()
+        .filter(|client_id| !canary_set.contains(client_id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    remaining.sort();
+    let mut target_batches = policy
+        .canary_client_ids
+        .iter()
+        .cloned()
+        .map(|client_id| (client_id, 0_u16))
+        .collect::<HashMap<_, _>>();
+    for (index, chunk) in remaining
+        .chunks(usize::from(policy.batch_size.max(1)))
+        .enumerate()
+    {
+        let batch_index = u16::try_from(index + 1)?;
+        for client_id in chunk {
+            target_batches.insert(client_id.clone(), batch_index);
+        }
+    }
+    anyhow::ensure!(
+        target_batches.len() == resolved_targets.len(),
+        "job_rollout_target_assignment_incomplete"
+    );
+    let total_batches = target_batches.values().copied().max().unwrap_or(0) + 1;
+    Ok(Some(PreparedJobRollout {
+        policy: policy.clone(),
+        target_batches,
+        total_batches,
+    }))
+}
+
 fn pending_runtime_config_apply(
     operation: &JobCommand,
     resolved_targets: &[String],
@@ -2412,6 +2464,7 @@ impl Repository {
             "confirmed": request.confirmed,
             "privileged": request.privileged,
             "force_unprivileged": request.force_unprivileged,
+            "rollout": request.rollout,
             "source_schedule_id": source_schedule_id,
             "operator_id": operator.operator.id,
             "operator_username": operator.operator.username,
@@ -2425,6 +2478,7 @@ impl Repository {
         let precompleted_by_client =
             precompleted_targets_by_client(resolved_targets, precompleted_targets)?;
         let pending_runtime_config = pending_runtime_config_apply(&operation, resolved_targets)?;
+        let prepared_rollout = prepare_job_rollout(request.rollout.as_ref(), resolved_targets)?;
         let mut finished_status = None::<String>;
         match self {
             Self::Memory(memory) => {
@@ -2480,6 +2534,29 @@ impl Repository {
                         &pending.reason,
                     )
                     .await;
+                }
+                if let Some(rollout) = prepared_rollout.as_ref() {
+                    memory
+                        .job_rollouts
+                        .write()
+                        .await
+                        .push(MemoryJobRolloutRecord {
+                            job_id,
+                            status: "running".to_string(),
+                            policy: rollout.policy.clone(),
+                            current_batch: 0,
+                            total_batches: rollout.total_batches,
+                            failure_baseline: 0,
+                            pause_reason: None,
+                            next_batch_unix: unix_now(),
+                            created_at: created_at.clone(),
+                            updated_at: created_at.clone(),
+                            completed_at: None,
+                        });
+                    let mut assignments = memory.job_rollout_targets.write().await;
+                    assignments.extend(rollout.target_batches.iter().map(
+                        |(client_id, batch_index)| ((job_id, client_id.clone()), *batch_index),
+                    ));
                 }
                 memory
                     .job_targets
@@ -2692,6 +2769,48 @@ impl Repository {
                         .await?;
                     }
                 }
+                if let Some(rollout) = prepared_rollout.as_ref() {
+                    sqlx::query(
+                        r#"
+                        INSERT INTO job_rollouts (
+                            job_id,
+                            status,
+                            canary_client_ids,
+                            batch_size,
+                            max_failures,
+                            pause_after_canary,
+                            batch_delay_secs,
+                            current_batch,
+                            total_batches,
+                            failure_baseline,
+                            next_batch_at
+                        )
+                        VALUES ($1, 'running', $2, $3, $4, $5, $6, 0, $7, 0, now())
+                        "#,
+                    )
+                    .bind(job_id)
+                    .bind(&rollout.policy.canary_client_ids)
+                    .bind(i32::from(rollout.policy.batch_size))
+                    .bind(i32::from(rollout.policy.max_failures))
+                    .bind(rollout.policy.pause_after_canary)
+                    .bind(i64::from(rollout.policy.batch_delay_secs))
+                    .bind(i32::from(rollout.total_batches))
+                    .execute(&mut *tx)
+                    .await?;
+                    for (client_id, batch_index) in &rollout.target_batches {
+                        sqlx::query(
+                            r#"
+                            INSERT INTO job_rollout_targets (job_id, client_id, batch_index)
+                            VALUES ($1, $2, $3)
+                            "#,
+                        )
+                        .bind(job_id)
+                        .bind(client_id)
+                        .bind(i32::from(*batch_index))
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                }
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (
@@ -2754,12 +2873,15 @@ impl Repository {
     ) -> Result<Vec<ClaimedJobTarget>> {
         match self {
             Self::Memory(memory) => {
-                let now = unix_now().to_string();
+                let now_unix = unix_now();
+                let now = now_unix.to_string();
                 let operations = memory.job_operations.read().await.clone();
                 let source_schedule_ids = memory.job_source_schedule_ids.read().await.clone();
                 let timeouts = memory.job_timeouts.read().await.clone();
                 let jobs = memory.jobs.read().await.clone();
                 let target_snapshot = memory.job_targets.read().await.clone();
+                let rollouts = memory.job_rollouts.read().await.clone();
+                let rollout_targets = memory.job_rollout_targets.read().await.clone();
                 let mut active_clients = target_snapshot
                     .iter()
                     .filter(|target| {
@@ -2797,6 +2919,21 @@ impl Repository {
                     let Some(job) = jobs.iter().find(|job| job.id == target.job_id) else {
                         continue;
                     };
+                    if let Some(rollout) = rollouts.iter().find(|rollout| {
+                        rollout.job_id == target.job_id && rollout.completed_at.is_none()
+                    }) {
+                        let Some(batch_index) =
+                            rollout_targets.get(&(target.job_id, target.client_id.clone()))
+                        else {
+                            continue;
+                        };
+                        if rollout.status != "running"
+                            || rollout.next_batch_unix > now_unix
+                            || *batch_index > rollout.current_batch
+                        {
+                            continue;
+                        }
+                    }
                     let Some(operation) = operations.get(&target.job_id).cloned() else {
                         continue;
                     };
@@ -2869,6 +3006,33 @@ impl Repository {
                               AND target.status IN ('queued', 'dispatching')
                               AND job.completed_at IS NULL
                               AND job.status IN ('queued', 'running')
+                              AND (
+                                NOT EXISTS (
+                                  SELECT 1
+                                  FROM job_rollouts rollout
+                                  WHERE rollout.job_id = target.job_id
+                                )
+                                OR EXISTS (
+                                  SELECT 1
+                                  FROM job_rollouts rollout
+                                  JOIN job_rollout_targets rollout_target
+                                    ON rollout_target.job_id = rollout.job_id
+                                   AND rollout_target.client_id = target.client_id
+                                  WHERE rollout.job_id = target.job_id
+                                    AND rollout_target.batch_index <= rollout.current_batch
+                                    AND (
+                                      (
+                                        target.status = 'queued'
+                                        AND rollout.status = 'running'
+                                        AND rollout.next_batch_at <= now()
+                                      )
+                                      OR (
+                                        target.status = 'dispatching'
+                                        AND rollout.status IN ('running', 'paused')
+                                      )
+                                    )
+                                )
+                              )
                               AND clients.hidden_at IS NULL
                               AND clients.process_incarnation_id IS NOT NULL
                               AND (
@@ -4062,6 +4226,18 @@ impl Repository {
                     .await?;
                 }
                 let pending_canceled = canceled_targets.len();
+                if let Some(rollout) = memory
+                    .job_rollouts
+                    .write()
+                    .await
+                    .iter_mut()
+                    .find(|rollout| rollout.job_id == job_id && rollout.completed_at.is_none())
+                {
+                    rollout.status = "aborted".to_string();
+                    rollout.pause_reason = Some(message.to_string());
+                    rollout.updated_at = now.clone();
+                    rollout.completed_at = Some(now.clone());
+                }
                 memory.audits.write().await.push(AuditLogView {
                     id: Uuid::new_v4(),
                     actor_id: Some(actor_id),
@@ -4176,6 +4352,22 @@ impl Repository {
                         .await?;
                 }
                 finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(&mut tx, job_id).await?;
+                sqlx::query(
+                    r#"
+                    UPDATE job_rollouts
+                    SET
+                        status = 'aborted',
+                        pause_reason = $2,
+                        updated_at = now(),
+                        completed_at = now()
+                    WHERE job_id = $1
+                      AND completed_at IS NULL
+                    "#,
+                )
+                .bind(job_id)
+                .bind(message)
+                .execute(&mut *tx)
+                .await?;
                 let cancel_targets = active_rows
                     .into_iter()
                     .map(|row| row.try_get("client_id").map_err(Into::into))

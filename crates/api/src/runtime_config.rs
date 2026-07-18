@@ -293,6 +293,7 @@ async fn push_runtime_config_job(
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
+        rollout: None,
     };
     let (status, response) =
         create_job_from_internal_operator_mutation(state, operator, request).await?;

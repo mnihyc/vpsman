@@ -47,7 +47,8 @@ UIs. `vpsman` targets a different operating model:
 | Area | What it covers |
 | --- | --- |
 | Fleet operations | Inventory, tags, groups, target preview, summaries, alerts, and per-VPS detail panels. |
-| Remote work | Reviewed shell/script jobs, interactive terminal sessions, file browser, file transfer, process supervision, and schedules. |
+| Remote work | Reviewed shell/script jobs, interactive terminal sessions, file browser, file transfer, host and managed processes, native services, read-only storage inventory, and schedules. |
+| Host maintenance | Explicit APT/DNF/YUM/Pacman update plans, stale-plan rejection, per-VPS apply evidence, and durable canary/batch job rollouts. |
 | Backups | Bounded recursive configuration snapshots, chunked artifacts, restore plans, rollback, migration links, and object-store retention. |
 | Runtime config | Source templates, per-VPS overrides, bulk config patches, and visible runtime config sync jobs. |
 | Network | Explicit NAT-safe tunnel plans, per-VPS owned nftables port forwarding, exact endpoint evidence, topology, bounded network tests, and optional daemon-neutral routing-cost adapters. |
@@ -388,6 +389,7 @@ before any release artifacts or GitHub release are published.
 - [Target selectors](docs/target-selectors.md)
 - [Operator access scopes](docs/operator-access-scopes.md)
 - [Job status model](docs/job-status-model.md)
+- [Host management and Linux support](docs/host-management.md)
 - [Telemetry metric definitions](docs/telemetry-metrics.md)
 - [Port forwarding](docs/port-forwarding.md)
 - [Build notes](docs/build.md)

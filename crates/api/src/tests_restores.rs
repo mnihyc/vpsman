@@ -300,6 +300,7 @@ async fn restore_job_requires_selected_archive_upload_to_match_backup_artifact()
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
+        rollout: None,
     };
 
     let state = test_state_with_privilege_auto_approve(repo);
@@ -352,6 +353,7 @@ async fn restore_job_accepts_matching_selected_archive_upload() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
+        rollout: None,
     };
 
     let (gateway_url, gateway_task) = spawn_restore_gateway_once().await;
@@ -403,6 +405,7 @@ async fn restore_dry_run_job_reaches_validation_without_confirmation() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
+        rollout: None,
     };
 
     let live_state = test_state_with_privilege_auto_approve(repo.clone());
@@ -477,6 +480,7 @@ async fn restore_rollback_degrades_unprivileged_target_without_gateway() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
+        rollout: None,
     };
 
     let state = test_state_with_privilege_auto_approve(repo.clone());

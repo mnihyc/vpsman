@@ -144,7 +144,8 @@ export function HomePanel({
   const visibleReview = visibleDisplayStates.filter(
     (state) => state.tone === "warning" || state.tone === "critical",
   ).length;
-  const runningJobs = jobs.filter((job) => isActiveJobStatus(job.status)).length || summary.running_jobs;
+  const loadedRunningJobs = jobs.filter((job) => isActiveJobStatus(job.status)).length;
+  const runningJobs = Math.max(loadedRunningJobs, summary.running_jobs);
   const failedJobs = jobs.filter((job) => isFailedJobStatus(job.status)).length;
   const failedBackups = backups.filter((backup) => isFailedBackupStatus(backup.status)).length;
   const activeTransfers = fileTransfers.filter((transfer) => isActiveTransferStatus(transfer.status)).length;

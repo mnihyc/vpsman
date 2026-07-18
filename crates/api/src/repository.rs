@@ -90,6 +90,8 @@ pub(crate) struct MemoryState {
     pub(crate) job_operations: Arc<RwLock<HashMap<Uuid, vpsman_common::JobCommand>>>,
     pub(crate) job_source_schedule_ids: Arc<RwLock<HashMap<Uuid, Uuid>>>,
     pub(crate) job_timeouts: Arc<RwLock<HashMap<Uuid, u64>>>,
+    pub(crate) job_rollouts: Arc<RwLock<Vec<MemoryJobRolloutRecord>>>,
+    pub(crate) job_rollout_targets: Arc<RwLock<HashMap<(Uuid, String), u16>>>,
     pub(crate) job_approvals: Arc<RwLock<Vec<JobApprovalView>>>,
     pub(crate) job_approval_requests: Arc<RwLock<HashMap<Uuid, CreateJobRequest>>>,
     pub(crate) command_templates: Arc<RwLock<Vec<CommandTemplateView>>>,

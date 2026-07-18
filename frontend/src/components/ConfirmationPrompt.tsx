@@ -3,6 +3,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
@@ -31,6 +32,36 @@ type ConfirmationFocusTarget = {
   title: string | null;
   type: string | null;
 };
+
+const RAPID_CONFIRM_POINTER_WINDOW_MS = 600;
+let rapidConfirmPointerUntil = 0;
+let rapidConfirmPointerTimer: number | null = null;
+
+function blockRapidConfirmClickThrough(event: MouseEvent) {
+  if (
+    event.detail <= 1 ||
+    performance.now() >= rapidConfirmPointerUntil
+  ) {
+    return;
+  }
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}
+
+function guardRapidConfirmPointerRepeat(detail: number) {
+  if (detail <= 0 || typeof document === "undefined") return;
+  rapidConfirmPointerUntil =
+    performance.now() + RAPID_CONFIRM_POINTER_WINDOW_MS;
+  document.addEventListener("click", blockRapidConfirmClickThrough, true);
+  if (rapidConfirmPointerTimer !== null) {
+    window.clearTimeout(rapidConfirmPointerTimer);
+  }
+  rapidConfirmPointerTimer = window.setTimeout(() => {
+    document.removeEventListener("click", blockRapidConfirmClickThrough, true);
+    rapidConfirmPointerTimer = null;
+    rapidConfirmPointerUntil = 0;
+  }, RAPID_CONFIRM_POINTER_WINDOW_MS);
+}
 
 declare global {
   interface Window {
@@ -340,10 +371,11 @@ export function ConfirmationPrompt({
   if (!open) {
     return null;
   }
-  function handleConfirm() {
+  function handleConfirm(event: ReactMouseEvent<HTMLButtonElement>) {
     if (confirmBlocked || confirmLatchedRef.current) {
       return;
     }
+    guardRapidConfirmPointerRepeat(event.detail);
     confirmLatchedRef.current = true;
     pendingRef.current = true;
     setConfirmLatched(true);

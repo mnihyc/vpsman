@@ -2,9 +2,11 @@ import { expect, test } from "@playwright/test";
 import { PRIVILEGE_OPERATION_GOLDEN_VECTORS } from "../src/generated/protocolContracts";
 import {
   buildPrivilegeForJobOperation,
+  canonicalJobPrivilegeIntent,
   canonicalDbPrivilegeIntent,
   canonicalOperationJson,
   parseCommandArgv,
+  rolloutPolicyHashHex,
   textPayloadHashHex,
 } from "../src/privilege";
 import type { JobOperation } from "../src/types";
@@ -53,6 +55,7 @@ test("frontend operation canonicalization matches Rust-generated golden vectors"
       "file_archive_tar_true",
       "user_sessions",
       "process_list",
+      "storage_inventory",
       "process_start",
       "process_stop",
       "process_restart",
@@ -67,6 +70,11 @@ test("frontend operation canonicalization matches Rust-generated golden vectors"
       "network_speed_test",
       "network_routing_status",
       "network_routing_apply",
+      "package_update_plan",
+      "package_update_apply",
+      "service_inventory",
+      "service_action",
+      "service_logs",
     ]),
   );
 
@@ -212,4 +220,31 @@ test("generated privilege assertions carry a request-bound timestamp", async () 
   expect(assertion.expires_unix).toBe(assertion.issued_unix + 300);
   expect(assertion.nonce_hex).toMatch(/^[0-9a-f]{32}$/);
   expect(assertion.assertion_hex).toMatch(/^[0-9a-f]{64}$/);
+});
+
+test("staged rollout policy is canonical and bound into the job intent", async () => {
+  const rolloutHash = await rolloutPolicyHashHex({
+    canary_client_ids: ["client-a"],
+    batch_size: 5,
+    max_failures: 1,
+    pause_after_canary: true,
+    batch_delay_secs: 30,
+  });
+  expect(rolloutHash).toBe(
+    "a43f9af81dbbf9e2f497e5155b140f8a7067ff47507df01215261195b30879ab",
+  );
+  expect(
+    canonicalJobPrivilegeIntent({
+      selectorExpression: " tag:prod ",
+      commandType: "shell_argv",
+      operationPayloadHash: "ab".repeat(32),
+      rolloutPolicyHash: rolloutHash,
+      resolvedTargets: ["client-b", "client-a"],
+      maxTimeoutSecs: 30,
+      forceUnprivileged: false,
+      privileged: true,
+    }),
+  ).toBe(
+    `{"version":1,"action":"job.dispatch","selector_expression":"tag:prod","command_type":"shell_argv","operation_payload_hash":"${"ab".repeat(32)}","rollout_policy_hash":"${rolloutHash}","resolved_targets":["client-a","client-b"],"max_timeout_secs":30,"force_unprivileged":false,"privileged":true}`,
+  );
 });

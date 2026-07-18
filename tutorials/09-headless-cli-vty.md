@@ -148,7 +148,8 @@ file-pull --path /etc/hostname tag:edge
 file-push --source ./payload.txt --path /tmp/payload.txt tag:edge --confirmed
 terminal-poll --session-id <uuid> --replay-from-seq 1 --client-id edge-01
 terminal-replay --client-id edge-01 --session-id <uuid> --output-file ./terminal.log
-process-list tag:edge --limit 50
+host-process-refresh tag:edge --limit 50
+host-processes --client-id edge-01 --limit 50
 process-start edge-worker --argv /usr/bin/sleep --argv 60 tag:edge
 tunnel-plans
 tunnel-plan-export --plan-id <saved_plan_uuid> --output-file ./plan.json
@@ -170,6 +171,11 @@ agent-update --artifact-url https://github.com/<owner>/vpsman/releases/download/
 agent-update-activate --staged-sha256-hex <sha256> tag:edge --restart-agent --confirmed
 agent-update-rollback --rollback-sha256-hex <sha256> tag:edge --confirmed
 ```
+
+Host process inventory is read-only and does not require `enable`. Native
+service and OS-package commands are available from the one-shot CLI; see
+[Host management and Linux support](../docs/host-management.md) for the exact
+provider matrix, reviewed-state arguments, and unsupported behavior.
 
 `tunnel-plan-delete` accepts the exact reviewed revision of an enabled or
 disabled plan. `tunnel-plan-disable` is separate and not a deletion prerequisite.

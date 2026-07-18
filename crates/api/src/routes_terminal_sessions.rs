@@ -169,6 +169,7 @@ pub(crate) async fn submit_terminal_session_input(
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
+        rollout: None,
     };
     let result = create_job_from_terminal_input_route(&state, &operator, job_request).await;
     match result {

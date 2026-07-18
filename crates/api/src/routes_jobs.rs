@@ -374,16 +374,19 @@ async fn prepare_job_approval(
     }
     vpsman_server_core::validate_network_command_targets(&job_command, &fixed_target_ids)
         .map_err(|error| ApiError::bad_request(error.code()))?;
+    validate_job_rollout(job.rollout.as_ref(), &job_command, &fixed_target_ids)?;
     validate_restore_archive_binding(state, &job_command, &fixed_target_ids).await?;
     let effective_max_timeout_secs =
         effective_job_max_timeout_secs(job.max_timeout_secs, state.max_job_timeout_secs())?;
     job.max_timeout_secs = Some(effective_max_timeout_secs);
     let request_fingerprint =
         request_fingerprint_for_job(&job, &command_hash, &fixed_target_ids, None)?;
+    let rollout_policy_hash = job_rollout_policy_hash(job.rollout.as_ref())?;
     let privilege_intent = JobPrivilegeIntent::new(JobPrivilegeIntentInput {
         selector_expression: &job.selector_expression,
         command_type: job.command_type_label(),
         operation_payload_hash: &command_hash,
+        rollout_policy_hash: rollout_policy_hash.as_deref(),
         resolved_targets: &fixed_target_ids,
         max_timeout_secs: job.max_timeout_secs.unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS),
         force_unprivileged: job.force_unprivileged,
@@ -471,6 +474,7 @@ async fn create_job_inner(
         .await?
         .targets;
     let resolved_targets = fixed_target_ids;
+    validate_job_rollout(request.rollout.as_ref(), &job_command, &resolved_targets)?;
     let missing_fixed_targets = resolved_targets
         .iter()
         .filter(|client_id| {
@@ -569,10 +573,12 @@ async fn create_job_inner(
         .await;
     }
     if request.privileged && matches!(privilege_source, JobPrivilegeSource::RequestAssertion) {
+        let rollout_policy_hash = job_rollout_policy_hash(request.rollout.as_ref())?;
         let privilege_intent = JobPrivilegeIntent::new(JobPrivilegeIntentInput {
             selector_expression: &request.selector_expression,
             command_type: request.command_type_label(),
             operation_payload_hash: &command_hash,
+            rollout_policy_hash: rollout_policy_hash.as_deref(),
             resolved_targets: &resolved_targets,
             max_timeout_secs: request
                 .max_timeout_secs
@@ -810,6 +816,13 @@ fn job_allows_unprivileged_submission(command: &JobCommand) -> bool {
     matches!(
         command,
         JobCommand::ConfigRead
+            | JobCommand::ProcessList { .. }
+            | JobCommand::ServiceInventory { .. }
+            | JobCommand::ServiceLogs { .. }
+            | JobCommand::PackageUpdatePlan {
+                refresh_metadata: false,
+                ..
+            }
             | JobCommand::NetworkStatus { .. }
             | JobCommand::NetworkRoutingStatus { .. }
     ) && !job_command_requires_confirmation(command)
@@ -1102,9 +1115,85 @@ pub(crate) fn request_fingerprint_for_job(
         "privileged": request.privileged,
         "force_unprivileged": request.force_unprivileged,
         "source_schedule_id": source_schedule_id,
+        "rollout": request.rollout,
     }))
     .map_err(|error| ApiError::from(anyhow!("failed to encode job fingerprint: {error}")))?;
     Ok(payload_hash(&bytes))
+}
+
+fn validate_job_rollout(
+    rollout: Option<&crate::model::JobRolloutPolicy>,
+    command: &JobCommand,
+    resolved_targets: &[String],
+) -> Result<(), ApiError> {
+    let Some(rollout) = rollout else {
+        return Ok(());
+    };
+    if resolved_targets.len() < 2 {
+        return Err(ApiError::bad_request(
+            "job_rollout_requires_multiple_targets",
+        ));
+    }
+    if matches!(command, JobCommand::NetworkSpeedTest { .. }) {
+        return Err(ApiError::bad_request(
+            "job_rollout_network_speed_test_unsupported",
+        ));
+    }
+    if rollout.canary_client_ids.is_empty() || rollout.canary_client_ids.len() > 25 {
+        return Err(ApiError::bad_request(
+            "job_rollout_canary_count_out_of_range",
+        ));
+    }
+    if rollout.canary_client_ids.len() >= resolved_targets.len() {
+        return Err(ApiError::bad_request(
+            "job_rollout_canary_must_leave_remaining_targets",
+        ));
+    }
+    let resolved = resolved_targets
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let mut unique_canaries = HashSet::new();
+    for client_id in &rollout.canary_client_ids {
+        if !unique_canaries.insert(client_id.as_str()) {
+            return Err(ApiError::bad_request(
+                "job_rollout_canary_target_duplicated",
+            ));
+        }
+        if !resolved.contains(client_id.as_str()) {
+            return Err(ApiError::bad_request(
+                "job_rollout_canary_target_not_resolved",
+            ));
+        }
+    }
+    if !(1..=100).contains(&rollout.batch_size) {
+        return Err(ApiError::bad_request("job_rollout_batch_size_out_of_range"));
+    }
+    if rollout.max_failures > 100 {
+        return Err(ApiError::bad_request(
+            "job_rollout_max_failures_out_of_range",
+        ));
+    }
+    if rollout.batch_delay_secs > 86_400 {
+        return Err(ApiError::bad_request(
+            "job_rollout_batch_delay_out_of_range",
+        ));
+    }
+    Ok(())
+}
+
+fn job_rollout_policy_hash(
+    rollout: Option<&crate::model::JobRolloutPolicy>,
+) -> Result<Option<String>, ApiError> {
+    rollout
+        .map(|rollout| {
+            encode_json(rollout)
+                .map(|payload| payload_hash(&payload))
+                .map_err(|error| {
+                    ApiError::from(anyhow!("failed to encode rollout policy: {error}"))
+                })
+        })
+        .transpose()
 }
 
 async fn existing_job_response_for_id(

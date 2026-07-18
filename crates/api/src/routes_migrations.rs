@@ -189,6 +189,9 @@ async fn preflight_migration_restore_job(
         return Err(ApiError::conflict("fixed_target_not_found"));
     }
     let command = request.job.job_command()?;
+    if request.job.rollout.is_some() {
+        return Err(ApiError::bad_request("migration_job_rollout_unsupported"));
+    }
     validate_restore_archive_binding(state, &command, &targets).await?;
     let command_payload = encode_json(&command).map_err(|error| {
         ApiError::from(anyhow::anyhow!(
@@ -202,6 +205,7 @@ async fn preflight_migration_restore_job(
         selector_expression: &request.job.selector_expression,
         command_type: request.job.command_type_label(),
         operation_payload_hash: &command_hash,
+        rollout_policy_hash: None,
         resolved_targets: &targets,
         max_timeout_secs: request
             .job

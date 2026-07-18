@@ -140,6 +140,16 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
       description: "Process inventory, logs, restart, and stop workflows",
     },
     {
+      id: "services",
+      label: "Services",
+      description: "Host service inventory, lifecycle actions, and provider logs",
+    },
+    {
+      id: "storage",
+      label: "Storage",
+      description: "Read-only block devices, mounts, capacity, and usage evidence",
+    },
+    {
       id: "bulk_files",
       label: "Bulk files",
       description: "Multi-VPS file operations with preflight and results",
@@ -174,6 +184,11 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
   ],
   Automation: [
     {
+      id: "rollouts",
+      label: "Rollouts",
+      description: "Durable canaries, staged batches, safety pauses, and evidence",
+    },
+    {
       id: "schedules",
       label: "Schedules",
       description:
@@ -189,6 +204,12 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
       label: "Source templates",
       description:
         "Persistent source template registry and render/test workflow",
+    },
+    {
+      id: "os_updates",
+      label: "OS updates",
+      description:
+        "Native package posture, reviewed candidates, and explicit updates",
     },
     {
       id: "agent_updates",

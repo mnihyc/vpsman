@@ -1109,7 +1109,7 @@ fn latest_file_download_status(outputs: &[JobOutputView]) -> Option<FileDownload
         })
 }
 
-async fn materialize_output_bytes(
+pub(crate) async fn materialize_output_bytes(
     state: &AppState,
     output: &JobOutputView,
 ) -> Result<Vec<u8>, ApiError> {

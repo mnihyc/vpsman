@@ -87,6 +87,11 @@
   color: var(--success-text);
 }
 
+.status.danger {
+  background: var(--danger-soft);
+  color: var(--danger-strong);
+}
+
 .status.warn {
   background: var(--warning-soft);
   color: var(--warning-text);
@@ -4510,6 +4515,12 @@
   border-radius: 8px;
   background: var(--surface);
   padding: 14px;
+}
+
+.consoleDetailPanel:focus {
+  border-color: var(--primary-border);
+  box-shadow: var(--focus-ring);
+  outline: none;
 }
 
 .consoleDetailPanelHeader {

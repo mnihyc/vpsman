@@ -10,11 +10,80 @@ async function activate(locator: Locator) {
   await locator.evaluate((element) => (element as HTMLElement).click());
 }
 
+test("keeps host process scope and target routable while refreshing a read-only snapshot", async ({ page }, testInfo) => {
+  await page.goto("/");
+  await openConsoleSubpage(page, "Remote Operations", "Processes");
+
+  const scope = page.getByRole("group", { name: "Process scope" });
+  await expect(scope.getByRole("button", { name: "Host" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  const inventory = page.locator(".hostProcessPanel");
+  await expect(inventory.getByText("Choose a VPS")).toBeVisible();
+  const snapshotSummary = page.getByLabel("Host process snapshot summary");
+  await expect(snapshotSummary).toContainText("No snapshot");
+  await inventory.getByLabel("Host process VPS").fill("edge-sfo-01");
+  await page.getByRole("option", { name: /edge-sfo-01/ }).click();
+
+  await expect(page).toHaveURL(/process_client=agent-sfo-01/);
+  await expect(snapshotSummary).toContainText("Complete");
+  await expect(inventory.getByText("sshd", { exact: true }).first()).toBeVisible();
+  await expect(inventory.getByText("node", { exact: true }).first()).toBeVisible();
+  await expect(inventory.getByText("146 MiB")).toBeVisible();
+  const command = inventory.getByTitle(
+    "/usr/bin/node /srv/dashboard/server.js --listen 127.0.0.1:3000",
+  );
+  await expect(command.first()).toBeVisible();
+  if (testInfo.project.name.includes("mobile")) {
+    await activate(
+      inventory.getByRole("button", {
+        name: "Show details for Host process inventory row 4242",
+      }),
+    );
+  } else {
+    await activate(inventory.getByText("node", { exact: true }).first());
+  }
+  await expect(inventory.getByText("Parent PID")).toBeVisible();
+  await expect(inventory.getByText("User ID")).toBeVisible();
+
+  const beforeRefresh = await processJobRequestCount(page);
+  await inventory
+    .getByRole("button", { name: "Refresh snapshot" })
+    .dblclick({ delay: 50 });
+  await expect.poll(() => processJobRequestCount(page)).toBe(beforeRefresh + 1);
+  expect(await lastProcessJobRequest(page)).toMatchObject({
+    command: "process_list",
+    confirmed: false,
+    destructive: false,
+    privileged: false,
+    selector_expression: "id:agent-sfo-01",
+    target_client_ids: ["agent-sfo-01"],
+    operation: { limit: 512, type: "process_list" },
+  });
+  await expect(
+    inventory.getByText("Host process snapshot refreshed from edge-sfo-01 (fo01)."),
+  ).toBeVisible();
+
+  await page.reload();
+  await expect(page.getByLabel("Host process VPS")).toHaveValue(/edge-sfo-01/);
+  await expect(page.getByText("sshd", { exact: true }).first()).toBeVisible();
+  await activate(scope.getByRole("button", { name: "Managed" }));
+  await expect(page).toHaveURL(/process_mode=managed/);
+  await expect(page.getByText("Process supervisor inventory")).toBeVisible();
+  await page.goBack();
+  await expect(scope.getByRole("button", { name: "Host" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(page.getByText("Host processes", { exact: true })).toBeVisible();
+});
+
 test("shows restart and desired-only limit evidence in process supervisor inventory", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.includes("mobile"), "dense process inventory evidence is covered in desktop layout");
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Remote Operations", "Processes");
+  await openManagedProcesses(page);
 
   const inventory = page.locator(".fleetPanel", { hasText: "Process supervisor inventory" });
   const grid = inventory.getByLabel("Process health inventory data");
@@ -65,7 +134,7 @@ test("runs restart directly and confirms stop from process inventory", async ({ 
 
   await page.goto("/");
   await unlockPrivilegeFromTop(page);
-  await openConsoleSubpage(page, "Remote Operations", "Processes");
+  await openManagedProcesses(page);
 
   const inventory = page.locator(".fleetPanel", { hasText: "Process supervisor inventory" });
   await expect(inventory.getByRole("button", { name: "Open logs for process ospf-worker" })).toBeVisible();
@@ -140,7 +209,7 @@ test("refreshes process observations on every scoped VPS and reports partial fai
 
   await page.goto("/");
   await unlockPrivilegeFromTop(page);
-  await openConsoleSubpage(page, "Remote Operations", "Processes");
+  await openManagedProcesses(page);
 
   const inventory = page.locator(".fleetPanel", { hasText: "Process supervisor inventory" });
   const beforeRefresh = await processJobRequestCount(page);
@@ -169,7 +238,7 @@ test("reviews the exact process start command without exposing environment value
 
   await page.goto("/");
   await unlockPrivilegeFromTop(page);
-  await openConsoleSubpage(page, "Remote Operations", "Processes");
+  await openManagedProcesses(page);
 
   const inventory = page.locator(".fleetPanel", { hasText: "Process supervisor inventory" });
   await expect(
@@ -204,7 +273,7 @@ test("renders process operation cards on mobile with resource usage and actions"
   test.skip(!testInfo.project.name.includes("mobile"), "mobile process card layout");
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Remote Operations", "Processes");
+  await openManagedProcesses(page);
 
   const cards = page.getByLabel("Process supervisor mobile cards");
   await expect(cards).toBeVisible();
@@ -232,6 +301,16 @@ async function expectProcessDispatchPreset(page: Page, action: string) {
   await expect(composer.getByLabel("Supervisor action")).toHaveValue(action);
   await expect(composer.getByLabel("Supervisor process name")).toHaveValue("ospf-worker");
   await expect(composer.getByLabel("Bulk target selector expression")).toHaveValue("id:agent-sfo-01");
+}
+
+async function openManagedProcesses(page: Page) {
+  await openConsoleSubpage(page, "Remote Operations", "Processes");
+  const mode = page.getByRole("group", { name: "Process scope" });
+  await activate(mode.getByRole("button", { name: "Managed" }));
+  await expect(mode.getByRole("button", { name: "Managed" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
 }
 
 async function reviewProcessDispatch(page: Page, effect: string, execution: string) {

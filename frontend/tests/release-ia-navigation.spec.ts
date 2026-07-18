@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { readFile } from "node:fs/promises";
 import { normalizeSubpage, viewLabel, viewSubpages } from "../src/constants";
 import {
   backupId,
@@ -703,7 +704,7 @@ test("release pages use operational page headers", async ({ page }) => {
   await expect(fleetMonitorHeader.locator(".fleetStatusStrip")).toHaveCount(0);
 });
 
-test("remote operations owns terminal, files, transfers, processes, and bulk files", async ({
+test("remote operations owns terminal, files, transfers, processes, services, storage, and bulk files", async ({
   page,
 }, testInfo) => {
   await gotoConsoleHome(page);
@@ -729,9 +730,22 @@ test("remote operations owns terminal, files, transfers, processes, and bulk fil
   ).toBeVisible();
 
   await openConsoleSubpage(page, "Remote Operations", "Processes");
-  await expect(page.getByRole("heading", { name: "Processes" })).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Process supervisor" }),
+    page.getByRole("heading", { level: 1, name: "Processes", exact: true }),
+  ).toBeVisible();
+  const processScope = page.getByRole("group", { name: "Process scope" });
+  await expect(
+    processScope.getByRole("button", { name: "Host" }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    page.getByRole("heading", { name: "Host processes", exact: true }),
+  ).toBeVisible();
+  await activate(processScope.getByRole("button", { name: "Managed" }));
+  await expect(
+    page.getByRole("heading", {
+      name: "Process supervisor inventory",
+      exact: true,
+    }),
   ).toBeVisible();
   const processGrid = page.getByLabel("Process health inventory data grid");
   if (testInfo.project.name.includes("mobile")) {
@@ -753,6 +767,22 @@ test("remote operations owns terminal, files, transfers, processes, and bulk fil
     await expect(processRow).toContainText("2 processes, 2 PIDs");
     await expect(processRow).not.toContainText("1 processes");
   }
+
+  await openConsoleSubpage(page, "Remote Operations", "Services");
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Services", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Host services", exact: true }),
+  ).toBeVisible();
+
+  await openConsoleSubpage(page, "Remote Operations", "Storage");
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Storage", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Host storage", exact: true }),
+  ).toBeVisible();
 
   await openConsoleSubpage(page, "Remote Operations", "Bulk files");
   await expect(page.getByRole("heading", { name: "Bulk files" })).toBeVisible();
@@ -783,7 +813,19 @@ test("jobs history links to operational owners without embedding their workflows
     page.getByRole("heading", { name: "File transfer sessions" }),
   ).toHaveCount(0);
   await expect(
-    page.getByRole("heading", { name: "Process supervisor" }),
+    page.getByRole("heading", { name: "Host processes", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", {
+      name: "Process supervisor inventory",
+      exact: true,
+    }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "Host services" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "Host storage" }),
   ).toHaveCount(0);
   await expect(
     page.getByRole("heading", { name: "Artifact cleanup" }),
@@ -861,6 +903,8 @@ test("jobs history links to operational owners without embedding their workflows
     { button: "Files", heading: "Files" },
     { button: "Transfers", heading: "Transfers" },
     { button: "Processes", heading: "Processes" },
+    { button: "Services", heading: "Services" },
+    { button: "Storage", heading: "Storage" },
     { button: "Bulk files", heading: "Bulk files" },
   ]) {
     await openConsoleSubpage(page, "Jobs", "History");
@@ -1738,7 +1782,38 @@ test("fleet monitor renders VPS card workflow actions", async ({
         exact: true,
       }),
     ).toBeVisible();
-    await expect(page.locator("body")).toContainText("edge-sfo-01");
+    if (action.heading === "Instance detail") {
+      await expect(
+        page.getByLabel("Canonical VPS detail").getByLabel("Selected VPS identity"),
+      ).toContainText("edge-sfo-01");
+    } else if (action.heading === "Terminal") {
+      await expect(page.getByLabel("New terminal target")).toHaveValue(
+        /edge-sfo-01/,
+      );
+    } else if (action.heading === "Files") {
+      await expect(
+        page.getByRole("combobox", { name: "File browser target VPS" }),
+      ).toHaveValue(/edge-sfo-01/);
+    } else if (action.heading === "Processes") {
+      await expect(
+        page
+          .getByRole("group", { name: "Process scope" })
+          .getByRole("button", { name: "Host" }),
+      ).toHaveAttribute("aria-pressed", "true");
+      await expect(
+        page.getByRole("combobox", { name: "Host process VPS" }),
+      ).toHaveValue(/edge-sfo-01/);
+    } else if (action.heading === "Backup requests") {
+      await expect(
+        page
+          .getByRole("complementary", { name: "Run backup" })
+          .getByRole("combobox", { name: "Backup client" }),
+      ).toHaveValue(/edge-sfo-01/);
+    } else if (action.heading === "Network graph") {
+      await expect(page.locator(".topologyNodeInspector")).toContainText(
+        "edge-sfo-01",
+      );
+    }
   }
 });
 
@@ -2151,9 +2226,14 @@ test("fleet instance row actions expose release VPS workflows", async ({
         page.getByRole("combobox", { name: "File browser target VPS" }),
       ).toHaveValue(/edge-sfo-01/);
     } else if (action.label === "Open processes") {
-      await expect(page.getByLabel("Process VPS focus")).toContainText(
-        "edge-sfo-01",
-      );
+      await expect(
+        page
+          .getByRole("group", { name: "Process scope" })
+          .getByRole("button", { name: "Host" }),
+      ).toHaveAttribute("aria-pressed", "true");
+      await expect(
+        page.getByRole("combobox", { name: "Host process VPS" }),
+      ).toHaveValue(/edge-sfo-01/);
     } else if (action.label === "Open backups") {
       const workflow = page.getByRole("complementary", { name: "Run backup" });
       const target = workflow.getByRole("combobox", { name: "Backup client" });
@@ -2245,9 +2325,14 @@ test("VPS detail workflow actions preserve the exact resource target", async ({
 
   detail = await openDetail();
   await detail.getByRole("button", { name: "Processes", exact: true }).click();
-  await expect(page.getByLabel("Process VPS focus")).toContainText(
-    "edge-sfo-01",
-  );
+  await expect(
+    page
+      .getByRole("group", { name: "Process scope" })
+      .getByRole("button", { name: "Host" }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    page.getByRole("combobox", { name: "Host process VPS" }),
+  ).toHaveValue(/edge-sfo-01/);
 
   detail = await openDetail();
   await detail.getByRole("button", { name: "Back up", exact: true }).click();
@@ -2871,7 +2956,7 @@ test("automation runbooks promotes command templates into reviewed catalog", asy
   await expect(catalog).toContainText("edge-health-check");
   await expect(catalog).toContainText("Argv command");
   await expect(catalog).toContainText("Latest same operation");
-  await expect(catalog).toContainText("No run found for this runbook");
+  await expect(catalog).toContainText("not attributed to this runbook");
   await expect(catalog).not.toContainText("No loaded run");
   await expect(catalog).not.toContainText("shell_argv");
   await expect(catalog).not.toContainText("No matching run");
@@ -3979,6 +4064,38 @@ test("observability fleet metrics owns resource charts and read-only analysis co
     page.getByLabel("Fleet resource usage curve data coverage"),
   ).toContainText(/latest sample (current|stale)/);
   await expect(page.locator(".timeSeriesLegend")).toContainText("core-fra-02");
+  const resourceChart = page.locator(".timeSeriesChartShell").first();
+  const coreSeries = resourceChart.getByRole("button", {
+    name: "Hide core-fra-02 series",
+  });
+  await coreSeries.click();
+  await expect(
+    resourceChart.getByRole("button", { name: "Show core-fra-02 series" }),
+  ).toHaveAttribute("aria-pressed", "false");
+  await expect(resourceChart.getByText("2/3 series", { exact: true })).toBeVisible();
+
+  const downloadPromise = page.waitForEvent("download");
+  await resourceChart.getByRole("button", { name: "Export CSV" }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe("fleet-cpu-load.csv");
+  const downloadPath = await download.path();
+  expect(downloadPath).not.toBeNull();
+  const csv = await readFile(downloadPath!, "utf8");
+  expect(csv).toContain("timestamp,edge-sfo-01");
+  expect(csv).not.toContain("core-fra-02");
+
+  await resourceChart.getByRole("button", { name: "Show all" }).click();
+  await expect(
+    resourceChart.getByRole("button", { name: "Hide core-fra-02 series" }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await resourceChart.locator(".timeSeriesChart").focus();
+  await resourceChart.locator(".timeSeriesChart").press("ArrowLeft");
+  await expect(resourceChart.locator(".timeSeriesHover")).toContainText(
+    "core-fra-02",
+  );
+  await expect(resourceChart.locator(".timeSeriesHover")).toContainText(
+    /GMT|UTC/,
+  );
   await expect(page.getByLabel("Top resource VPS list")).toContainText(
     "edge-sfo-01",
   );
@@ -4001,12 +4118,24 @@ test("observability fleet metrics owns resource charts and read-only analysis co
       /Metric definition: Each chart point averages retained 60-second used-memory ratios/,
     ),
   ).toBeVisible();
+  const memoryFigureLabel = await page
+    .getByRole("figure", { name: /Fleet resource usage curve/ })
+    .locator("figcaption")
+    .textContent();
+  expect(memoryFigureLabel).toMatch(/Latest values: .+%/);
+  expect(memoryFigureLabel).not.toMatch(/\b[1-9]\d{2,}%/);
   await controls.getByRole("button", { name: "Disk" }).click();
   await expect(
     page.getByText(
       /Metric definition: Each chart point averages retained 60-second free-space ratios/,
     ),
   ).toBeVisible();
+  const diskFigureLabel = await page
+    .getByRole("figure", { name: /Fleet resource usage curve/ })
+    .locator("figcaption")
+    .textContent();
+  expect(diskFigureLabel).toMatch(/Latest values: .+%/);
+  expect(diskFigureLabel).not.toMatch(/\b[1-9]\d{2,}%/);
 
   await expect(
     page
@@ -4129,7 +4258,22 @@ test("observability network metrics is chart-first and mutation-free", async ({
     "points",
   );
   await panel.getByRole("button", { name: "Throughput" }).click();
+  await expect(page).toHaveURL(
+    /\?network_metric=throughput#\/observability\/network-metrics$/,
+  );
   await expect(panel.getByText(/Time filter: retained evidence/)).toBeVisible();
+  await expect(
+    panel.getByText(/Metric definition: Each point is average TCP throughput/),
+  ).toBeVisible();
+  await page.reload();
+  await expect(
+    panel.getByText(/Metric definition: Each point is average TCP throughput/),
+  ).toBeVisible();
+  await page.goBack();
+  await expect(
+    panel.getByText(/Metric definition: Each point is the mean RTT/),
+  ).toBeVisible();
+  await page.goForward();
   await expect(
     panel.getByText(/Metric definition: Each point is average TCP throughput/),
   ).toBeVisible();

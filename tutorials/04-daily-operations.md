@@ -317,7 +317,7 @@ similarly bound to the destination remaining absent through commit.
 
 ```sh
 cargo run -p vpsctl -- user-sessions --tags edge
-cargo run -p vpsctl -- process-list --limit 50 --tags edge
+cargo run -p vpsctl -- host-process-refresh --limit 50 --tags edge
 ```
 
 Start and supervise a vpsman-managed process:

@@ -3,8 +3,9 @@ use vpsman_common::FileExistingPolicy;
 
 use crate::{
     cli::Command, commands::CommandContext, commands_config, commands_file_transfer,
-    commands_file_transfer_download, commands_file_transfers, commands_files, commands_jobs,
-    commands_process, commands_terminal, commands_terminal_sessions,
+    commands_file_transfer_download, commands_file_transfers, commands_files,
+    commands_host_management, commands_jobs, commands_process, commands_storage, commands_terminal,
+    commands_terminal_sessions,
 };
 
 pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<Command>> {
@@ -13,6 +14,34 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
     match command {
         Command::Jobs { limit } => {
             commands_jobs::jobs(api_url, token, limit)?;
+            Ok(None)
+        }
+        Command::JobRollouts { limit } => {
+            commands_jobs::job_rollouts(api_url, token, limit)?;
+            Ok(None)
+        }
+        Command::JobRollout { job_id } => {
+            commands_jobs::job_rollout(api_url, token, job_id)?;
+            Ok(None)
+        }
+        Command::JobRolloutPause { job_id, reason } => {
+            commands_jobs::job_rollout_update(api_url, token, job_id, "pause", false, reason)?;
+            Ok(None)
+        }
+        Command::JobRolloutResume {
+            job_id,
+            reason,
+            confirmed,
+        } => {
+            commands_jobs::job_rollout_update(api_url, token, job_id, "resume", confirmed, reason)?;
+            Ok(None)
+        }
+        Command::JobCancel {
+            job_id,
+            reason,
+            confirmed,
+        } => {
+            commands_jobs::job_cancel(api_url, token, job_id, reason, confirmed)?;
             Ok(None)
         }
         Command::JobCreate {
@@ -29,6 +58,11 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             destructive,
             confirmed,
             force_unprivileged,
+            rollout_canary_clients,
+            rollout_batch_size,
+            rollout_max_failures,
+            rollout_batch_delay_secs,
+            rollout_continue_after_canary,
         } => {
             commands_jobs::job_create(
                 api_url,
@@ -47,6 +81,11 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                     destructive,
                     confirmed,
                     force_unprivileged,
+                    rollout_canary_clients,
+                    rollout_batch_size,
+                    rollout_max_failures,
+                    rollout_batch_delay_secs,
+                    rollout_continue_after_canary,
                 },
             )?;
             Ok(None)
@@ -720,28 +759,48 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             )?;
             Ok(None)
         }
-        Command::ProcessList {
-            limit,
-            clients,
-            tags,
-            password_env,
-            super_salt_hex,
-            privilege_ttl_secs,
-            max_timeout_secs,
-            confirmed,
-        } => {
-            commands_process::process_list(
-                api_url,
-                token,
-                limit,
-                clients,
-                tags,
-                password_env,
-                super_salt_hex,
-                privilege_ttl_secs,
-                max_timeout_secs,
-                confirmed,
-            )?;
+        Command::HostProcessRefresh(command) => {
+            commands_host_management::host_process_refresh(api_url, token, command)?;
+            Ok(None)
+        }
+        Command::HostProcesses(command) => {
+            commands_host_management::host_processes(api_url, token, command)?;
+            Ok(None)
+        }
+        Command::HostServiceRefresh(command) => {
+            commands_host_management::host_service_refresh(api_url, token, command)?;
+            Ok(None)
+        }
+        Command::HostServices(command) => {
+            commands_host_management::host_services(api_url, token, command)?;
+            Ok(None)
+        }
+        Command::HostServiceLogs(command) => {
+            commands_host_management::host_service_logs(api_url, token, command)?;
+            Ok(None)
+        }
+        Command::HostServiceAction(command) => {
+            commands_host_management::host_service_action(api_url, token, command)?;
+            Ok(None)
+        }
+        Command::OsUpdateCheck(command) => {
+            commands_host_management::os_update_check(api_url, token, command)?;
+            Ok(None)
+        }
+        Command::OsUpdateRefresh(command) => {
+            commands_host_management::os_update_refresh(api_url, token, command)?;
+            Ok(None)
+        }
+        Command::OsUpdatePlans => {
+            commands_host_management::os_update_plans(api_url, token)?;
+            Ok(None)
+        }
+        Command::OsUpdatePlan(command) => {
+            commands_host_management::os_update_plan(api_url, token, command)?;
+            Ok(None)
+        }
+        Command::OsUpdateApply(command) => {
+            commands_host_management::os_update_apply(api_url, token, command)?;
             Ok(None)
         }
         Command::ProcessStart {
@@ -896,6 +955,28 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
         }
         Command::ProcessSupervisorInventory { limit } => {
             commands_process::process_supervisor_inventory(api_url, token, limit)?;
+            Ok(None)
+        }
+        Command::HostStorageRefresh {
+            limit,
+            include_system_mounts,
+            clients,
+            tags,
+            max_timeout_secs,
+        } => {
+            commands_storage::storage_inventory(
+                api_url,
+                token,
+                limit,
+                include_system_mounts,
+                clients,
+                tags,
+                max_timeout_secs,
+            )?;
+            Ok(None)
+        }
+        Command::HostStorage { client_id, limit } => {
+            commands_storage::host_storage(api_url, token, client_id, limit)?;
             Ok(None)
         }
         other => Ok(Some(other)),

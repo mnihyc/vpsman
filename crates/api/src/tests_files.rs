@@ -474,6 +474,7 @@ fn file_push_job_command_uses_operation_payload_and_type() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
+        rollout: None,
     };
 
     assert_eq!(request.command_type_label(), "file_push");
@@ -562,6 +563,7 @@ fn chunked_file_push_job_command_uses_operation_payload_and_type() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
+        rollout: None,
     };
 
     assert_eq!(request.command_type_label(), "file_push_chunked");

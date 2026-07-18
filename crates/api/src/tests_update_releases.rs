@@ -177,6 +177,7 @@ async fn strict_agent_update_release_policy_rejects_unregistered_update_before_g
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
+        rollout: None,
     };
     let state = test_state(repo.clone(), Default::default(), true);
     let headers = crate::test_auth_headers(&state).await;
@@ -650,6 +651,7 @@ fn update_job_request_for_targets(
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
+        rollout: None,
     }
 }
 

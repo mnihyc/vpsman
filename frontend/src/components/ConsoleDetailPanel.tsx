@@ -18,12 +18,19 @@ export function ConsoleDetailPanel({
   const panelRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
-    window.requestAnimationFrame(() => {
-      const panel = panelRef.current;
-      if (!panel) return;
-      scrollIntoViewWithMotion(panel, { block: "start" });
-      panel.focus({ preventScroll: true });
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => {
+        const panel = panelRef.current;
+        if (!panel) return;
+        scrollIntoViewWithMotion(panel, { block: "start" });
+        panel.focus({ preventScroll: true });
+      });
     });
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      window.cancelAnimationFrame(secondFrame);
+    };
   }, []);
 
   return (

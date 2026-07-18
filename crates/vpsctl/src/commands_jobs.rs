@@ -4,13 +4,15 @@ use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Deserialize;
 use uuid::Uuid;
-use vpsman_common::{JobCommand, JobStatus};
+use vpsman_common::{encode_json, payload_hash, JobCommand, JobRolloutPolicy, JobStatus};
 
 use crate::{
     commands_schedules::selector_expression_from_targets,
     http::{http_get, http_get_to_file, http_post_json},
     jobs::{resolve_target_ids, submit_privileged_operation, PrivilegedOperationRequest},
-    privilege::{build_privilege_for_job_command, load_super_password, load_super_salt_hex},
+    privilege::{
+        build_privilege_for_job_command_with_rollout_hash, load_super_password, load_super_salt_hex,
+    },
 };
 
 pub(crate) fn jobs(api_url: &str, token: Option<&str>, limit: u16) -> Result<()> {
@@ -20,6 +22,82 @@ pub(crate) fn jobs(api_url: &str, token: Option<&str>, limit: u16) -> Result<()>
             api_url,
             &format!("/api/v1/jobs?limit={}", limit.clamp(1, 200)),
             token,
+        )?
+    );
+    Ok(())
+}
+
+pub(crate) fn job_rollouts(api_url: &str, token: Option<&str>, limit: u16) -> Result<()> {
+    println!(
+        "{}",
+        http_get(
+            api_url,
+            &format!("/api/v1/job-rollouts?limit={}", limit.clamp(1, 200)),
+            token,
+        )?
+    );
+    Ok(())
+}
+
+pub(crate) fn job_rollout(api_url: &str, token: Option<&str>, job_id: String) -> Result<()> {
+    let job_id = Uuid::parse_str(&job_id).context("invalid --job-id UUID")?;
+    println!(
+        "{}",
+        http_get(api_url, &format!("/api/v1/job-rollouts/{job_id}"), token)?
+    );
+    Ok(())
+}
+
+pub(crate) fn job_rollout_update(
+    api_url: &str,
+    token: Option<&str>,
+    job_id: String,
+    action: &str,
+    confirmed: bool,
+    reason: Option<String>,
+) -> Result<()> {
+    anyhow::ensure!(
+        matches!(action, "pause" | "resume"),
+        "invalid rollout action"
+    );
+    if action == "resume" {
+        anyhow::ensure!(confirmed, "job-rollout-resume requires --confirmed");
+    }
+    let job_id = Uuid::parse_str(&job_id).context("invalid --job-id UUID")?;
+    println!(
+        "{}",
+        http_post_json(
+            api_url,
+            &format!("/api/v1/job-rollouts/{job_id}/{action}"),
+            token,
+            &serde_json::json!({
+                "confirmed": confirmed,
+                "reason": reason,
+            }),
+        )?
+    );
+    Ok(())
+}
+
+pub(crate) fn job_cancel(
+    api_url: &str,
+    token: Option<&str>,
+    job_id: String,
+    reason: Option<String>,
+    confirmed: bool,
+) -> Result<()> {
+    anyhow::ensure!(confirmed, "job-cancel requires --confirmed");
+    let job_id = Uuid::parse_str(&job_id).context("invalid --job-id UUID")?;
+    println!(
+        "{}",
+        http_post_json(
+            api_url,
+            &format!("/api/v1/jobs/{job_id}/cancel"),
+            token,
+            &serde_json::json!({
+                "confirmed": true,
+                "reason": reason,
+            }),
         )?
     );
     Ok(())
@@ -39,6 +117,11 @@ pub(crate) struct JobCreateOptions {
     pub(crate) destructive: bool,
     pub(crate) confirmed: bool,
     pub(crate) force_unprivileged: bool,
+    pub(crate) rollout_canary_clients: Vec<String>,
+    pub(crate) rollout_batch_size: Option<u16>,
+    pub(crate) rollout_max_failures: Option<u16>,
+    pub(crate) rollout_batch_delay_secs: Option<u32>,
+    pub(crate) rollout_continue_after_canary: bool,
 }
 
 pub(crate) fn job_create(
@@ -57,6 +140,18 @@ pub(crate) fn job_create(
     });
     let selector_expression = selector_expression_from_targets(&options.clients, &options.tags);
     let target_ids = resolve_target_ids(api_url, token, &options.clients, &options.tags)?;
+    let rollout = build_job_rollout_policy(
+        &options.rollout_canary_clients,
+        options.rollout_batch_size,
+        options.rollout_max_failures,
+        options.rollout_batch_delay_secs,
+        options.rollout_continue_after_canary,
+        &target_ids,
+    )?;
+    let rollout_policy_hash = rollout
+        .as_ref()
+        .map(|policy| encode_json(policy).map(|payload| payload_hash(&payload)))
+        .transpose()?;
     let privilege_assertion = if options.privileged {
         let password = load_super_password(&options.password_env)?;
         let salt_hex = load_super_salt_hex(options.super_salt_hex.as_deref())?;
@@ -69,7 +164,7 @@ pub(crate) fn job_create(
             }
         };
         Some(
-            build_privilege_for_job_command(
+            build_privilege_for_job_command_with_rollout_hash(
                 &target_ids,
                 &assertion_command,
                 if operation.is_some() {
@@ -84,6 +179,7 @@ pub(crate) fn job_create(
                 options.max_timeout_secs,
                 options.force_unprivileged,
                 true,
+                rollout_policy_hash.as_deref(),
             )?
             .privilege_assertion,
         )
@@ -109,10 +205,88 @@ pub(crate) fn job_create(
                 "force_unprivileged": options.force_unprivileged,
                 "max_timeout_secs": options.max_timeout_secs,
                 "privilege_assertion": privilege_assertion,
+                "rollout": rollout,
             }),
         )?
     );
     Ok(())
+}
+
+fn build_job_rollout_policy(
+    canary_clients: &[String],
+    batch_size: Option<u16>,
+    max_failures: Option<u16>,
+    batch_delay_secs: Option<u32>,
+    continue_after_canary: bool,
+    target_ids: &[String],
+) -> Result<Option<JobRolloutPolicy>> {
+    if canary_clients.is_empty() {
+        anyhow::ensure!(
+            batch_size.is_none()
+                && max_failures.is_none()
+                && batch_delay_secs.is_none()
+                && !continue_after_canary,
+            "rollout options require at least one explicit --rollout-canary"
+        );
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        target_ids.len() >= 2,
+        "staged rollout requires at least two resolved clients"
+    );
+    let mut normalized_canaries = canary_clients
+        .iter()
+        .map(|client_id| client_id.trim().to_string())
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        normalized_canaries
+            .iter()
+            .all(|client_id| !client_id.is_empty()),
+        "rollout canary client ID cannot be empty"
+    );
+    let original_count = normalized_canaries.len();
+    normalized_canaries.sort();
+    normalized_canaries.dedup();
+    anyhow::ensure!(
+        normalized_canaries.len() == original_count,
+        "rollout canary client IDs must be unique"
+    );
+    anyhow::ensure!(
+        normalized_canaries.len() <= 25,
+        "staged rollout supports at most 25 canary clients"
+    );
+    anyhow::ensure!(
+        normalized_canaries.len() < target_ids.len(),
+        "rollout canaries must leave at least one client for a later batch"
+    );
+    for client_id in &normalized_canaries {
+        anyhow::ensure!(
+            target_ids.contains(client_id),
+            "rollout canary {client_id} is not in the resolved target snapshot"
+        );
+    }
+    let batch_size = batch_size.unwrap_or(5);
+    let max_failures = max_failures.unwrap_or(0);
+    let batch_delay_secs = batch_delay_secs.unwrap_or(0);
+    anyhow::ensure!(
+        (1..=100).contains(&batch_size),
+        "rollout batch size must be between 1 and 100"
+    );
+    anyhow::ensure!(
+        max_failures <= 100,
+        "rollout tolerated failures must be between 0 and 100"
+    );
+    anyhow::ensure!(
+        batch_delay_secs <= 86_400,
+        "rollout batch delay must be between 0 and 86400 seconds"
+    );
+    Ok(Some(JobRolloutPolicy {
+        canary_client_ids: normalized_canaries,
+        batch_size,
+        max_failures,
+        pause_after_canary: !continue_after_canary,
+        batch_delay_secs,
+    }))
 }
 
 pub(crate) fn job_shell(
@@ -801,5 +975,46 @@ mod tests {
         {
             assert!(!JobStatus::parse(status).is_some_and(JobStatus::is_terminal));
         }
+    }
+
+    #[test]
+    fn staged_rollout_requires_explicit_resolved_canaries() {
+        let targets = vec!["client-a".to_string(), "client-b".to_string()];
+        let policy =
+            build_job_rollout_policy(&["client-a".to_string()], None, None, None, false, &targets)
+                .unwrap()
+                .unwrap();
+        assert_eq!(policy.canary_client_ids, vec!["client-a"]);
+        assert_eq!(policy.batch_size, 5);
+        assert_eq!(policy.max_failures, 0);
+        assert!(policy.pause_after_canary);
+
+        assert!(build_job_rollout_policy(
+            &["client-missing".to_string()],
+            Some(1),
+            Some(0),
+            Some(0),
+            false,
+            &targets,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("not in the resolved target snapshot"));
+    }
+
+    #[test]
+    fn rollout_modifiers_without_canary_are_rejected() {
+        let targets = vec!["client-a".to_string(), "client-b".to_string()];
+        assert!(
+            build_job_rollout_policy(&[], Some(10), None, None, false, &targets)
+                .unwrap_err()
+                .to_string()
+                .contains("explicit --rollout-canary")
+        );
+        assert!(
+            build_job_rollout_policy(&[], None, None, None, false, &targets)
+                .unwrap()
+                .is_none()
+        );
     }
 }

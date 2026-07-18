@@ -532,6 +532,7 @@ fn migration_run_request(
             force_unprivileged: false,
             privileged: true,
             privilege_assertion: None,
+            rollout: None,
         },
     }
 }

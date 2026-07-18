@@ -2124,6 +2124,10 @@ h2 {
     flex-wrap: wrap;
   }
 
+  .gridToolbarActions .columnChooserButton span {
+    display: none;
+  }
+
   .gridTable {
     overflow-x: visible;
   }

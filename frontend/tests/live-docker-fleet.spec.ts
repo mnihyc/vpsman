@@ -1209,7 +1209,7 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
     {
       view: "Remote Operations",
       subpage: "Processes",
-      marker: "Process supervisor inventory",
+      marker: "Host processes",
       screenshot: "page-remote-operations-processes",
     },
     {

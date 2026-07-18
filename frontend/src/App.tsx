@@ -124,6 +124,16 @@ const AgentUpdateReleasesPanel = retryableLazy(() =>
     default: module.AgentUpdateReleasesPanel,
   })),
 );
+const OsUpdatesPanel = retryableLazy(() =>
+  import("./panels/automation/OsUpdatesPanel").then((module) => ({
+    default: module.OsUpdatesPanel,
+  })),
+);
+const RolloutsPanel = retryableLazy(() =>
+  import("./panels/automation/RolloutsPanel").then((module) => ({
+    default: module.RolloutsPanel,
+  })),
+);
 const RunbooksPanel = retryableLazy(() =>
   import("./panels/automation/RunbooksPanel").then((module) => ({
     default: module.RunbooksPanel,
@@ -209,6 +219,10 @@ function getScopedPageTitle(view: ActiveView, subpage: string): string {
         return "Transfers";
       case "processes":
         return "Processes";
+      case "services":
+        return "Services";
+      case "storage":
+        return "Storage";
       default:
         return "Remote";
     }
@@ -231,10 +245,14 @@ function getScopedPageTitle(view: ActiveView, subpage: string): string {
     switch (subpage) {
       case "schedules":
         return "Schedules";
+      case "rollouts":
+        return "Rollouts";
       case "runbooks":
         return "Runbooks";
       case "source_templates":
         return "Source templates";
+      case "os_updates":
+        return "OS updates";
       case "agent_updates":
         return "Agent updates";
       default:
@@ -344,12 +362,36 @@ function getScopedPageTitle(view: ActiveView, subpage: string): string {
 }
 
 function getScopedPageDescription(view: ActiveView, subpage: string): string {
+  if (view === "Remote Operations") {
+    switch (subpage) {
+      case "terminal":
+        return "Open, resume, replay, and audit browser terminal sessions";
+      case "files":
+        return "Browse and edit one VPS with explicit file action evidence";
+      case "transfers":
+        return "Transfer sessions, resumable handoffs, and integrity evidence";
+      case "processes":
+        return "Host and managed process inventory, logs, and lifecycle actions";
+      case "services":
+        return "Init provider detection, host service state, boot policy, actions, and logs";
+      case "storage":
+        return "Read-only block devices, mounts, capacity, and provider-reported usage";
+      case "bulk_files":
+        return "Apply reviewed file operations across an explicit VPS scope";
+      default:
+        return "Direct VPS access and host operations without leaving the console";
+    }
+  }
   if (view === "Automation") {
     switch (subpage) {
       case "runbooks":
         return "Reusable reviewed operations, parameters, and execution handoff";
+      case "rollouts":
+        return "Durable canaries, bounded batches, safety pauses, and per-VPS evidence";
       case "source_templates":
         return "Persistent source templates, rendering, tests, and job handoff";
+      case "os_updates":
+        return "Native package support, reviewed update candidates, and explicit application";
       case "agent_updates":
         return "Release metadata, update checks, rollout, rollback, and job evidence";
       default:
@@ -491,6 +533,27 @@ function writeConsoleRoute(
     return;
   }
   const searchParams = new URLSearchParams(window.location.search);
+  if (!(view === "Remote Operations" && subpage === "processes")) {
+    searchParams.delete("process_mode");
+    searchParams.delete("process_client");
+  }
+  if (!(view === "Remote Operations" && subpage === "services")) {
+    searchParams.delete("service_client");
+  }
+  if (!(view === "Remote Operations" && subpage === "storage")) {
+    searchParams.delete("storage_client");
+    searchParams.delete("storage_system");
+    searchParams.delete("storage_view");
+  }
+  if (!(view === "Automation" && subpage === "os_updates")) {
+    searchParams.delete("os_update_client");
+  }
+  if (!(view === "Automation" && subpage === "rollouts")) {
+    searchParams.delete("rollout_job");
+  }
+  if (!(view === "Observability" && subpage === "network_metrics")) {
+    searchParams.delete("network_metric");
+  }
   if (!(view === "Observability" && subpage === "dashboards")) {
     [
       "dashboard",
@@ -811,6 +874,17 @@ export function App() {
       [activeView]: nextSubpage,
     }));
     writeConsoleRoute(activeView, nextSubpage);
+  }
+
+  function openRolloutDetails(jobId: string) {
+    selectView("Automation", "rollouts");
+    const url = new URL(window.location.href);
+    url.searchParams.set("rollout_job", jobId);
+    window.history.replaceState(
+      null,
+      "",
+      `${url.pathname}${url.search}${url.hash}`,
+    );
   }
 
   function selectReleaseDestination(
@@ -1539,6 +1613,40 @@ export function App() {
     );
   }
 
+  function renderOsUpdatesPanel() {
+    return (
+      <section className="workspace singleColumn">
+        <OsUpdatesPanel
+          agents={dashboard.agents}
+          onCreateJob={dashboard.createJob}
+          onDownloadOutputStream={dashboard.downloadJobOutputStream}
+          onLoadPlan={dashboard.loadHostPackageUpdatePlan}
+          onLoadPlans={dashboard.loadHostPackageUpdatePlans}
+          onLoadTargets={dashboard.loadJobTargets}
+          onOpenJobDetails={openJobDetails}
+          onOpenPrivilegeUnlock={openPrivilegeUnlock}
+          privilegeMaterial={privilegeMaterial}
+        />
+      </section>
+    );
+  }
+
+  function renderRolloutsPanel() {
+    return (
+      <section className="workspace singleColumn">
+        <RolloutsPanel
+          agents={dashboard.agents}
+          jobs={dashboard.jobs}
+          onCancelJob={dashboard.cancelJob}
+          onLoadRollouts={dashboard.loadJobRollouts}
+          onOpenJobDetails={openJobDetails}
+          onUpdateRollout={dashboard.updateJobRollout}
+          rollouts={dashboard.jobRollouts}
+        />
+      </section>
+    );
+  }
+
   function renderRunbooksPanel() {
     return (
       <RunbooksPanel
@@ -1618,6 +1726,7 @@ export function App() {
         onLoadTargets={dashboard.loadJobTargets}
         onSubmitTerminalInput={dashboard.submitTerminalInput}
         onOpenSchedules={() => selectView("Automation", "schedules")}
+        onOpenRollout={openRolloutDetails}
         onOpenVpsDetail={releaseRoutes.openVpsDetail}
         onOpenRemoteOperations={(subpage) =>
           selectView("Remote Operations", subpage)
@@ -1663,8 +1772,12 @@ export function App() {
         onDownloadFileBundle={dashboard.downloadFileDownloadBundle}
         onDownloadFileTransferSource={dashboard.downloadFileTransferSource}
         onDownloadOutputChunk={dashboard.downloadJobOutputChunk}
+        onDownloadOutputStream={dashboard.downloadJobOutputStream}
         onDispatchPresetApplied={() => setJobDispatchPreset(null)}
         onLoadJob={dashboard.loadJob}
+        onLoadHostProcessInventory={dashboard.loadHostProcessInventory}
+        onLoadHostServiceInventory={dashboard.loadHostServiceInventory}
+        onLoadHostStorageInventory={dashboard.loadHostStorageInventory}
         onLoadOutputs={dashboard.loadJobOutputs}
         onLoadTargets={dashboard.loadJobTargets}
         onLoadTerminalReplay={dashboard.loadTerminalReplay}
@@ -1990,10 +2103,11 @@ export function App() {
             fileTransfers={dashboard.fileTransfers}
             fleetAlerts={dashboard.fleetAlerts}
             jobs={dashboard.jobs}
-            runningJobCount={
+            runningJobCount={Math.max(
               dashboard.jobs.filter((job) => isActiveJobStatus(job.status))
-                .length || dashboard.summary.running_jobs
-            }
+                .length,
+              dashboard.summary.running_jobs,
+            )}
             telemetryNetworkRates={dashboard.telemetryNetworkRates}
             telemetryRollups={dashboard.telemetryRollups}
             telemetryTunnels={dashboard.telemetryTunnels}
@@ -2046,10 +2160,12 @@ export function App() {
       return renderJobPanel(jobSubpage(activeSubpage));
     }
     if (activeView === "Automation") {
+      if (activeSubpage === "rollouts") return renderRolloutsPanel();
       if (activeSubpage === "schedules") return renderSchedulesPanel();
       if (activeSubpage === "runbooks") return renderRunbooksPanel();
       if (activeSubpage === "source_templates")
         return renderSourceTemplatesPanel();
+      if (activeSubpage === "os_updates") return renderOsUpdatesPanel();
       if (activeSubpage === "agent_updates") return renderAgentUpdatesPanel();
       return renderRunbooksPanel();
     }
@@ -2309,9 +2425,15 @@ function networkReleaseSubpage(subpage: string) {
 
 function remoteOperationsReleaseSubpage(subpage: string) {
   if (
-    ["terminal", "files", "transfers", "processes", "bulk_files"].includes(
-      subpage,
-    )
+    [
+      "terminal",
+      "files",
+      "transfers",
+      "processes",
+      "services",
+      "storage",
+      "bulk_files",
+    ].includes(subpage)
   ) {
     return subpage;
   }
@@ -2320,9 +2442,7 @@ function remoteOperationsReleaseSubpage(subpage: string) {
 
 function automationReleaseSubpage(subpage: string) {
   if (
-    ["schedules", "runbooks", "source_templates", "agent_updates"].includes(
-      subpage,
-    )
+    ["rollouts", "schedules", "runbooks", "source_templates", "os_updates", "agent_updates"].includes(subpage)
   ) {
     return subpage;
   }
@@ -2437,7 +2557,11 @@ function configSubpage(subpage: string) {
 
 function remoteOperationsSubpage(subpage: string) {
   if (subpage === "bulk_files") return "multi_files";
-  if (["terminal", "files", "transfers", "processes"].includes(subpage))
+  if (
+    ["terminal", "files", "transfers", "processes", "services", "storage"].includes(
+      subpage,
+    )
+  )
     return subpage;
   return "terminal";
 }

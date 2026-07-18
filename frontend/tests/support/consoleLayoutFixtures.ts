@@ -10,7 +10,13 @@ import {
 } from "./jobSessionFixtures";
 import { installTransferJobApiMock } from "./transferJobMock";
 import { JOB_COMMAND_TYPE_BY_OPERATION_TYPE } from "../../src/generated/protocolContracts";
-import type { AuditLogRecord } from "../../src/types";
+import type {
+  AuditLogRecord,
+  HostPackageUpdatePlanRecord,
+  HostServiceInventoryRecord,
+  HostStorageInventoryRecord,
+  JobRolloutRecord,
+} from "../../src/types";
 
 type FixtureJobOutput = {
   client_id: string;
@@ -1842,6 +1848,335 @@ const processSupervisorInventory = [
   },
 ];
 
+function hostProcessInventory(clientId: string) {
+  return {
+    client_id: clientId,
+    last_attempt: {
+      completed_at: "2026-06-02T10:03:00Z",
+      job_id: "51515151-2222-4333-8444-555555555555",
+      message: "completed",
+      status: "completed",
+    },
+    observed_at: "2026-06-02T10:03:00Z",
+    processes: [
+      {
+        command: "/usr/sbin/sshd -D -o AuthorizedKeysFile=.ssh/authorized_keys",
+        name: "sshd",
+        pid: 812,
+        ppid: 1,
+        rss_kib: 18_432,
+        state: "S",
+        uid: 0,
+      },
+      {
+        command: "/usr/bin/node /srv/dashboard/server.js --listen 127.0.0.1:3000",
+        name: "node",
+        pid: 4_242,
+        ppid: 1,
+        rss_kib: 131_072,
+        state: "R",
+        uid: 1000,
+      },
+    ],
+    source: "/proc",
+    source_job_id: "51515151-2222-4333-8444-555555555555",
+    truncated: false,
+  };
+}
+
+export function hostServiceInventory(
+  clientId: string,
+): HostServiceInventoryRecord {
+  return {
+    capability: {
+      can_enable_disable: true,
+      can_inventory: true,
+      can_read_logs: true,
+      can_start_stop_restart: true,
+      enable_backend: "systemctl",
+      provider: "systemd" as const,
+      provider_version: null,
+      reason: null,
+      status: "supported" as const,
+    },
+    client_id: clientId,
+    last_attempt: {
+      completed_at: "2026-06-02T10:04:00Z",
+      job_id: "52525252-2222-4333-8444-555555555555",
+      message: "completed",
+      status: "completed",
+    },
+    observed_at: "2026-06-02T10:04:00Z",
+    services: [
+      {
+        active_state: "active",
+        description: "OpenSSH server daemon",
+        enabled_state: "enabled",
+        load_state: "loaded",
+        name: "sshd.service",
+        state_reason: null,
+        sub_state: "running",
+      },
+      {
+        active_state: "failed",
+        description: "Example background worker",
+        enabled_state: "disabled",
+        load_state: "loaded",
+        name: "example-worker.service",
+        state_reason: "Result: exit-code",
+        sub_state: "failed",
+      },
+      {
+        active_state: "inactive",
+        description: "One-shot maintenance task",
+        enabled_state: "static",
+        load_state: "loaded",
+        name: "maintenance.service",
+        state_reason: null,
+        sub_state: "dead",
+      },
+    ],
+    source_job_id: "52525252-2222-4333-8444-555555555555",
+    truncated: false,
+  };
+}
+
+export function hostStorageInventory(
+  clientId: string,
+): HostStorageInventoryRecord {
+  return {
+    capability: {
+      available_columns: [
+        "NAME",
+        "KNAME",
+        "PKNAME",
+        "TYPE",
+        "SIZE",
+        "FSTYPE",
+        "FSVER",
+        "LABEL",
+        "UUID",
+        "MOUNTPOINT",
+        "FSAVAIL",
+        "FSUSE%",
+        "RO",
+        "RM",
+        "MODEL",
+        "SERIAL",
+        "TRAN",
+        "MAJ:MIN",
+      ],
+      can_report_filesystem_usage: true,
+      provider: "lsblk_json",
+      provider_version: "lsblk from util-linux 2.39.3",
+      reason: null,
+      status: "supported",
+    },
+    client_id: clientId,
+    devices: [
+      {
+        device_type: "disk",
+        filesystem_available_bytes: null,
+        filesystem_type: null,
+        filesystem_used_percent: null,
+        filesystem_version: null,
+        kernel_name: "vda",
+        label: null,
+        major_minor: "252:0",
+        model: "Cloud Block Device",
+        mount_points: [],
+        name: "vda",
+        parent_path: null,
+        path: "/dev/vda",
+        read_only: false,
+        removable: false,
+        serial: "cloud-root-001",
+        size_bytes: 107_374_182_400,
+        transport: "virtio",
+        uuid: null,
+      },
+      {
+        device_type: "part",
+        filesystem_available_bytes: 30_064_771_072,
+        filesystem_type: "ext4",
+        filesystem_used_percent: 72,
+        filesystem_version: "1.0",
+        kernel_name: "vda1",
+        label: "rootfs",
+        major_minor: "252:1",
+        model: null,
+        mount_points: ["/"],
+        name: "vda1",
+        parent_path: "/dev/vda",
+        path: "/dev/vda1",
+        read_only: false,
+        removable: false,
+        serial: null,
+        size_bytes: 107_363_696_640,
+        transport: null,
+        uuid: "11111111-2222-4333-8444-555555555555",
+      },
+      {
+        device_type: "disk",
+        filesystem_available_bytes: 48_318_382_080,
+        filesystem_type: "xfs",
+        filesystem_used_percent: 91,
+        filesystem_version: "5",
+        kernel_name: "vdb",
+        label: "archive",
+        major_minor: "252:16",
+        model: "Cloud Archive Volume",
+        mount_points: ["/srv/archive"],
+        name: "vdb",
+        parent_path: null,
+        path: "/dev/vdb",
+        read_only: true,
+        removable: false,
+        serial: "cloud-archive-001",
+        size_bytes: 536_870_912_000,
+        transport: "virtio",
+        uuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      },
+    ],
+    devices_truncated: false,
+    include_pseudo_mounts: false,
+    last_attempt: {
+      completed_at: "2026-06-02T10:05:00Z",
+      job_id: "53535353-2222-4333-8444-555555555555",
+      message: "completed",
+      status: "completed",
+    },
+    mounts: [
+      {
+        filesystem_type: "ext4",
+        major_minor: "252:1",
+        mount_id: 36,
+        options: ["errors=remount-ro", "relatime", "rw"],
+        parent_id: 25,
+        pseudo: false,
+        read_only: false,
+        root: "/",
+        source: "/dev/vda1",
+        target: "/",
+      },
+      {
+        filesystem_type: "xfs",
+        major_minor: "252:16",
+        mount_id: 37,
+        options: ["attr2", "inode64", "ro"],
+        parent_id: 25,
+        pseudo: false,
+        read_only: true,
+        root: "/",
+        source: "/dev/vdb",
+        target: "/srv/archive",
+      },
+    ],
+    mounts_truncated: false,
+    observed_at: "2026-06-02T10:05:00Z",
+    source_job_id: "53535353-2222-4333-8444-555555555555",
+  };
+}
+
+export function hostPackageUpdatePlans(): HostPackageUpdatePlanRecord[] {
+  return [
+    {
+      capability: {
+        can_apply: true,
+        can_plan_cached: true,
+        can_refresh_metadata: true,
+        distro_id: "ubuntu",
+        distro_version: "22.04",
+        provider: "apt",
+        reason: null,
+        status: "supported",
+      },
+      client_id: "agent-sfo-01",
+      evidence_error: null,
+      last_attempt: {
+        completed_at: "2026-06-02T10:05:00Z",
+        job_id: "53535353-2222-4333-8444-555555555555",
+        message: "completed",
+        status: "completed",
+      },
+      metadata_refresh_requested: true,
+      metadata_refreshed: true,
+      observed_at: "2026-06-02T10:05:00Z",
+      packages: [
+        {
+          architecture: "amd64",
+          candidate_version: "1.1.1f-1ubuntu2.22",
+          current_version: "1.1.1f-1ubuntu2.21",
+          name: "openssl",
+          repository: "Ubuntu:focal-updates",
+        },
+        {
+          architecture: "amd64",
+          candidate_version: "252.22-1ubuntu1.1",
+          current_version: "252.22-1ubuntu1",
+          name: "systemd",
+          repository: "Ubuntu:jammy-updates",
+        },
+      ],
+      plan_hash: "a".repeat(64),
+      reboot_required_before: false,
+      source_job_id: "53535353-2222-4333-8444-555555555555",
+      truncated: false,
+    },
+    {
+      capability: {
+        can_apply: true,
+        can_plan_cached: true,
+        can_refresh_metadata: false,
+        distro_id: "arch",
+        distro_version: null,
+        provider: "pacman",
+        reason:
+          "Pacman metadata refresh is unsupported as a separate action because Arch requires it to be followed immediately by a full system upgrade; cached planning and application remain available",
+        status: "supported",
+      },
+      client_id: "agent-fra-02",
+      evidence_error: null,
+      last_attempt: {
+        completed_at: "2026-06-02T09:55:00Z",
+        job_id: "54545454-2222-4333-8444-555555555555",
+        message: "completed",
+        status: "completed",
+      },
+      metadata_refresh_requested: false,
+      metadata_refreshed: false,
+      observed_at: "2026-06-02T09:55:00Z",
+      packages: [
+        {
+          architecture: null,
+          candidate_version: "6.10.9.arch1-1",
+          current_version: "6.10.8.arch1-1",
+          name: "linux",
+          repository: null,
+        },
+      ],
+      plan_hash: "b".repeat(64),
+      reboot_required_before: null,
+      source_job_id: "54545454-2222-4333-8444-555555555555",
+      truncated: false,
+    },
+    {
+      capability: null,
+      client_id: "agent-nyc-03",
+      evidence_error: null,
+      last_attempt: null,
+      metadata_refresh_requested: false,
+      metadata_refreshed: false,
+      observed_at: null,
+      packages: [],
+      plan_hash: null,
+      reboot_required_before: null,
+      source_job_id: null,
+      truncated: false,
+    },
+  ];
+}
+
 const sourceStatus = [
   {
     assigned_at: "2026-06-02T10:00:00Z",
@@ -2360,8 +2695,22 @@ export const tunnelPlans = [
 const networkProbeJobId = "99999999-aaaa-4bbb-8ccc-dddddddddddd";
 const networkStatusJobId = "88888888-aaaa-4bbb-8ccc-dddddddddddd";
 const networkSpeedJobId = "77777777-aaaa-4bbb-8ccc-dddddddddddd";
+const rolloutJobId = "55555555-aaaa-4bbb-8ccc-dddddddddddd";
 
 const networkJobs = [
+  {
+    actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+    command_type: "shell_argv",
+    completed_at: null,
+    created_at: "2026-06-02T10:00:00Z",
+    id: rolloutJobId,
+    max_timeout_secs: 60,
+    payload_hash: "5".repeat(64),
+    privileged: true,
+    source_schedule_id: null,
+    status: "running",
+    target_count: 3,
+  },
   {
     actor_id: null,
     command_type: "scheduled_shell_argv",
@@ -2422,6 +2771,46 @@ const networkJobs = [
     source_schedule_id: null,
     status: "completed",
     target_count: 1,
+  },
+];
+
+const jobRollouts: JobRolloutRecord[] = [
+  {
+    batch_delay_secs: 30,
+    batch_size: 1,
+    canary_client_ids: ["agent-sfo-01"],
+    completed_at: null,
+    created_at: "2026-06-02T10:00:00Z",
+    current_batch: 1,
+    failure_baseline: 0,
+    job_id: rolloutJobId,
+    max_failures: 0,
+    next_batch_at: "2026-06-02T10:01:00Z",
+    pause_after_canary: true,
+    pause_reason: "canary_review",
+    status: "paused",
+    targets: [
+      {
+        batch_index: 0,
+        client_id: "agent-sfo-01",
+        message: "completed",
+        status: "completed",
+      },
+      {
+        batch_index: 1,
+        client_id: "agent-fra-02",
+        message: null,
+        status: "queued",
+      },
+      {
+        batch_index: 2,
+        client_id: "agent-nyc-03",
+        message: null,
+        status: "queued",
+      },
+    ],
+    total_batches: 3,
+    updated_at: "2026-06-02T10:01:00Z",
   },
 ];
 
@@ -2955,6 +3344,10 @@ export async function installConsoleApiMock(
     dashboardSummaryOverride?: Partial<typeof dashboardOverview.summary>;
     fileTransferSourceArtifactsOverride?: typeof fileTransferSourceArtifacts;
     fileTransfersOverride?: typeof fileTransfers;
+    hostServiceInventoryOverride?: ReturnType<typeof hostServiceInventory>;
+    hostStorageInventoryOverride?: ReturnType<typeof hostStorageInventory>;
+    hostPackageUpdatePlansOverride?: ReturnType<typeof hostPackageUpdatePlans>;
+    jobRolloutsOverride?: JobRolloutRecord[];
     ospfUpdatePlansOverride?: typeof ospfUpdatePlans;
     operatorRoleOverride?: "admin" | "operator" | "viewer";
     telemetryFailurePath?: "network-rates" | "rollups" | "tunnels";
@@ -2998,7 +3391,12 @@ export async function installConsoleApiMock(
       fileTransferSourceArtifactsFixture,
       fileTransfersFixture,
       historyRetentionPoliciesFixture,
+      hostProcessInventoryFixture,
+      hostPackageUpdatePlansFixture,
+      hostServiceInventoryFixture,
+      hostStorageInventoryFixture,
       jobApprovalsFixture,
+      jobRolloutsFixture,
       jobOutputsFixture,
       jobsFixture,
       networkObservationsFixture,
@@ -3092,6 +3490,60 @@ export async function installConsoleApiMock(
         })),
       }));
       let telemetryNetworkRateRequestCount = 0;
+      const mutableHostPackageUpdatePlans = hostPackageUpdatePlansFixture.map(
+        (plan) => ({
+          ...plan,
+          capability: plan.capability ? { ...plan.capability } : null,
+          packages: plan.packages.map((item) => ({ ...item })),
+        }),
+      );
+      const hostStorageStorageKey = "__vpsmanTestHostStorage";
+      const persistedHostStorage = window.sessionStorage.getItem(
+        hostStorageStorageKey,
+      );
+      if (persistedHostStorage) {
+        Object.assign(
+          hostStorageInventoryFixture,
+          JSON.parse(persistedHostStorage),
+        );
+      }
+      const persistHostStorage = () =>
+        window.sessionStorage.setItem(
+          hostStorageStorageKey,
+          JSON.stringify(hostStorageInventoryFixture),
+        );
+      const rolloutStorageKey = "__vpsmanTestJobRollouts";
+      const persistedJobRollouts = window.sessionStorage.getItem(
+        rolloutStorageKey,
+      );
+      let mutableJobRollouts = persistedJobRollouts
+        ? (JSON.parse(persistedJobRollouts) as typeof jobRolloutsFixture)
+        : jobRolloutsFixture.map((rollout) => ({
+            ...rollout,
+            canary_client_ids: [...rollout.canary_client_ids],
+            targets: rollout.targets.map((target) => ({ ...target })),
+          }));
+      const persistJobRollouts = () =>
+        window.sessionStorage.setItem(
+          rolloutStorageKey,
+          JSON.stringify(mutableJobRollouts),
+        );
+      const createdRolloutJobStorageKey = "__vpsmanTestCreatedRolloutJob";
+      const persistedCreatedRolloutJob = window.sessionStorage.getItem(
+        createdRolloutJobStorageKey,
+      );
+      if (persistedCreatedRolloutJob) {
+        const createdJob = JSON.parse(
+          persistedCreatedRolloutJob,
+        ) as (typeof jobsFixture)[number];
+        if (
+          !(jobsFixture as Array<{ id: string }>).some(
+            (job) => job.id === createdJob.id,
+          )
+        ) {
+          jobsFixture.unshift(createdJob);
+        }
+      }
       const backendAgents = () =>
         agentsFixture.filter((agent) => !deletedAgentIds.has(agent.id));
       const dashboardAgents = () =>
@@ -3154,6 +3606,7 @@ export async function installConsoleApiMock(
         jobs: [] as unknown[],
         jobApprovals: [] as unknown[],
         jobApprovalDecisions: [] as unknown[],
+        jobRolloutActions: [] as unknown[],
         jobOutputComparisons: [] as unknown[],
         commandTemplates: [] as unknown[],
         migrationLinks: [] as unknown[],
@@ -3993,9 +4446,38 @@ export async function installConsoleApiMock(
             scopedAgents.map((agent) => agent.id),
           );
           const scopedResourceSeries =
-            dashboardOverviewFixture.resource_curve.series.filter((series) =>
-              scopedClientIds.has(series.client_id),
-            );
+            dashboardOverviewFixture.resource_curve.series
+              .filter((series) => scopedClientIds.has(series.client_id))
+              .map((series) => {
+                if (requestedResourceMetric === "cpu_load") return series;
+
+                const transform =
+                  requestedResourceMetric === "memory_used"
+                    ? (value: number) =>
+                        0.36 + Math.min(Math.max(value, 0) / 4, 0.52)
+                    : (value: number) =>
+                        0.82 - Math.min(Math.max(value, 0) / 4, 0.62);
+                const points = series.points.map((point) => ({
+                  ...point,
+                  value: transform(point.value),
+                }));
+
+                return {
+                  ...series,
+                  critical_threshold:
+                    requestedResourceMetric === "memory_used" ? 0.8 : 0.1,
+                  current:
+                    points.at(-1)?.value ?? transform(series.current),
+                  peak: transform(series.peak),
+                  points,
+                  threshold_direction:
+                    requestedResourceMetric === "memory_used"
+                      ? "above"
+                      : "below",
+                  warning_threshold:
+                    requestedResourceMetric === "memory_used" ? 0.7 : 0.2,
+                };
+              });
           return jsonResponse({
             ...dashboardOverviewFixture,
             group_by: requestedGroupBy,
@@ -5318,6 +5800,55 @@ export async function installConsoleApiMock(
         if (pathname === "/api/v1/job-approvals" && method === "GET") {
           return jsonResponse(currentJobApprovals);
         }
+        if (pathname === "/api/v1/job-rollouts" && method === "GET") {
+          return jsonResponse(mutableJobRollouts);
+        }
+        const jobRolloutActionMatch = pathname.match(
+          /^\/api\/v1\/job-rollouts\/([^/]+)\/(pause|resume)$/,
+        );
+        if (jobRolloutActionMatch && method === "POST") {
+          const jobId = decodeURIComponent(jobRolloutActionMatch[1]);
+          const action = jobRolloutActionMatch[2] as "pause" | "resume";
+          const body = (await readJsonBody(input, init)) as {
+            confirmed?: boolean;
+            reason?: string | null;
+          } | null;
+          requests.jobRolloutActions.push({ action, body, job_id: jobId });
+          const rollout = mutableJobRollouts.find(
+            (record) => record.job_id === jobId,
+          );
+          if (!rollout) {
+            return jsonResponse({ error: "job_rollout_not_found" }, 404);
+          }
+          if (rollout.status === "completed" || rollout.status === "aborted") {
+            return jsonResponse({ error: "job_rollout_terminal" }, 409);
+          }
+          if (action === "resume" && !body?.confirmed) {
+            return jsonResponse(
+              { error: "job_rollout_resume_requires_confirmation" },
+              409,
+            );
+          }
+          rollout.status = action === "pause" ? "paused" : "running";
+          rollout.pause_reason =
+            action === "pause" ? body?.reason ?? "operator_requested" : null;
+          rollout.next_batch_at = "2026-06-02T10:02:00Z";
+          rollout.updated_at = "2026-06-02T10:02:00Z";
+          persistJobRollouts();
+          return jsonResponse(rollout);
+        }
+        const jobRolloutMatch = pathname.match(
+          /^\/api\/v1\/job-rollouts\/([^/]+)$/,
+        );
+        if (jobRolloutMatch && method === "GET") {
+          const jobId = decodeURIComponent(jobRolloutMatch[1]);
+          const rollout = mutableJobRollouts.find(
+            (record) => record.job_id === jobId,
+          );
+          return rollout
+            ? jsonResponse(rollout)
+            : jsonResponse({ error: "job_rollout_not_found" }, 404);
+        }
         if (pathname === "/api/v1/job-approvals" && method === "POST") {
           const body = (await readJsonBody(input, init)) as {
             approval_id?: string;
@@ -5603,6 +6134,55 @@ export async function installConsoleApiMock(
         ) {
           return jsonResponse(processSupervisorInventoryFixture);
         }
+        const hostProcessMatch = pathname.match(
+          /^\/api\/v1\/host-processes\/([^/]+)$/,
+        );
+        if (hostProcessMatch && method === "GET") {
+          return jsonResponse(
+            {
+              ...hostProcessInventoryFixture,
+              client_id: decodeURIComponent(hostProcessMatch[1]),
+            },
+          );
+        }
+        const hostServiceMatch = pathname.match(
+          /^\/api\/v1\/host-services\/([^/]+)$/,
+        );
+        if (hostServiceMatch && method === "GET") {
+          return jsonResponse({
+            ...hostServiceInventoryFixture,
+            client_id: decodeURIComponent(hostServiceMatch[1]),
+          });
+        }
+        const hostStorageMatch = pathname.match(
+          /^\/api\/v1\/host-storage\/([^/]+)$/,
+        );
+        if (hostStorageMatch && method === "GET") {
+          return jsonResponse({
+            ...hostStorageInventoryFixture,
+            client_id: decodeURIComponent(hostStorageMatch[1]),
+          });
+        }
+        if (pathname === "/api/v1/os-updates" && method === "GET") {
+          const visibleClientIds = new Set(visibleAgents().map((agent) => agent.id));
+          return jsonResponse(
+            mutableHostPackageUpdatePlans.filter((plan) =>
+              visibleClientIds.has(plan.client_id),
+            ),
+          );
+        }
+        const hostPackageUpdateMatch = pathname.match(
+          /^\/api\/v1\/os-updates\/([^/]+)$/,
+        );
+        if (hostPackageUpdateMatch && method === "GET") {
+          const clientId = decodeURIComponent(hostPackageUpdateMatch[1]);
+          const plan = mutableHostPackageUpdatePlans.find(
+            (item) => item.client_id === clientId,
+          );
+          return plan
+            ? jsonResponse(plan)
+            : jsonResponse({ error: "agent_not_found" }, 404);
+        }
         if (pathname === "/api/v1/file-transfers" && method === "GET") {
           return jsonResponse(fileTransfersFixture);
         }
@@ -5848,6 +6428,79 @@ export async function installConsoleApiMock(
             limit: 1000,
             next_cursor: null,
             has_more: false,
+          });
+        }
+        const outputStreamMatch = pathname.match(
+          /^\/api\/v1\/jobs\/([^/]+)\/outputs\/([^/]+)\/download$/,
+        );
+        if (outputStreamMatch && method === "GET") {
+          const jobId = outputStreamMatch[1];
+          const clientId = decodeURIComponent(outputStreamMatch[2]);
+          const stream = new URL(url, window.location.href).searchParams.get("stream") ?? "combined";
+          const items =
+            createdJobOutputs.get(jobId) ??
+            (jobOutputsFixture as Record<string, FixtureJobOutput[]>)[jobId] ??
+            [];
+          const payload = items
+            .filter(
+              (item) =>
+                item.client_id === clientId &&
+                (stream === "combined" || item.stream === stream),
+            )
+            .sort((left, right) => (left.seq ?? 0) - (right.seq ?? 0))
+            .map((item) => (item.data_base64 ? atob(item.data_base64) : ""))
+            .join("");
+          return Promise.resolve(
+            new Response(payload, {
+              headers: { "Content-Type": "application/octet-stream" },
+              status: 200,
+            }),
+          );
+        }
+        const jobCancelMatch = pathname.match(
+          /^\/api\/v1\/jobs\/([^/]+)\/cancel$/,
+        );
+        if (jobCancelMatch && method === "POST") {
+          const jobId = decodeURIComponent(jobCancelMatch[1]);
+          const body = await readJsonBody(input, init);
+          const rollout = mutableJobRollouts.find(
+            (record) => record.job_id === jobId,
+          );
+          if (!rollout) {
+            return jsonResponse({ error: "job_not_found" }, 404);
+          }
+          const activeTargets = rollout.targets.filter((target) =>
+            ["dispatching", "running"].includes(target.status),
+          );
+          const queuedTargets = rollout.targets.filter(
+            (target) => target.status === "queued",
+          );
+          for (const target of queuedTargets) {
+            target.status = "canceled";
+            target.message = "operator_aborted_rollout";
+          }
+          rollout.status = "aborted";
+          rollout.pause_reason = "operator_aborted_rollout";
+          rollout.completed_at = "2026-06-02T10:03:00Z";
+          rollout.updated_at = "2026-06-02T10:03:00Z";
+          persistJobRollouts();
+          requests.jobRolloutActions.push({
+            action: "abort",
+            body,
+            job_id: jobId,
+          });
+          return jsonResponse({
+            cancel_acks: activeTargets.map((target) => ({
+              accepted: true,
+              acked: true,
+              applied: true,
+              client_id: target.client_id,
+              message: "cancellation applied",
+            })),
+            job_id: jobId,
+            pending_canceled: queuedTargets.length,
+            requested_targets: activeTargets.length + queuedTargets.length,
+            status: "canceled",
           });
         }
         const jobMatch = pathname.match(/^\/api\/v1\/jobs\/([^/]+)$/);
@@ -6989,6 +7642,15 @@ export async function installConsoleApiMock(
           const targets = resolveBulkTargets(body);
           const commandType =
             (body as { command?: string } | null)?.command ?? "job";
+          const rolloutPolicy = (body as {
+            rollout?: {
+              batch_delay_secs: number;
+              batch_size: number;
+              canary_client_ids: string[];
+              max_failures: number;
+              pause_after_canary: boolean;
+            } | null;
+          } | null)?.rollout;
           const targetRecords = targets.map((agent) => ({
             client_id: agent.id,
             completed_at: "2026-05-31T10:09:00Z",
@@ -6998,12 +7660,11 @@ export async function installConsoleApiMock(
                 : agent.status === "offline"
                   ? null
                   : 0,
-            message:
-              agent.status === "stale"
-                ? `stale: agent rejected ${commandType} command_version 3`
-                : agent.status === "offline"
-                  ? "agent offline"
-                  : "completed",
+            message: (agent.status === "stale"
+              ? `stale: agent rejected ${commandType} command_version 3`
+              : agent.status === "offline"
+                ? "agent offline"
+                : "completed") as string | null,
             started_at:
               agent.status === "offline" ? null : "2026-05-31T10:08:55Z",
             status:
@@ -7014,7 +7675,182 @@ export async function installConsoleApiMock(
                   : "completed",
           }));
           const jobId = "11111111-2222-4333-8444-555555555555";
+          if (commandType === "storage_inventory") {
+            const operation = (body as {
+              operation?: { include_pseudo_mounts?: boolean };
+            }).operation;
+            hostStorageInventoryFixture.include_pseudo_mounts = Boolean(
+              operation?.include_pseudo_mounts,
+            );
+            hostStorageInventoryFixture.source_job_id = jobId;
+            hostStorageInventoryFixture.observed_at =
+              "2026-06-02T10:06:00Z";
+            hostStorageInventoryFixture.last_attempt = {
+              completed_at: "2026-06-02T10:06:00Z",
+              job_id: jobId,
+              message: "completed",
+              status: "completed",
+            };
+            persistHostStorage();
+          }
+          if (rolloutPolicy) {
+            const canaryIds = new Set(rolloutPolicy.canary_client_ids);
+            for (const target of targetRecords) {
+              const isCanary = canaryIds.has(target.client_id);
+              target.completed_at = isCanary
+                ? "2026-05-31T10:09:00Z"
+                : null;
+              target.exit_code = isCanary ? 0 : null;
+              target.message = isCanary ? "completed" : null;
+              target.started_at = isCanary
+                ? "2026-05-31T10:08:55Z"
+                : null;
+              target.status = isCanary ? "completed" : "queued";
+            }
+            const batchByClient = new Map<string, number>();
+            for (const canaryId of rolloutPolicy.canary_client_ids) {
+              batchByClient.set(canaryId, 0);
+            }
+            const remaining = targets
+              .map((agent) => agent.id)
+              .filter((clientId) => !canaryIds.has(clientId))
+              .sort();
+            const batchSize = Math.max(1, rolloutPolicy.batch_size);
+            for (let index = 0; index < remaining.length; index += 1) {
+              batchByClient.set(
+                remaining[index],
+                Math.floor(index / batchSize) + 1,
+              );
+            }
+            const totalBatches =
+              Math.max(0, ...Array.from(batchByClient.values())) + 1;
+            const currentBatch = totalBatches > 1 ? 1 : 0;
+            const nextRollout: JobRolloutRecord = {
+              ...rolloutPolicy,
+              canary_client_ids: [...rolloutPolicy.canary_client_ids],
+              completed_at: null,
+              created_at: "2026-05-31T10:08:55Z",
+              current_batch: currentBatch,
+              failure_baseline: 0,
+              job_id: jobId,
+              next_batch_at: "2026-05-31T10:09:00Z",
+              pause_reason:
+                rolloutPolicy.pause_after_canary && totalBatches > 1
+                  ? "canary_review"
+                  : null,
+              status:
+                rolloutPolicy.pause_after_canary && totalBatches > 1
+                  ? "paused"
+                  : "running",
+              targets: targetRecords.map((target) => ({
+                batch_index: batchByClient.get(target.client_id) ?? 0,
+                client_id: target.client_id,
+                message: target.message,
+                status: target.status,
+              })),
+              total_batches: totalBatches,
+              updated_at: "2026-05-31T10:09:00Z",
+            };
+            mutableJobRollouts = [
+              nextRollout,
+              ...mutableJobRollouts.filter(
+                (rollout) => rollout.job_id !== jobId,
+              ),
+            ];
+            persistJobRollouts();
+            const createdJob = {
+              actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+              command_type: commandType,
+              completed_at: null,
+              created_at: "2026-05-31T10:08:55Z",
+              id: jobId,
+              max_timeout_secs:
+                (body as { max_timeout_secs?: number } | null)
+                  ?.max_timeout_secs ?? 30,
+              payload_hash: "1".repeat(64),
+              privileged: true,
+              source_schedule_id: null,
+              status: "running",
+              target_count: targets.length,
+            };
+            const existingIndex = (
+              jobsFixture as Array<{ id: string }>
+            ).findIndex((job) => job.id === jobId);
+            if (existingIndex >= 0) {
+              jobsFixture.splice(existingIndex, 1, createdJob);
+            } else {
+              jobsFixture.unshift(createdJob);
+            }
+            window.sessionStorage.setItem(
+              createdRolloutJobStorageKey,
+              JSON.stringify(createdJob),
+            );
+          }
           createdJobTargets.set(jobId, targetRecords);
+          if (commandType === "package_update_plan") {
+            const operation = (body as {
+              operation?: { refresh_metadata?: boolean };
+            }).operation;
+            for (const target of targetRecords) {
+              if (target.status !== "completed") continue;
+              const plan = mutableHostPackageUpdatePlans.find(
+                (item) => item.client_id === target.client_id,
+              );
+              if (!plan) continue;
+              plan.last_attempt = {
+                completed_at: "2026-06-02T10:09:00Z",
+                job_id: jobId,
+                message: "completed",
+                status: "completed",
+              };
+              plan.metadata_refresh_requested = Boolean(
+                operation?.refresh_metadata,
+              );
+              plan.metadata_refreshed = Boolean(operation?.refresh_metadata);
+              plan.observed_at = "2026-06-02T10:09:00Z";
+              plan.source_job_id = jobId;
+            }
+          }
+          if (commandType === "package_update_apply") {
+            const operation = (body as {
+              operation?: { plan_hash?: string; provider?: string };
+            }).operation;
+            const outputs: FixtureJobOutput[] = [];
+            for (const [index, target] of targetRecords.entries()) {
+              if (target.status !== "completed") continue;
+              const plan = mutableHostPackageUpdatePlans.find(
+                (item) => item.client_id === target.client_id,
+              );
+              const appliedPackageCount = plan?.packages.length ?? 0;
+              if (plan) {
+                plan.packages = [];
+                plan.plan_hash = "c".repeat(64);
+                plan.observed_at = "2026-06-02T10:10:00Z";
+                plan.reboot_required_before = true;
+              }
+              outputs.push({
+                client_id: target.client_id,
+                created_at: "2026-06-02T10:10:00Z",
+                data_base64: btoa(
+                  JSON.stringify({
+                    accepted_plan_hash: operation?.plan_hash ?? "",
+                    applied_package_count: appliedPackageCount,
+                    completed: true,
+                    provider: operation?.provider ?? "apt",
+                    reboot_required_after: true,
+                    remaining_packages: [],
+                    type: "package_update_apply",
+                  }),
+                ),
+                done: true,
+                exit_code: 0,
+                job_id: jobId,
+                seq: index,
+                stream: "stdout",
+              });
+            }
+            createdJobOutputs.set(jobId, outputs);
+          }
           if (commandType === "config_read") {
             createdJobOutputs.set(
               jobId,
@@ -7037,6 +7873,37 @@ export async function installConsoleApiMock(
                 seq: index,
                 stream: "status",
               })),
+            );
+          }
+          if (commandType === "service_logs") {
+            const operation = (body as {
+              operation?: { provider?: string; service?: string };
+            }).operation;
+            createdJobOutputs.set(
+              jobId,
+              targetRecords.flatMap((target, index) => [
+                {
+                  client_id: target.client_id,
+                  created_at: "2026-05-31T10:09:00Z",
+                  data_base64: btoa(
+                    JSON.stringify({
+                      lines: [
+                        "Jun 02 10:03:58 host sshd[812]: Server listening on 0.0.0.0 port 22.",
+                        "Jun 02 10:04:01 host sshd[812]: Accepted publickey for operator.",
+                      ],
+                      provider: operation?.provider ?? "systemd",
+                      service: operation?.service ?? "sshd.service",
+                      truncated: false,
+                      type: "service_logs",
+                    }),
+                  ),
+                  done: true,
+                  exit_code: 0,
+                  job_id: jobId,
+                  seq: index,
+                  stream: "stdout",
+                },
+              ]),
             );
           }
           return jsonResponse({
@@ -7129,7 +7996,17 @@ export async function installConsoleApiMock(
         fileTransferSourceArtifacts,
       fileTransfersFixture: options.fileTransfersOverride ?? fileTransfers,
       historyRetentionPoliciesFixture: historyRetentionPolicies,
+      hostProcessInventoryFixture: hostProcessInventory("agent-sfo-01"),
+      hostPackageUpdatePlansFixture:
+        options.hostPackageUpdatePlansOverride ?? hostPackageUpdatePlans(),
+      hostServiceInventoryFixture:
+        options.hostServiceInventoryOverride ??
+        hostServiceInventory("agent-sfo-01"),
+      hostStorageInventoryFixture:
+        options.hostStorageInventoryOverride ??
+        hostStorageInventory("agent-sfo-01"),
       jobApprovalsFixture: jobApprovals,
+      jobRolloutsFixture: options.jobRolloutsOverride ?? jobRollouts,
       jobOutputsFixture: networkJobOutputs,
       jobsFixture: networkJobs,
       networkObservationsFixture: networkObservations,

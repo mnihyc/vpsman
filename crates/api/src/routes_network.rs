@@ -1009,6 +1009,7 @@ pub(crate) async fn dispatch_routing_jobs(
             force_unprivileged: false,
             privileged: endpoint_apply.is_some(),
             privilege_assertion: None,
+            rollout: None,
         };
         match create_job_from_internal_operator_mutation(state, operator, request).await {
             Ok((_status, Json(response))) => {

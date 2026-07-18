@@ -884,6 +884,7 @@ async fn network_diagnostics_require_an_exact_declared_plan_and_limit_disabled_p
         force_unprivileged: false,
         privileged: false,
         privilege_assertion: None,
+        rollout: None,
     };
 
     let mut exact = request_for(saved.id, saved.plan.clone());

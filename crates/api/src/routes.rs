@@ -45,6 +45,10 @@ use crate::{
         export_history, list_history_retention_policies, prune_history_retention,
         upsert_history_retention_policy,
     },
+    routes_host_management::{
+        get_host_package_update_plan, get_host_process_inventory, get_host_service_inventory,
+        get_host_storage_inventory, list_host_package_update_plans,
+    },
     routes_ingest::{
         ingest_agent_hello, ingest_command_output, ingest_gateway_session_ended,
         ingest_gateway_session_started, ingest_telemetry, ingest_terminal_output,
@@ -68,6 +72,9 @@ use crate::{
         download_job_target_statuses, get_job, list_audit_logs, list_job_outputs, list_job_targets,
         list_jobs, list_network_observation_trends, list_network_observations,
         list_process_supervisor_inventory,
+    },
+    routes_job_rollouts::{
+        get_job_rollout, list_job_rollouts, pause_job_rollout, resume_job_rollout,
     },
     routes_jobs::{
         approve_job_approval, cancel_job, create_job, create_job_approval, list_job_approvals,
@@ -408,6 +415,16 @@ pub(crate) fn build_router(state: AppState) -> Router {
             get(latest_agent_update_release),
         )
         .route("/api/v1/jobs/{job_id}", get(get_job))
+        .route("/api/v1/job-rollouts", get(list_job_rollouts))
+        .route("/api/v1/job-rollouts/{job_id}", get(get_job_rollout))
+        .route(
+            "/api/v1/job-rollouts/{job_id}/pause",
+            post(pause_job_rollout),
+        )
+        .route(
+            "/api/v1/job-rollouts/{job_id}/resume",
+            post(resume_job_rollout),
+        )
         .route("/api/v1/jobs/{job_id}/cancel", post(cancel_job))
         .route("/api/v1/jobs/{job_id}/targets", get(list_job_targets))
         .route(
@@ -442,6 +459,23 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/process-supervisor/inventory",
             get(list_process_supervisor_inventory),
+        )
+        .route(
+            "/api/v1/host-processes/{client_id}",
+            get(get_host_process_inventory),
+        )
+        .route(
+            "/api/v1/host-services/{client_id}",
+            get(get_host_service_inventory),
+        )
+        .route(
+            "/api/v1/host-storage/{client_id}",
+            get(get_host_storage_inventory),
+        )
+        .route("/api/v1/os-updates", get(list_host_package_update_plans))
+        .route(
+            "/api/v1/os-updates/{client_id}",
+            get(get_host_package_update_plan),
         )
         .route("/api/v1/file-transfers", get(list_file_transfer_sessions))
         .route(

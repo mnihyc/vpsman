@@ -246,6 +246,7 @@ pub(crate) async fn apply_schedule_now(
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
+        rollout: None,
     };
     create_job_from_saved_schedule(&state, &operator, job_request, schedule_id).await
 }

@@ -54,8 +54,10 @@ pub(crate) fn parse_vty_process_supervisor(
     }
 }
 
-pub(crate) fn parse_vty_process_list(tokens: &[&str]) -> Result<VtyProcessSupervisorRequest> {
-    let mut limit = 50_u16;
+pub(crate) fn parse_vty_host_process_refresh(
+    tokens: &[&str],
+) -> Result<VtyProcessSupervisorRequest> {
+    let mut limit = 200_u16;
     let mut target_tokens = Vec::new();
     let mut index = 0;
     while index < tokens.len() {
@@ -75,7 +77,10 @@ pub(crate) fn parse_vty_process_list(tokens: &[&str]) -> Result<VtyProcessSuperv
                 index += 1;
             }
             "--destructive" => {
-                anyhow::bail!("process-list is not destructive; omit --destructive");
+                anyhow::bail!("host-process-refresh is read-only; omit --destructive");
+            }
+            "--confirmed" => {
+                anyhow::bail!("host-process-refresh is read-only; omit --confirmed");
             }
             value => {
                 target_tokens.push(value);
@@ -85,7 +90,7 @@ pub(crate) fn parse_vty_process_list(tokens: &[&str]) -> Result<VtyProcessSuperv
     }
     anyhow::ensure!(
         (1..=512).contains(&limit),
-        "process-list --limit must be between 1 and 512"
+        "host-process-refresh --limit must be between 1 and 512"
     );
     Ok(VtyProcessSupervisorRequest {
         command_label: "process_list",
@@ -94,6 +99,53 @@ pub(crate) fn parse_vty_process_list(tokens: &[&str]) -> Result<VtyProcessSuperv
         max_timeout_secs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
         force_unprivileged: false,
     })
+}
+
+pub(crate) fn host_processes_path(command: &str) -> Result<String> {
+    let tokens = command.split_whitespace().collect::<Vec<_>>();
+    anyhow::ensure!(
+        tokens.first() == Some(&"host-processes"),
+        "expected host-processes command"
+    );
+    let mut client_id = None;
+    let mut limit = 200_u16;
+    let mut index = 1;
+    while index < tokens.len() {
+        match tokens[index] {
+            "--client-id" => {
+                client_id = Some(next_value(&tokens, index, "--client-id")?);
+                index += 2;
+            }
+            value if value.starts_with("--client-id=") => {
+                client_id = Some(value.trim_start_matches("--client-id="));
+                index += 1;
+            }
+            "--limit" => {
+                limit = next_value(&tokens, index, "--limit")?
+                    .parse()
+                    .context("--limit must be an integer")?;
+                index += 2;
+            }
+            value if value.starts_with("--limit=") => {
+                limit = value
+                    .trim_start_matches("--limit=")
+                    .parse()
+                    .context("--limit must be an integer")?;
+                index += 1;
+            }
+            value => anyhow::bail!("unexpected argument {value}"),
+        }
+    }
+    anyhow::ensure!(
+        (1..=512).contains(&limit),
+        "host-processes --limit must be between 1 and 512"
+    );
+    let client_id = client_id.context("host-processes requires --client-id")?;
+    anyhow::ensure!(!client_id.trim().is_empty(), "--client-id cannot be empty");
+    Ok(format!(
+        "/api/v1/host-processes/{}?limit={limit}",
+        crate::util::percent_encode_path_segment(client_id.trim())
+    ))
 }
 
 pub(crate) fn is_vty_process_supervisor_inventory_command(command: &str) -> bool {
@@ -569,8 +621,8 @@ fn parse_max_bytes(value: &str) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_vty_process_list, parse_vty_process_supervisor, parse_vty_user_sessions,
-        process_supervisor_inventory_path,
+        host_processes_path, parse_vty_host_process_refresh, parse_vty_process_supervisor,
+        parse_vty_user_sessions, process_supervisor_inventory_path,
     };
     use vpsman_common::{
         JobCommand, ProcessResourceLimits, ProcessRestartPolicy, ProcessRunPolicy,
@@ -579,8 +631,9 @@ mod tests {
     const TEST_PROCESS_ARGV_SLEEP: &str = "/bin/sleep";
 
     #[test]
-    fn parses_vty_process_list_targets_and_limit() {
-        let request = parse_vty_process_list(&["id:client-a", "tag:bgp", "--limit", "25"]).unwrap();
+    fn parses_vty_host_process_refresh_targets_and_limit() {
+        let request =
+            parse_vty_host_process_refresh(&["id:client-a", "tag:bgp", "--limit", "25"]).unwrap();
 
         assert_eq!(request.command_label, "process_list");
         assert!(request.selection.clients.is_empty());
@@ -593,10 +646,20 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_vty_process_list_limit() {
-        assert!(parse_vty_process_list(&["tag:bgp", "--limit", "0"]).is_err());
-        assert!(parse_vty_process_list(&["tag:bgp", "--limit=600"]).is_err());
-        assert!(parse_vty_process_list(&["tag:bgp", "--destructive"]).is_err());
+    fn rejects_invalid_vty_host_process_refresh_flags() {
+        assert!(parse_vty_host_process_refresh(&["tag:bgp", "--limit", "0"]).is_err());
+        assert!(parse_vty_host_process_refresh(&["tag:bgp", "--limit=600"]).is_err());
+        assert!(parse_vty_host_process_refresh(&["tag:bgp", "--destructive"]).is_err());
+        assert!(parse_vty_host_process_refresh(&["tag:bgp", "--confirmed"]).is_err());
+    }
+
+    #[test]
+    fn builds_host_process_snapshot_path() {
+        assert_eq!(
+            host_processes_path("host-processes --client-id edge/a --limit 25").unwrap(),
+            "/api/v1/host-processes/edge%2Fa?limit=25"
+        );
+        assert!(host_processes_path("host-processes --limit 25").is_err());
     }
 
     #[test]

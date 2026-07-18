@@ -16,8 +16,6 @@ use tokio::{
     time,
 };
 use tracing::{debug, info, warn};
-#[cfg(test)]
-use vpsman_common::CURRENT_COMMAND_PROTOCOL_VERSION;
 use vpsman_common::{
     decode_json, decode_noise_key_hex, encode_json, job_command_min_supported_protocol_version,
     job_command_protocol_version, job_command_safety, job_command_type_label,
@@ -2790,7 +2788,7 @@ mod tests {
         ActiveCommand {
             payload_hash: "payload-hash".to_string(),
             cancel_token: CommandCancelToken::default(),
-            command_version: CURRENT_COMMAND_PROTOCOL_VERSION,
+            command_version: vpsman_common::MIN_COMMAND_PROTOCOL_VERSION,
             safety: JobCommandSafety::Read,
             stream_id: 1,
             replay_outputs: Vec::new(),
@@ -2839,14 +2837,15 @@ mod tests {
             argv: vec!["/bin/true".to_string()],
             pty: false,
         };
+        let command_version = job_command_protocol_version(&command);
 
         assert!(command_supports_requested_protocol(
             &command,
-            CURRENT_COMMAND_PROTOCOL_VERSION
+            command_version
         ));
         assert!(!command_supports_requested_protocol(
             &command,
-            CURRENT_COMMAND_PROTOCOL_VERSION + 1
+            command_version + 1
         ));
         assert!(!command_supports_requested_protocol(&command, 0));
     }
@@ -2858,16 +2857,44 @@ mod tests {
             activate: true,
             restart_agent: true,
         };
+        let command_version = job_command_protocol_version(&command);
 
         assert!(!command_supports_requested_protocol(
             &command,
-            CURRENT_COMMAND_PROTOCOL_VERSION + 10
+            command_version + 10
         ));
         assert!(command_supports_requested_protocol(
             &command,
-            CURRENT_COMMAND_PROTOCOL_VERSION
+            command_version
         ));
         assert!(!command_supports_requested_protocol(&command, 0));
+    }
+
+    #[test]
+    fn new_host_commands_require_their_exact_protocol_generation() {
+        let command = JobCommand::StorageInventory {
+            include_pseudo_mounts: false,
+            limit: 512,
+        };
+        let command_version = job_command_protocol_version(&command);
+
+        assert_eq!(
+            command_version,
+            job_command_min_supported_protocol_version(&command)
+        );
+        assert!(command_version > vpsman_common::MIN_COMMAND_PROTOCOL_VERSION);
+        assert!(command_supports_requested_protocol(
+            &command,
+            command_version
+        ));
+        assert!(!command_supports_requested_protocol(
+            &command,
+            vpsman_common::MIN_COMMAND_PROTOCOL_VERSION
+        ));
+        assert!(!command_supports_requested_protocol(
+            &command,
+            command_version + 1
+        ));
     }
 
     #[test]

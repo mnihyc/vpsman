@@ -139,6 +139,7 @@ async fn record_scheduled_memory_job(
         force_unprivileged: false,
         privileged: false,
         privilege_assertion: None,
+        rollout: None,
     };
     let command_hash = payload_hash(&encode_json(&schedule.operation).unwrap());
     repo.record_dispatching_job_from_schedule(
@@ -616,6 +617,7 @@ async fn saved_schedule_job_skips_never_connected_targets_immediately() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
+        rollout: None,
     };
 
     let (status, Json(response)) = crate::routes_jobs::create_job_from_saved_schedule(

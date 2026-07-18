@@ -195,7 +195,11 @@ const allViews: ScreenshotEntry[] = [
     subpage: "Processes",
     heading: "Processes",
     id: "12-remote-operations-processes",
-    requiredText: ["Process supervisor"],
+    requiredText: [
+      "Process scope",
+      "Host processes",
+      "Read-only Linux process inventory",
+    ],
   },
   {
     view: "Remote Operations",
@@ -1452,7 +1456,11 @@ async function expectSectionBelowToolbar(
   await section.page().waitForTimeout(300);
   const gap = await section.evaluate((element) => {
     const topbar = document.querySelector<HTMLElement>(".topbar");
-    const visibleTop = topbar?.getBoundingClientRect().bottom ?? 0;
+    const topbarRect = topbar?.getBoundingClientRect();
+    const visibleTop =
+      topbarRect && topbarRect.bottom > 0 && topbarRect.top < window.innerHeight
+        ? Math.max(0, topbarRect.bottom)
+        : 0;
     return Math.round(element.getBoundingClientRect().top - visibleTop);
   });
   expect(gap, "on-demand panel gap below sticky toolbar").toBeGreaterThanOrEqual(8);

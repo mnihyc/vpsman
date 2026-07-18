@@ -27,6 +27,7 @@ mod model_command_templates;
 mod model_dashboard;
 mod model_file_transfer;
 mod model_history;
+mod model_host_management;
 mod model_port_forwarding;
 mod model_server_jobs;
 mod model_source_templates;
@@ -54,9 +55,11 @@ mod repository_file_transfer_sources;
 mod repository_file_transfers;
 mod repository_gateway_sessions;
 mod repository_history;
+mod repository_host_management;
 mod repository_ingest;
 mod repository_inventory;
 mod repository_job_outputs;
+mod repository_job_rollouts;
 mod repository_jobs;
 mod repository_key_lifecycle;
 mod repository_migrations;
@@ -88,9 +91,11 @@ mod routes_command_templates;
 mod routes_dashboard;
 mod routes_file_transfers;
 mod routes_history;
+mod routes_host_management;
 mod routes_ingest;
 mod routes_inventory;
 mod routes_job_history;
+mod routes_job_rollouts;
 mod routes_jobs;
 mod routes_key_lifecycle;
 mod routes_migrations;
@@ -827,6 +832,8 @@ mod tests_postgres_reliability;
 mod tests_process;
 #[cfg(test)]
 mod tests_restores;
+#[cfg(test)]
+mod tests_rollouts;
 #[cfg(test)]
 mod tests_schedules;
 #[cfg(test)]

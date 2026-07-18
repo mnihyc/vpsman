@@ -243,6 +243,7 @@ export function JobsPanel({
   onLoadTargets,
   onSubmitTerminalInput,
   onOpenPrivilegeUnlock,
+  onOpenRollout,
   onOpenSchedules,
   onOpenVpsDetail,
   onOpenRemoteOperations,
@@ -308,6 +309,7 @@ export function JobsPanel({
   ) => Promise<TerminalInputSubmitResponse>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenPrivilegeUnlock: () => void;
+  onOpenRollout?: (jobId: string) => void;
   onOpenSchedules?: () => void;
   onOpenVpsDetail?: (clientId: string) => void;
   onOpenRemoteOperations?: (subpage: string) => void;
@@ -1432,6 +1434,7 @@ export function JobsPanel({
             onDownloadFileTransferSource={onDownloadFileTransferSource}
             onDownloadOutputChunk={onDownloadOutputChunk}
             onOpenRemoteTerminal={() => onOpenRemoteOperations?.("terminal")}
+            onOpenRollout={onOpenRollout}
             onLoadJob={onLoadJob}
             onLoadOutputs={onLoadOutputs}
             onLoadTargets={onLoadTargets}
@@ -1486,6 +1489,8 @@ export function JobsPanel({
                     { label: "Files", subpage: "files" },
                     { label: "Transfers", subpage: "transfers" },
                     { label: "Processes", subpage: "processes" },
+                    { label: "Services", subpage: "services" },
+                    { label: "Storage", subpage: "storage" },
                     { label: "Bulk files", subpage: "bulk_files" },
                   ].map((link) => (
                     <button

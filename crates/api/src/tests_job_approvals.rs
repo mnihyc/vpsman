@@ -177,6 +177,7 @@ fn approval_job_request(job_id: Uuid, client_id: &str) -> CreateJobRequest {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
+        rollout: None,
     }
 }
 

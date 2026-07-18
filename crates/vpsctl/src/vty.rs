@@ -29,7 +29,7 @@ use crate::vty_inventory::{
 use crate::vty_job_outputs::{is_vty_job_output_command, submit_vty_job_output_command};
 use crate::vty_jobs::{
     vty_create_job, vty_create_shell_script, vty_submit_operation, vty_submit_operation_with_force,
-    VtyJobSelection, VtyPrivilegeContext,
+    vty_submit_read_only_operation, VtyJobSelection, VtyPrivilegeContext,
 };
 use crate::vty_migrations::{
     parse_vty_migration_link, parse_vty_migration_run, submit_vty_migration_link,
@@ -47,9 +47,9 @@ use crate::vty_privilege::{
     vty_privilege_help,
 };
 use crate::vty_process::{
-    is_vty_process_supervisor_inventory_command, parse_vty_process_list,
-    parse_vty_process_supervisor, parse_vty_user_sessions, process_supervisor_inventory_path,
-    process_supervisor_usage,
+    host_processes_path, is_vty_process_supervisor_inventory_command,
+    parse_vty_host_process_refresh, parse_vty_process_supervisor, parse_vty_user_sessions,
+    process_supervisor_inventory_path, process_supervisor_usage,
 };
 use crate::vty_schedules::{
     parse_vty_schedule_create_options, submit_vty_schedule_create, VtyScheduleCreateRequest,
@@ -109,7 +109,8 @@ Files, terminals, and processes:
   file-transfer-source-upload | file-transfer-source-download
   terminal-open | terminal-input | terminal-poll | terminal-resize | terminal-close
   terminal-sessions | terminal-replay | terminal-follow
-  user-sessions | process-list | process-start | process-stop | process-restart
+  user-sessions | host-process-refresh | host-processes
+  process-start | process-stop | process-restart
   process-status | process-logs | process-supervisor-inventory
 
 Agent updates:
@@ -597,17 +598,16 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
                     )?
                 );
             }
-            command if command.starts_with("process-list ") => {
+            command
+                if command == "host-process-refresh"
+                    || command.starts_with("host-process-refresh ") =>
+            {
                 let parts = command.split_whitespace().collect::<Vec<_>>();
                 if parts.len() < 2 {
-                    println!("usage: process-list <target ...> [--limit <1-512>] [--confirmed]");
+                    println!("usage: host-process-refresh <target ...> [--limit <1-512>]");
                     continue;
                 }
-                if !privilege_context.enabled {
-                    println!("{PRIVILEGE_UNLOCK_REQUIRED}");
-                    continue;
-                }
-                let request = match parse_vty_process_list(&parts[1..]) {
+                let request = match parse_vty_host_process_refresh(&parts[1..]) {
                     Ok(request) => request,
                     Err(error) => {
                         println!("usage error: {error}");
@@ -616,16 +616,26 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
                 };
                 println!(
                     "{}",
-                    vty_submit_operation(
+                    vty_submit_read_only_operation(
                         api_url,
                         token.as_deref(),
-                        &privilege_context,
                         request.command_label,
                         &request.operation,
                         request.selection,
                         request.max_timeout_secs,
                     )?
                 );
+            }
+            command if command == "host-processes" || command.starts_with("host-processes ") => {
+                let path = match host_processes_path(command) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        println!("usage error: {error}");
+                        println!("usage: host-processes --client-id <id> [--limit <1-512>]");
+                        continue;
+                    }
+                };
+                println!("{}", http_get(api_url, &path, token.as_deref())?);
             }
             command if is_vty_process_supervisor_inventory_command(command) => {
                 let path = match process_supervisor_inventory_path(command) {

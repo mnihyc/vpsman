@@ -251,6 +251,7 @@ async fn backup_job_dispatch_requires_confirmation() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
+        rollout: None,
     };
 
     let state = test_state(Repository::Memory(MemoryState::default()));
@@ -298,6 +299,7 @@ async fn backup_job_dispatch_auto_records_request_and_object_artifact() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
+        rollout: None,
     };
 
     let headers = crate::test_auth_headers(&state).await;
@@ -436,6 +438,7 @@ async fn async_backup_final_failure_marks_backup_request_failed() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
+        rollout: None,
     };
     let job_id = repo
         .record_dispatching_job(
@@ -557,6 +560,7 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
+        rollout: None,
     };
 
     let (_status, Json(response)) = create_job(State(state.clone()), headers, Json(job_request))

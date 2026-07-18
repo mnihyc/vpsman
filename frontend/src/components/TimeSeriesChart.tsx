@@ -1,4 +1,12 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
+import { Download, Eye } from "lucide-react";
 import uPlot from "uplot";
 import { consolePalette } from "../colorPalette";
 import { formatFullTime } from "../utils";
@@ -13,6 +21,7 @@ export type TimeSeriesChartLine = {
 type HoverState = {
   fullTimeLabel: string;
   index: number;
+  side: "left" | "right";
   timeLabel: string;
   values: Array<{ color: string; label: string; value: number | null }>;
 };
@@ -20,6 +29,7 @@ type HoverState = {
 type TimeSeriesChartProps = {
   ariaLabel: string;
   emptyLabel: string;
+  exportFileName?: string;
   height?: number;
   lines: TimeSeriesChartLine[];
   pointsOnly?: boolean;
@@ -30,6 +40,7 @@ type TimeSeriesChartProps = {
 export function TimeSeriesChart({
   ariaLabel,
   emptyLabel,
+  exportFileName,
   height = 236,
   lines,
   pointsOnly = false,
@@ -40,6 +51,7 @@ export function TimeSeriesChart({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<uPlot | null>(null);
   const [hover, setHover] = useState<HoverState | null>(null);
+  const [hiddenSeries, setHiddenSeries] = useState<Set<string>>(() => new Set());
   const unixTimes = useMemo(
     () =>
       times
@@ -65,6 +77,26 @@ export function TimeSeriesChart({
       ] as uPlot.AlignedData,
     [sanitizedLines, unixTimes],
   );
+  const seriesKeys = useMemo(
+    () => sanitizedLines.map((line, index) => `${index}:${line.label}`),
+    [sanitizedLines],
+  );
+  const visibleLines = useMemo(
+    () =>
+      sanitizedLines.filter(
+        (_line, index) => !hiddenSeries.has(seriesKeys[index]),
+      ),
+    [hiddenSeries, sanitizedLines, seriesKeys],
+  );
+  const visibleLineCount = visibleLines.length;
+
+  useEffect(() => {
+    setHiddenSeries((current) => {
+      const validKeys = new Set(seriesKeys);
+      const next = new Set([...current].filter((key) => validKeys.has(key)));
+      return next.size === current.size ? current : next;
+    });
+  }, [seriesKeys]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -111,12 +143,15 @@ export function TimeSeriesChart({
               setHover({
                 fullTimeLabel: formatChartFullTime(unixTimes[index]),
                 index,
+                side: (plot.cursor.left ?? 0) > plot.width / 2 ? "left" : "right",
                 timeLabel: formatChartTime(unixTimes[index]),
-                values: sanitizedLines.map((line) => ({
-                  color: line.color,
-                  label: line.label,
-                  value: line.values[index] ?? null,
-                })),
+                values: sanitizedLines
+                  .filter((_line, lineIndex) => !hiddenSeries.has(seriesKeys[lineIndex]))
+                  .map((line) => ({
+                    color: line.color,
+                    label: line.label,
+                    value: line.values[index] ?? null,
+                  })),
               });
             },
           ],
@@ -137,9 +172,10 @@ export function TimeSeriesChart({
         },
         series: [
           {},
-          ...sanitizedLines.map((line) => ({
+          ...sanitizedLines.map((line, index) => ({
             label: line.label,
             points: { show: true, size: pointsOnly ? 6 : 4, width: 1 },
+            show: !hiddenSeries.has(seriesKeys[index]),
             spanGaps: false,
             stroke: line.color,
             width: pointsOnly ? 0 : 2,
@@ -163,7 +199,16 @@ export function TimeSeriesChart({
       plot.destroy();
       plotRef.current = null;
     };
-  }, [data, height, pointsOnly, sanitizedLines, unixTimes, valueFormatter]);
+  }, [
+    data,
+    height,
+    hiddenSeries,
+    pointsOnly,
+    sanitizedLines,
+    seriesKeys,
+    unixTimes,
+    valueFormatter,
+  ]);
 
   const hasData = unixTimes.length > 0 && sanitizedLines.length > 0;
   const accessibleRows = useMemo(() => {
@@ -173,18 +218,89 @@ export function TimeSeriesChart({
       return {
         fullTimeLabel: formatChartFullTime(time),
         timeLabel: formatChartTime(time),
-        values: sanitizedLines.map((line) => ({
-          label: line.label,
-          value: valueFormatter(line.values[sourceIndex] ?? null),
-        })),
+        values: sanitizedLines
+          .filter((_line, lineIndex) => !hiddenSeries.has(seriesKeys[lineIndex]))
+          .map((line) => ({
+            label: line.label,
+            value: valueFormatter(line.values[sourceIndex] ?? null),
+          })),
       };
     });
-  }, [sanitizedLines, unixTimes, valueFormatter]);
+  }, [hiddenSeries, sanitizedLines, seriesKeys, unixTimes, valueFormatter]);
   const latestValues = accessibleRows[accessibleRows.length - 1]?.values ?? [];
   const coverageLabel = useMemo(
-    () => chartCoverageLabel(unixTimes, sanitizedLines),
-    [sanitizedLines, unixTimes],
+    () => chartCoverageLabel(unixTimes, visibleLines),
+    [unixTimes, visibleLines],
   );
+
+  function inspectWithKeyboard(event: KeyboardEvent<HTMLDivElement>) {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+      return;
+    }
+    event.preventDefault();
+    const lastIndex = unixTimes.length - 1;
+    const currentIndex = hover?.index ?? lastIndex;
+    const nextIndex =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? lastIndex
+          : event.key === "ArrowLeft"
+            ? Math.max(0, currentIndex - 1)
+            : Math.min(lastIndex, currentIndex + 1);
+    setHover(
+      buildHoverState(
+        nextIndex,
+        "right",
+        unixTimes,
+        sanitizedLines,
+        seriesKeys,
+        hiddenSeries,
+      ),
+    );
+  }
+
+  function toggleSeries(seriesKey: string) {
+    setHover(null);
+    setHiddenSeries((current) => {
+      const next = new Set(current);
+      if (next.has(seriesKey)) {
+        next.delete(seriesKey);
+      } else if (sanitizedLines.length - next.size > 1) {
+        next.add(seriesKey);
+      }
+      return next;
+    });
+  }
+
+  function showAllSeries() {
+    setHover(null);
+    setHiddenSeries(new Set());
+  }
+
+  function exportVisibleCsv() {
+    if (!exportFileName) return;
+    const rows = [
+      ["timestamp", ...visibleLines.map((line) => line.label)],
+      ...unixTimes.map((unixTime, index) => [
+        new Date(unixTime * 1000).toISOString(),
+        ...visibleLines.map((line) => line.values[index] ?? ""),
+      ]),
+    ];
+    const csv = rows.map((row) => row.map(csvCell).join(",")).join("\n");
+    const url = URL.createObjectURL(
+      new Blob([csv], { type: "text/csv;charset=utf-8" }),
+    );
+    const link = document.createElement("a");
+    link.download = exportFileName.endsWith(".csv")
+      ? exportFileName
+      : `${exportFileName}.csv`;
+    link.href = url;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
 
   return (
     <figure
@@ -203,14 +319,89 @@ export function TimeSeriesChart({
       </figcaption>
       {hasData ? (
         <>
-          <div className="timeSeriesChart" ref={hostRef} style={{ minHeight: height }} />
-          <div className="timeSeriesLegend">
-            {sanitizedLines.map((line) => (
-              <span key={line.label}>
-                <i style={{ background: line.color }} />
-                {line.label}
-              </span>
-            ))}
+          <div
+            aria-label={`${ariaLabel}. Use left and right arrow keys to inspect samples.`}
+            className="timeSeriesChart"
+            onBlur={() => setHover(null)}
+            onFocus={() =>
+              setHover(
+                buildHoverState(
+                  unixTimes.length - 1,
+                  "right",
+                  unixTimes,
+                  sanitizedLines,
+                  seriesKeys,
+                  hiddenSeries,
+                ),
+              )
+            }
+            onKeyDown={inspectWithKeyboard}
+            ref={hostRef}
+            role="group"
+            style={{ minHeight: height }}
+            tabIndex={0}
+          />
+          <div className="timeSeriesLegendToolbar">
+            <div
+              aria-label={`${ariaLabel} series`}
+              className="timeSeriesLegend"
+            >
+              {sanitizedLines.map((line, index) => {
+                const seriesKey = seriesKeys[index];
+                const visible = !hiddenSeries.has(seriesKey);
+                const lastVisible = visible && visibleLineCount === 1;
+                return (
+                  <button
+                    aria-disabled={lastVisible}
+                    aria-label={
+                      lastVisible
+                        ? `${line.label} is the only visible series`
+                        : `${visible ? "Hide" : "Show"} ${line.label} series`
+                    }
+                    aria-pressed={visible}
+                    className={visible ? "" : "hidden"}
+                    key={seriesKey}
+                    onClick={() => toggleSeries(seriesKey)}
+                    title={
+                      lastVisible
+                        ? "At least one chart series remains visible"
+                        : `${visible ? "Hide" : "Show"} ${line.label} on this chart`
+                    }
+                    type="button"
+                  >
+                    <i style={{ background: line.color }} />
+                    {line.label}
+                  </button>
+                );
+              })}
+            </div>
+            {(hiddenSeries.size > 0 || exportFileName) && (
+              <div className="timeSeriesLegendActions">
+                <span>{visibleLineCount}/{sanitizedLines.length} series</span>
+                {hiddenSeries.size > 0 && (
+                  <button
+                    className="timeSeriesLegendAction"
+                    onClick={showAllSeries}
+                    title="Restore every chart series"
+                    type="button"
+                  >
+                    <Eye size={13} />
+                    Show all
+                  </button>
+                )}
+                {exportFileName && (
+                  <button
+                    className="timeSeriesLegendAction"
+                    onClick={exportVisibleCsv}
+                    title="Download visible chart series as CSV"
+                    type="button"
+                  >
+                    <Download size={13} />
+                    Export CSV
+                  </button>
+                )}
+              </div>
+            )}
           </div>
           {coverageLabel && (
             <p className="timeSeriesCoverage" aria-label={`${ariaLabel} data coverage`}>
@@ -218,7 +409,7 @@ export function TimeSeriesChart({
             </p>
           )}
           {hover && (
-            <div className="timeSeriesHover">
+            <div className={`timeSeriesHover ${hover.side}`}>
               <strong title={hover.fullTimeLabel}>{hover.timeLabel}</strong>
               <small>{hover.fullTimeLabel}</small>
               {hover.values.map((entry) => (
@@ -235,11 +426,13 @@ export function TimeSeriesChart({
             <thead>
               <tr>
                 <th scope="col">Time</th>
-                {sanitizedLines.map((line) => (
-                  <th key={line.label} scope="col">
-                    {line.label}
-                  </th>
-                ))}
+                {sanitizedLines
+                  .filter((_line, lineIndex) => !hiddenSeries.has(seriesKeys[lineIndex]))
+                  .map((line) => (
+                    <th key={line.label} scope="col">
+                      {line.label}
+                    </th>
+                  ))}
               </tr>
             </thead>
             <tbody>
@@ -259,6 +452,34 @@ export function TimeSeriesChart({
       )}
     </figure>
   );
+}
+
+function buildHoverState(
+  index: number,
+  side: HoverState["side"],
+  unixTimes: number[],
+  lines: TimeSeriesChartLine[],
+  seriesKeys: string[],
+  hiddenSeries: Set<string>,
+): HoverState {
+  return {
+    fullTimeLabel: formatChartFullTime(unixTimes[index]),
+    index,
+    side,
+    timeLabel: formatChartTime(unixTimes[index]),
+    values: lines
+      .filter((_line, lineIndex) => !hiddenSeries.has(seriesKeys[lineIndex]))
+      .map((line) => ({
+        color: line.color,
+        label: line.label,
+        value: line.values[index] ?? null,
+      })),
+  };
+}
+
+function csvCell(value: unknown): string {
+  const text = String(value ?? "");
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
 function chartCoverageLabel(

@@ -29,6 +29,7 @@ import {
   canonicalJobPrivilegeIntent,
   operationPayloadHashHex,
   parseCommandArgv,
+  rolloutPolicyHashHex,
   textPayloadHashHex,
   type PrivilegeAssertion,
   type PrivilegeMaterial,
@@ -70,6 +71,7 @@ import type {
   JobApprovalRecord,
   JobOperation,
   JobOutputRecord,
+  JobRolloutPolicy,
   JobTargetRecord,
   JobTargetSelection,
   UpsertCommandTemplateRequest,
@@ -171,6 +173,7 @@ type DispatchConfirmationSnapshot = {
   targets: AgentView[];
   maxTimeoutSecs: number;
   maxTimeoutOverrideSecs?: number;
+  rollout: JobRolloutPolicy | null;
 } & (
   | {
       kind: "job";
@@ -238,6 +241,7 @@ function jobRequestFromConfirmation(
     force_unprivileged: snapshot.forceUnprivileged,
     privileged: true,
     privilege_assertion: snapshot.privilegeAssertion,
+    rollout: snapshot.rollout,
   };
 }
 
@@ -278,6 +282,7 @@ export function JobDispatchPanel({
   onDownloadFileTransferSource,
   onDownloadOutputChunk,
   onOpenJobsDispatch,
+  onOpenRollout,
   onOpenRemoteTerminal,
   onLoadJob,
   onLoadOutputs,
@@ -307,6 +312,7 @@ export function JobDispatchPanel({
   onDownloadFileTransferSource: (downloadPath: string) => Promise<Blob>;
   onDownloadOutputChunk: (jobId: string, clientId: string, seq: number) => Promise<Blob>;
   onOpenJobsDispatch?: () => void;
+  onOpenRollout?: (jobId: string) => void;
   onOpenRemoteTerminal?: () => void;
   onLoadJob: (jobId: string) => Promise<JobHistoryRecord>;
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
@@ -398,12 +404,19 @@ export function JobDispatchPanel({
   );
   const [maxTimeoutSecs, setMaxTimeoutSecs] = useState("");
   const [forceUnprivileged, setForceUnprivileged] = useState(false);
+  const [rolloutEnabled, setRolloutEnabled] = useState(false);
+  const [rolloutCanaryClientId, setRolloutCanaryClientId] = useState("");
+  const [rolloutBatchSize, setRolloutBatchSize] = useState("5");
+  const [rolloutMaxFailures, setRolloutMaxFailures] = useState("0");
+  const [rolloutPauseAfterCanary, setRolloutPauseAfterCanary] = useState(true);
+  const [rolloutBatchDelaySecs, setRolloutBatchDelaySecs] = useState("0");
   const [preview, setPreview] = useState<BulkResolveResponse | null>(null);
   const [lastJob, setLastJob] = useState<CreateJobResponse | null>(null);
   const [dispatchProgress, setDispatchProgress] = useState<BulkJobProgress | null>(null);
   const [lastDispatchProgress, setLastDispatchProgress] = useState<BulkJobProgress | null>(null);
   const [lastDispatchContext, setLastDispatchContext] = useState<string | null>(null);
   const [lastPayloadHash, setLastPayloadHash] = useState<string | null>(null);
+  const [lastRolloutJobId, setLastRolloutJobId] = useState<string | null>(null);
   const [transferProgress, setTransferProgress] = useState<ResumableUploadProgress | ResumableDownloadProgress | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [dispatchPromptOpen, setDispatchPromptOpen] = useState(false);
@@ -628,6 +641,12 @@ export function JobDispatchPanel({
     mode,
     privilegeMaterial,
     processLimit,
+    rolloutBatchDelaySecs,
+    rolloutBatchSize,
+    rolloutCanaryClientId,
+    rolloutEnabled,
+    rolloutMaxFailures,
+    rolloutPauseAfterCanary,
     selectorExpression,
     shellPty,
     shellScript,
@@ -766,6 +785,11 @@ export function JobDispatchPanel({
       mode !== "file_transfer_download",
   );
   const impactTargets = preview?.targets ?? expressionTargets;
+  const rolloutUnavailableReason = rolloutUnsupportedReason(
+    terminalSurface,
+    fixedMode,
+    mode,
+  );
   const activeDispatchConfirmation = dispatchPromptOpen ? dispatchConfirmation : null;
   const dispatchConfirmationSelector =
     activeDispatchConfirmation?.selectorExpression ?? normalizedSelectorExpression;
@@ -820,6 +844,7 @@ export function JobDispatchPanel({
     ...operationReviewItems(
       activeDispatchConfirmation?.kind === "job" ? activeDispatchConfirmation.operation : undefined,
     ),
+    ...rolloutReviewItems(activeDispatchConfirmation),
     ...(dispatchConfirmationFollowSymlinks === null
       ? []
       : [
@@ -869,6 +894,7 @@ export function JobDispatchPanel({
     setLastDispatchProgress(null);
     setLastDispatchContext(null);
     setLastJob(null);
+    setLastRolloutJobId(null);
     setTransferProgress(null);
   }
 
@@ -972,6 +998,7 @@ export function JobDispatchPanel({
     const maxTimeout = maxTimeoutOverride ?? effectiveJobMaxTimeoutSecs(maxTimeoutSecs);
     const frozenForceUnprivileged = supportsForceUnprivileged ? forceUnprivileged : false;
     const operationLabel = operationCommandLabel(mode, commandText);
+    const rollout = reviewedRolloutPolicy(targets);
     const base = {
       forceUnprivileged: frozenForceUnprivileged,
       operationLabel,
@@ -979,6 +1006,7 @@ export function JobDispatchPanel({
       targets,
       maxTimeoutSecs: maxTimeout,
       maxTimeoutOverrideSecs: maxTimeoutOverride,
+      rollout,
     };
     if (mode === "file_transfer_upload") {
       const uploadSourceFile =
@@ -1106,11 +1134,18 @@ export function JobDispatchPanel({
     const clientIds = targets.map((target) => target.id);
     const payloadHashHex = await operationPayloadHashHex(operation);
     const commandType = commandTypeForApi(operation);
+    if (rollout && operation.type === "network_speed_test") {
+      throw new Error(
+        "Staged rollout is unsupported for a coordinated network speed test.",
+      );
+    }
+    const rolloutPolicyHash = await rolloutPolicyHashHex(rollout);
     const privilegeAssertion = await buildPrivilegeAssertion({
       intent: canonicalJobPrivilegeIntent({
         selectorExpression: selector,
         commandType,
         operationPayloadHash: payloadHashHex,
+        rolloutPolicyHash,
         resolvedTargets: clientIds,
         maxTimeoutSecs: maxTimeout,
         forceUnprivileged: frozenForceUnprivileged,
@@ -1129,6 +1164,42 @@ export function JobDispatchPanel({
       operationLabel: jobOperationLabel(operation, operationLabel),
       payloadHashHex,
       privilegeAssertion,
+    };
+  }
+
+  function reviewedRolloutPolicy(targets: AgentView[]): JobRolloutPolicy | null {
+    if (!rolloutEnabled) return null;
+    if (rolloutUnavailableReason) {
+      throw new Error(rolloutUnavailableReason);
+    }
+    if (targets.length < 2) {
+      throw new Error("Staged rollout requires at least two resolved VPSs.");
+    }
+    const canary = rolloutCanaryClientId.trim();
+    if (!canary || !targets.some((target) => target.id === canary)) {
+      throw new Error("Select one canary from the current resolved target scope.");
+    }
+    return {
+      batch_delay_secs: parseRolloutInteger(
+        rolloutBatchDelaySecs,
+        "Inter-stage delay",
+        0,
+        86_400,
+      ),
+      batch_size: parseRolloutInteger(
+        rolloutBatchSize,
+        "Batch size",
+        1,
+        100,
+      ),
+      canary_client_ids: [canary],
+      max_failures: parseRolloutInteger(
+        rolloutMaxFailures,
+        "Tolerated failures",
+        0,
+        100,
+      ),
+      pause_after_canary: rolloutPauseAfterCanary,
     };
   }
 
@@ -1434,7 +1505,28 @@ export function JobDispatchPanel({
       );
       setLastJob(nextJob);
       setLastPayloadHash(confirmed.payloadHashHex);
-      await trackDispatchProgress(nextJob, confirmed.targets, confirmed.maxTimeoutSecs);
+      if (confirmed.rollout) {
+        setLastRolloutJobId(nextJob.job_id);
+        const targetRecords = await onLoadTargets(nextJob.job_id);
+        setLastDispatchProgress(
+          buildBulkJobProgress({
+            jobId: nextJob.job_id,
+            maxTimeoutSecs: confirmed.maxTimeoutSecs,
+            targetCount: createJobTargetCount(nextJob),
+            targetRecords,
+            targets: confirmed.targets,
+          }),
+        );
+        setReviewStatus(
+          `Staged rollout accepted with ${confirmed.rollout.canary_client_ids.length} canary and ${confirmed.rollout.batch_size}-VPS batches.`,
+        );
+      } else {
+        await trackDispatchProgress(
+          nextJob,
+          confirmed.targets,
+          confirmed.maxTimeoutSecs,
+        );
+      }
     });
   }
 
@@ -1840,10 +1932,74 @@ export function JobDispatchPanel({
               setMaxTimeoutSecs={setMaxTimeoutSecs}
               maxTimeoutSecs={maxTimeoutSecs}
             />
-            <div className="dispatchOptionNote">
-              <strong>Rollout controls</strong>
-              <span>Per-job controls stored here are timeout and privilege mode. Fleet concurrency uses the system dispatcher policy; canary and stop-after-failure are not recorded by this job request.</span>
-            </div>
+            {!terminalSurface && !fixedMode && (
+              <div className="dispatchOptionNote rolloutControls">
+                <label className="checkLine" title={rolloutUnavailableReason ?? "Release one reviewed canary before bounded fleet batches"}>
+                  <input
+                    checked={rolloutEnabled}
+                    disabled={Boolean(rolloutUnavailableReason)}
+                    onChange={(event) => setRolloutEnabled(event.target.checked)}
+                    type="checkbox"
+                  />
+                  <span>Staged rollout</span>
+                </label>
+                {rolloutEnabled && !rolloutUnavailableReason ? (
+                  <div className="rolloutControlGrid">
+                    <label>
+                      <span>Canary VPS</span>
+                      <select
+                        aria-label="Rollout canary VPS"
+                        onChange={(event) => setRolloutCanaryClientId(event.target.value)}
+                        value={rolloutCanaryClientId}
+                      >
+                        <option value="">Select canary</option>
+                        {impactTargets.map((target) => (
+                          <option key={target.id} value={target.id}>
+                            {target.display_name || target.id} · {target.id}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <RolloutNumberField
+                      label="Batch size"
+                      max={100}
+                      min={1}
+                      onChange={setRolloutBatchSize}
+                      value={rolloutBatchSize}
+                    />
+                    <RolloutNumberField
+                      label="Tolerated failures"
+                      max={100}
+                      min={0}
+                      onChange={setRolloutMaxFailures}
+                      value={rolloutMaxFailures}
+                    />
+                    <RolloutNumberField
+                      label="Stage delay (seconds)"
+                      max={86_400}
+                      min={0}
+                      onChange={setRolloutBatchDelaySecs}
+                      value={rolloutBatchDelaySecs}
+                    />
+                    <label className="checkLine">
+                      <input
+                        checked={rolloutPauseAfterCanary}
+                        onChange={(event) =>
+                          setRolloutPauseAfterCanary(event.target.checked)
+                        }
+                        type="checkbox"
+                      />
+                      <span>Pause after canary</span>
+                    </label>
+                  </div>
+                ) : (
+                  <span>
+                    {rolloutUnavailableReason ??
+                      "Normal dispatch releases all resolved targets through the dispatcher."}
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         </details>
 
@@ -1904,6 +2060,19 @@ export function JobDispatchPanel({
             onOpenJobDetails={onOpenJobDetails}
             progress={visibleDispatchProgress}
           />
+        )}
+
+        {!dispatchPromptOpen && lastRolloutJobId && onOpenRollout && (
+          <div className="dispatchResultActions">
+            <button
+              className="secondaryAction compactAction"
+              onClick={() => onOpenRollout(lastRolloutJobId)}
+              type="button"
+            >
+              <ShieldCheck size={14} />
+              <span>Open staged rollout</span>
+            </button>
+          </div>
         )}
 
         {!dispatchPromptOpen && (
@@ -2125,6 +2294,88 @@ function transferReviewItems(snapshot: DispatchConfirmationSnapshot | null) {
     ];
   }
   return [];
+}
+
+function rolloutReviewItems(snapshot: DispatchConfirmationSnapshot | null) {
+  if (snapshot?.kind !== "job") return [];
+  if (!snapshot.rollout) {
+    return [{ label: "Delivery", value: "Standard dispatcher" }];
+  }
+  const canaryId = snapshot.rollout.canary_client_ids[0] ?? "";
+  const canary = snapshot.targets.find((target) => target.id === canaryId);
+  return [
+    { label: "Delivery", value: "Staged rollout" },
+    {
+      label: "Canary",
+      title: canaryId,
+      value: canary?.display_name || canaryId,
+    },
+    {
+      label: "Batches",
+      value: `${snapshot.rollout.batch_size} VPS · ${snapshot.rollout.batch_delay_secs}s delay`,
+    },
+    {
+      label: "Safety pause",
+      value: `${snapshot.rollout.max_failures} failures tolerated · ${snapshot.rollout.pause_after_canary ? "pause after canary" : "continue after canary"}`,
+    },
+  ];
+}
+
+function rolloutUnsupportedReason(
+  terminalSurface: boolean,
+  fixedMode: DispatchMode | undefined,
+  mode: DispatchMode,
+): string | null {
+  if (terminalSurface || fixedMode) {
+    return "Staged rollout is available from Jobs / Dispatch.";
+  }
+  if (mode === "file_transfer_upload" || mode === "file_transfer_download") {
+    return "Browser-managed resumable transfers do not support staged rollout.";
+  }
+  return null;
+}
+
+function parseRolloutInteger(
+  value: string,
+  label: string,
+  min: number,
+  max: number,
+) {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`${label} must be between ${min} and ${max}.`);
+  }
+  return parsed;
+}
+
+function RolloutNumberField({
+  label,
+  max,
+  min,
+  onChange,
+  value,
+}: {
+  label: string;
+  max: number;
+  min: number;
+  onChange: (value: string) => void;
+  value: string;
+}) {
+  return (
+    <label>
+      <span>{label}</span>
+      <input
+        aria-label={label}
+        inputMode="numeric"
+        max={max}
+        min={min}
+        onChange={(event) => onChange(event.target.value)}
+        step={1}
+        type="number"
+        value={value}
+      />
+    </label>
+  );
 }
 
 function formatTransferBytes(value: number): string {

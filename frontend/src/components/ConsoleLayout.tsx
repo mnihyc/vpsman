@@ -114,7 +114,13 @@ export function ConsoleActionMenu({
   actions,
   label = "Actions",
 }: {
-  actions: Array<{ disabled?: boolean; label: string; onSelect: () => void; tone?: "danger" | "normal" }>;
+  actions: Array<{
+    disabled?: boolean;
+    label: string;
+    onSelect: () => void;
+    title?: string;
+    tone?: "danger" | "normal";
+  }>;
   label?: string;
 }) {
   return (
@@ -138,6 +144,7 @@ export function ConsoleActionMenu({
               disabled={action.disabled}
               key={action.label}
               onSelect={action.onSelect}
+              title={action.title}
             >
               {action.label}
             </DropdownMenu.Item>

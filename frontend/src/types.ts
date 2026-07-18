@@ -1625,6 +1625,186 @@ export type ProcessSupervisorInventoryRecord = {
   observed_at: string;
 };
 
+export type HostProcessRecord = {
+  pid: number;
+  ppid: number;
+  uid: number;
+  state: string;
+  name: string;
+  command: string;
+  rss_kib: number;
+};
+
+export type HostProcessAttemptRecord = {
+  job_id: string;
+  status: string;
+  message: string | null;
+  completed_at: string | null;
+};
+
+export type HostProcessInventoryRecord = {
+  client_id: string;
+  source_job_id: string | null;
+  source: string | null;
+  truncated: boolean;
+  observed_at: string | null;
+  processes: HostProcessRecord[];
+  last_attempt: HostProcessAttemptRecord | null;
+};
+
+export type HostServiceProvider = "systemd" | "openrc" | "sysv";
+export type HostServiceAction =
+  | "start"
+  | "stop"
+  | "restart"
+  | "enable"
+  | "disable";
+
+export type HostServiceCapabilityRecord = {
+  status: "supported" | "ambiguous" | "probe_failed" | "unsupported";
+  provider: HostServiceProvider | null;
+  provider_version: string | null;
+  can_inventory: boolean;
+  can_start_stop_restart: boolean;
+  can_enable_disable: boolean;
+  can_read_logs: boolean;
+  enable_backend: string | null;
+  reason: string | null;
+};
+
+export type HostServiceRecord = {
+  name: string;
+  description: string;
+  load_state: string;
+  active_state: string;
+  sub_state: string;
+  enabled_state: string;
+  state_reason: string | null;
+};
+
+export type HostServiceInventoryRecord = {
+  client_id: string;
+  source_job_id: string | null;
+  observed_at: string | null;
+  capability: HostServiceCapabilityRecord | null;
+  truncated: boolean;
+  services: HostServiceRecord[];
+  last_attempt: HostProcessAttemptRecord | null;
+};
+
+export type HostStorageProvider = "lsblk_json" | "lsblk_pairs";
+
+export type HostStorageCapabilityRecord = {
+  status: "supported" | "probe_failed" | "unsupported";
+  provider: HostStorageProvider | null;
+  provider_version: string | null;
+  available_columns: string[];
+  can_report_filesystem_usage: boolean;
+  reason: string | null;
+};
+
+export type HostBlockDeviceRecord = {
+  name: string;
+  path: string;
+  kernel_name: string | null;
+  parent_path: string | null;
+  device_type: string;
+  size_bytes: number;
+  filesystem_type: string | null;
+  filesystem_version: string | null;
+  label: string | null;
+  uuid: string | null;
+  mount_points: string[];
+  filesystem_available_bytes: number | null;
+  filesystem_used_percent: number | null;
+  read_only: boolean;
+  removable: boolean;
+  model: string | null;
+  serial: string | null;
+  transport: string | null;
+  major_minor: string | null;
+};
+
+export type HostMountRecord = {
+  mount_id: number;
+  parent_id: number;
+  major_minor: string;
+  root: string;
+  target: string;
+  filesystem_type: string;
+  source: string;
+  options: string[];
+  read_only: boolean;
+  pseudo: boolean;
+};
+
+export type HostStorageInventoryRecord = {
+  client_id: string;
+  source_job_id: string | null;
+  observed_at: string | null;
+  capability: HostStorageCapabilityRecord | null;
+  include_pseudo_mounts: boolean;
+  devices_truncated: boolean;
+  mounts_truncated: boolean;
+  devices: HostBlockDeviceRecord[];
+  mounts: HostMountRecord[];
+  last_attempt: HostProcessAttemptRecord | null;
+};
+
+export type HostServiceLogSnapshot = {
+  type: "service_logs";
+  provider: HostServiceProvider;
+  service: string;
+  truncated: boolean;
+  lines: string[];
+};
+
+export type HostPackageProvider = "apt" | "dnf" | "yum" | "pacman";
+
+export type HostPackageCapabilityRecord = {
+  status: "supported" | "ambiguous" | "probe_failed" | "unsupported";
+  provider: HostPackageProvider | null;
+  distro_id: string;
+  distro_version: string | null;
+  can_plan_cached: boolean;
+  can_refresh_metadata: boolean;
+  can_apply: boolean;
+  reason: string | null;
+};
+
+export type HostPackageUpdateRecord = {
+  name: string;
+  architecture: string | null;
+  current_version: string | null;
+  candidate_version: string;
+  repository: string | null;
+};
+
+export type HostPackageUpdatePlanRecord = {
+  client_id: string;
+  source_job_id: string | null;
+  observed_at: string | null;
+  capability: HostPackageCapabilityRecord | null;
+  metadata_refresh_requested: boolean;
+  metadata_refreshed: boolean;
+  plan_hash: string | null;
+  truncated: boolean;
+  packages: HostPackageUpdateRecord[];
+  reboot_required_before: boolean | null;
+  last_attempt: HostProcessAttemptRecord | null;
+  evidence_error: string | null;
+};
+
+export type HostPackageUpdateApplyResult = {
+  type: "package_update_apply";
+  provider: HostPackageProvider;
+  accepted_plan_hash: string;
+  applied_package_count: number;
+  remaining_packages: HostPackageUpdateRecord[];
+  completed: boolean;
+  reboot_required_after: boolean | null;
+};
+
 export type AgentUpdateReleaseRecord = {
   id: string;
   actor_id: string | null;
@@ -2001,6 +2181,11 @@ export type JobOperation =
   | { type: "user_sessions" }
   | { type: "process_list"; limit: number }
   | {
+      type: "storage_inventory";
+      include_pseudo_mounts: boolean;
+      limit: number;
+    }
+  | {
       type: "process_start";
       name: string;
       argv: string[];
@@ -2024,6 +2209,35 @@ export type JobOperation =
   | { type: "process_restart"; name: string }
   | { type: "process_status"; name: string | null }
   | { type: "process_logs"; name: string; max_bytes: number }
+  | {
+      type: "service_inventory";
+      expected_provider?: HostServiceProvider | null;
+      limit: number;
+    }
+  | {
+      type: "service_action";
+      provider: HostServiceProvider;
+      service: string;
+      action: HostServiceAction;
+      expected_active_state: string;
+      expected_enabled_state: string;
+    }
+  | {
+      type: "service_logs";
+      provider: HostServiceProvider;
+      service: string;
+      max_lines: number;
+    }
+  | {
+      type: "package_update_plan";
+      expected_provider?: HostPackageProvider | null;
+      refresh_metadata: boolean;
+    }
+  | {
+      type: "package_update_apply";
+      provider: HostPackageProvider;
+      plan_hash: string;
+    }
   | {
       type: "backup";
       paths: string[];
@@ -2118,6 +2332,60 @@ export type CreateJobRequest = {
   force_unprivileged?: boolean;
   privileged: boolean;
   privilege_assertion?: PrivilegeAssertion | null;
+  rollout?: JobRolloutPolicy | null;
+};
+
+export type JobRolloutPolicy = {
+  canary_client_ids: string[];
+  batch_size: number;
+  max_failures: number;
+  pause_after_canary: boolean;
+  batch_delay_secs: number;
+};
+
+export type JobRolloutTargetRecord = {
+  client_id: string;
+  batch_index: number;
+  status: JobTargetStatus;
+  message: string | null;
+};
+
+export type JobRolloutRecord = {
+  job_id: string;
+  status: "running" | "paused" | "completed" | "aborted";
+  canary_client_ids: string[];
+  batch_size: number;
+  max_failures: number;
+  pause_after_canary: boolean;
+  batch_delay_secs: number;
+  current_batch: number;
+  total_batches: number;
+  failure_baseline: number;
+  pause_reason: string | null;
+  next_batch_at: string;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+  targets: JobRolloutTargetRecord[];
+};
+
+export type UpdateJobRolloutRequest = {
+  confirmed?: boolean;
+  reason?: string | null;
+};
+
+export type CancelJobResponse = {
+  job_id: string;
+  status: string | null;
+  requested_targets: number;
+  pending_canceled: number;
+  cancel_acks: Array<{
+    client_id: string;
+    accepted: boolean;
+    acked: boolean;
+    applied: boolean;
+    message: string;
+  }>;
 };
 
 export type CreateJobApprovalRequest = {

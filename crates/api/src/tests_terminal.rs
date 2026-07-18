@@ -28,6 +28,7 @@ fn terminal_job_commands_use_operation_payload_and_type() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
+        rollout: None,
     };
 
     assert_eq!(request.command_type_label(), "terminal_open");
@@ -119,6 +120,7 @@ fn terminal_job_commands_reject_unsafe_or_oversized_payloads() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
+        rollout: None,
     };
 
     assert_eq!(
