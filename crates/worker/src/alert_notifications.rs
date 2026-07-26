@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use reqwest::{redirect::Policy, Url};
 use serde_json::{json, Value};
 use sqlx::{types::Json as SqlJson, PgPool, Row};
 use tokio::time::Duration;
@@ -10,6 +9,7 @@ use vpsman_common::{
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_PERMANENTLY_FAILED,
 };
+use vpsman_server_core::prepare_webhook_target;
 
 use crate::actor_authority::actor_authorized;
 
@@ -167,7 +167,6 @@ async fn process_queued_deliveries(
     .fetch_all(pool)
     .await?;
 
-    let client = webhook_client(config.webhook_timeout_secs)?;
     let mut outcomes = Vec::new();
     for row in rows {
         let delivery = delivery_from_row(row)?;
@@ -212,7 +211,7 @@ async fn process_queued_deliveries(
             if actor_authorized(pool, delivery.actor_id, "operator", &["integrations:write"])
                 .await?
             {
-                deliver_notification(&client, &delivery).await
+                deliver_notification(&delivery, config.webhook_timeout_secs).await
             } else {
                 Err(anyhow::anyhow!("actor_authority_revoked"))
             };
@@ -321,44 +320,50 @@ async fn alert_notification_channel_enabled(pool: &PgPool, channel_id: Uuid) -> 
     Ok(enabled)
 }
 
-async fn deliver_notification(client: &reqwest::Client, delivery: &DeliveryRow) -> Result<()> {
+async fn deliver_notification(delivery: &DeliveryRow, webhook_timeout_secs: u64) -> Result<()> {
     anyhow::ensure!(
         delivery.delivery_kind == "webhook",
         "fleet alert notification delivery kind is invalid"
     );
-    deliver_webhook_payload(client, delivery).await
+    deliver_webhook_payload(delivery, webhook_timeout_secs).await
 }
 
-async fn deliver_webhook_payload(client: &reqwest::Client, delivery: &DeliveryRow) -> Result<()> {
-    let url = validate_webhook_url(&delivery.target)?;
-    let body = json!({
-        "schema": "vpsman.fleet_alert.webhook_delivery.v1",
-        "delivery": {
-            "id": delivery.id,
-            "channel_id": delivery.channel_id,
-            "channel_name": &delivery.channel_name,
-            "alert_id": &delivery.alert_id,
-            "alert_severity": &delivery.alert_severity,
-            "alert_category": &delivery.alert_category,
-            "dedupe_key": &delivery.dedupe_key,
-            "attempt": delivery.attempt_count.saturating_add(1),
-            "created_at": &delivery.created_at,
-        },
-        "payload": &delivery.payload,
-    });
-    let response = client
-        .post(url)
-        .json(&body)
-        .send()
-        .await
-        .context("webhook request failed")?;
-    let status = response.status();
-    anyhow::ensure!(
-        status.is_success(),
-        "webhook returned non-success status {}",
-        status.as_u16()
-    );
-    Ok(())
+async fn deliver_webhook_payload(delivery: &DeliveryRow, webhook_timeout_secs: u64) -> Result<()> {
+    let timeout = Duration::from_secs(webhook_timeout_secs.clamp(1, 60));
+    tokio::time::timeout(timeout, async {
+        let target = prepare_webhook_target(&delivery.target, timeout).await?;
+        let body = json!({
+            "schema": "vpsman.fleet_alert.webhook_delivery.v1",
+            "delivery": {
+                "id": delivery.id,
+                "channel_id": delivery.channel_id,
+                "channel_name": &delivery.channel_name,
+                "alert_id": &delivery.alert_id,
+                "alert_severity": &delivery.alert_severity,
+                "alert_category": &delivery.alert_category,
+                "dedupe_key": &delivery.dedupe_key,
+                "attempt": delivery.attempt_count.saturating_add(1),
+                "created_at": &delivery.created_at,
+            },
+            "payload": &delivery.payload,
+        });
+        let response = target
+            .client()
+            .post(target.url().clone())
+            .json(&body)
+            .send()
+            .await
+            .context("webhook request failed")?;
+        let status = response.status();
+        anyhow::ensure!(
+            status.is_success(),
+            "webhook returned non-success status {}",
+            status.as_u16()
+        );
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .context("fleet alert notification delivery timed out")?
 }
 
 async fn prune_deliveries(pool: &PgPool, config: AlertNotificationWorkerConfig) -> Result<usize> {
@@ -494,35 +499,6 @@ fn delivery_from_row(row: sqlx::postgres::PgRow) -> Result<DeliveryRow> {
     })
 }
 
-fn webhook_client(max_timeout_secs: u64) -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(max_timeout_secs.clamp(1, 60)))
-        .redirect(Policy::none())
-        .build()
-        .context("failed to build fleet alert notification webhook client")
-}
-
-fn validate_webhook_url(target: &str) -> Result<Url> {
-    let url = Url::parse(target.trim()).context("webhook target must be an absolute URL")?;
-    match url.scheme() {
-        "https" => {}
-        "http" if is_local_http_webhook(&url) => {}
-        _ => anyhow::bail!("webhook target must use https, or http for localhost only"),
-    }
-    anyhow::ensure!(
-        url.username().is_empty() && url.password().is_none(),
-        "webhook target must not embed credentials"
-    );
-    Ok(url)
-}
-
-fn is_local_http_webhook(url: &Url) -> bool {
-    matches!(
-        url.host_str(),
-        Some("localhost") | Some("127.0.0.1") | Some("::1") | Some("[::1]")
-    )
-}
-
 fn truncate_error(error: &str) -> String {
     error.chars().take(MAX_ERROR_BYTES).collect()
 }
@@ -569,15 +545,6 @@ mod tests {
                 webhook_timeout_secs: 60,
             }
         );
-    }
-
-    #[test]
-    fn webhook_url_policy_allows_https_and_local_http_only() {
-        assert!(validate_webhook_url("https://hooks.example/vpsman").is_ok());
-        assert!(validate_webhook_url("http://localhost:9000/hook").is_ok());
-        assert!(validate_webhook_url("http://127.0.0.1:9000/hook").is_ok());
-        assert!(validate_webhook_url("http://hooks.example/hook").is_err());
-        assert!(validate_webhook_url("https://user:secret@example.com/hook").is_err());
     }
 
     #[test]

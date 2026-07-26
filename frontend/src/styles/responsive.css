@@ -54,6 +54,11 @@
     display: none;
   }
 
+  .controlPlaneNotice {
+    align-items: flex-start;
+    margin-inline: 16px;
+  }
+
   .scopeSelectorGroup {
     display: flex;
     width: 100%;

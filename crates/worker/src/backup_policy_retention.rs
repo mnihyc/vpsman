@@ -87,6 +87,10 @@ pub(crate) async fn process_backup_policy_retention_prune(
     let policies = list_backup_policy_retention_candidates(pool, &config).await?;
     let mut outcomes = Vec::new();
     for policy in &policies {
+        // Advance the durable round-robin cursor before doing external work.
+        // A failed or interrupted policy is retried after the other policies
+        // have had a bounded opportunity to run instead of starving them.
+        mark_backup_policy_retention_scanned(pool, policy.schedule_id).await?;
         if !actor_authorized(
             pool,
             policy.actor_id,
@@ -118,27 +122,11 @@ async fn list_backup_policy_retention_candidates(
     pool: &PgPool,
     config: &BackupPolicyRetentionPruneConfig,
 ) -> Result<Vec<BackupPolicyRetentionPolicy>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT
-            schedule.id AS schedule_id,
-            schedule.actor_id,
-            schedule.name,
-            schedule.enabled,
-            policy.retention_days,
-            policy.keep_last
-        FROM backup_policies policy
-        JOIN schedules schedule ON schedule.id = policy.schedule_id
-        WHERE ($1 OR schedule.enabled = TRUE)
-          AND schedule.operation ->> 'type' = 'backup'
-        ORDER BY schedule.name ASC, schedule.id ASC
-        LIMIT $2
-        "#,
-    )
-    .bind(config.include_disabled)
-    .bind(config.limit)
-    .fetch_all(pool)
-    .await?;
+    let rows = sqlx::query(backup_policy_retention_policies_query())
+        .bind(config.include_disabled)
+        .bind(config.limit)
+        .fetch_all(pool)
+        .await?;
 
     rows.into_iter()
         .map(|row| {
@@ -152,6 +140,41 @@ async fn list_backup_policy_retention_candidates(
             })
         })
         .collect()
+}
+
+fn backup_policy_retention_policies_query() -> &'static str {
+    r#"
+        SELECT
+            schedule.id AS schedule_id,
+            schedule.actor_id,
+            schedule.name,
+            schedule.enabled,
+            policy.retention_days,
+            policy.keep_last
+        FROM backup_policies policy
+        JOIN schedules schedule ON schedule.id = policy.schedule_id
+        WHERE ($1 OR schedule.enabled = TRUE)
+          AND schedule.deleted_at IS NULL
+          AND schedule.operation ->> 'type' = 'backup'
+        ORDER BY
+            policy.retention_scanned_at ASC NULLS FIRST,
+            schedule.id ASC
+        LIMIT $2
+        "#
+}
+
+async fn mark_backup_policy_retention_scanned(pool: &PgPool, schedule_id: Uuid) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE backup_policies
+        SET retention_scanned_at = now()
+        WHERE schedule_id = $1
+        "#,
+    )
+    .bind(schedule_id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn prune_backup_policy(
@@ -490,5 +513,13 @@ mod tests {
     fn backup_policy_retention_candidate_query_returns_prune_identities() {
         let query = super::backup_policy_retention_candidate_query();
         assert!(query.contains("SELECT request_id, artifact_id, object_key"));
+    }
+
+    #[test]
+    fn backup_policy_scan_is_ordered_by_the_durable_fairness_cursor() {
+        let query = super::backup_policy_retention_policies_query();
+        assert!(query.contains("retention_scanned_at ASC NULLS FIRST"));
+        assert!(query.contains("schedule.id ASC"));
+        assert!(query.contains("schedule.deleted_at IS NULL"));
     }
 }

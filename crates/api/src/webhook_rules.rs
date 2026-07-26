@@ -16,9 +16,9 @@ use vpsman_server_core::operator_is_active_authorized;
 use crate::{
     model::{AgentView, AuthContext},
     model_webhook_rules::{
-        WebhookEventCandidate, WebhookRuleDeliveryCandidate, WebhookRuleDeliveryView,
-        WebhookRuleDispatchRequest, WebhookRuleDryRunRequest, WebhookRuleDryRunView,
-        WebhookRuleProcessRequest, WebhookRuleView,
+        WebhookRuleDeliveryCandidate, WebhookRuleDeliveryView, WebhookRuleDispatchRequest,
+        WebhookRuleDryRunRequest, WebhookRuleDryRunView, WebhookRuleProcessRequest,
+        WebhookRuleView,
     },
     repository_webhook_rules::dry_run_webhook_delivery,
     selector_expression::{agent_expression_context, parse_selector_expression},
@@ -27,7 +27,8 @@ use crate::{
 };
 
 const WEBHOOK_PROCESS_DRY_RUN_STATUS: &str = "delivery_dry_run";
-const WEBHOOK_DELIVERY_LEASE_SECS: i64 = 300;
+const WEBHOOK_DELIVERY_TIMEOUT_SECS: i64 = 5;
+const WEBHOOK_DELIVERY_LEASE_MARGIN_SECS: i64 = 60;
 const MAX_WEBHOOK_ERROR_BYTES: usize = 1024;
 const MAX_WEBHOOK_DELIVERY_ATTEMPTS: i32 = 4;
 const WEBHOOK_RETRY_BACKOFF_SECS: [i64; 3] = [60, 300, 1800];
@@ -171,34 +172,7 @@ impl AppState {
             request.preview_hash.as_deref() == Some(preview_hash.as_str()),
             "webhook_rule_dispatch_preview_hash_mismatch"
         );
-        if request.rule_id.is_some() {
-            return self.repo.record_webhook_rule_deliveries(&candidates).await;
-        }
-        self.repo
-            .record_webhook_event(WebhookEventCandidate {
-                kind: event_kind.to_string(),
-                event_id: event_id.clone(),
-                event_predicates: vec![event_kind.to_string()],
-                subject_client_ids: Vec::new(),
-                payload: json!({
-                    "event": {
-                        "kind": event_kind,
-                        "id": event_id,
-                        "source": "manual_dispatch",
-                    }
-                }),
-                actor_id: Some(operator.operator.id),
-            })
-            .await?;
-        Ok(candidates
-            .iter()
-            .map(|candidate| {
-                let mut delivery = dry_run_webhook_delivery(candidate);
-                delivery.status = "event_logged".to_string();
-                delivery.review_preview_hash = Some(preview_hash.clone());
-                delivery
-            })
-            .collect())
+        self.repo.record_webhook_rule_deliveries(&candidates).await
     }
 
     pub(crate) async fn process_webhook_rule_deliveries(
@@ -251,13 +225,10 @@ impl AppState {
             .collect::<Vec<_>>();
         let expected_ids = delivery_ids.iter().copied().collect::<HashSet<_>>();
         let lease_id = Uuid::new_v4();
+        let lease_secs = delivery_lease_secs(delivery_ids.len());
         let claimed_deliveries = self
             .repo
-            .claim_webhook_rule_deliveries_for_process(
-                &delivery_ids,
-                lease_id,
-                WEBHOOK_DELIVERY_LEASE_SECS,
-            )
+            .claim_webhook_rule_deliveries_for_process(&delivery_ids, lease_id, lease_secs)
             .await?;
         let claimed_ids = claimed_deliveries
             .iter()
@@ -267,11 +238,6 @@ impl AppState {
             claimed_ids == expected_ids,
             "webhook_rule_process_claim_mismatch"
         );
-        let client = reqwest::Client::builder()
-            .timeout(tokio::time::Duration::from_secs(5))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .context("failed to build webhook rule client")?;
         let mut processed = Vec::new();
         for delivery in claimed_deliveries {
             if !self.repo.webhook_rule_enabled(delivery.rule_id).await? {
@@ -290,7 +256,7 @@ impl AppState {
                 .webhook_delivery_actor_authorized(delivery.actor_id)
                 .await?
             {
-                deliver_webhook_rule(&client, &delivery).await
+                deliver_webhook_rule(&delivery).await
             } else {
                 Err(anyhow::anyhow!("actor_authority_revoked"))
             };
@@ -541,29 +507,41 @@ pub(crate) fn webhook_candidate_for_event(
     }))
 }
 
-pub(crate) async fn deliver_webhook_rule(
-    client: &reqwest::Client,
-    delivery: &WebhookRuleDeliveryView,
-) -> Result<()> {
-    crate::repository_webhook_rules::validate_webhook_rule_target(&delivery.target)?;
-    let body = serde_json::to_vec(&delivery.payload).context("failed to encode webhook payload")?;
-    let mut request = client
-        .post(delivery.target.trim())
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .header(WEBHOOK_DELIVERY_HEADER, delivery.id.to_string())
-        .header(WEBHOOK_EVENT_HEADER, delivery.event_kind.trim())
-        .body(body.clone());
-    if let Some(secret) = delivery.signing_secret.as_deref() {
-        request = request.header(WEBHOOK_SIGNATURE_HEADER, webhook_signature(secret, &body)?);
-    }
-    let response = request.send().await.context("webhook request failed")?;
-    let status = response.status();
-    anyhow::ensure!(
-        status.is_success(),
-        "webhook returned non-success status {}",
-        status.as_u16()
-    );
-    Ok(())
+pub(crate) async fn deliver_webhook_rule(delivery: &WebhookRuleDeliveryView) -> Result<()> {
+    let timeout = tokio::time::Duration::from_secs(WEBHOOK_DELIVERY_TIMEOUT_SECS as u64);
+    tokio::time::timeout(timeout, async {
+        let target = vpsman_server_core::prepare_webhook_target(&delivery.target, timeout).await?;
+        let body =
+            serde_json::to_vec(&delivery.payload).context("failed to encode webhook payload")?;
+        let mut request = target
+            .client()
+            .post(target.url().clone())
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(WEBHOOK_DELIVERY_HEADER, delivery.id.to_string())
+            .header(WEBHOOK_EVENT_HEADER, delivery.event_kind.trim())
+            .body(body.clone());
+        if let Some(secret) = delivery.signing_secret.as_deref() {
+            request = request.header(WEBHOOK_SIGNATURE_HEADER, webhook_signature(secret, &body)?);
+        }
+        let response = request.send().await.context("webhook request failed")?;
+        let status = response.status();
+        anyhow::ensure!(
+            status.is_success(),
+            "webhook returned non-success status {}",
+            status.as_u16()
+        );
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .context("webhook delivery timed out")?
+}
+
+fn delivery_lease_secs(delivery_count: usize) -> i64 {
+    i64::try_from(delivery_count)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(WEBHOOK_DELIVERY_TIMEOUT_SECS)
+        .saturating_add(WEBHOOK_DELIVERY_LEASE_MARGIN_SECS)
+        .max(WEBHOOK_DELIVERY_LEASE_MARGIN_SECS)
 }
 
 fn webhook_signature(secret: &str, body: &[u8]) -> Result<String> {
@@ -683,7 +661,7 @@ mod tests {
             name: "edge-online".to_string(),
             enabled: true,
             expression: "interval.30sec && tag:edge".to_string(),
-            target: "https://hooks.example/vpsman".to_string(),
+            target: "https://hooks.acme.com/vpsman".to_string(),
             body_template: "{rule.name} {event.kind} {vps.id}".to_string(),
             cooldown_secs: 30,
             signing_secret: Some("secret".to_string()),
@@ -725,5 +703,12 @@ mod tests {
         );
         let long = anyhow::anyhow!("x".repeat(MAX_WEBHOOK_ERROR_BYTES + 100));
         assert_eq!(format_delivery_error(&long).len(), MAX_WEBHOOK_ERROR_BYTES);
+    }
+
+    #[test]
+    fn process_lease_covers_every_serial_delivery_timeout() {
+        assert_eq!(delivery_lease_secs(0), 60);
+        assert_eq!(delivery_lease_secs(50), 310);
+        assert_eq!(delivery_lease_secs(200), 1_060);
     }
 }

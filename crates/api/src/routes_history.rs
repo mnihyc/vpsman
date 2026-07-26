@@ -496,6 +496,17 @@ pub(crate) async fn export_history(
                     ),
                 );
             }
+            HistoryDomain::TrafficCounterSamples => {
+                data.insert(
+                    domain.as_str().to_string(),
+                    json!(
+                        state
+                            .repo
+                            .export_traffic_counter_samples(limit, query.client_id.as_deref())
+                            .await?
+                    ),
+                );
+            }
             HistoryDomain::SystemMetricRollups => {
                 data.insert(
                     domain.as_str().to_string(),
@@ -623,6 +634,7 @@ fn history_retention_authority_scope(domain: HistoryDomain) -> &'static str {
         HistoryDomain::SystemMetricRollups
         | HistoryDomain::TelemetryRollups
         | HistoryDomain::TelemetryNetworkRates
+        | HistoryDomain::TrafficCounterSamples
         | HistoryDomain::ClientStatusHistory
         | HistoryDomain::GatewaySessions => "inventory:write",
         HistoryDomain::JobOutputs => "jobs:write",
@@ -640,6 +652,7 @@ fn history_export_scope(domain: HistoryDomain) -> &'static str {
         HistoryDomain::SystemMetricRollups
         | HistoryDomain::TelemetryRollups
         | HistoryDomain::TelemetryNetworkRates
+        | HistoryDomain::TrafficCounterSamples
         | HistoryDomain::ClientStatusHistory
         | HistoryDomain::GatewaySessions => SCOPE_FLEET_READ,
     }

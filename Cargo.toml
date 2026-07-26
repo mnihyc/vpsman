@@ -56,6 +56,7 @@ toml = "0.8.22"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 tower = { version = "0.5.2", features = ["util"] }
+url = "2.5.8"
 uuid = { version = "1.17.0", features = ["serde", "v4"] }
 webpki-roots = "1.0.7"
 

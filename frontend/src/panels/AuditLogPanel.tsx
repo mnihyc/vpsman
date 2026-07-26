@@ -116,6 +116,8 @@ export function AuditLogPanel({
       ) ?? historyRetentionPolicies[0],
     [historyRetentionPolicies, selectedDomain],
   );
+  const minimumRetentionDays =
+    selectedPolicy?.domain === "traffic_counter_samples" ? 32 : 1;
   const [retentionDays, setRetentionDays] = useState("365");
   const [pruneLimit, setPruneLimit] = useState("1000");
   const [metadataOnly, setMetadataOnly] = useState(false);
@@ -291,6 +293,16 @@ export function AuditLogPanel({
   }
 
   const submitPolicy = async () => {
+    if (
+      minimumRetentionDays > 1 &&
+      Number(retentionDays) < minimumRetentionDays
+    ) {
+      setRetentionStatus(
+        `Traffic accounting counters require at least ${minimumRetentionDays} retention days to preserve a complete monthly cycle`,
+      );
+      setRetentionStatusTone("danger");
+      return;
+    }
     setRetentionStatus("Saving history retention policy");
     setRetentionStatusTone("progress");
     try {
@@ -806,7 +818,7 @@ export function AuditLogPanel({
                 <label>
                   <span>Retention days</span>
                   <input
-                    min={1}
+                    min={minimumRetentionDays}
                     max={3650}
                     type="number"
                     value={retentionDays}
@@ -815,6 +827,12 @@ export function AuditLogPanel({
                       clearPruneConfirmation();
                     }}
                   />
+                  {minimumRetentionDays > 1 && (
+                    <small>
+                      Minimum {minimumRetentionDays} days preserves the active
+                      monthly cycle.
+                    </small>
+                  )}
                 </label>
                 <label>
                   <span>Prune limit</span>
@@ -1710,6 +1728,7 @@ function historyDomainLabel(domain: string | null | undefined): string {
     system_metric_rollups: "System metrics",
     telemetry_network_rates: "Network traffic rates",
     telemetry_rollups: "Telemetry rollups",
+    traffic_counter_samples: "Traffic accounting counters",
     topology_history: "Topology history",
   };
   return domain
@@ -1728,6 +1747,8 @@ function historyDomainDescription(domain: string | null | undefined): string {
     system_metric_rollups: "Control-plane capacity rollups",
     telemetry_network_rates: "Per-VPS network rate history",
     telemetry_rollups: "Per-VPS telemetry rollups",
+    traffic_counter_samples:
+      "Raw per-interface counters used for monthly traffic accounting",
     topology_history: "Topology graph and trend history",
   };
   return domain

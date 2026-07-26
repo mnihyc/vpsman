@@ -1,4 +1,7 @@
-use std::cmp::Reverse;
+use std::{
+    cmp::Reverse,
+    collections::{HashMap, HashSet},
+};
 
 use anyhow::{ensure, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -8,6 +11,7 @@ use uuid::Uuid;
 
 use crate::{
     model::{AuditLogView, AuthContext, BackupRequestStatus},
+    model_alert_policies::TrafficCounterSampleRecord,
     model_history::{
         HistoryDomain, HistoryRetentionPolicyView, HistoryRetentionPruneOutcome,
         HistoryRetentionPrunePlan, UpsertHistoryRetentionPolicyRequest,
@@ -82,7 +86,7 @@ impl Repository {
             .unwrap_or_else(|| default_policy(domain));
         if let Some(retention_days) = request.retention_days {
             ensure!(
-                (1..=3650).contains(&retention_days),
+                (domain.minimum_retention_days()..=3650).contains(&retention_days),
                 "history_retention_days_out_of_range"
             );
             policy.retention_days = retention_days;
@@ -265,6 +269,20 @@ impl Repository {
                             |row| &row.bucket_start,
                         )
                         .await?;
+                        Ok(HistoryRetentionPruneOutcome {
+                            matched_rows,
+                            pruned_rows: if dry_run { 0 } else { matched_rows },
+                            object_keys: Vec::new(),
+                        })
+                    }
+                    HistoryDomain::TrafficCounterSamples => {
+                        let matched_rows = prune_memory_traffic_counter_samples(
+                            &memory.traffic_counter_samples,
+                            cutoff_unix,
+                            limit,
+                            dry_run,
+                        )
+                        .await;
                         Ok(HistoryRetentionPruneOutcome {
                             matched_rows,
                             pruned_rows: if dry_run { 0 } else { matched_rows },
@@ -639,6 +657,74 @@ impl Repository {
         Ok(())
     }
 
+    pub(crate) async fn export_traffic_counter_samples(
+        &self,
+        limit: i64,
+        client_id: Option<&str>,
+    ) -> Result<Vec<TrafficCounterSampleRecord>> {
+        match self {
+            Self::Memory(memory) => {
+                let mut rows = memory
+                    .traffic_counter_samples
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|row| client_id.is_none_or(|expected| row.client_id == expected))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                rows.sort_by(|left, right| {
+                    right
+                        .observed_unix
+                        .cmp(&left.observed_unix)
+                        .then_with(|| left.client_id.cmp(&right.client_id))
+                        .then_with(|| left.source_kind.cmp(&right.source_kind))
+                        .then_with(|| left.interface.cmp(&right.interface))
+                });
+                rows.truncate(limit.clamp(1, 1000) as usize);
+                Ok(rows)
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        client_id,
+                        source_kind,
+                        interface,
+                        observed_at::text AS observed_at,
+                        EXTRACT(EPOCH FROM observed_at)::bigint AS observed_unix,
+                        rx_bytes,
+                        tx_bytes,
+                        counter_epoch,
+                        sample_source
+                    FROM traffic_counter_samples
+                    WHERE ($1::text IS NULL OR client_id = $1)
+                    ORDER BY observed_at DESC, client_id ASC, source_kind ASC, interface ASC
+                    LIMIT $2
+                    "#,
+                )
+                .bind(client_id)
+                .bind(limit.clamp(1, 1000))
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|row| {
+                        Ok(TrafficCounterSampleRecord {
+                            client_id: row.try_get("client_id")?,
+                            source_kind: row.try_get("source_kind")?,
+                            interface: row.try_get("interface")?,
+                            observed_at: row.try_get("observed_at")?,
+                            observed_unix: row.try_get("observed_unix")?,
+                            rx_bytes: row.try_get("rx_bytes")?,
+                            tx_bytes: row.try_get("tx_bytes")?,
+                            counter_epoch: row.try_get("counter_epoch")?,
+                            sample_source: row.try_get("sample_source")?,
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
+
     pub(crate) async fn export_job_outputs(
         &self,
         limit: i64,
@@ -948,6 +1034,69 @@ async fn prune_memory_vec<T>(
     Ok(matched_rows as i64)
 }
 
+async fn prune_memory_traffic_counter_samples(
+    rows: &tokio::sync::RwLock<Vec<TrafficCounterSampleRecord>>,
+    cutoff_unix: u64,
+    limit: usize,
+    dry_run: bool,
+) -> i64 {
+    let mut rows = rows.write().await;
+    let cutoff_unix = i64::try_from(cutoff_unix).unwrap_or(i64::MAX);
+    let mut baselines = HashMap::<(String, String, String), (i64, usize)>::new();
+    for (index, row) in rows.iter().enumerate() {
+        if row.observed_unix >= cutoff_unix {
+            continue;
+        }
+        let key = (
+            row.client_id.clone(),
+            row.source_kind.clone(),
+            row.interface.clone(),
+        );
+        if baselines
+            .get(&key)
+            .is_none_or(|(observed_unix, _)| row.observed_unix > *observed_unix)
+        {
+            baselines.insert(key, (row.observed_unix, index));
+        }
+    }
+    let protected_indices = baselines
+        .into_values()
+        .map(|(_, index)| index)
+        .collect::<HashSet<_>>();
+    let mut matched_indices = rows
+        .iter()
+        .enumerate()
+        .filter(|(index, row)| {
+            row.observed_unix < cutoff_unix && !protected_indices.contains(index)
+        })
+        .map(|(index, row)| {
+            (
+                index,
+                row.observed_unix,
+                row.client_id.clone(),
+                row.source_kind.clone(),
+                row.interface.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    matched_indices.sort_by(|left, right| {
+        left.1
+            .cmp(&right.1)
+            .then_with(|| left.2.cmp(&right.2))
+            .then_with(|| left.3.cmp(&right.3))
+            .then_with(|| left.4.cmp(&right.4))
+    });
+    matched_indices.truncate(limit);
+    let matched_rows = matched_indices.len() as i64;
+    if !dry_run {
+        matched_indices.sort_unstable_by_key(|(index, ..)| Reverse(*index));
+        for (index, ..) in matched_indices {
+            rows.remove(index);
+        }
+    }
+    matched_rows
+}
+
 async fn list_postgres_history_retention_object_candidates(
     pool: &sqlx::PgPool,
     domain: HistoryDomain,
@@ -1207,6 +1356,12 @@ async fn prune_postgres_history_domain(
         }
         (HistoryDomain::TelemetryNetworkRates, false) => {
             prune_telemetry_network_rates(pool, cutoff_unix, limit, false).await
+        }
+        (HistoryDomain::TrafficCounterSamples, true) => {
+            prune_traffic_counter_samples(pool, cutoff_unix, limit, true).await
+        }
+        (HistoryDomain::TrafficCounterSamples, false) => {
+            prune_traffic_counter_samples(pool, cutoff_unix, limit, false).await
         }
         (HistoryDomain::SystemMetricRollups, true) => {
             prune_system_metric_rollups(pool, cutoff_unix, limit, true).await
@@ -1491,6 +1646,85 @@ async fn prune_telemetry_network_rates(
           AND rate.bucket_secs = doomed.bucket_secs
           AND rate.bucket_start = doomed.bucket_start
         RETURNING rate.client_id
+        "#
+    };
+    let rows = sqlx::query(query)
+        .bind(cutoff_unix as i64)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+    Ok(HistoryRetentionPruneOutcome {
+        matched_rows: rows.len() as i64,
+        pruned_rows: if dry_run { 0 } else { rows.len() as i64 },
+        object_keys: Vec::new(),
+    })
+}
+
+async fn prune_traffic_counter_samples(
+    pool: &sqlx::PgPool,
+    cutoff_unix: u64,
+    limit: i32,
+    dry_run: bool,
+) -> Result<HistoryRetentionPruneOutcome> {
+    let query = if dry_run {
+        r#"
+        SELECT
+            sample.client_id,
+            sample.source_kind,
+            sample.interface,
+            sample.observed_at
+        FROM traffic_counter_samples sample
+        WHERE sample.observed_at < to_timestamp($1)
+          AND EXISTS (
+              SELECT 1
+              FROM traffic_counter_samples newer
+              WHERE newer.client_id = sample.client_id
+                AND newer.source_kind = sample.source_kind
+                AND newer.interface = sample.interface
+                AND newer.observed_at < to_timestamp($1)
+                AND newer.observed_at > sample.observed_at
+          )
+        ORDER BY
+            sample.observed_at ASC,
+            sample.client_id ASC,
+            sample.source_kind ASC,
+            sample.interface ASC
+        LIMIT $2
+        "#
+    } else {
+        r#"
+        WITH doomed AS (
+            SELECT
+                sample.client_id,
+                sample.source_kind,
+                sample.interface,
+                sample.observed_at
+            FROM traffic_counter_samples sample
+            WHERE sample.observed_at < to_timestamp($1)
+              AND EXISTS (
+                  SELECT 1
+                  FROM traffic_counter_samples newer
+                  WHERE newer.client_id = sample.client_id
+                    AND newer.source_kind = sample.source_kind
+                    AND newer.interface = sample.interface
+                    AND newer.observed_at < to_timestamp($1)
+                    AND newer.observed_at > sample.observed_at
+              )
+            ORDER BY
+                sample.observed_at ASC,
+                sample.client_id ASC,
+                sample.source_kind ASC,
+                sample.interface ASC
+            LIMIT $2
+            FOR UPDATE OF sample SKIP LOCKED
+        )
+        DELETE FROM traffic_counter_samples sample
+        USING doomed
+        WHERE sample.client_id = doomed.client_id
+          AND sample.source_kind = doomed.source_kind
+          AND sample.interface = doomed.interface
+          AND sample.observed_at = doomed.observed_at
+        RETURNING sample.client_id
         "#
     };
     let rows = sqlx::query(query)

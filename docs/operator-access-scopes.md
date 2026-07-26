@@ -57,8 +57,8 @@ History retention writes require `history:write` plus authority for the selected
 domain. Audit retention requires `audit:read`; job-output retention requires
 `jobs:write`; backup-artifact retention requires `backups:write`; network
 observation and topology retention require `network:write`; telemetry and
-system rollup, per-interface telemetry, client lifecycle, and gateway session
-retention require `inventory:write`.
+system rollup, per-interface telemetry, raw traffic counters, client lifecycle,
+and gateway session retention require `inventory:write`.
 
 Server artifact cleanup requires explicit cleanup domains. `job_output` and
 `file_transfer` cleanup require `jobs:write`; `backup_artifact` cleanup requires
@@ -105,12 +105,24 @@ access token lifetime is one day. Admin-targeted changes and changes that grant
 the admin role require an explicit admin-risk acknowledgement in the dashboard,
 CLI, VTY, and API payload.
 
-Login throttling and auth history use the operator client IP resolved from
-`X-Forwarded-For` by default because the API is private behind the dashboard
-proxy. IPv4 and IPv6 forwarded addresses are supported, including IPv6 access
-terminated by an external TLS provider. Directly exposed or custom
-reverse-proxy deployments can narrow trusted peers with
-`[api].trusted_proxy_cidrs` or `VPSMAN_TRUSTED_PROXY_CIDRS`.
+Login throttling and auth history use the operator client IP. The API accepts
+`X-Forwarded-For` only from explicitly trusted proxy peers; the secure default
+trusts IPv4 and IPv6 loopback only. Container or external TLS proxies must add
+their exact peer CIDRs with `[api].trusted_proxy_cidrs` or
+`VPSMAN_TRUSTED_PROXY_CIDRS`. Never use `0.0.0.0/0` or `::/0`: doing so lets a
+direct client choose the address used for throttling and auth evidence.
+The bundled Compose deployment pins its frontend proxy to
+`172.31.255.2` on a dedicated frontend/API network and trusts only that `/32`;
+keep the Compose address and configured peer in sync if customizing its
+network.
+
+Authentication failures feed two bounded lockout buckets: one for the
+username/client-IP pair and one for the client IP across usernames. A hostile
+client therefore cannot lock an operator out from every network, while a single
+source still cannot rotate usernames without being throttled. The historical
+`operator_auth_username_failed_attempt_limit` setting controls the
+username/client-IP bucket. Defaults are 8 pair failures and 64 source failures
+within 15 minutes, followed by a 15-minute lockout.
 
 Fleet WebSocket streams use the same bearer-session authority as HTTP routes.
 The server periodically revalidates token expiry, session revocation, operator

@@ -516,7 +516,7 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
             categories: Some(vec!["agent_status".to_string()]),
             operator_states: Some(vec!["open".to_string()]),
             delivery_kind: "webhook".to_string(),
-            target: "http://127.0.0.1:9/fleet".to_string(),
+            target: "https://hooks.acme.com/fleet".to_string(),
             cooldown_secs: Some(900),
             enabled: Some(true),
             notes: Some("page edge operators".to_string()),
@@ -536,7 +536,7 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
             categories: Some(vec!["agent_status".to_string()]),
             operator_states: Some(Vec::new()),
             delivery_kind: "webhook".to_string(),
-            target: "http://127.0.0.1:9/provider".to_string(),
+            target: "https://hooks.acme.com/provider".to_string(),
             cooldown_secs: Some(900),
             enabled: Some(true),
             notes: None,
@@ -644,6 +644,16 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
     assert_eq!(stored.len(), 2);
     assert!(stored.iter().all(|row| row.attempt_count == 0));
 
+    if let Repository::Memory(memory) = &state.repo {
+        for delivery in memory
+            .fleet_alert_notification_deliveries
+            .write()
+            .await
+            .iter_mut()
+        {
+            delivery.target = "https://127.0.0.1:9/blocked".to_string();
+        }
+    }
     let process_dry_run = state
         .process_fleet_alert_notifications(
             &FleetAlertNotificationProcessRequest {
@@ -693,7 +703,7 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
             && delivery
                 .error
                 .as_deref()
-                .is_some_and(|error| error.contains("webhook request failed"))
+                .is_some_and(|error| error.contains("webhook target address is not public"))
     }));
     if let Repository::Memory(memory) = &state.repo {
         let audits = memory.audits.read().await;
@@ -759,7 +769,7 @@ async fn fleet_alert_notification_dispatch_review_tolerates_observation_timestam
             categories: Some(vec!["resource".to_string()]),
             operator_states: Some(vec!["open".to_string()]),
             delivery_kind: "webhook".to_string(),
-            target: "http://127.0.0.1:9/resource-webhook".to_string(),
+            target: "https://hooks.acme.com/resource-webhook".to_string(),
             cooldown_secs: Some(60),
             enabled: Some(true),
             notes: None,
@@ -855,7 +865,7 @@ async fn fleet_alert_notification_dispatch_review_rejects_target_set_change() {
             categories: Some(vec!["resource".to_string()]),
             operator_states: Some(vec!["open".to_string()]),
             delivery_kind: "webhook".to_string(),
-            target: "http://127.0.0.1:9/resource-webhook".to_string(),
+            target: "https://hooks.acme.com/resource-webhook".to_string(),
             cooldown_secs: Some(60),
             enabled: Some(true),
             notes: None,
@@ -946,7 +956,7 @@ async fn disabled_alert_notification_channel_cancels_retryable_deliveries() {
             categories: Some(vec!["agent_status".to_string()]),
             operator_states: Some(vec!["open".to_string()]),
             delivery_kind: "webhook".to_string(),
-            target: "http://127.0.0.1:9/fleet".to_string(),
+            target: "https://hooks.acme.com/fleet".to_string(),
             cooldown_secs: Some(900),
             enabled: Some(true),
             notes: None,
@@ -966,7 +976,7 @@ async fn disabled_alert_notification_channel_cancels_retryable_deliveries() {
                 alert_category: "agent_status".to_string(),
                 status: "queued".to_string(),
                 delivery_kind: "webhook".to_string(),
-                target: "http://127.0.0.1:9/fleet".to_string(),
+                target: "https://hooks.acme.com/fleet".to_string(),
                 dedupe_key: "fleet-alert-notification:test".to_string(),
                 payload: json!({"schema": "test"}),
                 cooldown_until_unix: 0,
@@ -987,7 +997,7 @@ async fn disabled_alert_notification_channel_cancels_retryable_deliveries() {
             categories: Some(vec!["agent_status".to_string()]),
             operator_states: Some(vec!["open".to_string()]),
             delivery_kind: "webhook".to_string(),
-            target: "http://127.0.0.1:9/fleet".to_string(),
+            target: "https://hooks.acme.com/fleet".to_string(),
             cooldown_secs: Some(900),
             enabled: Some(false),
             notes: None,
@@ -1034,7 +1044,7 @@ async fn deleted_alert_notification_channel_preserves_and_cancels_delivery_histo
             categories: Some(vec!["agent_status".to_string()]),
             operator_states: Some(vec!["open".to_string()]),
             delivery_kind: "webhook".to_string(),
-            target: "http://127.0.0.1:9/fleet".to_string(),
+            target: "https://hooks.acme.com/fleet".to_string(),
             cooldown_secs: Some(900),
             enabled: Some(true),
             notes: None,
@@ -1054,7 +1064,7 @@ async fn deleted_alert_notification_channel_preserves_and_cancels_delivery_histo
                 alert_category: "agent_status".to_string(),
                 status: "queued".to_string(),
                 delivery_kind: "webhook".to_string(),
-                target: "http://127.0.0.1:9/fleet".to_string(),
+                target: "https://hooks.acme.com/fleet".to_string(),
                 dedupe_key: "fleet-alert-notification:deleted-test".to_string(),
                 payload: json!({"schema": "test"}),
                 cooldown_until_unix: 0,
@@ -1078,7 +1088,7 @@ async fn deleted_alert_notification_channel_preserves_and_cancels_delivery_histo
                 alert_category: "agent_status".to_string(),
                 status: "queued".to_string(),
                 delivery_kind: "webhook".to_string(),
-                target: "http://127.0.0.1:9/fleet".to_string(),
+                target: "https://hooks.acme.com/fleet".to_string(),
                 dedupe_key: "fleet-alert-notification:stale-deleted-test".to_string(),
                 payload: json!({"schema": "test"}),
                 cooldown_until_unix: 0,
@@ -1128,7 +1138,7 @@ async fn disabled_webhook_rule_cancels_retryable_deliveries() {
             name: "edge-rule".to_string(),
             enabled: true,
             expression: "status = stale".to_string(),
-            target: "http://127.0.0.1:9/webhook".to_string(),
+            target: "https://hooks.acme.com/webhook".to_string(),
             body_template: String::new(),
             signing_secret: None,
             clear_signing_secret: false,
@@ -1147,7 +1157,7 @@ async fn disabled_webhook_rule_cancels_retryable_deliveries() {
                 rule_name: "edge-rule".to_string(),
                 event_kind: "manual.test".to_string(),
                 event_id: "event-1".to_string(),
-                target: "http://127.0.0.1:9/webhook".to_string(),
+                target: "https://hooks.acme.com/webhook".to_string(),
                 dedupe_key: "webhook-rule:test".to_string(),
                 payload: json!({"schema": "test"}),
                 matched_vps: Vec::new(),
@@ -1168,7 +1178,7 @@ async fn disabled_webhook_rule_cancels_retryable_deliveries() {
             name: "edge-rule".to_string(),
             enabled: false,
             expression: "status = stale".to_string(),
-            target: "http://127.0.0.1:9/webhook".to_string(),
+            target: "https://hooks.acme.com/webhook".to_string(),
             body_template: String::new(),
             signing_secret: None,
             clear_signing_secret: false,
@@ -1209,7 +1219,7 @@ async fn deleted_webhook_rule_preserves_and_cancels_delivery_history() {
             name: "deleted-edge-rule".to_string(),
             enabled: true,
             expression: "status = stale".to_string(),
-            target: "http://127.0.0.1:9/webhook".to_string(),
+            target: "https://hooks.acme.com/webhook".to_string(),
             body_template: String::new(),
             signing_secret: None,
             clear_signing_secret: false,
@@ -1228,7 +1238,7 @@ async fn deleted_webhook_rule_preserves_and_cancels_delivery_history() {
                 rule_name: "deleted-edge-rule".to_string(),
                 event_kind: "manual.test".to_string(),
                 event_id: "deleted-event-1".to_string(),
-                target: "http://127.0.0.1:9/webhook".to_string(),
+                target: "https://hooks.acme.com/webhook".to_string(),
                 dedupe_key: "webhook-rule:deleted-test".to_string(),
                 payload: json!({"schema": "test"}),
                 matched_vps: Vec::new(),
@@ -1251,7 +1261,7 @@ async fn deleted_webhook_rule_preserves_and_cancels_delivery_history() {
                 rule_name: "deleted-edge-rule".to_string(),
                 event_kind: "manual.test".to_string(),
                 event_id: "deleted-event-2".to_string(),
-                target: "http://127.0.0.1:9/webhook".to_string(),
+                target: "https://hooks.acme.com/webhook".to_string(),
                 dedupe_key: "webhook-rule:stale-deleted-test".to_string(),
                 payload: json!({"schema": "test"}),
                 matched_vps: Vec::new(),
@@ -1294,7 +1304,7 @@ async fn webhook_rule_signing_secret_is_redacted_preserved_rotated_and_cleared()
                 name: "signed-edge-rule".to_string(),
                 enabled: true,
                 expression: "interval.30sec && tag:edge".to_string(),
-                target: format!("http://127.0.0.1:9/{target_suffix}"),
+                target: format!("https://hooks.acme.com/{target_suffix}"),
                 body_template: "{rule.name} {event.kind}".to_string(),
                 signing_secret: signing_secret.map(ToOwned::to_owned),
                 clear_signing_secret,
@@ -1323,7 +1333,7 @@ async fn webhook_rule_signing_secret_is_redacted_preserved_rotated_and_cleared()
         .unwrap();
     assert!(preserved.signing_secret_set);
     assert_eq!(preserved.signing_secret.as_deref(), Some("alpha-secret"));
-    assert_eq!(preserved.target, "http://127.0.0.1:9/preserve");
+    assert_eq!(preserved.target, "https://hooks.acme.com/preserve");
 
     let rotated = repo
         .upsert_webhook_rule(
@@ -1365,9 +1375,11 @@ async fn webhook_rule_dispatch_can_be_scoped_to_one_rule() {
         });
     }
     let first_rule_id = Uuid::new_v4();
+    let second_enabled_rule_id = Uuid::new_v4();
     let scoped_rule_id = Uuid::new_v4();
     for (id, name) in [
         (first_rule_id, "alpha-webhook"),
+        (second_enabled_rule_id, "middle-webhook"),
         (scoped_rule_id, "zulu-webhook"),
     ] {
         repo.upsert_webhook_rule(
@@ -1376,7 +1388,7 @@ async fn webhook_rule_dispatch_can_be_scoped_to_one_rule() {
                 name: name.to_string(),
                 enabled: id != scoped_rule_id,
                 expression: "interval.30sec && tag:edge".to_string(),
-                target: format!("http://127.0.0.1:9/{name}"),
+                target: format!("https://hooks.acme.com/{name}"),
                 body_template: "{rule.name} {event.kind}".to_string(),
                 signing_secret: (id == scoped_rule_id).then(|| "scoped-secret".to_string()),
                 clear_signing_secret: false,
@@ -1397,7 +1409,7 @@ async fn webhook_rule_dispatch_can_be_scoped_to_one_rule() {
                 rule_id: None,
                 event_kind: "interval.30sec".to_string(),
                 event_id: Some("event-1".to_string()),
-                limit: Some(100),
+                limit: Some(1),
                 dry_run: Some(true),
                 preview_hash: None,
                 confirmed: false,
@@ -1408,6 +1420,31 @@ async fn webhook_rule_dispatch_can_be_scoped_to_one_rule() {
         .unwrap();
     assert_eq!(broad_preview.len(), 1);
     assert_eq!(broad_preview[0].rule_id, first_rule_id);
+
+    let broad_dispatch = state
+        .dispatch_webhook_rules(
+            &crate::model_webhook_rules::WebhookRuleDispatchRequest {
+                rule_id: None,
+                event_kind: "interval.30sec".to_string(),
+                event_id: Some("event-1".to_string()),
+                limit: Some(1),
+                dry_run: Some(false),
+                preview_hash: broad_preview[0].review_preview_hash.clone(),
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(broad_dispatch.len(), 1);
+    assert_eq!(broad_dispatch[0].rule_id, first_rule_id);
+    assert_eq!(broad_dispatch[0].status, "queued");
+    if let Repository::Memory(memory) = &state.repo {
+        assert!(
+            memory.webhook_events.read().await.is_empty(),
+            "manual dispatch must not defer broad rule re-evaluation to the worker"
+        );
+    }
 
     let scoped_preview = state
         .dispatch_webhook_rules(
@@ -1480,7 +1517,7 @@ async fn webhook_rule_dispatch_generated_event_id_can_be_confirmed_when_reused()
             name: "generated-event-webhook".to_string(),
             enabled: true,
             expression: "interval.30sec && tag:edge".to_string(),
-            target: "http://127.0.0.1:9/generated-event-webhook".to_string(),
+            target: "https://hooks.acme.com/generated-event-webhook".to_string(),
             body_template: "{rule.name} {event.id}".to_string(),
             signing_secret: None,
             clear_signing_secret: false,
@@ -1551,7 +1588,10 @@ async fn webhook_rule_dispatch_generated_event_id_can_be_confirmed_when_reused()
         .unwrap();
     assert_eq!(dispatch.len(), 1);
     assert_eq!(dispatch[0].event_id, reviewed_event_id);
-    assert_eq!(dispatch[0].status, "event_logged");
+    assert_eq!(dispatch[0].status, "queued");
+    if let Repository::Memory(memory) = &state.repo {
+        assert!(memory.webhook_events.read().await.is_empty());
+    }
 }
 
 fn alert_test_state(repo: Repository) -> AppState {

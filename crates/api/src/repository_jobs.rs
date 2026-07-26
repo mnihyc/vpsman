@@ -1024,6 +1024,28 @@ fn job_approval_matches_search(approval: &JobApprovalView, needle: &str) -> bool
         || approval.risk.to_ascii_lowercase().contains(needle)
 }
 
+fn job_approval_allows_dispatch(
+    approvals: &[JobApprovalView],
+    approval_id: Option<Uuid>,
+    job_id: Uuid,
+    payload_hash: &str,
+    request_fingerprint: Option<&str>,
+) -> bool {
+    approval_id.is_none_or(|approval_id| {
+        approvals
+            .iter()
+            .find(|approval| approval.id == approval_id)
+            .is_some_and(|approval| {
+                approval.job_id == job_id
+                    && approval.status == "approved"
+                    && approval.payload_hash == payload_hash
+                    && request_fingerprint.is_some_and(|fingerprint| {
+                        approval.request_fingerprint.as_str() == fingerprint
+                    })
+            })
+    })
+}
+
 fn aggregate_job_status_from_targets(targets: &[JobTargetView]) -> &'static str {
     let statuses = targets
         .iter()
@@ -1711,6 +1733,9 @@ impl Repository {
                     .find(|approval| approval.id == approval_id)
                     .ok_or_else(|| anyhow::anyhow!("job_approval_not_found"))?;
                 if approval.status != "pending" {
+                    if approval.status == status {
+                        return Ok(approval.clone());
+                    }
                     bail!("job_approval_not_pending");
                 }
                 approval.status = status.to_string();
@@ -1778,15 +1803,15 @@ impl Repository {
                 .fetch_optional(&mut *tx)
                 .await?;
                 let Some(row) = updated else {
-                    let exists: Option<Uuid> =
-                        sqlx::query_scalar("SELECT id FROM job_approvals WHERE id = $1")
-                            .bind(approval_id)
-                            .fetch_optional(&mut *tx)
-                            .await?;
-                    if exists.is_some() {
-                        bail!("job_approval_not_pending");
+                    tx.rollback().await?;
+                    let Some((existing, _)) = self.get_job_approval_request(approval_id).await?
+                    else {
+                        bail!("job_approval_not_found");
+                    };
+                    if existing.status == status {
+                        return Ok(existing);
                     }
-                    bail!("job_approval_not_found");
+                    bail!("job_approval_not_pending");
                 };
                 let updated = job_approval_from_row(row)?;
                 let audit = job_approval_audit(
@@ -2369,6 +2394,32 @@ impl Repository {
             resolved_targets,
             None,
             &[],
+            None,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn record_dispatching_job_for_approval(
+        &self,
+        job_id: Uuid,
+        request: &CreateJobRequest,
+        command_hash: &str,
+        request_fingerprint: &str,
+        operator: &AuthContext,
+        resolved_targets: &[String],
+        approval_id: Uuid,
+    ) -> Result<Uuid> {
+        self.record_dispatching_job_with_source(
+            job_id,
+            request,
+            command_hash,
+            request_fingerprint,
+            operator,
+            resolved_targets,
+            None,
+            &[],
+            Some(approval_id),
         )
         .await
     }
@@ -2382,6 +2433,7 @@ impl Repository {
         operator: &AuthContext,
         resolved_targets: &[String],
         precompleted_targets: &[PrecompletedJobTarget],
+        approval_id: Option<Uuid>,
     ) -> Result<Uuid> {
         self.record_dispatching_job_with_source(
             job_id,
@@ -2392,6 +2444,7 @@ impl Repository {
             resolved_targets,
             None,
             precompleted_targets,
+            approval_id,
         )
         .await
     }
@@ -2416,6 +2469,7 @@ impl Repository {
             resolved_targets,
             Some(source_schedule_id),
             &[],
+            None,
         )
         .await
     }
@@ -2440,6 +2494,7 @@ impl Repository {
             resolved_targets,
             Some(source_schedule_id),
             precompleted_targets,
+            None,
         )
         .await
     }
@@ -2454,6 +2509,7 @@ impl Repository {
         resolved_targets: &[String],
         source_schedule_id: Option<Uuid>,
         precompleted_targets: &[PrecompletedJobTarget],
+        approval_id: Option<Uuid>,
     ) -> Result<Uuid> {
         let command_type = request.command_type_label().to_string();
         let metadata = json!({
@@ -2466,6 +2522,7 @@ impl Repository {
             "force_unprivileged": request.force_unprivileged,
             "rollout": request.rollout,
             "source_schedule_id": source_schedule_id,
+            "approval_id": approval_id,
             "operator_id": operator.operator.id,
             "operator_username": operator.operator.username,
             "operator_role": operator.operator.role,
@@ -2522,6 +2579,13 @@ impl Repository {
                         .write()
                         .await
                         .insert(job_id, schedule_id);
+                }
+                if let Some(approval_id) = approval_id {
+                    memory
+                        .job_approval_ids
+                        .write()
+                        .await
+                        .insert(job_id, approval_id);
                 }
                 if let Some(pending) = pending_runtime_config.as_ref() {
                     queue_runtime_config_apply_memory_state(
@@ -2680,9 +2744,9 @@ impl Repository {
                     INSERT INTO jobs (
                         id, actor_id, command_type, privileged, status,
                         target_count, payload_hash, operation, source_schedule_id, request_fingerprint,
-                        max_timeout_secs
+                        max_timeout_secs, approval_id
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                     "#,
                 )
                 .bind(job_id)
@@ -2696,6 +2760,7 @@ impl Repository {
                 .bind(source_schedule_id)
                 .bind(request_fingerprint)
                 .bind(request.max_timeout_secs.unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS) as i64)
+                .bind(approval_id)
                 .execute(&mut *tx)
                 .await?;
                 if let Some(pending) = pending_runtime_config.as_ref() {
@@ -2879,6 +2944,9 @@ impl Repository {
                 let source_schedule_ids = memory.job_source_schedule_ids.read().await.clone();
                 let timeouts = memory.job_timeouts.read().await.clone();
                 let jobs = memory.jobs.read().await.clone();
+                let approvals = memory.job_approvals.read().await.clone();
+                let approval_ids = memory.job_approval_ids.read().await.clone();
+                let request_fingerprints = memory.job_request_fingerprints.read().await.clone();
                 let target_snapshot = memory.job_targets.read().await.clone();
                 let rollouts = memory.job_rollouts.read().await.clone();
                 let rollout_targets = memory.job_rollout_targets.read().await.clone();
@@ -2919,6 +2987,15 @@ impl Repository {
                     let Some(job) = jobs.iter().find(|job| job.id == target.job_id) else {
                         continue;
                     };
+                    if !job_approval_allows_dispatch(
+                        &approvals,
+                        approval_ids.get(&job.id).copied(),
+                        job.id,
+                        &job.payload_hash,
+                        request_fingerprints.get(&job.id).map(String::as_str),
+                    ) {
+                        continue;
+                    }
                     if let Some(rollout) = rollouts.iter().find(|rollout| {
                         rollout.job_id == target.job_id && rollout.completed_at.is_none()
                     }) {
@@ -3007,6 +3084,18 @@ impl Repository {
                               AND job.completed_at IS NULL
                               AND job.status IN ('queued', 'running')
                               AND (
+                                job.approval_id IS NULL
+                                OR EXISTS (
+                                  SELECT 1
+                                  FROM job_approvals approval
+                                  WHERE approval.id = job.approval_id
+                                    AND approval.job_id = job.id
+                                    AND approval.status = 'approved'
+                                    AND approval.payload_hash = job.payload_hash
+                                    AND approval.request_fingerprint = job.request_fingerprint
+                                )
+                              )
+                              AND (
                                 NOT EXISTS (
                                   SELECT 1
                                   FROM job_rollouts rollout
@@ -3085,6 +3174,19 @@ impl Repository {
                                       AND earlier_target.status IN ('queued', 'dispatching')
                                       AND earlier_job.completed_at IS NULL
                                       AND earlier_job.status IN ('queued', 'running')
+                                      AND (
+                                        earlier_job.approval_id IS NULL
+                                        OR EXISTS (
+                                          SELECT 1
+                                          FROM job_approvals earlier_approval
+                                          WHERE earlier_approval.id = earlier_job.approval_id
+                                            AND earlier_approval.job_id = earlier_job.id
+                                            AND earlier_approval.status = 'approved'
+                                            AND earlier_approval.payload_hash = earlier_job.payload_hash
+                                            AND earlier_approval.request_fingerprint
+                                              = earlier_job.request_fingerprint
+                                        )
+                                      )
                                       AND COALESCE(earlier_job.operation ->> 'type', '') = ANY($3::text[])
                                       AND (
                                         (
@@ -3150,6 +3252,19 @@ impl Repository {
                                       AND earlier_target.status IN ('queued', 'dispatching')
                                       AND earlier_job.completed_at IS NULL
                                       AND earlier_job.status IN ('queued', 'running')
+                                      AND (
+                                        earlier_job.approval_id IS NULL
+                                        OR EXISTS (
+                                          SELECT 1
+                                          FROM job_approvals earlier_approval
+                                          WHERE earlier_approval.id = earlier_job.approval_id
+                                            AND earlier_approval.job_id = earlier_job.id
+                                            AND earlier_approval.status = 'approved'
+                                            AND earlier_approval.payload_hash = earlier_job.payload_hash
+                                            AND earlier_approval.request_fingerprint
+                                              = earlier_job.request_fingerprint
+                                        )
+                                      )
                                       AND (
                                         (
                                           earlier_target.status = 'queued'

@@ -97,6 +97,18 @@ export function PreferencesPanel({
   );
   const dirty = JSON.stringify(draft) !== JSON.stringify(preferences);
   const saveInFlight = preferencesSaving || localSavePending;
+  const draftValidationError =
+    validateTimezone(draft.timezone?.trim() || null) ??
+    validateDashboardLimits(
+      draft.dashboard_resource_top_limit,
+      draft.dashboard_network_top_limit,
+    ) ??
+    validateFleetTagVisibilityOverrides(
+      normalizeFleetTagVisibilityOverrides(
+        draft.fleet_tag_visibility_overrides,
+      ),
+    );
+  const saveDisabled = !dirty || saveInFlight || Boolean(draftValidationError);
 
   useEffect(() => {
     setDraft(preferences);
@@ -115,15 +127,8 @@ export function PreferencesPanel({
     const fleetTagVisibilityOverrides = normalizeFleetTagVisibilityOverrides(
       draft.fleet_tag_visibility_overrides,
     );
-    const validationError =
-      validateTimezone(timezone) ??
-      validateDashboardLimits(
-        draft.dashboard_resource_top_limit,
-        draft.dashboard_network_top_limit,
-      ) ??
-      validateFleetTagVisibilityOverrides(fleetTagVisibilityOverrides);
-    if (validationError) {
-      setLocalError(validationError);
+    if (draftValidationError) {
+      setLocalError(draftValidationError);
       return;
     }
     savePendingRef.current = true;
@@ -270,7 +275,8 @@ export function PreferencesPanel({
               </button>
               <button
                 className="primaryAction compactAction"
-                disabled={!dirty || saveInFlight}
+                disabled={saveDisabled}
+                title={draftValidationError ?? undefined}
                 type="submit"
               >
                 <Save size={16} />
@@ -303,6 +309,7 @@ export function PreferencesPanel({
               <label>
                 <span>Name display</span>
                 <select
+                  name="vps_name_display_mode"
                   value={draft.vps_name_display_mode}
                   onChange={(event) =>
                     setDraft((current) => ({
@@ -339,6 +346,7 @@ export function PreferencesPanel({
               <label className="checkLine inlineCheck">
                 <input
                   checked={draft.show_country_flags}
+                  name="show_country_flags"
                   onChange={(event) =>
                     setDraft((current) => ({
                       ...current,
@@ -364,6 +372,7 @@ export function PreferencesPanel({
               <div className="preferenceTagVisibilityToolbar">
                 <input
                   aria-label="Filter Fleet tag visibility"
+                  name="fleet_tag_visibility_filter"
                   onChange={(event) => setTagVisibilityFilter(event.target.value)}
                   placeholder="Filter tags"
                   value={tagVisibilityFilter}
@@ -401,6 +410,7 @@ export function PreferencesPanel({
                       <label className="tagVisibilityLine" key={tag.name}>
                         <input
                           checked={checked}
+                          name="fleet_tag_visibility"
                           onChange={(event) =>
                             setFleetTagVisibility(tag.name, event.target.checked)
                           }
@@ -443,6 +453,7 @@ export function PreferencesPanel({
                 <span>Display timezone</span>
                 <input
                   list="operator-timezones"
+                  name="timezone"
                   placeholder={browserTimezone}
                   value={draft.timezone ?? ""}
                   onChange={(event) =>
@@ -483,6 +494,7 @@ export function PreferencesPanel({
               <label>
                 <span>Console language</span>
                 <select
+                  name="language"
                   value={draft.language}
                   onChange={() =>
                     setDraft((current) => ({
@@ -515,6 +527,7 @@ export function PreferencesPanel({
               <label>
                 <span>Default expansion</span>
                 <select
+                  name="sidebar_subpanel_default"
                   value={draft.sidebar_subpanel_default}
                   onChange={(event) =>
                     setDraft((current) => ({
@@ -550,6 +563,7 @@ export function PreferencesPanel({
                 <span>Prompt display</span>
                 <select
                   aria-label="Review prompt display mode"
+                  name="review_prompt_mode"
                   value={draft.review_prompt_mode}
                   onChange={(event) =>
                     setDraft((current) => ({
@@ -596,6 +610,7 @@ export function PreferencesPanel({
                 <span>Default comparison</span>
                 <select
                   aria-label="Bulk output comparison default"
+                  name="bulk_output_compare_mode"
                   value={draft.bulk_output_compare_mode}
                   onChange={(event) =>
                     setDraft((current) => ({
@@ -652,6 +667,7 @@ export function PreferencesPanel({
                   <span>Resource top count</span>
                   <select
                     aria-label="Resource curve top count"
+                    name="dashboard_resource_top_limit"
                     value={draft.dashboard_resource_top_limit}
                     onChange={(event) =>
                       setDraft((current) => ({
@@ -671,6 +687,7 @@ export function PreferencesPanel({
                   <span>Network top count</span>
                   <select
                     aria-label="Network top count"
+                    name="dashboard_network_top_limit"
                     value={draft.dashboard_network_top_limit}
                     onChange={(event) =>
                       setDraft((current) => ({
@@ -691,6 +708,7 @@ export function PreferencesPanel({
                 <span>Curve exclusions</span>
                 <textarea
                   aria-label="Home telemetry curve exclusions"
+                  name="dashboard_curve_exclusions"
                   onChange={(event) =>
                     setDraft((current) => ({
                       ...current,
@@ -807,7 +825,8 @@ export function PreferencesPanel({
             </button>
             <button
               className="primaryAction"
-              disabled={!dirty || saveInFlight}
+              disabled={saveDisabled}
+              title={draftValidationError ?? undefined}
               type="submit"
             >
               <Save size={18} />

@@ -94,6 +94,7 @@ pub(crate) struct MemoryState {
     pub(crate) job_rollout_targets: Arc<RwLock<HashMap<(Uuid, String), u16>>>,
     pub(crate) job_approvals: Arc<RwLock<Vec<JobApprovalView>>>,
     pub(crate) job_approval_requests: Arc<RwLock<HashMap<Uuid, CreateJobRequest>>>,
+    pub(crate) job_approval_ids: Arc<RwLock<HashMap<Uuid, Uuid>>>,
     pub(crate) command_templates: Arc<RwLock<Vec<CommandTemplateView>>>,
     pub(crate) job_targets: Arc<RwLock<Vec<JobTargetView>>>,
     pub(crate) job_outputs: Arc<RwLock<Vec<JobOutputView>>>,

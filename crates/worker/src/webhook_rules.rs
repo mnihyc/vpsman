@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{Duration as ChronoDuration, Utc};
 use hmac::{Hmac, Mac};
-use reqwest::{redirect::Policy, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::Sha256;
@@ -15,6 +14,7 @@ use vpsman_common::{
     WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED, WEBHOOK_RULE_DELIVERY_STATUS_FAILED,
     WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
 };
+use vpsman_server_core::prepare_webhook_target;
 
 use crate::actor_authority::actor_authorized;
 
@@ -76,6 +76,7 @@ impl Default for WebhookRuleWorkerConfig {
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) struct WebhookRuleWorkerRun {
     pub(crate) materialized: usize,
+    pub(crate) legacy_manual_events_skipped: usize,
     pub(crate) processed: usize,
     pub(crate) delivered: usize,
     pub(crate) failed: usize,
@@ -152,6 +153,13 @@ struct EventRow {
 }
 
 #[derive(Clone, Debug)]
+struct SkippedLegacyManualEvent {
+    id: Uuid,
+    kind: String,
+    event_id: String,
+}
+
+#[derive(Clone, Debug)]
 struct DeliveryOutcome {
     id: Uuid,
     rule_id: Uuid,
@@ -178,13 +186,15 @@ pub(crate) async fn process_webhook_rules(
 ) -> Result<WebhookRuleWorkerRun> {
     ensure_event_partitions(pool).await?;
     let materialized = materialize_interval_events(pool, config).await?;
-    let event_deliveries = process_webhook_events(pool, config).await?;
+    let (event_deliveries, legacy_manual_events_skipped) =
+        process_webhook_events(pool, config).await?;
     let (processed, delivered, failed) = process_queued_deliveries(pool, config).await?;
     let pruned = drop_old_event_partitions(pool, config).await?
         + prune_default_partition_rows(pool, config).await?
         + prune_deliveries(pool, config).await?;
     Ok(WebhookRuleWorkerRun {
         materialized: materialized + event_deliveries,
+        legacy_manual_events_skipped,
         processed,
         delivered,
         failed,
@@ -204,11 +214,7 @@ async fn materialize_interval_events(
     let mut materialized = 0_usize;
     for &(event_kind, bucket_secs) in INTERVAL_EVENTS {
         let event_id = format!("{event_kind}:{}", now - now.rem_euclid(bucket_secs));
-        if !rules.iter().any(|rule| {
-            rule.expression
-                .to_ascii_lowercase()
-                .contains(&event_kind.to_ascii_lowercase())
-        }) {
+        if !rules_reference_event(&rules, event_kind)? {
             continue;
         }
         if insert_webhook_event(
@@ -234,41 +240,92 @@ async fn materialize_interval_events(
 }
 
 async fn list_enabled_rules(pool: &PgPool, limit: i64) -> Result<Vec<RuleRow>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT
-            id,
-            actor_id,
-            name,
-            expression,
-            target,
-            body_template,
-            cooldown_secs
-        FROM webhook_rules
-        WHERE enabled = TRUE
-        ORDER BY updated_at ASC, id ASC
-        LIMIT $1
-        "#,
-    )
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
-    rows.into_iter()
-        .map(|row| {
-            Ok(RuleRow {
-                id: row.try_get("id")?,
-                actor_id: row.try_get("actor_id")?,
-                name: row.try_get("name")?,
-                expression: row.try_get("expression")?,
-                target: row.try_get("target")?,
-                body_template: row.try_get("body_template")?,
-                cooldown_secs: row.try_get("cooldown_secs")?,
-            })
-        })
-        .collect()
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    let rules = list_enabled_rules_in_tx(&mut tx, limit).await?;
+    tx.commit().await?;
+    Ok(rules)
 }
 
-async fn list_visible_vps(pool: &PgPool) -> Result<Vec<VpsRow>> {
+async fn list_enabled_rules_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    limit: i64,
+) -> Result<Vec<RuleRow>> {
+    let page_limit = limit.clamp(1, 1000);
+    let mut cursor = None;
+    let mut rules = Vec::new();
+    loop {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id,
+                actor_id,
+                name,
+                expression,
+                target,
+                body_template,
+                cooldown_secs
+            FROM webhook_rules
+            WHERE enabled = TRUE
+              AND ($1::uuid IS NULL OR id > $1)
+            ORDER BY id ASC
+            LIMIT $2
+            "#,
+        )
+        .bind(cursor)
+        .bind(page_limit)
+        .fetch_all(&mut **tx)
+        .await?;
+        let page = rows
+            .into_iter()
+            .map(|row| {
+                Ok(RuleRow {
+                    id: row.try_get("id")?,
+                    actor_id: row.try_get("actor_id")?,
+                    name: row.try_get("name")?,
+                    expression: row.try_get("expression")?,
+                    target: row.try_get("target")?,
+                    body_template: row.try_get("body_template")?,
+                    cooldown_secs: row.try_get("cooldown_secs")?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let next_cursor = next_enabled_rule_cursor(&page, page_limit as usize);
+        rules.extend(page);
+        let Some(next_cursor) = next_cursor else {
+            break;
+        };
+        anyhow::ensure!(
+            cursor.is_none_or(|previous| next_cursor > previous),
+            "enabled webhook rule pagination cursor did not advance"
+        );
+        cursor = Some(next_cursor);
+    }
+    Ok(rules)
+}
+
+fn next_enabled_rule_cursor(page: &[RuleRow], page_limit: usize) -> Option<Uuid> {
+    (page.len() == page_limit)
+        .then(|| page.last().map(|rule| rule.id))
+        .flatten()
+}
+
+fn rules_reference_event(rules: &[RuleRow], event_kind: &str) -> Result<bool> {
+    let event_kind = event_kind.to_ascii_lowercase();
+    for rule in rules {
+        let expression = parse_expression(&rule.expression)
+            .map_err(anyhow::Error::msg)?
+            .context("webhook rule expression is empty")?;
+        if expression_referenced_events(&expression).contains(&event_kind) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+async fn list_visible_vps(tx: &mut Transaction<'_, Postgres>) -> Result<Vec<VpsRow>> {
     let rows = sqlx::query(
         r#"
         SELECT
@@ -291,7 +348,7 @@ async fn list_visible_vps(pool: &PgPool) -> Result<Vec<VpsRow>> {
         ORDER BY c.id
         "#,
     )
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await?;
     rows.into_iter()
         .map(|row| {
@@ -439,8 +496,14 @@ pub(crate) async fn insert_webhook_event_in_tx(
     Ok(false)
 }
 
-async fn process_webhook_events(pool: &PgPool, config: WebhookRuleWorkerConfig) -> Result<usize> {
+async fn process_webhook_events(
+    pool: &PgPool,
+    config: WebhookRuleWorkerConfig,
+) -> Result<(usize, usize)> {
     let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *tx)
+        .await?;
     let rows = sqlx::query(
         r#"
         SELECT
@@ -464,13 +527,26 @@ async fn process_webhook_events(pool: &PgPool, config: WebhookRuleWorkerConfig) 
     .await?;
     if rows.is_empty() {
         tx.commit().await?;
-        return Ok(0);
+        return Ok((0, 0));
     }
-    let rules = list_enabled_rules(pool, config.materialize_limit).await?;
-    let vps_rows = list_visible_vps(pool).await?;
+    let rules = list_enabled_rules_in_tx(&mut tx, config.materialize_limit).await?;
+    let vps_rows = list_visible_vps(&mut tx).await?;
     let mut inserted = 0_usize;
+    let mut skipped_legacy_manual_events = Vec::new();
     for row in rows {
         let event = event_from_row(row)?;
+        if is_legacy_broad_manual_dispatch(&event) {
+            skipped_legacy_manual_events.push(SkippedLegacyManualEvent {
+                id: event.id,
+                kind: event.kind.clone(),
+                event_id: event.event_id.clone(),
+            });
+            sqlx::query("UPDATE webhook_events SET processed_at = now() WHERE id = $1")
+                .bind(event.id)
+                .execute(&mut *tx)
+                .await?;
+            continue;
+        }
         for rule in &rules {
             let candidates = event_candidate_for_rule(rule, &event, &vps_rows)?;
             let Some(candidate) = candidates else {
@@ -485,8 +561,50 @@ async fn process_webhook_events(pool: &PgPool, config: WebhookRuleWorkerConfig) 
             .execute(&mut *tx)
             .await?;
     }
+    if !skipped_legacy_manual_events.is_empty() {
+        insert_legacy_manual_event_skip_audit(&mut tx, &skipped_legacy_manual_events).await?;
+    }
+    let skipped_count = skipped_legacy_manual_events.len();
     tx.commit().await?;
-    Ok(inserted)
+    Ok((inserted, skipped_count))
+}
+
+fn is_legacy_broad_manual_dispatch(event: &EventRow) -> bool {
+    event
+        .payload
+        .pointer("/event/source")
+        .and_then(Value::as_str)
+        .is_some_and(|source| source == "manual_dispatch")
+}
+
+async fn insert_legacy_manual_event_skip_audit(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    events: &[SkippedLegacyManualEvent],
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs (
+            id, actor_id, action, target, command_hash, metadata
+        )
+        VALUES ($1, NULL, $2, $3, NULL, $4)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind("webhook.legacy_manual_dispatch_events_skipped")
+    .bind("webhook_events")
+    .bind(json!({
+        "worker": "webhook_rule_worker",
+        "skipped_count": events.len(),
+        "reason": "legacy broad manual dispatch did not persist its reviewed candidate set; skipped fail-closed",
+        "events": events.iter().map(|event| json!({
+            "id": event.id,
+            "kind": &event.kind,
+            "event_id": &event.event_id,
+        })).collect::<Vec<_>>(),
+    }))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -805,7 +923,6 @@ async fn process_queued_deliveries(
     .fetch_all(pool)
     .await?;
 
-    let client = webhook_client(config.webhook_timeout_secs)?;
     let mut outcomes = Vec::new();
     for row in rows {
         let delivery = delivery_from_row(row)?;
@@ -851,7 +968,7 @@ async fn process_queued_deliveries(
             if actor_authorized(pool, delivery.actor_id, "operator", &["integrations:write"])
                 .await?
             {
-                deliver_webhook(&client, &delivery).await
+                deliver_webhook(&delivery, config.webhook_timeout_secs).await
             } else {
                 Err(anyhow::anyhow!("actor_authority_revoked"))
             };
@@ -962,26 +1079,33 @@ async fn webhook_rule_enabled(pool: &PgPool, rule_id: Uuid) -> Result<bool> {
     Ok(enabled)
 }
 
-async fn deliver_webhook(client: &reqwest::Client, delivery: &DeliveryRow) -> Result<()> {
-    let url = validate_webhook_url(&delivery.target)?;
-    let body = serde_json::to_vec(&delivery.payload).context("failed to encode webhook payload")?;
-    let mut request = client
-        .post(url)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .header(WEBHOOK_DELIVERY_HEADER, delivery.id.to_string())
-        .header(WEBHOOK_EVENT_HEADER, delivery.event_kind.trim())
-        .body(body.clone());
-    if let Some(secret) = delivery.signing_secret.as_deref() {
-        request = request.header(WEBHOOK_SIGNATURE_HEADER, webhook_signature(secret, &body)?);
-    }
-    let response = request.send().await.context("webhook request failed")?;
-    let status = response.status();
-    anyhow::ensure!(
-        status.is_success(),
-        "webhook returned non-success status {}",
-        status.as_u16()
-    );
-    Ok(())
+async fn deliver_webhook(delivery: &DeliveryRow, webhook_timeout_secs: u64) -> Result<()> {
+    let timeout = Duration::from_secs(webhook_timeout_secs.clamp(1, 60));
+    tokio::time::timeout(timeout, async {
+        let target = prepare_webhook_target(&delivery.target, timeout).await?;
+        let body =
+            serde_json::to_vec(&delivery.payload).context("failed to encode webhook payload")?;
+        let mut request = target
+            .client()
+            .post(target.url().clone())
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(WEBHOOK_DELIVERY_HEADER, delivery.id.to_string())
+            .header(WEBHOOK_EVENT_HEADER, delivery.event_kind.trim())
+            .body(body.clone());
+        if let Some(secret) = delivery.signing_secret.as_deref() {
+            request = request.header(WEBHOOK_SIGNATURE_HEADER, webhook_signature(secret, &body)?);
+        }
+        let response = request.send().await.context("webhook request failed")?;
+        let status = response.status();
+        anyhow::ensure!(
+            status.is_success(),
+            "webhook returned non-success status {}",
+            status.as_u16()
+        );
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .context("webhook delivery timed out")?
 }
 
 fn webhook_signature(secret: &str, body: &[u8]) -> Result<String> {
@@ -1343,35 +1467,6 @@ fn delivery_from_row(row: sqlx::postgres::PgRow) -> Result<DeliveryRow> {
     })
 }
 
-fn webhook_client(max_timeout_secs: u64) -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(max_timeout_secs.clamp(1, 60)))
-        .redirect(Policy::none())
-        .build()
-        .context("failed to build webhook rule client")
-}
-
-fn validate_webhook_url(target: &str) -> Result<Url> {
-    let url = Url::parse(target.trim()).context("webhook target must be an absolute URL")?;
-    match url.scheme() {
-        "https" => {}
-        "http" if is_local_http_webhook(&url) => {}
-        _ => anyhow::bail!("webhook target must use https, or http for localhost only"),
-    }
-    anyhow::ensure!(
-        url.username().is_empty() && url.password().is_none(),
-        "webhook target must not embed credentials"
-    );
-    Ok(url)
-}
-
-fn is_local_http_webhook(url: &Url) -> bool {
-    matches!(
-        url.host_str(),
-        Some("localhost") | Some("127.0.0.1") | Some("::1") | Some("[::1]")
-    )
-}
-
 fn truncate_error(error: &str) -> String {
     error.chars().take(MAX_ERROR_BYTES).collect()
 }
@@ -1423,15 +1518,6 @@ mod tests {
     }
 
     #[test]
-    fn webhook_url_policy_allows_https_and_local_http_only() {
-        assert!(validate_webhook_url("https://hooks.example/vpsman").is_ok());
-        assert!(validate_webhook_url("http://localhost:9000/hook").is_ok());
-        assert!(validate_webhook_url("http://127.0.0.1:9000/hook").is_ok());
-        assert!(validate_webhook_url("http://hooks.example/hook").is_err());
-        assert!(validate_webhook_url("https://user:secret@example.com/hook").is_err());
-    }
-
-    #[test]
     fn delivery_error_is_bounded() {
         let error = "x".repeat(MAX_ERROR_BYTES + 100);
         assert_eq!(truncate_error(&error).len(), MAX_ERROR_BYTES);
@@ -1454,6 +1540,55 @@ mod tests {
     }
 
     #[test]
+    fn enabled_rule_pagination_advances_and_interval_checks_include_later_pages() {
+        let rule = |id, expression: &str| RuleRow {
+            id: Uuid::from_u128(id),
+            actor_id: None,
+            name: format!("rule-{id}"),
+            expression: expression.to_string(),
+            target: "https://hooks.acme.com/vpsman".to_string(),
+            body_template: String::new(),
+            cooldown_secs: 30,
+        };
+        let first_page = vec![rule(1, "tag:edge"), rule(2, "status = online")];
+        let final_page = vec![rule(3, "interval.30sec && tag:edge")];
+
+        assert_eq!(
+            next_enabled_rule_cursor(&first_page, 2),
+            Some(Uuid::from_u128(2))
+        );
+        assert_eq!(next_enabled_rule_cursor(&final_page, 2), None);
+
+        let all_rules = first_page.into_iter().chain(final_page).collect::<Vec<_>>();
+        assert!(rules_reference_event(&all_rules, "interval.30sec").unwrap());
+    }
+
+    #[test]
+    fn legacy_broad_manual_event_is_classified_for_fail_closed_skip() {
+        let event = EventRow {
+            id: Uuid::from_u128(7),
+            actor_id: None,
+            kind: "interval.30sec".to_string(),
+            event_id: "legacy-reviewed-event".to_string(),
+            event_predicates: vec!["interval.30sec".to_string()],
+            subject_client_ids: Vec::new(),
+            payload: json!({
+                "event": {
+                    "kind": "interval.30sec",
+                    "id": "legacy-reviewed-event",
+                    "source": "manual_dispatch",
+                }
+            }),
+            occurred_at_unix: 1,
+        };
+        assert!(is_legacy_broad_manual_dispatch(&event));
+
+        let mut automatic = event;
+        automatic.payload["event"]["source"] = Value::String("automatic".to_string());
+        assert!(!is_legacy_broad_manual_dispatch(&automatic));
+    }
+
+    #[test]
     fn webhook_signature_uses_payload_bytes() {
         let signature = webhook_signature("secret", br#"{"hello":"world"}"#).unwrap();
         assert_eq!(
@@ -1469,7 +1604,7 @@ mod tests {
             actor_id: None,
             name: "edge interval".to_string(),
             expression: "interval.30sec && tag:edge".to_string(),
-            target: "https://hooks.example/vpsman".to_string(),
+            target: "https://hooks.acme.com/vpsman".to_string(),
             body_template: "{event.kind} {vps.id}".to_string(),
             cooldown_secs: 30,
         };

@@ -127,6 +127,88 @@ test("refreshes a stored session before returning to sign in", async ({
   ).toHaveCount(0);
 });
 
+test("sign out revokes the bearer session and clears privilege before reauthentication", async ({
+  page,
+}) => {
+  await installAuthSessionApiMock(page);
+  await page.goto("/");
+
+  await page.getByLabel("Username").fill("session-admin");
+  await page.getByLabel("Password").fill("session-password-123");
+  await activate(page.getByRole("button", { name: "Sign in" }));
+  await expectAuthenticatedConsoleShell(page);
+
+  await activate(
+    page
+      .locator(".topbar")
+      .getByRole("button", { name: "Open privilege unlock" }),
+  );
+  const unlock = page.getByRole("dialog", { name: "Unlock privilege" });
+  await unlock.getByLabel(/privilege secret/i).fill("local-super-password");
+  await unlock
+    .getByLabel(/privilege salt/i)
+    .fill("00112233445566778899aabbccddeeff");
+  await activate(
+    unlock
+      .getByLabel("Unlock with privilege material")
+      .getByRole("button", { name: "Unlock", exact: true }),
+  );
+  await expect(
+    page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
+  ).toBeVisible();
+
+  const logoutRequest = page.waitForRequest("**/api/v1/auth/logout");
+  await activate(page.getByRole("button", { name: "Clear operator session" }));
+  const request = await logoutRequest;
+  expect(request.method()).toBe("POST");
+  expect(request.headers().authorization).toBe(`Bearer ${accessToken}`);
+  await expectOperatorAccessShell(page);
+  expect(await readSessionStorage(page)).toEqual({
+    access: null,
+    refresh: null,
+  });
+
+  await page.getByLabel("Username").fill("session-admin");
+  await page.getByLabel("Password").fill("session-password-123");
+  await activate(page.getByRole("button", { name: "Sign in" }));
+  await expectAuthenticatedConsoleShell(page);
+  await expect(
+    page
+      .locator(".topbar")
+      .getByRole("button", { name: "Open privilege unlock" }),
+  ).toBeVisible();
+  await expect(
+    page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
+  ).toHaveCount(0);
+});
+
+test("sign out clears local authentication when server revocation fails", async ({
+  page,
+}) => {
+  await installAuthSessionApiMock(page);
+  await page.unroute("**/api/v1/auth/logout");
+  await page.route("**/api/v1/auth/logout", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: { error: "operator_store_unavailable" },
+      status: 503,
+    });
+  });
+  await page.goto("/");
+
+  await page.getByLabel("Username").fill("session-admin");
+  await page.getByLabel("Password").fill("session-password-123");
+  await activate(page.getByRole("button", { name: "Sign in" }));
+  await expectAuthenticatedConsoleShell(page);
+  await activate(page.getByRole("button", { name: "Clear operator session" }));
+
+  await expectOperatorAccessShell(page);
+  expect(await readSessionStorage(page)).toEqual({
+    access: null,
+    refresh: null,
+  });
+});
+
 async function installAuthSessionApiMock(page: import("@playwright/test").Page) {
   await page.route("**/api/v1/auth/bootstrap-status", async (route) => {
     await route.fulfill({
@@ -153,6 +235,9 @@ async function installAuthSessionApiMock(page: import("@playwright/test").Page) 
         token_type: "Bearer",
       },
     });
+  });
+  await page.route("**/api/v1/auth/logout", async (route) => {
+    await route.fulfill({ status: 204 });
   });
   await page.route("**/api/v1/auth/refresh", async (route) => {
     const body = (await route.request().postDataJSON()) as {

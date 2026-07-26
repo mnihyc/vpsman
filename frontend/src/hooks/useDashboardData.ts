@@ -71,6 +71,7 @@ export function useDashboardData(activeView: ActiveView) {
   const inventoryReloadTimer = useRef<number | null>(null);
   const topologyReloadTimer = useRef<number | null>(null);
   const refreshAuthRef = useRef<Promise<void> | null>(null);
+  const authGenerationRef = useRef(0);
   const activeViewRef = useRef(activeView);
 
   useEffect(() => {
@@ -78,6 +79,7 @@ export function useDashboardData(activeView: ActiveView) {
   }, [activeView]);
 
   const forceAuthRequired = useCallback(() => {
+    authGenerationRef.current += 1;
     clearStoredAuthSession();
     setApiToken("");
     setAuthRequired(true);
@@ -92,17 +94,24 @@ export function useDashboardData(activeView: ActiveView) {
       forceAuthRequired();
       return Promise.resolve();
     }
+    const authGeneration = authGenerationRef.current;
     refreshAuthRef.current = apiPost<AuthResponse>(
       "/api/v1/auth/refresh",
       "",
       { refresh_token: refreshToken },
     )
       .then((auth) => {
+        if (authGeneration !== authGenerationRef.current) {
+          return;
+        }
         persistAuthSession(auth);
         setApiToken(auth.access_token);
         setAuthRequired(false);
       })
       .catch((error) => {
+        if (authGeneration !== authGenerationRef.current) {
+          return;
+        }
         if (isApiUnauthorized(error)) {
           forceAuthRequired();
         }
@@ -541,6 +550,7 @@ export function useDashboardData(activeView: ActiveView) {
 
   const handleAuth = useCallback(
     async (auth: AuthResponse) => {
+      authGenerationRef.current += 1;
       persistAuthSession(auth);
       access.setAuthenticatedOperator(auth.operator);
       setApiToken(auth.access_token);
@@ -550,6 +560,13 @@ export function useDashboardData(activeView: ActiveView) {
   );
 
   const clearSession = useCallback(() => {
+    const logoutToken = readStoredAccessToken() || apiToken;
+    if (logoutToken) {
+      void apiPost<void>("/api/v1/auth/logout", logoutToken, {}).catch(
+        () => undefined,
+      );
+    }
+    authGenerationRef.current += 1;
     clearStoredAuthSession();
     setApiToken("");
     setAuthRequired(true);
@@ -558,6 +575,7 @@ export function useDashboardData(activeView: ActiveView) {
     dashboardOverview.clearDashboardOverview();
   }, [
     access.clearOperator,
+    apiToken,
     dashboardOverview.clearDashboardOverview,
     fleet.clearFleet,
   ]);

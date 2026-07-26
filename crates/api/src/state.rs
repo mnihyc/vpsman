@@ -1,4 +1,10 @@
-use std::{net::SocketAddr, path::PathBuf, time::Duration};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::{OnceLock, RwLock as StdRwLock},
+    time::Duration,
+};
 
 use anyhow::{ensure, Result};
 use axum::http::HeaderMap;
@@ -28,9 +34,42 @@ use crate::{
 pub(crate) const DEFAULT_ARTIFACT_MAX_BYTES: usize = 128 * 1024 * 1024;
 const MIN_ARTIFACT_MAX_BYTES: usize = 1024 * 1024;
 const MAX_ARTIFACT_MAX_BYTES: usize = 4 * 1024 * 1024 * 1024;
-const DEFAULT_OPERATOR_AUTH_FAILED_ATTEMPT_LIMIT: i64 = 8;
-const DEFAULT_OPERATOR_AUTH_FAILED_ATTEMPT_WINDOW_SECS: u64 = 24 * 60 * 60;
-const DEFAULT_OPERATOR_AUTH_LOCKOUT_SECS: u64 = 24 * 60 * 60;
+const DEFAULT_OPERATOR_AUTH_USERNAME_FAILED_ATTEMPT_LIMIT: i64 = 8;
+const DEFAULT_OPERATOR_AUTH_IP_FAILED_ATTEMPT_LIMIT: i64 = 64;
+const DEFAULT_OPERATOR_AUTH_FAILED_ATTEMPT_WINDOW_SECS: u64 = 15 * 60;
+const DEFAULT_OPERATOR_AUTH_LOCKOUT_SECS: u64 = 15 * 60;
+static SUITE_CONFIG_LAST_KNOWN_GOOD: OnceLock<StdRwLock<HashMap<PathBuf, SuiteConfig>>> =
+    OnceLock::new();
+
+pub(crate) fn remember_suite_config(path: &Path, config: &SuiteConfig) {
+    let cache = SUITE_CONFIG_LAST_KNOWN_GOOD.get_or_init(|| StdRwLock::new(HashMap::new()));
+    if let Ok(mut cache) = cache.write() {
+        cache.insert(path.to_path_buf(), config.clone());
+    }
+}
+
+fn load_suite_config_last_known_good(path: &Path) -> Option<SuiteConfig> {
+    let cached = || {
+        SUITE_CONFIG_LAST_KNOWN_GOOD
+            .get()
+            .and_then(|cache| cache.read().ok())
+            .and_then(|cache| cache.get(path).cloned())
+    };
+    // `SuiteConfig::load_optional` intentionally treats a missing file as an
+    // empty/default config. That is correct at startup, but during hot reload
+    // an atomic replace can make the path briefly absent. Preserve the last
+    // valid runtime values across that gap.
+    if !path.exists() {
+        return cached().or_else(|| SuiteConfig::load_optional(path).ok());
+    }
+    match SuiteConfig::load_optional(path) {
+        Ok(config) => {
+            remember_suite_config(path, &config);
+            Some(config)
+        }
+        Err(_) => cached(),
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -70,8 +109,8 @@ pub(crate) struct OperatorAuthThrottleConfig {
 impl Default for OperatorAuthThrottleConfig {
     fn default() -> Self {
         Self {
-            username_failed_attempt_limit: DEFAULT_OPERATOR_AUTH_FAILED_ATTEMPT_LIMIT,
-            ip_failed_attempt_limit: DEFAULT_OPERATOR_AUTH_FAILED_ATTEMPT_LIMIT,
+            username_failed_attempt_limit: DEFAULT_OPERATOR_AUTH_USERNAME_FAILED_ATTEMPT_LIMIT,
+            ip_failed_attempt_limit: DEFAULT_OPERATOR_AUTH_IP_FAILED_ATTEMPT_LIMIT,
             failed_attempt_window_secs: DEFAULT_OPERATOR_AUTH_FAILED_ATTEMPT_WINDOW_SECS,
             lockout_secs: DEFAULT_OPERATOR_AUTH_LOCKOUT_SECS,
         }
@@ -110,7 +149,7 @@ impl DispatcherRuntimeConfig {
 
 impl AppState {
     fn current_suite_config(&self) -> Option<SuiteConfig> {
-        SuiteConfig::load_optional(&self.suite_config_path).ok()
+        load_suite_config_last_known_good(&self.suite_config_path)
     }
 
     pub(crate) fn dispatcher_runtime_config(&self) -> DispatcherRuntimeConfig {
@@ -952,4 +991,28 @@ fn merge_evidence(base: Value, extra: Value) -> Value {
         }
     }
     Value::Object(merged)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn invalid_hot_reload_keeps_the_last_known_good_suite_config() {
+        let path = std::env::temp_dir().join(format!(
+            "vpsman-suite-config-last-known-good-{}.toml",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, "version = 1\n\n[capacity]\ndispatcher_batch = 17\n").unwrap();
+        let initial = super::load_suite_config_last_known_good(&path).unwrap();
+        assert_eq!(initial.capacity.dispatcher_batch, Some(17));
+
+        std::fs::remove_file(&path).unwrap();
+        let missing_fallback = super::load_suite_config_last_known_good(&path).unwrap();
+        assert_eq!(missing_fallback.capacity.dispatcher_batch, Some(17));
+
+        std::fs::write(&path, "version = 1\n\n[capacity\n").unwrap();
+        let fallback = super::load_suite_config_last_known_good(&path).unwrap();
+        assert_eq!(fallback.capacity.dispatcher_batch, Some(17));
+
+        let _ = std::fs::remove_file(path);
+    }
 }

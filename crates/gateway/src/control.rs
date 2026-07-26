@@ -401,7 +401,11 @@ where
     S: AsyncWrite + Unpin,
 {
     let message = error.to_string();
-    let status = if message.contains("not configured") {
+    let status = if message.contains("not configured")
+        || message.contains(&format!(
+            "{:?}",
+            PrivilegeAssertionError::ReplayProtectionSaturated
+        )) {
         "503 Service Unavailable"
     } else if message.contains(&format!("{:?}", PrivilegeAssertionError::Replay)) {
         "409 Conflict"

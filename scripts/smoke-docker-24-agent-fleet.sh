@@ -171,6 +171,7 @@ docker run -d \
   -e VPSMAN_PUBLIC_GATEWAY_ENDPOINTS="primary=$gateway_addr=10" \
   -e VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX="$gateway_public_hex" \
   -e VPSMAN_BACKUP_OBJECT_STORE_DIR="$object_store_dir" \
+  -e VPSMAN_DEV_ALLOW_LOOPBACK_WEBHOOKS=1 \
   -e VPSMAN_SUITE_CONFIG="$VPSMAN_SUITE_CONFIG" \
   -e VPSMAN_ENROLLMENT_TELEMETRY_LIGHT_SECS=2 \
   -e VPSMAN_ENROLLMENT_TELEMETRY_FULL_SECS=4 \
@@ -846,6 +847,7 @@ if ! env \
   VPSMAN_POSTGRES_URL="$postgres_url" \
   VPSMAN_MIGRATIONS_DIR="$ROOT_DIR/migrations" \
   VPSMAN_BACKUP_OBJECT_STORE_DIR="$object_store_dir" \
+  VPSMAN_DEV_ALLOW_LOOPBACK_WEBHOOKS=1 \
   target/debug/vpsman-worker --once --worker-id docker-fleet-artifact-cleanup --worker-lease-secs 60 \
   >"$cleanup_worker_log" 2>&1; then
   echo "artifact cleanup worker failed" >&2

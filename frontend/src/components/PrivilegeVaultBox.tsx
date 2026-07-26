@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { LockKeyhole, Save, ShieldCheck, Trash2 } from "lucide-react";
 import { ActionFeedback } from "./ActionFeedback";
 import { ConfirmationPrompt } from "./ConfirmationPrompt";
@@ -7,6 +7,7 @@ import {
   clearPrivilegeVault,
   hasPrivilegeVault,
   loadPrivilegeVault,
+  MIN_VAULT_PASSPHRASE_LENGTH,
   savePrivilegeVault,
 } from "../vault";
 import { runPanelAction, shortHash } from "../utils";
@@ -51,6 +52,7 @@ export function PrivilegeVaultBox({
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [clearVaultPromptOpen, setClearVaultPromptOpen] = useState(false);
+  const vaultPassphraseHintId = useId();
   const privilegeStatus = privilegeMaterial
     ? "Unlocked"
     : vaultAvailable
@@ -260,6 +262,7 @@ export function PrivilegeVaultBox({
             <input
               aria-label={label("Vault passphrase")}
               autoComplete="off"
+              name="vault_unlock_passphrase"
               onChange={(event) => setUnlockPassphrase(event.target.value)}
               placeholder="local vault passphrase"
               type="password"
@@ -297,6 +300,7 @@ export function PrivilegeVaultBox({
               <input
                 aria-label={label("Super password")}
                 autoComplete="off"
+                name="privilege_secret"
                 onChange={(event) => setSuperPassword(event.target.value)}
                 placeholder="enter privilege secret"
                 type="password"
@@ -308,6 +312,7 @@ export function PrivilegeVaultBox({
               <input
                 aria-label={label("Super salt hex")}
                 autoComplete="off"
+                name="privilege_salt_hex"
                 onChange={(event) => setSuperSaltHex(event.target.value)}
                 placeholder="paste 64-character hex salt"
                 value={superSaltHex}
@@ -317,6 +322,7 @@ export function PrivilegeVaultBox({
           <label className="checkLine vaultSaveOption">
             <input
               checked={saveToVault}
+              name="save_privilege_to_vault"
               onChange={(event) => setSaveToVault(event.target.checked)}
               type="checkbox"
             />
@@ -329,14 +335,24 @@ export function PrivilegeVaultBox({
             </span>
           </label>
           {saveToVault && (
-            <input
-              aria-label={label("New vault passphrase")}
-              autoComplete="off"
-              onChange={(event) => setVaultPassphrase(event.target.value)}
-              placeholder="new local vault passphrase"
-              type="password"
-              value={vaultPassphrase}
-            />
+            <>
+              <input
+                aria-describedby={vaultPassphraseHintId}
+                aria-label={label("New vault passphrase")}
+                autoComplete="off"
+                minLength={MIN_VAULT_PASSPHRASE_LENGTH}
+                name="new_vault_passphrase"
+                onChange={(event) => setVaultPassphrase(event.target.value)}
+                placeholder="new local vault passphrase"
+                type="password"
+                value={vaultPassphrase}
+              />
+              <small id={vaultPassphraseHintId}>
+                Use at least {MIN_VAULT_PASSPHRASE_LENGTH} characters. New vaults
+                use 600,000 PBKDF2-SHA256 iterations; existing vaults remain
+                unlockable with their recorded parameters.
+              </small>
+            </>
           )}
           <button
             className="primaryAction"
@@ -344,7 +360,8 @@ export function PrivilegeVaultBox({
               pending ||
               !superPassword ||
               !superSaltHex ||
-              (saveToVault && !vaultPassphrase)
+              (saveToVault &&
+                vaultPassphrase.length < MIN_VAULT_PASSPHRASE_LENGTH)
             }
             type="submit"
           >

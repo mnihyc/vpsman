@@ -28,12 +28,15 @@ pub enum PrivilegeAssertionError {
     InvalidAssertion,
     #[error("privilege assertion nonce was already used")]
     Replay,
+    #[error("privilege assertion replay protection is saturated")]
+    ReplayProtectionSaturated,
 }
 
 #[derive(Debug)]
 pub struct PrivilegeAssertionReplayCache {
     seen: HashMap<String, u64>,
     order: VecDeque<(String, u64)>,
+    max_entries: usize,
 }
 
 impl Default for PrivilegeAssertionReplayCache {
@@ -44,9 +47,11 @@ impl Default for PrivilegeAssertionReplayCache {
 
 impl PrivilegeAssertionReplayCache {
     pub fn new(max_entries: usize) -> Self {
+        let max_entries = max_entries.max(1);
         Self {
-            seen: HashMap::with_capacity(max_entries.max(1)),
+            seen: HashMap::with_capacity(max_entries),
             order: VecDeque::new(),
+            max_entries,
         }
     }
 
@@ -60,6 +65,12 @@ impl PrivilegeAssertionReplayCache {
         let nonce_hex = nonce_hex.to_string();
         if self.seen.contains_key(&nonce_hex) {
             return Err(PrivilegeAssertionError::Replay);
+        }
+        if self.seen.len() >= self.max_entries {
+            // Never evict an unexpired nonce: doing so would turn a memory
+            // pressure defense into a replay window. Fail closed until an
+            // existing assertion expires.
+            return Err(PrivilegeAssertionError::ReplayProtectionSaturated);
         }
         self.seen.insert(nonce_hex.clone(), expires_unix);
         self.order.push_back((nonce_hex, expires_unix));
@@ -202,13 +213,13 @@ mod tests {
     }
 
     #[test]
-    fn privilege_assertion_replay_cache_keeps_unexpired_nonces_under_churn() {
+    fn privilege_assertion_replay_cache_fails_closed_at_its_hard_bound() {
         let verifier_key = [10_u8; 32];
         let intent = r#"{"action":"job.dispatch","target":"fleet"}"#;
         let intent_hash = payload_hash(intent.as_bytes());
         let mut replay_cache = PrivilegeAssertionReplayCache::new(2);
 
-        for nonce in [[1_u8; 16], [2_u8; 16], [3_u8; 16]] {
+        for nonce in [[1_u8; 16], [2_u8; 16]] {
             let assertion = sign_privilege_assertion(&verifier_key, &intent_hash, &nonce, 100, 300);
             assert_eq!(
                 verify_privilege_assertion(
@@ -221,6 +232,13 @@ mod tests {
                 Ok(intent_hash.clone())
             );
         }
+        let third = sign_privilege_assertion(&verifier_key, &intent_hash, &[3_u8; 16], 100, 300);
+        assert_eq!(
+            verify_privilege_assertion(&verifier_key, intent, &third, 120, &mut replay_cache),
+            Err(PrivilegeAssertionError::ReplayProtectionSaturated)
+        );
+        assert_eq!(replay_cache.seen.len(), 2);
+        assert_eq!(replay_cache.order.len(), 2);
 
         let first = sign_privilege_assertion(&verifier_key, &intent_hash, &[1_u8; 16], 100, 300);
         assert_eq!(

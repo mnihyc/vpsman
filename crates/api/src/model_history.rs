@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
-use vpsman_common::{DEFAULT_TELEMETRY_RETENTION_DAYS, DEFAULT_TELEMETRY_RETENTION_PRUNE_LIMIT};
+use vpsman_common::{
+    DEFAULT_TELEMETRY_RETENTION_DAYS, DEFAULT_TELEMETRY_RETENTION_PRUNE_LIMIT,
+    MIN_TRAFFIC_COUNTER_RETENTION_DAYS,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HistoryDomain {
@@ -7,6 +10,7 @@ pub(crate) enum HistoryDomain {
     SystemMetricRollups,
     TelemetryRollups,
     TelemetryNetworkRates,
+    TrafficCounterSamples,
     JobOutputs,
     BackupArtifacts,
     NetworkObservations,
@@ -16,11 +20,12 @@ pub(crate) enum HistoryDomain {
 }
 
 impl HistoryDomain {
-    pub(crate) const ALL: [Self; 10] = [
+    pub(crate) const ALL: [Self; 11] = [
         Self::AuditLogs,
         Self::SystemMetricRollups,
         Self::TelemetryRollups,
         Self::TelemetryNetworkRates,
+        Self::TrafficCounterSamples,
         Self::JobOutputs,
         Self::BackupArtifacts,
         Self::NetworkObservations,
@@ -35,6 +40,7 @@ impl HistoryDomain {
             Self::SystemMetricRollups => "system_metric_rollups",
             Self::TelemetryRollups => "telemetry_rollups",
             Self::TelemetryNetworkRates => "telemetry_network_rates",
+            Self::TrafficCounterSamples => "traffic_counter_samples",
             Self::JobOutputs => "job_outputs",
             Self::BackupArtifacts => "backup_artifacts",
             Self::NetworkObservations => "network_observations",
@@ -52,6 +58,7 @@ impl HistoryDomain {
             }
             "telemetry_rollups" | "telemetry" => Some(Self::TelemetryRollups),
             "telemetry_network_rates" => Some(Self::TelemetryNetworkRates),
+            "traffic_counter_samples" | "traffic_counters" => Some(Self::TrafficCounterSamples),
             "job_outputs" | "jobs" => Some(Self::JobOutputs),
             "backup_artifacts" | "backups" => Some(Self::BackupArtifacts),
             "network_observations" | "network" => Some(Self::NetworkObservations),
@@ -66,7 +73,7 @@ impl HistoryDomain {
         match self {
             Self::JobOutputs => 30,
             Self::SystemMetricRollups => 3650,
-            Self::TelemetryRollups | Self::TelemetryNetworkRates => {
+            Self::TelemetryRollups | Self::TelemetryNetworkRates | Self::TrafficCounterSamples => {
                 DEFAULT_TELEMETRY_RETENTION_DAYS
             }
             Self::NetworkObservations | Self::TopologyHistory => 180,
@@ -76,10 +83,17 @@ impl HistoryDomain {
         }
     }
 
+    pub(crate) fn minimum_retention_days(self) -> i32 {
+        match self {
+            Self::TrafficCounterSamples => MIN_TRAFFIC_COUNTER_RETENTION_DAYS,
+            _ => 1,
+        }
+    }
+
     pub(crate) fn default_prune_limit(self) -> i32 {
         match self {
             Self::JobOutputs | Self::NetworkObservations => 5_000,
-            Self::TelemetryRollups | Self::TelemetryNetworkRates => {
+            Self::TelemetryRollups | Self::TelemetryNetworkRates | Self::TrafficCounterSamples => {
                 DEFAULT_TELEMETRY_RETENTION_PRUNE_LIMIT
             }
             Self::SystemMetricRollups

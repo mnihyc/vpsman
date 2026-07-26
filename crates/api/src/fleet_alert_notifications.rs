@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
-use reqwest::{redirect::Policy, Url};
 use serde_json::json;
 use tokio::time::Duration;
 use uuid::Uuid;
@@ -13,7 +12,7 @@ use vpsman_common::{
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_PERMANENTLY_FAILED,
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_QUEUED,
 };
-use vpsman_server_core::operator_is_active_authorized;
+use vpsman_server_core::{operator_is_active_authorized, prepare_webhook_target};
 
 use crate::{
     fleet_alerts::{build_agent_alert_scopes, AgentAlertScope},
@@ -30,7 +29,7 @@ use crate::{
 
 const NOTIFICATION_WEBHOOK_TIMEOUT_SECS: u64 = 5;
 const NOTIFICATION_PROCESS_DRY_RUN_STATUS: &str = "delivery_dry_run";
-const NOTIFICATION_DELIVERY_LEASE_SECS: i64 = 300;
+const NOTIFICATION_DELIVERY_LEASE_MARGIN_SECS: i64 = 60;
 const MAX_NOTIFICATION_ERROR_BYTES: usize = 1024;
 const MAX_NOTIFICATION_DELIVERY_ATTEMPTS: i32 = 4;
 const NOTIFICATION_RETRY_BACKOFF_SECS: [i64; 3] = [60, 300, 1800];
@@ -146,12 +145,13 @@ impl AppState {
             .collect::<Vec<_>>();
         let expected_ids = delivery_ids.iter().copied().collect::<HashSet<_>>();
         let lease_id = Uuid::new_v4();
+        let lease_secs = notification_delivery_lease_secs(delivery_ids.len());
         let claimed_deliveries = self
             .repo
             .claim_fleet_alert_notification_deliveries_for_process(
                 &delivery_ids,
                 lease_id,
-                NOTIFICATION_DELIVERY_LEASE_SECS,
+                lease_secs,
             )
             .await?;
         let claimed_ids = claimed_deliveries
@@ -163,7 +163,6 @@ impl AppState {
             "fleet_alert_notification_process_claim_mismatch"
         );
         let mut processed = Vec::new();
-        let client = webhook_client()?;
         for delivery in claimed_deliveries {
             if !self
                 .repo
@@ -185,7 +184,7 @@ impl AppState {
                 .fleet_alert_delivery_actor_authorized(delivery.actor_id)
                 .await?
             {
-                deliver_notification(&client, &delivery).await
+                deliver_notification(&delivery).await
             } else {
                 Err(anyhow::anyhow!("actor_authority_revoked"))
             };
@@ -507,23 +506,12 @@ fn notification_process_preview_hash(
     Ok(payload_hash(&payload))
 }
 
-fn webhook_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(NOTIFICATION_WEBHOOK_TIMEOUT_SECS))
-        .redirect(Policy::none())
-        .build()
-        .context("failed to build fleet alert notification webhook client")
-}
-
-async fn deliver_notification(
-    client: &reqwest::Client,
-    delivery: &FleetAlertNotificationDeliveryView,
-) -> Result<()> {
+async fn deliver_notification(delivery: &FleetAlertNotificationDeliveryView) -> Result<()> {
     anyhow::ensure!(
         delivery.delivery_kind == "webhook",
         "fleet alert notification delivery kind is invalid"
     );
-    deliver_webhook_payload(client, delivery).await
+    deliver_webhook_payload(delivery).await
 }
 
 fn notification_next_retry_after_secs(attempt_count: i32) -> Option<i64> {
@@ -547,60 +535,50 @@ fn format_delivery_error(error: &anyhow::Error) -> String {
         .collect()
 }
 
-async fn deliver_webhook_payload(
-    client: &reqwest::Client,
-    delivery: &FleetAlertNotificationDeliveryView,
-) -> Result<()> {
-    let url = validate_webhook_url(&delivery.target)?;
-    let body = json!({
-        "schema": "vpsman.fleet_alert.webhook_delivery.v1",
-        "delivery": {
-            "id": delivery.id,
-            "channel_id": delivery.channel_id,
-            "channel_name": &delivery.channel_name,
-            "alert_id": &delivery.alert_id,
-            "alert_severity": &delivery.alert_severity,
-            "alert_category": &delivery.alert_category,
-            "dedupe_key": &delivery.dedupe_key,
-            "attempt": delivery.attempt_count.saturating_add(1),
-            "created_at": &delivery.created_at,
-        },
-        "payload": &delivery.payload,
-    });
-    let response = client
-        .post(url)
-        .json(&body)
-        .send()
-        .await
-        .context("webhook request failed")?;
-    let status = response.status();
-    anyhow::ensure!(
-        status.is_success(),
-        "webhook returned non-success status {}",
-        status.as_u16()
-    );
-    Ok(())
+async fn deliver_webhook_payload(delivery: &FleetAlertNotificationDeliveryView) -> Result<()> {
+    let timeout = Duration::from_secs(NOTIFICATION_WEBHOOK_TIMEOUT_SECS);
+    tokio::time::timeout(timeout, async {
+        let target = prepare_webhook_target(&delivery.target, timeout).await?;
+        let body = json!({
+            "schema": "vpsman.fleet_alert.webhook_delivery.v1",
+            "delivery": {
+                "id": delivery.id,
+                "channel_id": delivery.channel_id,
+                "channel_name": &delivery.channel_name,
+                "alert_id": &delivery.alert_id,
+                "alert_severity": &delivery.alert_severity,
+                "alert_category": &delivery.alert_category,
+                "dedupe_key": &delivery.dedupe_key,
+                "attempt": delivery.attempt_count.saturating_add(1),
+                "created_at": &delivery.created_at,
+            },
+            "payload": &delivery.payload,
+        });
+        let response = target
+            .client()
+            .post(target.url().clone())
+            .json(&body)
+            .send()
+            .await
+            .context("webhook request failed")?;
+        let status = response.status();
+        anyhow::ensure!(
+            status.is_success(),
+            "webhook returned non-success status {}",
+            status.as_u16()
+        );
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .context("fleet alert notification delivery timed out")?
 }
 
-fn validate_webhook_url(target: &str) -> Result<Url> {
-    let url = Url::parse(target.trim()).context("webhook target must be an absolute URL")?;
-    match url.scheme() {
-        "https" => {}
-        "http" if is_local_http_webhook(&url) => {}
-        _ => anyhow::bail!("webhook target must use https, or http for localhost only"),
-    }
-    anyhow::ensure!(
-        url.username().is_empty() && url.password().is_none(),
-        "webhook target must not embed credentials"
-    );
-    Ok(url)
-}
-
-fn is_local_http_webhook(url: &Url) -> bool {
-    matches!(
-        url.host_str(),
-        Some("localhost") | Some("127.0.0.1") | Some("::1") | Some("[::1]")
-    )
+fn notification_delivery_lease_secs(delivery_count: usize) -> i64 {
+    i64::try_from(delivery_count)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(NOTIFICATION_WEBHOOK_TIMEOUT_SECS as i64)
+        .saturating_add(NOTIFICATION_DELIVERY_LEASE_MARGIN_SECS)
+        .max(NOTIFICATION_DELIVERY_LEASE_MARGIN_SECS)
 }
 
 #[cfg(test)]
@@ -615,14 +593,6 @@ mod tests {
     }
 
     #[test]
-    fn webhook_url_policy_allows_https_and_local_http_only() {
-        assert!(validate_webhook_url("https://hooks.example/vpsman").is_ok());
-        assert!(validate_webhook_url("http://127.0.0.1:9000/hook").is_ok());
-        assert!(validate_webhook_url("http://example.com/hook").is_err());
-        assert!(validate_webhook_url("https://user:secret@example.com/hook").is_err());
-    }
-
-    #[test]
     fn delivery_error_keeps_nested_transport_cause_and_is_bounded() {
         let error = anyhow::anyhow!("connection refused").context("webhook request failed");
         assert_eq!(
@@ -634,5 +604,12 @@ mod tests {
             format_delivery_error(&long).len(),
             MAX_NOTIFICATION_ERROR_BYTES
         );
+    }
+
+    #[test]
+    fn process_lease_covers_every_serial_delivery_timeout() {
+        assert_eq!(notification_delivery_lease_secs(0), 60);
+        assert_eq!(notification_delivery_lease_secs(50), 310);
+        assert_eq!(notification_delivery_lease_secs(200), 1_060);
     }
 }

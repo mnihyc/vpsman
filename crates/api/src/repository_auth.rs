@@ -179,7 +179,7 @@ impl Repository {
         user_agent: Option<&str>,
         throttle: &OperatorAuthThrottleConfig,
     ) -> Result<OperatorLoginAttempt> {
-        let username_key = normalize_auth_throttle_username(&request.username);
+        let username_key = normalize_auth_throttle_identity(&request.username, remote_ip);
         let ip_key = normalize_auth_throttle_ip(remote_ip);
         if self
             .operator_auth_throttle_locked(&username_key, &ip_key)
@@ -360,7 +360,7 @@ impl Repository {
         username: &str,
         remote_ip: &str,
     ) -> Result<bool> {
-        let username_key = normalize_auth_throttle_username(username);
+        let username_key = normalize_auth_throttle_identity(username, remote_ip);
         let ip_key = normalize_auth_throttle_ip(remote_ip);
         self.operator_auth_throttle_locked(&username_key, &ip_key)
             .await
@@ -372,7 +372,7 @@ impl Repository {
         remote_ip: &str,
         throttle: &OperatorAuthThrottleConfig,
     ) -> Result<()> {
-        let username_key = normalize_auth_throttle_username(username);
+        let username_key = normalize_auth_throttle_identity(username, remote_ip);
         let ip_key = normalize_auth_throttle_ip(remote_ip);
         self.record_operator_auth_failure(
             &username_key,
@@ -386,8 +386,9 @@ impl Repository {
     pub(crate) async fn clear_operator_auth_management_success(
         &self,
         username: &str,
+        remote_ip: &str,
     ) -> Result<()> {
-        let username_key = normalize_auth_throttle_username(username);
+        let username_key = normalize_auth_throttle_identity(username, remote_ip);
         self.clear_operator_auth_success(&username_key).await
     }
 
@@ -401,7 +402,7 @@ impl Repository {
                 let now = unix_now();
                 let throttle = memory.operator_auth_throttle.read().await;
                 Ok(
-                    throttle_bucket_locked(&throttle, "username", username_key, now)
+                    throttle_bucket_locked(&throttle, "username_ip", username_key, now)
                         || throttle_bucket_locked(&throttle, "ip", ip_key, now),
                 )
             }
@@ -412,7 +413,7 @@ impl Repository {
                         SELECT 1
                         FROM operator_auth_throttle
                         WHERE (
-                            (scope_kind = 'username' AND scope_key = $1)
+                            (scope_kind = 'username_ip' AND scope_key = $1)
                             OR (scope_kind = 'ip' AND scope_key = $2)
                         )
                           AND locked_until IS NOT NULL
@@ -443,7 +444,7 @@ impl Repository {
                 let mut lockouts = Vec::new();
                 if let Some(lockout) = record_memory_throttle_failure(
                     &mut buckets,
-                    "username",
+                    "username_ip",
                     username_key,
                     throttle.username_failed_attempt_limit,
                     throttle.failed_attempt_window_secs,
@@ -476,7 +477,7 @@ impl Repository {
                 let mut lockouts = Vec::new();
                 if let Some(lockout) = record_postgres_throttle_failure(
                     &mut tx,
-                    "username",
+                    "username_ip",
                     username_key,
                     throttle.username_failed_attempt_limit,
                     throttle.failed_attempt_window_secs,
@@ -520,7 +521,7 @@ impl Repository {
                 let buckets = memory.operator_auth_throttle.read().await;
                 Ok(throttle_bucket_has_recent_failures(
                     &buckets,
-                    "username",
+                    "username_ip",
                     username_key,
                     now,
                     throttle.failed_attempt_window_secs,
@@ -533,7 +534,7 @@ impl Repository {
                         SELECT 1
                         FROM operator_auth_throttle
                         WHERE (
-                            (scope_kind = 'username' AND scope_key = $1)
+                            (scope_kind = 'username_ip' AND scope_key = $1)
                         )
                           AND failed_attempts > 0
                           AND (
@@ -556,12 +557,12 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let mut buckets = memory.operator_auth_throttle.write().await;
-                buckets.remove(&("username".to_string(), username_key.to_string()));
+                buckets.remove(&("username_ip".to_string(), username_key.to_string()));
                 Ok(())
             }
             Self::Postgres(pool) => {
                 sqlx::query(
-                    "DELETE FROM operator_auth_throttle WHERE scope_kind = 'username' AND scope_key = $1",
+                    "DELETE FROM operator_auth_throttle WHERE scope_kind = 'username_ip' AND scope_key = $1",
                 )
                 .bind(username_key)
                 .execute(pool)
@@ -582,7 +583,7 @@ impl Repository {
             "username": operator.username,
             "username_key": username_key,
             "ip": ip_key,
-            "cleared_scope_kinds": ["username"],
+            "cleared_scope_kinds": ["username_ip"],
         });
         match self {
             Self::Memory(memory) => {
@@ -1954,6 +1955,98 @@ impl Repository {
         }
     }
 
+    /// Revokes the session row proven by an issued access token.
+    ///
+    /// This lookup intentionally ignores normal access expiry and prior revocation:
+    /// an expired token must still be able to revoke its paired refresh token, and
+    /// a retry after a lost response must remain successful without a second audit.
+    pub(crate) async fn logout_operator_session(&self, access_token: &str) -> Result<bool> {
+        let access_hash = token_hash(access_token);
+        match self {
+            Self::Memory(memory) => {
+                let (session_id, operator_id, newly_revoked) = {
+                    let mut sessions = memory.sessions.write().await;
+                    let Some(session) = sessions
+                        .iter_mut()
+                        .find(|session| session.access_token_hash == access_hash)
+                    else {
+                        return Ok(false);
+                    };
+                    let newly_revoked = !session.revoked;
+                    session.revoked = true;
+                    (session.session_id, session.operator_id, newly_revoked)
+                };
+                if newly_revoked {
+                    let operator_username = memory
+                        .operators
+                        .read()
+                        .await
+                        .iter()
+                        .find(|operator| operator.id == operator_id)
+                        .map(|operator| operator.username.clone())
+                        .unwrap_or_default();
+                    record_session_logout_audit(
+                        memory,
+                        session_id,
+                        operator_id,
+                        &operator_username,
+                    )
+                    .await;
+                }
+                Ok(true)
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let row = sqlx::query(
+                    r#"
+                    SELECT
+                        s.id,
+                        s.operator_id,
+                        o.username AS operator_username,
+                        s.revoked_at IS NOT NULL AS revoked
+                    FROM operator_sessions AS s
+                    JOIN operators AS o ON o.id = s.operator_id
+                    WHERE s.access_token_hash = $1
+                    FOR UPDATE OF s
+                    "#,
+                )
+                .bind(&access_hash)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(row) = row else {
+                    tx.rollback().await?;
+                    return Ok(false);
+                };
+                let session_id: Uuid = row.try_get("id")?;
+                let operator_id: Uuid = row.try_get("operator_id")?;
+                let operator_username: String = row.try_get("operator_username")?;
+                let revoked: bool = row.try_get("revoked")?;
+                if !revoked {
+                    sqlx::query("UPDATE operator_sessions SET revoked_at = now() WHERE id = $1")
+                        .bind(session_id)
+                        .execute(&mut *tx)
+                        .await?;
+                    sqlx::query(audit_insert_sql())
+                        .bind(Uuid::new_v4())
+                        .bind(operator_id)
+                        .bind("operator_session.logged_out")
+                        .bind(format!("operator-session:{session_id}"))
+                        .bind(serde_json::json!({
+                            "session_id": session_id,
+                            "operator_id": operator_id,
+                            "operator_username": operator_username,
+                            "revocation_scope": "current_session",
+                            "revoked_access_and_refresh": true,
+                        }))
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                tx.commit().await?;
+                Ok(true)
+            }
+        }
+    }
+
     pub(crate) async fn issue_session(&self, operator: OperatorView) -> Result<AuthResponse> {
         let session = PreparedOperatorSession::new(operator.session_refresh_ttl_secs);
 
@@ -2185,6 +2278,12 @@ fn normalize_auth_throttle_username(username: &str) -> String {
     } else {
         normalized
     }
+}
+
+fn normalize_auth_throttle_identity(username: &str, remote_ip: &str) -> String {
+    let username = normalize_auth_throttle_username(username);
+    let remote_ip = normalize_auth_throttle_ip(remote_ip);
+    format!("{}:{username}|{remote_ip}", username.len())
 }
 
 fn normalize_auth_throttle_ip(remote_ip: &str) -> String {
@@ -2511,6 +2610,29 @@ async fn record_session_revoke_audit(
             "revoked_by_operator_id": actor.operator.id,
             "revoked_by_operator_username": actor.operator.username,
             "revoked_by_session_id": actor.session_id,
+        }),
+        created_at: unix_now().to_string(),
+    });
+}
+
+async fn record_session_logout_audit(
+    memory: &crate::repository::MemoryState,
+    session_id: Uuid,
+    operator_id: Uuid,
+    operator_username: &str,
+) {
+    memory.audits.write().await.push(AuditLogView {
+        id: Uuid::new_v4(),
+        actor_id: Some(operator_id),
+        action: "operator_session.logged_out".to_string(),
+        target: format!("operator-session:{session_id}"),
+        command_hash: None,
+        metadata: serde_json::json!({
+            "session_id": session_id,
+            "operator_id": operator_id,
+            "operator_username": operator_username,
+            "revocation_scope": "current_session",
+            "revoked_access_and_refresh": true,
         }),
         created_at: unix_now().to_string(),
     });

@@ -133,14 +133,16 @@ For daily 20+ VPS operation, this is the preferred browser pattern:
 ## History Retention And Export
 
 History retention policies are managed by domain. This includes audit logs,
-system and telemetry rollups, per-interface network rates, job outputs, backup
-artifacts, network/topology history, client lifecycle history, and ended gateway
-sessions. Telemetry rollups and per-interface network rates default to 90 days;
-the running worker applies those two policies automatically every minute in
-bounded leased batches. A stored policy override changes the automatic age,
-batch limit, or enabled state. Other domains remain explicit maintenance
-workflows. Use dry-run before manual pruning, especially for object-backed
-domains such as job outputs and backup artifacts:
+system and telemetry rollups, per-interface network rates, raw traffic-accounting
+counters, job outputs, backup artifacts, network/topology history, client
+lifecycle history, and ended gateway sessions. Telemetry rollups, per-interface
+network rates, and raw traffic counters default to 90 days; the running worker
+applies all three policies automatically every minute in bounded leased batches.
+Raw counters require at least 32 days and retain one pre-cutoff baseline per
+VPS/source/interface stream so monthly accounting remains exact. A stored policy
+override changes the automatic age, batch limit, or enabled state. Other domains
+remain explicit maintenance workflows. Use dry-run before manual pruning,
+especially for object-backed domains such as job outputs and backup artifacts:
 
 Dashboard network rates are interval averages derived from cumulative interface
 counters, not instantaneous samples. Active tunnel throughput is a separate

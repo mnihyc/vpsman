@@ -79,6 +79,7 @@ type ConsoleShellProps = {
   savedFleetViews: SavedFleetView[];
   summary: FleetSummary;
   summaryScopeLabel: string;
+  wsState: string;
 };
 
 export function ConsoleShell({
@@ -112,6 +113,7 @@ export function ConsoleShell({
   savedFleetViews,
   summary,
   summaryScopeLabel,
+  wsState,
 }: ConsoleShellProps) {
   const { preferences } = usePanelDisplaySettings();
   const initialSubpanelPreferences = useRef(readSidebarSubpanelPreferences());
@@ -121,6 +123,9 @@ export function ConsoleShell({
   );
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState("");
+  const [browserOnline, setBrowserOnline] = useState(() =>
+    typeof navigator === "undefined" ? true : navigator.onLine,
+  );
   const commandButtonRef = useRef<HTMLButtonElement | null>(null);
   const commandInputRef = useRef<HTMLInputElement | null>(null);
   const commandReturnFocusRef = useRef<HTMLElement | null>(null);
@@ -159,6 +164,41 @@ export function ConsoleShell({
   const activeSubpageBase = activeSubpage.split(":")[0];
   const activeSubpageLabel = subpageLabel(activeView, activeSubpage);
   const activeSubpageDescription = subpageDescription(activeView, activeSubpage);
+  const controlPlaneLabel = !browserOnline
+    ? "Offline"
+    : wsState === "connected"
+      ? "Live"
+      : wsState === "reconnecting"
+        ? "Reconnecting"
+        : wsState === "connecting"
+          ? "Connecting"
+          : "Unavailable";
+  const controlPlaneDetail = !browserOnline
+    ? "Network offline; showing the last loaded data. Actions may fail until connectivity returns."
+    : wsState === "reconnecting"
+      ? "The live event stream is reconnecting. Loaded data remains visible and may lag until it resumes."
+      : wsState === "connecting"
+        ? "Connecting to the live event stream."
+        : wsState === "connected"
+          ? "Live event stream connected."
+          : "The live event stream is unavailable.";
+  const controlPlaneTone =
+    !browserOnline || wsState === "auth required"
+      ? "danger"
+      : wsState === "connected"
+        ? "ok"
+        : "warning";
+
+  useEffect(() => {
+    const markOnline = () => setBrowserOnline(true);
+    const markOffline = () => setBrowserOnline(false);
+    window.addEventListener("online", markOnline);
+    window.addEventListener("offline", markOffline);
+    return () => {
+      window.removeEventListener("online", markOnline);
+      window.removeEventListener("offline", markOffline);
+    };
+  }, []);
   const mobilePageValue = `${activeView}::${activeSubpageBase}`;
   const selectMobilePage = (value: string) => {
     const option = navSections
@@ -292,6 +332,7 @@ export function ConsoleShell({
     <div className={className} aria-label="Saved fleet views">
       <select
         aria-label="Saved fleet view"
+        name="saved_fleet_view"
         onChange={(event) => onApplySavedFleetView(event.target.value)}
         value={activeSavedFleetViewId ?? ""}
       >
@@ -304,6 +345,7 @@ export function ConsoleShell({
       </select>
       <input
         aria-label="Saved fleet view name"
+        name="saved_fleet_view_name"
         onChange={(event) => onSavedFleetViewNameChange(event.target.value)}
         placeholder="View name"
         title={draftSavedFleetViewName || "View name"}
@@ -569,6 +611,7 @@ export function ConsoleShell({
               <select
                 aria-label="Console page"
                 className="mobilePageSelector"
+                name="console_page"
                 onChange={(event) => selectMobilePage(event.target.value)}
                 title={`${activeViewLabel} / ${activeSubpageLabel}`}
                 value={mobilePageValue}
@@ -596,9 +639,13 @@ export function ConsoleShell({
                 "savedViewControls mobileSavedViewControls",
               )}
             </details>
-            <span className="controlPlanePill">
+            <span
+              aria-label={`Control plane status: ${controlPlaneLabel}`}
+              className={`controlPlanePill ${controlPlaneTone}`}
+              title={controlPlaneDetail}
+            >
               <RadioTower size={17} />
-              <span>Live</span>
+              <span>{controlPlaneLabel}</span>
             </span>
             <button
               className="iconButton"
@@ -646,6 +693,18 @@ export function ConsoleShell({
             )}
           </div>
         </header>
+
+        {controlPlaneTone !== "ok" && (
+          <div
+            aria-live="polite"
+            className={`controlPlaneNotice ${controlPlaneTone}`}
+            role="status"
+          >
+            <RadioTower aria-hidden="true" size={17} />
+            <strong>{controlPlaneLabel}</strong>
+            <span>{controlPlaneDetail}</span>
+          </div>
+        )}
 
         <section
           className={`consoleHeader${hideFleetStatusSummary ? " withoutFleetStatus" : ""}`}
@@ -748,6 +807,7 @@ export function ConsoleShell({
               <input
                 aria-label="Command palette search"
                 autoComplete="off"
+                name="command_palette_search"
                 onChange={(event) => setCommandQuery(event.target.value)}
                 placeholder="Search pages, VPS, jobs, sessions, transfers, backups, audit"
                 ref={commandInputRef}

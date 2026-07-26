@@ -670,19 +670,50 @@ export function App() {
     useState<"register" | null>(null);
   const [sourceTemplateWorkflowIntent, setSourceTemplateWorkflowIntent] =
     useState<"runtime_tunnel_adapter" | "routing_cost_adapter" | null>(null);
-  const [privilegeMaterial, setPrivilegeMaterial] =
-    useState<PrivilegeMaterial | null>(null);
+  const [privilegeGrant, setPrivilegeGrant] = useState<{
+    material: PrivilegeMaterial;
+    operatorId: string;
+  } | null>(null);
   const [privilegeUnlockOpen, setPrivilegeUnlockOpen] = useState(false);
   const closePrivilegeUnlock = useCallback(
     () => setPrivilegeUnlockOpen(false),
     [],
   );
   const dashboard = useDashboardData(activeView);
+  const privilegeMaterial =
+    privilegeGrant &&
+    dashboard.apiToken &&
+    dashboard.operator?.id === privilegeGrant.operatorId
+      ? privilegeGrant.material
+      : null;
+  const setPrivilegeMaterial = useCallback(
+    (material: PrivilegeMaterial | null) => {
+      if (!material || !dashboard.apiToken || !dashboard.operator?.id) {
+        setPrivilegeGrant(null);
+        return;
+      }
+      setPrivilegeGrant({
+        material,
+        operatorId: dashboard.operator.id,
+      });
+    },
+    [dashboard.apiToken, dashboard.operator?.id],
+  );
   useEffect(() => {
     if (!dashboard.apiToken) {
+      setPrivilegeGrant(null);
       setPrivilegeUnlockOpen(false);
     }
   }, [dashboard.apiToken]);
+  useEffect(() => {
+    if (
+      privilegeGrant &&
+      privilegeGrant.operatorId !== dashboard.operator?.id
+    ) {
+      setPrivilegeGrant(null);
+      setPrivilegeUnlockOpen(false);
+    }
+  }, [dashboard.operator?.id, privilegeGrant]);
   const fleetViews = useFleetViews(dashboard.agents);
   const operatorPreferences = useMemo(
     () => sanitizeOperatorPreferences(dashboard.operator?.preferences),
@@ -976,6 +1007,11 @@ export function App() {
   function lockPrivilege() {
     setPrivilegeMaterial(null);
     setPrivilegeUnlockOpen(false);
+  }
+
+  function clearOperatorSession() {
+    lockPrivilege();
+    dashboard.clearSession();
   }
 
   function openVpsDetail(target: ReleaseRouteTarget) {
@@ -2008,7 +2044,7 @@ export function App() {
         initialIdentityWorkflow={accessIdentityWorkflowIntent}
         lastLiveEvent={dashboard.lastLiveEvent}
         loading={dashboard.accessLoading}
-        onClearSession={dashboard.clearSession}
+        onClearSession={clearOperatorSession}
         onClearOperatorTotp={dashboard.clearOperatorTotp}
         onConfirmTotp={dashboard.confirmTotp}
         onCreateOperator={dashboard.createOperator}
@@ -2296,7 +2332,7 @@ export function App() {
           pageTitle={pageTitle}
           onApplySavedFleetView={fleetViews.applySavedFleetView}
           onClearFleetView={fleetViews.clearFleetView}
-          onClearSession={dashboard.clearSession}
+          onClearSession={clearOperatorSession}
           onDeleteSavedFleetView={fleetViews.deleteSavedFleetView}
           onFleetQueryChange={fleetViews.setFleetQuery}
           onLockPrivilege={lockPrivilege}
@@ -2309,6 +2345,7 @@ export function App() {
           savedFleetViews={fleetViews.savedViews}
           summary={shellSummary}
           summaryScopeLabel={summaryScopeLabel}
+          wsState={dashboard.wsState}
         >
           <WorkspaceErrorBoundary
             resetKey={`${activeView}:${activeSubpage}`}

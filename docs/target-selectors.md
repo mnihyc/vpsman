@@ -157,12 +157,27 @@ Delivery is one aggregated webhook call per rule/event occurrence. The JSON
 body includes rule metadata, event metadata, `matched_vps`, and rendered
 `message`.
 
+A confirmed manual dispatch queues only the candidate set represented by its
+review hash and limit. It does not log a broad event for the worker to
+re-evaluate against a later rule or fleet state. Pre-upgrade broad manual
+events without a durable reviewed candidate set are skipped fail-closed and
+recorded as `webhook.legacy_manual_dispatch_events_skipped` audit entries.
+
 Template placeholders include `{vps.name}`, `{vps.display_name}`, `{vps.id}`,
 `{vps.status}`, `{vps.tags}`, `{event.kind}`, `{event.id}`, `{rule.id}`, and
 `{rule.name}`. When multiple VPSs match, values are joined with spaces.
 
-Webhook targets must be HTTPS, except HTTP localhost targets are allowed for
-local testing. Embedded credentials and redirects are rejected.
+Webhook targets use HTTPS by default. At delivery time, every DNS answer must
+be a public unicast address; private, loopback, link-local, multicast,
+unspecified, documentation, and reserved addresses are rejected. The validated
+answers are pinned for the request, redirects and proxies are disabled, and
+embedded URL credentials are rejected.
+
+Local development can explicitly set
+`VPSMAN_DEV_ALLOW_LOOPBACK_WEBHOOKS=1` in both the API and worker environments
+to permit only HTTP targets on `localhost`, `127.0.0.0/8`, or `::1`. This switch
+does not permit other private-network targets or HTTPS loopback targets and
+must remain unset in production.
 
 Examples:
 

@@ -73,6 +73,7 @@ start_api() {
     VPSMAN_INTERNAL_TOKEN="$internal_token" \
     VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
     VPSMAN_BACKUP_OBJECT_STORE_DIR="$SMOKE_TMPDIR/object-store" \
+    VPSMAN_DEV_ALLOW_LOOPBACK_WEBHOOKS=1 \
     RUST_LOG="vpsman_api=warn" \
       target/debug/vpsman-api >"$api_log" 2>&1 &
     api_pid="$!"
@@ -759,6 +760,7 @@ VALUES (
 SQL
 VPSMAN_POSTGRES_URL="$postgres_url" \
 VPSMAN_MIGRATIONS_DIR="$ROOT_DIR/migrations" \
+VPSMAN_DEV_ALLOW_LOOPBACK_WEBHOOKS=1 \
   target/debug/vpsman-worker --once --worker-id pg-postgres-smoke --notification-retention-days 30 >"$SMOKE_TMPDIR/worker-once.log" 2>&1
 scheduled_run_count="0"
 scheduled_run_job_id=""
@@ -789,9 +791,9 @@ fi
 api_get "/api/v1/schedules" | jq -e --arg schedule_id "$schedule_id" '
   any(.[]; .id == $schedule_id and .catch_up_policy == "run_all_limited" and .catch_up_limit == 2 and .failure_count == 0 and .last_error == null)
 ' >/dev/null
-worker_lease_count="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT count(*) FROM worker_leases WHERE task_name IN ('schedules','alert_notifications') AND owner = 'pg-postgres-smoke' AND lease_expires_at > now()")"
+worker_lease_count="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT count(*) FROM worker_leases WHERE task_name IN ('schedules','alert_notifications') AND owner = 'pg-postgres-smoke' AND lease_expires_at <= now()")"
 if [[ "$worker_lease_count" != "2" ]]; then
-  echo "expected active worker lease rows for scheduler and alert singleton tasks" >&2
+  echo "expected released worker lease evidence for scheduler and alert singleton tasks" >&2
   docker exec "$container_name" psql -U vpsman -d vpsman -c "SELECT task_name, owner, lease_expires_at FROM worker_leases ORDER BY task_name" >&2 || true
   exit 1
 fi
@@ -862,6 +864,7 @@ VALUES (
 SQL
 VPSMAN_POSTGRES_URL="$postgres_url" \
 VPSMAN_MIGRATIONS_DIR="$ROOT_DIR/migrations" \
+VPSMAN_DEV_ALLOW_LOOPBACK_WEBHOOKS=1 \
   target/debug/vpsman-worker --once --worker-id pg-competing-worker --notification-retention-days 30 >/dev/null
 contended_notification_count="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT count(*) FROM fleet_alert_notification_deliveries WHERE id = '$contended_notification_id' AND status = 'queued' AND attempt_count = 0")"
 if [[ "$contended_notification_count" != "1" ]]; then

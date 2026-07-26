@@ -63,7 +63,7 @@ PY
 
 smoke_postgres_backup_policy_prune_evidence() {
   local backup_prune_policy_json
-  local policy_source_count policy_prune_dry_run_json policy_prune_json
+  local policy_source_count policy_prune_dry_run_json
   local pruned_artifact_count retained_artifact_count cleared_link_count
 
   backup_prune_policy_json="$(vpsctl_json backup-policy-upsert \
@@ -139,13 +139,12 @@ SQL
       --backup-policy-prune-delete-objects \
       --backup-policy-prune-object-store-dir "$SMOKE_TMPDIR/object-store" \
       >"$SMOKE_TMPDIR/backup-policy-prune-worker.log" 2>&1
-  policy_prune_json="$(cat "$SMOKE_TMPDIR/backup-policy-prune-worker.log")"
   rg -q 'backup_policy_prune_pruned=2' "$SMOKE_TMPDIR/backup-policy-prune-worker.log" || {
     echo "expected backup policy retention worker to prune two artifacts" >&2
     cat "$SMOKE_TMPDIR/backup-policy-prune-worker.log" >&2 || true
     exit 1
   }
-  policy_prune_worker_lease_count="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT count(*) FROM worker_leases WHERE task_name = 'backup_policy_retention_prune' AND owner = 'pg-backup-prune-worker' AND lease_expires_at > now()")"
+  policy_prune_worker_lease_count="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT count(*) FROM worker_leases WHERE task_name = 'backup_policy_retention_prune' AND owner = 'pg-backup-prune-worker' AND lease_expires_at <= now()")"
   if [[ "$policy_prune_worker_lease_count" != "1" ]]; then
     echo "expected backup policy retention worker lease evidence" >&2
     docker exec "$container_name" psql -U vpsman -d vpsman -c "SELECT task_name, owner, lease_expires_at FROM worker_leases ORDER BY task_name" >&2 || true

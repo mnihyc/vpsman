@@ -128,7 +128,7 @@ pub(crate) struct TrafficAccountingRecord {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct TrafficCounterSampleRecord {
     pub(crate) client_id: String,
     pub(crate) source_kind: String,

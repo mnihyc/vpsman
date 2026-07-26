@@ -680,6 +680,22 @@ export function ConsoleDataGrid<T>({
   }
 
   function renderEmptyContent() {
+    if (rows.length > 0 && globalFilter.trim()) {
+      return (
+        <div className="emptyState compactEmpty">
+          <strong>No matching {itemLabel}</strong>
+          <span>Try another search or clear the current search.</span>
+          <button
+            className="secondaryAction compactAction"
+            onClick={() => setGlobalFilter("")}
+            type="button"
+          >
+            <X size={14} />
+            <span>Clear search</span>
+          </button>
+        </div>
+      );
+    }
     const emptyContent = empty ?? `No ${itemLabel} match the current view.`;
     if (typeof emptyContent === "string" || typeof emptyContent === "number") {
       return <div className="emptyState compactEmpty">{emptyContent}</div>;

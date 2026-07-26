@@ -608,7 +608,7 @@ async fn main() -> Result<()> {
     let Some(postgres_url) = args.postgres_url.as_deref() else {
         warn!("VPSMAN_POSTGRES_URL is not configured; worker cannot process durable queues");
         if args.once {
-            return Ok(());
+            bail!("VPSMAN_POSTGRES_URL is required when --once is used");
         }
         let mut ticker = time::interval(Duration::from_secs(args.tick_secs.max(1)));
         loop {
@@ -616,16 +616,19 @@ async fn main() -> Result<()> {
             warn!("worker tick skipped: PostgreSQL is not configured");
         }
     };
-    let pool = connect_postgres(
-        postgres_url,
-        &args.migrations_dir,
-        args.db_max_connections.clamp(1, 256),
-    )
-    .await?;
+    let db_max_connections = args.db_max_connections.clamp(2, 256);
+    if args.db_max_connections < 2 {
+        warn!(
+            requested = args.db_max_connections,
+            effective = db_max_connections,
+            "worker requires two PostgreSQL connections while a task lease is held"
+        );
+    }
+    let pool = connect_postgres(postgres_url, &args.migrations_dir, db_max_connections).await?;
     let worker_id = args
         .worker_id
         .clone()
-        .unwrap_or_else(|| format!("vpsman-worker-{}", std::process::id()));
+        .unwrap_or_else(|| format!("vpsman-worker-{}-{}", std::process::id(), Uuid::new_v4()));
     info!(tick_secs = args.tick_secs, "worker started");
     if args.once {
         let runtime_config = WorkerRuntimeConfig::from_args(&args)?;
@@ -680,6 +683,7 @@ async fn main() -> Result<()> {
             alert_notification_failed = alert_notifications.failed,
             alert_notification_pruned = alert_notifications.pruned,
             webhook_rule_materialized = webhook_rules.materialized,
+            webhook_rule_legacy_manual_events_skipped = webhook_rules.legacy_manual_events_skipped,
             webhook_rule_processed = webhook_rules.processed,
             webhook_rule_delivered = webhook_rules.delivered,
             webhook_rule_failed = webhook_rules.failed,
@@ -689,6 +693,7 @@ async fn main() -> Result<()> {
             backup_policy_prune_pruned = backup_policy_prune.pruned_rows,
             telemetry_rollups_pruned = telemetry_retention.rollups_pruned,
             telemetry_network_rates_pruned = telemetry_retention.network_rates_pruned,
+            traffic_counter_samples_pruned = telemetry_retention.traffic_counter_samples_pruned,
             artifact_cleanup_jobs = artifact_cleanup.jobs,
             artifact_cleanup_deleted = artifact_cleanup.deleted_rows,
             "worker once completed"
@@ -809,9 +814,14 @@ async fn main() -> Result<()> {
         .await
         {
             Ok(run) => {
-                if run.materialized > 0 || run.processed > 0 || run.pruned > 0 {
+                if run.materialized > 0
+                    || run.legacy_manual_events_skipped > 0
+                    || run.processed > 0
+                    || run.pruned > 0
+                {
                     info!(
                         materialized = run.materialized,
+                        legacy_manual_events_skipped = run.legacy_manual_events_skipped,
                         processed = run.processed,
                         delivered = run.delivered,
                         failed = run.failed,
@@ -854,10 +864,14 @@ async fn main() -> Result<()> {
             .await
             {
                 Ok(run) => {
-                    if run.rollups_pruned > 0 || run.network_rates_pruned > 0 {
+                    if run.rollups_pruned > 0
+                        || run.network_rates_pruned > 0
+                        || run.traffic_counter_samples_pruned > 0
+                    {
                         info!(
                             telemetry_rollups_pruned = run.rollups_pruned,
                             telemetry_network_rates_pruned = run.network_rates_pruned,
+                            traffic_counter_samples_pruned = run.traffic_counter_samples_pruned,
                             "processed telemetry history retention"
                         );
                     }
@@ -1061,14 +1075,17 @@ async fn process_webhook_rules_if_leader(
     worker_id: &str,
     lease_secs: i32,
 ) -> Result<WebhookRuleWorkerRun> {
-    if !acquire_worker_lease(pool, "webhook_rules", worker_id, lease_secs).await? {
+    let Some(lease) = acquire_worker_lease(pool, "webhook_rules", worker_id, lease_secs).await?
+    else {
         debug!(
             worker_id,
             "skipped webhook rules because another worker holds the lease"
         );
         return Ok(WebhookRuleWorkerRun::default());
-    }
-    process_webhook_rules(pool, config).await
+    };
+    let result = process_webhook_rules(pool, config).await;
+    lease.finish().await?;
+    result
 }
 
 async fn process_alert_notifications_if_leader(
@@ -1077,14 +1094,18 @@ async fn process_alert_notifications_if_leader(
     worker_id: &str,
     lease_secs: i32,
 ) -> Result<AlertNotificationWorkerRun> {
-    if !acquire_worker_lease(pool, "alert_notifications", worker_id, lease_secs).await? {
+    let Some(lease) =
+        acquire_worker_lease(pool, "alert_notifications", worker_id, lease_secs).await?
+    else {
         debug!(
             worker_id,
             "skipped fleet alert notifications because another worker holds the lease"
         );
         return Ok(AlertNotificationWorkerRun::default());
-    }
-    process_alert_notifications(pool, config).await
+    };
+    let result = process_alert_notifications(pool, config).await;
+    lease.finish().await?;
+    result
 }
 
 async fn process_backup_policy_retention_prune_if_leader(
@@ -1096,14 +1117,18 @@ async fn process_backup_policy_retention_prune_if_leader(
     if !config.enabled {
         return Ok(BackupPolicyRetentionPruneRun::default());
     }
-    if !acquire_worker_lease(pool, "backup_policy_retention_prune", worker_id, lease_secs).await? {
+    let Some(lease) =
+        acquire_worker_lease(pool, "backup_policy_retention_prune", worker_id, lease_secs).await?
+    else {
         debug!(
             worker_id,
             "skipped backup policy retention prune because another worker holds the lease"
         );
         return Ok(BackupPolicyRetentionPruneRun::default());
-    }
-    process_backup_policy_retention_prune(pool, config).await
+    };
+    let result = process_backup_policy_retention_prune(pool, config).await;
+    lease.finish().await?;
+    result
 }
 
 async fn process_telemetry_history_retention_if_leader(
@@ -1111,14 +1136,18 @@ async fn process_telemetry_history_retention_if_leader(
     worker_id: &str,
     lease_secs: i32,
 ) -> Result<TelemetryHistoryRetentionRun> {
-    if !acquire_worker_lease(pool, "telemetry_history_retention", worker_id, lease_secs).await? {
+    let Some(lease) =
+        acquire_worker_lease(pool, "telemetry_history_retention", worker_id, lease_secs).await?
+    else {
         debug!(
             worker_id,
             "skipped telemetry history retention because another worker holds the lease"
         );
         return Ok(TelemetryHistoryRetentionRun::default());
-    }
-    process_telemetry_history_retention(pool).await
+    };
+    let result = process_telemetry_history_retention(pool).await;
+    lease.finish().await?;
+    result
 }
 
 #[derive(Default)]
@@ -1153,14 +1182,18 @@ async fn process_artifact_cleanup_jobs_if_leader(
     worker_id: &str,
     lease_secs: i32,
 ) -> Result<ArtifactCleanupRun> {
-    if !acquire_worker_lease(pool, "artifact_cleanup_jobs", worker_id, lease_secs).await? {
+    let Some(lease) =
+        acquire_worker_lease(pool, "artifact_cleanup_jobs", worker_id, lease_secs).await?
+    else {
         debug!(
             worker_id,
             "skipped artifact cleanup jobs because another worker holds the lease"
         );
         return Ok(ArtifactCleanupRun::default());
-    }
-    process_artifact_cleanup_jobs(pool, object_stores).await
+    };
+    let result = process_artifact_cleanup_jobs(pool, object_stores).await;
+    lease.finish().await?;
+    result
 }
 
 async fn process_artifact_cleanup_jobs(
@@ -1726,15 +1759,16 @@ async fn process_due_schedules_if_leader(
     lease_secs: i32,
     dispatch_config: &ScheduleDispatchConfig,
 ) -> Result<usize> {
-    let acquired = acquire_worker_lease(pool, "schedules", worker_id, lease_secs).await?;
-    if !acquired {
+    let Some(lease) = acquire_worker_lease(pool, "schedules", worker_id, lease_secs).await? else {
         debug!(
             worker_id,
             "skipped due schedules because another worker holds the lease"
         );
         return Ok(0);
-    }
-    process_due_schedules(pool, limit, dispatch_config).await
+    };
+    let result = process_due_schedules(pool, limit, dispatch_config).await;
+    lease.finish().await?;
+    result
 }
 
 async fn process_due_schedules(
@@ -3856,6 +3890,66 @@ mod schedule_tests {
         let mut default_false = false;
         apply_bool_default(&mut default_false, env_name, Some(true));
         assert!(default_false);
+    }
+
+    #[tokio::test]
+    async fn worker_lease_excludes_concurrent_and_legacy_ttl_holders() {
+        let Some(db) = PgWorkerTestDb::maybe_new().await else {
+            return;
+        };
+
+        let first = acquire_worker_lease(&db.pool, "lease-regression", "worker-a", 60)
+            .await
+            .unwrap()
+            .expect("first worker acquires lease");
+        assert!(
+            acquire_worker_lease(&db.pool, "lease-regression", "worker-b", 60)
+                .await
+                .unwrap()
+                .is_none(),
+            "transaction advisory lock must exclude a concurrent worker"
+        );
+        first.finish().await.unwrap();
+
+        sqlx::query(
+            r#"
+            UPDATE worker_leases
+            SET owner = 'legacy-worker',
+                lease_expires_at = now() + interval '60 seconds'
+            WHERE task_name = 'lease-regression'
+            "#,
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        assert!(
+            acquire_worker_lease(&db.pool, "lease-regression", "worker-c", 60)
+                .await
+                .unwrap()
+                .is_none(),
+            "an unexpired legacy TTL row must block a new worker"
+        );
+
+        sqlx::query(
+            "UPDATE worker_leases SET lease_expires_at = now() WHERE task_name = 'lease-regression'",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let recovered = acquire_worker_lease(&db.pool, "lease-regression", "worker-c", 60)
+            .await
+            .unwrap()
+            .expect("expired legacy lease is recoverable");
+        recovered.finish().await.unwrap();
+        let released: bool = sqlx::query_scalar(
+            "SELECT lease_expires_at <= now() FROM worker_leases WHERE task_name = 'lease-regression'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert!(released);
+
+        db.cleanup().await;
     }
 
     struct PgWorkerTestDb {

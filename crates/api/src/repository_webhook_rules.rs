@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
-use reqwest::Url;
 use serde_json::json;
 use sqlx::{types::Json as SqlJson, Row};
 use std::collections::{HashMap, HashSet};
@@ -1385,26 +1384,9 @@ fn webhook_rule_metadata(rule: &WebhookRuleView, operator: &AuthContext) -> serd
     })
 }
 
-fn validate_webhook_url(target: &str) -> Result<Url> {
+fn validate_webhook_url(target: &str) -> Result<reqwest::Url> {
     validate_required_text(target, MAX_TARGET_BYTES, "webhook target")?;
-    let url = Url::parse(target.trim()).context("webhook target must be an absolute URL")?;
-    match url.scheme() {
-        "https" => {}
-        "http" if is_local_http_webhook(&url) => {}
-        _ => anyhow::bail!("webhook target must use https, or http for localhost only"),
-    }
-    anyhow::ensure!(
-        url.username().is_empty() && url.password().is_none(),
-        "webhook target must not embed credentials"
-    );
-    Ok(url)
-}
-
-fn is_local_http_webhook(url: &Url) -> bool {
-    matches!(
-        url.host_str(),
-        Some("localhost") | Some("127.0.0.1") | Some("::1") | Some("[::1]")
-    )
+    vpsman_server_core::validate_webhook_target(target)
 }
 
 fn validate_required_text(value: &str, max_bytes: usize, label: &str) -> Result<()> {
@@ -1660,11 +1642,12 @@ mod tests {
     }
 
     #[test]
-    fn webhook_url_policy_allows_https_and_local_http_only() {
-        assert!(validate_webhook_rule_target("https://hooks.example/vpsman").is_ok());
-        assert!(validate_webhook_rule_target("http://localhost:9000/hook").is_ok());
-        assert!(validate_webhook_rule_target("http://127.0.0.1:9000/hook").is_ok());
-        assert!(validate_webhook_rule_target("http://hooks.example/hook").is_err());
+    fn webhook_url_policy_requires_public_https_by_default() {
+        assert!(validate_webhook_rule_target("https://hooks.acme.com/vpsman").is_ok());
+        assert!(validate_webhook_rule_target("http://localhost:9000/hook").is_err());
+        assert!(validate_webhook_rule_target("http://127.0.0.1:9000/hook").is_err());
+        assert!(validate_webhook_rule_target("http://hooks.acme.com/hook").is_err());
+        assert!(validate_webhook_rule_target("https://127.0.0.1/hook").is_err());
         assert!(validate_webhook_rule_target("https://user:secret@example.com/hook").is_err());
     }
 
@@ -1675,7 +1658,7 @@ mod tests {
             name: "stale edge".to_string(),
             enabled: true,
             expression: "status = stale && tag:edge".to_string(),
-            target: "https://hooks.example/vpsman".to_string(),
+            target: "https://hooks.acme.com/vpsman".to_string(),
             body_template: "{vps.name} stale".to_string(),
             signing_secret: None,
             clear_signing_secret: false,

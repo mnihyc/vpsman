@@ -195,26 +195,27 @@ pub(crate) async fn approve_job_approval(
         .get_job_approval_request(approval_id)
         .await?
         .ok_or_else(|| ApiError::not_found("job_approval_not_found"))?;
-    if approval.status != "pending" {
+    if approval.status == "rejected" {
         return Err(ApiError::conflict("job_approval_not_pending"));
     }
-    let (_, Json(job)) = create_job_inner(
-        &state,
-        &operator,
-        frozen_request,
-        JobPrivilegeSource::ApprovedRequest,
-    )
-    .await?;
+    let decision_reason = bounded_review_reason(request.reason.as_deref());
     let approval = state
         .repo
         .decide_job_approval(
             approval_id,
             "approved",
             &operator,
-            bounded_review_reason(request.reason.as_deref()).as_deref(),
+            decision_reason.as_deref(),
         )
         .await
         .map_err(map_job_approval_repo_error)?;
+    let (_, Json(job)) = create_job_inner(
+        &state,
+        &operator,
+        frozen_request,
+        JobPrivilegeSource::ApprovedRequest(approval_id),
+    )
+    .await?;
     Ok(Json(JobApprovalDecisionResponse {
         approval,
         job: Some(job),
@@ -307,7 +308,7 @@ pub(crate) async fn create_job_from_internal_operator_mutation(
 
 enum JobPrivilegeSource {
     RequestAssertion,
-    ApprovedRequest,
+    ApprovedRequest(Uuid),
     SavedSchedule(Uuid),
     TerminalInputRoute,
     InternalOperatorMutation,
@@ -522,10 +523,14 @@ async fn create_job_inner(
     validate_restore_archive_binding(state, &job_command, &resolved_targets).await?;
     let source_schedule_id = match &privilege_source {
         JobPrivilegeSource::RequestAssertion => None,
-        JobPrivilegeSource::ApprovedRequest => None,
+        JobPrivilegeSource::ApprovedRequest(_) => None,
         JobPrivilegeSource::SavedSchedule(schedule_id) => Some(*schedule_id),
         JobPrivilegeSource::TerminalInputRoute => None,
         JobPrivilegeSource::InternalOperatorMutation => None,
+    };
+    let approval_id = match &privilege_source {
+        JobPrivilegeSource::ApprovedRequest(approval_id) => Some(*approval_id),
+        _ => None,
     };
     let effective_max_timeout_secs =
         effective_job_max_timeout_secs(request.max_timeout_secs, state.max_job_timeout_secs())?;
@@ -536,8 +541,24 @@ async fn create_job_inner(
         &resolved_targets,
         source_schedule_id,
     )?;
-    if let Some(response) =
-        existing_job_response_for_id(state, operator, job_id, &request_fingerprint).await?
+    if let JobPrivilegeSource::ApprovedRequest(approval_id) = &privilege_source {
+        validate_approved_job_binding(
+            state,
+            *approval_id,
+            job_id,
+            &command_hash,
+            &request_fingerprint,
+        )
+        .await?;
+    }
+    if let Some(response) = existing_job_response_for_id(
+        state,
+        operator,
+        job_id,
+        &request_fingerprint,
+        matches!(&privilege_source, JobPrivilegeSource::ApprovedRequest(_)),
+    )
+    .await?
     {
         return Ok((StatusCode::OK, Json(response)));
     }
@@ -691,6 +712,7 @@ async fn create_job_inner(
                 operator,
                 &resolved_targets,
                 &precompleted_targets,
+                approval_id,
             )
             .await?
     };
@@ -1201,11 +1223,12 @@ async fn existing_job_response_for_id(
     operator: &AuthContext,
     job_id: Uuid,
     request_fingerprint: &str,
+    allow_approved_request_actor_mismatch: bool,
 ) -> Result<Option<CreateJobResponse>, ApiError> {
     let Some(existing) = state.repo.get_job(job_id).await? else {
         return Ok(None);
     };
-    if existing.actor_id != Some(operator.operator.id) {
+    if !allow_approved_request_actor_mismatch && existing.actor_id != Some(operator.operator.id) {
         return Err(ApiError::conflict("job_id_reused_by_different_actor"));
     }
     let stored_fingerprint = state
@@ -1230,6 +1253,30 @@ async fn existing_job_response_for_id(
         message: None,
         recovery: None,
     }))
+}
+
+async fn validate_approved_job_binding(
+    state: &AppState,
+    approval_id: Uuid,
+    job_id: Uuid,
+    command_hash: &str,
+    request_fingerprint: &str,
+) -> Result<(), ApiError> {
+    let (approval, _) = state
+        .repo
+        .get_job_approval_request(approval_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("job_approval_not_found"))?;
+    if approval.status != "approved" {
+        return Err(ApiError::conflict("job_approval_not_pending"));
+    }
+    if approval.job_id != job_id
+        || approval.payload_hash != command_hash
+        || approval.request_fingerprint != request_fingerprint
+    {
+        return Err(ApiError::conflict("job_approval_binding_mismatch"));
+    }
+    Ok(())
 }
 
 pub(crate) async fn create_job_target_counts(

@@ -9,6 +9,7 @@ use crate::{
         AuditLogView, AuthContext, ClientStatusHistoryView, GatewaySessionView, JobOutputView,
         ListQuery, OperatorView, ServerJobView, TelemetryNetworkRateView,
     },
+    model_alert_policies::TrafficCounterSampleRecord,
     model_history::{
         HistoryDomain, HistoryRetentionPrunePlan, HistoryRetentionPruneRequest,
         UpsertHistoryRetentionPolicyRequest,
@@ -38,6 +39,11 @@ async fn history_retention_policy_updates_and_prunes_memory_audit() {
     }));
     assert!(defaults.iter().any(|policy| {
         policy.domain == "telemetry_rollups"
+            && policy.retention_days == DEFAULT_TELEMETRY_RETENTION_DAYS
+            && policy.built_in_default
+    }));
+    assert!(defaults.iter().any(|policy| {
+        policy.domain == "traffic_counter_samples"
             && policy.retention_days == DEFAULT_TELEMETRY_RETENTION_DAYS
             && policy.built_in_default
     }));
@@ -278,6 +284,70 @@ async fn history_retention_rejects_unconfirmed_policy_update() {
 }
 
 #[tokio::test]
+async fn traffic_counter_retention_rejects_a_truncated_monthly_window() {
+    let repo = Repository::Memory(MemoryState::default());
+    let error = repo
+        .upsert_history_retention_policy(
+            UpsertHistoryRetentionPolicyRequest {
+                domain: "traffic_counter_samples".to_string(),
+                retention_days: Some(31),
+                prune_limit: None,
+                enabled: None,
+                metadata_only: None,
+                export_enabled: None,
+                notes: None,
+                clear_notes: false,
+                confirmed: true,
+            },
+            &test_operator(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("history_retention_days_out_of_range"));
+}
+
+#[tokio::test]
+async fn traffic_counter_retention_preserves_one_baseline_per_stream() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        memory.traffic_counter_samples.write().await.extend([
+            traffic_counter_sample("edge-a", "host", "eth0", 10),
+            traffic_counter_sample("edge-a", "host", "eth0", 20),
+            traffic_counter_sample("edge-a", "host", "eth0", 110),
+            traffic_counter_sample("edge-a", "tunnel", "eth0", 15),
+            traffic_counter_sample("edge-a", "tunnel", "eth0", 25),
+            traffic_counter_sample("edge-a", "tunnel", "eth0", 115),
+            traffic_counter_sample("edge-a", "host", "eth1", 30),
+        ]);
+    }
+    let plan = HistoryRetentionPrunePlan {
+        domain: HistoryDomain::TrafficCounterSamples,
+        prune_limit: 100,
+        enabled: true,
+    };
+    let dry_run = repo.prune_history_domain(&plan, 100, true).await.unwrap();
+    assert_eq!(dry_run.matched_rows, 2);
+    assert_eq!(dry_run.pruned_rows, 0);
+
+    let pruned = repo.prune_history_domain(&plan, 100, false).await.unwrap();
+    assert_eq!(pruned.matched_rows, 2);
+    assert_eq!(pruned.pruned_rows, 2);
+
+    if let Repository::Memory(memory) = &repo {
+        let mut retained = memory
+            .traffic_counter_samples
+            .read()
+            .await
+            .iter()
+            .map(|sample| sample.observed_unix)
+            .collect::<Vec<_>>();
+        retained.sort_unstable();
+        assert_eq!(retained, vec![20, 25, 30, 110, 115]);
+    }
+}
+
+#[tokio::test]
 async fn history_retention_prunes_network_rates_lifecycle_and_ended_gateway_sessions() {
     let repo = Repository::Memory(MemoryState::default());
     let old = unix_now().saturating_sub(400 * 86_400).to_string();
@@ -368,6 +438,25 @@ fn audit_with_created_at(target: &str, created_at: String) -> AuditLogView {
         command_hash: None,
         metadata: json!({}),
         created_at,
+    }
+}
+
+fn traffic_counter_sample(
+    client_id: &str,
+    source_kind: &str,
+    interface: &str,
+    observed_unix: i64,
+) -> TrafficCounterSampleRecord {
+    TrafficCounterSampleRecord {
+        client_id: client_id.to_string(),
+        source_kind: source_kind.to_string(),
+        interface: interface.to_string(),
+        observed_at: observed_unix.to_string(),
+        observed_unix,
+        rx_bytes: observed_unix,
+        tx_bytes: observed_unix,
+        counter_epoch: 0,
+        sample_source: "test".to_string(),
     }
 }
 

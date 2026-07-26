@@ -49,7 +49,7 @@ async fn job_approval_approve_dispatches_frozen_request_without_privilege_materi
 
     let Json(decision) = approve_job_approval(
         State(state.clone()),
-        headers,
+        headers.clone(),
         axum::extract::Path(approval.id),
         Json(DecideJobApprovalRequest {
             confirmed: true,
@@ -66,6 +66,26 @@ async fn job_approval_approve_dispatches_frozen_request_without_privilege_materi
     );
     assert_eq!(decision.job.as_ref().map(|job| job.job_id), Some(job_id));
     assert!(repo.get_job(job_id).await.unwrap().is_some());
+
+    let Json(retry) = approve_job_approval(
+        State(state.clone()),
+        headers,
+        axum::extract::Path(approval.id),
+        Json(DecideJobApprovalRequest {
+            confirmed: true,
+            reason: Some("a retry must not replace the durable decision".to_string()),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(retry.approval.status, "approved");
+    assert_eq!(retry.approval.decision_by, decision.approval.decision_by);
+    assert_eq!(
+        retry.approval.decision_reason,
+        decision.approval.decision_reason
+    );
+    assert_eq!(retry.job.as_ref().map(|job| job.job_id), Some(job_id));
+
     let actions = repo
         .list_audit_logs(20)
         .await
@@ -76,6 +96,13 @@ async fn job_approval_approve_dispatches_frozen_request_without_privilege_materi
     assert!(actions.contains(&"job.approval_requested".to_string()));
     assert!(actions.contains(&"job.approval_approved".to_string()));
     assert!(actions.contains(&"job.dispatch_requested".to_string()));
+    assert_eq!(
+        actions
+            .iter()
+            .filter(|action| action.as_str() == "job.approval_approved")
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -100,7 +127,7 @@ async fn job_approval_reject_records_decision_without_dispatching_job() {
 
     let Json(decision) = reject_job_approval(
         State(state.clone()),
-        headers,
+        headers.clone(),
         axum::extract::Path(approval.id),
         Json(DecideJobApprovalRequest {
             confirmed: true,
@@ -113,6 +140,38 @@ async fn job_approval_reject_records_decision_without_dispatching_job() {
     assert_eq!(decision.approval.status, "rejected");
     assert_eq!(decision.approval.risk, "maintenance");
     assert!(decision.job.is_none());
+    assert!(repo.get_job(job_id).await.unwrap().is_none());
+
+    let Json(retry) = reject_job_approval(
+        State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(approval.id),
+        Json(DecideJobApprovalRequest {
+            confirmed: true,
+            reason: Some("a retry must preserve the first rejection".to_string()),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(retry.approval.status, "rejected");
+    assert_eq!(
+        retry.approval.decision_reason,
+        decision.approval.decision_reason
+    );
+
+    let error = approve_job_approval(
+        State(state),
+        headers,
+        axum::extract::Path(approval.id),
+        Json(DecideJobApprovalRequest {
+            confirmed: true,
+            reason: Some("late approval must lose to rejection".to_string()),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::CONFLICT);
+    assert_eq!(error.code, "job_approval_not_pending");
     assert!(repo.get_job(job_id).await.unwrap().is_none());
 }
 
@@ -157,6 +216,239 @@ async fn job_approval_reject_requires_operator_reason() {
         .unwrap();
     assert_eq!(stored.status, "pending");
     assert!(repo.get_job(job_id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn approved_decision_recovers_idempotently_when_job_creation_is_interrupted() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_agent(&repo, "client-a").await;
+    let state = test_state(repo.clone());
+    let (_operator, headers) = crate::test_auth_context_and_headers(&state).await;
+    let job_id = Uuid::new_v4();
+    let (_status, Json(approval)) = create_job_approval(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateJobApprovalRequest {
+            approval_id: Some(Uuid::new_v4()),
+            job: approval_job_request(job_id, "client-a"),
+            reason: Some("post-decision recovery test".to_string()),
+            risk: None,
+        }),
+    )
+    .await
+    .unwrap();
+
+    if let Repository::Memory(memory) = &repo {
+        memory.agents.write().await.clear();
+    }
+    let error = approve_job_approval(
+        State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(approval.id),
+        Json(DecideJobApprovalRequest {
+            confirmed: true,
+            reason: Some("durable first decision".to_string()),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "fixed_target_not_found");
+    let (decided, _) = repo
+        .get_job_approval_request(approval.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(decided.status, "approved");
+    assert_eq!(
+        decided.decision_reason.as_deref(),
+        Some("durable first decision")
+    );
+    assert!(repo.get_job(job_id).await.unwrap().is_none());
+
+    seed_agent(&repo, "client-a").await;
+    let Json(recovered) = approve_job_approval(
+        State(state),
+        headers,
+        axum::extract::Path(approval.id),
+        Json(DecideJobApprovalRequest {
+            confirmed: true,
+            reason: Some("retry must preserve the first decision".to_string()),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(recovered.approval.status, "approved");
+    assert_eq!(
+        recovered.approval.decision_reason.as_deref(),
+        Some("durable first decision")
+    );
+    assert_eq!(recovered.job.as_ref().map(|job| job.job_id), Some(job_id));
+    assert!(repo.get_job(job_id).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn approval_backed_job_claim_requires_approved_matching_binding() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_agent(&repo, "client-a").await;
+    let state = test_state(repo.clone());
+    let (operator, headers) = crate::test_auth_context_and_headers(&state).await;
+
+    let pending_job_id = Uuid::new_v4();
+    let (_status, Json(pending)) = create_job_approval(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateJobApprovalRequest {
+            approval_id: Some(Uuid::new_v4()),
+            job: approval_job_request(pending_job_id, "client-a"),
+            reason: Some("pending dispatch gate test".to_string()),
+            risk: None,
+        }),
+    )
+    .await
+    .unwrap();
+    let (_, pending_request) = repo
+        .get_job_approval_request(pending.id)
+        .await
+        .unwrap()
+        .unwrap();
+    repo.record_dispatching_job_for_approval(
+        pending_job_id,
+        &pending_request,
+        &pending.payload_hash,
+        &pending.request_fingerprint,
+        &operator,
+        &pending.target_client_ids,
+        pending.id,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        repo.claim_due_job_targets(10, 30, 60)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a job committed before its approval decision must remain unclaimable"
+    );
+
+    let _ = reject_job_approval(
+        State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(pending.id),
+        Json(DecideJobApprovalRequest {
+            confirmed: true,
+            reason: Some("reject the simulated pre-decision job".to_string()),
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        repo.claim_due_job_targets(10, 30, 60)
+            .await
+            .unwrap()
+            .is_empty(),
+        "rejection must not release a previously committed job"
+    );
+
+    let mismatched_job_id = Uuid::new_v4();
+    let (_status, Json(mismatched)) = create_job_approval(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateJobApprovalRequest {
+            approval_id: Some(Uuid::new_v4()),
+            job: approval_job_request(mismatched_job_id, "client-a"),
+            reason: Some("frozen binding test".to_string()),
+            risk: None,
+        }),
+    )
+    .await
+    .unwrap();
+    let (_, mismatched_request) = repo
+        .get_job_approval_request(mismatched.id)
+        .await
+        .unwrap()
+        .unwrap();
+    repo.record_dispatching_job_for_approval(
+        mismatched_job_id,
+        &mismatched_request,
+        &mismatched.payload_hash,
+        "different-request-fingerprint",
+        &operator,
+        &mismatched.target_client_ids,
+        mismatched.id,
+    )
+    .await
+    .unwrap();
+    repo.decide_job_approval(
+        mismatched.id,
+        "approved",
+        &operator,
+        Some("approve only the frozen request"),
+    )
+    .await
+    .unwrap();
+    assert!(
+        repo.claim_due_job_targets(10, 30, 60)
+            .await
+            .unwrap()
+            .is_empty(),
+        "approval must not authorize a job with a different request fingerprint"
+    );
+
+    let approved_job_id = Uuid::new_v4();
+    let (_status, Json(approved)) = create_job_approval(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateJobApprovalRequest {
+            approval_id: Some(Uuid::new_v4()),
+            job: approval_job_request(approved_job_id, "client-a"),
+            reason: Some("approved binding control".to_string()),
+            risk: None,
+        }),
+    )
+    .await
+    .unwrap();
+    let (_status, Json(duplicate)) = create_job_approval(
+        State(state),
+        headers,
+        Json(CreateJobApprovalRequest {
+            approval_id: Some(Uuid::new_v4()),
+            job: approval_job_request(approved_job_id, "client-a"),
+            reason: Some("duplicate approval must not control the bound job".to_string()),
+            risk: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(duplicate.status, "pending");
+    let (_, approved_request) = repo
+        .get_job_approval_request(approved.id)
+        .await
+        .unwrap()
+        .unwrap();
+    repo.record_dispatching_job_for_approval(
+        approved_job_id,
+        &approved_request,
+        &approved.payload_hash,
+        &approved.request_fingerprint,
+        &operator,
+        &approved.target_client_ids,
+        approved.id,
+    )
+    .await
+    .unwrap();
+    repo.decide_job_approval(
+        approved.id,
+        "approved",
+        &operator,
+        Some("matching approval"),
+    )
+    .await
+    .unwrap();
+
+    let claimed = repo.claim_due_job_targets(10, 30, 60).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].job_id, approved_job_id);
 }
 
 fn approval_job_request(job_id: Uuid, client_id: &str) -> CreateJobRequest {

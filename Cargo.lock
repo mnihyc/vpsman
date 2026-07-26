@@ -3205,6 +3205,10 @@ dependencies = [
 name = "vpsman-server-core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "reqwest",
+ "tokio",
+ "url",
  "vpsman-common",
 ]
 

@@ -159,6 +159,97 @@ async fn refresh_operator_session_rotates_refresh_token_once() {
 }
 
 #[tokio::test]
+async fn logout_route_revokes_current_session_idempotently_and_audits_once() {
+    let state = memory_test_state();
+    let auth = state
+        .repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin".to_string(),
+            password: "admin-password-123".to_string(),
+        })
+        .await
+        .unwrap();
+    let app = crate::routes::build_router(state.clone());
+    let logout_request = || {
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/logout")
+            .header(AUTHORIZATION, format!("Bearer {}", auth.access_token))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let response = app.clone().oneshot(logout_request()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(state
+        .repo
+        .authenticate_access_token(&auth.access_token)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(state
+        .repo
+        .refresh_operator_session(&auth.refresh_token)
+        .await
+        .unwrap()
+        .is_none());
+
+    let retry = app.oneshot(logout_request()).await.unwrap();
+    assert_eq!(retry.status(), StatusCode::NO_CONTENT);
+    let logout_audits = state
+        .repo
+        .list_audit_logs(100)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|audit| audit.action == "operator_session.logged_out")
+        .collect::<Vec<_>>();
+    assert_eq!(logout_audits.len(), 1);
+    assert_eq!(
+        logout_audits[0].metadata["revocation_scope"],
+        "current_session"
+    );
+    assert_eq!(
+        logout_audits[0].metadata["revoked_access_and_refresh"],
+        true
+    );
+    let audit_json = serde_json::to_string(&logout_audits[0]).unwrap();
+    assert!(!audit_json.contains(&auth.access_token));
+    assert!(!audit_json.contains(&auth.refresh_token));
+}
+
+#[tokio::test]
+async fn logout_route_rejects_missing_or_unknown_session_credentials() {
+    let app = crate::routes::build_router(memory_test_state());
+
+    let missing = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/logout")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+    let unknown = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/logout")
+                .header(AUTHORIZATION, format!("Bearer {}", "f".repeat(64)))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn concurrent_refresh_operator_session_mints_one_replacement() {
     let repo = Repository::Memory(MemoryState::default());
     let auth = repo
@@ -197,7 +288,7 @@ async fn concurrent_refresh_operator_session_mints_one_replacement() {
 }
 
 #[tokio::test]
-async fn operator_login_throttle_locks_username_and_success_clears_username_bucket() {
+async fn operator_login_throttle_isolates_username_lockouts_by_client_ip() {
     let repo = Repository::Memory(MemoryState::default());
     let password = "admin-password-123";
     repo.bootstrap_operator(&BootstrapOperatorRequest {
@@ -276,6 +367,36 @@ async fn operator_login_throttle_locks_username_and_success_clears_username_buck
         .unwrap(),
         repository_auth::OperatorLoginAttempt::Throttled
     ));
+    assert!(matches!(
+        repo.login_operator_with_throttle(
+            &LoginRequest {
+                username: "admin".to_string(),
+                password: password.to_string(),
+                totp_code: None,
+            },
+            "203.0.113.11",
+            None,
+            &throttle,
+        )
+        .await
+        .unwrap(),
+        repository_auth::OperatorLoginAttempt::Authenticated(_)
+    ));
+    assert!(matches!(
+        repo.login_operator_with_throttle(
+            &LoginRequest {
+                username: "admin".to_string(),
+                password: password.to_string(),
+                totp_code: None,
+            },
+            "203.0.113.10",
+            None,
+            &throttle,
+        )
+        .await
+        .unwrap(),
+        repository_auth::OperatorLoginAttempt::Throttled
+    ));
     let audit_count_before = repo.list_audit_logs(100).await.unwrap().len();
     for _ in 0..3 {
         assert!(matches!(
@@ -302,7 +423,7 @@ async fn operator_login_throttle_locks_username_and_success_clears_username_buck
     let audit_json = serde_json::to_string(&repo.list_audit_logs(10).await.unwrap()).unwrap();
     assert!(audit_json.contains("operator_auth.login_after_failures"));
     assert!(audit_json.contains("operator_auth.lockout_created"));
-    assert!(audit_json.contains("\"scope_kind\":\"username\""));
+    assert!(audit_json.contains("\"scope_kind\":\"username_ip\""));
     assert!(!audit_json.contains("\"scope_kind\":\"ip\""));
     assert!(!audit_json.contains("operator_auth.login_throttled"));
 }
@@ -349,12 +470,13 @@ async fn login_route_returns_too_many_requests_after_configured_failures() {
 
 #[tokio::test]
 async fn login_route_ip_throttle_spans_unknown_usernames() {
-    let state = memory_test_state();
+    let failure_limit = 8;
+    let (state, suite_config_path) = memory_test_state_with_ip_throttle_limit(failure_limit);
     let peer = "203.0.113.21:44321"
         .parse::<std::net::SocketAddr>()
         .unwrap();
 
-    for index in 0..8 {
+    for index in 0..failure_limit {
         let error = routes_auth::login_operator(
             axum::extract::State(state.clone()),
             axum::extract::ConnectInfo(peer),
@@ -403,14 +525,16 @@ async fn login_route_ip_throttle_spans_unknown_usernames() {
     .unwrap_err();
     assert_eq!(error.status, StatusCode::UNAUTHORIZED);
     assert_eq!(error.code, "invalid_operator_credentials");
+    std::fs::remove_file(suite_config_path).unwrap();
 }
 
 #[tokio::test]
 async fn login_route_throttles_by_forwarded_ipv6_operator_ip() {
-    let state = memory_test_state();
+    let failure_limit = 8;
+    let (state, suite_config_path) = memory_test_state_with_ip_throttle_limit(failure_limit);
     let peer = "127.0.0.1:44321".parse::<std::net::SocketAddr>().unwrap();
 
-    for index in 0..8 {
+    for index in 0..failure_limit {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "2001:db8::10".parse().unwrap());
         let error = routes_auth::login_operator(
@@ -459,6 +583,7 @@ async fn login_route_throttles_by_forwarded_ipv6_operator_ip() {
     .await
     .unwrap_err();
     assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+    std::fs::remove_file(suite_config_path).unwrap();
 }
 
 #[tokio::test]
@@ -918,7 +1043,7 @@ async fn fleet_read_only_cannot_read_sensitive_payload_surfaces() {
                 name: None,
                 enabled: Some(true),
                 expression: "status = online".to_string(),
-                target: Some("https://hooks.example/vpsman".to_string()),
+                target: Some("https://www.cloudflare.com/vpsman-test-webhook".to_string()),
                 event_kind: "manual.dry_run".to_string(),
                 event_id: None,
                 body_template: String::new(),
@@ -2164,7 +2289,7 @@ async fn memory_repository_routes_require_bearer_tokens() {
                 name: "route auth regression".to_string(),
                 enabled: true,
                 expression: "status = online".to_string(),
-                target: "https://hooks.example/vpsman".to_string(),
+                target: "https://www.cloudflare.com/vpsman-test-webhook".to_string(),
                 body_template: String::new(),
                 signing_secret: None,
                 clear_signing_secret: false,
@@ -2474,6 +2599,19 @@ fn memory_test_state() -> AppState {
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
         dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
     }
+}
+
+fn memory_test_state_with_ip_throttle_limit(limit: i64) -> (AppState, std::path::PathBuf) {
+    let mut state = memory_test_state();
+    let suite_config_path =
+        std::env::temp_dir().join(format!("vpsman-auth-throttle-test-{}.toml", Uuid::new_v4()));
+    std::fs::write(
+        &suite_config_path,
+        format!("version = 1\n\n[api]\noperator_auth_ip_failed_attempt_limit = {limit}\n"),
+    )
+    .unwrap();
+    state.suite_config_path = suite_config_path.clone();
+    (state, suite_config_path)
 }
 
 fn memory_privilege_test_state() -> AppState {

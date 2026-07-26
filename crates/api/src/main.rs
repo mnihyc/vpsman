@@ -124,7 +124,7 @@ use gateway_client::{GatewayClientTimeouts, GatewayDispatchClient};
 use object_store::{BackupObjectStore, S3BackupObjectStoreSettings};
 use repository::Repository;
 use routes::build_router;
-use state::{AppState, UpdateReleasePolicy, DEFAULT_ARTIFACT_MAX_BYTES};
+use state::{remember_suite_config, AppState, UpdateReleasePolicy, DEFAULT_ARTIFACT_MAX_BYTES};
 use tokio::{sync::broadcast, time};
 use tracing::info;
 use vpsman_common::{
@@ -567,6 +567,7 @@ async fn main() -> Result<()> {
     let mut args = Args::parse();
     let suite_config =
         SuiteConfig::load_optional(&args.suite_config).map_err(anyhow::Error::msg)?;
+    remember_suite_config(&args.suite_config, &suite_config);
     args.apply_suite_config(&suite_config)
         .map_err(anyhow::Error::msg)?;
     info!(

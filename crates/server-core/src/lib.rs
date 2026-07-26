@@ -4,6 +4,13 @@ use vpsman_common::{
     MAX_DIRECT_FILE_DOWNLOAD_BYTES,
 };
 
+mod webhook_target;
+
+pub use webhook_target::{
+    prepare_webhook_target, validate_webhook_target, PreparedWebhookTarget,
+    DEVELOPMENT_LOOPBACK_WEBHOOKS_ENV,
+};
+
 pub use vpsman_common::{
     job_statuses, job_target_statuses, job_target_terminal_statuses, job_terminal_statuses,
     JobStatus, JobStatusClass, JobTargetStatusClass, JOB_STATUSES, JOB_STATUS_AGENT_TIMEOUT,

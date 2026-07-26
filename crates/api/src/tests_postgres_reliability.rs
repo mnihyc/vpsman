@@ -1,6 +1,7 @@
 use std::{path::Path, str::FromStr, time::Duration};
 
 use axum::http::{header::AUTHORIZATION, HeaderMap};
+use chrono::{Datelike, Utc};
 use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions},
     PgPool, Row,
@@ -28,6 +29,7 @@ use crate::{
     model_alert_notifications::{
         CreateFleetAlertNotificationChannelRequest, FleetAlertNotificationCandidate,
     },
+    model_history::{HistoryDomain, HistoryRetentionPrunePlan},
     model_webhook_rules::{CreateWebhookRuleRequest, WebhookRuleDeliveryCandidate},
     repository::Repository,
     repository_backups::BackupRequestSourceLink,
@@ -54,7 +56,7 @@ async fn postgres_deleted_delivery_owners_reject_stale_dispatch_snapshots() {
                 categories: Some(vec!["agent_status".to_string()]),
                 operator_states: Some(vec!["open".to_string()]),
                 delivery_kind: "webhook".to_string(),
-                target: "http://127.0.0.1:9/fleet".to_string(),
+                target: "https://www.cloudflare.com/vpsman-test-fleet-webhook".to_string(),
                 cooldown_secs: Some(60),
                 enabled: Some(true),
                 notes: None,
@@ -79,7 +81,7 @@ async fn postgres_deleted_delivery_owners_reject_stale_dispatch_snapshots() {
                 alert_category: "agent_status".to_string(),
                 status: "queued".to_string(),
                 delivery_kind: "webhook".to_string(),
-                target: "http://127.0.0.1:9/fleet".to_string(),
+                target: "https://www.cloudflare.com/vpsman-test-fleet-webhook".to_string(),
                 dedupe_key: "deleted-channel-stale-dispatch".to_string(),
                 payload: serde_json::json!({"schema": "test"}),
                 cooldown_until_unix: 0,
@@ -98,7 +100,7 @@ async fn postgres_deleted_delivery_owners_reject_stale_dispatch_snapshots() {
                 name: "deleted-rule".to_string(),
                 enabled: true,
                 expression: "interval.1min".to_string(),
-                target: "http://127.0.0.1:9/webhook".to_string(),
+                target: "https://www.cloudflare.com/vpsman-test-rule-webhook".to_string(),
                 body_template: String::new(),
                 signing_secret: None,
                 clear_signing_secret: false,
@@ -121,7 +123,7 @@ async fn postgres_deleted_delivery_owners_reject_stale_dispatch_snapshots() {
             rule_name: "deleted-rule".to_string(),
             event_kind: "manual.test".to_string(),
             event_id: "deleted-rule-stale-event".to_string(),
-            target: "http://127.0.0.1:9/webhook".to_string(),
+            target: "https://www.cloudflare.com/vpsman-test-rule-webhook".to_string(),
             dedupe_key: "deleted-rule-stale-dispatch".to_string(),
             payload: serde_json::json!({"schema": "test"}),
             matched_vps: Vec::new(),
@@ -413,6 +415,194 @@ async fn postgres_telemetry_queries_scope_before_limit_and_preserve_rate_baselin
     assert_eq!(latest_mixed.len(), 1);
     assert_eq!(latest_mixed[0].bucket_secs, 300);
     assert_eq!(latest_mixed[0].rx_bytes_delta, 15_000);
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_traffic_accounting_ignores_more_than_200k_unrelated_old_rows() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let old_client_id = "traffic-old-history";
+    let target_client_id = "traffic-current-cycle";
+    insert_client(&db.pool, old_client_id, None).await;
+    insert_client(&db.pool, target_client_id, None).await;
+
+    // Keep the configured boundary well behind "now", including across a
+    // midnight rollover while this test is running.
+    let today = Utc::now().day();
+    let reset_day = if today > 14 { today - 14 } else { today + 14 };
+    sqlx::query(
+        r#"
+        INSERT INTO vps_rule_values (client_id, key, value_raw, value_json)
+        VALUES
+            (
+                $1,
+                'traffic.reset_day',
+                $2,
+                jsonb_build_object('day', $3::integer)
+            ),
+            (
+                $1,
+                'traffic.selectors',
+                'eth0',
+                '{"selectors":[{"source":"host","interface":"eth0","direction":"total","canonical":"eth0"}]}'::jsonb
+            ),
+            (
+                $1,
+                'traffic.quota.total',
+                '1TB',
+                '{"bytes":1000000000000,"display":"1 TB"}'::jsonb
+            )
+        "#,
+    )
+    .bind(target_client_id)
+    .bind(reset_day.to_string())
+    .bind(reset_day as i32)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let cycle_start = chrono::DateTime::parse_from_rfc3339(
+        &db.repo
+            .get_traffic_accounting(target_client_id)
+            .await
+            .unwrap()
+            .cycle_start,
+    )
+    .unwrap()
+    .timestamp();
+
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_samples (
+            client_id,
+            source_kind,
+            interface,
+            observed_at,
+            rx_bytes,
+            tx_bytes,
+            counter_epoch,
+            sample_source
+        )
+        SELECT
+            $1,
+            'host',
+            'eth0',
+            to_timestamp(($2::bigint + generated.sample)::double precision),
+            generated.sample::bigint,
+            generated.sample::bigint,
+            0,
+            'test'
+        FROM generate_series(1, 200001) AS generated(sample)
+        "#,
+    )
+    .bind(old_client_id)
+    .bind(cycle_start - 10_000_000)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_samples (
+            client_id,
+            source_kind,
+            interface,
+            observed_at,
+            rx_bytes,
+            tx_bytes,
+            counter_epoch,
+            sample_source
+        )
+        VALUES
+            ($1, 'host', 'eth0', to_timestamp($2::double precision), 100, 200, 0, 'test'),
+            ($1, 'host', 'eth0', to_timestamp($3::double precision), 130, 260, 0, 'test'),
+            ($1, 'host', 'eth0', to_timestamp($4::double precision), 10, 300, 0, 'test'),
+            ($1, 'host', 'eth0', to_timestamp($5::double precision), 20, 320, 0, 'test'),
+            ($1, 'host', 'eth0', to_timestamp($6::double precision), 30, 340, 0, 'test')
+        "#,
+    )
+    .bind(target_client_id)
+    .bind((cycle_start - 1) as f64)
+    .bind((cycle_start + 10) as f64)
+    .bind((cycle_start + 20) as f64)
+    .bind((cycle_start + 25) as f64)
+    .bind((cycle_start + 30) as f64)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let accounting = db
+        .repo
+        .get_traffic_accounting(target_client_id)
+        .await
+        .unwrap();
+    assert_eq!(accounting.client_id, target_client_id);
+    assert_eq!(accounting.rx_bytes, 50);
+    assert_eq!(accounting.tx_bytes, 140);
+    assert_eq!(accounting.total_bytes, 190);
+    assert_eq!(accounting.latest_rx_bytes, 30);
+    assert_eq!(accounting.latest_tx_bytes, 340);
+    assert_eq!(accounting.latest_total_bytes, 370);
+    assert_eq!(accounting.counter_epochs_seen, 1);
+    assert_eq!(
+        chrono::DateTime::parse_from_rfc3339(
+            accounting
+                .last_sample_at
+                .as_deref()
+                .expect("current-cycle traffic sample is present")
+        )
+        .unwrap()
+        .timestamp(),
+        cycle_start + 30
+    );
+
+    let retention_client_id = "traffic-retention-baseline";
+    insert_client(&db.pool, retention_client_id, None).await;
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_samples (
+            client_id, source_kind, interface, observed_at,
+            rx_bytes, tx_bytes, counter_epoch, sample_source
+        )
+        VALUES
+            ($1, 'host', 'eth0', to_timestamp(10), 10, 10, 0, 'test'),
+            ($1, 'host', 'eth0', to_timestamp(20), 20, 20, 0, 'test'),
+            ($1, 'host', 'eth0', to_timestamp(100), 100, 100, 0, 'test')
+        "#,
+    )
+    .bind(retention_client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let pruned = db
+        .repo
+        .prune_history_domain(
+            &HistoryRetentionPrunePlan {
+                domain: HistoryDomain::TrafficCounterSamples,
+                prune_limit: 100,
+                enabled: true,
+            },
+            50,
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(pruned.pruned_rows, 1);
+    let retained: Vec<i64> = sqlx::query_scalar(
+        r#"
+        SELECT EXTRACT(EPOCH FROM observed_at)::bigint
+        FROM traffic_counter_samples
+        WHERE client_id = $1
+        ORDER BY observed_at ASC
+        "#,
+    )
+    .bind(retention_client_id)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(retained, vec![20, 100]);
 
     db.cleanup().await;
 }
@@ -1163,7 +1353,7 @@ async fn postgres_network_operator(repo: &Repository) -> AuthContext {
 }
 
 #[tokio::test]
-async fn postgres_operator_login_throttle_persists_locked_username_bucket() {
+async fn postgres_operator_login_throttle_persists_per_client_identity_bucket() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
     };
@@ -1216,14 +1406,30 @@ async fn postgres_operator_login_throttle_persists_locked_username_bucket() {
             .unwrap(),
         crate::repository_auth::OperatorLoginAttempt::Throttled
     ));
+    assert!(matches!(
+        second_repo
+            .login_operator_with_throttle(
+                &LoginRequest {
+                    username: "admin".to_string(),
+                    password: "admin-password-123".to_string(),
+                    totp_code: None,
+                },
+                "203.0.113.31",
+                None,
+                &throttle,
+            )
+            .await
+            .unwrap(),
+        crate::repository_auth::OperatorLoginAttempt::Authenticated(_)
+    ));
 
     let row = sqlx::query(
         r#"
         SELECT failed_attempts,
-               locked_until IS NOT NULL AND locked_until > now() AS locked
+               locked_until IS NOT NULL AND locked_until > now() AS locked,
+               scope_key
         FROM operator_auth_throttle
-        WHERE scope_kind = 'username'
-          AND scope_key = 'admin'
+        WHERE scope_kind = 'username_ip'
         "#,
     )
     .fetch_one(&db.pool)
@@ -1231,8 +1437,10 @@ async fn postgres_operator_login_throttle_persists_locked_username_bucket() {
     .unwrap();
     let failed_attempts: i64 = row.try_get("failed_attempts").unwrap();
     let locked: bool = row.try_get("locked").unwrap();
+    let scope_key: String = row.try_get("scope_key").unwrap();
     assert_eq!(failed_attempts, 2);
     assert!(locked);
+    assert_eq!(scope_key, "5:admin|203.0.113.30");
     let audit_count: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_logs WHERE action = $1")
         .bind("operator_auth.lockout_created")
         .fetch_one(&db.pool)

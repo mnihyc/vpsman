@@ -3,7 +3,7 @@ use std::net::{IpAddr, SocketAddr};
 use axum::http::HeaderMap;
 use ipnet::IpNet;
 
-const DEFAULT_TRUSTED_PROXY_CIDRS: &[&str] = &["0.0.0.0/0", "::/0"];
+const DEFAULT_TRUSTED_PROXY_CIDRS: &[&str] = &["127.0.0.0/8", "::1/128"];
 
 #[derive(Clone, Debug)]
 pub(crate) struct TrustedProxyConfig {
@@ -112,7 +112,7 @@ mod tests {
 
     #[test]
     fn untrusted_peer_cannot_spoof_forwarded_origin() {
-        let config = TrustedProxyConfig::from_env_csv("127.0.0.0/8,::1/128").unwrap();
+        let config = TrustedProxyConfig::default();
         let peer = "198.51.100.20:44000".parse().unwrap();
 
         assert_eq!(

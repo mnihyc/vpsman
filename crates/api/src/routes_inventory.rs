@@ -821,7 +821,14 @@ pub(crate) async fn bulk_mutate_tags(
     let _operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
-    validate_persisted_tag_name(&request.tag)?;
+    match &request.action {
+        crate::model::BulkTagMutationAction::Add => {
+            validate_persisted_tag_name(&request.tag)?;
+        }
+        crate::model::BulkTagMutationAction::Remove => {
+            validate_legacy_tag_name_for_cleanup(&request.tag)?;
+        }
+    }
     validate_bulk_selector_expression(&request.selector_expression)?;
     request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
     let fixed_targets = verified_fixed_target_ids(
@@ -868,7 +875,7 @@ pub(crate) async fn delete_tag(
     let _operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
-    validate_persisted_tag_name(&tag)?;
+    validate_legacy_tag_name_for_cleanup(&tag)?;
     if request.confirmed {
         let preview = state.repo.delete_tag(&tag, false).await?;
         require_matching_preview_hash(
@@ -1595,6 +1602,14 @@ fn validate_telemetry_rollup_query(query: &TelemetryRollupQuery) -> Result<(), A
 }
 
 fn validate_persisted_tag_name(tag: &str) -> Result<(), ApiError> {
+    validate_legacy_tag_name_for_cleanup(tag)?;
+    if tag.split(':').any(str::is_empty) {
+        return Err(ApiError::bad_request("invalid_tag_name"));
+    }
+    Ok(())
+}
+
+fn validate_legacy_tag_name_for_cleanup(tag: &str) -> Result<(), ApiError> {
     if tag.is_empty() || tag.len() > 128 {
         return Err(ApiError::bad_request("invalid_tag_name"));
     }
@@ -1758,8 +1773,8 @@ fn validate_telemetry_tunnel_query(query: &TelemetryTunnelQuery) -> Result<(), A
 mod tests {
     use super::{
         peer_client_ids_for_deleted_agent, telemetry_network_rate_limit_or_default,
-        validate_assign_source_template, validate_persisted_tag_name,
-        validate_source_template_candidate, validate_template_name,
+        validate_assign_source_template, validate_legacy_tag_name_for_cleanup,
+        validate_persisted_tag_name, validate_source_template_candidate, validate_template_name,
     };
     use crate::model::AssignSourceTemplateRequest;
 
@@ -1771,6 +1786,12 @@ mod tests {
 
         assert!(validate_persisted_tag_name("id:edge-a").is_err());
         assert!(validate_persisted_tag_name("name:edge-a").is_err());
+        assert!(validate_persisted_tag_name("provider:").is_err());
+        assert!(validate_persisted_tag_name(":alpha").is_err());
+        assert!(validate_persisted_tag_name("role::edge").is_err());
+        validate_legacy_tag_name_for_cleanup("provider:").unwrap();
+        validate_legacy_tag_name_for_cleanup(":alpha").unwrap();
+        validate_legacy_tag_name_for_cleanup("role::edge").unwrap();
     }
 
     #[test]

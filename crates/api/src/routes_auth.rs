@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use axum::{
     extract::{ConnectInfo, Path, Query, State},
-    http::{header::USER_AGENT, HeaderMap},
+    http::{header::USER_AGENT, HeaderMap, StatusCode},
     Json,
 };
 use uuid::Uuid;
@@ -21,8 +21,9 @@ use crate::{
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
     repository_auth::OperatorLoginAttempt,
     security::{
-        normalize_operator_scopes, validate_operator_credentials, validate_operator_role,
-        DEFAULT_REFRESH_TOKEN_TTL_SECS, MAX_REFRESH_TOKEN_TTL_SECS, MIN_REFRESH_TOKEN_TTL_SECS,
+        bearer_token, normalize_operator_scopes, validate_operator_credentials,
+        validate_operator_role, DEFAULT_REFRESH_TOKEN_TTL_SECS, MAX_REFRESH_TOKEN_TTL_SECS,
+        MIN_REFRESH_TOKEN_TTL_SECS,
     },
     state::AppState,
 };
@@ -95,6 +96,18 @@ pub(crate) async fn refresh_operator_session(
         .ok_or_else(|| ApiError::unauthorized("invalid_refresh_token"))
 }
 
+pub(crate) async fn logout_operator_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let access_token =
+        bearer_token(&headers).ok_or_else(|| ApiError::unauthorized("missing_bearer_token"))?;
+    if !state.repo.logout_operator_session(access_token).await? {
+        return Err(ApiError::unauthorized("invalid_operator_session"));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub(crate) async fn setup_operator_totp(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -115,7 +128,7 @@ pub(crate) async fn setup_operator_totp(
         TotpSetupOutcome::Created(response) => {
             state
                 .repo
-                .clear_operator_auth_management_success(&operator.operator.username)
+                .clear_operator_auth_management_success(&operator.operator.username, &remote_ip)
                 .await?;
             Ok(Json(response))
         }
@@ -146,7 +159,7 @@ pub(crate) async fn confirm_operator_totp(
         TotpUpdateOutcome::Updated(updated) => {
             state
                 .repo
-                .clear_operator_auth_management_success(&operator.operator.username)
+                .clear_operator_auth_management_success(&operator.operator.username, &remote_ip)
                 .await?;
             Ok(Json(*updated))
         }
@@ -177,7 +190,7 @@ pub(crate) async fn disable_operator_totp(
         TotpUpdateOutcome::Updated(updated) => {
             state
                 .repo
-                .clear_operator_auth_management_success(&operator.operator.username)
+                .clear_operator_auth_management_success(&operator.operator.username, &remote_ip)
                 .await?;
             Ok(Json(*updated))
         }

@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_TELEMETRY_RETENTION_DAYS: i32 = 90;
 pub const DEFAULT_TELEMETRY_RETENTION_PRUNE_LIMIT: i32 = 10_000;
+// Monthly traffic cycles span at most 31 days; the extra day keeps retention
+// strictly behind the active cycle boundary.
+pub const MIN_TRAFFIC_COUNTER_RETENTION_DAYS: i32 = 32;
 pub const MAX_TELEMETRY_DISKS: usize = 256;
 pub const MAX_TELEMETRY_NETWORKS: usize = 512;
 pub const MAX_TELEMETRY_TUNNELS: usize = 512;

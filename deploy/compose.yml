@@ -10,6 +10,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vpsman}
     volumes:
       - ./runtime/postgres/data:/var/lib/postgresql/data
+    networks:
+      - backend
 
   api:
     image: debian:bookworm-slim
@@ -36,6 +38,9 @@ services:
           create_host_path: false
     depends_on:
       - postgres
+    networks:
+      - backend
+      - frontend_api
 
   gateway:
     image: debian:bookworm-slim
@@ -76,6 +81,8 @@ services:
           create_host_path: false
     depends_on:
       - api
+    networks:
+      - backend
 
   worker:
     image: debian:bookworm-slim
@@ -95,6 +102,8 @@ services:
     depends_on:
       - postgres
       - api
+    networks:
+      - backend
 
   frontend:
     image: nginx:1.27-alpine
@@ -106,3 +115,13 @@ services:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       - api
+    networks:
+      frontend_api:
+        ipv4_address: 172.31.255.2
+
+networks:
+  backend:
+  frontend_api:
+    ipam:
+      config:
+        - subnet: 172.31.255.0/29

@@ -20,8 +20,9 @@ use crate::{
         bootstrap_operator, bootstrap_status, clear_operator_totp, confirm_operator_totp,
         create_operator, current_operator, delete_operator, disable_operator,
         disable_operator_totp, enable_operator, list_operator_auth_events, list_operator_sessions,
-        list_operators, login_operator, refresh_operator_session, reset_operator_password,
-        revoke_operator_session, setup_operator_totp, update_operator, update_operator_preferences,
+        list_operators, login_operator, logout_operator_session, refresh_operator_session,
+        reset_operator_password, revoke_operator_session, setup_operator_totp, update_operator,
+        update_operator_preferences,
     },
     routes_backups::{
         abort_backup_artifact_upload_session, commit_backup_artifact_upload_session,
@@ -145,6 +146,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/api/v1/auth/bootstrap-status", get(bootstrap_status))
         .route("/api/v1/auth/bootstrap", post(bootstrap_operator))
         .route("/api/v1/auth/login", post(login_operator))
+        .route("/api/v1/auth/logout", post(logout_operator_session))
         .route("/api/v1/auth/refresh", post(refresh_operator_session))
         .route("/api/v1/auth/me", get(current_operator))
         .route("/api/v1/auth/preferences", put(update_operator_preferences))

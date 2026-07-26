@@ -116,6 +116,12 @@ export function FleetGroupsPanel({
     return runPanelAction(setPending, setActionError, action);
   };
 
+  useEffect(() => {
+    setActionError(null);
+    setActionStatus(null);
+    setLastMutation(null);
+  }, [subpage]);
+
   return (
     <section className="workspace singleColumn">
       <div className="fleetPanel">
@@ -539,10 +545,30 @@ function TagRegistry({
   const [deletePreview, setDeletePreview] = useState<TagMutationResponse | null>(null);
   const trimmedGroupName = tagName.trim();
   const groupNameHasComma = trimmedGroupName.includes(",");
+  const groupNameHasEmptySegment =
+    trimmedGroupName.length > 0 &&
+    trimmedGroupName.split(":").some((segment) => segment.length === 0);
+  const groupNameHasInvalidCharacters =
+    trimmedGroupName.length > 0 &&
+    !/^[A-Za-z0-9._:-]+$/.test(trimmedGroupName);
+  const groupNameIsReserved =
+    trimmedGroupName.startsWith("id:") || trimmedGroupName.startsWith("name:");
+  const groupNameError =
+    trimmedGroupName.length > 128
+      ? "Group names must be 128 characters or fewer."
+      : groupNameHasComma
+        ? "Use one group name per submission; commas are not accepted here."
+        : groupNameHasEmptySegment
+          ? "Every group segment before or after a colon must have a value."
+          : groupNameHasInvalidCharacters
+            ? "Use letters, numbers, periods, dashes, underscores, and colons only."
+            : groupNameIsReserved
+              ? "The id: and name: prefixes are reserved for VPS selectors."
+              : null;
 
   async function submitTag(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!trimmedGroupName || groupNameHasComma) {
+    if (!trimmedGroupName || groupNameError) {
       return;
     }
     await runAction(async () => {
@@ -672,7 +698,7 @@ function TagRegistry({
           />
           <button
             className="secondaryAction"
-            disabled={pending || !trimmedGroupName || groupNameHasComma}
+            disabled={pending || !trimmedGroupName || groupNameError !== null}
             type="submit"
           >
             <Plus size={14} />
@@ -680,9 +706,8 @@ function TagRegistry({
           </button>
         </div>
         <small id="group-name-hint">
-          {groupNameHasComma
-            ? "Use one group name per submission; commas are not accepted here."
-            : "Use the group later in selectors, schedules, alerts, and bulk operations."}
+          {groupNameError ??
+            "Use the group later in selectors, schedules, alerts, and bulk operations."}
         </small>
       </form>
       <ConsoleDataGrid

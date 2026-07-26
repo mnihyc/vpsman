@@ -3,7 +3,8 @@ import { normalizeHex, type PrivilegeMaterial } from "./privilege";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const PRIVILEGE_STORAGE_KEY = "vpsman.privilegeVault";
-const KDF_ITERATIONS = 180_000;
+const KDF_ITERATIONS = 600_000;
+export const MIN_VAULT_PASSPHRASE_LENGTH = 12;
 
 type StoredEncryptedVault = {
   version: 1;
@@ -24,8 +25,10 @@ export function clearPrivilegeVault(): void {
 }
 
 export async function savePrivilegeVault(material: PrivilegeMaterial, passphrase: string): Promise<void> {
-  if (!passphrase) {
-    throw new Error("Vault passphrase is required");
+  if (passphrase.length < MIN_VAULT_PASSPHRASE_LENGTH) {
+    throw new Error(
+      `Vault passphrase must be at least ${MIN_VAULT_PASSPHRASE_LENGTH} characters`,
+    );
   }
   if (!material.superPassword) {
     throw new Error("Super password is required");

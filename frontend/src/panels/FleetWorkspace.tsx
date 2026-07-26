@@ -8635,7 +8635,20 @@ function FleetAlertList({
   );
 
   useEffect(() => {
-    setReviewSnapshot(null);
+    setReviewSnapshot((current) => {
+      if (!current) {
+        return current;
+      }
+      const currentAlerts = new Map(alerts.map((alert) => [alert.id, alert]));
+      const reviewIsCurrent = current.rows.every((reviewedAlert) => {
+        const latestAlert = currentAlerts.get(reviewedAlert.id);
+        return (
+          latestAlert != null &&
+          alertOperatorState(latestAlert) === alertOperatorState(reviewedAlert)
+        );
+      });
+      return reviewIsCurrent ? current : null;
+    });
   }, [alerts]);
 
   function reviewAlertUpdate(
