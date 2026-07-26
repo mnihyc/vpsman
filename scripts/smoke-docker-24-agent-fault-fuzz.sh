@@ -42,6 +42,10 @@ proxy_log="$SMOKE_TMPDIR/network-proxy.log"
 proxy_stats="$SMOKE_TMPDIR/network-proxy-stats.json"
 mkdir -p "$object_store_dir" "$screenshot_dir"
 
+smoke_fault_log() {
+  printf '[docker-fault-fuzz:%s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2
+}
+
 pg_container="vpsman-$run_id-postgres"
 api_container="vpsman-$run_id-api"
 gateway_container="vpsman-$run_id-gateway"
@@ -718,9 +722,9 @@ frontend_test_host="${VPSMAN_FRONTEND_TEST_HOST:-localhost}"
 if [[ "${VPSMAN_SMOKE_SKIP_BUILD:-0}" == "1" ]]; then
   [[ -f "$ROOT_DIR/frontend/dist/index.html" ]] ||
     smoke_fail "VPSMAN_SMOKE_SKIP_BUILD=1 requires existing frontend/dist assets"
-  smoke_fleet_log "reusing frontend production assets for post-fault UI smoke"
+  smoke_fault_log "reusing frontend production assets for post-fault UI smoke"
 else
-  smoke_fleet_log "building frontend production assets for post-fault UI smoke"
+  smoke_fault_log "building frontend production assets for post-fault UI smoke"
   env \
     VPSMAN_API_PROXY="$api_url" \
     VPSMAN_FRONTEND_SMOKE_ROOT="$ROOT_DIR" \
