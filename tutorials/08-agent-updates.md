@@ -10,11 +10,11 @@ The default self-update source is the GitHub release manifest:
 https://github.com/mnihyc/vpsman/releases/latest/download/version.json
 ```
 
-Agents installed by the one-line installer are configured with this default
-manifest URL and 24 hour interval/jitter values, but autonomous updates are
-disabled unless the install command sets
-`VPSMAN_AGENT_UNMANAGED_UPDATE_ENABLED=1` or a later incremental config patch
-enables `update.unmanaged_enabled`. When enabled, the autonomous updater reads
+Agents installed by the one-line bootstrap installer start with autonomous
+updates disabled. Bootstrap intentionally rejects runtime-policy environment
+variables, including `VPSMAN_AGENT_UNMANAGED_UPDATE_ENABLED`; enable
+`update.unmanaged_enabled` later through a reviewed incremental config patch.
+When enabled, the autonomous updater reads
 `version.json`, checks `SHA256SUMS`, downloads the matching musl agent asset
 from the release, stages it, activates it, and restarts the agent according to
 local update settings.

@@ -17,7 +17,7 @@ test("dispatches and operates a durable staged rollout", async ({
   const composer = page.locator(".commandComposer");
   await composer.getByLabel("Command argv").fill("/bin/echo staged-rollout");
   await composer
-    .getByRole("searchbox", { name: "Bulk target selector expression" })
+    .getByRole("combobox", { name: "Bulk target selector expression" })
     .fill("id:*");
   await expect(composer.getByText("All 3 scoped VPSs")).toBeVisible();
 

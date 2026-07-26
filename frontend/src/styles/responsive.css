@@ -235,6 +235,14 @@
     word-break: normal;
   }
 
+  .gridMobileFieldValue > small {
+    display: block;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    word-break: normal;
+  }
+
   .gridMobileCard.stackedFields .gridMobileFields {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -622,6 +630,10 @@
 
   .mobileSavedViewMenu[open] {
     width: 100%;
+  }
+
+  .mobileSavedViewMenu:not([open]) > .mobileSavedViewControls {
+    display: none;
   }
 
   .mobileSavedViewMenu .savedViewControls {

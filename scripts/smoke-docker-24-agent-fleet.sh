@@ -811,11 +811,17 @@ jq -e --arg expression "$cleanup_expression" '
 ' <<<"$cleanup_preview_json" >/dev/null
 
 frontend_test_host="${VPSMAN_FRONTEND_TEST_HOST:-localhost}"
-smoke_fleet_log "building frontend production assets for live Docker fleet UI smoke"
-env \
-  VPSMAN_API_PROXY="$api_url" \
-  VPSMAN_FRONTEND_SMOKE_ROOT="$ROOT_DIR" \
-  bash -ic 'cd "$VPSMAN_FRONTEND_SMOKE_ROOT/frontend" && npm run build'
+if [[ "${VPSMAN_SMOKE_SKIP_BUILD:-0}" == "1" ]]; then
+  [[ -f "$ROOT_DIR/frontend/dist/index.html" ]] ||
+    smoke_fail "VPSMAN_SMOKE_SKIP_BUILD=1 requires existing frontend/dist assets"
+  smoke_fleet_log "reusing frontend production assets for live Docker fleet UI smoke"
+else
+  smoke_fleet_log "building frontend production assets for live Docker fleet UI smoke"
+  env \
+    VPSMAN_API_PROXY="$api_url" \
+    VPSMAN_FRONTEND_SMOKE_ROOT="$ROOT_DIR" \
+    bash -ic 'cd "$VPSMAN_FRONTEND_SMOKE_ROOT/frontend" && npm run build'
+fi
 
 smoke_fleet_log "running live Docker fleet UI smoke (desktop and mobile sequentially)"
 if ! env \

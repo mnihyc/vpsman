@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ActionFeedback } from "../components/ActionFeedback";
+import { handleTabListKeyDown, tabId } from "../components/AccessibleTabs";
 import { ConsoleActionDrawer } from "../components/ConsoleLayout";
 import {
   ConsoleDataGrid,
@@ -1427,6 +1428,7 @@ export function SourceTemplatePanel({
               className="templateDetailTabs"
               role="tablist"
               aria-label="Source template workflow"
+              onKeyDown={handleTabListKeyDown}
             >
               {(planBoundAdapter
                 ? [["lifecycle", "Test / update"]]
@@ -1437,18 +1439,27 @@ export function SourceTemplatePanel({
                   ]
               ).map(([value, label]) => (
                 <button
+                  aria-controls="source-template-workflow-tabpanel"
                   aria-selected={detailTab === value}
                   className={detailTab === value ? "selected" : ""}
+                  id={tabId("source-template-workflow", value)}
                   key={value}
                   onClick={() => setDetailTab(value as SourceTemplateDetailTab)}
                   role="tab"
+                  tabIndex={detailTab === value ? 0 : -1}
                   type="button"
                 >
                   {label}
                 </button>
               ))}
             </div>
-            {planBoundAdapter ? (
+            <div
+              aria-labelledby={tabId("source-template-workflow", detailTab)}
+              className="sourceTemplateWorkflowPanel"
+              id="source-template-workflow-tabpanel"
+              role="tabpanel"
+            >
+              {planBoundAdapter ? (
               <div
                 className="operationNote sourceAdapterBindingNote"
                 role="note"
@@ -1835,7 +1846,8 @@ export function SourceTemplatePanel({
                   </div>
                 )}
               </form>
-            )}
+              )}
+            </div>
           </div>
         )}
       </ConsoleActionDrawer>

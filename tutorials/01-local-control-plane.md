@@ -49,20 +49,21 @@ cp .env.example .env
 # Edit POSTGRES_PASSWORD before real deployment. Use URL-safe random hex,
 # because compose derives the API/worker Postgres URL from this value.
 export VPSMAN_SUPER_PASSWORD='<local_super_password>'
-vpsctl compose-secrets --secrets-dir config/secrets
+./runtime/cli/current/vpsctl compose-secrets --secrets-dir config/secrets
 docker compose up -d
 ```
 
-If `vpsctl` is not installed yet, run the same helper from the source checkout
-instead: `cargo run -p vpsctl -- compose-secrets --secrets-dir deploy/config/secrets`.
+If the bundled CLI is not staged yet, run the same helper from the repository
+root instead:
+`cargo run -p vpsctl -- compose-secrets --secrets-dir deploy/config/secrets`.
 It writes the mounted internal token, gateway private key, privilege verifier
 key, a gateway public-key file for agent installs, and
 `operator-privilege.env` with the generated `VPSMAN_SUPER_SALT_HEX`.
 
 The default compose shape uses:
 
-- API: `http://127.0.0.1:8080`
-- Frontend: `http://127.0.0.1:5173`
+- browser and host CLI origin: `http://127.0.0.1:5173`
+- API container: private `http://api:8080`, reached through the Nginx origin
 - Gateway TCP: `127.0.0.1:9443`
 - Gateway control API: private between API and gateway containers
 - PostgreSQL: `runtime/postgres/data`
@@ -77,10 +78,12 @@ that same authoritative TOML from the dashboard; runtime data stays under
 `runtime/`, and secrets stay in read-only mounts. Local disk object
 storage is the default compose shape. Configure the S3/MinIO variables
 only when the deployment should use the implemented S3-compatible adapter for
-backup or update artifacts. To upgrade from GitHub Releases, run
-`./update.sh latest` from the deployment directory; it refreshes the server, frontend, and
-host CLI release payloads and recreates the compose services. Runtime state
-stays under the deployment directory, not Docker-managed named volumes.
+backup or update artifacts. For a reviewed production upgrade, run
+`./update.sh vX.Y.Z` with the exact target tag from the deployment directory;
+use `latest` only for disposable local evaluation. The updater refreshes the
+server, frontend, and host CLI release payloads and recreates the compose
+services. Runtime state stays under the deployment directory, not
+Docker-managed named volumes.
 
 ## Start Processes Manually
 

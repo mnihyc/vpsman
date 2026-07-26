@@ -6618,12 +6618,13 @@ button.vpsDetailRecord:hover {
 }
 
 .countryFlag {
-  display: block;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 16px;
-  height: 12px;
-  object-fit: cover;
-  border-radius: 3px;
-  box-shadow: 0 0 0 1px rgba(60, 64, 67, 0.18);
+  height: 16px;
+  font-size: 15px;
+  line-height: 1;
 }
 
 .fleetNodeDetailCard {

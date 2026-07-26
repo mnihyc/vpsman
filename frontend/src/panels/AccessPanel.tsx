@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -46,6 +47,12 @@ import { clearPrivilegeVault, hasPrivilegeVault } from "../vault";
 import { generateNoiseKeypair } from "../noiseKeygen";
 import { scrollIntoViewWithMotion } from "../motion";
 import { usePanelDisplaySettings } from "../panelDisplay";
+import {
+  INSTALLER_ASSET_NAME,
+  INSTALLER_SHA256,
+  RELEASE_TAG,
+  SOURCE_COMMIT,
+} from "../buildInfo";
 import type {
   GatewaySessionRecord,
   LifecycleOutcomeRecord,
@@ -113,9 +120,18 @@ type LocalActionFeedback = {
   tone: ActionFeedbackTone;
 };
 
-const AGENT_INSTALL_SCRIPT_URL =
-  "https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-agent.sh";
-const DEFAULT_AGENT_INSTALL_RELEASE = "latest";
+const AGENT_INSTALL_SOURCE_URL = INSTALLER_ASSET_NAME
+  ? new URL(`/${INSTALLER_ASSET_NAME}`, window.location.origin).toString()
+  : null;
+const AGENT_INSTALL_COMMIT_URL = INSTALLER_ASSET_NAME
+  ? `https://raw.githubusercontent.com/mnihyc/vpsman/${SOURCE_COMMIT}/deploy/install-agent.sh`
+  : null;
+const AGENT_INSTALL_RELEASE_URL = RELEASE_TAG
+  ? `https://github.com/mnihyc/vpsman/releases/download/${RELEASE_TAG}`
+  : null;
+const DEFAULT_AGENT_INSTALL_RELEASE = RELEASE_TAG || "latest";
+const INSTALLER_CURL_FLAGS =
+  "-fL --retry 2 --connect-timeout 5 --max-time 30";
 
 type AccessOverviewItem = {
   action: string;
@@ -359,6 +375,7 @@ export function AccessPanel({
   wsState,
 }: AccessPanelProps) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
+  const identityClientIdHelpId = useId();
   const identityFormRef = useRef<HTMLFormElement | null>(null);
   const revokeFormRef = useRef<HTMLFormElement | null>(null);
   const identityWorkflowRef = useRef<HTMLElement | null>(null);
@@ -506,11 +523,12 @@ export function AccessPanel({
     terminalSessions.length === 0
       ? "No terminal session records are loaded; terminal shells are managed in Remote and audited separately."
       : `${replayableTerminalSessions} replayable terminal session${replayableTerminalSessions === 1 ? "" : "s"}; shell streams stay in Remote and audit evidence.`;
+  const identityClientIdError = validateIdentityClientId(identityClientId);
   const identityDraftReady =
     canManageOperators &&
     !identityPending &&
     !identityReviewPending &&
-    identityClientId.trim().length > 0 &&
+    identityClientIdError === null &&
     isFixedHex32(identityPublicKeyHex);
   const canRevokeClientKey =
     canManageOperators &&
@@ -952,8 +970,12 @@ export function AccessPanel({
   async function requestIdentityImport(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const clientId = identityClientId.trim();
+    if (identityClientIdError) {
+      setIdentityError(identityClientIdError);
+      return;
+    }
     if (!identityDraftReady) {
-      setIdentityError("Client ID and 64-hex public key are required");
+      setIdentityError("A valid client ID and 64-hex public key are required");
       return;
     }
     if (!privilegeMaterial) {
@@ -1952,6 +1974,11 @@ export function AccessPanel({
               <label>
                 <span>VPS client ID</span>
                 <input
+                  aria-describedby={identityClientIdHelpId}
+                  aria-errormessage={
+                    identityClientIdError ? identityClientIdHelpId : undefined
+                  }
+                  aria-invalid={Boolean(identityClientIdError)}
                   aria-label="Agent identity client ID"
                   disabled={!canManageOperators || identityPending}
                   onChange={(event) => {
@@ -1965,10 +1992,11 @@ export function AccessPanel({
                   }
                   value={identityClientId}
                 />
-                <small className="fieldHelp">
-                  {identityMode === "rotate"
-                    ? "Use the existing VPS ID. Only the current public key is replaced."
-                    : `Defaults to the next numerical VPS ID (${nextIdentityClientId}). Editable for imported or legacy string IDs.`}
+                <small className="fieldHelp" id={identityClientIdHelpId}>
+                  {identityClientIdError ??
+                    (identityMode === "rotate"
+                      ? "Use the existing VPS ID. Only the current public key is replaced."
+                      : `Defaults to the next numerical VPS ID (${nextIdentityClientId}). Editable for imported or legacy string IDs.`)}
                 </small>
               </label>
               <label className="wideField">
@@ -2686,6 +2714,188 @@ function isFixedHex32(value: string): boolean {
   return /^[0-9a-fA-F]{64}$/.test(value.trim());
 }
 
+function validateIdentityClientId(value: string): string | null {
+  const clientId = value.trim();
+  if (!clientId) {
+    return "Client ID is required.";
+  }
+  if (clientId.length > 120) {
+    return "Client ID must not exceed 120 ASCII characters.";
+  }
+  if (!/^[A-Za-z0-9._:-]+$/.test(clientId)) {
+    return "Client ID may use only letters, numbers, dot, underscore, colon, and hyphen.";
+  }
+  return null;
+}
+
+function gatewayEndpointsValidationError(value: string): string | null {
+  const entries = value
+    .split(/[\n,]/)
+    .map((entry) => (entry.endsWith("\r") ? entry.slice(0, -1) : entry))
+    .filter((entry) => !/^\s*$/.test(entry));
+  if (entries.length === 0) {
+    return "Gateway endpoints are required before copying the command.";
+  }
+  if (entries.length > 16) {
+    return "Gateway endpoints support at most 16 entries.";
+  }
+
+  for (const [index, entry] of entries.entries()) {
+    const fields = entry.split("=");
+    const entryLabel = `Gateway endpoint ${index + 1}`;
+    if (
+      fields.length !== 3 ||
+      !fields[0] ||
+      !fields[1] ||
+      !fields[2]
+    ) {
+      return `${entryLabel} must use label=host:port=priority.`;
+    }
+    const [label, tcpAddress, priority] = fields;
+    if (
+      label.length > 64 ||
+      !/^[A-Za-z0-9._:-]+$/.test(label)
+    ) {
+      return `${entryLabel} label may use only letters, numbers, dot, underscore, colon, and hyphen.`;
+    }
+    if (
+      tcpAddress.length > 256 ||
+      tcpAddress.includes("\0") ||
+      /\s/.test(tcpAddress)
+    ) {
+      return `${entryLabel} host and port cannot contain whitespace.`;
+    }
+    const port = gatewayEndpointPort(tcpAddress);
+    if (port === null) {
+      return `${entryLabel} must use a valid IPv4 address, DNS hostname, or bracketed IPv6 literal with a numeric port from 1 to 65535.`;
+    }
+    const parsedPriority = Number(priority);
+    if (
+      !/^[0-9]+$/.test(priority) ||
+      priority.length > 5 ||
+      !Number.isSafeInteger(parsedPriority) ||
+      parsedPriority > 65_535
+    ) {
+      return `${entryLabel} priority must be an integer from 0 to 65535.`;
+    }
+  }
+  return null;
+}
+
+function gatewayEndpointPort(tcpAddress: string): number | null {
+  let host = "";
+  let portText = "";
+  if (tcpAddress.startsWith("[")) {
+    const closingBracket = tcpAddress.lastIndexOf("]:");
+    if (closingBracket <= 1) {
+      return null;
+    }
+    host = tcpAddress.slice(1, closingBracket);
+    portText = tcpAddress.slice(closingBracket + 2);
+    if (!isValidIpv6Literal(host)) {
+      return null;
+    }
+  } else {
+    const separator = tcpAddress.lastIndexOf(":");
+    if (separator <= 0) {
+      return null;
+    }
+    host = tcpAddress.slice(0, separator);
+    portText = tcpAddress.slice(separator + 1);
+    if (
+      host.includes(":") ||
+      (/^[0-9.]+$/.test(host)
+        ? !isValidIpv4Literal(host)
+        : !isValidHostname(host))
+    ) {
+      return null;
+    }
+  }
+  const port = Number(portText);
+  return /^[0-9]+$/.test(portText) &&
+    portText.length <= 5 &&
+    port >= 1 &&
+    port <= 65_535
+    ? port
+    : null;
+}
+
+function isValidIpv4Literal(value: string): boolean {
+  const octets = value.split(".");
+  return (
+    octets.length === 4 &&
+    octets.every(
+      (octet) =>
+        /^[0-9]{1,3}$/.test(octet) && Number(octet) <= 255,
+    )
+  );
+}
+
+function isValidIpv6Literal(value: string): boolean {
+  if (!value.includes(":")) {
+    return false;
+  }
+  let normalized = value;
+  if (normalized.includes(".")) {
+    const lastColon = normalized.lastIndexOf(":");
+    const ipv4Tail = normalized.slice(lastColon + 1);
+    if (lastColon < 0 || !isValidIpv4Literal(ipv4Tail)) {
+      return false;
+    }
+    normalized = `${normalized.slice(0, lastColon)}:0:0`;
+  }
+  if (!/^[0-9A-Fa-f:]+$/.test(normalized)) {
+    return false;
+  }
+  const compression = normalized.indexOf("::");
+  if (compression >= 0) {
+    if (normalized.indexOf("::", compression + 2) >= 0) {
+      return false;
+    }
+    const left = normalized.slice(0, compression);
+    const right = normalized.slice(compression + 2);
+    if (left.endsWith(":") || right.startsWith(":")) {
+      return false;
+    }
+    const groups = [
+      ...(left ? left.split(":") : []),
+      ...(right ? right.split(":") : []),
+    ];
+    return (
+      groups.length < 8 &&
+      groups.every((group) => /^[0-9A-Fa-f]{1,4}$/.test(group))
+    );
+  }
+  if (normalized.startsWith(":") || normalized.endsWith(":")) {
+    return false;
+  }
+  const groups = normalized.split(":");
+  return (
+    groups.length === 8 &&
+    groups.every((group) => /^[0-9A-Fa-f]{1,4}$/.test(group))
+  );
+}
+
+function isValidHostname(value: string): boolean {
+  if (value.length > 253) {
+    return false;
+  }
+  const normalized = value.endsWith(".") ? value.slice(0, -1) : value;
+  if (
+    !normalized ||
+    normalized.startsWith(".") ||
+    normalized.endsWith(".") ||
+    normalized.includes("..")
+  ) {
+    return false;
+  }
+  return normalized.split(".").every(
+    (label) =>
+      label.length <= 63 &&
+      /^[0-9A-Za-z](?:[0-9A-Za-z-]*[0-9A-Za-z])?$/.test(label),
+  );
+}
+
 function scrollIntoViewSoon(element: HTMLElement | null) {
   if (!element) {
     return;
@@ -2708,6 +2918,13 @@ function InstallCommand({
   operatorPreferences: OperatorPreferences | null;
   privateKeyHex: string;
 }) {
+  const installControlId = useId().replace(/:/g, "");
+  const gatewayKeyInputId = `${installControlId}-gateway-key`;
+  const gatewayKeyErrorId = `${gatewayKeyInputId}-error`;
+  const gatewayEndpointsInputId = `${installControlId}-gateway-endpoints`;
+  const gatewayEndpointsErrorId = `${gatewayEndpointsInputId}-error`;
+  const installModeInputId = `${installControlId}-install-mode`;
+  const installerErrorId = `${installControlId}-installer-error`;
   const [installMode, setInstallMode] = useState<AgentInstallMode>(
     () => operatorPreferences?.agent_install_mode ?? "root",
   );
@@ -2728,8 +2945,25 @@ function InstallCommand({
     gatewayServerPublicKeyHex.trim();
   const normalizedGatewayEndpoints = gatewayEndpoints.trim();
   const gatewayKeyValid = isFixedHex32(normalizedGatewayServerPublicKeyHex);
+  const gatewayEndpointsError = gatewayEndpointsValidationError(
+    normalizedGatewayEndpoints,
+  );
+  const gatewayEndpointsValid = gatewayEndpointsError === null;
+  const installerVerified =
+    AGENT_INSTALL_RELEASE_URL !== null ||
+    (AGENT_INSTALL_SOURCE_URL !== null &&
+      /^[0-9a-f]{64}$/.test(INSTALLER_SHA256));
   const canBuildCommand =
-    gatewayKeyValid && normalizedGatewayEndpoints.length > 0;
+    installerVerified &&
+    gatewayKeyValid &&
+    gatewayEndpointsValid;
+  const installValidationDescription = [
+    !gatewayKeyValid ? gatewayKeyErrorId : null,
+    !gatewayEndpointsValid ? gatewayEndpointsErrorId : null,
+    !installerVerified ? installerErrorId : null,
+  ]
+    .filter(Boolean)
+    .join(" ") || undefined;
   const gatewayDefaultsDirty =
     normalizedGatewayServerPublicKeyHex !==
       savedGatewayServerPublicKeyHex.trim() ||
@@ -2758,10 +2992,15 @@ function InstallCommand({
         installMode,
         privateKeyHex,
       })
-    : [
-        "Enter the gateway server public key and endpoints to generate",
-        "the paste-ready latest-release agent install command.",
-      ].join(" ");
+    : installerVerified
+      ? [
+          "Enter the gateway server public key and endpoints to generate",
+          "the paste-ready verified agent install command.",
+        ].join(" ")
+      : [
+          "Installer command unavailable: rebuild from a Git checkout that",
+          "contains the embedded source commit, or use a tagged release build.",
+        ].join(" ");
   const foregroundStartCommand =
     'env VPSMAN_AGENT_STATE_DIR="$PWD/vpsman-agent/state" ' +
     '"$PWD/vpsman-agent/bin/vpsman-agent" ' +
@@ -2833,6 +3072,7 @@ function InstallCommand({
 
   return (
     <div
+      aria-describedby={installValidationDescription}
       aria-label="Agent install command"
       className="installCommandBlock"
     >
@@ -2840,13 +3080,20 @@ function InstallCommand({
         <div>
           <strong>Agent install command</strong>
           <span>
-            Builds a paste-ready latest-release install line. The private key is
-            still shown once and is not saved. Gateway values can be saved as
-            this operator's reusable installer defaults.
+            Builds a paste-ready installer line pinned to this control-plane
+            build and verifies it before passing identity material. The private
+            key is shown once and is not saved by the console; the copied line
+            contains it, so use a trusted shell with history disabled and clear
+            the clipboard afterward. Gateway values can be saved as this
+            operator's reusable installer defaults.
+            {!RELEASE_TAG
+              ? " Source builds try the exact public commit first, then this console origin; transfer the installer manually if neither is reachable from the VPS."
+              : ""}
           </span>
         </div>
         <div className="sectionActions">
           <button
+            aria-describedby={installValidationDescription}
             className="secondaryAction compact"
             disabled={!canSaveGatewayDefaults}
             onClick={handleSaveGatewayDefaults}
@@ -2857,6 +3104,7 @@ function InstallCommand({
             {saveGatewayDefaultsLabel}
           </button>
           <button
+            aria-describedby={installValidationDescription}
             className="secondaryAction compact"
             disabled={!canBuildCommand}
             onClick={() => void handleCopy()}
@@ -2869,11 +3117,17 @@ function InstallCommand({
         </div>
       </div>
       <div className="installCommandControls">
-        <label>
+        <label htmlFor={gatewayKeyInputId}>
           <span>Gateway public key</span>
           <input
+            aria-describedby={!gatewayKeyValid ? gatewayKeyErrorId : undefined}
+            aria-errormessage={!gatewayKeyValid ? gatewayKeyErrorId : undefined}
+            aria-invalid={!gatewayKeyValid}
             aria-label="Gateway server public key hex"
+            aria-required="true"
             className="monospace"
+            id={gatewayKeyInputId}
+            name="gateway_server_public_key_hex"
             onChange={(event) => {
               setGatewayServerPublicKeyHex(event.target.value);
               setInstallFeedback(null);
@@ -2883,23 +3137,36 @@ function InstallCommand({
             value={gatewayServerPublicKeyHex}
           />
         </label>
-        <label>
+        <label htmlFor={gatewayEndpointsInputId}>
           <span>Gateway endpoints</span>
-          <input
+          <textarea
+            aria-describedby={
+              !gatewayEndpointsValid ? gatewayEndpointsErrorId : undefined
+            }
+            aria-errormessage={
+              !gatewayEndpointsValid ? gatewayEndpointsErrorId : undefined
+            }
+            aria-invalid={!gatewayEndpointsValid}
             aria-label="Gateway endpoints"
+            aria-required="true"
+            id={gatewayEndpointsInputId}
+            name="gateway_endpoints"
             onChange={(event) => {
               setGatewayEndpoints(event.target.value);
               setInstallFeedback(null);
             }}
             placeholder="primary=gw.example.com:9443=10"
-            title="Comma-separated gateway endpoints accepted by the installer."
+            rows={2}
+            title="Comma- or newline-separated gateway endpoints accepted by the installer."
             value={gatewayEndpoints}
           />
         </label>
-        <label>
+        <label htmlFor={installModeInputId}>
           <span>Install mode</span>
           <select
             aria-label="Install mode"
+            id={installModeInputId}
+            name="agent_install_mode"
             onChange={(event) => {
               setInstallMode(event.target.value as AgentInstallMode);
               setInstallFeedback(null);
@@ -2913,18 +3180,32 @@ function InstallCommand({
           </select>
         </label>
       </div>
-      {!gatewayKeyValid ? (
-        <small className="installCommandHint warn">
-          {normalizedGatewayServerPublicKeyHex.length === 0
-            ? "Gateway public key is required before copying the command."
-            : "Gateway public key must be exactly 64 hex characters."}
-        </small>
-      ) : null}
-      {normalizedGatewayEndpoints.length === 0 ? (
-        <small className="installCommandHint warn">
-          Gateway endpoints are required before copying the command.
-        </small>
-      ) : null}
+      <div aria-live="polite" className="installCommandValidation">
+        {!gatewayKeyValid ? (
+          <small
+            className="installCommandHint warn"
+            id={gatewayKeyErrorId}
+          >
+            {normalizedGatewayServerPublicKeyHex.length === 0
+              ? "Gateway public key is required before copying the command."
+              : "Gateway public key must be exactly 64 hex characters."}
+          </small>
+        ) : null}
+        {!gatewayEndpointsValid ? (
+          <small
+            className="installCommandHint warn"
+            id={gatewayEndpointsErrorId}
+          >
+            {gatewayEndpointsError}
+          </small>
+        ) : null}
+        {!installerVerified ? (
+          <small className="installCommandHint warn" id={installerErrorId}>
+            This source build could not read the pinned installer from its Git
+            commit. Use a full Git checkout or a tagged release build.
+          </small>
+        ) : null}
+      </div>
       <ActionFeedback
         className="localActionFeedback"
         message={
@@ -2970,10 +3251,28 @@ function buildAgentInstallCommand({
   if (installMode === "staged") {
     environment.push(["VPSMAN_AGENT_ENABLE_SERVICE", "0"]);
   }
+  const acquisition = AGENT_INSTALL_RELEASE_URL
+    ? [
+        `curl ${INSTALLER_CURL_FLAGS} ${AGENT_INSTALL_RELEASE_URL}/install-agent.sh -o "$agent_install_tmp/install-agent.sh" &&`,
+        `curl ${INSTALLER_CURL_FLAGS} ${AGENT_INSTALL_RELEASE_URL}/SHA256SUMS -o "$agent_install_tmp/SHA256SUMS" &&`,
+        `awk '$2 == "install-agent.sh" { print; seen++ } END { exit seen == 1 ? 0 : 1 }' "$agent_install_tmp/SHA256SUMS" > "$agent_install_tmp/SHA256SUMS.installer" &&`,
+        `(cd "$agent_install_tmp" && sha256sum -c SHA256SUMS.installer) &&`,
+      ]
+    : AGENT_INSTALL_SOURCE_URL && AGENT_INSTALL_COMMIT_URL
+      ? [
+          `((curl ${INSTALLER_CURL_FLAGS} ${shellQuote(AGENT_INSTALL_COMMIT_URL)} -o "$agent_install_tmp/install-agent.sh" &&`,
+          `printf '%s  %s\\n' ${shellQuote(INSTALLER_SHA256)} "$agent_install_tmp/install-agent.sh" | sha256sum -c -) ||`,
+          `(curl ${INSTALLER_CURL_FLAGS} ${shellQuote(AGENT_INSTALL_SOURCE_URL)} -o "$agent_install_tmp/install-agent.sh" &&`,
+          `printf '%s  %s\\n' ${shellQuote(INSTALLER_SHA256)} "$agent_install_tmp/install-agent.sh" | sha256sum -c -)) &&`,
+        ]
+      : [];
   return [
-    `curl -fsSL ${AGENT_INSTALL_SCRIPT_URL} | env`,
+    'agent_install_tmp="$(mktemp -d)" &&',
+    `(trap 'rm -rf -- "$agent_install_tmp"' EXIT;`,
+    ...acquisition,
+    "env",
     ...environment.map(([name, value]) => `${name}=${shellQuote(value)}`),
-    "bash",
+    'bash "$agent_install_tmp/install-agent.sh")',
   ].join(" ");
 }
 

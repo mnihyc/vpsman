@@ -67,7 +67,7 @@ test("captures Access operators and Audit sessions interaction loop", async ({
   );
   await activate(page.getByRole("button", { name: "Create user" }));
   await expect(page.getByText("3 operator records")).toBeVisible();
-  await expect(page.getByText("release-admin")).toBeVisible();
+  await expect(page.getByText("release-admin", { exact: true })).toBeVisible();
   await capture(
     page,
     page.locator("main.content"),
@@ -179,6 +179,18 @@ async function capture(
 ) {
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.waitForTimeout(150);
+  const prompt = page.locator(".confirmationPrompt:visible").last();
+  if ((await prompt.count()) > 0) {
+    await expect
+      .poll(() =>
+        prompt.evaluate(
+          (element) =>
+            element === document.activeElement ||
+            element.contains(document.activeElement),
+        ),
+      )
+      .toBe(true);
+  }
   const layout = await page.evaluate(() => {
     const viewportWidth = document.documentElement.clientWidth;
     const viewportHeight = document.documentElement.clientHeight;

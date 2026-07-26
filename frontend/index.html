@@ -4,75 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/src/boot-recovery.css" />
     <title>vpsman</title>
-    <style>
-      .bootRecovery {
-        box-sizing: border-box;
-        visibility: hidden;
-        width: min(560px, calc(100% - 32px));
-        margin: 64px auto;
-        padding: 20px;
-        border: 1px solid #c9cdd4;
-        border-left: 4px solid #c83232;
-        border-radius: 4px;
-        background: #fff;
-        color: #1f2328;
-        font: 14px/1.5 system-ui, sans-serif;
-      }
-
-      .bootRecovery[data-state="pending"] {
-        animation: revealBootRecovery 0s 10s forwards;
-      }
-
-      .bootRecovery[data-state="error"] {
-        visibility: visible;
-      }
-
-      .bootRecovery[hidden] {
-        display: none;
-      }
-
-      .bootRecovery h1 {
-        margin: 0 0 8px;
-        font-size: 18px;
-      }
-
-      .bootRecovery p {
-        margin: 0 0 16px;
-      }
-
-      .bootRecovery a {
-        display: inline-flex;
-        align-items: center;
-        min-height: 36px;
-        padding: 7px 14px;
-        box-sizing: border-box;
-        border: 1px solid #0f62fe;
-        border-radius: 4px;
-        background: #0f62fe;
-        color: #fff;
-        font: inherit;
-        font-weight: 600;
-        text-decoration: none;
-      }
-
-      .bootRecovery a:focus-visible {
-        outline: 2px solid #0f62fe;
-        outline-offset: 2px;
-      }
-
-      .bootRecovery details {
-        margin-top: 16px;
-        overflow-wrap: anywhere;
-        color: #4b5563;
-      }
-
-      @keyframes revealBootRecovery {
-        to {
-          visibility: visible;
-        }
-      }
-    </style>
   </head>
   <body>
     <div id="root"></div>
@@ -93,66 +26,6 @@
         <span id="boot-error"></span>
       </details>
     </section>
-    <script type="module">
-      const retryKey = "vpsman:boot-retries";
-      const maxAutomaticReloads = 2;
-      const startupTimeoutMs = 15_000;
-      const recovery = document.getElementById("boot-recovery");
-      const recoveryMessage = document.getElementById("boot-recovery-message");
-      const reloadButton = document.getElementById("reload-console");
-      const errorDetailsContainer = document.getElementById(
-        "boot-error-details",
-      );
-      const errorDetails = document.getElementById("boot-error");
-
-      recovery.hidden = true;
-      reloadButton.addEventListener("click", (event) => {
-        event.preventDefault();
-        sessionStorage.removeItem(retryKey);
-        window.location.reload();
-      });
-
-      async function startConsole() {
-        let timeoutId;
-        try {
-          await Promise.race([
-            import("/src/main.tsx"),
-            new Promise((_, reject) => {
-              timeoutId = window.setTimeout(
-                () => reject(new Error("Console startup timed out after 15 seconds.")),
-                startupTimeoutMs,
-              );
-            }),
-          ]);
-          sessionStorage.removeItem(retryKey);
-        } catch (error) {
-          const attempts = Number.parseInt(
-            sessionStorage.getItem(retryKey) ?? "0",
-            10,
-          );
-          if (Number.isFinite(attempts) && attempts < maxAutomaticReloads) {
-            sessionStorage.setItem(retryKey, String(attempts + 1));
-            window.location.reload();
-            return;
-          }
-
-          sessionStorage.removeItem(retryKey);
-          recoveryMessage.textContent =
-            "Startup was interrupted after two automatic retries. No operation was submitted.";
-          errorDetails.textContent =
-            error instanceof Error ? error.message : String(error);
-          errorDetailsContainer.hidden = false;
-          recovery.hidden = false;
-          recovery.dataset.state = "error";
-          reloadButton.focus();
-        } finally {
-          if (timeoutId !== undefined) {
-            window.clearTimeout(timeoutId);
-          }
-        }
-      }
-
-      void startConsole();
-    </script>
+    <script type="module" src="/src/boot-recovery.js"></script>
   </body>
 </html>

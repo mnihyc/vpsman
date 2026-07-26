@@ -327,11 +327,14 @@ async function collectLayoutSignals(page: Page) {
       .map((element) => {
         const rect = element.getBoundingClientRect();
         return {
+          ariaLabel: element.getAttribute("aria-label") ?? "",
           className: element instanceof HTMLElement ? element.className : "",
           clippedByScroller: hasHorizontalScroller(element),
+          left: Math.round(rect.left),
           right: Math.round(rect.right),
           tagName: element.tagName.toLowerCase(),
           text: (element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 100),
+          title: element.getAttribute("title") ?? "",
           width: Math.round(rect.width),
         };
       })

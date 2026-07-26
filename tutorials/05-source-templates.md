@@ -111,7 +111,7 @@ Clone a shared template before changing production assignments:
 
 ```sh
 cargo run -p vpsctl -- source-template-clone \
-  --template-id <template_uuid> \
+  --source-template-id <template_uuid> \
   --name traffic-vnstat-json-lab
 ```
 

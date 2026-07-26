@@ -57,28 +57,49 @@ current ownership, so a stale connection cannot continue by claiming the old key
 
 ## Install on the VPS
 
+Download the installer from the reviewed release and verify it before sending
+identity material to it:
+
+The generated console command requires `curl`, `mktemp`, `sha256sum`, and
+`awk`; the manual pinned sequence below requires `curl` and `sha256sum`.
+The generated line contains the one-time agent private key. Run it only in a
+trusted shell with command history disabled, then clear the clipboard; do not
+paste it into tickets, shared terminals, chat, or logs.
+
+```sh
+release_tag=vX.Y.Z
+release_url="https://github.com/mnihyc/vpsman/releases/download/${release_tag}"
+curl -fLO "${release_url}/install-agent.sh"
+curl -fLO "${release_url}/SHA256SUMS"
+grep "  install-agent.sh$" SHA256SUMS > SHA256SUMS.installer
+test "$(wc -l < SHA256SUMS.installer)" -eq 1
+sha256sum -c SHA256SUMS.installer
+```
+
 Root service example:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-agent.sh | env \
+env \
+  VPSMAN_AGENT_RELEASE="$release_tag" \
   VPSMAN_INSTALL_MODE=root \
   VPSMAN_AGENT_CLIENT_ID=agent-nrt-04 \
   VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=<agent_noise_private_key_hex> \
   VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=<gateway_noise_public_key_hex> \
   VPSMAN_GATEWAY_ENDPOINTS='primary=gw.example.com:9443=10,backup=gw-backup.example.com:9443=20' \
-  bash
+  bash ./install-agent.sh
 ```
 
 Unprivileged service example:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-agent.sh | env \
+env \
+  VPSMAN_AGENT_RELEASE="$release_tag" \
   VPSMAN_INSTALL_MODE=user \
   VPSMAN_AGENT_CLIENT_ID=agent-nrt-04 \
   VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=<agent_noise_private_key_hex> \
   VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=<gateway_noise_public_key_hex> \
   VPSMAN_GATEWAY_ENDPOINTS='primary=gw.example.com:9443=10' \
-  bash
+  bash ./install-agent.sh
 ```
 
 The installer writes a bootstrap-only `agent.toml`, installs a systemd unit, and starts the agent

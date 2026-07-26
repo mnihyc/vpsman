@@ -139,13 +139,15 @@ Supported event predicate names include:
   `schedule.id:<id>`, `schedule.name:<name>`.
 - Alert: `alert.severity:<level>`, `alert.category:<category>`,
   `alert.state:<state>`, `alert.open`, `alert.policy_reached`.
-- Policy alert payloads: `policy.<path>`, `rule.<path>`, and
-  `traffic.<path>` comparisons for issued `alert.policy_reached` events.
+- Policy alert payloads: `policy.<path>`, `rule.<path>` (also
+  `policy_rule.<path>`), and `traffic.<path>` comparisons for issued
+  `alert.policy_reached` events.
 - Telemetry: `telemetry.rollup`, `telemetry.network_rate`, `telemetry.tunnel`,
   plus `telemetry.<path>` comparisons.
 
-The current worker materializes interval events for expression webhooks. Other
-event predicates are parsed and evaluable for API dry-runs and future producers.
+The worker materializes interval events for expression webhooks, and the API
+policy evaluator emits `alert.policy_reached` events. Other event predicates are
+parsed and evaluable for API dry-runs and future producers.
 
 ## Expression Webhooks
 
@@ -154,8 +156,10 @@ has `name`, `enabled`, `expression`, `target`, `body_template`,
 `cooldown_secs`, and `notes`.
 
 Delivery is one aggregated webhook call per rule/event occurrence. The JSON
-body includes rule metadata, event metadata, `matched_vps`, and rendered
-`message`.
+body includes webhook-rule metadata as `rule`, event metadata, `matched_vps`,
+and rendered `message`. Policy-alert deliveries additionally include `policy`,
+`traffic`, and their source alert rule as `policy_rule`; this avoids replacing
+the webhook rule used by existing `{rule.*}` templates.
 
 A confirmed manual dispatch queues only the candidate set represented by its
 review hash and limit. It does not log a broad event for the worker to

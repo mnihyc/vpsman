@@ -3336,6 +3336,7 @@ export async function installConsoleApiMock(
     agentListOverride?: typeof agents;
     agentDeleteDelayMs?: number;
     agentDeleteFailedClientIds?: string[];
+    agentDeleteRequestFailure?: boolean;
     agentDeleteSyncJobIds?: string[];
     auditLogsOverride?: AuditLogRecord[];
     backupArtifactsOverride?: typeof backupArtifacts;
@@ -3360,6 +3361,7 @@ export async function installConsoleApiMock(
       agentListOverrideFixture,
       agentDeleteDelayMsFixture,
       agentDeleteFailedClientIdsFixture,
+      agentDeleteRequestFailureFixture,
       agentDeleteSyncJobIdsFixture,
       agentsFixture,
       agentUpdateReleasesFixture,
@@ -4983,6 +4985,16 @@ export async function installConsoleApiMock(
           const body = await readJsonBody(input, init);
           requests.agentDeletes.push(body);
           const clientId = decodeURIComponent(deleteAgentMatch[1]);
+          if (agentDeleteRequestFailureFixture) {
+            return jsonResponse(
+              {
+                error: "fixture_delete_refused",
+                message:
+                  "Fixture refused the VPS deletion before changing inventory.",
+              },
+              503,
+            );
+          }
           deletedAgentIds.add(clientId);
           return jsonResponse({
             client_id: clientId,
@@ -7960,6 +7972,8 @@ export async function installConsoleApiMock(
       agentDeleteDelayMsFixture: options.agentDeleteDelayMs ?? 0,
       agentDeleteFailedClientIdsFixture:
         options.agentDeleteFailedClientIds ?? [],
+      agentDeleteRequestFailureFixture:
+        options.agentDeleteRequestFailure ?? false,
       agentDeleteSyncJobIdsFixture: options.agentDeleteSyncJobIds ?? [
         "d1000000-0000-4000-8000-000000000001",
       ],

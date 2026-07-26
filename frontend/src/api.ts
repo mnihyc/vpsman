@@ -341,7 +341,7 @@ export async function apiErrorFromResponse(response: Response): Promise<ApiRespo
     } else {
       const text = (await response.text()).trim();
       if (text) {
-        detail = text.replace(/\s+/g, " ").slice(0, 240);
+        detail = nonJsonErrorDetail(response, text);
       }
     }
   } catch (error) {
@@ -352,6 +352,22 @@ export async function apiErrorFromResponse(response: Response): Promise<ApiRespo
     detail = response.statusText.trim() || "The server returned no explanatory error body";
   }
   return new ApiResponseError(response.status, code, detail, recovery);
+}
+
+function nonJsonErrorDetail(response: Response, text: string): string {
+  const contentType = (
+    response.headers.get("content-type") ?? ""
+  ).toLowerCase();
+  if (
+    contentType.includes("text/html") ||
+    /<(?:!doctype|html|head|body|title|center|h1)\b/i.test(text)
+  ) {
+    return "The reverse proxy returned an HTML error page instead of an API response";
+  }
+  return text
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .slice(0, 240);
 }
 
 export async function apiJsonFromResponse<T>(

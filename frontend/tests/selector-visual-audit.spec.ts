@@ -39,12 +39,12 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
   await capture(page, outputDir, manifest, "file-browser-target");
 
   await openConsoleSubpage(page, "Network", "Tunnel plans");
-  await activate(page.getByRole("button", { name: "Create tunnel plan" }));
-  const tunnelComposer = page.locator(".scheduleComposer", {
+  await activate(page.getByRole("button", { name: "Create plan", exact: true }));
+  const tunnelComposer = page.locator(".tunnelPlanComposer", {
     has: page.getByRole("heading", { name: "Create tunnel plan" }),
   });
-  await openVpsMenu(tunnelComposer, "Left VPS", "sfo", /edge-sfo-01.*agent-sfo-01/);
-  await openVpsMenu(tunnelComposer, "Right VPS", "fra", /core-fra-02.*agent-fra-02/);
+  await openVpsMenu(tunnelComposer, "Left tunnel VPS", "sfo", /edge-sfo-01.*agent-sfo-01/);
+  await openVpsMenu(tunnelComposer, "Right tunnel VPS", "fra", /core-fra-02.*agent-fra-02/);
   await capture(page, outputDir, manifest, "topology-tunnel-targets");
 
   await openConsoleSubpage(page, "Backups", "Restore");
@@ -71,7 +71,7 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
     hasText: "Create alert policy",
   }).last();
   await expect(policyEditor).toBeVisible();
-  const policyExpression = policyEditor.getByRole("searchbox", {
+  const policyExpression = policyEditor.getByRole("combobox", {
     name: "Policy VPS selector expression",
   });
   await policyExpression.fill("tag:edge && status:online");
@@ -130,24 +130,24 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
   await openExpressionMenu(dispatchComposer, "Bulk target selector expression", "name:s", /edge-sfo-01.*Name.*agent-sfo-01/);
   await capture(page, outputDir, manifest, "dispatch-expression-name-search");
   await page.keyboard.press("Enter");
-  await expect(dispatchComposer.getByRole("searchbox", { name: "Bulk target selector expression" })).toHaveValue("name:edge-sfo-01");
+  await expect(dispatchComposer.getByRole("combobox", { name: "Bulk target selector expression" })).toHaveValue("name:edge-sfo-01");
   await capture(page, outputDir, manifest, "dispatch-expression-name-selected");
-  await dispatchComposer.getByRole("searchbox", { name: "Bulk target selector expression" }).fill("");
+  await dispatchComposer.getByRole("combobox", { name: "Bulk target selector expression" }).fill("");
   await openExpressionMenu(dispatchComposer, "Bulk target selector expression", "fo01", /edge-sfo-01.*ID.*agent-sfo-01/);
   await capture(page, outputDir, manifest, "dispatch-expression-id-suffix-search");
-  await dispatchComposer.getByRole("searchbox", { name: "Bulk target selector expression" }).fill("");
+  await dispatchComposer.getByRole("combobox", { name: "Bulk target selector expression" }).fill("");
   await openExpressionMenu(dispatchComposer, "Bulk target selector expression", "status:on", /^status:online$/);
   await capture(page, outputDir, manifest, "dispatch-expression-status-search");
-  await dispatchComposer.getByRole("searchbox", { name: "Bulk target selector expression" }).fill("");
+  await dispatchComposer.getByRole("combobox", { name: "Bulk target selector expression" }).fill("");
   await openExpressionMenu(dispatchComposer, "Bulk target selector expression", "vps.status:on", /^vps\.status:online$/);
   await capture(page, outputDir, manifest, "dispatch-expression-vps-status-search");
-  await dispatchComposer.getByRole("searchbox", { name: "Bulk target selector expression" }).fill("");
+  await dispatchComposer.getByRole("combobox", { name: "Bulk target selector expression" }).fill("");
   await openExpressionMenu(dispatchComposer, "Bulk target selector expression", "role:e", /^role:edge$/);
   await capture(page, outputDir, manifest, "dispatch-expression-unknown-namespace-search");
-  await dispatchComposer.getByRole("searchbox", { name: "Bulk target selector expression" }).fill("");
+  await dispatchComposer.getByRole("combobox", { name: "Bulk target selector expression" }).fill("");
   await openExpressionMenu(dispatchComposer, "Bulk target selector expression", "*", /^\*$/);
   await capture(page, outputDir, manifest, "dispatch-expression-all-wildcard-search");
-  const longExpression = dispatchComposer.getByRole("searchbox", { name: "Bulk target selector expression" });
+  const longExpression = dispatchComposer.getByRole("combobox", { name: "Bulk target selector expression" });
   await longExpression.fill(
     "provider:alpha && country:US && status:online && role:edge && id:agent-sfo-01 || id:agent-fra-02 || id:agent-nyc-03 || " +
       "vps.status:online && vps.provider:alpha && vps.country:US && tag:role:edge && name:edge-sfo-01 || " +
@@ -185,7 +185,7 @@ async function openExpressionMenu(
   query: string,
   expectedOption: RegExp,
 ) {
-  const searchbox = root.getByRole("searchbox", { name: label });
+  const searchbox = root.getByRole("combobox", { name: label });
   await expect(searchbox).toBeVisible();
   await searchbox.click();
   await searchbox.fill("");
@@ -228,12 +228,23 @@ async function capture(
     const overflowCandidates = Array.from(document.querySelectorAll("*"))
       .map((element) => {
         const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
         return {
+          ariaLabel: element.getAttribute("aria-label") ?? "",
           className: element instanceof HTMLElement ? element.className : "",
           clippedByScroller: hasHorizontalScroller(element),
+          display: style.display,
+          left: Math.round(rect.left),
+          overflowWrap: style.overflowWrap,
+          parentClassName:
+            element.parentElement instanceof HTMLElement
+              ? element.parentElement.className
+              : "",
           right: Math.round(rect.right),
           tagName: element.tagName.toLowerCase(),
           text: (element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 100),
+          title: element.getAttribute("title") ?? "",
+          whiteSpace: style.whiteSpace,
           width: Math.round(rect.width),
         };
       })

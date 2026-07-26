@@ -2,6 +2,10 @@ import { AlertTriangle, Bell, ExternalLink, RadioTower } from "lucide-react";
 import { useState } from "react";
 import { ActionFeedback } from "../../components/ActionFeedback";
 import {
+  handleTabListKeyDown,
+  tabId,
+} from "../../components/AccessibleTabs";
+import {
   DeliveryPreviewSection,
   FleetAlertNotificationManager,
   FleetAlertPolicyManager,
@@ -121,18 +125,26 @@ export function AlertsPanel({
               <MetricTile actionLabel="Open failed deliveries" detail={`${failedDeliveries} failed retained notification deliveries`} label="Delivery history" onAction={openDeliveryEvidence} value={String(fleetAlertNotifications.length)} />
             </div>
 
-            <div className="observabilityWorkflowTabs" role="tablist" aria-label="Alert configuration sections">
+            <div
+              className="observabilityWorkflowTabs"
+              role="tablist"
+              aria-label="Alert configuration sections"
+              onKeyDown={handleTabListKeyDown}
+            >
               {[
                 ["policies", "Policies", "Threshold rules and matched policy alerts"],
                 ["destinations", "Destinations", "Alert notification channels"],
                 ["deliveries", "Deliveries", "Previewed, failed, and retained notifications"],
               ].map(([id, label, detail]) => (
                 <button
+                  aria-controls={`observability-alert-${id}`}
                   aria-selected={activeTab === id}
                   className={activeTab === id ? "active" : ""}
+                  id={tabId("observability-alert", id)}
                   key={id}
                   onClick={() => setActiveTab(id as AlertConfigTab)}
                   role="tab"
+                  tabIndex={activeTab === id ? 0 : -1}
                   type="button"
                 >
                   <strong>{label}</strong>
@@ -144,7 +156,12 @@ export function AlertsPanel({
         ) : null}
 
         {activeTab === "policies" ? (
-          <section className="dashboardSection observabilityGroupSection" aria-labelledby="observability-alert-policies-title">
+          <section
+            aria-labelledby={tabId("observability-alert", "policies")}
+            className="dashboardSection observabilityGroupSection"
+            id="observability-alert-policies"
+            role="tabpanel"
+          >
             <div className="dashboardSectionHeader">
               <div>
                 <h2 id="observability-alert-policies-title">Alert policies</h2>
@@ -168,7 +185,12 @@ export function AlertsPanel({
         ) : null}
 
         {activeTab === "destinations" ? (
-          <section className="dashboardSection observabilityGroupSection" aria-labelledby="observability-alert-channels-title">
+          <section
+            aria-labelledby={tabId("observability-alert", "destinations")}
+            className="dashboardSection observabilityGroupSection"
+            id="observability-alert-destinations"
+            role="tabpanel"
+          >
             <div className="dashboardSectionHeader">
               <div>
                 <h2 id="observability-alert-channels-title">Notification channels</h2>
@@ -192,7 +214,12 @@ export function AlertsPanel({
         ) : null}
 
         {activeTab === "deliveries" ? (
-          <section className="dashboardSection observabilityGroupSection" id="observability-alert-deliveries" aria-labelledby="observability-alert-deliveries-title">
+          <section
+            aria-labelledby={tabId("observability-alert", "deliveries")}
+            className="dashboardSection observabilityGroupSection"
+            id="observability-alert-deliveries"
+            role="tabpanel"
+          >
             <div className="dashboardSectionHeader">
               <div>
                 <h2 id="observability-alert-deliveries-title">Notification deliveries</h2>

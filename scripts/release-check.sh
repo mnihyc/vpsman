@@ -5,11 +5,17 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib-smoke.sh"
 
 smoke_enter_root
-smoke_require_tools bash cargo date docker tee
+smoke_require_tools bash cargo cp date docker tee
 
 stamp="$(date +%Y%m%d-%H%M%S)"
 log_dir="${VPSMAN_RELEASE_LOG_DIR:-target/release-check/$stamp}"
 mkdir -p "$log_dir"
+if [[ -z "${VPSMAN_BUILD_NUMBER_DIR:-}" ]]; then
+  release_build_number_dir="$(cd "$log_dir" && pwd)/build-numbers"
+  mkdir -p "$release_build_number_dir"
+  cp "$ROOT_DIR"/build/build-numbers/*.txt "$release_build_number_dir/"
+  export VPSMAN_BUILD_NUMBER_DIR="$release_build_number_dir"
+fi
 
 run_step() {
   local name="$1"
@@ -51,6 +57,11 @@ run_step customizability-audit bash scripts/audit-customizability.sh
 run_step migration-compatibility-audit bash scripts/audit-migrations.sh
 run_step agent-static-deps-audit bash scripts/audit-agent-static-deps.sh
 run_step security-sweep bash scripts/security-sweep.sh
+run_step release-version-gate-self-test \
+  python3 .github/scripts/check-release-version-gate.py --self-test
+run_step deploy-bundle-smoke bash scripts/smoke-deploy-bundle.sh
+run_step deploy-updater-smoke bash scripts/smoke-deploy-updater.sh
+run_step deploy-agent-installer-smoke bash scripts/smoke-deploy-install-agent.sh
 
 if [[ "${VPSMAN_RELEASE_SKIP_TESTS:-0}" == "1" ]]; then
   skip_step cargo-test-common-file-transfer "VPSMAN_RELEASE_SKIP_TESTS=1"
@@ -114,6 +125,7 @@ if [[ "${VPSMAN_RELEASE_SKIP_FRONTEND:-0}" == "1" ]]; then
   skip_step frontend-npm-install "VPSMAN_RELEASE_SKIP_FRONTEND=1"
   skip_step check-frontend-contracts "VPSMAN_RELEASE_SKIP_FRONTEND=1"
   skip_step frontend-build "VPSMAN_RELEASE_SKIP_FRONTEND=1"
+  skip_step frontend-installer-asset-audit "VPSMAN_RELEASE_SKIP_FRONTEND=1"
   skip_step frontend-audit "VPSMAN_RELEASE_SKIP_FRONTEND=1"
 else
   if [[ "${VPSMAN_RELEASE_SKIP_NPM_INSTALL:-0}" == "1" ]]; then
@@ -123,6 +135,7 @@ else
   fi
   run_step check-frontend-contracts bash scripts/check-frontend-contracts.sh
   run_shell_step frontend-build "cd frontend && npm run build"
+  run_step frontend-installer-asset-audit bash scripts/audit-frontend-installer-asset.sh
   run_shell_step frontend-audit "cd frontend && npm audit --audit-level=moderate"
   run_step frontend-console-layout bash scripts/smoke-frontend-console-layout.sh
   run_step frontend-screenshot-review bash scripts/smoke-frontend-screenshot-review.sh
@@ -132,7 +145,8 @@ fi
 if [[ "${VPSMAN_RELEASE_SKIP_DOCKER:-0}" == "1" ]]; then
   skip_step docker-compose-config "VPSMAN_RELEASE_SKIP_DOCKER=1"
 else
-  run_step docker-compose-config docker compose -f deploy/compose.yml config
+  run_step docker-compose-config \
+    docker compose --env-file deploy/.env.example -f deploy/compose.yml config --quiet
 fi
 
 if [[ "${VPSMAN_RELEASE_SKIP_SMOKES:-0}" == "1" ]]; then

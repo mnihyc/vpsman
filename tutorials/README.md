@@ -36,15 +36,23 @@ Command examples use the development form:
 cargo run -p vpsctl -- <command>
 ```
 
-For installed deployments, replace that prefix with `vpsctl`.
+For a versioned deployment bundle, run from the bundle root and replace that
+prefix with `./runtime/cli/current/vpsctl`.
 
-Common environment:
+Common environment when running the control plane manually from source:
 
 ```sh
 export VPSMAN_API_URL=http://127.0.0.1:8080
 export VPSMAN_API_TOKEN=<operator_token>
 export VPSMAN_SUPER_PASSWORD=<local_super_password>
 export VPSMAN_SUPER_SALT_HEX=<64_hex_salt>
+```
+
+The Compose deployment intentionally keeps port 8080 private. For its bundled
+CLI, use the Nginx console/API origin instead:
+
+```sh
+export VPSMAN_API_URL=http://127.0.0.1:5173
 ```
 
 `VPSMAN_API_TOKEN` authenticates the operator to the API. The super password

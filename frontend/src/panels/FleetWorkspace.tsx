@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -50,6 +51,7 @@ import {
   ActionFeedback,
   type ActionFeedbackTone,
 } from "../components/ActionFeedback";
+import { handleTabListKeyDown, tabId } from "../components/AccessibleTabs";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ConsoleDetailPanel } from "../components/ConsoleDetailPanel";
 import {
@@ -1555,6 +1557,8 @@ function FleetInstanceDetail({
   vpsNameDisplayMode: VpsNameDisplayMode;
   wsState: string;
 }) {
+  const detailTabNamespace = `fleet-detail-${useId().replace(/:/g, "")}`;
+  const detailTabPanelId = `${detailTabNamespace}-tabpanel`;
   const [activeDetailTab, setActiveDetailTab] =
     useState<FleetDetailTab>("Overview");
   const [aliasDraft, setAliasDraft] = useState(agent.display_name ?? "");
@@ -1860,14 +1864,18 @@ function FleetInstanceDetail({
         className="detailTabs"
         role="tablist"
         aria-label="VPS detail sections"
+        onKeyDown={handleTabListKeyDown}
       >
         {detailTabs.map((tab) => (
           <button
+            aria-controls={detailTabPanelId}
             aria-selected={activeDetailTab === tab}
             className={activeDetailTab === tab ? "selected" : ""}
+            id={tabId(detailTabNamespace, tab)}
             key={tab}
             onClick={() => setActiveDetailTab(tab)}
             role="tab"
+            tabIndex={activeDetailTab === tab ? 0 : -1}
             type="button"
           >
             {tab}
@@ -1896,7 +1904,12 @@ function FleetInstanceDetail({
           tone="green"
         />
       </div>
-      <div className="detailPane fleetDetailPane" role="tabpanel">
+      <div
+        aria-labelledby={tabId(detailTabNamespace, activeDetailTab)}
+        className="detailPane fleetDetailPane"
+        id={detailTabPanelId}
+        role="tabpanel"
+      >
         {activeDetailTab === "Overview" && (
           <>
             <DetailLine
@@ -3101,14 +3114,18 @@ function FleetSelectionPanel({
         className="selectionStatsTabs"
         role="tablist"
         aria-label="Selected VPS statistical tables"
+        onKeyDown={handleTabListKeyDown}
       >
         {selectionStatsModes.map((mode) => (
           <button
+            aria-controls="fleet-selection-stats-tabpanel"
             aria-selected={selectionStatsMode === mode.id}
             className={selectionStatsMode === mode.id ? "selected" : ""}
+            id={tabId("fleet-selection-stats", mode.id)}
             key={mode.id}
             onClick={() => setSelectionStatsMode(mode.id)}
             role="tab"
+            tabIndex={selectionStatsMode === mode.id ? 0 : -1}
             type="button"
           >
             {mode.label}
@@ -3145,7 +3162,6 @@ function FleetSelectionStatsTable({
   tagVisibilityOverrides: Record<string, boolean>;
   vpsNameDisplayMode: VpsNameDisplayMode;
 }) {
-  const modeLabel = selectionStatsModeLabel(mode);
   const rows = agents
     .slice()
     .sort((left, right) =>
@@ -3162,8 +3178,9 @@ function FleetSelectionStatsTable({
   if (mode === "network")
     return (
       <div
-        aria-label={`${modeLabel} for selected VPSs`}
+        aria-labelledby={tabId("fleet-selection-stats", mode)}
         className="fleetSelectionStatsTable networkMode"
+        id="fleet-selection-stats-tabpanel"
         role="tabpanel"
       >
         <div className="fleetSelectionStatsRow heading">
@@ -3198,8 +3215,9 @@ function FleetSelectionStatsTable({
   if (mode === "overview")
     return (
       <div
-        aria-label={`${modeLabel} for selected VPSs`}
+        aria-labelledby={tabId("fleet-selection-stats", mode)}
         className="fleetSelectionStatsTable overviewMode"
+        id="fleet-selection-stats-tabpanel"
         role="tabpanel"
       >
         <div className="fleetSelectionStatsRow heading">
@@ -3236,8 +3254,9 @@ function FleetSelectionStatsTable({
   if (mode === "capabilities")
     return (
       <div
-        aria-label={`${modeLabel} for selected VPSs`}
+        aria-labelledby={tabId("fleet-selection-stats", mode)}
         className="fleetSelectionStatsTable capabilitiesMode"
+        id="fleet-selection-stats-tabpanel"
         role="tabpanel"
       >
         <div className="fleetSelectionStatsRow heading">
@@ -3268,8 +3287,9 @@ function FleetSelectionStatsTable({
     );
   return (
     <div
-      aria-label={`${modeLabel} for selected VPSs`}
+      aria-labelledby={tabId("fleet-selection-stats", mode)}
       className="fleetSelectionStatsTable telemetryMode"
+      id="fleet-selection-stats-tabpanel"
       role="tabpanel"
     >
       <div className="fleetSelectionStatsRow heading">
@@ -3300,10 +3320,6 @@ function FleetSelectionStatsTable({
   );
 }
 
-function selectionStatsModeLabel(mode: FleetSelectionStatsMode) {
-  return selectionStatsModes.find((item) => item.id === mode)?.label ?? mode;
-}
-
 function CountryBadge({
   country,
   showFlag,
@@ -3313,16 +3329,18 @@ function CountryBadge({
 }) {
   if (!country) return <span className="countryBadge">unset</span>;
   const normalized = country.toUpperCase();
+  const hasCountryCode = /^[A-Z]{2}$/.test(normalized);
   return (
     <span className="countryBadge" title={normalized}>
-      {showFlag && /^[A-Z]{2}$/.test(normalized) && (
-        <img
-          alt=""
+      {showFlag && hasCountryCode && (
+        <span
+          aria-hidden="true"
           className="countryFlag"
-          loading="lazy"
-          referrerPolicy="no-referrer"
-          src={`https://flagcdn.com/16x12/${normalized.toLowerCase()}.png`}
-        />
+        >
+          {Array.from(normalized, (character) =>
+            String.fromCodePoint(127397 + character.charCodeAt(0)),
+          ).join("")}
+        </span>
       )}
       <span>{normalized}</span>
     </span>
@@ -5295,6 +5313,7 @@ export function FleetNotificationsHub({
         className="consoleRegistryTabs"
         role="tablist"
         aria-label="Notification registries"
+        onKeyDown={handleTabListKeyDown}
       >
         {[
           ["channels", "Channels"],
@@ -5303,90 +5322,102 @@ export function FleetNotificationsHub({
           ["maintenance", "Maintenance"],
         ].map(([id, label]) => (
           <button
+            aria-controls="notification-registry-tabpanel"
             aria-selected={tab === id}
             className={tab === id ? "active" : undefined}
+            id={tabId("notification-registry", id)}
             key={id}
             onClick={() => setTab(id as NotificationRegistryTab)}
             role="tab"
+            tabIndex={tab === id ? 0 : -1}
             type="button"
           >
             {label}
           </button>
         ))}
       </div>
-      {tab === "channels" && (
-        <FleetAlertNotificationManager
-          agents={agents}
-          channels={alertChannels}
-          deliveries={alertDeliveries}
-          onDelete={onDeleteAlertChannel}
-          onDispatch={onDispatchAlertNotifications}
-          onOpenDeliveries={openDeliveries}
-          onPreviewRows={setAlertPreviewRows}
-          onProcess={onProcessAlertNotifications}
-          onUpsert={onUpsertAlertChannel}
-        />
-      )}
-      {tab === "webhooks" && (
-        <WebhookRuleManager
-          agents={agents}
-          deliveries={webhookDeliveries}
-          onDelete={onDeleteWebhookRule}
-          onDispatch={onDispatchWebhookRules}
-          onDryRun={onDryRunWebhookRule}
-          onOpenDeliveries={openDeliveries}
-          onPreviewDryRun={setDryRunPreview}
-          onPreviewRows={setWebhookPreviewRows}
-          onProcess={onProcessWebhookRuleDeliveries}
-          onUpsert={onUpsertWebhookRule}
-          rules={webhookRules}
-        />
-      )}
-      {tab === "deliveries" && (
-        <div className="consoleCrudPanel">
-          {alertPreviewRows.length > 0 && (
-            <DeliveryPreviewSection
-              count={alertPreviewRows.length}
-              onClear={clearAlertPreview}
-              title="Notification delivery preview"
-            >
-              <NotificationDeliveryHistoryGrid
-                deliveries={alertPreviewRows}
-                preview
-              />
-            </DeliveryPreviewSection>
-          )}
-          {(dryRunPreview || webhookPreviewRows.length > 0) && (
-            <DeliveryPreviewSection
-              count={webhookPreviewRows.length}
-              onClear={clearWebhookPreview}
-              title="Webhook delivery preview"
-            >
-              {dryRunPreview && (
-                <WebhookDryRunNotice agents={agents} preview={dryRunPreview} />
-              )}
-              <WebhookDeliveryHistoryGrid
-                deliveries={webhookPreviewRows}
-                preview
-              />
-            </DeliveryPreviewSection>
-          )}
-          <NotificationDeliveryHistoryGrid
+      <div
+        aria-labelledby={tabId("notification-registry", tab)}
+        id="notification-registry-tabpanel"
+        role="tabpanel"
+      >
+        {tab === "channels" && (
+          <FleetAlertNotificationManager
+            agents={agents}
+            channels={alertChannels}
             deliveries={alertDeliveries}
-            preview={false}
+            onDelete={onDeleteAlertChannel}
+            onDispatch={onDispatchAlertNotifications}
+            onOpenDeliveries={openDeliveries}
+            onPreviewRows={setAlertPreviewRows}
+            onProcess={onProcessAlertNotifications}
+            onUpsert={onUpsertAlertChannel}
           />
-          <WebhookDeliveryHistoryGrid
+        )}
+        {tab === "webhooks" && (
+          <WebhookRuleManager
+            agents={agents}
             deliveries={webhookDeliveries}
-            preview={false}
+            onDelete={onDeleteWebhookRule}
+            onDispatch={onDispatchWebhookRules}
+            onDryRun={onDryRunWebhookRule}
+            onOpenDeliveries={openDeliveries}
+            onPreviewDryRun={setDryRunPreview}
+            onPreviewRows={setWebhookPreviewRows}
+            onProcess={onProcessWebhookRuleDeliveries}
+            onUpsert={onUpsertWebhookRule}
+            rules={webhookRules}
           />
-        </div>
-      )}
-      {tab === "maintenance" && (
-        <WebhookDeliveryMaintenancePanel
-          onRotate={onRotateWebhookDeliveryHistory}
-          rules={webhookRules}
-        />
-      )}
+        )}
+        {tab === "deliveries" && (
+          <div className="consoleCrudPanel">
+            {alertPreviewRows.length > 0 && (
+              <DeliveryPreviewSection
+                count={alertPreviewRows.length}
+                onClear={clearAlertPreview}
+                title="Notification delivery preview"
+              >
+                <NotificationDeliveryHistoryGrid
+                  deliveries={alertPreviewRows}
+                  preview
+                />
+              </DeliveryPreviewSection>
+            )}
+            {(dryRunPreview || webhookPreviewRows.length > 0) && (
+              <DeliveryPreviewSection
+                count={webhookPreviewRows.length}
+                onClear={clearWebhookPreview}
+                title="Webhook delivery preview"
+              >
+                {dryRunPreview && (
+                  <WebhookDryRunNotice
+                    agents={agents}
+                    preview={dryRunPreview}
+                  />
+                )}
+                <WebhookDeliveryHistoryGrid
+                  deliveries={webhookPreviewRows}
+                  preview
+                />
+              </DeliveryPreviewSection>
+            )}
+            <NotificationDeliveryHistoryGrid
+              deliveries={alertDeliveries}
+              preview={false}
+            />
+            <WebhookDeliveryHistoryGrid
+              deliveries={webhookDeliveries}
+              preview={false}
+            />
+          </div>
+        )}
+        {tab === "maintenance" && (
+          <WebhookDeliveryMaintenancePanel
+            onRotate={onRotateWebhookDeliveryHistory}
+            rules={webhookRules}
+          />
+        )}
+      </div>
     </div>
   );
 }
@@ -9262,6 +9293,9 @@ function trafficStateForClient(
   if (!traffic.last_sample_at) {
     return "unknown";
   }
+  if (traffic.state === "stale") {
+    return "stale";
+  }
   if (traffic.state === "incomplete" || traffic.incomplete_reasons.length > 0) {
     return "incomplete";
   }
@@ -9274,7 +9308,7 @@ function trafficStateTone(
   if (state === "critical") {
     return "critical";
   }
-  if (state === "warning" || state === "incomplete") {
+  if (state === "warning" || state === "incomplete" || state === "stale") {
     return "warning";
   }
   if (state === "ok") {

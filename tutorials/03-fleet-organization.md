@@ -144,8 +144,9 @@ dry-run, preview-hash confirmation, and explicit unset actions. Use
 Observability > Alerts for policy-group editing, selector dry-runs, notification
 channels, and rule previews.
 Issued policy alerts appear in Fleet > Alerts and are delivered by the existing
-notification/webhook channels as `alert.policy_reached` events with `alert`,
-`vps`, `policy`, `rule`, and `traffic` payload roots.
+notification/webhook channels as `alert.policy_reached` events. Delivery
+payloads use `alert`, `policy`, `policy_rule`, and `traffic` for source event
+data, `matched_vps` for matched VPSs, and `rule` for the webhook rule.
 
 Route alert notifications through scoped channel presets:
 

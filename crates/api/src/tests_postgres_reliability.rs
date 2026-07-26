@@ -29,6 +29,7 @@ use crate::{
     model_alert_notifications::{
         CreateFleetAlertNotificationChannelRequest, FleetAlertNotificationCandidate,
     },
+    model_alert_policies::{CreateFleetAlertPolicyRequest, PolicyRuleRequest, VpsRuleQuery},
     model_history::{HistoryDomain, HistoryRetentionPrunePlan},
     model_webhook_rules::{CreateWebhookRuleRequest, WebhookRuleDeliveryCandidate},
     repository::Repository,
@@ -415,6 +416,531 @@ async fn postgres_telemetry_queries_scope_before_limit_and_preserve_rate_baselin
     assert_eq!(latest_mixed.len(), 1);
     assert_eq!(latest_mixed[0].bucket_secs, 300);
     assert_eq!(latest_mixed[0].rx_bytes_delta, 15_000);
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_policy_alert_state_and_webhook_event_commit_atomically_and_repair_idempotently() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+    let client_id = "atomic-policy-client";
+    sqlx::query(
+        r#"
+        INSERT INTO clients (id, display_name, public_key, status)
+        VALUES ($1, 'Atomic Policy Client', $2, 'online')
+        "#,
+    )
+    .bind(client_id)
+    .bind(vec![81_u8; 32])
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_rollups (
+            client_id, bucket_start, bucket_secs, sample_count,
+            cpu_load_1_avg, cpu_load_1_max,
+            memory_total_bytes_max, memory_available_bytes_avg, memory_available_bytes_min,
+            disk_total_bytes_max, disk_available_bytes_avg, disk_available_bytes_min,
+            network_rx_bytes_max, network_tx_bytes_max, latest_observed_at
+        )
+        VALUES (
+            $1, date_trunc('minute', now()), 60, 1,
+            2.0, 2.0, 1000, 500, 500, 2000, 1500, 1500, 0, 0, now()
+        )
+        "#,
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let policy_id = Uuid::new_v4();
+    let rule_id = Uuid::new_v4();
+    for (policy_name, severity, expected_alerts) in [
+        ("atomic-policy", "warning", 1_i64),
+        ("atomic-policy", "critical", 2_i64),
+        ("renamed-atomic-policy", "critical", 2_i64),
+    ] {
+        db.repo
+            .upsert_fleet_alert_policy(
+                &CreateFleetAlertPolicyRequest {
+                    id: Some(policy_id),
+                    name: policy_name.to_string(),
+                    enabled: true,
+                    selector_expression: format!("id:{client_id}"),
+                    rules: vec![PolicyRuleRequest {
+                        id: Some(rule_id),
+                        name: "cpu threshold".to_string(),
+                        enabled: true,
+                        traffic_selector: None,
+                        condition_expression: "cpu.load_1 >= 1".to_string(),
+                        window_secs: 0,
+                        severity: severity.to_string(),
+                    }],
+                    notes: None,
+                    confirmed: true,
+                    preview_hash: None,
+                },
+                &operator,
+            )
+            .await
+            .unwrap();
+        let alert_count = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM policy_alerts WHERE policy_rule_id = $1 AND client_id = $2",
+        )
+        .bind(rule_id)
+        .bind(client_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(alert_count, expected_alerts);
+    }
+
+    let generations = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT trigger_generation
+        FROM policy_alerts
+        WHERE policy_rule_id = $1 AND client_id = $2
+        ORDER BY trigger_generation
+        "#,
+    )
+    .bind(rule_id)
+    .bind(client_id)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(generations, vec![1, 2]);
+
+    let latest_alert_id = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT id
+        FROM policy_alerts
+        WHERE policy_rule_id = $1 AND client_id = $2
+        ORDER BY trigger_generation DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(rule_id)
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM webhook_events WHERE kind = $1 AND event_id = $2")
+        .bind("alert.policy_reached")
+        .bind(format!("policy-alert:{latest_alert_id}"))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(db.repo.evaluate_policy_rules().await.unwrap(), 0);
+    let repaired = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM webhook_events WHERE kind = $1 AND event_id = $2",
+    )
+    .bind("alert.policy_reached")
+    .bind(format!("policy-alert:{latest_alert_id}"))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(repaired, 1);
+
+    sqlx::query(
+        "UPDATE telemetry_rollups SET cpu_load_1_avg = 0.0, cpu_load_1_max = 0.0 WHERE client_id = $1",
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(db.repo.evaluate_policy_rules().await.unwrap(), 0);
+    sqlx::query(
+        r#"
+        CREATE FUNCTION reject_policy_webhook_event() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            IF NEW.kind = 'alert.policy_reached' THEN
+                RAISE EXCEPTION 'forced policy webhook failure';
+            END IF;
+            RETURN NEW;
+        END
+        $$
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        CREATE TRIGGER reject_policy_webhook_event
+        BEFORE INSERT ON webhook_events
+        FOR EACH ROW EXECUTE FUNCTION reject_policy_webhook_event()
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE telemetry_rollups SET cpu_load_1_avg = 2.0, cpu_load_1_max = 2.0 WHERE client_id = $1",
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let error = db.repo.evaluate_policy_rules().await.unwrap_err();
+    assert!(format!("{error:#}").contains("forced policy webhook failure"));
+    let state = sqlx::query_as::<_, (bool, i64)>(
+        r#"
+        SELECT condition_true, trigger_generation
+        FROM policy_rule_states
+        WHERE policy_rule_id = $1 AND client_id = $2
+        "#,
+    )
+    .bind(rule_id)
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(state, (false, 2));
+    let alert_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM policy_alerts WHERE policy_rule_id = $1 AND client_id = $2",
+    )
+    .bind(rule_id)
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(alert_count, 2);
+
+    sqlx::query("DROP TRIGGER reject_policy_webhook_event ON webhook_events")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION reject_policy_webhook_event()")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(db.repo.evaluate_policy_rules().await.unwrap(), 1);
+    let final_counts = sqlx::query_as::<_, (i64, i64)>(
+        r#"
+        SELECT
+            (SELECT count(*) FROM policy_alerts WHERE policy_rule_id = $1 AND client_id = $2),
+            (SELECT count(*) FROM webhook_events WHERE kind = 'alert.policy_reached')
+        "#,
+    )
+    .bind(rule_id)
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(final_counts, (3, 3));
+
+    let retained_alert_id = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT id
+        FROM policy_alerts
+        WHERE policy_rule_id = $1 AND client_id = $2
+        ORDER BY trigger_generation DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(rule_id)
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE policy_alerts SET observed_at = now() - interval '2 hours' WHERE id = $1")
+        .bind(retained_alert_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM webhook_events WHERE kind = $1 AND event_id = $2")
+        .bind("alert.policy_reached")
+        .bind(format!("policy-alert:{retained_alert_id}"))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(db.repo.evaluate_policy_rules().await.unwrap(), 0);
+    let retained_event_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM webhook_events WHERE kind = $1 AND event_id = $2",
+    )
+    .bind("alert.policy_reached")
+    .bind(format!("policy-alert:{retained_alert_id}"))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        retained_event_count, 0,
+        "normal event retention must not redeliver an old sustained alert"
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_fleet_alert_policy_regression_concurrent_name_upserts_share_identity() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+    let request = || CreateFleetAlertPolicyRequest {
+        id: None,
+        name: "concurrent-name-policy".to_string(),
+        enabled: true,
+        selector_expression: "*".to_string(),
+        rules: vec![PolicyRuleRequest {
+            id: None,
+            name: "cpu threshold".to_string(),
+            enabled: true,
+            traffic_selector: None,
+            condition_expression: "cpu.load_1 >= 1".to_string(),
+            window_secs: 0,
+            severity: "warning".to_string(),
+        }],
+        notes: None,
+        confirmed: true,
+        preview_hash: None,
+    };
+    let first_request = request();
+    let second_request = request();
+
+    let (first, second) = tokio::join!(
+        db.repo.upsert_fleet_alert_policy(&first_request, &operator),
+        db.repo
+            .upsert_fleet_alert_policy(&second_request, &operator),
+    );
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert_eq!(second.id, first.id);
+    assert_eq!(second.rules[0].id, first.rules[0].id);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM policy_groups WHERE name = $1")
+            .bind("concurrent-name-policy")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        1
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_fleet_alert_policy_regression_reads_legacy_overlapping_traffic_selectors() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+    let client_id = "legacy-overlap-client";
+    insert_client(&db.pool, client_id, None).await;
+    sqlx::query(
+        r#"
+        INSERT INTO vps_rule_values (client_id, key, value_raw, value_json)
+        VALUES (
+            $1,
+            'traffic.selectors',
+            'eth0,eth0+rx',
+            '{"selectors":[
+                {"source":"host","interface":"eth0","direction":"total","canonical":"eth0"},
+                {"source":"host","interface":"eth0","direction":"rx","canonical":"eth0+rx"}
+            ]}'::jsonb
+        )
+        "#,
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let rules = db
+        .repo
+        .list_vps_rules(&VpsRuleQuery {
+            limit: Some(10),
+            client_id: Some(client_id.to_string()),
+            selector_expression: None,
+            key: Some("traffic.selectors".to_string()),
+            state: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].value_raw, "eth0,eth0+rx");
+
+    db.repo
+        .upsert_fleet_alert_policy(
+            &CreateFleetAlertPolicyRequest {
+                id: None,
+                name: "legacy-overlap-policy".to_string(),
+                enabled: true,
+                selector_expression: format!("id:{client_id}"),
+                rules: vec![PolicyRuleRequest {
+                    id: None,
+                    name: "cpu threshold".to_string(),
+                    enabled: true,
+                    traffic_selector: None,
+                    condition_expression: "cpu.load_1 >= 1".to_string(),
+                    window_secs: 0,
+                    severity: "warning".to_string(),
+                }],
+                notes: None,
+                confirmed: true,
+                preview_hash: None,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    db.repo.evaluate_policy_rules().await.unwrap();
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn filter_limit_regression_postgres_rules_and_policies() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let target_client_id = "zzz-filter-target";
+    insert_client(&db.pool, target_client_id, None).await;
+    sqlx::query(
+        r#"
+        INSERT INTO clients (
+            id,
+            display_name,
+            public_key,
+            status,
+            internal_build_number,
+            capabilities
+        )
+        SELECT
+            'aaa-filter-' || lpad(value::text, 3, '0'),
+            'AAA Filter ' || lpad(value::text, 3, '0'),
+            decode(lpad(to_hex(value), 64, '0'), 'hex'),
+            'online',
+            1,
+            '{}'::jsonb
+        FROM generate_series(1, 21) AS series(value)
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO vps_rule_values (client_id, key, value_raw, value_json)
+        SELECT client.id, rule.key, rule.value_raw, rule.value_json
+        FROM clients client
+        CROSS JOIN (
+            VALUES
+                ('traffic.reset_day', '1', '{"day":1}'::jsonb),
+                ('traffic.quota.total', '1GB', '{"bytes":1000000000}'::jsonb),
+                ('traffic.quota.rx', '1GB', '{"bytes":1000000000}'::jsonb),
+                ('traffic.quota.tx', '1GB', '{"bytes":1000000000}'::jsonb),
+                (
+                    'traffic.selectors',
+                    'eth0',
+                    '{"selectors":[{"source":"host","interface":"eth0","direction":"total","canonical":"eth0"}]}'::jsonb
+                )
+        ) AS rule(key, value_raw, value_json)
+        WHERE client.id LIKE 'aaa-filter-%'
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO vps_rule_values (client_id, key, value_raw, value_json)
+        VALUES
+            ($1, 'traffic.reset_day', '1', '{"day":1}'::jsonb),
+            ($1, 'traffic.quota.total', '1GB', '{"bytes":1000000000}'::jsonb),
+            ($1, 'traffic.quota.rx', '1GB', '{"bytes":1000000000}'::jsonb),
+            ($1, 'traffic.quota.tx', '1GB', '{"bytes":1000000000}'::jsonb),
+            (
+                $1,
+                'traffic.selectors',
+                'eth0',
+                '{"selectors":[{"source":"host","interface":"eth0","direction":"total","canonical":"eth0"}]}'::jsonb
+            )
+        "#,
+    )
+    .bind(target_client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let effective = db.repo.effective_vps_rules(target_client_id).await.unwrap();
+    assert_eq!(effective.len(), 5);
+    assert!(effective
+        .iter()
+        .all(|rule| rule.client_id == target_client_id));
+
+    let client_filtered = db
+        .repo
+        .list_vps_rules(&VpsRuleQuery {
+            limit: Some(2),
+            client_id: Some(target_client_id.to_string()),
+            selector_expression: None,
+            key: None,
+            state: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(client_filtered.len(), 2);
+    assert!(client_filtered
+        .iter()
+        .all(|rule| rule.client_id == target_client_id));
+
+    let selector_filtered = db
+        .repo
+        .list_vps_rules(&VpsRuleQuery {
+            limit: Some(2),
+            client_id: None,
+            selector_expression: Some(format!("id:{target_client_id}")),
+            key: None,
+            state: Some("ok".to_string()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(selector_filtered.len(), 2);
+    assert!(selector_filtered
+        .iter()
+        .all(|rule| rule.client_id == target_client_id));
+
+    let matching_policy_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO policy_groups (id, name, enabled, selector_expression)
+        VALUES
+            ($1, 'aaa-filter-policy-1', TRUE, 'id:not-present'),
+            ($2, 'aaa-filter-policy-2', TRUE, 'id:not-present'),
+            ($3, 'zzz-filter-policy', TRUE, $4)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .bind(matching_policy_id)
+    .bind(format!("id:{target_client_id}"))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let client_policies = db
+        .repo
+        .list_fleet_alert_policies(1, Some(true), None, Some(target_client_id))
+        .await
+        .unwrap();
+    assert_eq!(client_policies.len(), 1);
+    assert_eq!(client_policies[0].id, matching_policy_id);
+
+    let selector_policies = db
+        .repo
+        .list_fleet_alert_policies(1, Some(true), Some(&format!("id:{target_client_id}")), None)
+        .await
+        .unwrap();
+    assert_eq!(selector_policies.len(), 1);
+    assert_eq!(selector_policies[0].id, matching_policy_id);
 
     db.cleanup().await;
 }

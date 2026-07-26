@@ -35,6 +35,26 @@ const WEBHOOK_RETRY_BACKOFF_SECS: [i64; 3] = [60, 300, 1800];
 const WEBHOOK_SIGNATURE_HEADER: &str = "X-Vpsman-Webhook-Signature";
 const WEBHOOK_DELIVERY_HEADER: &str = "X-Vpsman-Webhook-Delivery";
 const WEBHOOK_EVENT_HEADER: &str = "X-Vpsman-Webhook-Event";
+const EVENT_EXPRESSION_ROOTS: [&str; 9] = [
+    "server",
+    "job",
+    "schedule",
+    "alert",
+    "telemetry",
+    "event",
+    "policy",
+    "rule",
+    "traffic",
+];
+const EVENT_DELIVERY_ROOTS: [&str; 7] = [
+    "server",
+    "job",
+    "schedule",
+    "alert",
+    "telemetry",
+    "policy",
+    "traffic",
+];
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -432,10 +452,13 @@ pub(crate) fn webhook_candidate_for_event(
             for predicate in event_predicates {
                 context = context.with_event_predicate(predicate);
             }
-            for root in ["server", "job", "schedule", "alert", "telemetry", "event"] {
+            for root in EVENT_EXPRESSION_ROOTS {
                 if let Some(value) = event_payload.get(root).cloned() {
                     context = context.with_json_root(root, value);
                 }
+            }
+            if let Some(value) = event_payload.get("rule").cloned() {
+                context = context.with_json_root("policy_rule", value);
             }
             expression_matches(&context, &expression)
         })
@@ -591,10 +614,16 @@ fn merge_event_payload_roots(payload: &mut Value, event_payload: &Value) {
     let Some(target) = payload.as_object_mut() else {
         return;
     };
-    for root in ["server", "job", "schedule", "alert", "telemetry"] {
+    for root in EVENT_DELIVERY_ROOTS {
         if let Some(value) = event_payload.get(root).cloned() {
             target.insert(root.to_string(), value);
         }
+    }
+    // `rule` is reserved for webhook-rule template compatibility. Policy
+    // events still evaluate their source rule as `rule.*`, while the delivered
+    // payload exposes that source unambiguously as `policy_rule`.
+    if let Some(value) = event_payload.get("rule").cloned() {
+        target.insert("policy_rule".to_string(), value);
     }
     if let Some(event) = event_payload.get("event").and_then(Value::as_object) {
         if let Some(target_event) = target.get_mut("event").and_then(Value::as_object_mut) {
@@ -683,6 +712,54 @@ mod tests {
         assert_eq!(candidate.matched_vps.len(), 1);
         assert_eq!(candidate.message, "edge-online interval.30sec edge-a");
         assert_eq!(candidate.signing_secret.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn policy_alert_candidate_exposes_event_roots_without_webhook_rule_collision() {
+        let rule = WebhookRuleView {
+            id: Uuid::nil(),
+            name: "delivery-rule".to_string(),
+            enabled: true,
+            expression: "alert.policy_reached && alert.category:traffic && traffic.cycle_percent >= 80 && policy.name = monthly && rule.name = quota-80 && policy_rule.window_secs = 0".to_string(),
+            target: "https://hooks.acme.com/vpsman".to_string(),
+            body_template:
+                "{rule.name} {policy.name} {policy_rule.name} {traffic.cycle_percent}".to_string(),
+            cooldown_secs: 30,
+            signing_secret: None,
+            signing_secret_set: false,
+            notes: None,
+            actor_id: None,
+            created_at: "0".to_string(),
+            updated_at: "0".to_string(),
+        };
+        let event_payload = json!({
+            "event": {"kind": "alert.policy_reached"},
+            "alert": {"category": "traffic"},
+            "policy": {"name": "monthly"},
+            "rule": {"name": "quota-80", "window_secs": 0},
+            "traffic": {"cycle_percent": 82.0},
+        });
+
+        let candidate = webhook_candidate_for_event(
+            &rule,
+            "alert.policy_reached",
+            "policy-alert:test",
+            &[
+                "alert.policy_reached".to_string(),
+                "alert.category:traffic".to_string(),
+            ],
+            &event_payload,
+            vec![agent("edge-a", &["edge"])],
+            None,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(candidate.message, "delivery-rule monthly quota-80 82.0");
+        assert_eq!(candidate.payload["rule"]["name"], "delivery-rule");
+        assert_eq!(candidate.payload["policy_rule"]["name"], "quota-80");
+        assert_eq!(candidate.payload["policy"]["name"], "monthly");
+        assert_eq!(candidate.payload["traffic"]["cycle_percent"], 82.0);
     }
 
     #[test]

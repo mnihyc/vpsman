@@ -81,6 +81,29 @@ test("bootstrap status failure explains the cause and safe fallback", async ({
   );
 });
 
+test("reverse-proxy HTML failure is concise and does not leak its error page", async ({
+  page,
+}) => {
+  await page.route("**/api/v1/auth/bootstrap-status", async (route) => {
+    await route.fulfill({
+      body: "<html><head><title>502 Bad Gateway</title></head><body><!-- proxy padding --><h1>502 Bad Gateway</h1></body></html>",
+      contentType: "text/html",
+      status: 502,
+    });
+  });
+
+  await page.goto("/");
+
+  const status = page.getByRole("alert");
+  await expect(status).toContainText(
+    "The reverse proxy returned an HTML error page instead of an API response",
+  );
+  await expect(status).toContainText("no success is assumed");
+  await expect(status).not.toContainText("<html>");
+  await expect(status).not.toContainText("proxy padding");
+  await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
+});
+
 test("successful bootstrap-status response with malformed JSON is not treated as state", async ({
   page,
 }) => {

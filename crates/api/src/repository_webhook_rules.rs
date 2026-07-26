@@ -507,20 +507,9 @@ impl Repository {
         event: WebhookEventCandidate,
     ) -> Result<WebhookEventRow> {
         let occurred_at = Utc::now();
-        let row = WebhookEventRow {
-            id: Uuid::new_v4(),
-            kind: event.kind.trim().to_string(),
-            event_id: event.event_id.trim().to_string(),
-            event_predicates: normalize_event_predicates(&event.kind, &event.event_predicates),
-            subject_client_ids: normalize_subject_client_ids(&event.subject_client_ids),
-            payload: event.payload,
-            occurred_at: occurred_at.to_rfc3339(),
-            actor_id: event.actor_id,
-        };
-        anyhow::ensure!(!row.kind.is_empty(), "webhook event kind is required");
-        anyhow::ensure!(!row.event_id.is_empty(), "webhook event id is required");
         match self {
             Self::Memory(memory) => {
+                let row = webhook_event_row(event, occurred_at)?;
                 let mut events = memory.webhook_events.write().await;
                 if let Some(stored) = events
                     .iter()
@@ -533,68 +522,10 @@ impl Repository {
                 Ok(row)
             }
             Self::Postgres(pool) => {
-                ensure_webhook_event_partition(pool, occurred_at).await?;
-                let payload = SqlJson(&row.payload);
-                let inserted = sqlx::query(
-                    r#"
-                    INSERT INTO webhook_events (
-                        id,
-                        kind,
-                        event_id,
-                        event_predicates,
-                        subject_client_ids,
-                        payload,
-                        occurred_at,
-                        actor_id
-                    )
-                    SELECT $1, $2, $3, $4, $5, $6, $7::timestamptz, $8
-                    WHERE NOT EXISTS (
-                        SELECT 1
-                        FROM webhook_events
-                        WHERE kind = $2 AND event_id = $3
-                    )
-                    "#,
-                )
-                .bind(row.id)
-                .bind(&row.kind)
-                .bind(&row.event_id)
-                .bind(&row.event_predicates)
-                .bind(&row.subject_client_ids)
-                .bind(payload)
-                .bind(occurred_at.to_rfc3339())
-                .bind(row.actor_id)
-                .execute(pool)
-                .await?;
-                if inserted.rows_affected() > 0 {
-                    let _ = sqlx::query("SELECT pg_notify('webhook_events', $1)")
-                        .bind(row.event_id.clone())
-                        .execute(pool)
-                        .await?;
-                    Ok(row)
-                } else {
-                    let stored = sqlx::query(
-                        r#"
-                        SELECT
-                            id,
-                            kind,
-                            event_id,
-                            event_predicates,
-                            subject_client_ids,
-                            payload,
-                            occurred_at::text AS occurred_at,
-                            actor_id
-                        FROM webhook_events
-                        WHERE kind = $1 AND event_id = $2
-                        ORDER BY occurred_at DESC
-                        LIMIT 1
-                        "#,
-                    )
-                    .bind(&row.kind)
-                    .bind(&row.event_id)
-                    .fetch_one(pool)
-                    .await?;
-                    webhook_event_from_row(stored)
-                }
+                let mut tx = pool.begin().await?;
+                let row = record_webhook_event_in_tx(&mut tx, event, occurred_at).await?;
+                tx.commit().await?;
+                Ok(row)
             }
         }
     }
@@ -1452,6 +1383,98 @@ pub(crate) async fn ensure_webhook_event_partition_in_tx(
     );
     sqlx::query(&sql).execute(&mut **tx).await?;
     Ok(())
+}
+
+pub(crate) async fn record_webhook_event_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    event: WebhookEventCandidate,
+    occurred_at: DateTime<Utc>,
+) -> Result<WebhookEventRow> {
+    let row = webhook_event_row(event, occurred_at)?;
+    ensure_webhook_event_partition_in_tx(tx, occurred_at).await?;
+    let lock_name = format!("vpsman:webhook-event:{}:{}", row.kind, row.event_id);
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(lock_name)
+        .execute(&mut **tx)
+        .await?;
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO webhook_events (
+            id,
+            kind,
+            event_id,
+            event_predicates,
+            subject_client_ids,
+            payload,
+            occurred_at,
+            actor_id
+        )
+        SELECT $1, $2, $3, $4, $5, $6, $7::timestamptz, $8
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM webhook_events
+            WHERE kind = $2 AND event_id = $3
+        )
+        "#,
+    )
+    .bind(row.id)
+    .bind(&row.kind)
+    .bind(&row.event_id)
+    .bind(&row.event_predicates)
+    .bind(&row.subject_client_ids)
+    .bind(SqlJson(&row.payload))
+    .bind(&row.occurred_at)
+    .bind(row.actor_id)
+    .execute(&mut **tx)
+    .await?;
+    if inserted.rows_affected() > 0 {
+        sqlx::query("SELECT pg_notify('webhook_events', $1)")
+            .bind(row.event_id.clone())
+            .execute(&mut **tx)
+            .await?;
+        return Ok(row);
+    }
+    let stored = sqlx::query(
+        r#"
+        SELECT
+            id,
+            kind,
+            event_id,
+            event_predicates,
+            subject_client_ids,
+            payload,
+            occurred_at::text AS occurred_at,
+            actor_id
+        FROM webhook_events
+        WHERE kind = $1 AND event_id = $2
+        ORDER BY occurred_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(&row.kind)
+    .bind(&row.event_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    webhook_event_from_row(stored)
+}
+
+pub(crate) fn webhook_event_row(
+    event: WebhookEventCandidate,
+    occurred_at: DateTime<Utc>,
+) -> Result<WebhookEventRow> {
+    let row = WebhookEventRow {
+        id: Uuid::new_v4(),
+        kind: event.kind.trim().to_string(),
+        event_id: event.event_id.trim().to_string(),
+        event_predicates: normalize_event_predicates(&event.kind, &event.event_predicates),
+        subject_client_ids: normalize_subject_client_ids(&event.subject_client_ids),
+        payload: event.payload,
+        occurred_at: occurred_at.to_rfc3339(),
+        actor_id: event.actor_id,
+    };
+    anyhow::ensure!(!row.kind.is_empty(), "webhook event kind is required");
+    anyhow::ensure!(!row.event_id.is_empty(), "webhook event id is required");
+    Ok(row)
 }
 
 fn webhook_event_from_row(row: sqlx::postgres::PgRow) -> Result<WebhookEventRow> {

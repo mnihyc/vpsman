@@ -333,6 +333,468 @@ async fn fleet_alert_policy_groups_issue_resource_alerts() {
 }
 
 #[tokio::test]
+async fn fleet_alert_policy_regression_upsert_by_name_preserves_identity_past_list_limit() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    let request = CreateFleetAlertPolicyRequest {
+        id: None,
+        name: "repeatable-cli-policy".to_string(),
+        enabled: true,
+        selector_expression: "*".to_string(),
+        rules: vec![PolicyRuleRequest {
+            id: None,
+            name: "rule-1".to_string(),
+            enabled: true,
+            traffic_selector: None,
+            condition_expression: "cpu.load_1 >= 1".to_string(),
+            window_secs: 0,
+            severity: "warning".to_string(),
+        }],
+        notes: None,
+        confirmed: true,
+        preview_hash: None,
+    };
+
+    let first = repo
+        .upsert_fleet_alert_policy(&request, &operator)
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.list_fleet_alert_policies(20, None, None, None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    if let Repository::Memory(memory) = &repo {
+        let mut groups = memory.policy_groups.write().await;
+        for index in 0..1000 {
+            let mut filler = first.clone();
+            filler.id = Uuid::new_v4();
+            filler.name = format!("aaa-filler-{index:04}");
+            for rule in &mut filler.rules {
+                rule.id = Uuid::new_v4();
+                rule.group_id = filler.id;
+            }
+            groups.push(filler);
+        }
+    }
+    let second = repo
+        .upsert_fleet_alert_policy(&request, &operator)
+        .await
+        .unwrap();
+
+    assert_eq!(second.id, first.id);
+    assert_eq!(second.rules[0].id, first.rules[0].id);
+    assert_eq!(second.rules[0].rule_version, first.rules[0].rule_version);
+    if let Repository::Memory(memory) = &repo {
+        assert_eq!(
+            memory
+                .policy_groups
+                .read()
+                .await
+                .iter()
+                .filter(|group| group.name == request.name)
+                .count(),
+            1
+        );
+    }
+
+    let conflicting = CreateFleetAlertPolicyRequest {
+        id: Some(Uuid::new_v4()),
+        name: request.name.clone(),
+        enabled: request.enabled,
+        selector_expression: request.selector_expression.clone(),
+        rules: vec![PolicyRuleRequest {
+            id: None,
+            name: "rule-1".to_string(),
+            enabled: true,
+            traffic_selector: None,
+            condition_expression: "cpu.load_1 >= 1".to_string(),
+            window_secs: 0,
+            severity: "warning".to_string(),
+        }],
+        notes: None,
+        confirmed: true,
+        preview_hash: None,
+    };
+    assert!(repo
+        .upsert_fleet_alert_policy(&conflicting, &operator)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("fleet_alert_policy_name_conflict"));
+}
+
+#[tokio::test]
+async fn fleet_alert_policy_delete_review_regression_checks_name_inside_delete_lock() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    let rule_id = Uuid::new_v4();
+    let request = |id, name: &str| CreateFleetAlertPolicyRequest {
+        id,
+        name: name.to_string(),
+        enabled: true,
+        selector_expression: "*".to_string(),
+        rules: vec![PolicyRuleRequest {
+            id: Some(rule_id),
+            name: "cpu threshold".to_string(),
+            enabled: true,
+            traffic_selector: None,
+            condition_expression: "cpu.load_1 >= 1".to_string(),
+            window_secs: 0,
+            severity: "warning".to_string(),
+        }],
+        notes: None,
+        confirmed: true,
+        preview_hash: None,
+    };
+    let created = repo
+        .upsert_fleet_alert_policy(&request(None, "reviewed-before"), &operator)
+        .await
+        .unwrap();
+    let renamed = repo
+        .upsert_fleet_alert_policy(&request(Some(created.id), "reviewed-after"), &operator)
+        .await
+        .unwrap();
+
+    let stale = repo
+        .delete_fleet_alert_policy(renamed.id, "reviewed-before", &operator)
+        .await
+        .unwrap_err();
+    assert!(stale
+        .to_string()
+        .contains("fleet_alert_policy_delete_review_stale"));
+    assert_eq!(
+        repo.get_fleet_alert_policy(renamed.id).await.unwrap().name,
+        "reviewed-after"
+    );
+    if let Repository::Memory(memory) = &repo {
+        assert!(!memory
+            .audits
+            .read()
+            .await
+            .iter()
+            .any(|audit| audit.action == "fleet.alert_policy_deleted"));
+    }
+
+    repo.delete_fleet_alert_policy(renamed.id, "reviewed-after", &operator)
+        .await
+        .unwrap();
+    assert!(repo
+        .get_fleet_alert_policy(renamed.id)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("fleet_alert_policy_not_found"));
+    assert!(repo
+        .delete_fleet_alert_policy(renamed.id, "reviewed-after", &operator)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("fleet_alert_policy_not_found"));
+    if let Repository::Memory(memory) = &repo {
+        assert_eq!(
+            memory
+                .audits
+                .read()
+                .await
+                .iter()
+                .filter(|audit| audit.action == "fleet.alert_policy_deleted")
+                .count(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn fleet_alert_policy_regression_reordering_keeps_rule_state_and_alert_identity() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    if let Repository::Memory(memory) = &repo {
+        memory.agents.write().await.push(AgentView {
+            id: "reorder-edge".to_string(),
+            display_name: "Reorder Edge".to_string(),
+            status: "online".to_string(),
+            tags: Vec::new(),
+            registration_ip: None,
+            last_ip: None,
+            last_seen_at: None,
+            arch: None,
+            internal_build_number: 1,
+            process_incarnation_id: None,
+            stale_since: None,
+            stale_reason: None,
+            capabilities: AgentCapabilitySnapshot::default(),
+        });
+        memory
+            .telemetry_rollups
+            .write()
+            .await
+            .push(alert_test_rollup("reorder-edge", 2.0, 500, 1500));
+    }
+    let first_rule_id = Uuid::new_v4();
+    let retained_rule_id = Uuid::new_v4();
+    let initial = repo
+        .upsert_fleet_alert_policy(
+            &CreateFleetAlertPolicyRequest {
+                id: None,
+                name: "reorder-policy".to_string(),
+                enabled: true,
+                selector_expression: "id:reorder-edge".to_string(),
+                rules: vec![
+                    PolicyRuleRequest {
+                        id: Some(first_rule_id),
+                        name: "first".to_string(),
+                        enabled: true,
+                        traffic_selector: None,
+                        condition_expression: "cpu.load_1 >= 1".to_string(),
+                        window_secs: 0,
+                        severity: "warning".to_string(),
+                    },
+                    PolicyRuleRequest {
+                        id: Some(retained_rule_id),
+                        name: "retained".to_string(),
+                        enabled: true,
+                        traffic_selector: None,
+                        condition_expression: "cpu.load_1 >= 1".to_string(),
+                        window_secs: 0,
+                        severity: "critical".to_string(),
+                    },
+                ],
+                notes: None,
+                confirmed: true,
+                preview_hash: None,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    let retained_version = initial
+        .rules
+        .iter()
+        .find(|rule| rule.id == retained_rule_id)
+        .unwrap()
+        .rule_version;
+    let (alerts_before, events_before) = if let Repository::Memory(memory) = &repo {
+        (
+            memory.policy_alerts.read().await.len(),
+            memory.webhook_events.read().await.len(),
+        )
+    } else {
+        unreachable!()
+    };
+
+    let reordered = repo
+        .upsert_fleet_alert_policy(
+            &CreateFleetAlertPolicyRequest {
+                id: Some(initial.id),
+                name: initial.name.clone(),
+                enabled: true,
+                selector_expression: initial.selector_expression.clone(),
+                rules: vec![PolicyRuleRequest {
+                    id: Some(retained_rule_id),
+                    name: "retained".to_string(),
+                    enabled: true,
+                    traffic_selector: None,
+                    condition_expression: "cpu.load_1 >= 1".to_string(),
+                    window_secs: 0,
+                    severity: "critical".to_string(),
+                }],
+                notes: None,
+                confirmed: true,
+                preview_hash: None,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(reordered.rules[0].id, retained_rule_id);
+    assert_eq!(reordered.rules[0].rule_version, retained_version);
+    if let Repository::Memory(memory) = &repo {
+        assert_eq!(memory.policy_alerts.read().await.len(), alerts_before);
+        assert_eq!(memory.webhook_events.read().await.len(), events_before);
+        assert!(memory.policy_rule_states.read().await.iter().any(|state| {
+            state.policy_rule_id == retained_rule_id && state.rule_version == retained_version
+        }));
+    }
+}
+
+#[tokio::test]
+async fn filter_limit_regression_internal_traffic_accounting_is_unbounded() {
+    let memory = MemoryState::default();
+    memory.agents.write().await.push(AgentView {
+        id: "zzz-rule-target".to_string(),
+        display_name: "Rule Target".to_string(),
+        status: "online".to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: None,
+        arch: None,
+        internal_build_number: 1,
+        process_incarnation_id: None,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: AgentCapabilitySnapshot::default(),
+    });
+    let stored_rule =
+        |client_id: String, key: &str, value_raw: &str, value_json: serde_json::Value| {
+            crate::model_alert_policies::VpsRuleValueRecord {
+                client_id,
+                key: key.to_string(),
+                value_raw: value_raw.to_string(),
+                value_json,
+                parsed_display: value_raw.to_string(),
+                state: "ok".to_string(),
+                validation_errors: Vec::new(),
+                source_kind: "operator".to_string(),
+                source_id: None,
+                updated_by: None,
+                updated_at: "1".to_string(),
+            }
+        };
+    let mut rules = (0..5000)
+        .map(|index| {
+            stored_rule(
+                format!("aaa-filler-{index:04}"),
+                "traffic.reset_day",
+                "1",
+                json!({"day": 1}),
+            )
+        })
+        .collect::<Vec<_>>();
+    rules.extend([
+        stored_rule(
+            "zzz-rule-target".to_string(),
+            "traffic.selectors",
+            "eth0",
+            json!({
+                "selectors": [{
+                    "source": "host",
+                    "interface": "eth0",
+                    "direction": "total",
+                    "canonical": "eth0"
+                }]
+            }),
+        ),
+        stored_rule(
+            "zzz-rule-target".to_string(),
+            "traffic.reset_day",
+            "7",
+            json!({"day": 7}),
+        ),
+        stored_rule(
+            "zzz-rule-target".to_string(),
+            "traffic.quota.total",
+            "1GB",
+            json!({"bytes": 1_000_000_000_i64}),
+        ),
+    ]);
+    *memory.vps_rule_values.write().await = rules;
+    let repo = Repository::Memory(memory);
+
+    let accounting = repo
+        .get_traffic_accounting("zzz-rule-target")
+        .await
+        .unwrap();
+    assert_eq!(accounting.reset_day, Some(7));
+    assert_eq!(accounting.quota_total_bytes, Some(1_000_000_000));
+    assert_eq!(accounting.selectors, vec!["eth0"]);
+
+    let public_rows = repo
+        .list_vps_rules(&VpsRuleQuery {
+            limit: Some(2),
+            client_id: Some("zzz-rule-target".to_string()),
+            selector_expression: None,
+            key: None,
+            state: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(public_rows.len(), 2);
+    assert_eq!(public_rows[0].key, "traffic.quota.total");
+    assert_eq!(public_rows[1].key, "traffic.reset_day");
+}
+
+#[tokio::test]
+async fn filter_limit_regression_policy_evaluator_is_unbounded() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    let target = repo
+        .upsert_fleet_alert_policy(
+            &CreateFleetAlertPolicyRequest {
+                id: None,
+                name: "zzz-evaluated-policy".to_string(),
+                enabled: true,
+                selector_expression: "id:zzz-policy-target".to_string(),
+                rules: vec![PolicyRuleRequest {
+                    id: None,
+                    name: "target threshold".to_string(),
+                    enabled: true,
+                    traffic_selector: None,
+                    condition_expression: "cpu.load_1 >= 1".to_string(),
+                    window_secs: 0,
+                    severity: "warning".to_string(),
+                }],
+                notes: None,
+                confirmed: true,
+                preview_hash: None,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    if let Repository::Memory(memory) = &repo {
+        memory.agents.write().await.push(AgentView {
+            id: "zzz-policy-target".to_string(),
+            display_name: "Policy Target".to_string(),
+            status: "online".to_string(),
+            tags: Vec::new(),
+            registration_ip: None,
+            last_ip: None,
+            last_seen_at: None,
+            arch: None,
+            internal_build_number: 1,
+            process_incarnation_id: None,
+            stale_since: None,
+            stale_reason: None,
+            capabilities: AgentCapabilitySnapshot::default(),
+        });
+        memory
+            .telemetry_rollups
+            .write()
+            .await
+            .push(alert_test_rollup("zzz-policy-target", 2.0, 500, 1500));
+        let mut groups = (0..1000)
+            .map(|index| {
+                let mut filler = target.clone();
+                filler.id = Uuid::new_v4();
+                filler.name = format!("aaa-filler-policy-{index:04}");
+                filler.selector_expression = "id:not-present".to_string();
+                for rule in &mut filler.rules {
+                    rule.id = Uuid::new_v4();
+                    rule.group_id = filler.id;
+                }
+                filler
+            })
+            .collect::<Vec<_>>();
+        groups.push(target);
+        *memory.policy_groups.write().await = groups;
+    }
+
+    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 1);
+    if let Repository::Memory(memory) = &repo {
+        assert_eq!(memory.policy_alerts.read().await.len(), 1);
+        assert_eq!(
+            memory.policy_alerts.read().await[0].client_id,
+            "zzz-policy-target"
+        );
+    }
+}
+
+#[tokio::test]
 async fn fleet_alerts_merge_operator_state_and_filter_muted_alerts() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {

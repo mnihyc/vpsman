@@ -98,7 +98,7 @@ manually. Pools must not overlap real networks.
 cargo run -p vpsctl -- tunnel-allocate \
   --ipv4-pool-cidr 10.255.0.0/16 \
   --ipv6-pool-cidr fd80::/80 \
-  --reserved-address 10.255.0.0,fd80:: \
+  --reserved-addresses 10.255.0.0,fd80:: \
   --include-ipv4 \
   --include-ipv6
 ```

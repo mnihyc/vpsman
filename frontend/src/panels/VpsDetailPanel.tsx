@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { agentDisplayState } from "../agentDisplayState";
 import { ActionFeedback } from "../components/ActionFeedback";
+import { handleTabListKeyDown, tabId } from "../components/AccessibleTabs";
 import type { FileTransferSessionRecord } from "../typesFileTransfer";
 import type {
   AgentView,
@@ -368,14 +369,22 @@ export function VpsDetailPanel({
           </select>
         </label>
 
-        <div className="detailTabs" role="tablist" aria-label="VPS detail tabs">
+        <div
+          className="detailTabs"
+          role="tablist"
+          aria-label="VPS detail tabs"
+          onKeyDown={handleTabListKeyDown}
+        >
           {detailTabs.map((tab) => (
             <button
+              aria-controls="vps-detail-tabpanel"
               aria-selected={activeTab === tab}
               className={activeTab === tab ? "selected" : ""}
+              id={tabId("vps-detail", tab)}
               key={tab}
               onClick={() => setActiveTab(tab)}
               role="tab"
+              tabIndex={activeTab === tab ? 0 : -1}
               type="button"
             >
               {tab}
@@ -383,7 +392,12 @@ export function VpsDetailPanel({
           ))}
         </div>
 
-        <div className="vpsDetailTabPanel" role="tabpanel" aria-label={`${activeTab} tab`}>
+        <div
+          aria-labelledby={tabId("vps-detail", activeTab)}
+          className="vpsDetailTabPanel"
+          id="vps-detail-tabpanel"
+          role="tabpanel"
+        >
           {activeTab === "Summary" && (
             <SummaryTab
               agent={agent}

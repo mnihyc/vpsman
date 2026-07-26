@@ -2,6 +2,12 @@
 
 This directory is the Docker Compose deployment root. It can be renamed or
 copied outside a source checkout; paths below are relative to this directory.
+Production installations should use the checksum-verified
+`vpsman-deploy-vX.Y.Z.tar.gz` asset from the selected GitHub release. See the
+[production deployment and recovery runbook](../docs/production-deployment.md)
+for pinned installation, network exposure, backup, restore, upgrade, and
+rollback procedures. The same runbook is stored at
+`docs/production-deployment.md` inside a release deployment bundle.
 
 ```text
 .
@@ -12,6 +18,7 @@ copied outside a source checkout; paths below are relative to this directory.
 |-- update.sh                    # release download, verify, start, rollback
 |-- install-agent.sh             # remote agent installer helper
 |-- AGENT_GATEWAY_INSTALL.md     # agent install notes
+|-- vpsctl -> runtime/cli/current/vpsctl  # updater-created host CLI link
 |-- config/
 |   |-- vpsman.toml              # authoritative non-secret suite config
 |   `-- secrets/                 # generated local secret files; not committed
@@ -28,19 +35,24 @@ copied outside a source checkout; paths below are relative to this directory.
     |           |-- file-transfers/          # file-transfer handoff artifacts
     |           `-- file-transfer-sources/   # uploaded source artifacts
     |-- downloads/               # downloaded release metadata/checksums
+    |-- update-backups/          # automatic pre-activation database dumps
+    |-- transactions/            # interrupted update recovery state
+    |-- update.lock              # updater concurrency lock
     |-- server/
     |   |-- current/             # active server release payload
-    |   |-- previous/            # rollback server payload
-    |   `-- staged-*/            # update staging, if an update is in progress
+    |   `-- previous/            # rollback server payload
     |-- frontend/
     |   |-- current/             # active frontend release payload
-    |   |-- previous/            # rollback frontend payload
-    |   `-- staged-*/            # update staging, if an update is in progress
+    |   `-- previous/            # rollback frontend payload
     `-- cli/
         |-- current/             # active host CLI release payload; contains vpsctl
-        |-- previous/            # rollback host CLI payload
-        `-- staged-*/            # update staging, if an update is in progress
+        `-- previous/            # rollback host CLI payload
 ```
+
+The versioned release bundle also carries `LICENSE-APACHE`, `LICENSE-MIT`,
+`SECURITY.md`, and the production/migration runbooks under `docs/`.
+`RELEASE_TAG` starts with the bundle tag and is then maintained atomically by
+the updater as the authoritative active payload tag.
 
 ## Persistence Model
 
@@ -94,13 +106,43 @@ files private.
 `update.sh first-start latest` installs release assets into
 `runtime/server/current`, `runtime/frontend/current`, and
 `runtime/cli/current`, creates missing compose secrets when
-`VPSMAN_SUPER_PASSWORD` is set, then starts compose.
+`VPSMAN_SUPER_PASSWORD` is set, snapshots PostgreSQL, then starts compose. The
+snapshot makes API migrations reversible if activation fails, including for a
+restored database.
 
 After first start, open the browser console. An empty control plane shows
 **Create first operator** and signs in the initial admin after creation. Once an
 operator exists, the same unauthenticated page shows **Sign in**.
 
 `update.sh latest` updates the same three release payloads for an existing
-deployment. Rollback swaps `current` and `previous` for server, frontend, and
-CLI together. The update script verifies release checksums and does not delete
-PostgreSQL or object-store runtime data.
+deployment. It verifies checksums and migration compatibility, stops application
+writers, stores a PostgreSQL dump under `runtime/update-backups/`, activates
+the release transactionally, and verifies readiness and release identity.
+Repeating the active tag is a no-op only after selected asset identities,
+current payload contents, and live build readiness all match the verified
+release. Same-tag identity drift, corruption, or unready services fail closed
+without replacing the older rollback payload.
+Rollback applies the same safeguards before swapping `current` and `previous`
+for server, frontend, and CLI together. Use `update.sh recover` after an
+interrupted transaction. Successful activation updates `RELEASE_TAG`; a rollback
+to a legacy payload without embedded release metadata removes the marker rather
+than leaving a false recovery identity.
+
+The host CLI is `runtime/cli/current/vpsctl`. Because the API container is not
+published directly, point the CLI at the Nginx origin:
+
+```sh
+./runtime/cli/current/vpsctl --api-url http://127.0.0.1:5173 health
+```
+
+Payload update and rollback do not replace `compose.yml`, `nginx.conf`, `.env`,
+suite configuration, or secrets, and they do not reverse external effects.
+Review the target versioned deployment bundle and take an encrypted off-host
+control-plane backup before upgrading; the updater's local database dump is an
+additional recovery layer, and product-managed VPS backups do not cover the
+control plane itself. Automatic first-start, update, and rollback dumps are
+mode-restricted but are not encrypted or pruned; monitor
+`runtime/update-backups/` and apply the deployment's reviewed retention policy.
+The application payload is checksum-pinned, but the upstream Compose image tags
+are mutable; the production runbook documents that residual and the
+operator-owned digest-pinning boundary.

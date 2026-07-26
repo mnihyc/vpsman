@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -123,10 +124,12 @@ export function ConsoleShell({
   );
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState("");
+  const [activeCommandIndex, setActiveCommandIndex] = useState(0);
   const [browserOnline, setBrowserOnline] = useState(() =>
     typeof navigator === "undefined" ? true : navigator.onLine,
   );
   const commandButtonRef = useRef<HTMLButtonElement | null>(null);
+  const commandBackdropRef = useRef<HTMLDivElement | null>(null);
   const commandInputRef = useRef<HTMLInputElement | null>(null);
   const commandReturnFocusRef = useRef<HTMLElement | null>(null);
   const contentRef = useRef<HTMLElement | null>(null);
@@ -280,16 +283,22 @@ export function ConsoleShell({
     }
     return groups;
   }, [filteredCommandItems]);
+  const activeCommandItem = filteredCommandItems[activeCommandIndex] ?? null;
+  const activeCommandOptionId = activeCommandItem
+    ? commandPaletteOptionId(activeCommandIndex)
+    : undefined;
   const openCommandPalette = () => {
     commandReturnFocusRef.current =
       document.activeElement instanceof HTMLElement
         ? document.activeElement
         : commandButtonRef.current;
+    setActiveCommandIndex(0);
     setCommandPaletteOpen(true);
   };
   const closeCommandPalette = (restoreFocus = true) => {
     setCommandPaletteOpen(false);
     setCommandQuery("");
+    setActiveCommandIndex(0);
     if (restoreFocus) {
       window.requestAnimationFrame(() => {
         (commandReturnFocusRef.current ?? commandButtonRef.current)?.focus({
@@ -474,6 +483,87 @@ export function ConsoleShell({
       return;
     }
     window.setTimeout(() => commandInputRef.current?.focus(), 0);
+  }, [commandPaletteOpen]);
+
+  useEffect(() => {
+    setActiveCommandIndex((current) =>
+      filteredCommandItems.length === 0
+        ? 0
+        : Math.min(current, filteredCommandItems.length - 1),
+    );
+  }, [filteredCommandItems.length]);
+
+  useEffect(() => {
+    if (!commandPaletteOpen || !activeCommandOptionId) {
+      return;
+    }
+    document
+      .getElementById(activeCommandOptionId)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [activeCommandOptionId, commandPaletteOpen]);
+
+  useLayoutEffect(() => {
+    if (!commandPaletteOpen || !commandBackdropRef.current) {
+      return undefined;
+    }
+    const backdrop = commandBackdropRef.current;
+    const siblings = Array.from(backdrop.parentElement?.children ?? [])
+      .filter(
+        (element): element is HTMLElement =>
+          element instanceof HTMLElement && element !== backdrop,
+      )
+      .map((element) => ({
+        ariaHidden: element.getAttribute("aria-hidden"),
+        element,
+        inert: element.inert,
+      }));
+    for (const sibling of siblings) {
+      sibling.element.inert = true;
+      sibling.element.setAttribute("aria-hidden", "true");
+    }
+    const containFocus = (event: FocusEvent) => {
+      if (
+        event.target instanceof Node &&
+        !backdrop.contains(event.target)
+      ) {
+        commandInputRef.current?.focus({ preventScroll: true });
+      }
+    };
+    const trapTab = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") {
+        return;
+      }
+      const focusable = commandPaletteFocusableElements(backdrop);
+      if (focusable.length === 0) {
+        event.preventDefault();
+        commandInputRef.current?.focus({ preventScroll: true });
+        return;
+      }
+      const first = focusable[0]!;
+      const last = focusable[focusable.length - 1]!;
+      const active = document.activeElement;
+      if (
+        (event.shiftKey && (active === first || !backdrop.contains(active))) ||
+        (!event.shiftKey && (active === last || !backdrop.contains(active)))
+      ) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus({ preventScroll: true });
+      }
+    };
+    document.addEventListener("focusin", containFocus);
+    document.addEventListener("keydown", trapTab, true);
+    return () => {
+      document.removeEventListener("focusin", containFocus);
+      document.removeEventListener("keydown", trapTab, true);
+      for (const sibling of siblings) {
+        sibling.element.inert = sibling.inert;
+        if (sibling.ariaHidden === null) {
+          sibling.element.removeAttribute("aria-hidden");
+        } else {
+          sibling.element.setAttribute("aria-hidden", sibling.ariaHidden);
+        }
+      }
+    };
   }, [commandPaletteOpen]);
 
   useEffect(() => {
@@ -799,18 +889,55 @@ export function ConsoleShell({
               closeCommandPalette();
             }
           }}
+          ref={commandBackdropRef}
           role="dialog"
         >
           <div className="commandPalette">
             <div className="commandPaletteHeader">
               <Command size={18} />
               <input
+                aria-activedescendant={activeCommandOptionId}
+                aria-autocomplete="list"
+                aria-controls="command-palette-results"
+                aria-expanded="true"
                 aria-label="Command palette search"
                 autoComplete="off"
                 name="command_palette_search"
-                onChange={(event) => setCommandQuery(event.target.value)}
+                onChange={(event) => {
+                  setCommandQuery(event.target.value);
+                  setActiveCommandIndex(0);
+                }}
+                onKeyDown={(event) => {
+                  if (filteredCommandItems.length === 0) {
+                    return;
+                  }
+                  if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    setActiveCommandIndex(
+                      (current) =>
+                        (current + 1) % filteredCommandItems.length,
+                    );
+                  } else if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    setActiveCommandIndex(
+                      (current) =>
+                        (current - 1 + filteredCommandItems.length) %
+                        filteredCommandItems.length,
+                    );
+                  } else if (event.key === "Home") {
+                    event.preventDefault();
+                    setActiveCommandIndex(0);
+                  } else if (event.key === "End") {
+                    event.preventDefault();
+                    setActiveCommandIndex(filteredCommandItems.length - 1);
+                  } else if (event.key === "Enter" && activeCommandItem) {
+                    event.preventDefault();
+                    selectCommandItem(activeCommandItem);
+                  }
+                }}
                 placeholder="Search pages, VPS, jobs, sessions, transfers, backups, audit"
                 ref={commandInputRef}
+                role="combobox"
                 type="search"
                 value={commandQuery}
               />
@@ -818,31 +945,55 @@ export function ConsoleShell({
             </div>
             <div className="commandPaletteMeta">
               <h2 id="command-palette-title">Command palette</h2>
-              <span>{filteredCommandItems.length} results</span>
+              <span aria-live="polite">
+                {filteredCommandItems.length} results
+              </span>
             </div>
-            <div className="commandPaletteResults" role="listbox" aria-label="Command palette results">
+            <div
+              className="commandPaletteResults"
+              id="command-palette-results"
+              role="listbox"
+              aria-label="Command palette results"
+            >
               {groupedCommandItems.length > 0 ? (
-                groupedCommandItems.map((group) => (
-                  <section className="commandPaletteGroup" key={group.group} aria-label={`${group.group} results`}>
-                    <span className="commandPaletteGroupTitle">{group.group}</span>
-                    {group.items.map((item) => (
-                      <button
-                        aria-label={`${item.group}: ${item.label}. ${item.detail}`}
-                        className="commandPaletteResult"
-                        data-command-group={item.group}
-                        key={item.id}
-                        onClick={() => selectCommandItem(item)}
-                        role="option"
-                        title={`${item.label}\n${item.detail}`}
-                        type="button"
-                      >
-                        <span className="commandPaletteResultText">
-                          <strong title={item.label}>{item.label}</strong>
-                          <small title={item.detail}>{item.detail}</small>
-                        </span>
-                        <span className="commandPaletteGroupBadge">{item.group}</span>
-                      </button>
-                    ))}
+                groupedCommandItems.map((group, groupIndex) => (
+                  <section
+                    aria-labelledby={`command-palette-group-${groupIndex}`}
+                    className="commandPaletteGroup"
+                    key={group.group}
+                    role="group"
+                  >
+                    <span
+                      className="commandPaletteGroupTitle"
+                      id={`command-palette-group-${groupIndex}`}
+                    >
+                      {group.group}
+                    </span>
+                    {group.items.map((item) => {
+                      const itemIndex = filteredCommandItems.indexOf(item);
+                      return (
+                        <button
+                          aria-label={`${item.group}: ${item.label}. ${item.detail}`}
+                          aria-selected={activeCommandIndex === itemIndex}
+                          className="commandPaletteResult"
+                          data-command-group={item.group}
+                          id={commandPaletteOptionId(itemIndex)}
+                          key={item.id}
+                          onClick={() => selectCommandItem(item)}
+                          onMouseMove={() => setActiveCommandIndex(itemIndex)}
+                          role="option"
+                          tabIndex={-1}
+                          title={`${item.label}\n${item.detail}`}
+                          type="button"
+                        >
+                          <span className="commandPaletteResultText">
+                            <strong title={item.label}>{item.label}</strong>
+                            <small title={item.detail}>{item.detail}</small>
+                          </span>
+                          <span className="commandPaletteGroupBadge">{item.group}</span>
+                        </button>
+                      );
+                    })}
                   </section>
                 ))
               ) : (
@@ -910,4 +1061,28 @@ function writeSidebarSubpanelPreferences(defaultMode: string, state: Record<stri
   } catch {
     // Local navigation chrome state is non-critical.
   }
+}
+
+function commandPaletteOptionId(index: number) {
+  return `command-palette-option-${index}`;
+}
+
+function commandPaletteFocusableElements(container: HTMLElement) {
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(
+      [
+        "a[href]",
+        "button:not([disabled]):not([tabindex='-1'])",
+        "input:not([disabled]):not([tabindex='-1'])",
+        "select:not([disabled]):not([tabindex='-1'])",
+        "textarea:not([disabled]):not([tabindex='-1'])",
+        "[tabindex]:not([tabindex='-1'])",
+      ].join(","),
+    ),
+  ).filter(
+    (element) =>
+      element.getAttribute("aria-hidden") !== "true" &&
+      getComputedStyle(element).display !== "none" &&
+      getComputedStyle(element).visibility !== "hidden",
+  );
 }

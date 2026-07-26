@@ -1,4 +1,5 @@
 import { expect, test, type Locator } from "@playwright/test";
+import { createHash } from "node:crypto";
 import {
   backupId,
   installConsoleApiMock,
@@ -13,29 +14,33 @@ import {
 } from "./support/consoleNavigation";
 
 test.beforeEach(async ({ page }, testInfo) => {
-  const options = testInfo.tags.includes("@delete-cleanup-queue-failure")
+  const options = testInfo.tags.includes("@delete-request-failure")
     ? {
-        agentDeleteFailedClientIds: ["agent-fra-02"],
-        agentDeleteSyncJobIds: [],
+        agentDeleteRequestFailure: true,
       }
-    : testInfo.tags.includes("@ospf-planned-baseline")
+    : testInfo.tags.includes("@delete-cleanup-queue-failure")
       ? {
-          ospfUpdatePlansOverride: ospfUpdatePlans.map((plan) => ({
-            ...plan,
-            confidence: "no_recent_observations",
-            evidence: {
-              ...plan.evidence,
-              degraded_count: 0,
-              healthy_probe_streak: 0,
-              latest_observed_at: null,
-              sample_count: 0,
-            },
-            evidence_summary:
-              "No recent probe evidence; using the planned cost baseline",
-            status: "review_planned_baseline",
-          })),
+          agentDeleteFailedClientIds: ["agent-fra-02"],
+          agentDeleteSyncJobIds: [],
         }
-      : undefined;
+      : testInfo.tags.includes("@ospf-planned-baseline")
+        ? {
+            ospfUpdatePlansOverride: ospfUpdatePlans.map((plan) => ({
+              ...plan,
+              confidence: "no_recent_observations",
+              evidence: {
+                ...plan.evidence,
+                degraded_count: 0,
+                healthy_probe_streak: 0,
+                latest_observed_at: null,
+                sample_count: 0,
+              },
+              evidence_summary:
+                "No recent probe evidence; using the planned cost baseline",
+              status: "review_planned_baseline",
+            })),
+          }
+        : undefined;
   await installConsoleApiMock(page, options);
 });
 
@@ -195,9 +200,23 @@ test("exposes hover titles for truncated grid text and editable values", async (
     page.locator('input[data-test-tooltip-probe="true"]'),
   ).not.toHaveAttribute("title", /.+/);
   if (testInfo.project.name.includes("mobile")) {
-    await expect(
-      page.getByRole("combobox", { name: "Console page", exact: true }),
-    ).toHaveAttribute("title", /Fleet \/ Instances/);
+    const mobilePageSelector = page.getByRole("combobox", {
+      name: "Console page",
+      exact: true,
+    });
+    await expect(mobilePageSelector).toHaveAttribute(
+      "title",
+      /Fleet \/ Instances/,
+    );
+    await mobilePageSelector.focus();
+    await expect(mobilePageSelector).toBeFocused();
+    await expect
+      .poll(() =>
+        page
+          .locator(".mobilePageMenu")
+          .evaluate((element) => getComputedStyle(element).boxShadow),
+      )
+      .not.toBe("none");
     const mobileCard = fleetGrid.getByLabel(
       "VPS instance records mobile card agent-sfo-01",
     );
@@ -217,7 +236,7 @@ test("exposes hover titles for truncated grid text and editable values", async (
   await expect(
     edgeRow.locator(".gridCellContent", { hasText: "edge-sfo-01" }).first(),
   ).toHaveAttribute("title", /edge-sfo-01/);
-  const fleetSearch = page.getByRole("searchbox", { name: "Search fleet" });
+  const fleetSearch = page.getByRole("combobox", { name: "Search fleet" });
   await fleetSearch.fill("edge-sfo-01");
   await expect(fleetSearch).toHaveAttribute("title", "edge-sfo-01");
 });
@@ -280,7 +299,7 @@ test("keeps search expression autocomplete above clipped workflow panels", async
   const drawer = templatePanel.getByLabel("shared:vnstat-json", {
     exact: true,
   });
-  const targetExpression = drawer.getByRole("searchbox", {
+  const targetExpression = drawer.getByRole("combobox", {
     name: "Template assignment target expression",
   });
   await targetExpression.fill("provider:");
@@ -293,6 +312,20 @@ test("keeps search expression autocomplete above clipped workflow panels", async
   });
   await expect(providerOption).toBeVisible();
   await expect(providerOption).toHaveAttribute("title", "provider:alpha");
+  await expect(targetExpression).toHaveAttribute("role", "combobox");
+  await expect(targetExpression).toHaveAttribute("aria-expanded", "true");
+  const options = autocomplete.getByRole("option");
+  await expect(options.first()).toHaveAttribute("aria-selected", "true");
+  const optionCount = await options.count();
+  expect(optionCount).toBeGreaterThan(0);
+  await targetExpression.press("ArrowDown");
+  const nextOption = options.nth(optionCount > 1 ? 1 : 0);
+  await expect(nextOption).toHaveAttribute("aria-selected", "true");
+  const selectedSuggestion =
+    (await nextOption.locator("span").textContent()) ?? "";
+  await targetExpression.press("Enter");
+  await expect(targetExpression).toHaveValue(selectedSuggestion);
+  await expect(autocomplete).toHaveCount(0);
 });
 
 test("renders an operational cloud-console fleet workspace", async ({
@@ -350,7 +383,7 @@ test("renders an operational cloud-console fleet workspace", async ({
   await expect(fleetInstancesHeader).not.toContainText("2 online / 3 total");
   if (testInfo.project.name.includes("desktop")) {
     await expect(
-      page.getByRole("searchbox", { name: "Search fleet" }),
+      page.getByRole("combobox", { name: "Search fleet" }),
     ).toBeVisible();
   }
   const fleetGrid = page.getByLabel("VPS instance records data grid");
@@ -522,7 +555,7 @@ test("renders an operational cloud-console fleet workspace", async ({
     await activate(coreDetail.getByRole("tab", { name: "Network" }));
   }
   await expect(
-    coreDetail.getByRole("tabpanel", { name: "Network tab" }),
+    coreDetail.getByRole("tabpanel", { name: "Network" }),
   ).toBeVisible();
   await expect(coreDetail).toContainText("Network workflow");
   await expect(
@@ -639,6 +672,45 @@ test(
   },
 );
 
+test(
+  "keeps an overlay confirmation failure visible after submit",
+  { tag: "@delete-request-failure" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "overlay confirmation error persistence is shared across layouts",
+    );
+
+    await page.goto("/");
+    await openConsoleSubpage(page, "System", "Preferences");
+    await page
+      .getByLabel("Review prompt display mode")
+      .selectOption("overlay");
+    await page.getByRole("button", { name: "Save preferences" }).click();
+    await unlockPrivilegeFromTop(page);
+    await openConsoleSubpage(page, "Fleet", "Instances");
+    await openDeleteVpsReview(page);
+    await activate(
+      page
+        .getByRole("dialog", { name: "Delete VPS from panel" })
+        .getByRole("button", { name: "Delete VPS" }),
+    );
+
+    await expect(page.locator(".confirmationPromptOverlay")).toHaveCount(0);
+    const failure = page.getByRole("alert").filter({
+      hasText: "Delete VPS from panel failed",
+    });
+    await expect(failure).toContainText(
+      "Fixture refused the VPS deletion before changing inventory.",
+    );
+    await expect(
+      page
+        .getByLabel("VPS instance records data grid")
+        .locator(".gridBody [role=row]", { hasText: "backup-nyc-03" }),
+    ).toBeVisible();
+  },
+);
+
 test("review prompt display mode follows operator preference", async ({
   page,
 }, testInfo) => {
@@ -710,6 +782,7 @@ test("review prompt display mode follows operator preference", async ({
 test("reviews notification and webhook queue mutations before commit", async ({
   page,
 }, testInfo) => {
+  testInfo.setTimeout(60_000);
   test.skip(
     testInfo.project.name.includes("mobile"),
     "queue mutation confirmations are covered in the desktop notifications panel",
@@ -773,11 +846,13 @@ test("reviews notification and webhook queue mutations before commit", async ({
   await expect(
     webhooks.getByText("Event webhook rules", { exact: true }).first(),
   ).toBeVisible();
-  const webhookRules = webhooks.getByLabel("Event webhook rules");
+  const webhookRules = webhooks.getByRole("tabpanel", {
+    name: /^Rules\b/,
+  });
   await activate(
     webhookRules.getByRole("button", { name: "Create rule" }).first(),
   );
-  const webhookExpression = webhooks.getByRole("searchbox", {
+  const webhookExpression = webhooks.getByRole("combobox", {
     name: "Webhook expression",
   });
   await webhookExpression.click();
@@ -1263,7 +1338,7 @@ test("opens manual update check dispatch from fleet selection", async ({
       .getByRole("heading", { name: "Command dispatch" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("searchbox", { name: "Bulk target selector expression" }),
+    page.getByRole("combobox", { name: "Bulk target selector expression" }),
   ).toHaveValue("id:agent-fra-02");
   await expect(
     page.getByLabel("Agent update version manifest URL"),
@@ -1344,7 +1419,7 @@ test("opens dispatch from fleet selection with selected VPS ids", async ({
       .getByRole("heading", { name: "Command dispatch" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("searchbox", { name: "Bulk target selector expression" }),
+    page.getByRole("combobox", { name: "Bulk target selector expression" }),
   ).toHaveValue("id:agent-fra-02");
   await expect(page.getByRole("button", { name: "Argv" })).toHaveClass(
     /selected/,
@@ -1363,7 +1438,7 @@ test("keeps fleet alert policy actions selection-scoped", async ({
     0,
   );
   await expect(page.getByText("Policy detail")).toHaveCount(0);
-  const policySearch = grid.getByRole("searchbox", {
+  const policySearch = grid.getByRole("combobox", {
     name: "Policy groups search",
   });
   await policySearch.click();
@@ -2153,7 +2228,7 @@ test("manages template assignments from automation source templates", async ({
 
   const panel = page.locator(".sourceTemplatePanel");
   const sourceStatusSection = panel.locator(".sourceStatusSection");
-  const activeSourcesSearch = panel.getByRole("searchbox", {
+  const activeSourcesSearch = panel.getByRole("combobox", {
     name: "Active sources search",
   });
   await expect(sourceStatusSection.locator("summary")).toContainText(
@@ -2176,7 +2251,7 @@ test("manages template assignments from automation source templates", async ({
   ).toHaveCount(0);
   await activeSourcesSearch.fill("not-a-real-source");
   await expect(
-    panel.getByText("No active source records match the current search."),
+    activeSourcesGrid.getByText("No matching sources"),
   ).toBeVisible();
   await expect(panel.getByText(/No selected source records/)).toHaveCount(0);
   await activeSourcesSearch.fill("");
@@ -2211,7 +2286,7 @@ test("manages template assignments from automation source templates", async ({
   await activeSourcesSearch.fill("");
 
   const templatePanel = page.locator(".sourceTemplatePanel");
-  const templateRegistrySearch = templatePanel.getByRole("searchbox", {
+  const templateRegistrySearch = templatePanel.getByRole("combobox", {
     name: "Template registry search",
   });
   await expect(
@@ -2329,7 +2404,7 @@ test("manages template assignments from automation source templates", async ({
     .getByLabel("Template assignment template")
     .selectOption("11111111-1111-4111-8111-111111111111");
   await templatePanel
-    .getByRole("searchbox", {
+    .getByRole("combobox", {
       name: "Template assignment target expression",
     })
     .fill("(provider:alpha && country:US) || id:agent-fra-02");
@@ -2478,7 +2553,7 @@ test("keeps source template assignment review while unlocking privilege inline",
     .getByLabel("Template assignment template")
     .selectOption("11111111-1111-4111-8111-111111111111");
   await templatePanel
-    .getByRole("searchbox", {
+    .getByRole("combobox", {
       name: "Template assignment target expression",
     })
     .fill("(provider:alpha && country:US) || id:agent-fra-02");
@@ -2621,7 +2696,7 @@ test("renders patch generators and submits explicit runtime config patch modes",
   );
   const validGeneratorValues = await generatorValues.inputValue();
   await bulk
-    .getByRole("searchbox", { name: "Bulk patch target expression" })
+    .getByRole("combobox", { name: "Bulk patch target expression" })
     .fill("id:agent-sfo-01");
   await expect(
     page.getByRole("option", { name: /edge-sfo-01.*agent-sfo-01/ }),
@@ -2887,7 +2962,17 @@ test("registers VPS identities and revokes current keys from the access panel", 
   await expect(
     inspector.getByRole("heading", { name: "Register VPS" }),
   ).toBeVisible();
-  await inspector.getByLabel("Agent identity client ID").fill("agent-tokyo-04");
+  const clientIdInput = inspector.getByLabel("Agent identity client ID");
+  await clientIdInput.fill("agent tokyo");
+  await expect(clientIdInput).toHaveAttribute("aria-invalid", "true");
+  await expect(inspector).toContainText(
+    "Client ID may use only letters, numbers, dot, underscore, colon, and hyphen.",
+  );
+  await expect(
+    inspector.getByRole("button", { name: "Review registration" }),
+  ).toBeDisabled();
+  await clientIdInput.fill("agent-tokyo-04");
+  await expect(clientIdInput).toHaveAttribute("aria-invalid", "false");
   await page.evaluate(
     ({ privateKeyHex, publicKeyHex }) => {
       function hexToBase64Url(hex: string): string {
@@ -3006,8 +3091,30 @@ test("registers VPS identities and revokes current keys from the access panel", 
 
   const installCommand = inspector.getByLabel("Agent install command");
   await expect(installCommand).toContainText(
-    "curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-agent.sh | env",
+    'agent_install_tmp="$(mktemp -d)"',
   );
+  await expect(installCommand).toContainText(
+    /install-agent-[0-9a-f]{40}-[0-9a-f]{64}\.sh/,
+  );
+  await expect(installCommand).toContainText(
+    /raw\.githubusercontent\.com\/mnihyc\/vpsman\/[0-9a-f]{40}\/deploy\/install-agent\.sh/,
+  );
+  await expect(installCommand).toContainText(
+    "sha256sum -c -",
+  );
+  const installCommandText =
+    (await installCommand.locator("pre code").textContent()) ?? "";
+  const emittedInstallerUrl = installCommandText.match(
+    /https?:\/\/[^' ]+\/install-agent-[0-9a-f]{40}-[0-9a-f]{64}\.sh/,
+  )?.[0];
+  expect(emittedInstallerUrl).toBeTruthy();
+  const emittedInstaller = await page.request.get(emittedInstallerUrl!);
+  expect(emittedInstaller.ok()).toBe(true);
+  const emittedInstallerSha256 = createHash("sha256")
+    .update(await emittedInstaller.body())
+    .digest("hex");
+  expect(emittedInstallerUrl).toContain(emittedInstallerSha256);
+  expect(installCommandText).toContain(emittedInstallerSha256);
   await expect(installCommand).toContainText("VPSMAN_AGENT_RELEASE='latest'");
   await expect(installCommand).toContainText("VPSMAN_INSTALL_MODE='root'");
   await expect(installCommand).toContainText(
@@ -3022,9 +3129,51 @@ test("registers VPS identities and revokes current keys from the access panel", 
   await expect(installCommand).toContainText(
     "VPSMAN_GATEWAY_ENDPOINTS='primary=gw.example.com:9443=10'",
   );
-  await installCommand
-    .getByLabel("Gateway endpoints")
-    .fill("primary=gw.example.com:9443=20");
+  const gatewayKey = installCommand.getByLabel(
+    "Gateway server public key hex",
+  );
+  await expect(gatewayKey).toHaveAttribute("aria-invalid", "false");
+  await gatewayKey.fill("not-a-key");
+  await expect(gatewayKey).toHaveAttribute("aria-invalid", "true");
+  const gatewayKeyErrorId = await gatewayKey.getAttribute("aria-errormessage");
+  expect(gatewayKeyErrorId).toBeTruthy();
+  await expect(page.locator(`#${gatewayKeyErrorId}`)).toContainText(
+    "exactly 64 hex characters",
+  );
+  await expect(
+    installCommand.getByRole("button", { name: "Copy command" }),
+  ).toBeDisabled();
+  await gatewayKey.fill("1".repeat(64));
+  const gatewayEndpoints = installCommand.getByLabel("Gateway endpoints");
+  await gatewayEndpoints.fill("");
+  await expect(gatewayEndpoints).toHaveAttribute("aria-invalid", "true");
+  await gatewayEndpoints.fill("primary=gw.example.com:not-a-port=10");
+  await expect(gatewayEndpoints).toHaveAttribute("aria-invalid", "true");
+  const gatewayEndpointsErrorId = await gatewayEndpoints.getAttribute(
+    "aria-errormessage",
+  );
+  expect(gatewayEndpointsErrorId).toBeTruthy();
+  await expect(page.locator(`#${gatewayEndpointsErrorId}`)).toContainText(
+    "numeric port from 1 to 65535",
+  );
+  await gatewayEndpoints.fill("ipv6=2001:db8::1:9443=10");
+  await expect(gatewayEndpoints).toHaveAttribute("aria-invalid", "true");
+  await gatewayEndpoints.fill("scoped=[fe80::1%eth0]:9443=10");
+  await expect(gatewayEndpoints).toHaveAttribute("aria-invalid", "true");
+  await gatewayEndpoints.fill("bad=bad_host.example:9443=10");
+  await expect(gatewayEndpoints).toHaveAttribute("aria-invalid", "true");
+  await gatewayEndpoints.fill("bad=999.0.0.1:9443=10");
+  await expect(gatewayEndpoints).toHaveAttribute("aria-invalid", "true");
+  await gatewayEndpoints.fill(
+    "primary=gw.example.com:9443=10\nbackup=gw-backup.example.com:9443=20",
+  );
+  await expect(gatewayEndpoints).toHaveAttribute("aria-invalid", "false");
+  await gatewayEndpoints.fill("ipv6=[2001:db8::1]:9443=10");
+  await expect(gatewayEndpoints).toHaveAttribute("aria-invalid", "false");
+  await expect(installCommand).toContainText(
+    "VPSMAN_GATEWAY_ENDPOINTS='ipv6=[2001:db8::1]:9443=10'",
+  );
+  await gatewayEndpoints.fill("primary=gw.example.com:9443=20");
   await activate(installCommand.getByRole("button", { name: "Save defaults" }));
   await expect
     .poll(async () =>
@@ -4280,7 +4429,7 @@ test("keeps long search expressions horizontally editable and inspectable", asyn
   await page.goto("/");
   await openConsoleSubpage(page, "Jobs", "Dispatch");
 
-  const expression = page.getByRole("searchbox", {
+  const expression = page.getByRole("combobox", {
     name: "Bulk target selector expression",
   });
   const longSelector =

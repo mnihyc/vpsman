@@ -6,7 +6,13 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  # Serialize every release tag so two distinct tags cannot both pass the
+  # published-version check before either release exists.
+  group: vpsman-release-publish
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -27,8 +33,16 @@ jobs:
           set -euo pipefail
 
           release_tag="${GITHUB_REF_NAME}"
-          if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+          if [[ ! "$release_tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
             echo "release tag must look like v1.2.3 or v1.2.3-rc.1: $release_tag" >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse "${release_tag}^{commit}")" != "$(git rev-parse HEAD)" ]]; then
+            echo "checked-out commit does not match the release tag: $release_tag" >&2
+            exit 1
+          fi
+          if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $release_tag already exists; releases and their assets are immutable" >&2
             exit 1
           fi
 
@@ -112,7 +126,7 @@ jobs:
             exit 1
           fi
           release_tag="${GITHUB_REF_NAME}"
-          if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+          if [[ ! "$release_tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
             echo "release tag must look like v1.2.3 or v1.2.3-rc.1: $release_tag" >&2
             exit 1
           fi
@@ -151,6 +165,7 @@ jobs:
           cp target/release/vpsman-gateway release-artifacts/server/bin/vpsman-gateway
           cp target/release/vpsman-worker release-artifacts/server/bin/vpsman-worker
           cp migrations/*.sql release-artifacts/server/migrations/
+          cp LICENSE-APACHE LICENSE-MIT release-artifacts/server/
           (cd release-artifacts/server && zip -qr ../assets/vpsman-server-linux-x86_64.zip .)
           cp target/x86_64-unknown-linux-musl/release/vpsman-agent release-artifacts/assets/vpsman-agent-linux-x86_64-musl
           cp target/aarch64-unknown-linux-musl/release/vpsman-agent release-artifacts/assets/vpsman-agent-linux-aarch64-musl
@@ -190,6 +205,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -206,8 +223,11 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+      - name: Audit frontend installer acquisition
+        run: bash scripts/audit-frontend-installer-asset.sh
+
       - name: Package frontend
-        run: tar -C frontend -czf vpsman-frontend-dist.tar.gz dist
+        run: tar -czf vpsman-frontend-dist.tar.gz -C frontend dist -C .. LICENSE-APACHE LICENSE-MIT
 
       - name: Upload frontend artifact
         uses: actions/upload-artifact@v6
@@ -218,6 +238,8 @@ jobs:
   github-release:
     name: Publish GitHub release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     needs:
       - linux-binaries
       - frontend
@@ -242,23 +264,40 @@ jobs:
             exit 1
           fi
           release_tag="${GITHUB_REF_NAME}"
-          if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+          if [[ ! "$release_tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
             echo "release tag must look like v1.2.3 or v1.2.3-rc.1: $release_tag" >&2
             exit 1
           fi
-          echo "tag=$release_tag" >> "$GITHUB_OUTPUT"
-          echo "version=${release_tag#v}" >> "$GITHUB_OUTPUT"
+          if [[ "$(git rev-parse "${release_tag}^{commit}")" != "$(git rev-parse HEAD)" ]]; then
+            echo "checked-out commit does not match the release tag: $release_tag" >&2
+            exit 1
+          fi
+          {
+            echo "tag=$release_tag"
+            echo "version=${release_tag#v}"
+            echo "commit=$(git rev-parse HEAD)"
+            if [[ "$release_tag" == *-* ]]; then
+              echo "prerelease=true"
+            else
+              echo "prerelease=false"
+            fi
+          } >> "$GITHUB_OUTPUT"
 
       - name: Flatten release assets
         env:
           RELEASE_TAG: ${{ steps.release-tag.outputs.tag }}
           RELEASE_VERSION: ${{ steps.release-tag.outputs.version }}
+          RELEASE_COMMIT: ${{ steps.release-tag.outputs.commit }}
         run: |
           set -euo pipefail
           rm -rf release-assets
           mkdir -p release-assets
           cp release-downloads/vpsman-linux-binaries/* release-assets/
           cp release-downloads/vpsman-frontend-dist/vpsman-frontend-dist.tar.gz release-assets/
+          install -m 0644 LICENSE-APACHE LICENSE-MIT release-assets/
+          install -m 0755 deploy/install-agent.sh release-assets/install-agent.sh
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$RELEASE_COMMIT")" \
+            bash scripts/package-deploy-bundle.sh "$RELEASE_TAG" release-assets
           python3 -c '
           import json
           import os
@@ -287,7 +326,7 @@ jobs:
                   "project": "vpsman",
                   "tag": release_tag,
                   "version": os.environ["RELEASE_VERSION"],
-                  "commit": os.environ["GITHUB_SHA"],
+                  "commit": os.environ["RELEASE_COMMIT"],
                   "assets": [release_asset(name) for name in asset_names],
                   "checksum_manifest": release_asset("SHA256SUMS"),
               }
@@ -307,33 +346,49 @@ jobs:
           if metadata.get("version") != os.environ["RELEASE_VERSION"]:
               raise SystemExit("version.json version does not match release version")
           '
-          (cd release-assets && sha256sum * > SHA256SUMS)
+          (cd release-assets && sha256sum -- * > SHA256SUMS)
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ steps.release-tag.outputs.tag }}
+          RELEASE_PRERELEASE: ${{ steps.release-tag.outputs.prerelease }}
+          RELEASE_COMMIT: ${{ steps.release-tag.outputs.commit }}
         run: |
+          set -euo pipefail
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            expected_assets="$(mktemp)"
-            current_assets="$(mktemp)"
-            find release-assets -maxdepth 1 -type f -printf '%f\n' | sort > "$expected_assets"
-            gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort > "$current_assets"
-            while IFS= read -r asset; do
-              if ! grep -Fxq "$asset" "$expected_assets"; then
-                gh release delete-asset "$RELEASE_TAG" "$asset" --yes
-              fi
-            done < "$current_assets"
-            gh release upload "$RELEASE_TAG" release-assets/* --clobber
-            gh release edit "$RELEASE_TAG" \
-              --title "vpsman $RELEASE_TAG" \
-              --latest \
-              --target "$GITHUB_SHA"
-          else
-            gh release create "$RELEASE_TAG" release-assets/* \
-              --title "vpsman $RELEASE_TAG" \
-              --generate-notes \
-              --latest \
-              --verify-tag \
-              --target "$GITHUB_SHA"
+            echo "release $RELEASE_TAG already exists; refusing to replace immutable assets" >&2
+            exit 1
           fi
+
+          remote_tag_commit="$(
+            git ls-remote --exit-code \
+              origin \
+              "refs/tags/$RELEASE_TAG" \
+              "refs/tags/$RELEASE_TAG^{}" |
+              awk '
+                $2 ~ /\^\{\}$/ { peeled = $1 }
+                $2 !~ /\^\{\}$/ { direct = $1 }
+                END { print peeled != "" ? peeled : direct }
+              '
+          )"
+          if [[ "$remote_tag_commit" != "$RELEASE_COMMIT" ]]; then
+            echo "remote tag $RELEASE_TAG moved after checkout; refusing to publish" >&2
+            echo "expected commit: $RELEASE_COMMIT" >&2
+            echo "remote commit:   ${remote_tag_commit:-missing}" >&2
+            exit 1
+          fi
+
+          release_args=(
+            --title "vpsman $RELEASE_TAG"
+            --generate-notes
+            --verify-tag
+            --target "$RELEASE_COMMIT"
+          )
+          if [[ "$RELEASE_PRERELEASE" == "true" ]]; then
+            release_args+=(--prerelease)
+          else
+            release_args+=(--latest)
+          fi
+
+          gh release create "$RELEASE_TAG" release-assets/* "${release_args[@]}"

@@ -1,4 +1,6 @@
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,6 +8,16 @@ import { fileURLToPath } from "node:url";
 const apiTarget = process.env.VPSMAN_API_PROXY ?? "http://127.0.0.1:8080";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendBuildNumber = readBuildNumber("frontend");
+const sourceCommit = resolveSourceCommit();
+const releaseTag = resolveReleaseTag();
+verifyReleaseTagCommit(releaseTag, sourceCommit);
+const installerBytes = releaseTag ? null : readInstallerAtCommit(sourceCommit);
+const installerSha256 = installerBytes
+  ? createHash("sha256").update(installerBytes).digest("hex")
+  : "";
+const installerAssetName = !installerBytes
+  ? ""
+  : `install-agent-${sourceCommit}-${installerSha256}.sh`;
 const apiProxy = {
   "/api": apiTarget,
   "/health": apiTarget,
@@ -18,7 +30,14 @@ const apiProxy = {
 export default defineConfig({
   define: {
     __VPSMAN_FRONTEND_BUILD_NUMBER__: JSON.stringify(frontendBuildNumber),
+    __VPSMAN_INSTALLER_ASSET_NAME__: JSON.stringify(installerAssetName),
+    __VPSMAN_INSTALLER_SHA256__: JSON.stringify(installerSha256),
+    __VPSMAN_RELEASE_TAG__: JSON.stringify(releaseTag),
+    __VPSMAN_SOURCE_COMMIT__: JSON.stringify(sourceCommit),
   },
+  plugins: installerBytes
+    ? [sourceInstallerAssetPlugin(installerAssetName, installerBytes)]
+    : [],
   preview: {
     proxy: apiProxy,
   },
@@ -26,6 +45,124 @@ export default defineConfig({
     proxy: apiProxy,
   },
 });
+
+function resolveSourceCommit(): string {
+  const configured =
+    process.env.VPSMAN_SOURCE_COMMIT ??
+    process.env.GITHUB_SHA ??
+    execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    }).trim();
+  if (!/^[0-9a-fA-F]{40}$/.test(configured)) {
+    throw new Error(
+      "VPSMAN_SOURCE_COMMIT/GITHUB_SHA must be an exact 40-character Git commit",
+    );
+  }
+  return configured.toLowerCase();
+}
+
+function resolveReleaseTag(): string {
+  const configured =
+    process.env.VPSMAN_RELEASE_TAG ??
+    (process.env.GITHUB_REF_TYPE === "tag"
+      ? process.env.GITHUB_REF_NAME ?? ""
+      : "");
+  if (!configured) {
+    return "";
+  }
+  const match =
+    /^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/.exec(
+      configured,
+    );
+  const nonCanonicalNumericIdentifier =
+    match?.[1]
+      ?.split(".")
+      .some(
+        (part) => /^\d+$/.test(part) && part.length > 1 && part.startsWith("0"),
+      ) ?? false;
+  if (!match || nonCanonicalNumericIdentifier) {
+    throw new Error(
+      "VPSMAN_RELEASE_TAG/GITHUB_REF_NAME must be an exact canonical vX.Y.Z tag",
+    );
+  }
+  return configured;
+}
+
+function verifyReleaseTagCommit(
+  releaseTag: string,
+  sourceCommit: string,
+): void {
+  if (!releaseTag) {
+    return;
+  }
+  let taggedCommit: string;
+  try {
+    taggedCommit = execFileSync(
+      "git",
+      ["rev-parse", `${releaseTag}^{commit}`],
+      { cwd: repoRoot, encoding: "utf8" },
+    )
+      .trim()
+      .toLowerCase();
+  } catch {
+    throw new Error(
+      `tagged frontend build requires ${releaseTag} in a full Git checkout`,
+    );
+  }
+  if (taggedCommit !== sourceCommit) {
+    throw new Error(
+      `release tag ${releaseTag} resolves to ${taggedCommit}, not source commit ${sourceCommit}`,
+    );
+  }
+}
+
+function readInstallerAtCommit(sourceCommit: string): Uint8Array | null {
+  try {
+    return execFileSync(
+      "git",
+      ["show", `${sourceCommit}:deploy/install-agent.sh`],
+      { cwd: repoRoot },
+    );
+  } catch {
+    return null;
+  }
+}
+
+function sourceInstallerAssetPlugin(
+  assetName: string,
+  contents: Uint8Array,
+): Plugin {
+  let outDir = "";
+  const route = `/${assetName}`;
+  return {
+    name: "vpsman-source-installer-asset",
+    configResolved(config) {
+      outDir = config.build.outDir;
+    },
+    configureServer(server) {
+      server.middlewares.use(route, (request, response, next) => {
+        if (request.method !== "GET" && request.method !== "HEAD") {
+          next();
+          return;
+        }
+        response.statusCode = 200;
+        response.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+        response.setHeader("Content-Length", contents.byteLength.toString());
+        response.setHeader("Content-Type", "text/x-shellscript; charset=utf-8");
+        if (request.method === "HEAD") {
+          response.end();
+          return;
+        }
+        response.end(contents);
+      });
+    },
+    closeBundle() {
+      fs.mkdirSync(outDir, { recursive: true });
+      fs.writeFileSync(path.join(outDir, assetName), contents, { mode: 0o755 });
+    },
+  };
+}
 
 function readBuildNumber(component: string): string {
   const counterDir = process.env.VPSMAN_BUILD_NUMBER_DIR

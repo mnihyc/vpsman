@@ -135,7 +135,8 @@ pub(crate) async fn list_fleet_alert_policies(
                 query.selector_expression.as_deref(),
                 query.client_id.as_deref(),
             )
-            .await?,
+            .await
+            .map_err(fleet_alert_policy_error)?,
     ))
 }
 
@@ -147,7 +148,13 @@ pub(crate) async fn get_fleet_alert_policy(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
-    Ok(Json(state.repo.get_fleet_alert_policy(policy_id).await?))
+    Ok(Json(
+        state
+            .repo
+            .get_fleet_alert_policy(policy_id)
+            .await
+            .map_err(fleet_alert_policy_error)?,
+    ))
 }
 
 pub(crate) async fn dry_run_fleet_alert_policy(
@@ -199,20 +206,11 @@ pub(crate) async fn delete_fleet_alert_policy(
         "fleet_alert_policy_delete_confirmation_required",
         "fleet_alert_policy_delete_review_invalid",
     )?;
-    let existing = state
-        .repo
-        .list_fleet_alert_policies(1000, None, None, None)
-        .await?
-        .into_iter()
-        .find(|policy| policy.id == policy_id)
-        .ok_or_else(|| ApiError::not_found("fleet_alert_policy_not_found"))?;
-    if existing.name != request.reviewed_name.trim() {
-        return Err(ApiError::conflict("fleet_alert_policy_delete_review_stale"));
-    }
     state
         .repo
-        .delete_fleet_alert_policy(policy_id, &operator)
-        .await?;
+        .delete_fleet_alert_policy(policy_id, &request.reviewed_name, &operator)
+        .await
+        .map_err(fleet_alert_policy_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -224,7 +222,13 @@ pub(crate) async fn list_vps_rules(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
-    Ok(Json(state.repo.list_vps_rules(&query).await?))
+    Ok(Json(
+        state
+            .repo
+            .list_vps_rules(&query)
+            .await
+            .map_err(vps_rules_error)?,
+    ))
 }
 
 pub(crate) async fn get_effective_vps_rules(
@@ -246,7 +250,13 @@ pub(crate) async fn dry_run_vps_rules(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_CONFIG_READ)
         .await?;
-    Ok(Json(state.repo.dry_run_vps_rules(&request).await?))
+    Ok(Json(
+        state
+            .repo
+            .dry_run_vps_rules(&request)
+            .await
+            .map_err(vps_rules_error)?,
+    ))
 }
 
 pub(crate) async fn bulk_upsert_vps_rules(
@@ -261,7 +271,8 @@ pub(crate) async fn bulk_upsert_vps_rules(
         state
             .repo
             .bulk_upsert_vps_rules(&request, &operator)
-            .await?,
+            .await
+            .map_err(vps_rules_error)?,
     ))
 }
 
@@ -274,7 +285,11 @@ pub(crate) async fn bulk_unset_vps_rules(
         .require_operator_role_and_scope(&headers, "operator", "config:write")
         .await?;
     Ok(Json(
-        state.repo.bulk_unset_vps_rules(&request, &operator).await?,
+        state
+            .repo
+            .bulk_unset_vps_rules(&request, &operator)
+            .await
+            .map_err(vps_rules_error)?,
     ))
 }
 
@@ -286,7 +301,13 @@ pub(crate) async fn list_traffic_accounting(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
-    Ok(Json(state.repo.list_traffic_accounting(&query).await?))
+    Ok(Json(
+        state
+            .repo
+            .list_traffic_accounting(&query)
+            .await
+            .map_err(vps_rules_error)?,
+    ))
 }
 
 pub(crate) async fn get_traffic_accounting(
@@ -297,7 +318,19 @@ pub(crate) async fn get_traffic_accounting(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
-    Ok(Json(state.repo.get_traffic_accounting(&client_id).await?))
+    Ok(Json(
+        state
+            .repo
+            .get_traffic_accounting(&client_id)
+            .await
+            .map_err(|error| {
+                if error.to_string().contains("traffic_accounting_not_found") {
+                    ApiError::not_found("traffic_accounting_not_found")
+                } else {
+                    ApiError::from(error)
+                }
+            })?,
+    ))
 }
 
 pub(crate) async fn list_policy_alerts(
@@ -738,10 +771,71 @@ fn validate_alert_policy_query(query: &FleetAlertPolicyQuery) -> Result<(), ApiE
     Ok(())
 }
 
+fn vps_rules_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("vps_rules_preview_hash_mismatch") {
+        return ApiError::conflict("vps_rules_preview_hash_mismatch");
+    }
+    for code in [
+        "vps_rules_confirmation_required",
+        "vps_rules_operation_invalid",
+        "vps_rules_values_required",
+        "vps_rules_keys_required",
+        "vps_rules_duplicate_key",
+        "vps_rules_key_unsupported",
+        "vps_rules_empty_value_invalid",
+        "vps_rules_value_too_long",
+        "vps_rules_preview_contains_invalid_rows",
+        "traffic_reset_day_invalid",
+        "traffic_selector_empty",
+        "traffic_selector_empty_item",
+        "traffic_selector_source_invalid",
+        "traffic_selector_interface_required",
+        "traffic_selector_interface_invalid",
+        "traffic_selector_direction_invalid",
+        "traffic_selector_duplicate",
+        "traffic_selector_direction_overlap",
+        "traffic_selector_too_many_items",
+        "byte_size_empty",
+        "byte_size_number_invalid",
+        "byte_size_unit_invalid",
+        "byte_size_too_large",
+    ] {
+        if message.contains(code) {
+            return ApiError::bad_request(code);
+        }
+    }
+    if message.contains("traffic.reset_day must be an integer") {
+        return ApiError::bad_request("traffic_reset_day_invalid");
+    }
+    if message.contains("invalid selector expression") || message.contains("selector expression") {
+        return ApiError::bad_request("vps_rules_selector_invalid");
+    }
+    ApiError::from(error)
+}
+
 fn fleet_alert_policy_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
+    if message.contains("fleet_alert_policy_not_found") {
+        return ApiError::not_found("fleet_alert_policy_not_found");
+    }
     if message.contains("fleet_alert_policy_preview_hash_mismatch") {
         return ApiError::conflict("fleet_alert_policy_preview_hash_mismatch");
+    }
+    if message.contains("fleet_alert_policy_name_conflict") {
+        return ApiError::conflict("fleet_alert_policy_name_conflict");
+    }
+    if message.contains("fleet_alert_policy_delete_review_stale") {
+        return ApiError::conflict("fleet_alert_policy_delete_review_stale");
+    }
+    if message.contains("fleet_alert_policy_rule_id_conflict") {
+        return ApiError::conflict("fleet_alert_policy_rule_id_conflict");
+    }
+    if message.contains("fleet_alert_policy_rule_identity_conflict") {
+        return ApiError::conflict("fleet_alert_policy_rule_identity_conflict");
+    }
+    if message.contains("fleet_alert_policy_duplicate_rule_id") {
+        return ApiError::bad_request("fleet_alert_policy_duplicate_rule_id");
     }
     if message.contains("confirmation_required") {
         return ApiError::bad_request("fleet_alert_policy_confirmation_required");
@@ -784,7 +878,7 @@ fn fleet_alert_policy_error(error: anyhow::Error) -> ApiError {
             "fleet_alert_policy_traffic_selector_requires_traffic_metric",
         );
     }
-    if message.contains("traffic selector") {
+    if message.contains("traffic selector") || message.contains("traffic_selector_") {
         return ApiError::bad_request("fleet_alert_policy_traffic_selector_invalid");
     }
     if message.contains("notes are too long") {
@@ -879,5 +973,37 @@ mod tests {
         let message = error.public_message.expect("public condition detail");
         assert!(message.contains("unknown metric cpu.load1"));
         assert!(message.contains("cpu.load_1"));
+    }
+
+    #[test]
+    fn fleet_alert_policy_regression_input_errors_are_not_server_failures() {
+        let overlap = vps_rules_error(anyhow::anyhow!("traffic_selector_direction_overlap"));
+        assert_eq!(overlap.status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(overlap.code, "traffic_selector_direction_overlap");
+
+        let invalid_bytes = vps_rules_error(anyhow::anyhow!("byte_size_number_invalid"));
+        assert_eq!(invalid_bytes.status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(invalid_bytes.code, "byte_size_number_invalid");
+
+        let name_conflict =
+            fleet_alert_policy_error(anyhow::anyhow!("fleet_alert_policy_name_conflict"));
+        assert_eq!(name_conflict.status, axum::http::StatusCode::CONFLICT);
+        assert_eq!(name_conflict.code, "fleet_alert_policy_name_conflict");
+
+        let missing = fleet_alert_policy_error(anyhow::anyhow!("fleet_alert_policy_not_found"));
+        assert_eq!(missing.status, axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(missing.code, "fleet_alert_policy_not_found");
+    }
+
+    #[test]
+    fn fleet_alert_policy_delete_review_regression_maps_stale_and_missing() {
+        let stale =
+            fleet_alert_policy_error(anyhow::anyhow!("fleet_alert_policy_delete_review_stale"));
+        assert_eq!(stale.status, axum::http::StatusCode::CONFLICT);
+        assert_eq!(stale.code, "fleet_alert_policy_delete_review_stale");
+
+        let missing = fleet_alert_policy_error(anyhow::anyhow!("fleet_alert_policy_not_found"));
+        assert_eq!(missing.status, axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(missing.code, "fleet_alert_policy_not_found");
     }
 }

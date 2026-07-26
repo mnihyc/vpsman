@@ -1,6 +1,10 @@
 import { useState } from "react";
 import { ActionFeedback } from "../../components/ActionFeedback";
 import {
+  handleTabListKeyDown,
+  tabId,
+} from "../../components/AccessibleTabs";
+import {
   DeliveryPreviewSection,
   WebhookDeliveryHistoryGrid,
   WebhookDeliveryMaintenancePanel,
@@ -113,18 +117,26 @@ export function WebhooksPanel({
           <MetricTile actionLabel="History" detail="Retained event webhook delivery rows" label="Deliveries" onAction={openDeliveryEvidence} value={String(webhookRuleDeliveries.length)} />
         </div>
 
-        <div className="observabilityWorkflowTabs" role="tablist" aria-label="Event webhook sections">
+        <div
+          className="observabilityWorkflowTabs"
+          role="tablist"
+          aria-label="Event webhook sections"
+          onKeyDown={handleTabListKeyDown}
+        >
           {[
             ["rules", "Rules", "Create rules, send tests, and retry failed deliveries"],
             ["deliveries", "Deliveries", "Previewed, queued, failed, and retained event webhooks"],
             ["maintenance", "Maintenance", "Reviewed retention cleanup"],
           ].map(([id, label, detail]) => (
             <button
+              aria-controls={`observability-webhook-${id}`}
               aria-selected={activeTab === id}
               className={activeTab === id ? "active" : ""}
+              id={tabId("observability-webhook", id)}
               key={id}
               onClick={() => setActiveTab(id as WebhookConfigTab)}
               role="tab"
+              tabIndex={activeTab === id ? 0 : -1}
               type="button"
             >
               <strong>{label}</strong>
@@ -134,7 +146,12 @@ export function WebhooksPanel({
         </div>
 
         {activeTab === "rules" ? (
-          <section className="dashboardSection observabilityGroupSection" aria-labelledby="observability-webhook-rules-title">
+          <section
+            aria-labelledby={tabId("observability-webhook", "rules")}
+            className="dashboardSection observabilityGroupSection"
+            id="observability-webhook-rules"
+            role="tabpanel"
+          >
             <div className="dashboardSectionHeader">
               <div>
                 <h2 id="observability-webhook-rules-title">Event webhook rules</h2>
@@ -161,7 +178,12 @@ export function WebhooksPanel({
         ) : null}
 
         {activeTab === "deliveries" ? (
-          <section className="dashboardSection observabilityGroupSection" id="observability-webhook-deliveries" aria-labelledby="observability-webhook-deliveries-title">
+          <section
+            aria-labelledby={tabId("observability-webhook", "deliveries")}
+            className="dashboardSection observabilityGroupSection"
+            id="observability-webhook-deliveries"
+            role="tabpanel"
+          >
             <div className="dashboardSectionHeader">
               <div>
                 <h2 id="observability-webhook-deliveries-title">Event webhook deliveries</h2>
@@ -179,7 +201,12 @@ export function WebhooksPanel({
         ) : null}
 
         {activeTab === "maintenance" ? (
-          <section className="dashboardSection observabilityGroupSection" aria-labelledby="observability-webhook-maintenance-title">
+          <section
+            aria-labelledby={tabId("observability-webhook", "maintenance")}
+            className="dashboardSection observabilityGroupSection"
+            id="observability-webhook-maintenance"
+            role="tabpanel"
+          >
             <div className="dashboardSectionHeader">
               <div>
                 <h2 id="observability-webhook-maintenance-title">Event webhook maintenance</h2>

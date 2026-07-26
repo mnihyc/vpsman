@@ -530,7 +530,10 @@ partial_job_json="$(vpsctl_json job-shell \
   --confirmed)"
 partial_job_id="$(jq -r '.job_id' <<<"$partial_job_json")"
 smoke_assert_job_create_queued "$partial_job_json" "$agent_count"
-partial_final="$(smoke_wait_api_job_status "$api_url" "$partial_job_id" "terminal" 120 "$access_token")"
+# The control-plane target deadline includes its pre-delivery start grace. Leave
+# enough room for the dispatcher sweep immediately after that deadline instead
+# of racing the same 120-second boundary in this harness.
+partial_final="$(smoke_wait_api_job_status "$api_url" "$partial_job_id" "terminal" 180 "$access_token")"
 jq -e --argjson expected "$agent_count" '
   .status == "partial_success" and .target_count == $expected
 ' <<<"$partial_final" >/dev/null
@@ -610,11 +613,16 @@ tunnel_plan_json="$(vpsctl_json tunnel-plan \
   --left-tunnel-ipv4-cidr 10.254.25.0/31 \
   --right-tunnel-ipv4-cidr 10.254.25.1/31 \
   --bandwidth-mbps 1000 \
-  --latency-ms 18 \
   --save \
   --enabled \
   --confirmed)"
-jq -e '.name == "docker-fault-fuzz-gre" and .status == "planned"' <<<"$tunnel_plan_json" >/dev/null
+jq -e '
+  .plan.name == "docker-fault-fuzz-gre" and
+  .plan.enabled == true and
+  .plan.revision == 1 and
+  .plan.plan.interface_name == "greff" and
+  (.sync | length) == 2
+' <<<"$tunnel_plan_json" >/dev/null
 
 alert_policy_json="$(vpsctl_json alert-policy upsert \
   --name docker-edge-resource-alerts \
@@ -707,11 +715,17 @@ jq -e '
 ' <<<"$cleanup_source_json" >/dev/null
 
 frontend_test_host="${VPSMAN_FRONTEND_TEST_HOST:-localhost}"
-smoke_fleet_log "building frontend production assets for post-fault UI smoke"
-env \
-  VPSMAN_API_PROXY="$api_url" \
-  VPSMAN_FRONTEND_SMOKE_ROOT="$ROOT_DIR" \
-  bash -ic 'cd "$VPSMAN_FRONTEND_SMOKE_ROOT/frontend" && npm run build'
+if [[ "${VPSMAN_SMOKE_SKIP_BUILD:-0}" == "1" ]]; then
+  [[ -f "$ROOT_DIR/frontend/dist/index.html" ]] ||
+    smoke_fail "VPSMAN_SMOKE_SKIP_BUILD=1 requires existing frontend/dist assets"
+  smoke_fleet_log "reusing frontend production assets for post-fault UI smoke"
+else
+  smoke_fleet_log "building frontend production assets for post-fault UI smoke"
+  env \
+    VPSMAN_API_PROXY="$api_url" \
+    VPSMAN_FRONTEND_SMOKE_ROOT="$ROOT_DIR" \
+    bash -ic 'cd "$VPSMAN_FRONTEND_SMOKE_ROOT/frontend" && npm run build'
+fi
 
 if ! env \
   VPSMAN_API_PROXY="$api_url" \

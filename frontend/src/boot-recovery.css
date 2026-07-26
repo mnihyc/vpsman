@@ -1,0 +1,66 @@
+.bootRecovery {
+  box-sizing: border-box;
+  visibility: hidden;
+  width: min(560px, calc(100% - 32px));
+  margin: 64px auto;
+  padding: 20px;
+  border: 1px solid #c9cdd4;
+  border-left: 4px solid #c83232;
+  border-radius: 4px;
+  background: #fff;
+  color: #1f2328;
+  font: 14px/1.5 system-ui, sans-serif;
+}
+
+.bootRecovery[data-state="pending"] {
+  animation: revealBootRecovery 0s 10s forwards;
+}
+
+.bootRecovery[data-state="error"] {
+  visibility: visible;
+}
+
+.bootRecovery[hidden] {
+  display: none;
+}
+
+.bootRecovery h1 {
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+
+.bootRecovery p {
+  margin: 0 0 16px;
+}
+
+.bootRecovery a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 7px 14px;
+  box-sizing: border-box;
+  border: 1px solid #0f62fe;
+  border-radius: 4px;
+  background: #0f62fe;
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.bootRecovery a:focus-visible {
+  outline: 2px solid #0f62fe;
+  outline-offset: 2px;
+}
+
+.bootRecovery details {
+  margin-top: 16px;
+  overflow-wrap: anywhere;
+  color: #4b5563;
+}
+
+@keyframes revealBootRecovery {
+  to {
+    visibility: visible;
+  }
+}

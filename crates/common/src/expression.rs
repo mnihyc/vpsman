@@ -84,6 +84,7 @@ pub struct VpsMetadata {
 enum FieldValue {
     String(String),
     Number(i128),
+    Decimal(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -758,6 +759,7 @@ fn is_event_predicate(raw: &str) -> bool {
                 | "vps.tag_changed"
                 | "job.created"
                 | "alert.open"
+                | "alert.policy_reached"
                 | "telemetry.rollup"
                 | "telemetry.network_rate"
                 | "telemetry.tunnel"
@@ -838,6 +840,7 @@ fn membership_matches(
         let actual = match actual {
             FieldValue::String(value) => value.as_str(),
             FieldValue::Number(value) => return list_values_match(&value.to_string(), values),
+            FieldValue::Decimal(value) => value.as_str(),
         };
         list_values_match(actual, values)
     });
@@ -865,6 +868,16 @@ fn field_value_literal_matches(actual: &FieldValue, expected: &str) -> bool {
         FieldValue::Number(actual) => expected
             .parse::<i128>()
             .is_ok_and(|expected| *actual == expected),
+        FieldValue::Decimal(actual) => {
+            let Some(actual) = actual.parse::<f64>().ok().filter(|value| value.is_finite()) else {
+                return false;
+            };
+            expected
+                .parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite())
+                .is_some_and(|expected| actual == expected)
+        }
     }
 }
 
@@ -872,6 +885,29 @@ fn order_field_value(actual: &FieldValue, operator: ComparisonOperator, expected
     if let FieldValue::Number(actual) = actual {
         if let Ok(expected) = expected.parse::<i128>() {
             return compare_order(*actual, expected, operator);
+        }
+    }
+    if let FieldValue::Decimal(actual) = actual {
+        let values = actual
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .zip(
+                expected
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|value| value.is_finite()),
+            );
+        if let Some((actual, expected)) = values {
+            return match operator {
+                ComparisonOperator::Lt => actual < expected,
+                ComparisonOperator::Lte => actual <= expected,
+                ComparisonOperator::Gt => actual > expected,
+                ComparisonOperator::Gte => actual >= expected,
+                ComparisonOperator::Eq | ComparisonOperator::NotEq => {
+                    unreachable!("not an order operator")
+                }
+            };
         }
     }
     if let Some(actual) = field_value_timestamp(actual) {
@@ -896,6 +932,17 @@ fn field_value_timestamp(value: &FieldValue) -> Option<i64> {
     match value {
         FieldValue::String(value) => parse_timestamp(value),
         FieldValue::Number(value) => i64::try_from(*value).ok(),
+        FieldValue::Decimal(value) => value
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite() && value.fract() == 0.0)
+            .and_then(|value| {
+                if value >= i64::MIN as f64 && value <= i64::MAX as f64 {
+                    Some(value as i64)
+                } else {
+                    None
+                }
+            }),
     }
 }
 
@@ -1079,7 +1126,15 @@ fn json_value_to_field_values(value: &Value) -> Option<Vec<FieldValue>> {
         Value::String(value) => Some(vec![FieldValue::String(value.clone())]),
         Value::Number(value) => value
             .as_i64()
-            .map(|value| vec![FieldValue::Number(value.into())]),
+            .map(i128::from)
+            .or_else(|| value.as_u64().map(i128::from))
+            .map(|value| vec![FieldValue::Number(value)])
+            .or_else(|| {
+                value
+                    .as_f64()
+                    .filter(|value| value.is_finite())
+                    .map(|_| vec![FieldValue::Decimal(value.to_string())])
+            }),
         Value::Bool(value) => Some(vec![FieldValue::String(value.to_string())]),
         Value::Array(values) => {
             let flattened = values
@@ -1229,6 +1284,19 @@ mod tests {
         assert!(matches("vps.last_seen_at > 1780880000", &context));
         assert!(matches("vps.internal_build_number > 10", &context));
         assert!(!matches("vps.internal_build_number < 10", &context));
+    }
+
+    #[test]
+    fn event_objects_support_decimal_comparisons_and_policy_alert_predicates() {
+        let context = ExpressionContext::default()
+            .with_json_root("traffic", serde_json::json!({"cycle_percent": 82.5}))
+            .with_event_predicate("alert.policy_reached");
+        assert!(matches(
+            "alert.policy_reached && traffic.cycle_percent >= 82.25",
+            &context
+        ));
+        assert!(matches("traffic.cycle_percent = 82.5", &context));
+        assert!(!matches("traffic.cycle_percent < 80", &context));
     }
 
     #[test]

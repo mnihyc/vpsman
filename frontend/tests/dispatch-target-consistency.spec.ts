@@ -328,12 +328,12 @@ test("bulk config review uses the current backend-resolved selector instead of a
 
   const panel = page.locator(".configApplyGrid");
   await panel
-    .getByRole("searchbox", { name: "Bulk patch target expression" })
+    .getByRole("combobox", { name: "Bulk patch target expression" })
     .fill("id:agent-sfo-01");
   await activate(panel.getByRole("button", { name: "Preview changes" }));
   await expect(panel.getByText("1 VPS resolved")).toBeVisible();
   await panel
-    .getByRole("searchbox", { name: "Bulk patch target expression" })
+    .getByRole("combobox", { name: "Bulk patch target expression" })
     .fill("id:agent-fra-02");
   await expect(
     panel.getByRole("button", { name: "Apply patch" }),
@@ -374,14 +374,14 @@ test("bulk tag mutation requires a fresh preview after selector edits", async ({
 
   await page.getByLabel("Bulk group", { exact: true }).fill("maintenance:test");
   await page
-    .getByRole("searchbox", { name: "Bulk group selector expression" })
+    .getByRole("combobox", { name: "Bulk group selector expression" })
     .fill("id:agent-sfo-01");
   await includeBulkTagReviewTargets(page);
   await reviewBulkTagMutation(page);
   await expect(page.locator(".bulkTagPreview")).toContainText("edge-sfo-01");
   await expect(page.getByText("Confirm tag mutation")).toBeVisible();
   await page
-    .getByRole("searchbox", { name: "Bulk group selector expression" })
+    .getByRole("combobox", { name: "Bulk group selector expression" })
     .fill("id:agent-fra-02");
   await expect(page.getByText("Confirm tag mutation")).toBeHidden();
   await reviewBulkTagMutation(page);
@@ -471,7 +471,7 @@ test("bulk tag async preview ignores stale selector edits", async ({
   await unlockPrivilegeFor(page, "Fleet", "Bulk groups");
 
   await page.getByLabel("Bulk group", { exact: true }).fill("maintenance:test");
-  const selector = page.getByRole("searchbox", {
+  const selector = page.getByRole("combobox", {
     name: "Bulk group selector expression",
   });
   await selector.fill("id:agent-sfo-01");
@@ -591,7 +591,7 @@ test("backup policy review submits a frozen target list and privilege assertion"
 
   await activate(page.getByRole("button", { name: "Create policy" }).first());
   await page.getByLabel("Backup policy name").fill("nightly system backup");
-  const policySelector = page.getByRole("searchbox", {
+  const policySelector = page.getByRole("combobox", {
     name: "Backup policy target expression",
   });
   await policySelector.click();
@@ -769,7 +769,7 @@ test("bulk config async review preparation ignores stale selector edits", async 
   await unlockPrivilegeFor(page, "Config", "Bulk patch");
 
   const panel = page.locator(".configApplyGrid");
-  const selector = panel.getByRole("searchbox", {
+  const selector = panel.getByRole("combobox", {
     name: "Bulk patch target expression",
   });
   await selector.fill("id:agent-sfo-01");
@@ -821,7 +821,7 @@ test("template assignment async review ignores stale selector edits", async ({
   await unlockPrivilegeFor(page, "Automation", "Source templates");
 
   const panel = await openSourceTemplateWorkflow(page, "Assign");
-  const selector = panel.getByRole("searchbox", {
+  const selector = panel.getByRole("combobox", {
     name: "Template assignment target expression",
   });
   await selector.fill("id:agent-sfo-01");
@@ -1083,7 +1083,7 @@ test("overlay confirmations restore focus after asynchronous review preparation"
 
   await page.getByLabel("Bulk group", { exact: true }).fill("maintenance:test");
   await page
-    .getByRole("searchbox", { name: "Bulk group selector expression" })
+    .getByRole("combobox", { name: "Bulk group selector expression" })
     .fill("id:agent-sfo-01");
   await includeBulkTagReviewTargets(page);
   const reviewButton = page
@@ -1116,7 +1116,7 @@ test("overlay confirmations restore focus when the prompt mounts synchronously",
   const main = page.locator("#console-main-content");
   await main.getByLabel("Command argv").fill("/bin/echo focus-check");
   await main
-    .getByRole("searchbox", { name: "Bulk target selector expression" })
+    .getByRole("combobox", { name: "Bulk target selector expression" })
     .fill("id:agent-sfo-01");
   const reviewButton = main.getByRole("button", {
     name: "Dispatch",

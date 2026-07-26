@@ -193,13 +193,13 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   await activate(selectionPanel.getByRole("tab", { name: "Network" }));
   await expect(
     selectionPanel.getByRole("tabpanel", {
-      name: "Network for selected VPSs",
+      name: "Network",
     }),
   ).toContainText("df-alpha-DE-10");
   await activate(selectionPanel.getByRole("tab", { name: "Capabilities" }));
   await expect(
     selectionPanel.getByRole("tabpanel", {
-      name: "Capabilities for selected VPSs",
+      name: "Capabilities",
     }),
   ).toContainText("Root uid 0");
   await forceClick(grid.getByRole("button", { name: "Actions", exact: true }));
@@ -261,7 +261,7 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     .getByLabel("Bulk group", { exact: true })
     .fill("maintenance:2026-q2-patch");
   await page
-    .getByRole("searchbox", { name: "Bulk group selector expression" })
+    .getByRole("combobox", { name: "Bulk group selector expression" })
     .fill("provider:alpha && country:US");
   await page.keyboard.press("Escape");
   const bulkTagResolution = page.getByLabel("Bulk group target resolution");

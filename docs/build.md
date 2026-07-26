@@ -3,6 +3,16 @@
 Use the user's profile-managed tools. Do not install build software through
 `apt` for this project.
 
+Frontend source builds read `deploy/install-agent.sh` from the exact Git commit,
+emit it under a commit-and-SHA-256-addressed filename, and embed the same
+checksum. The Access command verifies an exact-commit raw download and falls
+back to that same verified console asset, never an unchecked mutable installer.
+A source archive without the corresponding Git object can build with
+`VPSMAN_SOURCE_COMMIT`, but installer-command copying is disabled; use a full
+Git checkout or transfer a separately reviewed installer. Tagged builds require
+the tag in a full Git checkout, verify that it resolves to the source commit,
+and use the exact-tag release checksum manifest instead.
+
 ## Rust
 
 The repo pins Rust through `rust-toolchain.toml` and uses rustup-managed targets:
@@ -38,6 +48,11 @@ all components.
 
 GitHub Actions reads the current positive counter values without incrementing
 them. Only local builds advance the counters.
+
+The aggregate `scripts/release-check.sh` copies the counters into its ignored
+log directory and exports that location for all of its builds, so a verification
+run does not advance tracked release identity. Set `VPSMAN_BUILD_NUMBER_DIR`
+explicitly only when another isolated counter directory is required.
 
 `.cargo/config.toml` uses `rust-lld` for musl targets, so final linking does
 not require system cross linkers. Native C build scripts still use Cargo's

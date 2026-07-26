@@ -7,7 +7,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-vpsman}
       POSTGRES_USER: ${POSTGRES_USER:-vpsman}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vpsman}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
       - ./runtime/postgres/data:/var/lib/postgresql/data
     networks:
@@ -16,11 +16,12 @@ services:
   api:
     image: debian:bookworm-slim
     restart: unless-stopped
+    stop_grace_period: 30s
     working_dir: /opt/vpsman
     command: ./bin/vpsman-api
     environment:
       VPSMAN_SUITE_CONFIG: /etc/vpsman/vpsman.toml
-      VPSMAN_POSTGRES_URL: "postgres://${POSTGRES_USER:-vpsman}:${POSTGRES_PASSWORD:-vpsman}@postgres:5432/${POSTGRES_DB:-vpsman}"
+      VPSMAN_POSTGRES_URL: "postgres://${POSTGRES_USER:-vpsman}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-vpsman}"
       # Container-internal only; this service intentionally has no host API port.
       VPSMAN_API_BIND: 0.0.0.0:8080
     volumes:
@@ -45,6 +46,7 @@ services:
   gateway:
     image: debian:bookworm-slim
     restart: unless-stopped
+    stop_grace_period: 45s
     working_dir: /opt/vpsman
     command: ./bin/vpsman-gateway
     environment:
@@ -53,7 +55,10 @@ services:
       # boundary remains loopback-only through the ports mapping below.
       VPSMAN_GATEWAY_BIND: 0.0.0.0:9443
     ports:
-      - "127.0.0.1:9443:9443"
+      # Keep loopback for local evaluation. Production remote agents require
+      # an explicit host/NAT/L4 ingress choice, for example
+      # VPSMAN_GATEWAY_PUBLISH=0.0.0.0:9443:9443 plus a restrictive firewall.
+      - "${VPSMAN_GATEWAY_PUBLISH:-127.0.0.1:9443:9443}"
     volumes:
       - ./runtime/server/current:/opt/vpsman:ro
       - ./runtime/data:/var/lib/vpsman
@@ -87,11 +92,12 @@ services:
   worker:
     image: debian:bookworm-slim
     restart: unless-stopped
+    stop_grace_period: 30s
     working_dir: /opt/vpsman
     command: ./bin/vpsman-worker
     environment:
       VPSMAN_SUITE_CONFIG: /etc/vpsman/vpsman.toml
-      VPSMAN_POSTGRES_URL: "postgres://${POSTGRES_USER:-vpsman}:${POSTGRES_PASSWORD:-vpsman}@postgres:5432/${POSTGRES_DB:-vpsman}"
+      VPSMAN_POSTGRES_URL: "postgres://${POSTGRES_USER:-vpsman}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-vpsman}"
     volumes:
       - ./runtime/server/current:/opt/vpsman:ro
       - ./runtime/data:/var/lib/vpsman
@@ -106,8 +112,9 @@ services:
       - backend
 
   frontend:
-    image: nginx:1.27-alpine
+    image: nginx:1.30-alpine
     restart: unless-stopped
+    stop_grace_period: 10s
     ports:
       - "${VPSMAN_FRONTEND_BIND:-127.0.0.1:5173}:80"
     volumes:

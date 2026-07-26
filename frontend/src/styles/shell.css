@@ -338,6 +338,11 @@ nav {
   flex: 0 0 auto;
 }
 
+.mobilePageMenu:focus-within {
+  border-color: var(--focus);
+  box-shadow: var(--focus-ring);
+}
+
 .mobilePageMenu .mobilePageSelector {
   flex: 1 1 auto;
   min-width: 0;
@@ -624,6 +629,7 @@ nav {
 }
 
 .commandPaletteResult:hover,
+.commandPaletteResult[aria-selected="true"],
 .commandPaletteResult:focus-visible {
   border-color: var(--primary-border);
   background: var(--primary-soft);
@@ -657,6 +663,7 @@ nav {
 }
 
 .commandPaletteResult:hover .commandPaletteResultText small,
+.commandPaletteResult[aria-selected="true"] .commandPaletteResultText small,
 .commandPaletteResult:focus-visible .commandPaletteResultText small {
   color: var(--primary-text);
 }
@@ -968,7 +975,8 @@ nav {
   font-size: 11px;
 }
 
-.searchExpressionAutocomplete button:hover {
+.searchExpressionAutocomplete button:hover,
+.searchExpressionAutocomplete button[aria-selected="true"] {
   background: var(--primary-soft);
   color: var(--primary-text);
 }
@@ -1377,6 +1385,42 @@ nav {
   font-size: 12px;
   font-weight: 700;
   overflow-wrap: anywhere;
+}
+
+.confirmationPromptDetachedError {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: var(--z-toast);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  width: min(420px, calc(100vw - 32px));
+  box-sizing: border-box;
+  border: 1px solid var(--danger-border);
+  border-radius: 8px;
+  background: var(--danger-soft);
+  box-shadow: var(--shadow-drawer);
+  color: var(--danger);
+  padding: 12px;
+}
+
+.confirmationPromptDetachedError > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.confirmationPromptDetachedError strong,
+.confirmationPromptDetachedError span {
+  overflow-wrap: anywhere;
+}
+
+.confirmationPromptDetachedError span {
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .confirmationTypedInput {
@@ -2265,6 +2309,11 @@ h2 {
 
   .gridMobileFieldValue > .gridCellContent {
     display: block;
+    min-width: 0;
+    overflow: visible;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+    white-space: normal;
     width: 100%;
   }
 

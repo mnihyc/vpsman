@@ -133,6 +133,7 @@ use vpsman_common::{
 };
 
 const DEFAULT_BACKUP_OBJECT_STORE_DIR: &str = "runtime/data/objects/backups";
+const DEFAULT_POLICY_EVALUATION_INTERVAL_SECS: u64 = 30;
 
 pub(crate) use error::ApiError;
 pub(crate) use routes_jobs::TargetDispatchOutcome;
@@ -322,6 +323,12 @@ struct Args {
     alert_cpu_load_warning: f64,
     #[arg(long, env = "VPSMAN_ALERT_CPU_LOAD_CRITICAL", default_value_t = 4.0)]
     alert_cpu_load_critical: f64,
+    #[arg(
+        long,
+        env = "VPSMAN_POLICY_EVALUATION_INTERVAL_SECS",
+        default_value_t = DEFAULT_POLICY_EVALUATION_INTERVAL_SECS
+    )]
+    policy_evaluation_interval_secs: u64,
 }
 
 impl Args {
@@ -660,6 +667,10 @@ async fn main() -> Result<()> {
     backup_upload_sessions::spawn_backup_upload_session_cleanup();
     job_dispatcher::spawn_job_dispatcher(state.clone());
     network_ospf_controller::spawn_automatic_ospf_controller(state.clone());
+    spawn_policy_evaluator(
+        state.repo.clone(),
+        args.policy_evaluation_interval_secs.clamp(5, 3600),
+    );
     spawn_system_metric_sampler(state.clone());
     let listener = tokio::net::TcpListener::bind(args.bind)
         .await
@@ -669,8 +680,31 @@ async fn main() -> Result<()> {
         listener,
         build_router(state).into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = async {
+                if let Some(signal) = terminate.as_mut() {
+                    signal.recv().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 fn spawn_system_metric_sampler(state: AppState) {
@@ -680,6 +714,19 @@ fn spawn_system_metric_sampler(state: AppState) {
             ticker.tick().await;
             if let Err(error) = routes_system::record_system_dashboard_sample(&state).await {
                 tracing::warn!(%error, "failed to record system dashboard metric sample");
+            }
+        }
+    });
+}
+
+fn spawn_policy_evaluator(repo: Repository, interval_secs: u64) {
+    tokio::spawn(async move {
+        let mut ticker = time::interval(std::time::Duration::from_secs(interval_secs));
+        ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            if let Err(error) = repo.evaluate_policy_rules().await {
+                tracing::warn!(%error, "failed to evaluate fleet alert policies");
             }
         }
     });

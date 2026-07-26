@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/mnihyc/vpsman/actions/workflows/ci.yml/badge.svg)](https://github.com/mnihyc/vpsman/actions/workflows/ci.yml)
 [![Release Build](https://github.com/mnihyc/vpsman/actions/workflows/release.yml/badge.svg)](https://github.com/mnihyc/vpsman/actions/workflows/release.yml)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 `vpsman` is a private VPS fleet control plane for operators who manage
 long-lived Linux machines and want to stop falling back to SSH, VNC, shell
@@ -25,6 +25,8 @@ agent updates, access control, and audit evidence.
 - [Development](#development)
 - [Release Assets](#release-assets)
 - [Documentation](#documentation)
+- [Support and Contributing](#support-and-contributing)
+- [Security](#security)
 - [License](#license)
 
 ## Why vpsman?
@@ -83,34 +85,47 @@ Core packages:
 
 ## Quick Start
 
-For a real deployment, start from GitHub Releases through the compose updater.
-For development or evaluation, use the local control-plane tutorial.
+For a real deployment, start from a checksum-verified, versioned GitHub release
+bundle. For development or evaluation, use the local control-plane tutorial.
 
 Prerequisites depend on the path you choose:
 
-- Docker and Docker Compose for the release deployment.
+- An x86-64 Linux host with Docker and Docker Compose for the release
+  control-plane deployment; agents and standalone `vpsctl` also support ARM64.
 - Rust via `rustup` for source builds; the repo pins the toolchain in
   [rust-toolchain.toml](rust-toolchain.toml).
 - Node matching [frontend/.nvmrc](frontend/.nvmrc) for frontend development.
-- `curl`, `env`, and systemd for the default root/user agent installer path;
+- `curl`, `env`, `mktemp`, `sha256sum`, and `awk` for the generated verified
+  agent installer command, plus systemd for the default root/user service path;
   staged no-systemd installs are also supported.
 
 ### Deploy from GitHub Releases
 
 ```sh
-cd deploy
+export VPSMAN_RELEASE_TAG=vX.Y.Z
+release_url="https://github.com/mnihyc/vpsman/releases/download/${VPSMAN_RELEASE_TAG}"
+curl -fLO "${release_url}/vpsman-deploy-${VPSMAN_RELEASE_TAG}.tar.gz"
+curl -fLO "${release_url}/SHA256SUMS"
+grep "  vpsman-deploy-${VPSMAN_RELEASE_TAG}.tar.gz$" SHA256SUMS \
+  > SHA256SUMS.deploy
+test "$(wc -l < SHA256SUMS.deploy)" -eq 1
+sha256sum -c SHA256SUMS.deploy
+tar -xzf "vpsman-deploy-${VPSMAN_RELEASE_TAG}.tar.gz"
+cd "vpsman-deploy-${VPSMAN_RELEASE_TAG}"
+
 cp .env.example .env
 
 # Edit .env before production use. POSTGRES_PASSWORD should be a strong,
 # URL-safe secret because compose derives service database URLs from it.
 export VPSMAN_SUPER_PASSWORD='<local_super_password>'
 
-./update.sh first-start latest
+./update.sh first-start "$VPSMAN_RELEASE_TAG"
+unset VPSMAN_SUPER_PASSWORD
 ```
 
 The updater downloads release assets, verifies `SHA256SUMS`, creates missing
-compose secrets, stages server/frontend/CLI payloads under `deploy/runtime/`,
-and starts the stack.
+compose secrets, stages server/frontend/CLI payloads under the deployment's
+`runtime/` directory, and starts the stack.
 
 Open `http://127.0.0.1:5173` after first start. When no operator exists, the
 console shows **Create first operator** and creates the initial admin session
@@ -122,12 +137,22 @@ By default:
 - the browser console binds to `127.0.0.1:5173`;
 - the API is private inside the compose network;
 - the agent gateway binds to loopback on `9443`;
-- persistent data stays under `deploy/runtime/`;
-- non-secret suite config stays in `deploy/config/vpsman.toml`;
-- generated secrets stay in `deploy/config/secrets/`.
+- persistent data stays under `runtime/`;
+- non-secret suite config stays in `config/vpsman.toml`;
+- generated secrets stay in `config/secrets/`.
 
 See [deploy/README.md](deploy/README.md) for the full directory layout and
-persistence model.
+persistence model. Before exposing a real control plane, follow the
+[production deployment, backup, restore, and upgrade runbook](docs/production-deployment.md).
+
+The bundled host CLI is `./runtime/cli/current/vpsctl`. Point it at the Nginx
+console/API origin, for example:
+
+```sh
+./runtime/cli/current/vpsctl \
+  --api-url http://127.0.0.1:5173 \
+  health
+```
 
 ### Run locally from source
 
@@ -138,7 +163,7 @@ At a high level:
 
 ```sh
 # 1. Start Postgres.
-docker run --rm --name vpsman-quickstart-postgres \
+docker run -d --rm --name vpsman-quickstart-postgres \
   -e POSTGRES_DB=vpsman \
   -e POSTGRES_USER=vpsman \
   -e POSTGRES_PASSWORD=vpsman \
@@ -180,7 +205,8 @@ npm run dev -- --port 5173
 Open `http://127.0.0.1:5173`. The console asks the API whether an operator
 already exists, then shows either **Create first operator** for first start or
 **Sign in** for normal access. Follow the tutorials to register agents and
-dispatch work.
+dispatch work. Stop the disposable database afterward with
+`docker stop vpsman-quickstart-postgres`.
 
 ## Add a VPS Agent
 
@@ -195,9 +221,16 @@ console:
 6. Fill gateway install defaults once.
 7. Copy the generated one-line installer to the VPS.
 
-The generated command installs the latest GitHub release by default and supports
-root service, user service, and explicitly staged no-systemd installs. Staging
-prints the exact foreground command needed to start the agent.
+The generated command verifies the installer pinned to a source build's exact
+commit, falling back to the same verified content-addressed installer emitted
+by that console, or uses the exact tag checksum manifest in a release build.
+It then installs that tagged agent release or the latest stable agent from a
+source build. Neither a public raw-commit URL nor a private console origin is
+guaranteed to be reachable from every managed VPS; when both are unavailable,
+download the emitted installer through the console origin and transfer it
+manually. Root service, user service, and explicitly staged no-systemd installs
+are supported. Staging prints the exact foreground command needed to start the
+agent.
 
 CLI/manual equivalent:
 
@@ -214,13 +247,16 @@ vpsctl agent-identity-upsert \
   --tags country:JP,role:edge \
   --confirmed
 
-curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-agent.sh | env \
+# Copy install-agent.sh from the checksum-verified vX.Y.Z deployment bundle to
+# the target VPS, then run:
+env \
+  VPSMAN_AGENT_RELEASE=vX.Y.Z \
   VPSMAN_INSTALL_MODE=root \
   VPSMAN_AGENT_CLIENT_ID=1 \
   VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=<agent_noise_private_key_hex> \
   VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=<gateway_noise_public_key_hex> \
   VPSMAN_GATEWAY_ENDPOINTS='primary=gw.example.com:9443=10,backup=gw-backup.example.com:9443=20' \
-  bash
+  bash ./install-agent.sh
 ```
 
 Agents do not call the browser panel, HTTP API, or a panel-side endpoint lookup
@@ -273,7 +309,7 @@ local change. See [Tutorial 07](tutorials/07-backup-restore-migration.md) and
 
 ### Persistence and updates
 
-Compose deployments keep durable state under `deploy/runtime/`:
+Compose deployments keep durable state under their `runtime/` directory:
 
 - PostgreSQL data: `runtime/postgres/data`
 - filesystem object store: `runtime/data/objects/backups`
@@ -284,17 +320,18 @@ Compose deployments keep durable state under `deploy/runtime/`:
 Update an existing deployment:
 
 ```sh
-cd deploy
-./update.sh latest
-
-# or pin any published tag (replace vX.Y.Z):
+cd /path/to/the/versioned-deployment
 ./update.sh vX.Y.Z
+
+# Use latest only for a disposable environment where change review is not
+# required:
+./update.sh latest
 ```
 
 Rollback swaps server, frontend, and CLI payload directories back together:
 
 ```sh
-cd deploy
+cd /path/to/the/versioned-deployment
 ./update.sh rollback
 ```
 
@@ -363,6 +400,10 @@ The release workflow publishes:
 - `vpsctl-linux-x86_64-musl`
 - `vpsctl-linux-aarch64-musl`
 - `vpsman-frontend-dist.tar.gz`
+- `vpsman-deploy-vX.Y.Z.tar.gz`
+- `install-agent.sh`
+- `LICENSE-APACHE`
+- `LICENSE-MIT`
 - `version.json`
 - `SHA256SUMS`
 
@@ -373,6 +414,12 @@ Tag-triggered releases run the release version gate first, then the reusable
 release quality workflow in
 [.github/workflows/release-quality-gate.yml](.github/workflows/release-quality-gate.yml)
 before any release artifacts or GitHub release are published.
+The workflow refuses to rebuild an existing release or replace its assets and
+detects release-tag movement before publication; repository hosting should also
+protect the `v*` tag namespace. Prerelease tags are marked as prereleases and
+are never promoted to the latest stable release.
+Generated GitHub release notes are the canonical per-version change record; the
+project does not maintain a separate rolling changelog.
 
 ## Documentation
 
@@ -385,6 +432,7 @@ before any release artifacts or GitHub release are published.
 - [Agent updates](tutorials/08-agent-updates.md)
 - [Headless CLI/VTY](tutorials/09-headless-cli-vty.md)
 - [Deploy layout](deploy/README.md)
+- [Production deployment and recovery](docs/production-deployment.md)
 - [Direct gateway agent install](deploy/AGENT_GATEWAY_INSTALL.md)
 - [Target selectors](docs/target-selectors.md)
 - [Operator access scopes](docs/operator-access-scopes.md)
@@ -393,6 +441,19 @@ before any release artifacts or GitHub release are published.
 - [Telemetry metric definitions](docs/telemetry-metrics.md)
 - [Port forwarding](docs/port-forwarding.md)
 - [Build notes](docs/build.md)
+
+## Support and Contributing
+
+Use GitHub issues for reproducible non-security bugs, documentation gaps, and
+bounded feature proposals. Community support is best-effort and has no response
+or resolution SLA. See [CONTRIBUTING.md](CONTRIBUTING.md) for the information
+to include, local quality gates, and change guidelines.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for supported releases and private vulnerability
+reporting guidance. Do not post exploit details, live credentials, private
+keys, or production data in a public issue.
 
 ## Project Status
 
@@ -404,4 +465,7 @@ where an action is broad, destructive, privileged, or difficult to reverse.
 
 ## License
 
-Licensed under either [MIT](LICENSE) or [Apache-2.0](LICENSE), at your option.
+Licensed under either [MIT](LICENSE-MIT) or
+[Apache-2.0](LICENSE-APACHE), at your option. Unless explicitly stated
+otherwise, contributions intentionally submitted for inclusion in vpsman are
+licensed under the same terms.

@@ -324,11 +324,21 @@
   color: var(--warning-text);
 }
 
+.installCommandValidation {
+  display: grid;
+  gap: 4px;
+}
+
 .installCommandControls {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
   gap: 8px;
   align-items: end;
+}
+
+.installCommandControls textarea {
+  min-height: 64px;
+  resize: vertical;
 }
 
 .installCommandBlock pre {

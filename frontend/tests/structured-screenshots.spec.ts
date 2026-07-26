@@ -1247,7 +1247,7 @@ async function navigateAndScreenshot(
   }
 
   if (entry.prepare === "config-bulk-patch-preview") {
-    const selector = page.getByRole("searchbox", {
+    const selector = page.getByRole("combobox", {
       name: "Bulk patch target expression",
     });
     await selector.fill("id:agent-sfo-01");

@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -151,6 +152,7 @@ export function ConfirmationPrompt({
   const { preferences } = usePanelDisplaySettings();
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const promptRef = useRef<HTMLElement | null>(null);
+  const overlaySubmissionRef = useRef(false);
   const confirmLatchedRef = useRef(false);
   const observedPendingRef = useRef(false);
   const onCancelRef = useRef(onCancel);
@@ -159,6 +161,7 @@ export function ConfirmationPrompt({
   const previouslyOpenRef = useRef(false);
   const [typedConfirmation, setTypedConfirmation] = useState("");
   const [confirmLatched, setConfirmLatched] = useState(false);
+  const errorId = useId();
   const typedConfirmationRequired = Boolean(typedConfirmationText);
   const typedConfirmationMatches =
     !typedConfirmationText || typedConfirmation.trim() === typedConfirmationText;
@@ -168,6 +171,7 @@ export function ConfirmationPrompt({
     pending || confirmLatched || confirmDisabled || !typedConfirmationMatches;
 
   if (open && !previouslyOpenRef.current) {
+    overlaySubmissionRef.current = false;
     const activeElement =
       document.activeElement instanceof HTMLElement
         ? document.activeElement
@@ -369,6 +373,26 @@ export function ConfirmationPrompt({
   }, [expiresAtUnix, onCancel, open, pending]);
 
   if (!open) {
+    if (
+      displayMode === "overlay" &&
+      overlaySubmissionRef.current &&
+      error
+    ) {
+      return createPortal(
+        <div
+          aria-atomic="true"
+          className="confirmationPromptDetachedError"
+          role="alert"
+        >
+          <AlertTriangle aria-hidden="true" size={18} />
+          <div>
+            <strong>{title} failed</strong>
+            <span>{error}</span>
+          </div>
+        </div>,
+        document.body,
+      );
+    }
     return null;
   }
   function handleConfirm(event: ReactMouseEvent<HTMLButtonElement>) {
@@ -381,6 +405,7 @@ export function ConfirmationPrompt({
     setConfirmLatched(true);
     try {
       if (displayMode === "overlay") {
+        overlaySubmissionRef.current = true;
         onCancel();
       }
       onConfirm();
@@ -396,6 +421,7 @@ export function ConfirmationPrompt({
       ref={promptRef}
       className={`confirmationPrompt ${tone} ${displayMode}Prompt`}
       aria-label={title}
+      aria-describedby={error ? errorId : undefined}
       aria-modal={displayMode === "overlay" ? true : undefined}
       role={displayMode === "overlay" ? "dialog" : "region"}
       tabIndex={-1}
@@ -431,7 +457,16 @@ export function ConfirmationPrompt({
           </label>
         )}
         {children}
-        {error && <small className="confirmationPromptError">{error}</small>}
+        {error && (
+          <small
+            aria-atomic="true"
+            className="confirmationPromptError"
+            id={errorId}
+            role="alert"
+          >
+            {error}
+          </small>
+        )}
       </div>
       <button
         aria-label="Close confirmation"

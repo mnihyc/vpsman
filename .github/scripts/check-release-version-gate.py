@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject release tags older than the newest published GitHub release."""
+"""Reject duplicate or out-of-order GitHub release tags."""
 
 from __future__ import annotations
 
@@ -24,6 +24,9 @@ def parse_tag(tag: str) -> Version:
     match = TAG_RE.match(tag.strip())
     if not match:
         raise ValueError(f"{tag!r} is not a supported release tag")
+    for part in match.group(1, 2, 3):
+        if len(part) > 1 and part.startswith("0"):
+            raise ValueError(f"{tag!r} has a core version identifier with a leading zero")
 
     prerelease_text = match.group(4)
     prerelease = None
@@ -33,6 +36,10 @@ def parse_tag(tag: str) -> Version:
             if not part:
                 raise ValueError(f"{tag!r} has an empty prerelease identifier")
             if part.isdigit():
+                if len(part) > 1 and part.startswith("0"):
+                    raise ValueError(
+                        f"{tag!r} has a numeric prerelease identifier with a leading zero"
+                    )
                 identifiers.append((0, int(part)))
             else:
                 identifiers.append((1, part))
@@ -82,16 +89,17 @@ def check_candidate(candidate_tag: str, reference_tag: str | None) -> bool:
     if comparison < 0:
         print(
             f"Release tag {candidate_tag} is older than newest published release "
-            f"{reference_tag}; refusing to publish an old version as latest.",
+            f"{reference_tag}; refusing an out-of-order release.",
             file=sys.stderr,
         )
         return False
     if comparison == 0:
         print(
-            f"Release tag {candidate_tag} matches newest published release "
-            f"{reference_tag}; allowing rebuild or retag."
+            f"Release tag {candidate_tag} is already published as {reference_tag}; "
+            "release tags and assets are immutable.",
+            file=sys.stderr,
         )
-        return True
+        return False
 
     print(f"Release tag {candidate_tag} is newer than newest published release {reference_tag}.")
     return True
@@ -105,7 +113,12 @@ def compare_candidate(candidate_tag: str, reference_tag: str | None) -> int | No
     return compare_versions(candidate, reference)
 
 
-def newest_semver_tag(tags: list[str], *, warn: bool = True) -> str:
+def newest_semver_tag(
+    tags: list[str],
+    *,
+    stable_only: bool = False,
+    warn: bool = True,
+) -> str:
     newest_tag = ""
     newest_version: Version | None = None
     for raw_tag in tags:
@@ -118,16 +131,33 @@ def newest_semver_tag(tags: list[str], *, warn: bool = True) -> str:
             if warn:
                 print(f"Ignoring non-semver published release tag: {tag}", file=sys.stderr)
             continue
+        if stable_only and version.prerelease is not None:
+            continue
         if newest_version is None or compare_versions(version, newest_version) > 0:
             newest_tag = tag
             newest_version = version
     return newest_tag
 
 
+def published_reference_tag(candidate_tag: str, published_tags: list[str]) -> str:
+    """Choose the release channel that constrains a candidate.
+
+    Stable releases advance only the stable channel, so a future prerelease
+    does not block the corresponding stable release. Prereleases are compared
+    with every published semantic version.
+    """
+
+    candidate = parse_tag(candidate_tag)
+    return newest_semver_tag(
+        published_tags,
+        stable_only=candidate.prerelease is None,
+    )
+
+
 def run_self_test() -> int:
     cases = [
         ("v1.2.3", "", True),
-        ("v1.2.3", "v1.2.3", True),
+        ("v1.2.3", "v1.2.3", False),
         ("v1.2.4", "v1.2.3", True),
         ("v1.2.3", "v1.2.4", False),
         ("v1.2.3-rc.1", "v1.2.3", False),
@@ -141,7 +171,7 @@ def run_self_test() -> int:
     failures = 0
     for candidate_tag, latest_tag, expected in cases:
         comparison = compare_candidate(candidate_tag, latest_tag)
-        actual = comparison is None or comparison >= 0
+        actual = comparison is None or comparison > 0
         if actual != expected:
             failures += 1
             print(
@@ -156,6 +186,32 @@ def run_self_test() -> int:
     newest = newest_semver_tag(["legacy", "v1.2.3", "v1.2.4-rc.1", "v1.2.3"], warn=False)
     if newest != "v1.2.4-rc.1":
         print(f"self-test failed: expected newest v1.2.4-rc.1, got {newest}", file=sys.stderr)
+        return 1
+
+    stable_reference = published_reference_tag(
+        "v1.2.4",
+        ["v1.2.3", "v1.3.0-rc.1"],
+    )
+    if stable_reference != "v1.2.3":
+        print(
+            f"self-test failed: expected stable reference v1.2.3, got {stable_reference}",
+            file=sys.stderr,
+        )
+        return 1
+
+    for invalid_tag in (
+        "v01.2.3",
+        "v1.02.3",
+        "v1.2.03",
+        "v1.2.3-rc.",
+        "v1.2.3-rc..1",
+        "v1.2.3-01",
+    ):
+        try:
+            parse_tag(invalid_tag)
+        except ValueError:
+            continue
+        print(f"self-test failed: accepted invalid SemVer tag {invalid_tag}", file=sys.stderr)
         return 1
 
     print("release version gate self-test passed")
@@ -189,7 +245,11 @@ def main() -> int:
         if args.published_release_tags_file:
             with open(args.published_release_tags_file, encoding="utf-8") as release_tags:
                 published_tags.extend(release_tags)
-        reference_tag = newest_semver_tag(published_tags) if published_tags else args.latest_tag.strip()
+        reference_tag = (
+            published_reference_tag(args.candidate_tag, published_tags)
+            if published_tags
+            else args.latest_tag.strip()
+        )
         return 0 if check_candidate(args.candidate_tag, reference_tag) else 1
     except ValueError as exc:
         print(exc, file=sys.stderr)

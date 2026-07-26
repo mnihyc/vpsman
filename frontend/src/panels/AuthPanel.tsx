@@ -171,6 +171,8 @@ export function AuthPanel({
             autoComplete="username"
             autoFocus
             disabled={isChecking}
+            id="operator-username"
+            name="username"
             onChange={(event) => setUsername(event.target.value)}
             ref={usernameInputRef}
             value={username}
@@ -181,8 +183,10 @@ export function AuthPanel({
             <span>TOTP code</span>
             <input
               autoComplete="one-time-code"
+              id="operator-totp-code"
               inputMode="numeric"
               maxLength={6}
+              name="totp_code"
               placeholder="Optional if MFA is disabled"
               onChange={(event) => setTotpCode(event.target.value)}
               value={totpCode}
@@ -194,6 +198,8 @@ export function AuthPanel({
           <input
             autoComplete={mode === "login" ? "current-password" : "new-password"}
             disabled={isChecking}
+            id="operator-password"
+            name="password"
             onChange={(event) => setPassword(event.target.value)}
             ref={passwordInputRef}
             type="password"

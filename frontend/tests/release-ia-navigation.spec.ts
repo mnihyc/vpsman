@@ -395,7 +395,7 @@ test("keyboard navigation reaches release shell controls and page primary action
   );
   await expectReachableByTab(
     page,
-    page.getByRole("searchbox", { name: "Search fleet" }),
+    page.getByRole("combobox", { name: "Search fleet" }),
     "global fleet search",
     80,
   );
@@ -429,7 +429,7 @@ test("fleet scope selector edits scope and clear is explicit", async ({
   await gotoConsoleHome(page);
 
   const scopeEditor = page.getByRole("button", { name: /Edit fleet scope/ });
-  const fleetSearch = page.getByRole("searchbox", { name: "Search fleet" });
+  const fleetSearch = page.getByRole("combobox", { name: "Search fleet" });
   const clearScope = page.getByRole("button", { name: "Clear fleet scope" });
 
   await expect(scopeEditor).toBeVisible();
@@ -534,7 +534,7 @@ test("home applies fleet scope to target-bound records and labels fleet-wide evi
   );
 
   await gotoConsoleHome(page);
-  await page.getByRole("searchbox", { name: "Search fleet" }).fill("sfo");
+  await page.getByRole("combobox", { name: "Search fleet" }).fill("sfo");
 
   const posture = page.getByLabel("Home posture strip");
   const alertMetric = posture.locator(".homePostureMetric").filter({
@@ -1552,7 +1552,7 @@ test("home quick actions route to release pages with selected VPS scope", async 
     page.getByRole("heading", { name: "Command dispatch" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("searchbox", { name: "Bulk target selector expression" }),
+    page.getByRole("combobox", { name: "Bulk target selector expression" }),
   ).toHaveValue("id:agent-sfo-01");
 
   await clickHomeQuickAction(page, "Run backup");
@@ -2100,11 +2100,11 @@ test("fleet groups expose registry assignments and reviewed bulk mutation eviden
   await page.getByLabel("Bulk group", { exact: true }).fill("maintenance:test");
   await expect(page.getByLabel("Bulk group target preview")).toHaveCount(0);
   await page
-    .getByRole("searchbox", { name: "Bulk group selector expression" })
+    .getByRole("combobox", { name: "Bulk group selector expression" })
     .fill("id:agent-sfo-01");
   const selectorStatus = page
     .locator(".searchExpressionInput", {
-      has: page.getByRole("searchbox", {
+      has: page.getByRole("combobox", {
         name: "Bulk group selector expression",
       }),
     })
@@ -2314,7 +2314,7 @@ test("VPS detail workflow actions preserve the exact resource target", async ({
   let detail = await openDetail();
   await detail.getByRole("button", { name: "Run command", exact: true }).click();
   await expect(
-    page.getByRole("searchbox", { name: "Bulk target selector expression" }),
+    page.getByRole("combobox", { name: "Bulk target selector expression" }),
   ).toHaveValue("id:agent-sfo-01");
 
   detail = await openDetail();
@@ -2484,7 +2484,7 @@ test("fleet instance config detail separates source readiness, drift, apply stat
 
   const detail = page.getByLabel("Canonical VPS detail");
   await activate(detail.getByRole("tab", { name: "Config" }));
-  const configTab = detail.getByRole("tabpanel", { name: "Config tab" });
+  const configTab = detail.getByRole("tabpanel", { name: "Config" });
   const posture = configTab.getByLabel("VPS config posture");
   await expect(posture).toContainText("Desired source");
   await expect(posture).toContainText("Render status");
@@ -2591,6 +2591,20 @@ test("command palette indexes release pages and fixture entities", async ({
   const palette = page.getByRole("dialog", { name: "Command palette" });
   await expect(palette).toBeVisible();
   const search = page.getByLabel("Command palette search");
+  await expect(search).toHaveAttribute("role", "combobox");
+  await expect(search).toHaveAttribute(
+    "aria-controls",
+    "command-palette-results",
+  );
+  await expect(page.locator(".sidebar")).toHaveAttribute("aria-hidden", "true");
+  const initialOptions = palette.getByRole("option");
+  await expect(initialOptions.first()).toHaveAttribute("aria-selected", "true");
+  await search.press("End");
+  await expect(initialOptions.last()).toHaveAttribute("aria-selected", "true");
+  await search.press("Home");
+  await expect(initialOptions.first()).toHaveAttribute("aria-selected", "true");
+  await search.press("Tab");
+  await expect(search).toBeFocused();
   await search.fill("Remote Terminal");
   await expect(
     palette
@@ -3229,7 +3243,7 @@ test("config overview focuses on drift risk and routes to config workflows", asy
   await activate(currentState.getByRole("button", { name: "Retry" }).first());
   await expect(page.getByRole("heading", { name: "Bulk patch" })).toBeVisible();
   await expect(
-    page.getByRole("searchbox", { name: "Bulk patch target expression" }),
+    page.getByRole("combobox", { name: "Bulk patch target expression" }),
   ).toHaveValue("id:agent-fra-02");
 
   await openConsoleSubpage(page, "Config", "Overview");
@@ -3503,9 +3517,10 @@ test("observability alerts and webhooks are explicit separate pages", async ({
   await expect(
     page.getByRole("heading", { name: "Alert policies" }),
   ).toBeVisible();
-  await expect(
-    page.getByRole("tablist", { name: "Alert configuration sections" }),
-  ).toContainText("Destinations");
+  const alertTabs = page.getByRole("tablist", {
+    name: "Alert configuration sections",
+  });
+  await expect(alertTabs).toContainText("Destinations");
   await expect(
     page.getByRole("heading", { name: "Notification channels" }),
   ).toHaveCount(0);
@@ -3514,7 +3529,20 @@ test("observability alerts and webhooks are explicit separate pages", async ({
   ).toBeVisible();
   await expect(page.getByText("edge-resource-policy")).toBeVisible();
 
-  await activate(page.getByRole("tab", { name: /Destinations/ }));
+  const policiesTab = alertTabs.getByRole("tab", { name: /Policies/ });
+  const destinationsTab = alertTabs.getByRole("tab", {
+    name: /Destinations/,
+  });
+  await expect(policiesTab).toHaveAttribute("tabindex", "0");
+  await expect(destinationsTab).toHaveAttribute("tabindex", "-1");
+  await policiesTab.focus();
+  await policiesTab.press("ArrowRight");
+  await expect(destinationsTab).toBeFocused();
+  await expect(destinationsTab).toHaveAttribute("aria-selected", "true");
+  await expect(destinationsTab).toHaveAttribute(
+    "aria-controls",
+    "observability-alert-destinations",
+  );
   await expect(
     page.getByRole("heading", { name: "Notification channels" }),
   ).toBeVisible();
@@ -3783,7 +3811,7 @@ test("config bulk patch requires reviewed scope and privilege before apply", asy
   await expect(page.getByRole("heading", { name: "Bulk patch" })).toBeVisible();
   const bulk = page.locator(".configApplyGrid");
   await expect(
-    bulk.getByRole("searchbox", { name: "Bulk patch target expression" }),
+    bulk.getByRole("combobox", { name: "Bulk patch target expression" }),
   ).toBeVisible();
   await expect(
     bulk.getByRole("button", { name: "Preview changes" }),
@@ -3799,7 +3827,7 @@ test("config bulk patch requires reviewed scope and privilege before apply", asy
   await openConsoleSubpage(page, "Config", "Bulk patch");
   const unlockedBulk = page.locator(".configApplyGrid");
   await unlockedBulk
-    .getByRole("searchbox", { name: "Bulk patch target expression" })
+    .getByRole("combobox", { name: "Bulk patch target expression" })
     .fill("id:agent-sfo-01");
   await activate(unlockedBulk.getByRole("button", { name: "Preview changes" }));
   await expect(unlockedBulk).toContainText("1 VPS resolved");
@@ -5704,7 +5732,7 @@ test("backups policies keep authoring separate and review prune preview before a
   ).toHaveCount(0);
   await expect(drawer.getByLabel("Backup policy name")).toHaveValue("");
   await expect(
-    drawer.getByRole("searchbox", {
+    drawer.getByRole("combobox", {
       name: "Backup policy target expression",
     }),
   ).toHaveText("");
@@ -7029,7 +7057,7 @@ async function expectCanonicalVpsDetail(page: Page, vpsName: string) {
   ]) {
     await activate(detail.getByRole("tab", { name: tab }));
     await expect(
-      detail.getByRole("tabpanel", { name: `${tab} tab` }),
+      detail.getByRole("tabpanel", { name: tab }),
     ).toBeVisible();
   }
 }

@@ -1,6 +1,7 @@
 import { Search, X } from "lucide-react";
 import {
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -66,8 +67,12 @@ export function SearchExpressionInput({
   const previewRef = useRef<HTMLDivElement | null>(null);
   const [autocompleteOpen, setAutocompleteOpen] = useState(false);
   const [autocompleteStyle, setAutocompleteStyle] = useState<CSSProperties | null>(null);
+  const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(0);
   const [focused, setFocused] = useState(false);
   const [caretIndex, setCaretIndex] = useState(value.length);
+  const generatedId = useId().replace(/:/g, "");
+  const autocompleteId = `${inputId ?? `search-expression-${generatedId}`}-suggestions`;
+  const metaId = `${inputId ?? `search-expression-${generatedId}`}-status`;
   const parsed = parseSearchExpression(value);
   const displayTokens = useMemo(() => tokenizeForDisplay(value), [value]);
   const hasTokens = displayTokens.some((token) => token.kind === "term");
@@ -76,14 +81,25 @@ export function SearchExpressionInput({
     () => buildCompletion(value, caretIndex, agents ?? [], suggestions ?? [], vpsNameDisplayMode, Boolean(agents?.length)),
     [agents, caretIndex, suggestions, value, vpsNameDisplayMode],
   );
+  const visibleSuggestions = completion.filtered.slice(0, 8);
   const matchTitle = agents && !parsed.error ? agentListTitle(matchedAgents) : undefined;
   const matchSummary = parsed.error
     ? parsed.error
     : `${matchedAgents.length}/${agents?.length ?? 0}`;
   const metaText = verificationMessage ?? matchSummary;
   const metaTitle = verificationMessage ?? matchTitle ?? matchSummary;
+  const showVisibleMeta = Boolean(showMatchCount && agents);
+  const showMeta = showVisibleMeta || Boolean(verificationMessage);
   const autocompleteVisible =
-    (focused || autocompleteOpen) && completion.filtered.length > 0 && completion.fragment.trim().length > 0;
+    focused &&
+    autocompleteOpen &&
+    visibleSuggestions.length > 0 &&
+    completion.fragment.trim().length > 0;
+  const activeSuggestion = visibleSuggestions[activeSuggestionIndex] ?? null;
+  const activeSuggestionId =
+    autocompleteVisible && activeSuggestion
+      ? `${autocompleteId}-option-${activeSuggestionIndex}`
+      : undefined;
 
   useEffect(() => {
     if (!focused && !autocompleteOpen) {
@@ -155,6 +171,23 @@ export function SearchExpressionInput({
   }, [value]);
 
   useEffect(() => {
+    setActiveSuggestionIndex((current) =>
+      visibleSuggestions.length === 0
+        ? 0
+        : Math.min(current, visibleSuggestions.length - 1),
+    );
+  }, [visibleSuggestions.length]);
+
+  useEffect(() => {
+    if (!activeSuggestionId) {
+      return;
+    }
+    document
+      .getElementById(activeSuggestionId)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [activeSuggestionId]);
+
+  useEffect(() => {
     const container = containerRef.current;
     if (!container) {
       return;
@@ -208,6 +241,7 @@ export function SearchExpressionInput({
     const nextValue = cleanEditorText(editor.value);
     const nextCaretIndex = Math.min(editor.selectionStart ?? nextValue.length, nextValue.length);
     setCaretIndex(nextCaretIndex);
+    setActiveSuggestionIndex(0);
     setAutocompleteOpen(true);
     setFocused(true);
     if (nextValue !== value) {
@@ -216,6 +250,23 @@ export function SearchExpressionInput({
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (
+      !event.altKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      (event.key === "ArrowDown" || event.key === "ArrowUp") &&
+      visibleSuggestions.length > 0
+    ) {
+      event.preventDefault();
+      setAutocompleteOpen(true);
+      setActiveSuggestionIndex((current) =>
+        event.key === "ArrowDown"
+          ? (current + 1) % visibleSuggestions.length
+          : (current - 1 + visibleSuggestions.length) %
+            visibleSuggestions.length,
+      );
+      return;
+    }
     if (!event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
       if (event.key === "Home") {
         event.preventDefault();
@@ -230,8 +281,12 @@ export function SearchExpressionInput({
     }
     if (event.key === "Enter") {
       event.preventDefault();
-      if (completion.filtered.length > 0 && completion.fragment.trim()) {
-        applySuggestion(completion.filtered[0]);
+      if (
+        autocompleteVisible &&
+        activeSuggestion &&
+        completion.fragment.trim()
+      ) {
+        applySuggestion(activeSuggestion);
       } else {
         const nextValue = value.trim();
         onChange(nextValue);
@@ -242,8 +297,7 @@ export function SearchExpressionInput({
     }
     if (event.key === "Escape") {
       setAutocompleteOpen(false);
-      setFocused(false);
-      editorRef.current?.blur();
+      return;
     }
   }
 
@@ -256,6 +310,7 @@ export function SearchExpressionInput({
     const nextValue = cleanEditorText(`${value.slice(0, start)}${pastedText}${value.slice(end)}`);
     const nextCaretIndex = Math.min(start + pastedText.length, nextValue.length);
     setCaretIndex(nextCaretIndex);
+    setActiveSuggestionIndex(0);
     setAutocompleteOpen(true);
     setFocused(true);
     if (nextValue !== value) {
@@ -322,6 +377,17 @@ export function SearchExpressionInput({
           </div>
         )}
         <input
+          aria-activedescendant={activeSuggestionId}
+          aria-autocomplete="list"
+          aria-controls={autocompleteId}
+          aria-describedby={showMeta ? metaId : undefined}
+          aria-errormessage={
+            showMeta && (parsed.error || verification === "invalid")
+              ? metaId
+              : undefined
+          }
+          aria-expanded={autocompleteVisible}
+          aria-invalid={Boolean(parsed.error) || verification === "invalid"}
           aria-label={ariaLabel}
           autoCapitalize="none"
           autoComplete="off"
@@ -340,6 +406,7 @@ export function SearchExpressionInput({
           onClick={handlePointerUpdate}
           onFocus={(event) => {
             setAutocompleteOpen(true);
+            setActiveSuggestionIndex(0);
             setFocused(true);
             syncInputCaret(event.currentTarget);
           }}
@@ -350,7 +417,7 @@ export function SearchExpressionInput({
           onSelect={handleSelectionUpdate}
           placeholder={placeholder}
           ref={bindEditor}
-          role="searchbox"
+          role="combobox"
           spellCheck={false}
           tabIndex={0}
           type="text"
@@ -361,18 +428,23 @@ export function SearchExpressionInput({
         ? createPortal(
           <div
             className="searchExpressionAutocomplete"
+            id={autocompleteId}
             ref={menuRef}
             role="listbox"
             style={autocompleteStyle}
           >
-            {completion.filtered.slice(0, 8).map((suggestion) => (
+            {visibleSuggestions.map((suggestion, index) => (
               <button
+                aria-selected={activeSuggestionIndex === index}
+                id={`${autocompleteId}-option-${index}`}
                 key={`${suggestion.value}:${suggestion.label}`}
                 onClick={() => applySuggestion(suggestion)}
                 onMouseDown={(event) => {
                   event.preventDefault();
                 }}
+                onMouseMove={() => setActiveSuggestionIndex(index)}
                 role="option"
+                tabIndex={-1}
                 title={`${suggestion.label} ${suggestion.detail ?? ""}`.trim()}
                 type="button"
               >
@@ -384,11 +456,19 @@ export function SearchExpressionInput({
           document.body,
         )
         : null}
-      {showMatchCount && agents && (
-        <span className={parsed.error ? "searchExpressionMeta errorText" : "searchExpressionMeta"} title={metaTitle}>
+      {showVisibleMeta ? (
+        <span
+          className={parsed.error ? "searchExpressionMeta errorText" : "searchExpressionMeta"}
+          id={metaId}
+          title={metaTitle}
+        >
           {metaText}
         </span>
-      )}
+      ) : verificationMessage ? (
+        <span className="srOnly" id={metaId}>
+          {verificationMessage}
+        </span>
+      ) : null}
     </div>
   );
 }

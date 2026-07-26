@@ -26,6 +26,7 @@ import {
 } from "../components/ConsoleDataGrid";
 import { parse, stringify, type TomlTable } from "smol-toml";
 import { ActionFeedback } from "../components/ActionFeedback";
+import { handleTabListKeyDown, tabId } from "../components/AccessibleTabs";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import { AdminRoleBoundary } from "../components/RoleBoundary";
@@ -4758,14 +4759,18 @@ function SystemCapacityPanel({
             className="systemCapacityTabs"
             role="tablist"
             aria-label="System capacity subsystems"
+            onKeyDown={handleTabListKeyDown}
           >
             {capacityTabs.map((tab) => (
               <button
+                aria-controls="system-capacity-tabpanel"
                 aria-selected={activeSubsystem === tab.id}
                 className={activeSubsystem === tab.id ? "active" : ""}
+                id={tabId("system-capacity", tab.id)}
                 key={tab.id}
                 onClick={() => setActiveSubsystem(tab.id)}
                 role="tab"
+                tabIndex={activeSubsystem === tab.id ? 0 : -1}
                 type="button"
               >
                 <span>{tab.label}</span>
@@ -4777,49 +4782,55 @@ function SystemCapacityPanel({
             ))}
           </div>
           <div
-            className="systemCapacityStrip"
-            aria-label="System capacity configured limits"
+            aria-labelledby={tabId("system-capacity", activeSubsystem)}
+            id="system-capacity-tabpanel"
+            role="tabpanel"
           >
-            <div>
-              <strong>Selected range</strong>
-              <span>{`${window}; ${sampleCoverage}`}</span>
+            <div
+              className="systemCapacityStrip"
+              aria-label="System capacity configured limits"
+            >
+              <div>
+                <strong>Selected range</strong>
+                <span>{`${window}; ${sampleCoverage}`}</span>
+              </div>
+              <div>
+                <strong>Capacity profile</strong>
+                <span>{capacityForecast}</span>
+              </div>
+              <div>
+                <strong>Dispatch limit</strong>
+                <span>{configuredLimit}</span>
+              </div>
             </div>
-            <div>
-              <strong>Capacity profile</strong>
-              <span>{capacityForecast}</span>
-            </div>
-            <div>
-              <strong>Dispatch limit</strong>
-              <span>{configuredLimit}</span>
-            </div>
-          </div>
-          <CapacityFactorGrid
-            ariaLabel={`${activeSubsystem} capacity health factors`}
-            items={selectedFactors}
-          />
-          <div
-            className="systemCapacityConfigLinks"
-            aria-label="Capacity Suite Config links"
-          >
-            <strong>Suite Config fields</strong>
-            <span>
-              Limits shown here are edited in System / Suite config; each action
-              keeps the field key visible.
-            </span>
-            <div>
-              {selectedConfigLinks.map(([label, key]) => (
-                <button
-                  className="secondaryAction compactAction"
-                  key={key}
-                  onClick={() => onSelectView("System", "suite_config")}
-                  title={`Open System / Suite config for ${key}`}
-                  type="button"
-                >
-                  <SlidersHorizontal size={16} />
-                  <span>{label}</span>
-                  <small>{key}</small>
-                </button>
-              ))}
+            <CapacityFactorGrid
+              ariaLabel={`${activeSubsystem} capacity health factors`}
+              items={selectedFactors}
+            />
+            <div
+              className="systemCapacityConfigLinks"
+              aria-label="Capacity Suite Config links"
+            >
+              <strong>Suite Config fields</strong>
+              <span>
+                Limits shown here are edited in System / Suite config; each
+                action keeps the field key visible.
+              </span>
+              <div>
+                {selectedConfigLinks.map(([label, key]) => (
+                  <button
+                    className="secondaryAction compactAction"
+                    key={key}
+                    onClick={() => onSelectView("System", "suite_config")}
+                    title={`Open System / Suite config for ${key}`}
+                    type="button"
+                  >
+                    <SlidersHorizontal size={16} />
+                    <span>{label}</span>
+                    <small>{key}</small>
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         </section>
