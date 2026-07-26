@@ -5,6 +5,8 @@
 /frontend/tmp/
 /frontend/test-results/
 /frontend/playwright-report/
+/output/
+/state/
 /.tmp/
 /deploy/runtime/
 /deploy/.env
