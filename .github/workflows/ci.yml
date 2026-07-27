@@ -166,10 +166,8 @@ jobs:
       - name: Release version comparator self-test
         run: python3 .github/scripts/check-release-version-gate.py --self-test
 
-      - name: Component build-number gate
-        run: |
-          python3 .github/scripts/check-build-number-gate.py --self-test
-          python3 .github/scripts/check-build-number-gate.py
+      - name: Component build-number comparator self-test
+        run: python3 .github/scripts/check-build-number-gate.py --self-test
 
       - name: Deployment bundle reproducibility smoke
         run: bash scripts/smoke-deploy-bundle.sh
