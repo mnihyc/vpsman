@@ -58,7 +58,16 @@ test.beforeEach(async ({ page }, testInfo) => {
   if (customMockTests.has(testInfo.title)) {
     return;
   }
-  await installConsoleApiMock(page);
+  await installConsoleApiMock(page, {
+    alertEvidenceSaturated: testInfo.tags.includes(
+      "@alert-evidence-saturated",
+    ),
+    alertStateCoverage: testInfo.tags.includes("@alert-state-coverage"),
+    dashboardCountsTruncated: testInfo.tags.includes(
+      "@dashboard-counts-truncated",
+    ),
+    recordPagesSaturated: testInfo.tags.includes("@record-pages-saturated"),
+  });
 });
 
 async function gotoConsoleHome(page: Page) {
@@ -561,6 +570,269 @@ test("home applies fleet scope to target-bound records and labels fleet-wide evi
   ).toBeVisible();
   await expect(page.getByText("Fleet audit").first()).toBeVisible();
 });
+
+test(
+  "daily checks exclude muted and acknowledged alerts without hiding their records",
+  { tag: "@alert-state-coverage" },
+  async ({ page }) => {
+    await gotoConsoleHome(page);
+
+    const posture = page.getByLabel("Home posture strip");
+    const alertMetric = posture
+      .locator(".homePostureMetric")
+      .filter({ hasText: "Open alerts" });
+    await expect(alertMetric.locator("strong")).toHaveText("2");
+    await expect(alertMetric).toContainText(
+      "1 critical, 1 warning, 0 info",
+    );
+    await expect(
+      page.getByText("Open daily alert", { exact: true }).first(),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Escalated daily alert", { exact: true }).first(),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Muted daily alert", { exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByText("Acknowledged daily alert", { exact: true }),
+    ).toHaveCount(0);
+
+    const shellSummary = page.getByLabel("Fleet status summary");
+    await expect(
+      shellSummary
+        .locator(".metric")
+        .filter({ hasText: "Alerts" })
+        .locator("strong"),
+    ).toHaveText("2");
+
+    await openConsoleSubpage(page, "Fleet", "Alerts");
+    for (const title of [
+      "Open daily alert",
+      "Escalated daily alert",
+      "Muted daily alert",
+      "Acknowledged daily alert",
+    ]) {
+      await expect(page.getByText(title, { exact: true }).first()).toBeVisible();
+    }
+  },
+);
+
+test(
+  "bounded overview counts stay visibly lower-bound on mounted daily-check pages",
+  { tag: "@dashboard-counts-truncated" },
+  async ({ page }, testInfo) => {
+    test.setTimeout(60_000);
+    await gotoConsoleHome(page);
+
+    const posture = page.getByLabel("Home posture strip");
+    await expect(
+      posture
+        .locator(".homePostureMetric")
+        .filter({ hasText: "Open alerts" })
+        .locator("strong"),
+    ).toHaveText("3");
+    await expect(
+      posture
+        .locator(".homePostureMetric")
+        .filter({ hasText: "Open alerts" }),
+    ).not.toContainText("in loaded page");
+    await expect(
+      posture
+        .locator(".homePostureMetric")
+        .filter({ hasText: "Running jobs" })
+        .locator("strong"),
+    ).toHaveText("3");
+    await expect(
+      posture
+        .locator(".homePostureMetric")
+        .filter({ hasText: "Backups" })
+        .locator("strong"),
+    ).toHaveText("1");
+
+    if (!testInfo.project.name.includes("mobile")) {
+      await page.getByRole("combobox", { name: "Search fleet" }).fill("sfo");
+      await expect(
+        posture
+          .locator(".homePostureMetric")
+          .filter({ hasText: "Fleet jobs" })
+          .locator("strong"),
+      ).toHaveText("3");
+    }
+
+    await openConsoleSubpage(page, "Observability", "Fleet metrics");
+    const definitions = page.getByLabel(
+      "Fleet metrics availability definitions",
+    );
+    await expect(
+      definitions.locator("div").filter({ hasText: "Active alerts" }).first(),
+    ).toContainText("≥3");
+    await expect(definitions).toContainText("Alerts in shown groups");
+    await expect(
+      page.getByLabel("Fleet metrics group breakdown"),
+    ).toContainText("≥2 alerts in the loaded operations page");
+
+    await openConsoleSubpage(page, "Observability", "Dashboards");
+    const dashboardPanel = page.locator(".observabilityDashboardsPanel");
+    await expect(
+      dashboardPanel
+        .getByLabel("Fleet operations dashboard widgets")
+        .locator(".metricCard")
+        .filter({ hasText: "Completed backups" })
+        .locator("strong"),
+    ).toHaveText("≥1");
+
+    if (testInfo.project.name.includes("mobile")) {
+      await dashboardPanel
+        .getByLabel("Dashboard preset", { exact: true })
+        .selectOption({ label: "Group posture" });
+    } else {
+      await dashboardPanel
+        .getByLabel("Dashboard preset registry")
+        .getByRole("button", { name: /Group posture/ })
+        .click();
+    }
+    const groupDashboard = dashboardPanel.getByLabel(
+      "Group posture dashboard widgets",
+    );
+    await expect(groupDashboard).toContainText("Alerts");
+    await expect(groupDashboard).toContainText("≥2");
+    await expect(groupDashboard).toContainText(
+      "alert/job counts use loaded operations page",
+    );
+  },
+);
+
+test(
+  "scoped daily counts disclose saturated source pages",
+  { tag: "@record-pages-saturated" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "desktop scope editing provides direct coverage of client-side filtering after global page caps",
+    );
+    await gotoConsoleHome(page);
+
+    const shellAlertMetric = page
+      .getByLabel("Fleet status summary")
+      .locator(".metric")
+      .filter({ hasText: "Alerts" });
+    const posture = page.getByLabel("Home posture strip");
+    const alertMetric = posture
+      .locator(".homePostureMetric")
+      .filter({ hasText: "Open alerts" });
+    const backupMetric = posture
+      .locator(".homePostureMetric")
+      .filter({ hasText: "Backups" });
+    const transferMetric = posture
+      .locator(".homePostureMetric")
+      .filter({ hasText: "Transfers" });
+
+    await page
+      .getByRole("combobox", { name: "Search fleet" })
+      .fill("does-not-match");
+    await expect(shellAlertMetric.locator("strong")).toHaveText("0 loaded");
+    await expect(shellAlertMetric).toHaveClass(/\byellow\b/);
+    await expect(shellAlertMetric).toHaveAttribute(
+      "title",
+      /loaded alert page; additional matching alerts may exist/,
+    );
+    await expect(alertMetric.locator("strong")).toHaveText("0");
+    await expect(alertMetric).toHaveClass(/\binfo\b/);
+    await expect(backupMetric.locator("strong")).toHaveText("0");
+    await expect(backupMetric).toHaveClass(/\binfo\b/);
+    await expect(transferMetric.locator("strong")).toHaveText("0");
+    await expect(transferMetric).toHaveClass(/\binfo\b/);
+
+    await page.getByRole("combobox", { name: "Search fleet" }).fill("sfo");
+    await expect(shellAlertMetric.locator("strong")).toHaveText("≥1");
+    await expect(shellAlertMetric).toHaveAttribute(
+      "title",
+      /loaded alert page; additional matching alerts may exist/,
+    );
+
+    await expect(alertMetric.locator("strong")).toHaveText("≥1");
+    await expect(alertMetric).toContainText("in loaded page");
+
+    await expect(backupMetric.locator("strong")).toHaveText("≥1");
+    await expect(backupMetric).toContainText(
+      "≥1 artifacts in the loaded page",
+    );
+
+    await expect(transferMetric.locator("strong")).toHaveText("≥3");
+    await expect(transferMetric).toContainText("in loaded history");
+
+    await openConsoleSubpage(page, "Fleet", "Monitor");
+    const card = page
+      .getByLabel("VPS monitor cards")
+      .locator(".vpsMonitorCard", { hasText: "edge-sfo-01" });
+    const signals = card.getByLabel("Operational signals for edge-sfo-01");
+    await expect(
+      signals.locator(".vpsMonitorSignal").filter({ hasText: "Alerts" }),
+    ).toContainText("≥1 warning");
+    await expect(
+      signals.locator(".vpsMonitorSignal").filter({ hasText: "Backup" }),
+    ).toContainText("≥1 recorded");
+    await expect(
+      signals.locator(".vpsMonitorSignal").filter({ hasText: "Transfer" }),
+    ).toContainText("≥1 failed");
+    await expect(card).toContainText("counts use capped loaded pages");
+
+    await card
+      .getByRole("button", { name: /edge-sfo-01/ })
+      .first()
+      .click();
+    const alertFact = page
+      .getByLabel("VPS resource facts")
+      .locator(".vpsResourceFact")
+      .filter({ hasText: "Alerts" });
+    await expect(alertFact.locator("strong")).toHaveText("≥1 active");
+    await expect(alertFact).toContainText("fleet alert page is capped");
+
+    await openConsoleSubpage(page, "Fleet", "Monitor");
+    await page.getByRole("combobox", { name: "Search fleet" }).fill("nyc");
+    const nycCard = page
+      .getByLabel("VPS monitor cards")
+      .locator(".vpsMonitorCard", { hasText: "backup-nyc-03" });
+    await expect(
+      nycCard
+        .getByLabel("Operational signals for backup-nyc-03")
+        .locator(".vpsMonitorSignal")
+        .filter({ hasText: "Backup" }),
+    ).toContainText("None in loaded page");
+
+    await openConsoleSubpage(page, "Fleet", "Alerts");
+    await expect(
+      page.getByLabel("Fleet alerts").locator(".fleetAlertHeader small"),
+    ).toContainText("Loaded page:");
+  },
+);
+
+test(
+  "bounded alert subcounts identify the loaded page",
+  { tag: "@alert-evidence-saturated" },
+  async ({ page }) => {
+    await gotoConsoleHome(page);
+    await openConsoleSubpage(page, "Observability", "Alerts");
+
+    const summary = page.getByLabel("Alert routing summary");
+    const policyMetric = summary
+      .locator(".metricCard")
+      .filter({ hasText: "Policy alerts" });
+    await expect(policyMetric.locator("strong")).toHaveText("200+");
+    await expect(policyMetric).toContainText(
+      "200 warning or critical policy-issued alerts in the loaded page",
+    );
+
+    const deliveryMetric = summary
+      .locator(".metricCard")
+      .filter({ hasText: "Delivery history" });
+    await expect(deliveryMetric.locator("strong")).toHaveText("200+");
+    await expect(deliveryMetric).toContainText(
+      "200 failed retained notification deliveries in the loaded page",
+    );
+  },
+);
 
 test("release IA reaches every configured page and subpage", async ({
   page,
@@ -2587,10 +2859,20 @@ test("command palette indexes release pages and fixture entities", async ({
   await gotoConsoleHome(page);
   await waitForConsoleShell(page);
 
-  await page.getByRole("button", { name: "Open command palette" }).click();
+  const commandPaletteButton = page.getByRole("button", {
+    name: "Open command palette",
+  });
+  await commandPaletteButton.click();
   const palette = page.getByRole("dialog", { name: "Command palette" });
   await expect(palette).toBeVisible();
   const search = page.getByLabel("Command palette search");
+  await page.keyboard.press("Control+K");
+  await expect(search).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(palette).toBeHidden();
+  await expect(commandPaletteButton).toBeFocused();
+  await commandPaletteButton.click();
+  await expect(palette).toBeVisible();
   await expect(search).toHaveAttribute("role", "combobox");
   await expect(search).toHaveAttribute(
     "aria-controls",
@@ -4061,8 +4343,8 @@ test("observability fleet metrics owns resource charts and read-only analysis co
 
   const definitions = page.getByLabel("Fleet metrics availability definitions");
   await expect(definitions).toContainText("Active alerts");
-  await expect(definitions).toContainText("Affected VPS");
-  await expect(definitions).toContainText("Reachability observations");
+  await expect(definitions).toContainText("VPS in shown evidence");
+  await expect(definitions).toContainText("Alerts in shown groups");
   await expect(definitions).toContainText("Unavailable VPS");
 
   await expect(page.locator(".timeSeriesChartShell")).toBeVisible();
@@ -4131,7 +4413,7 @@ test("observability fleet metrics owns resource charts and read-only analysis co
     "country:US",
   );
   await expect(page.getByLabel("Fleet metrics group breakdown")).toContainText(
-    "historical interval gaps",
+    "alerts",
   );
   await expect(page.getByLabel("Fleet metrics group breakdown")).toContainText(
     "currently reachable",
@@ -6821,6 +7103,54 @@ test("system preferences separates personal display from shared defaults", async
   await expect(shared).not.toContainText("Home telemetry curves");
   await expect(shared).not.toContainText("operator-stored defaults");
   await expect(shared).not.toContainText("Server public key hex");
+});
+
+test("invalid preference drafts expose accessible save feedback", async ({
+  page,
+}) => {
+  await gotoConsoleHome(page);
+  await openConsoleSubpage(page, "System", "Preferences");
+
+  const timezone = page.getByLabel("Display timezone");
+  await timezone.fill("Mars/Olympus_Mons");
+
+  const validation = page.locator("#preferences-draft-validation-error");
+  await expect(validation).toBeVisible();
+  await expect(validation).toHaveAttribute("role", "status");
+  await expect(validation).toHaveAttribute("aria-live", "polite");
+  await expect(validation).toContainText(
+    "Timezone must be a valid IANA identifier",
+  );
+  await expect(timezone).toHaveAttribute("aria-invalid", "true");
+  await expect(timezone).toHaveAttribute(
+    "aria-describedby",
+    "preferences-draft-validation-error",
+  );
+
+  for (const name of ["Save changes", "Save preferences"]) {
+    const save = page.getByRole("button", { name });
+    await expect(save).toBeEnabled();
+    await expect(save).toHaveAttribute(
+      "aria-describedby",
+      "preferences-draft-validation-error",
+    );
+  }
+
+  const stickySave = page.getByRole("button", { name: "Save changes" });
+  await stickySave.focus();
+  await expect(stickySave).toBeFocused();
+  await stickySave.click();
+  await expect(validation).toBeVisible();
+  await expect(timezone).toHaveValue("Mars/Olympus_Mons");
+  const preferenceRequestCount = await page.evaluate(
+    () =>
+      (
+        window as unknown as {
+          __vpsmanTestRequests: { operatorPreferences: unknown[] };
+        }
+      ).__vpsmanTestRequests.operatorPreferences.length,
+  );
+  expect(preferenceRequestCount).toBe(0);
 });
 
 async function expectCommandPaletteGroup(

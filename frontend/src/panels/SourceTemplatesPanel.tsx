@@ -1961,6 +1961,18 @@ function sourceEvidenceSummary(row: SourceStatusRecord): string {
     typeof evidence.ospf_update_candidate_count === "number"
       ? evidence.ospf_update_candidate_count
       : null;
+  const matchingRoutingPlanCount =
+    typeof evidence.matching_routing_plan_count === "number"
+      ? evidence.matching_routing_plan_count
+      : null;
+  const routingEndpointIssueCount =
+    typeof evidence.routing_endpoint_issue_count === "number"
+      ? evidence.routing_endpoint_issue_count
+      : null;
+  const routingVerifiedCount =
+    typeof evidence.routing_verified_count === "number"
+      ? evidence.routing_verified_count
+      : null;
   const trafficLimitPlanCount =
     typeof evidence.traffic_limit_plan_count === "number"
       ? evidence.traffic_limit_plan_count
@@ -2082,6 +2094,19 @@ function sourceEvidenceSummary(row: SourceStatusRecord): string {
   }
   if (ospfUpdateCandidateCount !== null && ospfUpdateCandidateCount > 0) {
     parts.push(`${ospfUpdateCandidateCount} OSPF updates`);
+  }
+  if (matchingRoutingPlanCount !== null) {
+    parts.push(
+      `${matchingRoutingPlanCount} matching routing ${
+        matchingRoutingPlanCount === 1 ? "plan" : "plans"
+      }`,
+    );
+  }
+  if (routingEndpointIssueCount !== null && routingEndpointIssueCount > 0) {
+    parts.push(`${routingEndpointIssueCount} failed or stale endpoints`);
+  }
+  if (routingVerifiedCount !== null && routingVerifiedCount > 0) {
+    parts.push(`${routingVerifiedCount} verified endpoints`);
   }
   if (trafficLimitPlanCount !== null && trafficLimitPlanCount > 0) {
     parts.push(`${trafficLimitPlanCount} traffic limit plans`);

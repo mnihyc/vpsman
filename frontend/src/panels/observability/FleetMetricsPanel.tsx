@@ -3,6 +3,7 @@ import { ActionFeedback } from "../../components/ActionFeedback";
 import { TimeSeriesChart, type TimeSeriesChartLine } from "../../components/TimeSeriesChart";
 import { VpsCombobox } from "../../components/VpsCombobox";
 import { dashboardChartColors } from "../../colorPalette";
+import { formatLowerBoundCount } from "../../constants";
 import {
   dashboardScopeLabel,
   dashboardScopeValueOptions,
@@ -468,12 +469,18 @@ function MetricTile({ detail, label, value }: { detail: string; label: string; v
 }
 
 function GroupTile({ cluster }: { cluster: DashboardLabelClusterRecord }) {
+  const boundedSuffix = cluster.counts_truncated
+    ? " in the loaded operations page"
+    : "";
   return (
     <div className="observabilityGroupTile">
       <span>{cluster.kind}</span>
       <strong>{cluster.label}</strong>
       <small>
-        {cluster.online}/{cluster.total} currently reachable, {cluster.warnings} historical interval gap{cluster.warnings === 1 ? "" : "s"}, {formatBitsPerSecond(cluster.rx_bps + cluster.tx_bps)} aggregate interval-average rate
+        {cluster.kind === "date"
+          ? `${cluster.total} network samples, ${formatLowerBoundCount(cluster.warnings, cluster.counts_truncated)} alerts${boundedSuffix}, ${formatLowerBoundCount(cluster.running_jobs, cluster.counts_truncated)} running jobs${boundedSuffix}`
+          : `${cluster.online}/${cluster.total} currently reachable, ${formatLowerBoundCount(cluster.warnings, cluster.counts_truncated)} alerts${boundedSuffix}, ${formatLowerBoundCount(cluster.running_jobs, cluster.counts_truncated)} active job assignments${boundedSuffix}`}
+        , {formatBitsPerSecond(cluster.rx_bps + cluster.tx_bps)} aggregate interval-average rate
       </small>
     </div>
   );
@@ -481,29 +488,32 @@ function GroupTile({ cluster }: { cluster: DashboardLabelClusterRecord }) {
 
 function WarningDefinitionStrip({ overview }: { overview: DashboardOverviewRecord | null }) {
   const activeAlerts = overview?.operations.active_alerts ?? 0;
+  const alertsTruncated = overview?.operations.alerts_truncated ?? false;
   const criticalAlerts = overview?.operations.critical_alerts ?? 0;
   const warningAlerts = overview?.operations.warning_alerts ?? 0;
   const infoAlerts = Math.max(0, activeAlerts - criticalAlerts - warningAlerts);
   const affectedVpsCount = uniqueAffectedVpsCount(overview);
-  const reachabilityObservations =
+  const groupedAlerts =
     overview?.label_clusters.reduce((total, cluster) => total + cluster.warnings, 0) ?? 0;
+  const groupedAlertsTruncated =
+    overview?.label_clusters.some((cluster) => cluster.counts_truncated) ?? false;
   const unavailableVps =
     (overview?.summary.offline ?? 0) + (overview?.summary.stale ?? 0);
   const definitions = [
     {
-      detail: `${criticalAlerts} critical, ${warningAlerts} warning, ${infoAlerts} info`,
+      detail: `${criticalAlerts} critical, ${warningAlerts} warning, ${infoAlerts} info${alertsTruncated ? " in loaded page" : ""}`,
       label: "Active alerts",
-      value: String(activeAlerts),
+      value: formatLowerBoundCount(activeAlerts, alertsTruncated),
     },
     {
-      detail: "unique VPSs named by recent alerts or degraded-agent evidence",
-      label: "Affected VPS",
+      detail: "unique VPSs named by the recent alert and degraded-agent rows shown",
+      label: "VPS in shown evidence",
       value: String(affectedVpsCount),
     },
     {
-      detail: "group rows can overlap across provider, country, tag, and all-fleet buckets",
-      label: "Reachability observations",
-      value: String(reachabilityObservations),
+      detail: `group rows shown can overlap across provider, country, tag, and all-fleet buckets${groupedAlertsTruncated ? "; alert counts use the loaded operations page" : ""}`,
+      label: "Alerts in shown groups",
+      value: formatLowerBoundCount(groupedAlerts, groupedAlertsTruncated),
     },
     {
       detail: "offline and stale VPSs in the retained overview scope",

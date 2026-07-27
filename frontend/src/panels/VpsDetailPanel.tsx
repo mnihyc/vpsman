@@ -17,6 +17,10 @@ import {
 import { agentDisplayState } from "../agentDisplayState";
 import { ActionFeedback } from "../components/ActionFeedback";
 import { handleTabListKeyDown, tabId } from "../components/AccessibleTabs";
+import {
+  formatLowerBoundCount,
+  isActionableFleetAlertState,
+} from "../constants";
 import type { FileTransferSessionRecord } from "../typesFileTransfer";
 import type {
   AgentView,
@@ -66,6 +70,7 @@ type VpsDetailPanelProps = {
   backups: BackupRequestRecord[];
   fileTransfers: FileTransferSessionRecord[];
   fleetAlerts: FleetAlertRecord[];
+  fleetAlertsTruncated: boolean;
   fleetAlertPolicies: FleetAlertPolicyRecord[];
   jobs: JobHistoryRecord[];
   loading: boolean;
@@ -117,6 +122,7 @@ export function VpsDetailPanel({
   backups,
   fileTransfers,
   fleetAlerts,
+  fleetAlertsTruncated,
   fleetAlertPolicies,
   jobs,
   loading,
@@ -229,7 +235,9 @@ export function VpsDetailPanel({
     );
   }
 
-  const activeAlertCount = related.alerts.filter((alert) => alert.operator_state !== "cleared").length;
+  const activeAlertCount = related.alerts.filter((alert) =>
+    isActionableFleetAlertState(alert.operator_state),
+  ).length;
   const latestJob = related.relatedJobs[0] ?? null;
   const displayState = agentDisplayState(agent);
   const activeJobCount = related.relatedJobs.filter((job) =>
@@ -340,9 +348,17 @@ export function VpsDetailPanel({
             <VpsResourceFact
               icon={<AlertTriangle size={16} />}
               label="Alerts"
-              value={`${activeAlertCount} active`}
-              detail={`${related.alerts.length} loaded records`}
-              tone={activeAlertCount > 0 ? "warning" : "ready"}
+              value={
+                fleetAlertsTruncated && activeAlertCount === 0
+                  ? "None in loaded page"
+                  : `${formatLowerBoundCount(activeAlertCount, fleetAlertsTruncated)} active`
+              }
+              detail={`${related.alerts.length} loaded records${fleetAlertsTruncated ? "; the fleet alert page is capped" : ""}`}
+              tone={
+                activeAlertCount > 0 || fleetAlertsTruncated
+                  ? "warning"
+                  : "ready"
+              }
             />
             <VpsResourceFact
               icon={<History size={16} />}

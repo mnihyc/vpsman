@@ -280,7 +280,8 @@ smoke_cleanup() {
       echo "keeping smoke tmpdir: $SMOKE_TMPDIR" >&2
       return
     fi
-    rm -rf "$SMOKE_TMPDIR"
+    rm -rf -- "$SMOKE_TMPDIR"
+    rmdir -- "$SMOKE_ROOT_DIR/.tmp" 2>/dev/null || true
   fi
 }
 

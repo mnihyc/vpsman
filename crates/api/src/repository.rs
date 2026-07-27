@@ -49,6 +49,7 @@ pub(crate) struct TelemetryIngestWatermark {
 }
 
 pub(crate) type TelemetryIngestWatermarks = Arc<RwLock<HashMap<String, TelemetryIngestWatermark>>>;
+type CapabilityDegradedJobTargets = HashMap<(Uuid, String), (String, String)>;
 
 #[derive(Clone, Default)]
 pub(crate) struct MemoryState {
@@ -98,6 +99,7 @@ pub(crate) struct MemoryState {
     pub(crate) command_templates: Arc<RwLock<Vec<CommandTemplateView>>>,
     pub(crate) job_targets: Arc<RwLock<Vec<JobTargetView>>>,
     pub(crate) job_outputs: Arc<RwLock<Vec<JobOutputView>>>,
+    pub(crate) capability_degraded_job_targets: Arc<RwLock<CapabilityDegradedJobTargets>>,
     pub(crate) server_artifacts: Arc<RwLock<Vec<ServerArtifactCleanupCandidate>>>,
     pub(crate) terminal_sessions: Arc<RwLock<Vec<TerminalSessionView>>>,
     pub(crate) terminal_input_requests: Arc<RwLock<Vec<TerminalInputRequestRecord>>>,

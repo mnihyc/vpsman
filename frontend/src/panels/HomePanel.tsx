@@ -15,6 +15,11 @@ import {
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import { VpsCombobox } from "../components/VpsCombobox";
 import { agentDisplayState } from "../agentDisplayState";
+import {
+  formatLowerBoundCount,
+  HISTORY_DETAIL_LIMIT,
+  isActionableFleetAlertState,
+} from "../constants";
 import type { FileTransferSessionRecord } from "../typesFileTransfer";
 import type {
   AgentView,
@@ -22,7 +27,6 @@ import type {
   BackupArtifactRecord,
   BackupRequestRecord,
   DashboardDrilldownRecord,
-  DashboardOverviewRecord,
   DashboardPreferences,
   DashboardWindow,
   FleetAlertRecord,
@@ -44,12 +48,17 @@ type HomePanelProps = {
   backups: BackupRequestRecord[];
   dashboardError: string | null;
   dashboardLoading: boolean;
-  dashboardOverview: DashboardOverviewRecord | null;
   dashboardPreferences: DashboardPreferences;
   dashboardWindow: DashboardWindow;
   fileTransfers: FileTransferSessionRecord[];
   fleetAlerts: FleetAlertRecord[];
   jobs: JobHistoryRecord[];
+  recordBounds: {
+    backupArtifacts: boolean;
+    backups: boolean;
+    fileTransfers: boolean;
+    fleetAlerts: boolean;
+  };
   schedules: ScheduleRecord[];
   summary: FleetSummary;
   systemDashboard: SystemDashboardRecord | null;
@@ -110,6 +119,7 @@ export function HomePanel({
   fileTransfers,
   fleetAlerts,
   jobs,
+  recordBounds,
   schedules,
   scopeFiltered,
   summary,
@@ -146,11 +156,14 @@ export function HomePanel({
   ).length;
   const loadedRunningJobs = jobs.filter((job) => isActiveJobStatus(job.status)).length;
   const runningJobs = Math.max(loadedRunningJobs, summary.running_jobs);
+  const alertsTruncated = recordBounds.fleetAlerts;
+  const runningJobsTruncated = jobs.length >= HISTORY_DETAIL_LIMIT;
+  const backupsTruncated = recordBounds.backups;
   const failedJobs = jobs.filter((job) => isFailedJobStatus(job.status)).length;
   const failedBackups = backups.filter((backup) => isFailedBackupStatus(backup.status)).length;
   const activeTransfers = fileTransfers.filter((transfer) => isActiveTransferStatus(transfer.status)).length;
   const activeAlerts = fleetAlerts.filter(
-    (alert) => alert.operator_state !== "acknowledged",
+    (alert) => isActionableFleetAlertState(alert.operator_state),
   );
   const criticalAlerts = activeAlerts.filter((alert) => alert.severity === "critical").length;
   const warningAlerts = activeAlerts.filter((alert) => alert.severity === "warning").length;
@@ -294,11 +307,13 @@ export function HomePanel({
               <ConsoleStatusBadge tone={visibleOnline === agents.length && criticalAlerts === 0 ? "ok" : "warning"}>
                 {visibleOnline}/{agents.length} visible live
               </ConsoleStatusBadge>
-              <ConsoleStatusBadge tone={criticalAlerts > 0 ? "critical" : warningAlerts > 0 ? "warning" : infoAlerts > 0 ? "info" : "ok"}>
+              <ConsoleStatusBadge tone={criticalAlerts > 0 ? "critical" : warningAlerts > 0 ? "warning" : infoAlerts > 0 || alertsTruncated ? "info" : "ok"}>
                 {criticalAlerts} critical / {warningAlerts} warning / {infoAlerts} info
+                {alertsTruncated ? " in loaded page" : ""}
               </ConsoleStatusBadge>
-              <ConsoleStatusBadge tone={runningJobs > 0 ? "info" : "neutral"}>
-                {runningJobs} {scopeFiltered ? "fleet " : ""}running jobs
+              <ConsoleStatusBadge tone={runningJobs > 0 || runningJobsTruncated ? "info" : "neutral"}>
+                {formatLowerBoundCount(runningJobs, runningJobsTruncated)}{" "}
+                {scopeFiltered ? "fleet " : ""}running jobs
               </ConsoleStatusBadge>
             </div>
           </div>
@@ -408,28 +423,31 @@ export function HomePanel({
             value={String(visibleReview + visibleOffline)}
           />
           <HomePostureMetric
-            detail={`${criticalAlerts} critical, ${warningAlerts} warning, ${infoAlerts} info`}
+            detail={`${criticalAlerts} critical, ${warningAlerts} warning, ${infoAlerts} info${alertsTruncated ? " in loaded page" : ""}`}
             label="Open alerts"
-            tone={criticalAlerts ? "critical" : warningAlerts ? "warning" : infoAlerts ? "info" : "ok"}
-            value={String(activeAlerts.length)}
+            tone={criticalAlerts ? "critical" : warningAlerts ? "warning" : infoAlerts || alertsTruncated ? "info" : "ok"}
+            value={formatLowerBoundCount(activeAlerts.length, alertsTruncated)}
           />
           <HomePostureMetric
-            detail={`${failedJobs} failed in ${scopeFiltered ? "fleet " : ""}loaded history`}
+            detail={`${formatLowerBoundCount(failedJobs, jobs.length >= HISTORY_DETAIL_LIMIT)} failed in ${scopeFiltered ? "fleet " : ""}loaded history`}
             label={scopeFiltered ? "Fleet jobs" : "Running jobs"}
-            tone={failedJobs ? "critical" : runningJobs ? "info" : "ok"}
-            value={String(runningJobs)}
+            tone={failedJobs ? "critical" : runningJobs || runningJobsTruncated ? "info" : "ok"}
+            value={formatLowerBoundCount(runningJobs, runningJobsTruncated)}
           />
           <HomePostureMetric
-            detail={`${failedBackups} failed, ${backupArtifacts.length} artifacts`}
+            detail={`${formatLowerBoundCount(failedBackups, backupsTruncated)} failed${backupsTruncated ? " in loaded history" : ""}, ${formatLowerBoundCount(backupArtifacts.length, recordBounds.backupArtifacts)} artifacts${recordBounds.backupArtifacts ? " in the loaded page" : ""}`}
             label="Backups"
-            tone={failedBackups ? "critical" : "ok"}
-            value={String(backups.length)}
+            tone={failedBackups ? "critical" : backupsTruncated || recordBounds.backupArtifacts ? "info" : "ok"}
+            value={formatLowerBoundCount(backups.length, backupsTruncated)}
           />
           <HomePostureMetric
-            detail={`${activeTransfers} active transfer sessions`}
+            detail={`${formatLowerBoundCount(activeTransfers, recordBounds.fileTransfers)} active transfer sessions${recordBounds.fileTransfers ? " in loaded history" : ""}`}
             label="Transfers"
-            tone={activeTransfers ? "info" : "ok"}
-            value={String(fileTransfers.length)}
+            tone={activeTransfers || recordBounds.fileTransfers ? "info" : "ok"}
+            value={formatLowerBoundCount(
+              fileTransfers.length,
+              recordBounds.fileTransfers,
+            )}
           />
         </div>
 
@@ -653,7 +671,7 @@ function buildAttentionItems({
   const alertItems = fleetAlerts
     .filter(
       (alert) =>
-        alert.operator_state !== "acknowledged" &&
+        isActionableFleetAlertState(alert.operator_state) &&
         (alert.severity === "critical" || alert.severity === "warning"),
     )
     .map((alert) => {
@@ -919,7 +937,7 @@ function buildRecentFailureItems({
   const alertItems = fleetAlerts
     .filter(
       (alert) =>
-        alert.operator_state !== "acknowledged" &&
+        isActionableFleetAlertState(alert.operator_state) &&
         (alert.severity === "critical" || alert.severity === "warning"),
     )
     .map((alert) => ({

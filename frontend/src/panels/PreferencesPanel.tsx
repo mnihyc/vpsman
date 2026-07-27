@@ -49,6 +49,7 @@ const COMMON_TIMEZONES = [
 ];
 
 const DASHBOARD_TOP_LIMIT_OPTIONS = [3, 5, 8, 12, 16];
+const DRAFT_VALIDATION_ERROR_ID = "preferences-draft-validation-error";
 
 type PreferenceScopeTab = "browser" | "personal" | "system";
 
@@ -64,7 +65,6 @@ export function PreferencesPanel({
     updatePreferences,
   } = usePanelDisplaySettings();
   const [draft, setDraft] = useState<OperatorPreferences>(preferences);
-  const [localError, setLocalError] = useState<string | null>(null);
   const [localSelectionMessage, setLocalSelectionMessage] = useState<
     string | null
   >(null);
@@ -97,8 +97,11 @@ export function PreferencesPanel({
   );
   const dirty = JSON.stringify(draft) !== JSON.stringify(preferences);
   const saveInFlight = preferencesSaving || localSavePending;
+  const timezoneValidationError = validateTimezone(
+    draft.timezone?.trim() || null,
+  );
   const draftValidationError =
-    validateTimezone(draft.timezone?.trim() || null) ??
+    timezoneValidationError ??
     validateDashboardLimits(
       draft.dashboard_resource_top_limit,
       draft.dashboard_network_top_limit,
@@ -108,7 +111,7 @@ export function PreferencesPanel({
         draft.fleet_tag_visibility_overrides,
       ),
     );
-  const saveDisabled = !dirty || saveInFlight || Boolean(draftValidationError);
+  const saveDisabled = !dirty || saveInFlight;
 
   useEffect(() => {
     setDraft(preferences);
@@ -119,7 +122,6 @@ export function PreferencesPanel({
     if (!dirty || saveInFlight || savePendingRef.current) {
       return;
     }
-    setLocalError(null);
     const timezone = draft.timezone?.trim() || null;
     const dashboardCurveExclusions = normalizeCurveExclusions(
       draft.dashboard_curve_exclusions,
@@ -128,7 +130,6 @@ export function PreferencesPanel({
       draft.fleet_tag_visibility_overrides,
     );
     if (draftValidationError) {
-      setLocalError(draftValidationError);
       return;
     }
     savePendingRef.current = true;
@@ -149,7 +150,6 @@ export function PreferencesPanel({
   }
 
   function resetPreferences() {
-    setLocalError(null);
     setDraft(preferences);
   }
 
@@ -262,6 +262,12 @@ export function PreferencesPanel({
                     ? "Save applies only the operator preference draft."
                     : "Personal and browser-local controls are separated from shared system defaults."}
               </span>
+              <ActionFeedback
+                className="preferenceDraftValidation"
+                id={DRAFT_VALIDATION_ERROR_ID}
+                message={draftValidationError}
+                tone="warning"
+              />
             </div>
             <div className="buttonCluster">
               <button
@@ -274,9 +280,11 @@ export function PreferencesPanel({
                 <span>Reset draft</span>
               </button>
               <button
+                aria-describedby={
+                  draftValidationError ? DRAFT_VALIDATION_ERROR_ID : undefined
+                }
                 className="primaryAction compactAction"
                 disabled={saveDisabled}
-                title={draftValidationError ?? undefined}
                 type="submit"
               >
                 <Save size={16} />
@@ -452,6 +460,12 @@ export function PreferencesPanel({
               <label>
                 <span>Display timezone</span>
                 <input
+                  aria-describedby={
+                    timezoneValidationError
+                      ? DRAFT_VALIDATION_ERROR_ID
+                      : undefined
+                  }
+                  aria-invalid={Boolean(timezoneValidationError)}
                   list="operator-timezones"
                   name="timezone"
                   placeholder={browserTimezone}
@@ -809,7 +823,7 @@ export function PreferencesPanel({
 
           <ActionFeedback
             className="localActionFeedback preferencesActionFeedback"
-            message={localError ?? preferencesError}
+            message={preferencesError}
             tone="danger"
           />
 
@@ -824,9 +838,11 @@ export function PreferencesPanel({
               <span>Reset</span>
             </button>
             <button
+              aria-describedby={
+                draftValidationError ? DRAFT_VALIDATION_ERROR_ID : undefined
+              }
               className="primaryAction"
               disabled={saveDisabled}
-              title={draftValidationError ?? undefined}
               type="submit"
             >
               <Save size={18} />

@@ -123,7 +123,7 @@ export function ExecutionResultPanel({
         </span>
         <span>
           <strong>{progress.unavailable}</strong>
-          unavailable
+          pre-run unavailable
         </span>
         <span>
           <strong>{progress.unsuccessful}</strong>

@@ -2957,6 +2957,12 @@ function InstallCommand({
     installerVerified &&
     gatewayKeyValid &&
     gatewayEndpointsValid;
+  const gatewayValidationDescription = [
+    !gatewayKeyValid ? gatewayKeyErrorId : null,
+    !gatewayEndpointsValid ? gatewayEndpointsErrorId : null,
+  ]
+    .filter(Boolean)
+    .join(" ") || undefined;
   const installValidationDescription = [
     !gatewayKeyValid ? gatewayKeyErrorId : null,
     !gatewayEndpointsValid ? gatewayEndpointsErrorId : null,
@@ -2972,7 +2978,8 @@ function InstallCommand({
   const canSaveGatewayDefaults =
     operatorPreferences !== null &&
     gatewayDefaultsDirty &&
-    canBuildCommand &&
+    gatewayKeyValid &&
+    gatewayEndpointsValid &&
     !savePending;
   const saveGatewayDefaultsLabel = savePending
     ? "Saving"
@@ -3000,6 +3007,7 @@ function InstallCommand({
       : [
           "Installer command unavailable: rebuild from a Git checkout that",
           "contains the embedded source commit, or use a tagged release build.",
+          "Valid gateway defaults can still be saved for a manual install.",
         ].join(" ");
   const foregroundStartCommand =
     'env VPSMAN_AGENT_STATE_DIR="$PWD/vpsman-agent/state" ' +
@@ -3080,20 +3088,17 @@ function InstallCommand({
         <div>
           <strong>Agent install command</strong>
           <span>
-            Builds a paste-ready installer line pinned to this control-plane
-            build and verifies it before passing identity material. The private
-            key is shown once and is not saved by the console; the copied line
-            contains it, so use a trusted shell with history disabled and clear
-            the clipboard afterward. Gateway values can be saved as this
-            operator's reusable installer defaults.
-            {!RELEASE_TAG
+            {installerVerified
+              ? "Builds a paste-ready installer line pinned to this control-plane build and verifies it before passing identity material. The private key is shown once and is not saved by the console; the copied line contains it, so use a trusted shell with history disabled and clear the clipboard afterward. Gateway values can be saved as this operator's reusable installer defaults."
+              : "Command generation is disabled because this build has no verified installer asset. Valid gateway defaults can still be saved for a manual or reviewed install; use a full Git checkout or a tagged release build to copy a verified command."}
+            {!RELEASE_TAG && INSTALLER_ASSET_NAME
               ? " Source builds try the exact public commit first, then this console origin; transfer the installer manually if neither is reachable from the VPS."
               : ""}
           </span>
         </div>
         <div className="sectionActions">
           <button
-            aria-describedby={installValidationDescription}
+            aria-describedby={gatewayValidationDescription}
             className="secondaryAction compact"
             disabled={!canSaveGatewayDefaults}
             onClick={handleSaveGatewayDefaults}
@@ -3187,7 +3192,7 @@ function InstallCommand({
             id={gatewayKeyErrorId}
           >
             {normalizedGatewayServerPublicKeyHex.length === 0
-              ? "Gateway public key is required before copying the command."
+              ? "Gateway public key is required before saving defaults or copying the command."
               : "Gateway public key must be exactly 64 hex characters."}
           </small>
         ) : null}
@@ -3202,7 +3207,8 @@ function InstallCommand({
         {!installerVerified ? (
           <small className="installCommandHint warn" id={installerErrorId}>
             This source build could not read the pinned installer from its Git
-            commit. Use a full Git checkout or a tagged release build.
+            commit. Saving valid gateway defaults remains available; use a full
+            Git checkout or a tagged release build to copy a verified command.
           </small>
         ) : null}
       </div>

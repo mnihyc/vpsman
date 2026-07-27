@@ -17,7 +17,7 @@ rewrite of tagged history.
 | Source database | Upgrade to current migrations |
 | --- | --- |
 | Fresh database | Supported. |
-| `v0.1.4`, `v0.1.5`, or `v0.1.6` | Supported. These releases share byte-identical migration history for all versions they have in common. |
+| `v0.1.4`, `v0.1.5`, `v0.1.6`, or `v0.1.7` | Supported. These releases share byte-identical migration history for all versions they have in common. |
 | `v0.1.0` through `v0.1.3` | **Blocked pending an explicit compatibility bridge.** Those releases published different bytes and, in one case, a different filename for migration versions later folded into the baseline. The current SQLx migrator will correctly reject their recorded checksums. |
 
 The tagged drift is finite but not checksum-only:
@@ -86,3 +86,4 @@ Rules enforced by `scripts/audit-migrations.sh`:
 | `0021_backup_policy_retention_fairness.sql` | Adds a durable per-policy retention-scan cursor so bounded worker batches rotate fairly through every backup policy; one failing or alphabetically early policy can no longer starve the rest. |
 | `0022_auth_throttle_username_ip_scope.sql` | Adds the username/client-IP authentication throttle scope while retaining legacy scope values, preventing one hostile source from locking an operator out from every network. |
 | `0023_job_approval_dispatch_binding.sql` | Binds each approval-backed job to the exact reviewed approval. Existing matching jobs are backfilled deterministically, so unrelated or duplicate approval rows cannot block or authorize dispatch. |
+| `0024_fleet_alert_query_bounds.sql` | Persists validated capability-degradation metadata on terminal job targets and adds bounded fleet-alert/dashboard candidate indexes. Existing structured status output is safely backfilled; malformed or unrelated output remains ignored. |

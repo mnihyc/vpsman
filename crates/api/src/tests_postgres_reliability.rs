@@ -11,7 +11,8 @@ use uuid::Uuid;
 use vpsman_common::{
     payload_hash, plan_tunnel, AgentCapabilitySnapshot, AgentHello, AgentMetrics,
     AgentUpdateHeartbeat, CommandOutput, CpuStat, GatewayAgentHelloIngest, GatewayTelemetryIngest,
-    JobCommand, LoadAverage, OutputStream, RuntimeTunnelManager, TelemetryEnvelope,
+    JobCommand, LoadAverage, OutputStream, RuntimeTunnelControl, RuntimeTunnelManager,
+    TelemetryEnvelope, TunnelAddressPair, TunnelKind, TunnelPlanInput,
 };
 use vpsman_server_core::{
     JOB_STATUS_CANCELED, JOB_STATUS_COMPLETED, JOB_STATUS_CONTROL_TIMEOUT, JOB_STATUS_FAILED,
@@ -23,13 +24,16 @@ use crate::{
     gateway_client::GatewayDispatchClient,
     model::{
         AuthContext, BackupRequestStatus, BootstrapOperatorRequest, CreateBackupRequest,
-        CreateScheduleRequest, DeleteAgentRequest, JobOutputView, LoginRequest, NewServerArtifact,
-        WsEvent,
+        CreateScheduleRequest, DeleteAgentRequest, FleetAlertQuery, JobOutputView, LoginRequest,
+        NewServerArtifact, WsEvent,
     },
     model_alert_notifications::{
         CreateFleetAlertNotificationChannelRequest, FleetAlertNotificationCandidate,
     },
-    model_alert_policies::{CreateFleetAlertPolicyRequest, PolicyRuleRequest, VpsRuleQuery},
+    model_alert_policies::{
+        CreateFleetAlertPolicyRequest, PolicyAlertQuery, PolicyDryRunRequest, PolicyRuleRequest,
+        VpsRuleQuery,
+    },
     model_history::{HistoryDomain, HistoryRetentionPrunePlan},
     model_webhook_rules::{CreateWebhookRuleRequest, WebhookRuleDeliveryCandidate},
     repository::Repository,
@@ -174,6 +178,21 @@ async fn postgres_fleet_summary_accounts_for_disconnected_and_missing_contact_st
         .await
         .unwrap();
     }
+    sqlx::query(
+        r#"
+        INSERT INTO jobs (
+            id, command_type, privileged, status, target_count, payload_hash,
+            request_fingerprint, max_timeout_secs
+        )
+        SELECT
+            md5('fleet-summary-job-' || status)::uuid, 'shell', false, status, 1,
+            repeat('a', 64), 'fleet-summary-' || status, 30
+        FROM unnest(ARRAY['queued', 'running', 'completed', 'skipped']) AS status
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
 
     let summary = db.repo.fleet_summary().await.unwrap();
     assert_eq!(summary.total, 5);
@@ -183,6 +202,7 @@ async fn postgres_fleet_summary_accounts_for_disconnected_and_missing_contact_st
     assert_eq!(summary.stale, 1);
     assert_eq!(summary.unknown, 1);
     assert_eq!(summary.warnings, 4);
+    assert_eq!(summary.running_jobs, 2);
     assert_eq!(
         summary.online + summary.offline + summary.never + summary.stale + summary.unknown,
         summary.total
@@ -278,13 +298,14 @@ async fn postgres_telemetry_ingest_is_sequence_bound_and_idempotent() {
 }
 
 #[tokio::test]
-async fn postgres_telemetry_queries_scope_before_limit_and_preserve_rate_baseline() {
+async fn postgres_telemetry_queries_preserve_scope_baseline_and_multi_day_endpoints() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
     };
     for (client_id, key_byte) in [
         ("selected-telemetry", 51_u8),
         ("unrelated-telemetry", 52_u8),
+        ("multi-day-telemetry", 53_u8),
     ] {
         sqlx::query(
             r#"
@@ -385,6 +406,109 @@ async fn postgres_telemetry_queries_scope_before_limit_and_preserve_rate_baselin
         .unwrap();
     assert_eq!(rollups.len(), 1);
     assert_eq!(rollups[0].client_id, "selected-telemetry");
+
+    let coarse_start = current / 300 * 300;
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_rollups (
+            client_id, bucket_start, bucket_secs, sample_count,
+            cpu_load_1_avg, cpu_load_1_max,
+            memory_total_bytes_max, memory_available_bytes_avg, memory_available_bytes_min,
+            disk_total_bytes_max, disk_available_bytes_avg, disk_available_bytes_min,
+            network_rx_bytes_max, network_tx_bytes_max, latest_observed_at
+        )
+        VALUES
+            (
+                'selected-telemetry', to_timestamp($1::double precision), 60, 1,
+                1.0, 1.2, 1000, 900, 900, 2000, 1900, 1900, 0, 0,
+                to_timestamp($1::double precision)
+            ),
+            (
+                'selected-telemetry', to_timestamp($2::double precision), 60, 3,
+                3.0, 3.4, 1000, 500, 500, 2000, 1100, 1100, 0, 0,
+                to_timestamp($2::double precision)
+            )
+        "#,
+    )
+    .bind((coarse_start + 7) as f64)
+    .bind((coarse_start + 13) as f64)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let aggregated = db
+        .repo
+        .list_dashboard_telemetry_rollups(
+            2,
+            Some(coarse_start),
+            Some(coarse_start + 299),
+            Some(60),
+            300,
+            &scope,
+        )
+        .await
+        .unwrap();
+    assert_eq!(aggregated.len(), 1);
+    assert_eq!(
+        crate::util::parse_timestamp_unix(&aggregated[0].bucket_start),
+        Some(coarse_start)
+    );
+    assert_eq!(aggregated[0].bucket_secs, 300);
+    assert_eq!(aggregated[0].sample_count, 5);
+    assert!((aggregated[0].cpu_load_1_avg - 2.1).abs() < 0.000_001);
+    assert_eq!(aggregated[0].cpu_load_1_max, 3.4);
+    assert_eq!(aggregated[0].memory_available_bytes_avg, 580);
+    assert_eq!(aggregated[0].memory_available_bytes_min, 500);
+    assert_eq!(aggregated[0].disk_available_bytes_avg, 1340);
+    assert_eq!(aggregated[0].disk_available_bytes_min, 1100);
+
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_rollups (
+            client_id, bucket_start, bucket_secs, sample_count,
+            cpu_load_1_avg, cpu_load_1_max,
+            memory_total_bytes_max, memory_available_bytes_avg, memory_available_bytes_min,
+            disk_total_bytes_max, disk_available_bytes_avg, disk_available_bytes_min,
+            network_rx_bytes_max, network_tx_bytes_max, latest_observed_at
+        )
+        VALUES
+            (
+                'multi-day-telemetry', to_timestamp(0), 60, 1,
+                1.0, 1.0, 1000, 900, 900, 2000, 1900, 1900, 0, 0,
+                to_timestamp(0)
+            ),
+            (
+                'multi-day-telemetry', to_timestamp(172800), 60, 1,
+                2.0, 2.0, 1000, 800, 800, 2000, 1800, 1800, 0, 0,
+                to_timestamp(172800)
+            ),
+            (
+                'multi-day-telemetry', to_timestamp(345600), 60, 1,
+                3.0, 3.0, 1000, 700, 700, 2000, 1700, 1700, 0, 0,
+                to_timestamp(345600)
+            )
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let multi_day_rollups = db
+        .repo
+        .list_dashboard_telemetry_rollups(
+            2,
+            Some(0),
+            Some(345_600),
+            Some(60),
+            345_600,
+            &["multi-day-telemetry".to_string()],
+        )
+        .await
+        .unwrap();
+    let multi_day_bucket_starts = multi_day_rollups
+        .iter()
+        .map(|row| crate::util::parse_timestamp_unix(&row.bucket_start).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(multi_day_bucket_starts, vec![0, 345_600]);
+
     let rates = db
         .repo
         .list_dashboard_telemetry_network_rates(
@@ -416,6 +540,668 @@ async fn postgres_telemetry_queries_scope_before_limit_and_preserve_rate_baselin
     assert_eq!(latest_mixed.len(), 1);
     assert_eq!(latest_mixed[0].bucket_secs, 300);
     assert_eq!(latest_mixed[0].rx_bytes_delta, 15_000);
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_policy_rollup_lookup_is_selected_and_not_public_page_bounded() {
+    const CLIENT_COUNT: i32 = 5_001;
+    const PUBLIC_PAGE_SIZE: i64 = 5_000;
+
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO clients (id, display_name, public_key, status)
+        SELECT
+            format('policy-rollup-scale-%s', value),
+            format('Policy Rollup Scale %s', value),
+            decode(lpad(to_hex(value), 64, '0'), 'hex'),
+            'online'
+        FROM generate_series(1, $1) AS generated(value)
+        "#,
+    )
+    .bind(CLIENT_COUNT)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_rollups (
+            client_id, bucket_start, bucket_secs, sample_count,
+            cpu_load_1_avg, cpu_load_1_max,
+            memory_total_bytes_max, memory_available_bytes_avg, memory_available_bytes_min,
+            disk_total_bytes_max, disk_available_bytes_avg, disk_available_bytes_min,
+            network_rx_bytes_max, network_tx_bytes_max, latest_observed_at
+        )
+        SELECT
+            id, date_trunc('minute', now()), 60, 1,
+            2.0, 2.0, 1000, 500, 500, 2000, 1500, 1500, 0, 0, now()
+        FROM clients
+        WHERE id LIKE 'policy-rollup-scale-%'
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let client_ids = (1..=CLIENT_COUNT)
+        .map(|value| format!("policy-rollup-scale-{value}"))
+        .collect::<Vec<_>>();
+
+    let public_page = db
+        .repo
+        .list_latest_telemetry_rollups(PUBLIC_PAGE_SIZE, None, None)
+        .await
+        .unwrap();
+    assert_eq!(public_page.len(), PUBLIC_PAGE_SIZE as usize);
+    let selected = db
+        .repo
+        .list_latest_telemetry_rollups_for_clients(&client_ids, None)
+        .await
+        .unwrap();
+    assert_eq!(selected.len(), CLIENT_COUNT as usize);
+    let preview = db
+        .repo
+        .dry_run_fleet_alert_policy(&PolicyDryRunRequest {
+            id: None,
+            name: "postgres-large-fleet-policy".to_string(),
+            enabled: true,
+            selector_expression: "*".to_string(),
+            rules: vec![PolicyRuleRequest {
+                id: None,
+                name: "all-client threshold".to_string(),
+                enabled: true,
+                traffic_selector: None,
+                condition_expression: "cpu.load_1 >= 1".to_string(),
+                window_secs: 0,
+                severity: "warning".to_string(),
+            }],
+            notes: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(preview.matched_vps_count, CLIENT_COUNT as usize);
+    assert_eq!(preview.rule_previews[0].true_count, i64::from(CLIENT_COUNT));
+    assert_eq!(preview.rule_previews[0].incomplete_count, 0);
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_fleet_alert_candidates_survive_public_caps_and_parse_real_skips() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    for (client_id, display_name, key_byte) in [
+        ("alert-target-a", "Alert Target A", 91_u8),
+        ("alert-target-b", "Alert Target B", 92_u8),
+        ("alert-filler", "Alert Filler", 93_u8),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO clients (id, display_name, public_key, status)
+            VALUES ($1, $2, $3, 'online')
+            "#,
+        )
+        .bind(client_id)
+        .bind(display_name)
+        .bind(vec![key_byte; 32])
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+
+    let policy_alert_id = Uuid::new_v4();
+    let policy_group_id = Uuid::new_v4();
+    let policy_rule_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO policy_alerts (
+            id, policy_group_id, policy_rule_id, client_id, trigger_generation,
+            severity, category, title, detail, payload, observed_at, created_at
+        )
+        VALUES (
+            $1, $2, $3, 'alert-target-a', 0,
+            'warning', 'resource', 'Older scoped alert',
+            'must survive unrelated newer rows', '{"regression":"policy_candidate"}'::jsonb,
+            '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z'
+        )
+        "#,
+    )
+    .bind(policy_alert_id)
+    .bind(policy_group_id)
+    .bind(policy_rule_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO policy_alerts (
+            id, policy_group_id, policy_rule_id, client_id, trigger_generation,
+            severity, category, title, detail, payload, observed_at, created_at
+        )
+        SELECT
+            md5('fleet-policy-filler-' || value::text)::uuid,
+            $1, $2, 'alert-filler', value,
+            'critical', 'resource', 'Newer filler', 'outside requested client',
+            '{}'::jsonb, now() + value * interval '1 second',
+            now() + value * interval '1 second'
+        FROM generate_series(1, 200) AS generated(value)
+        "#,
+    )
+    .bind(policy_group_id)
+    .bind(policy_rule_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let failed_backup_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO backup_requests (
+            id, client_id, paths, include_config, status, payload_hash,
+            command_scope, created_at
+        )
+        VALUES (
+            $1, 'alert-target-a', ARRAY['/srv/app'], true, 'execution_failed',
+            repeat('a', 64), 'client:alert-target-a', '2020-01-01T00:00:00Z'
+        )
+        "#,
+    )
+    .bind(failed_backup_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO backup_requests (
+            id, client_id, paths, include_config, status, payload_hash,
+            command_scope, created_at
+        )
+        SELECT
+            md5('fleet-backup-filler-' || value::text)::uuid,
+            'alert-filler', ARRAY['/tmp'], false, 'artifact_metadata_recorded',
+            repeat('b', 64), 'client:alert-filler',
+            now() + value * interval '1 second'
+        FROM generate_series(1, 1001) AS generated(value)
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let backup_counts = db
+        .repo
+        .source_backup_evidence_counts(&["alert-target-a".to_string()])
+        .await
+        .unwrap();
+    assert_eq!(backup_counts["alert-target-a"].backup_request_count, 1);
+
+    let failed_job_id = Uuid::new_v4();
+    let capability_job_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO jobs (
+            id, command_type, privileged, status, target_count, payload_hash,
+            request_fingerprint, max_timeout_secs, created_at, completed_at
+        )
+        VALUES
+            (
+                $1, 'shell', false, 'failed', 1, repeat('c', 64),
+                'fleet-failed-job', 30,
+                '2020-01-01T00:00:00Z', '2020-01-01T00:01:00Z'
+            ),
+            (
+                $2, 'agent_update', true, 'skipped', 1, repeat('d', 64),
+                'fleet-capability-job', 30,
+                '2020-01-01T00:02:00Z', '2020-01-01T00:03:00Z'
+            )
+        "#,
+    )
+    .bind(failed_job_id)
+    .bind(capability_job_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO jobs (
+            id, command_type, privileged, status, target_count, payload_hash,
+            request_fingerprint, max_timeout_secs, created_at, completed_at
+        )
+        SELECT
+            md5('fleet-job-filler-' || value::text)::uuid,
+            'shell', false, 'completed', 1, repeat('e', 64),
+            'fleet-job-filler-' || value::text, 30,
+            now() + value * interval '1 second',
+            now() + value * interval '1 second'
+        FROM generate_series(1, 200) AS generated(value)
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO job_targets (
+            job_id, client_id, status, message, exit_code,
+            started_at, completed_at,
+            capability_degraded_reason, capability_degraded_hint
+        )
+        VALUES (
+            $1, 'alert-target-b', 'skipped',
+            'target agent lacks agent update capability', 0,
+            '2020-01-01T00:02:00Z', '2020-01-01T00:03:00Z',
+            'target_agent_lacks_agent_update_capability',
+            'Run the agent with host mutation capability before retrying.'
+        )
+        "#,
+    )
+    .bind(capability_job_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let capability_reason = "target_agent_lacks_agent_update_capability";
+    let capability_hint = "Run the agent with host mutation capability before retrying.";
+    let capability_output = serde_json::to_vec(&serde_json::json!({
+        "type": "capability_degraded",
+        "status": "skipped",
+        "client_id": "alert-target-b",
+        "command_type": "agent_update",
+        "reason": capability_reason,
+        "hint": capability_hint,
+    }))
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO job_outputs (
+            job_id, client_id, seq, stream, data, exit_code, done, storage, created_at
+        )
+        VALUES (
+            $1, 'alert-target-b', 0, 'status', $2, 0, true, 'inline',
+            '2020-01-01T00:03:00Z'
+        )
+        "#,
+    )
+    .bind(capability_job_id)
+    .bind(capability_output)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let operator = postgres_network_operator(&db.repo).await;
+    let tunnel_input = postgres_alert_test_tunnel_input();
+    let tunnel_plan = plan_tunnel(&tunnel_input).unwrap();
+    let saved_tunnel = db
+        .repo
+        .record_tunnel_plan(&tunnel_input, &tunnel_plan, true, &operator)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_tunnels (
+            client_id, observed_at, interface, kind, ownership_mode,
+            mutation_policy, source, telemetry_plan_id, telemetry_plan_name,
+            telemetry_plan_runtime_manager, telemetry_endpoint_side,
+            telemetry_peer_client_id, adapter_health
+        )
+        VALUES (
+            'alert-target-a', '2020-01-01T00:00:00Z', 'gre42', 'gre',
+            'external_managed_adapter', 'adapter_owned', 'telemetry',
+            $1, $2, 'external_managed_adapter', 'left', 'alert-target-b',
+            '{"status":"failed"}'::jsonb
+        )
+        "#,
+    )
+    .bind(saved_tunnel.id.to_string())
+    .bind(&saved_tunnel.name)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_tunnels (
+            client_id, observed_at, interface, kind, ownership_mode,
+            mutation_policy, source, adapter_health
+        )
+        SELECT
+            'alert-filler', now() + value * interval '1 second',
+            'filler' || value::text, 'gre', 'external_managed_adapter',
+            'adapter_owned', 'telemetry', '{"status":"ok","success":true}'::jsonb
+        FROM generate_series(1, 5000) AS generated(value)
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    assert!(!db
+        .repo
+        .list_policy_alerts(&PolicyAlertQuery {
+            limit: Some(200),
+            client_id: None,
+            severity: None,
+            category: None,
+            policy_group_id: None,
+        })
+        .await
+        .unwrap()
+        .iter()
+        .any(|alert| alert.id == policy_alert_id));
+    assert!(!db
+        .repo
+        .list_backup_requests(200)
+        .await
+        .unwrap()
+        .iter()
+        .any(|backup| backup.id == failed_backup_id));
+    assert!(db
+        .repo
+        .list_jobs(200)
+        .await
+        .unwrap()
+        .iter()
+        .all(|job| job.id != failed_job_id && job.id != capability_job_id));
+    assert!(
+        db.repo
+            .list_telemetry_tunnels(5_000, None, None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|tunnel| tunnel.client_id == "alert-target-a"),
+        "undeclared telemetry noise must be discarded before the public tunnel page limit"
+    );
+
+    let policy_fleet_alert_id = format!("policy-alert:{policy_alert_id}");
+    sqlx::query(
+        r#"
+        INSERT INTO fleet_alert_states (
+            alert_id, state, escalation_level, reason, created_at, updated_at
+        )
+        VALUES (
+            $1, 'acknowledged', 0, 'known old policy alert',
+            '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z'
+        )
+        "#,
+    )
+    .bind(&policy_fleet_alert_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO fleet_alert_states (
+            alert_id, state, escalation_level, created_at, updated_at
+        )
+        SELECT
+            'unrelated:' || value::text, 'open', 0,
+            now() + value * interval '1 second',
+            now() + value * interval '1 second'
+        FROM generate_series(1, 1000) AS generated(value)
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert!(db
+        .repo
+        .list_fleet_alert_states(1_000, None)
+        .await
+        .unwrap()
+        .iter()
+        .all(|state| state.alert_id != policy_fleet_alert_id));
+
+    let state = postgres_app_state(&db);
+    let policy_alerts = state
+        .list_fleet_alerts(FleetAlertQuery {
+            limit: Some(1),
+            client_id: Some("alert-target-a".to_string()),
+            severity: Some("warning".to_string()),
+            category: Some("resource".to_string()),
+            operator_state: Some("acknowledged".to_string()),
+            include_muted: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(policy_alerts.len(), 1);
+    assert_eq!(policy_alerts[0].id, policy_fleet_alert_id);
+
+    let backup_alerts = state
+        .list_fleet_alerts(FleetAlertQuery {
+            limit: Some(1),
+            client_id: Some("alert-target-a".to_string()),
+            severity: Some("critical".to_string()),
+            category: Some("backup".to_string()),
+            operator_state: None,
+            include_muted: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(backup_alerts.len(), 1);
+    assert_eq!(backup_alerts[0].target_id, failed_backup_id.to_string());
+
+    let job_alerts = state
+        .list_fleet_alerts(FleetAlertQuery {
+            limit: Some(1),
+            client_id: None,
+            severity: Some("critical".to_string()),
+            category: Some("job".to_string()),
+            operator_state: None,
+            include_muted: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(job_alerts.len(), 1);
+    assert_eq!(job_alerts[0].target_id, failed_job_id.to_string());
+
+    let capability_alerts = state
+        .list_fleet_alerts(FleetAlertQuery {
+            limit: Some(1),
+            client_id: Some("alert-target-b".to_string()),
+            severity: Some("warning".to_string()),
+            category: Some("capability_degraded".to_string()),
+            operator_state: None,
+            include_muted: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(capability_alerts.len(), 1);
+    assert_eq!(capability_alerts[0].status, capability_reason);
+    assert_eq!(capability_alerts[0].detail, capability_hint);
+    assert_eq!(capability_alerts[0].evidence["target_status"], "skipped");
+
+    let tunnel_alerts = state
+        .list_fleet_alerts(FleetAlertQuery {
+            limit: Some(1),
+            client_id: Some("alert-target-a".to_string()),
+            severity: Some("critical".to_string()),
+            category: Some("network".to_string()),
+            operator_state: None,
+            include_muted: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(tunnel_alerts.len(), 1);
+    assert_eq!(tunnel_alerts[0].status, "tunnel_adapter_degraded");
+    assert_eq!(
+        tunnel_alerts[0].evidence["adapter_health"]["success"],
+        false
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_tunnel_adapter_failures_only_degrade_external_managed_plans() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+    let cases = [
+        (
+            RuntimeTunnelManager::AgentIproute2Managed,
+            "agent_iproute2_managed",
+            "external_managed_adapter",
+            "skipped",
+            false,
+        ),
+        (
+            RuntimeTunnelManager::ExternalObserved,
+            "external_observed",
+            "external_observed",
+            "skipped",
+            false,
+        ),
+        (
+            RuntimeTunnelManager::ExternalManagedAdapter,
+            "external_managed_adapter",
+            "agent_iproute2_managed",
+            "failed",
+            true,
+        ),
+    ];
+    let source_template_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO source_templates (
+            id, domain, name, scope, definition
+        )
+        VALUES (
+            $1, 'runtime_tunnel_adapter', 'shared:adapter-semantics', 'shared',
+            '{"manager":"external_managed_adapter"}'::jsonb
+        )
+        "#,
+    )
+    .bind(source_template_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    for (index, (manager, manager_label, stored_manager, health_status, expected_degraded)) in
+        cases.into_iter().enumerate()
+    {
+        let left_client_id = format!("adapter-semantics-{index}-a");
+        let right_client_id = format!("adapter-semantics-{index}-b");
+        for (client_id, key_byte) in [
+            (left_client_id.as_str(), 110_u8 + index as u8 * 2),
+            (right_client_id.as_str(), 111_u8 + index as u8 * 2),
+        ] {
+            sqlx::query(
+                r#"
+                INSERT INTO clients (id, display_name, public_key, status)
+                VALUES ($1, $1, $2, 'online')
+                "#,
+            )
+            .bind(client_id)
+            .bind(vec![key_byte; 32])
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO client_source_template_assignments (
+                client_id, domain, template_id
+            )
+            VALUES ($1, 'runtime_tunnel_adapter', $2)
+            "#,
+        )
+        .bind(&left_client_id)
+        .bind(source_template_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let mut input = crate::tests_network::test_plan_input(manager, false);
+        input.name = format!("adapter-semantics-{index}");
+        input.interface_name = format!("tas{index}");
+        input.left_client_id = left_client_id.clone();
+        input.right_client_id = right_client_id.clone();
+        input.address_pool_cidr = format!("10.20.{index}.0/29");
+        input.ipv4_tunnel = Some(TunnelAddressPair {
+            left: format!("10.20.{index}.0"),
+            right: format!("10.20.{index}.1"),
+            prefix_len: 31,
+        });
+        let plan = plan_tunnel(&input).unwrap();
+        let saved = db
+            .repo
+            .record_tunnel_plan(&input, &plan, true, &operator)
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO telemetry_tunnels (
+                client_id, observed_at, interface, kind, ownership_mode,
+                mutation_policy, source, telemetry_plan_id, telemetry_plan_name,
+                telemetry_plan_runtime_manager, telemetry_endpoint_side,
+                telemetry_peer_client_id, traffic_status, adapter_health
+            )
+            VALUES (
+                $1, '2020-01-01T00:00:00Z', $2, 'wireguard', $3,
+                'managed_desired', 'telemetry', $4, $5, $6, 'left', $7, 'ok',
+                jsonb_build_object(
+                    'status', $8::text,
+                    'configured', false,
+                    'success', false
+                )
+            )
+            "#,
+        )
+        .bind(&left_client_id)
+        .bind(&input.interface_name)
+        .bind(manager_label)
+        .bind(saved.id.to_string())
+        .bind(&saved.name)
+        .bind(stored_manager)
+        .bind(&right_client_id)
+        .bind(health_status)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let candidates = db
+            .repo
+            .list_fleet_alert_tunnel_candidates(
+                Some(&left_client_id),
+                None,
+                Some("critical"),
+                None,
+                None,
+                200,
+            )
+            .await
+            .unwrap();
+        assert_eq!(!candidates.is_empty(), expected_degraded, "{manager_label}");
+        let source_status = db
+            .repo
+            .list_source_status(Some(&left_client_id), Some("runtime_tunnel_adapter"))
+            .await
+            .unwrap();
+        assert_eq!(source_status.len(), 1, "{manager_label}");
+        assert_eq!(
+            source_status[0].status == "degraded",
+            expected_degraded,
+            "{manager_label}"
+        );
+        let network_alerts = postgres_app_state(&db)
+            .list_fleet_alerts(FleetAlertQuery {
+                limit: Some(10),
+                client_id: Some(left_client_id),
+                severity: Some("critical".to_string()),
+                category: Some("network".to_string()),
+                operator_state: None,
+                include_muted: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            !network_alerts.is_empty(),
+            expected_degraded,
+            "{manager_label}"
+        );
+    }
 
     db.cleanup().await;
 }
@@ -1213,6 +1999,39 @@ fn workspace_migrations_dir() -> std::path::PathBuf {
         .join("..")
         .join("..")
         .join("migrations")
+}
+
+fn postgres_alert_test_tunnel_input() -> TunnelPlanInput {
+    TunnelPlanInput {
+        name: "postgres-alert-gre42".to_string(),
+        interface_name: "gre42".to_string(),
+        kind: TunnelKind::Gre,
+        runtime_control: RuntimeTunnelControl {
+            manager: RuntimeTunnelManager::ExternalManagedAdapter,
+            left_adapter_template_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+            right_adapter_template_id: Some("22222222-2222-4222-8222-222222222222".to_string()),
+            ..Default::default()
+        },
+        runtime_topology: Default::default(),
+        left_client_id: "alert-target-a".to_string(),
+        right_client_id: "alert-target-b".to_string(),
+        left_remote_underlay: "198.51.100.10".to_string(),
+        right_remote_underlay: "203.0.113.20".to_string(),
+        left_local_underlay: None,
+        right_local_underlay: None,
+        address_pool_cidr: "10.42.0.0/30".to_string(),
+        reserved_addresses: Vec::new(),
+        ipv4_tunnel: Some(TunnelAddressPair {
+            left: "10.42.0.0".to_string(),
+            right: "10.42.0.1".to_string(),
+            prefix_len: 31,
+        }),
+        ipv6_address_pool_cidr: None,
+        ipv6_tunnel: None,
+        latency_primary_family: Default::default(),
+        bandwidth_mbps: 100,
+        ospf: None,
+    }
 }
 
 fn postgres_app_state(db: &PgReliabilityTestDb) -> AppState {

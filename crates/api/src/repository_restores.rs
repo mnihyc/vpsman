@@ -93,6 +93,7 @@ fn restore_plan_order_by(sort: Option<&str>, descending: bool) -> &'static str {
 }
 
 impl Repository {
+    #[cfg(test)]
     pub(crate) async fn list_restore_plans(&self, limit: i64) -> Result<Vec<RestorePlanView>> {
         match self {
             Self::Memory(memory) => {

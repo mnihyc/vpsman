@@ -112,7 +112,7 @@ if [[ "${VPSMAN_RELEASE_SKIP_MUSL:-0}" == "1" ]]; then
   skip_step cargo-build-vpsctl-aarch64-musl "VPSMAN_RELEASE_SKIP_MUSL=1"
 else
   run_step cargo-build-agent-x86_64-musl \
-    cargo build -p vpsman-agent --target x86_64-unknown-linux-musl
+    cargo build -p vpsman-agent --release --target x86_64-unknown-linux-musl
   run_step cargo-build-agent-aarch64-musl \
     cargo build -p vpsman-agent --target aarch64-unknown-linux-musl
   run_step cargo-build-vpsctl-x86_64-musl \
@@ -192,7 +192,7 @@ else
   run_step smoke-agent-install-distro-matrix \
     env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-agent-install-distro-matrix.sh
   run_step smoke-agent-resource-budget \
-    bash scripts/smoke-agent-resource-budget.sh
+    env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-agent-resource-budget.sh
   run_step smoke-agent-reconnect-churn \
     env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-agent-reconnect-churn.sh
   run_step smoke-postgres-persistence \

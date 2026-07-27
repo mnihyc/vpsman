@@ -24,6 +24,9 @@ import type { ActiveView, AgentView, FleetSummary } from "./types";
 import type { PrivilegeMaterial } from "./privilege";
 import {
   defaultSubpages,
+  FLEET_DETAIL_LIMIT,
+  HISTORY_DETAIL_LIMIT,
+  isActionableFleetAlertState,
   navItems,
   normalizeSubpage,
   viewLabel,
@@ -747,6 +750,12 @@ export function App() {
   const hasFleetScope =
     fleetViews.fleetQuery.trim().length > 0 ||
     fleetViews.activeSavedViewId !== null;
+  const recordPageBounds = {
+    backupArtifacts: dashboard.backupArtifacts.length >= HISTORY_DETAIL_LIMIT,
+    backups: dashboard.backups.length >= HISTORY_DETAIL_LIMIT,
+    fileTransfers: dashboard.fileTransfers.length >= FLEET_DETAIL_LIMIT,
+    fleetAlerts: dashboard.fleetAlerts.length >= FLEET_DETAIL_LIMIT,
+  };
   const shellSummary =
     hasFleetScope || activeView === "Home" || activeView === "Fleet"
       ? visibleSummary
@@ -760,7 +769,7 @@ export function App() {
     );
     const activeAlerts = dashboard.fleetAlerts.filter(
       (alert) =>
-        alert.operator_state !== "acknowledged" &&
+        isActionableFleetAlertState(alert.operator_state) &&
         (alert.client_id === null || scopedClientIds.has(alert.client_id)),
     );
     const critical = activeAlerts.filter(
@@ -770,7 +779,13 @@ export function App() {
       (alert) => alert.severity === "warning",
     ).length;
     const info = activeAlerts.length - critical - warning;
-    return { critical, info, total: activeAlerts.length, warning };
+    return {
+      critical,
+      info,
+      total: activeAlerts.length,
+      truncated: dashboard.fleetAlerts.length >= FLEET_DETAIL_LIMIT,
+      warning,
+    };
   }, [dashboard.agents, dashboard.fleetAlerts, hasFleetScope, visibleAgents]);
   const homeScopedRecords = useMemo(() => {
     if (!hasFleetScope) {
@@ -1270,12 +1285,12 @@ export function App() {
         backups={homeScopedRecords.backups}
         dashboardError={dashboard.dashboardOverviewError}
         dashboardLoading={dashboard.dashboardOverviewLoading}
-        dashboardOverview={dashboard.dashboardOverview}
         dashboardPreferences={dashboard.dashboardPreferences}
         dashboardWindow={dashboard.dashboardOverviewWindow}
         fileTransfers={homeScopedRecords.fileTransfers}
         fleetAlerts={homeScopedRecords.fleetAlerts}
         jobs={dashboard.jobs}
+        recordBounds={recordPageBounds}
         schedules={homeScopedRecords.schedules}
         scopeFiltered={hasFleetScope}
         summary={visibleSummary}
@@ -1415,6 +1430,7 @@ export function App() {
         backups={dashboard.backups}
         fileTransfers={dashboard.fileTransfers}
         fleetAlerts={dashboard.fleetAlerts}
+        fleetAlertsTruncated={recordPageBounds.fleetAlerts}
         fleetAlertPolicies={dashboard.fleetAlertPolicies}
         jobs={dashboard.jobs}
         loading={
@@ -2139,6 +2155,7 @@ export function App() {
             fileTransfers={dashboard.fileTransfers}
             fleetAlerts={dashboard.fleetAlerts}
             jobs={dashboard.jobs}
+            recordBounds={recordPageBounds}
             runningJobCount={Math.max(
               dashboard.jobs.filter((job) => isActiveJobStatus(job.status))
                 .length,

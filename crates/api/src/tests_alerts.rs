@@ -1,40 +1,12 @@
 use super::*;
+use base64::Engine as _;
 use serde_json::json;
 use vpsman_common::{AgentCapabilitySnapshot, AgentPrivilegeMode};
 
 #[tokio::test]
 async fn fleet_alerts_derive_actionable_current_status() {
     let repo = Repository::Memory(MemoryState::default());
-    let tunnel_input = vpsman_common::TunnelPlanInput {
-        name: "edge-a-gre42".to_string(),
-        interface_name: "gre42".to_string(),
-        kind: vpsman_common::TunnelKind::Gre,
-        runtime_control: vpsman_common::RuntimeTunnelControl {
-            manager: vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter,
-            left_adapter_template_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
-            right_adapter_template_id: Some("22222222-2222-4222-8222-222222222222".to_string()),
-            ..Default::default()
-        },
-        runtime_topology: Default::default(),
-        left_client_id: "edge-a".to_string(),
-        right_client_id: "edge-b".to_string(),
-        left_remote_underlay: "198.51.100.10".to_string(),
-        right_remote_underlay: "203.0.113.20".to_string(),
-        left_local_underlay: None,
-        right_local_underlay: None,
-        address_pool_cidr: "10.42.0.0/30".to_string(),
-        reserved_addresses: Vec::new(),
-        ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
-            left: "10.42.0.0".to_string(),
-            right: "10.42.0.1".to_string(),
-            prefix_len: 31,
-        }),
-        ipv6_address_pool_cidr: None,
-        ipv6_tunnel: None,
-        latency_primary_family: Default::default(),
-        bandwidth_mbps: 100,
-        ospf: None,
-    };
+    let tunnel_input = alert_test_tunnel_input();
     let tunnel_plan = vpsman_common::plan_tunnel(&tunnel_input).unwrap();
     let saved_tunnel = repo
         .record_tunnel_plan(&tunnel_input, &tunnel_plan, true, &test_operator())
@@ -150,14 +122,45 @@ async fn fleet_alerts_derive_actionable_current_status() {
         memory.job_targets.write().await.push(JobTargetView {
             job_id: backup_job,
             client_id: "edge-b".to_string(),
-            status: "degraded_unprivileged".to_string(),
-            message: None,
-            exit_code: None,
+            status: "skipped".to_string(),
+            message: Some("target lacks the required capability".to_string()),
+            exit_code: Some(0),
             started_at: Some("105".to_string()),
             deadline_at: None,
             completed_at: Some("110".to_string()),
             process_incarnation_id: None,
         });
+        let status = json!({
+            "type": "capability_degraded",
+            "status": "skipped",
+            "client_id": "edge-b",
+            "command_type": "backup",
+            "reason": "target_agent_lacks_root_runtime_network_capability",
+            "hint": "Run this agent with root privileges before retrying the backup.",
+        });
+        memory.job_outputs.write().await.push(JobOutputView {
+            job_id: backup_job,
+            client_id: "edge-b".to_string(),
+            seq: 0,
+            stream: "status".to_string(),
+            data_base64: base64::engine::general_purpose::STANDARD
+                .encode(serde_json::to_vec(&status).unwrap()),
+            storage: "inline".to_string(),
+            artifact_object_key: None,
+            artifact_sha256_hex: None,
+            artifact_size_bytes: None,
+            exit_code: Some(0),
+            done: true,
+            received_at: None,
+            created_at: "110".to_string(),
+        });
+        memory.capability_degraded_job_targets.write().await.insert(
+            (backup_job, "edge-b".to_string()),
+            (
+                "target_agent_lacks_root_runtime_network_capability".to_string(),
+                "Run this agent with root privileges before retrying the backup.".to_string(),
+            ),
+        );
     }
 
     let state = alert_test_state(repo);
@@ -175,8 +178,21 @@ async fn fleet_alerts_derive_actionable_current_status() {
     assert_alert_category(&alerts, "agent_status");
     assert_alert_category(&alerts, "network");
     assert_alert_category(&alerts, "backup");
-    assert_alert_category(&alerts, "unprivileged_blocked");
+    assert_alert_category(&alerts, "capability_degraded");
     assert_alert_category(&alerts, "source_readiness");
+    let capability_alert = alerts
+        .iter()
+        .find(|alert| alert.category == "capability_degraded")
+        .unwrap();
+    assert_eq!(
+        capability_alert.status,
+        "target_agent_lacks_root_runtime_network_capability"
+    );
+    assert_eq!(
+        capability_alert.detail,
+        "Run this agent with root privileges before retrying the backup."
+    );
+    assert_eq!(capability_alert.evidence["target_status"], "skipped");
     assert!(alerts
         .windows(2)
         .all(|pair| severity_rank_for_test(&pair[0].severity)
@@ -197,7 +213,163 @@ async fn fleet_alerts_derive_actionable_current_status() {
         alert.client_id.as_deref() == Some("edge-b") && alert.severity == "warning"
     }));
     assert_alert_category(&edge_b, "agent_status");
-    assert_alert_category(&edge_b, "unprivileged_blocked");
+    assert_alert_category(&edge_b, "capability_degraded");
+}
+
+#[tokio::test]
+async fn tunnel_adapter_failures_only_degrade_external_managed_plans() {
+    for (manager, manager_label, health_status, expected_degraded) in [
+        (
+            vpsman_common::RuntimeTunnelManager::AgentIproute2Managed,
+            "agent_iproute2_managed",
+            "skipped",
+            false,
+        ),
+        (
+            vpsman_common::RuntimeTunnelManager::ExternalObserved,
+            "external_observed",
+            "skipped",
+            false,
+        ),
+        (
+            vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter,
+            "external_managed_adapter",
+            "failed",
+            true,
+        ),
+    ] {
+        let repo = Repository::Memory(MemoryState::default());
+        let input = crate::tests_network::test_plan_input(manager, false);
+        let plan = vpsman_common::plan_tunnel(&input).unwrap();
+        let saved = repo
+            .record_tunnel_plan(&input, &plan, true, &test_operator())
+            .await
+            .unwrap();
+        if let Repository::Memory(memory) = &repo {
+            memory.agents.write().await.push(AgentView {
+                id: "client-a".to_string(),
+                display_name: "Client A".to_string(),
+                status: "online".to_string(),
+                tags: Vec::new(),
+                registration_ip: None,
+                last_ip: None,
+                last_seen_at: None,
+                arch: None,
+                internal_build_number: 1,
+                process_incarnation_id: None,
+                stale_since: None,
+                stale_reason: None,
+                capabilities: AgentCapabilitySnapshot::default(),
+            });
+            memory
+                .telemetry_tunnels
+                .write()
+                .await
+                .push(TelemetryTunnelView {
+                    client_id: "client-a".to_string(),
+                    observed_at: "200".to_string(),
+                    interface: input.interface_name.clone(),
+                    kind: "wireguard".to_string(),
+                    ownership_mode: manager_label.to_string(),
+                    mutation_policy: "managed_desired".to_string(),
+                    plan_id: Some(saved.id),
+                    plan_name: Some(saved.name.clone()),
+                    plan_runtime_manager: Some(manager_label.to_string()),
+                    endpoint_side: Some("left".to_string()),
+                    peer_client_id: Some("client-b".to_string()),
+                    source: "telemetry".to_string(),
+                    operstate: Some("up".to_string()),
+                    mtu: Some(1476),
+                    link_type: None,
+                    address: Some("10.10.0.0".to_string()),
+                    rx_bytes: 100,
+                    tx_bytes: 200,
+                    traffic_source: Some("interface_counters".to_string()),
+                    traffic_status: Some("ok".to_string()),
+                    traffic_reason: None,
+                    traffic_checked_unix: Some(200),
+                    adapter_health: Some(TelemetryTunnelAdapterHealthView {
+                        status: health_status.to_string(),
+                        checked_unix: 200,
+                        configured: false,
+                        success: false,
+                        exit_code: None,
+                        reason: Some("adapter command was not applicable or failed".to_string()),
+                        duration_ms: 0,
+                        command_sha256_hex: None,
+                        timed_out: false,
+                        output_truncated: false,
+                        stdout_sha256_hex: None,
+                        stderr_sha256_hex: None,
+                    }),
+                    latency_monitoring_enabled: None,
+                    latency_status: None,
+                    latency_reason: None,
+                    latency_primary_family: None,
+                    latency_target: None,
+                    latency_checked_unix: None,
+                    latency_avg_ms: None,
+                    packet_loss_ratio: None,
+                    latency_healthy_windows: None,
+                    latency_missed_windows: None,
+                });
+            let template_id = Uuid::new_v4();
+            memory
+                .source_templates
+                .write()
+                .await
+                .push(SourceTemplateView {
+                    id: template_id,
+                    domain: "runtime_tunnel_adapter".to_string(),
+                    name: format!("shared:{manager_label}"),
+                    scope: "shared".to_string(),
+                    built_in: false,
+                    is_default: false,
+                    owner_client_id: None,
+                    description: None,
+                    definition: json!({"manager": manager_label}),
+                    assigned_client_count: 1,
+                    created_at: "100".to_string(),
+                    updated_at: "100".to_string(),
+                });
+            memory
+                .source_template_assignments
+                .write()
+                .await
+                .push(SourceTemplateAssignmentView {
+                    client_id: "client-a".to_string(),
+                    domain: "runtime_tunnel_adapter".to_string(),
+                    template_id,
+                    template_name: format!("shared:{manager_label}"),
+                    template_scope: "shared".to_string(),
+                    assigned_at: "100".to_string(),
+                });
+        }
+
+        let source_status = repo
+            .list_source_status(Some("client-a"), Some("runtime_tunnel_adapter"))
+            .await
+            .unwrap();
+        assert_eq!(source_status.len(), 1, "{manager_label}");
+        assert_eq!(
+            source_status[0].status == "degraded",
+            expected_degraded,
+            "{manager_label}"
+        );
+
+        let alerts = alert_test_state(repo)
+            .list_fleet_alerts(FleetAlertQuery {
+                limit: Some(10),
+                client_id: Some("client-a".to_string()),
+                severity: Some("critical".to_string()),
+                category: Some("network".to_string()),
+                operator_state: None,
+                include_muted: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(!alerts.is_empty(), expected_degraded, "{manager_label}");
+    }
 }
 
 #[tokio::test]
@@ -792,6 +964,566 @@ async fn filter_limit_regression_policy_evaluator_is_unbounded() {
             "zzz-policy-target"
         );
     }
+}
+
+#[tokio::test]
+async fn policy_rollups_exceed_public_page_without_truncating_preview_or_evaluation() {
+    const CLIENT_COUNT: usize = 5_001;
+    const PUBLIC_PAGE_SIZE: i64 = 5_000;
+
+    let repo = Repository::Memory(MemoryState::default());
+    let policy = repo
+        .upsert_fleet_alert_policy(
+            &CreateFleetAlertPolicyRequest {
+                id: None,
+                name: "large-fleet-policy".to_string(),
+                enabled: true,
+                selector_expression: "*".to_string(),
+                rules: vec![PolicyRuleRequest {
+                    id: None,
+                    name: "all-client threshold".to_string(),
+                    enabled: true,
+                    traffic_selector: None,
+                    condition_expression: "cpu.load_1 >= 1".to_string(),
+                    window_secs: 0,
+                    severity: "warning".to_string(),
+                }],
+                notes: None,
+                confirmed: true,
+                preview_hash: None,
+            },
+            &test_operator(),
+        )
+        .await
+        .unwrap();
+    if let Repository::Memory(memory) = &repo {
+        memory
+            .agents
+            .write()
+            .await
+            .extend((0..CLIENT_COUNT).map(|index| {
+                let client_id = format!("scale-client-{index:05}");
+                AgentView {
+                    id: client_id.clone(),
+                    display_name: client_id,
+                    status: "online".to_string(),
+                    tags: Vec::new(),
+                    registration_ip: None,
+                    last_ip: None,
+                    last_seen_at: None,
+                    arch: None,
+                    internal_build_number: 1,
+                    process_incarnation_id: None,
+                    stale_since: None,
+                    stale_reason: None,
+                    capabilities: AgentCapabilitySnapshot::default(),
+                }
+            }));
+        memory.telemetry_rollups.write().await.extend(
+            (0..CLIENT_COUNT).map(|index| {
+                alert_test_rollup(&format!("scale-client-{index:05}"), 2.0, 500, 1500)
+            }),
+        );
+    }
+
+    let public_page = repo
+        .list_latest_telemetry_rollups(PUBLIC_PAGE_SIZE, None, None)
+        .await
+        .unwrap();
+    assert_eq!(public_page.len(), PUBLIC_PAGE_SIZE as usize);
+
+    let preview = repo
+        .dry_run_fleet_alert_policy(&PolicyDryRunRequest {
+            id: Some(policy.id),
+            name: policy.name.clone(),
+            enabled: true,
+            selector_expression: "*".to_string(),
+            rules: vec![PolicyRuleRequest {
+                id: Some(policy.rules[0].id),
+                name: policy.rules[0].name.clone(),
+                enabled: true,
+                traffic_selector: None,
+                condition_expression: "cpu.load_1 >= 1".to_string(),
+                window_secs: 0,
+                severity: "warning".to_string(),
+            }],
+            notes: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(preview.matched_vps_count, CLIENT_COUNT);
+    assert_eq!(
+        preview.rule_previews[0].true_count,
+        i64::try_from(CLIENT_COUNT).unwrap()
+    );
+    assert_eq!(preview.rule_previews[0].false_count, 0);
+    assert_eq!(preview.rule_previews[0].incomplete_count, 0);
+
+    let last_client_id = format!("scale-client-{:05}", CLIENT_COUNT - 1);
+    let base_alerts = alert_test_state(repo.clone())
+        .list_fleet_alerts(FleetAlertQuery {
+            limit: Some(100),
+            client_id: Some(last_client_id.clone()),
+            severity: None,
+            category: Some("resource".to_string()),
+            operator_state: None,
+            include_muted: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        base_alerts.iter().any(|alert| {
+            alert.client_id.as_deref() == Some(last_client_id.as_str())
+                && alert.status == "cpu_load_high"
+        }),
+        "base resource alerts must include clients beyond the public telemetry page"
+    );
+
+    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), CLIENT_COUNT);
+    if let Repository::Memory(memory) = &repo {
+        assert_eq!(
+            memory
+                .policy_rule_states
+                .read()
+                .await
+                .iter()
+                .filter(|state| state.policy_rule_id == policy.rules[0].id)
+                .count(),
+            CLIENT_COUNT
+        );
+        assert_eq!(
+            memory
+                .policy_alerts
+                .read()
+                .await
+                .iter()
+                .filter(|alert| alert.policy_rule_id == policy.rules[0].id)
+                .count(),
+            CLIENT_COUNT
+        );
+    }
+}
+
+#[tokio::test]
+async fn fleet_alert_candidates_are_not_hidden_by_public_page_caps() {
+    let repo = Repository::Memory(MemoryState::default());
+    let tunnel_input = alert_test_tunnel_input();
+    let tunnel_plan = vpsman_common::plan_tunnel(&tunnel_input).unwrap();
+    let saved_tunnel = repo
+        .record_tunnel_plan(&tunnel_input, &tunnel_plan, true, &test_operator())
+        .await
+        .unwrap();
+    let policy_alert_id = Uuid::new_v4();
+    let failed_backup_id = Uuid::new_v4();
+    let failed_job_id = Uuid::new_v4();
+
+    if let Repository::Memory(memory) = &repo {
+        memory.agents.write().await.extend([
+            AgentView {
+                id: "edge-a".to_string(),
+                display_name: "Edge A".to_string(),
+                status: "online".to_string(),
+                tags: Vec::new(),
+                registration_ip: None,
+                last_ip: None,
+                last_seen_at: None,
+                arch: None,
+                internal_build_number: 1,
+                process_incarnation_id: None,
+                stale_since: None,
+                stale_reason: None,
+                capabilities: AgentCapabilitySnapshot::default(),
+            },
+            AgentView {
+                id: "edge-b".to_string(),
+                display_name: "Edge B".to_string(),
+                status: "online".to_string(),
+                tags: Vec::new(),
+                registration_ip: None,
+                last_ip: None,
+                last_seen_at: None,
+                arch: None,
+                internal_build_number: 1,
+                process_incarnation_id: None,
+                stale_since: None,
+                stale_reason: None,
+                capabilities: AgentCapabilitySnapshot::default(),
+            },
+        ]);
+
+        let policy_group_id = Uuid::new_v4();
+        let policy_rule_id = Uuid::new_v4();
+        memory.policy_alerts.write().await.push(PolicyAlertRecord {
+            id: policy_alert_id,
+            policy_group_id,
+            policy_rule_id,
+            client_id: "edge-a".to_string(),
+            trigger_generation: 1,
+            severity: "warning".to_string(),
+            category: "resource".to_string(),
+            title: "Older scoped policy alert".to_string(),
+            detail: "must not be hidden by newer unrelated alerts".to_string(),
+            actual_value: Some(2.0),
+            threshold_value: Some(1.0),
+            payload: json!({"regression": "policy_candidate"}),
+            observed_at: "00000".to_string(),
+            created_at: "00000".to_string(),
+        });
+        memory
+            .policy_alerts
+            .write()
+            .await
+            .extend((1..=200).map(|index| PolicyAlertRecord {
+                id: Uuid::new_v4(),
+                policy_group_id,
+                policy_rule_id,
+                client_id: "filler".to_string(),
+                trigger_generation: index,
+                severity: "critical".to_string(),
+                category: "resource".to_string(),
+                title: "Newer filler policy alert".to_string(),
+                detail: "not in the requested scope".to_string(),
+                actual_value: None,
+                threshold_value: None,
+                payload: json!({}),
+                observed_at: format!("{index:05}"),
+                created_at: format!("{index:05}"),
+            }));
+
+        memory
+            .backup_requests
+            .write()
+            .await
+            .push(BackupRequestView {
+                id: failed_backup_id,
+                actor_id: None,
+                client_id: "edge-a".to_string(),
+                paths: vec!["/srv/app".to_string()],
+                include_config: true,
+                follow_symlinks: false,
+                missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
+                status: "execution_failed".to_string(),
+                payload_hash: "a".repeat(64),
+                command_scope: "client:edge-a".to_string(),
+                artifact_id: None,
+                source_job_id: None,
+                source_schedule_id: None,
+                note: None,
+                created_at: "00000".to_string(),
+            });
+        memory
+            .backup_requests
+            .write()
+            .await
+            .extend((1..=200).map(|index| BackupRequestView {
+                id: Uuid::new_v4(),
+                actor_id: None,
+                client_id: "filler".to_string(),
+                paths: vec!["/tmp".to_string()],
+                include_config: false,
+                follow_symlinks: false,
+                missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
+                status: "artifact_metadata_recorded".to_string(),
+                payload_hash: "b".repeat(64),
+                command_scope: "client:filler".to_string(),
+                artifact_id: None,
+                source_job_id: None,
+                source_schedule_id: None,
+                note: None,
+                created_at: format!("{index:05}"),
+            }));
+
+        memory.jobs.write().await.push(JobHistoryView {
+            id: failed_job_id,
+            actor_id: None,
+            command_type: "shell".to_string(),
+            source_schedule_id: None,
+            privileged: false,
+            status: "failed".to_string(),
+            target_count: 1,
+            payload_hash: "c".repeat(64),
+            max_timeout_secs: 30,
+            created_at: "00000".to_string(),
+            completed_at: Some("00000".to_string()),
+        });
+        memory
+            .jobs
+            .write()
+            .await
+            .extend((1..=200).map(|index| JobHistoryView {
+                id: Uuid::new_v4(),
+                actor_id: None,
+                command_type: "shell".to_string(),
+                source_schedule_id: None,
+                privileged: false,
+                status: "completed".to_string(),
+                target_count: 1,
+                payload_hash: "d".repeat(64),
+                max_timeout_secs: 30,
+                created_at: format!("{index:05}"),
+                completed_at: Some(format!("{index:05}")),
+            }));
+
+        let healthy_adapter = TelemetryTunnelAdapterHealthView {
+            status: "ok".to_string(),
+            checked_unix: 1,
+            configured: true,
+            success: true,
+            exit_code: Some(0),
+            reason: None,
+            duration_ms: 1,
+            command_sha256_hex: Some("0".repeat(64)),
+            timed_out: false,
+            output_truncated: false,
+            stdout_sha256_hex: None,
+            stderr_sha256_hex: None,
+        };
+        let healthy_tunnel = TelemetryTunnelView {
+            client_id: "edge-a".to_string(),
+            observed_at: "00001".to_string(),
+            interface: "gre42".to_string(),
+            kind: "gre".to_string(),
+            ownership_mode: "managed".to_string(),
+            mutation_policy: "managed".to_string(),
+            plan_id: Some(saved_tunnel.id),
+            plan_name: Some(saved_tunnel.name.clone()),
+            plan_runtime_manager: None,
+            endpoint_side: Some("left".to_string()),
+            peer_client_id: Some("edge-b".to_string()),
+            source: "telemetry".to_string(),
+            operstate: Some("up".to_string()),
+            mtu: Some(1476),
+            link_type: Some(778),
+            address: Some("10.42.0.0".to_string()),
+            rx_bytes: 100,
+            tx_bytes: 200,
+            traffic_source: Some("vnstat".to_string()),
+            traffic_status: Some("ok".to_string()),
+            traffic_reason: None,
+            traffic_checked_unix: Some(1),
+            adapter_health: Some(healthy_adapter),
+            latency_monitoring_enabled: None,
+            latency_status: None,
+            latency_reason: None,
+            latency_primary_family: None,
+            latency_target: None,
+            latency_checked_unix: None,
+            latency_avg_ms: None,
+            packet_loss_ratio: None,
+            latency_healthy_windows: None,
+            latency_missed_windows: None,
+        };
+        memory
+            .telemetry_tunnels
+            .write()
+            .await
+            .extend((1..=5_000).map(|index| {
+                let mut tunnel = healthy_tunnel.clone();
+                tunnel.observed_at = format!("{index:05}");
+                tunnel
+            }));
+        let mut failed_tunnel = healthy_tunnel;
+        failed_tunnel.observed_at = "00000".to_string();
+        failed_tunnel.adapter_health.as_mut().unwrap().status = "failed".to_string();
+        failed_tunnel.adapter_health.as_mut().unwrap().success = false;
+        failed_tunnel.adapter_health.as_mut().unwrap().exit_code = Some(1);
+        failed_tunnel.adapter_health.as_mut().unwrap().reason =
+            Some("adapter status command failed".to_string());
+        memory.telemetry_tunnels.write().await.push(failed_tunnel);
+
+        let source_template_id = Uuid::new_v4();
+        memory
+            .source_templates
+            .write()
+            .await
+            .push(SourceTemplateView {
+                id: source_template_id,
+                domain: "runtime_tunnel_adapter".to_string(),
+                name: "shared:runtime-adapter".to_string(),
+                scope: "shared".to_string(),
+                built_in: false,
+                is_default: false,
+                owner_client_id: None,
+                description: None,
+                definition: json!({"manager": "external_managed_adapter"}),
+                assigned_client_count: 1,
+                created_at: "00000".to_string(),
+                updated_at: "00000".to_string(),
+            });
+        memory
+            .source_template_assignments
+            .write()
+            .await
+            .push(SourceTemplateAssignmentView {
+                client_id: "edge-a".to_string(),
+                domain: "runtime_tunnel_adapter".to_string(),
+                template_id: source_template_id,
+                template_name: "shared:runtime-adapter".to_string(),
+                template_scope: "shared".to_string(),
+                assigned_at: "00000".to_string(),
+            });
+    }
+
+    assert!(!repo
+        .list_policy_alerts(&PolicyAlertQuery {
+            limit: Some(200),
+            client_id: None,
+            severity: None,
+            category: None,
+            policy_group_id: None,
+        })
+        .await
+        .unwrap()
+        .iter()
+        .any(|alert| alert.id == policy_alert_id));
+    assert!(!repo
+        .list_backup_requests(200)
+        .await
+        .unwrap()
+        .iter()
+        .any(|request| request.id == failed_backup_id));
+    assert!(!repo
+        .list_jobs(200)
+        .await
+        .unwrap()
+        .iter()
+        .any(|job| job.id == failed_job_id));
+    assert!(repo
+        .list_telemetry_tunnels(5_000, None, None)
+        .await
+        .unwrap()
+        .iter()
+        .all(|tunnel| {
+            tunnel
+                .adapter_health
+                .as_ref()
+                .is_none_or(|health| health.success)
+        }));
+
+    let policy_fleet_alert_id = format!("policy-alert:{policy_alert_id}");
+    if let Repository::Memory(memory) = &repo {
+        memory
+            .fleet_alert_states
+            .write()
+            .await
+            .push(FleetAlertStateView {
+                alert_id: policy_fleet_alert_id.clone(),
+                state: "acknowledged".to_string(),
+                muted_until_unix: None,
+                escalation_level: 0,
+                reason: Some("known older alert".to_string()),
+                actor_id: None,
+                created_at: "00000".to_string(),
+                updated_at: "00000".to_string(),
+            });
+        memory
+            .fleet_alert_states
+            .write()
+            .await
+            .extend((1..=1_000).map(|index| FleetAlertStateView {
+                alert_id: format!("unrelated:{index:04}"),
+                state: "open".to_string(),
+                muted_until_unix: None,
+                escalation_level: 0,
+                reason: None,
+                actor_id: None,
+                created_at: format!("{index:05}"),
+                updated_at: format!("{index:05}"),
+            }));
+    }
+    assert!(repo
+        .list_fleet_alert_states(1_000, None)
+        .await
+        .unwrap()
+        .iter()
+        .all(|state| state.alert_id != policy_fleet_alert_id));
+
+    let state = alert_test_state(repo);
+    let acknowledged_policy = state
+        .list_fleet_alerts(FleetAlertQuery {
+            limit: Some(1),
+            client_id: Some("edge-a".to_string()),
+            severity: Some("warning".to_string()),
+            category: Some("resource".to_string()),
+            operator_state: Some("acknowledged".to_string()),
+            include_muted: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(acknowledged_policy.len(), 1);
+    assert_eq!(acknowledged_policy[0].id, policy_fleet_alert_id);
+
+    let backup_alerts = state
+        .list_fleet_alerts(FleetAlertQuery {
+            limit: Some(1),
+            client_id: Some("edge-a".to_string()),
+            severity: Some("critical".to_string()),
+            category: Some("backup".to_string()),
+            operator_state: None,
+            include_muted: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(backup_alerts.len(), 1);
+    assert_eq!(backup_alerts[0].target_id, failed_backup_id.to_string());
+
+    let job_alerts = state
+        .list_fleet_alerts(FleetAlertQuery {
+            limit: Some(1),
+            client_id: None,
+            severity: Some("critical".to_string()),
+            category: Some("job".to_string()),
+            operator_state: None,
+            include_muted: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(job_alerts.len(), 1);
+    assert_eq!(job_alerts[0].target_id, failed_job_id.to_string());
+
+    let tunnel_alerts = state
+        .list_fleet_alerts(FleetAlertQuery {
+            limit: Some(1),
+            client_id: Some("edge-a".to_string()),
+            severity: Some("critical".to_string()),
+            category: Some("network".to_string()),
+            operator_state: None,
+            include_muted: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(tunnel_alerts.len(), 1);
+    assert_eq!(tunnel_alerts[0].status, "tunnel_adapter_degraded");
+
+    let source_alerts = state
+        .list_fleet_alerts(FleetAlertQuery {
+            limit: Some(100),
+            client_id: Some("edge-a".to_string()),
+            severity: Some("warning".to_string()),
+            category: Some("source_readiness".to_string()),
+            operator_state: None,
+            include_muted: None,
+        })
+        .await
+        .unwrap();
+    let source_alert = source_alerts
+        .iter()
+        .find(|alert| alert.evidence["domain"] == "runtime_tunnel_adapter")
+        .unwrap();
+    assert_eq!(source_alert.status, "degraded");
+    assert_eq!(source_alert.evidence["evidence"]["sample_count"], 5_001);
+    assert_eq!(source_alert.evidence["evidence"]["truncated_count"], 4_901);
+    assert_eq!(
+        source_alert.evidence["evidence"]["samples"]
+            .as_array()
+            .unwrap()
+            .len(),
+        100
+    );
+    assert_eq!(
+        source_alert.evidence["evidence"]["samples"][0]["adapter_status"],
+        "failed"
+    );
 }
 
 #[tokio::test]
@@ -2096,6 +2828,39 @@ fn alert_test_rollup(
         network_tx_bytes_max: 0,
         latest_observed_at: "120".to_string(),
         updated_at: "121".to_string(),
+    }
+}
+
+fn alert_test_tunnel_input() -> vpsman_common::TunnelPlanInput {
+    vpsman_common::TunnelPlanInput {
+        name: "edge-a-gre42".to_string(),
+        interface_name: "gre42".to_string(),
+        kind: vpsman_common::TunnelKind::Gre,
+        runtime_control: vpsman_common::RuntimeTunnelControl {
+            manager: vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter,
+            left_adapter_template_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+            right_adapter_template_id: Some("22222222-2222-4222-8222-222222222222".to_string()),
+            ..Default::default()
+        },
+        runtime_topology: Default::default(),
+        left_client_id: "edge-a".to_string(),
+        right_client_id: "edge-b".to_string(),
+        left_remote_underlay: "198.51.100.10".to_string(),
+        right_remote_underlay: "203.0.113.20".to_string(),
+        left_local_underlay: None,
+        right_local_underlay: None,
+        address_pool_cidr: "10.42.0.0/30".to_string(),
+        reserved_addresses: Vec::new(),
+        ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
+            left: "10.42.0.0".to_string(),
+            right: "10.42.0.1".to_string(),
+            prefix_len: 31,
+        }),
+        ipv6_address_pool_cidr: None,
+        ipv6_tunnel: None,
+        latency_primary_family: Default::default(),
+        bandwidth_mbps: 100,
+        ospf: None,
     }
 }
 

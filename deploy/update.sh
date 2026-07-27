@@ -86,10 +86,11 @@ fi
 
 [[ "$REPO" =~ ^[0-9A-Za-z_.-]+/[0-9A-Za-z_.-]+$ ]] ||
   fail "VPSMAN_RELEASE_REPO must be an owner/repository pair"
-[[ "$HEALTH_TIMEOUT_SECS" =~ ^[0-9]+$ ]] ||
-  fail "VPSMAN_UPDATE_HEALTH_TIMEOUT_SECS must be a positive integer"
-((HEALTH_TIMEOUT_SECS >= 10 && HEALTH_TIMEOUT_SECS <= 3600)) ||
-  fail "VPSMAN_UPDATE_HEALTH_TIMEOUT_SECS must be between 10 and 3600"
+[[ "$HEALTH_TIMEOUT_SECS" =~ ^(0|[1-9][0-9]*)$ &&
+  "${#HEALTH_TIMEOUT_SECS}" -le 4 ]] ||
+  fail "VPSMAN_UPDATE_HEALTH_TIMEOUT_SECS must be a canonical integer between 10 and 3600"
+((10#$HEALTH_TIMEOUT_SECS >= 10 && 10#$HEALTH_TIMEOUT_SECS <= 3600)) ||
+  fail "VPSMAN_UPDATE_HEALTH_TIMEOUT_SECS must be a canonical integer between 10 and 3600"
 
 require_tool() {
   if ! command -v "$1" >/dev/null 2>&1; then

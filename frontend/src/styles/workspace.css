@@ -5335,6 +5335,16 @@ button.vpsDetailRecord:hover {
   line-height: 1.35;
 }
 
+.preferenceStickySaveBar .preferenceDraftValidation.actionFeedback {
+  width: fit-content;
+  max-width: 100%;
+  margin-top: 4px;
+}
+
+.preferenceStickySaveBar .preferenceDraftValidation.actionFeedback span {
+  color: inherit;
+}
+
 .preferenceSection {
   display: grid;
   gap: 12px;

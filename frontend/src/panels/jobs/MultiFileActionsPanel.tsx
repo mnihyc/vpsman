@@ -1760,7 +1760,7 @@ function buildBulkPostRunItems({
         : "No retry candidates";
   return [
     {
-      detail: `${lastRunProgress.completed} completed, ${lastRunProgress.skipped} skipped, ${lastRunProgress.unsuccessful} unsuccessful, ${lastRunProgress.unavailable} unavailable.`,
+      detail: `${lastRunProgress.completed} completed, ${lastRunProgress.skipped} skipped, ${lastRunProgress.unsuccessful} unsuccessful, ${lastRunProgress.unavailable} pre-run unavailable.`,
       key: "post-outcome",
       label: "Run outcome",
       tone: lastRunProgress.unsuccessful > 0 || lastRunProgress.unavailable > 0 ? "attention" : "ready",

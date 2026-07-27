@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { apiDelete, apiGet, apiPost, apiPostPreview, isApiUnauthorized } from "../api";
-import { emptySummary } from "../constants";
+import { emptySummary, FLEET_DETAIL_LIMIT } from "../constants";
 import type {
   AgentView,
   FleetAlertPolicyRecord,
@@ -39,7 +39,6 @@ import type {
   TelemetryTunnelRecord,
 } from "../types";
 
-const FLEET_DETAIL_LIMIT = 200;
 const FLEET_TELEMETRY_SNAPSHOT_LIMIT = 5_000;
 
 export function useFleetData(apiToken: string, onUnauthorized: () => void) {

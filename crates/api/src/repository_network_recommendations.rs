@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 use vpsman_common::{observed_ospf_cost, payload_hash, OspfControlMode};
@@ -9,6 +11,7 @@ use crate::{
     },
     repository::Repository,
     repository_network_observations::topology_identity_hash_for_plan,
+    util::compare_timestamps_desc,
 };
 
 const OSPF_EVIDENCE_WINDOW_MINUTES: i64 = 10;
@@ -29,12 +32,69 @@ impl Repository {
             .map(|plan| recommend_plan_ospf_cost(plan, &observations).view)
             .collect::<Vec<_>>();
         recommendations.sort_by(|left, right| {
-            right
-                .latest_observed_at
-                .cmp(&left.latest_observed_at)
-                .then_with(|| left.plan_name.cmp(&right.plan_name))
+            compare_optional_timestamps_desc(
+                left.latest_observed_at.as_deref(),
+                right.latest_observed_at.as_deref(),
+            )
+            .then_with(|| left.plan_name.cmp(&right.plan_name))
         });
         Ok(recommendations.into_iter().take(limit as usize).collect())
+    }
+
+    pub(crate) async fn list_network_ospf_recommendations_for_plans(
+        &self,
+        plans: &[TunnelPlanView],
+    ) -> Result<Vec<NetworkOspfRecommendationView>> {
+        if plans.is_empty() {
+            return Ok(Vec::new());
+        }
+        let eligible_plans = plans
+            .iter()
+            .filter(|plan| plan.enabled && plan.plan.ospf.is_some())
+            .collect::<Vec<_>>();
+        let plan_ids = eligible_plans
+            .iter()
+            .map(|plan| plan.id)
+            .collect::<Vec<_>>();
+        let since = (Utc::now() - Duration::minutes(OSPF_EVIDENCE_WINDOW_MINUTES)).timestamp();
+        let observations = self
+            .list_network_observations_for_plans_since(
+                &plan_ids,
+                since,
+                MAX_RECENT_PROBE_SAMPLES_PER_PLAN,
+                MAX_RECENT_SPEED_SAMPLES_PER_PLAN,
+            )
+            .await?;
+        let observations_by_plan = observations.into_iter().fold(
+            HashMap::<uuid::Uuid, Vec<NetworkObservationView>>::new(),
+            |mut grouped, observation| {
+                if let Some(plan_id) = observation.plan_id {
+                    grouped.entry(plan_id).or_default().push(observation);
+                }
+                grouped
+            },
+        );
+        let mut recommendations = eligible_plans
+            .iter()
+            .map(|plan| {
+                recommend_plan_ospf_cost(
+                    plan,
+                    observations_by_plan
+                        .get(&plan.id)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]),
+                )
+                .view
+            })
+            .collect::<Vec<_>>();
+        recommendations.sort_by(|left, right| {
+            compare_optional_timestamps_desc(
+                left.latest_observed_at.as_deref(),
+                right.latest_observed_at.as_deref(),
+            )
+            .then_with(|| left.plan_name.cmp(&right.plan_name))
+        });
+        Ok(recommendations)
     }
 
     pub(crate) async fn list_network_ospf_update_plans(
@@ -461,6 +521,15 @@ fn parse_observed_at(value: &str) -> Option<DateTime<Utc>> {
         })
 }
 
+fn compare_optional_timestamps_desc(left: Option<&str>, right: Option<&str>) -> std::cmp::Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => compare_timestamps_desc(left, right),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
 fn update_plan_priority(plan: &NetworkOspfUpdatePlanView) -> i32 {
     match plan.status.as_str() {
         "adapter_unavailable" => 7,
@@ -511,4 +580,22 @@ where
 struct OspfRecommendationCandidate {
     view: NetworkOspfRecommendationView,
     healthy_probe_streak: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compare_optional_timestamps_desc;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn recommendation_ordering_handles_mixed_timestamp_formats_and_missing_evidence() {
+        assert_eq!(
+            compare_optional_timestamps_desc(Some("1770000000"), Some("2026-01-01T00:00:00Z"),),
+            Ordering::Less,
+        );
+        assert_eq!(
+            compare_optional_timestamps_desc(Some("1770000000"), None),
+            Ordering::Less,
+        );
+    }
 }

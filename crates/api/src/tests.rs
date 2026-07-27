@@ -35,6 +35,25 @@ async fn fleet_summary_accounts_for_every_visible_connection_state() {
         agent("never", "never", None),
         agent("stale", "stale", Some("2026-07-11T12:00:00Z")),
     ]);
+    let job = |status: &str| JobHistoryView {
+        id: Uuid::new_v4(),
+        actor_id: None,
+        command_type: "shell".to_string(),
+        source_schedule_id: None,
+        privileged: false,
+        status: status.to_string(),
+        target_count: 1,
+        payload_hash: format!("fleet-summary-{status}"),
+        max_timeout_secs: 30,
+        created_at: "2026-07-12T12:00:00Z".to_string(),
+        completed_at: None,
+    };
+    memory.jobs.write().await.extend([
+        job("queued"),
+        job("running"),
+        job("dispatching"),
+        job("completed"),
+    ]);
 
     let summary = repo.fleet_summary().await.unwrap();
     assert_eq!(summary.total, 5);
@@ -44,6 +63,7 @@ async fn fleet_summary_accounts_for_every_visible_connection_state() {
     assert_eq!(summary.stale, 1);
     assert_eq!(summary.unknown, 1);
     assert_eq!(summary.warnings, 4);
+    assert_eq!(summary.running_jobs, 2);
     assert_eq!(
         summary.online + summary.offline + summary.never + summary.stale + summary.unknown,
         summary.total

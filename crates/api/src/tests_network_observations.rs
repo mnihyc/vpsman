@@ -53,6 +53,55 @@ async fn records_network_observation_summaries_from_status_outputs() {
 }
 
 #[tokio::test]
+async fn memory_network_observation_ordering_handles_mixed_timestamp_formats() {
+    let repo = Repository::Memory(MemoryState::default());
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    let plan_id = Uuid::new_v4();
+    let job_id = Uuid::new_v4();
+    let observation = |id: Uuid, observed_at: &str| NetworkObservationView {
+        id,
+        job_id,
+        client_id: "left-a".to_string(),
+        seq: 0,
+        kind: "network_probe".to_string(),
+        role: None,
+        plan_id: Some(plan_id),
+        topology_identity_hash: Some("mixed-time".to_string()),
+        plan_name: Some("mixed-time".to_string()),
+        interface_name: Some("tun-mixed".to_string()),
+        peer_client_id: Some("right-b".to_string()),
+        target: Some("192.0.2.1".to_string()),
+        healthy: Some(true),
+        latency_avg_ms: Some(1.0),
+        packet_loss_ratio: Some(0.0),
+        throughput_mbps: None,
+        bytes: None,
+        metadata: serde_json::json!({}),
+        observed_at: observed_at.to_string(),
+    };
+    memory.network_observations.write().await.extend([
+        observation(Uuid::new_v4(), "999"),
+        observation(Uuid::new_v4(), "1970-01-01T00:16:40Z"),
+    ]);
+
+    let latest = repo.list_network_observations(1).await.unwrap();
+    assert_eq!(latest[0].observed_at, "1970-01-01T00:16:40Z");
+
+    let capped = repo
+        .list_network_observations_for_plans_since(&[plan_id], 0, 1, 1)
+        .await
+        .unwrap();
+    assert_eq!(capped.len(), 1);
+    assert_eq!(capped[0].observed_at, "1970-01-01T00:16:40Z");
+
+    let trends = repo.list_network_observation_trends(10).await.unwrap();
+    assert_eq!(trends.len(), 1);
+    assert_eq!(trends[0].latest_observed_at, "1970-01-01T00:16:40Z");
+}
+
+#[tokio::test]
 async fn rolls_up_network_observation_trends_by_plan_and_endpoint() {
     let repo = Repository::Memory(MemoryState::default());
     let job_id = Uuid::new_v4();

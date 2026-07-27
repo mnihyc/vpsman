@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use crate::{
     error::ApiError,
-    fleet_alerts::FleetAlertPolicy,
+    fleet_alerts::{FleetAlertPolicy, FleetAlertSelector},
     model::{
         AgentView, BackupRequestStatus, BackupRequestView, DashboardAgentSummaryView,
         DashboardAlertSummaryView, DashboardAvailableFiltersView, DashboardDrilldownView,
@@ -25,10 +25,10 @@ use crate::{
     },
     state::AppState,
     unix_now,
+    util::timestamp_in_optional_bounds,
 };
 
 const DASHBOARD_LIMIT: i64 = 200;
-const DASHBOARD_TELEMETRY_LIMIT: i64 = 50_000;
 const DASHBOARD_SOURCE_BUCKET_SECS: i32 = 60;
 const DASHBOARD_MIN_CHART_STEP_SECS: u64 = 60;
 const DASHBOARD_DEFAULT_CHART_POINTS: u32 = 240;
@@ -154,6 +154,7 @@ struct DashboardGroupingContext<'a> {
     alert_counts_by_client: &'a HashMap<String, usize>,
     running_job_targets: &'a HashMap<String, usize>,
     network_by_client: &'a HashMap<String, NetworkClientAggregate>,
+    counts_truncated: bool,
 }
 
 impl DashboardGroupBy {
@@ -255,13 +256,6 @@ impl DashboardScope {
         }
     }
 
-    fn matches_client(&self, client_id: Option<&str>, scoped_client_ids: &HashSet<String>) -> bool {
-        if self.kind == DashboardScopeKind::All {
-            return client_id.is_none_or(|client_id| scoped_client_ids.contains(client_id));
-        }
-        client_id.is_some_and(|client_id| scoped_client_ids.contains(client_id))
-    }
-
     fn to_view(&self, matched_clients: usize) -> DashboardScopeView {
         let kind = self.kind.as_str().to_string();
         let value = self.value.clone();
@@ -346,6 +340,7 @@ pub(crate) async fn dashboard_overview(
             group_by,
             resource_metric,
             chart_points,
+            now,
             &operator.operator.preferences,
         )
         .await?,
@@ -359,9 +354,10 @@ async fn build_dashboard_overview(
     group_by: DashboardGroupBy,
     resource_metric: DashboardResourceMetric,
     chart_points: u32,
+    snapshot_unix: u64,
     preferences: &OperatorPreferences,
 ) -> Result<DashboardOverviewView, ApiError> {
-    let now = range.end_unix;
+    let now = snapshot_unix;
     let agents = state.repo.list_agents().await?;
     let available_filters = build_available_filters(&agents);
     let scoped_agents = agents
@@ -379,20 +375,28 @@ async fn build_dashboard_overview(
         .iter()
         .map(|agent| (agent.id.clone(), agent.clone()))
         .collect::<HashMap<_, _>>();
-    let alerts = state
-        .list_fleet_alerts(FleetAlertQuery {
-            limit: Some(DASHBOARD_LIMIT),
-            client_id: None,
-            severity: None,
-            category: None,
-            operator_state: None,
-            include_muted: Some(false),
-        })
-        .await?
-        .into_iter()
-        .filter(|alert| timestamp_in_range(&alert.observed_at, &range))
-        .filter(|alert| scope.matches_client(alert.client_id.as_deref(), &scoped_client_ids))
-        .collect::<Vec<_>>();
+    let alert_selection = state
+        .list_fleet_alerts_selected(
+            FleetAlertQuery {
+                limit: Some(DASHBOARD_LIMIT),
+                client_id: None,
+                severity: None,
+                category: None,
+                operator_state: None,
+                include_muted: Some(false),
+            },
+            Some(FleetAlertSelector {
+                agents: &scoped_agents,
+                allowed_client_ids: &scoped_client_ids,
+                start_unix: range.start_unix,
+                end_unix: range.end_unix,
+                snapshot_unix,
+                include_global: scope.kind == DashboardScopeKind::All,
+            }),
+        )
+        .await?;
+    let alerts = alert_selection.alerts;
+    let alerts_truncated = alert_selection.truncated;
     let telemetry_range = if range.mode == "all" {
         DashboardRange {
             start_unix: state
@@ -412,6 +416,7 @@ async fn build_dashboard_overview(
         &telemetry_range,
         preferred_bucket_secs,
         chart_step_secs,
+        chart_points,
         &scoped_client_id_list,
     )
     .await?;
@@ -420,25 +425,29 @@ async fn build_dashboard_overview(
         &telemetry_range,
         preferred_bucket_secs,
         chart_step_secs,
+        chart_points,
         &scoped_client_id_list,
     )
     .await?;
-    let jobs = state.repo.list_jobs(DASHBOARD_LIMIT).await?;
-    let running_jobs = jobs
-        .iter()
-        .filter(|job| is_running_job_status(&job.status))
-        .cloned()
-        .collect::<Vec<_>>();
-    let running_job_targets = running_job_targets_by_client(state, &running_jobs).await?;
-    let scoped_running_jobs =
-        running_jobs_in_scope(state, &running_jobs, &scoped_client_ids).await?;
-    let backup_requests = state
+    let mut running_jobs = state
         .repo
-        .list_backup_requests(DASHBOARD_LIMIT)
-        .await?
-        .into_iter()
-        .filter(|backup| scoped_client_ids.contains(&backup.client_id))
-        .collect::<Vec<_>>();
+        .list_dashboard_running_jobs(&scoped_client_id_list, DASHBOARD_LIMIT + 1)
+        .await?;
+    let running_jobs_truncated = running_jobs.len() > DASHBOARD_LIMIT as usize;
+    running_jobs.truncate(DASHBOARD_LIMIT as usize);
+    let running_job_targets =
+        running_job_targets_by_client(state, &running_jobs, &scoped_client_id_list).await?;
+    let mut backup_requests = state
+        .repo
+        .list_dashboard_backup_requests(
+            &scoped_client_id_list,
+            range.start_unix,
+            range.end_unix,
+            DASHBOARD_LIMIT + 1,
+        )
+        .await?;
+    let backups_truncated = backup_requests.len() > DASHBOARD_LIMIT as usize;
+    backup_requests.truncate(DASHBOARD_LIMIT as usize);
     let latest_rollups = latest_rollups_by_client(&rollups);
     let latest_rates = coherent_latest_rates(latest_rates_by_client_interface(&network_rates));
     let latest_rates_by_client = network_by_client(latest_rates.values());
@@ -454,7 +463,7 @@ async fn build_dashboard_overview(
         &network_rates,
         &alerts,
         &backup_requests,
-        &jobs,
+        &running_jobs,
     );
     let chart_step_secs = dashboard_chart_step_secs(&effective_range, chart_points);
 
@@ -463,7 +472,10 @@ async fn build_dashboard_overview(
         &scoped_agents,
         &agents_by_id,
         &backup_requests,
-        scoped_running_jobs.len(),
+        running_jobs.len(),
+        alerts_truncated,
+        running_jobs_truncated,
+        backups_truncated,
         effective_range,
     );
     let resources = build_resources(latest_rollups.values());
@@ -490,11 +502,12 @@ async fn build_dashboard_overview(
         agents: &scoped_agents,
         alerts: &alerts,
         backups: &backup_requests,
-        running_jobs: &scoped_running_jobs,
+        running_jobs: &running_jobs,
         network_rates: &network_rates,
         alert_counts_by_client: &alert_counts_by_client,
         running_job_targets: &running_job_targets,
         network_by_client: &latest_rates_by_client,
+        counts_truncated: alerts_truncated || running_jobs_truncated || backups_truncated,
     };
     let label_clusters = build_grouped_statistics(group_by, &grouping_context);
 
@@ -522,7 +535,9 @@ async fn build_dashboard_overview(
                 .count(),
             stale: stale_agents,
             warnings: stale_agents.max(alerts.len()),
-            running_jobs: scoped_running_jobs.len(),
+            warnings_truncated: alerts_truncated,
+            running_jobs: running_jobs.len(),
+            running_jobs_truncated,
         },
         operations,
         resources,
@@ -543,12 +558,22 @@ fn validate_dashboard_range(
     query: &DashboardOverviewQuery,
     now: u64,
 ) -> Result<DashboardRange, ApiError> {
-    let start = query
-        .start_unix
-        .or_else(|| query.start_at.as_deref().and_then(parse_timestamp_unix));
-    let end = query
-        .end_unix
-        .or_else(|| query.end_at.as_deref().and_then(parse_timestamp_unix));
+    let start = match (query.start_unix, query.start_at.as_deref()) {
+        (Some(timestamp), _) => Some(timestamp),
+        (None, Some(value)) => Some(
+            parse_timestamp_unix(value)
+                .ok_or_else(|| ApiError::bad_request("invalid_dashboard_start"))?,
+        ),
+        (None, None) => None,
+    };
+    let end = match (query.end_unix, query.end_at.as_deref()) {
+        (Some(timestamp), _) => Some(timestamp),
+        (None, Some(value)) => Some(
+            parse_timestamp_unix(value)
+                .ok_or_else(|| ApiError::bad_request("invalid_dashboard_end"))?,
+        ),
+        (None, None) => None,
+    };
 
     if start.is_some() || end.is_some() {
         let start_unix = start.ok_or_else(|| ApiError::bad_request("missing_dashboard_start"))?;
@@ -797,6 +822,7 @@ async fn load_dashboard_rollups(
     range: &DashboardRange,
     preferred_bucket_secs: Option<i32>,
     chart_step_secs: u64,
+    chart_points: u32,
     client_ids: &[String],
 ) -> Result<Vec<TelemetryRollupView>, ApiError> {
     let bounded_range = telemetry_query_bounds(range);
@@ -804,7 +830,7 @@ async fn load_dashboard_rollups(
     let mut rollups = state
         .repo
         .list_dashboard_telemetry_rollups(
-            DASHBOARD_TELEMETRY_LIMIT,
+            i64::from(chart_points),
             bounded_range.0,
             bounded_range.1,
             preferred_bucket_secs,
@@ -816,7 +842,7 @@ async fn load_dashboard_rollups(
         rollups = state
             .repo
             .list_dashboard_telemetry_rollups(
-                DASHBOARD_TELEMETRY_LIMIT,
+                i64::from(chart_points),
                 bounded_range.0,
                 bounded_range.1,
                 None,
@@ -833,6 +859,7 @@ async fn load_dashboard_network_rates(
     range: &DashboardRange,
     preferred_bucket_secs: Option<i32>,
     chart_step_secs: u64,
+    chart_points: u32,
     client_ids: &[String],
 ) -> Result<Vec<TelemetryNetworkRateView>, ApiError> {
     let bounded_range = telemetry_query_bounds(range);
@@ -840,7 +867,7 @@ async fn load_dashboard_network_rates(
     let mut rates = state
         .repo
         .list_dashboard_telemetry_network_rates(
-            DASHBOARD_TELEMETRY_LIMIT,
+            i64::from(chart_points),
             bounded_range.0,
             bounded_range.1,
             preferred_bucket_secs,
@@ -852,7 +879,7 @@ async fn load_dashboard_network_rates(
         rates = state
             .repo
             .list_dashboard_telemetry_network_rates(
-                DASHBOARD_TELEMETRY_LIMIT,
+                i64::from(chart_points),
                 bounded_range.0,
                 bounded_range.1,
                 None,
@@ -879,7 +906,8 @@ fn preferred_dashboard_bucket_secs() -> Option<i32> {
 fn dashboard_chart_step_secs(range: &DashboardRange, chart_points: u32) -> u64 {
     let span = range.end_unix.saturating_sub(range.start_unix);
     let points = u64::from(chart_points.clamp(2, DASHBOARD_MAX_CHART_POINTS));
-    let raw_step = span.saturating_add(points.saturating_sub(1)) / points;
+    let intervals = points.saturating_sub(1);
+    let raw_step = span.saturating_add(intervals.saturating_sub(1)) / intervals;
     round_up_to_minute(raw_step.max(DASHBOARD_MIN_CHART_STEP_SECS))
 }
 
@@ -934,32 +962,18 @@ fn effective_dashboard_range(
 async fn running_job_targets_by_client(
     state: &AppState,
     jobs: &[JobHistoryView],
+    client_ids: &[String],
 ) -> Result<HashMap<String, usize>, ApiError> {
     let mut counts = HashMap::new();
-    for job in jobs.iter().take(50) {
-        for target in state.repo.list_job_targets(job.id).await? {
-            *counts.entry(target.client_id).or_insert(0) += 1;
-        }
+    let job_ids = jobs.iter().map(|job| job.id).collect::<Vec<_>>();
+    for target in state
+        .repo
+        .list_dashboard_job_targets(&job_ids, client_ids)
+        .await?
+    {
+        *counts.entry(target.client_id).or_insert(0) += 1;
     }
     Ok(counts)
-}
-
-async fn running_jobs_in_scope(
-    state: &AppState,
-    jobs: &[JobHistoryView],
-    scoped_client_ids: &HashSet<String>,
-) -> Result<Vec<JobHistoryView>, ApiError> {
-    let mut scoped_jobs = Vec::new();
-    for job in jobs.iter().take(50) {
-        let targets = state.repo.list_job_targets(job.id).await?;
-        if targets
-            .iter()
-            .any(|target| scoped_client_ids.contains(&target.client_id))
-        {
-            scoped_jobs.push(job.clone());
-        }
-    }
-    Ok(scoped_jobs)
 }
 
 fn build_operations(
@@ -968,6 +982,9 @@ fn build_operations(
     agents_by_id: &HashMap<String, AgentView>,
     backups: &[BackupRequestView],
     running_jobs: usize,
+    alerts_truncated: bool,
+    running_jobs_truncated: bool,
+    backups_truncated: bool,
     range: DashboardRange,
 ) -> DashboardOperationsView {
     let backup_window = backups
@@ -1020,6 +1037,9 @@ fn build_operations(
                 status.contains("failed") || status.contains("error")
             })
             .count(),
+        alerts_truncated,
+        running_jobs_truncated,
+        backups_truncated,
         recent_alerts,
         degraded_agents,
     }
@@ -1400,6 +1420,7 @@ fn build_grouped_statistics(
             context.backups,
             context.running_jobs,
             context.network_rates,
+            context.counts_truncated,
         );
     }
 
@@ -1443,6 +1464,7 @@ fn build_grouped_statistics(
                 context.alert_counts_by_client,
                 context.running_job_targets,
                 context.network_by_client,
+                context.counts_truncated,
             );
         }
         DashboardGroupBy::Status => {
@@ -1451,6 +1473,7 @@ fn build_grouped_statistics(
                 context.alert_counts_by_client,
                 context.running_job_targets,
                 context.network_by_client,
+                context.counts_truncated,
             );
         }
         DashboardGroupBy::Date => unreachable!(),
@@ -1467,6 +1490,7 @@ fn build_grouped_statistics(
                 context.alert_counts_by_client,
                 context.running_job_targets,
                 context.network_by_client,
+                context.counts_truncated,
             )
         })
         .collect::<Vec<_>>();
@@ -1490,6 +1514,7 @@ fn build_grouped_statistics(
             context.alert_counts_by_client,
             context.running_job_targets,
             context.network_by_client,
+            context.counts_truncated,
         ));
     }
     clusters
@@ -1500,6 +1525,7 @@ fn build_client_groups(
     alert_counts_by_client: &HashMap<String, usize>,
     running_job_targets: &HashMap<String, usize>,
     network_by_client: &HashMap<String, NetworkClientAggregate>,
+    counts_truncated: bool,
 ) -> Vec<DashboardLabelClusterView> {
     let mut groups = agents
         .iter()
@@ -1512,6 +1538,7 @@ fn build_client_groups(
                 alert_counts_by_client,
                 running_job_targets,
                 network_by_client,
+                counts_truncated,
             )
         })
         .collect::<Vec<_>>();
@@ -1531,6 +1558,7 @@ fn build_status_groups(
     alert_counts_by_client: &HashMap<String, usize>,
     running_job_targets: &HashMap<String, usize>,
     network_by_client: &HashMap<String, NetworkClientAggregate>,
+    counts_truncated: bool,
 ) -> Vec<DashboardLabelClusterView> {
     let mut clients_by_status = BTreeMap::<String, Vec<&AgentView>>::new();
     for agent in agents {
@@ -1550,6 +1578,7 @@ fn build_status_groups(
                 alert_counts_by_client,
                 running_job_targets,
                 network_by_client,
+                counts_truncated,
             )
         })
         .collect()
@@ -1561,6 +1590,7 @@ fn build_date_groups(
     backups: &[crate::model::BackupRequestView],
     running_jobs: &[JobHistoryView],
     network_rates: &[TelemetryNetworkRateView],
+    counts_truncated: bool,
 ) -> Vec<DashboardLabelClusterView> {
     let bucket_secs = date_group_bucket_secs(range);
     let mut groups = BTreeMap::<u64, DashboardLabelClusterView>::new();
@@ -1570,23 +1600,32 @@ fn build_date_groups(
     };
 
     for rate in network_rates {
+        if !timestamp_in_range(&rate.bucket_start, range) {
+            continue;
+        }
         if let Some(timestamp) = parse_timestamp_unix(&rate.bucket_start) {
             let bucket = bucket_start(timestamp);
-            let group = date_group_entry(&mut groups, bucket);
+            let group = date_group_entry(&mut groups, bucket, counts_truncated);
             group.total += rate.sample_count.max(0) as usize;
             group.rx_bps += rate.rx_bps_avg.max(0.0);
             group.tx_bps += rate.tx_bps_avg.max(0.0);
         }
     }
     for alert in alerts {
+        if !timestamp_in_range(&alert.observed_at, range) {
+            continue;
+        }
         if let Some(timestamp) = parse_timestamp_unix(&alert.observed_at) {
-            let group = date_group_entry(&mut groups, bucket_start(timestamp));
+            let group = date_group_entry(&mut groups, bucket_start(timestamp), counts_truncated);
             group.warnings += 1;
         }
     }
     for backup in backups {
+        if !timestamp_in_range(&backup.created_at, range) {
+            continue;
+        }
         if let Some(timestamp) = parse_timestamp_unix(&backup.created_at) {
-            let group = date_group_entry(&mut groups, bucket_start(timestamp));
+            let group = date_group_entry(&mut groups, bucket_start(timestamp), counts_truncated);
             if backup.status == BackupRequestStatus::ArtifactMetadataRecorded.as_str() {
                 group.online += 1;
             } else {
@@ -1595,8 +1634,12 @@ fn build_date_groups(
         }
     }
     for job in running_jobs {
+        if !timestamp_in_range(&job.created_at, range) {
+            continue;
+        }
         if let Some(timestamp) = parse_timestamp_unix(&job.created_at) {
-            date_group_entry(&mut groups, bucket_start(timestamp)).running_jobs += 1;
+            date_group_entry(&mut groups, bucket_start(timestamp), counts_truncated)
+                .running_jobs += 1;
         }
     }
 
@@ -1610,6 +1653,7 @@ fn build_date_groups(
 fn date_group_entry(
     groups: &mut BTreeMap<u64, DashboardLabelClusterView>,
     bucket: u64,
+    counts_truncated: bool,
 ) -> &mut DashboardLabelClusterView {
     groups
         .entry(bucket)
@@ -1623,6 +1667,7 @@ fn date_group_entry(
             stale: 0,
             warnings: 0,
             running_jobs: 0,
+            counts_truncated,
             rx_bps: 0.0,
             tx_bps: 0.0,
             drilldown: drilldown("Open topology evidence", "Topology", "evidence", None),
@@ -1648,6 +1693,7 @@ fn cluster_for_agents(
     alert_counts_by_client: &HashMap<String, usize>,
     running_job_targets: &HashMap<String, usize>,
     network_by_client: &HashMap<String, NetworkClientAggregate>,
+    counts_truncated: bool,
 ) -> DashboardLabelClusterView {
     let mut online = 0_usize;
     let mut offline = 0_usize;
@@ -1688,6 +1734,7 @@ fn cluster_for_agents(
         stale,
         warnings,
         running_jobs,
+        counts_truncated,
         rx_bps,
         tx_bps,
         drilldown: drilldown(
@@ -1887,10 +1934,6 @@ fn tag_matches(tags: &[String], expected: &str) -> bool {
     tags.iter().any(|tag| tag.eq_ignore_ascii_case(expected))
 }
 
-fn is_running_job_status(status: &str) -> bool {
-    matches!(status, "queued" | "running")
-}
-
 fn is_degraded_agent_status(status: &str) -> bool {
     status == "stale"
 }
@@ -1907,9 +1950,7 @@ fn total_bps(client: &DashboardNetworkClientView) -> f64 {
 }
 
 fn timestamp_in_range(value: &str, range: &DashboardRange) -> bool {
-    parse_timestamp_unix(value)
-        .map(|timestamp| timestamp >= range.start_unix && timestamp <= range.end_unix)
-        .unwrap_or(true)
+    timestamp_in_optional_bounds(value, Some(range.start_unix), Some(range.end_unix))
 }
 
 fn timestamp_sort_key(value: &str) -> u64 {
@@ -1980,5 +2021,25 @@ fn drilldown(
         view: view.to_string(),
         subpage: subpage.to_string(),
         query: query.filter(|value| !value.is_empty()),
+    }
+}
+
+#[cfg(test)]
+mod chart_step_tests {
+    use super::*;
+
+    #[test]
+    fn chart_step_covers_inclusive_multi_day_endpoints() {
+        let range = DashboardRange {
+            mode: "all",
+            window: None,
+            start_unix: 0,
+            end_unix: 4 * 24 * 60 * 60,
+        };
+
+        assert_eq!(
+            dashboard_chart_step_secs(&range, 2),
+            range.end_unix - range.start_unix
+        );
     }
 }

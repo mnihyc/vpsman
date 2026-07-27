@@ -22,8 +22,8 @@ use vpsman_common::{
 };
 #[cfg(test)]
 use vpsman_common::{
-    expression_matches, parse_expression, plan_tunnel, ExpressionContext, TunnelAddressPair,
-    TunnelEndpointSide, TunnelKind, TunnelPlanInput, VpsMetadata,
+    expression_matches, parse_expression, plan_tunnel, AgentPrivilegeMode, ExpressionContext,
+    TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelPlanInput, VpsMetadata,
 };
 use vpsman_object_store::{BackupObjectStore, S3BackupObjectStoreSettings};
 use vpsman_server_core::{
@@ -2144,7 +2144,9 @@ async fn materialize_due_schedule(
                 message,
                 exit_code,
                 started_at,
-                completed_at
+                completed_at,
+                capability_degraded_reason,
+                capability_degraded_hint
             )
             VALUES (
                 $1,
@@ -2153,7 +2155,9 @@ async fn materialize_due_schedule(
                 $4,
                 $5,
                 CASE WHEN $3 = 'skipped' THEN now() ELSE NULL END,
-                CASE WHEN $3 = 'skipped' THEN now() ELSE NULL END
+                CASE WHEN $3 = 'skipped' THEN now() ELSE NULL END,
+                $6,
+                $7
             )
             "#,
         )
@@ -2169,6 +2173,8 @@ async fn materialize_due_schedule(
         } else {
             None
         })
+        .bind(skip.map(|skip| skip.failure.reason))
+        .bind(skip.map(|skip| skip.failure.hint))
         .execute(&mut **tx)
         .await?;
     }
@@ -3576,6 +3582,69 @@ mod schedule_tests {
         let output = job_status_output(&db.pool, job_id, "edge-a").await;
         assert_eq!(output["type"], "busy_update_skipped");
         assert_eq!(output["reason"], "busy_agent_active_jobs");
+        db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_scheduled_capability_skip_persists_alert_metadata() {
+        let Some(db) = PgWorkerTestDb::maybe_new().await else {
+            return;
+        };
+        insert_worker_client(&db.pool, "edge-unprivileged", "online", false).await;
+        let capabilities = AgentCapabilitySnapshot {
+            privilege_mode: AgentPrivilegeMode::Unprivileged,
+            ..AgentCapabilitySnapshot::default()
+        };
+        sqlx::query("UPDATE clients SET capabilities = $2 WHERE id = $1")
+            .bind("edge-unprivileged")
+            .bind(SqlJson(capabilities))
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let schedule_id = insert_worker_schedule(
+            &db.pool,
+            "capability-degraded-schedule",
+            serde_json::json!({"type": "agent_update_check"}),
+            &["edge-unprivileged"],
+        )
+        .await;
+
+        let processed = process_due_schedule(
+            &db.pool,
+            schedule_id,
+            &ScheduleDispatchConfig::new(60, DEFAULT_MAX_JOB_TIMEOUT_SECS, false),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(processed, 1);
+        let (job_id, status, _, last_error) = schedule_result(&db.pool, schedule_id).await;
+        assert_eq!(status.as_deref(), Some(JOB_STATUS_SKIPPED));
+        assert_eq!(last_error, None);
+        let row = sqlx::query(
+            r#"
+            SELECT capability_degraded_reason, capability_degraded_hint
+            FROM job_targets
+            WHERE job_id = $1 AND client_id = 'edge-unprivileged'
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.try_get::<Option<String>, _>("capability_degraded_reason")
+                .unwrap()
+                .as_deref(),
+            Some("target_agent_lacks_agent_update_capability")
+        );
+        assert!(row
+            .try_get::<Option<String>, _>("capability_degraded_hint")
+            .unwrap()
+            .is_some_and(|hint| hint.contains("agent update was not dispatched")));
+        let output = job_status_output(&db.pool, job_id, "edge-unprivileged").await;
+        assert_eq!(output["type"], "capability_degraded");
+        assert_eq!(output["command_type"], "agent_update_check");
         db.cleanup().await;
     }
 

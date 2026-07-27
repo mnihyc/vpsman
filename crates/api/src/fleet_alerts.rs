@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -7,13 +7,16 @@ use vpsman_common::payload_hash;
 use crate::{
     model::{
         AgentView, BackupRequestView, FleetAlertQuery, FleetAlertView, JobHistoryView,
-        JobTargetView, SourceStatusView, TelemetryRollupView, TelemetryTunnelView,
+        SourceStatusView, TelemetryRollupView, TelemetryTunnelView,
     },
     model_alert_policies::PolicyAlertQuery,
     model_alert_states::FleetAlertStateView,
     repository_alert_policies::policy_alert_to_fleet_alert,
+    repository_jobs::CapabilityDegradedJobTargetCandidate,
+    repository_telemetry_rollups::tunnel_adapter_health_is_degraded,
     state::AppState,
     unix_now,
+    util::{compare_timestamps_desc, timestamp_in_optional_bounds},
 };
 
 const DEFAULT_MEMORY_AVAILABLE_CRITICAL_RATIO: f64 = 0.10;
@@ -22,6 +25,15 @@ const DEFAULT_DISK_AVAILABLE_CRITICAL_RATIO: f64 = 0.10;
 const DEFAULT_DISK_AVAILABLE_WARNING_RATIO: f64 = 0.20;
 const DEFAULT_CPU_LOAD_WARNING: f64 = 2.0;
 const DEFAULT_CPU_LOAD_CRITICAL: f64 = 4.0;
+const FLEET_ALERT_RESULT_LIMIT_MAX: i64 = 200;
+// Historical/event sources are deliberately bounded independently before they
+// are merged with current agent/resource/source-readiness snapshots. Repository
+// selectors must apply native client, category, severity, and dashboard-window
+// filters before this horizon so a narrow query is not crowded out by unrelated
+// fleet history. Saturation is surfaced to dashboard/UI consumers as a lower
+// bound; older event history remains available from its owning workflow.
+const FLEET_EVENT_SOURCE_HORIZON_MAX: i64 = 200;
+const SOURCE_READINESS_EVIDENCE_LIMIT: usize = 100;
 
 #[derive(Clone, Debug)]
 pub(crate) struct FleetAlertPolicy {
@@ -83,6 +95,20 @@ pub(crate) struct AgentAlertScope {
     pub(crate) tags: Vec<String>,
 }
 
+pub(crate) struct FleetAlertSelector<'a> {
+    pub(crate) agents: &'a [AgentView],
+    pub(crate) allowed_client_ids: &'a HashSet<String>,
+    pub(crate) start_unix: u64,
+    pub(crate) end_unix: u64,
+    pub(crate) snapshot_unix: u64,
+    pub(crate) include_global: bool,
+}
+
+pub(crate) struct FleetAlertSelection {
+    pub(crate) alerts: Vec<FleetAlertView>,
+    pub(crate) truncated: bool,
+}
+
 pub(crate) fn build_agent_alert_scopes(agents: &[AgentView]) -> HashMap<String, AgentAlertScope> {
     agents
         .iter()
@@ -139,53 +165,226 @@ impl AppState {
         &self,
         query: FleetAlertQuery,
     ) -> Result<Vec<FleetAlertView>> {
-        let mut alerts = Vec::new();
-        let agents = self.repo.list_agents().await?;
-        let agents_by_id = agents
-            .iter()
-            .map(|agent| (agent.id.as_str(), agent))
-            .collect::<HashMap<_, _>>();
-        append_agent_status_alerts(&mut alerts, &agents);
+        Ok(self.list_fleet_alerts_selected(query, None).await?.alerts)
+    }
 
-        let rollups = self
-            .repo
-            .list_latest_telemetry_rollups(5_000, None, None)
-            .await?;
-        let base_alert_policy = self.fleet_alert_policy();
-        append_resource_alerts(&mut alerts, &latest_rollups(rollups), &base_alert_policy)?;
+    pub(crate) async fn list_fleet_alerts_selected(
+        &self,
+        query: FleetAlertQuery,
+        selector: Option<FleetAlertSelector<'_>>,
+    ) -> Result<FleetAlertSelection> {
+        let selector = selector.as_ref();
+        let mut alerts = Vec::new();
+        let mut source_saturated = false;
+        let snapshot_observed_at = selector
+            .map(|selector| selector.snapshot_unix)
+            .unwrap_or_else(unix_now)
+            .to_string();
+        let needs_agents = (query_allows_category(&query, "agent_status")
+            && query_allows_any_severity(&query, &["critical", "warning"]))
+            || (query_allows_category(&query, "resource")
+                && query_allows_any_severity(&query, &["critical", "warning"]));
+        let agents = if needs_agents {
+            let agents = if let Some(selector) = selector {
+                selector.agents.to_vec()
+            } else {
+                self.repo.list_agents().await?
+            };
+            agents
+                .into_iter()
+                .filter(|agent| {
+                    query
+                        .client_id
+                        .as_deref()
+                        .is_none_or(|client_id| agent.id == client_id)
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        if query_allows_category(&query, "agent_status")
+            && query_allows_any_severity(&query, &["critical", "warning"])
+        {
+            append_agent_status_alerts(&mut alerts, &agents, &snapshot_observed_at);
+        }
+
+        if query_allows_category(&query, "resource")
+            && query_allows_any_severity(&query, &["critical", "warning"])
+        {
+            let rollup_client_ids = agents
+                .iter()
+                .map(|agent| agent.id.clone())
+                .collect::<Vec<_>>();
+            let rollups = self
+                .repo
+                .list_latest_telemetry_rollups_for_clients(&rollup_client_ids, None)
+                .await?;
+            let base_alert_policy = self.fleet_alert_policy();
+            append_resource_alerts(&mut alerts, &latest_rollups(rollups), &base_alert_policy)?;
+        }
 
         let policy_alerts = self
             .repo
-            .list_policy_alerts(&PolicyAlertQuery {
-                limit: Some(200),
-                client_id: None,
-                severity: None,
-                category: None,
-                policy_group_id: None,
-            })
+            .list_policy_alert_candidates(
+                &PolicyAlertQuery {
+                    limit: None,
+                    client_id: query.client_id.clone(),
+                    severity: query.severity.clone(),
+                    category: query.category.clone(),
+                    policy_group_id: None,
+                },
+                FLEET_EVENT_SOURCE_HORIZON_MAX as usize,
+                selector.map(|selector| selector.allowed_client_ids),
+                selector.map(|selector| selector.start_unix),
+                selector.map(|selector| selector.end_unix),
+            )
             .await?;
+        source_saturated |= policy_alerts.len() >= FLEET_EVENT_SOURCE_HORIZON_MAX as usize;
         alerts.extend(policy_alerts.iter().map(policy_alert_to_fleet_alert));
 
-        let tunnels = self.repo.list_telemetry_tunnels(5_000, None, None).await?;
-        append_tunnel_alerts(&mut alerts, &tunnels);
+        if query_allows_category(&query, "network")
+            && query_allows_any_severity(&query, &["critical", "warning"])
+        {
+            let scoped_client_ids = selector.map(|selector| {
+                selector
+                    .allowed_client_ids
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            });
+            let tunnels = self
+                .repo
+                .list_fleet_alert_tunnel_candidates(
+                    query.client_id.as_deref(),
+                    scoped_client_ids.as_deref(),
+                    query.severity.as_deref(),
+                    selector.map(|selector| selector.start_unix),
+                    selector.map(|selector| selector.end_unix),
+                    FLEET_EVENT_SOURCE_HORIZON_MAX as usize,
+                )
+                .await?;
+            source_saturated |= tunnels.len() >= FLEET_EVENT_SOURCE_HORIZON_MAX as usize;
+            append_tunnel_alerts(&mut alerts, &tunnels);
+        }
 
-        let source_status = self.list_source_status(None, None).await?;
-        append_source_readiness_alerts(&mut alerts, &source_status);
+        if query_allows_category(&query, "source_readiness")
+            && query_allows_any_severity(&query, &["warning", "info"])
+        {
+            let source_status = if let Some(selector) = selector {
+                self.list_source_status_for_agents(selector.agents, None)
+                    .await?
+            } else {
+                self.list_source_status(query.client_id.as_deref(), None)
+                    .await?
+            };
+            append_source_readiness_alerts_at(&mut alerts, &source_status, &snapshot_observed_at);
+        }
 
-        let backup_requests = self.repo.list_backup_requests(200).await?;
-        append_backup_request_alerts(&mut alerts, &backup_requests);
+        if query_allows_category(&query, "backup") && query_allows_severity(&query, "critical") {
+            let backup_requests = self
+                .repo
+                .list_failed_backup_request_candidates(
+                    query.client_id.as_deref(),
+                    selector.map(|selector| selector.allowed_client_ids),
+                    selector.map(|selector| selector.start_unix),
+                    selector.map(|selector| selector.end_unix),
+                    FLEET_EVENT_SOURCE_HORIZON_MAX,
+                )
+                .await?;
+            source_saturated |= backup_requests.len() >= FLEET_EVENT_SOURCE_HORIZON_MAX as usize;
+            append_backup_request_alerts(&mut alerts, &backup_requests);
+        }
 
-        let jobs = self.repo.list_jobs(200).await?;
-        append_job_alerts(&mut alerts, &self.repo, &jobs, &agents_by_id).await?;
+        if query.client_id.is_none()
+            && selector.is_none_or(|selector| selector.include_global)
+            && query_allows_any_category(&query, &["backup", "agent_update", "job"])
+            && query_allows_any_severity(&query, &["critical", "warning"])
+        {
+            let jobs = self
+                .repo
+                .list_failed_job_alert_candidates(
+                    query.category.as_deref(),
+                    query.severity.as_deref(),
+                    selector.map(|selector| selector.start_unix),
+                    selector.map(|selector| selector.end_unix),
+                    FLEET_EVENT_SOURCE_HORIZON_MAX,
+                )
+                .await?;
+            source_saturated |= jobs.len() >= FLEET_EVENT_SOURCE_HORIZON_MAX as usize;
+            append_job_alerts(&mut alerts, &jobs);
+        }
+        if query_allows_category(&query, "capability_degraded")
+            && query_allows_severity(&query, "warning")
+        {
+            let targets = self
+                .repo
+                .list_capability_degraded_job_target_candidates(
+                    query.client_id.as_deref(),
+                    selector.map(|selector| selector.allowed_client_ids),
+                    selector.map(|selector| selector.start_unix),
+                    selector.map(|selector| selector.end_unix),
+                    FLEET_EVENT_SOURCE_HORIZON_MAX,
+                )
+                .await?;
+            source_saturated |= targets.len() >= FLEET_EVENT_SOURCE_HORIZON_MAX as usize;
+            append_capability_degraded_target_alerts(&mut alerts, &targets);
+        }
 
-        let alert_states = self.repo.list_fleet_alert_states(1000, None).await?;
+        let alert_ids = alerts
+            .iter()
+            .map(|alert| alert.id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let alert_states = self
+            .repo
+            .list_fleet_alert_states_for_alert_ids(&alert_ids)
+            .await?;
         apply_alert_states(&mut alerts, &alert_states);
-        apply_alert_filters(&mut alerts, &query);
-        Ok(alerts)
+        if let Some(selector) = selector {
+            apply_alert_selector(&mut alerts, selector);
+        }
+        let result_truncated = apply_alert_filters(&mut alerts, &query);
+        Ok(FleetAlertSelection {
+            alerts,
+            truncated: source_saturated || result_truncated,
+        })
     }
 }
 
-fn append_agent_status_alerts(alerts: &mut Vec<FleetAlertView>, agents: &[AgentView]) {
+fn query_allows_category(query: &FleetAlertQuery, category: &str) -> bool {
+    query
+        .category
+        .as_deref()
+        .is_none_or(|requested| requested == category)
+}
+
+fn query_allows_any_category(query: &FleetAlertQuery, categories: &[&str]) -> bool {
+    query
+        .category
+        .as_deref()
+        .is_none_or(|requested| categories.contains(&requested))
+}
+
+fn query_allows_severity(query: &FleetAlertQuery, severity: &str) -> bool {
+    query
+        .severity
+        .as_deref()
+        .is_none_or(|requested| requested == severity)
+}
+
+fn query_allows_any_severity(query: &FleetAlertQuery, severities: &[&str]) -> bool {
+    query
+        .severity
+        .as_deref()
+        .is_none_or(|requested| severities.contains(&requested))
+}
+
+fn append_agent_status_alerts(
+    alerts: &mut Vec<FleetAlertView>,
+    agents: &[AgentView],
+    observed_at: &str,
+) {
     for agent in agents {
         if agent.status == "online" {
             continue;
@@ -211,7 +410,7 @@ fn append_agent_status_alerts(alerts: &mut Vec<FleetAlertView>, agents: &[AgentV
                     "tags": &agent.tags,
                     "capability_privilege_mode": agent.capabilities.privilege_mode,
                 }),
-                observed_at: unix_now().to_string(),
+                observed_at: observed_at.to_string(),
             },
         );
     }
@@ -311,11 +510,7 @@ fn append_resource_alerts(
 
 fn append_tunnel_alerts(alerts: &mut Vec<FleetAlertView>, tunnels: &[TelemetryTunnelView]) {
     for tunnel in tunnels {
-        if tunnel
-            .adapter_health
-            .as_ref()
-            .is_some_and(|health| !health.success)
-        {
+        if tunnel_adapter_health_is_degraded(tunnel) {
             push_tunnel_alert(
                 alerts,
                 "critical",
@@ -355,9 +550,40 @@ fn append_tunnel_alerts(alerts: &mut Vec<FleetAlertView>, tunnels: &[TelemetryTu
     }
 }
 
+#[cfg(test)]
 fn append_source_readiness_alerts(alerts: &mut Vec<FleetAlertView>, rows: &[SourceStatusView]) {
-    let mut pending_evidence_rows = Vec::new();
+    let observed_at = unix_now().to_string();
+    append_source_readiness_alerts_at(alerts, rows, &observed_at);
+}
+
+fn append_source_readiness_alerts_at(
+    alerts: &mut Vec<FleetAlertView>,
+    rows: &[SourceStatusView],
+    observed_at: &str,
+) {
+    let mut rows_by_client = BTreeMap::<&str, Vec<&SourceStatusView>>::new();
     for row in rows {
+        rows_by_client
+            .entry(row.client_id.as_str())
+            .or_default()
+            .push(row);
+    }
+    for client_rows in rows_by_client.values() {
+        append_source_readiness_alerts_for_client_at(alerts, client_rows, observed_at);
+    }
+}
+
+fn append_source_readiness_alerts_for_client_at(
+    alerts: &mut Vec<FleetAlertView>,
+    rows: &[&SourceStatusView],
+    observed_at: &str,
+) {
+    // Source readiness is a current configuration/runtime snapshot. Assignment
+    // time remains evidence, but must not make a presently degraded source look
+    // like a historical event (or let one recent assignment timestamp an older
+    // aggregate).
+    let mut pending_evidence_rows = Vec::new();
+    for &row in rows {
         if matches!(
             row.status.as_str(),
             "selected_no_samples" | "selected_no_artifacts"
@@ -383,9 +609,10 @@ fn append_source_readiness_alerts(alerts: &mut Vec<FleetAlertView>, rows: &[Sour
                     "domain": &row.domain,
                     "template_name": &row.template_name,
                     "source_kind": &row.source_kind,
+                    "assigned_at": &row.assigned_at,
                     "evidence": &row.evidence,
                 }),
-                observed_at: row.assigned_at.clone(),
+                observed_at: observed_at.to_string(),
             },
         );
     }
@@ -401,10 +628,9 @@ fn append_source_readiness_alerts(alerts: &mut Vec<FleetAlertView>, rows: &[Sour
         .iter()
         .map(|row| row.domain.clone())
         .collect::<BTreeSet<_>>();
-    let evidence_limit = 100;
     let evidence_rows = pending_evidence_rows
         .iter()
-        .take(evidence_limit)
+        .take(SOURCE_READINESS_EVIDENCE_LIMIT)
         .map(|row| {
             json!({
                 "client_id": &row.client_id,
@@ -415,16 +641,29 @@ fn append_source_readiness_alerts(alerts: &mut Vec<FleetAlertView>, rows: &[Sour
                 "source_kind": &row.source_kind,
                 "status": &row.status,
                 "status_reason": &row.status_reason,
+                "assigned_at": &row.assigned_at,
             })
         })
         .collect::<Vec<_>>();
-    let observed_at = pending_evidence_rows
+    let affected_client_count = affected_clients.len();
+    let affected_domain_count = affected_domains.len();
+    let affected_client_samples = affected_clients
         .iter()
-        .map(|row| row.assigned_at.as_str())
-        .max()
-        .unwrap_or_default()
-        .to_string();
-    let target_id = "fleet:pending_evidence";
+        .take(SOURCE_READINESS_EVIDENCE_LIMIT)
+        .cloned()
+        .collect::<Vec<_>>();
+    let affected_domain_samples = affected_domains
+        .iter()
+        .take(SOURCE_READINESS_EVIDENCE_LIMIT)
+        .cloned()
+        .collect::<Vec<_>>();
+    let summary_client_id = (affected_client_count == 1)
+        .then(|| affected_clients.iter().next().cloned())
+        .flatten();
+    let target_id = summary_client_id.as_deref().map_or_else(
+        || "fleet:pending_evidence".to_string(),
+        |client_id| format!("client:{client_id}:pending_evidence"),
+    );
     let status = "selected_pending_evidence";
     push_alert(
         alerts,
@@ -432,68 +671,69 @@ fn append_source_readiness_alerts(alerts: &mut Vec<FleetAlertView>, rows: &[Sour
             severity: "info",
             category: "source_readiness",
             target_kind: "source_template_summary",
-            target_id,
-            client_id: None,
+            target_id: &target_id,
+            client_id: summary_client_id.as_deref(),
             title: "Selected source templates await evidence",
             detail: format!(
                 "{} selected assignments across {} VPSs and {} source domains have no retained evidence yet",
                 pending_evidence_rows.len(),
-                affected_clients.len(),
-                affected_domains.len(),
+                affected_client_count,
+                affected_domain_count,
             ),
             status,
             evidence: json!({
                 "assignment_count": pending_evidence_rows.len(),
-                "affected_clients": affected_clients,
-                "affected_domains": affected_domains,
+                "affected_client_count": affected_client_count,
+                "affected_clients": affected_client_samples,
+                "affected_clients_truncated_count":
+                    affected_client_count.saturating_sub(SOURCE_READINESS_EVIDENCE_LIMIT),
+                "affected_domain_count": affected_domain_count,
+                "affected_domains": affected_domain_samples,
+                "affected_domains_truncated_count":
+                    affected_domain_count.saturating_sub(SOURCE_READINESS_EVIDENCE_LIMIT),
                 "assignments": evidence_rows,
-                "truncated_count": pending_evidence_rows.len().saturating_sub(evidence_limit),
+                "assignments_truncated_count": pending_evidence_rows
+                    .len()
+                    .saturating_sub(SOURCE_READINESS_EVIDENCE_LIMIT),
+                "truncated_count": pending_evidence_rows
+                    .len()
+                    .saturating_sub(SOURCE_READINESS_EVIDENCE_LIMIT),
             }),
-            observed_at,
+            observed_at: observed_at.to_string(),
         },
     );
 }
 
-async fn append_job_alerts(
-    alerts: &mut Vec<FleetAlertView>,
-    repo: &crate::repository::Repository,
-    jobs: &[JobHistoryView],
-    agents_by_id: &HashMap<&str, &AgentView>,
-) -> Result<()> {
+fn append_job_alerts(alerts: &mut Vec<FleetAlertView>, jobs: &[JobHistoryView]) {
     for job in jobs {
-        if failed_status(&job.status) {
-            let severity = if job.status == "partial_success" {
-                "warning"
+        let severity = if job.status == "partial_success" {
+            "warning"
+        } else {
+            "critical"
+        };
+        let category =
+            if job.command_type.contains("backup") || job.command_type.contains("restore") {
+                "backup"
+            } else if job.command_type.contains("agent_update") {
+                "agent_update"
             } else {
-                "critical"
+                "job"
             };
-            let category =
-                if job.command_type.contains("backup") || job.command_type.contains("restore") {
-                    "backup"
-                } else if job.command_type.contains("agent_update") {
-                    "agent_update"
-                } else {
-                    "job"
-                };
-            push_job_alert(
-                alerts,
-                severity,
-                job,
-                category,
-                "Job requires operator attention",
-                format!("{} job {}", job.command_type, job.status),
-                json!({"command_type": &job.command_type, "target_count": job.target_count}),
-            );
-        }
-        let targets = repo.list_job_targets(job.id).await?;
-        append_unprivileged_target_alerts(alerts, job, &targets, agents_by_id);
+        push_job_alert(
+            alerts,
+            severity,
+            job,
+            category,
+            "Job requires operator attention",
+            format!("{} job {}", job.command_type, job.status),
+            json!({"command_type": &job.command_type, "target_count": job.target_count}),
+        );
     }
-    Ok(())
 }
 
 fn append_backup_request_alerts(alerts: &mut Vec<FleetAlertView>, backups: &[BackupRequestView]) {
     for backup in backups {
-        if backup.status.contains("failed") || backup.status.contains("rejected") {
+        if backup.status == "execution_failed" {
             push_alert(
                 alerts,
                 AlertInput {
@@ -517,34 +757,31 @@ fn append_backup_request_alerts(alerts: &mut Vec<FleetAlertView>, backups: &[Bac
     }
 }
 
-fn append_unprivileged_target_alerts(
+fn append_capability_degraded_target_alerts(
     alerts: &mut Vec<FleetAlertView>,
-    job: &JobHistoryView,
-    targets: &[JobTargetView],
-    agents_by_id: &HashMap<&str, &AgentView>,
+    candidates: &[CapabilityDegradedJobTargetCandidate],
 ) {
-    for target in targets {
-        if !target.status.contains("unprivileged") {
-            continue;
-        }
-        let agent_hint = agents_by_id
-            .get(target.client_id.as_str())
-            .and_then(|agent| agent.capabilities.unprivileged_hint.clone());
+    for candidate in candidates {
+        let job = &candidate.job;
+        let target = &candidate.target;
         push_alert(
             alerts,
             AlertInput {
                 severity: "warning",
-                category: "unprivileged_blocked",
+                category: "capability_degraded",
                 target_kind: "job_target",
                 target_id: &format!("{}:{}", job.id, target.client_id),
                 client_id: Some(&target.client_id),
-                title: "Privileged operation degraded on unprivileged agent",
-                detail: agent_hint
-                    .unwrap_or_else(|| format!("{} reported {}", target.client_id, target.status)),
-                status: &target.status,
+                title: "Operation skipped because the agent lacks a required capability",
+                detail: candidate.hint.clone(),
+                status: &candidate.reason,
                 evidence: json!({
                     "job_id": job.id,
                     "command_type": &job.command_type,
+                    "target_status": &target.status,
+                    "target_message": &target.message,
+                    "reason": &candidate.reason,
+                    "hint": &candidate.hint,
                     "exit_code": target.exit_code,
                     "started_at": &target.started_at,
                     "completed_at": &target.completed_at,
@@ -591,21 +828,6 @@ fn available_ratio_alert(
     } else {
         None
     }
-}
-
-fn failed_status(status: &str) -> bool {
-    matches!(
-        status,
-        "failed"
-            | "agent_timeout"
-            | "control_timeout"
-            | "partial_success"
-            | "rejected"
-            | "canceled"
-    ) || status.contains("failed")
-        || status.contains("rejected")
-        || status.contains("timeout")
-        || status.contains("error")
 }
 
 fn push_resource_alert(
@@ -760,7 +982,23 @@ fn apply_alert_states(alerts: &mut [FleetAlertView], states: &[FleetAlertStateVi
     }
 }
 
-fn apply_alert_filters(alerts: &mut Vec<FleetAlertView>, query: &FleetAlertQuery) {
+fn apply_alert_selector(alerts: &mut Vec<FleetAlertView>, selector: &FleetAlertSelector<'_>) {
+    alerts.retain(|alert| {
+        let client_matches = alert
+            .client_id
+            .as_ref()
+            .map(|client_id| selector.allowed_client_ids.contains(client_id))
+            .unwrap_or(selector.include_global);
+        client_matches
+            && timestamp_in_optional_bounds(
+                &alert.observed_at,
+                Some(selector.start_unix),
+                Some(selector.end_unix),
+            )
+    });
+}
+
+fn apply_alert_filters(alerts: &mut Vec<FleetAlertView>, query: &FleetAlertQuery) -> bool {
     if let Some(client_id) = query.client_id.as_deref() {
         alerts.retain(|alert| alert.client_id.as_deref() == Some(client_id));
     }
@@ -781,11 +1019,17 @@ fn apply_alert_filters(alerts: &mut Vec<FleetAlertView>, query: &FleetAlertQuery
             .cmp(&operator_state_rank(&right.operator_state))
             .then_with(|| severity_rank(&left.severity).cmp(&severity_rank(&right.severity)))
             .then_with(|| right.escalation_level.cmp(&left.escalation_level))
-            .then_with(|| right.observed_at.cmp(&left.observed_at))
+            .then_with(|| compare_timestamps_desc(&left.observed_at, &right.observed_at))
             .then_with(|| left.category.cmp(&right.category))
             .then_with(|| left.target_id.cmp(&right.target_id))
     });
-    alerts.truncate(query.limit.unwrap_or(50).clamp(1, 200) as usize);
+    let limit = query
+        .limit
+        .unwrap_or(50)
+        .clamp(1, FLEET_ALERT_RESULT_LIMIT_MAX) as usize;
+    let truncated = alerts.len() > limit;
+    alerts.truncate(limit);
+    truncated
 }
 
 fn operator_state_rank(state: &str) -> usize {
@@ -872,7 +1116,7 @@ mod tests {
     }
 
     #[test]
-    fn source_readiness_aggregates_pending_evidence_but_keeps_warnings_per_vps() {
+    fn source_readiness_keeps_stable_per_vps_summaries_and_warnings() {
         let mut alerts = Vec::new();
         let rows = vec![
             source_status("edge-a", "telemetry", "selected_no_samples"),
@@ -883,27 +1127,89 @@ mod tests {
 
         append_source_readiness_alerts(&mut alerts, &rows);
 
-        assert_eq!(alerts.len(), 2);
-        let summary = alerts
+        assert_eq!(alerts.len(), 3);
+        let edge_a_summary = alerts
             .iter()
-            .find(|alert| alert.severity == "info")
-            .expect("pending evidence summary");
-        assert_eq!(summary.target_kind, "source_template_summary");
-        assert_eq!(summary.client_id, None);
-        assert_eq!(summary.evidence["assignment_count"], 3);
-        assert_eq!(
-            summary.evidence["affected_clients"]
-                .as_array()
-                .unwrap()
-                .len(),
-            2
-        );
+            .find(|alert| alert.target_id == "client:edge-a:pending_evidence")
+            .expect("edge-a pending evidence summary");
+        assert_eq!(edge_a_summary.target_kind, "source_template_summary");
+        assert_eq!(edge_a_summary.client_id.as_deref(), Some("edge-a"));
+        assert_eq!(edge_a_summary.evidence["assignment_count"], 2);
+        let edge_b_summary = alerts
+            .iter()
+            .find(|alert| alert.target_id == "client:edge-b:pending_evidence")
+            .expect("edge-b pending evidence summary");
+        assert_eq!(edge_b_summary.client_id.as_deref(), Some("edge-b"));
+        assert_eq!(edge_b_summary.evidence["assignment_count"], 1);
         let warning = alerts
             .iter()
             .find(|alert| alert.severity == "warning")
             .expect("degraded assignment warning");
         assert_eq!(warning.client_id.as_deref(), Some("edge-b"));
         assert_eq!(warning.status, "degraded");
+    }
+
+    #[test]
+    fn source_readiness_summary_remains_visible_to_its_single_vps_scope() {
+        let mut alerts = Vec::new();
+        append_source_readiness_alerts(
+            &mut alerts,
+            &[
+                source_status("edge-a", "telemetry", "selected_no_samples"),
+                source_status("edge-a", "network", "selected_no_artifacts"),
+            ],
+        );
+
+        apply_alert_filters(
+            &mut alerts,
+            &FleetAlertQuery {
+                limit: Some(10),
+                client_id: Some("edge-a".to_string()),
+                severity: Some("info".to_string()),
+                category: Some("source_readiness".to_string()),
+                operator_state: None,
+                include_muted: None,
+            },
+        );
+
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].client_id.as_deref(), Some("edge-a"));
+        assert_eq!(alerts[0].target_id, "client:edge-a:pending_evidence");
+    }
+
+    #[test]
+    fn source_readiness_summary_bounds_every_evidence_collection() {
+        let rows = (0..SOURCE_READINESS_EVIDENCE_LIMIT + 5)
+            .map(|index| {
+                source_status(
+                    "edge-a",
+                    &format!("domain-{index:03}"),
+                    "selected_no_samples",
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut alerts = Vec::new();
+
+        append_source_readiness_alerts(&mut alerts, &rows);
+
+        let summary = alerts.first().expect("pending evidence summary");
+        assert_eq!(summary.evidence["affected_client_count"], 1);
+        assert_eq!(
+            summary.evidence["affected_clients"]
+                .as_array()
+                .expect("affected client samples")
+                .len(),
+            1
+        );
+        assert_eq!(summary.evidence["affected_clients_truncated_count"], 0);
+        assert_eq!(
+            summary.evidence["assignments"]
+                .as_array()
+                .expect("assignment samples")
+                .len(),
+            SOURCE_READINESS_EVIDENCE_LIMIT
+        );
+        assert_eq!(summary.evidence["assignments_truncated_count"], 5);
     }
 
     fn source_status(client_id: &str, domain: &str, status: &str) -> SourceStatusView {

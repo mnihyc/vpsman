@@ -60,7 +60,7 @@ current ownership, so a stale connection cannot continue by claiming the old key
 Download the installer from the reviewed release and verify it before sending
 identity material to it:
 
-The generated console command requires `curl`, `mktemp`, `sha256sum`, and
+The generated console command requires `curl`, `flock`, `mktemp`, `sha256sum`, and
 `awk`; the manual pinned sequence below requires `curl` and `sha256sum`.
 The generated line contains the one-time agent private key. Run it only in a
 trusted shell with command history disabled, then clear the clipboard; do not
@@ -107,6 +107,14 @@ unless `VPSMAN_AGENT_ENABLE_SERVICE=0` is set for an intentional staging-only
 install. A staging-only run prints the exact `VPSMAN_AGENT_STATE_DIR=... \
 vpsman-agent --config ... run` command needed to start the agent in the
 foreground.
+Installer runs for the same agent home are serialized and a concurrent run is
+refused before snapshots or installation changes. Reinstall is supported for an
+unregistered, inactive staged unit or for the canonical
+`vpsman-agent.service` when it is already enabled,
+owned by the requested unit path, and exactly active or inactive. Linked,
+disabled, runtime, masked, externally owned, or transitional unit states are
+refused without replacing files or changing service registration; normalize
+the service to a supported state and retry.
 It does not call `/api`, `/.well-known`, or any panel-side lookup endpoint. The
 local file contains only the client id, gateway endpoints and priority, Noise
 key material, server trust, and gateway retry/connect timing. Display names,

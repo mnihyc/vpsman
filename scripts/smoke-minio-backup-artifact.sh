@@ -214,7 +214,7 @@ if target/debug/vpsctl --api-url "$api_url" backup-artifact-upload \
   echo "expected duplicate MinIO object upload to fail" >&2
   exit 1
 fi
-grep -q "backup_artifact_object_exists" "$duplicate_log"
+grep -q "Backup artifact object exists" "$duplicate_log"
 
 backups_json="$(api_auth_get "/api/v1/backups?limit=20")"
 artifacts_json="$(api_auth_get "/api/v1/backup-artifacts?limit=20")"

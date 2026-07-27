@@ -95,7 +95,7 @@ Prerequisites depend on the path you choose:
 - Rust via `rustup` for source builds; the repo pins the toolchain in
   [rust-toolchain.toml](rust-toolchain.toml).
 - Node matching [frontend/.nvmrc](frontend/.nvmrc) for frontend development.
-- `curl`, `env`, `mktemp`, `sha256sum`, and `awk` for the generated verified
+- `curl`, `env`, `flock`, `mktemp`, `sha256sum`, and `awk` for the generated verified
   agent installer command, plus systemd for the default root/user service path;
   staged no-systemd installs are also supported.
 

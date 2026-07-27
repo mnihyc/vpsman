@@ -1484,6 +1484,83 @@ async fn source_status_enriches_backup_and_update_runtime_readiness() {
                 note: None,
                 created_at: "102".to_string(),
             });
+        let mut filler_artifacts = Vec::with_capacity(1_001);
+        let mut filler_backups = Vec::with_capacity(1_001);
+        let mut filler_restores = Vec::with_capacity(1_001);
+        let mut filler_migrations = Vec::with_capacity(1_001);
+        for index in 0..1_001 {
+            let filler_backup_id = Uuid::new_v4();
+            let filler_restore_id = Uuid::new_v4();
+            let created_at = format!("{}", 1_000 + index);
+            filler_artifacts.push(BackupArtifactView {
+                id: Uuid::new_v4(),
+                client_id: "unrelated".to_string(),
+                object_key: format!("backups/unrelated/{index}.tar"),
+                sha256_hex: "9".repeat(64),
+                size_bytes: 1,
+                status: "active".to_string(),
+                content_available: true,
+                created_at: created_at.clone(),
+            });
+            filler_backups.push(BackupRequestView {
+                id: filler_backup_id,
+                actor_id: None,
+                client_id: "unrelated".to_string(),
+                paths: vec!["/tmp".to_string()],
+                include_config: false,
+                follow_symlinks: false,
+                missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
+                status: "artifact_metadata_recorded".to_string(),
+                payload_hash: "8".repeat(64),
+                command_scope: "backup".to_string(),
+                artifact_id: None,
+                source_job_id: None,
+                source_schedule_id: None,
+                note: None,
+                created_at: created_at.clone(),
+            });
+            filler_restores.push(RestorePlanView {
+                id: filler_restore_id,
+                actor_id: None,
+                source_backup_request_id: filler_backup_id,
+                source_client_id: "unrelated".to_string(),
+                target_client_id: "unrelated-target".to_string(),
+                paths: vec!["/tmp".to_string()],
+                include_config: false,
+                destination_root: None,
+                status: "planned_metadata_only".to_string(),
+                payload_hash: "7".repeat(64),
+                command_scope: "restore".to_string(),
+                note: None,
+                created_at: created_at.clone(),
+            });
+            filler_migrations.push(MigrationLinkView {
+                id: Uuid::new_v4(),
+                actor_id: None,
+                restore_plan_id: filler_restore_id,
+                source_backup_request_id: filler_backup_id,
+                source_client_id: "unrelated".to_string(),
+                target_client_id: "unrelated-target".to_string(),
+                paths: vec!["/tmp".to_string()],
+                include_config: false,
+                destination_root: None,
+                status: "linked_metadata_only".to_string(),
+                note: None,
+                created_at,
+            });
+        }
+        memory
+            .backup_artifacts
+            .write()
+            .await
+            .extend(filler_artifacts);
+        memory.backup_requests.write().await.extend(filler_backups);
+        memory.restore_plans.write().await.extend(filler_restores);
+        memory
+            .migration_links
+            .write()
+            .await
+            .extend(filler_migrations);
     }
     let tunnel_input = TunnelPlanInput {
         name: "edge-a-b".to_string(),

@@ -172,6 +172,7 @@ const dashboardOverview = {
   group_by: "labels",
   label_clusters: [
     {
+      counts_truncated: false,
       online: 1,
       drilldown: {
         label: "Open matching VPS",
@@ -190,6 +191,7 @@ const dashboardOverview = {
       warnings: 2,
     },
     {
+      counts_truncated: false,
       online: 1,
       drilldown: {
         label: "Open matching VPS",
@@ -208,6 +210,7 @@ const dashboardOverview = {
       warnings: 1,
     },
     {
+      counts_truncated: false,
       online: 1,
       drilldown: {
         label: "Open matching VPS",
@@ -226,6 +229,7 @@ const dashboardOverview = {
       warnings: 1,
     },
     {
+      counts_truncated: false,
       online: 2,
       drilldown: {
         label: "Open matching VPS",
@@ -402,9 +406,11 @@ const dashboardOverview = {
   },
   operations: {
     active_alerts: 3,
+    alerts_truncated: false,
     backup_completed: 1,
     backup_failed: 0,
     backup_pending: 1,
+    backups_truncated: false,
     critical_alerts: 1,
     degraded_agents: [
       {
@@ -453,6 +459,7 @@ const dashboardOverview = {
       },
     ],
     running_jobs: 3,
+    running_jobs_truncated: false,
     stale_agents: 1,
     warning_alerts: 2,
   },
@@ -542,9 +549,11 @@ const dashboardOverview = {
   summary: {
     online: 2,
     running_jobs: 3,
+    running_jobs_truncated: false,
     stale: 1,
     total: 3,
     warnings: 3,
+    warnings_truncated: false,
   },
   time_range: {
     end_at: "2026-06-05T20:44:58Z",
@@ -3334,6 +3343,8 @@ export async function installConsoleApiMock(
   page: Page,
   options: {
     agentListOverride?: typeof agents;
+    alertEvidenceSaturated?: boolean;
+    alertStateCoverage?: boolean;
     agentDeleteDelayMs?: number;
     agentDeleteFailedClientIds?: string[];
     agentDeleteRequestFailure?: boolean;
@@ -3342,9 +3353,11 @@ export async function installConsoleApiMock(
     backupArtifactsOverride?: typeof backupArtifacts;
     bulkResolveFailure?: boolean;
     dashboardLatestSampleAtOverride?: string;
+    dashboardCountsTruncated?: boolean;
     dashboardSummaryOverride?: Partial<typeof dashboardOverview.summary>;
     fileTransferSourceArtifactsOverride?: typeof fileTransferSourceArtifacts;
     fileTransfersOverride?: typeof fileTransfers;
+    recordPagesSaturated?: boolean;
     hostServiceInventoryOverride?: ReturnType<typeof hostServiceInventory>;
     hostStorageInventoryOverride?: ReturnType<typeof hostStorageInventory>;
     hostPackageUpdatePlansOverride?: ReturnType<typeof hostPackageUpdatePlans>;
@@ -3371,6 +3384,7 @@ export async function installConsoleApiMock(
       bulkResolveFailureFixture,
       dashboardOverviewFixture,
       dashboardLatestSampleAtOverrideFixture,
+      dashboardCountsTruncatedFixture,
       dashboardSummaryOverrideFixture,
       systemDashboardFixture,
       sourceTemplateAssignmentsFixture,
@@ -4483,6 +4497,26 @@ export async function installConsoleApiMock(
           return jsonResponse({
             ...dashboardOverviewFixture,
             group_by: requestedGroupBy,
+            label_clusters: dashboardOverviewFixture.label_clusters.map(
+              (cluster) => ({
+                ...cluster,
+                counts_truncated:
+                  dashboardCountsTruncatedFixture ||
+                  cluster.counts_truncated,
+              }),
+            ),
+            operations: {
+              ...dashboardOverviewFixture.operations,
+              alerts_truncated:
+                dashboardCountsTruncatedFixture ||
+                dashboardOverviewFixture.operations.alerts_truncated,
+              backups_truncated:
+                dashboardCountsTruncatedFixture ||
+                dashboardOverviewFixture.operations.backups_truncated,
+              running_jobs_truncated:
+                dashboardCountsTruncatedFixture ||
+                dashboardOverviewFixture.operations.running_jobs_truncated,
+            },
             resource_curve: {
               ...dashboardOverviewFixture.resource_curve,
               latest_sample_at:
@@ -4496,12 +4530,16 @@ export async function installConsoleApiMock(
               ...dashboardOverviewFixture.resources,
               sampled_clients: scopedResourceSeries.length,
             },
-            summary: dashboardSummaryOverrideFixture
-              ? {
-                  ...dashboardOverviewFixture.summary,
-                  ...dashboardSummaryOverrideFixture,
-                }
-              : dashboardOverviewFixture.summary,
+            summary: {
+              ...dashboardOverviewFixture.summary,
+              ...dashboardSummaryOverrideFixture,
+              running_jobs_truncated:
+                dashboardCountsTruncatedFixture ||
+                dashboardOverviewFixture.summary.running_jobs_truncated,
+              warnings_truncated:
+                dashboardCountsTruncatedFixture ||
+                dashboardOverviewFixture.summary.warnings_truncated,
+            },
             scope: {
               kind: scopeKind,
               label:
@@ -7980,12 +8018,41 @@ export async function installConsoleApiMock(
       agentsFixture: agents,
       agentUpdateReleasesFixture: agentUpdateReleases,
       auditLogsFixture: options.auditLogsOverride ?? auditLogs,
-      artifactsFixture: options.backupArtifactsOverride ?? backupArtifacts,
-      backupsFixture: backupRequests,
+      artifactsFixture:
+        options.backupArtifactsOverride ??
+        (options.recordPagesSaturated
+          ? [
+              ...backupArtifacts,
+              ...Array.from(
+                { length: 1_000 - backupArtifacts.length },
+                (_, index) => ({
+                  ...backupArtifacts[0],
+                  client_id: "agent-fra-02",
+                  id: `b0000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+                  object_key: `backups/agent-fra-02/filler-${index}.tar`,
+                }),
+              ),
+            ]
+          : backupArtifacts),
+      backupsFixture: options.recordPagesSaturated
+        ? [
+            ...backupRequests,
+            ...Array.from(
+              { length: 1_000 - backupRequests.length },
+              (_, index) => ({
+                ...backupRequests[0],
+                client_id: "agent-fra-02",
+                id: `a0000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+              }),
+            ),
+          ]
+        : backupRequests,
       bulkResolveFailureFixture: options.bulkResolveFailure ?? false,
       dashboardOverviewFixture: dashboardOverview,
       dashboardLatestSampleAtOverrideFixture:
         options.dashboardLatestSampleAtOverride ?? null,
+      dashboardCountsTruncatedFixture:
+        options.dashboardCountsTruncated ?? false,
       dashboardSummaryOverrideFixture: options.dashboardSummaryOverride ?? null,
       systemDashboardFixture: systemDashboard,
       sourceTemplateAssignmentsFixture: sourceTemplateAssignments,
@@ -7998,17 +8065,83 @@ export async function installConsoleApiMock(
       clientKeyRevocationsFixture: clientKeyRevocations,
       keyLifecycleReportFixture: keyLifecycleReport,
       fleetAlertNotificationChannelsFixture: fleetAlertNotificationChannels,
-      fleetAlertNotificationsFixture: fleetAlertNotifications,
+      fleetAlertNotificationsFixture: options.alertEvidenceSaturated
+        ? Array.from({ length: 200 }, (_, index) => ({
+            ...fleetAlertNotifications[0],
+            id: `fdfdfdfd-aaaa-4aaa-8aaa-${String(index).padStart(12, "0")}`,
+          }))
+        : fleetAlertNotifications,
       fleetAlertPoliciesFixture: fleetAlertPolicies,
       fleetAlertStatesFixture: fleetAlertStates,
-      fleetAlertsFixture: fleetAlerts,
-      policyAlertsFixture: policyAlerts,
+      fleetAlertsFixture: options.alertStateCoverage
+        ? [
+            {
+              ...fleetAlerts[3],
+              id: "fleet-alert-state-open",
+              operator_state: "open",
+              severity: "warning",
+              title: "Open daily alert",
+            },
+            {
+              ...fleetAlerts[3],
+              escalation_level: 1,
+              id: "fleet-alert-state-escalated",
+              operator_state: "escalated",
+              severity: "critical",
+              title: "Escalated daily alert",
+            },
+            {
+              ...fleetAlerts[3],
+              id: "fleet-alert-state-muted",
+              muted_until_unix: 1_900_000_000,
+              operator_state: "muted",
+              severity: "critical",
+              title: "Muted daily alert",
+            },
+            {
+              ...fleetAlerts[2],
+              id: "fleet-alert-state-acknowledged",
+              title: "Acknowledged daily alert",
+            },
+          ]
+        : options.recordPagesSaturated
+          ? [
+            ...fleetAlerts,
+            ...Array.from(
+              { length: 200 - fleetAlerts.length },
+              (_, index) => ({
+                ...fleetAlerts[0],
+                id: `fleet-alert-filler-${String(index).padStart(3, "0")}`,
+                target_id: `agent-fra-02:filler-${index}`,
+              }),
+            ),
+            ]
+          : fleetAlerts,
+      policyAlertsFixture: options.alertEvidenceSaturated
+        ? Array.from({ length: 200 }, (_, index) => ({
+            ...policyAlerts[0],
+            id: `policy-alert-saturated-${String(index).padStart(3, "0")}`,
+          }))
+        : policyAlerts,
       policyDryRunFixture,
       portForwardRulesFixture: portForwardRules,
       fileTransferSourceArtifactsFixture:
         options.fileTransferSourceArtifactsOverride ??
         fileTransferSourceArtifacts,
-      fileTransfersFixture: options.fileTransfersOverride ?? fileTransfers,
+      fileTransfersFixture:
+        options.fileTransfersOverride ??
+        (options.recordPagesSaturated
+          ? [
+              ...fileTransfers,
+              ...Array.from(
+                { length: 200 - fileTransfers.length },
+                (_, index) => ({
+                  ...fileTransfers[1],
+                  session_id: `70000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+                }),
+              ),
+            ]
+          : fileTransfers),
       historyRetentionPoliciesFixture: historyRetentionPolicies,
       hostProcessInventoryFixture: hostProcessInventory("agent-sfo-01"),
       hostPackageUpdatePlansFixture:

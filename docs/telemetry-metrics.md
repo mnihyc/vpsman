@@ -85,3 +85,20 @@ bandwidth as evidence, not as automatic discovery of link capacity.
   between those measurements remain visible.
 - Last-known values stay available for diagnosis but carry stale state when
   they fall outside the current freshness window.
+
+## Fleet Alert Read-Model Bounds
+
+Fleet alerts are a bounded operational read model, not an unbounded history
+export. The API combines current agent, resource, and source-readiness
+snapshots with at most 200 matching candidates from each durable event source.
+Client, category, severity, and dashboard-time filters are applied by the
+source before that horizon. The combined result is then merged with operator
+state, ordered, and limited to the requested page.
+
+When any source reaches its horizon, dashboard responses mark the affected
+counts as truncated and the console renders them as lower bounds (`200+` or
+`≥200`) instead of presenting an exact total. An `operator_state` filter
+applies to this same bounded active-alert working set. Use the fleet-alert-state
+ledger for each alert's current durable triage state, the audit log for triage
+transitions, and the owning policy, job, backup, or network workflow for older
+event history.

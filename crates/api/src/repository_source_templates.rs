@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use anyhow::{Context, Result};
 use sqlx::Row;
@@ -28,7 +28,7 @@ impl Repository {
         let mut templates = match self {
             Self::Memory(memory) => {
                 let assignments = self
-                    .effective_source_template_assignments(None, domain)
+                    .effective_source_template_assignments(None, None, domain)
                     .await?;
                 let mut templates = memory
                     .source_templates
@@ -110,6 +110,49 @@ impl Repository {
         };
         self.apply_plan_bound_template_usage(&mut templates).await?;
         Ok(templates)
+    }
+
+    pub(crate) async fn list_source_templates_for_status(
+        &self,
+        domain: Option<&str>,
+    ) -> Result<Vec<SourceTemplateView>> {
+        self.ensure_builtin_source_templates().await?;
+        match self {
+            Self::Memory(memory) => Ok(memory
+                .source_templates
+                .read()
+                .await
+                .iter()
+                .filter(|template| domain.is_none_or(|domain| template.domain == domain))
+                .cloned()
+                .collect()),
+            Self::Postgres(pool) => sqlx::query(
+                r#"
+                SELECT
+                    id,
+                    domain,
+                    name,
+                    scope,
+                    built_in,
+                    is_default,
+                    owner_client_id,
+                    description,
+                    definition,
+                    created_at::text AS created_at,
+                    updated_at::text AS updated_at,
+                    0::bigint AS assigned_client_count
+                FROM source_templates
+                WHERE $1::TEXT IS NULL OR domain = $1
+                ORDER BY domain, is_default DESC, scope, name
+                "#,
+            )
+            .bind(domain)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .map(source_template_from_row)
+            .collect(),
+        }
     }
 
     pub(crate) async fn create_source_template(
@@ -557,18 +600,25 @@ impl Repository {
         domain: Option<&str>,
     ) -> Result<Vec<SourceTemplateAssignmentView>> {
         self.ensure_builtin_source_templates().await?;
-        self.effective_source_template_assignments(client_id, domain)
+        self.effective_source_template_assignments(client_id, None, domain)
             .await
     }
 
     async fn effective_source_template_assignments(
         &self,
         client_id: Option<&str>,
+        client_ids: Option<&[String]>,
         domain: Option<&str>,
     ) -> Result<Vec<SourceTemplateAssignmentView>> {
         match self {
             Self::Memory(memory) => {
                 let hidden = memory.hidden_clients.read().await;
+                let allowed_client_ids = client_ids.map(|client_ids| {
+                    client_ids
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<HashSet<_>>()
+                });
                 let visible_clients = memory
                     .agents
                     .read()
@@ -579,6 +629,9 @@ impl Repository {
                             && agent.status != "deleted"
                             && agent.status != "revoked"
                             && client_id.is_none_or(|client_id| agent.id == client_id)
+                            && allowed_client_ids
+                                .as_ref()
+                                .is_none_or(|client_ids| client_ids.contains(agent.id.as_str()))
                     })
                     .map(|agent| agent.id.clone())
                     .collect::<BTreeSet<_>>();
@@ -633,6 +686,7 @@ impl Repository {
                         WHERE hidden_at IS NULL
                           AND status NOT IN ('deleted', 'revoked')
                           AND ($1::TEXT IS NULL OR id = $1)
+                          AND ($3::TEXT[] IS NULL OR id = ANY($3))
                     ),
                     explicit AS (
                         SELECT
@@ -688,6 +742,7 @@ impl Repository {
                 )
                 .bind(client_id)
                 .bind(domain)
+                .bind(client_ids)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
@@ -824,20 +879,17 @@ impl Repository {
         })
     }
 
-    async fn list_source_template_assignments_for_clients(
+    pub(crate) async fn list_source_template_assignments_for_clients(
         &self,
         client_ids: &[String],
         domain: Option<&str>,
     ) -> Result<Vec<SourceTemplateAssignmentView>> {
-        let assignments = self.list_source_template_assignments(None, domain).await?;
-        Ok(assignments
-            .into_iter()
-            .filter(|assignment| {
-                client_ids
-                    .iter()
-                    .any(|client_id| client_id == &assignment.client_id)
-            })
-            .collect())
+        if client_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.ensure_builtin_source_templates().await?;
+        self.effective_source_template_assignments(None, Some(client_ids), domain)
+            .await
     }
 
     async fn apply_plan_bound_template_usage(

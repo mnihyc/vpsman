@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -14,7 +15,10 @@ use crate::{
     },
     repository::Repository,
     unix_now,
-    util::{limit_or_default, offset_or_default, search_pattern, sort_descending},
+    util::{
+        compare_timestamps_desc, limit_or_default, offset_or_default, search_pattern,
+        sort_descending, timestamp_in_optional_bounds,
+    },
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -102,6 +106,7 @@ fn backup_request_order_by(sort: Option<&str>, descending: bool) -> &'static str
 }
 
 impl Repository {
+    #[cfg(test)]
     pub(crate) async fn list_backup_requests(&self, limit: i64) -> Result<Vec<BackupRequestView>> {
         match self {
             Self::Memory(memory) => {
@@ -137,6 +142,171 @@ impl Repository {
                     LIMIT $1
                     "#,
                 )
+                .bind(limit)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(backup_request_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn list_dashboard_backup_requests(
+        &self,
+        client_ids: &[String],
+        start_unix: u64,
+        end_unix: u64,
+        limit: i64,
+    ) -> Result<Vec<BackupRequestView>> {
+        if client_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Dashboard callers request one sentinel row beyond the visible page
+        // so count saturation can be disclosed instead of shown as exact.
+        let limit = limit.clamp(1, 201);
+        match self {
+            Self::Memory(memory) => {
+                let client_ids = client_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<HashSet<_>>();
+                let mut requests = memory
+                    .backup_requests
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|request| {
+                        client_ids.contains(request.client_id.as_str())
+                            && timestamp_in_optional_bounds(
+                                &request.created_at,
+                                Some(start_unix),
+                                Some(end_unix),
+                            )
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                requests.sort_by(|left, right| {
+                    compare_timestamps_desc(&left.created_at, &right.created_at)
+                        .then_with(|| right.id.cmp(&left.id))
+                });
+                requests.truncate(limit as usize);
+                Ok(requests)
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        id,
+                        actor_id,
+                        client_id,
+                        paths,
+                        include_config,
+                        follow_symlinks,
+                        missing_path_policy,
+                        status,
+                        payload_hash,
+                        command_scope,
+                        artifact_id,
+                        source_job_id,
+                        source_schedule_id,
+                        note,
+                        created_at::text AS created_at
+                    FROM backup_requests
+                    WHERE client_id = ANY($1::text[])
+                      AND created_at >= to_timestamp($2::double precision)
+                      AND created_at <= to_timestamp($3::double precision)
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT $4
+                    "#,
+                )
+                .bind(client_ids)
+                .bind(start_unix as f64)
+                .bind(end_unix as f64)
+                .bind(limit)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(backup_request_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn list_failed_backup_request_candidates(
+        &self,
+        client_id: Option<&str>,
+        allowed_client_ids: Option<&HashSet<String>>,
+        start_unix: Option<u64>,
+        end_unix: Option<u64>,
+        limit: i64,
+    ) -> Result<Vec<BackupRequestView>> {
+        let limit = limit.clamp(1, 200);
+        match self {
+            Self::Memory(memory) => {
+                let mut requests = memory
+                    .backup_requests
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|request| {
+                        client_id.is_none_or(|client_id| request.client_id == client_id)
+                            && allowed_client_ids
+                                .is_none_or(|client_ids| client_ids.contains(&request.client_id))
+                            && request.status == "execution_failed"
+                            && timestamp_in_optional_bounds(
+                                &request.created_at,
+                                start_unix,
+                                end_unix,
+                            )
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                requests.sort_by(|left, right| {
+                    compare_timestamps_desc(&left.created_at, &right.created_at)
+                        .then_with(|| right.id.cmp(&left.id))
+                });
+                requests.truncate(limit as usize);
+                Ok(requests)
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        id,
+                        actor_id,
+                        client_id,
+                        paths,
+                        include_config,
+                        follow_symlinks,
+                        missing_path_policy,
+                        status,
+                        payload_hash,
+                        command_scope,
+                        artifact_id,
+                        source_job_id,
+                        source_schedule_id,
+                        note,
+                        created_at::text AS created_at
+                    FROM backup_requests
+                    WHERE ($1::TEXT IS NULL OR client_id = $1)
+                      AND ($2::TEXT[] IS NULL OR client_id = ANY($2::TEXT[]))
+                      AND status = 'execution_failed'
+                      AND (
+                        $3::DOUBLE PRECISION IS NULL
+                        OR created_at >= to_timestamp($3::DOUBLE PRECISION)
+                      )
+                      AND (
+                        $4::DOUBLE PRECISION IS NULL
+                        OR created_at <= to_timestamp($4::DOUBLE PRECISION)
+                      )
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT $5
+                    "#,
+                )
+                .bind(client_id)
+                .bind(
+                    allowed_client_ids
+                        .map(|client_ids| client_ids.iter().cloned().collect::<Vec<_>>()),
+                )
+                .bind(start_unix.map(|value| value as f64))
+                .bind(end_unix.map(|value| value as f64))
                 .bind(limit)
                 .fetch_all(pool)
                 .await?;

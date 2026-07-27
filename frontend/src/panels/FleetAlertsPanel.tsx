@@ -9,6 +9,7 @@ import {
   VolumeX,
 } from "lucide-react";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
+import { FLEET_DETAIL_LIMIT, formatBoundedCount } from "../constants";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
@@ -48,10 +49,16 @@ export function FleetAlertsPanel({
         <div className="sectionHeader">
           <div>
             <h2>Fleet alerts</h2>
-            <span>{`${alerts.length} active fleet alerts`}</span>
+            <span>
+              {alerts.length >= FLEET_DETAIL_LIMIT
+                ? `${alerts.length}+ active fleet alerts; first ${alerts.length} shown`
+                : `${alerts.length} active fleet alerts`}
+            </span>
           </div>
           <div className="sectionActions">
-            <span className="sectionContext">{stateCount} triaged states</span>
+            <span className="sectionContext">
+              {formatBoundedCount(stateCount, stateCount >= FLEET_DETAIL_LIMIT)} triaged states
+            </span>
             <button
               className="secondaryAction compactAction"
               onClick={onOpenAlertPolicies}
@@ -121,6 +128,7 @@ function FleetAlertList({
   const criticalCount = alerts.filter((alert) => alert.severity === "critical").length;
   const warningCount = alerts.filter((alert) => alert.severity === "warning").length;
   const infoCount = alerts.length - criticalCount - warningCount;
+  const alertsCapped = alerts.length >= FLEET_DETAIL_LIMIT;
 
   const alertColumns = useMemo<ConsoleDataGridColumn<FleetAlertRecord>[]>(
     () => [
@@ -353,7 +361,7 @@ function FleetAlertList({
         <small>
           {alerts.length === 0
             ? "clear"
-            : `${criticalCount} critical / ${warningCount} warning / ${infoCount} info / ${stateCount} triaged`}
+            : `${alertsCapped ? "Loaded page: " : ""}${criticalCount} critical / ${warningCount} warning / ${infoCount} info / ${formatBoundedCount(stateCount, stateCount >= FLEET_DETAIL_LIMIT)} triaged`}
         </small>
       </div>
       <ConsoleDataGrid

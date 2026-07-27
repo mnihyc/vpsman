@@ -8,10 +8,14 @@ import { fileURLToPath } from "node:url";
 const apiTarget = process.env.VPSMAN_API_PROXY ?? "http://127.0.0.1:8080";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendBuildNumber = readBuildNumber("frontend");
-const sourceCommit = resolveSourceCommit();
 const releaseTag = resolveReleaseTag();
-verifyReleaseTagCommit(releaseTag, sourceCommit);
-const installerBytes = releaseTag ? null : readInstallerAtCommit(sourceCommit);
+const repositoryGitAvailable = repositoryHasOwnGitRoot();
+const sourceCommit = resolveSourceCommit(releaseTag, repositoryGitAvailable);
+verifyReleaseTagCommit(releaseTag, sourceCommit, repositoryGitAvailable);
+const installerBytes =
+  releaseTag || !sourceCommit || !repositoryGitAvailable
+    ? null
+    : readInstallerAtCommit(sourceCommit);
 const installerSha256 = installerBytes
   ? createHash("sha256").update(installerBytes).digest("hex")
   : "";
@@ -46,14 +50,58 @@ export default defineConfig({
   },
 });
 
-function resolveSourceCommit(): string {
-  const configured =
-    process.env.VPSMAN_SOURCE_COMMIT ??
-    process.env.GITHUB_SHA ??
-    execFileSync("git", ["rev-parse", "HEAD"], {
+function repositoryHasOwnGitRoot(): boolean {
+  let discoveredRoot: string;
+  try {
+    discoveredRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
       cwd: repoRoot,
       encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
     }).trim();
+    return (
+      fs.realpathSync(discoveredRoot) === fs.realpathSync(repoRoot)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function resolveSourceCommit(
+  releaseTag: string,
+  repositoryGitAvailable: boolean,
+): string {
+  const configured =
+    process.env.VPSMAN_SOURCE_COMMIT ?? process.env.GITHUB_SHA;
+  if (configured !== undefined) {
+    return normalizeSourceCommit(configured);
+  }
+  if (!repositoryGitAvailable) {
+    if (releaseTag) {
+      throw new Error(
+        "tagged frontend build requires an explicit source commit or a full Git checkout",
+      );
+    }
+    return "";
+  }
+  let discovered: string;
+  try {
+    discovered = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    if (releaseTag) {
+      throw new Error(
+        "tagged frontend build requires an explicit source commit or a full Git checkout",
+      );
+    }
+    return "";
+  }
+  return normalizeSourceCommit(discovered);
+}
+
+function normalizeSourceCommit(configured: string): string {
   if (!/^[0-9a-fA-F]{40}$/.test(configured)) {
     throw new Error(
       "VPSMAN_SOURCE_COMMIT/GITHUB_SHA must be an exact 40-character Git commit",
@@ -92,9 +140,15 @@ function resolveReleaseTag(): string {
 function verifyReleaseTagCommit(
   releaseTag: string,
   sourceCommit: string,
+  repositoryGitAvailable: boolean,
 ): void {
   if (!releaseTag) {
     return;
+  }
+  if (!repositoryGitAvailable) {
+    throw new Error(
+      `tagged frontend build requires ${releaseTag} in a full Git checkout`,
+    );
   }
   let taggedCommit: string;
   try {
@@ -122,7 +176,7 @@ function readInstallerAtCommit(sourceCommit: string): Uint8Array | null {
     return execFileSync(
       "git",
       ["show", `${sourceCommit}:deploy/install-agent.sh`],
-      { cwd: repoRoot },
+      { cwd: repoRoot, stdio: ["ignore", "pipe", "ignore"] },
     );
   } catch {
     return null;

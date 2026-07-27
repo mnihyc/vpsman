@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { apiGet, apiGetBlob, apiPost, buildListPath, isApiUnauthorized } from "../api";
 import { bytesToBase64, readFileSlice, sha256FileHex } from "../fileTransfer";
+import { HISTORY_DETAIL_LIMIT } from "../constants";
 import type {
   BackupArtifactRecord,
   BackupArtifactHandoffRecord,
@@ -42,12 +43,12 @@ export function useBackupsData(
     try {
       const [backupRows, policyRows, artifactRows, restoreRows, migrationRows] = await Promise.all([
         apiGet<BackupRequestRecord[]>(
-          buildListPath("/api/v1/backups", { limit: 1000, sort: "created_at", dir: "desc" }),
+          buildListPath("/api/v1/backups", { limit: HISTORY_DETAIL_LIMIT, sort: "created_at", dir: "desc" }),
           apiToken,
         ),
         apiGet<BackupPolicyRecord[]>("/api/v1/backup-policies", apiToken),
         apiGet<BackupArtifactRecord[]>(
-          buildListPath("/api/v1/backup-artifacts", { limit: 1000, sort: "created_at", dir: "desc" }),
+          buildListPath("/api/v1/backup-artifacts", { limit: HISTORY_DETAIL_LIMIT, sort: "created_at", dir: "desc" }),
           apiToken,
         ),
         apiGet<RestorePlanRecord[]>(

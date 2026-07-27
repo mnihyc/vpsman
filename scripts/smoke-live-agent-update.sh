@@ -7,7 +7,7 @@ source "$ROOT_DIR/scripts/lib-smoke.sh"
 smoke_enter_root
 smoke_require_tools awk base64 chmod cmp curl docker grep jq openssl sed sha256sum stat
 smoke_build_binaries
-if [[ -z "${VPSMAN_AGENT_UPDATE_ARTIFACT_BIN:-}" ]]; then
+if [[ -z "${VPSMAN_AGENT_UPDATE_ARTIFACT_BIN:-}" && "${VPSMAN_SMOKE_SKIP_BUILD:-0}" != "1" ]]; then
   cargo build -p vpsman-agent --release >/dev/null
 fi
 smoke_init_tmpdir "vpsman-live-agent-update"

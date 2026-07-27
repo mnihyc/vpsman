@@ -348,9 +348,10 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   await expect(
     resultPanel
       .locator(".executionResultStats span")
-      .filter({ hasText: "unavailable" })
+      .filter({ hasText: "pre-run unavailable" })
       .filter({ hasText: "3" }),
   ).toBeVisible();
+  await expect(resultPanel).toContainText("pre-run unavailable 3");
   await expect(
     resultPanel.getByText(/partial success: 20 completed, 4 unsuccessful/),
   ).toBeVisible();

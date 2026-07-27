@@ -782,7 +782,7 @@ async function exerciseExpressionWebhooks(page: Page, projectName: string) {
   await detail.getByLabel("Webhook rule name").fill("docker-fleet-q2-capacity");
   await detail
     .getByLabel("Webhook target")
-    .fill("https://hooks.example/vpsman/docker-fleet");
+    .fill("http://127.0.0.1:9/vpsman/docker-fleet");
   await detail.getByLabel("Webhook cooldown seconds").fill("60");
   await fillSearchExpression(
     detail.getByLabel("Webhook expression"),
@@ -802,7 +802,7 @@ async function exerciseExpressionWebhooks(page: Page, projectName: string) {
     page,
     projectName,
     "webhook-rule-form-filled",
-    "Webhook rule editor filled with production-style target, expression, template, and event kind.",
+    "Webhook rule editor filled with the reviewed local smoke target, expression, template, and event kind.",
   );
   await detail.getByRole("button", { name: "Create rule" }).click();
   await expect(

@@ -572,5 +572,5 @@ fn timestamp_in_bounds(value: &str, start_unix: u64, end_unix: u64) -> bool {
             let unix = timestamp.timestamp().max(0) as u64;
             unix >= start_unix && unix <= end_unix
         })
-        .unwrap_or(true)
+        .unwrap_or(false)
 }

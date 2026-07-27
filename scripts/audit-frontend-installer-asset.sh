@@ -12,6 +12,8 @@ fail() {
 
 [[ -d "$ASSET_DIR" ]] || fail "$DIST_DIR/assets is missing; build the frontend first"
 
+bash "$ROOT_DIR/scripts/check-frontend-vite-provenance.sh"
+
 source_commit="${VPSMAN_SOURCE_COMMIT:-${GITHUB_SHA:-}}"
 if [[ -z "$source_commit" ]]; then
   source_commit="$(git -C "$ROOT_DIR" rev-parse HEAD)"

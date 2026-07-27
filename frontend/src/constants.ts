@@ -487,5 +487,20 @@ export const emptySummary: FleetSummary = {
   warnings: 0,
 };
 
+export const FLEET_DETAIL_LIMIT = 200;
+export const HISTORY_DETAIL_LIMIT = 1_000;
+
+export function isActionableFleetAlertState(operatorState: string): boolean {
+  return operatorState === "open" || operatorState === "escalated";
+}
+
+export function formatBoundedCount(value: number, truncated = false): string {
+  return `${value}${truncated ? "+" : ""}`;
+}
+
+export function formatLowerBoundCount(value: number, truncated = false): string {
+  return truncated && value > 0 ? `≥${value}` : String(value);
+}
+
 export const ACCESS_TOKEN_STORAGE_KEY = "vpsman.accessToken";
 export const REFRESH_TOKEN_STORAGE_KEY = "vpsman.refreshToken";

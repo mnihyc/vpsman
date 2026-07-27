@@ -363,7 +363,7 @@ run_updater() {
       VPSMAN_SMOKE_REAL_DATE="$REAL_DATE" \
       VPSMAN_SMOKE_REAL_MV="$REAL_MV" \
       VPSMAN_SMOKE_TIMESTAMP="${VPSMAN_SMOKE_TIMESTAMP:-}" \
-      VPSMAN_UPDATE_HEALTH_TIMEOUT_SECS=10 \
+      VPSMAN_UPDATE_HEALTH_TIMEOUT_SECS="${VPSMAN_UPDATE_HEALTH_TIMEOUT_SECS:-10}" \
       bash ./update.sh "$@"
   )
 }
@@ -1008,6 +1008,19 @@ fi
 grep -Fq 'release target must be latest' "$INVALID_CORE_TAG/update.log" ||
   fail "zero-padded release tag refusal was not actionable"
 
+NONCANONICAL_HEALTH_TIMEOUT="$SMOKE_ROOT/noncanonical-health-timeout"
+prepare_deployment "$NONCANONICAL_HEALTH_TIMEOUT"
+if VPSMAN_UPDATE_HEALTH_TIMEOUT_SECS=0180 \
+  run_updater "$NONCANONICAL_HEALTH_TIMEOUT" first-start v9.8.7 \
+  >"$NONCANONICAL_HEALTH_TIMEOUT/update.log" 2>&1; then
+  fail "updater accepted a leading-zero health timeout"
+fi
+grep -Fq 'must be a canonical integer between 10 and 3600' \
+  "$NONCANONICAL_HEALTH_TIMEOUT/update.log" ||
+  fail "leading-zero health timeout refusal was not actionable"
+[[ ! -e "$NONCANONICAL_HEALTH_TIMEOUT/runtime" ]] ||
+  fail "invalid health timeout mutated deployment runtime"
+
 UNSAFE_ASSET="$SMOKE_ROOT/unsafe-asset"
 prepare_deployment "$UNSAFE_ASSET"
 if (
@@ -1050,4 +1063,4 @@ grep -Fq 'unsafe server archive path' "$MALICIOUS/update.log" ||
   fail "path-traversal archive escaped its transaction directory"
 
 printf '%s\n' \
-  '{"deploy_updater_smoke":"ok","checks":["first_start","selected_asset_identity_persistence","atomic_validated_backup","successful_version_update","successful_rollback","finalization_mutation_failure_guard","finalization_mutation_failure_recovery","same_release_recovery_guard","same_tag_asset_override_guard","same_tag_checksum_drift_guard","same_tag_missing_payload_guard","same_tag_stopped_service_guard","same_tag_unready_service_guard","exact_same_release_noop","latest_same_release_noop","failed_first_start_database_restore","pg_dump_partial_cleanup","backup_validation_failure_cleanup","backup_collision_refusal","abandoned_backup_partial_cleanup","suspicious_backup_partial_refusal","missing_backup_recovery_guard","recovery_stop_failure_guard","interrupted_activation_recovery","healthy_finalize_recovery","finalized_journal_cleanup","abandoned_staging_cleanup","placeholder_password_refusal","invalid_tag_refusal","zero_padded_core_tag_refusal","unsafe_asset_refusal","archive_path_traversal_refusal"]}'
+  '{"deploy_updater_smoke":"ok","checks":["first_start","selected_asset_identity_persistence","atomic_validated_backup","successful_version_update","successful_rollback","finalization_mutation_failure_guard","finalization_mutation_failure_recovery","same_release_recovery_guard","same_tag_asset_override_guard","same_tag_checksum_drift_guard","same_tag_missing_payload_guard","same_tag_stopped_service_guard","same_tag_unready_service_guard","exact_same_release_noop","latest_same_release_noop","failed_first_start_database_restore","pg_dump_partial_cleanup","backup_validation_failure_cleanup","backup_collision_refusal","abandoned_backup_partial_cleanup","suspicious_backup_partial_refusal","missing_backup_recovery_guard","recovery_stop_failure_guard","interrupted_activation_recovery","healthy_finalize_recovery","finalized_journal_cleanup","abandoned_staging_cleanup","placeholder_password_refusal","invalid_tag_refusal","zero_padded_core_tag_refusal","noncanonical_health_timeout_refusal","unsafe_asset_refusal","archive_path_traversal_refusal"]}'

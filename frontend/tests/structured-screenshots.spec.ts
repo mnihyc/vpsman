@@ -583,7 +583,7 @@ const allViews: ScreenshotEntry[] = [
       "Data available:",
       "Sparse data:",
       "Active alerts",
-      "Reachability observations",
+      "Alerts in shown groups",
       "Top VPS",
       "Fleet grouping",
     ],

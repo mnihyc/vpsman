@@ -97,13 +97,40 @@ Define an RPO, retention period, encryption method, and off-host destination
 before production use. The following creates a consistent maintenance-window
 backup for the default filesystem object store:
 
-```sh
+```bash
 set -Eeuo pipefail
 cd /path/to/the/versioned-deployment
 umask 077
+
+[[ -d runtime ]] || {
+  echo "runtime directory is missing; reconcile the deployment before backup" >&2
+  exit 1
+}
+exec 9>runtime/update.lock
+if ! flock -n 9; then
+  echo "another update, rollback, recovery, or backup is already running" >&2
+  exit 1
+fi
+
+[[ -f RELEASE_TAG ]] || {
+  echo "RELEASE_TAG is missing or invalid; reconcile the active release before backup" >&2
+  exit 1
+}
+active_release="$(sed -n '1p' RELEASE_TAG)"
+if [[ ! "$active_release" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+  echo "RELEASE_TAG is missing or invalid; reconcile the active release before backup" >&2
+  exit 1
+fi
+
 backup_dir="../vpsman-control-plane-$(date -u +%Y%m%dT%H%M%SZ)"
-mkdir -p "$backup_dir"
-dump_partial="$backup_dir/postgres.dump.partial"
+if ! mkdir -m 0700 -- "$backup_dir"; then
+  echo "backup destination already exists or cannot be created: $backup_dir" >&2
+  exit 1
+fi
+dump_partial="$backup_dir/.postgres.dump.partial"
+dump_final="$backup_dir/postgres.dump"
+archive_partial="$backup_dir/.deployment-files.tar.gz.partial"
+archive_final="$backup_dir/deployment-files.tar.gz"
 application_services_stopped=0
 
 restart_application_services() {
@@ -111,34 +138,62 @@ restart_application_services() {
     docker compose start api gateway worker frontend
   fi
 }
+
+publish_no_clobber() {
+  local partial="$1" final="$2"
+
+  mv -T --no-clobber -- "$partial" "$final"
+  if [[ -e "$partial" || -L "$partial" ]]; then
+    echo "refusing to overwrite unexpected backup destination: $final" >&2
+    return 1
+  fi
+  [[ -f "$final" && ! -L "$final" ]] || {
+    echo "backup publication did not create a regular file: $final" >&2
+    return 1
+  }
+}
 trap restart_application_services EXIT
 
-active_release="$(sed -n '1p' RELEASE_TAG)"
-if [[ ! "$active_release" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
-  echo "RELEASE_TAG is missing or invalid; reconcile the active release before backup" >&2
-  exit 1
-fi
-
-docker compose stop api gateway worker frontend
 application_services_stopped=1
+docker compose stop api gateway worker frontend
 docker compose exec -T postgres sh -ec \
   'pg_dump --format=custom --username="$POSTGRES_USER" --dbname="$POSTGRES_DB"' \
-  > "$dump_partial"
-test -s "$dump_partial"
-mv -- "$dump_partial" "$backup_dir/postgres.dump"
-tar -czf "$backup_dir/deployment-files.tar.gz" \
+  >"$dump_partial"
+[[ -s "$dump_partial" ]] || {
+  echo "PostgreSQL backup is empty" >&2
+  exit 1
+}
+docker compose exec -T postgres sh -ec \
+  'exec pg_restore --exit-on-error --file=/dev/null' \
+  <"$dump_partial"
+publish_no_clobber "$dump_partial" "$dump_final"
+
+tar -czf "$archive_partial" \
   .env compose.yml nginx.conf config runtime/data runtime/downloads RELEASE_TAG
+[[ -s "$archive_partial" ]] || {
+  echo "deployment-files archive is empty" >&2
+  exit 1
+}
+tar -tzf "$archive_partial" >/dev/null
+publish_no_clobber "$archive_partial" "$archive_final"
+
 docker compose start api gateway worker frontend
 application_services_stopped=0
 curl -fsS http://127.0.0.1:5173/health
 trap - EXIT
 ```
 
-Stopping the four application services freezes control-plane mutations while
-PostgreSQL remains available for `pg_dump`. If any backup command fails, restart
-the stopped services after preserving the failure evidence. Do not archive
-`runtime/postgres/data` while PostgreSQL is running and do not treat a raw data
-directory as a portable substitute for `pg_dump`.
+The shared `runtime/update.lock` prevents backup, update, rollback, and recovery
+from overlapping. Stopping the four application services freezes control-plane
+mutations while PostgreSQL remains available for `pg_dump`. The example
+exclusively creates a mode-0700 destination, fully reads the custom-format dump
+with `pg_restore`, validates the deployment archive, and publishes each
+artifact with a same-filesystem, no-clobber rename. A same-second rerun or an
+unexpected final file therefore aborts instead of overwriting evidence. If any
+backup command fails, restart the stopped services after preserving the partial
+artifact for diagnosis. Do not archive `runtime/postgres/data` while PostgreSQL
+is running and do not treat a raw data directory as a portable substitute for
+`pg_dump`.
 
 `RELEASE_TAG` is created by the versioned bundle and updated atomically only
 after the updater commits a healthy first start, update, or metadata-bearing

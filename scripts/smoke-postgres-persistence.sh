@@ -862,6 +862,9 @@ VALUES (
   '$operator_id'
 );
 SQL
+docker exec "$container_name" psql -U vpsman -d vpsman -v ON_ERROR_STOP=1 -c \
+  "UPDATE worker_leases SET owner = 'pg-held-worker', lease_expires_at = now() + interval '60 seconds', updated_at = now() WHERE task_name = 'alert_notifications'" \
+  >/dev/null
 VPSMAN_POSTGRES_URL="$postgres_url" \
 VPSMAN_MIGRATIONS_DIR="$ROOT_DIR/migrations" \
 VPSMAN_DEV_ALLOW_LOOPBACK_WEBHOOKS=1 \
@@ -873,6 +876,9 @@ if [[ "$contended_notification_count" != "1" ]]; then
   docker exec "$container_name" psql -U vpsman -d vpsman -c "SELECT id, status, attempt_count, error FROM fleet_alert_notification_deliveries WHERE id = '$contended_notification_id'" >&2 || true
   exit 1
 fi
+docker exec "$container_name" psql -U vpsman -d vpsman -v ON_ERROR_STOP=1 -c \
+  "UPDATE worker_leases SET lease_expires_at = now(), updated_at = now() WHERE task_name = 'alert_notifications' AND owner = 'pg-held-worker'" \
+  >/dev/null
 backup_json="$(vpsctl_json backup-request \
   --client-id pg-agent-a \
   --paths /etc/hostname \

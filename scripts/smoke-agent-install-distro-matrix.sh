@@ -14,12 +14,13 @@ fi
 agent_rebuild_needed=0
 if [[ ! -x "$agent_bin" ]]; then
   agent_rebuild_needed=1
-elif [[ -x target/debug/vpsman-agent && target/debug/vpsman-agent -nt "$agent_bin" ]]; then
-  agent_rebuild_needed=1
 elif find crates/agent crates/common -type f \( -name '*.rs' -o -name Cargo.toml \) -newer "$agent_bin" | grep -q .; then
   agent_rebuild_needed=1
 fi
 if [[ "$agent_rebuild_needed" == "1" ]]; then
+  if [[ "${VPSMAN_SMOKE_SKIP_BUILD:-0}" == "1" ]]; then
+    smoke_fail "VPSMAN_SMOKE_SKIP_BUILD=1 requires a current executable at $agent_bin"
+  fi
   cargo build -p vpsman-agent --release --target x86_64-unknown-linux-musl
 fi
 

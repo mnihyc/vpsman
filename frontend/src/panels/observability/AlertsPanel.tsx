@@ -1,6 +1,7 @@
 import { AlertTriangle, Bell, ExternalLink, RadioTower } from "lucide-react";
 import { useState } from "react";
 import { ActionFeedback } from "../../components/ActionFeedback";
+import { FLEET_DETAIL_LIMIT, formatBoundedCount } from "../../constants";
 import {
   handleTabListKeyDown,
   tabId,
@@ -78,6 +79,9 @@ export function AlertsPanel({
     ["failed", "permanently_failed"].includes(delivery.status),
   ).length;
   const urgentPolicyAlerts = policyAlerts.filter((alert) => ["critical", "warning"].includes(alert.severity)).length;
+  const policyAlertsTruncated = policyAlerts.length >= FLEET_DETAIL_LIMIT;
+  const deliveriesTruncated =
+    fleetAlertNotifications.length >= FLEET_DETAIL_LIMIT;
 
   function openDeliveryEvidence() {
     setActiveTab("deliveries");
@@ -119,10 +123,21 @@ export function AlertsPanel({
         {!policyEditorOpen ? (
           <>
             <div className="metricGrid observabilityMetricsSummary" aria-label="Alert routing summary">
-              <MetricTile actionLabel="Open triage" detail="Operational alert triage records live in Fleet / Alerts" label="Active fleet alerts" onAction={onOpenFleetAlerts} value={String(fleetAlerts.length)} />
-              <MetricTile actionLabel="Policies" detail={`${urgentPolicyAlerts} warning or critical policy-issued alerts`} label="Policy alerts" onAction={() => setActiveTab("policies")} value={String(policyAlerts.length)} />
-              <MetricTile actionLabel="Destinations" detail="Reviewed notification destinations, separate from event webhooks" label="Destinations" onAction={() => setActiveTab("destinations")} value={String(fleetAlertNotificationChannels.length)} />
-              <MetricTile actionLabel="Open failed deliveries" detail={`${failedDeliveries} failed retained notification deliveries`} label="Delivery history" onAction={openDeliveryEvidence} value={String(fleetAlertNotifications.length)} />
+              <MetricTile
+                actionLabel="Open triage"
+                detail={fleetAlerts.length >= FLEET_DETAIL_LIMIT
+                  ? `At least ${fleetAlerts.length} active alerts; open triage to review the loaded page`
+                  : "Operational alert triage records live in Fleet / Alerts"}
+                label="Active fleet alerts"
+                onAction={onOpenFleetAlerts}
+                value={formatBoundedCount(
+                  fleetAlerts.length,
+                  fleetAlerts.length >= FLEET_DETAIL_LIMIT,
+                )}
+              />
+              <MetricTile actionLabel="Policies" detail={`${urgentPolicyAlerts} warning or critical policy-issued alerts${policyAlertsTruncated ? " in the loaded page" : ""}`} label="Policy alerts" onAction={() => setActiveTab("policies")} value={formatBoundedCount(policyAlerts.length, policyAlertsTruncated)} />
+              <MetricTile actionLabel="Destinations" detail="Reviewed notification destinations, separate from event webhooks" label="Destinations" onAction={() => setActiveTab("destinations")} value={formatBoundedCount(fleetAlertNotificationChannels.length, fleetAlertNotificationChannels.length >= FLEET_DETAIL_LIMIT)} />
+              <MetricTile actionLabel="Open failed deliveries" detail={`${failedDeliveries} failed retained notification deliveries${deliveriesTruncated ? " in the loaded page" : ""}`} label="Delivery history" onAction={openDeliveryEvidence} value={formatBoundedCount(fleetAlertNotifications.length, deliveriesTruncated)} />
             </div>
 
             <div

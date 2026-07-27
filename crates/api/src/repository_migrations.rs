@@ -99,6 +99,7 @@ fn migration_link_order_by(sort: Option<&str>, descending: bool) -> &'static str
 }
 
 impl Repository {
+    #[cfg(test)]
     pub(crate) async fn list_migration_links(&self, limit: i64) -> Result<Vec<MigrationLinkView>> {
         match self {
             Self::Memory(memory) => {

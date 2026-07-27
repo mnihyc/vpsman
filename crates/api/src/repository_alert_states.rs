@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::{Context, Result};
 use serde_json::json;
 use sqlx::Row;
@@ -64,6 +66,52 @@ impl Repository {
                 )
                 .bind(limit.clamp(1, 1000))
                 .bind(state.as_deref())
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(alert_state_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn list_fleet_alert_states_for_alert_ids(
+        &self,
+        alert_ids: &[String],
+    ) -> Result<Vec<FleetAlertStateView>> {
+        if alert_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        match self {
+            Self::Memory(memory) => {
+                let alert_ids = alert_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+                let mut rows = memory
+                    .fleet_alert_states
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|row| alert_ids.contains(row.alert_id.as_str()))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                sort_alert_states(&mut rows);
+                Ok(rows)
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        alert_id,
+                        state,
+                        muted_until_unix,
+                        escalation_level,
+                        reason,
+                        actor_id,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at
+                    FROM fleet_alert_states
+                    WHERE alert_id = ANY($1::text[])
+                    ORDER BY updated_at DESC, alert_id ASC
+                    "#,
+                )
+                .bind(alert_ids)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter().map(alert_state_from_row).collect()

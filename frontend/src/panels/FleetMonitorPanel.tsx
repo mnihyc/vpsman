@@ -11,6 +11,10 @@ import {
 import { useMemo, useState, type ReactNode } from "react";
 import { agentDisplayState, type AgentDisplayState } from "../agentDisplayState";
 import { ActionFeedback } from "../components/ActionFeedback";
+import {
+  formatLowerBoundCount,
+  isActionableFleetAlertState,
+} from "../constants";
 import type { FileTransferSessionRecord } from "../typesFileTransfer";
 import type {
   AgentView,
@@ -36,6 +40,7 @@ type FleetMonitorPanelProps = {
   fleetAlerts?: FleetAlertRecord[];
   jobs?: JobHistoryRecord[];
   maxCards?: number;
+  recordBounds: MonitorRecordBounds;
   runningJobCount?: number;
   telemetryNetworkRates: TelemetryNetworkRateRecord[];
   telemetryRollups: TelemetryRollupRecord[];
@@ -52,6 +57,11 @@ type FleetMonitorPanelProps = {
 
 export type FleetMonitorDensity = "compact" | "comfortable";
 type FleetMonitorSort = "warning" | "traffic" | "cpu" | "memory" | "region" | "provider";
+type MonitorRecordBounds = {
+  backups: boolean;
+  fileTransfers: boolean;
+  fleetAlerts: boolean;
+};
 
 const monitorSortOptions: Array<{ label: string; value: FleetMonitorSort }> = [
   { label: "Warnings first", value: "warning" },
@@ -75,6 +85,7 @@ export function FleetMonitorPanel({
   fleetAlerts = [],
   jobs = [],
   maxCards,
+  recordBounds,
   runningJobCount,
   telemetryNetworkRates,
   telemetryRollups,
@@ -99,6 +110,7 @@ export function FleetMonitorPanel({
     fileTransfers,
     fleetAlerts,
     jobs,
+    recordBounds,
     runningJobCount,
   });
   const sortedAgents = useMemo(
@@ -496,6 +508,7 @@ export type VpsMonitorCardSignal = {
 type CardSignalContext = {
   global: {
     failedJobs: number;
+    recordBounds: MonitorRecordBounds;
     runningJobs: number;
   };
   records: Map<string, VpsMonitorCardSignal>;
@@ -507,6 +520,7 @@ function buildCardSignals({
   fileTransfers,
   fleetAlerts,
   jobs,
+  recordBounds,
   runningJobCount,
 }: {
   backups: BackupRequestRecord[];
@@ -514,6 +528,7 @@ function buildCardSignals({
   fileTransfers: FileTransferSessionRecord[];
   fleetAlerts: FleetAlertRecord[];
   jobs: JobHistoryRecord[];
+  recordBounds: MonitorRecordBounds;
   runningJobCount?: number;
 }): CardSignalContext {
   const runningJobs = runningJobCount ?? jobs.filter((job) => isActiveJobStatus(job.status)).length;
@@ -528,15 +543,20 @@ function buildCardSignals({
     records.set(
       clientId,
       buildClientSignal({
-        alerts: fleetAlerts.filter((alert) => alert.client_id === clientId && alert.operator_state !== "acknowledged"),
+        alerts: fleetAlerts.filter(
+          (alert) =>
+            alert.client_id === clientId &&
+            isActionableFleetAlertState(alert.operator_state),
+        ),
         backups: backups.filter((backup) => backup.client_id === clientId),
         failedJobs,
+        recordBounds,
         runningJobs,
         transfers: fileTransfers.filter((transfer) => transfer.client_id === clientId),
       }),
     );
   }
-  return { global: { failedJobs, runningJobs }, records };
+  return { global: { failedJobs, recordBounds, runningJobs }, records };
 }
 
 function defaultCardSignal(global: CardSignalContext["global"]): VpsMonitorCardSignal {
@@ -544,6 +564,7 @@ function defaultCardSignal(global: CardSignalContext["global"]): VpsMonitorCardS
     alerts: [],
     backups: [],
     failedJobs: global.failedJobs,
+    recordBounds: global.recordBounds,
     runningJobs: global.runningJobs,
     transfers: [],
   });
@@ -553,12 +574,14 @@ function buildClientSignal({
   alerts,
   backups,
   failedJobs,
+  recordBounds,
   runningJobs,
   transfers,
 }: {
   alerts: FleetAlertRecord[];
   backups: BackupRequestRecord[];
   failedJobs: number;
+  recordBounds: MonitorRecordBounds;
   runningJobs: number;
   transfers: FileTransferSessionRecord[];
 }): VpsMonitorCardSignal {
@@ -568,6 +591,16 @@ function buildClientSignal({
   const failedBackups = backups.filter((backup) => isFailedBackupStatus(backup.status)).length;
   const failedTransfers = transfers.filter((transfer) => isFailedTransferStatus(transfer.status)).length;
   const activeTransfers = transfers.filter((transfer) => isActiveTransferStatus(transfer.status)).length;
+  const recordPageCapped =
+    recordBounds.fleetAlerts ||
+    recordBounds.backups ||
+    recordBounds.fileTransfers;
+  const knownIssue =
+    criticalAlerts > 0 ||
+    warningAlerts > 0 ||
+    infoAlerts > 0 ||
+    failedBackups > 0 ||
+    failedTransfers > 0;
   const fleetJobText =
     failedJobs > 0
       ? `Fleet-wide jobs: ${failedJobs} failed`
@@ -577,22 +610,57 @@ function buildClientSignal({
   return {
     alertText:
       criticalAlerts > 0
-        ? `${criticalAlerts} critical`
+        ? `${formatLowerBoundCount(criticalAlerts, recordBounds.fleetAlerts)} critical`
         : warningAlerts > 0
-          ? `${warningAlerts} warning`
+          ? `${formatLowerBoundCount(warningAlerts, recordBounds.fleetAlerts)} warning`
           : infoAlerts > 0
-            ? `${infoAlerts} info`
-            : "Clear",
-    alertTone: criticalAlerts > 0 ? "critical" : warningAlerts > 0 ? "warning" : infoAlerts > 0 ? "info" : "neutral",
-    backupText: failedBackups > 0 ? `${failedBackups} failed` : backups.length > 0 ? `${backups.length} recorded` : "No run",
-    backupTone: failedBackups > 0 ? "critical" : "neutral",
+            ? `${formatLowerBoundCount(infoAlerts, recordBounds.fleetAlerts)} info`
+            : recordBounds.fleetAlerts
+              ? "None in loaded page"
+              : "Clear",
+    alertTone:
+      criticalAlerts > 0
+        ? "critical"
+        : warningAlerts > 0
+          ? "warning"
+          : infoAlerts > 0 || recordBounds.fleetAlerts
+            ? "info"
+            : "neutral",
+    backupText:
+      failedBackups > 0
+        ? `${formatLowerBoundCount(failedBackups, recordBounds.backups)} failed`
+        : backups.length > 0
+          ? `${formatLowerBoundCount(backups.length, recordBounds.backups)} recorded`
+          : recordBounds.backups
+            ? "None in loaded page"
+            : "No run",
+    backupTone:
+      failedBackups > 0
+        ? "critical"
+        : recordBounds.backups
+          ? "info"
+          : "neutral",
     fleetJobText,
     statusText:
-      criticalAlerts > 0 || warningAlerts > 0 || infoAlerts > 0 || failedBackups > 0 || failedTransfers > 0
-        ? `${criticalAlerts} critical / ${warningAlerts} warning / ${infoAlerts} info alerts; ${failedBackups} backup failures; ${failedTransfers} transfer failures`
-        : "No card-local alert, backup, or transfer warnings",
-    transferText: failedTransfers > 0 ? `${failedTransfers} failed` : activeTransfers > 0 ? `${activeTransfers} active` : "Clear",
-    transferTone: failedTransfers > 0 ? "critical" : activeTransfers > 0 ? "info" : "neutral",
+      knownIssue
+        ? `${criticalAlerts} critical / ${warningAlerts} warning / ${infoAlerts} info alerts; ${failedBackups} backup failures; ${failedTransfers} transfer failures${recordPageCapped ? "; counts use capped loaded pages" : ""}`
+        : recordPageCapped
+          ? "No card-local warnings in loaded pages; older records may not be shown"
+          : "No card-local alert, backup, or transfer warnings",
+    transferText:
+      failedTransfers > 0
+        ? `${formatLowerBoundCount(failedTransfers, recordBounds.fileTransfers)} failed`
+        : activeTransfers > 0
+          ? `${formatLowerBoundCount(activeTransfers, recordBounds.fileTransfers)} active`
+          : recordBounds.fileTransfers
+            ? "No issue loaded"
+            : "Clear",
+    transferTone:
+      failedTransfers > 0
+        ? "critical"
+        : activeTransfers > 0 || recordBounds.fileTransfers
+          ? "info"
+          : "neutral",
   };
 }
 

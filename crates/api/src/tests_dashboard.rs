@@ -4,7 +4,10 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use serde_json::json;
 use vpsman_common::{AgentCapabilitySnapshot, AgentPrivilegeMode};
+
+use crate::model_alert_policies::PolicyAlertRecord;
 
 #[tokio::test]
 async fn dashboard_overview_rejects_invalid_window() {
@@ -24,6 +27,59 @@ async fn dashboard_overview_rejects_invalid_window() {
 
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
     assert_eq!(error.code, "invalid_dashboard_window");
+}
+
+#[tokio::test]
+async fn dashboard_overview_rejects_malformed_textual_time_bounds() {
+    let state = dashboard_test_state(Repository::Memory(MemoryState::default()));
+    let headers = crate::test_auth_headers(&state).await;
+    for (query, expected_code) in [
+        (
+            routes_dashboard::DashboardOverviewQuery {
+                start_at: Some("not-a-timestamp".to_string()),
+                ..dashboard_query_default()
+            },
+            "invalid_dashboard_start",
+        ),
+        (
+            routes_dashboard::DashboardOverviewQuery {
+                end_at: Some("not-a-timestamp".to_string()),
+                ..dashboard_query_default()
+            },
+            "invalid_dashboard_end",
+        ),
+    ] {
+        let error = routes_dashboard::dashboard_overview(
+            State(state.clone()),
+            headers.clone(),
+            Query(query),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, expected_code);
+    }
+}
+
+#[tokio::test]
+async fn dashboard_overview_unix_bounds_take_precedence_over_textual_aliases() {
+    let state = dashboard_test_state(Repository::Memory(MemoryState::default()));
+    let headers = crate::test_auth_headers(&state).await;
+    let now = unix_now();
+    let result = routes_dashboard::dashboard_overview(
+        State(state),
+        headers,
+        Query(routes_dashboard::DashboardOverviewQuery {
+            start_at: Some("not-a-timestamp".to_string()),
+            start_unix: Some(now.saturating_sub(60)),
+            end_at: Some("also-not-a-timestamp".to_string()),
+            end_unix: Some(now),
+            ..dashboard_query_default()
+        }),
+    )
+    .await;
+
+    assert!(result.is_ok());
 }
 
 #[tokio::test]
@@ -401,6 +457,301 @@ async fn dashboard_overview_supports_scope_and_group_by() {
 }
 
 #[tokio::test]
+async fn dashboard_filters_scope_status_and_time_before_bounded_results() {
+    let repo = Repository::Memory(MemoryState::default());
+    let now = unix_now();
+    let current = now.saturating_sub(10).to_string();
+    let future = now.saturating_add(3_600).to_string();
+    let selected_client = "selected";
+    let unrelated_client = "noise-000";
+    let make_agent = |id: String, status: &str| AgentView {
+        display_name: id.clone(),
+        id,
+        status: status.to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: None,
+        arch: None,
+        internal_build_number: 1,
+        process_incarnation_id: None,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: AgentCapabilitySnapshot::default(),
+    };
+    let make_job =
+        |id: Uuid, status: &str, created_at: String, completed_at: Option<String>| JobHistoryView {
+            id,
+            actor_id: None,
+            command_type: "shell".to_string(),
+            source_schedule_id: None,
+            privileged: false,
+            status: status.to_string(),
+            target_count: 1,
+            payload_hash: "aa".repeat(32),
+            max_timeout_secs: 30,
+            created_at,
+            completed_at,
+        };
+    let make_target = |job_id: Uuid, client_id: &str, status: &str| JobTargetView {
+        job_id,
+        client_id: client_id.to_string(),
+        status: status.to_string(),
+        message: None,
+        exit_code: None,
+        started_at: Some(current.clone()),
+        deadline_at: None,
+        completed_at: (status == "completed").then(|| future.clone()),
+        process_incarnation_id: None,
+    };
+
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    let mut agents = (0..201)
+        .map(|index| make_agent(format!("noise-{index:03}"), "stale"))
+        .collect::<Vec<_>>();
+    agents.push(make_agent(selected_client.to_string(), "stale"));
+    memory.agents.write().await.extend(agents);
+
+    let policy_group_id = Uuid::new_v4();
+    let policy_rule_id = Uuid::new_v4();
+    memory.policy_alerts.write().await.extend([
+        PolicyAlertRecord {
+            id: Uuid::new_v4(),
+            policy_group_id,
+            policy_rule_id,
+            client_id: selected_client.to_string(),
+            trigger_generation: 1,
+            severity: "critical".to_string(),
+            category: "resource".to_string(),
+            title: "Current selected alert".to_string(),
+            detail: "must remain visible after scope filtering".to_string(),
+            actual_value: Some(2.0),
+            threshold_value: Some(1.0),
+            payload: json!({}),
+            observed_at: current.clone(),
+            created_at: current.clone(),
+        },
+        PolicyAlertRecord {
+            id: Uuid::new_v4(),
+            policy_group_id,
+            policy_rule_id,
+            client_id: selected_client.to_string(),
+            trigger_generation: 2,
+            severity: "critical".to_string(),
+            category: "resource".to_string(),
+            title: "Future selected alert".to_string(),
+            detail: "must not appear before its observation time".to_string(),
+            actual_value: Some(2.0),
+            threshold_value: Some(1.0),
+            payload: json!({}),
+            observed_at: future.clone(),
+            created_at: future.clone(),
+        },
+    ]);
+    memory
+        .policy_alerts
+        .write()
+        .await
+        .extend((0..201).map(|index| PolicyAlertRecord {
+            id: Uuid::new_v4(),
+            policy_group_id,
+            policy_rule_id: Uuid::new_v4(),
+            client_id: format!("noise-{index:03}"),
+            trigger_generation: 1,
+            severity: "critical".to_string(),
+            category: "resource".to_string(),
+            title: "Unrelated alert".to_string(),
+            detail: "must not consume the scoped alert cap".to_string(),
+            actual_value: Some(2.0),
+            threshold_value: Some(1.0),
+            payload: json!({}),
+            observed_at: now.saturating_sub(1).to_string(),
+            created_at: now.saturating_sub(1).to_string(),
+        }));
+
+    let selected_running_job_id = Uuid::new_v4();
+    let mut jobs = vec![make_job(
+        selected_running_job_id,
+        "running",
+        current.clone(),
+        None,
+    )];
+    let mut targets = vec![make_target(
+        selected_running_job_id,
+        selected_client,
+        "running",
+    )];
+    for index in 0..201 {
+        let job_id = Uuid::new_v4();
+        jobs.push(make_job(
+            job_id,
+            "running",
+            now.saturating_add(index).to_string(),
+            None,
+        ));
+        targets.push(make_target(job_id, unrelated_client, "running"));
+    }
+    for index in 0..201 {
+        let job_id = Uuid::new_v4();
+        jobs.push(make_job(
+            job_id,
+            "completed",
+            now.saturating_add(1_000 + index).to_string(),
+            Some(future.clone()),
+        ));
+        targets.push(make_target(job_id, selected_client, "completed"));
+    }
+    memory.jobs.write().await.extend(jobs);
+    memory.job_targets.write().await.extend(targets);
+
+    let mut backups = vec![dashboard_test_backup(
+        selected_client,
+        &current,
+        BackupRequestStatus::RequestedMetadataOnly,
+    )];
+    backups.push(dashboard_test_backup(
+        selected_client,
+        &current,
+        BackupRequestStatus::ExecutionFailed,
+    ));
+    backups.extend((0..201).map(|_| {
+        dashboard_test_backup(
+            unrelated_client,
+            &current,
+            BackupRequestStatus::ExecutionFailed,
+        )
+    }));
+    backups.extend((0..201).map(|_| {
+        dashboard_test_backup(
+            selected_client,
+            &future,
+            BackupRequestStatus::RequestedMetadataOnly,
+        )
+    }));
+    memory.backup_requests.write().await.extend(backups);
+
+    let state = dashboard_test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
+    let Json(view) = routes_dashboard::dashboard_overview(
+        State(state),
+        headers,
+        Query(routes_dashboard::DashboardOverviewQuery {
+            scope_kind: Some("client".to_string()),
+            scope_value: Some(selected_client.to_string()),
+            window: Some("24h".to_string()),
+            ..dashboard_query_default()
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(view.summary.total, 1);
+    assert_eq!(view.summary.running_jobs, 1);
+    assert_eq!(view.operations.running_jobs, 1);
+    assert_eq!(view.operations.backup_pending, 1);
+    assert_eq!(view.operations.backup_failed, 1);
+    assert_eq!(view.operations.active_alerts, 3);
+    assert!(view
+        .operations
+        .recent_alerts
+        .iter()
+        .any(|alert| alert.title == "Current selected alert"));
+    assert!(!view
+        .operations
+        .recent_alerts
+        .iter()
+        .any(|alert| alert.title == "Future selected alert"));
+}
+
+#[tokio::test]
+async fn dashboard_date_groups_do_not_rebucket_active_jobs_created_before_the_range() {
+    let repo = Repository::Memory(MemoryState::default());
+    let now = unix_now();
+    let start = now.saturating_sub(60 * 60);
+    let current = now.saturating_sub(10 * 60);
+    let old = now.saturating_sub(2 * 24 * 60 * 60);
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    memory.agents.write().await.push(AgentView {
+        id: "edge-a".to_string(),
+        display_name: "Edge A".to_string(),
+        status: "online".to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: None,
+        arch: None,
+        internal_build_number: 1,
+        process_incarnation_id: None,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: AgentCapabilitySnapshot::default(),
+    });
+    for created_at in [old, current] {
+        let job_id = Uuid::new_v4();
+        memory.jobs.write().await.push(JobHistoryView {
+            id: job_id,
+            actor_id: None,
+            command_type: "shell".to_string(),
+            source_schedule_id: None,
+            privileged: false,
+            status: "running".to_string(),
+            target_count: 1,
+            payload_hash: "aa".repeat(32),
+            max_timeout_secs: 30,
+            created_at: created_at.to_string(),
+            completed_at: None,
+        });
+        memory.job_targets.write().await.push(JobTargetView {
+            job_id,
+            client_id: "edge-a".to_string(),
+            status: "running".to_string(),
+            message: None,
+            exit_code: None,
+            started_at: Some(created_at.to_string()),
+            deadline_at: None,
+            completed_at: None,
+            process_incarnation_id: None,
+        });
+    }
+
+    let state = dashboard_test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
+    let Json(view) = routes_dashboard::dashboard_overview(
+        State(state),
+        headers,
+        Query(routes_dashboard::DashboardOverviewQuery {
+            start_unix: Some(start),
+            end_unix: Some(now),
+            group_by: Some("date".to_string()),
+            ..dashboard_query_default()
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        view.summary.running_jobs, 2,
+        "current workload summary remains independent of creation time"
+    );
+    assert_eq!(
+        view.label_clusters
+            .iter()
+            .map(|cluster| cluster.running_jobs)
+            .sum::<usize>(),
+        1,
+        "date groups include only jobs actually created inside the selected range"
+    );
+    assert!(view.label_clusters.iter().all(|cluster| {
+        crate::util::parse_timestamp_unix(&cluster.label)
+            .is_some_and(|timestamp| timestamp >= start && timestamp <= now)
+    }));
+}
+
+#[tokio::test]
 async fn dashboard_overview_supports_all_window_with_available_data_start() {
     let repo = Repository::Memory(MemoryState::default());
     let now = unix_now();
@@ -502,6 +853,90 @@ async fn dashboard_repository_scopes_before_limit_and_keeps_pre_window_network_b
     assert_eq!(rates[0].tx_bytes_delta, 6_000);
     assert!(rates[0].rx_bps_avg > 0.0);
     assert!(rates[0].tx_bps_avg > 0.0);
+}
+
+#[tokio::test]
+async fn dashboard_rollup_aggregation_is_weighted_and_fair_per_client() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        let mut a_latest_first = dashboard_test_rollup("edge-a", "610", 1.0, 1.2, 900, 1900);
+        a_latest_first.sample_count = 1;
+        let mut a_latest_second = dashboard_test_rollup("edge-a", "670", 3.0, 3.4, 500, 1100);
+        a_latest_second.sample_count = 3;
+        memory.telemetry_rollups.write().await.extend([
+            dashboard_test_rollup("edge-a", "100", 0.1, 0.2, 950, 1950),
+            dashboard_test_rollup("edge-a", "400", 0.4, 0.5, 800, 1800),
+            a_latest_first,
+            a_latest_second,
+            dashboard_test_rollup("edge-b", "50", 0.2, 0.3, 900, 1900),
+            dashboard_test_rollup("edge-b", "350", 0.5, 0.6, 800, 1800),
+            dashboard_test_rollup("edge-b", "650", 0.8, 0.9, 700, 1700),
+        ]);
+    }
+
+    let rows = repo
+        .list_dashboard_telemetry_rollups(
+            2,
+            Some(0),
+            Some(1_000),
+            Some(60),
+            300,
+            &["edge-a".to_string(), "edge-b".to_string()],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 4, "each client keeps its two newest points");
+    for client_id in ["edge-a", "edge-b"] {
+        assert_eq!(
+            rows.iter().filter(|row| row.client_id == client_id).count(),
+            2,
+            "{client_id} must not be crowded out by another client"
+        );
+    }
+    let aggregated = rows
+        .iter()
+        .find(|row| row.client_id == "edge-a" && row.bucket_start == "600")
+        .unwrap();
+    assert_eq!(aggregated.bucket_secs, 300);
+    assert_eq!(aggregated.sample_count, 4);
+    assert!((aggregated.cpu_load_1_avg - 2.5).abs() < f64::EPSILON);
+    assert_eq!(aggregated.cpu_load_1_max, 3.4);
+    assert_eq!(aggregated.memory_available_bytes_avg, 600);
+    assert_eq!(aggregated.memory_available_bytes_min, 500);
+    assert_eq!(aggregated.disk_available_bytes_avg, 1300);
+    assert_eq!(aggregated.disk_available_bytes_min, 1100);
+    assert_eq!(aggregated.latest_observed_at, "670");
+}
+
+#[tokio::test]
+async fn dashboard_rollups_retain_inclusive_multi_day_endpoints() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        memory.telemetry_rollups.write().await.extend([
+            dashboard_test_rollup("edge-a", "0", 1.0, 1.0, 900, 1900),
+            dashboard_test_rollup("edge-a", "172800", 2.0, 2.0, 800, 1800),
+            dashboard_test_rollup("edge-a", "345600", 3.0, 3.0, 700, 1700),
+        ]);
+    }
+
+    let rows = repo
+        .list_dashboard_telemetry_rollups(
+            2,
+            Some(0),
+            Some(345_600),
+            Some(60),
+            345_600,
+            &["edge-a".to_string()],
+        )
+        .await
+        .unwrap();
+    let bucket_starts = rows
+        .iter()
+        .map(|row| crate::util::parse_timestamp_unix(&row.bucket_start).unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(bucket_starts, vec![0, 345_600]);
 }
 
 #[tokio::test]

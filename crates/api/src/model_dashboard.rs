@@ -79,7 +79,9 @@ pub(crate) struct DashboardSummaryView {
     pub(crate) offline: usize,
     pub(crate) stale: usize,
     pub(crate) warnings: usize,
+    pub(crate) warnings_truncated: bool,
     pub(crate) running_jobs: usize,
+    pub(crate) running_jobs_truncated: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -92,6 +94,9 @@ pub(crate) struct DashboardOperationsView {
     pub(crate) backup_pending: usize,
     pub(crate) backup_completed: usize,
     pub(crate) backup_failed: usize,
+    pub(crate) alerts_truncated: bool,
+    pub(crate) running_jobs_truncated: bool,
+    pub(crate) backups_truncated: bool,
     pub(crate) recent_alerts: Vec<DashboardAlertSummaryView>,
     pub(crate) degraded_agents: Vec<DashboardAgentSummaryView>,
 }
@@ -201,6 +206,7 @@ pub(crate) struct DashboardLabelClusterView {
     pub(crate) stale: usize,
     pub(crate) warnings: usize,
     pub(crate) running_jobs: usize,
+    pub(crate) counts_truncated: bool,
     pub(crate) rx_bps: f64,
     pub(crate) tx_bps: f64,
     pub(crate) drilldown: DashboardDrilldownView,

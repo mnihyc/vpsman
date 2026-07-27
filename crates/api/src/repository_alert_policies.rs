@@ -24,6 +24,7 @@ use crate::{
     repository_webhook_rules::{record_webhook_event_in_tx, webhook_event_row},
     selector_expression::{agent_matches_selector_expression, parse_selector_expression},
     unix_now,
+    util::{compare_timestamps_desc, timestamp_in_optional_bounds},
 };
 
 const MAX_POLICY_NAME_BYTES: usize = 128;
@@ -37,6 +38,15 @@ const MAX_TRAFFIC_INTERFACE_BYTES: usize = 128;
 const TRAFFIC_SAMPLE_STALE_SECS: i64 = 900;
 const POLICY_WEBHOOK_REPAIR_WINDOW_SECS: i64 = 3600;
 static POLICY_EVALUATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn policy_alert_severity_rank(severity: &str) -> usize {
+    match severity {
+        "critical" => 0,
+        "warning" => 1,
+        "info" => 2,
+        _ => 3,
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct TrafficSelector {
@@ -396,7 +406,14 @@ impl Repository {
             .list_traffic_counter_usage_for_streams(&stream_requests, now.timestamp())
             .await?;
         let traffic = traffic_accounting_for_agents(&matched, &rules, &traffic_usage, now);
-        let rollups = latest_rollups(self.list_latest_telemetry_rollups(5000, None, None).await?);
+        let rollup_client_ids = matched
+            .iter()
+            .map(|agent| agent.id.clone())
+            .collect::<Vec<_>>();
+        let rollups = latest_rollups(
+            self.list_latest_telemetry_rollups_for_clients(&rollup_client_ids, None)
+                .await?,
+        );
         let traffic_by_client = traffic
             .iter()
             .map(|record| (record.client_id.clone(), record))
@@ -987,10 +1004,55 @@ impl Repository {
         &self,
         query: &PolicyAlertQuery,
     ) -> Result<Vec<PolicyAlertRecord>> {
+        self.list_policy_alerts_matching(
+            query,
+            Some(query.limit.unwrap_or(200).clamp(1, 1000) as usize),
+            false,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn list_policy_alert_candidates(
+        &self,
+        query: &PolicyAlertQuery,
+        limit: usize,
+        allowed_client_ids: Option<&HashSet<String>>,
+        start_unix: Option<u64>,
+        end_unix: Option<u64>,
+    ) -> Result<Vec<PolicyAlertRecord>> {
+        // Fleet alerts expose at most 200 rows. Apply native query filters
+        // first, then keep one source-local top-K so dashboard polling remains
+        // bounded as policy history grows.
+        self.list_policy_alerts_matching(
+            query,
+            Some(limit.clamp(1, 200)),
+            true,
+            allowed_client_ids,
+            start_unix,
+            end_unix,
+        )
+        .await
+    }
+
+    async fn list_policy_alerts_matching(
+        &self,
+        query: &PolicyAlertQuery,
+        result_limit: Option<usize>,
+        prioritize_severity: bool,
+        allowed_client_ids: Option<&HashSet<String>>,
+        start_unix: Option<u64>,
+        end_unix: Option<u64>,
+    ) -> Result<Vec<PolicyAlertRecord>> {
+        let allowed_client_id_values =
+            allowed_client_ids.map(|client_ids| client_ids.iter().cloned().collect::<Vec<_>>());
         let mut alerts = match self {
             Self::Memory(memory) => memory.policy_alerts.read().await.clone(),
-            Self::Postgres(pool) => sqlx::query(
-                r#"
+            Self::Postgres(pool) => {
+                let sql = if prioritize_severity {
+                    r#"
                 SELECT
                     id,
                     policy_group_id,
@@ -1011,20 +1073,64 @@ impl Repository {
                   AND ($3::text IS NULL OR severity = $3)
                   AND ($4::text IS NULL OR category = $4)
                   AND ($5::uuid IS NULL OR policy_group_id = $5)
+                  AND ($6::text[] IS NULL OR client_id = ANY($6))
+                  AND ($7::double precision IS NULL OR observed_at >= to_timestamp($7))
+                  AND ($8::double precision IS NULL OR observed_at <= to_timestamp($8))
+                ORDER BY
+                    CASE severity
+                        WHEN 'critical' THEN 0
+                        WHEN 'warning' THEN 1
+                        WHEN 'info' THEN 2
+                        ELSE 3
+                    END ASC,
+                    observed_at DESC,
+                    id DESC
+                LIMIT $1
+                "#
+                } else {
+                    r#"
+                SELECT
+                    id,
+                    policy_group_id,
+                    policy_rule_id,
+                    client_id,
+                    trigger_generation,
+                    severity,
+                    category,
+                    title,
+                    detail,
+                    actual_value,
+                    threshold_value,
+                    payload,
+                    observed_at::text AS observed_at,
+                    created_at::text AS created_at
+                FROM policy_alerts
+                WHERE ($2::text IS NULL OR client_id = $2)
+                  AND ($3::text IS NULL OR severity = $3)
+                  AND ($4::text IS NULL OR category = $4)
+                  AND ($5::uuid IS NULL OR policy_group_id = $5)
+                  AND ($6::text[] IS NULL OR client_id = ANY($6))
+                  AND ($7::double precision IS NULL OR observed_at >= to_timestamp($7))
+                  AND ($8::double precision IS NULL OR observed_at <= to_timestamp($8))
                 ORDER BY observed_at DESC, id DESC
                 LIMIT $1
-                "#,
-            )
-            .bind(query.limit.unwrap_or(200).clamp(1, 1000))
-            .bind(query.client_id.as_deref())
-            .bind(query.severity.as_deref())
-            .bind(query.category.as_deref())
-            .bind(query.policy_group_id)
-            .fetch_all(pool)
-            .await?
-            .into_iter()
-            .map(policy_alert_from_row)
-            .collect::<Result<Vec<_>>>()?,
+                "#
+                };
+                sqlx::query(sql)
+                    .bind(result_limit.map(|limit| limit as i64))
+                    .bind(query.client_id.as_deref())
+                    .bind(query.severity.as_deref())
+                    .bind(query.category.as_deref())
+                    .bind(query.policy_group_id)
+                    .bind(allowed_client_id_values.as_deref())
+                    .bind(start_unix.map(|value| value as f64))
+                    .bind(end_unix.map(|value| value as f64))
+                    .fetch_all(pool)
+                    .await?
+                    .into_iter()
+                    .map(policy_alert_from_row)
+                    .collect::<Result<Vec<_>>>()?
+            }
         };
         alerts.retain(|alert| {
             query
@@ -1042,9 +1148,23 @@ impl Repository {
                 && query
                     .policy_group_id
                     .is_none_or(|policy_group_id| alert.policy_group_id == policy_group_id)
+                && allowed_client_ids.is_none_or(|client_ids| client_ids.contains(&alert.client_id))
+                && timestamp_in_optional_bounds(&alert.observed_at, start_unix, end_unix)
         });
-        alerts.sort_by(|left, right| right.observed_at.cmp(&left.observed_at));
-        alerts.truncate(query.limit.unwrap_or(200).clamp(1, 1000) as usize);
+        alerts.sort_by(|left, right| {
+            if prioritize_severity {
+                policy_alert_severity_rank(&left.severity)
+                    .cmp(&policy_alert_severity_rank(&right.severity))
+                    .then_with(|| compare_timestamps_desc(&left.observed_at, &right.observed_at))
+                    .then_with(|| right.id.cmp(&left.id))
+            } else {
+                compare_timestamps_desc(&left.observed_at, &right.observed_at)
+                    .then_with(|| right.id.cmp(&left.id))
+            }
+        });
+        if let Some(result_limit) = result_limit {
+            alerts.truncate(result_limit);
+        }
         Ok(alerts)
     }
 
@@ -1108,7 +1228,16 @@ impl Repository {
             .iter()
             .map(|record| (record.client_id.clone(), record))
             .collect::<HashMap<_, _>>();
-        let rollups = latest_rollups(self.list_latest_telemetry_rollups(5000, None, None).await?);
+        let rollup_client_ids = matched_groups
+            .iter()
+            .flat_map(|(_, matched)| matched.iter().map(|agent| agent.id.clone()))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let rollups = latest_rollups(
+            self.list_latest_telemetry_rollups_for_clients(&rollup_client_ids, None)
+                .await?,
+        );
         let mut fired = 0_usize;
         for (group, matched) in matched_groups {
             for rule in group.rules.iter().filter(|rule| rule.enabled) {

@@ -19,15 +19,14 @@ use crate::{
     fleet_alerts::FleetAlertPolicy,
     gateway_client::GatewayDispatchClient,
     model::{
-        AuthContext, BackupArtifactView, BackupRequestView, MigrationLinkView,
-        NetworkObservationTrendView, NetworkOspfRecommendationView, RestorePlanView,
+        AgentView, AuthContext, NetworkObservationTrendView, NetworkOspfRecommendationView,
         TunnelPlanView, WsEvent,
     },
-    model_agent_updates::AgentUpdateReleaseView,
     model_source_templates::SourceStatusView,
     object_store::BackupObjectStore,
     repository::Repository,
     repository_jobs::TerminalizationBatch,
+    repository_source_status::{BackupSourceEvidenceCounts, UpdateSourceEvidenceCounts},
     security::{bearer_token, constant_time_eq, operator_has_scope, role_allows},
 };
 
@@ -40,6 +39,36 @@ const DEFAULT_OPERATOR_AUTH_FAILED_ATTEMPT_WINDOW_SECS: u64 = 15 * 60;
 const DEFAULT_OPERATOR_AUTH_LOCKOUT_SECS: u64 = 15 * 60;
 static SUITE_CONFIG_LAST_KNOWN_GOOD: OnceLock<StdRwLock<HashMap<PathBuf, SuiteConfig>>> =
     OnceLock::new();
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct SourceStatusNetworkEnrichmentNeeds {
+    tunnel_plans: bool,
+    observation_trends: bool,
+    ospf_recommendations: bool,
+}
+
+fn source_status_network_enrichment_needs(
+    rows: &[SourceStatusView],
+) -> SourceStatusNetworkEnrichmentNeeds {
+    let mut needs = SourceStatusNetworkEnrichmentNeeds::default();
+    for row in rows {
+        match row.domain.as_str() {
+            "runtime_tunnel_adapter" => {
+                needs.tunnel_plans = true;
+                needs.observation_trends = true;
+            }
+            "routing_cost_adapter" => {
+                needs.tunnel_plans = true;
+                needs.ospf_recommendations = true;
+            }
+            "runtime_traffic_accounting_source" | "traffic_limit_status_source" => {
+                needs.tunnel_plans = true;
+            }
+            _ => {}
+        }
+    }
+    needs
+}
 
 pub(crate) fn remember_suite_config(path: &Path, config: &SuiteConfig) {
     let cache = SUITE_CONFIG_LAST_KNOWN_GOOD.get_or_init(|| StdRwLock::new(HashMap::new()));
@@ -474,25 +503,40 @@ impl AppState {
         client_id: Option<&str>,
         domain: Option<&str>,
     ) -> Result<Vec<SourceStatusView>> {
-        let mut rows = self.repo.list_source_status(client_id, domain).await?;
+        let rows = self.repo.list_source_status(client_id, domain).await?;
+        self.enrich_source_status_rows(rows).await
+    }
+
+    pub(crate) async fn list_source_status_for_agents(
+        &self,
+        agents: &[AgentView],
+        domain: Option<&str>,
+    ) -> Result<Vec<SourceStatusView>> {
+        let rows = self
+            .repo
+            .list_source_status_for_agents(agents, domain)
+            .await?;
+        self.enrich_source_status_rows(rows).await
+    }
+
+    async fn enrich_source_status_rows(
+        &self,
+        mut rows: Vec<SourceStatusView>,
+    ) -> Result<Vec<SourceStatusView>> {
+        let mut client_ids = rows
+            .iter()
+            .map(|row| row.client_id.clone())
+            .collect::<Vec<_>>();
+        client_ids.sort();
+        client_ids.dedup();
         if rows.iter().any(|row| {
             matches!(
                 row.domain.as_str(),
                 "backup_object_store" | "restore_path_mapping"
             )
         }) {
-            let artifacts = self.repo.list_backup_artifacts(1000).await?;
-            let backup_requests = self.repo.list_backup_requests(1000).await?;
-            let restore_plans = self.repo.list_restore_plans(1000).await?;
-            let migration_links = self.repo.list_migration_links(1000).await?;
-            enrich_backup_status_rows(
-                &mut rows,
-                self.backup_object_store.as_ref(),
-                &artifacts,
-                &backup_requests,
-                &restore_plans,
-                &migration_links,
-            );
+            let counts = self.repo.source_backup_evidence_counts(&client_ids).await?;
+            enrich_backup_status_rows(&mut rows, self.backup_object_store.as_ref(), &counts);
         }
         if rows.iter().any(|row| {
             matches!(
@@ -502,22 +546,42 @@ impl AppState {
                     | "update_rollback_heartbeat_source"
             )
         }) {
-            let releases = self.repo.list_agent_update_releases(1000).await?;
-            enrich_update_status_rows(&mut rows, &releases);
+            let counts = self.repo.source_update_evidence_counts().await?;
+            enrich_update_status_rows(&mut rows, counts);
         }
-        if rows.iter().any(|row| {
-            matches!(
-                row.domain.as_str(),
-                "runtime_tunnel_adapter"
-                    | "runtime_traffic_accounting_source"
-                    | "traffic_limit_status_source"
-                    | "routing_cost_adapter"
-            )
-        }) {
-            let plans = self.repo.list_tunnel_plans().await?;
-            let trends = self.repo.list_network_observation_trends(1000).await?;
-            let recommendations = self.repo.list_network_ospf_recommendations(1000).await?;
-            enrich_runtime_tunnel_status_rows(&mut rows, &plans, &trends, &recommendations);
+        let network_needs = source_status_network_enrichment_needs(&rows);
+        if network_needs.tunnel_plans {
+            let plans = self
+                .repo
+                .list_tunnel_plans()
+                .await?
+                .into_iter()
+                .filter(|plan| {
+                    client_ids.iter().any(|client_id| {
+                        plan.left_client_id == *client_id || plan.right_client_id == *client_id
+                    })
+                })
+                .collect::<Vec<_>>();
+            // Runtime traffic readiness only consumes the current saved plans.
+            // Keep retained observation history and OSPF evidence off that
+            // default polling path unless an adapter row can consume it.
+            if network_needs.observation_trends || network_needs.ospf_recommendations {
+                let trends = if network_needs.observation_trends {
+                    self.repo
+                        .list_recent_network_observation_trends_for_clients(&client_ids)
+                        .await?
+                } else {
+                    Vec::new()
+                };
+                let recommendations = if network_needs.ospf_recommendations {
+                    self.repo
+                        .list_network_ospf_recommendations_for_plans(&plans)
+                        .await?
+                } else {
+                    Vec::new()
+                };
+                enrich_runtime_tunnel_status_rows(&mut rows, &plans, &trends, &recommendations);
+            }
             enrich_runtime_traffic_status_rows(&mut rows, &plans);
         }
         for row in &rows {
@@ -693,10 +757,7 @@ fn is_safe_release_token(value: &str, max_bytes: usize) -> bool {
 fn enrich_backup_status_rows(
     rows: &mut [SourceStatusView],
     store: Option<&BackupObjectStore>,
-    artifacts: &[BackupArtifactView],
-    backup_requests: &[BackupRequestView],
-    restore_plans: &[RestorePlanView],
-    migration_links: &[MigrationLinkView],
+    counts_by_client: &HashMap<String, BackupSourceEvidenceCounts>,
 ) {
     for row in rows.iter_mut().filter(|row| {
         matches!(
@@ -704,41 +765,21 @@ fn enrich_backup_status_rows(
             "backup_object_store" | "restore_path_mapping"
         )
     }) {
-        let artifact_count = artifacts
-            .iter()
-            .filter(|artifact| artifact.client_id == row.client_id)
-            .count();
-        let backup_request_count = backup_requests
-            .iter()
-            .filter(|request| request.client_id == row.client_id)
-            .count();
-        let restore_source_count = restore_plans
-            .iter()
-            .filter(|plan| plan.source_client_id == row.client_id)
-            .count();
-        let restore_target_count = restore_plans
-            .iter()
-            .filter(|plan| plan.target_client_id == row.client_id)
-            .count();
-        let migration_source_count = migration_links
-            .iter()
-            .filter(|link| link.source_client_id == row.client_id)
-            .count();
-        let migration_target_count = migration_links
-            .iter()
-            .filter(|link| link.target_client_id == row.client_id)
-            .count();
+        let counts = counts_by_client
+            .get(&row.client_id)
+            .cloned()
+            .unwrap_or_default();
         let runtime_evidence = json!({
             "workflow": "backup_artifacts",
             "restore_workflow": "restore_migration",
             "server_object_store_configured": store.is_some(),
             "server_object_store_kind": store.map(BackupObjectStore::kind),
-            "artifact_count": artifact_count,
-            "backup_request_count": backup_request_count,
-            "restore_source_count": restore_source_count,
-            "restore_target_count": restore_target_count,
-            "migration_source_count": migration_source_count,
-            "migration_target_count": migration_target_count,
+            "artifact_count": counts.artifact_count,
+            "backup_request_count": counts.backup_request_count,
+            "restore_source_count": counts.restore_source_count,
+            "restore_target_count": counts.restore_target_count,
+            "migration_source_count": counts.migration_source_count,
+            "migration_target_count": counts.migration_target_count,
             "continuous_status": false,
         });
         row.evidence = merge_evidence(row.evidence.take(), runtime_evidence);
@@ -765,12 +806,7 @@ fn enrich_backup_status_rows(
     }
 }
 
-fn enrich_update_status_rows(rows: &mut [SourceStatusView], releases: &[AgentUpdateReleaseView]) {
-    let release_count = releases.len();
-    let external_release_count = releases
-        .iter()
-        .filter(|release| release.artifact_url_sha256_hex.is_some())
-        .count();
+fn enrich_update_status_rows(rows: &mut [SourceStatusView], counts: UpdateSourceEvidenceCounts) {
     for row in rows.iter_mut().filter(|row| {
         matches!(
             row.domain.as_str(),
@@ -779,8 +815,8 @@ fn enrich_update_status_rows(rows: &mut [SourceStatusView], releases: &[AgentUpd
     }) {
         let runtime_evidence = json!({
             "workflow": "agent_update_releases",
-            "release_count": release_count,
-            "external_release_count": external_release_count,
+            "release_count": counts.release_count,
+            "external_release_count": counts.external_release_count,
             "continuous_status": false,
         });
         row.evidence = merge_evidence(row.evidence.take(), runtime_evidence);
@@ -801,7 +837,7 @@ fn enrich_update_status_rows(rows: &mut [SourceStatusView], releases: &[AgentUpd
                     .to_string();
             continue;
         }
-        if external_release_count > 0 {
+        if counts.external_release_count > 0 {
             row.status = "ready".to_string();
             row.status_reason =
                 "external HTTPS update release metadata exists; agents download update artifacts outside the API"
@@ -866,43 +902,94 @@ fn enrich_runtime_tunnel_status_rows(
             .filter(|trend| trend.kind == "network_speed_test")
             .map(|trend| trend.sample_count)
             .sum();
+        let template_id = row.template_id.to_string();
+        let routing_plans = client_plans
+            .iter()
+            .copied()
+            .filter(|plan| {
+                let Some(ospf) = plan.plan.ospf.as_ref() else {
+                    return false;
+                };
+                plan.enabled
+                    && if plan.left_client_id == row.client_id {
+                        ospf.left_adapter_template_id == template_id
+                    } else {
+                        ospf.right_adapter_template_id == template_id
+                    }
+            })
+            .collect::<Vec<_>>();
         let routing_recommendation_count = recommendations
             .iter()
             .filter(|recommendation| {
-                ospf_recommendation_touches_client(recommendation, &row.client_id)
+                routing_plans
+                    .iter()
+                    .any(|plan| plan.id == recommendation.plan_id)
             })
             .count();
         let ospf_update_candidate_count = recommendations
             .iter()
             .filter(|recommendation| {
-                ospf_recommendation_touches_client(recommendation, &row.client_id)
+                routing_plans
+                    .iter()
+                    .any(|plan| plan.id == recommendation.plan_id)
                     && recommendation.cost_delta != 0
             })
             .count();
-        let runtime_evidence = json!({
-            "network_status_sample_count": network_status_sample_count,
-            "network_observation_sample_count": observation_sample_count,
-            "network_observation_degraded_count": degraded_observation_count,
-            "probe_sample_count": probe_sample_count,
-            "speed_sample_count": speed_sample_count,
-            "saved_plan_count": client_plans.len(),
-            "routing_recommendation_count": routing_recommendation_count,
-            "ospf_update_candidate_count": ospf_update_candidate_count,
-            "routing_status_source": "network_observation_trends",
-            "continuous_status": true,
-        });
+        let routing_endpoint_issue_count = routing_plans
+            .iter()
+            .filter(|plan| {
+                matches!(
+                    tunnel_endpoint_ospf_status(plan, &row.client_id),
+                    "failed" | "stale"
+                )
+            })
+            .count();
+        let routing_verified_count = routing_plans
+            .iter()
+            .filter(|plan| tunnel_endpoint_ospf_status(plan, &row.client_id) == "verified")
+            .count();
+        let runtime_evidence = if row.domain == "routing_cost_adapter" {
+            json!({
+                "matching_routing_plan_count": routing_plans.len(),
+                "routing_recommendation_count": routing_recommendation_count,
+                "ospf_update_candidate_count": ospf_update_candidate_count,
+                "routing_endpoint_issue_count": routing_endpoint_issue_count,
+                "routing_verified_count": routing_verified_count,
+                "routing_status_source": "tunnel_plan_endpoint_ospf_state",
+                "continuous_status": false,
+            })
+        } else {
+            json!({
+                "network_status_sample_count": network_status_sample_count,
+                "network_observation_sample_count": observation_sample_count,
+                "network_observation_degraded_count": degraded_observation_count,
+                "probe_sample_count": probe_sample_count,
+                "speed_sample_count": speed_sample_count,
+                "saved_plan_count": client_plans.len(),
+                "continuous_status": true,
+            })
+        };
         row.evidence = merge_evidence(row.evidence.take(), runtime_evidence);
         if row.domain == "routing_cost_adapter" && row.status != "agent_offline" {
-            row.status = if degraded_observation_count > 0 {
+            row.status = if routing_endpoint_issue_count > 0 {
                 "degraded".to_string()
-            } else if routing_recommendation_count > 0 || network_status_sample_count > 0 {
+            } else if routing_verified_count > 0 {
                 "ready".to_string()
             } else {
                 "ready_on_demand".to_string()
             };
-            row.status_reason =
-                "routing cost adapter is available for explicit tunnel endpoint status and apply jobs"
-                    .to_string();
+            row.status_reason = match row.status.as_str() {
+                "degraded" => format!(
+                    "{routing_endpoint_issue_count} matching tunnel endpoint routing-cost state(s) are failed or stale"
+                ),
+                "ready" => {
+                    "routing cost adapter has a verified matching tunnel endpoint state".to_string()
+                }
+                _ => {
+                    "routing cost adapter is available on demand for explicit tunnel endpoint status and apply jobs"
+                        .to_string()
+                }
+            };
         }
     }
 }
@@ -959,6 +1046,14 @@ fn tunnel_plan_touches_client(plan: &TunnelPlanView, client_id: &str) -> bool {
     plan.left_client_id == client_id || plan.right_client_id == client_id
 }
 
+fn tunnel_endpoint_ospf_status<'a>(plan: &'a TunnelPlanView, client_id: &str) -> &'a str {
+    if plan.left_client_id == client_id {
+        &plan.left_ospf_status
+    } else {
+        &plan.right_ospf_status
+    }
+}
+
 fn tunnel_plan_has_traffic_limit(plan: &TunnelPlanView) -> bool {
     !plan.plan.runtime_control.traffic_limit.is_default()
 }
@@ -971,13 +1066,6 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
 
 fn network_trend_touches_client(trend: &NetworkObservationTrendView, client_id: &str) -> bool {
     trend.client_id == client_id || trend.peer_client_id.as_deref() == Some(client_id)
-}
-
-fn ospf_recommendation_touches_client(
-    recommendation: &NetworkOspfRecommendationView,
-    client_id: &str,
-) -> bool {
-    recommendation.left_client_id == client_id || recommendation.right_client_id == client_id
 }
 
 fn merge_evidence(base: Value, extra: Value) -> Value {
@@ -995,6 +1083,17 @@ fn merge_evidence(base: Value, extra: Value) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+    use uuid::Uuid;
+    use vpsman_common::{
+        plan_tunnel, OspfControlMode, OspfCostPolicy, TunnelKind, TunnelOspfConfig, TunnelPlanInput,
+    };
+
+    use crate::{
+        model::{NetworkObservationTrendView, TunnelPlanEndpointRuntimeConfigView, TunnelPlanView},
+        model_source_templates::SourceStatusView,
+    };
+
     #[test]
     fn invalid_hot_reload_keeps_the_last_known_good_suite_config() {
         let path = std::env::temp_dir().join(format!(
@@ -1014,5 +1113,221 @@ mod tests {
         assert_eq!(fallback.capacity.dispatcher_batch, Some(17));
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn routing_adapter_readiness_uses_only_matching_endpoint_state() {
+        let matching_template_id = Uuid::parse_str("33333333-3333-4333-8333-333333333333").unwrap();
+        let mismatched_template_id =
+            Uuid::parse_str("55555555-5555-4555-8555-555555555555").unwrap();
+        let mut rows = vec![
+            test_source_status(
+                "routing_cost_adapter",
+                matching_template_id,
+                "ready_on_demand",
+            ),
+            test_source_status(
+                "routing_cost_adapter",
+                mismatched_template_id,
+                "ready_on_demand",
+            ),
+            test_source_status(
+                "runtime_tunnel_adapter",
+                Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap(),
+                "ready",
+            ),
+        ];
+        let plans = vec![test_tunnel_plan(matching_template_id, "failed")];
+        let trends = vec![NetworkObservationTrendView {
+            kind: "network_probe".to_string(),
+            plan_id: Some(plans[0].id),
+            topology_identity_hash: None,
+            plan_name: Some(plans[0].name.clone()),
+            interface_name: Some(plans[0].plan.interface_name.clone()),
+            client_id: "edge-a".to_string(),
+            peer_client_id: Some("edge-b".to_string()),
+            sample_count: 1,
+            healthy_count: 0,
+            degraded_count: 1,
+            latency_avg_ms: Some(500.0),
+            latency_min_ms: Some(500.0),
+            latency_max_ms: Some(500.0),
+            packet_loss_avg_ratio: Some(1.0),
+            throughput_avg_mbps: None,
+            throughput_max_mbps: None,
+            bytes_total: 0,
+            latest_observed_at: "2026-07-26T00:00:00Z".to_string(),
+        }];
+
+        super::enrich_runtime_tunnel_status_rows(&mut rows, &plans, &trends, &[]);
+
+        assert_eq!(rows[0].status, "degraded");
+        assert_eq!(rows[0].evidence["routing_endpoint_issue_count"], 1);
+        assert_eq!(rows[0].evidence["continuous_status"], false);
+        assert!(
+            rows[0]
+                .evidence
+                .get("network_observation_degraded_count")
+                .is_none(),
+            "routing evidence must not expose unrelated data-plane failures"
+        );
+
+        assert_eq!(rows[1].status, "ready_on_demand");
+        assert_eq!(rows[1].evidence["matching_routing_plan_count"], 0);
+        assert_eq!(rows[1].evidence["routing_endpoint_issue_count"], 0);
+        assert_eq!(rows[1].evidence["continuous_status"], false);
+
+        assert_eq!(rows[2].status, "ready");
+        assert_eq!(rows[2].evidence["network_observation_degraded_count"], 1);
+        assert_eq!(rows[2].evidence["continuous_status"], true);
+    }
+
+    #[test]
+    fn source_status_network_enrichment_keeps_history_queries_off_default_traffic_polling() {
+        let default_rows = vec![
+            test_source_status(
+                "runtime_traffic_accounting_source",
+                Uuid::new_v4(),
+                "selected_no_samples",
+            ),
+            test_source_status(
+                "traffic_limit_status_source",
+                Uuid::new_v4(),
+                "ready_on_demand",
+            ),
+        ];
+        assert_eq!(
+            super::source_status_network_enrichment_needs(&default_rows),
+            super::SourceStatusNetworkEnrichmentNeeds {
+                tunnel_plans: true,
+                observation_trends: false,
+                ospf_recommendations: false,
+            }
+        );
+
+        let adapter_rows = vec![
+            test_source_status("runtime_tunnel_adapter", Uuid::new_v4(), "ready"),
+            test_source_status("routing_cost_adapter", Uuid::new_v4(), "ready_on_demand"),
+        ];
+        assert_eq!(
+            super::source_status_network_enrichment_needs(&adapter_rows),
+            super::SourceStatusNetworkEnrichmentNeeds {
+                tunnel_plans: true,
+                observation_trends: true,
+                ospf_recommendations: true,
+            }
+        );
+
+        assert_eq!(
+            super::source_status_network_enrichment_needs(&[test_source_status(
+                "routing_cost_adapter",
+                Uuid::new_v4(),
+                "ready_on_demand",
+            )]),
+            super::SourceStatusNetworkEnrichmentNeeds {
+                tunnel_plans: true,
+                observation_trends: false,
+                ospf_recommendations: true,
+            }
+        );
+    }
+
+    fn test_source_status(domain: &str, template_id: Uuid, status: &str) -> SourceStatusView {
+        SourceStatusView {
+            client_id: "edge-a".to_string(),
+            display_name: "Edge A".to_string(),
+            client_status: "online".to_string(),
+            domain: domain.to_string(),
+            module: domain.to_string(),
+            template_id,
+            template_name: format!("{domain} test"),
+            template_scope: "global".to_string(),
+            source_kind: "external".to_string(),
+            status: status.to_string(),
+            status_reason: "test base state".to_string(),
+            evidence: json!({}),
+            assigned_at: "2026-07-26T00:00:00Z".to_string(),
+        }
+    }
+
+    fn test_tunnel_plan(left_adapter_template_id: Uuid, left_status: &str) -> TunnelPlanView {
+        let input = TunnelPlanInput {
+            name: "edge-a-edge-b".to_string(),
+            interface_name: "tunab".to_string(),
+            kind: TunnelKind::Gre,
+            runtime_control: Default::default(),
+            runtime_topology: Default::default(),
+            left_client_id: "edge-a".to_string(),
+            right_client_id: "edge-b".to_string(),
+            left_remote_underlay: "198.51.100.10".to_string(),
+            left_local_underlay: None,
+            right_remote_underlay: "203.0.113.20".to_string(),
+            right_local_underlay: None,
+            address_pool_cidr: "10.255.0.0/30".to_string(),
+            reserved_addresses: Vec::new(),
+            ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
+                left: "10.255.0.0".to_string(),
+                right: "10.255.0.1".to_string(),
+                prefix_len: 31,
+            }),
+            ipv6_address_pool_cidr: None,
+            ipv6_tunnel: None,
+            latency_primary_family: Default::default(),
+            bandwidth_mbps: 100,
+            ospf: Some(TunnelOspfConfig {
+                mode: OspfControlMode::Reviewed,
+                planned_latency_ms: 20.0,
+                planned_packet_loss_ratio: 0.01,
+                preference: 1.0,
+                policy: OspfCostPolicy::default(),
+                min_cost_delta: 5,
+                healthy_windows: 2,
+                left_adapter_template_id: left_adapter_template_id.to_string(),
+                right_adapter_template_id: "44444444-4444-4444-8444-444444444444".to_string(),
+            }),
+        };
+        let plan = plan_tunnel(&input).unwrap();
+        TunnelPlanView {
+            id: Uuid::new_v4(),
+            name: plan.name.clone(),
+            kind: plan.kind,
+            enabled: true,
+            revision: 1,
+            left_client_id: plan.left_client_id.clone(),
+            right_client_id: plan.right_client_id.clone(),
+            recommended_ospf_cost: plan.recommended_ospf_cost.map(i32::from),
+            ospf_status: left_status.to_string(),
+            left_ospf_status: left_status.to_string(),
+            right_ospf_status: "unverified".to_string(),
+            desired_ospf_cost: None,
+            left_current_ospf_cost: None,
+            right_current_ospf_cost: None,
+            left_ospf_job_id: None,
+            right_ospf_job_id: None,
+            connection_assessment: "automatic".to_string(),
+            connection_assessment_note: None,
+            connection_assessed_at: None,
+            connection_assessed_by: None,
+            left_runtime_config: test_runtime_config("edge-a"),
+            right_runtime_config: test_runtime_config("edge-b"),
+            input,
+            plan,
+            created_at: "2026-07-26T00:00:00Z".to_string(),
+            updated_at: "2026-07-26T00:00:00Z".to_string(),
+            deleted_at: None,
+            deleted_by: None,
+            deleted_reason: None,
+        }
+    }
+
+    fn test_runtime_config(client_id: &str) -> TunnelPlanEndpointRuntimeConfigView {
+        TunnelPlanEndpointRuntimeConfigView {
+            client_id: client_id.to_string(),
+            desired: "present".to_string(),
+            status: "not_dispatched".to_string(),
+            job_id: None,
+            error: None,
+            updated_at: None,
+        }
     }
 }

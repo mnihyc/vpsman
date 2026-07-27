@@ -20,6 +20,7 @@ import {
   type TimeSeriesChartLine,
 } from "../../components/TimeSeriesChart";
 import { consolePalette, dashboardChartColors } from "../../colorPalette";
+import { formatBoundedCount, formatLowerBoundCount } from "../../constants";
 import type {
   DashboardLabelClusterRecord,
   DashboardNetworkRecord,
@@ -583,19 +584,22 @@ function FleetOperationsDashboard({
         value={fleetHealthValue(overview.summary)}
       />
       <MetricTile
-        detail={`${countPhrase(operations.critical_alerts, "critical")} · ${countPhrase(operations.warning_alerts, "warning")} from operations`}
+        detail={`${countPhrase(operations.critical_alerts, "critical")} · ${countPhrase(operations.warning_alerts, "warning")} from ${operations.alerts_truncated ? "loaded operations page" : "operations"}`}
         label="Active alerts"
-        value={countValue(operations.active_alerts)}
+        value={countValue(operations.active_alerts, operations.alerts_truncated)}
       />
       <MetricTile
         detail={source.jobDetail}
         label="Running jobs"
-        value={countValue(source.runningJobs)}
+        value={countValue(source.runningJobs, source.runningJobsTruncated)}
       />
       <MetricTile
-        detail={`${countPhrase(operations.backup_failed, "failed")} · ${countPhrase(operations.backup_pending, "pending")}`}
-        label="Backup posture"
-        value={countValue(operations.backup_completed)}
+        detail={`${countPhrase(operations.backup_failed, "failed")} · ${countPhrase(operations.backup_pending, "pending")} from ${operations.backups_truncated ? "loaded backup page" : "backups"}`}
+        label="Completed backups"
+        value={countValue(
+          operations.backup_completed,
+          operations.backups_truncated,
+        )}
       />
       <div
         className="dashboardWidgetTable wideWidget"
@@ -903,18 +907,48 @@ function GroupDashboard({
           <span>{cluster.kind || "group"}</span>
           <strong>{cluster.label || "Unnamed group"}</strong>
           <small>
-            {countPhrase(cluster.total, "VPS")} ·{" "}
-            {countPhrase(cluster.online, "online")} ·{" "}
-            {countPhrase(cluster.stale, "stale")}
+            {cluster.kind === "date" ? (
+              <>
+                {countPhrase(cluster.total, "network sample")} ·{" "}
+                {countPhrase(
+                  cluster.online,
+                  "completed backup",
+                  cluster.counts_truncated,
+                )}{" "}
+                ·{" "}
+                {countPhrase(
+                  cluster.stale,
+                  "other backup record",
+                  cluster.counts_truncated,
+                )}
+              </>
+            ) : (
+              <>
+                {countPhrase(cluster.total, "VPS")} ·{" "}
+                {countPhrase(cluster.online, "online")} ·{" "}
+                {countPhrase(cluster.stale, "stale")}
+                {cluster.counts_truncated
+                  ? " · alert/job counts use loaded operations page"
+                  : ""}
+              </>
+            )}
           </small>
           <dl>
             <div>
-              <dt>Warnings</dt>
-              <dd>{countValue(cluster.warnings)}</dd>
+              <dt>Alerts</dt>
+              <dd>
+                {countValue(cluster.warnings, cluster.counts_truncated)}
+              </dd>
             </div>
             <div>
-              <dt>Jobs</dt>
-              <dd>{countValue(cluster.running_jobs)}</dd>
+              <dt>
+                {cluster.kind === "date"
+                  ? "Running jobs"
+                  : "Active job assignments"}
+              </dt>
+              <dd>
+                {countValue(cluster.running_jobs, cluster.counts_truncated)}
+              </dd>
             </div>
             <div>
               <dt>Traffic</dt>
@@ -1008,7 +1042,7 @@ function dashboardSourceSummary(overview: DashboardOverviewRecord | null): {
   }
   const source = dashboardSourceCounts(overview);
   return {
-    detail: `${source.fleetDetail} · ${countPhrase(overview.operations.active_alerts, "active alert")} · ${countPhrase(source.runningJobs, "running job")}`,
+    detail: `${source.fleetDetail} · ${countPhrase(overview.operations.active_alerts, "active alert", overview.operations.alerts_truncated)} · ${countPhrase(source.runningJobs, "running job", source.runningJobsTruncated)}`,
     value: `${countValue(overview.summary.total)} VPS`,
   };
 }
@@ -1018,6 +1052,7 @@ function dashboardSourceCounts(overview: DashboardOverviewRecord | null): {
   fleetDetail: string;
   jobDetail: string;
   runningJobs: number | null;
+  runningJobsTruncated: boolean;
 } {
   if (!overview) {
     return {
@@ -1025,26 +1060,32 @@ function dashboardSourceCounts(overview: DashboardOverviewRecord | null): {
       fleetDetail: "Fleet summary unavailable",
       jobDetail: "Running job counts unavailable",
       runningJobs: null,
+      runningJobsTruncated: false,
     };
   }
   const summaryJobs = finiteCount(overview.summary.running_jobs);
   const operationsJobs = finiteCount(overview.operations.running_jobs);
   const runningJobs = summaryJobs ?? operationsJobs;
+  const runningJobsTruncated =
+    summaryJobs !== null
+      ? overview.summary.running_jobs_truncated
+      : overview.operations.running_jobs_truncated;
   const jobDetail =
     summaryJobs !== null &&
     operationsJobs !== null &&
     summaryJobs !== operationsJobs
-      ? `Summary ${summaryJobs}; operations ${operationsJobs}; showing summary`
+      ? `Summary ${formatBoundedCount(summaryJobs, overview.summary.running_jobs_truncated)}; operations ${formatBoundedCount(operationsJobs, overview.operations.running_jobs_truncated)}; showing summary`
       : summaryJobs !== null
-        ? `${countPhrase(summaryJobs, "running job")} from fleet summary`
+        ? `${countPhrase(summaryJobs, "running job", overview.summary.running_jobs_truncated)} from fleet summary`
         : operationsJobs !== null
-          ? `${countPhrase(operationsJobs, "running job")} from operations`
+          ? `${countPhrase(operationsJobs, "running job", overview.operations.running_jobs_truncated)} from operations`
           : "Running job counts unavailable";
   return {
-    alertDetail: `${countPhrase(overview.operations.active_alerts, "active alert")} · ${countPhrase(overview.operations.critical_alerts, "critical")} · ${countPhrase(overview.operations.warning_alerts, "warning")} from operations`,
+    alertDetail: `${countPhrase(overview.operations.active_alerts, "active alert", overview.operations.alerts_truncated)} · ${countPhrase(overview.operations.critical_alerts, "critical")} · ${countPhrase(overview.operations.warning_alerts, "warning")} from ${overview.operations.alerts_truncated ? "loaded operations page" : "operations"}`,
     fleetDetail: `${fleetHealthValue(overview.summary)} online · ${countPhrase(overview.summary.stale, "stale")} · ${countPhrase(summaryOfflineCount(overview.summary), "offline")} from summary`,
     jobDetail,
     runningJobs,
+    runningJobsTruncated,
   };
 }
 
@@ -1232,17 +1273,27 @@ function dashboardAgentStatusLabel(status: string | null | undefined): string {
   return status.replace(/_/g, " ");
 }
 
-function countValue(value: number | null | undefined): string {
+function countValue(
+  value: number | null | undefined,
+  truncated = false,
+): string {
   const count = finiteCount(value);
-  return count === null ? "No data" : String(count);
+  return count === null ? "No data" : formatLowerBoundCount(count, truncated);
 }
 
-function countPhrase(value: number | null | undefined, unit: string): string {
+function countPhrase(
+  value: number | null | undefined,
+  unit: string,
+  truncated = false,
+): string {
   const count = finiteCount(value);
   if (count === null) {
     return `${capitalize(unit)} unavailable`;
   }
-  return `${count} ${pluralize(unit, count)}`;
+  if (truncated && count === 0) {
+    return `0 ${pluralize(unit, count)} loaded`;
+  }
+  return `${truncated ? "at least " : ""}${count} ${pluralize(unit, count)}`;
 }
 
 function finiteCount(value: number | null | undefined): number | null {

@@ -24,7 +24,14 @@ import {
 } from "lucide-react";
 import { Metric } from "./Metric";
 import { SearchExpressionInput } from "./SearchExpressionInput";
-import { navSections, subpageDescription, subpageLabel, viewLabel, viewSubpages } from "../constants";
+import {
+  formatLowerBoundCount,
+  navSections,
+  subpageDescription,
+  subpageLabel,
+  viewLabel,
+  viewSubpages,
+} from "../constants";
 import type { ActiveView, AgentView, FleetSummary } from "../types";
 import type { SavedFleetView } from "../hooks/useFleetViews";
 import { usePanelDisplaySettings } from "../panelDisplay";
@@ -54,7 +61,13 @@ type ConsoleShellProps = {
   activeSubpage: string;
   activeView: ActiveView;
   agents: AgentView[];
-  alertCounts: { critical: number; info: number; total: number; warning: number };
+  alertCounts: {
+    critical: number;
+    info: number;
+    total: number;
+    truncated: boolean;
+    warning: number;
+  };
   apiToken: string;
   children: ReactNode;
   commandItems: CommandPaletteItem[];
@@ -288,6 +301,10 @@ export function ConsoleShell({
     ? commandPaletteOptionId(activeCommandIndex)
     : undefined;
   const openCommandPalette = () => {
+    if (commandPaletteOpen) {
+      commandInputRef.current?.focus({ preventScroll: true });
+      return;
+    }
     commandReturnFocusRef.current =
       document.activeElement instanceof HTMLElement
         ? document.activeElement
@@ -848,9 +865,20 @@ export function ConsoleShell({
               />
               <Metric
                 label="Alerts"
-                title={`${alertCounts.critical} critical, ${alertCounts.warning} warning, ${alertCounts.info} info`}
-                value={String(alertCounts.total)}
-                tone={alertCounts.total > 0 ? "yellow" : "green"}
+                title={`${alertCounts.critical} critical, ${alertCounts.warning} warning, ${alertCounts.info} info${alertCounts.truncated ? " in the loaded alert page; additional matching alerts may exist" : ""}`}
+                value={
+                  alertCounts.truncated && alertCounts.total === 0
+                    ? "0 loaded"
+                    : formatLowerBoundCount(
+                        alertCounts.total,
+                        alertCounts.truncated,
+                      )
+                }
+                tone={
+                  alertCounts.total > 0 || alertCounts.truncated
+                    ? "yellow"
+                    : "green"
+                }
               />
               <Metric
                 label="Running jobs"
@@ -867,10 +895,12 @@ export function ConsoleShell({
               <strong className="fleetStatusCompact" title={fleetStatusTitle}>
                 {summary.total} VPS · {summary.online} online · {unavailableCount} unavailable · {summary.running_jobs} running
               </strong>
-              <span className={alertCounts.critical > 0 || alertCounts.warning > 0 ? "warn" : "ok"}>
+              <span className={alertCounts.critical > 0 || alertCounts.warning > 0 || alertCounts.truncated ? "warn" : "ok"}>
                 {alertCounts.total > 0
-                  ? `${alertCounts.critical} critical · ${alertCounts.warning} warning · ${alertCounts.info} info`
-                  : "No active alerts"}
+                  ? `${formatLowerBoundCount(alertCounts.total, alertCounts.truncated)} open · ${alertCounts.critical} critical · ${alertCounts.warning} warning · ${alertCounts.info} info${alertCounts.truncated ? " in loaded alerts" : ""}`
+                  : alertCounts.truncated
+                    ? "No matching alerts in the loaded page · more may exist"
+                    : "No active alerts"}
               </span>
               <small>{onlineRatio} online</small>
             </div>

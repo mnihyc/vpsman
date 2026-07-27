@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use serde_json::json;
+use sqlx::Row;
 
 use crate::{
     model::{
@@ -9,8 +10,27 @@ use crate::{
         TelemetryTunnelView,
     },
     repository::Repository,
+    repository_telemetry_rollups::tunnel_adapter_health_is_degraded,
     source_template_builtins::SOURCE_TEMPLATE_DOMAINS,
 };
+
+const SOURCE_STATUS_EVIDENCE_SAMPLE_LIMIT: usize = 100;
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct BackupSourceEvidenceCounts {
+    pub(crate) artifact_count: usize,
+    pub(crate) backup_request_count: usize,
+    pub(crate) restore_source_count: usize,
+    pub(crate) restore_target_count: usize,
+    pub(crate) migration_source_count: usize,
+    pub(crate) migration_target_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct UpdateSourceEvidenceCounts {
+    pub(crate) release_count: usize,
+    pub(crate) external_release_count: usize,
+}
 
 impl Repository {
     pub(crate) async fn list_source_status(
@@ -24,19 +44,36 @@ impl Repository {
             .into_iter()
             .filter(|agent| client_id.is_none_or(|client_id| agent.id == client_id))
             .collect::<Vec<_>>();
+        self.list_source_status_for_agents(&agents, domain).await
+    }
+
+    pub(crate) async fn list_source_status_for_agents(
+        &self,
+        agents: &[AgentView],
+        domain: Option<&str>,
+    ) -> Result<Vec<SourceStatusView>> {
+        if agents.is_empty() {
+            return Ok(Vec::new());
+        }
+        let client_ids = agents
+            .iter()
+            .map(|agent| agent.id.clone())
+            .collect::<Vec<_>>();
         let templates = self
-            .list_source_templates(domain)
+            .list_source_templates_for_status(domain)
             .await?
             .into_iter()
             .map(|template| (template.id, template))
             .collect::<HashMap<_, _>>();
         let assignments = self
-            .list_source_template_assignments(client_id, domain)
+            .list_source_template_assignments_for_clients(&client_ids, domain)
             .await?
             .into_iter()
             .filter(|assignment| templates.contains_key(&assignment.template_id))
             .collect::<Vec<_>>();
-        let tunnels = self.list_telemetry_tunnels(200, client_id, None).await?;
+        let tunnels = self
+            .list_declared_telemetry_tunnels_for_source_status_clients(&client_ids)
+            .await?;
         let tunnels_by_client = tunnels.into_iter().fold(
             HashMap::<String, Vec<TelemetryTunnelView>>::new(),
             |mut grouped, tunnel| {
@@ -77,6 +114,157 @@ impl Repository {
                 .then_with(|| left.domain.cmp(&right.domain))
         });
         Ok(rows)
+    }
+
+    pub(crate) async fn source_backup_evidence_counts(
+        &self,
+        client_ids: &[String],
+    ) -> Result<HashMap<String, BackupSourceEvidenceCounts>> {
+        if client_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        match self {
+            Self::Memory(memory) => {
+                let mut counts = client_ids
+                    .iter()
+                    .cloned()
+                    .map(|client_id| (client_id, BackupSourceEvidenceCounts::default()))
+                    .collect::<HashMap<_, _>>();
+                for artifact in memory.backup_artifacts.read().await.iter() {
+                    if let Some(count) = counts.get_mut(&artifact.client_id) {
+                        count.artifact_count += 1;
+                    }
+                }
+                for request in memory.backup_requests.read().await.iter() {
+                    if let Some(count) = counts.get_mut(&request.client_id) {
+                        count.backup_request_count += 1;
+                    }
+                }
+                for plan in memory.restore_plans.read().await.iter() {
+                    if let Some(count) = counts.get_mut(&plan.source_client_id) {
+                        count.restore_source_count += 1;
+                    }
+                    if let Some(count) = counts.get_mut(&plan.target_client_id) {
+                        count.restore_target_count += 1;
+                    }
+                }
+                for link in memory.migration_links.read().await.iter() {
+                    if let Some(count) = counts.get_mut(&link.source_client_id) {
+                        count.migration_source_count += 1;
+                    }
+                    if let Some(count) = counts.get_mut(&link.target_client_id) {
+                        count.migration_target_count += 1;
+                    }
+                }
+                Ok(counts)
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        selected.client_id,
+                        (
+                            SELECT count(*)::bigint
+                            FROM backup_artifacts artifact
+                            WHERE artifact.client_id = selected.client_id
+                        ) AS artifact_count,
+                        (
+                            SELECT count(*)::bigint
+                            FROM backup_requests request
+                            WHERE request.client_id = selected.client_id
+                        ) AS backup_request_count,
+                        (
+                            SELECT count(*)::bigint
+                            FROM restore_plans plan
+                            WHERE plan.source_client_id = selected.client_id
+                        ) AS restore_source_count,
+                        (
+                            SELECT count(*)::bigint
+                            FROM restore_plans plan
+                            WHERE plan.target_client_id = selected.client_id
+                        ) AS restore_target_count,
+                        (
+                            SELECT count(*)::bigint
+                            FROM migration_links link
+                            WHERE link.source_client_id = selected.client_id
+                        ) AS migration_source_count,
+                        (
+                            SELECT count(*)::bigint
+                            FROM migration_links link
+                            WHERE link.target_client_id = selected.client_id
+                        ) AS migration_target_count
+                    FROM unnest($1::text[]) AS selected(client_id)
+                    "#,
+                )
+                .bind(client_ids)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|row| {
+                        let count = |name| -> Result<usize> {
+                            Ok(row
+                                .try_get::<i64, _>(name)?
+                                .max(0)
+                                .try_into()
+                                .unwrap_or(usize::MAX))
+                        };
+                        let client_id: String = row.try_get("client_id")?;
+                        Ok((
+                            client_id,
+                            BackupSourceEvidenceCounts {
+                                artifact_count: count("artifact_count")?,
+                                backup_request_count: count("backup_request_count")?,
+                                restore_source_count: count("restore_source_count")?,
+                                restore_target_count: count("restore_target_count")?,
+                                migration_source_count: count("migration_source_count")?,
+                                migration_target_count: count("migration_target_count")?,
+                            },
+                        ))
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) async fn source_update_evidence_counts(&self) -> Result<UpdateSourceEvidenceCounts> {
+        match self {
+            Self::Memory(memory) => {
+                let releases = memory.agent_update_releases.read().await;
+                Ok(UpdateSourceEvidenceCounts {
+                    release_count: releases.len(),
+                    external_release_count: releases
+                        .iter()
+                        .filter(|release| release.artifact_url_sha256_hex.is_some())
+                        .count(),
+                })
+            }
+            Self::Postgres(pool) => {
+                let row = sqlx::query(
+                    r#"
+                    SELECT
+                        count(*)::bigint AS release_count,
+                        count(*) FILTER (
+                            WHERE artifact_url_sha256_hex IS NOT NULL
+                        )::bigint AS external_release_count
+                    FROM agent_update_releases
+                    "#,
+                )
+                .fetch_one(pool)
+                .await?;
+                Ok(UpdateSourceEvidenceCounts {
+                    release_count: row
+                        .try_get::<i64, _>("release_count")?
+                        .max(0)
+                        .try_into()
+                        .unwrap_or(usize::MAX),
+                    external_release_count: row
+                        .try_get::<i64, _>("external_release_count")?
+                        .max(0)
+                        .try_into()
+                        .unwrap_or(usize::MAX),
+                })
+            }
+        }
     }
 }
 
@@ -466,21 +654,11 @@ fn traffic_status(
     source_kind: &str,
     tunnels: &[TelemetryTunnelView],
 ) -> (String, String, serde_json::Value) {
-    let samples = tunnels
+    let status_tunnels = tunnels
         .iter()
-        .filter_map(|tunnel| {
-            tunnel.traffic_status.as_ref().map(|status| {
-                json!({
-                    "interface": tunnel.interface,
-                    "traffic_source": tunnel.traffic_source,
-                    "traffic_status": status,
-                    "traffic_reason": tunnel.traffic_reason,
-                    "traffic_checked_unix": tunnel.traffic_checked_unix,
-                })
-            })
-        })
+        .filter(|tunnel| tunnel.traffic_status.is_some())
         .collect::<Vec<_>>();
-    if samples.is_empty() {
+    if status_tunnels.is_empty() {
         return (
             "selected_no_samples".to_string(),
             format!("{source_kind} is selected, but no runtime traffic samples are available yet"),
@@ -490,20 +668,43 @@ fn traffic_status(
             }),
         );
     }
-    let unhealthy = samples.iter().any(|sample| {
-        sample
-            .get("traffic_status")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|status| status != "ok")
-    });
-    if unhealthy {
+    let degraded_count = status_tunnels
+        .iter()
+        .filter(|tunnel| tunnel.traffic_status.as_deref() != Some("ok"))
+        .count();
+    let samples = status_tunnels
+        .iter()
+        .copied()
+        .filter(|tunnel| tunnel.traffic_status.as_deref() != Some("ok"))
+        .chain(
+            status_tunnels
+                .iter()
+                .copied()
+                .filter(|tunnel| tunnel.traffic_status.as_deref() == Some("ok")),
+        )
+        .take(SOURCE_STATUS_EVIDENCE_SAMPLE_LIMIT)
+        .map(|tunnel| {
+            json!({
+                "interface": tunnel.interface,
+                "traffic_source": tunnel.traffic_source,
+                "traffic_status": tunnel.traffic_status,
+                "traffic_reason": tunnel.traffic_reason,
+                "traffic_checked_unix": tunnel.traffic_checked_unix,
+            })
+        })
+        .collect::<Vec<_>>();
+    let sample_count = status_tunnels.len();
+    let truncated_count = sample_count.saturating_sub(samples.len());
+    if degraded_count > 0 {
         (
             "degraded".to_string(),
             "one or more runtime traffic sources reported degraded status".to_string(),
             json!({
                 "continuous_status": true,
-                "sample_count": samples.len(),
+                "sample_count": sample_count,
+                "degraded_count": degraded_count,
                 "samples": samples,
+                "truncated_count": truncated_count,
             }),
         )
     } else {
@@ -512,8 +713,10 @@ fn traffic_status(
             "runtime traffic source is reporting healthy samples".to_string(),
             json!({
                 "continuous_status": true,
-                "sample_count": samples.len(),
+                "sample_count": sample_count,
+                "degraded_count": degraded_count,
                 "samples": samples,
+                "truncated_count": truncated_count,
             }),
         )
     }
@@ -531,15 +734,13 @@ fn tunnel_adapter_status(tunnels: &[TelemetryTunnelView]) -> (String, String, se
             }),
         );
     }
-    let degraded = tunnels.iter().filter(|tunnel| {
-        tunnel
-            .adapter_health
-            .as_ref()
-            .is_some_and(|health| !health.success)
-    });
-    let degraded_count = degraded.count();
+    let is_degraded = |tunnel: &&TelemetryTunnelView| tunnel_adapter_health_is_degraded(tunnel);
+    let degraded_count = tunnels.iter().filter(is_degraded).count();
     let samples = tunnels
         .iter()
+        .filter(is_degraded)
+        .chain(tunnels.iter().filter(|tunnel| !is_degraded(tunnel)))
+        .take(SOURCE_STATUS_EVIDENCE_SAMPLE_LIMIT)
         .map(|tunnel| {
             json!({
                 "interface": tunnel.interface,
@@ -549,15 +750,18 @@ fn tunnel_adapter_status(tunnels: &[TelemetryTunnelView]) -> (String, String, se
             })
         })
         .collect::<Vec<_>>();
+    let sample_count = tunnels.len();
+    let truncated_count = sample_count.saturating_sub(samples.len());
     if degraded_count > 0 {
         (
             "degraded".to_string(),
             "runtime tunnel telemetry reports adapter or saved-plan drift".to_string(),
             json!({
                 "continuous_status": true,
-                "sample_count": samples.len(),
+                "sample_count": sample_count,
                 "degraded_count": degraded_count,
                 "samples": samples,
+                "truncated_count": truncated_count,
             }),
         )
     } else {
@@ -566,9 +770,10 @@ fn tunnel_adapter_status(tunnels: &[TelemetryTunnelView]) -> (String, String, se
             "runtime tunnel telemetry matches selected adapter policy".to_string(),
             json!({
                 "continuous_status": true,
-                "sample_count": samples.len(),
+                "sample_count": sample_count,
                 "degraded_count": degraded_count,
                 "samples": samples,
+                "truncated_count": truncated_count,
             }),
         )
     }

@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { apiDelete, apiGet, apiGetBlob, apiPost, apiPostPreview, buildListPath, isApiUnauthorized } from "../api";
 import { downloadVerifiedArtifact, type ArtifactDownloadMode } from "../artifactDownload";
+import { FLEET_DETAIL_LIMIT, HISTORY_DETAIL_LIMIT } from "../constants";
 import type {
   AgentUpdateReleaseRecord,
   CommandTemplateRecord,
@@ -78,12 +79,12 @@ export function useJobsData(
         serverJobsResult,
         commandTemplatesResult,
       ] = await Promise.allSettled([
-        apiGet<JobHistoryRecord[]>(buildListPath("/api/v1/jobs", { limit: 1000, sort: "created_at", dir: "desc" }), apiToken),
+        apiGet<JobHistoryRecord[]>(buildListPath("/api/v1/jobs", { limit: HISTORY_DETAIL_LIMIT, sort: "created_at", dir: "desc" }), apiToken),
         apiGet<JobApprovalRecord[]>(buildListPath("/api/v1/job-approvals", { limit: 200, sort: "requested_at", dir: "desc" }), apiToken),
         apiGet<JobRolloutRecord[]>("/api/v1/job-rollouts?limit=200", apiToken),
         apiGet<AgentUpdateReleaseRecord[]>("/api/v1/agent-update-releases?limit=200", apiToken),
         apiGet<ProcessSupervisorInventoryRecord[]>("/api/v1/process-supervisor/inventory?limit=200", apiToken),
-        apiGet<FileTransferSessionRecord[]>("/api/v1/file-transfers?limit=200", apiToken),
+        apiGet<FileTransferSessionRecord[]>(`/api/v1/file-transfers?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
         apiGet<FileTransferSourceArtifactRecord[]>("/api/v1/file-transfer-sources?limit=200", apiToken),
         apiGet<TerminalSessionRecord[]>("/api/v1/terminal-sessions?limit=200", apiToken),
         apiGet<ServerJobRecord[]>("/api/v1/server-jobs?limit=200", apiToken),

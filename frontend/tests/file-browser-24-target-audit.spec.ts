@@ -42,13 +42,15 @@ test("bulk file operations remain scannable with 24 VPS targets", async ({ page 
 
   await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "22 VPSs" })).toBeVisible();
   await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "unsuccessful" }).filter({ hasText: "2" })).toBeVisible();
-  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "unavailable" }).filter({ hasText: "1" })).toBeVisible();
+  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "pre-run unavailable" }).filter({ hasText: "1" })).toBeVisible();
+  await expect(resultPanel).toContainText("pre-run unavailable 1");
   await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "1 VPS" }).filter({ hasText: "stale" })).toBeVisible();
   await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "1 VPS" }).filter({ hasText: "offline" })).toBeVisible();
   await expect(resultPanel.getByText("partial success: 22 completed, 2 unsuccessful", { exact: true })).toBeVisible();
   const postRun = page.getByLabel("Bulk file post-run handling");
   await expect(postRun).toContainText("2 VPSs retry candidates");
   await expect(postRun).toContainText("22 downloadable");
+  await expect(postRun).toContainText("1 pre-run unavailable");
   const reasons = resultPanel.getByLabel("Failed target reasons");
   await expect(reasons.getByText("stale: file download command_version mismatch", { exact: true })).toBeVisible();
   await expect(reasons.getByText("agent offline", { exact: true })).toBeVisible();

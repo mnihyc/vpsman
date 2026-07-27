@@ -93,32 +93,42 @@ impl Repository {
     pub(crate) async fn fleet_summary(&self) -> Result<FleetSummary> {
         match self {
             Self::Memory(memory) => {
-                let agents = memory.agents.read().await;
-                let hidden = memory.hidden_clients.read().await;
-                let visible_agents = agents
-                    .iter()
-                    .filter(|agent| !hidden.contains(&agent.id))
-                    .collect::<Vec<_>>();
-                let (mut online, mut offline, mut never, mut stale, mut unknown) =
-                    (0_usize, 0_usize, 0_usize, 0_usize, 0_usize);
-                for agent in &visible_agents {
-                    match agent.status.as_str() {
-                        "online" if agent.last_seen_at.is_some() => online += 1,
-                        "offline" | "disconnected" => offline += 1,
-                        "never" => never += 1,
-                        "stale" => stale += 1,
-                        _ => unknown += 1,
+                let (total, online, offline, never, stale, unknown) = {
+                    let agents = memory.agents.read().await;
+                    let hidden = memory.hidden_clients.read().await;
+                    let visible_agents = agents
+                        .iter()
+                        .filter(|agent| !hidden.contains(&agent.id))
+                        .collect::<Vec<_>>();
+                    let (mut online, mut offline, mut never, mut stale, mut unknown) =
+                        (0_usize, 0_usize, 0_usize, 0_usize, 0_usize);
+                    for agent in &visible_agents {
+                        match agent.status.as_str() {
+                            "online" if agent.last_seen_at.is_some() => online += 1,
+                            "offline" | "disconnected" => offline += 1,
+                            "never" => never += 1,
+                            "stale" => stale += 1,
+                            _ => unknown += 1,
+                        }
                     }
-                }
+                    (visible_agents.len(), online, offline, never, stale, unknown)
+                };
+                let running_jobs = memory
+                    .jobs
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|job| matches!(job.status.as_str(), "queued" | "running"))
+                    .count();
                 Ok(FleetSummary {
-                    total: visible_agents.len(),
+                    total,
                     online,
                     offline,
                     never,
                     unknown,
                     stale,
                     warnings: offline + never + stale + unknown,
-                    running_jobs: 0,
+                    running_jobs,
                 })
             }
             Self::Postgres(pool) => {

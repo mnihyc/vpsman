@@ -393,7 +393,9 @@ export function bulkProgressLabel(progress: BulkJobProgress): string {
     `reported ${progress.retrieved}`,
     `completed ${progress.completed}`,
     progress.skipped > 0 ? `skipped ${progress.skipped}` : "",
-    progress.unavailable > 0 ? `unavailable ${progress.unavailable}` : "",
+    progress.unavailable > 0
+      ? `pre-run unavailable ${progress.unavailable}`
+      : "",
     progress.unsuccessful > 0 ? `unsuccessful ${progress.unsuccessful}` : "",
     progress.rejected > 0 ? `rejected ${progress.rejected}` : "",
     progress.failed > 0 ? `failed ${progress.failed}` : "",

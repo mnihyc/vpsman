@@ -340,7 +340,9 @@ export type DashboardSummaryRecord = {
   offline: number;
   stale: number;
   warnings: number;
+  warnings_truncated: boolean;
   running_jobs: number;
+  running_jobs_truncated: boolean;
 };
 
 export type DashboardOperationsRecord = {
@@ -352,6 +354,9 @@ export type DashboardOperationsRecord = {
   backup_pending: number;
   backup_completed: number;
   backup_failed: number;
+  alerts_truncated: boolean;
+  running_jobs_truncated: boolean;
+  backups_truncated: boolean;
   recent_alerts: DashboardAlertSummaryRecord[];
   degraded_agents: DashboardAgentSummaryRecord[];
 };
@@ -444,6 +449,7 @@ export type DashboardLabelClusterRecord = {
   stale: number;
   warnings: number;
   running_jobs: number;
+  counts_truncated: boolean;
   rx_bps: number;
   tx_bps: number;
   drilldown: DashboardDrilldownRecord;

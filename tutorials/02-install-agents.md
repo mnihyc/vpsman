@@ -41,7 +41,7 @@ IDs are intentionally blocked and must not be reused.
 Download and verify the installer from the same reviewed release that supplies
 the agent binary:
 
-The generated console command requires `curl`, `mktemp`, `sha256sum`, and
+The generated console command requires `curl`, `flock`, `mktemp`, `sha256sum`, and
 `awk`; the manual pinned sequence below requires `curl` and `sha256sum`.
 The generated line contains the one-time agent private key. Run it only in a
 trusted shell with command history disabled, then clear the clipboard; do not

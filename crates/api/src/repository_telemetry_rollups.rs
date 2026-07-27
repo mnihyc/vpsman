@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Result;
 use chrono::DateTime;
@@ -10,9 +10,11 @@ use crate::{
         TelemetryTunnelView, TunnelPlanView,
     },
     repository::Repository,
+    util::compare_timestamps_desc,
 };
 
 const TELEMETRY_LIST_LIMIT_MAX: i64 = 50_000;
+const DASHBOARD_TELEMETRY_RESULT_LIMIT: usize = 50_000;
 
 impl Repository {
     pub(crate) async fn dashboard_telemetry_start_unix(
@@ -69,7 +71,7 @@ impl Repository {
 
     pub(crate) async fn list_dashboard_telemetry_rollups(
         &self,
-        limit: i64,
+        points_per_client: i64,
         start_unix: Option<u64>,
         end_unix: Option<u64>,
         bucket_secs: Option<i32>,
@@ -80,9 +82,10 @@ impl Repository {
             return Ok(Vec::new());
         }
         let step_secs = normalized_dashboard_step_secs(step_secs);
+        let points_per_client = points_per_client.clamp(2, 1_440) as usize;
         match self {
             Self::Memory(memory) => {
-                let mut rows = memory
+                let rows = memory
                     .telemetry_rollups
                     .read()
                     .await
@@ -95,12 +98,12 @@ impl Repository {
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                rows.sort_by(|left, right| {
-                    left.bucket_start
-                        .cmp(&right.bucket_start)
-                        .then_with(|| left.client_id.cmp(&right.client_id))
-                });
-                rows.truncate(limit.clamp(1, 50_000) as usize);
+                let mut rows = aggregate_memory_telemetry_rollups(rows, step_secs);
+                retain_fair_rollup_points(
+                    &mut rows,
+                    points_per_client,
+                    DASHBOARD_TELEMETRY_RESULT_LIMIT,
+                );
                 Ok(rows)
             }
             Self::Postgres(pool) => {
@@ -133,48 +136,85 @@ impl Repository {
                             AND ($2::BIGINT IS NULL OR bucket_start >= to_timestamp($2))
                             AND ($3::BIGINT IS NULL OR bucket_start <= to_timestamp($3))
                             AND client_id = ANY($6::TEXT[])
+                    ),
+                    bucketed AS (
+                        SELECT
+                            client_id,
+                            chart_bucket_start,
+                            $4::INTEGER AS bucket_secs,
+                            LEAST(sum(sample_count)::bigint, 2147483647)::integer AS sample_count,
+                            COALESCE(
+                                sum(cpu_load_1_avg * sample_count::double precision)
+                                    / NULLIF(sum(sample_count)::double precision, 0),
+                                0
+                            ) AS cpu_load_1_avg,
+                            max(cpu_load_1_max)::double precision AS cpu_load_1_max,
+                            max(memory_total_bytes_max)::bigint AS memory_total_bytes_max,
+                            round(COALESCE(
+                                sum(memory_available_bytes_avg::numeric * sample_count::numeric)
+                                    / NULLIF(sum(sample_count)::numeric, 0),
+                                0
+                            ))::bigint AS memory_available_bytes_avg,
+                            min(memory_available_bytes_min)::bigint AS memory_available_bytes_min,
+                            max(disk_total_bytes_max)::bigint AS disk_total_bytes_max,
+                            round(COALESCE(
+                                sum(disk_available_bytes_avg::numeric * sample_count::numeric)
+                                    / NULLIF(sum(sample_count)::numeric, 0),
+                                0
+                            ))::bigint AS disk_available_bytes_avg,
+                            min(disk_available_bytes_min)::bigint AS disk_available_bytes_min,
+                            max(network_rx_bytes_max)::bigint AS network_rx_bytes_max,
+                            max(network_tx_bytes_max)::bigint AS network_tx_bytes_max,
+                            max(latest_observed_at)::text AS latest_observed_at,
+                            max(updated_at)::text AS updated_at
+                        FROM selected
+                        GROUP BY client_id, chart_bucket_start
+                    ), ranked AS (
+                        SELECT
+                            bucketed.*,
+                            row_number() OVER (
+                                PARTITION BY client_id
+                                ORDER BY chart_bucket_start DESC
+                            ) AS point_rank
+                        FROM bucketed
+                    ), globally_bounded AS (
+                        SELECT *
+                        FROM ranked
+                        WHERE point_rank <= $5
+                        ORDER BY
+                            point_rank ASC,
+                            chart_bucket_start DESC,
+                            client_id ASC
+                        LIMIT $7
                     )
                     SELECT
                         client_id,
                         chart_bucket_start::text AS bucket_start,
-                        $4::INTEGER AS bucket_secs,
-                        LEAST(sum(sample_count)::bigint, 2147483647)::integer AS sample_count,
-                        COALESCE(
-                            sum(cpu_load_1_avg * sample_count::double precision)
-                                / NULLIF(sum(sample_count)::double precision, 0),
-                            0
-                        ) AS cpu_load_1_avg,
-                        max(cpu_load_1_max)::double precision AS cpu_load_1_max,
-                        max(memory_total_bytes_max)::bigint AS memory_total_bytes_max,
-                        round(COALESCE(
-                            sum(memory_available_bytes_avg::numeric * sample_count::numeric)
-                                / NULLIF(sum(sample_count)::numeric, 0),
-                            0
-                        ))::bigint AS memory_available_bytes_avg,
-                        min(memory_available_bytes_min)::bigint AS memory_available_bytes_min,
-                        max(disk_total_bytes_max)::bigint AS disk_total_bytes_max,
-                        round(COALESCE(
-                            sum(disk_available_bytes_avg::numeric * sample_count::numeric)
-                                / NULLIF(sum(sample_count)::numeric, 0),
-                            0
-                        ))::bigint AS disk_available_bytes_avg,
-                        min(disk_available_bytes_min)::bigint AS disk_available_bytes_min,
-                        max(network_rx_bytes_max)::bigint AS network_rx_bytes_max,
-                        max(network_tx_bytes_max)::bigint AS network_tx_bytes_max,
-                        max(latest_observed_at)::text AS latest_observed_at,
-                        max(updated_at)::text AS updated_at
-                    FROM selected
-                    GROUP BY client_id, chart_bucket_start
+                        bucket_secs,
+                        sample_count,
+                        cpu_load_1_avg,
+                        cpu_load_1_max,
+                        memory_total_bytes_max,
+                        memory_available_bytes_avg,
+                        memory_available_bytes_min,
+                        disk_total_bytes_max,
+                        disk_available_bytes_avg,
+                        disk_available_bytes_min,
+                        network_rx_bytes_max,
+                        network_tx_bytes_max,
+                        latest_observed_at,
+                        updated_at
+                    FROM globally_bounded
                     ORDER BY chart_bucket_start ASC, client_id ASC
-                    LIMIT $5
                     "#,
                 )
                 .bind(bucket_secs)
                 .bind(start_unix.map(|value| value as i64))
                 .bind(end_unix.map(|value| value as i64))
                 .bind(step_secs)
-                .bind(limit.clamp(1, 50_000))
+                .bind(points_per_client as i64)
                 .bind(client_ids)
+                .bind(DASHBOARD_TELEMETRY_RESULT_LIMIT as i64)
                 .fetch_all(pool)
                 .await?;
 
@@ -257,8 +297,45 @@ impl Repository {
         client_id: Option<&str>,
         bucket_secs: Option<i32>,
     ) -> Result<Vec<TelemetryRollupView>> {
+        self.list_latest_telemetry_rollups_matching(
+            Some(limit.clamp(1, TELEMETRY_LIST_LIMIT_MAX) as usize),
+            client_id,
+            None,
+            bucket_secs,
+        )
+        .await
+    }
+
+    pub(crate) async fn list_latest_telemetry_rollups_for_clients(
+        &self,
+        client_ids: &[String],
+        bucket_secs: Option<i32>,
+    ) -> Result<Vec<TelemetryRollupView>> {
+        // Policy evaluation must cover its complete, already-resolved target
+        // set. Keep this internal and require concrete client IDs rather than
+        // widening the page-bounded public telemetry query.
+        if client_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.list_latest_telemetry_rollups_matching(None, None, Some(client_ids), bucket_secs)
+            .await
+    }
+
+    async fn list_latest_telemetry_rollups_matching(
+        &self,
+        result_limit: Option<usize>,
+        client_id: Option<&str>,
+        client_ids: Option<&[String]>,
+        bucket_secs: Option<i32>,
+    ) -> Result<Vec<TelemetryRollupView>> {
         match self {
             Self::Memory(memory) => {
+                let allowed_client_ids = client_ids.map(|client_ids| {
+                    client_ids
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<HashSet<_>>()
+                });
                 let mut latest = HashMap::<String, TelemetryRollupView>::new();
                 for rollup in memory
                     .telemetry_rollups
@@ -267,6 +344,9 @@ impl Repository {
                     .iter()
                     .filter(|rollup| {
                         client_id.is_none_or(|client_id| rollup.client_id == client_id)
+                            && allowed_client_ids.as_ref().is_none_or(|client_ids| {
+                                client_ids.contains(rollup.client_id.as_str())
+                            })
                             && bucket_secs
                                 .is_none_or(|bucket_secs| rollup.bucket_secs == bucket_secs)
                     })
@@ -291,7 +371,9 @@ impl Repository {
                         .cmp(&parse_timestamp_unix(&left.latest_observed_at).unwrap_or(0))
                         .then_with(|| left.client_id.cmp(&right.client_id))
                 });
-                rows.truncate(limit.clamp(1, TELEMETRY_LIST_LIMIT_MAX) as usize);
+                if let Some(result_limit) = result_limit {
+                    rows.truncate(result_limit);
+                }
                 Ok(rows)
             }
             Self::Postgres(pool) => {
@@ -318,7 +400,8 @@ impl Repository {
                         FROM telemetry_rollups
                         WHERE
                             ($1::TEXT IS NULL OR client_id = $1)
-                            AND ($2::INTEGER IS NULL OR bucket_secs = $2)
+                            AND ($2::TEXT[] IS NULL OR client_id = ANY($2))
+                            AND ($3::INTEGER IS NULL OR bucket_secs = $3)
                         ORDER BY client_id, bucket_start DESC, latest_observed_at DESC, bucket_secs ASC
                     )
                     SELECT
@@ -340,12 +423,13 @@ impl Repository {
                         updated_at::text AS updated_at
                     FROM latest
                     ORDER BY latest_observed_at DESC, client_id ASC
-                    LIMIT $3
+                    LIMIT $4
                     "#,
                 )
                 .bind(client_id)
+                .bind(client_ids)
                 .bind(bucket_secs)
-                .bind(limit.clamp(1, TELEMETRY_LIST_LIMIT_MAX))
+                .bind(result_limit.map(|limit| limit as i64))
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter().map(telemetry_rollup_from_row).collect()
@@ -355,7 +439,7 @@ impl Repository {
 
     pub(crate) async fn list_dashboard_telemetry_network_rates(
         &self,
-        limit: i64,
+        points_per_series: i64,
         start_unix: Option<u64>,
         end_unix: Option<u64>,
         bucket_secs: Option<i32>,
@@ -366,6 +450,7 @@ impl Repository {
             return Ok(Vec::new());
         }
         let step_secs = normalized_dashboard_step_secs(step_secs);
+        let points_per_series = points_per_series.clamp(2, 1_440) as usize;
         match self {
             Self::Memory(memory) => {
                 let rows = memory
@@ -378,7 +463,7 @@ impl Repository {
                             && bucket_secs.is_none_or(|bucket_secs| rate.bucket_secs == bucket_secs)
                             && end_unix.is_none_or(|end| {
                                 parse_timestamp_unix(&rate.bucket_start)
-                                    .is_none_or(|timestamp| timestamp <= end)
+                                    .is_some_and(|timestamp| timestamp <= end)
                             })
                     })
                     .cloned()
@@ -387,13 +472,11 @@ impl Repository {
                 let mut rows =
                     derive_network_rates(aggregate_memory_network_rates(rows, step_secs));
                 rows.retain(|rate| timestamp_in_bounds(&rate.bucket_start, start_unix, end_unix));
-                rows.sort_by(|left, right| {
-                    left.bucket_start
-                        .cmp(&right.bucket_start)
-                        .then_with(|| left.client_id.cmp(&right.client_id))
-                        .then_with(|| left.interface.cmp(&right.interface))
-                });
-                rows.truncate(limit.clamp(1, 50_000) as usize);
+                retain_fair_network_points(
+                    &mut rows,
+                    points_per_series,
+                    DASHBOARD_TELEMETRY_RESULT_LIMIT,
+                );
                 Ok(rows)
             }
             Self::Postgres(pool) => {
@@ -477,6 +560,65 @@ impl Repository {
                             PARTITION BY client_id, interface
                             ORDER BY chart_bucket_start ASC
                         )
+                    ),
+                    bounded AS (
+                        SELECT
+                            client_id,
+                            interface,
+                            chart_bucket_start,
+                            bucket_secs,
+                            sample_count,
+                            rx_bytes_avg,
+                            tx_bytes_avg,
+                            GREATEST(
+                                rx_bytes_avg - COALESCE(previous_rx_bytes_avg, rx_bytes_avg),
+                                0::bigint
+                            ) AS rx_bytes_delta,
+                            GREATEST(
+                                tx_bytes_avg - COALESCE(previous_tx_bytes_avg, tx_bytes_avg),
+                                0::bigint
+                            ) AS tx_bytes_delta,
+                            CASE
+                                WHEN previous_bucket_start IS NULL THEN 0::double precision
+                                ELSE (
+                                    GREATEST(rx_bytes_avg - previous_rx_bytes_avg, 0::bigint) * 8
+                                )::double precision / GREATEST(
+                                    extract(epoch FROM (chart_bucket_start - previous_bucket_start)),
+                                    1
+                                )::double precision
+                            END AS rx_bps_avg,
+                            CASE
+                                WHEN previous_bucket_start IS NULL THEN 0::double precision
+                                ELSE (
+                                    GREATEST(tx_bytes_avg - previous_tx_bytes_avg, 0::bigint) * 8
+                                )::double precision / GREATEST(
+                                    extract(epoch FROM (chart_bucket_start - previous_bucket_start)),
+                                    1
+                                )::double precision
+                            END AS tx_bps_avg,
+                            updated_at
+                        FROM derived
+                        WHERE
+                            ($2::BIGINT IS NULL OR chart_bucket_start >= to_timestamp($2))
+                            AND ($3::BIGINT IS NULL OR chart_bucket_start <= to_timestamp($3))
+                    ), ranked AS (
+                        SELECT
+                            bounded.*,
+                            row_number() OVER (
+                                PARTITION BY client_id, interface
+                                ORDER BY chart_bucket_start DESC
+                            ) AS point_rank
+                        FROM bounded
+                    ), globally_bounded AS (
+                        SELECT *
+                        FROM ranked
+                        WHERE point_rank <= $5
+                        ORDER BY
+                            point_rank ASC,
+                            chart_bucket_start DESC,
+                            client_id ASC,
+                            interface ASC
+                        LIMIT $7
                     )
                     SELECT
                         client_id,
@@ -486,43 +628,22 @@ impl Repository {
                         sample_count,
                         rx_bytes_avg,
                         tx_bytes_avg,
-                        GREATEST(rx_bytes_avg - COALESCE(previous_rx_bytes_avg, rx_bytes_avg), 0::bigint)
-                            AS rx_bytes_delta,
-                        GREATEST(tx_bytes_avg - COALESCE(previous_tx_bytes_avg, tx_bytes_avg), 0::bigint)
-                            AS tx_bytes_delta,
-                        CASE
-                            WHEN previous_bucket_start IS NULL THEN 0::double precision
-                            ELSE (
-                                GREATEST(rx_bytes_avg - previous_rx_bytes_avg, 0::bigint) * 8
-                            )::double precision / GREATEST(
-                                extract(epoch FROM (chart_bucket_start - previous_bucket_start)),
-                                1
-                            )::double precision
-                        END AS rx_bps_avg,
-                        CASE
-                            WHEN previous_bucket_start IS NULL THEN 0::double precision
-                            ELSE (
-                                GREATEST(tx_bytes_avg - previous_tx_bytes_avg, 0::bigint) * 8
-                            )::double precision / GREATEST(
-                                extract(epoch FROM (chart_bucket_start - previous_bucket_start)),
-                                1
-                            )::double precision
-                        END AS tx_bps_avg,
+                        rx_bytes_delta,
+                        tx_bytes_delta,
+                        rx_bps_avg,
+                        tx_bps_avg,
                         updated_at
-                    FROM derived
-                    WHERE
-                        ($2::BIGINT IS NULL OR chart_bucket_start >= to_timestamp($2))
-                        AND ($3::BIGINT IS NULL OR chart_bucket_start <= to_timestamp($3))
+                    FROM globally_bounded
                     ORDER BY chart_bucket_start ASC, client_id ASC, interface ASC
-                    LIMIT $5
                     "#,
                 )
                 .bind(bucket_secs)
                 .bind(start_unix.map(|value| value as i64))
                 .bind(end_unix.map(|value| value as i64))
                 .bind(step_secs)
-                .bind(limit.clamp(1, 50_000))
+                .bind(points_per_series as i64)
                 .bind(client_ids)
+                .bind(DASHBOARD_TELEMETRY_RESULT_LIMIT as i64)
                 .fetch_all(pool)
                 .await?;
 
@@ -780,9 +901,81 @@ impl Repository {
         client_id: Option<&str>,
         interface: Option<&str>,
     ) -> Result<Vec<TelemetryTunnelView>> {
+        self.list_telemetry_tunnels_matching(
+            Some(limit.clamp(1, TELEMETRY_LIST_LIMIT_MAX) as usize),
+            client_id,
+            None,
+            interface,
+            false,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn list_fleet_alert_tunnel_candidates(
+        &self,
+        client_id: Option<&str>,
+        client_ids: Option<&[String]>,
+        severity: Option<&str>,
+        start_unix: Option<u64>,
+        end_unix: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<TelemetryTunnelView>> {
+        self.list_telemetry_tunnels_matching(
+            Some(limit),
+            client_id,
+            client_ids,
+            None,
+            true,
+            severity,
+            start_unix,
+            end_unix,
+        )
+        .await
+    }
+
+    pub(crate) async fn list_declared_telemetry_tunnels_for_source_status_clients(
+        &self,
+        client_ids: &[String],
+    ) -> Result<Vec<TelemetryTunnelView>> {
+        if client_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.list_telemetry_tunnels_matching(
+            None,
+            None,
+            Some(client_ids),
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    async fn list_telemetry_tunnels_matching(
+        &self,
+        result_limit: Option<usize>,
+        client_id: Option<&str>,
+        client_ids: Option<&[String]>,
+        interface: Option<&str>,
+        alert_candidates_only: bool,
+        severity: Option<&str>,
+        start_unix: Option<u64>,
+        end_unix: Option<u64>,
+    ) -> Result<Vec<TelemetryTunnelView>> {
         match self {
             Self::Memory(memory) => {
                 let mut records = memory.telemetry_tunnels.read().await.clone();
+                let allowed_client_ids = client_ids.map(|client_ids| {
+                    client_ids
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<HashSet<_>>()
+                });
                 let plans = memory
                     .tunnel_plans
                     .read()
@@ -794,16 +987,30 @@ impl Repository {
                 retain_declared_telemetry_tunnels(&mut records, &plans);
                 records.retain(|record| {
                     client_id.is_none_or(|expected| record.client_id == expected)
+                        && allowed_client_ids
+                            .as_ref()
+                            .is_none_or(|client_ids| client_ids.contains(record.client_id.as_str()))
                         && interface.is_none_or(|expected| record.interface == expected)
+                        && timestamp_in_bounds(&record.observed_at, start_unix, end_unix)
+                        && (!alert_candidates_only
+                            || telemetry_tunnel_matches_alert_candidate(record, severity))
                 });
                 records.sort_by(|left, right| {
-                    right
-                        .observed_at
-                        .cmp(&left.observed_at)
+                    tunnel_alert_priority(left, alert_candidates_only, severity)
+                        .cmp(&tunnel_alert_priority(
+                            right,
+                            alert_candidates_only,
+                            severity,
+                        ))
+                        .then_with(|| {
+                            compare_timestamps_desc(&left.observed_at, &right.observed_at)
+                        })
                         .then_with(|| left.client_id.cmp(&right.client_id))
                         .then_with(|| left.interface.cmp(&right.interface))
                 });
-                records.truncate(limit.clamp(1, TELEMETRY_LIST_LIMIT_MAX) as usize);
+                if let Some(result_limit) = result_limit {
+                    records.truncate(result_limit);
+                }
                 Ok(records)
             }
             Self::Postgres(pool) => {
@@ -813,7 +1020,7 @@ impl Repository {
                         client_id,
                         observed_at::text AS observed_at,
                         interface,
-                        kind,
+                        telemetry.kind AS kind,
                         ownership_mode,
                         mutation_policy,
                         source,
@@ -843,16 +1050,80 @@ impl Repository {
                         packet_loss_ratio,
                         latency_healthy_windows,
                         latency_missed_windows
-                    FROM telemetry_tunnels
-                    WHERE ($1::TEXT IS NULL OR client_id = $1)
-                      AND ($2::TEXT IS NULL OR interface = $2)
-                    ORDER BY observed_at DESC, client_id ASC, interface ASC
-                    LIMIT $3
+                    FROM telemetry_tunnels telemetry
+                    JOIN tunnel_plans current_plan
+                      ON current_plan.id::TEXT = telemetry.telemetry_plan_id
+                     AND current_plan.deleted_at IS NULL
+                     AND current_plan.enabled
+                     AND current_plan.name = telemetry.telemetry_plan_name
+                     AND current_plan.plan->>'interface_name' = telemetry.interface
+                     AND (
+                        (
+                            telemetry.telemetry_endpoint_side = 'left'
+                            AND current_plan.left_client_id = telemetry.client_id
+                            AND current_plan.right_client_id = telemetry.telemetry_peer_client_id
+                        )
+                        OR (
+                            telemetry.telemetry_endpoint_side = 'right'
+                            AND current_plan.right_client_id = telemetry.client_id
+                            AND current_plan.left_client_id = telemetry.telemetry_peer_client_id
+                        )
+                     )
+                    WHERE ($1::TEXT IS NULL OR telemetry.client_id = $1)
+                      AND ($2::TEXT[] IS NULL OR telemetry.client_id = ANY($2))
+                      AND ($3::TEXT IS NULL OR telemetry.interface = $3)
+                      AND (
+                        $6::DOUBLE PRECISION IS NULL
+                        OR telemetry.observed_at >= to_timestamp($6)
+                      )
+                      AND (
+                        $7::DOUBLE PRECISION IS NULL
+                        OR telemetry.observed_at <= to_timestamp($7)
+                      )
+                      AND (
+                        NOT $4::BOOLEAN
+                        OR (
+                            ($5::TEXT IS NULL OR $5 = 'critical')
+                            AND current_plan.plan#>>'{runtime_control,manager}'
+                                = 'external_managed_adapter'
+                            AND jsonb_typeof(telemetry.adapter_health) = 'object'
+                            AND jsonb_typeof(telemetry.adapter_health->'status') = 'string'
+                            AND telemetry.adapter_health->'success'
+                                IS DISTINCT FROM 'true'::jsonb
+                        )
+                        OR (
+                            ($5::TEXT IS NULL OR $5 = 'warning')
+                            AND telemetry.traffic_status IS NOT NULL
+                            AND telemetry.traffic_status <> 'ok'
+                        )
+                    )
+                    ORDER BY
+                        CASE
+                            WHEN $4::BOOLEAN
+                             AND $5::TEXT IS NULL
+                             AND current_plan.plan#>>'{runtime_control,manager}'
+                                = 'external_managed_adapter'
+                             AND jsonb_typeof(telemetry.adapter_health) = 'object'
+                             AND jsonb_typeof(telemetry.adapter_health->'status') = 'string'
+                             AND telemetry.adapter_health->'success'
+                                IS DISTINCT FROM 'true'::jsonb
+                            THEN 0
+                            ELSE 1
+                        END ASC,
+                        telemetry.observed_at DESC,
+                        telemetry.client_id ASC,
+                        telemetry.interface ASC
+                    LIMIT $8
                     "#,
                 )
                 .bind(client_id)
+                .bind(client_ids)
                 .bind(interface)
-                .bind(limit.clamp(1, TELEMETRY_LIST_LIMIT_MAX))
+                .bind(alert_candidates_only)
+                .bind(severity)
+                .bind(start_unix.map(|value| value as f64))
+                .bind(end_unix.map(|value| value as f64))
+                .bind(result_limit.map(|limit| limit as i64))
                 .fetch_all(pool)
                 .await?;
 
@@ -903,10 +1174,258 @@ impl Repository {
                     .collect::<Result<Vec<_>>>()?;
                 let plans = self.list_tunnel_plans().await?;
                 retain_declared_telemetry_tunnels(&mut records, &plans);
+                if alert_candidates_only {
+                    records.retain(|record| {
+                        telemetry_tunnel_matches_alert_candidate(record, severity)
+                    });
+                }
                 Ok(records)
             }
         }
     }
+}
+
+#[derive(Default)]
+struct MemoryRollupAggregate {
+    sample_count: i64,
+    cpu_weighted_total: f64,
+    cpu_max: Option<f64>,
+    memory_total_max: Option<i64>,
+    memory_available_weighted_total: i128,
+    memory_available_min: Option<i64>,
+    disk_total_max: Option<i64>,
+    disk_available_weighted_total: i128,
+    disk_available_min: Option<i64>,
+    network_rx_max: Option<i64>,
+    network_tx_max: Option<i64>,
+    latest_observed_at: String,
+    updated_at: String,
+}
+
+fn aggregate_memory_telemetry_rollups(
+    rows: Vec<TelemetryRollupView>,
+    step_secs: i32,
+) -> Vec<TelemetryRollupView> {
+    let step_secs = step_secs.max(60) as u64;
+    let mut groups = BTreeMap::<(String, u64), MemoryRollupAggregate>::new();
+    for row in rows {
+        let timestamp = parse_timestamp_unix(&row.bucket_start).unwrap_or(0);
+        let chart_bucket = timestamp / step_secs * step_secs;
+        let aggregate = groups
+            .entry((row.client_id.clone(), chart_bucket))
+            .or_default();
+        let sample_count = i64::from(row.sample_count.max(0));
+        aggregate.sample_count = aggregate.sample_count.saturating_add(sample_count);
+        aggregate.cpu_weighted_total += row.cpu_load_1_avg * sample_count as f64;
+        aggregate.cpu_max = Some(aggregate.cpu_max.map_or(row.cpu_load_1_max, |current| {
+            current.max(row.cpu_load_1_max)
+        }));
+        aggregate.memory_total_max = Some(
+            aggregate
+                .memory_total_max
+                .map_or(row.memory_total_bytes_max, |current| {
+                    current.max(row.memory_total_bytes_max)
+                }),
+        );
+        aggregate.memory_available_weighted_total =
+            aggregate.memory_available_weighted_total.saturating_add(
+                i128::from(row.memory_available_bytes_avg).saturating_mul(i128::from(sample_count)),
+            );
+        aggregate.memory_available_min = Some(
+            aggregate
+                .memory_available_min
+                .map_or(row.memory_available_bytes_min, |current| {
+                    current.min(row.memory_available_bytes_min)
+                }),
+        );
+        aggregate.disk_total_max = Some(
+            aggregate
+                .disk_total_max
+                .map_or(row.disk_total_bytes_max, |current| {
+                    current.max(row.disk_total_bytes_max)
+                }),
+        );
+        aggregate.disk_available_weighted_total =
+            aggregate.disk_available_weighted_total.saturating_add(
+                i128::from(row.disk_available_bytes_avg).saturating_mul(i128::from(sample_count)),
+            );
+        aggregate.disk_available_min = Some(
+            aggregate
+                .disk_available_min
+                .map_or(row.disk_available_bytes_min, |current| {
+                    current.min(row.disk_available_bytes_min)
+                }),
+        );
+        aggregate.network_rx_max = Some(
+            aggregate
+                .network_rx_max
+                .map_or(row.network_rx_bytes_max, |current| {
+                    current.max(row.network_rx_bytes_max)
+                }),
+        );
+        aggregate.network_tx_max = Some(
+            aggregate
+                .network_tx_max
+                .map_or(row.network_tx_bytes_max, |current| {
+                    current.max(row.network_tx_bytes_max)
+                }),
+        );
+        retain_newer_timestamp(&mut aggregate.latest_observed_at, &row.latest_observed_at);
+        retain_newer_timestamp(&mut aggregate.updated_at, &row.updated_at);
+    }
+
+    groups
+        .into_iter()
+        .map(|((client_id, bucket_start), aggregate)| {
+            let sample_count = aggregate.sample_count.max(0);
+            TelemetryRollupView {
+                client_id,
+                bucket_start: bucket_start.to_string(),
+                bucket_secs: step_secs as i32,
+                sample_count: sample_count.min(i64::from(i32::MAX)) as i32,
+                cpu_load_1_avg: if sample_count == 0 {
+                    0.0
+                } else {
+                    aggregate.cpu_weighted_total / sample_count as f64
+                },
+                cpu_load_1_max: aggregate.cpu_max.unwrap_or(0.0),
+                memory_total_bytes_max: aggregate.memory_total_max.unwrap_or(0),
+                memory_available_bytes_avg: round_i128_div_i64(
+                    aggregate.memory_available_weighted_total,
+                    sample_count,
+                ),
+                memory_available_bytes_min: aggregate.memory_available_min.unwrap_or(0),
+                disk_total_bytes_max: aggregate.disk_total_max.unwrap_or(0),
+                disk_available_bytes_avg: round_i128_div_i64(
+                    aggregate.disk_available_weighted_total,
+                    sample_count,
+                ),
+                disk_available_bytes_min: aggregate.disk_available_min.unwrap_or(0),
+                network_rx_bytes_max: aggregate.network_rx_max.unwrap_or(0),
+                network_tx_bytes_max: aggregate.network_tx_max.unwrap_or(0),
+                latest_observed_at: aggregate.latest_observed_at,
+                updated_at: aggregate.updated_at,
+            }
+        })
+        .collect()
+}
+
+fn retain_fair_rollup_points(
+    rows: &mut Vec<TelemetryRollupView>,
+    points_per_client: usize,
+    total_limit: usize,
+) {
+    // Assign each client a local recency rank before applying the global cap.
+    // This keeps one noisy client from crowding out newer points from its peers.
+    rows.sort_by(|left, right| {
+        left.client_id
+            .cmp(&right.client_id)
+            .then_with(|| {
+                parse_timestamp_unix(&right.bucket_start)
+                    .cmp(&parse_timestamp_unix(&left.bucket_start))
+            })
+            .then_with(|| right.bucket_start.cmp(&left.bucket_start))
+    });
+    let mut counts = HashMap::<String, usize>::new();
+    let mut ranked = std::mem::take(rows)
+        .into_iter()
+        .filter_map(|row| {
+            let count = counts.entry(row.client_id.clone()).or_default();
+            let rank = *count;
+            *count = count.saturating_add(1);
+            (rank < points_per_client).then_some((rank, row))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|(left_rank, left), (right_rank, right)| {
+        left_rank
+            .cmp(right_rank)
+            .then_with(|| {
+                parse_timestamp_unix(&right.bucket_start)
+                    .cmp(&parse_timestamp_unix(&left.bucket_start))
+            })
+            .then_with(|| left.client_id.cmp(&right.client_id))
+            .then_with(|| right.bucket_start.cmp(&left.bucket_start))
+    });
+    ranked.truncate(total_limit);
+    rows.extend(ranked.into_iter().map(|(_, row)| row));
+    rows.sort_by(|left, right| {
+        parse_timestamp_unix(&left.bucket_start)
+            .cmp(&parse_timestamp_unix(&right.bucket_start))
+            .then_with(|| left.client_id.cmp(&right.client_id))
+            .then_with(|| left.bucket_start.cmp(&right.bucket_start))
+    });
+}
+
+fn retain_fair_network_points(
+    rows: &mut Vec<TelemetryNetworkRateView>,
+    points_per_series: usize,
+    total_limit: usize,
+) {
+    // Use the same rank-first policy for every client/interface series.
+    rows.sort_by(|left, right| {
+        left.client_id
+            .cmp(&right.client_id)
+            .then_with(|| left.interface.cmp(&right.interface))
+            .then_with(|| {
+                parse_timestamp_unix(&right.bucket_start)
+                    .cmp(&parse_timestamp_unix(&left.bucket_start))
+            })
+            .then_with(|| right.bucket_start.cmp(&left.bucket_start))
+    });
+    let mut counts = HashMap::<(String, String), usize>::new();
+    let mut ranked = std::mem::take(rows)
+        .into_iter()
+        .filter_map(|row| {
+            let count = counts
+                .entry((row.client_id.clone(), row.interface.clone()))
+                .or_default();
+            let rank = *count;
+            *count = count.saturating_add(1);
+            (rank < points_per_series).then_some((rank, row))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|(left_rank, left), (right_rank, right)| {
+        left_rank
+            .cmp(right_rank)
+            .then_with(|| {
+                parse_timestamp_unix(&right.bucket_start)
+                    .cmp(&parse_timestamp_unix(&left.bucket_start))
+            })
+            .then_with(|| left.client_id.cmp(&right.client_id))
+            .then_with(|| left.interface.cmp(&right.interface))
+            .then_with(|| right.bucket_start.cmp(&left.bucket_start))
+    });
+    ranked.truncate(total_limit);
+    rows.extend(ranked.into_iter().map(|(_, row)| row));
+    rows.sort_by(|left, right| {
+        parse_timestamp_unix(&left.bucket_start)
+            .cmp(&parse_timestamp_unix(&right.bucket_start))
+            .then_with(|| left.client_id.cmp(&right.client_id))
+            .then_with(|| left.interface.cmp(&right.interface))
+            .then_with(|| left.bucket_start.cmp(&right.bucket_start))
+    });
+}
+
+fn retain_newer_timestamp(current: &mut String, candidate: &str) {
+    let replace = current.is_empty()
+        || match (
+            parse_timestamp_unix(candidate),
+            parse_timestamp_unix(current),
+        ) {
+            (Some(candidate), Some(current)) => candidate > current,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => candidate > current.as_str(),
+        };
+    if replace {
+        candidate.clone_into(current);
+    }
+}
+
+fn round_i128_div_i64(numerator: i128, denominator: i64) -> i64 {
+    let denominator = i128::from(denominator.max(1));
+    ((numerator + denominator / 2) / denominator).clamp(i128::from(i64::MIN), i128::from(i64::MAX))
+        as i64
 }
 
 #[derive(Default)]
@@ -1047,10 +1566,14 @@ fn retain_declared_telemetry_tunnels(
     records: &mut Vec<TelemetryTunnelView>,
     plans: &[TunnelPlanView],
 ) {
+    let plans_by_id = plans
+        .iter()
+        .map(|plan| (plan.id, plan))
+        .collect::<HashMap<_, _>>();
     records.retain_mut(|record| {
         let Some(plan) = record
             .plan_id
-            .and_then(|plan_id| plans.iter().find(|plan| plan.id == plan_id))
+            .and_then(|plan_id| plans_by_id.get(&plan_id).copied())
         else {
             return false;
         };
@@ -1086,6 +1609,39 @@ fn retain_declared_telemetry_tunnels(
         record.mutation_policy = matched_plan_mutation_policy(manager).to_string();
         true
     });
+}
+
+pub(crate) fn tunnel_adapter_health_is_degraded(tunnel: &TelemetryTunnelView) -> bool {
+    tunnel.plan_runtime_manager.as_deref() == Some("external_managed_adapter")
+        && tunnel
+            .adapter_health
+            .as_ref()
+            .is_some_and(|health| !health.success)
+}
+
+fn telemetry_tunnel_matches_alert_candidate(
+    tunnel: &TelemetryTunnelView,
+    severity: Option<&str>,
+) -> bool {
+    ((severity.is_none() || severity == Some("critical"))
+        && tunnel_adapter_health_is_degraded(tunnel))
+        || ((severity.is_none() || severity == Some("warning"))
+            && tunnel
+                .traffic_status
+                .as_deref()
+                .is_some_and(|status| status != "ok"))
+}
+
+fn tunnel_alert_priority(
+    tunnel: &TelemetryTunnelView,
+    alert_candidates_only: bool,
+    severity: Option<&str>,
+) -> usize {
+    if alert_candidates_only && severity.is_none() && tunnel_adapter_health_is_degraded(tunnel) {
+        0
+    } else {
+        1
+    }
 }
 
 fn parse_adapter_health(
@@ -1183,16 +1739,17 @@ fn telemetry_network_rate_from_row(row: sqlx::postgres::PgRow) -> Result<Telemet
 }
 
 fn timestamp_in_bounds(value: &str, start_unix: Option<u64>, end_unix: Option<u64>) -> bool {
-    parse_timestamp_unix(value)
-        .map(|timestamp| {
-            start_unix.is_none_or(|start| timestamp >= start)
-                && end_unix.is_none_or(|end| timestamp <= end)
-        })
-        .unwrap_or(true)
+    if start_unix.is_none() && end_unix.is_none() {
+        return true;
+    }
+    parse_timestamp_unix(value).is_some_and(|timestamp| {
+        start_unix.is_none_or(|start| timestamp >= start)
+            && end_unix.is_none_or(|end| timestamp <= end)
+    })
 }
 
 fn normalized_dashboard_step_secs(step_secs: i32) -> i32 {
-    step_secs.clamp(60, 86_400)
+    step_secs.max(60)
 }
 
 fn parse_timestamp_unix(value: &str) -> Option<u64> {
@@ -1237,5 +1794,107 @@ fn matched_plan_mutation_policy(manager: vpsman_common::RuntimeTunnelManager) ->
         vpsman_common::RuntimeTunnelManager::ExternalObserved => "observe_only_saved_plan",
         vpsman_common::RuntimeTunnelManager::AgentIproute2Managed
         | vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter => "managed_desired",
+    }
+}
+
+#[cfg(test)]
+mod fairness_tests {
+    use super::*;
+
+    #[test]
+    fn rollup_budget_is_globally_bounded_and_rank_fair() {
+        let mut rows = vec![
+            rollup("a", 100),
+            rollup("a", 300),
+            rollup("b", 200),
+            rollup("b", 250),
+            rollup("c", 275),
+        ];
+
+        retain_fair_rollup_points(&mut rows, 2, 4);
+
+        assert_eq!(rollup_keys(&rows), vec!["b:200", "b:250", "c:275", "a:300"]);
+        assert_eq!(rows.len(), 4);
+        assert!(["a", "b", "c"]
+            .into_iter()
+            .all(|client_id| rows.iter().any(|row| row.client_id == client_id)));
+    }
+
+    #[test]
+    fn network_budget_is_globally_bounded_and_stably_rank_fair() {
+        let mut rows = vec![
+            network_rate("a", "eth0", 200),
+            network_rate("a", "eth0", 300),
+            network_rate("a", "eth1", 200),
+            network_rate("a", "eth1", 300),
+            network_rate("b", "wg0", 275),
+        ];
+
+        retain_fair_network_points(&mut rows, 2, 4);
+
+        assert_eq!(
+            network_keys(&rows),
+            vec!["a/eth0:200", "b/wg0:275", "a/eth0:300", "a/eth1:300"]
+        );
+        assert_eq!(rows.len(), 4);
+        assert!(["a/eth0", "a/eth1", "b/wg0"].into_iter().all(|series| {
+            rows.iter()
+                .any(|row| format!("{}/{}", row.client_id, row.interface) == series)
+        }));
+    }
+
+    fn rollup(client_id: &str, bucket_start: u64) -> TelemetryRollupView {
+        let bucket_start = bucket_start.to_string();
+        TelemetryRollupView {
+            client_id: client_id.to_string(),
+            bucket_start: bucket_start.clone(),
+            bucket_secs: 60,
+            sample_count: 1,
+            cpu_load_1_avg: 0.0,
+            cpu_load_1_max: 0.0,
+            memory_total_bytes_max: 0,
+            memory_available_bytes_avg: 0,
+            memory_available_bytes_min: 0,
+            disk_total_bytes_max: 0,
+            disk_available_bytes_avg: 0,
+            disk_available_bytes_min: 0,
+            network_rx_bytes_max: 0,
+            network_tx_bytes_max: 0,
+            latest_observed_at: bucket_start.clone(),
+            updated_at: bucket_start,
+        }
+    }
+
+    fn network_rate(
+        client_id: &str,
+        interface: &str,
+        bucket_start: u64,
+    ) -> TelemetryNetworkRateView {
+        TelemetryNetworkRateView {
+            client_id: client_id.to_string(),
+            interface: interface.to_string(),
+            bucket_start: bucket_start.to_string(),
+            bucket_secs: 60,
+            sample_count: 1,
+            rx_bytes_avg: 0,
+            tx_bytes_avg: 0,
+            rx_bytes_delta: 0,
+            tx_bytes_delta: 0,
+            rx_bps_avg: 0.0,
+            tx_bps_avg: 0.0,
+            updated_at: bucket_start.to_string(),
+        }
+    }
+
+    fn rollup_keys(rows: &[TelemetryRollupView]) -> Vec<String> {
+        rows.iter()
+            .map(|row| format!("{}:{}", row.client_id, row.bucket_start))
+            .collect()
+    }
+
+    fn network_keys(rows: &[TelemetryNetworkRateView]) -> Vec<String> {
+        rows.iter()
+            .map(|row| format!("{}/{}:{}", row.client_id, row.interface, row.bucket_start))
+            .collect()
     }
 }
