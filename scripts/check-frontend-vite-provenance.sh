@@ -18,8 +18,10 @@ test_root="$(mktemp -d)"
 trap 'rm -rf -- "$test_root"' EXIT
 project_root="$test_root/project"
 frontend_root="$project_root/frontend"
-mkdir -p "$frontend_root"
+build_number_root="$project_root/build/build-numbers"
+mkdir -p "$frontend_root" "$build_number_root"
 cp "$ROOT_DIR/frontend/vite.config.ts" "$frontend_root/vite.config.ts"
+cp "$ROOT_DIR/build/build-numbers/frontend.txt" "$build_number_root/frontend.txt"
 ln -s "$ROOT_DIR/frontend/node_modules" "$frontend_root/node_modules"
 printf '%s\n' \
   '<!doctype html>' \
