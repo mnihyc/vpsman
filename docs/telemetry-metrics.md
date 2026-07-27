@@ -18,6 +18,9 @@ sample.
 - "Current" means the latest accepted interval that satisfies the page's
   freshness and scope rules. It does not mean an instantaneous read performed
   when the page rendered.
+- A Linux procfs read/parse failure or configured custom-source failure does
+  not become a zero-valued sample. The agent rejects that complete collection,
+  so the last accepted evidence ages naturally into stale/unavailable state.
 
 ## Resource Metrics
 
@@ -30,7 +33,8 @@ sample.
 The Linux disk collector ignores pseudo filesystems, deduplicates repeated
 source/filesystem pairs, and sums the filesystems it reports. A custom metrics
 provider can replace or augment the Linux snapshot under the configured agent
-contract.
+contract. A replacement must provide all core fields and explicit arrays;
+omission is an invalid sample rather than an instruction to synthesize zeros.
 
 ## Interface Rate And Traffic
 

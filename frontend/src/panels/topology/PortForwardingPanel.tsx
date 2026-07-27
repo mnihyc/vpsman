@@ -40,6 +40,8 @@ import type {
   PortForwardBulkResponse,
   PortForwardMutationResponse,
   PortForwardProtocol,
+  PortForwardRuleCorruptRecord,
+  PortForwardRuleListItem,
   PortForwardRuleRecord,
   ResolveHostnameResponse,
   UpdatePortForwardRuleRequest,
@@ -75,7 +77,7 @@ type PortForwardingPanelProps = {
     ruleId: string,
     request: UpdatePortForwardRuleRequest,
   ) => Promise<PortForwardMutationResponse>;
-  rules: PortForwardRuleRecord[];
+  rules: PortForwardRuleListItem[];
 };
 
 type EditorDraft = {
@@ -129,7 +131,7 @@ export function PortForwardingPanel({
   onMutate,
   onResolveHostname,
   onUpdate,
-  rules,
+  rules: ruleItems,
 }: PortForwardingPanelProps) {
   const [query, setQuery] = useState("");
   const [clientFilter, setClientFilter] = useState("all");
@@ -147,10 +149,14 @@ export function PortForwardingPanel({
   const [pending, setPending] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [forgetReason, setForgetReason] = useState("");
+  const [corruptDelete, setCorruptDelete] =
+    useState<PortForwardRuleCorruptRecord | null>(null);
   const editorRef = useRef<HTMLElement | null>(null);
   const detailRef = useRef<HTMLElement | null>(null);
   const writeBoundary = "Operator role and network:write scope required";
   const forgetBoundary = "Admin role and network:write scope required";
+  const corruptRules = ruleItems.filter(isCorruptPortForwardRule);
+  const rules = ruleItems.filter(isHealthyPortForwardRule);
 
   const agentById = useMemo(
     () => new Map(agents.map((agent) => [agent.id, agent])),
@@ -216,6 +222,35 @@ export function PortForwardingPanel({
   const supportedAgents = agents.filter(
     (agent) => agent.capabilities.port_forwarding?.status === "supported",
   ).length;
+
+  async function executeCorruptDelete(rule: PortForwardRuleCorruptRecord) {
+    setPending(true);
+    setFeedback(null);
+    try {
+      const response = await onMutate(rule.id, "delete", {
+        confirmed: true,
+        expected_revision: rule.revision,
+        reason: "retire_corrupt_persisted_configuration",
+      });
+      setCorruptDelete(null);
+      setFeedback({
+        ...syncFeedback(response, `Deleted corrupt rule ${rule.name}`),
+        anchor: "registry",
+      });
+    } catch (actionError) {
+      setCorruptDelete(null);
+      setFeedback({
+        anchor: "registry",
+        message:
+          actionError instanceof Error
+            ? actionError.message
+            : "Corrupt rule deletion failed",
+        tone: "danger",
+      });
+    } finally {
+      setPending(false);
+    }
+  }
 
   useEffect(() => {
     if (!editor) return;
@@ -484,6 +519,36 @@ export function PortForwardingPanel({
             <span>Desired state and latest owned-table evidence</span>
           </div>
         </div>
+        {corruptRules.length > 0 && (
+          <div className="portForwardRemovalNotice" role="alert">
+            <ShieldAlert size={17} />
+            <div>
+              <strong>
+                {corruptRules.length} persisted rule
+                {corruptRules.length === 1 ? "" : "s"} need repair
+              </strong>
+              {corruptRules.map((rule) => (
+                <div key={rule.id}>
+                  <span title={rule.configuration_error}>
+                    {rule.name} · {agentById.get(rule.client_id)?.display_name || rule.client_id} ·
+                    revision {rule.revision}: {rule.configuration_error}
+                  </span>
+                  {!rule.deleted_at && (
+                    <button
+                      className="dangerAction compactAction"
+                      disabled={!canWrite || pending || Boolean(editor)}
+                      onClick={() => setCorruptDelete(rule)}
+                      title={!canWrite ? writeBoundary : "Review deletion of this exact corrupt rule"}
+                      type="button"
+                    >
+                      <Trash2 size={14} /> Delete
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         <div className="portForwardToolbar">
           <label className="searchControl compactSearch">
             <Search size={15} />
@@ -629,6 +694,22 @@ export function PortForwardingPanel({
         pending={false}
         title={confirmationTitle(confirmation)}
         tone={confirmation?.kind === "single" && ["delete", "forget"].includes(confirmation.operation) || confirmation?.kind === "bulk" && confirmation.action === "delete" ? "danger" : "normal"}
+      />
+      <ConfirmationPrompt
+        confirmLabel="Delete corrupt rule"
+        detail="This retires the exact persisted revision. No missing mapping or protocol value is guessed."
+        items={corruptDelete ? [
+          { label: "Rule", value: corruptDelete.name },
+          { label: "VPS", value: agentById.get(corruptDelete.client_id)?.display_name || corruptDelete.client_id },
+          { label: "Revision", value: String(corruptDelete.revision) },
+          { label: "Configuration error", title: corruptDelete.configuration_error, value: corruptDelete.configuration_error },
+        ] : []}
+        onCancel={() => setCorruptDelete(null)}
+        onConfirm={() => corruptDelete && void executeCorruptDelete(corruptDelete)}
+        open={Boolean(corruptDelete)}
+        pending={pending}
+        title="Confirm corrupt rule deletion"
+        tone="danger"
       />
     </div>
   );
@@ -928,6 +1009,18 @@ function confirmationDetail(state: ConfirmationState | null) {
 
 function isNeverAppliedDisabledDraft(rule: PortForwardRuleRecord) {
   return !rule.enabled && rule.revision === 1 && !rule.deleted_at;
+}
+
+function isCorruptPortForwardRule(
+  rule: PortForwardRuleListItem,
+): rule is PortForwardRuleCorruptRecord {
+  return "configuration_error" in rule;
+}
+
+function isHealthyPortForwardRule(
+  rule: PortForwardRuleListItem,
+): rule is PortForwardRuleRecord {
+  return !isCorruptPortForwardRule(rule);
 }
 
 function confirmationItems(state: ConfirmationState | null, agents: Map<string, AgentView>) {

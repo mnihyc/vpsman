@@ -1,7 +1,8 @@
 # Build Notes
 
 Use the user's profile-managed tools. Do not install build software through
-`apt` for this project.
+`apt` for this project. Source and release audit tooling requires Python 3.11
+or newer.
 
 Frontend source builds read `deploy/install-agent.sh` from the exact Git commit,
 emit it under a commit-and-SHA-256-addressed filename, and embed the same
@@ -15,9 +16,13 @@ and use the exact-tag release checksum manifest instead.
 
 ## Rust
 
-The repo pins Rust through `rust-toolchain.toml` and uses rustup-managed targets:
+The repo supports the exact Rust version pinned by `rust-toolchain.toml` and
+uses rustup-managed targets. The workspace `rust-version` matches that channel;
+the dependency audit fails if those two declarations drift during an upgrade.
 
 ```sh
+bash scripts/install-rust-audit-tool.sh
+bash scripts/audit-rust-dependencies.sh
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo build -p vpsman-agent --target x86_64-unknown-linux-musl
@@ -47,7 +52,17 @@ reintroduce a common shared build number or timestamp-based build number for
 all components.
 
 GitHub Actions reads the current positive counter values without incrementing
-them. Only local builds advance the counters.
+them. Missing, malformed, or zero counters fail the build instead of inventing
+an identity. Only local builds advance the counters.
+
+Every tagged release republishes the server, agent, CLI, and frontend, so each
+component-scoped counter must be greater than that component's maximum across
+all earlier published SemVer releases, including prereleases from any version
+channel. `.github/scripts/check-build-number-gate.py` enforces that rule before
+release builds start. Its default pre-tag mode discovers local release tags and
+requires complete Git history; a shallow or unreadable history fails instead
+of skipping the comparison. The counters remain independent identities; do not
+replace them with a shared counter or a timestamp.
 
 The aggregate `scripts/release-check.sh` copies the counters into its ignored
 log directory and exports that location for all of its builds, so a verification
@@ -81,7 +96,7 @@ path configured by the user's profile/NVM:
 
 ```sh
 cd frontend
-bash -ic 'npm install'
+bash -ic 'npm ci'
 bash -ic 'npm run build'
 bash -ic 'npm audit --audit-level=moderate'
 ```

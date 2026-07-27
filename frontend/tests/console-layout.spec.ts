@@ -2017,10 +2017,10 @@ test("surfaces operator users under Access and session evidence under Audit", as
   await expect(governance).toContainText(
     "2 expired bearer sessions excluded from active counts",
   );
-  await expect(governance).toContainText("Auth failures in loaded history");
-  await expect(governance).toContainText("2 loaded failures");
+  await expect(governance).toContainText("Auth failures");
+  await expect(governance).toContainText("2 failures");
   await expect(governance).toContainText(
-    "Per-user counts below use the same loaded auth history",
+    "Per-user counts below use the same auth history",
   );
   await expect(governance).toContainText("Policy evidence boundary");
   const operatorGrid = page.getByLabel("Operator accounts data grid");
@@ -2143,7 +2143,7 @@ test("surfaces operator users under Access and session evidence under Audit", as
   ).toContainText("Terminal sessions");
   await expect(
     auditSessions.getByLabel("Session evidence summary"),
-  ).toContainText("stale terminal states hidden from open count");
+  ).toContainText(/stale terminal states? hidden from open count/);
   await expect(
     auditSessions.getByLabel("Session evidence summary"),
   ).toContainText("expired bearer sessions");
@@ -2162,6 +2162,386 @@ test("surfaces operator users under Access and session evidence under Audit", as
   await expect(
     auditSessions.getByRole("button", { name: "Revoke selected", exact: true }),
   ).toHaveCount(0);
+});
+
+test("marks saturated operator auth history without changing normal counts", async ({
+  page,
+}) => {
+  await installConsoleApiMock(page, {
+    operatorAuthEventsOverride: Array.from({ length: 200 }, (_, index) => ({
+        created_at: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
+        id: `auth-failure-${String(index).padStart(3, "0")}`,
+        operator_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+        reason: "invalid_credentials",
+        remote_ip: "127.0.0.1",
+        result: "failure",
+        session_id: null,
+        user_agent: "Playwright",
+        username: "console-admin",
+      })),
+  });
+  await page.goto("/");
+
+  await unlockPrivilegeFor(page, "Access", "Operators");
+  const governance = page.getByLabel("Operator governance overview");
+  await expect(governance).toContainText("Auth failures in loaded history");
+  await expect(governance).toContainText("≥200 loaded failures");
+  await expect(governance).toContainText(
+    "Per-user counts below use the same loaded auth history",
+  );
+  await selectGridRow(
+    page,
+    "Operator accounts",
+    "99999999-aaaa-4bbb-8ccc-000000000001",
+  );
+  await runGridAction(page, "Operator accounts", "Edit selected");
+  const selectedOperatorEvidence = page.getByLabel(
+    "Operator access evidence",
+  );
+  await expect(selectedOperatorEvidence).toContainText("Failed logins");
+  await expect(selectedOperatorEvidence).toContainText("≥200 loaded");
+});
+
+test("keeps legacy invalid schedule cadences visible and blocks only automatic runs", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "dense schedule and backup policy controls are covered in the desktop console",
+  );
+  await installConsoleApiMock(page, {
+    schedulesOverride: [
+        {
+          cadence_error: "schedule_cron_no_future_occurrence",
+          catch_up_limit: 1,
+          catch_up_policy: "skip_missed",
+          command_type: "shell_argv",
+          created_at: "2026-01-01T00:00:00Z",
+          cron_expr: "0 0 31 2 *",
+          deferred_until: null,
+          deleted_at: null,
+          enabled: true,
+          failure_count: 0,
+          id: "legacy-invalid-schedule",
+          last_error: null,
+          last_run_at: null,
+          max_failures: 3,
+          name: "legacy impossible cadence",
+          next_run_at: "",
+          next_runs: [],
+          operation: { argv: ["uptime"], pty: false, type: "shell" },
+          retry_delay_secs: 300,
+          selector_expression: "id:agent-sfo-01",
+          target_client_ids: ["agent-sfo-01"],
+          timezone: "UTC",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+    backupPoliciesOverride: [
+        {
+          cadence_error: "schedule_cron_invalid",
+          catch_up_limit: 4,
+          catch_up_policy: "run_all_limited",
+          created_at: "2026-01-01T00:00:00Z",
+          cron_expr: "not a cron",
+          enabled: true,
+          failure_count: 0,
+          follow_symlinks: false,
+          include_config: true,
+          keep_last: 11,
+          last_error: null,
+          last_run_at: null,
+          max_failures: 9,
+          missing_path_policy: "skip",
+          name: "legacy invalid backup cadence",
+          next_run_at: "",
+          next_runs: [],
+          paths: ["/etc", "/srv/data"],
+          retention_days: 45,
+          retry_delay_secs: 777,
+          rotation_generation: "quarterly-2026",
+          schedule_id: "legacy-invalid-backup-policy",
+          selector_expression: "id:agent-sfo-01",
+          target_client_ids: ["agent-sfo-01"],
+          timezone: "UTC",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+  });
+
+  await page.goto("/");
+  await unlockPrivilegeFor(page, "Automation", "Schedules");
+  const scheduleGrid = page.getByLabel("Schedule records data grid");
+  await expect(scheduleGrid).toContainText("Invalid cadence");
+  await expect(scheduleGrid).toContainText("Invalid cadence — edit required");
+  await expect(scheduleGrid).toContainText(
+    "Edit required; automatic runs blocked",
+  );
+  await selectGridRow(page, "Schedule records", "legacy-invalid-schedule");
+  await scheduleGrid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  await expect(
+    page.getByRole("menuitem", { name: "Review run now" }),
+  ).toBeEnabled();
+  await expect(page.getByRole("menuitem", { name: "Edit" })).toBeEnabled();
+  await expect(
+    page.getByRole("menuitem", { name: "Review disable" }),
+  ).toBeEnabled();
+  await expect(
+    page.getByRole("menuitem", { name: "Review enable" }),
+  ).toBeDisabled();
+  await page.keyboard.press("Escape");
+
+  await openConsoleSubpage(page, "Backups", "Policies");
+  await expect(page.getByLabel("Backup policy summary")).toContainText(
+    "0 automatic · 0 paused · 1 invalid cadence",
+  );
+  const policyGrid = page.getByLabel("Backup policy records data grid");
+  await expect(policyGrid).toContainText("Invalid cadence");
+  await expect(policyGrid).toContainText("edit required");
+  await expect(policyGrid).toContainText("automatic backups blocked");
+  await selectGridRow(
+    page,
+    "Backup policy records",
+    "legacy-invalid-backup-policy",
+  );
+  await runGridAction(page, "Backup policy records", "Edit policy");
+  await expect(
+    page.getByRole("heading", { name: "Edit backup policy" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Backup policy name")).toHaveValue(
+    "legacy invalid backup cadence",
+  );
+  await expect(page.getByLabel("Backup policy selected paths")).toHaveValue(
+    "/etc\n/srv/data",
+  );
+  await page
+    .getByLabel("Backup policy UTC cron expression")
+    .fill("30 2 * * *");
+  await activate(
+    page.getByRole("button", { name: "Review policy update" }),
+  );
+  const updatePrompt = page.locator(".confirmationPrompt").last();
+  await expect(updatePrompt).toContainText("Confirm backup policy update");
+  await expect(updatePrompt).toContainText("/etc, /srv/data");
+  await expect(updatePrompt).toContainText(
+    "45 days · keep last 11 · rotation quarterly-2026",
+  );
+  await activate(updatePrompt.getByRole("button", { name: "Save changes" }));
+  const backupPolicyUpdate = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: {
+          backupPolicyUpdates: Array<{ body: unknown; schedule_id: string }>;
+        };
+      }
+    ).__vpsmanTestRequests;
+    return requests.backupPolicyUpdates.at(-1);
+  });
+  expect(backupPolicyUpdate).toMatchObject({
+    body: {
+      catch_up_limit: 4,
+      catch_up_policy: "run_all_limited",
+      confirmed: true,
+      cron_expr: "30 2 * * *",
+      enabled: true,
+      follow_symlinks: false,
+      include_config: true,
+      keep_last: 11,
+      max_failures: 9,
+      missing_path_policy: "skip",
+      name: "legacy invalid backup cadence",
+      paths: ["/etc", "/srv/data"],
+      privilege_assertion: expect.any(Object),
+      retention_days: 45,
+      retry_delay_secs: 777,
+      rotation_generation: "quarterly-2026",
+      selector_expression: "id:agent-sfo-01",
+      target_client_ids: ["agent-sfo-01"],
+      timezone: "UTC",
+    },
+    schedule_id: "legacy-invalid-backup-policy",
+  });
+  await expect(policyGrid).not.toContainText("Invalid cadence");
+  await expect(policyGrid).toContainText("30 2 * * * · UTC");
+  await expect(policyGrid).toContainText("Automatic");
+});
+
+test("keeps malformed schedule operations visible with only repair and removal actions", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "dense schedule actions are covered in the desktop console",
+  );
+  await installConsoleApiMock(page, {
+    schedulesOverride: [
+      {
+        cadence_error: null,
+        catch_up_limit: 1,
+        catch_up_policy: "skip_missed",
+        command_type: "invalid_operation",
+        created_at: "2026-01-01T00:00:00Z",
+        cron_expr: "0 * * * *",
+        deferred_until: null,
+        deleted_at: null,
+        enabled: true,
+        failure_count: 0,
+        id: "malformed-operation-schedule",
+        last_error: "schedule_operation_invalid",
+        last_run_at: null,
+        max_failures: 3,
+        name: "malformed operation",
+        next_run_at: "2026-01-01T01:00:00Z",
+        next_runs: [],
+        operation: null,
+        operation_error: "schedule_operation_invalid",
+        operation_payload_hash:
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        retry_delay_secs: 300,
+        selector_expression: "id:agent-sfo-01",
+        target_client_ids: ["agent-sfo-01"],
+        timezone: "UTC",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+    ],
+  });
+
+  await page.goto("/");
+  await unlockPrivilegeFor(page, "Automation", "Schedules");
+  const scheduleGrid = page.getByLabel("Schedule records data grid");
+  await expect(scheduleGrid).toContainText("Invalid saved operation");
+  await expect(scheduleGrid).toContainText(
+    "Run, enable, defer, and retarget are blocked",
+  );
+  await selectGridRow(page, "Schedule records", "malformed-operation-schedule");
+  await scheduleGrid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  await expect(
+    page.getByRole("menuitem", { name: "Review run now" }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("menuitem", { name: "Review enable" }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("menuitem", { name: "Review target update" }),
+  ).toBeDisabled();
+  await expect(page.getByRole("menuitem", { name: "Defer" })).toBeDisabled();
+  await expect(
+    page.getByRole("menuitem", { name: "Review disable" }),
+  ).toBeEnabled();
+  await expect(
+    page.getByRole("menuitem", { name: "Review deletion" }),
+  ).toBeEnabled();
+  await expect(page.getByRole("menuitem", { name: "Edit" })).toBeEnabled();
+});
+
+test("accepts server-valid leap-day, named, and extended cadences without treating the short preview as validation", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "dense schedule composition is covered in the desktop console layout",
+  );
+  await page.clock.setFixedTime(new Date("2026-07-27T00:00:00Z"));
+  await page.goto("/");
+  await unlockPrivilegeFor(page, "Automation", "Schedules");
+  await activate(page.getByRole("button", { name: "Expand Create schedule" }));
+  await page
+    .getByLabel("Schedule job template")
+    .selectOption("46464646-5656-4789-8abc-defdefdefdef");
+  await page.getByLabel("Schedule target expression").fill("country:US");
+
+  const cronInput = page.getByLabel("Schedule cron expression");
+  const reviewSave = page.getByRole("button", {
+    name: "Review save",
+    exact: true,
+  });
+  await cronInput.fill("0 9 * * MON-FRI");
+  await expect(reviewSave).toBeEnabled();
+  await cronInput.fill("0 9 L * *");
+  await expect(reviewSave).toBeEnabled();
+  await cronInput.fill("0 0 29 2 *");
+  await expect(
+    page.getByText(
+      "No run appears in the short local preview; the server validates this cadence when saved.",
+    ),
+  ).toBeVisible();
+  await expect(reviewSave).toBeEnabled();
+  await activate(reviewSave);
+  await expect(page.getByText("Confirm schedule")).toBeVisible();
+  await expect(page.locator(".confirmationPrompt")).toContainText(
+    "Server calculates after save",
+  );
+});
+
+test("discloses the exact schedule fetch cap", async ({ page }) => {
+  await installConsoleApiMock(page, {
+    schedulesOverride: Array.from({ length: 1000 }, (_, index) => ({
+        cadence_error: null,
+        catch_up_limit: 1,
+        catch_up_policy: "skip_missed",
+        command_type: "shell_argv",
+        created_at: "2026-01-01T00:00:00Z",
+        cron_expr: "0 * * * *",
+        deferred_until: null,
+        deleted_at: null,
+        enabled: false,
+        failure_count: 0,
+        id: `schedule-cap-${String(index).padStart(4, "0")}`,
+        last_error: null,
+        last_run_at: null,
+        max_failures: 3,
+        name: `bounded schedule ${index}`,
+        next_run_at: "",
+        next_runs: [],
+        operation: { argv: ["uptime"], pty: false, type: "shell" },
+        retry_delay_secs: 300,
+        selector_expression: "",
+        target_client_ids: [],
+        timezone: "UTC",
+        updated_at: "2026-01-01T00:00:00Z",
+      })),
+  });
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Automation", "Schedules");
+  await expect(
+    page.getByRole("heading", { level: 2, name: "Schedules" }).locator(".."),
+  ).toContainText("≥1000 loaded schedules");
+  await expect(page.getByLabel("Schedule records data grid")).toContainText(
+    "1000 loaded; more may exist",
+  );
+
+});
+
+test("discloses the exact audit fetch cap", async ({ page }) => {
+  await installConsoleApiMock(page, {
+    auditLogsOverride: Array.from({ length: 1000 }, (_, index) => ({
+      action: "fixture.cap",
+      actor_id: null,
+      command_hash: null,
+      created_at: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+      id: `audit-cap-${String(index).padStart(4, "0")}`,
+      metadata: {},
+      target: `fixture:${index}`,
+    })),
+  });
+  await page.goto("/");
+  await openConsoleSubpage(page, "Audit", "Events");
+  await expect(page.getByLabel("Audit event summary")).toContainText(
+    "≥1000",
+  );
+  await expect(page.getByLabel("Audit event summary")).toContainText(
+    "All loaded events; more may exist",
+  );
+  await expect(page.getByLabel("Audit records data grid")).toContainText(
+    "1000 loaded; more may exist",
+  );
 });
 
 test("packs dense metric rows by label length", async ({ page }, testInfo) => {
@@ -2862,7 +3242,7 @@ test("creates a cron schedule from a command template with target preview", asyn
   await expect(page.getByText("0 * * * * · UTC")).toBeVisible();
   const schedulesGrid = page.getByLabel("Schedule records data grid");
   await expect(page.getByLabel("Schedule execution policy")).toContainText(
-    "Enabled schedules automatically dispatch future jobs",
+    "Enabled schedules with a valid cadence automatically dispatch future jobs",
   );
   await activate(
     schedulesGrid

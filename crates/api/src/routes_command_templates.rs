@@ -93,22 +93,24 @@ pub(crate) async fn delete_command_template(
     if command_template_id_is_builtin(template_id) {
         return Err(ApiError::conflict("command_template_builtin_immutable"));
     }
-    let existing = state
-        .repo
-        .list_command_templates(1000, None, None, None, None)
-        .await?
-        .into_iter()
-        .find(|template| template.id == template_id)
-        .ok_or_else(|| ApiError::not_found("command_template_not_found"))?;
-    if existing.name != request.reviewed_name.trim() {
-        return Err(ApiError::conflict("command_template_delete_review_stale"));
-    }
     state
         .repo
-        .delete_command_template(template_id, &operator)
-        .await?
+        .delete_command_template(template_id, &request.reviewed_name, &operator)
+        .await
+        .map_err(command_template_delete_error)?
         .map(Json)
         .ok_or_else(|| ApiError::not_found("command_template_not_found"))
+}
+
+fn command_template_delete_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("command_template_delete_review_stale") {
+        return ApiError::conflict("command_template_delete_review_stale");
+    }
+    if message.contains("command_template_builtin_immutable") {
+        return ApiError::conflict("command_template_builtin_immutable");
+    }
+    ApiError::from(error)
 }
 
 fn validate_template_query(query: &CommandTemplateQuery) -> Result<(), ApiError> {

@@ -4,6 +4,9 @@ import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
+import {
+  formatLowerBoundCount,
+} from "../../constants";
 import type {
   AgentView,
   AuditLogRecord,
@@ -49,26 +52,42 @@ const TERMINAL_STALE_FLOOR_MS = 60 * 60 * 1000;
 export function SessionEvidencePanel({
   agents,
   audits,
+  auditsTruncated,
   jobs,
+  jobsTruncated,
   loading,
   onRefresh,
   operator,
   operatorAuthEvents,
+  operatorAuthEventsTruncated,
   operatorSessions,
+  operatorSessionsTruncated,
   terminalSessions,
+  terminalSessionsTruncated,
 }: {
   agents: AgentView[];
   audits: AuditLogRecord[];
+  auditsTruncated: boolean;
   jobs: JobHistoryRecord[];
+  jobsTruncated: boolean;
   loading: boolean;
   onRefresh: () => void;
   operator: OperatorView | null;
   operatorAuthEvents: OperatorAuthEventRecord[];
+  operatorAuthEventsTruncated: boolean;
   operatorSessions: OperatorSessionRecord[];
+  operatorSessionsTruncated: boolean;
   terminalSessions: TerminalSessionRecord[];
+  terminalSessionsTruncated: boolean;
 }) {
   const canInspectOperatorAuthority = operator?.role === "admin";
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const authEventsTruncated = operatorAuthEventsTruncated;
+  const auditCorrelationTruncated = auditsTruncated || jobsTruncated;
+  const authCorrelationTruncated =
+    authEventsTruncated || auditCorrelationTruncated;
+  const operatorCorrelationTruncated =
+    operatorSessionsTruncated || auditCorrelationTruncated;
   const agentNameById = useMemo(
     () =>
       new Map(
@@ -262,7 +281,11 @@ export function SessionEvidencePanel({
         minSize: 150,
         searchValue: (row) =>
           canInspectOperatorAuthority
-            ? terminalExpiryLabel(row, operatorSessions)
+            ? terminalExpiryLabel(
+                row,
+                operatorSessions,
+                operatorCorrelationTruncated,
+              )
             : "Admin-only bearer evidence",
         size: 170,
         sortValue: (row) =>
@@ -271,7 +294,11 @@ export function SessionEvidencePanel({
             : row.session.observed_at,
         cell: (row) =>
           canInspectOperatorAuthority
-            ? terminalExpiryLabel(row, operatorSessions)
+            ? terminalExpiryLabel(
+                row,
+                operatorSessions,
+                operatorCorrelationTruncated,
+              )
             : "Admin-only bearer evidence",
       },
       {
@@ -303,6 +330,7 @@ export function SessionEvidencePanel({
       authEventBySessionId,
       canInspectOperatorAuthority,
       operatorSessions,
+      operatorCorrelationTruncated,
       terminalStateByKey,
     ],
   );
@@ -333,52 +361,115 @@ export function SessionEvidencePanel({
       <div className="metricGrid" aria-label="Session evidence summary">
         <div className="metricCard">
           <TerminalSquare size={18} />
-          <strong>{terminalSessions.length}</strong>
-          <small>Terminal sessions</small>
+          <strong>
+            {formatLowerBoundCount(
+              terminalSessions.length,
+              terminalSessionsTruncated,
+            )}
+          </strong>
+          <small>
+            {terminalSessionsTruncated
+              ? "Terminal sessions loaded"
+              : "Terminal sessions"}
+          </small>
         </div>
         <div className="metricCard">
           <Link2 size={18} />
-          <strong>{matchedSessions}</strong>
-          <small>Audit-linked terminals</small>
+          <strong>
+            {formatLowerBoundCount(
+              matchedSessions,
+              terminalSessionsTruncated || auditCorrelationTruncated,
+            )}
+          </strong>
+          <small>
+            {terminalSessionsTruncated || auditCorrelationTruncated
+              ? "Audit-linked in loaded evidence"
+              : "Audit-linked terminals"}
+          </small>
         </div>
         <div className="metricCard">
           <TerminalSquare size={18} />
-          <strong>{openSessions}</strong>
+          <strong>
+            {formatLowerBoundCount(openSessions, terminalSessionsTruncated)}
+          </strong>
           <small>
             {staleTerminalSessions > 0
-              ? `${staleTerminalSessions} stale terminal states hidden from open count`
-              : "Open terminals"}
+              ? terminalSessionsTruncated
+                ? `${formatLowerBoundCount(
+                    staleTerminalSessions,
+                    true,
+                  )} stale states excluded among loaded terminals`
+                : `${staleTerminalSessions} stale terminal ${
+                    staleTerminalSessions === 1 ? "state" : "states"
+                  } hidden from open count`
+              : terminalSessionsTruncated
+                ? "Open among loaded terminals"
+                : "Open terminals"}
           </small>
         </div>
         <div className="metricCard">
           <History size={18} />
-          <strong>{replayableSessions}</strong>
-          <small>Replayable transcripts</small>
+          <strong>
+            {formatLowerBoundCount(
+              replayableSessions,
+              terminalSessionsTruncated,
+            )}
+          </strong>
+          <small>
+            {terminalSessionsTruncated
+              ? "Replayable among loaded terminals"
+              : "Replayable transcripts"}
+          </small>
         </div>
         <div className="metricCard">
           <History size={18} />
-          <strong>{formatBytes(retainedBytes)}</strong>
-          <small>Retained transcript bytes</small>
+          <strong>
+            {terminalSessionsTruncated ? "≥" : ""}
+            {formatBytes(retainedBytes)}
+          </strong>
+          <small>
+            {terminalSessionsTruncated
+              ? "Retained bytes among loaded terminals"
+              : "Retained transcript bytes"}
+          </small>
         </div>
         <div className="metricCard">
           <KeyRound size={18} />
           <strong>
             {canInspectOperatorAuthority
-              ? operatorSessions.length
+              ? formatLowerBoundCount(
+                  operatorSessions.length,
+                  operatorSessionsTruncated,
+                )
               : "Admin only"}
           </strong>
           <small>
             {canInspectOperatorAuthority && expiredOperatorSessions > 0
-              ? `${expiredOperatorSessions} expired bearer sessions`
-              : "Bearer-session inventory"}
+              ? operatorSessionsTruncated
+                ? `${formatLowerBoundCount(
+                    expiredOperatorSessions,
+                    true,
+                  )} expired among loaded bearer sessions`
+                : `${expiredOperatorSessions} expired bearer ${
+                    expiredOperatorSessions === 1 ? "session" : "sessions"
+                  }`
+              : operatorSessionsTruncated
+                ? "Bearer sessions loaded"
+                : "Bearer-session inventory"}
           </small>
         </div>
         <div className="metricCard">
           <KeyRound size={18} />
           <strong>
-            {canInspectOperatorAuthority ? demoAuthSignals : "Admin only"}
+            {canInspectOperatorAuthority
+              ? formatLowerBoundCount(demoAuthSignals, authEventsTruncated)
+              : "Admin only"}
           </strong>
-          <small>Authentication signals</small>
+          <small>
+            {authEventsTruncated
+              ? "Demo/test signals among loaded auth events"
+              : "Authentication signals"}
+          </small>
         </div>
       </div>
 
@@ -401,6 +492,7 @@ export function SessionEvidencePanel({
         openRowLabel="Select proof"
         openRowTitle={(row) => `Show terminal proof for session ${row.session.session_id}.`}
         rows={evidenceRows}
+        rowsTruncated={terminalSessionsTruncated}
         searchPlaceholder="Search terminal session, actor, target, transcript, status, or audit event"
         selectable={false}
         storageKey="audit-terminal-session-evidence-grid"
@@ -414,9 +506,12 @@ export function SessionEvidencePanel({
       {selectedRecord && (
         <SelectedSessionEvidence
           agentNameById={agentNameById}
+          auditCorrelationTruncated={auditCorrelationTruncated}
+          authCorrelationTruncated={authCorrelationTruncated}
           authEventBySessionId={authEventBySessionId}
           canInspectOperatorAuthority={canInspectOperatorAuthority}
           operatorSessions={operatorSessions}
+          operatorCorrelationTruncated={operatorCorrelationTruncated}
           state={
             terminalStateByKey.get(terminalKey(selectedRecord.session)) ??
             terminalEvidenceState(selectedRecord.session)
@@ -429,6 +524,7 @@ export function SessionEvidencePanel({
         authEventBySessionId={authEventBySessionId}
         canInspectOperatorAuthority={canInspectOperatorAuthority}
         operatorSessions={operatorSessions}
+        operatorSessionsTruncated={operatorSessionsTruncated}
         stateById={operatorStateById}
       />
     </section>
@@ -437,16 +533,22 @@ export function SessionEvidencePanel({
 
 function SelectedSessionEvidence({
   agentNameById,
+  auditCorrelationTruncated,
+  authCorrelationTruncated,
   authEventBySessionId,
   canInspectOperatorAuthority,
   operatorSessions,
+  operatorCorrelationTruncated,
   record,
   state,
 }: {
   agentNameById: Map<string, string>;
+  auditCorrelationTruncated: boolean;
+  authCorrelationTruncated: boolean;
   authEventBySessionId: Map<string, OperatorAuthEventRecord>;
   canInspectOperatorAuthority: boolean;
   operatorSessions: OperatorSessionRecord[];
+  operatorCorrelationTruncated: boolean;
   record: TerminalEvidenceRecord;
   state: TerminalEvidenceState;
 }) {
@@ -502,7 +604,11 @@ function SelectedSessionEvidence({
           <strong>Expiry</strong>
           <span>
             {canInspectOperatorAuthority
-              ? terminalExpiryDetail(record, operatorSessions)
+              ? terminalExpiryDetail(
+                  record,
+                  operatorSessions,
+                  operatorCorrelationTruncated,
+                )
               : "Bearer-session expiry is visible to admins only"}
           </span>
         </span>
@@ -527,7 +633,13 @@ function SelectedSessionEvidence({
         >
           <div className="dashboardWidgetHeader">
             <strong>Terminal audit events</strong>
-            <small>{record.audits.length} matched</small>
+            <small>
+              {record.audits.length > 0
+                ? `${record.audits.length} matched`
+                : auditCorrelationTruncated
+                  ? "none in loaded audit history"
+                  : "0 matched"}
+            </small>
           </div>
           {record.audits.length > 0 ? (
             record.audits.slice(0, 6).map((audit) => (
@@ -551,7 +663,9 @@ function SelectedSessionEvidence({
             ))
           ) : (
             <div className="dashboardWidgetEmpty">
-              No direct audit row returned for this terminal session ID.
+              {auditCorrelationTruncated
+                ? "No direct row matched in the loaded audit history. Older audit or job evidence may exist."
+                : "No direct audit row returned for this terminal session ID."}{" "}
               Terminal inventory and transcript references remain visible.
             </div>
           )}
@@ -590,30 +704,62 @@ function SelectedSessionEvidence({
           <div className="dashboardWidgetHeader">
             <strong>Operator auth evidence</strong>
             <small>
-              {operatorSessionId ? shortId(operatorSessionId) : "not linked"}
+              {operatorSessionId
+                ? shortId(operatorSessionId)
+                : auditCorrelationTruncated
+                  ? "not linked in loaded audit history"
+                  : "not linked"}
             </small>
           </div>
           {canInspectOperatorAuthority ? (
             <div className="sessionEvidenceReferenceGrid">
               <span>
                 <strong>Operator session</strong>
-                <small>{operatorSessionId ?? "not returned"}</small>
+                <small>
+                  {operatorSessionId ??
+                    (auditCorrelationTruncated
+                      ? "not linked in loaded audit history"
+                      : "not returned")}
+                </small>
               </span>
               <span>
                 <strong>Auth result</strong>
-                <small>{authEvent?.result ?? "not matched"}</small>
+                <small>
+                  {authEvent?.result ??
+                    (authCorrelationTruncated
+                      ? "not in loaded correlation evidence"
+                      : "not matched")}
+                </small>
               </span>
               <span>
                 <strong>Remote IP</strong>
-                <small>{formatAuthRemoteIp(authEvent)}</small>
+                <small>
+                  {authEvent
+                    ? formatAuthRemoteIp(authEvent)
+                    : authCorrelationTruncated
+                      ? "not in loaded correlation evidence"
+                      : formatAuthRemoteIp(authEvent)}
+                </small>
               </span>
               <span>
                 <strong>User agent</strong>
-                <small>{formatAuthUserAgent(authEvent)}</small>
+                <small>
+                  {authEvent
+                    ? formatAuthUserAgent(authEvent)
+                    : authCorrelationTruncated
+                      ? "not in loaded correlation evidence"
+                      : formatAuthUserAgent(authEvent)}
+                </small>
               </span>
               <span>
                 <strong>Auth source</strong>
-                <small>{formatAuthEvidenceSource(authEvent)}</small>
+                <small>
+                  {authEvent
+                    ? formatAuthEvidenceSource(authEvent)
+                    : authCorrelationTruncated
+                      ? "not in loaded correlation evidence"
+                      : formatAuthEvidenceSource(authEvent)}
+                </small>
               </span>
             </div>
           ) : (
@@ -633,11 +779,13 @@ function OperatorSessionEvidence({
   authEventBySessionId,
   canInspectOperatorAuthority,
   operatorSessions,
+  operatorSessionsTruncated,
   stateById,
 }: {
   authEventBySessionId: Map<string, OperatorAuthEventRecord>;
   canInspectOperatorAuthority: boolean;
   operatorSessions: OperatorSessionRecord[];
+  operatorSessionsTruncated: boolean;
   stateById: Map<string, OperatorSessionEvidenceState>;
 }) {
   return (
@@ -649,7 +797,10 @@ function OperatorSessionEvidence({
         <strong>Operator session evidence</strong>
         <small>
           {canInspectOperatorAuthority
-            ? `${operatorSessions.length} bearer session${operatorSessions.length === 1 ? "" : "s"} · created and refresh expiry shown`
+            ? `${formatLowerBoundCount(
+                operatorSessions.length,
+                operatorSessionsTruncated,
+              )}${operatorSessionsTruncated ? " loaded" : ""} bearer session${operatorSessions.length === 1 ? "" : "s"} · created and refresh expiry shown`
             : "Admin only"}
         </small>
       </div>
@@ -928,10 +1079,13 @@ function terminalStartedDetail(record: TerminalEvidenceRecord): string {
 function terminalExpiryLabel(
   record: TerminalEvidenceRecord,
   operatorSessions: OperatorSessionRecord[],
+  operatorSessionsTruncated = false,
 ): string {
   const operatorSession = operatorSessionForTerminal(record, operatorSessions);
   if (!operatorSession) {
-    return "Terminal expiry not reported";
+    return operatorSessionsTruncated
+      ? "Linked expiry unavailable in loaded evidence"
+      : "Terminal expiry not reported";
   }
   const state = operatorSessionEvidenceState(operatorSession);
   return `${state.label} refresh ${formatCompactTime(operatorSession.refresh_expires_at)}`;
@@ -940,10 +1094,13 @@ function terminalExpiryLabel(
 function terminalExpiryDetail(
   record: TerminalEvidenceRecord,
   operatorSessions: OperatorSessionRecord[],
+  operatorSessionsTruncated = false,
 ): string {
   const operatorSession = operatorSessionForTerminal(record, operatorSessions);
   if (!operatorSession) {
-    return "Terminal expiry and linked bearer expiry are unavailable";
+    return operatorSessionsTruncated
+      ? "Linked bearer expiry is outside the loaded correlation evidence"
+      : "Terminal expiry and linked bearer expiry are unavailable";
   }
   const state = operatorSessionEvidenceState(operatorSession);
   return `${state.label} bearer session; access ${formatFullTime(operatorSession.expires_at)}; refresh ${formatFullTime(operatorSession.refresh_expires_at)}`;

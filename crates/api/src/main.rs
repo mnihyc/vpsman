@@ -127,6 +127,7 @@ use routes::build_router;
 use state::{remember_suite_config, AppState, UpdateReleasePolicy, DEFAULT_ARTIFACT_MAX_BYTES};
 use tokio::{sync::broadcast, time};
 use tracing::info;
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 use vpsman_common::{
     read_secret_file_ref, SuiteConfig, DEFAULT_MAX_JOB_TIMEOUT_SECS,
     MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
@@ -564,10 +565,14 @@ fn apply_usize_default(target: &mut usize, env_name: &str, value: Option<usize>)
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let log_writer = std::io::stderr
+        .with_max_level(tracing::Level::WARN)
+        .or_else(std::io::stdout.with_min_level(tracing::Level::INFO));
     tracing_subscriber::fmt()
+        .with_writer(log_writer)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "vpsman_api=info,tower_http=info".into()),
+                .unwrap_or_else(|_| "warn,vpsman_api=info,tower_http=info".into()),
         )
         .init();
 

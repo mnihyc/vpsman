@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 REPO="${VPSMAN_RELEASE_REPO:-mnihyc/vpsman}"
 FRONTEND_ASSET="vpsman-frontend-dist.tar.gz"
-MIN_SUPPORTED_RELEASE="v0.1.4"
+MIN_SUPPORTED_RELEASE="v0.2.0"
 HEALTH_TIMEOUT_SECS="${VPSMAN_UPDATE_HEALTH_TIMEOUT_SECS:-180}"
 
 log() {
@@ -33,7 +33,7 @@ Environment:
   VPSMAN_SUPER_PASSWORD      Required by first-start when compose secrets do not exist
   GITHUB_TOKEN               Optional token for GitHub release downloads
 
-The updater accepts only release v0.1.4 or newer. Before payload activation it
+The updater accepts only release v0.2.0 or newer. Before payload activation it
 verifies any existing migration history against the target release and saves a
 PostgreSQL archive under runtime/update-backups/. Updates and rollbacks stop
 application writers before taking that archive.

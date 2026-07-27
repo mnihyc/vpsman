@@ -1,6 +1,10 @@
 import { useCallback, useRef, useState } from "react";
 import { apiDelete, apiGet, apiPost, apiPostPreview, isApiUnauthorized } from "../api";
-import { emptySummary, FLEET_DETAIL_LIMIT } from "../constants";
+import {
+  emptySummary,
+  FLEET_DETAIL_LIMIT,
+  FLEET_TELEMETRY_SNAPSHOT_LIMIT,
+} from "../constants";
 import type {
   AgentView,
   FleetAlertPolicyRecord,
@@ -39,13 +43,41 @@ import type {
   TelemetryTunnelRecord,
 } from "../types";
 
-const FLEET_TELEMETRY_SNAPSHOT_LIMIT = 5_000;
+const FLEET_DETAIL_SOURCE_LABELS = [
+  "fleet alerts",
+  "fleet alert states",
+  "fleet alert policies",
+  "VPS rules",
+  "traffic accounting",
+  "policy alerts",
+  "notification channels",
+  "notification deliveries",
+  "webhook rules",
+  "webhook deliveries",
+] as const;
+
+const FLEET_CORE_SOURCE_LABELS = ["fleet summary", "agents"] as const;
+
+const FLEET_TELEMETRY_SOURCE_LABELS = [
+  "telemetry rollups",
+  "network rates",
+  "tunnel telemetry",
+] as const;
+
+const FLEET_ERROR_SOURCE_ORDER = ["core", "detail", "telemetry"] as const;
+type FleetErrorSource = (typeof FLEET_ERROR_SOURCE_ORDER)[number];
 
 export function useFleetData(apiToken: string, onUnauthorized: () => void) {
   const apiTokenRef = useRef(apiToken);
   const fleetFullGeneration = useRef(0);
   const fleetSnapshotGeneration = useRef(0);
-  const fleetTelemetryInFlight = useRef<Promise<void> | null>(null);
+  const fleetTelemetryInFlight = useRef<{
+    token: string;
+    promise: Promise<void>;
+  } | null>(null);
+  const fleetSourceErrors = useRef<
+    Partial<Record<FleetErrorSource, string>>
+  >({});
   apiTokenRef.current = apiToken;
   const [summary, setSummary] = useState<FleetSummary>(emptySummary);
   const [agents, setAgents] = useState<AgentView[]>([]);
@@ -80,80 +112,115 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     TelemetryTunnelRecord[]
   >([]);
   const [apiError, setApiError] = useState<string | null>(null);
+  const [fleetCoreEvidenceAvailable, setFleetCoreEvidenceAvailable] =
+    useState(false);
+  const [fleetAlertsEvidenceAvailable, setFleetAlertsEvidenceAvailable] =
+    useState(false);
+  const [configPolicyEvidenceAvailable, setConfigPolicyEvidenceAvailable] =
+    useState(false);
+
+  const publishFleetError = useCallback(
+    (source: FleetErrorSource, error: string | null) => {
+      if (error) {
+        fleetSourceErrors.current[source] = error;
+      } else {
+        delete fleetSourceErrors.current[source];
+      }
+      const errors = FLEET_ERROR_SOURCE_ORDER.flatMap((key) => {
+        const current = fleetSourceErrors.current[key];
+        return current ? [current] : [];
+      });
+      setApiError(errors.length > 0 ? errors.join("; ") : null);
+    },
+    [],
+  );
 
   const loadFleet = useCallback(async () => {
+    if (apiTokenRef.current !== apiToken) {
+      return;
+    }
     const fullGeneration = ++fleetFullGeneration.current;
     const requestGeneration = ++fleetSnapshotGeneration.current;
     try {
-      const [nextSummary, nextAgents] = await Promise.all([
-        apiGet<FleetSummary>("/api/v1/fleet/summary", apiToken),
-        apiGet<AgentView[]>("/api/v1/agents", apiToken),
-      ]);
-      const optionalResults = await Promise.allSettled([
-        apiGet<FleetAlertRecord[]>(
-          `/api/v1/fleet-alerts?limit=${FLEET_DETAIL_LIMIT}&include_muted=true`,
-          apiToken,
-        ),
-        apiGet<FleetAlertStateRecord[]>(
-          `/api/v1/fleet-alert-states?limit=${FLEET_DETAIL_LIMIT}`,
-          apiToken,
-        ),
-        apiGet<FleetAlertPolicyRecord[]>(
-          `/api/v1/fleet-alert-policies?limit=${FLEET_DETAIL_LIMIT}`,
-          apiToken,
-        ),
-        apiGet<VpsRuleValueRecord[]>(
-          `/api/v1/vps-rules?limit=${FLEET_TELEMETRY_SNAPSHOT_LIMIT}`,
-          apiToken,
-        ),
-        apiGet<TrafficAccountingRecord[]>(
-          `/api/v1/traffic-accounting?limit=${FLEET_DETAIL_LIMIT}`,
-          apiToken,
-        ),
-        apiGet<PolicyAlertRecord[]>(
-          `/api/v1/policy-alerts?limit=${FLEET_DETAIL_LIMIT}`,
-          apiToken,
-        ),
-        apiGet<FleetAlertNotificationChannelRecord[]>(
-          `/api/v1/fleet-alert-notification-channels?limit=${FLEET_DETAIL_LIMIT}`,
-          apiToken,
-        ),
-        apiGet<FleetAlertNotificationDeliveryRecord[]>(
-          `/api/v1/fleet-alert-notifications?limit=${FLEET_DETAIL_LIMIT}`,
-          apiToken,
-        ),
-        apiGet<WebhookRuleRecord[]>(
-          `/api/v1/webhook-rules?limit=${FLEET_DETAIL_LIMIT}`,
-          apiToken,
-        ),
-        apiGet<WebhookRuleDeliveryRecord[]>(
-          `/api/v1/webhook-deliveries?limit=${FLEET_DETAIL_LIMIT}`,
-          apiToken,
-        ),
-        apiGet<TelemetryRollupRecord[]>(
-          `/api/v1/telemetry/rollups?latest=true&limit=${FLEET_TELEMETRY_SNAPSHOT_LIMIT}`,
-          apiToken,
-        ),
-        apiGet<TelemetryNetworkRateRecord[]>(
-          `/api/v1/telemetry/network-rates?latest=true&limit=${FLEET_TELEMETRY_SNAPSHOT_LIMIT}`,
-          apiToken,
-        ),
-        apiGet<TelemetryTunnelRecord[]>(
-          `/api/v1/telemetry/tunnels?limit=${FLEET_TELEMETRY_SNAPSHOT_LIMIT}`,
-          apiToken,
-        ),
+      const [coreResults, optionalResults] = await Promise.all([
+        Promise.allSettled([
+          apiGet<FleetSummary>("/api/v1/fleet/summary", apiToken),
+          apiGet<AgentView[]>("/api/v1/agents", apiToken),
+        ]),
+        Promise.allSettled([
+          apiGet<FleetAlertRecord[]>(
+            `/api/v1/fleet-alerts?limit=${FLEET_DETAIL_LIMIT}&include_muted=true`,
+            apiToken,
+          ),
+          apiGet<FleetAlertStateRecord[]>(
+            `/api/v1/fleet-alert-states?limit=${FLEET_DETAIL_LIMIT}`,
+            apiToken,
+          ),
+          apiGet<FleetAlertPolicyRecord[]>(
+            `/api/v1/fleet-alert-policies?limit=${FLEET_DETAIL_LIMIT}`,
+            apiToken,
+          ),
+          apiGet<VpsRuleValueRecord[]>(
+            `/api/v1/vps-rules?limit=${FLEET_TELEMETRY_SNAPSHOT_LIMIT}`,
+            apiToken,
+          ),
+          apiGet<TrafficAccountingRecord[]>(
+            `/api/v1/traffic-accounting?limit=${FLEET_DETAIL_LIMIT}`,
+            apiToken,
+          ),
+          apiGet<PolicyAlertRecord[]>(
+            `/api/v1/policy-alerts?limit=${FLEET_DETAIL_LIMIT}`,
+            apiToken,
+          ),
+          apiGet<FleetAlertNotificationChannelRecord[]>(
+            `/api/v1/fleet-alert-notification-channels?limit=${FLEET_DETAIL_LIMIT}`,
+            apiToken,
+          ),
+          apiGet<FleetAlertNotificationDeliveryRecord[]>(
+            `/api/v1/fleet-alert-notifications?limit=${FLEET_DETAIL_LIMIT}`,
+            apiToken,
+          ),
+          apiGet<WebhookRuleRecord[]>(
+            `/api/v1/webhook-rules?limit=${FLEET_DETAIL_LIMIT}`,
+            apiToken,
+          ),
+          apiGet<WebhookRuleDeliveryRecord[]>(
+            `/api/v1/webhook-deliveries?limit=${FLEET_DETAIL_LIMIT}`,
+            apiToken,
+          ),
+          apiGet<TelemetryRollupRecord[]>(
+            `/api/v1/telemetry/rollups?latest=true&limit=${FLEET_TELEMETRY_SNAPSHOT_LIMIT}`,
+            apiToken,
+          ),
+          apiGet<TelemetryNetworkRateRecord[]>(
+            `/api/v1/telemetry/network-rates?latest=true&limit=${FLEET_TELEMETRY_SNAPSHOT_LIMIT}`,
+            apiToken,
+          ),
+          apiGet<TelemetryTunnelRecord[]>(
+            `/api/v1/telemetry/tunnels?limit=${FLEET_TELEMETRY_SNAPSHOT_LIMIT}`,
+            apiToken,
+          ),
+        ]),
       ]);
 
-      const optionalFailure = optionalResults.find(
-        (result) => result.status === "rejected",
-      );
-      if (
-        optionalFailure?.status === "rejected" &&
-        isApiUnauthorized(optionalFailure.reason)
-      ) {
-        throw optionalFailure.reason;
+      if (apiTokenRef.current !== apiToken) {
+        return;
+      }
+      const snapshotIsCurrent =
+        requestGeneration === fleetSnapshotGeneration.current;
+      const fullLoadIsCurrent = fullGeneration === fleetFullGeneration.current;
+      if (!snapshotIsCurrent && !fullLoadIsCurrent) {
+        return;
       }
 
+      const unauthorizedFailure = [...coreResults, ...optionalResults].find(
+        (result) =>
+          result.status === "rejected" &&
+          isApiUnauthorized(result.reason),
+      );
+      if (unauthorizedFailure?.status === "rejected") {
+        throw unauthorizedFailure.reason;
+      }
       const applyOptionalValue = <T>(
         index: number,
         apply: (value: T) => void,
@@ -164,17 +231,36 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         }
       };
 
-      if (apiTokenRef.current !== apiToken) {
-        return;
-      }
-      const snapshotIsCurrent =
-        requestGeneration === fleetSnapshotGeneration.current;
-      const fullLoadIsCurrent = fullGeneration === fleetFullGeneration.current;
       if (snapshotIsCurrent) {
-        setSummary(nextSummary);
-        setAgents(nextAgents);
+        const summaryResult = coreResults[0];
+        const agentsResult = coreResults[1];
+        setFleetCoreEvidenceAvailable(
+          coreResults.every((result) => result.status === "fulfilled"),
+        );
+        if (summaryResult.status === "fulfilled") {
+          setSummary(summaryResult.value as FleetSummary);
+        }
+        if (agentsResult.status === "fulfilled") {
+          setAgents(agentsResult.value as AgentView[]);
+        }
+        publishFleetError(
+          "core",
+          unavailableSourceSummary(
+            "Core fleet sources are unavailable",
+            coreResults,
+            FLEET_CORE_SOURCE_LABELS,
+          ),
+        );
       }
       if (fullLoadIsCurrent) {
+        setFleetAlertsEvidenceAvailable(
+          optionalResults[0].status === "fulfilled",
+        );
+        setConfigPolicyEvidenceAvailable(
+          optionalResults
+            .slice(2, 5)
+            .every((result) => result.status === "fulfilled"),
+        );
         applyOptionalValue<FleetAlertRecord[]>(0, setFleetAlerts);
         applyOptionalValue<FleetAlertStateRecord[]>(1, setFleetAlertStates);
         applyOptionalValue<FleetAlertPolicyRecord[]>(2, setFleetAlertPolicies);
@@ -194,6 +280,14 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
           9,
           setWebhookRuleDeliveries,
         );
+        publishFleetError(
+          "detail",
+          unavailableSourceSummary(
+            "Some fleet detail sources are unavailable",
+            optionalResults.slice(0, FLEET_DETAIL_SOURCE_LABELS.length),
+            FLEET_DETAIL_SOURCE_LABELS,
+          ),
+        );
       }
       if (snapshotIsCurrent) {
         applyOptionalValue<TelemetryRollupRecord[]>(10, setTelemetryRollups);
@@ -202,18 +296,23 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
           setTelemetryNetworkRates,
         );
         applyOptionalValue<TelemetryTunnelRecord[]>(12, setTelemetryTunnels);
-      }
-      if (fullLoadIsCurrent && optionalFailure?.status === "rejected") {
-        setApiError(
-          optionalFailure.reason instanceof Error
-            ? optionalFailure.reason.message
-            : "Some fleet details are unavailable",
+        publishFleetError(
+          "telemetry",
+          unavailableSourceSummary(
+            "Some live fleet sources are unavailable",
+            optionalResults.slice(FLEET_DETAIL_SOURCE_LABELS.length),
+            FLEET_TELEMETRY_SOURCE_LABELS,
+          ),
         );
-      } else if (snapshotIsCurrent) {
-        setApiError(null);
       }
     } catch (error) {
-      if (apiTokenRef.current !== apiToken) {
+      const fullLoadIsCurrent = fullGeneration === fleetFullGeneration.current;
+      const snapshotIsCurrent =
+        requestGeneration === fleetSnapshotGeneration.current;
+      if (
+        apiTokenRef.current !== apiToken ||
+        (!fullLoadIsCurrent && !snapshotIsCurrent)
+      ) {
         return;
       }
       if (isApiUnauthorized(error)) {
@@ -233,55 +332,91 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         setTelemetryRollups([]);
         setTelemetryNetworkRates([]);
         setTelemetryTunnels([]);
+        setFleetCoreEvidenceAvailable(false);
+        setFleetAlertsEvidenceAvailable(false);
+        setConfigPolicyEvidenceAvailable(false);
+        fleetSourceErrors.current = {
+          core: "Operator login required",
+        };
         setApiError("Operator login required");
         return;
       }
-      setApiError(error instanceof Error ? error.message : "API unavailable");
+      const message =
+        error instanceof Error ? error.message : "Fleet refresh unavailable";
+      if (snapshotIsCurrent) {
+        setFleetCoreEvidenceAvailable(false);
+        publishFleetError("core", message);
+      } else if (fullLoadIsCurrent) {
+        setFleetAlertsEvidenceAvailable(false);
+        setConfigPolicyEvidenceAvailable(false);
+        publishFleetError("detail", message);
+      }
     }
-  }, [apiToken, onUnauthorized]);
+  }, [apiToken, onUnauthorized, publishFleetError]);
 
   const loadFleetTelemetry = useCallback(() => {
-    if (fleetTelemetryInFlight.current) {
-      return fleetTelemetryInFlight.current;
+    if (apiTokenRef.current !== apiToken) {
+      return Promise.resolve();
+    }
+    if (fleetTelemetryInFlight.current?.token === apiToken) {
+      return fleetTelemetryInFlight.current.promise;
     }
     const requestGeneration = ++fleetSnapshotGeneration.current;
     const request = (async () => {
       try {
-        const [nextSummary, nextAgents] = await Promise.all([
-          apiGet<FleetSummary>("/api/v1/fleet/summary", apiToken),
-          apiGet<AgentView[]>("/api/v1/agents", apiToken),
+        const [coreResults, telemetryResults] = await Promise.all([
+          Promise.allSettled([
+            apiGet<FleetSummary>("/api/v1/fleet/summary", apiToken),
+            apiGet<AgentView[]>("/api/v1/agents", apiToken),
+          ]),
+          Promise.allSettled([
+            apiGet<TelemetryRollupRecord[]>(
+              `/api/v1/telemetry/rollups?latest=true&limit=${FLEET_TELEMETRY_SNAPSHOT_LIMIT}`,
+              apiToken,
+            ),
+            apiGet<TelemetryNetworkRateRecord[]>(
+              `/api/v1/telemetry/network-rates?latest=true&limit=${FLEET_TELEMETRY_SNAPSHOT_LIMIT}`,
+              apiToken,
+            ),
+            apiGet<TelemetryTunnelRecord[]>(
+              `/api/v1/telemetry/tunnels?limit=${FLEET_TELEMETRY_SNAPSHOT_LIMIT}`,
+              apiToken,
+            ),
+          ]),
         ]);
-        const telemetryResults = await Promise.allSettled([
-          apiGet<TelemetryRollupRecord[]>(
-            `/api/v1/telemetry/rollups?latest=true&limit=${FLEET_TELEMETRY_SNAPSHOT_LIMIT}`,
-            apiToken,
-          ),
-          apiGet<TelemetryNetworkRateRecord[]>(
-            `/api/v1/telemetry/network-rates?latest=true&limit=${FLEET_TELEMETRY_SNAPSHOT_LIMIT}`,
-            apiToken,
-          ),
-          apiGet<TelemetryTunnelRecord[]>(
-            `/api/v1/telemetry/tunnels?limit=${FLEET_TELEMETRY_SNAPSHOT_LIMIT}`,
-            apiToken,
-          ),
-        ]);
-        const telemetryFailure = telemetryResults.find(
-          (result) => result.status === "rejected",
-        );
-        if (
-          telemetryFailure?.status === "rejected" &&
-          isApiUnauthorized(telemetryFailure.reason)
-        ) {
-          throw telemetryFailure.reason;
-        }
         if (
           apiTokenRef.current !== apiToken ||
           requestGeneration !== fleetSnapshotGeneration.current
         ) {
           return;
         }
-        setSummary(nextSummary);
-        setAgents(nextAgents);
+        const unauthorizedFailure = [...coreResults, ...telemetryResults].find(
+          (result) =>
+            result.status === "rejected" &&
+            isApiUnauthorized(result.reason),
+        );
+        if (unauthorizedFailure?.status === "rejected") {
+          throw unauthorizedFailure.reason;
+        }
+        const summaryResult = coreResults[0];
+        const agentsResult = coreResults[1];
+        setFleetCoreEvidenceAvailable(
+          coreResults.every((result) => result.status === "fulfilled"),
+        );
+        if (summaryResult.status === "fulfilled") {
+          setSummary(summaryResult.value as FleetSummary);
+        }
+        if (agentsResult.status === "fulfilled") {
+          setAgents(agentsResult.value as AgentView[]);
+        }
+        publishFleetError(
+          "core",
+          unavailableSourceSummary(
+            "Core fleet sources are unavailable",
+            coreResults,
+            FLEET_CORE_SOURCE_LABELS,
+          ),
+        );
         const rollups = telemetryResults[0];
         const rates = telemetryResults[1];
         const tunnels = telemetryResults[2];
@@ -294,15 +429,19 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         if (tunnels.status === "fulfilled") {
           setTelemetryTunnels(tunnels.value);
         }
-        setApiError(
-          telemetryFailure?.status === "rejected"
-            ? telemetryFailure.reason instanceof Error
-              ? telemetryFailure.reason.message
-              : "Some live fleet telemetry is unavailable"
-            : null,
+        publishFleetError(
+          "telemetry",
+          unavailableSourceSummary(
+            "Some live fleet sources are unavailable",
+            telemetryResults,
+            FLEET_TELEMETRY_SOURCE_LABELS,
+          ),
         );
       } catch (error) {
-        if (apiTokenRef.current !== apiToken) {
+        if (
+          apiTokenRef.current !== apiToken ||
+          requestGeneration !== fleetSnapshotGeneration.current
+        ) {
           return;
         }
         if (isApiUnauthorized(error)) {
@@ -312,10 +451,17 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
           setTelemetryRollups([]);
           setTelemetryNetworkRates([]);
           setTelemetryTunnels([]);
+          setFleetCoreEvidenceAvailable(false);
+          setFleetAlertsEvidenceAvailable(false);
+          fleetSourceErrors.current = {
+            core: "Operator login required",
+          };
           setApiError("Operator login required");
           return;
         }
-        setApiError(
+        setFleetCoreEvidenceAvailable(false);
+        publishFleetError(
+          "core",
           error instanceof Error
             ? error.message
             : "Live fleet telemetry unavailable",
@@ -323,22 +469,29 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       }
     })();
     const trackedRequest = request.finally(() => {
-      if (fleetTelemetryInFlight.current === trackedRequest) {
+      if (fleetTelemetryInFlight.current?.promise === trackedRequest) {
         fleetTelemetryInFlight.current = null;
       }
     });
-    fleetTelemetryInFlight.current = trackedRequest;
+    fleetTelemetryInFlight.current = {
+      token: apiToken,
+      promise: trackedRequest,
+    };
     return trackedRequest;
-  }, [apiToken, onUnauthorized]);
+  }, [apiToken, onUnauthorized, publishFleetError]);
 
   const replaceFleetSnapshot = useCallback(
     (nextSummary: FleetSummary, nextAgents: AgentView[]) => {
+      if (apiTokenRef.current !== apiToken) {
+        return;
+      }
       fleetSnapshotGeneration.current += 1;
       setSummary(nextSummary);
       setAgents(nextAgents);
-      setApiError(null);
+      setFleetCoreEvidenceAvailable(true);
+      publishFleetError("core", null);
     },
-    [],
+    [apiToken, publishFleetError],
   );
 
   const updateAgentAlias = useCallback(
@@ -351,6 +504,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
           confirmed,
         },
       );
+      if (apiTokenRef.current !== apiToken) {
+        return agent;
+      }
       setAgents((current) =>
         current.map((stored) => (stored.id === agent.id ? agent : stored)),
       );
@@ -367,6 +523,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         apiToken,
         request,
       );
+      if (apiTokenRef.current !== apiToken) {
+        return response;
+      }
       setAgents((current) =>
         current.filter((agent) => agent.id !== response.client_id),
       );
@@ -383,6 +542,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         apiToken,
         request,
       );
+      if (apiTokenRef.current !== apiToken) {
+        return policy;
+      }
       setFleetAlertPolicies((current) => {
         const withoutPolicy = current.filter(
           (stored) => stored.id !== policy.id && stored.name !== policy.name,
@@ -452,6 +614,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         apiToken,
         { confirmed: true, reviewed_name: reviewedName },
       );
+      if (apiTokenRef.current !== apiToken) {
+        return;
+      }
       setFleetAlertPolicies((current) =>
         current.filter((policy) => policy.id !== policyId),
       );
@@ -467,6 +632,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         apiToken,
         request,
       );
+      if (apiTokenRef.current !== apiToken) {
+        return state;
+      }
       setFleetAlertStates((current) => {
         const withoutState = current.filter(
           (stored) => stored.alert_id !== state.alert_id,
@@ -488,6 +656,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         apiToken,
         request,
       );
+      if (apiTokenRef.current !== apiToken) {
+        return channel;
+      }
       setFleetAlertNotificationChannels((current) => {
         const withoutChannel = current.filter(
           (stored) => stored.id !== channel.id && stored.name !== channel.name,
@@ -509,6 +680,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         apiToken,
         { confirmed: true, reviewed_name: reviewedName },
       );
+      if (apiTokenRef.current !== apiToken) {
+        return;
+      }
       setFleetAlertNotificationChannels((current) =>
         current.filter((channel) => channel.id !== channelId),
       );
@@ -524,6 +698,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         apiToken,
         request,
       );
+      if (apiTokenRef.current !== apiToken) {
+        return deliveries;
+      }
       if (!request.dry_run) {
         setFleetAlertNotifications((current) => {
           const seen = new Set(deliveries.map((delivery) => delivery.id));
@@ -548,6 +725,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         apiToken,
         request,
       );
+      if (apiTokenRef.current !== apiToken) {
+        return deliveries;
+      }
       if (!request.dry_run) {
         setFleetAlertNotifications((current) => {
           const nextById = new Map(
@@ -574,6 +754,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         apiToken,
         request,
       );
+      if (apiTokenRef.current !== apiToken) {
+        return rule;
+      }
       setWebhookRules((current) => {
         const withoutRule = current.filter(
           (stored) => stored.id !== rule.id && stored.name !== rule.name,
@@ -595,6 +778,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         apiToken,
         { confirmed: true, reviewed_name: reviewedName },
       );
+      if (apiTokenRef.current !== apiToken) {
+        return;
+      }
       setWebhookRules((current) =>
         current.filter((rule) => rule.id !== ruleId),
       );
@@ -620,6 +806,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         apiToken,
         request,
       );
+      if (apiTokenRef.current !== apiToken) {
+        return deliveries;
+      }
       if (!request.dry_run) {
         setWebhookRuleDeliveries((current) => {
           const seen = new Set(deliveries.map((delivery) => delivery.id));
@@ -644,6 +833,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         apiToken,
         request,
       );
+      if (apiTokenRef.current !== apiToken) {
+        return deliveries;
+      }
       if (!request.dry_run) {
         setWebhookRuleDeliveries((current) => {
           const nextById = new Map(
@@ -679,6 +871,11 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
   );
 
   const clearFleet = useCallback(() => {
+    apiTokenRef.current = "";
+    fleetFullGeneration.current += 1;
+    fleetSnapshotGeneration.current += 1;
+    fleetTelemetryInFlight.current = null;
+    fleetSourceErrors.current = {};
     setSummary(emptySummary);
     setAgents([]);
     setFleetAlerts([]);
@@ -694,12 +891,18 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     setTelemetryRollups([]);
     setTelemetryNetworkRates([]);
     setTelemetryTunnels([]);
+    setFleetCoreEvidenceAvailable(false);
+    setFleetAlertsEvidenceAvailable(false);
+    setConfigPolicyEvidenceAvailable(false);
+    setApiError(null);
   }, []);
 
   return {
     agents,
     apiError,
     clearFleet,
+    configPolicyEvidenceAvailable,
+    fleetAlertsEvidenceAvailable,
     fleetAlerts,
     fleetAlertStates,
     fleetAlertPolicies,
@@ -713,6 +916,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     deleteAgent,
     loadFleet,
     loadFleetTelemetry,
+    fleetCoreEvidenceAvailable,
     replaceFleetSnapshot,
     updateAgentAlias,
     summary,
@@ -737,4 +941,17 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     rotateWebhookDeliveryHistory,
     updateFleetAlertState,
   };
+}
+
+function unavailableSourceSummary(
+  prefix: string,
+  results: readonly PromiseSettledResult<unknown>[],
+  labels: readonly string[],
+): string | null {
+  const failedLabels = results.flatMap((result, index) =>
+    result.status === "rejected" ? [labels[index]] : [],
+  );
+  return failedLabels.length > 0
+    ? `${prefix}: ${failedLabels.join(", ")}`
+    : null;
 }

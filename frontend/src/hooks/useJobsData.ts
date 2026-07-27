@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { apiDelete, apiGet, apiGetBlob, apiPost, apiPostPreview, buildListPath, isApiUnauthorized } from "../api";
 import { downloadVerifiedArtifact, type ArtifactDownloadMode } from "../artifactDownload";
 import { FLEET_DETAIL_LIMIT, HISTORY_DETAIL_LIMIT } from "../constants";
@@ -44,6 +44,15 @@ import type {
   TerminalSessionRecord,
 } from "../typesTerminal";
 
+const JOB_SOURCE_LABELS = [
+  "job history",
+  "job approvals",
+  "process supervisor inventory",
+  "file transfer sessions",
+  "file transfer sources",
+  "command templates",
+] as const;
+
 export function useJobsData(
   apiToken: string,
   onUnauthorized: () => void,
@@ -60,12 +69,87 @@ export function useJobsData(
   const [terminalSessions, setTerminalSessions] = useState<TerminalSessionRecord[]>([]);
   const [serverJobs, setServerJobs] = useState<ServerJobRecord[]>([]);
   const [commandTemplates, setCommandTemplates] = useState<CommandTemplateRecord[]>([]);
+  const [jobsTruncated, setJobsTruncated] = useState(false);
+  const [jobRolloutsTruncated, setJobRolloutsTruncated] = useState(false);
+  const [agentUpdateReleasesTruncated, setAgentUpdateReleasesTruncated] = useState(false);
+  const [processSupervisorInventoryTruncated, setProcessSupervisorInventoryTruncated] = useState(false);
+  const [fileTransfersTruncated, setFileTransfersTruncated] = useState(false);
+  const [fileTransferSourcesTruncated, setFileTransferSourcesTruncated] = useState(false);
+  const [terminalSessionsTruncated, setTerminalSessionsTruncated] = useState(false);
+  const [commandTemplatesTruncated, setCommandTemplatesTruncated] = useState(false);
   const [jobsError, setJobsError] = useState<string | null>(null);
+  const [serverJobsError, setServerJobsError] = useState<string | null>(null);
   const [jobsLoading, setJobsLoading] = useState(false);
+  const [jobsEvidenceAvailable, setJobsEvidenceAvailable] = useState(false);
+  const jobRolloutsRef = useRef<JobRolloutRecord[]>([]);
+  const jobsLoadGeneration = useRef(0);
+  const jobRolloutsLoadGeneration = useRef(0);
+  const agentUpdateReleasesLoadGeneration = useRef(0);
+  const terminalSessionsLoadGeneration = useRef(0);
+  const serverJobsLoadGeneration = useRef(0);
+  const commandTemplatesLoadGeneration = useRef(0);
+  const commandTemplateMutationGeneration = useRef(0);
+  const jobApprovalMutationGeneration = useRef(0);
+  const jobRolloutMutationGeneration = useRef(0);
+  const jobsInventoryError = useRef<string | null>(null);
+  const jobRolloutsError = useRef<string | null>(null);
+  const agentUpdateReleasesError = useRef<string | null>(null);
+  const terminalSessionsError = useRef<string | null>(null);
+  const commandTemplatesError = useRef<string | null>(null);
+  const currentApiToken = useRef(apiToken);
+  currentApiToken.current = apiToken;
+
+  const publishJobsError = useCallback(() => {
+    const errors = [
+      jobsInventoryError.current,
+      jobRolloutsError.current,
+      agentUpdateReleasesError.current,
+      terminalSessionsError.current,
+      commandTemplatesError.current,
+    ].filter((message): message is string => Boolean(message));
+    setJobsError(errors.length > 0 ? errors.join("; ") : null);
+  }, []);
+
+  const rethrowDirectRequestError = useCallback(
+    (error: unknown): never => {
+      if (currentApiToken.current !== apiToken) {
+        throw error;
+      }
+      if (isApiUnauthorized(error)) {
+        onUnauthorized();
+        throw new Error("Operator login required");
+      }
+      throw error;
+    },
+    [apiToken, onUnauthorized],
+  );
 
   const loadJobs = useCallback(async () => {
+    if (currentApiToken.current !== apiToken) {
+      return;
+    }
+    const generation = jobsLoadGeneration.current + 1;
+    jobsLoadGeneration.current = generation;
+    const rolloutsGeneration = jobRolloutsLoadGeneration.current + 1;
+    jobRolloutsLoadGeneration.current = rolloutsGeneration;
+    const releasesGeneration =
+      agentUpdateReleasesLoadGeneration.current + 1;
+    agentUpdateReleasesLoadGeneration.current = releasesGeneration;
+    const terminalGeneration = terminalSessionsLoadGeneration.current + 1;
+    terminalSessionsLoadGeneration.current = terminalGeneration;
+    const serverGeneration = serverJobsLoadGeneration.current + 1;
+    serverJobsLoadGeneration.current = serverGeneration;
+    const commandTemplatesGeneration =
+      commandTemplatesLoadGeneration.current + 1;
+    commandTemplatesLoadGeneration.current = commandTemplatesGeneration;
+    jobsInventoryError.current = null;
+    jobRolloutsError.current = null;
+    agentUpdateReleasesError.current = null;
+    terminalSessionsError.current = null;
+    commandTemplatesError.current = null;
     setJobsLoading(true);
     setJobsError(null);
+    setServerJobsError(null);
     try {
       const [
         jobsResult,
@@ -80,16 +164,22 @@ export function useJobsData(
         commandTemplatesResult,
       ] = await Promise.allSettled([
         apiGet<JobHistoryRecord[]>(buildListPath("/api/v1/jobs", { limit: HISTORY_DETAIL_LIMIT, sort: "created_at", dir: "desc" }), apiToken),
-        apiGet<JobApprovalRecord[]>(buildListPath("/api/v1/job-approvals", { limit: 200, sort: "requested_at", dir: "desc" }), apiToken),
-        apiGet<JobRolloutRecord[]>("/api/v1/job-rollouts?limit=200", apiToken),
-        apiGet<AgentUpdateReleaseRecord[]>("/api/v1/agent-update-releases?limit=200", apiToken),
-        apiGet<ProcessSupervisorInventoryRecord[]>("/api/v1/process-supervisor/inventory?limit=200", apiToken),
+        apiGet<JobApprovalRecord[]>(buildListPath("/api/v1/job-approvals", { limit: FLEET_DETAIL_LIMIT, sort: "requested_at", dir: "desc" }), apiToken),
+        apiGet<JobRolloutRecord[]>(`/api/v1/job-rollouts?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
+        apiGet<AgentUpdateReleaseRecord[]>(`/api/v1/agent-update-releases?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
+        apiGet<ProcessSupervisorInventoryRecord[]>(`/api/v1/process-supervisor/inventory?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
         apiGet<FileTransferSessionRecord[]>(`/api/v1/file-transfers?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
-        apiGet<FileTransferSourceArtifactRecord[]>("/api/v1/file-transfer-sources?limit=200", apiToken),
-        apiGet<TerminalSessionRecord[]>("/api/v1/terminal-sessions?limit=200", apiToken),
-        apiGet<ServerJobRecord[]>("/api/v1/server-jobs?limit=200", apiToken),
-        apiGet<CommandTemplateRecord[]>("/api/v1/command-templates?limit=1000", apiToken),
+        apiGet<FileTransferSourceArtifactRecord[]>(`/api/v1/file-transfer-sources?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
+        apiGet<TerminalSessionRecord[]>(`/api/v1/terminal-sessions?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
+        apiGet<ServerJobRecord[]>(`/api/v1/server-jobs?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
+        apiGet<CommandTemplateRecord[]>(`/api/v1/command-templates?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
       ]);
+      if (
+        jobsLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return;
+      }
       const settledResults = [
         jobsResult,
         jobApprovalsResult,
@@ -107,9 +197,11 @@ export function useJobsData(
       );
       if (unauthorized) {
         onUnauthorized();
+        setJobsEvidenceAvailable(false);
         setJobs([]);
         setJobApprovals([]);
         setJobRollouts([]);
+        jobRolloutsRef.current = [];
         setAgentUpdateReleases([]);
         setProcessSupervisorInventory([]);
         setFileTransfers([]);
@@ -117,60 +209,231 @@ export function useJobsData(
         setTerminalSessions([]);
         setServerJobs([]);
         setCommandTemplates([]);
+        setJobsTruncated(false);
+        setJobRolloutsTruncated(false);
+        setAgentUpdateReleasesTruncated(false);
+        setProcessSupervisorInventoryTruncated(false);
+        setFileTransfersTruncated(false);
+        setFileTransferSourcesTruncated(false);
+        setTerminalSessionsTruncated(false);
+        setCommandTemplatesTruncated(false);
+        jobsInventoryError.current = "Operator login required";
+        jobRolloutsError.current = null;
+        agentUpdateReleasesError.current = null;
+        terminalSessionsError.current = null;
+        commandTemplatesError.current = null;
         setJobsError("Operator login required");
+        setServerJobsError("Operator login required");
         return;
       }
-      if (jobsResult.status === "fulfilled") setJobs(jobsResult.value);
+      if (jobsResult.status === "fulfilled") {
+        setJobs(jobsResult.value);
+        setJobsTruncated(jobsResult.value.length >= HISTORY_DETAIL_LIMIT);
+      }
+      setJobsEvidenceAvailable(
+        jobsResult.status === "fulfilled" &&
+          fileTransfersResult.status === "fulfilled",
+      );
       if (jobApprovalsResult.status === "fulfilled") setJobApprovals(jobApprovalsResult.value);
-      if (jobRolloutsResult.status === "fulfilled") setJobRollouts(jobRolloutsResult.value);
-      if (releasesResult.status === "fulfilled") setAgentUpdateReleases(releasesResult.value);
+      if (jobRolloutsLoadGeneration.current === rolloutsGeneration) {
+        if (jobRolloutsResult.status === "fulfilled") {
+          jobRolloutsRef.current = jobRolloutsResult.value;
+          setJobRollouts(jobRolloutsResult.value);
+          setJobRolloutsTruncated(
+            jobRolloutsResult.value.length >= FLEET_DETAIL_LIMIT,
+          );
+        }
+        jobRolloutsError.current = settledSourceFailure(
+          "Job rollouts",
+          jobRolloutsResult,
+        );
+      }
+      if (agentUpdateReleasesLoadGeneration.current === releasesGeneration) {
+        if (releasesResult.status === "fulfilled") {
+          setAgentUpdateReleases(releasesResult.value);
+          setAgentUpdateReleasesTruncated(
+            releasesResult.value.length >= FLEET_DETAIL_LIMIT,
+          );
+        }
+        agentUpdateReleasesError.current = settledSourceFailure(
+          "Agent update releases",
+          releasesResult,
+        );
+      }
       if (processSupervisorInventoryResult.status === "fulfilled") {
         setProcessSupervisorInventory(processSupervisorInventoryResult.value);
+        setProcessSupervisorInventoryTruncated(
+          processSupervisorInventoryResult.value.length >= FLEET_DETAIL_LIMIT,
+        );
       }
-      if (fileTransfersResult.status === "fulfilled") setFileTransfers(fileTransfersResult.value);
-      if (fileTransferSourcesResult.status === "fulfilled") setFileTransferSources(fileTransferSourcesResult.value);
-      if (terminalSessionsResult.status === "fulfilled") setTerminalSessions(terminalSessionsResult.value);
-      if (serverJobsResult.status === "fulfilled") setServerJobs(serverJobsResult.value);
-      if (commandTemplatesResult.status === "fulfilled") setCommandTemplates(sortCommandTemplates(commandTemplatesResult.value));
-      const firstFailure = settledResults.find((result): result is PromiseRejectedResult => result.status === "rejected");
-      if (firstFailure) {
-        setJobsError(firstFailure.reason instanceof Error ? firstFailure.reason.message : "Job history partially unavailable");
+      if (fileTransfersResult.status === "fulfilled") {
+        setFileTransfers(fileTransfersResult.value);
+        setFileTransfersTruncated(fileTransfersResult.value.length >= FLEET_DETAIL_LIMIT);
       }
+      if (fileTransferSourcesResult.status === "fulfilled") {
+        setFileTransferSources(fileTransferSourcesResult.value);
+        setFileTransferSourcesTruncated(
+          fileTransferSourcesResult.value.length >= FLEET_DETAIL_LIMIT,
+        );
+      }
+      if (terminalSessionsLoadGeneration.current === terminalGeneration) {
+        if (terminalSessionsResult.status === "fulfilled") {
+          setTerminalSessions(terminalSessionsResult.value);
+          setTerminalSessionsTruncated(
+            terminalSessionsResult.value.length >= FLEET_DETAIL_LIMIT,
+          );
+        }
+        terminalSessionsError.current = settledSourceFailure(
+          "Terminal sessions",
+          terminalSessionsResult,
+        );
+      }
+      if (serverJobsLoadGeneration.current === serverGeneration) {
+        if (serverJobsResult.status === "fulfilled") {
+          setServerJobs(serverJobsResult.value);
+        } else {
+          setServerJobs([]);
+          setServerJobsError(
+            serverJobsResult.reason instanceof Error
+              ? `Maintenance jobs: ${serverJobsResult.reason.message}`
+              : "Maintenance job inventory unavailable",
+          );
+        }
+      }
+      if (
+        commandTemplatesLoadGeneration.current ===
+        commandTemplatesGeneration
+      ) {
+        if (commandTemplatesResult.status === "fulfilled") {
+          setCommandTemplates(
+            sortCommandTemplates(commandTemplatesResult.value),
+          );
+          setCommandTemplatesTruncated(
+            commandTemplatesResult.value.length >= FLEET_DETAIL_LIMIT,
+          );
+        }
+        commandTemplatesError.current = settledSourceFailure(
+          "Command templates",
+          commandTemplatesResult,
+        );
+      }
+      jobsInventoryError.current = unavailableSourceSummary(
+        "Some job sources are unavailable",
+        [
+          jobsResult,
+          jobApprovalsResult,
+          processSupervisorInventoryResult,
+          fileTransfersResult,
+          fileTransferSourcesResult,
+        ],
+        JOB_SOURCE_LABELS.slice(0, 5),
+      );
+      publishJobsError();
     } finally {
-      setJobsLoading(false);
+      if (
+        jobsLoadGeneration.current === generation &&
+        currentApiToken.current === apiToken
+      ) {
+        setJobsLoading(false);
+      }
     }
-  }, [apiToken, onUnauthorized]);
+  }, [apiToken, onUnauthorized, publishJobsError]);
 
   const loadAgentUpdateReleases = useCallback(async () => {
+    if (currentApiToken.current !== apiToken) {
+      return;
+    }
+    const generation = agentUpdateReleasesLoadGeneration.current + 1;
+    agentUpdateReleasesLoadGeneration.current = generation;
+    agentUpdateReleasesError.current = null;
+    publishJobsError();
     try {
-      setAgentUpdateReleases(await apiGet<AgentUpdateReleaseRecord[]>("/api/v1/agent-update-releases?limit=200", apiToken));
+      const records = await apiGet<AgentUpdateReleaseRecord[]>(
+        `/api/v1/agent-update-releases?limit=${FLEET_DETAIL_LIMIT}`,
+        apiToken,
+      );
+      if (
+        agentUpdateReleasesLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return;
+      }
+      setAgentUpdateReleases(records);
+      setAgentUpdateReleasesTruncated(records.length >= FLEET_DETAIL_LIMIT);
+      agentUpdateReleasesError.current = null;
+      publishJobsError();
     } catch (error) {
+      if (
+        agentUpdateReleasesLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return;
+      }
       if (isApiUnauthorized(error)) {
         onUnauthorized();
         setAgentUpdateReleases([]);
+        setAgentUpdateReleasesTruncated(false);
+        agentUpdateReleasesError.current = "Operator login required";
+        publishJobsError();
         return;
       }
-      setJobsError(error instanceof Error ? error.message : "Agent update registry unavailable");
+      agentUpdateReleasesError.current =
+        error instanceof Error
+          ? `Agent update releases: ${error.message}`
+          : "Agent update releases unavailable";
+      publishJobsError();
     }
-  }, [apiToken, onUnauthorized]);
+  }, [apiToken, onUnauthorized, publishJobsError]);
 
   const loadJobRollouts = useCallback(async () => {
+    if (currentApiToken.current !== apiToken) {
+      return jobRolloutsRef.current;
+    }
+    const generation = jobRolloutsLoadGeneration.current + 1;
+    jobRolloutsLoadGeneration.current = generation;
+    jobRolloutsError.current = null;
+    publishJobsError();
     try {
       const records = await apiGet<JobRolloutRecord[]>(
-        "/api/v1/job-rollouts?limit=200",
+        `/api/v1/job-rollouts?limit=${FLEET_DETAIL_LIMIT}`,
         apiToken,
       );
+      if (
+        jobRolloutsLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return jobRolloutsRef.current;
+      }
+      jobRolloutsRef.current = records;
       setJobRollouts(records);
+      setJobRolloutsTruncated(records.length >= FLEET_DETAIL_LIMIT);
+      jobRolloutsError.current = null;
+      publishJobsError();
       return records;
     } catch (error) {
+      if (
+        jobRolloutsLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return jobRolloutsRef.current;
+      }
       if (isApiUnauthorized(error)) {
         onUnauthorized();
+        jobRolloutsRef.current = [];
         setJobRollouts([]);
+        setJobRolloutsTruncated(false);
+        jobRolloutsError.current = "Operator login required";
+        publishJobsError();
         throw new Error("Operator login required");
       }
+      jobRolloutsError.current =
+        error instanceof Error
+          ? `Job rollouts: ${error.message}`
+          : "Job rollouts unavailable";
+      publishJobsError();
       throw error;
     }
-  }, [apiToken, onUnauthorized]);
+  }, [apiToken, onUnauthorized, publishJobsError]);
 
   const loadJobRollout = useCallback(
     async (jobId: string) => {
@@ -180,14 +443,10 @@ export function useJobsData(
           apiToken,
         );
       } catch (error) {
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          throw new Error("Operator login required");
-        }
-        throw error;
+        return rethrowDirectRequestError(error);
       }
     },
-    [apiToken, onUnauthorized],
+    [apiToken, rethrowDirectRequestError],
   );
 
   const updateJobRollout = useCallback(
@@ -196,15 +455,28 @@ export function useJobsData(
       action: "pause" | "resume",
       request: UpdateJobRolloutRequest,
     ) => {
+      const operationGeneration = jobRolloutMutationGeneration.current + 1;
+      jobRolloutMutationGeneration.current = operationGeneration;
       const record = await apiPost<JobRolloutRecord>(
         `/api/v1/job-rollouts/${encodeURIComponent(jobId)}/${action}`,
         apiToken,
         request,
       );
-      setJobRollouts((current) => [
+      if (
+        currentApiToken.current !== apiToken ||
+        jobRolloutMutationGeneration.current !== operationGeneration
+      ) {
+        return record;
+      }
+      jobRolloutsLoadGeneration.current += 1;
+      const nextRollouts = [
         record,
-        ...current.filter((rollout) => rollout.job_id !== record.job_id),
-      ]);
+        ...jobRolloutsRef.current.filter(
+          (rollout) => rollout.job_id !== record.job_id,
+        ),
+      ];
+      jobRolloutsRef.current = nextRollouts;
+      setJobRollouts(nextRollouts);
       void onAuditChanged();
       return record;
     },
@@ -218,6 +490,9 @@ export function useJobsData(
         apiToken,
         { confirmed: true, reason },
       );
+      if (currentApiToken.current !== apiToken) {
+        return response;
+      }
       void Promise.allSettled([loadJobs(), onAuditChanged()]);
       return response;
     },
@@ -225,14 +500,50 @@ export function useJobsData(
   );
 
   const loadTerminalSessions = useCallback(async () => {
+    if (currentApiToken.current !== apiToken) {
+      return;
+    }
+    const generation = terminalSessionsLoadGeneration.current + 1;
+    terminalSessionsLoadGeneration.current = generation;
+    terminalSessionsError.current = null;
+    publishJobsError();
     try {
-      setTerminalSessions(await apiGet<TerminalSessionRecord[]>("/api/v1/terminal-sessions?limit=200", apiToken));
+      const records = await apiGet<TerminalSessionRecord[]>(
+        `/api/v1/terminal-sessions?limit=${FLEET_DETAIL_LIMIT}`,
+        apiToken,
+      );
+      if (
+        terminalSessionsLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return;
+      }
+      setTerminalSessions(records);
+      setTerminalSessionsTruncated(records.length >= FLEET_DETAIL_LIMIT);
+      terminalSessionsError.current = null;
+      publishJobsError();
     } catch (error) {
+      if (
+        terminalSessionsLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return;
+      }
       if (isApiUnauthorized(error)) {
         onUnauthorized();
+        setTerminalSessions([]);
+        setTerminalSessionsTruncated(false);
+        terminalSessionsError.current = "Operator login required";
+        publishJobsError();
+        return;
       }
+      terminalSessionsError.current =
+        error instanceof Error
+          ? `Terminal sessions: ${error.message}`
+          : "Terminal session inventory unavailable";
+      publishJobsError();
     }
-  }, [apiToken, onUnauthorized]);
+  }, [apiToken, onUnauthorized, publishJobsError]);
 
   const loadHostProcessInventory = useCallback(
     async (clientId: string, limit = 512) => {
@@ -242,14 +553,10 @@ export function useJobsData(
           apiToken,
         );
       } catch (error) {
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          throw new Error("Operator login required");
-        }
-        throw error;
+        return rethrowDirectRequestError(error);
       }
     },
-    [apiToken, onUnauthorized],
+    [apiToken, rethrowDirectRequestError],
   );
 
   const loadHostServiceInventory = useCallback(
@@ -260,14 +567,10 @@ export function useJobsData(
           apiToken,
         );
       } catch (error) {
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          throw new Error("Operator login required");
-        }
-        throw error;
+        return rethrowDirectRequestError(error);
       }
     },
-    [apiToken, onUnauthorized],
+    [apiToken, rethrowDirectRequestError],
   );
 
   const loadHostStorageInventory = useCallback(
@@ -278,14 +581,10 @@ export function useJobsData(
           apiToken,
         );
       } catch (error) {
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          throw new Error("Operator login required");
-        }
-        throw error;
+        return rethrowDirectRequestError(error);
       }
     },
-    [apiToken, onUnauthorized],
+    [apiToken, rethrowDirectRequestError],
   );
 
   const loadHostPackageUpdatePlans = useCallback(async () => {
@@ -295,13 +594,9 @@ export function useJobsData(
         apiToken,
       );
     } catch (error) {
-      if (isApiUnauthorized(error)) {
-        onUnauthorized();
-        throw new Error("Operator login required");
-      }
-      throw error;
+      return rethrowDirectRequestError(error);
     }
-  }, [apiToken, onUnauthorized]);
+  }, [apiToken, rethrowDirectRequestError]);
 
   const loadHostPackageUpdatePlan = useCallback(
     async (clientId: string) => {
@@ -311,23 +606,51 @@ export function useJobsData(
           apiToken,
         );
       } catch (error) {
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          throw new Error("Operator login required");
-        }
-        throw error;
+        return rethrowDirectRequestError(error);
       }
     },
-    [apiToken, onUnauthorized],
+    [apiToken, rethrowDirectRequestError],
   );
 
   const loadServerJobs = useCallback(async () => {
+    if (currentApiToken.current !== apiToken) {
+      return;
+    }
+    const generation = serverJobsLoadGeneration.current + 1;
+    serverJobsLoadGeneration.current = generation;
+    setServerJobsError(null);
     try {
-      setServerJobs(await apiGet<ServerJobRecord[]>("/api/v1/server-jobs?limit=200", apiToken));
+      const records = await apiGet<ServerJobRecord[]>(
+        `/api/v1/server-jobs?limit=${FLEET_DETAIL_LIMIT}`,
+        apiToken,
+      );
+      if (
+        serverJobsLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return;
+      }
+      setServerJobs(records);
+      setServerJobsError(null);
     } catch (error) {
+      if (
+        serverJobsLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return;
+      }
       if (isApiUnauthorized(error)) {
         onUnauthorized();
+        setServerJobs([]);
+        setServerJobsError("Operator login required");
+        return;
       }
+      setServerJobs([]);
+      setServerJobsError(
+        error instanceof Error
+          ? error.message
+          : "Maintenance job inventory unavailable",
+      );
     }
   }, [apiToken, onUnauthorized]);
 
@@ -336,14 +659,10 @@ export function useJobsData(
       try {
         return await apiGet<JobTargetRecord[]>(`/api/v1/jobs/${encodeURIComponent(jobId)}/targets`, apiToken);
       } catch (error) {
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          throw new Error("Operator login required");
-        }
-        throw error;
+        return rethrowDirectRequestError(error);
       }
     },
-    [apiToken, onUnauthorized],
+    [apiToken, rethrowDirectRequestError],
   );
 
   const loadJob = useCallback(
@@ -351,14 +670,10 @@ export function useJobsData(
       try {
         return await apiGet<JobHistoryRecord>(`/api/v1/jobs/${encodeURIComponent(jobId)}`, apiToken);
       } catch (error) {
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          throw new Error("Operator login required");
-        }
-        throw error;
+        return rethrowDirectRequestError(error);
       }
     },
-    [apiToken, onUnauthorized],
+    [apiToken, rethrowDirectRequestError],
   );
 
   const loadJobOutputs = useCallback(
@@ -386,14 +701,10 @@ export function useJobsData(
         } while (cursor);
         return outputs;
       } catch (error) {
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          throw new Error("Operator login required");
-        }
-        throw error;
+        return rethrowDirectRequestError(error);
       }
     },
-    [apiToken, onUnauthorized],
+    [apiToken, rethrowDirectRequestError],
   );
 
   const downloadFileDownloadBundle = useCallback(
@@ -409,14 +720,10 @@ export function useJobsData(
           apiToken,
         );
       } catch (error) {
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          throw new Error("Operator login required");
-        }
-        throw error;
+        return rethrowDirectRequestError(error);
       }
     },
-    [apiToken, onUnauthorized],
+    [apiToken, rethrowDirectRequestError],
   );
 
   const downloadJobOutputArchive = useCallback(
@@ -432,14 +739,10 @@ export function useJobsData(
           apiToken,
         );
       } catch (error) {
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          throw new Error("Operator login required");
-        }
-        throw error;
+        return rethrowDirectRequestError(error);
       }
     },
-    [apiToken, onUnauthorized],
+    [apiToken, rethrowDirectRequestError],
   );
 
   const downloadJobTargetStatuses = useCallback(
@@ -450,14 +753,10 @@ export function useJobsData(
           apiToken,
         );
       } catch (error) {
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          throw new Error("Operator login required");
-        }
-        throw error;
+        return rethrowDirectRequestError(error);
       }
     },
-    [apiToken, onUnauthorized],
+    [apiToken, rethrowDirectRequestError],
   );
 
   const loadJobOutputComparison = useCallback(
@@ -468,41 +767,61 @@ export function useJobsData(
           apiToken,
         );
       } catch (error) {
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          throw new Error("Operator login required");
-        }
-        throw error;
+        return rethrowDirectRequestError(error);
       }
     },
-    [apiToken, onUnauthorized],
+    [apiToken, rethrowDirectRequestError],
   );
 
   const upsertCommandTemplate = useCallback(
     async (request: UpsertCommandTemplateRequest) => {
+      const operationGeneration =
+        commandTemplateMutationGeneration.current + 1;
+      commandTemplateMutationGeneration.current = operationGeneration;
       const response = await apiPost<CommandTemplateRecord>("/api/v1/command-templates", apiToken, request);
+      if (
+        currentApiToken.current !== apiToken ||
+        commandTemplateMutationGeneration.current !== operationGeneration
+      ) {
+        return response;
+      }
+      commandTemplatesLoadGeneration.current += 1;
+      commandTemplatesError.current = null;
       setCommandTemplates((current) => {
         const withoutTemplate = current.filter((template) => template.id !== response.id);
         return sortCommandTemplates([response, ...withoutTemplate]);
       });
+      publishJobsError();
       void onAuditChanged();
       return response;
     },
-    [apiToken, onAuditChanged],
+    [apiToken, onAuditChanged, publishJobsError],
   );
 
   const deleteCommandTemplate = useCallback(
     async (templateId: string, request: DeleteCommandTemplateRequest) => {
+      const operationGeneration =
+        commandTemplateMutationGeneration.current + 1;
+      commandTemplateMutationGeneration.current = operationGeneration;
       const response = await apiDelete<CommandTemplateRecord>(
         `/api/v1/command-templates/${encodeURIComponent(templateId)}`,
         apiToken,
         request,
       );
+      if (
+        currentApiToken.current !== apiToken ||
+        commandTemplateMutationGeneration.current !== operationGeneration
+      ) {
+        return response;
+      }
+      commandTemplatesLoadGeneration.current += 1;
+      commandTemplatesError.current = null;
       setCommandTemplates((current) => current.filter((template) => template.id !== response.id));
+      publishJobsError();
       void onAuditChanged();
       return response;
     },
-    [apiToken, onAuditChanged],
+    [apiToken, onAuditChanged, publishJobsError],
   );
 
   const downloadJobOutputChunk = useCallback(
@@ -513,14 +832,10 @@ export function useJobsData(
           apiToken,
         );
       } catch (error) {
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          throw new Error("Operator login required");
-        }
-        throw error;
+        return rethrowDirectRequestError(error);
       }
     },
-    [apiToken, onUnauthorized],
+    [apiToken, rethrowDirectRequestError],
   );
 
   const downloadJobOutputStream = useCallback(
@@ -531,14 +846,10 @@ export function useJobsData(
           apiToken,
         );
       } catch (error) {
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          throw new Error("Operator login required");
-        }
-        throw error;
+        return rethrowDirectRequestError(error);
       }
     },
-    [apiToken, onUnauthorized],
+    [apiToken, rethrowDirectRequestError],
   );
 
   const downloadFileDownloadForClient = useCallback(
@@ -549,14 +860,10 @@ export function useJobsData(
           apiToken,
         );
       } catch (error) {
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          throw new Error("Operator login required");
-        }
-        throw error;
+        return rethrowDirectRequestError(error);
       }
     },
-    [apiToken, onUnauthorized],
+    [apiToken, rethrowDirectRequestError],
   );
 
   const createFileTransferHandoff = useCallback(
@@ -567,9 +874,15 @@ export function useJobsData(
           apiToken,
           { confirmed: true },
         );
+        if (currentApiToken.current !== apiToken) {
+          return response;
+        }
         await loadJobs();
         return response;
       } catch (error) {
+        if (currentApiToken.current !== apiToken) {
+          throw error;
+        }
         if (isApiUnauthorized(error)) {
           onUnauthorized();
           throw new Error("Operator login required");
@@ -585,14 +898,10 @@ export function useJobsData(
       try {
         return await apiGetBlob(downloadPath, apiToken);
       } catch (error) {
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          throw new Error("Operator login required");
-        }
-        throw error;
+        return rethrowDirectRequestError(error);
       }
     },
-    [apiToken, onUnauthorized],
+    [apiToken, rethrowDirectRequestError],
   );
 
   const saveFileTransferHandoff = useCallback(
@@ -612,23 +921,25 @@ export function useJobsData(
           ...request,
         });
       } catch (error) {
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          throw new Error("Operator login required");
-        }
-        throw error;
+        return rethrowDirectRequestError(error);
       }
     },
-    [apiToken, onUnauthorized],
+    [apiToken, rethrowDirectRequestError],
   );
 
   const uploadFileTransferSource = useCallback(
     async (request: UploadFileTransferSourceArtifactRequest) => {
       try {
         const response = await apiPost<FileTransferSourceArtifactRecord>("/api/v1/file-transfer-sources", apiToken, request);
+        if (currentApiToken.current !== apiToken) {
+          return response;
+        }
         await loadJobs();
         return response;
       } catch (error) {
+        if (currentApiToken.current !== apiToken) {
+          throw error;
+        }
         if (isApiUnauthorized(error)) {
           onUnauthorized();
           throw new Error("Operator login required");
@@ -644,14 +955,10 @@ export function useJobsData(
       try {
         return await apiGetBlob(downloadPath, apiToken);
       } catch (error) {
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          throw new Error("Operator login required");
-        }
-        throw error;
+        return rethrowDirectRequestError(error);
       }
     },
-    [apiToken, onUnauthorized],
+    [apiToken, rethrowDirectRequestError],
   );
 
   const loadTerminalReplay = useCallback(
@@ -670,14 +977,10 @@ export function useJobsData(
           apiToken,
         );
       } catch (error) {
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          throw new Error("Operator login required");
-        }
-        throw error;
+        return rethrowDirectRequestError(error);
       }
     },
-    [apiToken, onUnauthorized],
+    [apiToken, rethrowDirectRequestError],
   );
 
   const submitTerminalInput = useCallback(
@@ -688,9 +991,15 @@ export function useJobsData(
           apiToken,
           request,
         );
+        if (currentApiToken.current !== apiToken) {
+          return response;
+        }
         void Promise.allSettled([loadJobs(), onFleetChanged(), onAuditChanged()]);
         return response;
       } catch (error) {
+        if (currentApiToken.current !== apiToken) {
+          throw error;
+        }
         if (isApiUnauthorized(error)) {
           onUnauthorized();
           throw new Error("Operator login required");
@@ -704,6 +1013,9 @@ export function useJobsData(
   const createJob = useCallback(
     async (request: CreateJobRequest) => {
       const response = await apiPost<CreateJobResponse>("/api/v1/jobs", apiToken, request);
+      if (currentApiToken.current !== apiToken) {
+        return response;
+      }
       void Promise.allSettled([loadJobs(), onFleetChanged(), onAuditChanged()]);
       return response;
     },
@@ -712,7 +1024,15 @@ export function useJobsData(
 
   const createJobApproval = useCallback(
     async (request: CreateJobApprovalRequest) => {
+      const operationGeneration = jobApprovalMutationGeneration.current + 1;
+      jobApprovalMutationGeneration.current = operationGeneration;
       const response = await apiPost<JobApprovalRecord>("/api/v1/job-approvals", apiToken, request);
+      if (
+        currentApiToken.current !== apiToken ||
+        jobApprovalMutationGeneration.current !== operationGeneration
+      ) {
+        return response;
+      }
       setJobApprovals((current) => [
         response,
         ...current.filter((approval) => approval.id !== response.id),
@@ -730,6 +1050,9 @@ export function useJobsData(
         apiToken,
         request,
       );
+      if (currentApiToken.current !== apiToken) {
+        return response;
+      }
       void Promise.allSettled([loadJobs(), onFleetChanged(), onAuditChanged()]);
       return response;
     },
@@ -743,6 +1066,9 @@ export function useJobsData(
         apiToken,
         request,
       );
+      if (currentApiToken.current !== apiToken) {
+        return response;
+      }
       void Promise.allSettled([loadJobs(), onAuditChanged()]);
       return response;
     },
@@ -757,14 +1083,10 @@ export function useJobsData(
           domains,
         });
       } catch (error) {
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          throw new Error("Operator login required");
-        }
-        throw error;
+        return rethrowDirectRequestError(error);
       }
     },
-    [apiToken, onUnauthorized],
+    [apiToken, rethrowDirectRequestError],
   );
 
   const createArtifactCleanupJob = useCallback(
@@ -776,10 +1098,19 @@ export function useJobsData(
           preview_hash: previewHash,
           confirmed: true,
         });
+        if (currentApiToken.current !== apiToken) {
+          return response;
+        }
         await loadServerJobs();
+        if (currentApiToken.current !== apiToken) {
+          return response;
+        }
         void onAuditChanged();
         return response;
       } catch (error) {
+        if (currentApiToken.current !== apiToken) {
+          throw error;
+        }
         if (isApiUnauthorized(error)) {
           onUnauthorized();
           throw new Error("Operator login required");
@@ -798,10 +1129,19 @@ export function useJobsData(
           apiToken,
           { confirmed: true },
         );
+        if (currentApiToken.current !== apiToken) {
+          return response;
+        }
         await loadServerJobs();
+        if (currentApiToken.current !== apiToken) {
+          return response;
+        }
         void onAuditChanged();
         return response;
       } catch (error) {
+        if (currentApiToken.current !== apiToken) {
+          throw error;
+        }
         if (isApiUnauthorized(error)) {
           onUnauthorized();
           throw new Error("Operator login required");
@@ -815,31 +1155,89 @@ export function useJobsData(
   const createAgentUpdateRelease = useCallback(
     async (request: CreateAgentUpdateReleaseRequest) => {
       const response = await apiPost<AgentUpdateReleaseRecord>("/api/v1/agent-update-releases", apiToken, request);
+      if (currentApiToken.current !== apiToken) {
+        return response;
+      }
       await loadAgentUpdateReleases();
+      if (currentApiToken.current !== apiToken) {
+        return response;
+      }
       void onAuditChanged();
       return response;
     },
     [apiToken, loadAgentUpdateReleases, onAuditChanged],
   );
 
+  const clearJobs = useCallback(() => {
+    jobsLoadGeneration.current += 1;
+    jobRolloutsLoadGeneration.current += 1;
+    agentUpdateReleasesLoadGeneration.current += 1;
+    terminalSessionsLoadGeneration.current += 1;
+    serverJobsLoadGeneration.current += 1;
+    commandTemplatesLoadGeneration.current += 1;
+    commandTemplateMutationGeneration.current += 1;
+    jobApprovalMutationGeneration.current += 1;
+    jobRolloutMutationGeneration.current += 1;
+    currentApiToken.current = "";
+    jobsInventoryError.current = null;
+    jobRolloutsError.current = null;
+    agentUpdateReleasesError.current = null;
+    terminalSessionsError.current = null;
+    commandTemplatesError.current = null;
+    jobRolloutsRef.current = [];
+    setJobs([]);
+    setJobApprovals([]);
+    setJobRollouts([]);
+    setAgentUpdateReleases([]);
+    setProcessSupervisorInventory([]);
+    setFileTransfers([]);
+    setFileTransferSources([]);
+    setTerminalSessions([]);
+    setServerJobs([]);
+    setCommandTemplates([]);
+    setJobsTruncated(false);
+    setJobRolloutsTruncated(false);
+    setAgentUpdateReleasesTruncated(false);
+    setProcessSupervisorInventoryTruncated(false);
+    setFileTransfersTruncated(false);
+    setFileTransferSourcesTruncated(false);
+    setTerminalSessionsTruncated(false);
+    setCommandTemplatesTruncated(false);
+    setJobsError(null);
+    setServerJobsError(null);
+    setJobsLoading(false);
+    setJobsEvidenceAvailable(false);
+  }, []);
+
   return {
+    clearJobs,
     createAgentUpdateRelease,
     createJob,
     createJobApproval,
     approveJobApproval,
     rejectJobApproval,
     commandTemplates,
+    commandTemplatesTruncated,
     agentUpdateReleases,
+    agentUpdateReleasesTruncated,
     fileTransfers,
+    fileTransfersTruncated,
     fileTransferSources,
+    fileTransferSourcesTruncated,
     jobApprovals,
     jobRollouts,
+    jobRolloutsTruncated,
     jobs,
+    jobsTruncated,
     jobsError,
+    jobsEvidenceAvailable,
     jobsLoading,
     processSupervisorInventory,
+    processSupervisorInventoryTruncated,
     serverJobs,
+    serverJobsError,
     terminalSessions,
+    terminalSessionsTruncated,
     cancelServerJob,
     cancelJob,
     loadJob,
@@ -888,4 +1286,29 @@ function sortCommandTemplates(templates: CommandTemplateRecord[]): CommandTempla
     }
     return right.updated_at.localeCompare(left.updated_at) || left.name.localeCompare(right.name);
   });
+}
+
+function unavailableSourceSummary(
+  prefix: string,
+  results: readonly PromiseSettledResult<unknown>[],
+  labels: readonly string[],
+): string | null {
+  const failedLabels = results.flatMap((result, index) =>
+    result.status === "rejected" ? [labels[index]] : [],
+  );
+  return failedLabels.length > 0
+    ? `${prefix}: ${failedLabels.join(", ")}`
+    : null;
+}
+
+function settledSourceFailure(
+  label: string,
+  result: PromiseSettledResult<unknown>,
+): string | null {
+  if (result.status === "fulfilled") {
+    return null;
+  }
+  return result.reason instanceof Error
+    ? `${label}: ${result.reason.message}`
+    : `${label} unavailable`;
 }

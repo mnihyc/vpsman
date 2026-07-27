@@ -434,6 +434,7 @@ nav {
 .controlPlaneNotice {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   margin: 12px 24px 0;
   padding: 10px 12px;
@@ -444,6 +445,7 @@ nav {
 }
 
 .controlPlaneNotice span {
+  flex: 1 1 280px;
   color: var(--text-secondary);
 }
 
@@ -1725,6 +1727,12 @@ h2 {
 .fleetStatusStrip span.warn {
   background: var(--warning-soft);
   color: var(--warning-text);
+}
+
+.fleetStatusStrip span.unknown,
+.fleetStatusStrip small.unknown {
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
 }
 
 .fleetStatusStrip small {

@@ -374,6 +374,136 @@ async fn topology_graph_combines_plans_endpoint_state_and_observation_trends() {
 }
 
 #[tokio::test]
+async fn topology_graph_keeps_quiet_plan_evidence_beyond_noisy_global_caps() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        memory.agents.write().await.extend([
+            topology_test_agent("left-a", "online"),
+            topology_test_agent("right-b", "online"),
+            topology_test_agent("quiet-left", "online"),
+            topology_test_agent("quiet-right", "online"),
+        ]);
+    }
+    let operator = topology_test_operator();
+    let noisy_input = test_plan_input("right-b");
+    let noisy_plan = repo
+        .record_tunnel_plan(
+            &noisy_input,
+            &plan_tunnel(&noisy_input).unwrap(),
+            true,
+            &operator,
+        )
+        .await
+        .unwrap();
+    let mut quiet_input = test_plan_input("quiet-right");
+    quiet_input.name = "quiet-edge".to_string();
+    quiet_input.interface_name = "tunquiet".to_string();
+    quiet_input.left_client_id = "quiet-left".to_string();
+    let quiet_plan = repo
+        .record_tunnel_plan(
+            &quiet_input,
+            &plan_tunnel(&quiet_input).unwrap(),
+            true,
+            &operator,
+        )
+        .await
+        .unwrap();
+    let noisy_identity =
+        crate::repository_network_observations::topology_identity_hash_for_plan(&noisy_plan);
+    let quiet_identity =
+        crate::repository_network_observations::topology_identity_hash_for_plan(&quiet_plan);
+    let probe = |plan: &TunnelPlanView,
+                 topology_identity_hash: &str,
+                 client_id: String,
+                 peer_client_id: &str,
+                 healthy: bool,
+                 latency_avg_ms: f64,
+                 observed_at: &str| NetworkObservationView {
+        id: Uuid::new_v4(),
+        job_id: Uuid::new_v4(),
+        client_id,
+        seq: 0,
+        kind: "network_probe".to_string(),
+        role: None,
+        plan_id: Some(plan.id),
+        topology_identity_hash: Some(topology_identity_hash.to_string()),
+        plan_name: Some(plan.name.clone()),
+        interface_name: Some(plan.plan.interface_name.clone()),
+        peer_client_id: Some(peer_client_id.to_string()),
+        target: None,
+        healthy: Some(healthy),
+        latency_avg_ms: Some(latency_avg_ms),
+        packet_loss_ratio: Some(if healthy { 0.0 } else { 0.1 }),
+        throughput_mbps: None,
+        bytes: None,
+        metadata: serde_json::json!({}),
+        observed_at: observed_at.to_string(),
+    };
+    if let Repository::Memory(memory) = &repo {
+        memory
+            .network_observations
+            .write()
+            .await
+            .extend((0..1_001).map(|index| {
+                probe(
+                    &noisy_plan,
+                    &noisy_identity,
+                    format!("noisy-source-{index:04}"),
+                    "right-b",
+                    true,
+                    5.0,
+                    "2000",
+                )
+            }));
+        memory.network_observations.write().await.push(probe(
+            &quiet_plan,
+            &quiet_identity,
+            "quiet-left".to_string(),
+            "quiet-right",
+            false,
+            42.0,
+            "1000",
+        ));
+
+        let mut noisy_telemetry = topology_test_tunnel(noisy_plan.id, "left-a", "left", "ok", None);
+        noisy_telemetry.observed_at = "2000".to_string();
+        memory
+            .telemetry_tunnels
+            .write()
+            .await
+            .extend((0..1_001).map(|_| noisy_telemetry.clone()));
+        let mut quiet_telemetry = noisy_telemetry;
+        quiet_telemetry.client_id = "quiet-left".to_string();
+        quiet_telemetry.observed_at = "1000".to_string();
+        quiet_telemetry.interface = quiet_plan.plan.interface_name.clone();
+        quiet_telemetry.plan_id = Some(quiet_plan.id);
+        quiet_telemetry.plan_name = Some(quiet_plan.name.clone());
+        quiet_telemetry.peer_client_id = Some("quiet-right".to_string());
+        quiet_telemetry.traffic_status = Some("degraded".to_string());
+        quiet_telemetry.traffic_reason = Some("quiet_link_degraded".to_string());
+        memory.telemetry_tunnels.write().await.push(quiet_telemetry);
+    }
+
+    let graph = repo.topology_graph(24).await.unwrap();
+    let quiet_edge = graph
+        .edges
+        .iter()
+        .find(|edge| edge.plan_id == quiet_plan.id)
+        .unwrap();
+
+    assert_eq!(quiet_edge.sample_count, 1);
+    assert_eq!(quiet_edge.degraded_count, 1);
+    assert_eq!(quiet_edge.latency_avg_ms, Some(42.0));
+    assert_eq!(quiet_edge.latency_series_ms, vec![42.0]);
+    assert_eq!(quiet_edge.probe_state, "degraded");
+    assert_eq!(quiet_edge.left_runtime_state, "degraded");
+    assert_eq!(
+        quiet_edge.left_runtime_reason.as_deref(),
+        Some("quiet_link_degraded")
+    );
+}
+
+#[tokio::test]
 async fn topology_graph_ignores_observations_from_reused_plan_name_with_different_identity() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {

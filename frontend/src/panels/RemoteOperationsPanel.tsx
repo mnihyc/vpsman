@@ -114,9 +114,12 @@ export function RemoteOperationsPanel({
   activeSubpage,
   agents,
   commandTemplates,
+  commandTemplatesTruncated,
   dispatchPreset,
   fileTransfers,
+  fileTransfersTruncated,
   fileTransferSources,
+  fileTransferSourcesTruncated,
   initialTargetIntent,
   lastTerminalOutputEvent,
   loading,
@@ -151,16 +154,21 @@ export function RemoteOperationsPanel({
   privilegeMaterial,
   privilegeUnlockOpen,
   processSupervisorInventory,
+  processSupervisorInventoryTruncated,
   setPrivilegeMaterial,
   terminalSessions,
+  terminalSessionsTruncated,
   transferTargetIntent,
 }: {
   activeSubpage: string;
   agents: AgentView[];
   commandTemplates: CommandTemplateRecord[];
+  commandTemplatesTruncated: boolean;
   dispatchPreset?: JobDispatchPreset | null;
   fileTransfers: FileTransferSessionRecord[];
+  fileTransfersTruncated: boolean;
   fileTransferSources: FileTransferSourceArtifactRecord[];
+  fileTransferSourcesTruncated: boolean;
   initialTargetIntent?: {
     clientId: string;
     destination: "processes" | "terminal";
@@ -244,8 +252,10 @@ export function RemoteOperationsPanel({
   privilegeMaterial: PrivilegeMaterial | null;
   privilegeUnlockOpen: boolean;
   processSupervisorInventory: ProcessSupervisorInventoryRecord[];
+  processSupervisorInventoryTruncated: boolean;
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
   terminalSessions: TerminalSessionRecord[];
+  terminalSessionsTruncated: boolean;
   transferTargetIntent?: {
     clientId: string;
     context: string;
@@ -595,6 +605,7 @@ export function RemoteOperationsPanel({
                     : null
                 }
                 inventory={processSupervisorInventory}
+                inventoryTruncated={processSupervisorInventoryTruncated}
                 loading={loading}
                 onCreateJob={onCreateJob}
                 onLoadTargets={onLoadTargets}
@@ -619,7 +630,9 @@ export function RemoteOperationsPanel({
                   <JobDispatchPanel
                     agents={agents}
                     fileTransferSources={fileTransferSources}
+                    fileTransferSourcesTruncated={fileTransferSourcesTruncated}
                     commandTemplates={commandTemplates}
+                    commandTemplatesTruncated={commandTemplatesTruncated}
                     dispatchPreset={processComposerPreset}
                     fixedMode="process_supervisor"
                     onCreateJob={onCreateJob}
@@ -674,7 +687,9 @@ export function RemoteOperationsPanel({
               initialUploadPath={transferTargetIntent?.path}
               initialUploadTargetClientId={transferTargetIntent?.clientId}
               transfers={fileTransfers}
+              transfersTruncated={fileTransfersTruncated}
               sources={fileTransferSources}
+              sourcesTruncated={fileTransferSourcesTruncated}
               loading={loading}
               onCreateHandoff={onCreateFileTransferHandoff}
               onDownloadSource={onDownloadFileTransferSource}
@@ -695,7 +710,9 @@ export function RemoteOperationsPanel({
                   <JobDispatchPanel
                     agents={agents}
                     fileTransferSources={fileTransferSources}
+                    fileTransferSourcesTruncated={fileTransferSourcesTruncated}
                     commandTemplates={commandTemplates}
+                    commandTemplatesTruncated={commandTemplatesTruncated}
                     dispatchPreset={transferComposerPreset}
                     fixedMode={transferComposerPreset.mode}
                     onCreateJob={onCreateJob}
@@ -735,6 +752,7 @@ export function RemoteOperationsPanel({
                   : null
               }
               sessions={terminalSessions}
+              sessionsTruncated={terminalSessionsTruncated}
               lastTerminalOutputEvent={lastTerminalOutputEvent}
               loading={loading}
               onCloseTerminal={closeTerminalSessionDirectly}
@@ -761,7 +779,9 @@ export function RemoteOperationsPanel({
                 <JobDispatchPanel
                   agents={agents}
                   fileTransferSources={fileTransferSources}
+                  fileTransferSourcesTruncated={fileTransferSourcesTruncated}
                   commandTemplates={commandTemplates}
+                  commandTemplatesTruncated={commandTemplatesTruncated}
                   dispatchPreset={dispatchPreset}
                   fixedMode="terminal_session"
                   surface="terminal"

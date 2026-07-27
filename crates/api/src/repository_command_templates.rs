@@ -133,13 +133,13 @@ impl Repository {
                     existing.updated_at = now.clone();
                     let view = existing.clone();
                     drop(rows);
-                    record_command_template_audit(
-                        self,
+                    record_memory_command_template_audit(
+                        memory,
                         &view,
                         operator,
                         "command_template.upserted",
                     )
-                    .await?;
+                    .await;
                     return Ok(view);
                 }
                 let view = CommandTemplateView {
@@ -158,8 +158,13 @@ impl Repository {
                 };
                 rows.push(view.clone());
                 drop(rows);
-                record_command_template_audit(self, &view, operator, "command_template.upserted")
-                    .await?;
+                record_memory_command_template_audit(
+                    memory,
+                    &view,
+                    operator,
+                    "command_template.upserted",
+                )
+                .await;
                 Ok(view)
             }
             Self::Postgres(pool) => {
@@ -255,10 +260,15 @@ impl Repository {
                     .fetch_one(&mut *tx)
                     .await?
                 };
-                tx.commit().await?;
                 let view = command_template_from_row(row)?;
-                record_command_template_audit(self, &view, operator, "command_template.upserted")
-                    .await?;
+                insert_command_template_audit_in_tx(
+                    &mut tx,
+                    &view,
+                    operator,
+                    "command_template.upserted",
+                )
+                .await?;
+                tx.commit().await?;
                 Ok(view)
             }
         }
@@ -267,6 +277,7 @@ impl Repository {
     pub(crate) async fn delete_command_template(
         &self,
         template_id: Uuid,
+        reviewed_name: &str,
         operator: &AuthContext,
     ) -> Result<Option<CommandTemplateView>> {
         ensure!(
@@ -279,13 +290,36 @@ impl Repository {
                 let Some(index) = rows.iter().position(|row| row.id == template_id) else {
                     return Ok(None);
                 };
+                ensure!(
+                    rows[index].name == reviewed_name.trim(),
+                    "command_template_delete_review_stale"
+                );
                 let view = rows.remove(index);
                 drop(rows);
-                record_command_template_audit(self, &view, operator, "command_template.deleted")
-                    .await?;
+                record_memory_command_template_audit(
+                    memory,
+                    &view,
+                    operator,
+                    "command_template.deleted",
+                )
+                .await;
                 Ok(Some(view))
             }
             Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let current_name = sqlx::query_scalar::<_, String>(
+                    "SELECT name FROM command_templates WHERE id = $1 FOR UPDATE",
+                )
+                .bind(template_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(current_name) = current_name else {
+                    return Ok(None);
+                };
+                ensure!(
+                    current_name == reviewed_name.trim(),
+                    "command_template_delete_review_stale"
+                );
                 let row = sqlx::query(
                     r#"
                     DELETE FROM command_templates
@@ -305,14 +339,20 @@ impl Repository {
                     "#,
                 )
                 .bind(template_id)
-                .fetch_optional(pool)
+                .fetch_optional(&mut *tx)
                 .await?;
                 let Some(row) = row else {
                     return Ok(None);
                 };
                 let view = command_template_from_row(row)?;
-                record_command_template_audit(self, &view, operator, "command_template.deleted")
-                    .await?;
+                insert_command_template_audit_in_tx(
+                    &mut tx,
+                    &view,
+                    operator,
+                    "command_template.deleted",
+                )
+                .await?;
+                tx.commit().await?;
                 Ok(Some(view))
             }
         }
@@ -767,13 +807,29 @@ fn normalized_defaults(request: &UpsertCommandTemplateRequest) -> serde_json::Va
     }
 }
 
-async fn record_command_template_audit(
-    repo: &Repository,
+async fn record_memory_command_template_audit(
+    memory: &crate::repository::MemoryState,
     template: &CommandTemplateView,
     operator: &AuthContext,
     action: &'static str,
-) -> Result<()> {
-    let metadata = serde_json::json!({
+) {
+    let metadata = command_template_audit_metadata(template, operator);
+    memory.audits.write().await.push(AuditLogView {
+        id: Uuid::new_v4(),
+        actor_id: Some(operator.operator.id),
+        action: action.to_string(),
+        target: format!("command_template:{}", template.id),
+        command_hash: None,
+        metadata,
+        created_at: unix_now().to_string(),
+    });
+}
+
+fn command_template_audit_metadata(
+    template: &CommandTemplateView,
+    operator: &AuthContext,
+) -> serde_json::Value {
+    serde_json::json!({
         "template_id": template.id,
         "name": template.name,
         "scope_kind": template.scope_kind,
@@ -782,35 +838,28 @@ async fn record_command_template_audit(
         "display_group": template.display_group,
         "operator_id": operator.operator.id,
         "operator_username": operator.operator.username,
-    });
-    match repo {
-        Repository::Memory(memory) => {
-            memory.audits.write().await.push(AuditLogView {
-                id: Uuid::new_v4(),
-                actor_id: Some(operator.operator.id),
-                action: action.to_string(),
-                target: format!("command_template:{}", template.id),
-                command_hash: None,
-                metadata,
-                created_at: unix_now().to_string(),
-            });
-        }
-        Repository::Postgres(pool) => {
-            sqlx::query(
-                r#"
-                INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
-                VALUES ($1, $2, $3, $4, NULL, $5)
-                "#,
-            )
-            .bind(Uuid::new_v4())
-            .bind(operator.operator.id)
-            .bind(action)
-            .bind(format!("command_template:{}", template.id))
-            .bind(metadata)
-            .execute(pool)
-            .await?;
-        }
-    }
+    })
+}
+
+async fn insert_command_template_audit_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    template: &CommandTemplateView,
+    operator: &AuthContext,
+    action: &'static str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
+        VALUES ($1, $2, $3, $4, NULL, $5)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(operator.operator.id)
+    .bind(action)
+    .bind(format!("command_template:{}", template.id))
+    .bind(command_template_audit_metadata(template, operator))
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 
@@ -988,7 +1037,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn user_defined_command_templates_can_be_deleted() {
+    async fn command_template_delete_rejects_a_stale_reviewed_name() {
         let repo = Repository::Memory(MemoryState::default());
         let operator = test_operator();
         let created = repo
@@ -1000,12 +1049,39 @@ mod tests {
             .unwrap();
         assert!(!created.built_in);
 
+        let Repository::Memory(memory) = &repo else {
+            unreachable!("test uses memory repository");
+        };
+        memory
+            .command_templates
+            .write()
+            .await
+            .iter_mut()
+            .find(|template| template.id == created.id)
+            .unwrap()
+            .name = "operator-health-check-renamed".to_string();
+
+        let error = repo
+            .delete_command_template(created.id, &created.name, &operator)
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("command_template_delete_review_stale"));
+        assert!(memory
+            .command_templates
+            .read()
+            .await
+            .iter()
+            .any(|template| template.id == created.id));
+
         let deleted = repo
-            .delete_command_template(created.id, &operator)
+            .delete_command_template(created.id, "operator-health-check-renamed", &operator)
             .await
             .unwrap()
             .expect("user template should delete");
         assert_eq!(deleted.id, created.id);
+        assert_eq!(deleted.name, "operator-health-check-renamed");
         assert!(!deleted.built_in);
 
         let templates = repo
@@ -1014,9 +1090,6 @@ mod tests {
             .unwrap();
         assert!(!templates.iter().any(|template| template.id == created.id));
 
-        let Repository::Memory(memory) = repo else {
-            unreachable!("test uses memory repository");
-        };
         let audits = memory.audits.read().await;
         assert!(audits
             .iter()

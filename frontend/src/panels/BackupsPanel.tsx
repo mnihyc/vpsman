@@ -30,6 +30,7 @@ import {
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ConsoleActionDrawer } from "../components/ConsoleLayout";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
+import { formatLowerBoundCount, HISTORY_DETAIL_LIMIT } from "../constants";
 import { bytesToBase64 } from "../fileTransfer";
 import {
   useReviewGenerationGuard,
@@ -86,6 +87,7 @@ import type {
   JobTargetSelection,
   MigrationLinkRecord,
   RestorePlanRecord,
+  UpdateBackupPolicyRequest,
   UploadBackupArtifactRequest,
 } from "../types";
 import type { FileTransferSessionRecord } from "../typesFileTransfer";
@@ -105,6 +107,7 @@ type BackupsPanelProps = {
   agents: AgentView[];
   artifacts: BackupArtifactRecord[];
   backupPolicies: BackupPolicyRecord[];
+  backupPoliciesTruncated: boolean;
   backups: BackupRequestRecord[];
   fileTransfers: FileTransferSessionRecord[];
   jobs: JobHistoryRecord[];
@@ -118,6 +121,10 @@ type BackupsPanelProps = {
   loading: boolean;
   onCreateBackupPolicy: (
     request: CreateBackupPolicyRequest,
+  ) => Promise<BackupPolicyRecord>;
+  onUpdateBackupPolicy: (
+    scheduleId: string,
+    request: UpdateBackupPolicyRequest,
   ) => Promise<BackupPolicyRecord>;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onCreateMigrationLink: (
@@ -236,7 +243,8 @@ type BackupWorkflowAction =
   | "migration-run";
 
 type BackupPolicySnapshot = {
-  request: CreateBackupPolicyRequest;
+  request: UpdateBackupPolicyRequest;
+  scheduleId: string | null;
   selectorExpression: string;
   targetClientIds: string[];
   targets: AgentView[];
@@ -339,6 +347,7 @@ export function BackupsPanel({
   agents,
   artifacts,
   backupPolicies,
+  backupPoliciesTruncated,
   backups,
   fileTransfers,
   jobs,
@@ -348,6 +357,7 @@ export function BackupsPanel({
   error,
   loading,
   onCreateBackupPolicy,
+  onUpdateBackupPolicy,
   onCreateJob,
   onCreateMigrationLink,
   onCreateMigrationRun,
@@ -402,6 +412,8 @@ export function BackupsPanel({
   const [policyPruneDryRun, setPolicyPruneDryRun] = useState(true);
   const [policyPruneMetadataOnly, setPolicyPruneMetadataOnly] = useState(false);
   const [lastPolicy, setLastPolicy] = useState<BackupPolicyRecord | null>(null);
+  const [editingPolicy, setEditingPolicy] =
+    useState<BackupPolicyRecord | null>(null);
   const [lastPolicyPrune, setLastPolicyPrune] =
     useState<BackupPolicyPruneResponse | null>(null);
   const [lastBackupJob, setLastBackupJob] = useState<CreateJobResponse | null>(
@@ -465,7 +477,7 @@ export function BackupsPanel({
   const [workflowOpen, setWorkflowOpen] = useState(false);
   const workflowOwnerSubpageRef = useRef<string | null>(null);
   const [policyWorkflowMode, setPolicyWorkflowMode] = useState<
-    "create" | "prune"
+    "create" | "edit" | "prune"
   >("create");
   const paths = useMemo(() => parseBackupPaths(pathsText), [pathsText]);
   const policyPaths = useMemo(
@@ -648,6 +660,27 @@ export function BackupsPanel({
     workflowOwnerSubpageRef.current = null;
     setWorkflowOpen(false);
   }
+  function openPolicyEditor(policy: BackupPolicyRecord) {
+    invalidateReviewGeneration();
+    setEditingPolicy(policy);
+    setPolicyWorkflowMode("edit");
+    setPolicyName(policy.name);
+    setPolicyTargetsText(
+      policy.selector_expression.trim() ||
+        selectorExpressionForClientIds(policy.target_client_ids),
+    );
+    setPolicyPathsText(policy.paths.join("\n"));
+    setPolicyIncludeConfig(policy.include_config);
+    setPolicyFollowSymlinks(policy.follow_symlinks);
+    setPolicyMissingPathPolicy(policy.missing_path_policy);
+    setPolicyCronExpr(policy.cron_expr);
+    setPolicyRetentionDays(policy.retention_days);
+    setPolicyKeepLast(policy.keep_last);
+    setPolicyRotationGeneration(policy.rotation_generation ?? "");
+    setPolicyEnabled(policy.enabled);
+    clearBackupConfirmations(["policy", "policy-prune"]);
+    openBackupWorkflow("policies");
+  }
   useEffect(() => {
     invalidateReviewGeneration();
     setActionError(null);
@@ -678,11 +711,16 @@ export function BackupsPanel({
   const lastRollbackJobStatus = lastRollbackJob
     ? (jobStatusById.get(lastRollbackJob.job_id) ?? lastRollbackJob.status)
     : null;
-  const status = `${backupPolicies.length} polic${backupPolicies.length === 1 ? "y" : "ies"}, ${backups.length} backup request${
+  const backupsTruncated = backups.length >= HISTORY_DETAIL_LIMIT;
+  const artifactsTruncated = artifacts.length >= HISTORY_DETAIL_LIMIT;
+  const restorePlansTruncated = restorePlans.length >= HISTORY_DETAIL_LIMIT;
+  const migrationLinksTruncated =
+    migrationLinks.length >= HISTORY_DETAIL_LIMIT;
+  const status = `${formatLowerBoundCount(backupPolicies.length, backupPoliciesTruncated)}${backupPoliciesTruncated ? " loaded" : ""} polic${backupPolicies.length === 1 ? "y" : "ies"}, ${formatLowerBoundCount(backups.length, backupsTruncated)}${backupsTruncated ? " loaded" : ""} backup request${
     backups.length === 1 ? "" : "s"
-  }, ${artifacts.length} artifact${artifacts.length === 1 ? "" : "s"}, ${restorePlans.length} restore plan${
+  }, ${formatLowerBoundCount(artifacts.length, artifactsTruncated)}${artifactsTruncated ? " loaded" : ""} artifact${artifacts.length === 1 ? "" : "s"}, ${formatLowerBoundCount(restorePlans.length, restorePlansTruncated)}${restorePlansTruncated ? " loaded" : ""} restore plan${
     restorePlans.length === 1 ? "" : "s"
-  }, ${migrationLinks.length} migration mapping${migrationLinks.length === 1 ? "" : "s"}`;
+  }, ${formatLowerBoundCount(migrationLinks.length, migrationLinksTruncated)}${migrationLinksTruncated ? " loaded" : ""} migration mapping${migrationLinks.length === 1 ? "" : "s"}`;
   const backupPageFeedbackMessage =
     error ?? (loading ? backupSubpageMeta.loading : null);
   const backupPageFeedbackTone = error ? "danger" : "progress";
@@ -893,7 +931,16 @@ export function BackupsPanel({
           missing_path_policy: policyMissingPathPolicy,
         };
         const operationPayloadHash = await operationPayloadHashHex(operation);
-        const request: CreateBackupPolicyRequest = {
+        const scheduleId = editingPolicy?.schedule_id ?? null;
+        const catchUpPolicy = editingPolicy
+          ? editingPolicy.catch_up_policy
+          : "skip_missed";
+        const catchUpLimit = editingPolicy ? editingPolicy.catch_up_limit : 1;
+        const retryDelaySecs = editingPolicy
+          ? editingPolicy.retry_delay_secs
+          : 300;
+        const maxFailures = editingPolicy ? editingPolicy.max_failures : 3;
+        const request: UpdateBackupPolicyRequest = {
           name: policyName.trim(),
           selector_expression: selectorExpression,
           target_client_ids: targetClientIds,
@@ -907,15 +954,17 @@ export function BackupsPanel({
           cron_expr: policyCronExpr.trim(),
           timezone: "UTC",
           enabled: policyEnabled,
-          catch_up_policy: "skip_missed",
-          catch_up_limit: 1,
-          retry_delay_secs: 300,
-          max_failures: 3,
+          catch_up_policy: catchUpPolicy,
+          catch_up_limit: catchUpLimit,
+          retry_delay_secs: retryDelaySecs,
+          max_failures: maxFailures,
           confirmed: true,
           privilege_assertion: await buildPrivilegeAssertion({
             intent: canonicalSchedulePrivilegeIntent({
-              action: "backup_policy.create",
-              scheduleId: null,
+              action: scheduleId
+                ? "backup_policy.update"
+                : "backup_policy.create",
+              scheduleId,
               name: policyName.trim(),
               commandType: "backup",
               operationPayloadHash,
@@ -924,10 +973,10 @@ export function BackupsPanel({
               cronExpr: policyCronExpr.trim(),
               timezone: "UTC",
               enabled: policyEnabled,
-              catchUpPolicy: "skip_missed",
-              catchUpLimit: 1,
-              retryDelaySecs: 300,
-              maxFailures: 3,
+              catchUpPolicy,
+              catchUpLimit,
+              retryDelaySecs,
+              maxFailures,
               deferredUntil: null,
               deleted: false,
             }),
@@ -937,6 +986,7 @@ export function BackupsPanel({
         requireCurrentBackupReview(reviewGeneration);
         setPendingPolicySnapshot({
           request,
+          scheduleId,
           selectorExpression,
           targetClientIds,
           targets: resolved.targets,
@@ -954,7 +1004,9 @@ export function BackupsPanel({
           "Backup policy confirmation snapshot is missing; review the policy again",
         );
       }
-      const policy = await onCreateBackupPolicy(snapshot.request);
+      const policy = snapshot.scheduleId
+        ? await onUpdateBackupPolicy(snapshot.scheduleId, snapshot.request)
+        : await onCreateBackupPolicy(snapshot.request);
       setLastPolicy(policy);
       setLastWorkflowAction("policy");
       setPendingPolicySnapshot(null);
@@ -1850,6 +1902,18 @@ export function BackupsPanel({
                 }, ${policyMissingPathPolicy === "skip" ? "optional roots" : "strict roots"}`,
           },
           {
+            label: "Paths",
+            value: policySnapshot
+              ? policySnapshot.request.paths.join(", ") || "Config only"
+              : policyPaths.join(", ") || "Config only",
+          },
+          {
+            label: "Retention",
+            value: policySnapshot
+              ? `${policySnapshot.request.retention_days} days · keep last ${policySnapshot.request.keep_last} · rotation ${policySnapshot.request.rotation_generation ?? "not set"}`
+              : `${policyRetentionDays} days · keep last ${policyKeepLast} · rotation ${policyRotationGeneration.trim() || "not set"}`,
+          },
+          {
             label: "Schedule",
             value:
               policySnapshot?.request.cron_expr ??
@@ -2349,7 +2413,9 @@ export function BackupsPanel({
 
   const backupConfirmationTitle =
     pendingConfirmation === "policy"
-      ? "Confirm backup policy"
+      ? pendingPolicySnapshot?.scheduleId
+        ? "Confirm backup policy update"
+        : "Confirm backup policy"
       : pendingConfirmation === "policy-prune"
         ? "Confirm policy prune apply"
         : pendingConfirmation === "backup-request"
@@ -2369,7 +2435,9 @@ export function BackupsPanel({
                       : "Confirm cutover restore";
   const backupConfirmationConfirmLabel =
     pendingConfirmation === "policy"
-      ? "Save policy"
+      ? pendingPolicySnapshot?.scheduleId
+        ? "Save changes"
+        : "Save policy"
       : pendingConfirmation === "policy-prune"
         ? "Apply prune"
         : pendingConfirmation === "backup-request"
@@ -2420,7 +2488,9 @@ export function BackupsPanel({
     backupSubpage === "policies"
       ? policyWorkflowMode === "prune"
         ? "Prune policies"
-        : "Create policy"
+        : policyWorkflowMode === "edit"
+          ? "Edit policy"
+          : "Create policy"
       : backupSubpage === "artifacts"
         ? "Open artifact workflow"
         : backupSubpage === "restore"
@@ -2432,7 +2502,9 @@ export function BackupsPanel({
     backupSubpage === "policies"
       ? policyWorkflowMode === "prune"
         ? "Preview retention candidates before applying policy-scoped metadata or object cleanup."
-        : "Define one recurring backup policy and freeze its resolved VPS targets during review."
+        : policyWorkflowMode === "edit"
+          ? "Repair or change this recurring backup policy without replacing its schedule identity or backup operation."
+          : "Define one recurring backup policy and freeze its resolved VPS targets during review."
       : "One-time backup, restore, artifact, and migration inputs stay out of the data table until needed.";
 
   return (
@@ -2457,6 +2529,7 @@ export function BackupsPanel({
                 className="primaryAction"
                 onClick={() => {
                   if (backupSubpage === "policies") {
+                    setEditingPolicy(null);
                     setPolicyWorkflowMode("create");
                     clearBackupConfirmations(["policy", "policy-prune"]);
                   }
@@ -2472,6 +2545,7 @@ export function BackupsPanel({
                 <button
                   className="secondaryAction"
                   onClick={() => {
+                    setEditingPolicy(null);
                     setPolicyWorkflowMode("prune");
                     clearBackupConfirmations(["policy", "policy-prune"]);
                     openBackupWorkflow();
@@ -2498,7 +2572,10 @@ export function BackupsPanel({
           />
         )}
         {backupSubpage === "policies" && (
-          <BackupPolicySummary backupPolicies={backupPolicies} />
+          <BackupPolicySummary
+            backupPolicies={backupPolicies}
+            truncated={backupPoliciesTruncated}
+          />
         )}
         {backupSubpage === "restore" && (
           <BackupRestoreSummary
@@ -2540,6 +2617,7 @@ export function BackupsPanel({
             activeSubpage={backupSubpage}
             artifacts={artifacts}
             backupPolicies={backupPolicies}
+            backupPoliciesTruncated={backupPoliciesTruncated}
             backups={backups}
             clientLabel={clientLabel}
             migrationLinks={migrationLinks}
@@ -2565,17 +2643,22 @@ export function BackupsPanel({
             activeSubpage={backupSubpage}
             artifacts={artifacts}
             backupPolicies={backupPolicies}
+            backupPoliciesTruncated={backupPoliciesTruncated}
             backups={backups}
             clientLabel={clientLabel}
             migrationLinks={migrationLinks}
             onCreatePolicy={
               backupSubpage === "policies"
                 ? () => {
+                    setEditingPolicy(null);
                     setPolicyWorkflowMode("create");
                     clearBackupConfirmations(["policy", "policy-prune"]);
                     openBackupWorkflow("policies");
                   }
                 : undefined
+            }
+            onEditPolicy={
+              backupSubpage === "policies" ? openPolicyEditor : undefined
             }
             onOpenRequestArtifact={openBackupRequestArtifact}
             onPlanRestoreSource={openBackupRestore}
@@ -2617,7 +2700,7 @@ export function BackupsPanel({
             tone={backupConfirmationTone}
           />
           {backupSubpage === "policies" && (
-            policyWorkflowMode === "create" ? (
+            policyWorkflowMode !== "prune" ? (
               <BackupPolicyForm
                 agents={agents}
                 confirmationOpen={pendingConfirmation === "policy"}
@@ -2627,6 +2710,7 @@ export function BackupsPanel({
                 missingPathPolicy={policyMissingPathPolicy}
                 keepLast={policyKeepLast}
                 name={policyName}
+                mode={policyWorkflowMode}
                 onCronExprChange={(value) => {
                   setPolicyCronExpr(value);
                   clearPolicyConfirmation();
@@ -3169,6 +3253,9 @@ function BackupRequestSummary({
     (backup) => backup.artifact_id,
   ).length;
   const activeArtifacts = artifacts.filter(backupArtifactContentAvailable);
+  const backupsTruncated = backups.length >= HISTORY_DETAIL_LIMIT;
+  const artifactsTruncated = artifacts.length >= HISTORY_DETAIL_LIMIT;
+  const protectionTruncated = backupsTruncated || artifactsTruncated;
   const storedBytes = activeArtifacts.reduce(
     (sum, artifact) => sum + artifact.size_bytes,
     0,
@@ -3179,13 +3266,23 @@ function BackupRequestSummary({
       className="backupRequestSummary"
     >
       <strong>
-        {protection.recent} recent · {needsEvidence} need evidence ·{" "}
-        {failedBackups.length} failed
+        {formatLowerBoundCount(protection.recent, protectionTruncated)} recent ·{" "}
+        {protectionTruncated
+          ? "coverage evidence incomplete at loaded limit"
+          : `${needsEvidence} need evidence`}{" "}
+        · {formatLowerBoundCount(failedBackups.length, backupsTruncated)} failed
+        {backupsTruncated ? " loaded" : ""}
       </strong>
       <span>
-        {backups.length} request{backups.length === 1 ? "" : "s"} ·{" "}
-        {artifactBackedCount} artifact-backed · {formatBytes(storedBytes)}{" "}
-        stored
+        {formatLowerBoundCount(backups.length, backupsTruncated)}
+        {backupsTruncated ? " loaded" : ""} request
+        {backups.length === 1 ? "" : "s"} ·{" "}
+        {formatLowerBoundCount(artifactBackedCount, backupsTruncated)}{" "}
+        artifact-backed{backupsTruncated ? " among loaded requests" : ""} ·{" "}
+        {artifactsTruncated ? "≥" : ""}
+        {formatBytes(storedBytes)} stored in{" "}
+        {formatLowerBoundCount(activeArtifacts.length, artifactsTruncated)}{" "}
+        {artifactsTruncated ? "loaded " : ""}active artifacts
       </span>
     </section>
   );
@@ -3193,24 +3290,29 @@ function BackupRequestSummary({
 
 function BackupPolicySummary({
   backupPolicies,
+  truncated,
 }: {
   backupPolicies: BackupPolicyRecord[];
+  truncated: boolean;
 }) {
-  const enabled = backupPolicies.filter((policy) => policy.enabled);
+  const automatic = backupPolicies.filter(backupPolicyRunsAutomatically);
+  const invalid = backupPolicies.filter((policy) => Boolean(policy.cadence_error));
   const failing = backupPolicies.filter(
-    (policy) => policy.failure_count > 0 || policy.last_error,
+    (policy) =>
+      !policy.cadence_error &&
+      (policy.failure_count > 0 || Boolean(policy.last_error)),
   );
   const fixedTargets = new Set(
     backupPolicies.flatMap((policy) => policy.target_client_ids),
   );
-  const nextPolicy = enabled
+  const nextPolicy = automatic
     .map((policy) => ({
       policy,
       timestamp: Date.parse(policy.next_run_at),
     }))
     .filter((entry) => Number.isFinite(entry.timestamp))
     .sort((left, right) => left.timestamp - right.timestamp)[0]?.policy;
-  const pausedCount = backupPolicies.length - enabled.length;
+  const pausedCount = backupPolicies.length - automatic.length - invalid.length;
   const nextRunLabel = nextPolicy
     ? Date.parse(nextPolicy.next_run_at) < Date.now()
       ? `next run overdue ${formatCompactTime(nextPolicy.next_run_at)}`
@@ -3222,12 +3324,17 @@ function BackupPolicySummary({
       className="backupRequestSummary backupPolicySummary"
     >
       <strong>
-        {enabled.length} enabled · {pausedCount} paused · {failing.length}{" "}
-        failing
+        {truncated ? "Loaded: " : ""}
+        {automatic.length} automatic · {pausedCount} paused · {invalid.length}{" "}
+        invalid cadence · {failing.length} execution failure
+        {failing.length === 1 ? "" : "s"}
       </strong>
       <span>
-        {backupPolicies.length} polic{backupPolicies.length === 1 ? "y" : "ies"}{" "}
-        · {fixedTargets.size} fixed target{fixedTargets.size === 1 ? "" : "s"} ·{" "}
+        {formatLowerBoundCount(backupPolicies.length, truncated)}
+        {truncated ? " loaded" : ""} polic
+        {backupPolicies.length === 1 ? "y" : "ies"} ·{" "}
+        {truncated ? "loaded " : ""}
+        {fixedTargets.size} fixed target{fixedTargets.size === 1 ? "" : "s"} ·{" "}
         {nextRunLabel}
       </span>
     </section>
@@ -3251,6 +3358,10 @@ function BackupRestoreSummary({
   selectedSourceBackup: BackupRequestRecord | null;
   targetLabel: string;
 }) {
+  const backupsTruncated = backups.length >= HISTORY_DETAIL_LIMIT;
+  const artifactsTruncated = artifacts.length >= HISTORY_DETAIL_LIMIT;
+  const restorePlansTruncated = restorePlans.length >= HISTORY_DETAIL_LIMIT;
+  const sourceEvidenceTruncated = backupsTruncated || artifactsTruncated;
   const readyArtifacts = backups.filter((backup) =>
     backupArtifactContentAvailable(backupArtifactForRequest(backup, artifacts)),
   );
@@ -3268,7 +3379,10 @@ function BackupRestoreSummary({
         : selectedSourceBackup.artifact_id
           ? "unverified package: metadata unavailable"
           : "unverified package: no artifact"
-    : `${readyArtifacts.length} restore-ready package${readyArtifacts.length === 1 ? "" : "s"}`;
+    : `${formatLowerBoundCount(
+        readyArtifacts.length,
+        sourceEvidenceTruncated,
+      )} restore-ready${sourceEvidenceTruncated ? " loaded" : ""} package${readyArtifacts.length === 1 ? "" : "s"}`;
   const scopeLabel = selectedSourceBackup
     ? restoreDraftScopeLabel(
         selectedSourceBackup.include_config,
@@ -3290,7 +3404,9 @@ function BackupRestoreSummary({
         {destinationLabel} · {scopeLabel}
         {destinationRoot ? ` · restore path ${destinationRoot}` : ""}
         {!selectedSourceBackup
-          ? ` · ${unavailableArtifacts} unverified · ${restorePlans.length} draft restore${restorePlans.length === 1 ? "" : "s"}`
+          ? artifactsTruncated
+            ? ` · artifact availability incomplete at loaded limit · ${formatLowerBoundCount(restorePlans.length, restorePlansTruncated)}${restorePlansTruncated ? " loaded" : ""} draft restore${restorePlans.length === 1 ? "" : "s"}`
+            : ` · ${formatLowerBoundCount(unavailableArtifacts, backupsTruncated)} unverified${backupsTruncated ? " in loaded requests" : ""} · ${formatLowerBoundCount(restorePlans.length, restorePlansTruncated)}${restorePlansTruncated ? " loaded" : ""} draft restore${restorePlans.length === 1 ? "" : "s"}`
           : ""}
       </span>
     </section>
@@ -3318,6 +3434,10 @@ function BackupMigrationSummary({
   selectedPlan: RestorePlanRecord | null;
   selectedSourceArtifact: BackupArtifactRecord | null;
 }) {
+  const migrationLinksTruncated =
+    migrationLinks.length >= HISTORY_DETAIL_LIMIT;
+  const restorePlansTruncated = restorePlans.length >= HISTORY_DETAIL_LIMIT;
+  const artifactsTruncated = artifacts.length >= HISTORY_DETAIL_LIMIT;
   const latestMapping =
     lastMigrationLink ??
     latestByIso(
@@ -3347,7 +3467,7 @@ function BackupMigrationSummary({
       : sourceBackup?.artifact_id
         ? `${shortId(sourceBackup.artifact_id)} · verify artifact`
         : "no artifact package yet"
-    : `${activeArtifactCount} active artifact${activeArtifactCount === 1 ? "" : "s"}`;
+    : `${formatLowerBoundCount(activeArtifactCount, artifactsTruncated)} active${artifactsTruncated ? " loaded" : ""} artifact${activeArtifactCount === 1 ? "" : "s"}`;
   const replacementTitle = relationship
     ? clientLabel(relationship.target_client_id)
     : "Choose replacement VPS";
@@ -3356,7 +3476,10 @@ function BackupMigrationSummary({
     "create a replacement-target draft restore";
   const mappingDetail = latestMapping
     ? `mapping ${shortId(latestMapping.id)} · ${migrationLinkStatusLabel(latestMapping.status)}`
-    : `${migrationLinks.length} saved mapping${migrationLinks.length === 1 ? "" : "s"}`;
+    : `${formatLowerBoundCount(
+        migrationLinks.length,
+        migrationLinksTruncated,
+      )}${migrationLinksTruncated ? " loaded" : ""} saved mapping${migrationLinks.length === 1 ? "" : "s"}`;
   return (
     <section
       aria-label="Migration relationship summary"
@@ -3377,12 +3500,20 @@ function BackupMigrationSummary({
       </div>
       <div className="backupMigrationMeta">
         <span>
-          {restorePlans.length} draft restore
+          {formatLowerBoundCount(
+            restorePlans.length,
+            restorePlansTruncated,
+          )}{" "}
+          {restorePlansTruncated ? "loaded " : ""}draft restore
           {restorePlans.length === 1 ? "" : "s"}
         </span>
         {sameVpsRestoreDraftCount > 0 && (
           <span>
-            {sameVpsRestoreDraftCount} same-VPS restore draft
+            {formatLowerBoundCount(
+              sameVpsRestoreDraftCount,
+              restorePlansTruncated,
+            )}{" "}
+            {restorePlansTruncated ? "loaded " : ""}same-VPS restore draft
             {sameVpsRestoreDraftCount === 1 ? "" : "s"} excluded
           </span>
         )}
@@ -3427,13 +3558,24 @@ function BackupOverview({
     backupRequestNeedsAttention(backup.status),
   );
   const activeArtifacts = artifacts.filter(backupArtifactContentAvailable);
+  const backupsTruncated = backups.length >= HISTORY_DETAIL_LIMIT;
+  const artifactsTruncated = artifacts.length >= HISTORY_DETAIL_LIMIT;
+  const restorePlansTruncated = restorePlans.length >= HISTORY_DETAIL_LIMIT;
+  const migrationLinksTruncated =
+    migrationLinks.length >= HISTORY_DETAIL_LIMIT;
+  const protectionEvidenceTruncated = backupsTruncated || artifactsTruncated;
+  const recoveryEvidenceTruncated =
+    protectionEvidenceTruncated || restorePlansTruncated;
   const storedBytes = activeArtifacts.reduce(
     (sum, artifact) => sum + artifact.size_bytes,
     0,
   );
-  const enabledPolicies = backupPolicies.filter((policy) => policy.enabled);
+  const automaticPolicies = backupPolicies.filter(
+    backupPolicyRunsAutomatically,
+  );
   const policyIssues = backupPolicies.filter(
-    (policy) => policy.failure_count > 0 || policy.last_error,
+    (policy) =>
+      policy.failure_count > 0 || policy.last_error || policy.cadence_error,
   );
   const latestBackup = latestByIso(backups, (backup) => backup.created_at);
   const latestArtifact = latestByIso(
@@ -3456,22 +3598,27 @@ function BackupOverview({
   );
   const artifactStates = backupArtifactStateSummary(artifacts);
   const recoverabilityReady =
+    !recoveryEvidenceTruncated &&
     agents.length > 0 &&
     protection.recent === agents.length &&
     failedBackups.length === 0 &&
     activeArtifacts.length > 0 &&
     restoreReadyPlans.length > 0;
-  const decisionValue = backupRecoveryDecisionValue({
-    activeArtifactCount: activeArtifacts.length,
-    agentCount: agents.length,
-    failedBackupCount: failedBackups.length,
-    protection,
-    recoverabilityReady,
-    restoreReadyCount: restoreReadyPlans.length,
-  });
+  const decisionValue = recoveryEvidenceTruncated
+    ? "Evidence incomplete"
+    : backupRecoveryDecisionValue({
+        activeArtifactCount: activeArtifacts.length,
+        agentCount: agents.length,
+        failedBackupCount: failedBackups.length,
+        protection,
+        recoverabilityReady,
+        restoreReadyCount: restoreReadyPlans.length,
+      });
   const decisionDetail = recoverabilityReady
     ? "Visible VPSs have recent usable backups, artifacts, and at least one restore-ready plan."
-    : "Do not treat backup coverage as trustworthy until recent usable backups and restore-test evidence are visible.";
+    : recoveryEvidenceTruncated
+      ? "Loaded recovery history reached a record limit, so this page does not claim complete recoverability."
+      : "Do not treat backup coverage as trustworthy until recent usable backups and restore-test evidence are visible.";
   const primaryActions = [
     {
       detail:
@@ -3480,7 +3627,10 @@ function BackupOverview({
       label: "Back up now",
       onClick: onStartBackup,
       tone: "primary" as const,
-      value: `${backups.length} request${backups.length === 1 ? "" : "s"}`,
+      value: `${formatLowerBoundCount(
+        backups.length,
+        backupsTruncated,
+      )}${backupsTruncated ? " loaded" : ""} request${backups.length === 1 ? "" : "s"}`,
     },
     {
       detail: "Schedule recurring backups and retention.",
@@ -3488,7 +3638,7 @@ function BackupOverview({
       label: "Create policy",
       onClick: () => onSelectSubpage("policies"),
       tone: "secondary" as const,
-      value: `${enabledPolicies.length}/${backupPolicies.length} enabled`,
+      value: `${automaticPolicies.length}/${backupPolicies.length} automatic`,
     },
     {
       detail: "Choose an artifact and plan recovery.",
@@ -3498,8 +3648,13 @@ function BackupOverview({
       tone: "secondary" as const,
       value:
         restoreReadyPlans.length > 0
-          ? `${restoreReadyPlans.length} ready`
-          : "not tested",
+          ? `${formatLowerBoundCount(
+              restoreReadyPlans.length,
+              restorePlansTruncated,
+            )} ready${restorePlansTruncated ? " loaded" : ""}`
+          : restorePlansTruncated
+            ? "none in loaded records"
+            : "not tested",
     },
   ];
   const recordLinks = [
@@ -3507,19 +3662,22 @@ function BackupOverview({
       icon: <DatabaseBackup size={16} />,
       label: "Requests",
       subpage: "requests",
-      value: `${backups.length} request${backups.length === 1 ? "" : "s"}`,
+      value: `${formatLowerBoundCount(
+        backups.length,
+        backupsTruncated,
+      )}${backupsTruncated ? " loaded" : ""} request${backups.length === 1 ? "" : "s"}`,
     },
     {
       icon: <ShieldCheck size={16} />,
       label: "Policies",
       subpage: "policies",
-      value: `${enabledPolicies.length}/${backupPolicies.length} enabled`,
+      value: `${automaticPolicies.length}/${backupPolicies.length} automatic`,
     },
     {
       icon: <Archive size={16} />,
       label: "Artifacts",
       subpage: "artifacts",
-      value: `${formatBytes(storedBytes)} stored`,
+      value: `${artifactsTruncated ? "≥" : ""}${formatBytes(storedBytes)} stored${artifactsTruncated ? " in loaded artifacts" : ""}`,
     },
     {
       icon: <RotateCcw size={16} />,
@@ -3527,8 +3685,13 @@ function BackupOverview({
       subpage: "restore",
       value:
         restoreReadyPlans.length > 0
-          ? `${restoreReadyPlans.length} ready`
-          : "not tested",
+          ? `${formatLowerBoundCount(
+              restoreReadyPlans.length,
+              restorePlansTruncated,
+            )} ready${restorePlansTruncated ? " loaded" : ""}`
+          : restorePlansTruncated
+            ? "none in loaded records"
+            : "not tested",
     },
     {
       icon: <ShieldCheck size={16} />,
@@ -3536,8 +3699,13 @@ function BackupOverview({
       subpage: "migration",
       value:
         migrationLinks.length > 0
-          ? `${migrationLinks.length} link${migrationLinks.length === 1 ? "" : "s"}`
-          : "not used",
+          ? `${formatLowerBoundCount(
+              migrationLinks.length,
+              migrationLinksTruncated,
+            )}${migrationLinksTruncated ? " loaded" : ""} link${migrationLinks.length === 1 ? "" : "s"}`
+          : migrationLinksTruncated
+            ? "none in loaded records"
+            : "not used",
     },
   ];
 
@@ -3558,30 +3726,45 @@ function BackupOverview({
         >
           <BackupOverviewMetric
             label="Recent"
-            value={`${protection.recent}/${agents.length} VPSs`}
+            value={
+              protectionEvidenceTruncated
+                ? `${protection.recent}/${agents.length} VPSs in loaded evidence`
+                : `${protection.recent}/${agents.length} VPSs`
+            }
           />
           <BackupOverviewMetric
             label="Overdue"
-            value={`${protection.overdue} VPS${protection.overdue === 1 ? "" : "s"}`}
+            value={`${protection.overdue} VPS${protection.overdue === 1 ? "" : "s"}${protectionEvidenceTruncated ? " in loaded evidence" : ""}`}
           />
           <BackupOverviewMetric
             label="Unknown"
-            value={`${protection.unknown} VPS${protection.unknown === 1 ? "" : "s"}`}
+            value={`${protection.unknown} VPS${protection.unknown === 1 ? "" : "s"}${protectionEvidenceTruncated ? " in loaded evidence" : ""}`}
           />
           <BackupOverviewMetric
             label="Failures"
-            value={`${failedBackups.length} request${failedBackups.length === 1 ? "" : "s"}`}
+            value={`${formatLowerBoundCount(
+              failedBackups.length,
+              backupsTruncated,
+            )}${backupsTruncated ? " loaded" : ""} request${failedBackups.length === 1 ? "" : "s"}`}
           />
           <BackupOverviewMetric
             label="Artifacts"
-            value={`${activeArtifacts.length} active`}
+            value={`${formatLowerBoundCount(
+              activeArtifacts.length,
+              artifactsTruncated,
+            )} active${artifactsTruncated ? " loaded" : ""}`}
           />
           <BackupOverviewMetric
             label="Restore tests"
             value={
               restoreReadyPlans.length > 0
-                ? `${restoreReadyPlans.length} ready`
-                : "none"
+                ? `${formatLowerBoundCount(
+                    restoreReadyPlans.length,
+                    restorePlansTruncated,
+                  )} ready${restorePlansTruncated ? " loaded" : ""}`
+                : restorePlansTruncated
+                  ? "none in loaded records"
+                  : "none"
             }
           />
         </div>
@@ -3595,8 +3778,12 @@ function BackupOverview({
           <span>Protection decision</span>
           <strong>
             {affectedRecords.length > 0
-              ? `${affectedRecords.length} VPS${affectedRecords.length === 1 ? "" : "s"} need backup evidence`
-              : "All visible VPSs have recent backups"}
+              ? protectionEvidenceTruncated
+                ? `${affectedRecords.length} VPS${affectedRecords.length === 1 ? "" : "s"} need review in loaded evidence`
+                : `${affectedRecords.length} VPS${affectedRecords.length === 1 ? "" : "s"} need backup evidence`
+              : protectionEvidenceTruncated
+                ? "No gap appears in loaded evidence"
+                : "All visible VPSs have recent backups"}
           </strong>
           <p>
             {affectedRecords.length > 0
@@ -3606,8 +3793,13 @@ function BackupOverview({
                     (record) =>
                       `${formatVpsName(record.agent)}: ${backupProtectionStateLabel(record.state)}`,
                   )
-                  .join("; ")
-              : "No visible backup coverage gaps in the current scope."}
+                  .join("; ") +
+                (protectionEvidenceTruncated
+                  ? "; classifications use loaded evidence only"
+                  : "")
+              : protectionEvidenceTruncated
+                ? "More backup or artifact history may exist beyond the loaded limit."
+                : "No visible backup coverage gaps in the current scope."}
           </p>
         </div>
         <div className="backupQuickActions">
@@ -3714,26 +3906,45 @@ function BackupOverview({
             value={
               policyIssues.length > 0
                 ? `${policyIssues.length} policy issue${policyIssues.length === 1 ? "" : "s"}`
-                : `${enabledPolicies.length} enabled`
+                : `${automaticPolicies.length} automatic`
             }
             detail={
               policyIssues.length > 0
                 ? policyIssues
                     .slice(0, 2)
                     .map(
-                      (policy) =>
-                        policy.last_error ?? `${policy.name} failures`,
+                      (policy) => {
+                        if (policy.cadence_error) {
+                          return `${policy.name}: invalid cadence; edit required`;
+                        }
+                        return (
+                          policy.last_error ??
+                          `${policy.name}: ${policy.failure_count} execution failure${
+                            policy.failure_count === 1 ? "" : "s"
+                          }`
+                        );
+                      },
                     )
                     .join("; ")
                 : backupPolicies.length > 0
-                  ? "No visible policy failure count or last-error evidence."
+                  ? "No visible cadence or execution failure evidence."
                   : "No backup policy records are visible."
             }
           />
           <BackupEvidenceRow
             label="Artifact states"
-            value={`${artifactStates.available} available · ${artifactStates.unavailable} unavailable`}
-            detail="Available packages have an active stored object whose size and SHA-256 were verified before activation."
+            value={`${formatLowerBoundCount(
+              artifactStates.available,
+              artifactsTruncated,
+            )} available${artifactsTruncated ? " loaded" : ""} · ${formatLowerBoundCount(
+              artifactStates.unavailable,
+              artifactsTruncated,
+            )} unavailable${artifactsTruncated ? " loaded" : ""}`}
+            detail={
+              artifactsTruncated
+                ? "Artifact state counts cover loaded records only; more records may exist."
+                : "Available packages have an active stored object whose size and SHA-256 were verified before activation."
+            }
           />
           <BackupEvidenceRow
             label="Restore verification"
@@ -3744,8 +3955,13 @@ function BackupOverview({
             }
             detail={
               restoreReadyPlans.length > 0
-                ? `${restoreReadyPlans.length} restore-ready plan${restoreReadyPlans.length === 1 ? "" : "s"} available.`
-                : "Run a restore rehearsal before considering the backup posture healthy."
+                ? `${formatLowerBoundCount(
+                    restoreReadyPlans.length,
+                    restorePlansTruncated,
+                  )} restore-ready plan${restoreReadyPlans.length === 1 ? "" : "s"} available${restorePlansTruncated ? " in loaded records" : ""}.`
+                : restorePlansTruncated
+                  ? "No restore-ready plan appears in loaded records; more history may exist."
+                  : "Run a restore rehearsal before considering the backup posture healthy."
             }
           />
           <BackupEvidenceRow
@@ -3816,6 +4032,8 @@ function BackupArtifactOwnershipGuide({
   onSelectSubpage: (subpage: string) => void;
 }) {
   const activeArtifacts = artifacts.filter(backupArtifactContentAvailable);
+  const artifactsTruncated = artifacts.length >= HISTORY_DETAIL_LIMIT;
+  const backupsTruncated = backups.length >= HISTORY_DETAIL_LIMIT;
   const latestArtifact =
     lastArtifact ?? latestByIso(artifacts, (artifact) => artifact.created_at);
   const requestsWithArtifact = backups.filter((backup) => backup.artifact_id);
@@ -3848,22 +4066,31 @@ function BackupArtifactOwnershipGuide({
       <div className="backupWorkflowSteps">
         <BackupGuideStep
           label="Artifact inventory"
-          value={`${artifacts.length} record${artifacts.length === 1 ? "" : "s"}`}
-          detail={`${activeArtifacts.length} active artifact${activeArtifacts.length === 1 ? "" : "s"} store ${formatBytes(storedBytes)} for backup recovery.`}
+          value={`${formatLowerBoundCount(
+            artifacts.length,
+            artifactsTruncated,
+          )}${artifactsTruncated ? " loaded" : ""} record${artifacts.length === 1 ? "" : "s"}`}
+          detail={`${formatLowerBoundCount(activeArtifacts.length, artifactsTruncated)} active${artifactsTruncated ? " loaded" : ""} artifact${activeArtifacts.length === 1 ? "" : "s"} store ${artifactsTruncated ? "at least " : ""}${formatBytes(storedBytes)} for backup recovery.`}
           tone={artifacts.length > 0 ? "ready" : "attention"}
         />
         <BackupGuideStep
           label="Backup linkage"
-          value={`${requestsWithArtifact.length}/${backups.length} linked`}
+          value={`${requestsWithArtifact.length}/${backups.length}${backupsTruncated ? " loaded" : ""} linked`}
           detail={
             requestsAwaitingArtifact.length > 0
-              ? `${requestsAwaitingArtifact.length} backup request${requestsAwaitingArtifact.length === 1 ? "" : "s"} still need artifact metadata.`
-              : "Visible backup requests all have artifact metadata."
+              ? `${formatLowerBoundCount(requestsAwaitingArtifact.length, backupsTruncated)}${backupsTruncated ? " loaded" : ""} backup request${requestsAwaitingArtifact.length === 1 ? "" : "s"} still need artifact metadata.`
+              : backupsTruncated
+                ? "No loaded backup request lacks artifact metadata; more history may exist."
+                : "Visible backup requests all have artifact metadata."
           }
           tone={
-            requestsAwaitingArtifact.length === 0 && backups.length > 0
-              ? "ready"
-              : "attention"
+            requestsAwaitingArtifact.length > 0
+              ? "attention"
+              : backupsTruncated
+                ? undefined
+                : backups.length > 0
+                  ? "ready"
+                  : "attention"
           }
         />
         <BackupGuideStep
@@ -3886,7 +4113,13 @@ function BackupArtifactOwnershipGuide({
           label="Lineage details"
           value="Object key and SHA"
           detail="Expanded rows keep object key, checksum, raw status, and linked request evidence."
-          tone={activeArtifacts.length > 0 ? "ready" : "attention"}
+          tone={
+            activeArtifacts.length > 0
+              ? "ready"
+              : artifactsTruncated
+                ? undefined
+                : "attention"
+          }
         />
       </div>
       <div
@@ -3985,7 +4218,9 @@ function buildBackupPostureItems({
     backups,
     artifacts,
   );
-  const enabledPolicies = backupPolicies.filter((policy) => policy.enabled);
+  const automaticPolicies = backupPolicies.filter(
+    backupPolicyRunsAutomatically,
+  );
   const latestBackup = latestByIso(backups, (backup) => backup.created_at);
   const latestArtifact = latestByIso(
     artifacts,
@@ -4005,12 +4240,18 @@ function buildBackupPostureItems({
   const migrationReadyLinks = migrationLinks.filter((link) =>
     migrationLinkReady(link.status),
   );
+  const backupsTruncated = backups.length >= HISTORY_DETAIL_LIMIT;
+  const artifactsTruncated = artifacts.length >= HISTORY_DETAIL_LIMIT;
+  const restorePlansTruncated = restorePlans.length >= HISTORY_DETAIL_LIMIT;
+  const migrationLinksTruncated =
+    migrationLinks.length >= HISTORY_DETAIL_LIMIT;
+  const protectionEvidenceTruncated = backupsTruncated || artifactsTruncated;
   const nextPolicy = latestByIso(
-    enabledPolicies.filter((policy) => policy.next_run_at),
+    automaticPolicies.filter((policy) => policy.next_run_at),
     (policy) => policy.next_run_at,
     "asc",
   );
-  const retentionDays = enabledPolicies
+  const retentionDays = automaticPolicies
     .map((policy) => policy.retention_days)
     .filter((value) => Number.isFinite(value));
   const topProblem = protection.records.find(
@@ -4019,62 +4260,86 @@ function buildBackupPostureItems({
   return [
     {
       detail:
-        protection.recent === agents.length && agents.length > 0
-          ? "Every visible VPS has a recent usable backup inside its expected freshness window."
-          : topProblem
-            ? `${formatVpsName(topProblem.agent)}: ${topProblem.detail}`
-            : "No visible VPS backup records are available.",
+        protectionEvidenceTruncated
+          ? topProblem
+            ? `${formatVpsName(topProblem.agent)}: ${topProblem.detail} Classification covers loaded evidence only.`
+            : "No gap appears in loaded evidence; more backup or artifact history may exist."
+          : protection.recent === agents.length && agents.length > 0
+            ? "Every visible VPS has a recent usable backup inside its expected freshness window."
+            : topProblem
+              ? `${formatVpsName(topProblem.agent)}: ${topProblem.detail}`
+              : "No visible VPS backup records are available.",
       label: "Recent backups",
       tone:
-        protection.recent === agents.length && agents.length > 0
-          ? "ready"
-          : "attention",
-      value: `${protection.recent}/${agents.length}`,
+        protectionEvidenceTruncated
+          ? undefined
+          : protection.recent === agents.length && agents.length > 0
+            ? "ready"
+            : "attention",
+      value: `${protection.recent}/${agents.length}${protectionEvidenceTruncated ? " in loaded evidence" : ""}`,
     },
     {
       detail:
         protection.overdue === 0
-          ? "No visible VPS has an old usable backup outside its expected interval."
-          : protection.records
+          ? protectionEvidenceTruncated
+            ? "No overdue VPS appears in loaded evidence; more history may exist."
+            : "No visible VPS has an old usable backup outside its expected interval."
+          : `${protection.records
               .filter((record) => record.state === "overdue")
               .slice(0, 3)
               .map(
                 (record) => `${formatVpsName(record.agent)}: ${record.detail}`,
               )
-              .join("; "),
+              .join("; ")}${protectionEvidenceTruncated ? " Loaded evidence only." : ""}`,
       label: "Overdue",
-      tone: protection.overdue === 0 ? "ready" : "attention",
-      value: String(protection.overdue),
+      tone: protectionEvidenceTruncated
+        ? undefined
+        : protection.overdue === 0
+          ? "ready"
+          : "attention",
+      value: `${protection.overdue}${protectionEvidenceTruncated ? " in loaded evidence" : ""}`,
     },
     {
       detail:
         protection.unprotected === 0
-          ? "Every visible VPS has at least some backup policy or request evidence."
-          : protection.records
+          ? protectionEvidenceTruncated
+            ? "No unprotected VPS appears in loaded evidence; more history may exist."
+            : "Every visible VPS has at least some backup policy or request evidence."
+          : `${protection.records
               .filter((record) => record.state === "unprotected")
               .slice(0, 3)
               .map(
                 (record) => `${formatVpsName(record.agent)}: ${record.detail}`,
               )
-              .join("; "),
+              .join("; ")}${protectionEvidenceTruncated ? " Classification covers loaded evidence only." : ""}`,
       label: "Unprotected",
-      tone: protection.unprotected === 0 ? "ready" : "attention",
-      value: String(protection.unprotected),
+      tone: protectionEvidenceTruncated
+        ? undefined
+        : protection.unprotected === 0
+          ? "ready"
+          : "attention",
+      value: `${protection.unprotected}${protectionEvidenceTruncated ? " in loaded evidence" : ""}`,
     },
     {
       detail:
         protection.unknown === 0
-          ? "No visible VPS is blocked by unverifiable backup evidence."
-          : protection.records
+          ? protectionEvidenceTruncated
+            ? "No unverifiable VPS appears in loaded evidence; more history may exist."
+            : "No visible VPS is blocked by unverifiable backup evidence."
+          : `${protection.records
               .filter((record) => record.state === "unknown")
               .slice(0, 3)
               .map(
                 (record) => `${formatVpsName(record.agent)}: ${record.detail}`,
               )
-              .join("; "),
+              .join("; ")}${protectionEvidenceTruncated ? " Classification covers loaded evidence only." : ""}`,
       label: "Unknown",
-      tone: protection.unknown === 0 ? "ready" : "attention",
-      value: String(protection.unknown),
+      tone: protectionEvidenceTruncated
+        ? undefined
+        : protection.unknown === 0
+          ? "ready"
+          : "attention",
+      value: `${protection.unknown}${protectionEvidenceTruncated ? " in loaded evidence" : ""}`,
     },
     {
       detail: latestBackup
@@ -4089,8 +4354,8 @@ function buildBackupPostureItems({
     },
     {
       detail: nextPolicy
-        ? `${nextPolicy.name} runs at ${formatTime(nextPolicy.next_run_at)}; ${enabledPolicies.length} enabled policy${enabledPolicies.length === 1 ? "" : "ies"}.`
-        : "No enabled backup policy with a next-run timestamp is visible.",
+        ? `${nextPolicy.name} runs at ${formatTime(nextPolicy.next_run_at)}; ${automaticPolicies.length} automatic polic${automaticPolicies.length === 1 ? "y" : "ies"} with valid cadence.`
+        : "No automatic backup policy with a valid next-run timestamp is visible.",
       label: "Next backup",
       tone: nextPolicy ? "ready" : "attention",
       value: nextPolicy ? formatTime(nextPolicy.next_run_at) : "No schedule",
@@ -4098,55 +4363,103 @@ function buildBackupPostureItems({
     {
       detail:
         failedBackups.length === 0
-          ? "No failed backup request status is present in the current history."
-          : failedBackups
+          ? backupsTruncated
+            ? "No failed request appears in loaded history; more records may exist."
+            : "No failed backup request status is present in the current history."
+          : `${failedBackups
               .slice(0, 3)
               .map(
                 (backup) =>
                   `${shortId(backup.id)} ${backupStatusLabel(backup.status)}`,
               )
-              .join("; "),
+              .join("; ")}${backupsTruncated ? "; more may exist outside loaded history." : ""}`,
       label: "Failed requests",
-      tone: failedBackups.length === 0 ? "ready" : "attention",
-      value: String(failedBackups.length),
+      tone:
+        failedBackups.length === 0
+          ? backupsTruncated
+            ? undefined
+            : "ready"
+          : "attention",
+      value: `${formatLowerBoundCount(
+        failedBackups.length,
+        backupsTruncated,
+      )}${backupsTruncated ? " loaded" : ""}`,
     },
     {
       detail: latestArtifact
-        ? `${activeArtifacts.length} active artifact${activeArtifacts.length === 1 ? "" : "s"}; latest ${shortId(latestArtifact.id)} has SHA-256 ${shortHash(latestArtifact.sha256_hex)}.`
-        : "No stored artifact metadata is available.",
+        ? `${formatLowerBoundCount(
+            activeArtifacts.length,
+            artifactsTruncated,
+          )} active artifact${activeArtifacts.length === 1 ? "" : "s"}${artifactsTruncated ? " in loaded history" : ""}; latest ${shortId(latestArtifact.id)} has SHA-256 ${shortHash(latestArtifact.sha256_hex)}.`
+        : artifactsTruncated
+          ? "No active artifact appears in loaded history; more records may exist."
+          : "No stored artifact metadata is available.",
       label: "Artifact storage",
-      tone: activeArtifacts.length > 0 ? "ready" : "attention",
-      value: `${formatBytes(storedBytes)} / ${activeArtifacts.length}`,
+      tone:
+        activeArtifacts.length > 0
+          ? "ready"
+          : artifactsTruncated
+            ? undefined
+            : "attention",
+      value: `${artifactsTruncated ? "≥" : ""}${formatBytes(storedBytes)} / ${formatLowerBoundCount(
+        activeArtifacts.length,
+        artifactsTruncated,
+      )}${artifactsTruncated ? " loaded" : ""}`,
     },
     {
       detail:
         restoreReadyPlans.length > 0
-          ? `${restoreReadyPlans.length} restore plan${restoreReadyPlans.length === 1 ? "" : "s"} ready for restore workflow review.`
-          : "No restore plan is ready; create and rehearse a restore before trusting the backup posture.",
+          ? `${formatLowerBoundCount(
+              restoreReadyPlans.length,
+              restorePlansTruncated,
+            )} restore plan${restoreReadyPlans.length === 1 ? "" : "s"} ready for restore workflow review${restorePlansTruncated ? " in loaded history" : ""}.`
+          : restorePlansTruncated
+            ? "No restore-ready plan appears in loaded history; more records may exist."
+            : "No restore plan is ready; create and rehearse a restore before trusting the backup posture.",
       label: "Restore test",
-      tone: restoreReadyPlans.length > 0 ? "ready" : "attention",
+      tone:
+        restoreReadyPlans.length > 0
+          ? "ready"
+          : restorePlansTruncated
+            ? undefined
+            : "attention",
       value:
         restoreReadyPlans.length > 0
-          ? `${restoreReadyPlans.length} ready`
-          : "Not tested",
+          ? `${formatLowerBoundCount(
+              restoreReadyPlans.length,
+              restorePlansTruncated,
+            )} ready${restorePlansTruncated ? " loaded" : ""}`
+          : restorePlansTruncated
+            ? "None in loaded records"
+            : "Not tested",
     },
     {
       detail:
         migrationReadyLinks.length > 0
-          ? `${migrationReadyLinks.length} migration mapping${migrationReadyLinks.length === 1 ? "" : "s"} connect source artifacts to replacement VPSs.`
-          : "No migration workflow is active; this is neutral unless a VPS replacement or cutover is planned.",
+          ? `${formatLowerBoundCount(
+              migrationReadyLinks.length,
+              migrationLinksTruncated,
+            )} migration mapping${migrationReadyLinks.length === 1 ? "" : "s"}${migrationLinksTruncated ? " in loaded history" : ""} connect source artifacts to replacement VPSs.`
+          : migrationLinksTruncated
+            ? "No active migration appears in loaded history; more records may exist."
+            : "No migration workflow is active; this is neutral unless a VPS replacement or cutover is planned.",
       label: "Migration",
       tone: migrationReadyLinks.length > 0 ? "ready" : undefined,
       value:
         migrationReadyLinks.length > 0
-          ? `${migrationReadyLinks.length} mapped`
-          : "Not used",
+          ? `${formatLowerBoundCount(
+              migrationReadyLinks.length,
+              migrationLinksTruncated,
+            )} mapped${migrationLinksTruncated ? " loaded" : ""}`
+          : migrationLinksTruncated
+            ? "None in loaded records"
+            : "Not used",
     },
     {
       detail:
         retentionDays.length > 0
-          ? `Enabled policies retain ${Math.min(...retentionDays)}-${Math.max(...retentionDays)} days. Artifact encryption and immutability evidence is unavailable.`
-          : "No enabled retention policy is visible. Artifact encryption and immutability evidence is unavailable.",
+          ? `Automatic policies retain ${Math.min(...retentionDays)}-${Math.max(...retentionDays)} days. Artifact encryption and immutability evidence is unavailable.`
+          : "No automatic retention policy is visible. Artifact encryption and immutability evidence is unavailable.",
       label: "Retention/security",
       tone: retentionDays.length > 0 ? "ready" : "attention",
       value:
@@ -4227,7 +4540,9 @@ function backupProtectionRecord(
   now: Date,
 ): BackupProtectionRecord {
   const policies = backupPolicies.filter(
-    (policy) => policy.enabled && policy.target_client_ids.includes(agent.id),
+    (policy) =>
+      backupPolicyRunsAutomatically(policy) &&
+      policy.target_client_ids.includes(agent.id),
   );
   const clientBackups = backups.filter(
     (backup) => backup.client_id === agent.id,
@@ -4290,8 +4605,8 @@ function backupProtectionRecord(
     return {
       agent,
       detail: latestPolicyRun?.last_run_at
-        ? `Enabled policy last ran ${formatCompactTime(latestPolicyRun.last_run_at)}, but no usable backup artifact is recorded.`
-        : "Enabled policy exists, but no backup run has produced a usable artifact yet.",
+        ? `Automatic policy last ran ${formatCompactTime(latestPolicyRun.last_run_at)}, but no usable backup artifact is recorded.`
+        : "Automatic policy exists, but no backup run has produced a usable artifact yet.",
       expectedMs,
       latestBackup: null,
       latestUsableBackup: null,
@@ -4301,7 +4616,7 @@ function backupProtectionRecord(
 
   return {
     agent,
-    detail: "No enabled backup policy or backup request is recorded.",
+    detail: "No automatic backup policy or backup request is recorded.",
     expectedMs,
     latestBackup: null,
     latestUsableBackup: null,
@@ -4332,6 +4647,10 @@ function expectedBackupFreshnessMs(policies: BackupPolicyRecord[]): number {
     return DEFAULT_BACKUP_FRESHNESS_MS;
   }
   return Math.max(Math.min(...intervals) * 2, 60 * 60 * 1000);
+}
+
+function backupPolicyRunsAutomatically(policy: BackupPolicyRecord): boolean {
+  return policy.enabled && !policy.cadence_error;
 }
 
 function policyExpectedIntervalMs(policy: BackupPolicyRecord): number | null {

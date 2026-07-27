@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 use vpsman_common::PrivilegeAssertion;
 
@@ -73,6 +73,7 @@ pub(crate) struct BackupPolicyView {
     pub(crate) cron_expr: String,
     pub(crate) timezone: String,
     pub(crate) next_runs: Vec<String>,
+    pub(crate) cadence_error: Option<String>,
     pub(crate) catch_up_policy: String,
     pub(crate) catch_up_limit: i32,
     pub(crate) retry_delay_secs: i64,
@@ -130,6 +131,64 @@ pub(crate) struct CreateBackupPolicyRequest {
     pub(crate) confirmed: bool,
     #[serde(default)]
     pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+}
+
+fn deserialize_required_nullable_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UpdateBackupPolicyRequest {
+    pub(crate) name: String,
+    pub(crate) selector_expression: String,
+    pub(crate) target_client_ids: Vec<String>,
+    pub(crate) paths: Vec<String>,
+    pub(crate) include_config: bool,
+    pub(crate) follow_symlinks: bool,
+    pub(crate) missing_path_policy: BackupMissingPathPolicy,
+    pub(crate) retention_days: i32,
+    pub(crate) keep_last: i32,
+    #[serde(deserialize_with = "deserialize_required_nullable_string")]
+    pub(crate) rotation_generation: Option<String>,
+    pub(crate) cron_expr: String,
+    pub(crate) timezone: String,
+    pub(crate) enabled: bool,
+    pub(crate) catch_up_policy: String,
+    pub(crate) catch_up_limit: i32,
+    pub(crate) retry_delay_secs: i64,
+    pub(crate) max_failures: i32,
+    pub(crate) confirmed: bool,
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+}
+
+impl From<UpdateBackupPolicyRequest> for CreateBackupPolicyRequest {
+    fn from(request: UpdateBackupPolicyRequest) -> Self {
+        Self {
+            name: request.name,
+            selector_expression: request.selector_expression,
+            target_client_ids: request.target_client_ids,
+            paths: request.paths,
+            include_config: request.include_config,
+            follow_symlinks: request.follow_symlinks,
+            missing_path_policy: request.missing_path_policy,
+            retention_days: Some(request.retention_days),
+            keep_last: Some(request.keep_last),
+            rotation_generation: request.rotation_generation,
+            cron_expr: request.cron_expr,
+            timezone: request.timezone,
+            enabled: request.enabled,
+            catch_up_policy: request.catch_up_policy,
+            catch_up_limit: request.catch_up_limit,
+            retry_delay_secs: request.retry_delay_secs,
+            max_failures: request.max_failures,
+            confirmed: request.confirmed,
+            privilege_assertion: request.privilege_assertion,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

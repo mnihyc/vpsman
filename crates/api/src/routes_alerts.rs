@@ -399,22 +399,11 @@ pub(crate) async fn delete_fleet_alert_notification_channel(
         "fleet_alert_notification_channel_delete_confirmation_required",
         "fleet_alert_notification_channel_delete_review_invalid",
     )?;
-    let existing = state
-        .repo
-        .list_fleet_alert_notification_channels(1000, None, None, None, None)
-        .await?
-        .into_iter()
-        .find(|channel| channel.id == channel_id)
-        .ok_or_else(|| ApiError::not_found("fleet_alert_notification_channel_not_found"))?;
-    if existing.name != request.reviewed_name.trim() {
-        return Err(ApiError::conflict(
-            "fleet_alert_notification_channel_delete_review_stale",
-        ));
-    }
     state
         .repo
-        .delete_fleet_alert_notification_channel(channel_id, &operator)
-        .await?;
+        .delete_fleet_alert_notification_channel(channel_id, &request.reviewed_name, &operator)
+        .await
+        .map_err(fleet_alert_notification_channel_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -478,6 +467,9 @@ fn alert_notification_delivery_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
     if message.contains("preview_hash_mismatch") {
         return ApiError::conflict("fleet_alert_notification_preview_hash_mismatch");
+    }
+    if message.contains("fleet_alert_notification_dispatch_channel_limit_exceeded") {
+        return ApiError::conflict("fleet_alert_notification_dispatch_channel_limit_exceeded");
     }
     ApiError::from(error)
 }
@@ -883,6 +875,17 @@ fn fleet_alert_policy_error(error: anyhow::Error) -> ApiError {
     }
     if message.contains("notes are too long") {
         return ApiError::bad_request("fleet_alert_policy_notes_too_long");
+    }
+    ApiError::from(error)
+}
+
+fn fleet_alert_notification_channel_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("fleet_alert_notification_channel_not_found") {
+        return ApiError::not_found("fleet_alert_notification_channel_not_found");
+    }
+    if message.contains("fleet_alert_notification_channel_delete_review_stale") {
+        return ApiError::conflict("fleet_alert_notification_channel_delete_review_stale");
     }
     ApiError::from(error)
 }

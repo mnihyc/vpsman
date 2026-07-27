@@ -32,7 +32,8 @@ use crate::{
         BackupArtifactUploadSessionView, BackupArtifactView, BackupPolicyPruneRequest,
         BackupPolicyPruneResponse, BackupPolicyView, BackupRequestStatus, BackupRequestView,
         BulkResolveRequest, CreateBackupPolicyRequest, CreateBackupRequest, CreateScheduleRequest,
-        ListQuery, RecordBackupArtifactMetadataRequest, UploadBackupArtifactRequest, WsEvent,
+        ListQuery, RecordBackupArtifactMetadataRequest, UpdateBackupPolicyRequest,
+        UploadBackupArtifactRequest, WsEvent,
     },
     privilege::{
         verify_privilege_intent, JobPrivilegeIntent, JobPrivilegeIntentInput,
@@ -84,11 +85,12 @@ pub(crate) async fn list_backup_artifacts(
 pub(crate) async fn list_backup_policies(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<BackupPolicyView>>, ApiError> {
     let _operator = state
         .require_operator_scope(&headers, SCOPE_BACKUPS_READ)
         .await?;
-    Ok(Json(state.repo.list_backup_policies().await?))
+    Ok(Json(state.repo.list_backup_policies(&query).await?))
 }
 
 pub(crate) async fn create_backup_policy(
@@ -104,17 +106,57 @@ pub(crate) async fn create_backup_policy(
     }
     validate_create_backup_policy_request(&request)?;
     request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
-    verify_backup_policy_privilege(&state, &request, request.privilege_assertion.clone()).await?;
+    verify_backup_policy_privilege(
+        &state,
+        &request,
+        request.privilege_assertion.clone(),
+        "backup_policy.create",
+        None,
+    )
+    .await?;
     Ok((
         StatusCode::CREATED,
         Json(state.repo.create_backup_policy(request, &operator).await?),
     ))
 }
 
+pub(crate) async fn update_backup_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(schedule_id): Path<uuid::Uuid>,
+    Json(request): Json<UpdateBackupPolicyRequest>,
+) -> Result<Json<BackupPolicyView>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "backups:write")
+        .await?;
+    if !operator_has_scope(&operator.operator.scopes, "schedules:write") {
+        return Err(ApiError::forbidden("operator_scope_insufficient"));
+    }
+    let mut request = CreateBackupPolicyRequest::from(request);
+    validate_update_backup_policy_request(&request)?;
+    request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
+    verify_backup_policy_privilege(
+        &state,
+        &request,
+        request.privilege_assertion.clone(),
+        "backup_policy.update",
+        Some(schedule_id),
+    )
+    .await?;
+    let updated = state
+        .repo
+        .update_backup_policy(schedule_id, request, &operator)
+        .await?
+        .ok_or_else(|| ApiError::not_found("backup_policy_not_found"))?;
+    Ok(Json(updated))
+}
+
 async fn verify_backup_policy_privilege(
     state: &AppState,
     request: &CreateBackupPolicyRequest,
     assertion: Option<PrivilegeAssertion>,
+    action: &'static str,
+    schedule_id: Option<uuid::Uuid>,
 ) -> Result<(), ApiError> {
     let resolved_targets =
         resolved_backup_policy_targets(state, &request.target_client_ids).await?;
@@ -124,9 +166,10 @@ async fn verify_backup_policy_privilege(
     })?;
     let operation_payload_hash = payload_hash(&operation_payload);
     let command_type = job_command_type_label(&operation);
+    let schedule_id = schedule_id.map(|id| id.to_string());
     let privilege_intent = SchedulePrivilegeIntent::new(SchedulePrivilegeIntentInput {
-        action: "backup_policy.create",
-        schedule_id: None,
+        action,
+        schedule_id: schedule_id.as_deref(),
         name: &request.name,
         command_type,
         operation_payload_hash: &operation_payload_hash,
@@ -252,10 +295,35 @@ async fn backup_policy_prune_plan(
     state: &AppState,
     request: &BackupPolicyPruneRequest,
 ) -> Result<Vec<BackupPolicyPrunePlan>, ApiError> {
-    let mut policies = state.repo.list_backup_policies().await?;
-    if let Some(schedule_id) = request.schedule_id {
-        policies.retain(|policy| policy.schedule_id == schedule_id);
-    }
+    let policies = if let Some(schedule_id) = request.schedule_id {
+        vec![state
+            .repo
+            .backup_policy_by_schedule_id(schedule_id)
+            .await?
+            .ok_or_else(|| ApiError::bad_request("backup_policy_not_found"))?]
+    } else {
+        let policies = state
+            .repo
+            .list_backup_policies(&ListQuery {
+                limit: Some(1000),
+                ..ListQuery::default()
+            })
+            .await?;
+        let overflow = state
+            .repo
+            .list_backup_policies(&ListQuery {
+                limit: Some(1),
+                offset: Some(1000),
+                ..ListQuery::default()
+            })
+            .await?;
+        if !overflow.is_empty() {
+            return Err(ApiError::bad_request(
+                "backup_policy_prune_schedule_id_required_at_scale",
+            ));
+        }
+        policies
+    };
     if policies.is_empty() {
         return Err(ApiError::bad_request("backup_policy_not_found"));
     }
@@ -464,6 +532,7 @@ mod tests {
                 cron_expr: "0 3 * * *".to_string(),
                 timezone: "UTC".to_string(),
                 next_runs: Vec::new(),
+                cadence_error: None,
                 catch_up_policy: "skip_missed".to_string(),
                 catch_up_limit: 1,
                 retry_delay_secs: 120,
@@ -1178,6 +1247,20 @@ pub(crate) fn validate_create_backup_policy_request(
         validate_backup_policy_generation(rotation_generation)?;
     }
     Ok(())
+}
+
+pub(crate) fn validate_update_backup_policy_request(
+    request: &CreateBackupPolicyRequest,
+) -> Result<(), ApiError> {
+    if request.retention_days.is_none() {
+        return Err(ApiError::bad_request(
+            "backup_policy_retention_days_required",
+        ));
+    }
+    if request.keep_last.is_none() {
+        return Err(ApiError::bad_request("backup_policy_keep_last_required"));
+    }
+    validate_create_backup_policy_request(request)
 }
 
 pub(crate) fn validate_backup_artifact_metadata_request(

@@ -1,8 +1,11 @@
-use anyhow::Result;
+use anyhow::{ensure, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde_json::Value;
 use sqlx::{postgres::PgRow, PgPool, Row};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet, HashMap},
+};
 use uuid::Uuid;
 use vpsman_common::{
     file_transfer_session_status, is_file_transfer_command_type, is_file_transfer_session_event,
@@ -66,13 +69,7 @@ impl Repository {
                         })
                     })
                     .collect::<Vec<_>>();
-                outputs.sort_by(|left, right| {
-                    right
-                        .created_at
-                        .cmp(&left.created_at)
-                        .then_with(|| right.job_id.cmp(&left.job_id))
-                        .then_with(|| right.seq.cmp(&left.seq))
-                });
+                sort_file_transfer_outputs_newest(&mut outputs)?;
                 Ok(build_file_transfer_sessions(outputs, limit, session_id))
             }
             Self::Postgres(pool) => {
@@ -306,7 +303,69 @@ impl Repository {
         };
         let sessions =
             file_transfer_sessions_from_outputs(pool, Some(client_id), None, 200).await?;
-        for session in sessions {
+        if sessions.is_empty() {
+            return Ok(());
+        }
+        let session_ids = sessions
+            .iter()
+            .map(|session| session.session_id)
+            .collect::<Vec<_>>();
+        let mut tx = pool.begin().await?;
+        // Every writer of this derived per-client inventory goes through this
+        // refresh path. Serialize refreshes before locking the current rows so
+        // a concurrent first insert cannot bypass the same merge invariant.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(client_id)
+            .execute(&mut *tx)
+            .await?;
+        let existing_rows = sqlx::query(
+            r#"
+            SELECT
+                session_id,
+                client_id,
+                direction,
+                status,
+                path,
+                size_bytes,
+                progress_bytes,
+                progress_ratio,
+                sha256_hex,
+                chunk_size_bytes,
+                last_chunk_size_bytes,
+                last_chunk_sha256_hex,
+                rate_limit_kbps,
+                resumed,
+                last_event,
+                last_job_id,
+                last_command_type,
+                last_seq,
+                observed_at::text AS observed_at,
+                handoff_available,
+                handoff_object_key,
+                handoff_download_path
+            FROM file_transfer_sessions
+            WHERE client_id = $1
+              AND session_id = ANY($2)
+            FOR UPDATE
+            "#,
+        )
+        .bind(client_id)
+        .bind(&session_ids)
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut existing_by_session = existing_rows
+            .into_iter()
+            .map(|row| {
+                let session = file_transfer_session_from_row(row)?;
+                Ok((session.session_id, session))
+            })
+            .collect::<std::result::Result<HashMap<_, _>, sqlx::Error>>()?;
+        for incoming in sessions {
+            let session = if let Some(existing) = existing_by_session.remove(&incoming.session_id) {
+                merge_persisted_file_transfer_session(existing, incoming)?
+            } else {
+                incoming
+            };
             sqlx::query(
                 r#"
                 INSERT INTO file_transfer_sessions (
@@ -384,9 +443,10 @@ impl Repository {
             .bind(session.handoff_available)
             .bind(&session.handoff_object_key)
             .bind(&session.handoff_download_path)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
         }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -630,6 +690,124 @@ fn file_transfer_session_from_row(
     })
 }
 
+fn merge_persisted_file_transfer_session(
+    mut existing: FileTransferSessionView,
+    incoming: FileTransferSessionView,
+) -> Result<FileTransferSessionView> {
+    ensure!(
+        existing.client_id == incoming.client_id && existing.session_id == incoming.session_id,
+        "file transfer session merge identity mismatch"
+    );
+    let source_order = compare_file_transfer_sources(&incoming, &existing)?;
+    let incoming_source_is_newer = source_order != Ordering::Less;
+    let existing_progress = existing.progress_bytes;
+    let incoming_progress = incoming.progress_bytes;
+    let existing_is_terminal = matches!(existing.status.as_str(), "completed" | "aborted");
+    let incoming_is_terminal = matches!(incoming.status.as_str(), "completed" | "aborted");
+    let preserve_existing_lifecycle = (existing_is_terminal
+        && (!incoming_is_terminal || !incoming_source_is_newer))
+        || (!incoming_is_terminal && incoming_progress < existing_progress);
+
+    if incoming_source_is_newer {
+        if !incoming.path.is_empty() {
+            existing.path = incoming.path.clone();
+        }
+        existing.size_bytes = incoming.size_bytes.or(existing.size_bytes);
+        existing.sha256_hex = incoming.sha256_hex.clone().or(existing.sha256_hex.take());
+        existing.chunk_size_bytes = incoming.chunk_size_bytes.or(existing.chunk_size_bytes);
+        existing.rate_limit_kbps = incoming.rate_limit_kbps.or(existing.rate_limit_kbps);
+        existing.resumed = incoming.resumed.or(existing.resumed);
+    } else {
+        if existing.path.is_empty() && !incoming.path.is_empty() {
+            existing.path = incoming.path.clone();
+        }
+        existing.size_bytes = existing.size_bytes.or(incoming.size_bytes);
+        existing.sha256_hex = existing.sha256_hex.take().or(incoming.sha256_hex.clone());
+        existing.chunk_size_bytes = existing.chunk_size_bytes.or(incoming.chunk_size_bytes);
+        existing.rate_limit_kbps = existing.rate_limit_kbps.or(incoming.rate_limit_kbps);
+        existing.resumed = existing.resumed.or(incoming.resumed);
+    }
+
+    match incoming_progress.cmp(&existing_progress) {
+        Ordering::Greater => {
+            existing.last_chunk_size_bytes = incoming
+                .last_chunk_size_bytes
+                .or(existing.last_chunk_size_bytes);
+            existing.last_chunk_sha256_hex = incoming
+                .last_chunk_sha256_hex
+                .clone()
+                .or(existing.last_chunk_sha256_hex.take());
+        }
+        Ordering::Equal if incoming_source_is_newer => {
+            existing.last_chunk_size_bytes = incoming
+                .last_chunk_size_bytes
+                .or(existing.last_chunk_size_bytes);
+            existing.last_chunk_sha256_hex = incoming
+                .last_chunk_sha256_hex
+                .clone()
+                .or(existing.last_chunk_sha256_hex.take());
+        }
+        Ordering::Equal => {
+            existing.last_chunk_size_bytes = existing
+                .last_chunk_size_bytes
+                .or(incoming.last_chunk_size_bytes);
+            existing.last_chunk_sha256_hex = existing
+                .last_chunk_sha256_hex
+                .take()
+                .or(incoming.last_chunk_sha256_hex.clone());
+        }
+        Ordering::Less => {}
+    }
+    existing.progress_bytes = existing_progress.max(incoming_progress);
+    existing.progress_ratio = existing.size_bytes.and_then(|size| {
+        (size > 0).then(|| (existing.progress_bytes as f64 / size as f64).clamp(0.0, 1.0))
+    });
+
+    if !preserve_existing_lifecycle {
+        existing.direction = incoming.direction;
+        existing.status = incoming.status;
+        existing.last_event = incoming.last_event;
+        existing.last_job_id = incoming.last_job_id;
+        existing.last_command_type = incoming.last_command_type;
+        existing.last_seq = incoming.last_seq;
+        existing.observed_at = incoming.observed_at;
+    }
+
+    let handoff_available = existing.direction == "download"
+        && existing.status == "completed"
+        && existing.size_bytes.is_some()
+        && existing.sha256_hex.is_some();
+    existing.handoff_available = handoff_available;
+    existing.handoff_object_key = existing
+        .sha256_hex
+        .as_deref()
+        .filter(|_| handoff_available)
+        .map(|sha256_hex| {
+            file_transfer_handoff_object_key(&existing.client_id, existing.session_id, sha256_hex)
+        });
+    existing.handoff_download_path = handoff_available
+        .then(|| file_transfer_handoff_download_path(&existing.client_id, existing.session_id));
+    let (evidence_status, unavailable_reason) =
+        initial_handoff_evidence(&existing.direction, &existing.status, handoff_available);
+    existing.handoff_evidence_status = evidence_status.to_string();
+    existing.handoff_unavailable_reason = unavailable_reason;
+    Ok(existing)
+}
+
+fn compare_file_transfer_sources(
+    incoming: &FileTransferSessionView,
+    existing: &FileTransferSessionView,
+) -> Result<Ordering> {
+    let incoming_observed_at = crate::util::parse_timestamp_utc(&incoming.observed_at)
+        .context("incoming file transfer timestamp is invalid")?;
+    let existing_observed_at = crate::util::parse_timestamp_utc(&existing.observed_at)
+        .context("stored file transfer timestamp is invalid")?;
+    Ok(incoming_observed_at
+        .cmp(&existing_observed_at)
+        .then_with(|| incoming.last_job_id.cmp(&existing.last_job_id))
+        .then_with(|| incoming.last_seq.cmp(&existing.last_seq)))
+}
+
 #[derive(Clone, Debug)]
 struct FileTransferStatusOutput {
     job_id: Uuid,
@@ -679,25 +857,32 @@ pub(crate) struct FileTransferDownloadHandoffChunk {
 #[derive(Clone, Debug)]
 struct FileTransferAggregate {
     latest: FileTransferEvent,
+    progress_bytes: i64,
     path: String,
     size_bytes: Option<i64>,
     sha256_hex: Option<String>,
     chunk_size_bytes: Option<i64>,
     last_chunk_size_bytes: Option<i64>,
     last_chunk_sha256_hex: Option<String>,
+    last_chunk_progress_bytes: Option<i64>,
     rate_limit_kbps: Option<i64>,
     resumed: Option<bool>,
 }
 
 impl FileTransferAggregate {
     fn new(event: FileTransferEvent) -> Self {
+        let last_chunk_progress_bytes = (event.last_chunk_size_bytes.is_some()
+            || event.last_chunk_sha256_hex.is_some())
+        .then_some(event.progress_bytes);
         Self {
+            progress_bytes: event.progress_bytes,
             path: event.path.clone(),
             size_bytes: event.size_bytes,
             sha256_hex: event.sha256_hex.clone(),
             chunk_size_bytes: event.chunk_size_bytes,
             last_chunk_size_bytes: event.last_chunk_size_bytes,
             last_chunk_sha256_hex: event.last_chunk_sha256_hex.clone(),
+            last_chunk_progress_bytes,
             rate_limit_kbps: event.rate_limit_kbps,
             resumed: event.resumed,
             latest: event,
@@ -705,25 +890,49 @@ impl FileTransferAggregate {
     }
 
     fn merge_older(&mut self, event: FileTransferEvent) {
+        let replacement =
+            file_transfer_event_advances_lifecycle(&self.latest, &event).then(|| event.clone());
         if self.path.is_empty() {
-            self.path = event.path;
+            self.path = event.path.clone();
         }
         self.size_bytes = self.size_bytes.or(event.size_bytes);
-        self.sha256_hex = self.sha256_hex.take().or(event.sha256_hex);
+        self.sha256_hex = self.sha256_hex.take().or(event.sha256_hex.clone());
         self.chunk_size_bytes = self.chunk_size_bytes.or(event.chunk_size_bytes);
-        self.last_chunk_size_bytes = self.last_chunk_size_bytes.or(event.last_chunk_size_bytes);
-        self.last_chunk_sha256_hex = self
-            .last_chunk_sha256_hex
-            .take()
-            .or(event.last_chunk_sha256_hex);
+        if event.last_chunk_size_bytes.is_some() || event.last_chunk_sha256_hex.is_some() {
+            match self.last_chunk_progress_bytes {
+                Some(progress) if event.progress_bytes == progress => {
+                    self.last_chunk_size_bytes =
+                        self.last_chunk_size_bytes.or(event.last_chunk_size_bytes);
+                    self.last_chunk_sha256_hex = self
+                        .last_chunk_sha256_hex
+                        .take()
+                        .or(event.last_chunk_sha256_hex.clone());
+                }
+                None => {
+                    self.last_chunk_size_bytes = event.last_chunk_size_bytes;
+                    self.last_chunk_sha256_hex = event.last_chunk_sha256_hex.clone();
+                    self.last_chunk_progress_bytes = Some(event.progress_bytes);
+                }
+                Some(progress) if event.progress_bytes > progress => {
+                    self.last_chunk_size_bytes = event.last_chunk_size_bytes;
+                    self.last_chunk_sha256_hex = event.last_chunk_sha256_hex.clone();
+                    self.last_chunk_progress_bytes = Some(event.progress_bytes);
+                }
+                Some(_) => {}
+            }
+        }
         self.rate_limit_kbps = self.rate_limit_kbps.or(event.rate_limit_kbps);
         self.resumed = self.resumed.or(event.resumed);
+        self.progress_bytes = self.progress_bytes.max(event.progress_bytes);
+        if let Some(replacement) = replacement {
+            self.latest = replacement;
+        }
     }
 
     fn into_view(self) -> FileTransferSessionView {
         let progress_ratio = self.size_bytes.and_then(|size| {
             if size > 0 {
-                Some((self.latest.progress_bytes as f64 / size as f64).clamp(0.0, 1.0))
+                Some((self.progress_bytes as f64 / size as f64).clamp(0.0, 1.0))
             } else {
                 None
             }
@@ -743,7 +952,7 @@ impl FileTransferAggregate {
             status: self.latest.status.to_string(),
             path: self.path,
             size_bytes: self.size_bytes,
-            progress_bytes: self.latest.progress_bytes,
+            progress_bytes: self.progress_bytes,
             progress_ratio,
             sha256_hex: self.sha256_hex,
             chunk_size_bytes: self.chunk_size_bytes,
@@ -780,6 +989,35 @@ impl FileTransferAggregate {
             self.latest.session_id,
         ))
     }
+}
+
+fn file_transfer_event_advances_lifecycle(
+    current: &FileTransferEvent,
+    candidate: &FileTransferEvent,
+) -> bool {
+    if matches!(current.status, "completed" | "aborted") {
+        return false;
+    }
+    matches!(candidate.status, "completed" | "aborted")
+        || candidate.progress_bytes > current.progress_bytes
+}
+
+fn sort_file_transfer_outputs_newest(outputs: &mut [FileTransferStatusOutput]) -> Result<()> {
+    for output in outputs.iter() {
+        crate::util::parse_timestamp_utc(&output.created_at)
+            .context("file transfer source timestamp is invalid")?;
+    }
+    outputs.sort_by(|left, right| {
+        crate::util::parse_timestamp_utc(&right.created_at)
+            .expect("file transfer timestamps were validated before sorting")
+            .cmp(
+                &crate::util::parse_timestamp_utc(&left.created_at)
+                    .expect("file transfer timestamps were validated before sorting"),
+            )
+            .then_with(|| right.job_id.cmp(&left.job_id))
+            .then_with(|| right.seq.cmp(&left.seq))
+    });
+    Ok(())
 }
 
 fn build_file_transfer_sessions(
@@ -1147,8 +1385,10 @@ fn set_handoff_evidence(
 mod tests {
     use super::{
         build_file_transfer_sessions, file_transfer_handoff_download_path,
-        file_transfer_handoff_object_key, FileTransferStatusOutput,
+        file_transfer_handoff_object_key, merge_persisted_file_transfer_session,
+        FileTransferStatusOutput,
     };
+    use crate::model_file_transfer::FileTransferSessionView;
     use uuid::Uuid;
 
     #[test]
@@ -1224,6 +1464,186 @@ mod tests {
         assert_eq!(session.rate_limit_kbps, Some(1000));
         assert_eq!(session.last_job_id, commit_job);
         assert_eq!(session.last_event, "file_transfer_commit");
+    }
+
+    #[test]
+    fn delayed_lower_progress_event_cannot_regress_transfer_lifecycle() {
+        let session_id = Uuid::new_v4();
+        let delayed_job = Uuid::new_v4();
+        let advanced_job = Uuid::new_v4();
+        let commit_job = Uuid::new_v4();
+        let advanced_hash = "a".repeat(64);
+        let outputs = vec![
+            status_output(
+                delayed_job,
+                "edge-a",
+                0,
+                "400",
+                "file_transfer_chunk",
+                "file_transfer_chunk_ack",
+                serde_json::json!({
+                    "type": "file_transfer_chunk_ack",
+                    "session_id": session_id,
+                    "path": "/opt/app.bin",
+                    "next_offset": 4,
+                    "size_bytes": 8,
+                    "extra": {
+                        "ack_size_bytes": 4,
+                        "chunk_sha256_hex": "d".repeat(64)
+                    }
+                }),
+            ),
+            status_output(
+                advanced_job,
+                "edge-a",
+                0,
+                "300",
+                "file_transfer_chunk",
+                "file_transfer_chunk_ack",
+                serde_json::json!({
+                    "type": "file_transfer_chunk_ack",
+                    "session_id": session_id,
+                    "path": "/opt/app.bin",
+                    "next_offset": 8,
+                    "size_bytes": 8,
+                    "extra": {
+                        "ack_size_bytes": 4,
+                        "chunk_sha256_hex": advanced_hash.clone()
+                    }
+                }),
+            ),
+            status_output(
+                commit_job,
+                "edge-a",
+                0,
+                "200",
+                "file_transfer_commit",
+                "file_transfer_commit",
+                serde_json::json!({
+                    "type": "file_transfer_commit",
+                    "session_id": session_id,
+                    "path": "/opt/app.bin",
+                    "next_offset": 8,
+                    "size_bytes": 8,
+                    "extra": {"sha256_hex": "b".repeat(64)}
+                }),
+            ),
+        ];
+
+        let sessions = build_file_transfer_sessions(outputs, 20, None);
+
+        let session = &sessions[0];
+        assert_eq!(session.status, "completed");
+        assert_eq!(session.progress_bytes, 8);
+        assert_eq!(session.progress_ratio, Some(1.0));
+        assert_eq!(session.last_chunk_size_bytes, Some(4));
+        assert_eq!(
+            session.last_chunk_sha256_hex.as_deref(),
+            Some(advanced_hash.as_str())
+        );
+        assert_eq!(session.last_job_id, commit_job);
+        assert_eq!(session.last_event, "file_transfer_commit");
+    }
+
+    #[test]
+    fn persisted_merge_keeps_newer_metadata_and_terminal_lifecycle() {
+        let session_id = Uuid::new_v4();
+        let existing_job = Uuid::new_v4();
+        let incoming_job = Uuid::new_v4();
+        let mut existing = persisted_session(
+            session_id,
+            "completed",
+            5,
+            100,
+            "new-hash",
+            "2026-07-01T00:00:00Z",
+            existing_job,
+        );
+        existing.handoff_available = true;
+        existing.handoff_object_key = Some("old-key".to_string());
+        existing.handoff_download_path = Some("old-path".to_string());
+        let mut incoming = persisted_session(
+            session_id,
+            "aborted",
+            10,
+            80,
+            "stale-hash",
+            "2026-06-30T23:59:59Z",
+            incoming_job,
+        );
+        incoming.last_chunk_size_bytes = Some(5);
+        incoming.last_chunk_sha256_hex = Some("latest-range-hash".to_string());
+
+        let merged = merge_persisted_file_transfer_session(existing, incoming).unwrap();
+
+        assert_eq!(merged.status, "completed");
+        assert_eq!(merged.last_job_id, existing_job);
+        assert_eq!(merged.progress_bytes, 10);
+        assert_eq!(merged.size_bytes, Some(100));
+        assert_eq!(merged.sha256_hex.as_deref(), Some("new-hash"));
+        assert_eq!(merged.last_chunk_size_bytes, Some(5));
+        assert_eq!(
+            merged.last_chunk_sha256_hex.as_deref(),
+            Some("latest-range-hash")
+        );
+        assert!(merged.handoff_available);
+    }
+
+    #[test]
+    fn persisted_merge_accepts_newer_terminal_state_and_clears_handoff() {
+        let session_id = Uuid::new_v4();
+        let existing = persisted_session(
+            session_id,
+            "completed",
+            10,
+            100,
+            "completed-hash",
+            "2026-07-01T00:00:00Z",
+            Uuid::new_v4(),
+        );
+        let incoming_job = Uuid::new_v4();
+        let incoming = persisted_session(
+            session_id,
+            "aborted",
+            10,
+            100,
+            "aborted-hash",
+            "2026-07-01T00:00:00.1Z",
+            incoming_job,
+        );
+
+        let merged = merge_persisted_file_transfer_session(existing, incoming).unwrap();
+
+        assert_eq!(merged.status, "aborted");
+        assert_eq!(merged.last_job_id, incoming_job);
+        assert!(!merged.handoff_available);
+        assert!(merged.handoff_object_key.is_none());
+        assert!(merged.handoff_download_path.is_none());
+    }
+
+    #[test]
+    fn persisted_merge_rejects_invalid_source_timestamps() {
+        let session_id = Uuid::new_v4();
+        let existing = persisted_session(
+            session_id,
+            "started",
+            0,
+            100,
+            "hash",
+            "2026-07-01T00:00:00Z",
+            Uuid::new_v4(),
+        );
+        let incoming = persisted_session(
+            session_id,
+            "transferring",
+            1,
+            100,
+            "hash",
+            "not-a-timestamp",
+            Uuid::new_v4(),
+        );
+
+        assert!(merge_persisted_file_transfer_session(existing, incoming).is_err());
     }
 
     #[test]
@@ -1345,6 +1765,54 @@ mod tests {
             data: serde_json::to_vec(&value).unwrap(),
             created_at: created_at.to_string(),
             command_type: command_type.to_string(),
+        }
+    }
+
+    fn persisted_session(
+        session_id: Uuid,
+        status: &str,
+        progress_bytes: i64,
+        size_bytes: i64,
+        sha256_hex: &str,
+        observed_at: &str,
+        last_job_id: Uuid,
+    ) -> FileTransferSessionView {
+        FileTransferSessionView {
+            session_id,
+            client_id: "edge-a".to_string(),
+            direction: "download".to_string(),
+            status: status.to_string(),
+            path: "/var/lib/archive.bin".to_string(),
+            size_bytes: Some(size_bytes),
+            progress_bytes,
+            progress_ratio: Some((progress_bytes as f64 / size_bytes as f64).clamp(0.0, 1.0)),
+            sha256_hex: Some(sha256_hex.to_string()),
+            chunk_size_bytes: Some(64),
+            last_chunk_size_bytes: None,
+            last_chunk_sha256_hex: None,
+            rate_limit_kbps: Some(1000),
+            resumed: Some(false),
+            last_event: match status {
+                "completed" => "file_transfer_download_chunk",
+                "aborted" => "file_transfer_abort",
+                "transferring" => "file_transfer_download_chunk",
+                _ => "file_transfer_download_start",
+            }
+            .to_string(),
+            last_job_id,
+            last_command_type: match status {
+                "aborted" => "file_transfer_abort",
+                "transferring" | "completed" => "file_transfer_download_chunk",
+                _ => "file_transfer_download_start",
+            }
+            .to_string(),
+            last_seq: 0,
+            observed_at: observed_at.to_string(),
+            handoff_available: status == "completed",
+            handoff_evidence_status: "not_completed".to_string(),
+            handoff_unavailable_reason: None,
+            handoff_object_key: None,
+            handoff_download_path: None,
         }
     }
 }

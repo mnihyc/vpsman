@@ -10,9 +10,9 @@ use uuid::Uuid;
 use vpsman_common::{
     default_webhook_message, expression_matches, expression_referenced_events,
     expression_referenced_roots, parse_expression, payload_hash, render_template_with_limit,
-    ExpressionContext, VpsMetadata, WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED,
-    WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED, WEBHOOK_RULE_DELIVERY_STATUS_FAILED,
-    WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
+    validate_template, Expression, ExpressionContext, VpsMetadata,
+    WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED, WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED,
+    WEBHOOK_RULE_DELIVERY_STATUS_FAILED, WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
 };
 use vpsman_server_core::prepare_webhook_target;
 
@@ -26,6 +26,7 @@ const RETRY_BACKOFF_SECS: [i64; 3] = [60, 5 * 60, 30 * 60];
 const WEBHOOK_SIGNATURE_HEADER: &str = "X-Vpsman-Webhook-Signature";
 const WEBHOOK_DELIVERY_HEADER: &str = "X-Vpsman-Webhook-Delivery";
 const WEBHOOK_EVENT_HEADER: &str = "X-Vpsman-Webhook-Event";
+const RULE_CONFIGURATION_EVENT_KIND: &str = "webhook.rule_configuration";
 const EVENT_EXPRESSION_ROOTS: [&str; 9] = [
     "server",
     "job",
@@ -222,7 +223,7 @@ pub(crate) async fn process_webhook_rules(
     })
 }
 
-async fn materialize_interval_events(
+pub(crate) async fn materialize_interval_events(
     pool: &PgPool,
     config: WebhookRuleWorkerConfig,
 ) -> Result<usize> {
@@ -231,10 +232,28 @@ async fn materialize_interval_events(
     if rules.is_empty() {
         return Ok(0);
     }
+    let mut referenced_events = std::collections::HashSet::new();
+    let mut invalid_rules = Vec::new();
+    for rule in &rules {
+        match validated_rule_expression(rule) {
+            Ok(expression) => referenced_events.extend(expression_referenced_events(&expression)),
+            Err(error) => invalid_rules.push((rule, format_delivery_error(&error))),
+        }
+    }
+
     let mut materialized = 0_usize;
+    if !invalid_rules.is_empty() {
+        let mut tx = pool.begin().await?;
+        for (rule, error) in invalid_rules {
+            if insert_rule_materialization_failure(&mut tx, rule, None, &error).await? {
+                materialized += 1;
+            }
+        }
+        tx.commit().await?;
+    }
     for &(event_kind, bucket_secs) in INTERVAL_EVENTS {
         let event_id = format!("{event_kind}:{}", now - now.rem_euclid(bucket_secs));
-        if !rules_reference_event(&rules, event_kind)? {
+        if !referenced_events.contains(event_kind) {
             continue;
         }
         if insert_webhook_event(
@@ -332,17 +351,15 @@ fn next_enabled_rule_cursor(page: &[RuleRow], page_limit: usize) -> Option<Uuid>
         .flatten()
 }
 
-fn rules_reference_event(rules: &[RuleRow], event_kind: &str) -> Result<bool> {
-    let event_kind = event_kind.to_ascii_lowercase();
-    for rule in rules {
-        let expression = parse_expression(&rule.expression)
-            .map_err(anyhow::Error::msg)?
-            .context("webhook rule expression is empty")?;
-        if expression_referenced_events(&expression).contains(&event_kind) {
-            return Ok(true);
-        }
+fn validated_rule_expression(rule: &RuleRow) -> Result<Expression> {
+    let expression = parse_expression(&rule.expression)
+        .map_err(|error| anyhow::anyhow!("invalid webhook rule expression: {error}"))?
+        .context("webhook rule expression is empty")?;
+    if !rule.body_template.trim().is_empty() {
+        validate_template(&rule.body_template)
+            .map_err(|error| anyhow::anyhow!("invalid webhook rule template: {error}"))?;
     }
-    Ok(false)
+    Ok(expression)
 }
 
 async fn list_visible_vps(tx: &mut Transaction<'_, Postgres>) -> Result<Vec<VpsRow>> {
@@ -499,7 +516,7 @@ pub(crate) async fn insert_webhook_event_in_tx(
     Ok(false)
 }
 
-async fn process_webhook_events(
+pub(crate) async fn process_webhook_events(
     pool: &PgPool,
     config: WebhookRuleWorkerConfig,
 ) -> Result<(usize, usize)> {
@@ -535,6 +552,18 @@ async fn process_webhook_events(
     let rules = list_enabled_rules_in_tx(&mut tx, config.materialize_limit).await?;
     let vps_rows = list_visible_vps(&mut tx).await?;
     let mut inserted = 0_usize;
+    let mut validated_rules = Vec::with_capacity(rules.len());
+    for rule in &rules {
+        match validated_rule_expression(rule) {
+            Ok(expression) => validated_rules.push((rule, expression)),
+            Err(error) => {
+                let error = format_delivery_error(&error);
+                if insert_rule_materialization_failure(&mut tx, rule, None, &error).await? {
+                    inserted += 1;
+                }
+            }
+        }
+    }
     let mut skipped_legacy_manual_events = Vec::new();
     for row in rows {
         let event = event_from_row(row)?;
@@ -550,13 +579,22 @@ async fn process_webhook_events(
                 .await?;
             continue;
         }
-        for rule in &rules {
-            let candidates = event_candidate_for_rule(rule, &event, &vps_rows)?;
-            let Some(candidate) = candidates else {
-                continue;
-            };
-            if insert_delivery_candidate(&mut tx, &candidate).await? {
-                inserted += 1;
+        for (rule, expression) in &validated_rules {
+            match event_candidate_for_validated_rule(rule, expression, &event, &vps_rows) {
+                Ok(Some(candidate)) => {
+                    if insert_delivery_candidate(&mut tx, &candidate).await? {
+                        inserted += 1;
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let error = format_delivery_error(&error);
+                    if insert_rule_materialization_failure(&mut tx, rule, Some(&event), &error)
+                        .await?
+                    {
+                        inserted += 1;
+                    }
+                }
             }
         }
         sqlx::query("UPDATE webhook_events SET processed_at = now() WHERE id = $1")
@@ -634,14 +672,22 @@ fn delivery_candidate_for_rule(
     )
 }
 
+#[cfg(test)]
 fn event_candidate_for_rule(
     rule: &RuleRow,
     event: &EventRow,
     vps_rows: &[VpsRow],
 ) -> Result<Option<DeliveryCandidate>> {
-    let expression = parse_expression(&rule.expression)
-        .map_err(anyhow::Error::msg)?
-        .context("webhook rule expression is empty")?;
+    let expression = validated_rule_expression(rule)?;
+    event_candidate_for_validated_rule(rule, &expression, event, vps_rows)
+}
+
+fn event_candidate_for_validated_rule(
+    rule: &RuleRow,
+    expression: &Expression,
+    event: &EventRow,
+    vps_rows: &[VpsRow],
+) -> Result<Option<DeliveryCandidate>> {
     let subject_ids = event
         .subject_client_ids
         .iter()
@@ -652,17 +698,17 @@ fn event_candidate_for_rule(
         .filter(|vps| subject_ids.is_empty() || subject_ids.contains(&vps.id))
         .filter(|vps| {
             let context = expression_context_for_event(vps, event);
-            expression_matches(&context, &expression)
+            expression_matches(&context, expression)
         })
         .cloned()
         .collect::<Vec<_>>();
     if matched_vps.is_empty() {
         return Ok(None);
     }
-    let referenced_roots = expression_referenced_roots(&expression)
+    let referenced_roots = expression_referenced_roots(expression)
         .into_iter()
         .collect::<Vec<_>>();
-    let referenced_events = expression_referenced_events(&expression)
+    let referenced_events = expression_referenced_events(expression)
         .into_iter()
         .collect::<Vec<_>>();
     let mut payload = json!({
@@ -869,6 +915,138 @@ async fn insert_delivery_candidate(
     .execute(&mut **tx)
     .await?;
     Ok(inserted.rows_affected() > 0)
+}
+
+async fn insert_rule_materialization_failure(
+    tx: &mut Transaction<'_, Postgres>,
+    rule: &RuleRow,
+    event: Option<&EventRow>,
+    error: &str,
+) -> Result<bool> {
+    let rule_enabled = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM webhook_rules WHERE id = $1 AND enabled = TRUE FOR UPDATE",
+    )
+    .bind(rule.id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .is_some();
+    if !rule_enabled {
+        return Ok(false);
+    }
+
+    let error = truncate_error(error);
+    let (event_kind, event_id, occurred_at_unix, actor_id, source_event) = match event {
+        Some(event) => (
+            event.kind.clone(),
+            event.event_id.clone(),
+            event.occurred_at_unix.max(0),
+            event.actor_id.or(rule.actor_id),
+            Some(json!({
+                "kind": &event.kind,
+                "id": &event.event_id,
+                "predicates": &event.event_predicates,
+                "occurred_at_unix": event.occurred_at_unix,
+            })),
+        ),
+        None => (
+            RULE_CONFIGURATION_EVENT_KIND.to_string(),
+            rule_configuration_failure_event_id(rule),
+            Utc::now().timestamp().max(0),
+            rule.actor_id,
+            None,
+        ),
+    };
+    let payload = json!({
+        "schema": "vpsman.webhook_rule.materialization_failure.v1",
+        "rule": {
+            "id": rule.id,
+            "name": &rule.name,
+            "expression": &rule.expression,
+        },
+        "event": source_event,
+        "failure": {
+            "phase": if event.is_some() { "event_materialization" } else { "configuration_validation" },
+            "error": &error,
+        },
+    });
+    let dedupe_fingerprint = json!({
+        "rule_id": rule.id,
+        "event_kind": &event_kind,
+        "event_id": &event_id,
+        "failure": "materialization",
+    });
+    let dedupe_hash = payload_hash(dedupe_fingerprint.to_string().as_bytes());
+    let delivery_id = Uuid::new_v4();
+    let matched_vps = Vec::<VpsRow>::new();
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO webhook_rule_deliveries (
+            id,
+            rule_id,
+            rule_name,
+            event_kind,
+            event_id,
+            status,
+            target,
+            dedupe_key,
+            payload,
+            matched_vps,
+            message,
+            error,
+            cooldown_until_unix,
+            attempt_count,
+            next_attempt_at,
+            last_attempt_at,
+            actor_id,
+            delivered_at
+        )
+        VALUES ($1, $2, $3, $4, $5, 'permanently_failed', $6, $7, $8, $9, $10, $11, $12, 0, NULL, NULL, $13, NULL)
+        ON CONFLICT (rule_id, event_id) DO NOTHING
+        "#,
+    )
+    .bind(delivery_id)
+    .bind(rule.id)
+    .bind(&rule.name)
+    .bind(&event_kind)
+    .bind(&event_id)
+    .bind(&rule.target)
+    .bind(format!("webhook-rule-failure:{}", &dedupe_hash[..32]))
+    .bind(SqlJson(&payload))
+    .bind(SqlJson(&matched_vps))
+    .bind("Webhook rule delivery could not be materialized")
+    .bind(&error)
+    .bind(occurred_at_unix)
+    .bind(actor_id)
+    .execute(&mut **tx)
+    .await?;
+    if inserted.rows_affected() == 0 {
+        return Ok(false);
+    }
+
+    let delivery = DeliveryRow {
+        id: delivery_id,
+        rule_id: rule.id,
+        actor_id,
+        rule_name: rule.name.clone(),
+        event_kind,
+        event_id,
+        target: rule.target.clone(),
+        signing_secret: None,
+        payload,
+        attempt_count: 0,
+    };
+    insert_permanent_failure_alert(tx, &delivery, Some(error)).await?;
+    Ok(true)
+}
+
+fn rule_configuration_failure_event_id(rule: &RuleRow) -> String {
+    let fingerprint = json!({
+        "rule_id": rule.id,
+        "expression": &rule.expression,
+        "body_template": &rule.body_template,
+    });
+    let hash = payload_hash(fingerprint.to_string().as_bytes());
+    format!("webhook-rule-configuration:{}", &hash[..32])
 }
 
 fn delivery_candidate_is_suppressed(
@@ -1559,7 +1737,7 @@ mod tests {
             body_template: String::new(),
             cooldown_secs: 30,
         };
-        let first_page = vec![rule(1, "tag:edge"), rule(2, "status = online")];
+        let first_page = vec![rule(1, "(tag:edge"), rule(2, "status = online")];
         let final_page = vec![rule(3, "interval.30sec && tag:edge")];
 
         assert_eq!(
@@ -1569,7 +1747,62 @@ mod tests {
         assert_eq!(next_enabled_rule_cursor(&final_page, 2), None);
 
         let all_rules = first_page.into_iter().chain(final_page).collect::<Vec<_>>();
-        assert!(rules_reference_event(&all_rules, "interval.30sec").unwrap());
+        assert!(all_rules.iter().any(|rule| {
+            validated_rule_expression(rule).is_ok_and(|expression| {
+                expression_referenced_events(&expression).contains("interval.30sec")
+            })
+        }));
+    }
+
+    #[test]
+    fn persisted_rule_validation_reports_expression_and_template_errors() {
+        let rule = |expression: &str, body_template: &str| RuleRow {
+            id: Uuid::from_u128(1),
+            actor_id: None,
+            name: "rule".to_string(),
+            expression: expression.to_string(),
+            target: "https://hooks.acme.com/vpsman".to_string(),
+            body_template: body_template.to_string(),
+            cooldown_secs: 30,
+        };
+
+        let expression_error = validated_rule_expression(&rule("(tag:edge", ""))
+            .unwrap_err()
+            .to_string();
+        assert!(expression_error.starts_with("invalid webhook rule expression:"));
+
+        let template_error =
+            validated_rule_expression(&rule("tag:edge", "[if alert.open]missing end"))
+                .unwrap_err()
+                .to_string();
+        assert!(template_error.starts_with("invalid webhook rule template:"));
+
+        assert!(validated_rule_expression(&rule(
+            "interval.30sec && tag:edge",
+            "{rule.name} {event.kind}"
+        ))
+        .is_ok());
+    }
+
+    #[test]
+    fn configuration_failure_identity_changes_only_with_material_configuration() {
+        let mut rule = RuleRow {
+            id: Uuid::from_u128(1),
+            actor_id: None,
+            name: "rule".to_string(),
+            expression: "(tag:edge".to_string(),
+            target: "https://hooks.acme.com/vpsman".to_string(),
+            body_template: String::new(),
+            cooldown_secs: 30,
+        };
+        let original = rule_configuration_failure_event_id(&rule);
+        assert_eq!(original, rule_configuration_failure_event_id(&rule));
+
+        rule.name = "renamed rule".to_string();
+        assert_eq!(original, rule_configuration_failure_event_id(&rule));
+
+        rule.expression = "(tag:core".to_string();
+        assert_ne!(original, rule_configuration_failure_event_id(&rule));
     }
 
     #[test]

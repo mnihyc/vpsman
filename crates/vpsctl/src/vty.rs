@@ -129,7 +129,11 @@ Agent updates:
   agent-update-releases | agent-update-release-latest | agent-update-release-record
 
 Backups, restores, and migrations:
-  backups | backup-policies | backup-artifacts | backup-policy-upsert
+  backups | backup-policies [--limit <1-1000>] [--offset <0-100000>]
+  backup-artifacts | backup-policy-upsert
+  backup-policy-upsert <name> [--schedule-id <uuid>] [--retention-days <n>]
+    [--keep-last <n>] [--rotation-generation <id> | --clear-rotation-generation]
+    <target ...> --confirmed
   backup-policy-prune | backup-request | backup-run
   backup-artifact-record | backup-artifact-upload | backup-artifact-upload-chunked
   backup-artifact-handoff

@@ -14,6 +14,7 @@ pub(crate) struct FleetAlertNotificationChannelView {
     pub(crate) target: String,
     pub(crate) cooldown_secs: i64,
     pub(crate) enabled: bool,
+    pub(crate) configuration_error: Option<String>,
     pub(crate) notes: Option<String>,
     pub(crate) actor_id: Option<Uuid>,
     pub(crate) created_at: String,

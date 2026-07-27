@@ -98,8 +98,7 @@ fn validate_operator_scope(role: &str, scope: &str) -> Result<(), ApiError> {
 }
 
 pub(crate) fn hash_operator_password(password: &str) -> Result<String> {
-    let mut salt = [0_u8; 16];
-    rand::thread_rng().fill_bytes(&mut salt);
+    let salt = rand::random::<[u8; 16]>();
     let digest = argon2_digest(password.as_bytes(), &salt)?;
     Ok(format!(
         "argon2id$v=19$m={ARGON2_MEMORY_KIB},t={ARGON2_TIME_COST},p={ARGON2_PARALLELISM}${}${}",

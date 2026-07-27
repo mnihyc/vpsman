@@ -20,6 +20,7 @@ import {
 import { ConsoleDetailPanel } from "../../components/ConsoleDetailPanel";
 import { ConsoleActionMenu } from "../../components/ConsoleLayout";
 import { jobTargetStatusBadgeClass } from "../../jobStatusPresentation";
+import { formatLowerBoundCount } from "../../constants";
 import { usePanelDisplaySettings } from "../../panelDisplay";
 import {
   beginSubmission,
@@ -57,6 +58,7 @@ export function RolloutsPanel({
   agents,
   jobs,
   rollouts: initialRollouts,
+  rolloutsTruncated,
   onCancelJob,
   onLoadRollouts,
   onOpenJobDetails,
@@ -65,6 +67,7 @@ export function RolloutsPanel({
   agents: AgentView[];
   jobs: JobHistoryRecord[];
   rollouts: JobRolloutRecord[];
+  rolloutsTruncated: boolean;
   onCancelJob: (jobId: string, reason: string) => Promise<CancelJobResponse>;
   onLoadRollouts: () => Promise<JobRolloutRecord[]>;
   onOpenJobDetails: (jobId: string) => void;
@@ -509,24 +512,24 @@ export function RolloutsPanel({
           className="processSupervisorSummaryStrip"
         >
           <span>
-            <strong>{activeCount}</strong>
-            <small>Running</small>
+            <strong>{formatLowerBoundCount(activeCount, rolloutsTruncated)}</strong>
+            <small>{rolloutsTruncated ? "Running in loaded page" : "Running"}</small>
           </span>
           <span className={pausedCount > 0 ? "attention" : undefined}>
-            <strong>{pausedCount}</strong>
-            <small>Paused</small>
+            <strong>{formatLowerBoundCount(pausedCount, rolloutsTruncated)}</strong>
+            <small>{rolloutsTruncated ? "Paused in loaded page" : "Paused"}</small>
           </span>
           <span className={failurePausedCount > 0 ? "attention" : undefined}>
-            <strong>{failurePausedCount}</strong>
-            <small>Safety review</small>
+            <strong>{formatLowerBoundCount(failurePausedCount, rolloutsTruncated)}</strong>
+            <small>{rolloutsTruncated ? "Safety review in loaded page" : "Safety review"}</small>
           </span>
           <span>
-            <strong>{completedCount}</strong>
-            <small>Completed</small>
+            <strong>{formatLowerBoundCount(completedCount, rolloutsTruncated)}</strong>
+            <small>{rolloutsTruncated ? "Completed in loaded page" : "Completed"}</small>
           </span>
           <span className={abortedCount > 0 ? "attention" : undefined}>
-            <strong>{abortedCount}</strong>
-            <small>Aborted</small>
+            <strong>{formatLowerBoundCount(abortedCount, rolloutsTruncated)}</strong>
+            <small>{rolloutsTruncated ? "Aborted in loaded page" : "Aborted"}</small>
           </span>
         </div>
 
@@ -577,6 +580,7 @@ export function RolloutsPanel({
           }}
           rowActions={actions}
           rows={rollouts}
+          rowsTruncated={rolloutsTruncated}
           searchPlaceholder="Search job, operation, state, or pause reason"
           selectable={false}
           singleExpandedRow

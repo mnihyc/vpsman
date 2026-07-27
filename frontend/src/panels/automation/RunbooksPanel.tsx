@@ -8,6 +8,7 @@ import {
   Search,
 } from "lucide-react";
 import { useMemo, useState } from "react";
+import { formatLowerBoundCount } from "../../constants";
 import type { JobDispatchPresetInput } from "../../jobDispatchPreset";
 import { agentsMatchingExpression } from "../../searchExpression";
 import type {
@@ -37,6 +38,7 @@ type RunbookCapability =
 type RunbooksPanelProps = {
   agents: AgentView[];
   commandTemplates: CommandTemplateRecord[];
+  commandTemplatesTruncated: boolean;
   jobs: JobHistoryRecord[];
   loading: boolean;
   onOpenDispatchPreset: (preset: JobDispatchPresetInput) => void;
@@ -49,6 +51,7 @@ type RunbooksPanelProps = {
 export function RunbooksPanel({
   agents,
   commandTemplates,
+  commandTemplatesTruncated,
   jobs,
   loading,
   onOpenDispatchPreset,
@@ -150,7 +153,9 @@ export function RunbooksPanel({
             <span>
               {loading
                 ? "Refreshing reviewed operation catalog"
-                : `${runbooks.length} reusable operations`}
+                : commandTemplatesTruncated
+                  ? `${runbooks.length} reusable operations loaded; older templates may not appear`
+                  : `${runbooks.length} reusable operations`}
             </span>
           </div>
           <div className="inlineActions">
@@ -179,18 +184,30 @@ export function RunbooksPanel({
         <div className="runbookSummary" aria-label="Runbook catalog summary">
           <RunbookMetric
             label="Runbooks"
-            value={String(runbooks.length)}
-            detail="template-backed reviewed operations"
+            value={formatLowerBoundCount(runbooks.length, commandTemplatesTruncated)}
+            detail={
+              commandTemplatesTruncated
+                ? "template-backed operations in loaded templates"
+                : "template-backed reviewed operations"
+            }
           />
           <RunbookMetric
             label="Ready"
-            value={String(dispatchableCount)}
-            detail="can open dispatch prefilled"
+            value={formatLowerBoundCount(dispatchableCount, commandTemplatesTruncated)}
+            detail={
+              commandTemplatesTruncated
+                ? "dispatchable operations in loaded templates"
+                : "can open dispatch prefilled"
+            }
           />
           <RunbookMetric
             label="Custom"
-            value={String(customCount)}
-            detail="operator-defined templates"
+            value={formatLowerBoundCount(customCount, commandTemplatesTruncated)}
+            detail={
+              commandTemplatesTruncated
+                ? "operator-defined entries in loaded templates"
+                : "operator-defined templates"
+            }
           />
           <RunbookMetric
             label="Latest job"
@@ -364,7 +381,9 @@ export function RunbooksPanel({
             <ClipboardList size={22} />
             <strong>No runbooks match</strong>
             <span>
-              Adjust the filter or create command templates in Jobs / Dispatch.
+              {commandTemplatesTruncated
+                ? "No runbooks match in the loaded templates. Older templates may not appear."
+                : "Adjust the filter or create command templates in Jobs / Dispatch."}
             </span>
           </div>
         )}

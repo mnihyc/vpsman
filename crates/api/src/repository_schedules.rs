@@ -1,17 +1,48 @@
-use std::cmp::Ordering;
 use std::str::FromStr;
+use std::{cmp::Ordering, collections::HashSet};
 
-use anyhow::Result;
+use anyhow::{ensure, Context, Result};
 use chrono::{DateTime, Utc};
 use croner::Cron;
-use sqlx::{types::Json as SqlJson, Row};
+use serde_json::Value;
+use sqlx::{types::Json as SqlJson, Postgres, Row, Transaction};
 use uuid::Uuid;
+use vpsman_common::{encode_json, payload_hash, JobCommand};
 
 use crate::job_request::job_command_type_label;
 use crate::model::*;
 use crate::repository::Repository;
 use crate::unix_now;
 use crate::util::{limit_or_default, offset_or_default, search_pattern, sort_descending};
+
+const SCHEDULE_OPERATION_INVALID: &str = "schedule_operation_invalid";
+const INVALID_SCHEDULE_COMMAND_TYPE: &str = "invalid_operation";
+
+fn decode_stored_schedule_operation(
+    operation: Value,
+) -> (Option<JobCommand>, Option<String>, String) {
+    let operation_payload_hash = payload_hash(operation.to_string().as_bytes());
+    match serde_json::from_value(operation) {
+        Ok(operation) => (Some(operation), None, operation_payload_hash),
+        Err(_) => (
+            None,
+            Some(SCHEDULE_OPERATION_INVALID.to_string()),
+            operation_payload_hash,
+        ),
+    }
+}
+
+fn valid_schedule_operation_payload_hash(operation: &JobCommand) -> Result<String> {
+    Ok(payload_hash(&encode_json(operation)?))
+}
+
+fn ensure_schedule_operation_valid(schedule: &ScheduleView) -> Result<()> {
+    ensure!(
+        schedule.operation.is_some() && schedule.operation_error.is_none(),
+        SCHEDULE_OPERATION_INVALID
+    );
+    Ok(())
+}
 
 fn compare_text_or_number(left: &str, right: &str) -> Ordering {
     match (left.parse::<i128>(), right.parse::<i128>()) {
@@ -68,7 +99,7 @@ fn schedule_matches_search(schedule: &ScheduleView, needle: &str) -> bool {
 
 fn schedule_order_by(sort: Option<&str>, descending: bool) -> &'static str {
     match (sort, descending) {
-        (None, _) => "enabled DESC, next_run_at ASC, name ASC",
+        (None, _) => "enabled DESC, next_run_at ASC, name ASC, id ASC",
         (Some("created_at"), true) => "created_at DESC, id DESC",
         (Some("created_at"), false) => "created_at ASC, id ASC",
         (Some("enabled" | "state"), true) => "enabled DESC, next_run_at ASC, id DESC",
@@ -96,6 +127,21 @@ impl Repository {
     }
 
     pub(crate) async fn query_schedules(&self, query: &ListQuery) -> Result<Vec<ScheduleView>> {
+        self.query_schedules_filtered(query, false).await
+    }
+
+    pub(crate) async fn query_backup_policy_schedules(
+        &self,
+        query: &ListQuery,
+    ) -> Result<Vec<ScheduleView>> {
+        self.query_schedules_filtered(query, true).await
+    }
+
+    async fn query_schedules_filtered(
+        &self,
+        query: &ListQuery,
+        require_backup_policy_metadata: bool,
+    ) -> Result<Vec<ScheduleView>> {
         let limit = query.limit.map(|limit| limit_or_default(Some(limit)));
         let offset = offset_or_default(query.offset);
         let q = query
@@ -106,12 +152,34 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let q = q.map(|value| value.to_ascii_lowercase());
+                let backup_policy_schedule_ids = if require_backup_policy_metadata {
+                    Some(
+                        memory
+                            .backup_policies
+                            .read()
+                            .await
+                            .iter()
+                            .map(|policy| policy.schedule_id)
+                            .collect::<HashSet<_>>(),
+                    )
+                } else {
+                    None
+                };
                 let mut schedules = memory
                     .schedules
                     .read()
                     .await
                     .iter()
                     .filter(|schedule| schedule.deleted_at.is_none())
+                    .filter(|schedule| {
+                        backup_policy_schedule_ids.as_ref().is_none_or(|ids| {
+                            ids.contains(&schedule.id)
+                                && matches!(
+                                    schedule.operation,
+                                    Some(vpsman_common::JobCommand::Backup { .. })
+                                )
+                        })
+                    })
                     .filter(|schedule| {
                         q.as_deref()
                             .map(|needle| schedule_matches_search(schedule, needle))
@@ -138,6 +206,7 @@ impl Repository {
                                 compare_text_or_number(&left.next_run_at, &right.next_run_at)
                             })
                             .then_with(|| left.name.cmp(&right.name))
+                            .then_with(|| left.id.cmp(&right.id))
                     }
                 });
                 Ok(schedules
@@ -186,26 +255,41 @@ impl Repository {
                         OR cron_expr ILIKE $3 ESCAPE '\'
                         OR catch_up_policy ILIKE $3 ESCAPE '\'
                         OR last_error ILIKE $3 ESCAPE '\'
-                    )
+                      )
+                      AND (
+                        $4::boolean = FALSE
+                        OR (
+                          operation->>'type' = 'backup'
+                          AND EXISTS (
+                            SELECT 1
+                            FROM backup_policies
+                            WHERE backup_policies.schedule_id = schedules.id
+                          )
+                        )
+                      )
                     ORDER BY {order_by}
                     LIMIT $1
                     OFFSET $2
                     "#,
                 ))
-                .bind(limit.unwrap_or(1000))
+                .bind(limit)
                 .bind(offset)
                 .bind(search_pattern(&query.q))
+                .bind(require_backup_policy_metadata)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
                     .map(|row| {
-                        let operation: SqlJson<vpsman_common::JobCommand> =
-                            row.try_get("operation")?;
-                        Ok(schedule_view_from_row(ScheduleRowParts {
+                        let operation: SqlJson<Value> = row.try_get("operation")?;
+                        let (operation, operation_error, operation_payload_hash) =
+                            decode_stored_schedule_operation(operation.0);
+                        schedule_view_from_row(ScheduleRowParts {
                             id: row.try_get("id")?,
                             name: row.try_get("name")?,
                             enabled: row.try_get("enabled")?,
-                            operation: operation.0,
+                            operation,
+                            operation_error,
+                            operation_payload_hash,
                             selector_expression: row.try_get("selector_expression")?,
                             target_client_ids: row.try_get("target_client_ids")?,
                             cron_expr: row.try_get("cron_expr")?,
@@ -222,7 +306,7 @@ impl Repository {
                             deleted_at: row.try_get("deleted_at")?,
                             created_at: row.try_get("created_at")?,
                             updated_at: row.try_get("updated_at")?,
-                        }))
+                        })
                     })
                     .collect()
             }
@@ -272,22 +356,25 @@ impl Repository {
         request: ScheduleCreateInput,
         operator: &AuthContext,
     ) -> Result<ScheduleView> {
-        let id = Uuid::new_v4();
-        let now = unix_now();
-        let next_runs = next_cron_runs(&request.cron_expr, 5)?;
-        let next_run = next_runs.first().cloned().unwrap_or_else(|| {
-            DateTime::<Utc>::from_timestamp(now as i64, 0)
-                .unwrap()
-                .to_rfc3339()
-        });
         match self {
             Self::Memory(memory) => {
+                let id = Uuid::new_v4();
+                let now = unix_now();
+                let next_runs = next_cron_runs(&request.cron_expr, 5)?;
+                let next_run = next_runs
+                    .first()
+                    .cloned()
+                    .context("schedule cron has no future occurrence")?;
                 let created_at = now.to_string();
+                let operation_payload_hash =
+                    valid_schedule_operation_payload_hash(&request.operation)?;
                 let schedule = schedule_view_from_row(ScheduleRowParts {
                     id,
                     name: request.name,
                     enabled: request.enabled,
-                    operation: request.operation,
+                    operation: Some(request.operation),
+                    operation_error: None,
+                    operation_payload_hash,
                     selector_expression: request.selector_expression,
                     target_client_ids: request.target_client_ids,
                     cron_expr: request.cron_expr,
@@ -304,7 +391,7 @@ impl Repository {
                     deleted_at: None,
                     created_at: created_at.clone(),
                     updated_at: created_at,
-                });
+                })?;
                 let mut schedules = memory.schedules.write().await;
                 schedules.push(schedule.clone());
                 memory.audits.write().await.push(AuditLogView {
@@ -316,6 +403,8 @@ impl Repository {
                     metadata: serde_json::json!({
                         "name": &schedule.name,
                         "operation_type": &schedule.command_type,
+                        "operation_error": &schedule.operation_error,
+                        "operation_payload_hash": &schedule.operation_payload_hash,
                         "selector_expression": &schedule.selector_expression,
                         "target_client_ids": &schedule.target_client_ids,
                         "target_count": schedule.target_client_ids.len(),
@@ -336,119 +425,10 @@ impl Repository {
                 Ok(schedule)
             }
             Self::Postgres(pool) => {
-                let row = sqlx::query(
-                    r#"
-                    INSERT INTO schedules (
-                        id,
-                        actor_id,
-                        name,
-                        enabled,
-                        operation,
-                        selector_expression,
-                        target_client_ids,
-                        cron_expr,
-                        timezone,
-                        catch_up_policy,
-                        catch_up_limit,
-                        retry_delay_secs,
-                        max_failures,
-                        next_run_at
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, to_timestamp($14))
-                    RETURNING
-                        id,
-                        name,
-                        enabled,
-                        operation,
-                        selector_expression,
-                        target_client_ids,
-                        cron_expr,
-                        timezone,
-                        catch_up_policy,
-                        catch_up_limit,
-                        retry_delay_secs,
-                        max_failures,
-                        failure_count,
-                        last_error,
-                        next_run_at::text AS next_run_at,
-                        last_run_at::text AS last_run_at,
-                        deferred_until::text AS deferred_until,
-                        deleted_at::text AS deleted_at,
-                        created_at::text AS created_at,
-                        updated_at::text AS updated_at
-                    "#,
-                )
-                .bind(id)
-                .bind(operator.operator.id)
-                .bind(&request.name)
-                .bind(request.enabled)
-                .bind(SqlJson(request.operation.clone()))
-                .bind(request.selector_expression.trim())
-                .bind(&request.target_client_ids)
-                .bind(&request.cron_expr)
-                .bind(&request.timezone)
-                .bind(&request.catch_up_policy)
-                .bind(request.catch_up_limit)
-                .bind(request.retry_delay_secs)
-                .bind(request.max_failures)
-                .bind(next_run_timestamp(&next_run)? as f64)
-                .fetch_one(pool)
-                .await?;
-                let operation: SqlJson<vpsman_common::JobCommand> = row.try_get("operation")?;
-                let schedule = schedule_view_from_row(ScheduleRowParts {
-                    id: row.try_get("id")?,
-                    name: row.try_get("name")?,
-                    enabled: row.try_get("enabled")?,
-                    operation: operation.0,
-                    selector_expression: row.try_get("selector_expression")?,
-                    target_client_ids: row.try_get("target_client_ids")?,
-                    cron_expr: row.try_get("cron_expr")?,
-                    timezone: row.try_get("timezone")?,
-                    catch_up_policy: row.try_get("catch_up_policy")?,
-                    catch_up_limit: row.try_get("catch_up_limit")?,
-                    retry_delay_secs: row.try_get("retry_delay_secs")?,
-                    max_failures: row.try_get("max_failures")?,
-                    failure_count: row.try_get("failure_count")?,
-                    last_error: row.try_get("last_error")?,
-                    next_run_at: row.try_get("next_run_at")?,
-                    last_run_at: row.try_get("last_run_at")?,
-                    deferred_until: row.try_get("deferred_until")?,
-                    deleted_at: row.try_get("deleted_at")?,
-                    created_at: row.try_get("created_at")?,
-                    updated_at: row.try_get("updated_at")?,
-                });
-                sqlx::query(
-                    r#"
-                    INSERT INTO audit_logs (
-                        id, actor_id, action, target, command_hash, metadata
-                    )
-                    VALUES ($1, $2, $3, $4, NULL, $5)
-                    "#,
-                )
-                .bind(Uuid::new_v4())
-                .bind(operator.operator.id)
-                .bind("schedule.created")
-                .bind(format!("schedule:{}", schedule.id))
-                .bind(serde_json::json!({
-                    "name": &schedule.name,
-                    "operation_type": &schedule.command_type,
-                    "selector_expression": &schedule.selector_expression,
-                    "target_client_ids": &schedule.target_client_ids,
-                    "target_count": schedule.target_client_ids.len(),
-                    "cron_expr": &schedule.cron_expr,
-                    "timezone": &schedule.timezone,
-                    "next_runs": &schedule.next_runs,
-                    "catch_up_policy": &schedule.catch_up_policy,
-                    "catch_up_limit": schedule.catch_up_limit,
-                    "retry_delay_secs": schedule.retry_delay_secs,
-                    "max_failures": schedule.max_failures,
-                    "enabled": schedule.enabled,
-                    "deferred_until": schedule.deferred_until,
-                    "operator_username": &operator.operator.username,
-                    "session_id": operator.session_id,
-                }))
-                .execute(pool)
-                .await?;
+                let mut tx = pool.begin().await?;
+                let schedule =
+                    create_schedule_record_postgres_in_tx(&mut tx, &request, operator).await?;
+                tx.commit().await?;
                 Ok(schedule)
             }
         }
@@ -480,9 +460,6 @@ impl Repository {
         request: ScheduleCreateInput,
         operator: &AuthContext,
     ) -> Result<ScheduleView> {
-        let now = unix_now().to_string();
-        let next_runs = next_cron_runs(&request.cron_expr, 5)?;
-        let next_run = next_runs.first().cloned().unwrap_or_else(|| now.clone());
         match self {
             Self::Memory(memory) => {
                 let mut schedules = memory.schedules.write().await;
@@ -490,75 +467,17 @@ impl Repository {
                     .iter_mut()
                     .find(|schedule| schedule.id == schedule_id && schedule.deleted_at.is_none())
                     .ok_or_else(|| anyhow::anyhow!("schedule_not_found:{schedule_id}"))?;
-                schedule.name = request.name;
-                schedule.enabled = request.enabled;
-                schedule.command_type = job_command_type_label(&request.operation).to_string();
-                schedule.operation = request.operation;
-                schedule.selector_expression = request.selector_expression;
-                schedule.target_client_ids = request.target_client_ids;
-                schedule.cron_expr = request.cron_expr;
-                schedule.timezone = request.timezone;
-                schedule.next_runs = next_runs;
-                schedule.catch_up_policy = request.catch_up_policy;
-                schedule.catch_up_limit = request.catch_up_limit;
-                schedule.retry_delay_secs = request.retry_delay_secs;
-                schedule.max_failures = request.max_failures;
-                schedule.failure_count = 0;
-                schedule.last_error = None;
-                schedule.next_run_at = next_run;
-                schedule.updated_at = now.clone();
-                let schedule = schedule.clone();
+                let schedule = apply_schedule_update_memory(schedule, &request)?;
                 drop(schedules);
                 record_memory_schedule_audit(memory, &schedule, operator, "schedule.updated").await;
                 Ok(schedule)
             }
             Self::Postgres(pool) => {
-                let result = sqlx::query(
-                    r#"
-                    UPDATE schedules
-                    SET
-                        actor_id = $2,
-                        name = $3,
-                        enabled = $4,
-                        operation = $5,
-                        selector_expression = $6,
-                        target_client_ids = $7,
-                        cron_expr = $8,
-                        timezone = $9,
-                        catch_up_policy = $10,
-                        catch_up_limit = $11,
-                        retry_delay_secs = $12,
-                        max_failures = $13,
-                        next_run_at = to_timestamp($14),
-                        failure_count = 0,
-                        last_error = NULL,
-                        updated_at = now()
-                    WHERE id = $1 AND deleted_at IS NULL
-                    "#,
-                )
-                .bind(schedule_id)
-                .bind(operator.operator.id)
-                .bind(&request.name)
-                .bind(request.enabled)
-                .bind(SqlJson(request.operation))
-                .bind(request.selector_expression.trim())
-                .bind(&request.target_client_ids)
-                .bind(&request.cron_expr)
-                .bind(&request.timezone)
-                .bind(&request.catch_up_policy)
-                .bind(request.catch_up_limit)
-                .bind(request.retry_delay_secs)
-                .bind(request.max_failures)
-                .bind(next_run_timestamp(&next_run)? as f64)
-                .execute(pool)
-                .await?;
-                anyhow::ensure!(
-                    result.rows_affected() > 0,
-                    "schedule_not_found:{schedule_id}"
-                );
-                let schedule = self.schedule_by_id(schedule_id).await?;
-                record_postgres_schedule_audit(pool, &schedule, operator, "schedule.updated")
-                    .await?;
+                let mut tx = pool.begin().await?;
+                let schedule =
+                    update_schedule_record_postgres_in_tx(&mut tx, schedule_id, &request, operator)
+                        .await?;
+                tx.commit().await?;
                 Ok(schedule)
             }
         }
@@ -579,6 +498,7 @@ impl Repository {
                     .iter_mut()
                     .find(|schedule| schedule.id == schedule_id && schedule.deleted_at.is_none())
                     .ok_or_else(|| anyhow::anyhow!("schedule_not_found:{schedule_id}"))?;
+                ensure_schedule_operation_valid(schedule)?;
                 schedule.selector_expression = selector_expression;
                 schedule.target_client_ids = target_client_ids;
                 schedule.updated_at = now;
@@ -594,6 +514,9 @@ impl Repository {
                 Ok(schedule)
             }
             Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let schedule = schedule_by_id_postgres_in_tx(&mut tx, schedule_id).await?;
+                ensure_schedule_operation_valid(&schedule)?;
                 let result = sqlx::query(
                     r#"
                     UPDATE schedules
@@ -609,20 +532,21 @@ impl Repository {
                 .bind(operator.operator.id)
                 .bind(selector_expression.trim())
                 .bind(&target_client_ids)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
                 anyhow::ensure!(
                     result.rows_affected() > 0,
                     "schedule_not_found:{schedule_id}"
                 );
-                let schedule = self.schedule_by_id(schedule_id).await?;
+                let schedule = schedule_by_id_postgres_in_tx(&mut tx, schedule_id).await?;
                 record_postgres_schedule_audit(
-                    pool,
+                    &mut tx,
                     &schedule,
                     operator,
                     "schedule.targets_updated",
                 )
                 .await?;
+                tx.commit().await?;
                 Ok(schedule)
             }
         }
@@ -642,6 +566,9 @@ impl Repository {
                     .iter_mut()
                     .find(|schedule| schedule.id == schedule_id && schedule.deleted_at.is_none())
                     .ok_or_else(|| anyhow::anyhow!("schedule_not_found:{schedule_id}"))?;
+                if enabled {
+                    ensure_schedule_operation_valid(schedule)?;
+                }
                 schedule.enabled = enabled;
                 schedule.updated_at = now;
                 let schedule = schedule.clone();
@@ -660,6 +587,11 @@ impl Repository {
                 Ok(schedule)
             }
             Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                if enabled {
+                    let schedule = schedule_by_id_postgres_in_tx(&mut tx, schedule_id).await?;
+                    ensure_schedule_operation_valid(&schedule)?;
+                }
                 let result = sqlx::query(
                     r#"
                     UPDATE schedules
@@ -670,15 +602,15 @@ impl Repository {
                 .bind(schedule_id)
                 .bind(enabled)
                 .bind(operator.operator.id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
                 anyhow::ensure!(
                     result.rows_affected() > 0,
                     "schedule_not_found:{schedule_id}"
                 );
-                let schedule = self.schedule_by_id(schedule_id).await?;
+                let schedule = schedule_by_id_postgres_in_tx(&mut tx, schedule_id).await?;
                 record_postgres_schedule_audit(
-                    pool,
+                    &mut tx,
                     &schedule,
                     operator,
                     if enabled {
@@ -688,6 +620,7 @@ impl Repository {
                     },
                 )
                 .await?;
+                tx.commit().await?;
                 Ok(schedule)
             }
         }
@@ -709,6 +642,7 @@ impl Repository {
                     .iter_mut()
                     .find(|schedule| schedule.id == schedule_id && schedule.deleted_at.is_none())
                     .ok_or_else(|| anyhow::anyhow!("schedule_not_found:{schedule_id}"))?;
+                ensure_schedule_operation_valid(schedule)?;
                 schedule.deferred_until = Some(deferred_until.to_string());
                 schedule.updated_at = now;
                 let schedule = schedule.clone();
@@ -724,6 +658,9 @@ impl Repository {
                 Ok(schedule)
             }
             Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let schedule = schedule_by_id_postgres_in_tx(&mut tx, schedule_id).await?;
+                ensure_schedule_operation_valid(&schedule)?;
                 let result = sqlx::query(
                     r#"
                     UPDATE schedules
@@ -734,21 +671,22 @@ impl Repository {
                 .bind(schedule_id)
                 .bind(next_run_timestamp(deferred_until)? as f64)
                 .bind(operator.operator.id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
                 anyhow::ensure!(
                     result.rows_affected() > 0,
                     "schedule_not_found:{schedule_id}"
                 );
-                let schedule = self.schedule_by_id(schedule_id).await?;
+                let schedule = schedule_by_id_postgres_in_tx(&mut tx, schedule_id).await?;
                 record_postgres_schedule_audit_with_extra(
-                    pool,
+                    &mut tx,
                     &schedule,
                     operator,
                     "schedule.deferred",
                     serde_json::json!({ "reason": reason }),
                 )
                 .await?;
+                tx.commit().await?;
                 Ok(schedule)
             }
         }
@@ -767,6 +705,7 @@ impl Repository {
                     .iter_mut()
                     .find(|schedule| schedule.id == schedule_id && schedule.deleted_at.is_none())
                     .ok_or_else(|| anyhow::anyhow!("schedule_not_found:{schedule_id}"))?;
+                schedule.enabled = false;
                 schedule.deleted_at = Some(now.clone());
                 schedule.updated_at = now;
                 let schedule = schedule.clone();
@@ -775,24 +714,36 @@ impl Repository {
                 Ok(())
             }
             Self::Postgres(pool) => {
-                let schedule = self.schedule_by_id(schedule_id).await?;
+                let mut tx = pool.begin().await?;
+                let sql = schedule_select_sql("WHERE id = $1 AND deleted_at IS NULL FOR UPDATE");
+                let row = sqlx::query(&sql)
+                    .bind(schedule_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                let schedule = schedule_from_postgres_row(row)?;
                 let result = sqlx::query(
                     r#"
                     UPDATE schedules
                     SET deleted_at = now(), deleted_by = $2, actor_id = $2, enabled = FALSE, updated_at = now()
                     WHERE id = $1 AND deleted_at IS NULL
+                    RETURNING
+                        deleted_at::text AS deleted_at,
+                        updated_at::text AS updated_at
                     "#,
                 )
                 .bind(schedule_id)
                 .bind(operator.operator.id)
-                .execute(pool)
+                .fetch_optional(&mut *tx)
                 .await?;
-                anyhow::ensure!(
-                    result.rows_affected() > 0,
-                    "schedule_not_found:{schedule_id}"
-                );
-                record_postgres_schedule_audit(pool, &schedule, operator, "schedule.deleted")
+                let result =
+                    result.ok_or_else(|| anyhow::anyhow!("schedule_not_found:{schedule_id}"))?;
+                let mut schedule = schedule;
+                schedule.enabled = false;
+                schedule.deleted_at = result.try_get("deleted_at")?;
+                schedule.updated_at = result.try_get("updated_at")?;
+                record_postgres_schedule_audit(&mut tx, &schedule, operator, "schedule.deleted")
                     .await?;
+                tx.commit().await?;
                 Ok(())
             }
         }
@@ -817,7 +768,9 @@ struct ScheduleRowParts {
     id: Uuid,
     name: String,
     enabled: bool,
-    operation: vpsman_common::JobCommand,
+    operation: Option<JobCommand>,
+    operation_error: Option<String>,
+    operation_payload_hash: String,
     selector_expression: String,
     target_client_ids: Vec<String>,
     cron_expr: String,
@@ -836,17 +789,25 @@ struct ScheduleRowParts {
     updated_at: String,
 }
 
-fn schedule_view_from_row(parts: ScheduleRowParts) -> ScheduleView {
-    let command_type = job_command_type_label(&parts.operation).to_string();
-    ScheduleView {
+fn schedule_view_from_row(parts: ScheduleRowParts) -> Result<ScheduleView> {
+    let command_type = parts
+        .operation
+        .as_ref()
+        .map(job_command_type_label)
+        .unwrap_or(INVALID_SCHEDULE_COMMAND_TYPE)
+        .to_string();
+    let (next_runs, cadence_error) = stored_cron_preview(&parts.cron_expr, 5);
+    Ok(ScheduleView {
         id: parts.id,
         name: parts.name,
         enabled: parts.enabled,
         command_type,
         operation: parts.operation,
+        operation_error: parts.operation_error,
+        operation_payload_hash: parts.operation_payload_hash,
         selector_expression: parts.selector_expression,
         target_client_ids: parts.target_client_ids,
-        next_runs: next_cron_runs(&parts.cron_expr, 5).unwrap_or_default(),
+        next_runs,
         cron_expr: parts.cron_expr,
         timezone: parts.timezone,
         catch_up_policy: parts.catch_up_policy,
@@ -856,12 +817,13 @@ fn schedule_view_from_row(parts: ScheduleRowParts) -> ScheduleView {
         failure_count: parts.failure_count,
         last_error: parts.last_error,
         next_run_at: parts.next_run_at,
+        cadence_error,
         last_run_at: parts.last_run_at,
         deferred_until: parts.deferred_until,
         deleted_at: parts.deleted_at,
         created_at: parts.created_at,
         updated_at: parts.updated_at,
-    }
+    })
 }
 
 fn schedule_select_sql(where_clause: &str) -> String {
@@ -895,12 +857,16 @@ fn schedule_select_sql(where_clause: &str) -> String {
 }
 
 fn schedule_from_postgres_row(row: sqlx::postgres::PgRow) -> Result<ScheduleView> {
-    let operation: SqlJson<vpsman_common::JobCommand> = row.try_get("operation")?;
-    Ok(schedule_view_from_row(ScheduleRowParts {
+    let operation: SqlJson<Value> = row.try_get("operation")?;
+    let (operation, operation_error, operation_payload_hash) =
+        decode_stored_schedule_operation(operation.0);
+    schedule_view_from_row(ScheduleRowParts {
         id: row.try_get("id")?,
         name: row.try_get("name")?,
         enabled: row.try_get("enabled")?,
-        operation: operation.0,
+        operation,
+        operation_error,
+        operation_payload_hash,
         selector_expression: row.try_get("selector_expression")?,
         target_client_ids: row.try_get("target_client_ids")?,
         cron_expr: row.try_get("cron_expr")?,
@@ -917,10 +883,234 @@ fn schedule_from_postgres_row(row: sqlx::postgres::PgRow) -> Result<ScheduleView
         deleted_at: row.try_get("deleted_at")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
-    }))
+    })
 }
 
-async fn record_memory_schedule_audit(
+pub(crate) async fn create_schedule_record_postgres_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    request: &ScheduleCreateInput,
+    operator: &AuthContext,
+) -> Result<ScheduleView> {
+    let id = Uuid::new_v4();
+    let next_runs = next_cron_runs(&request.cron_expr, 5)?;
+    let next_run = next_runs
+        .first()
+        .cloned()
+        .context("schedule cron has no future occurrence")?;
+    let row = sqlx::query(
+        r#"
+        INSERT INTO schedules (
+            id,
+            actor_id,
+            name,
+            enabled,
+            operation,
+            selector_expression,
+            target_client_ids,
+            cron_expr,
+            timezone,
+            catch_up_policy,
+            catch_up_limit,
+            retry_delay_secs,
+            max_failures,
+            next_run_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, to_timestamp($14))
+        RETURNING
+            id,
+            name,
+            enabled,
+            operation,
+            selector_expression,
+            target_client_ids,
+            cron_expr,
+            timezone,
+            catch_up_policy,
+            catch_up_limit,
+            retry_delay_secs,
+            max_failures,
+            failure_count,
+            last_error,
+            next_run_at::text AS next_run_at,
+            last_run_at::text AS last_run_at,
+            deferred_until::text AS deferred_until,
+            deleted_at::text AS deleted_at,
+            created_at::text AS created_at,
+            updated_at::text AS updated_at
+        "#,
+    )
+    .bind(id)
+    .bind(operator.operator.id)
+    .bind(&request.name)
+    .bind(request.enabled)
+    .bind(SqlJson(&request.operation))
+    .bind(request.selector_expression.trim())
+    .bind(&request.target_client_ids)
+    .bind(&request.cron_expr)
+    .bind(&request.timezone)
+    .bind(&request.catch_up_policy)
+    .bind(request.catch_up_limit)
+    .bind(request.retry_delay_secs)
+    .bind(request.max_failures)
+    .bind(next_run_timestamp(&next_run)? as f64)
+    .fetch_one(&mut **tx)
+    .await?;
+    let schedule = schedule_from_postgres_row(row)?;
+    record_postgres_schedule_audit(tx, &schedule, operator, "schedule.created").await?;
+    Ok(schedule)
+}
+
+pub(crate) async fn update_schedule_record_postgres_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    schedule_id: Uuid,
+    request: &ScheduleCreateInput,
+    operator: &AuthContext,
+) -> Result<ScheduleView> {
+    let next_runs = next_cron_runs(&request.cron_expr, 5)?;
+    let next_run = next_runs
+        .first()
+        .cloned()
+        .context("schedule cron has no future occurrence")?;
+    let result = sqlx::query(
+        r#"
+        UPDATE schedules
+        SET
+            actor_id = $2,
+            name = $3,
+            enabled = $4,
+            operation = $5,
+            selector_expression = $6,
+            target_client_ids = $7,
+            cron_expr = $8,
+            timezone = $9,
+            catch_up_policy = $10,
+            catch_up_limit = $11,
+            retry_delay_secs = $12,
+            max_failures = $13,
+            next_run_at = to_timestamp($14),
+            failure_count = 0,
+            last_error = NULL,
+            updated_at = now()
+        WHERE id = $1 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(schedule_id)
+    .bind(operator.operator.id)
+    .bind(&request.name)
+    .bind(request.enabled)
+    .bind(SqlJson(&request.operation))
+    .bind(request.selector_expression.trim())
+    .bind(&request.target_client_ids)
+    .bind(&request.cron_expr)
+    .bind(&request.timezone)
+    .bind(&request.catch_up_policy)
+    .bind(request.catch_up_limit)
+    .bind(request.retry_delay_secs)
+    .bind(request.max_failures)
+    .bind(next_run_timestamp(&next_run)? as f64)
+    .execute(&mut **tx)
+    .await?;
+    anyhow::ensure!(
+        result.rows_affected() > 0,
+        "schedule_not_found:{schedule_id}"
+    );
+    let schedule = schedule_by_id_postgres_in_tx(tx, schedule_id).await?;
+    record_postgres_schedule_audit(tx, &schedule, operator, "schedule.updated").await?;
+    Ok(schedule)
+}
+
+pub(crate) async fn schedule_by_id_postgres_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    schedule_id: Uuid,
+) -> Result<ScheduleView> {
+    let sql = schedule_select_sql("WHERE id = $1 AND deleted_at IS NULL");
+    let row = sqlx::query(&sql)
+        .bind(schedule_id)
+        .fetch_one(&mut **tx)
+        .await?;
+    schedule_from_postgres_row(row)
+}
+
+pub(crate) async fn backup_policy_schedule_by_id_postgres_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    schedule_id: Uuid,
+) -> Result<Option<ScheduleView>> {
+    let sql = schedule_select_sql(
+        r#"
+        WHERE id = $1
+          AND deleted_at IS NULL
+          AND operation->>'type' = 'backup'
+          AND EXISTS (
+            SELECT 1
+            FROM backup_policies
+            WHERE backup_policies.schedule_id = schedules.id
+          )
+        FOR UPDATE
+        "#,
+    );
+    let row = sqlx::query(&sql)
+        .bind(schedule_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    row.map(schedule_from_postgres_row).transpose()
+}
+
+pub(crate) async fn backup_policy_schedule_by_id_postgres(
+    pool: &sqlx::PgPool,
+    schedule_id: Uuid,
+) -> Result<Option<ScheduleView>> {
+    let sql = schedule_select_sql(
+        r#"
+        WHERE id = $1
+          AND deleted_at IS NULL
+          AND operation->>'type' = 'backup'
+          AND EXISTS (
+            SELECT 1
+            FROM backup_policies
+            WHERE backup_policies.schedule_id = schedules.id
+          )
+        "#,
+    );
+    let row = sqlx::query(&sql)
+        .bind(schedule_id)
+        .fetch_optional(pool)
+        .await?;
+    row.map(schedule_from_postgres_row).transpose()
+}
+
+pub(crate) fn apply_schedule_update_memory(
+    schedule: &mut ScheduleView,
+    request: &ScheduleCreateInput,
+) -> Result<ScheduleView> {
+    let next_runs = next_cron_runs(&request.cron_expr, 5)?;
+    let next_run = next_runs
+        .first()
+        .cloned()
+        .context("schedule cron has no future occurrence")?;
+    schedule.name = request.name.clone();
+    schedule.enabled = request.enabled;
+    schedule.command_type = job_command_type_label(&request.operation).to_string();
+    schedule.operation_payload_hash = valid_schedule_operation_payload_hash(&request.operation)?;
+    schedule.operation = Some(request.operation.clone());
+    schedule.operation_error = None;
+    schedule.selector_expression = request.selector_expression.clone();
+    schedule.target_client_ids = request.target_client_ids.clone();
+    schedule.cron_expr = request.cron_expr.clone();
+    schedule.timezone = request.timezone.clone();
+    schedule.next_runs = next_runs;
+    schedule.cadence_error = None;
+    schedule.catch_up_policy = request.catch_up_policy.clone();
+    schedule.catch_up_limit = request.catch_up_limit;
+    schedule.retry_delay_secs = request.retry_delay_secs;
+    schedule.max_failures = request.max_failures;
+    schedule.failure_count = 0;
+    schedule.last_error = None;
+    schedule.next_run_at = next_run;
+    schedule.updated_at = unix_now().to_string();
+    Ok(schedule.clone())
+}
+
+pub(crate) async fn record_memory_schedule_audit(
     memory: &crate::repository::MemoryState,
     schedule: &ScheduleView,
     operator: &AuthContext,
@@ -955,13 +1145,13 @@ async fn record_memory_schedule_audit_with_extra(
 }
 
 async fn record_postgres_schedule_audit(
-    pool: &sqlx::PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     schedule: &ScheduleView,
     operator: &AuthContext,
     action: &str,
 ) -> Result<()> {
     record_postgres_schedule_audit_with_extra(
-        pool,
+        tx,
         schedule,
         operator,
         action,
@@ -971,7 +1161,7 @@ async fn record_postgres_schedule_audit(
 }
 
 async fn record_postgres_schedule_audit_with_extra(
-    pool: &sqlx::PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     schedule: &ScheduleView,
     operator: &AuthContext,
     action: &str,
@@ -990,7 +1180,7 @@ async fn record_postgres_schedule_audit_with_extra(
     .bind(action)
     .bind(format!("schedule:{}", schedule.id))
     .bind(schedule_audit_metadata(schedule, operator, extra))
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
@@ -1004,12 +1194,15 @@ fn schedule_audit_metadata(
         "schedule_id": schedule.id,
         "name": &schedule.name,
         "operation_type": &schedule.command_type,
+        "operation_error": &schedule.operation_error,
+        "operation_payload_hash": &schedule.operation_payload_hash,
         "selector_expression": &schedule.selector_expression,
         "target_client_ids": &schedule.target_client_ids,
         "target_count": schedule.target_client_ids.len(),
         "cron_expr": &schedule.cron_expr,
         "timezone": &schedule.timezone,
         "next_runs": &schedule.next_runs,
+        "cadence_error": &schedule.cadence_error,
         "catch_up_policy": &schedule.catch_up_policy,
         "catch_up_limit": schedule.catch_up_limit,
         "retry_delay_secs": schedule.retry_delay_secs,
@@ -1027,12 +1220,31 @@ fn schedule_audit_metadata(
 }
 
 pub(crate) fn next_cron_runs(cron_expr: &str, count: usize) -> Result<Vec<String>> {
+    let runs = cron_runs_after_now(cron_expr, count)?;
+    ensure!(
+        count == 0 || !runs.is_empty(),
+        "schedule cron has no future occurrence"
+    );
+    Ok(runs)
+}
+
+fn cron_runs_after_now(cron_expr: &str, count: usize) -> Result<Vec<String>> {
     let cron = Cron::from_str(cron_expr)?;
     Ok(cron
         .iter_after(Utc::now())
         .take(count)
         .map(|run| run.to_rfc3339())
         .collect())
+}
+
+fn stored_cron_preview(cron_expr: &str, count: usize) -> (Vec<String>, Option<String>) {
+    match cron_runs_after_now(cron_expr, count) {
+        Ok(runs) if count > 0 && runs.is_empty() => {
+            (runs, Some("schedule_cron_no_future_occurrence".to_string()))
+        }
+        Ok(runs) => (runs, None),
+        Err(_) => (Vec::new(), Some("schedule_cron_invalid".to_string())),
+    }
 }
 
 fn next_run_timestamp(value: &str) -> Result<i64> {

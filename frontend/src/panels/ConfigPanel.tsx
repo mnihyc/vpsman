@@ -182,6 +182,8 @@ type SingleVpsConfigApplySnapshot = {
   payloadHashHex: string;
 };
 
+type EvidenceState = "available" | "loading" | "unavailable";
+
 export function ConfigPanel({
   activeSubpage,
   agents,
@@ -190,8 +192,11 @@ export function ConfigPanel({
   sourceTemplateAssignments,
   sourceTemplates,
   sourceStatus,
+  fleetConfigEvidenceAvailable,
+  inventoryEvidenceState,
   error,
   runtimeConfigApplyStates,
+  runtimeConfigEvidenceState,
   runtimeConfigPatchGenerators,
   fleetAlertPolicies,
   jobs,
@@ -224,8 +229,11 @@ export function ConfigPanel({
   sourceTemplateAssignments: SourceTemplateAssignmentRecord[];
   sourceTemplates: SourceTemplateRecord[];
   sourceStatus: SourceStatusRecord[];
+  fleetConfigEvidenceAvailable: boolean;
+  inventoryEvidenceState: EvidenceState;
   error: string | null;
   runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
+  runtimeConfigEvidenceState: EvidenceState;
   runtimeConfigPatchGenerators: RuntimeConfigPatchGeneratorRecord[];
   fleetAlertPolicies: FleetAlertPolicyRecord[];
   jobs: Array<{
@@ -323,7 +331,10 @@ export function ConfigPanel({
             sourceTemplateAssignments={sourceTemplateAssignments}
             sourceTemplates={sourceTemplates}
             sourceStatus={sourceStatus}
+            fleetConfigEvidenceAvailable={fleetConfigEvidenceAvailable}
+            inventoryEvidenceState={inventoryEvidenceState}
             runtimeConfigApplyStates={runtimeConfigApplyStates}
+            runtimeConfigEvidenceState={runtimeConfigEvidenceState}
             runtimeConfigPatchGenerators={runtimeConfigPatchGenerators}
             vpsRuleValues={vpsRuleValues}
             jobs={jobs}
@@ -363,6 +374,7 @@ export function ConfigPanel({
           <SingleVpsConfig
             agents={agents}
             runtimeConfigApplyStates={runtimeConfigApplyStates}
+            runtimeConfigEvidenceState={runtimeConfigEvidenceState}
             onCreateJob={onCreateJob}
             onLoadJobOutputs={onLoadJobOutputs}
             onLoadJobTargets={onLoadJobTargets}
@@ -409,7 +421,10 @@ function ConfigOverview({
   sourceTemplateAssignments,
   sourceTemplates,
   sourceStatus,
+  fleetConfigEvidenceAvailable,
+  inventoryEvidenceState,
   runtimeConfigApplyStates,
+  runtimeConfigEvidenceState,
   runtimeConfigPatchGenerators,
   vpsRuleValues,
   jobs,
@@ -419,7 +434,10 @@ function ConfigOverview({
   sourceTemplateAssignments: SourceTemplateAssignmentRecord[];
   sourceTemplates: SourceTemplateRecord[];
   sourceStatus: SourceStatusRecord[];
+  fleetConfigEvidenceAvailable: boolean;
+  inventoryEvidenceState: EvidenceState;
   runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
+  runtimeConfigEvidenceState: EvidenceState;
   runtimeConfigPatchGenerators: RuntimeConfigPatchGeneratorRecord[];
   vpsRuleValues: VpsRuleValueRecord[];
   jobs: Array<{
@@ -442,10 +460,23 @@ function ConfigOverview({
     (row) => !isReadySourceStatus(row.status),
   );
   const sourceReadyRows = sourceStatus.length - sourceRiskRows.length;
-  const allConfigStateRows = buildConfigCurrentStateRows(
-    agents,
-    runtimeConfigApplyStates,
-  );
+  const runtimeEvidenceAvailable =
+    runtimeConfigEvidenceState === "available";
+  const inventoryEvidenceAvailable = inventoryEvidenceState === "available";
+  const currentStateEvidenceAvailable =
+    runtimeEvidenceAvailable && fleetConfigEvidenceAvailable;
+  const completeSummaryEvidence =
+    currentStateEvidenceAvailable && inventoryEvidenceAvailable;
+  const evidenceLoading =
+    runtimeConfigEvidenceState === "loading" ||
+    inventoryEvidenceState === "loading";
+  const trustedRuntimeConfigApplyStates =
+    runtimeEvidenceAvailable
+      ? runtimeConfigApplyStates
+      : [];
+  const allConfigStateRows = currentStateEvidenceAvailable
+    ? buildConfigCurrentStateRows(agents, trustedRuntimeConfigApplyStates)
+    : [];
   const currentStateRows = allConfigStateRows.filter(
     (row) => row.resourceAvailable,
   );
@@ -492,18 +523,28 @@ function ConfigOverview({
   const retryableApplyRows = currentStateRows.filter(
     (row) => row.actionKind === "retry",
   );
-  const configHealth = configHealthStatus({
-    failedSyncs,
-    invalidRuleRows,
-    missingApplyStates,
-    missingTemplateCoverage,
-    pendingSyncs,
-    staleApplyRows,
-    sourceRiskCount: sourceRiskRows.length,
-    totalRuleRows: vpsRuleValues.length,
-    validRuleRows,
-  });
-  const latestApplyStates = runtimeConfigApplyStates
+  const configHealth =
+    completeSummaryEvidence
+      ? configHealthStatus({
+          failedSyncs,
+          invalidRuleRows,
+          missingApplyStates,
+          missingTemplateCoverage,
+          pendingSyncs,
+          staleApplyRows,
+          sourceRiskCount: sourceRiskRows.length,
+          totalRuleRows: vpsRuleValues.length,
+          validRuleRows,
+        })
+      : {
+          detail:
+            evidenceLoading
+              ? "Required config evidence is still loading. Health, drift, and zero-value claims remain unknown until the refresh finishes."
+              : "Required config evidence is incomplete. Health, drift, and zero-value claims remain unknown; cached rows are retained only as historical context.",
+          label: evidenceLoading ? "Checking evidence" : "Evidence incomplete",
+          tone: "warning" as const,
+        };
+  const latestApplyStates = trustedRuntimeConfigApplyStates
     .slice()
     .sort(
       (left, right) =>
@@ -590,27 +631,41 @@ function ConfigOverview({
         <div className="configHealthSummary">
           <span>
             <strong>
-              {appliedClientIds.size}/{currentStateRows.length || 0}
+              {currentStateEvidenceAvailable
+                ? `${appliedClientIds.size}/${currentStateRows.length}`
+                : "Unknown"}
             </strong>
             <small>current resources</small>
           </span>
           <span>
-            <strong>{applyAttentionCount}</strong>
+            <strong>
+              {currentStateEvidenceAvailable
+                ? applyAttentionCount
+                : "Unknown"}
+            </strong>
             <small>need attention</small>
           </span>
           <span>
-            <strong>{historicalStateRows.length}</strong>
+            <strong>
+              {currentStateEvidenceAvailable
+                ? historicalStateRows.length
+                : "Unknown"}
+            </strong>
             <small>historical records</small>
           </span>
           <span>
             <strong>
-              {sourceReadyRows}/{sourceStatus.length || 0}
+              {inventoryEvidenceAvailable
+                ? `${sourceReadyRows}/${sourceStatus.length}`
+                : "Unknown"}
             </strong>
             <small>source checks ready</small>
           </span>
           <span>
             <strong>
-              {ruleValidityLabel(validRuleRows, vpsRuleValues.length)}
+              {fleetConfigEvidenceAvailable
+                ? ruleValidityLabel(validRuleRows, vpsRuleValues.length)
+                : "Unknown"}
             </strong>
             <small>traffic/accounting rows</small>
           </span>
@@ -625,16 +680,27 @@ function ConfigOverview({
         <div className="configOverviewBlockHeader">
           <h3>Affected VPS current state</h3>
           <ConsoleStatusBadge
-            tone={retryableApplyRows.length ? "warning" : "ok"}
+            tone={
+              !currentStateEvidenceAvailable
+                ? "warning"
+                : retryableApplyRows.length
+                  ? "warning"
+                  : "ok"
+            }
           >
-            {applyAttentionCount} need attention
+            {runtimeConfigEvidenceState === "loading"
+              ? "Checking evidence"
+              : !currentStateEvidenceAvailable
+                ? "Evidence unavailable"
+                : `${applyAttentionCount} need attention`}
           </ConsoleStatusBadge>
         </div>
         <ConfigCurrentStateRowsList
           onOpenAction={openCurrentStateAction}
           rows={attentionStateRows}
         />
-        {attentionStateRows.length === 0 ? (
+        {currentStateEvidenceAvailable &&
+        attentionStateRows.length === 0 ? (
           <div className="emptyState compactEmptyState">
             <strong>All current VPS config states are healthy</strong>
             <span>
@@ -676,41 +742,85 @@ function ConfigOverview({
           <div className="configOverviewBlockHeader">
             <h3>Drift summary</h3>
             <ConsoleStatusBadge
-              tone={sourceRiskRows.length || failedSyncs ? "warning" : "ok"}
+              tone={
+                !completeSummaryEvidence ||
+                sourceRiskRows.length ||
+                failedSyncs
+                  ? "warning"
+                  : "ok"
+              }
             >
-              {applyAttentionCount + sourceRiskRows.length + invalidRuleRows}{" "}
-              action items
+              {completeSummaryEvidence
+                ? `${applyAttentionCount + sourceRiskRows.length + invalidRuleRows} action items`
+                : evidenceLoading
+                  ? "Checking evidence"
+                  : "Evidence incomplete"}
             </ConsoleStatusBadge>
           </div>
           <div className="configRiskList">
             <ConfigOverviewRiskRow
-              detail={`${failedSyncs} failed, ${staleApplyRows} stale, ${pendingSyncs} queued, ${missingApplyStates} unknown; current fleet only, historical records separated`}
+              detail={
+                currentStateEvidenceAvailable
+                  ? `${failedSyncs} failed, ${staleApplyRows} stale, ${pendingSyncs} queued, ${missingApplyStates} unknown; current fleet only, historical records separated`
+                  : runtimeConfigEvidenceState === "loading"
+                    ? "Runtime apply evidence is still loading."
+                    : "Current runtime apply evidence is unavailable."
+              }
               label="Runtime apply state"
               tone={
-                failedSyncs
+                !currentStateEvidenceAvailable
+                  ? "warning"
+                  : failedSyncs
                   ? "critical"
                   : staleApplyRows || pendingSyncs || missingApplyStates
                     ? "warning"
                     : "ok"
               }
               value={
-                failedSyncs + staleApplyRows + pendingSyncs + missingApplyStates
+                currentStateEvidenceAvailable
+                  ? failedSyncs +
+                    staleApplyRows +
+                    pendingSyncs +
+                    missingApplyStates
+                  : "Unknown"
               }
             />
             <ConfigOverviewRiskRow
               detail={
-                sourceRiskRows[0]?.status_reason ??
-                `${sourceReadyRows} source checks are ready`
+                inventoryEvidenceAvailable
+                  ? sourceRiskRows[0]?.status_reason ??
+                    `${sourceReadyRows} source checks are ready`
+                  : inventoryEvidenceState === "loading"
+                    ? "Source readiness evidence is still loading."
+                    : "Source readiness evidence is unavailable."
               }
               label="Source readiness drift"
-              tone={sourceRiskRows.length ? "warning" : "ok"}
-              value={sourceRiskRows.length}
+              tone={
+                !inventoryEvidenceAvailable || sourceRiskRows.length
+                  ? "warning"
+                  : "ok"
+              }
+              value={
+                inventoryEvidenceAvailable
+                  ? sourceRiskRows.length
+                  : "Unknown"
+              }
             />
             <ConfigOverviewRiskRow
-              detail={`${ruleValidityLabel(validRuleRows, vpsRuleValues.length)}; invalid values stay in Rules details`}
+              detail={
+                fleetConfigEvidenceAvailable
+                  ? `${ruleValidityLabel(validRuleRows, vpsRuleValues.length)}; invalid values stay in Rules details`
+                  : "Traffic and accounting rule evidence is unavailable."
+              }
               label="Rule validation"
-              tone={invalidRuleRows ? "warning" : "ok"}
-              value={invalidRuleRows}
+              tone={
+                !fleetConfigEvidenceAvailable || invalidRuleRows
+                  ? "warning"
+                  : "ok"
+              }
+              value={
+                fleetConfigEvidenceAvailable ? invalidRuleRows : "Unknown"
+              }
             />
           </div>
         </section>
@@ -722,26 +832,52 @@ function ConfigOverview({
           <div className="configOverviewBlockHeader">
             <h3>Template coverage</h3>
             <ConsoleStatusBadge
-              tone={missingTemplateCoverage ? "warning" : "ok"}
+              tone={
+                !inventoryEvidenceAvailable ||
+                !fleetConfigEvidenceAvailable ||
+                missingTemplateCoverage
+                  ? "warning"
+                  : "ok"
+              }
             >
-              {assignedClientIds.size}/{agents.length || 0} VPSs
+              {inventoryEvidenceAvailable && fleetConfigEvidenceAvailable
+                ? `${assignedClientIds.size}/${agents.length} VPSs`
+                : evidenceLoading
+                  ? "Checking evidence"
+                  : "Evidence incomplete"}
             </ConsoleStatusBadge>
           </div>
           <div className="configCoverageGrid">
             <span>
-              <strong>{sourceTemplates.length}</strong>
+              <strong>
+                {inventoryEvidenceAvailable
+                  ? sourceTemplates.length
+                  : "Unknown"}
+              </strong>
               <small>templates</small>
             </span>
             <span>
-              <strong>{customTemplateCount}</strong>
+              <strong>
+                {inventoryEvidenceAvailable
+                  ? customTemplateCount
+                  : "Unknown"}
+              </strong>
               <small>custom templates</small>
             </span>
             <span>
-              <strong>{sourceTemplateAssignments.length}</strong>
+              <strong>
+                {inventoryEvidenceAvailable
+                  ? sourceTemplateAssignments.length
+                  : "Unknown"}
+              </strong>
               <small>assignments</small>
             </span>
             <span>
-              <strong>{missingTemplateCoverage}</strong>
+              <strong>
+                {inventoryEvidenceAvailable && fleetConfigEvidenceAvailable
+                  ? missingTemplateCoverage
+                  : "Unknown"}
+              </strong>
               <small>VPS without assignment evidence</small>
             </span>
           </div>
@@ -825,7 +961,7 @@ function ConfigOverviewRiskRow({
   detail: string;
   label: string;
   tone: "critical" | "warning" | "ok" | "info" | "neutral";
-  value: number;
+  value: ReactNode;
 }) {
   return (
     <div className="configRiskRow">
@@ -3008,6 +3144,7 @@ function bulkVpsCountLabel(count: number): string {
 function SingleVpsConfig({
   agents,
   runtimeConfigApplyStates,
+  runtimeConfigEvidenceState,
   onCreateJob,
   onLoadJobOutputs,
   onLoadJobTargets,
@@ -3021,6 +3158,7 @@ function SingleVpsConfig({
 }: {
   agents: AgentView[];
   runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
+  runtimeConfigEvidenceState: EvidenceState;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
@@ -3067,9 +3205,12 @@ function SingleVpsConfig({
   );
   const runtimeApplyState = useMemo(
     () =>
-      runtimeConfigApplyStates.find((state) => state.client_id === clientId) ??
-      null,
-    [clientId, runtimeConfigApplyStates],
+      runtimeConfigEvidenceState === "available"
+        ? runtimeConfigApplyStates.find(
+            (state) => state.client_id === clientId,
+          ) ?? null
+        : null,
+    [clientId, runtimeConfigApplyStates, runtimeConfigEvidenceState],
   );
   const overrideLineCount = useMemo(
     () => countConfigPatchLines(overrideToml),
@@ -3382,7 +3523,13 @@ function SingleVpsConfig({
                 ? "Select a listed VPS"
                 : "no target selected"}
           </span>
-          <span>{runtimeConfigApplyStateSummary(runtimeApplyState)}</span>
+          <span>
+            {runtimeConfigEvidenceState === "loading"
+              ? "Checking apply-state evidence"
+              : runtimeConfigEvidenceState === "unavailable"
+                ? "Apply-state evidence unavailable"
+                : runtimeConfigApplyStateSummary(runtimeApplyState)}
+          </span>
         </div>
         <button
           className="secondaryAction"

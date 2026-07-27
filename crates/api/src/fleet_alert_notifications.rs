@@ -45,6 +45,10 @@ impl AppState {
             dry_run || request.confirmed,
             "fleet_alert_notification_dispatch_confirmation_required"
         );
+        let channels = self
+            .repo
+            .list_enabled_fleet_alert_notification_channels_for_dispatch()
+            .await?;
         let alerts = self
             .list_fleet_alerts(FleetAlertQuery {
                 limit: request.limit.or(Some(200)),
@@ -54,10 +58,6 @@ impl AppState {
                 operator_state: request.operator_state.clone(),
                 include_muted: request.include_muted,
             })
-            .await?;
-        let channels = self
-            .repo
-            .list_fleet_alert_notification_channels(1000, Some(true), None, None, None)
             .await?;
         let agents = self.repo.list_agents().await?;
         let agent_scopes = build_agent_alert_scopes(&agents);
@@ -288,7 +288,8 @@ fn channel_matches_alert(
     alert: &FleetAlertView,
     scope: Option<&AgentAlertScope>,
 ) -> bool {
-    severity_rank(&alert.severity) <= severity_rank(&channel.min_severity)
+    channel.configuration_error.is_none()
+        && severity_rank(&alert.severity) <= severity_rank(&channel.min_severity)
         && token_filter_matches(&channel.categories, &alert.category)
         && token_filter_matches(&channel.operator_states, &alert.operator_state)
         && scope_matches(channel, alert, scope)

@@ -164,17 +164,18 @@ impl Repository {
         let now = unix_now().to_string();
         let scope = request.scope.trim();
         let owner = request.owner_client_id.as_deref().map(str::trim);
-        let template = match self {
+        match self {
             Self::Memory(memory) => {
-                let mut templates = memory.source_templates.write().await;
-                if templates.iter().any(|template| {
-                    template.domain == request.domain
-                        && template.name == request.name
-                        && template.scope == scope
-                        && template.owner_client_id.as_deref() == owner
-                }) {
-                    anyhow::bail!("source_template_duplicate");
-                } else {
+                let template = {
+                    let mut templates = memory.source_templates.write().await;
+                    if templates.iter().any(|template| {
+                        template.domain == request.domain
+                            && template.name == request.name
+                            && template.scope == scope
+                            && template.owner_client_id.as_deref() == owner
+                    }) {
+                        anyhow::bail!("source_template_duplicate");
+                    }
                     let template = SourceTemplateView {
                         id: Uuid::new_v4(),
                         domain: request.domain.clone(),
@@ -191,9 +192,20 @@ impl Repository {
                     };
                     templates.push(template.clone());
                     template
-                }
+                };
+                record_memory_source_template_audit(
+                    memory,
+                    "source_template.saved",
+                    &format!("source_template:{}", template.id),
+                    Some(&template),
+                    &[],
+                    operator,
+                )
+                .await;
+                Ok(template)
             }
             Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
                 let existing_id = if let Some(owner) = owner {
                     sqlx::query(
                         r#"
@@ -204,7 +216,7 @@ impl Repository {
                     .bind(&request.domain)
                     .bind(&request.name)
                     .bind(owner)
-                    .fetch_optional(pool)
+                    .fetch_optional(&mut *tx)
                     .await?
                     .map(|row| row.get::<Uuid, _>("id"))
                 } else {
@@ -217,7 +229,7 @@ impl Repository {
                     .bind(&request.domain)
                     .bind(&request.name)
                     .bind(scope)
-                    .fetch_optional(pool)
+                    .fetch_optional(&mut *tx)
                     .await?
                     .map(|row| row.get::<Uuid, _>("id"))
                 };
@@ -244,20 +256,22 @@ impl Repository {
                 .bind(owner)
                 .bind(&request.description)
                 .bind(sqlx::types::Json(&request.definition))
-                .fetch_one(pool)
+                .fetch_one(&mut *tx)
                 .await?;
-                source_template_from_row(row)?
+                let template = source_template_from_row(row)?;
+                insert_source_template_audit_in_tx(
+                    &mut tx,
+                    "source_template.saved",
+                    &format!("source_template:{}", template.id),
+                    Some(&template),
+                    &[],
+                    operator,
+                )
+                .await?;
+                tx.commit().await?;
+                Ok(template)
             }
-        };
-        self.record_source_template_audit(
-            "source_template.saved",
-            &format!("source_template:{}", template.id),
-            Some(&template),
-            &[],
-            operator,
-        )
-        .await?;
-        Ok(template)
+        }
     }
 
     pub(crate) async fn source_template_by_id_in_domain(
@@ -314,37 +328,50 @@ impl Repository {
         let scope = request.scope.trim();
         let owner = request.owner_client_id.as_deref().map(str::trim);
         let description = request.description.clone().or(source.description.clone());
-        let template = match self {
+        match self {
             Self::Memory(memory) => {
-                let mut templates = memory.source_templates.write().await;
-                anyhow::ensure!(
-                    !templates.iter().any(|template| source_template_key_matches(
-                        template,
-                        &source.domain,
-                        &request.name,
-                        scope,
-                        owner
-                    )),
-                    "source_template_clone_target_exists"
-                );
-                let template = SourceTemplateView {
-                    id: Uuid::new_v4(),
-                    domain: source.domain.clone(),
-                    name: request.name.clone(),
-                    scope: scope.to_string(),
-                    built_in: false,
-                    is_default: false,
-                    owner_client_id: owner.map(ToOwned::to_owned),
-                    description,
-                    definition: source.definition.clone(),
-                    assigned_client_count: 0,
-                    created_at: now.clone(),
-                    updated_at: now,
+                let template = {
+                    let mut templates = memory.source_templates.write().await;
+                    anyhow::ensure!(
+                        !templates.iter().any(|template| source_template_key_matches(
+                            template,
+                            &source.domain,
+                            &request.name,
+                            scope,
+                            owner
+                        )),
+                        "source_template_clone_target_exists"
+                    );
+                    let template = SourceTemplateView {
+                        id: Uuid::new_v4(),
+                        domain: source.domain.clone(),
+                        name: request.name.clone(),
+                        scope: scope.to_string(),
+                        built_in: false,
+                        is_default: false,
+                        owner_client_id: owner.map(ToOwned::to_owned),
+                        description,
+                        definition: source.definition.clone(),
+                        assigned_client_count: 0,
+                        created_at: now.clone(),
+                        updated_at: now,
+                    };
+                    templates.push(template.clone());
+                    template
                 };
-                templates.push(template.clone());
-                template
+                record_memory_source_template_audit(
+                    memory,
+                    "source_template.cloned",
+                    &format!("source_template:{}", template.id),
+                    Some(&template),
+                    &[],
+                    operator,
+                )
+                .await;
+                Ok(template)
             }
             Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
                 let exists = if let Some(owner) = owner {
                     sqlx::query(
                         r#"
@@ -355,7 +382,7 @@ impl Repository {
                     .bind(&source.domain)
                     .bind(owner)
                     .bind(&request.name)
-                    .fetch_optional(pool)
+                    .fetch_optional(&mut *tx)
                     .await?
                     .is_some()
                 } else {
@@ -368,7 +395,7 @@ impl Repository {
                     .bind(&source.domain)
                     .bind(&request.name)
                     .bind(scope)
-                    .fetch_optional(pool)
+                    .fetch_optional(&mut *tx)
                     .await?
                     .is_some()
                 };
@@ -394,20 +421,22 @@ impl Repository {
                 .bind(owner)
                 .bind(&description)
                 .bind(sqlx::types::Json(&source.definition))
-                .fetch_one(pool)
+                .fetch_one(&mut *tx)
                 .await?;
-                source_template_from_row(row)?
+                let template = source_template_from_row(row)?;
+                insert_source_template_audit_in_tx(
+                    &mut tx,
+                    "source_template.cloned",
+                    &format!("source_template:{}", template.id),
+                    Some(&template),
+                    &[],
+                    operator,
+                )
+                .await?;
+                tx.commit().await?;
+                Ok(template)
             }
-        };
-        self.record_source_template_audit(
-            "source_template.cloned",
-            &format!("source_template:{}", template.id),
-            Some(&template),
-            &[],
-            operator,
-        )
-        .await?;
-        Ok(template)
+        }
     }
 
     pub(crate) async fn diff_source_template(
@@ -543,6 +572,7 @@ impl Repository {
                 existing.clone()
             }
             Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
                 let row = sqlx::query(
                     r#"
                     UPDATE source_templates p
@@ -570,19 +600,33 @@ impl Repository {
                 .bind(template_id)
                 .bind(&candidate_description)
                 .bind(sqlx::types::Json(&request.definition))
-                .fetch_one(pool)
+                .fetch_one(&mut *tx)
                 .await?;
-                source_template_from_row(row)?
+                let updated = source_template_from_row(row)?;
+                insert_source_template_audit_in_tx(
+                    &mut tx,
+                    "source_template.updated",
+                    &format!("source_template:{}", updated.id),
+                    Some(&updated),
+                    &[],
+                    operator,
+                )
+                .await?;
+                tx.commit().await?;
+                updated
             }
         };
-        self.record_source_template_audit(
-            "source_template.updated",
-            &format!("source_template:{}", updated.id),
-            Some(&updated),
-            &[],
-            operator,
-        )
-        .await?;
+        if let Self::Memory(memory) = self {
+            record_memory_source_template_audit(
+                memory,
+                "source_template.updated",
+                &format!("source_template:{}", updated.id),
+                Some(&updated),
+                &[],
+                operator,
+            )
+            .await;
+        }
         Ok(UpdateSourceTemplateResponse {
             sync: Vec::new(),
             template: updated,
@@ -854,6 +898,15 @@ impl Repository {
                     .execute(&mut *tx)
                     .await?;
                 }
+                insert_source_template_audit_in_tx(
+                    &mut tx,
+                    "source_template.assigned",
+                    &format!("source_template:{}", template.id),
+                    Some(&template),
+                    &client_ids,
+                    operator,
+                )
+                .await?;
                 tx.commit().await?;
             }
         }
@@ -861,14 +914,17 @@ impl Repository {
         let assignments = self
             .list_source_template_assignments_for_clients(&client_ids, Some(&request.domain))
             .await?;
-        self.record_source_template_audit(
-            "source_template.assigned",
-            &format!("source_template:{}", template.id),
-            Some(&template),
-            &client_ids,
-            operator,
-        )
-        .await?;
+        if let Self::Memory(memory) = self {
+            record_memory_source_template_audit(
+                memory,
+                "source_template.assigned",
+                &format!("source_template:{}", template.id),
+                Some(&template),
+                &client_ids,
+                operator,
+            )
+            .await;
+        }
         Ok(AssignSourceTemplateResponse {
             sync: Vec::new(),
             template,
@@ -1015,56 +1071,69 @@ impl Repository {
             .into_iter()
             .find(|template| template.id == template_id))
     }
+}
 
-    async fn record_source_template_audit(
-        &self,
-        action: &str,
-        target: &str,
-        template: Option<&SourceTemplateView>,
-        client_ids: &[String],
-        operator: &AuthContext,
-    ) -> Result<()> {
-        let metadata = serde_json::json!({
-            "domain": template.map(|template| template.domain.as_str()),
-            "template_id": template.map(|template| template.id),
-            "template_name": template.map(|template| template.name.as_str()),
-            "template_scope": template.map(|template| template.scope.as_str()),
-            "owner_client_id": template.and_then(|template| template.owner_client_id.as_deref()),
-            "target_clients": client_ids,
-            "target_count": client_ids.len(),
-        });
-        let command_hash = Some(payload_hash(metadata.to_string().as_bytes()));
-        match self {
-            Self::Memory(memory) => {
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: Some(operator.operator.id),
-                    action: action.to_string(),
-                    target: target.to_string(),
-                    command_hash,
-                    metadata,
-                    created_at: unix_now().to_string(),
-                });
-            }
-            Self::Postgres(pool) => {
-                sqlx::query(
-                    r#"
-                    INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    "#,
-                )
-                .bind(Uuid::new_v4())
-                .bind(operator.operator.id)
-                .bind(action)
-                .bind(target)
-                .bind(&command_hash)
-                .bind(sqlx::types::Json(&metadata))
-                .execute(pool)
-                .await?;
-            }
-        }
-        Ok(())
-    }
+fn source_template_audit_parts(
+    template: Option<&SourceTemplateView>,
+    client_ids: &[String],
+) -> (serde_json::Value, String) {
+    let metadata = serde_json::json!({
+        "domain": template.map(|template| template.domain.as_str()),
+        "template_id": template.map(|template| template.id),
+        "template_name": template.map(|template| template.name.as_str()),
+        "template_scope": template.map(|template| template.scope.as_str()),
+        "owner_client_id": template.and_then(|template| template.owner_client_id.as_deref()),
+        "target_clients": client_ids,
+        "target_count": client_ids.len(),
+    });
+    let command_hash = payload_hash(metadata.to_string().as_bytes());
+    (metadata, command_hash)
+}
+
+async fn record_memory_source_template_audit(
+    memory: &crate::repository::MemoryState,
+    action: &str,
+    target: &str,
+    template: Option<&SourceTemplateView>,
+    client_ids: &[String],
+    operator: &AuthContext,
+) {
+    let (metadata, command_hash) = source_template_audit_parts(template, client_ids);
+    memory.audits.write().await.push(AuditLogView {
+        id: Uuid::new_v4(),
+        actor_id: Some(operator.operator.id),
+        action: action.to_string(),
+        target: target.to_string(),
+        command_hash: Some(command_hash),
+        metadata,
+        created_at: unix_now().to_string(),
+    });
+}
+
+async fn insert_source_template_audit_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    action: &str,
+    target: &str,
+    template: Option<&SourceTemplateView>,
+    client_ids: &[String],
+    operator: &AuthContext,
+) -> Result<()> {
+    let (metadata, command_hash) = source_template_audit_parts(template, client_ids);
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(operator.operator.id)
+    .bind(action)
+    .bind(target)
+    .bind(command_hash)
+    .bind(sqlx::types::Json(metadata))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 fn source_template_from_row(row: sqlx::postgres::PgRow) -> Result<SourceTemplateView> {

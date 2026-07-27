@@ -3,7 +3,10 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::Utc;
 use serde_json::Value;
 use sqlx::{postgres::PgRow, types::Json as SqlJson, PgPool, Postgres, Row, Transaction};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet, HashSet},
+};
 use uuid::Uuid;
 use vpsman_common::{
     is_terminal_command_type, is_terminal_session_event, payload_hash, terminal_session_state,
@@ -396,14 +399,8 @@ impl Repository {
                         })
                     })
                     .collect::<Vec<_>>();
-                outputs.sort_by(|left, right| {
-                    right
-                        .created_at
-                        .cmp(&left.created_at)
-                        .then_with(|| right.job_id.cmp(&left.job_id))
-                        .then_with(|| right.seq.cmp(&left.seq))
-                });
-                let mut sessions = build_terminal_sessions(outputs, limit, session_id);
+                sort_terminal_outputs_newest(&mut outputs)?;
+                let mut sessions = build_terminal_sessions(outputs, limit, session_id)?;
                 sessions.extend(
                     memory
                         .terminal_sessions
@@ -417,7 +414,7 @@ impl Repository {
                         })
                         .cloned(),
                 );
-                Ok(deduplicate_terminal_sessions(sessions, limit))
+                deduplicate_terminal_sessions(sessions, limit)
             }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
@@ -874,144 +871,13 @@ impl Repository {
     }
 
     async fn upsert_terminal_session_event(&self, event: TerminalEvent) -> Result<()> {
+        let session = TerminalAggregate::new(event).into_view();
         match self {
             Self::Memory(memory) => {
                 let mut sessions = memory.terminal_sessions.write().await;
-                upsert_memory_terminal_session(&mut sessions, event);
-                Ok(())
+                upsert_memory_terminal_session(&mut sessions, session)
             }
-            Self::Postgres(pool) => {
-                sqlx::query(
-                    r#"
-                    INSERT INTO terminal_sessions (
-                        session_id,
-                        client_id,
-                        state,
-                        last_status,
-                        argv,
-                        cwd,
-                        cols,
-                        rows,
-                        idle_timeout_secs,
-                        flow_window_bytes,
-                        output_first_seq,
-                        output_next_seq,
-                        output_retained_first_seq,
-                        output_retained_bytes,
-                        output_dropped_bytes,
-                        output_dropped_chunks,
-                        output_replay_truncated,
-                        last_input_seq,
-                        session_exited,
-                        close_reason,
-                        last_event,
-                        last_job_id,
-                        last_command_type,
-                        last_seq,
-                        opened_at,
-                        observed_at
-                    )
-                    VALUES (
-                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                        $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-                        $21, $22, $23, $24, $25::timestamptz, $26::timestamptz
-                    )
-                    ON CONFLICT (client_id, session_id)
-                    DO UPDATE SET
-                        state = EXCLUDED.state,
-                        last_status = EXCLUDED.last_status,
-                        argv = CASE
-                            WHEN jsonb_array_length(EXCLUDED.argv) > 0 THEN EXCLUDED.argv
-                            ELSE terminal_sessions.argv
-                        END,
-                        cwd = COALESCE(EXCLUDED.cwd, terminal_sessions.cwd),
-                        cols = COALESCE(EXCLUDED.cols, terminal_sessions.cols),
-                        rows = COALESCE(EXCLUDED.rows, terminal_sessions.rows),
-                        idle_timeout_secs = COALESCE(
-                            EXCLUDED.idle_timeout_secs,
-                            terminal_sessions.idle_timeout_secs
-                        ),
-                        flow_window_bytes = COALESCE(
-                            EXCLUDED.flow_window_bytes,
-                            terminal_sessions.flow_window_bytes
-                        ),
-                        output_first_seq = COALESCE(
-                            terminal_sessions.output_first_seq,
-                            EXCLUDED.output_first_seq
-                        ),
-                        output_next_seq = GREATEST(
-                            COALESCE(terminal_sessions.output_next_seq, 0),
-                            COALESCE(EXCLUDED.output_next_seq, 0)
-                        ),
-                        output_retained_first_seq = COALESCE(
-                            EXCLUDED.output_retained_first_seq,
-                            terminal_sessions.output_retained_first_seq
-                        ),
-                        output_retained_bytes = COALESCE(
-                            EXCLUDED.output_retained_bytes,
-                            terminal_sessions.output_retained_bytes
-                        ),
-                        output_dropped_bytes = COALESCE(
-                            EXCLUDED.output_dropped_bytes,
-                            terminal_sessions.output_dropped_bytes
-                        ),
-                        output_dropped_chunks = COALESCE(
-                            EXCLUDED.output_dropped_chunks,
-                            terminal_sessions.output_dropped_chunks
-                        ),
-                        output_replay_truncated =
-                            terminal_sessions.output_replay_truncated
-                            OR EXCLUDED.output_replay_truncated,
-                        last_input_seq = COALESCE(
-                            EXCLUDED.last_input_seq,
-                            terminal_sessions.last_input_seq
-                        ),
-                        session_exited = EXCLUDED.session_exited,
-                        close_reason = COALESCE(EXCLUDED.close_reason, terminal_sessions.close_reason),
-                        last_event = EXCLUDED.last_event,
-                        last_job_id = EXCLUDED.last_job_id,
-                        last_command_type = EXCLUDED.last_command_type,
-                        last_seq = EXCLUDED.last_seq,
-                        opened_at = COALESCE(
-                            terminal_sessions.opened_at,
-                            EXCLUDED.opened_at
-                        ),
-                        observed_at = EXCLUDED.observed_at
-                    "#,
-                )
-                .bind(event.session_id)
-                .bind(&event.client_id)
-                .bind(event.state)
-                .bind(&event.status)
-                .bind(SqlJson(&event.argv))
-                .bind(&event.cwd)
-                .bind(event.cols)
-                .bind(event.rows)
-                .bind(event.idle_timeout_secs)
-                .bind(event.flow_window_bytes)
-                .bind(event.output_first_seq)
-                .bind(event.output_next_seq)
-                .bind(event.output_retained_first_seq)
-                .bind(event.output_retained_bytes)
-                .bind(event.output_dropped_bytes)
-                .bind(event.output_dropped_chunks)
-                .bind(event.output_replay_truncated)
-                .bind(event.input_seq)
-                .bind(event.session_exited)
-                .bind(&event.close_reason)
-                .bind(&event.event_type)
-                .bind(event.job_id)
-                .bind(&event.command_type)
-                .bind(event.seq)
-                .bind(
-                    (event.event_type == "terminal_open")
-                        .then_some(event.created_at.as_str()),
-                )
-                .bind(&event.created_at)
-                .execute(pool)
-                .await?;
-                Ok(())
-            }
+            Self::Postgres(pool) => upsert_postgres_terminal_session(pool, &session).await,
         }
     }
 
@@ -1020,9 +886,19 @@ impl Repository {
             return Ok(());
         };
         let sessions = terminal_sessions_from_outputs(pool, Some(client_id), None, 200).await?;
-        for session in sessions {
-            sqlx::query(
-                r#"
+        for session in &sessions {
+            upsert_postgres_terminal_session(pool, session).await?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) async fn upsert_postgres_terminal_session(
+    pool: &PgPool,
+    session: &TerminalSessionView,
+) -> Result<()> {
+    sqlx::query(
+        r#"
                 INSERT INTO terminal_sessions (
                     session_id,
                     client_id,
@@ -1058,67 +934,239 @@ impl Repository {
                 )
                 ON CONFLICT (client_id, session_id)
                 DO UPDATE SET
-                    state = EXCLUDED.state,
-                    last_status = EXCLUDED.last_status,
-                    argv = EXCLUDED.argv,
-                    cwd = EXCLUDED.cwd,
-                    cols = EXCLUDED.cols,
-                    rows = EXCLUDED.rows,
-                    idle_timeout_secs = EXCLUDED.idle_timeout_secs,
-                    flow_window_bytes = EXCLUDED.flow_window_bytes,
-                    output_first_seq = EXCLUDED.output_first_seq,
-                    output_next_seq = EXCLUDED.output_next_seq,
-                    output_retained_first_seq = EXCLUDED.output_retained_first_seq,
-                    output_retained_bytes = EXCLUDED.output_retained_bytes,
-                    output_dropped_bytes = EXCLUDED.output_dropped_bytes,
-                    output_dropped_chunks = EXCLUDED.output_dropped_chunks,
-                    output_replay_truncated = EXCLUDED.output_replay_truncated,
-                    last_input_seq = EXCLUDED.last_input_seq,
-                    session_exited = EXCLUDED.session_exited,
-                    close_reason = EXCLUDED.close_reason,
-                    last_event = EXCLUDED.last_event,
-                    last_job_id = EXCLUDED.last_job_id,
-                    last_command_type = EXCLUDED.last_command_type,
-                    last_seq = EXCLUDED.last_seq,
-                    opened_at = COALESCE(
+                    state = CASE
+                        WHEN (
+                            terminal_sessions.session_exited
+                            OR terminal_sessions.state IN (
+                                'closed', 'missing', 'rejected', 'exited'
+                            )
+                        )
+                        AND NOT (
+                            EXCLUDED.session_exited
+                            OR EXCLUDED.state IN (
+                                'closed', 'missing', 'rejected', 'exited'
+                            )
+                        )
+                        THEN terminal_sessions.state
+                        ELSE EXCLUDED.state
+                    END,
+                    last_status = CASE
+                        WHEN (
+                            terminal_sessions.session_exited
+                            OR terminal_sessions.state IN (
+                                'closed', 'missing', 'rejected', 'exited'
+                            )
+                        )
+                        AND NOT (
+                            EXCLUDED.session_exited
+                            OR EXCLUDED.state IN (
+                                'closed', 'missing', 'rejected', 'exited'
+                            )
+                        )
+                        THEN terminal_sessions.last_status
+                        ELSE EXCLUDED.last_status
+                    END,
+                    argv = CASE
+                        WHEN jsonb_array_length(EXCLUDED.argv) > 0 THEN EXCLUDED.argv
+                        ELSE terminal_sessions.argv
+                    END,
+                    cwd = COALESCE(EXCLUDED.cwd, terminal_sessions.cwd),
+                    cols = COALESCE(EXCLUDED.cols, terminal_sessions.cols),
+                    rows = COALESCE(EXCLUDED.rows, terminal_sessions.rows),
+                    idle_timeout_secs = COALESCE(
+                        EXCLUDED.idle_timeout_secs,
+                        terminal_sessions.idle_timeout_secs
+                    ),
+                    flow_window_bytes = COALESCE(
+                        EXCLUDED.flow_window_bytes,
+                        terminal_sessions.flow_window_bytes
+                    ),
+                    output_first_seq = COALESCE(
+                        terminal_sessions.output_first_seq,
+                        EXCLUDED.output_first_seq
+                    ),
+                    output_next_seq = GREATEST(
+                        terminal_sessions.output_next_seq,
+                        EXCLUDED.output_next_seq
+                    ),
+                    output_retained_first_seq = GREATEST(
+                        terminal_sessions.output_retained_first_seq,
+                        EXCLUDED.output_retained_first_seq
+                    ),
+                    output_retained_bytes = CASE
+                        WHEN EXCLUDED.output_retained_bytes IS NULL
+                        THEN terminal_sessions.output_retained_bytes
+                        WHEN terminal_sessions.output_retained_bytes IS NULL
+                        THEN EXCLUDED.output_retained_bytes
+                        WHEN EXCLUDED.output_next_seq IS NOT NULL
+                             AND (
+                                 terminal_sessions.output_next_seq IS NULL
+                                 OR EXCLUDED.output_next_seq
+                                    >= terminal_sessions.output_next_seq
+                             )
+                        THEN EXCLUDED.output_retained_bytes
+                        ELSE terminal_sessions.output_retained_bytes
+                    END,
+                    output_dropped_bytes = GREATEST(
+                        terminal_sessions.output_dropped_bytes,
+                        EXCLUDED.output_dropped_bytes
+                    ),
+                    output_dropped_chunks = GREATEST(
+                        terminal_sessions.output_dropped_chunks,
+                        EXCLUDED.output_dropped_chunks
+                    ),
+                    output_replay_truncated =
+                        terminal_sessions.output_replay_truncated
+                        OR EXCLUDED.output_replay_truncated,
+                    last_input_seq = GREATEST(
+                        terminal_sessions.last_input_seq,
+                        EXCLUDED.last_input_seq
+                    ),
+                    session_exited =
+                        terminal_sessions.session_exited
+                        OR EXCLUDED.session_exited,
+                    close_reason = COALESCE(
+                        terminal_sessions.close_reason,
+                        EXCLUDED.close_reason
+                    ),
+                    last_event = CASE
+                        WHEN (
+                            terminal_sessions.session_exited
+                            OR terminal_sessions.state IN (
+                                'closed', 'missing', 'rejected', 'exited'
+                            )
+                        )
+                        AND NOT (
+                            EXCLUDED.session_exited
+                            OR EXCLUDED.state IN (
+                                'closed', 'missing', 'rejected', 'exited'
+                            )
+                        )
+                        THEN terminal_sessions.last_event
+                        ELSE EXCLUDED.last_event
+                    END,
+                    last_job_id = CASE
+                        WHEN (
+                            terminal_sessions.session_exited
+                            OR terminal_sessions.state IN (
+                                'closed', 'missing', 'rejected', 'exited'
+                            )
+                        )
+                        AND NOT (
+                            EXCLUDED.session_exited
+                            OR EXCLUDED.state IN (
+                                'closed', 'missing', 'rejected', 'exited'
+                            )
+                        )
+                        THEN terminal_sessions.last_job_id
+                        ELSE EXCLUDED.last_job_id
+                    END,
+                    last_command_type = CASE
+                        WHEN (
+                            terminal_sessions.session_exited
+                            OR terminal_sessions.state IN (
+                                'closed', 'missing', 'rejected', 'exited'
+                            )
+                        )
+                        AND NOT (
+                            EXCLUDED.session_exited
+                            OR EXCLUDED.state IN (
+                                'closed', 'missing', 'rejected', 'exited'
+                            )
+                        )
+                        THEN terminal_sessions.last_command_type
+                        ELSE EXCLUDED.last_command_type
+                    END,
+                    last_seq = CASE
+                        WHEN (
+                            terminal_sessions.session_exited
+                            OR terminal_sessions.state IN (
+                                'closed', 'missing', 'rejected', 'exited'
+                            )
+                        )
+                        AND NOT (
+                            EXCLUDED.session_exited
+                            OR EXCLUDED.state IN (
+                                'closed', 'missing', 'rejected', 'exited'
+                            )
+                        )
+                        THEN terminal_sessions.last_seq
+                        ELSE EXCLUDED.last_seq
+                    END,
+                    opened_at = LEAST(
                         terminal_sessions.opened_at,
                         EXCLUDED.opened_at
                     ),
-                    observed_at = EXCLUDED.observed_at
-                WHERE EXCLUDED.observed_at >= terminal_sessions.observed_at
+                    observed_at = CASE
+                        WHEN (
+                            terminal_sessions.session_exited
+                            OR terminal_sessions.state IN (
+                                'closed', 'missing', 'rejected', 'exited'
+                            )
+                        )
+                        AND NOT (
+                            EXCLUDED.session_exited
+                            OR EXCLUDED.state IN (
+                                'closed', 'missing', 'rejected', 'exited'
+                            )
+                        )
+                        THEN terminal_sessions.observed_at
+                        ELSE EXCLUDED.observed_at
+                    END
+                WHERE (
+                    EXCLUDED.observed_at,
+                    EXCLUDED.last_job_id,
+                    EXCLUDED.last_seq
+                ) >= (
+                    terminal_sessions.observed_at,
+                    terminal_sessions.last_job_id,
+                    terminal_sessions.last_seq
+                )
+                OR (
+                    (
+                        EXCLUDED.session_exited
+                        OR EXCLUDED.state IN (
+                            'closed', 'missing', 'rejected', 'exited'
+                        )
+                    )
+                    AND NOT (
+                        terminal_sessions.session_exited
+                        OR terminal_sessions.state IN (
+                            'closed', 'missing', 'rejected', 'exited'
+                        )
+                    )
+                )
                 "#,
-            )
-            .bind(session.session_id)
-            .bind(&session.client_id)
-            .bind(&session.state)
-            .bind(&session.last_status)
-            .bind(SqlJson(&session.argv))
-            .bind(&session.cwd)
-            .bind(session.cols)
-            .bind(session.rows)
-            .bind(session.idle_timeout_secs)
-            .bind(session.flow_window_bytes)
-            .bind(session.output_first_seq)
-            .bind(session.output_next_seq)
-            .bind(session.output_retained_first_seq)
-            .bind(session.output_retained_bytes)
-            .bind(session.output_dropped_bytes)
-            .bind(session.output_dropped_chunks)
-            .bind(session.output_replay_truncated)
-            .bind(session.last_input_seq)
-            .bind(session.session_exited)
-            .bind(&session.close_reason)
-            .bind(&session.last_event)
-            .bind(session.last_job_id)
-            .bind(&session.last_command_type)
-            .bind(session.last_seq)
-            .bind(&session.opened_at)
-            .bind(&session.observed_at)
-            .execute(pool)
-            .await?;
-        }
-        Ok(())
-    }
+    )
+    .bind(session.session_id)
+    .bind(&session.client_id)
+    .bind(&session.state)
+    .bind(&session.last_status)
+    .bind(SqlJson(&session.argv))
+    .bind(&session.cwd)
+    .bind(session.cols)
+    .bind(session.rows)
+    .bind(session.idle_timeout_secs)
+    .bind(session.flow_window_bytes)
+    .bind(session.output_first_seq)
+    .bind(session.output_next_seq)
+    .bind(session.output_retained_first_seq)
+    .bind(session.output_retained_bytes)
+    .bind(session.output_dropped_bytes)
+    .bind(session.output_dropped_chunks)
+    .bind(session.output_replay_truncated)
+    .bind(session.last_input_seq)
+    .bind(session.session_exited)
+    .bind(&session.close_reason)
+    .bind(&session.last_event)
+    .bind(session.last_job_id)
+    .bind(&session.last_command_type)
+    .bind(session.last_seq)
+    .bind(&session.opened_at)
+    .bind(&session.observed_at)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn terminal_sessions_from_outputs(
@@ -1170,7 +1218,7 @@ async fn terminal_sessions_from_outputs(
             })
         })
         .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?;
-    Ok(build_terminal_sessions(outputs, limit, session_id))
+    build_terminal_sessions(outputs, limit, session_id)
 }
 
 fn terminal_session_from_row(row: PgRow) -> std::result::Result<TerminalSessionView, sqlx::Error> {
@@ -1347,30 +1395,50 @@ impl TerminalAggregate {
         }
     }
 
-    fn merge_older(&mut self, event: TerminalEvent) {
+    fn merge_older(&mut self, event: TerminalEvent) -> Result<()> {
+        let replacement = (terminal_event_is_terminal(&event)
+            && !terminal_event_is_terminal(&self.latest))
+        .then(|| event.clone());
+        let incoming_range_is_current = event.output_retained_bytes.is_some()
+            && (self.output_retained_bytes.is_none()
+                || event.output_next_seq.is_some_and(|next_seq| {
+                    self.output_next_seq
+                        .is_none_or(|current_seq| next_seq > current_seq)
+                }));
+        let session_exited = self.latest.session_exited || event.session_exited;
         if self.argv.is_empty() {
-            self.argv = event.argv;
+            self.argv = event.argv.clone();
         }
-        self.cwd = self.cwd.take().or(event.cwd);
+        self.cwd = self.cwd.take().or(event.cwd.clone());
         self.cols = self.cols.or(event.cols);
         self.rows = self.rows.or(event.rows);
         self.idle_timeout_secs = self.idle_timeout_secs.or(event.idle_timeout_secs);
         self.flow_window_bytes = self.flow_window_bytes.or(event.flow_window_bytes);
         self.output_first_seq = self.output_first_seq.or(event.output_first_seq);
-        self.output_next_seq = self.output_next_seq.or(event.output_next_seq);
-        self.output_retained_first_seq = self
-            .output_retained_first_seq
-            .or(event.output_retained_first_seq);
-        self.output_retained_bytes = self.output_retained_bytes.or(event.output_retained_bytes);
-        self.output_dropped_bytes = self.output_dropped_bytes.or(event.output_dropped_bytes);
-        self.output_dropped_chunks = self.output_dropped_chunks.or(event.output_dropped_chunks);
+        self.output_next_seq = max_optional_i64(self.output_next_seq, event.output_next_seq);
+        self.output_retained_first_seq = max_optional_i64(
+            self.output_retained_first_seq,
+            event.output_retained_first_seq,
+        );
+        if incoming_range_is_current {
+            self.output_retained_bytes = event.output_retained_bytes;
+        }
+        self.output_dropped_bytes =
+            max_optional_i64(self.output_dropped_bytes, event.output_dropped_bytes);
+        self.output_dropped_chunks =
+            max_optional_i64(self.output_dropped_chunks, event.output_dropped_chunks);
         self.output_replay_truncated |= event.output_replay_truncated;
-        self.last_input_seq = self.last_input_seq.or(event.input_seq);
-        self.close_reason = self.close_reason.take().or(event.close_reason);
+        self.last_input_seq = max_optional_i64(self.last_input_seq, event.input_seq);
+        self.close_reason = self.close_reason.take().or(event.close_reason.clone());
         if event.event_type == "terminal_open" {
             self.opened_at =
-                earliest_timestamp(self.opened_at.take(), Some(event.created_at.clone()));
+                earliest_timestamp(self.opened_at.take(), Some(event.created_at.clone()))?;
         }
+        if let Some(replacement) = replacement {
+            self.latest = replacement;
+        }
+        self.latest.session_exited = session_exited;
+        Ok(())
     }
 
     fn into_view(self) -> TerminalSessionView {
@@ -1405,11 +1473,41 @@ impl TerminalAggregate {
     }
 }
 
+fn terminal_state_is_terminal(state: &str) -> bool {
+    matches!(state, "closed" | "missing" | "rejected" | "exited")
+}
+
+fn terminal_event_is_terminal(event: &TerminalEvent) -> bool {
+    event.session_exited || terminal_state_is_terminal(event.state)
+}
+
+fn terminal_session_is_terminal(session: &TerminalSessionView) -> bool {
+    session.session_exited || terminal_state_is_terminal(&session.state)
+}
+
+fn sort_terminal_outputs_newest(outputs: &mut [TerminalStatusOutput]) -> Result<()> {
+    for output in outputs.iter() {
+        crate::util::parse_timestamp_utc(&output.created_at)
+            .with_context(|| "terminal source timestamp is invalid")?;
+    }
+    outputs.sort_by(|left, right| {
+        crate::util::parse_timestamp_utc(&right.created_at)
+            .expect("terminal timestamps were validated before sorting")
+            .cmp(
+                &crate::util::parse_timestamp_utc(&left.created_at)
+                    .expect("terminal timestamps were validated before sorting"),
+            )
+            .then_with(|| right.job_id.cmp(&left.job_id))
+            .then_with(|| right.seq.cmp(&left.seq))
+    });
+    Ok(())
+}
+
 fn build_terminal_sessions(
     outputs: Vec<TerminalStatusOutput>,
     limit: i64,
     session_filter: Option<Uuid>,
-) -> Vec<TerminalSessionView> {
+) -> Result<Vec<TerminalSessionView>> {
     let mut order = Vec::<(String, Uuid)>::new();
     let mut aggregates = BTreeMap::<(String, Uuid), TerminalAggregate>::new();
 
@@ -1422,7 +1520,7 @@ fn build_terminal_sessions(
         }
         let key = (event.client_id.clone(), event.session_id);
         if let Some(aggregate) = aggregates.get_mut(&key) {
-            aggregate.merge_older(event);
+            aggregate.merge_older(event)?;
         } else {
             order.push(key.clone());
             aggregates.insert(key, TerminalAggregate::new(event));
@@ -1443,7 +1541,7 @@ fn build_terminal_sessions(
             }
         }
     }
-    views
+    Ok(views)
 }
 
 fn parse_terminal_event(output: TerminalStatusOutput) -> Option<TerminalEvent> {
@@ -1911,13 +2009,37 @@ async fn update_postgres_terminal_session_range(
     Ok(())
 }
 
-fn upsert_memory_terminal_session(sessions: &mut Vec<TerminalSessionView>, event: TerminalEvent) {
-    let next = TerminalAggregate::new(event).into_view();
+fn upsert_memory_terminal_session(
+    sessions: &mut Vec<TerminalSessionView>,
+    next: TerminalSessionView,
+) -> Result<()> {
+    crate::util::parse_timestamp_utc(&next.observed_at)
+        .context("terminal source timestamp is invalid")?;
+    if let Some(opened_at) = next.opened_at.as_deref() {
+        crate::util::parse_timestamp_utc(opened_at)
+            .context("terminal opened timestamp is invalid")?;
+    }
     if let Some(existing) = sessions.iter_mut().find(|session| {
         session.client_id == next.client_id && session.session_id == next.session_id
     }) {
-        existing.state = next.state;
-        existing.last_status = next.last_status;
+        let advances_terminal =
+            terminal_session_is_terminal(&next) && !terminal_session_is_terminal(existing);
+        if !advances_terminal && !terminal_source_is_at_least_as_new(existing, &next)? {
+            return Ok(());
+        }
+        let preserve_terminal =
+            terminal_session_is_terminal(existing) && !terminal_session_is_terminal(&next);
+        let incoming_range_is_current = next.output_retained_bytes.is_some()
+            && (existing.output_retained_bytes.is_none()
+                || next.output_next_seq.is_some_and(|next_seq| {
+                    existing
+                        .output_next_seq
+                        .is_none_or(|existing_seq| next_seq >= existing_seq)
+                }));
+        if !preserve_terminal {
+            existing.state = next.state;
+            existing.last_status = next.last_status;
+        }
         if !next.argv.is_empty() {
             existing.argv = next.argv;
         }
@@ -1927,51 +2049,98 @@ fn upsert_memory_terminal_session(sessions: &mut Vec<TerminalSessionView>, event
         existing.idle_timeout_secs = next.idle_timeout_secs.or(existing.idle_timeout_secs);
         existing.flow_window_bytes = next.flow_window_bytes.or(existing.flow_window_bytes);
         existing.output_first_seq = existing.output_first_seq.or(next.output_first_seq);
-        existing.output_next_seq = match (existing.output_next_seq, next.output_next_seq) {
-            (Some(left), Some(right)) => Some(left.max(right)),
-            (None, value) | (value, None) => value,
-        };
-        existing.output_retained_first_seq = next
-            .output_retained_first_seq
-            .or(existing.output_retained_first_seq);
-        existing.output_retained_bytes = next
-            .output_retained_bytes
-            .or(existing.output_retained_bytes);
-        existing.output_dropped_bytes = next.output_dropped_bytes.or(existing.output_dropped_bytes);
-        existing.output_dropped_chunks = next
-            .output_dropped_chunks
-            .or(existing.output_dropped_chunks);
+        existing.output_next_seq = max_optional_i64(existing.output_next_seq, next.output_next_seq);
+        existing.output_retained_first_seq = max_optional_i64(
+            existing.output_retained_first_seq,
+            next.output_retained_first_seq,
+        );
+        if incoming_range_is_current {
+            existing.output_retained_bytes = next.output_retained_bytes;
+        }
+        existing.output_dropped_bytes =
+            max_optional_i64(existing.output_dropped_bytes, next.output_dropped_bytes);
+        existing.output_dropped_chunks =
+            max_optional_i64(existing.output_dropped_chunks, next.output_dropped_chunks);
         existing.output_replay_truncated |= next.output_replay_truncated;
-        existing.last_input_seq = next.last_input_seq.or(existing.last_input_seq);
-        existing.session_exited = next.session_exited;
-        existing.close_reason = next.close_reason.or_else(|| existing.close_reason.take());
-        existing.last_event = next.last_event;
-        existing.last_job_id = next.last_job_id;
-        existing.last_command_type = next.last_command_type;
-        existing.last_seq = next.last_seq;
-        existing.opened_at = earliest_timestamp(existing.opened_at.take(), next.opened_at);
-        existing.observed_at = next.observed_at;
+        existing.last_input_seq = max_optional_i64(existing.last_input_seq, next.last_input_seq);
+        existing.session_exited |= next.session_exited;
+        existing.close_reason = existing.close_reason.take().or(next.close_reason);
+        if !preserve_terminal {
+            existing.last_event = next.last_event;
+            existing.last_job_id = next.last_job_id;
+            existing.last_command_type = next.last_command_type;
+            existing.last_seq = next.last_seq;
+            existing.observed_at = next.observed_at;
+        }
+        existing.opened_at = earliest_timestamp(existing.opened_at.take(), next.opened_at)?;
     } else {
         sessions.push(next);
     }
+    Ok(())
 }
 
-fn earliest_timestamp(left: Option<String>, right: Option<String>) -> Option<String> {
+fn max_optional_i64(left: Option<i64>, right: Option<i64>) -> Option<i64> {
     match (left, right) {
-        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(left), Some(right)) => Some(left.max(right)),
         (Some(value), None) | (None, Some(value)) => Some(value),
         (None, None) => None,
+    }
+}
+
+fn terminal_source_is_at_least_as_new(
+    existing: &TerminalSessionView,
+    next: &TerminalSessionView,
+) -> Result<bool> {
+    Ok(
+        compare_terminal_timestamps(&next.observed_at, &existing.observed_at)?
+            .then_with(|| next.last_job_id.cmp(&existing.last_job_id))
+            .then_with(|| next.last_seq.cmp(&existing.last_seq))
+            != Ordering::Less,
+    )
+}
+
+fn compare_terminal_timestamps(left: &str, right: &str) -> Result<Ordering> {
+    let left = crate::util::parse_timestamp_utc(left)
+        .context("incoming terminal source timestamp is invalid")?;
+    let right = crate::util::parse_timestamp_utc(right)
+        .context("stored terminal source timestamp is invalid")?;
+    Ok(left.cmp(&right))
+}
+
+fn earliest_timestamp(left: Option<String>, right: Option<String>) -> Result<Option<String>> {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            let order = compare_terminal_timestamps(&left, &right)?;
+            Ok(Some(if order == Ordering::Greater {
+                right
+            } else {
+                left
+            }))
+        }
+        (Some(value), None) | (None, Some(value)) => {
+            crate::util::parse_timestamp_utc(&value)
+                .context("terminal opened timestamp is invalid")?;
+            Ok(Some(value))
+        }
+        (None, None) => Ok(None),
     }
 }
 
 fn deduplicate_terminal_sessions(
     mut sessions: Vec<TerminalSessionView>,
     limit: i64,
-) -> Vec<TerminalSessionView> {
+) -> Result<Vec<TerminalSessionView>> {
+    for session in &sessions {
+        crate::util::parse_timestamp_utc(&session.observed_at)
+            .context("terminal source timestamp is invalid")?;
+    }
     sessions.sort_by(|left, right| {
-        right
-            .observed_at
-            .cmp(&left.observed_at)
+        crate::util::parse_timestamp_utc(&right.observed_at)
+            .expect("terminal timestamps were validated before sorting")
+            .cmp(
+                &crate::util::parse_timestamp_utc(&left.observed_at)
+                    .expect("terminal timestamps were validated before sorting"),
+            )
             .then_with(|| left.client_id.cmp(&right.client_id))
             .then_with(|| left.session_id.cmp(&right.session_id))
     });
@@ -1985,7 +2154,7 @@ fn deduplicate_terminal_sessions(
             }
         }
     }
-    deduped
+    Ok(deduped)
 }
 
 fn terminal_seq_i64(value: u64) -> Result<i64> {
@@ -2019,7 +2188,10 @@ fn now_rfc3339() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_terminal_replay_from_chunks, build_terminal_sessions, TerminalStatusOutput};
+    use super::{
+        build_terminal_replay_from_chunks, build_terminal_sessions, parse_terminal_event,
+        upsert_memory_terminal_session, TerminalStatusOutput,
+    };
     use crate::{
         model_terminal::{TerminalOutputChunkRecord, TerminalSessionView},
         repository::{MemoryState, Repository},
@@ -2266,7 +2438,7 @@ mod tests {
             ),
         ];
 
-        let sessions = build_terminal_sessions(outputs, 20, None);
+        let sessions = build_terminal_sessions(outputs, 20, None).unwrap();
 
         assert_eq!(sessions.len(), 1);
         let session = &sessions[0];
@@ -2352,7 +2524,7 @@ mod tests {
             ),
         ];
 
-        let sessions = build_terminal_sessions(outputs, 20, Some(wanted));
+        let sessions = build_terminal_sessions(outputs, 20, Some(wanted)).unwrap();
 
         assert_eq!(sessions.len(), 1);
         let session = &sessions[0];
@@ -2366,6 +2538,144 @@ mod tests {
         assert!(!session.output_replay_truncated);
         assert!(session.session_exited);
         assert_eq!(session.last_job_id, close_job);
+    }
+
+    #[test]
+    fn delayed_nonterminal_output_cannot_reopen_aggregated_closed_session() {
+        let session_id = Uuid::new_v4();
+        let close_job = Uuid::new_v4();
+        let outputs = vec![
+            status_output(
+                Uuid::new_v4(),
+                "edge-a",
+                0,
+                "200",
+                "terminal_poll",
+                serde_json::json!({
+                    "type": "terminal_poll",
+                    "status": "polled",
+                    "session_id": session_id,
+                    "input_seq": 2,
+                    "output_next_seq": 8,
+                    "output_retained_first_seq": 2,
+                    "output_retained_bytes": 128,
+                    "output_dropped_bytes": 10,
+                    "output_dropped_chunks": 1,
+                    "session_exited": false
+                }),
+            ),
+            status_output(
+                close_job,
+                "edge-a",
+                0,
+                "100",
+                "terminal_close",
+                serde_json::json!({
+                    "type": "terminal_close",
+                    "status": "closed",
+                    "session_id": session_id,
+                    "output_next_seq": 10,
+                    "output_retained_first_seq": 5,
+                    "output_retained_bytes": 512,
+                    "output_dropped_bytes": 100,
+                    "output_dropped_chunks": 4,
+                    "session_exited": false
+                }),
+            ),
+        ];
+
+        let sessions = build_terminal_sessions(outputs, 20, None).unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        let session = &sessions[0];
+        assert_eq!(session.state, "closed");
+        assert!(!session.session_exited);
+        assert_eq!(session.last_event, "terminal_close");
+        assert_eq!(session.last_job_id, close_job);
+        assert_eq!(session.observed_at, "100");
+        assert_eq!(session.output_next_seq, Some(10));
+        assert_eq!(session.output_retained_first_seq, Some(5));
+        assert_eq!(session.output_retained_bytes, Some(512));
+        assert_eq!(session.output_dropped_bytes, Some(100));
+        assert_eq!(session.output_dropped_chunks, Some(4));
+        assert_eq!(session.last_input_seq, Some(2));
+    }
+
+    #[test]
+    fn delayed_terminal_event_cannot_reopen_or_regress_session_counters() {
+        let session_id = Uuid::new_v4();
+        let terminal_job_id = Uuid::new_v4();
+        let mut existing = test_terminal_session("edge-a", session_id, Some(7), "closed", false);
+        existing.output_next_seq = Some(10);
+        existing.output_retained_first_seq = Some(5);
+        existing.output_retained_bytes = Some(512);
+        existing.output_dropped_bytes = Some(100);
+        existing.output_dropped_chunks = Some(4);
+        existing.last_event = "terminal_close".to_string();
+        existing.last_job_id = terminal_job_id;
+        existing.last_command_type = "terminal_close".to_string();
+        existing.observed_at = "2026-06-21T00:00:00Z".to_string();
+        let mut sessions = vec![existing];
+        let delayed_job_id = Uuid::new_v4();
+        let delayed = parse_terminal_event(status_output(
+            delayed_job_id,
+            "edge-a",
+            0,
+            "2026-06-22T00:00:00Z",
+            "terminal_poll",
+            serde_json::json!({
+                "type": "terminal_poll",
+                "status": "polled",
+                "session_id": session_id,
+                "input_seq": 2,
+                "output_next_seq": 8,
+                "output_retained_first_seq": 2,
+                "output_retained_bytes": 128,
+                "output_dropped_bytes": 10,
+                "output_dropped_chunks": 1,
+                "session_exited": false
+            }),
+        ))
+        .unwrap();
+
+        upsert_memory_terminal_session(
+            &mut sessions,
+            super::TerminalAggregate::new(delayed).into_view(),
+        )
+        .unwrap();
+
+        let session = &sessions[0];
+        assert_eq!(session.state, "closed");
+        assert!(!session.session_exited);
+        assert_eq!(session.last_event, "terminal_close");
+        assert_eq!(session.last_job_id, terminal_job_id);
+        assert_eq!(session.output_next_seq, Some(10));
+        assert_eq!(session.output_retained_first_seq, Some(5));
+        assert_eq!(session.output_retained_bytes, Some(512));
+        assert_eq!(session.output_dropped_bytes, Some(100));
+        assert_eq!(session.output_dropped_chunks, Some(4));
+        assert_eq!(session.last_input_seq, Some(7));
+    }
+
+    #[test]
+    fn terminal_source_order_uses_full_precision_and_instant_equivalence() {
+        let session_id = Uuid::new_v4();
+        let mut existing = test_terminal_session("edge-a", session_id, None, "open", false);
+        existing.observed_at = "2026-06-21T00:00:00Z".to_string();
+        existing.last_job_id = Uuid::parse_str("ffffffff-ffff-4fff-8fff-ffffffffffff").unwrap();
+        let mut fractional = test_terminal_session("edge-a", session_id, None, "open", false);
+        fractional.observed_at = "2026-06-21T00:00:00.1Z".to_string();
+        fractional.last_job_id = Uuid::nil();
+
+        assert!(super::terminal_source_is_at_least_as_new(&existing, &fractional).unwrap());
+
+        let mut equivalent = test_terminal_session("edge-a", session_id, None, "open", false);
+        equivalent.observed_at = "2026-06-21T01:00:00+01:00".to_string();
+        equivalent.last_job_id = Uuid::nil();
+        assert!(!super::terminal_source_is_at_least_as_new(&existing, &equivalent).unwrap());
+
+        equivalent.observed_at = "not-a-timestamp".to_string();
+        assert!(super::terminal_source_is_at_least_as_new(&existing, &equivalent).is_err());
     }
 
     #[test]

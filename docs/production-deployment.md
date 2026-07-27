@@ -258,9 +258,9 @@ docker compose ps
 ```
 
 Do not bypass SQLx migration checksum failures or edit `_sqlx_migrations`.
-Releases `v0.1.0` through `v0.1.3` cannot currently be upgraded in place to the
-current migration baseline; restore them with their matching release or wait
-for a tested compatibility bridge.
+No `v0.1.x` database can be upgraded in place to the deliberately clean v0.2.0
+baseline. Keep it with its matching release, or move reviewed data through a
+separate export/import procedure into a fresh v0.2.0 database.
 
 ## Upgrade and Rollback
 

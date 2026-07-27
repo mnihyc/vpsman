@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{ensure, Result};
 use chrono::{DateTime, Utc};
@@ -17,21 +17,50 @@ use crate::{
     },
     model_topology::{TopologyGraphEdgeView, TopologyGraphNodeView, TopologyGraphView},
     repository::Repository,
-    repository_network_observations::topology_identity_hash_for_plan,
+    repository_network_observations::{
+        summarize_network_observation_trends, topology_identity_hash_for_plan,
+    },
 };
 
 impl Repository {
     pub(crate) async fn topology_graph(&self, limit: i64) -> Result<TopologyGraphView> {
         let agents = self.list_agents().await?;
         let plans = self.list_tunnel_plans().await?;
-        let trends = self.list_network_observation_trends(limit).await?;
+        let plan_ids = plans.iter().map(|plan| plan.id).collect::<Vec<_>>();
+        let plan_topologies = plans
+            .iter()
+            .map(|plan| {
+                (
+                    plan.id,
+                    topology_identity_hash_for_plan(plan),
+                    plan.left_client_id.clone(),
+                    plan.right_client_id.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let plan_id_set = plan_ids.iter().copied().collect::<HashSet<_>>();
+        let mut endpoint_client_ids = plans
+            .iter()
+            .flat_map(|plan| [&plan.left_client_id, &plan.right_client_id])
+            .cloned()
+            .collect::<Vec<_>>();
+        endpoint_client_ids.sort();
+        endpoint_client_ids.dedup();
         let observations = self
-            .list_network_observations(limit.saturating_mul(4).clamp(1, 1000))
+            .list_network_observations_for_topology(&plan_topologies, limit.clamp(1, 24) as usize)
             .await?;
-        let telemetry = self
-            .list_telemetry_tunnels(limit.saturating_mul(2).clamp(1, 1000), None, None)
+        let trends = summarize_network_observation_trends(&observations);
+        let mut telemetry = self
+            .list_declared_telemetry_tunnels_for_source_status_clients(&endpoint_client_ids)
             .await?;
-        let recommendations = self.list_network_ospf_recommendations(limit).await?;
+        telemetry.retain(|record| {
+            record
+                .plan_id
+                .is_some_and(|plan_id| plan_id_set.contains(&plan_id))
+        });
+        let recommendations = self
+            .list_network_ospf_recommendations_for_plans(&plans)
+            .await?;
 
         let agent_status = agents
             .iter()

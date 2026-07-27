@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
-use sqlx::{types::Json as SqlJson, Row};
+use sha2::{Digest, Sha256};
+use sqlx::{types::Json as SqlJson, Postgres, Row, Transaction};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 use vpsman_common::{
-    payload_hash, validate_template, WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED,
+    validate_template, WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED,
     WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED, WEBHOOK_RULE_DELIVERY_STATUS_FAILED,
     WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS, WEBHOOK_RULE_DELIVERY_STATUS_MATCHED_DRY_RUN,
     WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED, WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
@@ -31,6 +32,7 @@ const MAX_TARGET_BYTES: usize = 512;
 const MAX_TEMPLATE_BYTES: usize = 4096;
 const MAX_NOTES_BYTES: usize = 1024;
 const MAX_SIGNING_SECRET_BYTES: usize = 1024;
+const WEBHOOK_ROTATION_SCAN_BATCH_SIZE: i64 = 1_000;
 
 impl Repository {
     pub(crate) async fn list_webhook_rules(
@@ -85,6 +87,46 @@ impl Repository {
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter().map(webhook_rule_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn webhook_rule_by_id(
+        &self,
+        rule_id: Uuid,
+    ) -> Result<Option<WebhookRuleView>> {
+        match self {
+            Self::Memory(memory) => Ok(memory
+                .webhook_rules
+                .read()
+                .await
+                .iter()
+                .find(|rule| rule.id == rule_id)
+                .cloned()),
+            Self::Postgres(pool) => {
+                let row = sqlx::query(
+                    r#"
+                    SELECT
+                        id,
+                        name,
+                        enabled,
+                        expression,
+                        target,
+                        body_template,
+                        signing_secret,
+                        cooldown_secs,
+                        notes,
+                        actor_id,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at
+                    FROM webhook_rules
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(rule_id)
+                .fetch_optional(pool)
+                .await?;
+                row.map(webhook_rule_from_row).transpose()
             }
         }
     }
@@ -239,6 +281,7 @@ impl Repository {
     pub(crate) async fn delete_webhook_rule(
         &self,
         rule_id: Uuid,
+        reviewed_name: &str,
         operator: &AuthContext,
     ) -> Result<()> {
         match self {
@@ -248,8 +291,11 @@ impl Repository {
                     .iter()
                     .position(|rule| rule.id == rule_id)
                     .ok_or_else(|| anyhow::anyhow!("webhook_rule_not_found:{rule_id}"))?;
+                anyhow::ensure!(
+                    rules[position].name == reviewed_name.trim(),
+                    "webhook_rule_delete_review_stale"
+                );
                 let rule = rules.remove(position);
-                drop(rules);
                 let mut deliveries = memory.webhook_rule_deliveries.write().await;
                 cancel_memory_webhook_rule_deliveries(
                     &mut deliveries,
@@ -267,18 +313,22 @@ impl Repository {
                         unix_now().to_string(),
                         "webhook_rule.deleted",
                     ));
+                drop(rules);
                 Ok(())
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                let rule_exists = sqlx::query_scalar::<_, Uuid>(
-                    "SELECT id FROM webhook_rules WHERE id = $1 FOR UPDATE",
+                let current_name = sqlx::query_scalar::<_, String>(
+                    "SELECT name FROM webhook_rules WHERE id = $1 FOR UPDATE",
                 )
                 .bind(rule_id)
                 .fetch_optional(&mut *tx)
                 .await?
-                .is_some();
-                anyhow::ensure!(rule_exists, "webhook_rule_not_found:{rule_id}");
+                .ok_or_else(|| anyhow::anyhow!("webhook_rule_not_found:{rule_id}"))?;
+                anyhow::ensure!(
+                    current_name == reviewed_name.trim(),
+                    "webhook_rule_delete_review_stale"
+                );
                 sqlx::query(
                     r#"
                     UPDATE webhook_rule_deliveries
@@ -535,11 +585,12 @@ impl Repository {
         request: &WebhookDeliveryRotationRequest,
     ) -> Result<WebhookDeliveryRotationResponse> {
         let older_than = rotation_older_than(request)?;
+        let older_than_text = older_than.as_ref().map(DateTime::<Utc>::to_rfc3339);
         let status = normalize_optional_status(request.status.as_deref())?;
         match self {
             Self::Memory(memory) => {
                 let mut deliveries = memory.webhook_rule_deliveries.write().await;
-                let matched_ids = deliveries
+                let mut matched_ids = deliveries
                     .iter()
                     .filter(|delivery| {
                         rotation_delivery_matches(
@@ -552,10 +603,10 @@ impl Repository {
                     .map(|delivery| delivery.id)
                     .collect::<Vec<_>>();
                 let preview_hash = webhook_rotation_preview_hash(
-                    older_than.as_ref().map(DateTime::<Utc>::to_rfc3339),
+                    older_than_text.as_deref(),
                     status.as_deref(),
                     request.rule_id,
-                    &matched_ids,
+                    &mut matched_ids,
                 )?;
                 if request.confirmed {
                     anyhow::ensure!(
@@ -565,8 +616,20 @@ impl Repository {
                 }
                 let deleted = if request.confirmed {
                     let before = deliveries.len();
-                    deliveries.retain(|delivery| !matched_ids.contains(&delivery.id));
-                    before.saturating_sub(deliveries.len())
+                    deliveries.retain(|delivery| {
+                        !rotation_delivery_matches(
+                            delivery,
+                            older_than,
+                            status.as_deref(),
+                            request.rule_id,
+                        )
+                    });
+                    let deleted = before.saturating_sub(deliveries.len());
+                    anyhow::ensure!(
+                        deleted == matched_ids.len(),
+                        "webhook_delivery_rotation_changed_during_confirmation"
+                    );
+                    deleted
                 } else {
                     0
                 };
@@ -574,38 +637,27 @@ impl Repository {
                     matched_count: matched_ids.len(),
                     deleted_count: deleted,
                     confirmation_required: !request.confirmed,
-                    older_than: older_than.map(|value| value.to_rfc3339()),
+                    older_than: older_than_text,
                     status,
                     rule_id: request.rule_id,
                     preview_hash,
                 })
             }
             Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT id
-                    FROM webhook_rule_deliveries
-                    WHERE ($1::text IS NULL OR created_at < $1::timestamptz)
-                      AND ($2::text IS NULL OR status = $2)
-                      AND ($3::uuid IS NULL OR rule_id = $3)
-                    ORDER BY created_at ASC, id ASC
-                    "#,
-                )
-                .bind(older_than.as_ref().map(DateTime::<Utc>::to_rfc3339))
-                .bind(status.as_deref())
-                .bind(request.rule_id)
-                .fetch_all(pool)
-                .await?;
-                let matched_ids = rows
-                    .into_iter()
-                    .map(|row| row.try_get::<Uuid, _>("id"))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let preview_hash = webhook_rotation_preview_hash(
-                    older_than.as_ref().map(DateTime::<Utc>::to_rfc3339),
+                let mut tx = pool.begin().await?;
+                let transaction_mode = if request.confirmed {
+                    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"
+                } else {
+                    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+                };
+                sqlx::query(transaction_mode).execute(&mut *tx).await?;
+                let (matched_count, preview_hash) = postgres_webhook_rotation_snapshot(
+                    &mut tx,
+                    older_than_text.as_deref(),
                     status.as_deref(),
                     request.rule_id,
-                    &matched_ids,
-                )?;
+                )
+                .await?;
                 if request.confirmed {
                     anyhow::ensure!(
                         request.preview_hash.as_deref() == Some(preview_hash.as_str()),
@@ -613,24 +665,39 @@ impl Repository {
                     );
                 }
                 let deleted = if request.confirmed {
-                    sqlx::query(
+                    let deleted = sqlx::query(
                         r#"
                         DELETE FROM webhook_rule_deliveries
-                        WHERE id = ANY($1)
+                        WHERE ($1::text IS NULL OR created_at < $1::timestamptz)
+                          AND ($2::text IS NULL OR status = $2)
+                          AND ($3::uuid IS NULL OR rule_id = $3)
                         "#,
                     )
-                    .bind(&matched_ids)
-                    .execute(pool)
-                    .await?
-                    .rows_affected() as usize
+                    .bind(older_than_text.as_deref())
+                    .bind(status.as_deref())
+                    .bind(request.rule_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(webhook_rotation_confirmation_sql_error)?
+                    .rows_affected();
+                    let deleted = usize::try_from(deleted)
+                        .context("webhook delivery rotation delete count is invalid")?;
+                    anyhow::ensure!(
+                        deleted == matched_count,
+                        "webhook_delivery_rotation_changed_during_confirmation"
+                    );
+                    deleted
                 } else {
                     0
                 };
+                tx.commit()
+                    .await
+                    .map_err(webhook_rotation_confirmation_sql_error)?;
                 Ok(WebhookDeliveryRotationResponse {
-                    matched_count: matched_ids.len(),
+                    matched_count,
                     deleted_count: deleted,
                     confirmation_required: !request.confirmed,
-                    older_than: older_than.map(|value| value.to_rfc3339()),
+                    older_than: older_than_text,
                     status,
                     rule_id: request.rule_id,
                     preview_hash,
@@ -1562,20 +1629,93 @@ fn rotation_delivery_matches(
 }
 
 fn webhook_rotation_preview_hash(
-    older_than: Option<String>,
+    older_than: Option<&str>,
     status: Option<&str>,
     rule_id: Option<Uuid>,
-    matched_ids: &[Uuid],
+    matched_ids: &mut [Uuid],
 ) -> Result<String> {
+    matched_ids.sort_unstable();
+    let mut hasher = webhook_rotation_preview_hasher(older_than, status, rule_id)?;
+    for id in matched_ids {
+        hasher.update(id.as_bytes());
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn webhook_rotation_preview_hasher(
+    older_than: Option<&str>,
+    status: Option<&str>,
+    rule_id: Option<Uuid>,
+) -> Result<Sha256> {
     let payload = serde_json::to_vec(&json!({
-        "version": 1,
+        "version": 2,
         "kind": "webhook_delivery_rotation",
         "older_than": older_than,
         "status": status,
         "rule_id": rule_id,
-        "delivery_ids": matched_ids,
     }))?;
-    Ok(payload_hash(&payload))
+    let mut hasher = Sha256::new();
+    hasher.update((payload.len() as u64).to_be_bytes());
+    hasher.update(payload);
+    Ok(hasher)
+}
+
+async fn postgres_webhook_rotation_snapshot(
+    tx: &mut Transaction<'_, Postgres>,
+    older_than: Option<&str>,
+    status: Option<&str>,
+    rule_id: Option<Uuid>,
+) -> Result<(usize, String)> {
+    let mut matched_count = 0usize;
+    let mut after_id = None;
+    let mut hasher = webhook_rotation_preview_hasher(older_than, status, rule_id)?;
+    loop {
+        let rows = sqlx::query(
+            r#"
+            SELECT id
+            FROM webhook_rule_deliveries
+            WHERE ($1::text IS NULL OR created_at < $1::timestamptz)
+              AND ($2::text IS NULL OR status = $2)
+              AND ($3::uuid IS NULL OR rule_id = $3)
+              AND ($4::uuid IS NULL OR id > $4)
+            ORDER BY id ASC
+            LIMIT $5
+            "#,
+        )
+        .bind(older_than)
+        .bind(status)
+        .bind(rule_id)
+        .bind(after_id)
+        .bind(WEBHOOK_ROTATION_SCAN_BATCH_SIZE)
+        .fetch_all(&mut **tx)
+        .await?;
+        if rows.is_empty() {
+            break;
+        }
+        let row_count = rows.len();
+        for row in rows {
+            let id = row.try_get::<Uuid, _>("id")?;
+            hasher.update(id.as_bytes());
+            after_id = Some(id);
+            matched_count = matched_count
+                .checked_add(1)
+                .context("webhook delivery rotation match count overflow")?;
+        }
+        if row_count < WEBHOOK_ROTATION_SCAN_BATCH_SIZE as usize {
+            break;
+        }
+    }
+    Ok((matched_count, hex::encode(hasher.finalize())))
+}
+
+fn webhook_rotation_confirmation_sql_error(error: sqlx::Error) -> anyhow::Error {
+    if matches!(
+        &error,
+        sqlx::Error::Database(database) if database.code().as_deref() == Some("40001")
+    ) {
+        return anyhow::anyhow!("webhook_delivery_rotation_changed_during_confirmation");
+    }
+    error.into()
 }
 
 fn normalize_optional_filter(value: Option<&str>) -> Option<String> {
@@ -1692,5 +1832,43 @@ mod tests {
         assert!(webhook_rule_from_request(&request, &operator()).is_ok());
         request.expression = "status in []".to_string();
         assert!(webhook_rule_from_request(&request, &operator()).is_err());
+    }
+
+    #[test]
+    fn webhook_rotation_hash_is_stable_across_scan_batch_order() {
+        let first = Uuid::parse_str("11111111-2222-4333-8444-555555555555").unwrap();
+        let second = Uuid::parse_str("22222222-2222-4333-8444-555555555555").unwrap();
+        let mut forward = vec![first, second];
+        let mut reverse = vec![second, first];
+
+        let forward_hash = webhook_rotation_preview_hash(
+            Some("2026-07-01T00:00:00+00:00"),
+            Some(WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED),
+            None,
+            &mut forward,
+        )
+        .unwrap();
+        let reverse_hash = webhook_rotation_preview_hash(
+            Some("2026-07-01T00:00:00+00:00"),
+            Some(WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED),
+            None,
+            &mut reverse,
+        )
+        .unwrap();
+
+        assert_eq!(forward_hash, reverse_hash);
+    }
+
+    #[test]
+    fn webhook_rotation_hash_changes_when_the_reviewed_set_changes() {
+        let first = Uuid::parse_str("11111111-2222-4333-8444-555555555555").unwrap();
+        let second = Uuid::parse_str("22222222-2222-4333-8444-555555555555").unwrap();
+        let mut one = vec![first];
+        let mut two = vec![first, second];
+
+        let one_hash = webhook_rotation_preview_hash(None, None, None, &mut one).unwrap();
+        let two_hash = webhook_rotation_preview_hash(None, None, None, &mut two).unwrap();
+
+        assert_ne!(one_hash, two_hash);
     }
 }

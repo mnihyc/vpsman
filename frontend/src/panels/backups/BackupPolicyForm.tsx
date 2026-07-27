@@ -16,6 +16,7 @@ type BackupPolicyFormProps = {
   includeConfig: boolean;
   missingPathPolicy: BackupMissingPathPolicy;
   keepLast: number;
+  mode: "create" | "edit";
   name: string;
   confirmationOpen: boolean;
   onCronExprChange: (value: string) => void;
@@ -49,6 +50,7 @@ export function BackupPolicyForm({
   includeConfig,
   missingPathPolicy,
   keepLast,
+  mode,
   name,
   confirmationOpen,
   onCronExprChange,
@@ -77,7 +79,7 @@ export function BackupPolicyForm({
   return (
     <>
       <div className="sectionHeader compact">
-        <h2>Backup policy</h2>
+        <h2>{mode === "edit" ? "Edit backup policy" : "Backup policy"}</h2>
         <span>
           {targetCount} fixed VPS target{targetCount === 1 ? "" : "s"} after
           confirmation
@@ -266,7 +268,7 @@ export function BackupPolicyForm({
             type="submit"
           >
             <Save size={17} />
-            Review policy
+            {mode === "edit" ? "Review policy update" : "Review policy"}
           </button>
         )}
       </form>

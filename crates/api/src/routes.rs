@@ -29,7 +29,7 @@ use crate::{
         create_backup_artifact_handoff, create_backup_artifact_upload_session,
         create_backup_policy, create_backup_request, download_backup_artifact,
         list_backup_artifacts, list_backup_policies, list_backup_requests, prune_backup_policies,
-        record_backup_artifact_metadata, upload_backup_artifact,
+        record_backup_artifact_metadata, update_backup_policy, upload_backup_artifact,
         upload_backup_artifact_session_chunk, MAX_BACKUP_ARTIFACT_UPLOAD_BODY_BYTES,
     },
     routes_command_templates::{
@@ -635,6 +635,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/backup-policies",
             get(list_backup_policies).post(create_backup_policy),
+        )
+        .route(
+            "/api/v1/backup-policies/{schedule_id}",
+            put(update_backup_policy),
         )
         .route("/api/v1/backup-policies/prune", post(prune_backup_policies))
         .route(

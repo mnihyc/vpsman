@@ -1,5 +1,6 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { apiDelete, apiGet, apiPost, apiPut, buildListPath, isApiUnauthorized } from "../api";
+import { HISTORY_DETAIL_LIMIT } from "../constants";
 import type {
   CreateJobResponse,
   CreateScheduleRequest,
@@ -16,35 +17,70 @@ export function useSchedulesData(
   onAuditChanged: () => Promise<void>,
 ) {
   const [schedules, setSchedules] = useState<ScheduleRecord[]>([]);
+  const [schedulesTruncated, setSchedulesTruncated] = useState(false);
   const [schedulesError, setSchedulesError] = useState<string | null>(null);
   const [schedulesLoading, setSchedulesLoading] = useState(false);
+  const [schedulesEvidenceAvailable, setSchedulesEvidenceAvailable] =
+    useState(false);
+  const schedulesLoadGeneration = useRef(0);
+  const currentApiToken = useRef(apiToken);
+  currentApiToken.current = apiToken;
 
   const loadSchedules = useCallback(async () => {
+    if (currentApiToken.current !== apiToken) {
+      return;
+    }
+    const generation = schedulesLoadGeneration.current + 1;
+    schedulesLoadGeneration.current = generation;
     setSchedulesLoading(true);
     setSchedulesError(null);
     try {
-      setSchedules(
-        await apiGet<ScheduleRecord[]>(
-          buildListPath("/api/v1/schedules", { limit: 1000, sort: "next_run_at", dir: "asc" }),
-          apiToken,
-        ),
+      const records = await apiGet<ScheduleRecord[]>(
+        buildListPath("/api/v1/schedules", { limit: HISTORY_DETAIL_LIMIT, sort: "next_run_at", dir: "asc" }),
+        apiToken,
       );
+      if (
+        schedulesLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return;
+      }
+      setSchedules(records);
+      setSchedulesTruncated(records.length >= HISTORY_DETAIL_LIMIT);
+      setSchedulesEvidenceAvailable(true);
     } catch (error) {
+      if (
+        schedulesLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return;
+      }
       if (isApiUnauthorized(error)) {
         onUnauthorized();
+        setSchedulesEvidenceAvailable(false);
         setSchedules([]);
+        setSchedulesTruncated(false);
         setSchedulesError("Operator login required");
         return;
       }
+      setSchedulesEvidenceAvailable(false);
       setSchedulesError(error instanceof Error ? error.message : "Schedules unavailable");
     } finally {
-      setSchedulesLoading(false);
+      if (
+        schedulesLoadGeneration.current === generation &&
+        currentApiToken.current === apiToken
+      ) {
+        setSchedulesLoading(false);
+      }
     }
   }, [apiToken, onUnauthorized]);
 
   const createSchedule = useCallback(
     async (request: CreateScheduleRequest) => {
       await apiPost<ScheduleRecord>("/api/v1/schedules", apiToken, request);
+      if (currentApiToken.current !== apiToken) {
+        return;
+      }
       await Promise.all([loadSchedules(), onAuditChanged()]);
     },
     [apiToken, loadSchedules, onAuditChanged],
@@ -53,6 +89,9 @@ export function useSchedulesData(
   const updateSchedule = useCallback(
     async (scheduleId: string, request: UpdateScheduleRequest) => {
       await apiPut<ScheduleRecord>(`/api/v1/schedules/${scheduleId}`, apiToken, request);
+      if (currentApiToken.current !== apiToken) {
+        return;
+      }
       await Promise.all([loadSchedules(), onAuditChanged()]);
     },
     [apiToken, loadSchedules, onAuditChanged],
@@ -61,6 +100,9 @@ export function useSchedulesData(
   const updateScheduleTargets = useCallback(
     async (scheduleId: string, request: UpdateScheduleTargetsRequest) => {
       await apiPost<ScheduleRecord>(`/api/v1/schedules/${scheduleId}/targets`, apiToken, request);
+      if (currentApiToken.current !== apiToken) {
+        return;
+      }
       await Promise.all([loadSchedules(), onAuditChanged()]);
     },
     [apiToken, loadSchedules, onAuditChanged],
@@ -69,6 +111,9 @@ export function useSchedulesData(
   const enableSchedule = useCallback(
     async (scheduleId: string, request: SchedulePrivilegeMutationRequest) => {
       await apiPost<ScheduleRecord>(`/api/v1/schedules/${scheduleId}/enable`, apiToken, request);
+      if (currentApiToken.current !== apiToken) {
+        return;
+      }
       await Promise.all([loadSchedules(), onAuditChanged()]);
     },
     [apiToken, loadSchedules, onAuditChanged],
@@ -77,6 +122,9 @@ export function useSchedulesData(
   const disableSchedule = useCallback(
     async (scheduleId: string, request: SchedulePrivilegeMutationRequest) => {
       await apiPost<ScheduleRecord>(`/api/v1/schedules/${scheduleId}/disable`, apiToken, request);
+      if (currentApiToken.current !== apiToken) {
+        return;
+      }
       await Promise.all([loadSchedules(), onAuditChanged()]);
     },
     [apiToken, loadSchedules, onAuditChanged],
@@ -85,6 +133,9 @@ export function useSchedulesData(
   const deferSchedule = useCallback(
     async (scheduleId: string, request: DeferScheduleRequest) => {
       await apiPost<ScheduleRecord>(`/api/v1/schedules/${scheduleId}/defer`, apiToken, request);
+      if (currentApiToken.current !== apiToken) {
+        return;
+      }
       await Promise.all([loadSchedules(), onAuditChanged()]);
     },
     [apiToken, loadSchedules, onAuditChanged],
@@ -97,6 +148,9 @@ export function useSchedulesData(
         apiToken,
         request,
       );
+      if (currentApiToken.current !== apiToken) {
+        return response;
+      }
       await Promise.all([loadSchedules(), onAuditChanged()]);
       return response;
     },
@@ -106,13 +160,27 @@ export function useSchedulesData(
   const deleteSchedule = useCallback(
     async (scheduleId: string, request: SchedulePrivilegeMutationRequest) => {
       await apiDelete(`/api/v1/schedules/${scheduleId}`, apiToken, request);
+      if (currentApiToken.current !== apiToken) {
+        return;
+      }
       await Promise.all([loadSchedules(), onAuditChanged()]);
     },
     [apiToken, loadSchedules, onAuditChanged],
   );
 
+  const clearSchedules = useCallback(() => {
+    schedulesLoadGeneration.current += 1;
+    currentApiToken.current = "";
+    setSchedules([]);
+    setSchedulesTruncated(false);
+    setSchedulesError(null);
+    setSchedulesLoading(false);
+    setSchedulesEvidenceAvailable(false);
+  }, []);
+
   return {
     createSchedule,
+    clearSchedules,
     updateSchedule,
     updateScheduleTargets,
     enableSchedule,
@@ -122,7 +190,9 @@ export function useSchedulesData(
     deleteSchedule,
     loadSchedules,
     schedules,
+    schedulesTruncated,
     schedulesError,
+    schedulesEvidenceAvailable,
     schedulesLoading,
   };
 }

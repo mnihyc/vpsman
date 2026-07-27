@@ -90,6 +90,7 @@ export function TopologyGraphPanel({
   onInitialSelectionConsumed,
   onOpenVpsDetail,
   onRefresh,
+  runtimeConfigEvidenceState,
   runtimeConfigApplyStates,
 }: {
   agents: AgentView[];
@@ -100,6 +101,7 @@ export function TopologyGraphPanel({
   onInitialSelectionConsumed?: (requestId: string) => void;
   onOpenVpsDetail?: (clientId: string) => void;
   onRefresh: () => Promise<void>;
+  runtimeConfigEvidenceState: "available" | "loading" | "unavailable";
   runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
@@ -211,7 +213,7 @@ export function TopologyGraphPanel({
         </div>
         <button
           className="secondaryAction"
-          disabled={loading}
+          disabled={loading || runtimeConfigEvidenceState === "loading"}
           onClick={onRefresh}
           type="button"
         >
@@ -527,7 +529,8 @@ export function TopologyGraphPanel({
                   {selectedDisplayState
                     ? `${selectedDisplayState.label}; ${selectedDisplayState.detail}`
                     : `Topology identity ${humanStatus(selectedNode.status)}`}
-                  ; {selectedEdges.length} visible tunnels
+                  ; {selectedEdges.length} visible tunnel
+                  {selectedEdges.length === 1 ? "" : "s"}
                 </small>
               </span>
               <span className="topologyTagList">
@@ -550,10 +553,16 @@ export function TopologyGraphPanel({
               </span>
               <span className="topologyMetric">
                 <strong>
-                  {runtimeConfigApplyStateLabel(selectedRuntimeState)}
+                  {runtimeConfigApplyStateLabel(
+                    selectedRuntimeState,
+                    runtimeConfigEvidenceState,
+                  )}
                 </strong>
                 <small>
-                  {runtimeConfigApplyStateDetail(selectedRuntimeState)}
+                  {runtimeConfigApplyStateDetail(
+                    selectedRuntimeState,
+                    runtimeConfigEvidenceState,
+                  )}
                 </small>
               </span>
               {onOpenVpsDetail ? (
@@ -628,7 +637,14 @@ export function TopologyGraphPanel({
 
 function runtimeConfigApplyStateLabel(
   state: RuntimeConfigApplyStateRecord | null,
+  evidenceState: "available" | "loading" | "unavailable",
 ): string {
+  if (evidenceState === "loading") {
+    return "checking";
+  }
+  if (evidenceState === "unavailable") {
+    return "unknown";
+  }
   if (state?.pending_status === "failed") {
     return "sync failed";
   }
@@ -643,7 +659,14 @@ function runtimeConfigApplyStateLabel(
 
 function runtimeConfigApplyStateDetail(
   state: RuntimeConfigApplyStateRecord | null,
+  evidenceState: "available" | "loading" | "unavailable",
 ): string {
+  if (evidenceState === "loading") {
+    return "loading runtime configuration evidence";
+  }
+  if (evidenceState === "unavailable") {
+    return "runtime configuration evidence unavailable";
+  }
   if (!state) {
     return "no server state";
   }
@@ -753,7 +776,7 @@ function buildGraphLegendItems(edges: TopologyGraphEdge[]): GraphLegendItem[] {
     },
     {
       detail: latestMeasuredEdge
-        ? `${formatLoss(latestMeasuredEdge.packet_loss_avg_ratio)} loss; ${bandwidthLabel(latestMeasuredEdge)}; ${latestMeasuredEdge.sample_count} samples`
+        ? `${lossLabel(latestMeasuredEdge.packet_loss_avg_ratio)}; ${bandwidthLabel(latestMeasuredEdge)}; ${latestMeasuredEdge.sample_count} sample${latestMeasuredEdge.sample_count === 1 ? "" : "s"}`
         : "Measurement evidence is not available yet.",
       label: "Measurements",
       tone:
@@ -980,7 +1003,7 @@ function edgeInlineMetric(edge: TopologyGraphEdge): string {
   if (!edge.enabled) {
     return "disabled plan";
   }
-  return `${latencyLabel(edge)} / ${formatLoss(edge.packet_loss_avg_ratio)} / ${bandwidthLabel(edge)}`;
+  return `${latencyLabel(edge)} / ${lossLabel(edge.packet_loss_avg_ratio)} / ${bandwidthLabel(edge)}`;
 }
 
 function latencyLabel(edge: TopologyGraphEdge): string {
@@ -999,10 +1022,12 @@ function formatBandwidthMbps(value: number): string {
   return `${Math.round(value)} Mbps`;
 }
 
-function formatLoss(value: number | null): string {
-  return value === null
-    ? "loss pending"
-    : `${(value * 100).toFixed(value > 0 && value < 0.01 ? 2 : 1)}%`;
+function formatLoss(value: number): string {
+  return `${(value * 100).toFixed(value > 0 && value < 0.01 ? 2 : 1)}%`;
+}
+
+function lossLabel(value: number | null): string {
+  return value === null ? "loss pending" : `${formatLoss(value)} loss`;
 }
 
 function ospfCostSummary(edge: TopologyGraphEdge): string {
@@ -1018,7 +1043,7 @@ function ospfCostReason(edge: TopologyGraphEdge): string {
   if (edge.recommended_ospf_cost === null) {
     return "This tunnel plan has no routing cost adapter workflow.";
   }
-  return `${latencyLabel(edge)}, ${formatLoss(edge.packet_loss_avg_ratio)} loss, ${bandwidthLabel(edge)} drive recommended cost ${edge.recommended_ospf_cost}.`;
+  return `${latencyLabel(edge)}, ${lossLabel(edge.packet_loss_avg_ratio)}, ${bandwidthLabel(edge)} drive recommended cost ${edge.recommended_ospf_cost}.`;
 }
 
 function edgeStatusDetail(edge: TopologyGraphEdge): string {

@@ -64,70 +64,6 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn list_network_observations_since(
-        &self,
-        since_unix: i64,
-        limit: i64,
-    ) -> Result<Vec<NetworkObservationView>> {
-        match self {
-            Self::Memory(memory) => {
-                let mut observations = memory
-                    .network_observations
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|observation| {
-                        observation_timestamp_unix(&observation.observed_at)
-                            .is_some_and(|observed_at| observed_at >= since_unix)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                observations.sort_by(|left, right| {
-                    compare_timestamps_desc(&left.observed_at, &right.observed_at)
-                        .then_with(|| right.id.cmp(&left.id))
-                });
-                Ok(observations.into_iter().take(limit as usize).collect())
-            }
-            Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        id,
-                        job_id,
-                        client_id,
-                        seq,
-                        kind,
-                        role,
-                        plan_id,
-                        topology_identity_hash,
-                        plan_name,
-                        interface_name,
-                        peer_client_id,
-                        target,
-                        healthy,
-                        latency_avg_ms,
-                        packet_loss_ratio,
-                        throughput_mbps,
-                        bytes,
-                        metadata,
-                        observed_at::text AS observed_at
-                    FROM network_observations
-                    WHERE observed_at >= to_timestamp($1)
-                    ORDER BY observed_at DESC, id DESC
-                    LIMIT $2
-                    "#,
-                )
-                .bind(since_unix)
-                .bind(limit)
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter()
-                    .map(|row| network_observation_from_row(row).map_err(Into::into))
-                    .collect()
-            }
-        }
-    }
-
     pub(crate) async fn list_network_observations_for_plans_since(
         &self,
         plan_ids: &[Uuid],
@@ -246,6 +182,209 @@ impl Repository {
                 .bind(since_unix)
                 .bind(probe_limit_per_plan as i64)
                 .bind(speed_limit_per_plan as i64)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|row| network_observation_from_row(row).map_err(Into::into))
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) async fn list_network_observations_for_topology(
+        &self,
+        plan_topologies: &[(Uuid, String, String, String)],
+        sample_limit_per_plan_kind: usize,
+    ) -> Result<Vec<NetworkObservationView>> {
+        if plan_topologies.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sample_limit_per_plan_kind = sample_limit_per_plan_kind.max(1);
+        match self {
+            Self::Memory(memory) => {
+                let plan_topologies = plan_topologies
+                    .iter()
+                    .map(|(plan_id, identity, left_client_id, right_client_id)| {
+                        (
+                            *plan_id,
+                            (
+                                identity.as_str(),
+                                left_client_id.as_str(),
+                                right_client_id.as_str(),
+                            ),
+                        )
+                    })
+                    .collect::<HashMap<_, _>>();
+                let stored = memory.network_observations.read().await;
+                let mut probe_samples = HashMap::<Uuid, Vec<&NetworkObservationView>>::new();
+                let mut speed_samples = HashMap::<Uuid, Vec<&NetworkObservationView>>::new();
+                let mut latest_status = HashMap::<(Uuid, String), &NetworkObservationView>::new();
+                for observation in stored.iter() {
+                    let Some(plan_id) = observation.plan_id else {
+                        continue;
+                    };
+                    let Some((identity, left_client_id, right_client_id)) =
+                        plan_topologies.get(&plan_id)
+                    else {
+                        continue;
+                    };
+                    if observation.topology_identity_hash.as_deref() != Some(*identity) {
+                        continue;
+                    }
+                    match observation.kind.as_str() {
+                        "network_probe" => retain_recent_observation(
+                            probe_samples.entry(plan_id).or_default(),
+                            observation,
+                            sample_limit_per_plan_kind,
+                        ),
+                        "network_speed_test" => retain_recent_observation(
+                            speed_samples.entry(plan_id).or_default(),
+                            observation,
+                            sample_limit_per_plan_kind,
+                        ),
+                        "network_status"
+                            if observation.client_id == *left_client_id
+                                || observation.client_id == *right_client_id =>
+                        {
+                            let key = (plan_id, observation.client_id.clone());
+                            match latest_status.entry(key) {
+                                std::collections::hash_map::Entry::Occupied(mut current)
+                                    if compare_network_observations_desc(
+                                        observation,
+                                        current.get(),
+                                    )
+                                    .is_lt() =>
+                                {
+                                    current.insert(observation);
+                                }
+                                std::collections::hash_map::Entry::Vacant(current) => {
+                                    current.insert(observation);
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let mut observations = probe_samples
+                    .into_values()
+                    .chain(speed_samples.into_values())
+                    .flatten()
+                    .chain(latest_status.into_values())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                observations.sort_by(compare_network_observations_desc);
+                Ok(observations)
+            }
+            Self::Postgres(pool) => {
+                let plan_ids = plan_topologies
+                    .iter()
+                    .map(|(plan_id, _, _, _)| *plan_id)
+                    .collect::<Vec<_>>();
+                let topology_identities = plan_topologies
+                    .iter()
+                    .map(|(_, identity, _, _)| identity.as_str())
+                    .collect::<Vec<_>>();
+                let left_client_ids = plan_topologies
+                    .iter()
+                    .map(|(_, _, left_client_id, _)| left_client_id.as_str())
+                    .collect::<Vec<_>>();
+                let right_client_ids = plan_topologies
+                    .iter()
+                    .map(|(_, _, _, right_client_id)| right_client_id.as_str())
+                    .collect::<Vec<_>>();
+                let rows = sqlx::query(
+                    r#"
+                    WITH requested AS (
+                        SELECT *
+                        FROM unnest($1::uuid[], $2::text[], $3::text[], $4::text[])
+                            AS requested(
+                                plan_id,
+                                topology_identity_hash,
+                                left_client_id,
+                                right_client_id
+                            )
+                    ),
+                    measurement_kinds(kind) AS (
+                        VALUES ('network_probe'::text), ('network_speed_test'::text)
+                    ),
+                    recent_measurements AS (
+                        SELECT observation.*
+                        FROM requested
+                        CROSS JOIN measurement_kinds
+                        CROSS JOIN LATERAL (
+                            SELECT observation.*
+                            FROM network_observations observation
+                            WHERE observation.plan_id = requested.plan_id
+                              AND observation.topology_identity_hash
+                                  = requested.topology_identity_hash
+                              AND observation.kind = measurement_kinds.kind
+                            ORDER BY observation.observed_at DESC, observation.id DESC
+                            LIMIT $5
+                        ) observation
+                    ),
+                    requested_endpoints AS (
+                        SELECT
+                            plan_id,
+                            topology_identity_hash,
+                            left_client_id AS client_id
+                        FROM requested
+                        UNION
+                        SELECT
+                            plan_id,
+                            topology_identity_hash,
+                            right_client_id AS client_id
+                        FROM requested
+                    ),
+                    latest_status AS (
+                        SELECT observation.*
+                        FROM requested_endpoints endpoint
+                        CROSS JOIN LATERAL (
+                            SELECT observation.*
+                            FROM network_observations observation
+                            WHERE observation.plan_id = endpoint.plan_id
+                              AND observation.topology_identity_hash
+                                  = endpoint.topology_identity_hash
+                              AND observation.kind = 'network_status'
+                              AND observation.client_id = endpoint.client_id
+                            ORDER BY observation.observed_at DESC, observation.id DESC
+                            LIMIT 1
+                        ) observation
+                    ),
+                    selected AS (
+                        SELECT * FROM recent_measurements
+                        UNION ALL
+                        SELECT * FROM latest_status
+                    )
+                    SELECT
+                        id,
+                        job_id,
+                        client_id,
+                        seq,
+                        kind,
+                        role,
+                        plan_id,
+                        topology_identity_hash,
+                        plan_name,
+                        interface_name,
+                        peer_client_id,
+                        target,
+                        healthy,
+                        latency_avg_ms,
+                        packet_loss_ratio,
+                        throughput_mbps,
+                        bytes,
+                        metadata,
+                        observed_at::text AS observed_at
+                    FROM selected
+                    ORDER BY observed_at DESC, id DESC
+                    "#,
+                )
+                .bind(&plan_ids)
+                .bind(&topology_identities)
+                .bind(&left_client_ids)
+                .bind(&right_client_ids)
+                .bind(sample_limit_per_plan_kind as i64)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
@@ -764,7 +903,7 @@ impl TrendAccumulator {
     }
 }
 
-fn summarize_network_observation_trends(
+pub(crate) fn summarize_network_observation_trends(
     observations: &[NetworkObservationView],
 ) -> Vec<NetworkObservationTrendView> {
     let mut groups: HashMap<TrendKey, TrendAccumulator> = HashMap::new();
@@ -787,6 +926,35 @@ fn summarize_network_observation_trends(
         .into_values()
         .map(TrendAccumulator::into_view)
         .collect()
+}
+
+fn compare_network_observations_desc(
+    left: &NetworkObservationView,
+    right: &NetworkObservationView,
+) -> std::cmp::Ordering {
+    compare_timestamps_desc(&left.observed_at, &right.observed_at)
+        .then_with(|| right.id.cmp(&left.id))
+}
+
+fn retain_recent_observation<'a>(
+    selected: &mut Vec<&'a NetworkObservationView>,
+    candidate: &'a NetworkObservationView,
+    limit: usize,
+) {
+    if selected.len() < limit {
+        selected.push(candidate);
+        return;
+    }
+    let Some((oldest_index, oldest)) = selected
+        .iter()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| compare_network_observations_desc(left, right))
+    else {
+        return;
+    };
+    if compare_network_observations_desc(candidate, oldest).is_lt() {
+        selected[oldest_index] = candidate;
+    }
 }
 
 fn average(sum: f64, count: i64) -> Option<f64> {

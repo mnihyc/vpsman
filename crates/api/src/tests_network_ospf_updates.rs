@@ -7,8 +7,11 @@ use vpsman_common::{
 };
 
 use crate::{
-    model::{AuthContext, OperatorPreferences, OperatorView, SourceTemplateView},
+    model::{
+        AuthContext, NetworkObservationView, OperatorPreferences, OperatorView, SourceTemplateView,
+    },
     repository::Repository,
+    repository_network_observations::topology_identity_hash_for_plan,
     MemoryState,
 };
 
@@ -21,11 +24,22 @@ async fn reviewed_update_plan_is_daemon_neutral_and_requires_verified_endpoints(
     let before = repo.list_network_ospf_update_plans(10).await.unwrap();
     assert_eq!(before[0].status, "needs_adapter_status");
     assert!(!before[0].requires_approval);
+    assert!(repo
+        .list_automatic_network_ospf_update_plans(10)
+        .await
+        .unwrap()
+        .is_empty());
 
     verify_endpoint_costs(&repo, plan_id, 1000).await;
     record_healthy_evidence(&repo, "edge-a-edge-b").await;
     let plans = repo.list_network_ospf_update_plans(10).await.unwrap();
     let update = &plans[0];
+    let targeted = repo
+        .network_ospf_update_plan_by_id(plan_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(targeted.recommendation_id, update.recommendation_id);
     assert_eq!(update.control_mode, "reviewed");
     assert_eq!(
         update.plan_revision,
@@ -74,11 +88,150 @@ async fn automatic_update_plan_waits_for_configured_healthy_windows() {
     for latency in [25.0, 24.0, 23.0] {
         record_probe(&repo, "edge-a-edge-b", Uuid::new_v4(), latency, false).await;
     }
-    let ready = repo.list_network_ospf_update_plans(10).await.unwrap();
+    let ready = repo
+        .list_automatic_network_ospf_update_plans(10)
+        .await
+        .unwrap();
     assert_eq!(ready[0].status, "automatic_ready");
     assert_eq!(ready[0].evidence.healthy_probe_streak, 3);
     assert!(!ready[0].requires_approval);
     assert!(!ready[0].privilege_required);
+}
+
+#[tokio::test]
+async fn automatic_and_pending_controller_batches_rotate_fairly() {
+    let (repo, plan_id) = seeded_plan(OspfControlMode::Automatic, 1).await;
+    let template = repo.get_tunnel_plan(plan_id).await.unwrap().unwrap();
+    let Repository::Memory(memory) = &repo else {
+        unreachable!("test uses memory repository")
+    };
+    let mut plans = Vec::new();
+    for index in 1..=7_u128 {
+        let mut plan = template.clone();
+        plan.id = Uuid::from_u128(index);
+        plan.name = format!("automatic-{index}");
+        plan.plan.name = plan.name.clone();
+        plan.input.name = plan.name.clone();
+        plan.ospf_status = "pending".to_string();
+        plans.push(plan);
+    }
+    *memory.tunnel_plans.write().await = plans;
+
+    let first = repo
+        .list_automatic_tunnel_plan_ids_for_controller(3)
+        .await
+        .unwrap();
+    repo.mark_automatic_tunnel_plans_scanned(&first)
+        .await
+        .unwrap();
+    let second = repo
+        .list_automatic_tunnel_plan_ids_for_controller(3)
+        .await
+        .unwrap();
+    assert!(first.iter().all(|plan_id| !second.contains(plan_id)));
+    repo.mark_automatic_tunnel_plans_scanned(&second)
+        .await
+        .unwrap();
+    let third = repo
+        .list_automatic_tunnel_plan_ids_for_controller(3)
+        .await
+        .unwrap();
+    assert!(third.contains(&Uuid::from_u128(7)));
+
+    let pending_first = repo
+        .list_pending_tunnel_plan_ids_for_reconciliation(3)
+        .await
+        .unwrap();
+    repo.mark_pending_tunnel_plans_reconciled(&pending_first)
+        .await
+        .unwrap();
+    let pending_second = repo
+        .list_pending_tunnel_plan_ids_for_reconciliation(3)
+        .await
+        .unwrap();
+    assert!(pending_first
+        .iter()
+        .all(|plan_id| !pending_second.contains(plan_id)));
+}
+
+#[tokio::test]
+async fn automatic_update_plan_requires_explicit_packet_loss_evidence() {
+    let (repo, plan_id) = seeded_plan(OspfControlMode::Automatic, 1).await;
+    verify_endpoint_costs(&repo, plan_id, 1000).await;
+    record_probe_without_loss(&repo, "edge-a-edge-b", 20.0).await;
+
+    let plans = repo.list_network_ospf_update_plans(10).await.unwrap();
+    let update = &plans[0];
+    let planned_cost = repo
+        .get_tunnel_plan(plan_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .recommended_ospf_cost
+        .unwrap();
+
+    assert_eq!(update.status, "automatic_waiting_evidence");
+    assert_eq!(update.confidence, "incomplete_probe");
+    assert_eq!(update.recommended_ospf_cost, planned_cost);
+    assert_eq!(update.evidence.latency_avg_ms, Some(20.0));
+    assert_eq!(update.evidence.packet_loss_avg_ratio, None);
+    assert_eq!(update.evidence.healthy_probe_streak, 0);
+    assert!(update
+        .evidence
+        .reason
+        .contains("packet-loss evidence is unavailable"));
+    assert!(update.evidence_summary.contains("loss unavailable"));
+}
+
+#[tokio::test]
+async fn ospf_evidence_is_bounded_per_plan_instead_of_globally() {
+    let (repo, noisy_plan_id) = seeded_plan(OspfControlMode::Reviewed, 2).await;
+    let noisy_plan = repo.get_tunnel_plan(noisy_plan_id).await.unwrap().unwrap();
+    let mut quiet_input = noisy_plan.input.clone();
+    quiet_input.name = "quiet-edge".to_string();
+    quiet_input.interface_name = "tunquiet".to_string();
+    quiet_input.left_client_id = "quiet-left".to_string();
+    quiet_input.right_client_id = "quiet-right".to_string();
+    let quiet_planned = plan_tunnel(&quiet_input).unwrap();
+    let quiet_plan = repo
+        .record_tunnel_plan(&quiet_input, &quiet_planned, true, &operator())
+        .await
+        .unwrap();
+    let noisy_identity = topology_identity_hash_for_plan(&noisy_plan);
+    let quiet_identity = topology_identity_hash_for_plan(&quiet_plan);
+    let newer = Utc::now().to_rfc3339();
+    let older = (Utc::now() - Duration::seconds(1)).to_rfc3339();
+
+    let Repository::Memory(memory) = &repo else {
+        unreachable!("test uses memory repository")
+    };
+    let mut observations = memory.network_observations.write().await;
+    observations.extend(
+        (0..10_000).map(|_| test_probe_observation(&noisy_plan, &noisy_identity, 5.0, &newer)),
+    );
+    observations.push(test_probe_observation(
+        &quiet_plan,
+        &quiet_identity,
+        42.0,
+        &older,
+    ));
+    drop(observations);
+
+    let recommendations = repo.list_network_ospf_recommendations(10).await.unwrap();
+    let quiet_recommendation = recommendations
+        .iter()
+        .find(|recommendation| recommendation.plan_id == quiet_plan.id)
+        .unwrap();
+    assert_eq!(quiet_recommendation.latency_avg_ms, Some(42.0));
+    assert_eq!(quiet_recommendation.packet_loss_avg_ratio, Some(0.0));
+
+    let update_plans = repo.list_network_ospf_update_plans(10).await.unwrap();
+    let quiet_update = update_plans
+        .iter()
+        .find(|update| update.plan_id == quiet_plan.id)
+        .unwrap();
+    assert_eq!(quiet_update.evidence.latency_avg_ms, Some(42.0));
+    assert_eq!(quiet_update.evidence.packet_loss_avg_ratio, Some(0.0));
 }
 
 #[tokio::test]
@@ -288,6 +441,63 @@ async fn record_probe(
     .await
     .unwrap();
     sleep(TokioDuration::from_millis(1)).await;
+}
+
+async fn record_probe_without_loss(repo: &Repository, plan_name: &str, latency_ms: f64) {
+    let job_id = Uuid::new_v4();
+    repo.record_network_observations(
+        job_id,
+        "left-a",
+        &[CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&serde_json::json!({
+                "type": "network_probe",
+                "plan": plan_name,
+                "interface": "tunab",
+                "peer_client_id": "right-b",
+                "target": "10.255.0.1",
+                "parsed": {
+                    "healthy": true,
+                    "latency_avg_ms": latency_ms
+                }
+            }))
+            .unwrap(),
+            exit_code: Some(0),
+            done: true,
+        }],
+    )
+    .await
+    .unwrap();
+}
+
+fn test_probe_observation(
+    plan: &crate::model::TunnelPlanView,
+    topology_identity_hash: &str,
+    latency_avg_ms: f64,
+    observed_at: &str,
+) -> NetworkObservationView {
+    NetworkObservationView {
+        id: Uuid::new_v4(),
+        job_id: Uuid::new_v4(),
+        client_id: plan.left_client_id.clone(),
+        seq: 0,
+        kind: "network_probe".to_string(),
+        role: None,
+        plan_id: Some(plan.id),
+        topology_identity_hash: Some(topology_identity_hash.to_string()),
+        plan_name: Some(plan.name.clone()),
+        interface_name: Some(plan.plan.interface_name.clone()),
+        peer_client_id: Some(plan.right_client_id.clone()),
+        target: Some(plan.plan.right_tunnel_address.clone()),
+        healthy: Some(true),
+        latency_avg_ms: Some(latency_avg_ms),
+        packet_loss_ratio: Some(0.0),
+        throughput_mbps: None,
+        bytes: None,
+        metadata: serde_json::json!({}),
+        observed_at: observed_at.to_string(),
+    }
 }
 
 fn routing_template(id: &str, name: &str) -> SourceTemplateView {

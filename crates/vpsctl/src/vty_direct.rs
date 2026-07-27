@@ -1,6 +1,7 @@
 use anyhow::Result;
 use vpsman_common::{operator_db_payload_hash, OperatorDbPayloadInput};
 
+use crate::commands_backups::{backup_policy_cap_notice, fetch_backup_policy_page};
 use crate::http::{http_get, http_post_json, http_put_json};
 use crate::privilege::{build_privilege_for_db, DbPrivilegeRequest};
 use crate::vty_jobs::VtyPrivilegeContext;
@@ -52,7 +53,9 @@ pub(crate) fn submit_vty_direct_command(
         )?)),
         "backups" => Ok(Some(http_get(api_url, "/api/v1/backups", token)?)),
         "backup-artifacts" => Ok(Some(http_get(api_url, "/api/v1/backup-artifacts", token)?)),
-        "backup-policies" => Ok(Some(http_get(api_url, "/api/v1/backup-policies", token)?)),
+        command if command == "backup-policies" || command.starts_with("backup-policies ") => {
+            Ok(Some(submit_vty_backup_policies(api_url, token, command)?))
+        }
         "restore-plans" => Ok(Some(http_get(api_url, "/api/v1/restore-plans", token)?)),
         "migration-links" => Ok(Some(http_get(api_url, "/api/v1/migration-links", token)?)),
         "tunnel-plans" => Ok(Some(http_get(api_url, "/api/v1/tunnel-plans", token)?)),
@@ -140,6 +143,52 @@ pub(crate) fn submit_vty_direct_command(
             Ok(Some(submit_history_export(api_url, token, command)?))
         }
         _ => Ok(None),
+    }
+}
+
+fn submit_vty_backup_policies(api_url: &str, token: Option<&str>, command: &str) -> Result<String> {
+    let mut limit = 200_u16;
+    let mut offset = 0_u32;
+    let mut tokens = command.split_whitespace().skip(1);
+    while let Some(token) = tokens.next() {
+        match token {
+            "--limit" => {
+                limit = tokens
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--limit requires a value"))?
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("invalid --limit"))?;
+            }
+            "--offset" => {
+                offset = tokens
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--offset requires a value"))?
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("invalid --offset"))?;
+            }
+            value if value.starts_with("--limit=") => {
+                limit = value
+                    .trim_start_matches("--limit=")
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("invalid --limit"))?;
+            }
+            value if value.starts_with("--offset=") => {
+                offset = value
+                    .trim_start_matches("--offset=")
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("invalid --offset"))?;
+            }
+            _ => anyhow::bail!("usage: backup-policies [--limit <1-1000>] [--offset <0-100000>]"),
+        }
+    }
+    let (response, cap_reached) = fetch_backup_policy_page(api_url, token, limit, offset)?;
+    if cap_reached {
+        Ok(format!(
+            "{response}\nNOTICE: {}",
+            backup_policy_cap_notice(limit, offset)
+        ))
+    } else {
+        Ok(response)
     }
 }
 

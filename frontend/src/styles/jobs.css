@@ -4261,6 +4261,10 @@
   background: var(--warning);
 }
 
+.latencyCurve span.unknown {
+  background: var(--muted);
+}
+
 .topologyEvidence > .latencyCurve {
   min-height: 38px;
   gap: 4px;

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use sqlx::{types::Json as SqlJson, Row};
+use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
     RuntimeTunnelManager, TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
@@ -11,6 +12,32 @@ use crate::{
     internal_operator::persisted_actor_id, model::*, repository::Repository,
     repository_key_lifecycle::lock_postgres_agent_identity_lifecycle, unix_now,
 };
+
+#[derive(Clone, Copy)]
+enum ControllerTunnelPlanPage {
+    Automatic,
+    Pending,
+}
+
+const TUNNEL_PLAN_MANAGEMENT_READ_LIMIT: usize = 1_000;
+
+enum TunnelPlanRead {
+    Plan(Box<TunnelPlanView>),
+    Corrupt(Box<TunnelPlanCorruptView>),
+}
+
+pub(crate) struct TunnelPlanRecordAttempt {
+    pub(crate) plan_id: Uuid,
+    pub(crate) plan: Result<TunnelPlanView>,
+}
+
+pub(crate) struct TunnelPlanIdentity {
+    pub(crate) name: String,
+    pub(crate) enabled: bool,
+    pub(crate) revision: i64,
+    pub(crate) left_client_id: String,
+    pub(crate) right_client_id: String,
+}
 
 impl Repository {
     pub(crate) async fn mark_routing_adapter_template_stale(
@@ -86,7 +113,48 @@ impl Repository {
     }
 
     pub(crate) async fn list_tunnel_plans(&self) -> Result<Vec<TunnelPlanView>> {
-        let mut plans = match self {
+        let reads = self
+            .list_tunnel_plan_reads(TUNNEL_PLAN_MANAGEMENT_READ_LIMIT)
+            .await?;
+        let mut plans = Vec::with_capacity(reads.len());
+        for read in reads {
+            match read {
+                TunnelPlanRead::Plan(plan) => plans.push(*plan),
+                TunnelPlanRead::Corrupt(corrupt) => warn!(
+                    event = "tunnel_plan_configuration_corrupt",
+                    plan_id = %corrupt.id,
+                    error = %corrupt.configuration_error,
+                    "isolated malformed persisted tunnel plan"
+                ),
+            }
+        }
+        Ok(plans)
+    }
+
+    pub(crate) async fn list_tunnel_plan_items(&self) -> Result<Vec<TunnelPlanListItem>> {
+        let reads = self
+            .list_tunnel_plan_reads(TUNNEL_PLAN_MANAGEMENT_READ_LIMIT)
+            .await?;
+        Ok(reads
+            .into_iter()
+            .map(|read| match read {
+                TunnelPlanRead::Plan(plan) => TunnelPlanListItem::Plan(plan),
+                TunnelPlanRead::Corrupt(corrupt) => {
+                    warn!(
+                        event = "tunnel_plan_configuration_corrupt",
+                        plan_id = %corrupt.id,
+                        error = %corrupt.configuration_error,
+                        "exposing malformed persisted tunnel plan to management"
+                    );
+                    TunnelPlanListItem::Corrupt(corrupt)
+                }
+            })
+            .collect())
+    }
+
+    async fn list_tunnel_plan_reads(&self, limit: usize) -> Result<Vec<TunnelPlanRead>> {
+        let limit = limit.max(1);
+        let mut reads = match self {
             Self::Memory(memory) => {
                 let mut plans = memory
                     .tunnel_plans
@@ -96,8 +164,18 @@ impl Repository {
                     .filter(|plan| plan.deleted_at.is_none())
                     .cloned()
                     .collect::<Vec<_>>();
-                plans.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+                plans.sort_by(|left, right| {
+                    right
+                        .updated_at
+                        .cmp(&left.updated_at)
+                        .then_with(|| right.created_at.cmp(&left.created_at))
+                        .then_with(|| right.id.cmp(&left.id))
+                });
+                plans.truncate(limit);
                 plans
+                    .into_iter()
+                    .map(|plan| TunnelPlanRead::Plan(Box::new(plan)))
+                    .collect()
             }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
@@ -118,14 +196,20 @@ impl Repository {
                     FROM tunnel_plans
                     WHERE deleted_at IS NULL
                     ORDER BY updated_at DESC, created_at DESC, id DESC
+                    LIMIT $1
                     "#,
                 )
+                .bind(limit as i64)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
-                    .map(tunnel_plan_from_row)
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(anyhow::Error::from)?
+                    .map(|row| match tunnel_plan_from_row(&row) {
+                        Ok(plan) => Ok(TunnelPlanRead::Plan(Box::new(plan))),
+                        Err(error) => Ok(TunnelPlanRead::Corrupt(Box::new(
+                            tunnel_plan_corrupt_from_row(&row, &error)?,
+                        ))),
+                    })
+                    .collect::<Result<Vec<_>>>()?
             }
         };
         let apply_states = self
@@ -134,29 +218,341 @@ impl Repository {
             .into_iter()
             .map(|state| (state.client_id.clone(), state))
             .collect::<HashMap<_, _>>();
-        for plan in &mut plans {
-            plan.left_runtime_config = tunnel_endpoint_runtime_config_state(
-                plan.id,
-                &plan.left_client_id,
-                plan.enabled,
-                apply_states.get(&plan.left_client_id),
-            );
-            plan.right_runtime_config = tunnel_endpoint_runtime_config_state(
-                plan.id,
-                &plan.right_client_id,
-                plan.enabled,
-                apply_states.get(&plan.right_client_id),
-            );
+        for read in &mut reads {
+            if let TunnelPlanRead::Plan(plan) = read {
+                plan.left_runtime_config = tunnel_endpoint_runtime_config_state(
+                    plan.id,
+                    &plan.left_client_id,
+                    plan.enabled,
+                    apply_states.get(&plan.left_client_id),
+                );
+                plan.right_runtime_config = tunnel_endpoint_runtime_config_state(
+                    plan.id,
+                    &plan.right_client_id,
+                    plan.enabled,
+                    apply_states.get(&plan.right_client_id),
+                );
+            }
         }
-        Ok(plans)
+        Ok(reads)
+    }
+
+    pub(crate) async fn list_automatic_tunnel_plan_ids_for_controller(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<Uuid>> {
+        self.list_controller_tunnel_plan_ids_by_scan(ControllerTunnelPlanPage::Automatic, limit)
+            .await
+    }
+
+    pub(crate) async fn list_pending_tunnel_plan_ids_for_reconciliation(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<Uuid>> {
+        self.list_controller_tunnel_plan_ids_by_scan(ControllerTunnelPlanPage::Pending, limit)
+            .await
+    }
+
+    async fn list_controller_tunnel_plan_ids_by_scan(
+        &self,
+        page: ControllerTunnelPlanPage,
+        limit: usize,
+    ) -> Result<Vec<Uuid>> {
+        let limit = limit.max(1);
+        match self {
+            Self::Memory(memory) => {
+                let plans = memory.tunnel_plans.read().await;
+                let scans = match page {
+                    ControllerTunnelPlanPage::Automatic => {
+                        memory.automatic_ospf_plan_scans.read().await
+                    }
+                    ControllerTunnelPlanPage::Pending => {
+                        memory.pending_ospf_plan_reconciliations.read().await
+                    }
+                };
+                let mut plan_ids = plans
+                    .iter()
+                    .filter(|plan| {
+                        plan.deleted_at.is_none()
+                            && match page {
+                                ControllerTunnelPlanPage::Automatic => {
+                                    plan.enabled
+                                        && plan.plan.ospf.as_ref().is_some_and(|ospf| {
+                                            ospf.mode == vpsman_common::OspfControlMode::Automatic
+                                        })
+                                }
+                                ControllerTunnelPlanPage::Pending => plan.ospf_status == "pending",
+                            }
+                    })
+                    .map(|plan| plan.id)
+                    .collect::<Vec<_>>();
+                plan_ids.sort_by_key(|plan_id| (scans.get(plan_id).copied(), *plan_id));
+                plan_ids.truncate(limit);
+                Ok(plan_ids)
+            }
+            Self::Postgres(pool) => {
+                let (predicate, scan_column) = match page {
+                    ControllerTunnelPlanPage::Automatic => (
+                        "enabled = TRUE AND plan->'ospf'->>'mode' = 'automatic'",
+                        "automatic_ospf_scanned_at",
+                    ),
+                    ControllerTunnelPlanPage::Pending => {
+                        ("ospf_status = 'pending'", "pending_ospf_reconciled_at")
+                    }
+                };
+                let rows = sqlx::query(&format!(
+                    r#"
+                    SELECT id
+                    FROM tunnel_plans
+                    WHERE deleted_at IS NULL
+                      AND {predicate}
+                    ORDER BY {scan_column} ASC NULLS FIRST, id
+                    LIMIT $1
+                    "#
+                ))
+                .bind(limit as i64)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|row| row.try_get("id").map_err(Into::into))
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) async fn tunnel_plan_record_attempts(
+        &self,
+        plan_ids: &[Uuid],
+    ) -> Result<Vec<TunnelPlanRecordAttempt>> {
+        if plan_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        match self {
+            Self::Memory(memory) => {
+                let plans = memory.tunnel_plans.read().await;
+                Ok(plan_ids
+                    .iter()
+                    .filter_map(|plan_id| {
+                        plans
+                            .iter()
+                            .find(|plan| plan.id == *plan_id && plan.deleted_at.is_none())
+                            .cloned()
+                            .map(|plan| TunnelPlanRecordAttempt {
+                                plan_id: *plan_id,
+                                plan: Ok(plan),
+                            })
+                    })
+                    .collect())
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        id, name, kind, enabled, revision, left_client_id, right_client_id,
+                        input, plan, recommended_ospf_cost,
+                        ospf_status, left_ospf_status, right_ospf_status,
+                        desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
+                        left_ospf_job_id, right_ospf_job_id,
+                        connection_assessment, connection_assessment_note,
+                        connection_assessed_at::text AS connection_assessed_at,
+                        connection_assessed_by,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at,
+                        deleted_at::text AS deleted_at,
+                        deleted_by, deleted_reason
+                    FROM tunnel_plans
+                    WHERE id = ANY($1::uuid[])
+                      AND deleted_at IS NULL
+                    "#,
+                )
+                .bind(plan_ids)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|row| {
+                        let plan_id = row.try_get("id")?;
+                        Ok(TunnelPlanRecordAttempt {
+                            plan_id,
+                            plan: tunnel_plan_from_row(&row),
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) async fn mark_automatic_tunnel_plans_scanned(
+        &self,
+        plan_ids: &[Uuid],
+    ) -> Result<()> {
+        self.mark_controller_tunnel_plans_scanned(ControllerTunnelPlanPage::Automatic, plan_ids)
+            .await
+    }
+
+    pub(crate) async fn mark_pending_tunnel_plans_reconciled(
+        &self,
+        plan_ids: &[Uuid],
+    ) -> Result<()> {
+        self.mark_controller_tunnel_plans_scanned(ControllerTunnelPlanPage::Pending, plan_ids)
+            .await
+    }
+
+    async fn mark_controller_tunnel_plans_scanned(
+        &self,
+        page: ControllerTunnelPlanPage,
+        plan_ids: &[Uuid],
+    ) -> Result<()> {
+        if plan_ids.is_empty() {
+            return Ok(());
+        }
+        match self {
+            Self::Memory(memory) => {
+                let mut scans = match page {
+                    ControllerTunnelPlanPage::Automatic => {
+                        memory.automatic_ospf_plan_scans.write().await
+                    }
+                    ControllerTunnelPlanPage::Pending => {
+                        memory.pending_ospf_plan_reconciliations.write().await
+                    }
+                };
+                let generation = scans
+                    .values()
+                    .copied()
+                    .max()
+                    .unwrap_or_default()
+                    .saturating_add(1);
+                for plan_id in plan_ids {
+                    scans.insert(*plan_id, generation);
+                }
+                Ok(())
+            }
+            Self::Postgres(pool) => {
+                let scan_column = match page {
+                    ControllerTunnelPlanPage::Automatic => "automatic_ospf_scanned_at",
+                    ControllerTunnelPlanPage::Pending => "pending_ospf_reconciled_at",
+                };
+                sqlx::query(&format!(
+                    "UPDATE tunnel_plans SET {scan_column} = now() WHERE id = ANY($1::uuid[])"
+                ))
+                .bind(plan_ids)
+                .execute(pool)
+                .await?;
+                Ok(())
+            }
+        }
     }
 
     pub(crate) async fn get_tunnel_plan(&self, id: Uuid) -> Result<Option<TunnelPlanView>> {
-        Ok(self
-            .list_tunnel_plans()
+        let mut plan = self.get_tunnel_plan_record(id).await?;
+        let Some(plan) = plan.as_mut() else {
+            return Ok(None);
+        };
+        let left_state = self
+            .list_runtime_config_apply_records(Some(&plan.left_client_id))
             .await?
             .into_iter()
-            .find(|plan| plan.id == id))
+            .next();
+        let right_state = if plan.right_client_id == plan.left_client_id {
+            left_state.clone()
+        } else {
+            self.list_runtime_config_apply_records(Some(&plan.right_client_id))
+                .await?
+                .into_iter()
+                .next()
+        };
+        plan.left_runtime_config = tunnel_endpoint_runtime_config_state(
+            plan.id,
+            &plan.left_client_id,
+            plan.enabled,
+            left_state.as_ref(),
+        );
+        plan.right_runtime_config = tunnel_endpoint_runtime_config_state(
+            plan.id,
+            &plan.right_client_id,
+            plan.enabled,
+            right_state.as_ref(),
+        );
+        Ok(Some(plan.clone()))
+    }
+
+    pub(crate) async fn get_tunnel_plan_identity(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<TunnelPlanIdentity>> {
+        match self {
+            Self::Memory(memory) => Ok(memory
+                .tunnel_plans
+                .read()
+                .await
+                .iter()
+                .find(|plan| plan.id == id && plan.deleted_at.is_none())
+                .map(|plan| TunnelPlanIdentity {
+                    name: plan.name.clone(),
+                    enabled: plan.enabled,
+                    revision: plan.revision,
+                    left_client_id: plan.left_client_id.clone(),
+                    right_client_id: plan.right_client_id.clone(),
+                })),
+            Self::Postgres(pool) => {
+                let row = sqlx::query(
+                    r#"
+                    SELECT id, name, enabled, revision, left_client_id, right_client_id
+                    FROM tunnel_plans
+                    WHERE id = $1 AND deleted_at IS NULL
+                    "#,
+                )
+                .bind(id)
+                .fetch_optional(pool)
+                .await?;
+                row.map(|row| {
+                    Ok(TunnelPlanIdentity {
+                        name: row.try_get("name")?,
+                        enabled: row.try_get("enabled")?,
+                        revision: row.try_get("revision")?,
+                        left_client_id: row.try_get("left_client_id")?,
+                        right_client_id: row.try_get("right_client_id")?,
+                    })
+                })
+                .transpose()
+            }
+        }
+    }
+
+    pub(crate) async fn get_tunnel_plan_record(&self, id: Uuid) -> Result<Option<TunnelPlanView>> {
+        Ok(match self {
+            Self::Memory(memory) => memory
+                .tunnel_plans
+                .read()
+                .await
+                .iter()
+                .find(|plan| plan.id == id && plan.deleted_at.is_none())
+                .cloned(),
+            Self::Postgres(pool) => {
+                let row = sqlx::query(
+                    r#"
+                    SELECT
+                        id, name, kind, enabled, revision, left_client_id, right_client_id,
+                        input, plan, recommended_ospf_cost,
+                        ospf_status, left_ospf_status, right_ospf_status,
+                        desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
+                        left_ospf_job_id, right_ospf_job_id,
+                        connection_assessment, connection_assessment_note,
+                        connection_assessed_at::text AS connection_assessed_at,
+                        connection_assessed_by,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at,
+                        deleted_at::text AS deleted_at,
+                        deleted_by, deleted_reason
+                    FROM tunnel_plans
+                    WHERE id = $1 AND deleted_at IS NULL
+                    "#,
+                )
+                .bind(id)
+                .fetch_optional(pool)
+                .await?;
+                row.as_ref().map(tunnel_plan_from_row).transpose()?
+            }
+        })
     }
 
     pub(crate) async fn record_tunnel_plan(
@@ -479,7 +875,7 @@ impl Repository {
         operator: &AuthContext,
     ) -> Result<TunnelPlanView> {
         let existing = self
-            .get_tunnel_plan(plan_id)
+            .get_tunnel_plan_record(plan_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("tunnel_plan_not_found"))?;
         let ospf_status = if enabled && existing.plan.ospf.is_some() {
@@ -523,7 +919,7 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                let result = sqlx::query(
+                let row = sqlx::query(
                     r#"
                     UPDATE tunnel_plans
                     SET enabled = $2,
@@ -543,6 +939,19 @@ impl Repository {
                         connection_assessed_by = NULL,
                         updated_at = now()
                     WHERE id = $1 AND deleted_at IS NULL AND revision = $5
+                    RETURNING
+                        id, name, kind, enabled, revision, left_client_id, right_client_id,
+                        input, plan, recommended_ospf_cost,
+                        ospf_status, left_ospf_status, right_ospf_status,
+                        desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
+                        left_ospf_job_id, right_ospf_job_id,
+                        connection_assessment, connection_assessment_note,
+                        connection_assessed_at::text AS connection_assessed_at,
+                        connection_assessed_by,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at,
+                        deleted_at::text AS deleted_at,
+                        deleted_by, deleted_reason
                     "#,
                 )
                 .bind(plan_id)
@@ -550,16 +959,10 @@ impl Repository {
                 .bind(persisted_actor_id(operator))
                 .bind(ospf_status)
                 .bind(expected_revision)
-                .execute(&mut *tx)
+                .fetch_optional(&mut *tx)
                 .await?;
-                if result.rows_affected() == 0 {
-                    anyhow::bail!("tunnel_plan_snapshot_stale");
-                }
-                tx.commit().await?;
-                let updated = self
-                    .get_tunnel_plan(plan_id)
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("tunnel_plan_not_found"))?;
+                let row = row.ok_or_else(|| anyhow::anyhow!("tunnel_plan_snapshot_stale"))?;
+                let updated = tunnel_plan_from_row(&row)?;
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
@@ -575,9 +978,12 @@ impl Repository {
                 })
                 .bind(format!("tunnel_plan:{plan_id}"))
                 .bind(tunnel_plan_enabled_metadata(&updated, operator))
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
-                Ok(updated)
+                tx.commit().await?;
+                self.get_tunnel_plan(plan_id)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("tunnel_plan_not_found"))
             }
         }
     }
@@ -796,7 +1202,7 @@ impl Repository {
         operator: &AuthContext,
     ) -> Result<TunnelPlanView> {
         let existing = self
-            .get_tunnel_plan(plan_id)
+            .get_tunnel_plan_record(plan_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("tunnel_plan_not_found"))?;
         validate_ospf_stage(
@@ -825,6 +1231,11 @@ impl Repository {
                     plan.updated_at = unix_now().to_string();
                     plan.clone()
                 };
+                memory
+                    .pending_ospf_plan_reconciliations
+                    .write()
+                    .await
+                    .remove(&plan_id);
                 memory.audits.write().await.push(ospf_jobs_audit(
                     &updated,
                     left_job_id,
@@ -834,7 +1245,8 @@ impl Repository {
                 Ok(updated)
             }
             Self::Postgres(pool) => {
-                let result = sqlx::query(
+                let mut tx = pool.begin().await?;
+                let row = sqlx::query(
                     r#"
                     UPDATE tunnel_plans
                     SET actor_id = $2,
@@ -842,6 +1254,7 @@ impl Repository {
                         ospf_status = 'pending',
                         left_ospf_status = 'pending',
                         right_ospf_status = 'pending',
+                        pending_ospf_reconciled_at = NULL,
                         left_ospf_job_id = $4,
                         right_ospf_job_id = $5,
                         updated_at = now()
@@ -853,6 +1266,19 @@ impl Repository {
                       AND right_current_ospf_cost IS NOT DISTINCT FROM $7
                       AND left_ospf_status <> 'pending'
                       AND right_ospf_status <> 'pending'
+                    RETURNING
+                        id, name, kind, enabled, revision, left_client_id, right_client_id,
+                        input, plan, recommended_ospf_cost,
+                        ospf_status, left_ospf_status, right_ospf_status,
+                        desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
+                        left_ospf_job_id, right_ospf_job_id,
+                        connection_assessment, connection_assessment_note,
+                        connection_assessed_at::text AS connection_assessed_at,
+                        connection_assessed_by,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at,
+                        deleted_at::text AS deleted_at,
+                        deleted_by, deleted_reason
                     "#,
                 )
                 .bind(plan_id)
@@ -863,15 +1289,10 @@ impl Repository {
                 .bind(expected_left_cost.map(i32::from))
                 .bind(expected_right_cost.map(i32::from))
                 .bind(expected_revision)
-                .execute(pool)
+                .fetch_optional(&mut *tx)
                 .await?;
-                if result.rows_affected() == 0 {
-                    anyhow::bail!("tunnel_plan_ospf_snapshot_stale");
-                }
-                let updated = self
-                    .get_tunnel_plan(plan_id)
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("tunnel_plan_not_found"))?;
+                let row = row.ok_or_else(|| anyhow::anyhow!("tunnel_plan_ospf_snapshot_stale"))?;
+                let updated = tunnel_plan_from_row(&row)?;
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
@@ -887,9 +1308,12 @@ impl Repository {
                     right_job_id,
                     operator,
                 ))
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
-                Ok(updated)
+                tx.commit().await?;
+                self.get_tunnel_plan(plan_id)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("tunnel_plan_not_found"))
             }
         }
     }
@@ -935,43 +1359,57 @@ impl Repository {
                 let query = format!(
                     "UPDATE tunnel_plans SET {status_column} = $3, {cost_column} = $4, updated_at = now() \
                      WHERE id = $1 AND deleted_at IS NULL AND {job_column} = $2 \
-                       AND {status_column} = 'pending'"
+                       AND {status_column} = 'pending' \
+                     RETURNING enabled, plan, desired_ospf_cost, \
+                        left_ospf_status, right_ospf_status, \
+                        left_current_ospf_cost, right_current_ospf_cost"
                 );
-                let result = sqlx::query(&query)
+                let mut tx = pool.begin().await?;
+                let row = sqlx::query(&query)
                     .bind(plan_id)
                     .bind(job_id)
                     .bind(if succeeded { "verified" } else { "failed" })
                     .bind(current_cost.map(i32::from))
-                    .execute(pool)
+                    .fetch_optional(&mut *tx)
                     .await?;
-                if result.rows_affected() == 0 {
+                let Some(row) = row else {
                     return Ok(None);
-                }
-                let mut updated = self
-                    .get_tunnel_plan(plan_id)
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("tunnel_plan_not_found"))?;
-                updated.ospf_status = aggregate_ospf_status(&updated).to_string();
+                };
+                let plan: SqlJson<TunnelPlan> = row.try_get("plan")?;
+                let ospf_status = aggregate_ospf_status_fields(
+                    row.try_get("enabled")?,
+                    plan.0.ospf.is_some(),
+                    row.try_get::<String, _>("left_ospf_status")?.as_str(),
+                    row.try_get::<String, _>("right_ospf_status")?.as_str(),
+                    row.try_get("desired_ospf_cost")?,
+                    row.try_get("left_current_ospf_cost")?,
+                    row.try_get("right_current_ospf_cost")?,
+                );
                 sqlx::query(
                     "UPDATE tunnel_plans SET ospf_status = $2, updated_at = now() WHERE id = $1",
                 )
                 .bind(plan_id)
-                .bind(&updated.ospf_status)
-                .execute(pool)
+                .bind(ospf_status)
+                .execute(&mut *tx)
                 .await?;
-                Ok(Some(updated))
+                tx.commit().await?;
+                self.get_tunnel_plan(plan_id).await
             }
         }
     }
 }
 
-fn tunnel_plan_from_row(row: sqlx::postgres::PgRow) -> Result<TunnelPlanView, sqlx::Error> {
-    let input: SqlJson<TunnelPlanInput> = row.try_get("input")?;
-    let plan: SqlJson<TunnelPlan> = row.try_get("plan")?;
+fn tunnel_plan_from_row(row: &sqlx::postgres::PgRow) -> Result<TunnelPlanView> {
+    let input: SqlJson<serde_json::Value> = row.try_get("input")?;
+    let plan: SqlJson<serde_json::Value> = row.try_get("plan")?;
+    let input = serde_json::from_value::<TunnelPlanInput>(input.0)
+        .map_err(|error| anyhow::anyhow!("invalid persisted tunnel input: {error}"))?;
+    let plan = serde_json::from_value::<TunnelPlan>(plan.0)
+        .map_err(|error| anyhow::anyhow!("invalid persisted tunnel plan: {error}"))?;
     Ok(TunnelPlanView {
         id: row.try_get("id")?,
         name: row.try_get("name")?,
-        kind: parse_tunnel_kind(row.try_get::<String, _>("kind")?.as_str()),
+        kind: parse_tunnel_kind(row.try_get::<String, _>("kind")?.as_str())?,
         enabled: row.try_get("enabled")?,
         revision: row.try_get("revision")?,
         left_client_id: row.try_get("left_client_id")?,
@@ -997,13 +1435,32 @@ fn tunnel_plan_from_row(row: sqlx::postgres::PgRow) -> Result<TunnelPlanView, sq
             row.try_get::<String, _>("right_client_id")?.as_str(),
             row.try_get("enabled")?,
         ),
-        input: input.0,
-        plan: plan.0,
+        input,
+        plan,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
         deleted_at: row.try_get("deleted_at")?,
         deleted_by: row.try_get("deleted_by")?,
         deleted_reason: row.try_get("deleted_reason")?,
+    })
+}
+
+fn tunnel_plan_corrupt_from_row(
+    row: &sqlx::postgres::PgRow,
+    error: &anyhow::Error,
+) -> Result<TunnelPlanCorruptView> {
+    Ok(TunnelPlanCorruptView {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        kind: row.try_get("kind")?,
+        enabled: row.try_get("enabled")?,
+        revision: row.try_get("revision")?,
+        left_client_id: row.try_get("left_client_id")?,
+        right_client_id: row.try_get("right_client_id")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        deleted_at: row.try_get("deleted_at")?,
+        configuration_error: format!("Persisted tunnel configuration is invalid: {error}"),
     })
 }
 
@@ -1248,19 +1705,35 @@ fn set_endpoint_ospf_result(
 }
 
 fn aggregate_ospf_status(plan: &TunnelPlanView) -> &'static str {
-    if !plan.enabled || plan.plan.ospf.is_none() {
+    aggregate_ospf_status_fields(
+        plan.enabled,
+        plan.plan.ospf.is_some(),
+        &plan.left_ospf_status,
+        &plan.right_ospf_status,
+        plan.desired_ospf_cost,
+        plan.left_current_ospf_cost,
+        plan.right_current_ospf_cost,
+    )
+}
+
+fn aggregate_ospf_status_fields(
+    enabled: bool,
+    ospf_enabled: bool,
+    left: &str,
+    right: &str,
+    desired_ospf_cost: Option<i32>,
+    left_current_ospf_cost: Option<i32>,
+    right_current_ospf_cost: Option<i32>,
+) -> &'static str {
+    if !enabled || !ospf_enabled {
         return "disabled";
     }
-    let left = plan.left_ospf_status.as_str();
-    let right = plan.right_ospf_status.as_str();
     if left == "pending" || right == "pending" {
         return "pending";
     }
     if left == "verified" && right == "verified" {
-        if let Some(desired) = plan.desired_ospf_cost {
-            if plan.left_current_ospf_cost != Some(desired)
-                || plan.right_current_ospf_cost != Some(desired)
-            {
+        if let Some(desired) = desired_ospf_cost {
+            if left_current_ospf_cost != Some(desired) || right_current_ospf_cost != Some(desired) {
                 return "stale";
             }
         }
@@ -1413,8 +1886,8 @@ fn tunnel_kind_name(kind: TunnelKind) -> &'static str {
     }
 }
 
-fn parse_tunnel_kind(value: &str) -> TunnelKind {
-    match value {
+fn parse_tunnel_kind(value: &str) -> Result<TunnelKind> {
+    Ok(match value {
         "gre" => TunnelKind::Gre,
         "ipip" => TunnelKind::Ipip,
         "sit" => TunnelKind::Sit,
@@ -1422,8 +1895,9 @@ fn parse_tunnel_kind(value: &str) -> TunnelKind {
         "openvpn" => TunnelKind::Openvpn,
         "wireguard" => TunnelKind::Wireguard,
         "tun_tap" => TunnelKind::TunTap,
-        _ => TunnelKind::Custom,
-    }
+        "custom" => TunnelKind::Custom,
+        _ => anyhow::bail!("invalid persisted tunnel kind: {value}"),
+    })
 }
 
 fn runtime_manager_name(manager: RuntimeTunnelManager) -> &'static str {

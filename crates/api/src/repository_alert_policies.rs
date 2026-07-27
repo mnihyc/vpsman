@@ -1197,13 +1197,14 @@ impl Repository {
             &rules,
             now,
         );
-        let matched_groups = groups
-            .into_iter()
-            .map(|group| {
-                let matched = resolve_agents(&agents, &group.selector_expression)?;
-                Ok((group, matched))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let mut matched_groups = Vec::with_capacity(groups.len());
+        let mut selector_failures = Vec::new();
+        for group in groups {
+            match resolve_agents(&agents, &group.selector_expression) {
+                Ok(matched) => matched_groups.push((group, matched)),
+                Err(error) => selector_failures.push((group.id, group.name, error.to_string())),
+            }
+        }
         let mut stream_requests = traffic_stream_requests_from_rules(&cycle_starts, &rules);
         for (group, matched) in &matched_groups {
             for rule in group.rules.iter().filter(|rule| rule.enabled) {
@@ -1267,7 +1268,11 @@ impl Repository {
                 }
             }
         }
-        Ok(fired)
+        if selector_failures.is_empty() {
+            Ok(fired)
+        } else {
+            Err(policy_selector_partial_failure(&selector_failures))
+        }
     }
 
     async fn vps_rule_preview(
@@ -2838,6 +2843,33 @@ fn resolve_agents(agents: &[AgentView], selector: &str) -> Result<Vec<AgentView>
         .collect())
 }
 
+fn policy_selector_partial_failure(failures: &[(Uuid, String, String)]) -> anyhow::Error {
+    const MAX_REPORTED_FAILURES: usize = 8;
+    const MAX_ERROR_CHARS: usize = 256;
+
+    let details = failures
+        .iter()
+        .take(MAX_REPORTED_FAILURES)
+        .map(|(policy_id, name, error)| {
+            let name = name.chars().take(MAX_POLICY_NAME_BYTES).collect::<String>();
+            let error = error.chars().take(MAX_ERROR_CHARS).collect::<String>();
+            format!("{policy_id} ({name}): {error}")
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let omitted = failures.len().saturating_sub(MAX_REPORTED_FAILURES);
+    anyhow::anyhow!(
+        "fleet_alert_policy_evaluation_partial_failure: {} malformed persisted group selector(s): {}{}",
+        failures.len(),
+        details,
+        if omitted == 0 {
+            String::new()
+        } else {
+            format!("; {omitted} additional failure(s) omitted")
+        }
+    )
+}
+
 fn traffic_accounting_for_client(
     client_id: &str,
     rules: &[VpsRuleValueRecord],
@@ -2904,15 +2936,28 @@ fn traffic_accounting_for_client_with_selector_override(
     if reset_day.is_none() {
         incomplete_reasons.push("traffic.reset_day missing".to_string());
     }
-    let selectors = selector_override
-        .and_then(|selector| parse_persisted_traffic_selector_list(selector).ok())
-        .or_else(|| {
-            rule_map
-                .get(VPS_RULE_KEY_TRAFFIC_SELECTORS)
-                .and_then(|rule| parse_persisted_traffic_selector_list(&rule.value_raw).ok())
-        })
-        .unwrap_or_default();
-    if selectors.is_empty() {
+    let (selectors, selector_error) = match selector_override {
+        Some(selector) => match parse_persisted_traffic_selector_list(selector) {
+            Ok(selectors) => (selectors, None),
+            Err(error) => (
+                Vec::new(),
+                Some(format!("traffic.policy_selector invalid: {error}")),
+            ),
+        },
+        None => match rule_map.get(VPS_RULE_KEY_TRAFFIC_SELECTORS) {
+            Some(rule) => match parse_persisted_traffic_selector_list(&rule.value_raw) {
+                Ok(selectors) => (selectors, None),
+                Err(error) => (
+                    Vec::new(),
+                    Some(format!("traffic.selectors invalid: {error}")),
+                ),
+            },
+            None => (Vec::new(), None),
+        },
+    };
+    if let Some(error) = selector_error {
+        incomplete_reasons.push(error);
+    } else if selectors.is_empty() {
         incomplete_reasons.push("traffic.selectors missing".to_string());
     }
     let quota_total = quota_value(&rule_map, VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL);

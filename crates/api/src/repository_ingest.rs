@@ -76,13 +76,16 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
     for row in rows {
         let job_id: Uuid = row.try_get("job_id")?;
         let target_client_id: String = row.try_get("client_id")?;
-        let operation: sqlx::types::Json<JobCommand> = row.try_get("operation")?;
+        let operation = row
+            .try_get::<sqlx::types::Json<JobCommand>, _>("operation")
+            .map(|operation| operation.0);
+        let operation_decode_failed = operation.is_err();
         if let (
-            JobCommand::AgentUpdateActivate {
+            Some(JobCommand::AgentUpdateActivate {
                 staged_sha256_hex, ..
-            },
+            }),
             Some(heartbeat),
-        ) = (&operation.0, update_heartbeat)
+        ) = (operation.as_ref().ok(), update_heartbeat)
         {
             if heartbeat.activation_job_id == job_id {
                 let expected_sha256_hex = staged_sha256_hex.to_ascii_lowercase();
@@ -293,9 +296,21 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
                 continue;
             }
         }
-        let message = format!(
-            "agent process incarnation changed from {previous_process_incarnation_id} to {current_process_incarnation_id} before final command output"
-        );
+        let (message, reason) = if operation_decode_failed {
+            (
+                format!(
+                    "agent process incarnation changed from {previous_process_incarnation_id} to {current_process_incarnation_id} before final command output; stored job operation is missing or invalid"
+                ),
+                "agent_process_incarnation_changed_invalid_job_operation",
+            )
+        } else {
+            (
+                format!(
+                    "agent process incarnation changed from {previous_process_incarnation_id} to {current_process_incarnation_id} before final command output"
+                ),
+                "agent_process_incarnation_changed",
+            )
+        };
         append_synthetic_agent_lost_output_in_tx(
             tx,
             job_id,
@@ -346,7 +361,8 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
             "job_id": job_id,
             "status": TARGET_STATUS_AGENT_LOST,
             "message": message,
-            "reason": "agent_process_incarnation_changed",
+            "reason": reason,
+            "operation_decode_failed": operation_decode_failed,
             "gateway_id": gateway_id,
             "previous_process_incarnation_id": previous_process_incarnation_id,
             "current_process_incarnation_id": current_process_incarnation_id,

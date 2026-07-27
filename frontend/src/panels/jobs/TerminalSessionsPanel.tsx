@@ -29,6 +29,7 @@ import {
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { VpsCombobox } from "../../components/VpsCombobox";
 import { consolePalette } from "../../colorPalette";
+import { formatLowerBoundCount } from "../../constants";
 import { terminalSessionStateBadgeClass } from "../../jobStatusPresentation";
 import type { TerminalAction } from "../jobDispatchModel";
 import type { AgentView, WsTerminalOutputEvent } from "../../types";
@@ -84,6 +85,7 @@ export function TerminalSessionsPanel({
   initialTargetClientId,
   initialTargetRequestId,
   sessions,
+  sessionsTruncated,
   lastTerminalOutputEvent,
   loading,
   onCloseTerminal,
@@ -103,6 +105,7 @@ export function TerminalSessionsPanel({
   initialTargetClientId?: string | null;
   initialTargetRequestId?: string | null;
   sessions: TerminalSessionRecord[];
+  sessionsTruncated: boolean;
   lastTerminalOutputEvent: WsTerminalOutputEvent | null;
   loading: boolean;
   onCloseTerminal: (session: TerminalSessionRecord) => Promise<void>;
@@ -211,7 +214,9 @@ export function TerminalSessionsPanel({
     ? sessions.find((session) => `${session.client_id}:${session.session_id}` === followKey) ?? null
     : null;
   const followingLive = Boolean(followedSession && isTerminalActive(followedSession));
-  const terminalSummary = `${openSessions} open, ${replayableSessions} replayable, ${formatBytes(retainedBytes)} retained`;
+  const terminalSummary = sessionsTruncated
+    ? `${formatLowerBoundCount(openSessions, true)} open, ${formatLowerBoundCount(replayableSessions, true)} replayable, ${formatBytes(retainedBytes)} retained in loaded sessions`
+    : `${openSessions} open, ${replayableSessions} replayable, ${formatBytes(retainedBytes)} retained`;
   const terminalReplayFeedbackMessage = replayError;
   const activeReplay =
     replayPreview && activeSession?.session_id === replayPreview.sessionId
@@ -1111,16 +1116,16 @@ export function TerminalSessionsPanel({
       </div>
       <div className="terminalSummaryStrip">
         <span>
-          <strong>{openSessions}</strong>
-          <small>Open</small>
+          <strong>{formatLowerBoundCount(openSessions, sessionsTruncated)}</strong>
+          <small>{sessionsTruncated ? "Open in loaded sessions" : "Open"}</small>
         </span>
         <span>
-          <strong>{replayableSessions}</strong>
-          <small>Replayable</small>
+          <strong>{formatLowerBoundCount(replayableSessions, sessionsTruncated)}</strong>
+          <small>{sessionsTruncated ? "Replayable in loaded sessions" : "Replayable"}</small>
         </span>
         <span>
           <strong>{formatBytes(retainedBytes)}</strong>
-          <small>Retained output</small>
+          <small>{sessionsTruncated ? "Retained in loaded sessions" : "Retained output"}</small>
         </span>
         <span>
           <strong>{followingLive ? "Following" : "Not following"}</strong>
@@ -1352,6 +1357,7 @@ export function TerminalSessionsPanel({
           </div>
         )}
         rows={sessions}
+        rowsTruncated={sessionsTruncated}
         searchPlaceholder="Search terminal sessions"
         selectable={false}
         storageKey="vpsman.jobs.terminalSessions"

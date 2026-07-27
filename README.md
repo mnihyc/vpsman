@@ -95,6 +95,7 @@ Prerequisites depend on the path you choose:
 - Rust via `rustup` for source builds; the repo pins the toolchain in
   [rust-toolchain.toml](rust-toolchain.toml).
 - Node matching [frontend/.nvmrc](frontend/.nvmrc) for frontend development.
+- Python 3.11 or newer for source and release audit tooling.
 - `curl`, `env`, `flock`, `mktemp`, `sha256sum`, and `awk` for the generated verified
   agent installer command, plus systemd for the default root/user service path;
   staged no-systemd installs are also supported.
@@ -362,6 +363,8 @@ Rust uses the repository `rust-toolchain.toml`; Node is pinned through
 
 ```sh
 cargo fmt --all -- --check
+bash scripts/install-rust-audit-tool.sh
+bash scripts/audit-rust-dependencies.sh
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```

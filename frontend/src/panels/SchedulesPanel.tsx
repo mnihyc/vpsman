@@ -37,6 +37,7 @@ import {
   ActionFeedback,
   type ActionFeedbackTone,
 } from "../components/ActionFeedback";
+import { formatLowerBoundCount } from "../constants";
 import type {
   AgentView,
   BulkResolveResponse,
@@ -64,6 +65,7 @@ export function SchedulesPanel({
   activeSubpage: _activeSubpage,
   agents,
   commandTemplates,
+  commandTemplatesTruncated,
   error,
   loading,
   onApplyScheduleNow,
@@ -80,10 +82,12 @@ export function SchedulesPanel({
   onUpdateScheduleTargets,
   privilegeMaterial,
   schedules,
+  schedulesTruncated,
 }: {
   activeSubpage: string;
   agents: AgentView[];
   commandTemplates: CommandTemplateRecord[];
+  commandTemplatesTruncated: boolean;
   error: string | null;
   loading: boolean;
   onApplyScheduleNow: (
@@ -123,6 +127,7 @@ export function SchedulesPanel({
   ) => Promise<void>;
   privilegeMaterial: PrivilegeMaterial | null;
   schedules: ScheduleRecord[];
+  schedulesTruncated: boolean;
 }) {
   const [name, setName] = useState("");
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
@@ -202,14 +207,20 @@ export function SchedulesPanel({
     [agents, selectorExpression, selectorParse.error],
   );
   const selectedTargetCount = selectedTargetIds.length;
+  const cronShapeValid = useMemo(
+    () => hasCronFieldShape(cronExpr),
+    [cronExpr],
+  );
   const nextRuns = useMemo(() => previewNextCronRuns(cronExpr, 5), [cronExpr]);
   const ready =
     name.trim().length > 0 &&
     scheduleOperation !== null &&
-    nextRuns.length > 0 &&
+    cronShapeValid &&
     selectorExpression.trim().length > 0 &&
     !selectorParse.error;
-  const status = countPhrase(schedules.length, "schedule");
+  const status = schedulesTruncated
+    ? `${formatLowerBoundCount(schedules.length, true)} loaded schedules`
+    : countPhrase(schedules.length, "schedule");
   const schedulesPageFeedbackMessage =
     error ?? (loading ? "Loading schedules" : null);
   const schedulesPageFeedbackTone = error ? "danger" : "progress";
@@ -261,7 +272,7 @@ export function SchedulesPanel({
       label: "Next",
       value: confirmationNextRun
         ? formatTime(confirmationNextRun)
-        : "invalid",
+        : "Server calculates after save",
     },
     {
       label: "Catch-up",
@@ -306,11 +317,19 @@ export function SchedulesPanel({
         minSize: 170,
         sortValue: (schedule) => schedule.command_type,
         searchValue: (schedule) =>
-          `${schedule.command_type} ${operationSummary(schedule.operation)}`,
+          `${schedule.command_type} ${operationSummary(schedule.operation)} ${schedule.operation_error ?? ""}`,
         cell: (schedule) => (
           <span className="historyPrimary">
-            <strong>{operationSummary(schedule.operation)}</strong>
-            <small>{scheduleCommandTypeLabel(schedule.command_type)}</small>
+            <strong className={scheduleOperationInvalid(schedule) ? "status warn" : undefined}>
+              {scheduleOperationInvalid(schedule)
+                ? "Invalid saved operation"
+                : operationSummary(schedule.operation)}
+            </strong>
+            <small>
+              {scheduleOperationInvalid(schedule)
+                ? "Full edit required before execution"
+                : scheduleCommandTypeLabel(schedule.command_type)}
+            </small>
           </span>
         ),
       },
@@ -345,18 +364,26 @@ export function SchedulesPanel({
         minSize: 170,
         sortValue: (schedule) => schedule.cron_expr,
         searchValue: (schedule) =>
-          `${schedule.cron_expr} ${describeCronExpression(schedule.cron_expr)} ${schedule.timezone}`,
-        cell: (schedule) => (
-          <span
-            className="historyPrimary scheduleCadenceCell"
-            title={`${schedule.cron_expr} ${schedule.timezone}`}
-          >
-            <strong>{describeCronExpression(schedule.cron_expr)}</strong>
-            <small>
-              {schedule.cron_expr} · {schedule.timezone}
-            </small>
-          </span>
-        ),
+          `${schedule.cron_expr} ${describeCronExpression(schedule.cron_expr)} ${schedule.timezone} ${schedule.cadence_error ?? ""}`,
+        cell: (schedule) => {
+          const cadenceError = scheduleCadenceErrorDetail(schedule);
+          return (
+            <span
+              className="historyPrimary scheduleCadenceCell"
+              title={`${schedule.cron_expr} ${schedule.timezone}`}
+            >
+              {cadenceError ? (
+                <strong className="status warn">Invalid cadence</strong>
+              ) : (
+                <strong>{describeCronExpression(schedule.cron_expr)}</strong>
+              )}
+              <small>
+                {schedule.cron_expr} · {schedule.timezone}
+              </small>
+              {cadenceError ? <small>{cadenceError}</small> : null}
+            </span>
+          );
+        },
       },
       {
         id: "nextRun",
@@ -419,25 +446,47 @@ export function SchedulesPanel({
         sortValue: (schedule) =>
           `${schedule.enabled ? "enabled" : "disabled"} ${schedule.failure_count}`,
         searchValue: (schedule) =>
-          `${schedule.enabled ? "enabled" : "disabled"} ${schedule.last_error ?? ""}`,
-        cell: (schedule) => (
-          <span className="historyPrimary">
-            <span className={schedule.enabled ? "status ok" : "status neutral"}>
-              {schedule.enabled ? "Enabled" : "Disabled"}
-            </span>
-            <small>
-              {schedule.enabled
-                ? "Automatic runs authorized"
-                : "Automatic runs paused"}
-            </small>
-            {schedule.failure_count > 0 && (
+          `${schedule.enabled ? "enabled" : "disabled"} ${schedule.last_error ?? ""} ${schedule.cadence_error ?? ""} ${schedule.operation_error ?? ""}`,
+        cell: (schedule) => {
+          const cadenceError = scheduleCadenceErrorDetail(schedule);
+          const operationInvalid = scheduleOperationInvalid(schedule);
+          return (
+            <span className="historyPrimary">
+              <span
+                className={
+                  operationInvalid || cadenceError
+                    ? "status warn"
+                    : schedule.enabled
+                      ? "status ok"
+                      : "status neutral"
+                }
+              >
+                {operationInvalid
+                  ? "Invalid operation"
+                  : cadenceError
+                  ? "Invalid cadence"
+                  : schedule.enabled
+                    ? "Enabled"
+                    : "Disabled"}
+              </span>
               <small>
-                {schedule.failure_count}/{schedule.max_failures} failures
+                {operationInvalid
+                  ? "Run, enable, defer, and retarget are blocked"
+                  : cadenceError
+                  ? "Edit required; automatic runs blocked"
+                  : schedule.enabled
+                    ? "Automatic runs authorized"
+                    : "Automatic runs paused"}
               </small>
-            )}
-            {schedule.last_error && <small>{schedule.last_error}</small>}
-          </span>
-        ),
+              {schedule.failure_count > 0 && (
+                <small>
+                  {schedule.failure_count}/{schedule.max_failures} failures
+                </small>
+              )}
+              {schedule.last_error && <small>{schedule.last_error}</small>}
+            </span>
+          );
+        },
       },
     ],
     [agents, commandTemplates],
@@ -565,24 +614,39 @@ export function SchedulesPanel({
   function editSchedule(schedule: ScheduleRecord) {
     setPendingScheduleSnapshot(null);
     setScheduleLifecycleFeedback(null);
-    const matchingTemplate = commandTemplates.find(
-      (template) =>
-        JSON.stringify(template.operation) ===
-        JSON.stringify(schedule.operation),
-    );
-    if (schedule.operation.type !== "shell" && !matchingTemplate) {
+    const matchingTemplate = schedule.operation
+      ? commandTemplates.find(
+          (template) =>
+            JSON.stringify(template.operation) ===
+            JSON.stringify(schedule.operation),
+        )
+      : undefined;
+    if (
+      schedule.operation &&
+      schedule.operation.type !== "shell" &&
+      !matchingTemplate
+    ) {
       setScheduleLifecycleFeedback({
         message:
-          "Non-shell schedules can be modified from their command template",
-        tone: "danger",
+          commandTemplatesTruncated
+            ? "This schedule's non-shell template is not in the loaded template page; older templates may exist. Modification stays disabled until that template is loaded."
+            : "Non-shell schedules can be modified from their command template",
+        tone: commandTemplatesTruncated ? "warning" : "danger",
       });
       return;
+    }
+    if (!schedule.operation) {
+      setScheduleLifecycleFeedback({
+        message:
+          "The saved operation is invalid. Choose a replacement command or template, then review the full schedule update.",
+        tone: "warning",
+      });
     }
     setEditingScheduleId(schedule.id);
     setName(schedule.name);
     setSelectedTemplateId(matchingTemplate?.id ?? "");
     setCommandText(
-      schedule.operation.type === "shell"
+      schedule.operation?.type === "shell"
         ? operationToCommandText(schedule.operation)
         : "",
     );
@@ -773,7 +837,14 @@ export function SchedulesPanel({
     if (!targetIds.length) {
       throw new Error("Schedule has no fixed VPS targets");
     }
-    const operationHash = await operationPayloadHashHex(schedule.operation);
+    const operationHash =
+      schedule.operation_payload_hash?.trim() ||
+      (schedule.operation
+        ? await operationPayloadHashHex(schedule.operation)
+        : "");
+    if (!operationHash) {
+      throw new Error("Schedule operation evidence is unavailable");
+    }
     return buildPrivilegeAssertion({
       intent: canonicalSchedulePrivilegeIntent({
         action,
@@ -828,7 +899,9 @@ export function SchedulesPanel({
       },
       {
         label: "Operation",
-        value: `${operationSummary(action.schedule.operation)} · ${scheduleCommandTypeLabel(action.schedule.command_type)}`,
+        value: scheduleOperationInvalid(action.schedule)
+          ? "Invalid saved operation · repair required"
+          : `${operationSummary(action.schedule.operation)} · ${scheduleCommandTypeLabel(action.schedule.command_type)}`,
       },
       {
         label: "Fixed targets",
@@ -840,7 +913,13 @@ export function SchedulesPanel({
       },
       {
         label: "State",
-        value: action.schedule.enabled ? "Enabled" : "Disabled",
+        value: scheduleOperationInvalid(action.schedule)
+          ? "Invalid operation — execution blocked"
+          : action.schedule.cadence_error
+          ? "Invalid cadence — automatic runs blocked"
+          : action.schedule.enabled
+            ? "Enabled"
+            : "Disabled",
       },
     ];
     if (action.type === "targetUpdate") {
@@ -877,7 +956,8 @@ export function SchedulesPanel({
           " now",
         ),
       label: "Review run now",
-      disabled: (rows) => rows.length !== 1,
+      disabled: (rows) =>
+        rows.length !== 1 || Boolean(rows[0] && scheduleOperationInvalid(rows[0])),
       icon: <Play size={14} />,
       onSelect: (rows) => rows[0] && reviewApplyNow(rows[0]),
     },
@@ -885,7 +965,11 @@ export function SchedulesPanel({
       description: (rows) =>
         describeScheduleAction(rows, "Enable", "Automatic runs will resume."),
       label: "Review enable",
-      disabled: (rows) => rows.length !== 1 || rows[0]?.enabled === true,
+      disabled: (rows) =>
+        rows.length !== 1 ||
+        rows[0]?.enabled === true ||
+        Boolean(rows[0]?.cadence_error) ||
+        Boolean(rows[0] && scheduleOperationInvalid(rows[0])),
       icon: <Power size={14} />,
       onSelect: (rows) =>
         rows[0] && openScheduleAction({ type: "enable", schedule: rows[0] }),
@@ -911,7 +995,9 @@ export function SchedulesPanel({
       description: (rows) => describeScheduleTargetUpdate(rows),
       label: "Review target update",
       disabled: (rows) =>
-        rows.length !== 1 || !rows[0]?.selector_expression.trim(),
+        rows.length !== 1 ||
+        !rows[0]?.selector_expression.trim() ||
+        Boolean(rows[0] && scheduleOperationInvalid(rows[0])),
       icon: <Target size={14} />,
       onSelect: (rows) => {
         const schedule = rows[0];
@@ -927,7 +1013,8 @@ export function SchedulesPanel({
           "Opens a defer form before confirmation.",
         ),
       label: "Defer",
-      disabled: (rows) => rows.length !== 1,
+      disabled: (rows) =>
+        rows.length !== 1 || Boolean(rows[0] && scheduleOperationInvalid(rows[0])),
       icon: <Clock3 size={14} />,
       onSelect: (rows) => rows[0] && startDefer(rows[0]),
     },
@@ -975,7 +1062,8 @@ export function SchedulesPanel({
           " now",
         ),
       label: "Run now",
-      disabled: (rows) => rows.length !== 1,
+      disabled: (rows) =>
+        rows.length !== 1 || Boolean(rows[0] && scheduleOperationInvalid(rows[0])),
       icon: <Play size={14} />,
       onSelect: (rows) => rows[0] && reviewApplyNow(rows[0]),
     },
@@ -983,7 +1071,11 @@ export function SchedulesPanel({
       description: (rows) =>
         describeScheduleAction(rows, "Enable", "Automatic runs will resume."),
       label: "Enable",
-      disabled: (rows) => rows.length !== 1 || rows[0]?.enabled === true,
+      disabled: (rows) =>
+        rows.length !== 1 ||
+        rows[0]?.enabled === true ||
+        Boolean(rows[0]?.cadence_error) ||
+        Boolean(rows[0] && scheduleOperationInvalid(rows[0])),
       icon: <Power size={14} />,
       onSelect: (rows) =>
         rows[0] && openScheduleAction({ type: "enable", schedule: rows[0] }),
@@ -1049,9 +1141,10 @@ export function SchedulesPanel({
         >
           <Clock3 size={16} />
           <span>
-            Enabled schedules automatically dispatch future jobs from their
-            saved target snapshot. Use <strong>Run now</strong> for one manual
-            dispatch; approval work is separate in Jobs / Approvals.
+            Enabled schedules with a valid cadence automatically dispatch future
+            jobs from their saved target snapshot. Use <strong>Run now</strong>{" "}
+            for one manual dispatch; approval work is separate in Jobs /
+            Approvals.
           </span>
         </div>
         <ConsoleDataGrid
@@ -1081,6 +1174,7 @@ export function SchedulesPanel({
           )}
           rowActions={scheduleRowActions}
           rows={schedules}
+          rowsTruncated={schedulesTruncated}
           storageKey="vpsman.grid.schedules"
           title="Schedule records"
         />
@@ -1249,6 +1343,12 @@ export function SchedulesPanel({
                   </>
                 )}
               </select>
+              {commandTemplatesTruncated && (
+                <small>
+                  {commandTemplates.length} templates loaded; older templates
+                  may not appear.
+                </small>
+              )}
             </label>
             <label>
               <span>Command argv</span>
@@ -1375,7 +1475,9 @@ export function SchedulesPanel({
               <span>
                 {nextRuns.length
                   ? `${describeCronExpression(cronExpr)}. Times shown in browser timezone.`
-                  : "Invalid or unsupported cron expression"}
+                  : cronShapeValid
+                    ? "No run appears in the short local preview; the server validates this cadence when saved."
+                    : "Cron must use five fields; the server validates it when saved."}
               </span>
               <div className="targetChipList">
                 {nextRuns.map((run) => (
@@ -1632,31 +1734,74 @@ function formatInterval(seconds: number): string {
   return `${seconds}s`;
 }
 
-function previewNextCronRuns(expr: string, count: number): string[] {
+type ParsedCronExpression = {
+  domAny: boolean;
+  domValues: Set<number> | null;
+  dowAny: boolean;
+  dowValues: Set<number> | null;
+  hours: Set<number>;
+  minutes: Set<number>;
+  months: Set<number>;
+};
+
+function hasCronFieldShape(expr: string): boolean {
+  return expr.trim().split(/\s+/).length === 5;
+}
+
+function parseCronExpression(expr: string): ParsedCronExpression | null {
   const fields = expr.trim().split(/\s+/);
   if (fields.length !== 5) {
-    return [];
+    return null;
   }
   const [minuteExpr, hourExpr, domExpr, monthExpr, dowExpr] = fields;
   const minutes = parseCronField(minuteExpr, 0, 59);
   const hours = parseCronField(hourExpr, 0, 23);
   const months = parseCronField(monthExpr, 1, 12);
   if (!minutes || !hours || !months) {
-    return [];
+    return null;
   }
   const domAny = domExpr === "*";
   const dowAny = dowExpr === "*";
   const domValues = domAny ? null : parseCronField(domExpr, 1, 31);
   const dowValues = dowAny ? null : parseCronField(dowExpr, 0, 7);
   if ((!domAny && !domValues) || (!dowAny && !dowValues)) {
+    return null;
+  }
+  return {
+    domAny,
+    domValues,
+    dowAny,
+    dowValues,
+    hours,
+    minutes,
+    months,
+  };
+}
+
+function previewNextCronRuns(expr: string, count: number): string[] {
+  const parsed = parseCronExpression(expr);
+  if (!parsed) {
     return [];
   }
+  const {
+    domAny,
+    domValues,
+    dowAny,
+    dowValues,
+    hours,
+    minutes,
+    months,
+  } = parsed;
   const result: string[] = [];
   const cursor = new Date();
   cursor.setUTCSeconds(0, 0);
   cursor.setUTCMinutes(cursor.getUTCMinutes() + 1);
-  const deadline = cursor.getTime() + 366 * 24 * 60 * 60 * 1000;
-  while (result.length < count && cursor.getTime() <= deadline) {
+  const maxMinuteChecks = 32 * 24 * 60;
+  for (
+    let checkedMinutes = 0;
+    result.length < count && checkedMinutes < maxMinuteChecks;
+    checkedMinutes += 1
+  ) {
     const month = cursor.getUTCMonth() + 1;
     const minute = cursor.getUTCMinutes();
     const hour = cursor.getUTCHours();
@@ -1825,8 +1970,16 @@ function ScheduleExpandedDetail({ schedule }: { schedule: ScheduleRecord }) {
     <div className="consoleInlineDetailGrid">
       <span>
         <strong>Operation</strong>
-        <span>{operationSummary(schedule.operation)}</span>
-        <span>{scheduleCommandTypeLabel(schedule.command_type)}</span>
+        <span>
+          {scheduleOperationInvalid(schedule)
+            ? "Invalid saved operation"
+            : operationSummary(schedule.operation)}
+        </span>
+        <span>
+          {scheduleOperationInvalid(schedule)
+            ? "Full edit required before execution"
+            : scheduleCommandTypeLabel(schedule.command_type)}
+        </span>
       </span>
       <span>
         <strong>Targets</strong>
@@ -1862,7 +2015,11 @@ function ScheduleExpandedDetail({ schedule }: { schedule: ScheduleRecord }) {
         <strong>Execution policy</strong>
         <span>
           {schedule.enabled
-            ? "Enabled schedules authorize future runs automatically"
+            ? scheduleOperationInvalid(schedule)
+              ? "Invalid operation — automatic and manual runs are blocked"
+              : schedule.cadence_error
+              ? "Invalid cadence — edit required; automatic runs are blocked"
+              : "Enabled schedules authorize future runs automatically"
             : "Disabled schedules do not dispatch future runs"}
         </span>
         <span>{describeSchedulePolicy(schedule)}</span>
@@ -1880,6 +2037,26 @@ type ScheduleRunTiming = {
 };
 
 function scheduleRunTiming(schedule: ScheduleRecord): ScheduleRunTiming {
+  if (scheduleOperationInvalid(schedule)) {
+    return {
+      detail:
+        "Automatic and manual runs are blocked until a full reviewed edit replaces the saved operation.",
+      futureRuns: [],
+      label: "Invalid operation",
+      staleRuns: [],
+      tone: "warn",
+    };
+  }
+  const cadenceError = scheduleCadenceErrorDetail(schedule);
+  if (cadenceError) {
+    return {
+      detail: `Invalid cadence — edit required. ${cadenceError}`,
+      futureRuns: [],
+      label: "Invalid cadence",
+      staleRuns: [],
+      tone: "warn",
+    };
+  }
   const runs = parseScheduleRuns(schedule);
   const now = Date.now();
   const futureRuns = runs
@@ -1921,6 +2098,23 @@ function scheduleRunTiming(schedule: ScheduleRecord): ScheduleRunTiming {
     staleRuns,
     tone: schedule.enabled ? "warn" : "neutral",
   };
+}
+
+function scheduleOperationInvalid(schedule: ScheduleRecord): boolean {
+  return !schedule.operation || Boolean(schedule.operation_error);
+}
+
+function scheduleCadenceErrorDetail(schedule: ScheduleRecord): string | null {
+  if (!schedule.cadence_error) {
+    return null;
+  }
+  if (schedule.cadence_error === "schedule_cron_invalid") {
+    return "The saved cron expression is invalid.";
+  }
+  if (schedule.cadence_error === "schedule_cron_no_future_occurrence") {
+    return "The saved cron expression has no future occurrence.";
+  }
+  return `The API reported ${schedule.cadence_error.replace(/_/g, " ")}.`;
 }
 
 function scheduleOverdueAge(value: string): string {

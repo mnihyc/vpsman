@@ -712,16 +712,21 @@ async fn runtime_config_apply_state_keeps_failed_sync_pending_failed() {
     )
     .await
     .unwrap();
-    if let Repository::Memory(memory) = &repo {
-        memory.job_operations.write().await.insert(
-            job_id,
-            JobCommand::RuntimeConfigSync {
-                desired_version: config.version,
-                reason: "test-fail".to_string(),
-                config: Box::new(config),
-            },
-        );
-    }
+
+    repo.record_runtime_config_apply_terminal_for_target_status(
+        Uuid::new_v4(),
+        "client-a",
+        vpsman_server_core::TARGET_STATUS_FAILED,
+        Some("unrelated job"),
+    )
+    .await
+    .unwrap();
+    let unchanged = repo
+        .list_runtime_config_apply_states(Some("client-a"))
+        .await
+        .unwrap();
+    assert_eq!(unchanged[0].pending_job_id, Some(job_id));
+    assert_eq!(unchanged[0].pending_status.as_deref(), Some("queued"));
 
     repo.record_runtime_config_apply_terminal_for_target_status(
         job_id,
@@ -1066,14 +1071,28 @@ async fn runtime_config_patch_generators_keep_built_ins_immutable_and_custom_gen
     assert!(!edited.built_in);
 
     let built_in_delete = repo
-        .delete_runtime_config_patch_generator(disable.id, &operator)
+        .delete_runtime_config_patch_generator(disable.id, &disable.name, &operator)
         .await;
     assert!(built_in_delete
         .unwrap_err()
         .to_string()
         .contains("runtime_config_patch_generator_builtin_immutable"));
 
-    repo.delete_runtime_config_patch_generator(custom.id, &operator)
+    let stale_delete = repo
+        .delete_runtime_config_patch_generator(custom.id, &custom.name, &operator)
+        .await
+        .unwrap_err();
+    assert!(stale_delete
+        .to_string()
+        .contains("runtime_config_patch_generator_delete_review_stale"));
+    assert!(repo
+        .list_runtime_config_patch_generators()
+        .await
+        .unwrap()
+        .iter()
+        .any(|generator| generator.id == custom.id));
+
+    repo.delete_runtime_config_patch_generator(custom.id, &edited.name, &operator)
         .await
         .unwrap();
     let after_delete = repo.list_runtime_config_patch_generators().await.unwrap();

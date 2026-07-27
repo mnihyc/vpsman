@@ -1903,11 +1903,8 @@ impl Repository {
                 session.revoked = true;
                 drop(sessions);
                 record_session_revoke_audit(memory, session_id, actor).await;
-                Ok(self
-                    .list_operator_sessions(200, actor.session_id)
-                    .await?
-                    .into_iter()
-                    .find(|session| session.id == session_id))
+                self.operator_session_by_id(session_id, actor.session_id)
+                    .await
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
@@ -1946,11 +1943,8 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
-                Ok(self
-                    .list_operator_sessions(200, actor.session_id)
-                    .await?
-                    .into_iter()
-                    .find(|session| session.id == session_id))
+                self.operator_session_by_id(session_id, actor.session_id)
+                    .await
             }
         }
     }

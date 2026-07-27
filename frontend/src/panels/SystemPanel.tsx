@@ -24,6 +24,7 @@ import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
+import { formatLowerBoundCount } from "../constants";
 import { parse, stringify, type TomlTable } from "smol-toml";
 import { ActionFeedback } from "../components/ActionFeedback";
 import { handleTabListKeyDown, tabId } from "../components/AccessibleTabs";
@@ -76,6 +77,8 @@ import {
 
 type SystemPanelProps = {
   activeSubpage: string;
+  accessError: string | null;
+  accessLoading: boolean;
   dashboard: SystemDashboardRecord | null;
   dashboardError: string | null;
   dashboardLoading: boolean;
@@ -133,7 +136,9 @@ type SystemPanelProps = {
   onValidateSuiteConfig: (toml: string) => Promise<SuiteConfigValidateResponse>;
   operator: OperatorView | null;
   operatorAuthEvents: OperatorAuthEventRecord[];
+  operatorAuthEventsTruncated: boolean;
   operatorSessions: OperatorSessionRecord[];
+  operatorSessionsTruncated: boolean;
   operators: OperatorView[];
   privilegeMaterial: PrivilegeMaterial | null;
   suiteConfig: SuiteConfigResponse | null;
@@ -576,6 +581,8 @@ const suiteConfigSections: ConfigSectionSpec[] = [
 
 export function SystemPanel({
   activeSubpage,
+  accessError,
+  accessLoading,
   dashboard,
   dashboardError,
   dashboardLoading,
@@ -597,7 +604,9 @@ export function SystemPanel({
   onValidateSuiteConfig,
   operator,
   operatorAuthEvents,
+  operatorAuthEventsTruncated,
   operatorSessions,
+  operatorSessionsTruncated,
   operators,
   privilegeMaterial,
   suiteConfig,
@@ -644,7 +653,10 @@ export function SystemPanel({
     return (
       <SystemUsersPanel
         authEvents={operatorAuthEvents}
+        authEventsTruncated={operatorAuthEventsTruncated}
         currentOperator={operator}
+        loadError={accessError}
+        loadLoading={accessLoading}
         onClearOperatorTotp={onClearOperatorTotp}
         onCreateOperator={onCreateOperator}
         onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
@@ -655,6 +667,7 @@ export function SystemPanel({
         operators={operators}
         privilegeMaterial={privilegeMaterial}
         sessions={operatorSessions}
+        sessionsTruncated={operatorSessionsTruncated}
       />
     );
   }
@@ -662,10 +675,14 @@ export function SystemPanel({
     return (
       <SystemSessionsPanel
         authEvents={operatorAuthEvents}
+        authEventsTruncated={operatorAuthEventsTruncated}
+        loadError={accessError}
+        loadLoading={accessLoading}
         onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
         onRevokeOperatorSession={onRevokeOperatorSession}
         privilegeMaterial={privilegeMaterial}
         sessions={operatorSessions}
+        sessionsTruncated={operatorSessionsTruncated}
       />
     );
   }
@@ -818,7 +835,10 @@ function FieldLabel({ help, label }: { help: string; label: string }) {
 
 export function SystemUsersPanel({
   authEvents,
+  authEventsTruncated,
   currentOperator,
+  loadError,
+  loadLoading,
   onClearOperatorTotp,
   onCreateOperator,
   onOpenPrivilegeUnlock,
@@ -829,9 +849,13 @@ export function SystemUsersPanel({
   operators,
   privilegeMaterial,
   sessions,
+  sessionsTruncated,
 }: {
   authEvents: OperatorAuthEventRecord[];
+  authEventsTruncated: boolean;
   currentOperator: OperatorView | null;
+  loadError?: string | null;
+  loadLoading?: boolean;
   onClearOperatorTotp: (
     operatorId: string,
     adminRiskAcknowledged: boolean,
@@ -875,6 +899,7 @@ export function SystemUsersPanel({
   operators: OperatorView[];
   privilegeMaterial: PrivilegeMaterial | null;
   sessions: OperatorSessionRecord[];
+  sessionsTruncated: boolean;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selectedOperator =
@@ -952,7 +977,11 @@ export function SystemUsersPanel({
   const unknownAuthFailureCount =
     authFailureEvents.length - knownAuthFailureCount;
   const governanceTone =
-    adminWithoutMfaCount > 0 || adminLongTtlCount > 0 ? "warning" : "ok";
+    adminWithoutMfaCount > 0 || adminLongTtlCount > 0
+      ? "warning"
+      : sessionsTruncated || authEventsTruncated
+        ? "info"
+        : "ok";
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
@@ -1096,7 +1125,11 @@ export function SystemUsersPanel({
       {
         id: "sessions",
         header: "Active sessions",
-        cell: (row) => `${accessSummaries[row.id]?.activeSessions ?? 0}`,
+        cell: (row) =>
+          `${formatLowerBoundCount(
+            accessSummaries[row.id]?.activeSessions ?? 0,
+            sessionsTruncated,
+          )}${sessionsTruncated ? " loaded" : ""}`,
         sortValue: (row) => accessSummaries[row.id]?.activeSessions ?? 0,
         minSize: 112,
       },
@@ -1104,10 +1137,16 @@ export function SystemUsersPanel({
         id: "lastLogin",
         header: "Last login",
         cell: (row) => (
-          <OperatorAuthTimeValue event={accessSummaries[row.id]?.lastLogin} />
+          <OperatorAuthTimeValue
+            event={accessSummaries[row.id]?.lastLogin}
+            historyTruncated={authEventsTruncated}
+          />
         ),
         searchValue: (row) =>
-          formatAuthEventTime(accessSummaries[row.id]?.lastLogin),
+          formatAuthEventTime(
+            accessSummaries[row.id]?.lastLogin,
+            authEventsTruncated,
+          ),
         sortValue: (row) =>
           accessSummaries[row.id]?.lastLogin?.created_at ?? "",
         minSize: 120,
@@ -1164,6 +1203,7 @@ export function SystemUsersPanel({
       canManageUsers,
       privilegeMaterial,
       reviewPending,
+      sessionsTruncated,
     ],
   );
 
@@ -1586,6 +1626,14 @@ export function SystemUsersPanel({
 
   return (
     <div className="workspace singleColumn systemWorkspace systemUsersWorkspace">
+      <ActionFeedback
+        className="localActionFeedback"
+        message={
+          loadError ??
+          (loadLoading ? "Refreshing operator access records" : null)
+        }
+        tone={loadError ? "danger" : "progress"}
+      />
       <section
         className="controlPanel systemUserGovernancePanel"
         aria-label="Operator governance overview"
@@ -1599,7 +1647,11 @@ export function SystemUsersPanel({
             </span>
           </div>
           <ConsoleStatusBadge tone={governanceTone}>
-            {governanceTone === "ok" ? "Ready" : "Needs review"}
+            {governanceTone === "ok"
+              ? "Ready"
+              : governanceTone === "info"
+                ? "Loaded evidence"
+                : "Needs review"}
           </ConsoleStatusBadge>
         </div>
         <div className="systemPostureGrid operatorPostureGrid operatorPolicyGrid">
@@ -1633,21 +1685,37 @@ export function SystemUsersPanel({
             value={`${operatorRoleOptions.length} standard roles`}
           />
           <SystemPostureTile
-            detail={`${revokableSessionCount} non-current active bearer session${revokableSessionCount === 1 ? "" : "s"} can be revoked here or reviewed in Audit / Sessions; ${expiredSessionCount} expired bearer session${expiredSessionCount === 1 ? "" : "s"} excluded from active counts.`}
+            detail={`${formatLowerBoundCount(revokableSessionCount, sessionsTruncated)} non-current active bearer session${revokableSessionCount === 1 ? "" : "s"}${sessionsTruncated ? " in loaded records" : ""} can be revoked here or reviewed in Audit / Sessions; ${formatLowerBoundCount(expiredSessionCount, sessionsTruncated)} expired bearer session${expiredSessionCount === 1 ? "" : "s"} excluded from${sessionsTruncated ? " loaded" : ""} active counts.`}
             icon={<Activity size={18} />}
             label="Bearer sessions"
             tone={activeSessionCount > 0 ? "info" : "neutral"}
-            value={`${activeSessionCount} active`}
+            value={`${formatLowerBoundCount(
+              activeSessionCount,
+              sessionsTruncated,
+            )} active${sessionsTruncated ? " loaded" : ""}`}
           />
           <SystemPostureTile
-            detail={`${knownAuthFailureCount} failure events map to visible operators; ${Math.max(0, unknownAuthFailureCount)} loaded failures are unknown usernames. Per-user counts below use the same loaded auth history.`}
+            detail={`${formatLowerBoundCount(knownAuthFailureCount, authEventsTruncated)} failure events map to visible operators; ${formatLowerBoundCount(Math.max(0, unknownAuthFailureCount), authEventsTruncated)}${authEventsTruncated ? " loaded" : ""} failures are unknown usernames. Per-user counts below use the same${authEventsTruncated ? " loaded" : ""} auth history.`}
             icon={<AlertTriangle size={18} />}
-            label="Auth failures in loaded history"
-            tone={authFailureEvents.length > 0 ? "warning" : "ok"}
+            label={
+              authEventsTruncated
+                ? "Auth failures in loaded history"
+                : "Auth failures"
+            }
+            tone={
+              authFailureEvents.length > 0
+                ? "warning"
+                : authEventsTruncated
+                  ? "info"
+                  : "ok"
+            }
             value={
               authFailureEvents.length === 1
-                ? "1 loaded failure"
-                : `${authFailureEvents.length} loaded failures`
+                ? `1${authEventsTruncated ? " loaded" : ""} failure`
+                : `${formatLowerBoundCount(
+                    authFailureEvents.length,
+                    authEventsTruncated,
+                  )}${authEventsTruncated ? " loaded" : ""} failures`
             }
           />
         </div>
@@ -1809,7 +1877,9 @@ export function SystemUsersPanel({
           openRowTitle={(row) => `Show operator details for ${row.username}.`}
           renderExpandedRow={(row) => (
             <OperatorDetailGrid
+              authEventsTruncated={authEventsTruncated}
               operator={row}
+              sessionsTruncated={sessionsTruncated}
               summary={accessSummaries[row.id]}
             />
           )}
@@ -1878,10 +1948,12 @@ export function SystemUsersPanel({
             />
             {selectedOperator && selectedAccessSummary ? (
               <OperatorAccessEvidencePanel
+                authEventsTruncated={authEventsTruncated}
                 operator={selectedOperator}
                 onRevokeSessions={() => void submitSelectedSessionRevoke()}
                 pending={reviewPending || actionPending}
                 summary={selectedAccessSummary}
+                sessionsTruncated={sessionsTruncated}
                 userCanManage={canManageUsers}
               />
             ) : null}
@@ -2179,12 +2251,19 @@ export function SystemUsersPanel({
 
 function SystemSessionsPanel({
   authEvents,
+  authEventsTruncated,
+  loadError,
+  loadLoading,
   onOpenPrivilegeUnlock,
   onRevokeOperatorSession,
   privilegeMaterial,
   sessions,
+  sessionsTruncated,
 }: {
   authEvents: OperatorAuthEventRecord[];
+  authEventsTruncated: boolean;
+  loadError: string | null;
+  loadLoading: boolean;
   onOpenPrivilegeUnlock: () => void;
   onRevokeOperatorSession: (
     sessionId: string,
@@ -2193,6 +2272,7 @@ function SystemSessionsPanel({
   ) => Promise<void>;
   privilegeMaterial: PrivilegeMaterial | null;
   sessions: OperatorSessionRecord[];
+  sessionsTruncated: boolean;
 }) {
   const [pendingRevoke, setPendingRevoke] =
     useState<PendingSessionRevoke | null>(null);
@@ -2558,6 +2638,14 @@ function SystemSessionsPanel({
 
   return (
     <div className="workspace singleColumn systemWorkspace">
+      <ActionFeedback
+        className="localActionFeedback"
+        message={
+          loadError ??
+          (loadLoading ? "Refreshing session and authentication records" : null)
+        }
+        tone={loadError ? "danger" : "progress"}
+      />
       <div className="workspaceStack">
         <section
           className="controlPanel sessionSecurityOverview"
@@ -2575,69 +2663,110 @@ function SystemSessionsPanel({
               tone={
                 suspiciousSessions > 0 || failureGroups.length > 0
                   ? "warning"
-                  : "ok"
+                  : sessionsTruncated || authEventsTruncated
+                    ? "info"
+                    : "ok"
               }
             >
               {suspiciousSessions > 0 || failureGroups.length > 0
                 ? "Needs review"
-                : "Healthy"}
+                : sessionsTruncated || authEventsTruncated
+                  ? "Loaded records clear"
+                  : "Healthy"}
             </ConsoleStatusBadge>
           </div>
           <div className="systemPostureGrid sessionPostureGrid">
             <SystemPostureTile
-              detail={`${currentSessions} current usable browser session; ${revokableSessions} non-current active bearer sessions can be revoked without ending the current console session; ${expiredSessions.length} expired bearer session${expiredSessions.length === 1 ? "" : "s"} excluded.`}
+              detail={`${formatLowerBoundCount(currentSessions, sessionsTruncated)} current usable browser session${sessionsTruncated ? " in loaded records" : ""}; ${formatLowerBoundCount(revokableSessions, sessionsTruncated)} non-current active bearer sessions can be revoked without ending the current console session; ${formatLowerBoundCount(expiredSessions.length, sessionsTruncated)} expired bearer session${expiredSessions.length === 1 ? "" : "s"} excluded.`}
               icon={<Activity size={18} />}
               label="Active sessions"
               tone={activeSessions.length > 0 ? "info" : "neutral"}
-              value={`${activeSessions.length} active`}
+              value={`${formatLowerBoundCount(
+                activeSessions.length,
+                sessionsTruncated,
+              )} active${sessionsTruncated ? " loaded" : ""}`}
             />
             <SystemPostureTile
               detail="Admin sessions are higher-risk and require admin-risk acknowledgement when revoked."
               icon={<ShieldCheck size={18} />}
               label="Admin sessions"
-              tone={adminSessions > 0 ? "warning" : "ok"}
-              value={`${adminSessions} admin`}
+              tone={
+                adminSessions > 0
+                  ? "warning"
+                  : sessionsTruncated
+                    ? "info"
+                    : "ok"
+              }
+              value={`${formatLowerBoundCount(
+                adminSessions,
+                sessionsTruncated,
+              )} admin${sessionsTruncated ? " loaded" : ""}`}
             />
             <SystemPostureTile
-              detail={`${enrichedSessions} active bearer sessions have login-event IP and user-agent evidence; missing evidence is flagged per row.`}
+              detail={`${formatLowerBoundCount(enrichedSessions, sessionsTruncated)} active bearer sessions${sessionsTruncated ? " in loaded records" : ""} have login-event IP and user-agent evidence; missing evidence is flagged per row.`}
               icon={<Network size={18} />}
               label="IP/device evidence"
               tone={
-                enrichedSessions === activeSessions.length ? "ok" : "warning"
+                sessionsTruncated
+                  ? "info"
+                  : enrichedSessions === activeSessions.length
+                    ? "ok"
+                    : "warning"
               }
-              value={`${enrichedSessions}/${activeSessions.length} enriched`}
+              value={`${enrichedSessions}/${activeSessions.length}${sessionsTruncated ? " loaded" : ""} enriched`}
             />
             <SystemPostureTile
-              detail={`${uniqueRemoteIps} remote IPs are visible. IP locations are unavailable, so impossible-travel detection is not evaluated.`}
+              detail={`${formatLowerBoundCount(uniqueRemoteIps, authEventsTruncated)} remote IPs are visible${authEventsTruncated ? " in loaded auth history" : ""}. IP locations are unavailable, so impossible-travel detection is not evaluated.`}
               icon={<ServerCog size={18} />}
               label="Location enrichment"
               tone="neutral"
               value="Unavailable"
             />
             <SystemPostureTile
-              detail={`${authFailureCount} non-success authentication events across ${failureGroups.length} grouped failure patterns.`}
+              detail={`${formatLowerBoundCount(authFailureCount, authEventsTruncated)} non-success authentication events across ${formatLowerBoundCount(failureGroups.length, authEventsTruncated)} grouped failure patterns${authEventsTruncated ? " in loaded history" : ""}.`}
               icon={<AlertTriangle size={18} />}
               label="Suspicious auth"
-              tone={authFailureCount > 0 ? "warning" : "ok"}
+              tone={
+                authFailureCount > 0
+                  ? "warning"
+                  : authEventsTruncated
+                    ? "info"
+                    : "ok"
+              }
               value={
                 authFailureCount === 1
-                  ? "1 failure"
-                  : `${authFailureCount} failures`
+                  ? `1${authEventsTruncated ? " loaded" : ""} failure`
+                  : `${formatLowerBoundCount(
+                      authFailureCount,
+                      authEventsTruncated,
+                    )}${authEventsTruncated ? " loaded" : ""} failures`
               }
             />
             <SystemPostureTile
               detail="The table exposes row-level revoke actions and still supports bulk revoke from selected rows."
               icon={<UserX size={18} />}
               label="Revocation"
-              tone={revokableSessions > 0 ? "info" : "ok"}
-              value={`${revokableSessions} revokable`}
+              tone={
+                revokableSessions > 0
+                  ? "info"
+                  : sessionsTruncated
+                    ? "info"
+                    : "ok"
+              }
+              value={`${formatLowerBoundCount(
+                revokableSessions,
+                sessionsTruncated,
+              )} revokable${sessionsTruncated ? " loaded" : ""}`}
             />
           </div>
         </section>
         <section className="controlPanel">
           <div className="sectionHeader compact">
             <h2>Sessions</h2>
-            <span>{sessions.length} recent sessions</span>
+            <span>
+              {formatLowerBoundCount(sessions.length, sessionsTruncated)} recent
+              {sessionsTruncated ? " loaded" : ""} sessions
+            </span>
           </div>
           <ActionFeedback
             className="localActionFeedback systemSessionActionFeedback"
@@ -2693,6 +2822,7 @@ function SystemSessionsPanel({
               },
             ]}
             rows={sessions}
+            rowsTruncated={sessionsTruncated}
             searchPlaceholder="Search user, role, IP, browser, device, state, or risk"
             singleExpandedRow
             storageKey="vpsman.system.sessions"
@@ -2704,7 +2834,12 @@ function SystemSessionsPanel({
             <div>
               <h2>Authentication history</h2>
               <span>
-                {filteredAuthEvents.length} of {authEvents.length} login results
+                {authEventsTruncated
+                  ? `${filteredAuthEvents.length} matching from ${formatLowerBoundCount(
+                      authEvents.length,
+                      true,
+                    )} loaded login results`
+                  : `${filteredAuthEvents.length} of ${authEvents.length} login results`}
               </span>
             </div>
             <div
@@ -2739,16 +2874,22 @@ function SystemSessionsPanel({
             >
               <div className="dashboardSideRailHeader">
                 <strong>Grouped failures</strong>
-                <span>{failureGroups.length} patterns</span>
+                <span>
+                  {formatLowerBoundCount(
+                    failureGroups.length,
+                    authEventsTruncated,
+                  )}
+                  {authEventsTruncated ? " loaded" : ""} patterns
+                </span>
               </div>
               {failureGroups.map((group) => (
                 <div className="authFailureGroupRow" key={group.key}>
                   <span className="status warn">{group.riskLabel}</span>
                   <strong>{group.username}</strong>
                   <b>
-                    {group.count === 1
-                      ? "1 attempt"
-                      : `${group.count} attempts`}
+                    {formatLowerBoundCount(group.count, authEventsTruncated)}
+                    {authEventsTruncated ? " loaded" : ""} attempt
+                    {group.count === 1 && !authEventsTruncated ? "" : "s"}
                   </b>
                   <p>
                     {group.reason} from {group.remoteIp}; last{" "}
@@ -2767,6 +2908,7 @@ function SystemSessionsPanel({
             itemLabel="events"
             renderExpandedRow={(row) => <AuthEventDetailGrid event={row} />}
             rows={filteredAuthEvents}
+            rowsTruncated={authEventsTruncated}
             searchPlaceholder="Search username, result, reason, remote IP, browser, device, or session"
             selectable={false}
             singleExpandedRow
@@ -2834,15 +2976,19 @@ function SystemSessionsPanel({
 }
 
 function OperatorAccessEvidencePanel({
+  authEventsTruncated,
   onRevokeSessions,
   operator,
   pending,
+  sessionsTruncated,
   summary,
   userCanManage,
 }: {
+  authEventsTruncated: boolean;
   onRevokeSessions: () => void;
   operator: OperatorView;
   pending: boolean;
+  sessionsTruncated: boolean;
   summary: OperatorAccessSummary;
   userCanManage: boolean;
 }) {
@@ -2873,17 +3019,37 @@ function OperatorAccessEvidencePanel({
         />
         <OperatorEvidenceTile
           label="Active sessions"
-          tone={summary.activeSessions > 0 ? "info" : "neutral"}
-          value={`${summary.activeSessions}`}
+          tone={
+            summary.activeSessions > 0 || sessionsTruncated
+              ? "info"
+              : "neutral"
+          }
+          value={`${formatLowerBoundCount(
+            summary.activeSessions,
+            sessionsTruncated,
+          )}${sessionsTruncated ? " loaded" : ""}`}
         />
         <OperatorEvidenceTile
           label="Failed logins"
-          tone={summary.failedLogins > 0 ? "warning" : "ok"}
-          value={`${summary.failedLogins}`}
+          tone={
+            summary.failedLogins > 0
+              ? "warning"
+              : authEventsTruncated
+                ? "info"
+                : "ok"
+          }
+          value={
+            authEventsTruncated && summary.failedLogins === 0
+              ? "None in loaded history"
+              : `${formatLowerBoundCount(
+                  summary.failedLogins,
+                  authEventsTruncated,
+                )}${authEventsTruncated ? " loaded" : ""}`
+          }
         />
         <OperatorEvidenceTile
           label="Last login"
-          value={formatAuthEventTime(summary.lastLogin)}
+          value={formatAuthEventTime(summary.lastLogin, authEventsTruncated)}
         />
         <OperatorEvidenceTile
           label="Lifecycle"
@@ -2937,10 +3103,14 @@ function OperatorEvidenceTile({
 }
 
 function OperatorDetailGrid({
+  authEventsTruncated,
   operator,
+  sessionsTruncated,
   summary,
 }: {
+  authEventsTruncated: boolean;
   operator: OperatorView;
+  sessionsTruncated: boolean;
   summary?: OperatorAccessSummary;
 }) {
   return (
@@ -2975,17 +3145,33 @@ function OperatorDetailGrid({
       </span>
       <span>
         <strong>Active sessions</strong>
-        <span>{summary?.activeSessions ?? 0}</span>
+        <span>
+          {formatLowerBoundCount(
+            summary?.activeSessions ?? 0,
+            sessionsTruncated,
+          )}
+          {sessionsTruncated ? " loaded" : ""}
+        </span>
       </span>
       <span>
         <strong>Last login</strong>
         <span>
-          <OperatorAuthTimeValue event={summary?.lastLogin ?? null} />
+          <OperatorAuthTimeValue
+            event={summary?.lastLogin ?? null}
+            historyTruncated={authEventsTruncated}
+          />
         </span>
       </span>
       <span>
         <strong>Auth failures</strong>
-        <span>{summary?.failedLogins ?? 0}</span>
+        <span>
+          {authEventsTruncated && (summary?.failedLogins ?? 0) === 0
+            ? "None in loaded history"
+            : `${formatLowerBoundCount(
+                summary?.failedLogins ?? 0,
+                authEventsTruncated,
+              )}${authEventsTruncated ? " loaded" : ""}`}
+        </span>
       </span>
       <span>
         <strong>Scopes</strong>
@@ -3775,13 +3961,21 @@ function FullTimeValue({ value }: { value: string }) {
 
 function OperatorAuthTimeValue({
   event,
+  historyTruncated = false,
 }: {
   event: OperatorAuthEventRecord | null | undefined;
+  historyTruncated?: boolean;
 }) {
   if (!event) {
     return (
-      <span title="No successful login event is loaded for this operator.">
-        Never
+      <span
+        title={
+          historyTruncated
+            ? "No successful login event appears for this operator in the loaded authentication history; older events may exist."
+            : "No successful login event is recorded for this operator."
+        }
+      >
+        {historyTruncated ? "None in loaded history" : "Never"}
       </span>
     );
   }
@@ -3794,8 +3988,13 @@ function OperatorAuthTimeValue({
 
 function formatAuthEventTime(
   event: OperatorAuthEventRecord | null | undefined,
+  historyTruncated = false,
 ): string {
-  return event ? formatTime(event.created_at) : "Not recorded";
+  return event
+    ? formatTime(event.created_at)
+    : historyTruncated
+      ? "None in loaded history"
+      : "Not recorded";
 }
 
 function operatorLifecycleLabel(operator: OperatorView): string {
@@ -4036,13 +4235,15 @@ function SystemDashboardPanel({
   const dbPressure = dashboard?.current.db_pool.max_connections
     ? dashboard.current.db_pool.in_use_connections /
       dashboard.current.db_pool.max_connections
-    : 0;
-  const lifecycleFailures =
-    (dashboard?.current.targets.control_timeout_last_24h ?? 0) +
-    (dashboard?.current.targets.agent_timeout_last_24h ?? 0) +
-    (dashboard?.current.targets.agent_lost_last_24h ?? 0);
-  const dbPressurePercent = Math.round(dbPressure * 100);
-  const queueDepth = dashboard?.current.dispatch.queue_depth ?? 0;
+    : null;
+  const lifecycleFailures = dashboard
+    ? dashboard.current.targets.control_timeout_last_24h +
+      dashboard.current.targets.agent_timeout_last_24h +
+      dashboard.current.targets.agent_lost_last_24h
+    : null;
+  const dbPressurePercent =
+    dbPressure === null ? null : Math.round(dbPressure * 100);
+  const queueDepth = dashboard?.current.dispatch.queue_depth ?? null;
   const dispatcherInFlight = dashboard?.capacity.dispatcher_in_flight ?? null;
   const dispatcherBatch = dashboard?.capacity.dispatcher_batch ?? null;
   const gatewayEvents = dashboard?.current.gateway_events;
@@ -4057,20 +4258,33 @@ function SystemDashboardPanel({
       : `${gatewayOldestAgeSeconds}s`;
   const gatewayRejected = gatewayEvents?.rejected_agent_connections ?? 0;
   const profileLimit = extractCapacityProfileLimit(dashboard?.notes ?? []);
-  const dbTone =
-    dbPressure >= 0.85 ? "critical" : dbPressure >= 0.7 ? "warning" : "ok";
-  const dispatchTone = dispatchHealthTone(
-    queueDepth,
-    dispatcherInFlight,
-    dispatcherBatch,
-  );
+  const dbTone: SystemHealthTone =
+    dbPressure === null
+      ? "neutral"
+      : dbPressure >= 0.85
+        ? "critical"
+        : dbPressure >= 0.7
+          ? "warning"
+          : "ok";
+  const dispatchTone: SystemHealthTone =
+    queueDepth === null
+      ? "neutral"
+      : dispatchHealthTone(
+          queueDepth,
+          dispatcherInFlight,
+          dispatcherBatch,
+        );
   const deadlineTone =
-    (dashboard?.current.targets.deadline_expired_active ?? 0) > 0
+    !dashboard || lifecycleFailures === null
+      ? "neutral"
+      : dashboard.current.targets.deadline_expired_active > 0
       ? "critical"
       : lifecycleFailures > 0
         ? "warning"
         : "ok";
-  const gatewayTone = gatewayHealthTone(gatewayEvents);
+  const gatewayTone = dashboard
+    ? gatewayHealthTone(gatewayEvents)
+    : "neutral";
   const postureTone = mostSevereTone([
     dbTone,
     dispatchTone,
@@ -4084,20 +4298,22 @@ function SystemDashboardPanel({
         ? "Current limits cover the profile."
         : `Raise dispatcher in-flight to at least ${profileLimit} and keep batch >= in-flight.`
       : "Recommended profile unavailable until capacity limits are loaded.";
-  const attentionItems = buildSystemAttentionItems({
-    dbPressurePercent,
-    dbTone,
-    dispatchTone,
-    gatewayCriticalFailures,
-    gatewayDropped,
-    gatewayOldestAgeLabel,
-    gatewayQueueDepth,
-    gatewayRejected,
-    gatewayRetries,
-    gatewayTone,
-    lifecycleFailures,
-    queueDepth,
-  });
+  const attentionItems = dashboard
+    ? buildSystemAttentionItems({
+        dbPressurePercent: dbPressurePercent ?? 0,
+        dbTone,
+        dispatchTone,
+        gatewayCriticalFailures,
+        gatewayDropped,
+        gatewayOldestAgeLabel,
+        gatewayQueueDepth,
+        gatewayRejected,
+        gatewayRetries,
+        gatewayTone,
+        lifecycleFailures: lifecycleFailures ?? 0,
+        queueDepth: queueDepth ?? 0,
+      })
+    : [];
   const dataCoverage =
     series.length > 0
       ? `${series.length} rollup series; latest sample ${formatCompactTime(dashboard?.generated_at ?? "")}`
@@ -4184,32 +4400,60 @@ function SystemDashboardPanel({
           </div>
           <div className="systemPostureGrid">
             <SystemPostureTile
-              detail={`${dashboard?.current.db_pool.in_use_connections ?? 0} of ${dashboard?.current.db_pool.max_connections ?? 0} connections in use; warn at 70%, critical at 85%.`}
+              detail={
+                dashboard
+                  ? `${dashboard.current.db_pool.in_use_connections} of ${dashboard.current.db_pool.max_connections} connections in use; warn at 70%, critical at 85%.`
+                  : "Database pool evidence is unavailable."
+              }
               icon={<Database size={18} />}
               label="Database"
               tone={dbTone}
-              value={`${dbPressurePercent}% in use`}
+              value={
+                dbPressurePercent === null
+                  ? "Unknown"
+                  : `${dbPressurePercent}% in use`
+              }
             />
             <SystemPostureTile
-              detail="Dispatch health summarized from current queue depth; configured limits live in System / Capacity."
+              detail={
+                dashboard
+                  ? "Dispatch health summarized from current queue depth; configured limits live in System / Capacity."
+                  : "Dispatch queue evidence is unavailable."
+              }
               icon={<Activity size={18} />}
               label="Control-plane queue"
               tone={dispatchTone}
-              value={`${queueDepth} queued`}
+              value={queueDepth === null ? "Unknown" : `${queueDepth} queued`}
             />
             <SystemPostureTile
-              detail={`${dashboard?.current.targets.deadline_expired_active ?? 0} active expired; ${lifecycleFailures} timeout or loss event${lifecycleFailures === 1 ? "" : "s"} in the last 24h.`}
+              detail={
+                dashboard && lifecycleFailures !== null
+                  ? `${dashboard.current.targets.deadline_expired_active} active expired; ${lifecycleFailures} timeout or loss event${lifecycleFailures === 1 ? "" : "s"} in the last 24h.`
+                  : "Worker lifecycle evidence is unavailable."
+              }
               icon={<TimerReset size={18} />}
               label="Worker"
               tone={deadlineTone}
-              value={`${lifecycleFailures} failure${lifecycleFailures === 1 ? "" : "s"}`}
+              value={
+                lifecycleFailures === null
+                  ? "Unknown"
+                  : `${lifecycleFailures} failure${lifecycleFailures === 1 ? "" : "s"}`
+              }
             />
             <SystemPostureTile
-              detail={`${gatewayQueueDepth} queued / ${gatewayOldestAgeLabel}; ${gatewayDropped} dropped, ${gatewayRetries} retries, ${gatewayRejected} rejected connects.`}
+              detail={
+                dashboard
+                  ? `${gatewayQueueDepth} queued / ${gatewayOldestAgeLabel}; ${gatewayDropped} dropped, ${gatewayRetries} retries, ${gatewayRejected} rejected connects.`
+                  : "Gateway delivery evidence is unavailable."
+              }
               icon={<Network size={18} />}
               label="Gateway"
               tone={gatewayTone}
-              value={gatewayEvents?.status ?? "Not configured"}
+              value={
+                dashboard
+                  ? (gatewayEvents?.status ?? "Not configured")
+                  : "Unknown"
+              }
             />
           </div>
 
@@ -4222,7 +4466,9 @@ function SystemDashboardPanel({
               <span>
                 {attentionItems.length
                   ? `${attentionItems.length} signal${attentionItems.length === 1 ? "" : "s"}`
-                  : "No active signals"}
+                  : dashboard
+                    ? "No active signals"
+                    : "Evidence unavailable"}
               </span>
             </div>
             {attentionItems.length ? (
@@ -4231,10 +4477,15 @@ function SystemDashboardPanel({
               ))
             ) : (
               <div className="systemAttentionEmpty">
-                <CheckCircle2 size={16} />
+                {dashboard ? (
+                  <CheckCircle2 size={16} />
+                ) : (
+                  <AlertTriangle size={16} />
+                )}
                 <span>
-                  No control-plane thresholds are currently breached in this
-                  sample.
+                  {dashboard
+                    ? "No control-plane thresholds are currently breached in this sample."
+                    : "Control-plane health is unavailable until dashboard data loads."}
                 </span>
               </div>
             )}
@@ -4275,7 +4526,11 @@ function SystemDashboardPanel({
         </section>
 
         <SystemMetricSection
-          badge={`${dashboard?.current.dispatch.queue_depth ?? 0} queued`}
+          badge={
+            dashboard
+              ? `${dashboard.current.dispatch.queue_depth} queued`
+              : "Unknown"
+          }
           badgeTone={dispatchTone}
           icon={<Activity size={18} />}
           insight="Overview shows one selected chart. Capacity-only curves stay in System / Capacity."
@@ -4284,19 +4539,27 @@ function SystemDashboardPanel({
           metrics={[
             {
               label: "Active jobs",
-              value: String(dashboard?.current.dispatch.active_jobs ?? 0),
+              value: dashboard
+                ? String(dashboard.current.dispatch.active_jobs)
+                : "Unknown",
             },
             {
               label: "Dispatch queue",
-              value: String(dashboard?.current.dispatch.queue_depth ?? 0),
+              value: dashboard
+                ? String(dashboard.current.dispatch.queue_depth)
+                : "Unknown",
             },
             {
               label: "Active targets",
-              value: String(dashboard?.current.targets.active ?? 0),
+              value: dashboard
+                ? String(dashboard.current.targets.active)
+                : "Unknown",
             },
             {
               label: "Retried targets",
-              value: String(dashboard?.current.dispatch.retried_targets ?? 0),
+              value: dashboard
+                ? String(dashboard.current.dispatch.retried_targets)
+                : "Unknown",
             },
           ]}
           lines={chartLines(series, [
@@ -4340,11 +4603,18 @@ function SystemCapacityPanel({
   const dbPressure = dashboard?.current.db_pool.max_connections
     ? dashboard.current.db_pool.in_use_connections /
       dashboard.current.db_pool.max_connections
-    : 0;
-  const dbPressurePercent = Math.round(dbPressure * 100);
-  const dbTone =
-    dbPressure >= 0.85 ? "critical" : dbPressure >= 0.7 ? "warning" : "ok";
-  const queueDepth = dashboard?.current.dispatch.queue_depth ?? 0;
+    : null;
+  const dbPressurePercent =
+    dbPressure === null ? null : Math.round(dbPressure * 100);
+  const dbTone: SystemHealthTone =
+    dbPressure === null
+      ? "neutral"
+      : dbPressure >= 0.85
+        ? "critical"
+        : dbPressure >= 0.7
+          ? "warning"
+          : "ok";
+  const queueDepth = dashboard?.current.dispatch.queue_depth ?? null;
   const dispatcherInFlight = dashboard?.capacity.dispatcher_in_flight ?? null;
   const dispatcherBatch = dashboard?.capacity.dispatcher_batch ?? null;
   const dispatchQueueGrowth = seriesDelta(series, "dispatch.queue_depth");
@@ -4360,10 +4630,15 @@ function SystemCapacityPanel({
     series,
     "gateway_events.current_queue_depth",
   );
-  const gatewayModel = gatewayCapacityHealth({
-    gatewayEvents,
-    queueGrowth: gatewayQueueGrowth.delta,
-  });
+  const gatewayModel = dashboard
+    ? gatewayCapacityHealth({
+        gatewayEvents,
+        queueGrowth: gatewayQueueGrowth.delta,
+      })
+    : {
+        reason: "gateway evidence unavailable",
+        tone: "neutral" as const,
+      };
   const profileLimit = extractCapacityProfileLimit(dashboard?.notes ?? []);
   const profileRatio =
     profileLimit && dispatcherInFlight
@@ -4374,9 +4649,12 @@ function SystemCapacityPanel({
     dispatchModel.tone,
     gatewayModel.tone,
   ]);
-  const configuredLimit = `${valueOrNotConfigured(dispatcherInFlight)} in-flight / ${valueOrNotConfigured(dispatcherBatch)} batch`;
-  const capacityForecast =
-    profileLimit && dispatcherInFlight && dispatcherBatch
+  const configuredLimit = dashboard
+    ? `${valueOrNotConfigured(dispatcherInFlight)} in-flight / ${valueOrNotConfigured(dispatcherBatch)} batch`
+    : "Unknown";
+  const capacityForecast = !dashboard
+    ? "Capacity evidence is unavailable."
+    : profileLimit && dispatcherInFlight && dispatcherBatch
       ? `${profileLimit}-VPS profile; ${dispatcherInFlight} in-flight (${profileRatio}% of profile) and ${dispatcherBatch} batch.`
       : profileLimit
         ? `${profileLimit}-VPS profile detected; set dispatcher limits in Suite config to complete the plan.`
@@ -4384,7 +4662,11 @@ function SystemCapacityPanel({
   const activeChart =
     activeSubsystem === "database" ? (
       <SystemMetricSection
-        badge={`${dbPressurePercent}% in use`}
+        badge={
+          dbPressurePercent === null
+            ? "Unknown"
+            : `${dbPressurePercent}% in use`
+        }
         badgeTone={dbTone}
         icon={<Database size={18} />}
         insight="Database capacity compares active usage with configured pool ceilings; sustained pressure above 70% needs pool review."
@@ -4393,19 +4675,27 @@ function SystemCapacityPanel({
         metrics={[
           {
             label: "API DB pool",
-            value: valueOrNotConfigured(dashboard?.capacity.api_db_pool),
+            value: dashboard
+              ? valueOrNotConfigured(dashboard.capacity.api_db_pool)
+              : "Unknown",
           },
           {
             label: "Worker DB pool",
-            value: valueOrNotConfigured(dashboard?.capacity.worker_db_pool),
+            value: dashboard
+              ? valueOrNotConfigured(dashboard.capacity.worker_db_pool)
+              : "Unknown",
           },
           {
             label: "In use",
-            value: String(dashboard?.current.db_pool.in_use_connections ?? 0),
+            value: dashboard
+              ? String(dashboard.current.db_pool.in_use_connections)
+              : "Unknown",
           },
           {
             label: "Open",
-            value: String(dashboard?.current.db_pool.open_connections ?? 0),
+            value: dashboard
+              ? String(dashboard.current.db_pool.open_connections)
+              : "Unknown",
           },
         ]}
         thresholds={[
@@ -4478,7 +4768,7 @@ function SystemCapacityPanel({
       />
     ) : (
       <SystemMetricSection
-        badge={`${queueDepth} queued`}
+        badge={queueDepth === null ? "Unknown" : `${queueDepth} queued`}
         badgeTone={dispatchModel.tone}
         icon={<Activity size={18} />}
         insight="Dispatch capacity uses queue growth, reported age, configured thresholds, and worker availability instead of warning on every nonzero queue."
@@ -4487,9 +4777,14 @@ function SystemCapacityPanel({
         metrics={[
           {
             label: "Active jobs",
-            value: String(dashboard?.current.dispatch.active_jobs ?? 0),
+            value: dashboard
+              ? String(dashboard.current.dispatch.active_jobs)
+              : "Unknown",
           },
-          { label: "Dispatch queue", value: String(queueDepth) },
+          {
+            label: "Dispatch queue",
+            value: queueDepth === null ? "Unknown" : String(queueDepth),
+          },
           {
             label: "Queue growth",
             value: formatDelta(dispatchQueueGrowth.delta),
@@ -4500,23 +4795,31 @@ function SystemCapacityPanel({
           },
           {
             label: "Active targets",
-            value: String(dashboard?.current.targets.active ?? 0),
+            value: dashboard
+              ? String(dashboard.current.targets.active)
+              : "Unknown",
           },
           {
             label: "Retried targets",
-            value: String(dashboard?.current.dispatch.retried_targets ?? 0),
+            value: dashboard
+              ? String(dashboard.current.dispatch.retried_targets)
+              : "Unknown",
           },
         ]}
         thresholds={[
           {
             label: "Capacity",
             tone: "info",
-            value: `${valueOrNotConfigured(dispatcherInFlight)} in-flight`,
+            value: dashboard
+              ? `${valueOrNotConfigured(dispatcherInFlight)} in-flight`
+              : "Unknown",
           },
           {
             label: "Batch",
             tone: "info",
-            value: `${valueOrNotConfigured(dispatcherBatch)} max`,
+            value: dashboard
+              ? `${valueOrNotConfigured(dispatcherBatch)} max`
+              : "Unknown",
           },
           {
             label: "Health",
@@ -4543,13 +4846,14 @@ function SystemCapacityPanel({
       id: "database",
       label: "Database",
       tone: dbTone,
-      value: `${dbPressurePercent}%`,
+      value:
+        dbPressurePercent === null ? "Unknown" : `${dbPressurePercent}%`,
     },
     {
       id: "dispatch",
       label: "Dispatch",
       tone: dispatchModel.tone,
-      value: `${queueDepth} queued`,
+      value: queueDepth === null ? "Unknown" : `${queueDepth} queued`,
     },
     {
       id: "gateway",
@@ -4566,19 +4870,26 @@ function SystemCapacityPanel({
               "Current database usage compared with the dashboard pool ceiling.",
             label: "Pool pressure",
             tone: dbTone,
-            value: `${dbPressurePercent}%`,
+            value:
+              dbPressurePercent === null
+                ? "Unknown"
+                : `${dbPressurePercent}%`,
           },
           {
             detail: "Warning threshold is 70% of max connections.",
             label: "Warn threshold",
             tone: "warning",
-            value: `${Math.ceil((dashboard?.current.db_pool.max_connections ?? 0) * 0.7)} connections`,
+            value: dashboard
+              ? `${Math.ceil(dashboard.current.db_pool.max_connections * 0.7)} connections`
+              : "Unknown",
           },
           {
             detail: "Critical threshold is 85% of max connections.",
             label: "Critical threshold",
             tone: "critical",
-            value: `${Math.ceil((dashboard?.current.db_pool.max_connections ?? 0) * 0.85)} connections`,
+            value: dashboard
+              ? `${Math.ceil(dashboard.current.db_pool.max_connections * 0.85)} connections`
+              : "Unknown",
           },
           {
             detail: "Suite Config owns the API and worker DB pool limits.",
@@ -4599,7 +4910,11 @@ function SystemCapacityPanel({
               detail:
                 "Oldest queued event age; missing age is not treated as pressure.",
               label: "Oldest event age",
-              tone: gatewayEvents?.oldest_event_age_secs ? "warning" : "ok",
+              tone: !dashboard
+                ? "neutral"
+                : gatewayEvents?.oldest_event_age_secs
+                  ? "warning"
+                  : "ok",
               value: secondsOrNotConfigured(
                 gatewayEvents?.oldest_event_age_secs,
               ),
@@ -4611,9 +4926,11 @@ function SystemCapacityPanel({
                   : "Change in gateway queue depth across the available samples.",
               label: "Queue growth",
               tone:
-                gatewayQueueGrowth.delta && gatewayQueueGrowth.delta > 0
-                  ? "warning"
-                  : "ok",
+                gatewayQueueGrowth.delta === null
+                  ? "neutral"
+                  : gatewayQueueGrowth.delta > 0
+                    ? "warning"
+                    : "ok",
               value: formatDelta(gatewayQueueGrowth.delta),
             },
             {
@@ -4638,9 +4955,11 @@ function SystemCapacityPanel({
                   : "Change in dispatch queue depth across the available samples.",
               label: "Queue growth",
               tone:
-                dispatchQueueGrowth.delta && dispatchQueueGrowth.delta > 0
-                  ? "warning"
-                  : "ok",
+                dispatchQueueGrowth.delta === null
+                  ? "neutral"
+                  : dispatchQueueGrowth.delta > 0
+                    ? "warning"
+                    : "ok",
               value: formatDelta(dispatchQueueGrowth.delta),
             },
             {
@@ -4654,8 +4973,14 @@ function SystemCapacityPanel({
               detail:
                 "Dispatcher capacity is considered available when in-flight capacity is configured.",
               label: "Worker availability",
-              tone: dispatcherInFlight ? "ok" : "critical",
-              value: dispatcherInFlight
+              tone: !dashboard
+                ? "neutral"
+                : dispatcherInFlight
+                  ? "ok"
+                  : "critical",
+              value: !dashboard
+                ? "Unknown"
+                : dispatcherInFlight
                 ? `${dispatcherInFlight} in-flight configured`
                 : "Not configured",
             },
@@ -6467,7 +6792,7 @@ function dispatchCapacityHealth({
   dispatcherBatch: number | null;
   dispatcherInFlight: number | null;
   oldestAgeSecs: number | null;
-  queueDepth: number;
+  queueDepth: number | null;
   queueGrowth: number | null;
 }): { reason: string; tone: SystemHealthTone; warningThreshold: string } {
   const warningThreshold = dispatcherInFlight
@@ -6477,6 +6802,13 @@ function dispatchCapacityHealth({
   const thresholdLabel = warningThreshold
     ? `${warningThreshold} queued`
     : "Not configured";
+  if (queueDepth === null) {
+    return {
+      reason: "queue evidence unavailable",
+      tone: "neutral",
+      warningThreshold: "Unknown",
+    };
+  }
   if (queueDepth <= 0) {
     return {
       reason: "queue empty",
@@ -6631,7 +6963,7 @@ function buildSystemAttentionItems({
   queueDepth: number;
 }): SystemAttentionItem[] {
   const items: SystemAttentionItem[] = [];
-  if (dbTone !== "ok") {
+  if (dbTone !== "ok" && dbTone !== "neutral") {
     items.push({
       detail:
         "DB pool pressure crossed the dashboard threshold; validate pool sizing before sustained operator traffic.",

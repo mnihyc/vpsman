@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use vpsman_common::OutputStream;
 
 pub(crate) fn limit_or_default(limit: Option<i64>) -> i64 {
@@ -49,20 +49,25 @@ pub(crate) fn output_stream_name(stream: OutputStream) -> &'static str {
     }
 }
 
-pub(crate) fn parse_timestamp_unix(value: &str) -> Option<u64> {
+pub(crate) fn parse_timestamp_utc(value: &str) -> Option<DateTime<Utc>> {
     let value = value.trim();
     if value.is_empty() {
         return None;
     }
     if let Ok(timestamp) = value.parse::<i64>() {
-        return (timestamp >= 0).then_some(timestamp as u64);
+        return (timestamp >= 0)
+            .then(|| DateTime::<Utc>::from_timestamp(timestamp, 0))
+            .flatten();
     }
     DateTime::parse_from_rfc3339(value)
         .ok()
         .or_else(|| DateTime::parse_from_rfc3339(&normalize_postgres_timestamp(value)).ok())
-        .map(|timestamp| timestamp.timestamp())
-        .filter(|timestamp| *timestamp >= 0)
-        .map(|timestamp| timestamp as u64)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .filter(|timestamp| timestamp.timestamp() >= 0)
+}
+
+pub(crate) fn parse_timestamp_unix(value: &str) -> Option<u64> {
+    parse_timestamp_utc(value).map(|timestamp| timestamp.timestamp() as u64)
 }
 
 pub(crate) fn timestamp_in_optional_bounds(
@@ -80,7 +85,7 @@ pub(crate) fn timestamp_in_optional_bounds(
 }
 
 pub(crate) fn compare_timestamps_desc(left: &str, right: &str) -> Ordering {
-    match (parse_timestamp_unix(left), parse_timestamp_unix(right)) {
+    match (parse_timestamp_utc(left), parse_timestamp_utc(right)) {
         (Some(left_timestamp), Some(right_timestamp)) => right_timestamp
             .cmp(&left_timestamp)
             .then_with(|| right.cmp(left)),
@@ -113,7 +118,8 @@ pub(crate) fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        compare_timestamps_desc, parse_timestamp_unix, search_pattern, timestamp_in_optional_bounds,
+        compare_timestamps_desc, parse_timestamp_unix, parse_timestamp_utc, search_pattern,
+        timestamp_in_optional_bounds,
     };
     use std::cmp::Ordering;
 
@@ -132,6 +138,14 @@ mod tests {
         assert_eq!(
             compare_timestamps_desc("120", "1970-01-01T00:01:00Z"),
             Ordering::Less
+        );
+        assert!(
+            parse_timestamp_utc("1970-01-01T00:00:00.1Z")
+                > parse_timestamp_utc("1970-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            parse_timestamp_utc("1970-01-01T01:00:00+01:00"),
+            parse_timestamp_utc("1970-01-01T00:00:00Z")
         );
     }
 

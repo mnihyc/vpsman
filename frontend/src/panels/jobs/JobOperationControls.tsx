@@ -191,6 +191,7 @@ export function JobOperationEditor({
   fileTransferSessionId,
   fileTransferSourceArtifactId,
   fileTransferSources,
+  fileTransferSourcesTruncated,
   fileTransferUploadSourceKind,
   mode,
   processLimit,
@@ -290,6 +291,7 @@ export function JobOperationEditor({
   fileTransferSessionId: string;
   fileTransferSourceArtifactId: string;
   fileTransferSources: FileTransferSourceArtifactRecord[];
+  fileTransferSourcesTruncated: boolean;
   fileTransferUploadSourceKind: "local-file" | "source-artifact";
   mode: DispatchMode;
   processLimit: number;
@@ -517,13 +519,23 @@ export function JobOperationEditor({
               onChange={(event) => setFileTransferSourceArtifactId(event.target.value)}
               value={fileTransferSourceArtifactId}
             >
-              <option value="">Select artifact</option>
+              <option value="">
+                {fileTransferSources.length === 0
+                  ? "No source artifacts available"
+                  : "Select artifact"}
+              </option>
               {fileTransferSources.map((source) => (
                 <option key={source.id} value={source.id}>
                   {source.name} · {formatBytes(source.size_bytes)}
                 </option>
               ))}
             </select>
+            {fileTransferSourcesTruncated && (
+              <small>
+                {fileTransferSources.length} source artifacts loaded; older
+                artifacts may not appear.
+              </small>
+            )}
           </label>
         ) : (
           <div className="wideField transferPrimaryField dispatchFileSourceField">

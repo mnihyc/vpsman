@@ -89,6 +89,22 @@ done < "$RELEASED_LEDGER"
 tag_verified="unavailable"
 if command -v git >/dev/null 2>&1 &&
   git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  baseline_tag_available=0
+  if git -C "$ROOT_DIR" rev-parse --verify --quiet "$release_floor_tag^{commit}" >/dev/null; then
+    baseline_tag_available=1
+  fi
+  if [[ "$baseline_tag_available" == "0" ]]; then
+    candidate_tag="${VPSMAN_MIGRATION_BASELINE_CANDIDATE_TAG:-}"
+    [[ "$candidate_tag" == "$release_floor_tag" ]] ||
+      fail "migration baseline tag $release_floor_tag is unavailable; use VPSMAN_MIGRATION_BASELINE_CANDIDATE_TAG=$release_floor_tag only while preparing that exact release"
+    [[ "${VPSMAN_REQUIRE_RELEASE_TAGS:-0}" != "1" ]] ||
+      fail "release-tag verification requested but migration baseline tag $release_floor_tag is unavailable"
+    tag_verified="candidate:$release_floor_tag"
+    printf '{"migration_audit":"ok","migration_count":%d,"latest":"%s","released_count":%d,"release_tag":"%s","compatibility_notes":"docs/migration-compatibility.md"}\n' \
+      "${#files[@]}" "${files[-1]}" "$released_count" "$tag_verified"
+    exit 0
+  fi
+
   latest_release_tag="$(
     git -C "$ROOT_DIR" tag --merged HEAD --list 'v[0-9]*.[0-9]*.[0-9]*' \
       --sort=-version:refname |
@@ -96,8 +112,6 @@ if command -v git >/dev/null 2>&1 &&
   )"
   [[ -n "$latest_release_tag" ]] ||
     fail "no reachable release tag; fetch tags before auditing released migrations"
-  git -C "$ROOT_DIR" rev-parse --verify --quiet "$release_floor_tag^{commit}" >/dev/null ||
-    fail "release-tag floor $release_floor_tag is unavailable; fetch release tags"
   git -C "$ROOT_DIR" merge-base --is-ancestor "$release_floor_tag" "$latest_release_tag" ||
     fail "latest release tag $latest_release_tag predates ledger floor $release_floor_tag"
 

@@ -22,7 +22,7 @@ use crate::{
         AllocateTunnelEndpointsRequest, AllocateTunnelEndpointsResponse, CreateJobRequest,
         CreateJobResponse, CreateTunnelPlanRequest, HistoryQuery, NetworkOspfRecommendationView,
         NetworkOspfUpdatePlanView, RefreshTunnelPlanOspfStatusRequest, RuntimeConfigDispatchView,
-        TunnelPlanEndpointRuntimeConfigView, TunnelPlanMutationResponse,
+        TunnelPlanEndpointRuntimeConfigView, TunnelPlanListItem, TunnelPlanMutationResponse,
         TunnelPlanOspfDispatchView, TunnelPlanOspfJobsResponse, TunnelPlanView,
         UpdateTunnelConnectionAssessmentRequest, UpdateTunnelPlanOspfCostRequest,
         UpdateTunnelPlanRequest,
@@ -47,11 +47,11 @@ pub(crate) struct TunnelPlanMutationRequest {
 pub(crate) async fn list_tunnel_plans(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<TunnelPlanView>>, ApiError> {
+) -> Result<Json<Vec<TunnelPlanListItem>>, ApiError> {
     let _operator = state
         .require_operator_scope(&headers, SCOPE_NETWORK_READ)
         .await?;
-    Ok(Json(state.repo.list_tunnel_plans().await?))
+    Ok(Json(state.repo.list_tunnel_plan_items().await?))
 }
 
 pub(crate) async fn create_tunnel_plan(
@@ -119,25 +119,37 @@ pub(crate) async fn update_tunnel_plan(
         .require_operator_role_and_scope(&headers, "operator", "network:write")
         .await?;
     require_tunnel_plan_confirmed(request.confirmed)?;
-    let existing = state
+    let identity = state
         .repo
-        .get_tunnel_plan(plan_id)
+        .get_tunnel_plan_identity(plan_id)
         .await?
         .ok_or_else(|| ApiError::not_found("tunnel_plan_not_found"))?;
-    if existing.revision != request.expected_revision {
+    if identity.revision != request.expected_revision {
         return Err(ApiError::conflict("tunnel_plan_snapshot_stale"));
     }
-    if existing.name != request.input.name {
+    if identity.name != request.input.name {
         return Err(ApiError::bad_request("tunnel_plan_name_is_immutable"));
     }
-    let enabled = request.enabled.unwrap_or(existing.enabled);
+    let enabled = request.enabled.unwrap_or(identity.enabled);
     let plan = plan_tunnel(&request.input)
         .map_err(|error| ApiError::bad_request(tunnel_plan_error_code(error)))?;
-    if existing.enabled == enabled && existing.input == request.input {
-        return Ok(Json(TunnelPlanMutationResponse {
-            plan: existing,
-            sync: Vec::new(),
-        }));
+    match state.repo.get_tunnel_plan(plan_id).await {
+        Ok(Some(existing)) if existing.enabled == enabled && existing.input == request.input => {
+            return Ok(Json(TunnelPlanMutationResponse {
+                plan: existing,
+                sync: Vec::new(),
+            }));
+        }
+        Ok(_) => {}
+        Err(error) if error.to_string().starts_with("invalid persisted tunnel") => {
+            warn!(
+                event = "tunnel_plan_configuration_replacement",
+                %plan_id,
+                error = %error,
+                "allowing reviewed full replacement of malformed tunnel configuration"
+            );
+        }
+        Err(error) => return Err(error.into()),
     }
     require_tunnel_endpoint_agents(
         &state,
@@ -160,9 +172,9 @@ pub(crate) async fn update_tunnel_plan(
         .await
         .map_err(tunnel_plan_repository_error)?;
     let mut sync_client_ids = Vec::new();
-    if existing.enabled {
-        sync_client_ids.push(existing.left_client_id);
-        sync_client_ids.push(existing.right_client_id);
+    if identity.enabled {
+        sync_client_ids.push(identity.left_client_id);
+        sync_client_ids.push(identity.right_client_id);
     }
     if view.enabled {
         sync_client_ids.push(view.left_client_id.clone());
@@ -733,11 +745,7 @@ async fn validate_ospf_recommendation_contract(
     plan_id: Uuid,
     request: &UpdateTunnelPlanOspfCostRequest,
 ) -> Result<(), ApiError> {
-    let update_plans = state.repo.list_network_ospf_update_plans(1_000).await?;
-    let Some(plan) = update_plans
-        .into_iter()
-        .find(|plan| plan.plan_id == plan_id)
-    else {
+    let Some(plan) = state.repo.network_ospf_update_plan_by_id(plan_id).await? else {
         return Err(ApiError::conflict(
             "tunnel_plan_ospf_recommendation_missing",
         ));

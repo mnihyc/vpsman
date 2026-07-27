@@ -1,5 +1,6 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { apiGet, apiPost, apiPut, isApiUnauthorized } from "../api";
+import { FLEET_DETAIL_LIMIT } from "../constants";
 import type {
   GatewaySessionRecord,
   OperatorAuthEventRecord,
@@ -26,6 +27,10 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
   const [operatorAuthEvents, setOperatorAuthEvents] = useState<
     OperatorAuthEventRecord[]
   >([]);
+  const [operatorSessionsTruncated, setOperatorSessionsTruncated] =
+    useState(false);
+  const [operatorAuthEventsTruncated, setOperatorAuthEventsTruncated] =
+    useState(false);
   const [clientKeyRevocations, setClientKeyRevocations] = useState<
     ClientKeyRevocationView[]
   >([]);
@@ -38,16 +43,25 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
   const [accessLoading, setAccessLoading] = useState(false);
   const [preferencesError, setPreferencesError] = useState<string | null>(null);
   const [preferencesSaving, setPreferencesSaving] = useState(false);
+  const accessLoadGeneration = useRef(0);
+  const preferencesMutationGeneration = useRef(0);
+  const currentApiToken = useRef(apiToken);
+  currentApiToken.current = apiToken;
 
   function resetAccessRecords() {
     setOperator(null);
     setOperators([]);
     setOperatorSessions([]);
     setOperatorAuthEvents([]);
+    setOperatorSessionsTruncated(false);
+    setOperatorAuthEventsTruncated(false);
     setClientKeyRevocations([]);
     setKeyLifecycleReport(null);
     setGatewaySessions([]);
+    setAccessError(null);
+    setAccessLoading(false);
     setPreferencesError(null);
+    setPreferencesSaving(false);
   }
 
   const setAuthenticatedOperator = useCallback(
@@ -69,6 +83,11 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
   );
 
   const loadCurrentOperatorProfile = useCallback(async () => {
+    if (currentApiToken.current !== apiToken) {
+      return;
+    }
+    const generation = accessLoadGeneration.current + 1;
+    accessLoadGeneration.current = generation;
     setAccessLoading(true);
     setAccessError(null);
     try {
@@ -76,8 +95,20 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
         "/api/v1/auth/me",
         apiToken,
       );
+      if (
+        accessLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return;
+      }
       setAuthenticatedOperator(nextOperator);
     } catch (error) {
+      if (
+        accessLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return;
+      }
       if (isApiUnauthorized(error)) {
         onUnauthorized();
         resetAccessRecords();
@@ -88,11 +119,21 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
         error instanceof Error ? error.message : "Operator profile unavailable",
       );
     } finally {
-      setAccessLoading(false);
+      if (
+        accessLoadGeneration.current === generation &&
+        currentApiToken.current === apiToken
+      ) {
+        setAccessLoading(false);
+      }
     }
   }, [apiToken, onUnauthorized, setAuthenticatedOperator]);
 
   const loadCurrentOperator = useCallback(async () => {
+    if (currentApiToken.current !== apiToken) {
+      return;
+    }
+    const generation = accessLoadGeneration.current + 1;
+    accessLoadGeneration.current = generation;
     setAccessLoading(true);
     setAccessError(null);
     try {
@@ -100,6 +141,12 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
         "/api/v1/auth/me",
         apiToken,
       );
+      if (
+        accessLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return;
+      }
       setAuthenticatedOperator(nextOperator);
       const [
         gatewaySessionsResult,
@@ -110,7 +157,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
         keyLifecycleReportResult,
       ] = await Promise.allSettled([
         apiGet<GatewaySessionRecord[]>(
-          "/api/v1/gateway-sessions?limit=200",
+          `/api/v1/gateway-sessions?limit=${FLEET_DETAIL_LIMIT}`,
           apiToken,
         ),
         nextOperator.role === "admin"
@@ -118,19 +165,19 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
           : Promise.resolve([]),
         nextOperator.role === "admin"
           ? apiGet<OperatorSessionRecord[]>(
-              "/api/v1/operator-sessions?limit=200",
+              `/api/v1/operator-sessions?limit=${FLEET_DETAIL_LIMIT}`,
               apiToken,
             )
           : Promise.resolve([]),
         nextOperator.role === "admin"
           ? apiGet<OperatorAuthEventRecord[]>(
-              "/api/v1/operator-auth-events?limit=200",
+              `/api/v1/operator-auth-events?limit=${FLEET_DETAIL_LIMIT}`,
               apiToken,
             )
           : Promise.resolve([]),
         nextOperator.role === "admin"
           ? apiGet<ClientKeyRevocationView[]>(
-              "/api/v1/client-key-revocations?limit=200",
+              `/api/v1/client-key-revocations?limit=${FLEET_DETAIL_LIMIT}`,
               apiToken,
             )
           : Promise.resolve([]),
@@ -141,6 +188,12 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
             )
           : Promise.resolve(null),
       ]);
+      if (
+        accessLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return;
+      }
       const failures: string[] = [];
       const unauthorized = [
         gatewaySessionsResult,
@@ -163,11 +216,25 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
         settledValue(gatewaySessionsResult, [], "gateway sessions", failures),
       );
       setOperators(settledValue(operatorsResult, [], "operators", failures));
-      setOperatorSessions(
-        settledValue(operatorSessionsResult, [], "operator sessions", failures),
+      const nextOperatorSessions = settledValue(
+        operatorSessionsResult,
+        [],
+        "operator sessions",
+        failures,
       );
-      setOperatorAuthEvents(
-        settledValue(operatorAuthEventsResult, [], "auth history", failures),
+      setOperatorSessions(nextOperatorSessions);
+      setOperatorSessionsTruncated(
+        nextOperatorSessions.length >= FLEET_DETAIL_LIMIT,
+      );
+      const nextOperatorAuthEvents = settledValue(
+        operatorAuthEventsResult,
+        [],
+        "auth history",
+        failures,
+      );
+      setOperatorAuthEvents(nextOperatorAuthEvents);
+      setOperatorAuthEventsTruncated(
+        nextOperatorAuthEvents.length >= FLEET_DETAIL_LIMIT,
       );
       setClientKeyRevocations(
         settledValue(
@@ -186,6 +253,12 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
         );
       }
     } catch (error) {
+      if (
+        accessLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return;
+      }
       if (isApiUnauthorized(error)) {
         onUnauthorized();
         resetAccessRecords();
@@ -196,7 +269,12 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
         error instanceof Error ? error.message : "Operator session unavailable",
       );
     } finally {
-      setAccessLoading(false);
+      if (
+        accessLoadGeneration.current === generation &&
+        currentApiToken.current === apiToken
+      ) {
+        setAccessLoading(false);
+      }
     }
   }, [apiToken, onUnauthorized, setAuthenticatedOperator]);
 
@@ -222,8 +300,14 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
           admin_risk_acknowledged: adminRiskAcknowledged,
           privilege_assertion: privilegeAssertion,
         });
+        if (currentApiToken.current !== apiToken) {
+          return;
+        }
         await loadCurrentOperator();
       } catch (error) {
+        if (currentApiToken.current !== apiToken) {
+          return;
+        }
         if (isApiUnauthorized(error)) {
           onUnauthorized();
           resetAccessRecords();
@@ -250,9 +334,15 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
           apiToken,
           request,
         );
+        if (currentApiToken.current !== apiToken) {
+          return response;
+        }
         await loadCurrentOperator();
         return response;
       } catch (error) {
+        if (currentApiToken.current !== apiToken) {
+          throw error;
+        }
         if (isApiUnauthorized(error)) {
           onUnauthorized();
           resetAccessRecords();
@@ -287,8 +377,14 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
             privilege_assertion: privilegeAssertion,
           },
         );
+        if (currentApiToken.current !== apiToken) {
+          return;
+        }
         await loadCurrentOperator();
       } catch (error) {
+        if (currentApiToken.current !== apiToken) {
+          return;
+        }
         if (isApiUnauthorized(error)) {
           onUnauthorized();
           resetAccessRecords();
@@ -327,8 +423,14 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
             privilege_assertion: privilegeAssertion,
           },
         );
+        if (currentApiToken.current !== apiToken) {
+          return;
+        }
         await loadCurrentOperator();
       } catch (error) {
+        if (currentApiToken.current !== apiToken) {
+          return;
+        }
         if (isApiUnauthorized(error)) {
           onUnauthorized();
           resetAccessRecords();
@@ -364,8 +466,14 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
             privilege_assertion: privilegeAssertion,
           },
         );
+        if (currentApiToken.current !== apiToken) {
+          return;
+        }
         await loadCurrentOperator();
       } catch (error) {
+        if (currentApiToken.current !== apiToken) {
+          return;
+        }
         if (isApiUnauthorized(error)) {
           onUnauthorized();
           resetAccessRecords();
@@ -400,8 +508,14 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
             privilege_assertion: privilegeAssertion,
           },
         );
+        if (currentApiToken.current !== apiToken) {
+          return;
+        }
         await loadCurrentOperator();
       } catch (error) {
+        if (currentApiToken.current !== apiToken) {
+          return;
+        }
         if (isApiUnauthorized(error)) {
           onUnauthorized();
           resetAccessRecords();
@@ -434,8 +548,14 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
             privilege_assertion: privilegeAssertion,
           },
         );
+        if (currentApiToken.current !== apiToken) {
+          return;
+        }
         await loadCurrentOperator();
       } catch (error) {
+        if (currentApiToken.current !== apiToken) {
+          return;
+        }
         if (isApiUnauthorized(error)) {
           onUnauthorized();
           resetAccessRecords();
@@ -455,12 +575,19 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     async (password: string) => {
       setAccessError(null);
       try {
-        return await apiPost<TotpSetupResponse>(
+        const response = await apiPost<TotpSetupResponse>(
           "/api/v1/auth/totp/setup",
           apiToken,
           { password },
         );
+        if (currentApiToken.current !== apiToken) {
+          return null;
+        }
+        return response;
       } catch (error) {
+        if (currentApiToken.current !== apiToken) {
+          return null;
+        }
         if (isApiUnauthorized(error)) {
           onUnauthorized();
           resetAccessRecords();
@@ -484,8 +611,14 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
           password,
           code,
         });
+        if (currentApiToken.current !== apiToken) {
+          return;
+        }
         await loadCurrentOperator();
       } catch (error) {
+        if (currentApiToken.current !== apiToken) {
+          return;
+        }
         if (isApiUnauthorized(error)) {
           onUnauthorized();
           resetAccessRecords();
@@ -509,8 +642,14 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
           password,
           code,
         });
+        if (currentApiToken.current !== apiToken) {
+          return;
+        }
         await loadCurrentOperator();
       } catch (error) {
+        if (currentApiToken.current !== apiToken) {
+          return;
+        }
         if (isApiUnauthorized(error)) {
           onUnauthorized();
           resetAccessRecords();
@@ -540,9 +679,15 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
           apiToken,
           { confirmed, reason, privilege_assertion: privilegeAssertion },
         );
+        if (currentApiToken.current !== apiToken) {
+          return response;
+        }
         await loadCurrentOperator();
         return response;
       } catch (error) {
+        if (currentApiToken.current !== apiToken) {
+          throw error;
+        }
         if (isApiUnauthorized(error)) {
           onUnauthorized();
           resetAccessRecords();
@@ -560,6 +705,9 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
 
   const updateOperatorPreferences = useCallback(
     async (preferences: OperatorPreferences) => {
+      const operationGeneration =
+        preferencesMutationGeneration.current + 1;
+      preferencesMutationGeneration.current = operationGeneration;
       setPreferencesSaving(true);
       setPreferencesError(null);
       setAccessError(null);
@@ -569,8 +717,21 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
           apiToken,
           preferences,
         );
+        if (
+          currentApiToken.current !== apiToken ||
+          preferencesMutationGeneration.current !== operationGeneration
+        ) {
+          return;
+        }
         setAuthenticatedOperator(nextOperator);
+        await loadCurrentOperatorProfile();
       } catch (error) {
+        if (
+          currentApiToken.current !== apiToken ||
+          preferencesMutationGeneration.current !== operationGeneration
+        ) {
+          throw error;
+        }
         if (isApiUnauthorized(error)) {
           onUnauthorized();
           resetAccessRecords();
@@ -582,19 +743,33 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
         setPreferencesError(message);
         throw error;
       } finally {
-        setPreferencesSaving(false);
+        if (
+          currentApiToken.current === apiToken &&
+          preferencesMutationGeneration.current === operationGeneration
+        ) {
+          setPreferencesSaving(false);
+        }
       }
     },
-    [apiToken, onUnauthorized, setAuthenticatedOperator],
+    [
+      apiToken,
+      loadCurrentOperatorProfile,
+      onUnauthorized,
+      setAuthenticatedOperator,
+    ],
   );
 
   const clearOperator = useCallback(() => {
+    accessLoadGeneration.current += 1;
+    preferencesMutationGeneration.current += 1;
+    currentApiToken.current = "";
     resetAccessRecords();
   }, []);
 
   return {
     accessError,
     accessLoading,
+    clearAccess: clearOperator,
     clearOperator,
     clientKeyRevocations,
     clearOperatorTotp,
@@ -608,8 +783,10 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     loadCurrentOperator,
     operator,
     operatorAuthEvents,
+    operatorAuthEventsTruncated,
     operators,
     operatorSessions,
+    operatorSessionsTruncated,
     preferencesError,
     preferencesSaving,
     revokeClientKey,

@@ -64,6 +64,8 @@ export function useDashboardData(activeView: ActiveView) {
     useState<WsJobOutputEvent | null>(null);
   const [lastTerminalOutputEvent, setLastTerminalOutputEvent] =
     useState<WsTerminalOutputEvent | null>(null);
+  const [authRefreshError, setAuthRefreshError] = useState<string | null>(null);
+  const [logoutWarning, setLogoutWarning] = useState<string | null>(null);
   const dashboardOverviewReloadTimer = useRef<number | null>(null);
   const fleetReloadTimer = useRef<number | null>(null);
   const fleetTelemetryReloadTimer = useRef<number | null>(null);
@@ -72,6 +74,7 @@ export function useDashboardData(activeView: ActiveView) {
   const topologyReloadTimer = useRef<number | null>(null);
   const refreshAuthRef = useRef<Promise<void> | null>(null);
   const authGenerationRef = useRef(0);
+  const clearDashboardDataRef = useRef<() => void>(() => undefined);
   const activeViewRef = useRef(activeView);
 
   useEffect(() => {
@@ -80,7 +83,12 @@ export function useDashboardData(activeView: ActiveView) {
 
   const forceAuthRequired = useCallback(() => {
     authGenerationRef.current += 1;
+    refreshAuthRef.current = null;
+    clearDashboardDataRef.current();
     clearStoredAuthSession();
+    setAuthRefreshError(null);
+    setLogoutWarning(null);
+    setWsState("auth required");
     setApiToken("");
     setAuthRequired(true);
   }, []);
@@ -95,7 +103,8 @@ export function useDashboardData(activeView: ActiveView) {
       return Promise.resolve();
     }
     const authGeneration = authGenerationRef.current;
-    refreshAuthRef.current = apiPost<AuthResponse>(
+    setAuthRefreshError(null);
+    const request = apiPost<AuthResponse>(
       "/api/v1/auth/refresh",
       "",
       { refresh_token: refreshToken },
@@ -105,6 +114,7 @@ export function useDashboardData(activeView: ActiveView) {
           return;
         }
         persistAuthSession(auth);
+        setAuthRefreshError(null);
         setApiToken(auth.access_token);
         setAuthRequired(false);
       })
@@ -114,12 +124,22 @@ export function useDashboardData(activeView: ActiveView) {
         }
         if (isApiUnauthorized(error)) {
           forceAuthRequired();
+          return;
         }
+        setAuthRefreshError(
+          error instanceof Error
+            ? `Session refresh failed: ${error.message}`
+            : "Session refresh failed without usable error detail. Retry after checking API availability.",
+        );
       })
       .finally(() => {
-        refreshAuthRef.current = null;
+        if (refreshAuthRef.current === trackedRequest) {
+          refreshAuthRef.current = null;
+        }
       });
-    return refreshAuthRef.current;
+    const trackedRequest = request;
+    refreshAuthRef.current = trackedRequest;
+    return trackedRequest;
   }, [forceAuthRequired]);
 
   const requireAuth = useCallback(() => {
@@ -150,6 +170,49 @@ export function useDashboardData(activeView: ActiveView) {
     audit.loadAudits,
   );
   const backups = useBackupsData(apiToken, requireAuth, audit.loadAudits);
+  const clearDashboardData = useCallback(() => {
+    for (const timer of [
+      dashboardOverviewReloadTimer,
+      fleetReloadTimer,
+      fleetTelemetryReloadTimer,
+      inventoryReloadTimer,
+      topologyReloadTimer,
+    ]) {
+      if (timer.current !== null) {
+        window.clearTimeout(timer.current);
+        timer.current = null;
+      }
+    }
+    fleetTelemetryReloadedAt.current = 0;
+    setLastLiveEvent("waiting");
+    setLastJobOutputEvent(null);
+    setLastTerminalOutputEvent(null);
+    access.clearAccess();
+    dashboardOverview.clearDashboardOverview();
+    fleet.clearFleet();
+    audit.clearAudits();
+    inventory.clearInventory();
+    jobs.clearJobs();
+    schedules.clearSchedules();
+    system.clearSystem();
+    topology.clearTopology();
+    portForwarding.clearPortForwarding();
+    backups.clearBackups();
+  }, [
+    access.clearAccess,
+    audit.clearAudits,
+    backups.clearBackups,
+    dashboardOverview.clearDashboardOverview,
+    fleet.clearFleet,
+    inventory.clearInventory,
+    jobs.clearJobs,
+    portForwarding.clearPortForwarding,
+    schedules.clearSchedules,
+    system.clearSystem,
+    topology.clearTopology,
+  ]);
+  clearDashboardDataRef.current = clearDashboardData;
+
   const scheduleDashboardOverviewReload = useCallback(() => {
     if (dashboardOverviewReloadTimer.current !== null) {
       window.clearTimeout(dashboardOverviewReloadTimer.current);
@@ -355,6 +418,7 @@ export function useDashboardData(activeView: ActiveView) {
       }
     } else if (activeView === "Network") {
       void inventory.loadRuntimeConfigApplyStates();
+      void portForwarding.loadPortForwardRules();
       void topology.loadTunnelPlans();
       void topology.loadNetworkObservations();
       void topology.loadNetworkTrends();
@@ -376,7 +440,6 @@ export function useDashboardData(activeView: ActiveView) {
     } else if (activeView === "Audit") {
       void audit.loadAudits();
       void jobs.loadJobs();
-      void jobs.loadTerminalSessions();
       void access.loadCurrentOperator();
     } else if (activeView === "Access") {
       void access.loadCurrentOperator();
@@ -399,7 +462,6 @@ export function useDashboardData(activeView: ActiveView) {
     inventory.loadTagInventory,
     inventory.loadRuntimeConfigApplyStates,
     jobs.loadJobs,
-    jobs.loadTerminalSessions,
     schedules.loadSchedules,
     system.loadSuiteConfig,
     system.loadSystemDashboard,
@@ -453,6 +515,9 @@ export function useDashboardData(activeView: ActiveView) {
         }
       });
       socket.addEventListener("message", (message) => {
+        if (disposed) {
+          return;
+        }
         const event = parseWsEvent(message.data);
         if (!event) {
           return;
@@ -551,33 +616,45 @@ export function useDashboardData(activeView: ActiveView) {
   const handleAuth = useCallback(
     async (auth: AuthResponse) => {
       authGenerationRef.current += 1;
+      refreshAuthRef.current = null;
+      clearDashboardData();
       persistAuthSession(auth);
+      setAuthRefreshError(null);
+      setLogoutWarning(null);
       access.setAuthenticatedOperator(auth.operator);
+      setWsState("connecting");
       setApiToken(auth.access_token);
       setAuthRequired(false);
     },
-    [access.setAuthenticatedOperator],
+    [access.setAuthenticatedOperator, clearDashboardData],
   );
 
   const clearSession = useCallback(() => {
     const logoutToken = readStoredAccessToken() || apiToken;
-    if (logoutToken) {
-      void apiPost<void>("/api/v1/auth/logout", logoutToken, {}).catch(
-        () => undefined,
-      );
-    }
     authGenerationRef.current += 1;
+    const logoutGeneration = authGenerationRef.current;
+    refreshAuthRef.current = null;
+    clearDashboardData();
     clearStoredAuthSession();
+    setAuthRefreshError(null);
+    setLogoutWarning(null);
+    setWsState("auth required");
     setApiToken("");
     setAuthRequired(true);
-    access.clearOperator();
-    fleet.clearFleet();
-    dashboardOverview.clearDashboardOverview();
+    if (logoutToken) {
+      void apiPost<void>("/api/v1/auth/logout", logoutToken, {}).catch(
+        () => {
+          if (authGenerationRef.current === logoutGeneration) {
+            setLogoutWarning(
+              "Signed out locally, but the server could not revoke this session. It may remain active until it expires; sign in again to review Access > Sessions when the API is available.",
+            );
+          }
+        },
+      );
+    }
   }, [
-    access.clearOperator,
     apiToken,
-    dashboardOverview.clearDashboardOverview,
-    fleet.clearFleet,
+    clearDashboardData,
   ]);
 
   return {
@@ -590,18 +667,25 @@ export function useDashboardData(activeView: ActiveView) {
     assignTag: inventory.assignTag,
     bulkMutateTags: inventory.bulkMutateTags,
     auditError: audit.auditError,
+    auditEvidenceAvailable: audit.auditEvidenceAvailable,
     auditLoading: audit.auditLoading,
     audits: audit.audits,
+    auditsTruncated: audit.auditsTruncated,
     historyExport: audit.historyExport,
     historyPruneResult: audit.historyPruneResult,
     historyRetentionPolicies: audit.historyRetentionPolicies,
     authRequired,
+    authRefreshError,
     backupArtifacts: backups.backupArtifacts,
+    backupArtifactsTruncated: backups.backupArtifactsTruncated,
     backupPolicies: backups.backupPolicies,
+    backupPoliciesTruncated: backups.backupPoliciesTruncated,
     backups: backups.backups,
+    backupsTruncated: backups.backupsTruncated,
     migrationLinks: backups.migrationLinks,
     restorePlans: backups.restorePlans,
     backupsError: backups.backupsError,
+    backupsEvidenceAvailable: backups.backupsEvidenceAvailable,
     backupsLoading: backups.backupsLoading,
     clearSession,
     clientKeyRevocations: access.clientKeyRevocations,
@@ -613,6 +697,7 @@ export function useDashboardData(activeView: ActiveView) {
     upsertAgentIdentity: access.upsertAgentIdentity,
     createBackupRequest: backups.createBackupRequest,
     createBackupPolicy: backups.createBackupPolicy,
+    updateBackupPolicy: backups.updateBackupPolicy,
     createFileTransferHandoff: jobs.createFileTransferHandoff,
     createMigrationLink: backups.createMigrationLink,
     createMigrationRun: backups.createMigrationRun,
@@ -626,6 +711,7 @@ export function useDashboardData(activeView: ActiveView) {
     createJobApproval: jobs.createJobApproval,
     approveJobApproval: jobs.approveJobApproval,
     rejectJobApproval: jobs.rejectJobApproval,
+    retryAuthRefresh: refreshStoredAuth,
     createArtifactCleanupJob: jobs.createArtifactCleanupJob,
     createAgentUpdateRelease: jobs.createAgentUpdateRelease,
     createSourceTemplate: inventory.createSourceTemplate,
@@ -652,23 +738,36 @@ export function useDashboardData(activeView: ActiveView) {
     disableTotp: access.disableTotp,
     handleAuth,
     jobs: jobs.jobs,
+    jobsTruncated: jobs.jobsTruncated,
     jobApprovals: jobs.jobApprovals,
     commandTemplates: jobs.commandTemplates,
+    commandTemplatesTruncated: jobs.commandTemplatesTruncated,
     deleteCommandTemplate: jobs.deleteCommandTemplate,
     agentUpdateReleases: jobs.agentUpdateReleases,
+    agentUpdateReleasesTruncated: jobs.agentUpdateReleasesTruncated,
     jobsError: jobs.jobsError,
+    jobsEvidenceAvailable: jobs.jobsEvidenceAvailable,
     jobsLoading: jobs.jobsLoading,
     keyLifecycleReport: access.keyLifecycleReport,
     processSupervisorInventory: jobs.processSupervisorInventory,
+    processSupervisorInventoryTruncated: jobs.processSupervisorInventoryTruncated,
     serverJobs: jobs.serverJobs,
+    serverJobsError: jobs.serverJobsError,
     fileTransfers: jobs.fileTransfers,
+    fileTransfersTruncated: jobs.fileTransfersTruncated,
     fileTransferSources: jobs.fileTransferSources,
+    fileTransferSourcesTruncated: jobs.fileTransferSourcesTruncated,
     terminalSessions: jobs.terminalSessions,
+    terminalSessionsTruncated: jobs.terminalSessionsTruncated,
+    jobRolloutsTruncated: jobs.jobRolloutsTruncated,
     gatewaySessions: access.gatewaySessions,
     deleteAgent: fleet.deleteAgent,
+    fleetAlertsEvidenceAvailable: fleet.fleetAlertsEvidenceAvailable,
     fleetAlerts: fleet.fleetAlerts,
     fleetAlertStates: fleet.fleetAlertStates,
     fleetAlertPolicies: fleet.fleetAlertPolicies,
+    configPolicyEvidenceAvailable: fleet.configPolicyEvidenceAvailable,
+    fleetCoreEvidenceAvailable: fleet.fleetCoreEvidenceAvailable,
     vpsRuleValues: fleet.vpsRuleValues,
     trafficAccounting: fleet.trafficAccounting,
     policyAlerts: fleet.policyAlerts,
@@ -731,6 +830,7 @@ export function useDashboardData(activeView: ActiveView) {
     previewArtifactCleanup: jobs.previewArtifactCleanup,
     loadTagInventory: inventory.loadTagInventory,
     loadSourceTemplates: inventory.loadSourceTemplates,
+    loadRuntimeConfigApplyStates: inventory.loadRuntimeConfigApplyStates,
     loadSchedules: schedules.loadSchedules,
     loadNetworkObservations: topology.loadNetworkObservations,
     loadNetworkTrends: topology.loadNetworkTrends,
@@ -749,8 +849,10 @@ export function useDashboardData(activeView: ActiveView) {
     ospfUpdatePlans: topology.ospfUpdatePlans,
     operator: access.operator,
     operatorAuthEvents: access.operatorAuthEvents,
+    operatorAuthEventsTruncated: access.operatorAuthEventsTruncated,
     operators: access.operators,
     operatorSessions: access.operatorSessions,
+    operatorSessionsTruncated: access.operatorSessionsTruncated,
     preferencesError: access.preferencesError,
     preferencesSaving: access.preferencesSaving,
     sourceTemplateAssignments: inventory.sourceTemplateAssignments,
@@ -779,7 +881,9 @@ export function useDashboardData(activeView: ActiveView) {
     setupTotp: access.setupTotp,
     testSourceTemplate: inventory.testSourceTemplate,
     schedules: schedules.schedules,
+    schedulesTruncated: schedules.schedulesTruncated,
     schedulesError: schedules.schedulesError,
+    schedulesEvidenceAvailable: schedules.schedulesEvidenceAvailable,
     schedulesLoading: schedules.schedulesLoading,
     summary: fleet.summary,
     systemDashboard: system.systemDashboard,
@@ -787,6 +891,7 @@ export function useDashboardData(activeView: ActiveView) {
     systemDashboardLoading: system.systemDashboardLoading,
     systemDashboardPointDensity: system.systemDashboardPointDensity,
     systemDashboardWindow: system.systemDashboardWindow,
+    logoutWarning,
     setSystemDashboardPointDensity: system.setSystemDashboardPointDensity,
     setSystemDashboardWindow: system.setSystemDashboardWindow,
     setOperatorStatus: access.setOperatorStatus,
@@ -802,12 +907,19 @@ export function useDashboardData(activeView: ActiveView) {
     tags: inventory.tags,
     tagsError: inventory.tagsError,
     tagsLoading: inventory.tagsLoading,
+    tagInventoryEvidenceAvailable:
+      inventory.tagInventoryEvidenceAvailable,
+    runtimeConfigApplyEvidenceAvailable:
+      inventory.runtimeConfigApplyEvidenceAvailable,
+    runtimeConfigApplyError: inventory.runtimeConfigApplyError,
+    runtimeConfigApplyLoading: inventory.runtimeConfigApplyLoading,
     runtimeConfigApplyStates: inventory.runtimeConfigApplyStates,
     runtimeConfigPatchGenerators: inventory.runtimeConfigPatchGenerators,
     telemetryRollups: fleet.telemetryRollups,
     topologyError: topology.topologyError,
     topologyGraph: topology.topologyGraph,
     topologyLoading: topology.topologyLoading,
+    tunnelPlanCorruptions: topology.tunnelPlanCorruptions,
     tunnelPlans: topology.tunnelPlans,
     portForwardRules: portForwarding.portForwardRules,
     portForwardError: portForwarding.portForwardError,

@@ -21,6 +21,12 @@ CREATE TABLE telemetry_rollups (
 CREATE INDEX telemetry_rollups_latest_idx
     ON telemetry_rollups (bucket_secs, bucket_start DESC, client_id);
 
+CREATE INDEX telemetry_rollups_client_latest_idx
+    ON telemetry_rollups (client_id, bucket_start DESC, bucket_secs);
+
+CREATE INDEX telemetry_rollups_retention_idx
+    ON telemetry_rollups (bucket_start);
+
 CREATE TABLE telemetry_network_rates (
     client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     interface TEXT NOT NULL,
@@ -35,6 +41,21 @@ CREATE TABLE telemetry_network_rates (
 
 CREATE INDEX telemetry_network_rates_latest_idx
     ON telemetry_network_rates (bucket_secs, bucket_start DESC, client_id, interface);
+
+CREATE INDEX telemetry_network_rates_client_latest_idx
+    ON telemetry_network_rates (client_id, interface, bucket_start DESC, bucket_secs);
+
+CREATE INDEX telemetry_network_rates_retention_idx
+    ON telemetry_network_rates (bucket_start);
+
+CREATE TABLE telemetry_ingest_watermarks (
+    client_id TEXT PRIMARY KEY REFERENCES clients(id) ON DELETE CASCADE,
+    process_incarnation_id UUID NOT NULL,
+    telemetry_seq BIGINT NOT NULL CHECK (telemetry_seq > 0),
+    reported_observed_unix BIGINT NOT NULL CHECK (reported_observed_unix >= 0),
+    accepted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    gateway_session_id UUID NOT NULL
+);
 
 CREATE TABLE telemetry_tunnels (
     client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
@@ -188,6 +209,113 @@ CREATE TABLE policy_rules (
 CREATE INDEX policy_rules_group_idx
     ON policy_rules (group_id, sort_order ASC, created_at ASC);
 
+INSERT INTO policy_groups (
+    id, name, enabled, selector_expression, notes
+) VALUES
+    (
+        'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1',
+        'Predefined CPU load warning',
+        FALSE,
+        'status:online',
+        'Disabled predefined policy. Enable or edit after confirming fleet-specific CPU expectations.'
+    ),
+    (
+        'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2',
+        'Predefined memory pressure',
+        FALSE,
+        'status:online',
+        'Disabled predefined policy. Enable or edit after confirming memory pressure thresholds.'
+    ),
+    (
+        'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3',
+        'Predefined traffic quota warning',
+        FALSE,
+        'status:online',
+        'Disabled predefined policy. Enable or edit after configuring VPS traffic quota rules.'
+    )
+ON CONFLICT (name) DO NOTHING;
+
+INSERT INTO policy_rules (
+    id,
+    group_id,
+    sort_order,
+    name,
+    enabled,
+    traffic_selector,
+    condition_expression,
+    window_secs,
+    severity
+)
+SELECT
+    'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1',
+    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1',
+    0,
+    'CPU load above 1.5',
+    TRUE,
+    NULL,
+    'cpu.load_1 >= 1.5',
+    300,
+    'warning'
+WHERE EXISTS (
+    SELECT 1 FROM policy_groups
+    WHERE id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1'
+)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO policy_rules (
+    id,
+    group_id,
+    sort_order,
+    name,
+    enabled,
+    traffic_selector,
+    condition_expression,
+    window_secs,
+    severity
+)
+SELECT
+    'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2',
+    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2',
+    0,
+    'Available memory below 15%',
+    TRUE,
+    NULL,
+    'memory.available_ratio <= 0.15',
+    300,
+    'warning'
+WHERE EXISTS (
+    SELECT 1 FROM policy_groups
+    WHERE id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2'
+)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO policy_rules (
+    id,
+    group_id,
+    sort_order,
+    name,
+    enabled,
+    traffic_selector,
+    condition_expression,
+    window_secs,
+    severity
+)
+SELECT
+    'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb3',
+    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3',
+    0,
+    'Traffic cycle above 80%',
+    TRUE,
+    NULL,
+    'traffic.cycle_percent >= 80',
+    300,
+    'warning'
+WHERE EXISTS (
+    SELECT 1 FROM policy_groups
+    WHERE id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3'
+)
+ON CONFLICT (id) DO NOTHING;
+
 CREATE TABLE policy_rule_states (
     policy_rule_id UUID NOT NULL REFERENCES policy_rules(id) ON DELETE CASCADE,
     client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
@@ -238,6 +366,31 @@ CREATE INDEX policy_alerts_recent_idx
 
 CREATE INDEX policy_alerts_client_idx
     ON policy_alerts (client_id, observed_at DESC);
+
+CREATE INDEX policy_alerts_fleet_priority_idx
+    ON policy_alerts (
+        (CASE severity
+            WHEN 'critical' THEN 0
+            WHEN 'warning' THEN 1
+            WHEN 'info' THEN 2
+            ELSE 3
+        END),
+        observed_at DESC,
+        id DESC
+    );
+
+CREATE INDEX policy_alerts_client_fleet_priority_idx
+    ON policy_alerts (
+        client_id,
+        (CASE severity
+            WHEN 'critical' THEN 0
+            WHEN 'warning' THEN 1
+            WHEN 'info' THEN 2
+            ELSE 3
+        END),
+        observed_at DESC,
+        id DESC
+    );
 
 CREATE TABLE fleet_alert_states (
     alert_id TEXT PRIMARY KEY,
@@ -298,7 +451,7 @@ CREATE INDEX fleet_alert_notification_channels_match_idx
 
 CREATE TABLE fleet_alert_notification_deliveries (
     id UUID PRIMARY KEY,
-    channel_id UUID NOT NULL REFERENCES fleet_alert_notification_channels(id) ON DELETE CASCADE,
+    channel_id UUID NOT NULL,
     channel_name TEXT NOT NULL,
     alert_id TEXT NOT NULL,
     alert_severity TEXT NOT NULL,
@@ -400,7 +553,7 @@ CREATE INDEX webhook_events_kind_idx
 
 CREATE TABLE webhook_rule_deliveries (
     id UUID PRIMARY KEY,
-    rule_id UUID NOT NULL REFERENCES webhook_rules(id) ON DELETE CASCADE,
+    rule_id UUID NOT NULL,
     rule_name TEXT NOT NULL,
     event_kind TEXT NOT NULL,
     event_id TEXT NOT NULL,
@@ -480,6 +633,7 @@ CREATE TABLE history_retention_policies (
         'system_metric_rollups',
         'telemetry_rollups',
         'telemetry_network_rates',
+        'traffic_counter_samples',
         'job_outputs',
         'backup_artifacts',
         'network_observations',
@@ -487,6 +641,8 @@ CREATE TABLE history_retention_policies (
         'client_status_history',
         'gateway_sessions'
     )),
+    CONSTRAINT history_retention_policies_traffic_counter_min_days_check
+        CHECK (domain <> 'traffic_counter_samples' OR retention_days >= 32),
     CHECK (retention_days BETWEEN 1 AND 3650),
     CHECK (prune_limit BETWEEN 1 AND 100000),
     CHECK (notes IS NULL OR length(notes) <= 1000)

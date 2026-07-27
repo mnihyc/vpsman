@@ -12,13 +12,14 @@ use sqlx::{
 };
 use tokio::time;
 use tracing::{debug, info, warn};
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 use uuid::Uuid;
 use vpsman_common::{
     encode_json, job_command_operation_type, payload_hash, read_secret_file_ref,
     AgentCapabilitySnapshot, JobCommand, SuiteConfig, ARTIFACT_CLEANUP_RUNNING_TIMEOUT_SECS,
-    DEFAULT_MAX_JOB_TIMEOUT_SECS, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS, SERVER_JOB_STATUS_COMPLETED,
-    SERVER_JOB_STATUS_FAILED, SERVER_JOB_STATUS_QUEUED, SERVER_JOB_STATUS_RUNNING,
-    SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
+    DEFAULT_MAX_JOB_TIMEOUT_SECS, MAX_ARTIFACT_CLEANUP_REVIEWED_TARGETS,
+    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS, SERVER_JOB_STATUS_COMPLETED, SERVER_JOB_STATUS_FAILED,
+    SERVER_JOB_STATUS_QUEUED, SERVER_JOB_STATUS_RUNNING, SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
 };
 #[cfg(test)]
 use vpsman_common::{
@@ -34,6 +35,9 @@ use vpsman_server_core::{
 
 const DEFAULT_BACKUP_OBJECT_STORE_DIR: &str = "runtime/data/objects/backups";
 const TELEMETRY_HISTORY_RETENTION_INTERVAL_SECS: u64 = 60;
+const SCHEDULE_CRON_INVALID: &str = "schedule_cron_invalid";
+const SCHEDULE_CRON_NO_FUTURE_OCCURRENCE: &str = "schedule_cron_no_future_occurrence";
+const SCHEDULE_OPERATION_INVALID: &str = "schedule_operation_invalid";
 mod actor_authority;
 mod alert_notifications;
 mod backup_policy_retention;
@@ -587,10 +591,14 @@ fn apply_bool_default(target: &mut bool, env_name: &str, value: Option<bool>) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let log_writer = std::io::stderr
+        .with_max_level(tracing::Level::WARN)
+        .or_else(std::io::stdout.with_min_level(tracing::Level::INFO));
     tracing_subscriber::fmt()
+        .with_writer(log_writer)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "vpsman_worker=info".into()),
+                .unwrap_or_else(|_| "warn,vpsman_worker=info".into()),
         )
         .init();
 
@@ -1379,6 +1387,7 @@ async fn run_artifact_cleanup_job(
     job: &ArtifactCleanupJob,
 ) -> Result<ArtifactCleanupRun> {
     let candidates = artifact_cleanup_targets(pool, job.id).await?;
+    validate_artifact_cleanup_candidate_sizes(&candidates)?;
     let mut run = ArtifactCleanupRun::default();
     for candidate in &candidates {
         if !candidate.identity_matches_review
@@ -1394,16 +1403,41 @@ async fn run_artifact_cleanup_job(
         match apply_artifact_cleanup_candidate(pool, object_stores, candidate).await? {
             ArtifactCleanupDisposition::Deleted => {
                 run.deleted_rows += 1;
-                run.deleted_bytes += candidate.size_bytes;
+                run.deleted_bytes = run
+                    .deleted_bytes
+                    .checked_add(candidate.size_bytes)
+                    .context("artifact cleanup deleted byte total overflow")?;
             }
             ArtifactCleanupDisposition::Tombstoned => {
                 run.tombstoned_rows += 1;
-                run.tombstoned_bytes += candidate.size_bytes;
+                run.tombstoned_bytes = run
+                    .tombstoned_bytes
+                    .checked_add(candidate.size_bytes)
+                    .context("artifact cleanup tombstoned byte total overflow")?;
             }
         }
         persist_artifact_cleanup_progress(pool, job.id, &run).await?;
     }
     Ok(run)
+}
+
+fn validate_artifact_cleanup_candidate_sizes(
+    candidates: &[ArtifactCleanupCandidate],
+) -> Result<()> {
+    candidates.iter().try_fold(0_i64, |total, candidate| {
+        ensure!(
+            candidate.size_bytes >= 0,
+            "artifact_cleanup_reviewed_target_numeric_invalid: artifact {} has a negative size",
+            candidate.id
+        );
+        total.checked_add(candidate.size_bytes).with_context(|| {
+            format!(
+                "artifact_cleanup_reviewed_target_numeric_invalid: byte total overflow at artifact {}",
+                candidate.id
+            )
+        })
+    })?;
+    Ok(())
 }
 
 async fn persist_artifact_cleanup_progress(
@@ -1700,6 +1734,9 @@ async fn artifact_cleanup_targets(
     pool: &PgPool,
     server_job_id: Uuid,
 ) -> Result<Vec<ArtifactCleanupCandidate>> {
+    let detection_limit = i64::try_from(MAX_ARTIFACT_CLEANUP_REVIEWED_TARGETS)?
+        .checked_add(1)
+        .context("artifact cleanup target detection limit overflow")?;
     let rows = sqlx::query(
         r#"
         SELECT
@@ -1720,12 +1757,14 @@ async fn artifact_cleanup_targets(
         LEFT JOIN server_artifacts artifact ON artifact.id = target.artifact_id
         WHERE target.server_job_id = $1
         ORDER BY target.created_at ASC, target.artifact_id ASC
-        LIMIT 10000
+        LIMIT $2
         "#,
     )
     .bind(server_job_id)
+    .bind(detection_limit)
     .fetch_all(pool)
     .await?;
+    ensure_artifact_cleanup_target_count(rows.len())?;
     rows.into_iter()
         .map(|row| {
             Ok(ArtifactCleanupCandidate {
@@ -1740,6 +1779,15 @@ async fn artifact_cleanup_targets(
         })
         .collect::<std::result::Result<Vec<_>, sqlx::Error>>()
         .map_err(Into::into)
+}
+
+fn ensure_artifact_cleanup_target_count(count: usize) -> Result<()> {
+    ensure!(
+        count <= MAX_ARTIFACT_CLEANUP_REVIEWED_TARGETS,
+        "artifact_cleanup_reviewed_target_limit_exceeded: job contains more than \
+         {MAX_ARTIFACT_CLEANUP_REVIEWED_TARGETS} reviewed targets"
+    );
+    Ok(())
 }
 
 async fn delete_object_key_confirmed(
@@ -1862,11 +1910,31 @@ async fn process_due_schedule(
             tx.commit().await?;
             return Ok(0);
         };
+        let id: Uuid = row.try_get("id")?;
+        let actor_id: Option<Uuid> = row.try_get("actor_id")?;
+        let name: String = row.try_get("name")?;
+        let raw_operation = row.try_get::<SqlJson<Value>, _>("operation")?.0;
+        let operation_revision = payload_hash(raw_operation.to_string().as_bytes());
+        let operation = match serde_json::from_value(raw_operation) {
+            Ok(operation) => operation,
+            Err(_) => {
+                disable_schedule_for_invalid_operation(
+                    &mut tx,
+                    id,
+                    actor_id,
+                    &name,
+                    &operation_revision,
+                )
+                .await?;
+                tx.commit().await?;
+                return Ok(0);
+            }
+        };
         let schedule = DueSchedule {
-            id: row.try_get("id")?,
-            actor_id: row.try_get("actor_id")?,
-            name: row.try_get("name")?,
-            operation: row.try_get::<SqlJson<JobCommand>, _>("operation")?.0,
+            id,
+            actor_id,
+            name,
+            operation,
             selector_expression: row.try_get("selector_expression")?,
             target_client_ids: row.try_get("target_client_ids")?,
             cron_expr: row.try_get("cron_expr")?,
@@ -1887,6 +1955,11 @@ async fn process_due_schedule(
         .await?
         {
             disable_schedule_for_revoked_actor(&mut tx, &schedule).await?;
+            tx.commit().await?;
+            return Ok(0);
+        }
+        if let Some(cadence_error) = schedule_cadence_error(&schedule.cron_expr, Utc::now()) {
+            disable_schedule_for_invalid_cadence(&mut tx, &schedule, cadence_error).await?;
             tx.commit().await?;
             return Ok(0);
         }
@@ -2988,6 +3061,141 @@ async fn disable_schedule_for_revoked_actor(
     Ok(())
 }
 
+async fn disable_schedule_for_invalid_operation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    schedule_id: Uuid,
+    actor_id: Option<Uuid>,
+    schedule_name: &str,
+    operation_revision: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE schedules
+        SET enabled = FALSE,
+            last_error = $2,
+            updated_at = now()
+        WHERE id = $1
+          AND enabled = TRUE
+        "#,
+    )
+    .bind(schedule_id)
+    .bind(SCHEDULE_OPERATION_INVALID)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs (
+            id, actor_id, action, target, command_hash, metadata
+        )
+        VALUES ($1, $2, 'schedule.due_failed', $3, $4, $5)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(actor_id)
+    .bind(format!("schedule:{schedule_id}"))
+    .bind(operation_revision)
+    .bind(serde_json::json!({
+        "worker": "schedule_dispatch_worker",
+        "schedule_id": schedule_id,
+        "schedule_name": schedule_name,
+        "disabled": true,
+        "permanent": true,
+        "error": SCHEDULE_OPERATION_INVALID,
+        "operation_payload_hash": operation_revision,
+    }))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+fn schedule_cadence_error(cron_expr: &str, now: DateTime<Utc>) -> Option<&'static str> {
+    let Ok(cron) = Cron::from_str(cron_expr) else {
+        return Some(SCHEDULE_CRON_INVALID);
+    };
+    if cron.iter_after(now).next().is_none() {
+        return Some(SCHEDULE_CRON_NO_FUTURE_OCCURRENCE);
+    }
+    None
+}
+
+async fn disable_schedule_for_invalid_cadence(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    schedule: &DueSchedule,
+    cadence_error: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE schedules
+        SET enabled = FALSE,
+            last_error = $2,
+            updated_at = now()
+        WHERE id = $1
+          AND enabled = TRUE
+        "#,
+    )
+    .bind(schedule.id)
+    .bind(cadence_error)
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs (
+            id, actor_id, action, target, command_hash, metadata
+        )
+        VALUES ($1, $2, 'schedule.due_failed', $3, NULL, $4)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(schedule.actor_id)
+    .bind(format!("schedule:{}", schedule.id))
+    .bind(serde_json::json!({
+        "worker": "schedule_dispatch_worker",
+        "schedule_id": schedule.id,
+        "schedule_name": &schedule.name,
+        "disabled": true,
+        "permanent": true,
+        "error": cadence_error,
+    }))
+    .execute(&mut **tx)
+    .await?;
+
+    let cadence_revision = payload_hash(schedule.cron_expr.as_bytes());
+    let event_id = format!(
+        "schedule:{}:invalid_cadence:{}",
+        schedule.id,
+        &cadence_revision[..16]
+    );
+    let predicates = vec![
+        "schedule.failed".to_string(),
+        format!("schedule.id:{}", schedule.id),
+        format!("schedule.name:{}", schedule.name),
+    ];
+    insert_webhook_event_in_tx(
+        tx,
+        "schedule.failed",
+        &event_id,
+        &predicates,
+        &[],
+        serde_json::json!({
+            "event": {
+                "kind": "schedule.failed",
+                "id": event_id,
+                "predicates": &predicates,
+            },
+            "schedule": {
+                "id": schedule.id,
+                "name": &schedule.name,
+                "disabled": true,
+                "permanent": true,
+                "error": cadence_error,
+            },
+        }),
+    )
+    .await?;
+    Ok(())
+}
+
 fn catch_up_run_count(schedule: &DueSchedule, due_occurrences: i64) -> i64 {
     let due_occurrences = due_occurrences.max(1);
     match schedule.catch_up_policy.as_str() {
@@ -3056,6 +3264,43 @@ mod schedule_tests {
     use super::*;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use std::{path::Path, str::FromStr};
+
+    #[test]
+    fn artifact_cleanup_worker_rejects_targets_beyond_the_reviewed_limit() {
+        assert!(
+            ensure_artifact_cleanup_target_count(MAX_ARTIFACT_CLEANUP_REVIEWED_TARGETS).is_ok()
+        );
+        assert!(
+            ensure_artifact_cleanup_target_count(MAX_ARTIFACT_CLEANUP_REVIEWED_TARGETS + 1)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn artifact_cleanup_worker_validates_all_sizes_before_deletion() {
+        let candidate = |id, size_bytes| ArtifactCleanupCandidate {
+            id,
+            domain: "job_output".to_string(),
+            object_key: format!("job-outputs/{id}"),
+            size_bytes,
+            status: "active".to_string(),
+            backup_artifact_id: None,
+            identity_matches_review: true,
+        };
+        assert!(validate_artifact_cleanup_candidate_sizes(&[
+            candidate(Uuid::new_v4(), 1),
+            candidate(Uuid::new_v4(), 2),
+        ])
+        .is_ok());
+        assert!(
+            validate_artifact_cleanup_candidate_sizes(&[candidate(Uuid::new_v4(), -1,)]).is_err()
+        );
+        assert!(validate_artifact_cleanup_candidate_sizes(&[
+            candidate(Uuid::new_v4(), i64::MAX),
+            candidate(Uuid::new_v4(), 1),
+        ])
+        .is_err());
+    }
 
     fn schedule_with_policy(policy: &str, limit: i32) -> DueSchedule {
         DueSchedule {
@@ -3234,6 +3479,279 @@ mod schedule_tests {
             ..VpsMetadata::default()
         });
         assert!(expression_matches(&context, &expression));
+    }
+
+    #[test]
+    fn schedule_cadence_validation_distinguishes_legacy_failures() {
+        let now = Utc::now();
+        assert_eq!(schedule_cadence_error("* * * * *", now), None);
+        assert_eq!(
+            schedule_cadence_error("0 0 31 2 *", now),
+            Some(SCHEDULE_CRON_NO_FUTURE_OCCURRENCE)
+        );
+        assert_eq!(
+            schedule_cadence_error("not a cron", now),
+            Some(SCHEDULE_CRON_INVALID)
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_invalid_cadence_disables_once_without_blocking_valid_schedules() {
+        let Some(db) = PgWorkerTestDb::maybe_new().await else {
+            return;
+        };
+        insert_worker_client(&db.pool, "cadence-edge", "online", false).await;
+        let invalid_id = insert_worker_schedule(
+            &db.pool,
+            "invalid-cadence-schedule",
+            serde_json::json!({"type": "shell", "argv": ["/bin/true"], "pty": false}),
+            &["cadence-edge"],
+        )
+        .await;
+        let valid_id = insert_worker_schedule(
+            &db.pool,
+            "valid-cadence-schedule",
+            serde_json::json!({"type": "shell", "argv": ["/bin/true"], "pty": false}),
+            &["cadence-edge"],
+        )
+        .await;
+        sqlx::query("UPDATE schedules SET cron_expr = '0 0 31 2 *' WHERE id = $1")
+            .bind(invalid_id)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+
+        let processed = process_due_schedules(
+            &db.pool,
+            10,
+            &ScheduleDispatchConfig::new(60, DEFAULT_MAX_JOB_TIMEOUT_SECS, false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(processed, 1);
+
+        let invalid =
+            sqlx::query("SELECT enabled, failure_count, last_error FROM schedules WHERE id = $1")
+                .bind(invalid_id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert!(!invalid.try_get::<bool, _>("enabled").unwrap());
+        assert_eq!(invalid.try_get::<i32, _>("failure_count").unwrap(), 0);
+        assert_eq!(
+            invalid
+                .try_get::<Option<String>, _>("last_error")
+                .unwrap()
+                .as_deref(),
+            Some(SCHEDULE_CRON_NO_FUTURE_OCCURRENCE)
+        );
+        let invalid_jobs: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE source_schedule_id = $1")
+                .bind(invalid_id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        let valid_jobs: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE source_schedule_id = $1")
+                .bind(valid_id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(invalid_jobs, 0);
+        assert_eq!(valid_jobs, 1);
+        let invalid_audits: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit_logs WHERE action = 'schedule.due_failed' AND target = $1",
+        )
+        .bind(format!("schedule:{invalid_id}"))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let invalid_events: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM webhook_events WHERE kind = 'schedule.failed' AND event_id LIKE $1",
+        )
+        .bind(format!("schedule:{invalid_id}:invalid_cadence:%"))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(invalid_audits, 1);
+        assert_eq!(invalid_events, 1);
+
+        assert_eq!(
+            process_due_schedules(
+                &db.pool,
+                10,
+                &ScheduleDispatchConfig::new(60, DEFAULT_MAX_JOB_TIMEOUT_SECS, false),
+            )
+            .await
+            .unwrap(),
+            0
+        );
+        let repeated_audits: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit_logs WHERE action = 'schedule.due_failed' AND target = $1",
+        )
+        .bind(format!("schedule:{invalid_id}"))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(repeated_audits, 1);
+
+        db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_webhook_rule_failures_do_not_poison_event_batch() {
+        let Some(db) = PgWorkerTestDb::maybe_new().await else {
+            return;
+        };
+        for index in 0..5 {
+            insert_worker_client(&db.pool, &format!("webhook-edge-{index}"), "online", false).await;
+        }
+        let good_rule =
+            insert_worker_webhook_rule(&db.pool, "valid-webhook-rule", "id:webhook-edge-0", "")
+                .await;
+        let invalid_expression_rule = insert_worker_webhook_rule(
+            &db.pool,
+            "invalid-expression-webhook-rule",
+            "(tag:edge",
+            "",
+        )
+        .await;
+        let invalid_template_rule = insert_worker_webhook_rule(
+            &db.pool,
+            "invalid-template-webhook-rule",
+            "status = online",
+            "[if alert.open]missing end",
+        )
+        .await;
+        let expanding_template = format!("[for v in matched_vps]{}[endfor]", "x".repeat(3_900));
+        let render_failure_rule = insert_worker_webhook_rule(
+            &db.pool,
+            "render-failure-webhook-rule",
+            "status = online",
+            &expanding_template,
+        )
+        .await;
+        let event_id = "webhook-poison-regression";
+        webhook_rules::insert_webhook_event(
+            &db.pool,
+            "agent.test",
+            event_id,
+            &["agent.test"],
+            &[],
+            serde_json::json!({
+                "event": {
+                    "kind": "agent.test",
+                    "id": event_id,
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            webhook_rules::materialize_interval_events(
+                &db.pool,
+                WebhookRuleWorkerConfig::default(),
+            )
+            .await
+            .unwrap(),
+            2
+        );
+        let result =
+            webhook_rules::process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default())
+                .await
+                .unwrap();
+        assert_eq!(result, (2, 0));
+
+        let deliveries = sqlx::query_as::<_, (Uuid, String, String, String, Option<String>)>(
+            r#"
+            SELECT rule_id, status, event_kind, event_id, error
+            FROM webhook_rule_deliveries
+            ORDER BY rule_id
+            "#,
+        )
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(deliveries.len(), 4);
+        let delivery_for = |rule_id| {
+            deliveries
+                .iter()
+                .find(|delivery| delivery.0 == rule_id)
+                .expect("rule delivery evidence is present")
+        };
+
+        let good = delivery_for(good_rule);
+        assert_eq!(good.1, "queued");
+        assert_eq!(good.2, "agent.test");
+        assert_eq!(good.3, event_id);
+        assert_eq!(good.4, None);
+
+        let invalid_expression = delivery_for(invalid_expression_rule);
+        assert_eq!(invalid_expression.1, "permanently_failed");
+        assert_eq!(invalid_expression.2, "webhook.rule_configuration");
+        assert!(invalid_expression
+            .3
+            .starts_with("webhook-rule-configuration:"));
+        assert!(invalid_expression
+            .4
+            .as_deref()
+            .is_some_and(|error| error.starts_with("invalid webhook rule expression:")));
+
+        let invalid_template = delivery_for(invalid_template_rule);
+        assert_eq!(invalid_template.1, "permanently_failed");
+        assert_eq!(invalid_template.2, "webhook.rule_configuration");
+        assert!(invalid_template
+            .4
+            .as_deref()
+            .is_some_and(|error| error.starts_with("invalid webhook rule template:")));
+
+        let render_failure = delivery_for(render_failure_rule);
+        assert_eq!(render_failure.1, "permanently_failed");
+        assert_eq!(render_failure.2, "agent.test");
+        assert_eq!(render_failure.3, event_id);
+        assert!(render_failure
+            .4
+            .as_deref()
+            .is_some_and(|error| error.contains("rendered message exceeds length limit")));
+
+        let event_processed: bool = sqlx::query_scalar(
+            "SELECT processed_at IS NOT NULL FROM webhook_events WHERE event_id = $1",
+        )
+        .bind(event_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert!(event_processed);
+        let open_failure_alerts: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM fleet_alert_states WHERE alert_id LIKE 'webhook_delivery:%' AND state = 'open'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(open_failure_alerts, 3);
+        let permanent_failure_audits: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit_logs WHERE action = 'webhook.rule_delivery_permanently_failed'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(permanent_failure_audits, 3);
+
+        assert_eq!(
+            webhook_rules::process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default(),)
+                .await
+                .unwrap(),
+            (0, 0)
+        );
+        let delivery_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM webhook_rule_deliveries")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(delivery_count, 4);
+
+        db.cleanup().await;
     }
 
     #[tokio::test]
@@ -4227,6 +4745,31 @@ mod schedule_tests {
         .await
         .unwrap();
         operator_id
+    }
+
+    async fn insert_worker_webhook_rule(
+        pool: &PgPool,
+        name: &str,
+        expression: &str,
+        body_template: &str,
+    ) -> Uuid {
+        let rule_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO webhook_rules (
+                id, name, enabled, expression, target, body_template, cooldown_secs
+            )
+            VALUES ($1, $2, TRUE, $3, 'https://hooks.example.invalid/vpsman', $4, 0)
+            "#,
+        )
+        .bind(rule_id)
+        .bind(name)
+        .bind(expression)
+        .bind(body_template)
+        .execute(pool)
+        .await
+        .unwrap();
+        rule_id
     }
 
     async fn insert_active_worker_target(pool: &PgPool, client_id: &str) {

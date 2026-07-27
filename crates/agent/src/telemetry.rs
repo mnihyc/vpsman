@@ -6,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -14,7 +14,6 @@ use tokio::{
     task::JoinHandle,
     time::{self, Duration, Instant},
 };
-use tracing::debug;
 use vpsman_common::{
     render_tunnel_endpoint_config, AgentConfig, AgentMetrics, AgentRuntimeStatusTelemetryPlan,
     CpuStat, DiskStat, LoadAverage, MemoryStat, NetworkStat, RuntimeTunnelAdapterHealthStat,
@@ -48,19 +47,21 @@ struct LatencyMonitorState {
 
 fn collect_linux_metrics(config: &AgentConfig) -> Result<AgentMetrics> {
     let proc_root = Path::new(&config.telemetry.proc_root);
-    let networks = network_stats(proc_root).unwrap_or_default();
+    let networks = network_stats(proc_root)?;
+    let cores = std::thread::available_parallelism()
+        .context("failed to determine available CPU cores")?
+        .get();
     Ok(AgentMetrics {
         observed_unix: unix_now(),
-        hostname: hostname(config),
-        uptime_secs: uptime_secs(proc_root).unwrap_or_default(),
+        hostname: hostname(config)?,
+        uptime_secs: uptime_secs(proc_root)?,
         cpu: CpuStat {
-            load: load_average(proc_root).unwrap_or_default(),
-            cores: std::thread::available_parallelism()
-                .map(|value| value.get() as u16)
-                .unwrap_or(1),
+            load: load_average(proc_root)?,
+            cores: u16::try_from(cores)
+                .context("available CPU core count exceeds protocol range")?,
         },
-        memory: memory_stat(proc_root).unwrap_or_default(),
-        disks: disk_stats(proc_root).unwrap_or_default(),
+        memory: memory_stat(proc_root)?,
+        disks: disk_stats(proc_root)?,
         networks,
         tunnels: Vec::new(),
         port_forwarding: None,
@@ -76,7 +77,7 @@ pub(crate) async fn collect_metrics_for_config(
     } else {
         collect_linux_metrics(config)?
     };
-    apply_custom_metrics_if_configured(config, &mut metrics).await;
+    apply_custom_metrics_if_configured(config, &mut metrics).await?;
     let reserved_runtime_tunnels = config
         .network
         .runtime_status_telemetry_plans
@@ -100,89 +101,194 @@ pub(crate) fn unix_now() -> u64 {
         .as_secs()
 }
 
-pub(crate) fn read_optional(path: &str) -> Option<String> {
-    std::fs::read_to_string(path).ok()
+fn read_proc_file(proc_root: &Path, relative_path: &str) -> Result<String> {
+    let path = proc_root.join(relative_path);
+    std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read telemetry source {}", path.display()))
 }
 
-fn read_optional_path(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path).ok()
+fn hostname(config: &AgentConfig) -> Result<String> {
+    resolve_hostname(
+        config.telemetry.hostname_file.as_deref(),
+        |path| std::fs::read_to_string(path),
+        read_system_hostname,
+    )
 }
 
-fn hostname(config: &AgentConfig) -> String {
-    config
-        .telemetry
-        .hostname_file
-        .as_deref()
-        .and_then(read_optional)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .or_else(|| std::env::var("HOSTNAME").ok())
-        .unwrap_or_else(|| "unknown".to_string())
+fn resolve_hostname<ReadFile, DefaultHostname>(
+    configured_path: Option<&str>,
+    read_file: ReadFile,
+    default_hostname: DefaultHostname,
+) -> Result<String>
+where
+    ReadFile: FnOnce(&str) -> std::io::Result<String>,
+    DefaultHostname: FnOnce() -> Result<String>,
+{
+    let (value, source) = if let Some(path) = configured_path {
+        let value = read_file(path)
+            .with_context(|| format!("failed to read configured hostname file {path}"))?;
+        (value, format!("configured hostname file {path}"))
+    } else {
+        (
+            default_hostname().context("failed to read operating system hostname")?,
+            "operating system hostname".to_string(),
+        )
+    };
+    let value = value.trim();
+    ensure!(!value.is_empty(), "{source} is empty");
+    Ok(value.to_string())
 }
 
-fn uptime_secs(proc_root: &Path) -> Option<u64> {
-    let contents = read_optional_path(&proc_root.join("uptime"))?;
-    let first = contents.split_whitespace().next()?;
-    first.parse::<f64>().ok().map(|value| value as u64)
+fn read_system_hostname() -> Result<String> {
+    let mut hostname = [0_u8; 256];
+    let result =
+        unsafe { libc::gethostname(hostname.as_mut_ptr().cast::<libc::c_char>(), hostname.len()) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error()).context("gethostname failed");
+    }
+    let length = hostname
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(hostname.len());
+    String::from_utf8(hostname[..length].to_vec()).context("operating system hostname is not UTF-8")
 }
 
-fn load_average(proc_root: &Path) -> Option<LoadAverage> {
-    let contents = read_optional_path(&proc_root.join("loadavg"))?;
+fn uptime_secs(proc_root: &Path) -> Result<u64> {
+    let contents = read_proc_file(proc_root, "uptime")?;
+    let first = contents
+        .split_whitespace()
+        .next()
+        .context("telemetry uptime source is empty")?;
+    let value = first
+        .parse::<f64>()
+        .context("telemetry uptime is not numeric")?;
+    ensure!(
+        value.is_finite() && value >= 0.0 && value <= u64::MAX as f64,
+        "telemetry uptime is out of range"
+    );
+    Ok(value as u64)
+}
+
+fn load_average(proc_root: &Path) -> Result<LoadAverage> {
+    let contents = read_proc_file(proc_root, "loadavg")?;
     let mut fields = contents.split_whitespace();
-    Some(LoadAverage {
-        one: fields.next()?.parse().ok()?,
-        five: fields.next()?.parse().ok()?,
-        fifteen: fields.next()?.parse().ok()?,
+    let parse_field = |field: Option<&str>, label: &str| -> Result<f64> {
+        let value = field
+            .with_context(|| format!("telemetry load average is missing {label}"))?
+            .parse::<f64>()
+            .with_context(|| format!("telemetry load average {label} is not numeric"))?;
+        ensure!(
+            value.is_finite() && value >= 0.0,
+            "telemetry load average {label} is out of range"
+        );
+        Ok(value)
+    };
+    Ok(LoadAverage {
+        one: parse_field(fields.next(), "one-minute value")?,
+        five: parse_field(fields.next(), "five-minute value")?,
+        fifteen: parse_field(fields.next(), "fifteen-minute value")?,
     })
 }
 
-fn memory_stat(proc_root: &Path) -> Option<MemoryStat> {
-    let contents = read_optional_path(&proc_root.join("meminfo"))?;
-    let mut total = 0_u64;
-    let mut available = 0_u64;
+fn memory_stat(proc_root: &Path) -> Result<MemoryStat> {
+    let contents = read_proc_file(proc_root, "meminfo")?;
+    let mut total = None;
+    let mut available = None;
 
     for line in contents.lines() {
         let mut fields = line.split_whitespace();
-        match fields.next()? {
-            "MemTotal:" => total = fields.next()?.parse::<u64>().ok()? * 1024,
-            "MemAvailable:" => available = fields.next()?.parse::<u64>().ok()? * 1024,
+        let Some(key) = fields.next() else {
+            continue;
+        };
+        match key {
+            "MemTotal:" | "MemAvailable:" => {
+                let value = fields
+                    .next()
+                    .with_context(|| format!("telemetry {key} value is missing"))?
+                    .parse::<u64>()
+                    .with_context(|| format!("telemetry {key} value is not numeric"))?;
+                ensure!(
+                    fields.next() == Some("kB"),
+                    "telemetry {key} unit is not kB"
+                );
+                let value = value
+                    .checked_mul(1024)
+                    .with_context(|| format!("telemetry {key} value is out of range"))?;
+                if key == "MemTotal:" {
+                    total = Some(value);
+                } else {
+                    available = Some(value);
+                }
+            }
             _ => {}
         }
     }
 
-    Some(MemoryStat {
-        total_bytes: total,
-        available_bytes: available,
+    let total_bytes = total.context("telemetry meminfo is missing MemTotal")?;
+    let available_bytes = available.context("telemetry meminfo is missing MemAvailable")?;
+    ensure!(
+        total_bytes > 0 && available_bytes <= total_bytes,
+        "telemetry memory values are inconsistent"
+    );
+    Ok(MemoryStat {
+        total_bytes,
+        available_bytes,
     })
 }
 
-fn network_stats(proc_root: &Path) -> Option<Vec<NetworkStat>> {
-    let contents = read_optional_path(&proc_root.join("net/dev"))?;
-    Some(network_stats_from_proc_net_dev(&contents))
+fn network_stats(proc_root: &Path) -> Result<Vec<NetworkStat>> {
+    let contents = read_proc_file(proc_root, "net/dev")?;
+    network_stats_from_proc_net_dev(&contents)
 }
 
-fn network_stats_from_proc_net_dev(contents: &str) -> Vec<NetworkStat> {
+fn network_stats_from_proc_net_dev(contents: &str) -> Result<Vec<NetworkStat>> {
+    let mut lines = contents.lines();
+    ensure!(
+        lines.next().is_some_and(|line| line.contains("Receive")),
+        "telemetry network source is missing its receive header"
+    );
+    ensure!(
+        lines.next().is_some_and(|line| line.contains("bytes")),
+        "telemetry network source is missing its counter header"
+    );
     let mut stats = Vec::new();
 
-    for line in contents.lines().skip(2) {
-        let Some((name, counters)) = line.split_once(':') else {
-            continue;
-        };
-        let fields: Vec<&str> = counters.split_whitespace().collect();
-        if fields.len() < 16 {
+    for line in lines {
+        if line.trim().is_empty() {
             continue;
         }
+        let (name, counters) = line
+            .split_once(':')
+            .context("telemetry network row is missing ':'")?;
+        let name = name.trim();
+        ensure!(
+            !name.is_empty(),
+            "telemetry network interface name is empty"
+        );
+        let fields: Vec<&str> = counters.split_whitespace().collect();
+        ensure!(
+            fields.len() >= 16,
+            "telemetry network row for {name} has incomplete counters"
+        );
         stats.push(NetworkStat {
-            interface: name.trim().to_string(),
-            rx_bytes: fields[0].parse().unwrap_or_default(),
-            tx_bytes: fields[8].parse().unwrap_or_default(),
+            interface: name.to_string(),
+            rx_bytes: fields[0]
+                .parse()
+                .with_context(|| format!("telemetry RX counter for {name} is not numeric"))?,
+            tx_bytes: fields[8]
+                .parse()
+                .with_context(|| format!("telemetry TX counter for {name} is not numeric"))?,
         });
         if stats.len() == MAX_TELEMETRY_NETWORKS {
             break;
         }
     }
 
-    stats
+    ensure!(
+        !stats.is_empty(),
+        "telemetry network source contains no interface counters"
+    );
+    Ok(stats)
 }
 
 async fn collect_runtime_status_telemetry(
@@ -952,8 +1058,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
-fn disk_stats(proc_root: &Path) -> Option<Vec<DiskStat>> {
-    let contents = read_optional_path(&proc_root.join("mounts"))?;
+fn disk_stats(proc_root: &Path) -> Result<Vec<DiskStat>> {
+    let contents = read_proc_file(proc_root, "mounts")?;
     let ignored = HashSet::from([
         "proc",
         "sysfs",
@@ -973,46 +1079,117 @@ fn disk_stats(proc_root: &Path) -> Option<Vec<DiskStat>> {
     let mut seen_sources = HashSet::new();
     let mut disks = Vec::new();
 
-    for line in contents.lines() {
+    for (index, line) in contents.lines().enumerate() {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 3
-            || ignored.contains(fields[2])
+        ensure!(
+            fields.len() >= 3,
+            "telemetry mounts row {} is incomplete",
+            index + 1
+        );
+        if ignored.contains(fields[2])
             || !seen_sources.insert((fields[0].to_string(), fields[2].to_string()))
         {
             continue;
         }
-        if let Some(stat) = statvfs(fields[1]) {
-            disks.push(DiskStat {
-                mountpoint: fields[1].to_string(),
-                total_bytes: stat.0,
-                available_bytes: stat.1,
-            });
-            if disks.len() == MAX_TELEMETRY_DISKS {
-                break;
-            }
+        let mountpoint = decode_proc_mount_field(fields[1]);
+        let stat = statvfs(&mountpoint)?;
+        disks.push(DiskStat {
+            mountpoint,
+            total_bytes: stat.0,
+            available_bytes: stat.1,
+        });
+        if disks.len() == MAX_TELEMETRY_DISKS {
+            break;
         }
     }
 
-    Some(disks)
+    Ok(disks)
 }
 
-fn statvfs(path: &str) -> Option<(u64, u64)> {
-    let c_path = CString::new(path).ok()?;
+fn decode_proc_mount_field(value: &str) -> String {
+    value
+        .replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
+}
+
+fn statvfs(path: &str) -> Result<(u64, u64)> {
+    let c_path = CString::new(path).context("telemetry mount path contains a null byte")?;
     let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     let rc = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
     if rc != 0 {
-        debug!(%path, "statvfs failed");
-        return None;
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to inspect telemetry mount {path}"));
     }
     let stat = unsafe { stat.assume_init() };
     let total = stat.f_blocks.saturating_mul(stat.f_frsize);
     let available = stat.f_bavail.saturating_mul(stat.f_frsize);
-    Some((total, available))
+    Ok((total, available))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_hostname_read_failure_is_not_replaced_by_a_default() {
+        let default_called = std::cell::Cell::new(false);
+        let error = resolve_hostname(
+            Some("/configured/hostname"),
+            |_| Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing")),
+            || {
+                default_called.set(true);
+                Ok("fallback-hostname".to_string())
+            },
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("failed to read configured hostname file /configured/hostname"));
+        assert!(!default_called.get());
+    }
+
+    #[test]
+    fn configured_hostname_must_not_be_empty() {
+        let error = resolve_hostname(
+            Some("/configured/hostname"),
+            |_| Ok(" \n".to_string()),
+            || Ok("fallback-hostname".to_string()),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "configured hostname file /configured/hostname is empty"
+        );
+    }
+
+    #[test]
+    fn missing_default_hostname_is_an_error_instead_of_an_invented_identity() {
+        let error = resolve_hostname(
+            None,
+            |_| unreachable!("no configured hostname file should be read"),
+            || anyhow::bail!("system source unavailable"),
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("system source unavailable"));
+        assert!(!format!("{error:#}").contains("unknown"));
+    }
+
+    #[test]
+    fn default_hostname_uses_the_operating_system_value() {
+        let hostname = resolve_hostname(
+            None,
+            |_| unreachable!("no configured hostname file should be read"),
+            || Ok("node-from-os\n".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(hostname, "node-from-os");
+    }
 
     #[test]
     fn parses_linux_network_counters_without_classifying_tunnels() {
@@ -1021,7 +1198,8 @@ mod tests {
              face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n\
              eth0: 10 1 0 0 0 0 0 0 20 2 0 0 0 0 0 0\n\
              wg0: 30 3 0 0 0 0 0 0 40 4 0 0 0 0 0 0\n",
-        );
+        )
+        .unwrap();
         assert_eq!(stats.len(), 2);
         assert_eq!(stats[0].interface, "eth0");
         assert_eq!(stats[1].interface, "wg0");
@@ -1041,9 +1219,48 @@ mod tests {
             ));
         }
 
-        let stats = network_stats_from_proc_net_dev(&contents);
+        let stats = network_stats_from_proc_net_dev(&contents).unwrap();
         assert_eq!(stats.len(), MAX_TELEMETRY_NETWORKS);
         assert_eq!(stats.last().unwrap().interface, "veth511");
+    }
+
+    #[test]
+    fn malformed_linux_network_counters_fail_instead_of_becoming_zero() {
+        let error = network_stats_from_proc_net_dev(
+            "Inter-| Receive | Transmit\n\
+             face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n\
+             eth0: broken 1 0 0 0 0 0 0 20 2 0 0 0 0 0 0\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("RX counter"));
+    }
+
+    #[test]
+    fn incomplete_meminfo_fails_instead_of_becoming_zero() {
+        let root = std::env::temp_dir().join(format!("vpsman-meminfo-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("meminfo"), "MemTotal: 1024 kB\n").unwrap();
+        let error = memory_stat(&root).unwrap_err();
+        assert!(error.to_string().contains("MemAvailable"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn malformed_mount_inventory_fails_instead_of_disappearing() {
+        let root = std::env::temp_dir().join(format!("vpsman-mounts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("mounts"), "incomplete-row\n").unwrap();
+        let error = disk_stats(&root).unwrap_err();
+        assert!(error.to_string().contains("row 1 is incomplete"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn decodes_proc_mount_escapes_before_inspection() {
+        assert_eq!(
+            decode_proc_mount_field("/srv/space\\040and\\011tab\\134dir"),
+            "/srv/space and\ttab\\dir"
+        );
     }
 
     #[test]

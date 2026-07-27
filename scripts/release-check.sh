@@ -56,9 +56,13 @@ run_legacy_step tutorial-audit bash scripts/audit-tutorials.sh
 run_step customizability-audit bash scripts/audit-customizability.sh
 run_step migration-compatibility-audit bash scripts/audit-migrations.sh
 run_step agent-static-deps-audit bash scripts/audit-agent-static-deps.sh
+run_step rust-dependency-audit bash scripts/audit-rust-dependencies.sh
 run_step security-sweep bash scripts/security-sweep.sh
 run_step release-version-gate-self-test \
   python3 .github/scripts/check-release-version-gate.py --self-test
+run_step build-number-gate-self-test \
+  python3 .github/scripts/check-build-number-gate.py --self-test
+run_step build-number-gate python3 .github/scripts/check-build-number-gate.py
 run_step deploy-bundle-smoke bash scripts/smoke-deploy-bundle.sh
 run_step deploy-updater-smoke bash scripts/smoke-deploy-updater.sh
 run_step deploy-agent-installer-smoke bash scripts/smoke-deploy-install-agent.sh
@@ -131,7 +135,7 @@ else
   if [[ "${VPSMAN_RELEASE_SKIP_NPM_INSTALL:-0}" == "1" ]]; then
     skip_step frontend-npm-install "VPSMAN_RELEASE_SKIP_NPM_INSTALL=1"
   else
-    run_shell_step frontend-npm-install "cd frontend && npm install"
+    run_shell_step frontend-npm-install "cd frontend && npm ci"
   fi
   run_step check-frontend-contracts bash scripts/check-frontend-contracts.sh
   run_shell_step frontend-build "cd frontend && npm run build"

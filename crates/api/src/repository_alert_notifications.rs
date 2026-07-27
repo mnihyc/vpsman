@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use chrono::{Duration, Utc};
-use serde_json::json;
+use serde_json::{json, Value};
 use sqlx::{types::Json as SqlJson, Row};
 use std::collections::HashSet;
+use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
     is_fleet_alert_notification_delivery_status,
@@ -37,9 +38,63 @@ const MAX_SCOPE_VALUE_BYTES: usize = 128;
 const MAX_TARGET_BYTES: usize = 512;
 const MAX_NOTES_BYTES: usize = 1024;
 const DELIVERY_KIND_WEBHOOK: &str = "webhook";
+const FLEET_ALERT_NOTIFICATION_DISPATCH_CHANNEL_LIMIT: i64 = 1_000;
 
 impl Repository {
     pub(crate) async fn list_fleet_alert_notification_channels(
+        &self,
+        limit: i64,
+        enabled: Option<bool>,
+        scope_kind: Option<&str>,
+        scope_value: Option<&str>,
+        delivery_kind: Option<&str>,
+    ) -> Result<Vec<FleetAlertNotificationChannelView>> {
+        self.query_fleet_alert_notification_channels(
+            limit.clamp(1, 1000),
+            enabled,
+            scope_kind,
+            scope_value,
+            delivery_kind,
+        )
+        .await
+    }
+
+    pub(crate) async fn list_enabled_fleet_alert_notification_channels_for_dispatch(
+        &self,
+    ) -> Result<Vec<FleetAlertNotificationChannelView>> {
+        let channels = self
+            .query_fleet_alert_notification_channels(
+                FLEET_ALERT_NOTIFICATION_DISPATCH_CHANNEL_LIMIT + 1,
+                Some(true),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        anyhow::ensure!(
+            channels.len() <= FLEET_ALERT_NOTIFICATION_DISPATCH_CHANNEL_LIMIT as usize,
+            "fleet_alert_notification_dispatch_channel_limit_exceeded:{}",
+            FLEET_ALERT_NOTIFICATION_DISPATCH_CHANNEL_LIMIT
+        );
+        Ok(channels
+            .into_iter()
+            .filter(|channel| {
+                if let Some(error) = channel.configuration_error.as_deref() {
+                    warn!(
+                        channel_id = %channel.id,
+                        channel_name = %channel.name,
+                        %error,
+                        "skipping malformed fleet alert notification channel"
+                    );
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect())
+    }
+
+    async fn query_fleet_alert_notification_channels(
         &self,
         limit: i64,
         enabled: Option<bool>,
@@ -76,7 +131,7 @@ impl Repository {
                     .cloned()
                     .collect::<Vec<_>>();
                 sort_channels(&mut rows);
-                rows.truncate(limit.clamp(1, 1000) as usize);
+                rows.truncate(limit.max(1) as usize);
                 Ok(rows)
             }
             Self::Postgres(pool) => {
@@ -107,7 +162,7 @@ impl Repository {
                     LIMIT $1
                     "#,
                 )
-                .bind(limit.clamp(1, 1000))
+                .bind(limit.max(1))
                 .bind(enabled)
                 .bind(scope_kind.as_deref())
                 .bind(scope_value.as_deref())
@@ -285,6 +340,7 @@ impl Repository {
     pub(crate) async fn delete_fleet_alert_notification_channel(
         &self,
         channel_id: Uuid,
+        reviewed_name: &str,
         operator: &AuthContext,
     ) -> Result<()> {
         match self {
@@ -296,8 +352,11 @@ impl Repository {
                     .ok_or_else(|| {
                         anyhow::anyhow!("fleet_alert_notification_channel_not_found:{channel_id}")
                     })?;
+                anyhow::ensure!(
+                    channels[index].name == reviewed_name.trim(),
+                    "fleet_alert_notification_channel_delete_review_stale"
+                );
                 let channel = channels.remove(index);
-                drop(channels);
                 let mut deliveries = memory.fleet_alert_notification_deliveries.write().await;
                 cancel_memory_fleet_alert_notification_deliveries(
                     &mut deliveries,
@@ -309,20 +368,23 @@ impl Repository {
                     notification_channel_audit(&channel, operator, unix_now().to_string());
                 audit.action = "fleet.alert_notification_channel_deleted".to_string();
                 memory.audits.write().await.push(audit);
+                drop(channels);
                 Ok(())
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                let channel_exists = sqlx::query_scalar::<_, Uuid>(
-                    "SELECT id FROM fleet_alert_notification_channels WHERE id = $1 FOR UPDATE",
+                let current_name = sqlx::query_scalar::<_, String>(
+                    "SELECT name FROM fleet_alert_notification_channels WHERE id = $1 FOR UPDATE",
                 )
                 .bind(channel_id)
                 .fetch_optional(&mut *tx)
                 .await?
-                .is_some();
+                .ok_or_else(|| {
+                    anyhow::anyhow!("fleet_alert_notification_channel_not_found:{channel_id}")
+                })?;
                 anyhow::ensure!(
-                    channel_exists,
-                    "fleet_alert_notification_channel_not_found:{channel_id}"
+                    current_name == reviewed_name.trim(),
+                    "fleet_alert_notification_channel_delete_review_stale"
                 );
                 sqlx::query(
                     r#"
@@ -1014,6 +1076,7 @@ fn channel_from_request(
         target: request.target.trim().to_string(),
         cooldown_secs,
         enabled: request.enabled.unwrap_or(true),
+        configuration_error: None,
         notes: request
             .notes
             .as_deref()
@@ -1057,25 +1120,46 @@ fn delivery_from_candidate(
 }
 
 fn channel_from_row(row: sqlx::postgres::PgRow) -> Result<FleetAlertNotificationChannelView> {
-    let categories: SqlJson<Vec<String>> = row.try_get("categories")?;
-    let operator_states: SqlJson<Vec<String>> = row.try_get("operator_states")?;
+    let categories: SqlJson<Value> = row.try_get("categories")?;
+    let operator_states: SqlJson<Value> = row.try_get("operator_states")?;
+    let (categories, categories_valid) = persisted_channel_tokens(categories.0, false);
+    let (operator_states, operator_states_valid) =
+        persisted_channel_tokens(operator_states.0, true);
+    let configuration_error = (!categories_valid || !operator_states_valid)
+        .then(|| "fleet_alert_notification_channel_filters_invalid".to_string());
     Ok(FleetAlertNotificationChannelView {
         id: row.try_get("id")?,
         name: row.try_get("name")?,
         scope_kind: row.try_get("scope_kind")?,
         scope_value: row.try_get("scope_value")?,
         min_severity: row.try_get("min_severity")?,
-        categories: categories.0,
-        operator_states: operator_states.0,
+        categories,
+        operator_states,
         delivery_kind: row.try_get("delivery_kind")?,
         target: row.try_get("target")?,
         cooldown_secs: row.try_get("cooldown_secs")?,
         enabled: row.try_get("enabled")?,
+        configuration_error,
         notes: row.try_get("notes")?,
         actor_id: row.try_get("actor_id")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
+}
+
+fn persisted_channel_tokens(value: Value, operator_states: bool) -> (Vec<String>, bool) {
+    let Ok(stored) = serde_json::from_value::<Vec<String>>(value) else {
+        return (Vec::new(), false);
+    };
+    let normalized = if operator_states {
+        normalize_operator_states(&stored)
+    } else {
+        normalize_tokens(&stored, "category")
+    };
+    match normalized {
+        Ok(normalized) if normalized == stored => (stored, true),
+        _ => (Vec::new(), false),
+    }
 }
 
 fn delivery_from_row(row: sqlx::postgres::PgRow) -> Result<FleetAlertNotificationDeliveryView> {
@@ -1360,6 +1444,7 @@ fn notification_channel_metadata(
         "target": &channel.target,
         "cooldown_secs": channel.cooldown_secs,
         "enabled": channel.enabled,
+        "configuration_error": &channel.configuration_error,
         "operator": {
             "id": operator.operator.id,
             "username": &operator.operator.username,

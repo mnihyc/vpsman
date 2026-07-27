@@ -65,6 +65,7 @@ fn rejects_vty_backup_run_without_safe_scope_or_target() {
 fn parses_vty_backup_policy_upsert() {
     let request = parse_vty_backup_policy_upsert(&[
         "nightly-edge",
+        "--schedule-id=52ff9113-03bd-4fa5-a166-3243681826fe",
         "--path",
         "/etc/hostname",
         "--include-config",
@@ -80,6 +81,10 @@ fn parses_vty_backup_policy_upsert() {
     .unwrap();
 
     assert_eq!(request.name, "nightly-edge");
+    assert_eq!(
+        request.schedule_id,
+        Some(Uuid::parse_str("52ff9113-03bd-4fa5-a166-3243681826fe").unwrap())
+    );
     assert_eq!(request.paths, vec!["/etc/hostname"]);
     assert!(request.include_config);
     assert!(request.skip_missing_paths);
@@ -87,9 +92,50 @@ fn parses_vty_backup_policy_upsert() {
     assert_eq!(request.retention_days, Some(45));
     assert_eq!(request.keep_last, Some(12));
     assert_eq!(request.rotation_generation.as_deref(), Some("keyring/v2"));
+    assert!(!request.clear_rotation_generation);
     assert!(request.selection.clients.is_empty());
     assert_eq!(request.selection.tags, vec!["edge", "id:client-a"]);
     assert!(request.selection.confirmed);
+}
+
+#[test]
+fn vty_backup_policy_update_requires_explicit_rotation_intent() {
+    let base = [
+        "nightly-edge",
+        "--schedule-id=52ff9113-03bd-4fa5-a166-3243681826fe",
+        "--include-config",
+        "--retention-days=45",
+        "--keep-last=12",
+        "id:client-a",
+        "--confirmed",
+    ];
+    assert!(parse_vty_backup_policy_upsert(&base).is_err());
+
+    let request = parse_vty_backup_policy_upsert(&[
+        "nightly-edge",
+        "--schedule-id=52ff9113-03bd-4fa5-a166-3243681826fe",
+        "--include-config",
+        "--retention-days=45",
+        "--keep-last=12",
+        "--clear-rotation-generation",
+        "id:client-a",
+        "--confirmed",
+    ])
+    .unwrap();
+    assert!(request.clear_rotation_generation);
+    assert_eq!(request.rotation_generation, None);
+}
+
+#[test]
+fn rejects_invalid_vty_backup_policy_update_target() {
+    assert!(parse_vty_backup_policy_upsert(&[
+        "nightly-edge",
+        "--schedule-id=not-a-uuid",
+        "--include-config",
+        "id:client-a",
+        "--confirmed",
+    ])
+    .is_err());
 }
 
 #[test]

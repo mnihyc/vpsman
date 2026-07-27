@@ -506,6 +506,34 @@ pub(crate) struct TunnelPlanView {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[serde(untagged)]
+pub(crate) enum TunnelPlanListItem {
+    Plan(Box<TunnelPlanView>),
+    Corrupt(Box<TunnelPlanCorruptView>),
+}
+
+impl From<TunnelPlanView> for TunnelPlanListItem {
+    fn from(value: TunnelPlanView) -> Self {
+        Self::Plan(Box::new(value))
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct TunnelPlanCorruptView {
+    pub(crate) id: Uuid,
+    pub(crate) name: String,
+    pub(crate) kind: String,
+    pub(crate) enabled: bool,
+    pub(crate) revision: i64,
+    pub(crate) left_client_id: String,
+    pub(crate) right_client_id: String,
+    pub(crate) created_at: String,
+    pub(crate) updated_at: String,
+    pub(crate) deleted_at: Option<String>,
+    pub(crate) configuration_error: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct TunnelPlanEndpointRuntimeConfigView {
     pub(crate) client_id: String,
     pub(crate) desired: String,
@@ -812,12 +840,15 @@ pub(crate) struct ScheduleView {
     pub(crate) name: String,
     pub(crate) enabled: bool,
     pub(crate) command_type: String,
-    pub(crate) operation: JobCommand,
+    pub(crate) operation: Option<JobCommand>,
+    pub(crate) operation_error: Option<String>,
+    pub(crate) operation_payload_hash: String,
     pub(crate) selector_expression: String,
     pub(crate) target_client_ids: Vec<String>,
     pub(crate) cron_expr: String,
     pub(crate) timezone: String,
     pub(crate) next_runs: Vec<String>,
+    pub(crate) cadence_error: Option<String>,
     pub(crate) catch_up_policy: String,
     pub(crate) catch_up_limit: i32,
     pub(crate) retry_delay_secs: i64,

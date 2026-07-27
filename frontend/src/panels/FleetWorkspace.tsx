@@ -60,6 +60,11 @@ import {
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
 import {
+  FLEET_DETAIL_LIMIT,
+  FLEET_TELEMETRY_SNAPSHOT_LIMIT,
+  formatLowerBoundCount,
+} from "../constants";
+import {
   useReviewGenerationGuard,
   waitForReviewRender,
 } from "../hooks/useReviewGenerationGuard";
@@ -255,6 +260,7 @@ export function FleetWorkspace({
   activeSubpage,
   agents,
   apiError,
+  fleetCoreEvidenceAvailable,
   fleetAlerts,
   fleetAlertStates,
   fleetAlertPolicies,
@@ -308,6 +314,7 @@ export function FleetWorkspace({
   activeSubpage: string;
   agents: AgentView[];
   apiError: string | null;
+  fleetCoreEvidenceAvailable: boolean;
   fleetAlerts: FleetAlertRecord[];
   fleetAlertStates: FleetAlertStateRecord[];
   fleetAlertPolicies: FleetAlertPolicyRecord[];
@@ -402,6 +409,41 @@ export function FleetWorkspace({
   wsState: string;
 }) {
   const { preferences, vpsNameDisplayMode } = usePanelDisplaySettings();
+  const fleetAlertPoliciesTruncated =
+    fleetAlertPolicies.length >= FLEET_DETAIL_LIMIT;
+  const policyAlertsTruncated = policyAlerts.length >= FLEET_DETAIL_LIMIT;
+  const trafficAccountingTruncated =
+    trafficAccounting.length >= FLEET_DETAIL_LIMIT;
+  const notificationChannelsTruncated =
+    fleetAlertNotificationChannels.length >= FLEET_DETAIL_LIMIT;
+  const alertNotificationsTruncated =
+    fleetAlertNotifications.length >= FLEET_DETAIL_LIMIT;
+  const webhookRulesTruncated = webhookRules.length >= FLEET_DETAIL_LIMIT;
+  const webhookDeliveriesTruncated =
+    webhookRuleDeliveries.length >= FLEET_DETAIL_LIMIT;
+  const vpsRuleValuesTruncated =
+    vpsRuleValues.length >= FLEET_TELEMETRY_SNAPSHOT_LIMIT;
+  const telemetryRollupsTruncated =
+    telemetryRollups.length >= FLEET_TELEMETRY_SNAPSHOT_LIMIT;
+  const telemetryNetworkRatesTruncated =
+    telemetryNetworkRates.length >= FLEET_TELEMETRY_SNAPSHOT_LIMIT;
+  const telemetryTunnelsTruncated =
+    telemetryTunnels.length >= FLEET_TELEMETRY_SNAPSHOT_LIMIT;
+  const telemetryTruncated =
+    telemetryRollupsTruncated ||
+    telemetryNetworkRatesTruncated ||
+    telemetryTunnelsTruncated;
+  const fleetLoadBoundaryLabels = [
+    fleetAlertPoliciesTruncated ? "alert policies" : null,
+    policyAlertsTruncated ? "policy alerts" : null,
+    trafficAccountingTruncated ? "traffic accounting" : null,
+    notificationChannelsTruncated ? "notification channels" : null,
+    alertNotificationsTruncated ? "notification deliveries" : null,
+    webhookRulesTruncated ? "webhook rules" : null,
+    webhookDeliveriesTruncated ? "webhook deliveries" : null,
+    vpsRuleValuesTruncated ? "VPS rules" : null,
+    telemetryTruncated ? "telemetry" : null,
+  ].filter((label): label is string => label !== null);
   const [selectionStatsMode, setSelectionStatsMode] =
     useState<FleetSelectionStatsMode>("telemetry");
   const [deleteSnapshot, setDeleteSnapshot] =
@@ -1159,6 +1201,15 @@ export function FleetWorkspace({
           : "workspace singleColumn"
       }
     >
+      {fleetLoadBoundaryLabels.length > 0 ? (
+        <ActionFeedback
+          className="localActionFeedback"
+          message={`Loaded list limits reached for ${fleetLoadBoundaryLabels.join(
+            ", ",
+          )}; counts and filters below apply to loaded records.`}
+          tone="info"
+        />
+      ) : null}
       {fleetSubpage === "instances" && (
         <FleetInstancesPanel
           actions={fleetInstanceActions}
@@ -1169,6 +1220,7 @@ export function FleetWorkspace({
           deleteFeedback={deleteFeedback}
           deletePending={deletePending}
           deleteSnapshot={deleteSnapshot}
+          fleetCoreEvidenceAvailable={fleetCoreEvidenceAvailable}
           onCancelDelete={() => {
             setDeleteError(null);
             clearDeleteReview();
@@ -1225,7 +1277,9 @@ export function FleetWorkspace({
               onRequestedTabConsumed={ignoreRequestedFleetDetailTab}
               onUpdateAgentAlias={onUpdateAgentAlias}
               policies={fleetAlertPolicies}
+              policiesTruncated={fleetAlertPoliciesTruncated}
               policyAlerts={policyAlertsByClient.get(agent.id) ?? []}
+              policyAlertsTruncated={policyAlertsTruncated}
               privilegeMaterial={privilegeMaterial}
               requestedTab={null}
               showCountryFlags={preferences.show_country_flags}
@@ -1239,10 +1293,15 @@ export function FleetWorkspace({
               telemetryNetworkRates={
                 networkRateHistoryByClient.get(agent.id) ?? []
               }
+              telemetryNetworkRatesTruncated={telemetryNetworkRatesTruncated}
               telemetryRollups={rollupHistoryByClient.get(agent.id) ?? []}
+              telemetryRollupsTruncated={telemetryRollupsTruncated}
+              telemetryTunnelsTruncated={telemetryTunnelsTruncated}
               trafficAccounting={trafficByClient.get(agent.id) ?? null}
+              trafficAccountingTruncated={trafficAccountingTruncated}
               vpsNameDisplayMode={vpsNameDisplayMode}
               vpsRuleValues={vpsRulesByClient.get(agent.id) ?? []}
+              vpsRuleValuesTruncated={vpsRuleValuesTruncated}
               wsState={wsState}
             />
           )}
@@ -1258,7 +1317,10 @@ export function FleetWorkspace({
           <div className="sectionHeader">
             <div>
               <h2>Alert policies</h2>
-              <span>{`${fleetAlertPolicies.length} policy groups`}</span>
+              <span>{`${formatLowerBoundCount(
+                fleetAlertPolicies.length,
+                fleetAlertPoliciesTruncated,
+              )}${fleetAlertPoliciesTruncated ? " loaded" : ""} policy groups`}</span>
             </div>
             <span className="sectionContext">
               Selector expressions match VPSs; rule rows issue first-reach
@@ -1275,6 +1337,7 @@ export function FleetWorkspace({
             policyFocusId={policyFocusId}
             policyFilterClientId={policyFilterClientId}
             policies={fleetAlertPolicies}
+            rowsTruncated={fleetAlertPoliciesTruncated}
           />
         </div>
       )}
@@ -1284,10 +1347,22 @@ export function FleetWorkspace({
           <div className="sectionHeader">
             <div>
               <h2>Notification channels</h2>
-              <span>{`${fleetAlertNotificationChannels.length} alert channels, ${webhookRules.length} expression webhooks`}</span>
+              <span>{`${formatLowerBoundCount(
+                fleetAlertNotificationChannels.length,
+                notificationChannelsTruncated,
+              )}${notificationChannelsTruncated ? " loaded" : ""} alert channels, ${formatLowerBoundCount(
+                webhookRules.length,
+                webhookRulesTruncated,
+              )}${webhookRulesTruncated ? " loaded" : ""} expression webhooks`}</span>
             </div>
             <span className="sectionContext">
-              {fleetAlertNotifications.length + webhookRuleDeliveries.length}{" "}
+              {formatLowerBoundCount(
+                fleetAlertNotifications.length + webhookRuleDeliveries.length,
+                alertNotificationsTruncated || webhookDeliveriesTruncated,
+              )}{" "}
+              {alertNotificationsTruncated || webhookDeliveriesTruncated
+                ? "loaded "
+                : ""}
               retained deliveries
             </span>
           </div>
@@ -1324,6 +1399,7 @@ function FleetInstancesPanel({
   deleteFeedback,
   deletePending,
   deleteSnapshot,
+  fleetCoreEvidenceAvailable,
   onCancelDelete,
   onConfirmDelete,
   onOpenMonitor,
@@ -1347,6 +1423,7 @@ function FleetInstancesPanel({
   deleteFeedback: { message: string; tone: ActionFeedbackTone } | null;
   deletePending: boolean;
   deleteSnapshot: DeleteAgentConfirmationSnapshot | null;
+  fleetCoreEvidenceAvailable: boolean;
   onCancelDelete: () => void;
   onConfirmDelete: () => void;
   onOpenMonitor?: () => void;
@@ -1381,8 +1458,10 @@ function FleetInstancesPanel({
           <span>Live control-plane inventory</span>
         </div>
         <span className="sectionContext">
-          {summary.online} live / {summary.never + summary.unknown} no contact / {summary.total} total ·{" "}
-          {formatConsoleStreamState(wsState)}
+          {fleetCoreEvidenceAvailable
+            ? `${summary.online} live / ${summary.never + summary.unknown} no contact / ${summary.total} total`
+            : "Fleet inventory unavailable"}{" "}
+          · {formatConsoleStreamState(wsState)}
         </span>
       </div>
       <ConsoleFreshnessBanner error={apiError} />
@@ -1411,12 +1490,18 @@ function FleetInstancesPanel({
           <div className="emptyState">
             <Server size={22} />
             <strong>
-              {scopeActive ? "No VPS match this view" : "No live agents"}
+              {!fleetCoreEvidenceAvailable
+                ? "Fleet inventory unavailable"
+                : scopeActive
+                  ? "No VPS match this view"
+                  : "No live agents"}
             </strong>
             <span>
-              {scopeActive
-                ? "Adjust or clear the saved fleet view."
-                : "Waiting for VPS agents to connect through gateways and report in."}
+              {!fleetCoreEvidenceAvailable
+                ? "Retry the fleet refresh before assuming no VPS is registered."
+                : scopeActive
+                  ? "Adjust or clear the saved fleet view."
+                  : "Waiting for VPS agents to connect through gateways and report in."}
             </span>
           </div>
         }
@@ -1484,7 +1569,9 @@ function FleetInstanceDetail({
   sourceStatus,
   lastLiveEvent,
   policyAlerts,
+  policyAlertsTruncated,
   policies,
+  policiesTruncated,
   requestedTab,
   onRequestedTabConsumed,
   latestNetworkRates,
@@ -1505,9 +1592,14 @@ function FleetInstanceDetail({
   tagDisplayOrder,
   tagVisibilityOverrides,
   telemetryNetworkRates,
+  telemetryNetworkRatesTruncated,
   telemetryRollups,
+  telemetryRollupsTruncated,
+  telemetryTunnelsTruncated,
   trafficAccounting,
+  trafficAccountingTruncated,
   vpsRuleValues,
+  vpsRuleValuesTruncated,
   vpsNameDisplayMode,
   wsState,
 }: {
@@ -1516,7 +1608,9 @@ function FleetInstanceDetail({
   sourceStatus: SourceStatusRecord[];
   lastLiveEvent: string;
   policyAlerts: PolicyAlertRecord[];
+  policyAlertsTruncated: boolean;
   policies: FleetAlertPolicyRecord[];
+  policiesTruncated: boolean;
   requestedTab: FleetDetailTab | null;
   onRequestedTabConsumed: () => void;
   latestNetworkRates: TelemetryNetworkRateRecord[];
@@ -1551,9 +1645,14 @@ function FleetInstanceDetail({
   tagDisplayOrder: TagDisplayOrder;
   tagVisibilityOverrides: Record<string, boolean>;
   telemetryNetworkRates: TelemetryNetworkRateRecord[];
+  telemetryNetworkRatesTruncated: boolean;
   telemetryRollups: TelemetryRollupRecord[];
+  telemetryRollupsTruncated: boolean;
+  telemetryTunnelsTruncated: boolean;
   trafficAccounting: TrafficAccountingRecord | null;
+  trafficAccountingTruncated: boolean;
   vpsRuleValues: VpsRuleValueRecord[];
+  vpsRuleValuesTruncated: boolean;
   vpsNameDisplayMode: VpsNameDisplayMode;
   wsState: string;
 }) {
@@ -1885,22 +1984,42 @@ function FleetInstanceDetail({
       <div className="signalGrid fleetSignalGrid">
         <Metric
           label="Traffic"
-          value={formatSignalTraffic(latestRollup, latestNetworkRates)}
+          value={
+            !latestRollup &&
+            latestNetworkRates.length === 0 &&
+            (telemetryRollupsTruncated || telemetryNetworkRatesTruncated)
+              ? "Unknown in loaded telemetry pages"
+              : formatSignalTraffic(latestRollup, latestNetworkRates)
+          }
           tone="blue"
         />
         <Metric
           label="Samples"
-          value={formatSignalSamples(latestRollup, latestNetworkRates)}
+          value={
+            !latestRollup &&
+            latestNetworkRates.length === 0 &&
+            (telemetryRollupsTruncated || telemetryNetworkRatesTruncated)
+              ? "Unknown in loaded telemetry pages"
+              : formatSignalSamples(latestRollup, latestNetworkRates)
+          }
           tone="green"
         />
         <Metric
           label="RAM used"
-          value={formatMemoryUsed(latestRollup)}
+          value={
+            !latestRollup && telemetryRollupsTruncated
+              ? "Unknown in loaded rollup page"
+              : formatMemoryUsed(latestRollup)
+          }
           tone="blue"
         />
         <Metric
           label="Disk free"
-          value={formatDiskFree(latestRollup)}
+          value={
+            !latestRollup && telemetryRollupsTruncated
+              ? "Unknown in loaded rollup page"
+              : formatDiskFree(latestRollup)
+          }
           tone="green"
         />
       </div>
@@ -1989,32 +2108,57 @@ function FleetInstanceDetail({
             <DetailLine
               icon={<Gauge size={18} />}
               label="CPU load"
-              value={formatLoad(latestRollup?.cpu_load_1_avg)}
+              value={
+                !latestRollup && telemetryRollupsTruncated
+                  ? "Unknown in loaded rollup page; more may exist"
+                  : formatLoad(latestRollup?.cpu_load_1_avg)
+              }
             />
             <DetailLine
               icon={<Server size={18} />}
               label="RAM used"
-              value={formatMemoryUsed(latestRollup)}
+              value={
+                !latestRollup && telemetryRollupsTruncated
+                  ? "Unknown in loaded rollup page; more may exist"
+                  : formatMemoryUsed(latestRollup)
+              }
             />
             <DetailLine
               icon={<Boxes size={18} />}
               label="Disk free"
-              value={formatDiskFree(latestRollup)}
+              value={
+                !latestRollup && telemetryRollupsTruncated
+                  ? "Unknown in loaded rollup page; more may exist"
+                  : formatDiskFree(latestRollup)
+              }
             />
             <DetailLine
               icon={<Network size={18} />}
               label="Network bytes"
-              value={formatNetworkBytes(latestRollup)}
+              value={
+                !latestRollup && telemetryRollupsTruncated
+                  ? "Unknown in loaded rollup page; more may exist"
+                  : formatNetworkBytes(latestRollup)
+              }
             />
             <DetailLine
               icon={<Network size={18} />}
               label="Network rate"
-              value={formatNetworkRateSummary(latestNetworkRates, latestRollup)}
+              value={
+                latestNetworkRates.length === 0 &&
+                telemetryNetworkRatesTruncated
+                  ? "Unknown in loaded network-rate page; more may exist"
+                  : formatNetworkRateSummary(latestNetworkRates, latestRollup)
+              }
             />
             <DetailLine
               icon={<Activity size={18} />}
               label="Rollup samples"
-              value={formatRollupSamples(latestRollup)}
+              value={
+                !latestRollup && telemetryRollupsTruncated
+                  ? "Unknown in loaded rollup page; more may exist"
+                  : formatRollupSamples(latestRollup)
+              }
             />
             <DetailLine
               icon={<Server size={18} />}
@@ -2027,10 +2171,14 @@ function FleetInstanceDetail({
           <TrafficRulesDetail
             agent={agent}
             policyAlerts={policyAlerts}
+            policyAlertsTruncated={policyAlertsTruncated}
             policies={policies}
+            policiesTruncated={policiesTruncated}
             onNavigatePanel={onNavigatePanel}
             trafficAccounting={trafficAccounting}
+            trafficAccountingTruncated={trafficAccountingTruncated}
             vpsRuleValues={vpsRuleValues}
+            vpsRuleValuesTruncated={vpsRuleValuesTruncated}
           />
         )}
         {activeDetailTab === "Jobs" && (
@@ -2085,8 +2233,15 @@ function FleetInstanceDetail({
               selectedAgent={agent}
               snapshot={interfaceSnapshot}
             />
-            <TunnelList tunnels={latestTunnels} />
-            <NetworkRateList rates={latestNetworkRates} rollup={latestRollup} />
+            <TunnelList
+              tunnels={latestTunnels}
+              tunnelsTruncated={telemetryTunnelsTruncated}
+            />
+            <NetworkRateList
+              rates={latestNetworkRates}
+              ratesTruncated={telemetryNetworkRatesTruncated}
+              rollup={latestRollup}
+            />
             {agent.capabilities.unprivileged_hint && (
               <DetailLine
                 icon={<Activity size={18} />}
@@ -2129,7 +2284,9 @@ function FleetInstanceDetail({
       </div>
       <FleetNodeCharts
         networkRates={telemetryNetworkRates}
+        networkRatesTruncated={telemetryNetworkRatesTruncated}
         rollups={telemetryRollups}
+        rollupsTruncated={telemetryRollupsTruncated}
         title={agentLabel}
       />
     </div>
@@ -2303,9 +2460,13 @@ function TrafficRulesDetail({
   agent,
   onNavigatePanel,
   policyAlerts,
+  policyAlertsTruncated,
   policies,
+  policiesTruncated,
   trafficAccounting,
+  trafficAccountingTruncated,
   vpsRuleValues,
+  vpsRuleValuesTruncated,
 }: {
   agent: AgentView;
   onNavigatePanel?: (
@@ -2314,9 +2475,13 @@ function TrafficRulesDetail({
     targetClientId?: string,
   ) => void;
   policyAlerts: PolicyAlertRecord[];
+  policyAlertsTruncated: boolean;
   policies: FleetAlertPolicyRecord[];
+  policiesTruncated: boolean;
   trafficAccounting: TrafficAccountingRecord | null;
+  trafficAccountingTruncated: boolean;
   vpsRuleValues: VpsRuleValueRecord[];
+  vpsRuleValuesTruncated: boolean;
 }) {
   const policyById = new Map(policies.map((policy) => [policy.id, policy]));
   const alertByRule = new Map(
@@ -2335,6 +2500,9 @@ function TrafficRulesDetail({
       })),
     );
   const trafficRows = trafficAccounting?.selector_breakdown ?? [];
+  const trafficMissingUnderCap =
+    trafficAccounting === null && trafficAccountingTruncated;
+  const unknownTrafficPage = "Unknown in loaded traffic page; more may exist";
   const selectedPolicyId = matchedPolicyRows[0]?.policy.id;
   const trafficColumns = useMemo<
     ConsoleDataGridColumn<TrafficAccountingSelectorBreakdown>[]
@@ -2685,14 +2853,23 @@ function TrafficRulesDetail({
           Last accounting sample:{" "}
           {trafficAccounting?.last_sample_at
             ? formatTime(trafficAccounting.last_sample_at)
-            : "none"}
+            : trafficMissingUnderCap
+              ? unknownTrafficPage
+              : "none"}
         </span>
       </div>
       <div className="consoleOperationsBar">
         <span>
-          <strong>{selectorSummary(trafficAccounting)}</strong>
+          <strong>
+            {trafficMissingUnderCap
+              ? "Selector state unknown in loaded traffic page"
+              : selectorSummary(trafficAccounting)}
+          </strong>
           <small>
-            {trafficAccounting?.selector_hash ?? "no selector hash"}
+            {trafficAccounting?.selector_hash ??
+              (trafficMissingUnderCap
+                ? "More traffic records may exist"
+                : "no selector hash")}
           </small>
         </span>
         <div className="consoleOperationsActions">
@@ -2733,42 +2910,64 @@ function TrafficRulesDetail({
           value={
             trafficAccounting
               ? formatBytes(trafficAccounting.total_bytes)
-              : "not configured"
+              : trafficMissingUnderCap
+                ? unknownTrafficPage
+                : "not configured"
           }
           tone="blue"
         />
         <Metric
           label="Quota"
-          value={quotaSummary(trafficAccounting)}
+          value={
+            trafficMissingUnderCap
+              ? unknownTrafficPage
+              : quotaSummary(trafficAccounting)
+          }
           tone="green"
         />
         <Metric
           label="Cycle percent"
           value={
             trafficAccounting?.cycle_percent == null
-              ? "incomplete"
+              ? trafficMissingUnderCap
+                ? unknownTrafficPage
+                : "incomplete"
               : `${trafficAccounting.cycle_percent.toFixed(1)}%`
           }
           tone="blue"
         />
         <Metric
           label="Traffic state"
-          value={trafficStateForClient(trafficAccounting, policyAlerts)}
+          value={
+            trafficMissingUnderCap && policyAlerts.length === 0
+              ? unknownTrafficPage
+              : trafficStateForClient(trafficAccounting, policyAlerts)
+          }
           tone="green"
         />
       </div>
       <div className="consoleInlineDetailGrid trafficAccountingSummary">
         <span>
           <strong>Cycle start</strong>
-          <span>{trafficAccounting?.cycle_start ?? "not configured"}</span>
+          <span>
+            {trafficAccounting?.cycle_start ??
+              (trafficMissingUnderCap ? unknownTrafficPage : "not configured")}
+          </span>
         </span>
         <span>
           <strong>Cycle end</strong>
-          <span>{trafficAccounting?.cycle_end ?? "not configured"}</span>
+          <span>
+            {trafficAccounting?.cycle_end ??
+              (trafficMissingUnderCap ? unknownTrafficPage : "not configured")}
+          </span>
         </span>
         <span>
           <strong>Reset day</strong>
-          <span>{resetDaySummary(trafficAccounting)}</span>
+          <span>
+            {trafficMissingUnderCap
+              ? unknownTrafficPage
+              : resetDaySummary(trafficAccounting)}
+          </span>
         </span>
         <span>
           <strong>Cycle timezone</strong>
@@ -2779,17 +2978,23 @@ function TrafficRulesDetail({
           <span>
             {trafficAccounting?.last_sample_at
               ? formatCompactTime(trafficAccounting.last_sample_at)
-              : "none"}
+              : trafficMissingUnderCap
+                ? unknownTrafficPage
+                : "none"}
           </span>
         </span>
         <span>
           <strong>Counter epochs seen</strong>
-          <span>{trafficAccounting?.counter_epochs_seen ?? 0}</span>
+          <span>
+            {trafficAccounting?.counter_epochs_seen ??
+              (trafficMissingUnderCap ? unknownTrafficPage : 0)}
+          </span>
         </span>
         <span>
           <strong>Incomplete reasons</strong>
           <span>
-            {trafficAccounting?.incomplete_reasons.join(", ") || "none"}
+            {trafficAccounting?.incomplete_reasons.join(", ") ||
+              (trafficMissingUnderCap ? unknownTrafficPage : "none")}
           </span>
         </span>
       </div>
@@ -2797,10 +3002,15 @@ function TrafficRulesDetail({
         <ConsoleDataGrid
           columns={trafficColumns}
           defaultPageSize={5}
-          empty="No traffic selectors configured."
+          empty={
+            trafficMissingUnderCap
+              ? "No selector data for this VPS appears in the loaded traffic page; more records may exist."
+              : "No traffic selectors configured."
+          }
           getRowId={(row) => `${row.source}:${row.interface}:${row.direction}`}
           itemLabel="selectors"
           rows={trafficRows}
+          rowsTruncated={trafficMissingUnderCap}
           searchPlaceholder="Search selected traffic"
           selectable={false}
           storageKey={`vpsman.grid.fleet.traffic.selected.${agent.id}`}
@@ -2811,10 +3021,15 @@ function TrafficRulesDetail({
         <ConsoleDataGrid
           columns={vpsRuleColumns}
           defaultPageSize={6}
-          empty="No VPS rule values set."
+          empty={
+            vpsRuleValuesTruncated
+              ? "No rule values for this VPS appear in the loaded global page; more records may exist."
+              : "No VPS rule values set."
+          }
           getRowId={(row) => `${row.client_id}:${row.key}`}
           itemLabel="values"
           rows={vpsRuleValues}
+          rowsTruncated={vpsRuleValuesTruncated}
           searchPlaceholder="Search VPS rule values"
           selectable={false}
           storageKey={`vpsman.grid.fleet.traffic.rules.${agent.id}`}
@@ -2825,10 +3040,15 @@ function TrafficRulesDetail({
         <ConsoleDataGrid
           columns={policyColumns}
           defaultPageSize={6}
-          empty="No matched policy rule state for this VPS."
+          empty={
+            policiesTruncated || policyAlertsTruncated
+              ? "No matched policy state for this VPS appears in the loaded pages; more records may exist."
+              : "No matched policy rule state for this VPS."
+          }
           getRowId={(row) => `${row.policy.id}:${row.rule.id}`}
           itemLabel="policy rules"
           rows={matchedPolicyRows}
+          rowsTruncated={policiesTruncated || policyAlertsTruncated}
           searchPlaceholder="Search matched policy rules"
           selectable={false}
           storageKey={`vpsman.grid.fleet.traffic.policies.${agent.id}`}
@@ -2839,10 +3059,15 @@ function TrafficRulesDetail({
         <ConsoleDataGrid
           columns={alertColumns}
           defaultPageSize={6}
-          empty="No issued policy alerts."
+          empty={
+            policyAlertsTruncated
+              ? "No policy alerts for this VPS appear in the loaded global page; more records may exist."
+              : "No issued policy alerts."
+          }
           getRowId={(row) => row.id}
           itemLabel="alerts"
           rows={policyAlerts}
+          rowsTruncated={policyAlertsTruncated}
           searchPlaceholder="Search recent policy alerts"
           selectable={false}
           storageKey={`vpsman.grid.fleet.traffic.alerts.${agent.id}`}
@@ -2855,11 +3080,15 @@ function TrafficRulesDetail({
 
 function FleetNodeCharts({
   networkRates,
+  networkRatesTruncated,
   rollups,
+  rollupsTruncated,
   title,
 }: {
   networkRates: TelemetryNetworkRateRecord[];
+  networkRatesTruncated: boolean;
   rollups: TelemetryRollupRecord[];
+  rollupsTruncated: boolean;
   title: string;
 }) {
   const resourceChart = resourcePercentChartData(rollups);
@@ -2878,7 +3107,11 @@ function FleetNodeCharts({
           <strong>Resource use</strong>
           <TimeSeriesChart
             ariaLabel={`${title} resource percentage curves`}
-            emptyLabel="No resource rollup history"
+            emptyLabel={
+              rollupsTruncated
+                ? "No resource history for this VPS appears in the loaded rollup page; more may exist"
+                : "No resource rollup history"
+            }
             height={210}
             lines={resourceChart.lines}
             times={resourceChart.times}
@@ -2889,7 +3122,11 @@ function FleetNodeCharts({
           <strong>CPU load</strong>
           <TimeSeriesChart
             ariaLabel={`${title} CPU load curve`}
-            emptyLabel="No CPU rollup history"
+            emptyLabel={
+              rollupsTruncated
+                ? "No CPU history for this VPS appears in the loaded rollup page; more may exist"
+                : "No CPU rollup history"
+            }
             height={210}
             lines={cpuChart.lines}
             times={cpuChart.times}
@@ -2900,7 +3137,11 @@ function FleetNodeCharts({
           <strong>Network rate</strong>
           <TimeSeriesChart
             ariaLabel={`${title} network rate curves`}
-            emptyLabel="No network rate history"
+            emptyLabel={
+              networkRatesTruncated
+                ? "No network history for this VPS appears in the loaded rate page; more may exist"
+                : "No network rate history"
+            }
             height={210}
             lines={networkChart.lines}
             times={networkChart.times}
@@ -3558,7 +3799,9 @@ function ConsoleFreshnessBanner({ error }: { error: string | null }) {
   }
   return (
     <div className="consoleFreshnessBanner">
-      <span>Using cached data. Last refresh failed: {error}</span>
+      <span>
+        Last refresh failed; any previously loaded data remains visible: {error}
+      </span>
     </div>
   );
 }
@@ -3925,12 +4168,24 @@ function ChannelDetailGrid({
       </span>
       <span>
         <strong>State</strong>
-        <span>{channel.enabled ? "enabled" : "disabled"}</span>
+        <span>
+          {channel.configuration_error
+            ? "invalid — skipped"
+            : channel.enabled
+              ? "enabled"
+              : "disabled"}
+        </span>
       </span>
       <span>
         <strong>Categories</strong>
         <span>{tokenSummary(channel.categories, "all categories")}</span>
       </span>
+      {channel.configuration_error ? (
+        <span>
+          <strong>Configuration</strong>
+          <span>Stored filters are invalid; delete and replace this channel</span>
+        </span>
+      ) : null}
       <span>
         <strong>Operator states</strong>
         <span>{tokenSummary(channel.operator_states, "all states")}</span>
@@ -4120,6 +4375,7 @@ export function FleetAlertPolicyManager({
   editorMode = "inline",
   onEditorOpenChange,
   policies,
+  rowsTruncated = policies.length >= FLEET_DETAIL_LIMIT,
   policyAlerts,
   policyFocusId,
   policyFilterClientId,
@@ -4131,6 +4387,7 @@ export function FleetAlertPolicyManager({
   editorMode?: "inline" | "focused";
   onEditorOpenChange?: (open: boolean) => void;
   policies: FleetAlertPolicyRecord[];
+  rowsTruncated?: boolean;
   policyAlerts: PolicyAlertRecord[];
   policyFocusId: string | null;
   policyFilterClientId: string | null;
@@ -4686,6 +4943,7 @@ export function FleetAlertPolicyManager({
             renderExpandedRow={(policy) => <PolicyDetailGrid policy={policy} />}
             rowActions={policyActions}
             rows={policies}
+            rowsTruncated={rowsTruncated}
             searchPlaceholder="Search policies by name, selector, rules, or notes"
             storageKey="vpsman.grid.fleet.alertPolicies.v3"
             title="Policy groups"
@@ -5467,6 +5725,7 @@ export function FleetAlertNotificationManager({
   onProcess,
   onUpsert,
   queueMode = "full",
+  rowsTruncated = channels.length >= FLEET_DETAIL_LIMIT,
 }: {
   agents: AgentView[];
   channels: FleetAlertNotificationChannelRecord[];
@@ -5484,6 +5743,7 @@ export function FleetAlertNotificationManager({
     request: FleetAlertNotificationChannelRequest,
   ) => Promise<FleetAlertNotificationChannelRecord>;
   queueMode?: "full" | "configuration";
+  rowsTruncated?: boolean;
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
@@ -5518,7 +5778,9 @@ export function FleetAlertNotificationManager({
   const [queueSnapshot, setQueueSnapshot] =
     useState<AlertDeliveryQueueSnapshot | null>(null);
   const [queuePending, setQueuePending] = useState(false);
-  const hasEnabledChannels = channels.some((channel) => channel.enabled);
+  const hasEnabledChannels = channels.some(
+    (channel) => channel.enabled && !channel.configuration_error,
+  );
   const hasQueuedDeliveries = deliveries.some(
     (delivery) => delivery.status === "queued",
   );
@@ -5582,16 +5844,20 @@ export function FleetAlertNotificationManager({
         size: 260,
         minSize: 190,
         searchValue: (channel) =>
-          `${channel.categories.join(" ")} ${channel.operator_states.join(" ")}`,
+          `${channel.categories.join(" ")} ${channel.operator_states.join(" ")} ${channel.configuration_error ?? ""}`,
         cell: (channel) => (
           <span className="historyPrimary">
             <strong>
-              {channel.categories.length > 0
+              {channel.configuration_error
+                ? "Invalid stored filters"
+                : channel.categories.length > 0
                 ? channel.categories.join(", ")
                 : "all categories"}
             </strong>
             <small>
-              {channel.operator_states.length > 0
+              {channel.configuration_error
+                ? "Channel is skipped until replaced"
+                : channel.operator_states.length > 0
                 ? channel.operator_states.join(", ")
                 : "all states"}
             </small>
@@ -5618,10 +5884,27 @@ export function FleetAlertNotificationManager({
         size: 100,
         minSize: 90,
         sortValue: (channel) => channel.enabled,
-        searchValue: (channel) => (channel.enabled ? "enabled" : "disabled"),
+        searchValue: (channel) =>
+          channel.configuration_error
+            ? "invalid configuration"
+            : channel.enabled
+              ? "enabled"
+              : "disabled",
         cell: (channel) => (
-          <ConsoleStatusBadge tone={channel.enabled ? "ok" : "warning"}>
-            {channel.enabled ? "enabled" : "disabled"}
+          <ConsoleStatusBadge
+            tone={
+              channel.configuration_error
+                ? "critical"
+                : channel.enabled
+                  ? "ok"
+                  : "warning"
+            }
+          >
+            {channel.configuration_error
+              ? "invalid"
+              : channel.enabled
+                ? "enabled"
+                : "disabled"}
           </ConsoleStatusBadge>
         ),
       },
@@ -5673,6 +5956,13 @@ export function FleetAlertNotificationManager({
   }
 
   function editChannel(channel: FleetAlertNotificationChannelRecord) {
+    if (channel.configuration_error) {
+      setChannelStatus(
+        "Stored channel filters are invalid. Delete this channel and create a reviewed replacement.",
+        "danger",
+      );
+      return;
+    }
     setDetailChannelId(null);
     setEditingId(channel.id);
     setName(channel.name);
@@ -6043,7 +6333,8 @@ export function FleetAlertNotificationManager({
             rows[0]?.name,
             "Opens the channel editor below the table.",
           ),
-        disabled: (rows) => rows.length !== 1,
+        disabled: (rows) =>
+          rows.length !== 1 || Boolean(rows[0]?.configuration_error),
         icon: <Pencil size={14} />,
         onSelect: (rows) => rows[0] && editChannel(rows[0]),
       },
@@ -6053,6 +6344,7 @@ export function FleetAlertNotificationManager({
           `Enable ${rows.filter((channel) => !channel.enabled).length} disabled selected notification channel records.`,
         disabled: (rows) =>
           savePending ||
+          rows.some((channel) => Boolean(channel.configuration_error)) ||
           rows.filter((channel) => !channel.enabled).length === 0,
         icon: <Power size={14} />,
         onSelect: (rows) =>
@@ -6067,6 +6359,7 @@ export function FleetAlertNotificationManager({
           `Disable ${rows.filter((channel) => channel.enabled).length} enabled selected notification channel records.`,
         disabled: (rows) =>
           savePending ||
+          rows.some((channel) => Boolean(channel.configuration_error)) ||
           rows.filter((channel) => channel.enabled).length === 0,
         icon: <PowerOff size={14} />,
         onSelect: (rows) =>
@@ -6085,6 +6378,9 @@ export function FleetAlertNotificationManager({
         tone: "danger",
       },
     ];
+  const detailChannel = detailChannelId
+    ? channels.find((channel) => channel.id === detailChannelId) ?? null
+    : null;
 
   return (
     <div className="consoleCrudPanel">
@@ -6101,6 +6397,7 @@ export function FleetAlertNotificationManager({
           )}
           rowActions={channelActions}
           rows={channels}
+          rowsTruncated={rowsTruncated}
           searchPlaceholder="Search channels by name, scope, delivery target, or filters"
           storageKey="vpsman.grid.fleet.notificationChannels.v2"
           title="Alert notification channels"
@@ -6120,13 +6417,16 @@ export function FleetAlertNotificationManager({
             actions={
               <button
                 className="secondaryAction"
+                disabled={!detailChannel || Boolean(detailChannel.configuration_error)}
+                title={
+                  detailChannel?.configuration_error
+                    ? "Stored filters are invalid; delete and replace this channel"
+                    : "Edit notification channel"
+                }
                 type="button"
                 onClick={() => {
-                  const channel = channels.find(
-                    (candidate) => candidate.id === detailChannelId,
-                  );
-                  if (channel) {
-                    editChannel(channel);
+                  if (detailChannel) {
+                    editChannel(detailChannel);
                   }
                 }}
               >
@@ -6137,16 +6437,11 @@ export function FleetAlertNotificationManager({
             onClose={() => setDetailChannelId(null)}
             title="Notification channel details"
           >
-            {(() => {
-              const channel = channels.find(
-                (candidate) => candidate.id === detailChannelId,
-              );
-              return channel ? (
-                <ChannelDetailGrid channel={channel} />
-              ) : (
-                <span className="mutedText">Channel no longer exists.</span>
-              );
-            })()}
+            {detailChannel ? (
+              <ChannelDetailGrid channel={detailChannel} />
+            ) : (
+              <span className="mutedText">Channel no longer exists.</span>
+            )}
           </ConsoleDetailPanel>
         ) : null}
         {editorOpen ? (
@@ -6499,9 +6794,11 @@ export function FleetAlertNotificationManager({
 export function NotificationDeliveryHistoryGrid({
   deliveries,
   preview,
+  rowsTruncated = !preview && deliveries.length >= FLEET_DETAIL_LIMIT,
 }: {
   deliveries: FleetAlertNotificationDeliveryRecord[];
   preview: boolean;
+  rowsTruncated?: boolean;
 }) {
   const columns = useMemo<
     ConsoleDataGridColumn<FleetAlertNotificationDeliveryRecord>[]
@@ -6631,6 +6928,7 @@ export function NotificationDeliveryHistoryGrid({
         </div>
       )}
       rows={deliveries}
+      rowsTruncated={rowsTruncated}
       searchPlaceholder="Search notification deliveries"
       storageKey="vpsman.grid.fleet.notificationDeliveries.v2"
       title={
@@ -6694,6 +6992,7 @@ export function WebhookRuleManager({
   onUpsert,
   queueMode = "full",
   rules,
+  rowsTruncated = rules.length >= FLEET_DETAIL_LIMIT,
 }: {
   agents: AgentView[];
   deliveries: WebhookRuleDeliveryRecord[];
@@ -6714,6 +7013,7 @@ export function WebhookRuleManager({
   ) => Promise<WebhookRuleDeliveryRecord[]>;
   onUpsert: (request: WebhookRuleRequest) => Promise<WebhookRuleRecord>;
   queueMode?: "full" | "configuration";
+  rowsTruncated?: boolean;
   rules: WebhookRuleRecord[];
 }) {
   const configurationQueue = queueMode === "configuration";
@@ -7472,6 +7772,7 @@ export function WebhookRuleManager({
           renderExpandedRow={(rule) => <WebhookRuleDetailGrid rule={rule} />}
           rowActions={ruleActions}
           rows={rules}
+          rowsTruncated={rowsTruncated}
           searchPlaceholder="Search webhook rules by name, expression, target, or notes"
           storageKey="vpsman.grid.fleet.webhookRules.v2"
           title="Webhook rules"
@@ -8128,9 +8429,11 @@ function WebhookRuleSamplePreview({
 export function WebhookDeliveryHistoryGrid({
   deliveries,
   preview,
+  rowsTruncated = !preview && deliveries.length >= FLEET_DETAIL_LIMIT,
 }: {
   deliveries: WebhookRuleDeliveryRecord[];
   preview: boolean;
+  rowsTruncated?: boolean;
 }) {
   const columns = useMemo<ConsoleDataGridColumn<WebhookRuleDeliveryRecord>[]>(
     () => [
@@ -8254,6 +8557,7 @@ export function WebhookDeliveryHistoryGrid({
         </div>
       )}
       rows={deliveries}
+      rowsTruncated={rowsTruncated}
       searchPlaceholder="Search webhook deliveries"
       storageKey="vpsman.grid.fleet.webhookDeliveries.v2"
       title={preview ? "Webhook delivery preview" : "Webhook delivery history"}
@@ -8312,7 +8616,9 @@ export function WebhookDeliveryMaintenancePanel({
     );
     try {
       const response = await onRotate({
-        older_than_days: optionalInteger(rotationDays),
+        ...(confirmed
+          ? { older_than: rotationPreview!.older_than }
+          : { older_than_days: optionalInteger(rotationDays) }),
         status: rotationStatus,
         rule_id: rotationRuleId || null,
         confirmed,
@@ -9382,7 +9688,7 @@ type NetworkInterfacesSnapshot = {
   interface_count?: number;
   address_source?: { status?: string; error?: string | null };
   sysfs_source?: { status?: string; error?: string | null };
-  counter_source?: { status?: string };
+  counter_source?: { status?: string; error?: string | null };
   interfaces: NetworkInterfaceSnapshotRecord[];
 };
 
@@ -9508,23 +9814,59 @@ function NetworkInterfaceList({
 }: {
   snapshot: NetworkInterfacesSnapshot;
 }) {
+  const sources: Array<
+    [
+      string,
+      { status?: string; error?: string | null } | null | undefined,
+    ]
+  > = [
+    ["Interface metadata", snapshot.sysfs_source],
+    ["Traffic counters", snapshot.counter_source],
+    ["Interface addresses", snapshot.address_source],
+  ];
+  const sourceFailures = sources
+    .filter(([, source]) => source?.status && source.status !== "ok")
+    .map(
+      ([label, source]) =>
+        `${label}: ${source?.error?.trim() || source?.status || "unavailable"}`,
+    );
   if (snapshot.interfaces.length === 0) {
-    return <span>No interfaces returned</span>;
+    return (
+      <>
+        {sourceFailures.length > 0 && (
+          <ActionFeedback
+            className="localActionFeedback"
+            message={sourceFailures.join("; ")}
+            tone="danger"
+          />
+        )}
+        <span>No interfaces returned</span>
+      </>
+    );
   }
   return (
-    <div className="networkInterfaceList">
-      {snapshot.interfaces
-        .slice()
-        .sort((left, right) => left.name.localeCompare(right.name))
-        .map((networkInterface) => (
-          <div className="networkInterfaceRow" key={networkInterface.name}>
-            <strong>{networkInterface.name}</strong>
-            <span>{interfaceStateSummary(networkInterface)}</span>
-            <span>{interfaceAddressSummary(networkInterface)}</span>
-            <span>{interfaceTrafficSummary(networkInterface)}</span>
-          </div>
-        ))}
-    </div>
+    <>
+      {sourceFailures.length > 0 && (
+        <ActionFeedback
+          className="localActionFeedback"
+          message={sourceFailures.join("; ")}
+          tone="danger"
+        />
+      )}
+      <div className="networkInterfaceList">
+        {snapshot.interfaces
+          .slice()
+          .sort((left, right) => left.name.localeCompare(right.name))
+          .map((networkInterface) => (
+            <div className="networkInterfaceRow" key={networkInterface.name}>
+              <strong>{networkInterface.name}</strong>
+              <span>{interfaceStateSummary(networkInterface)}</span>
+              <span>{interfaceAddressSummary(networkInterface)}</span>
+              <span>{interfaceTrafficSummary(networkInterface)}</span>
+            </div>
+          ))}
+      </div>
+    </>
   );
 }
 
@@ -9562,15 +9904,15 @@ function interfaceAddressSummary(
 function interfaceTrafficSummary(
   networkInterface: NetworkInterfaceSnapshotRecord,
 ) {
-  const rxBytes =
+  const rx =
     typeof networkInterface.rx_bytes === "number"
-      ? networkInterface.rx_bytes
-      : 0;
-  const txBytes =
+      ? formatBytes(networkInterface.rx_bytes)
+      : "unknown";
+  const tx =
     typeof networkInterface.tx_bytes === "number"
-      ? networkInterface.tx_bytes
-      : 0;
-  return `RX ${formatBytes(rxBytes)} / TX ${formatBytes(txBytes)}`;
+      ? formatBytes(networkInterface.tx_bytes)
+      : "unknown";
+  return `RX ${rx} / TX ${tx}`;
 }
 
 function parseNetworkInterfacesSnapshot(
@@ -9606,9 +9948,11 @@ function isNetworkInterfacesSnapshot(
 
 function NetworkRateList({
   rates,
+  ratesTruncated,
   rollup,
 }: {
   rates: TelemetryNetworkRateRecord[];
+  ratesTruncated: boolean;
   rollup: TelemetryRollupRecord | null | undefined;
 }) {
   if (rates.length === 0) {
@@ -9617,10 +9961,13 @@ function NetworkRateList({
         icon={<Network size={18} />}
         label="Interfaces"
         value={
-          rollup &&
-          (rollup.network_rx_bytes_max > 0 || rollup.network_tx_bytes_max > 0)
-            ? "Counter-only telemetry; rate rollup pending"
-            : "Awaiting rate rollup"
+          ratesTruncated
+            ? "Unknown in loaded network-rate page; more may exist"
+            : rollup &&
+                (rollup.network_rx_bytes_max > 0 ||
+                  rollup.network_tx_bytes_max > 0)
+              ? "Counter-only telemetry; rate rollup pending"
+              : "Awaiting rate rollup"
         }
       />
     );
@@ -9669,13 +10016,23 @@ function NetworkRateList({
   );
 }
 
-function TunnelList({ tunnels }: { tunnels: TelemetryTunnelRecord[] }) {
+function TunnelList({
+  tunnels,
+  tunnelsTruncated,
+}: {
+  tunnels: TelemetryTunnelRecord[];
+  tunnelsTruncated: boolean;
+}) {
   if (tunnels.length === 0) {
     return (
       <DetailLine
         icon={<Network size={18} />}
         label="Runtime tunnels"
-        value="No tunnel reports"
+        value={
+          tunnelsTruncated
+            ? "Unknown in loaded tunnel page; more may exist"
+            : "No tunnel reports"
+        }
       />
     );
   }

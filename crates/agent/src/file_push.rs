@@ -556,6 +556,7 @@ struct OwnershipPlan {
     owner: Option<String>,
     group: Option<String>,
     status: OwnershipPlanStatus,
+    accounts: PlatformAccounts,
 }
 
 #[derive(Clone, Debug)]
@@ -566,23 +567,25 @@ enum OwnershipPlanStatus {
 }
 
 impl OwnershipPlan {
-    fn unchanged() -> Self {
+    fn unchanged(accounts: PlatformAccounts) -> Self {
         Self {
             uid: None,
             gid: None,
             owner: None,
             group: None,
             status: OwnershipPlanStatus::Unchanged,
+            accounts,
         }
     }
 
-    fn skipped(reason: &'static str) -> Self {
+    fn skipped(reason: &'static str, accounts: PlatformAccounts) -> Self {
         Self {
             uid: None,
             gid: None,
             owner: None,
             group: None,
             status: OwnershipPlanStatus::Skipped(reason),
+            accounts,
         }
     }
 }
@@ -597,11 +600,11 @@ fn resolve_ownership(
     let tokens = normalize_ownership_tokens(owner, group, uid, gid)?;
     let owner = tokens.owner.as_deref();
     let group = tokens.group.as_deref();
+    let accounts = PlatformAccounts::load()?;
     if owner.is_none() && group.is_none() && uid.is_none() && gid.is_none() {
-        return Ok(OwnershipPlan::unchanged());
+        return Ok(OwnershipPlan::unchanged(accounts));
     }
 
-    let accounts = PlatformAccounts::load();
     let mut missing = Vec::new();
     let owner_resolution = match owner.map(str::trim).filter(|value| !value.is_empty()) {
         Some(value) => resolve_owner_value(value, &accounts, &mut missing),
@@ -614,7 +617,7 @@ fn resolve_ownership(
 
     if !missing.is_empty() {
         if ownership_policy == FileOwnershipPolicy::Ignore {
-            return Ok(OwnershipPlan::skipped("missing_owner_or_group"));
+            return Ok(OwnershipPlan::skipped("missing_owner_or_group", accounts));
         }
         anyhow::bail!("missing owner/group: {}", missing.join(", "));
     }
@@ -630,19 +633,22 @@ fn resolve_ownership(
         group_resolution.as_ref().map(|value| value.id),
     )?;
     if resolved_uid.is_none() && resolved_gid.is_none() {
-        return Ok(OwnershipPlan::unchanged());
+        return Ok(OwnershipPlan::unchanged(accounts));
     }
 
+    let resolved_owner = owner_resolution
+        .and_then(|value| value.name)
+        .or_else(|| resolved_uid.and_then(|value| accounts.user_name_for_id(value)));
+    let resolved_group = group_resolution
+        .and_then(|value| value.name)
+        .or_else(|| resolved_gid.and_then(|value| accounts.group_name_for_id(value)));
     Ok(OwnershipPlan {
         uid: resolved_uid,
         gid: resolved_gid,
-        owner: owner_resolution
-            .and_then(|value| value.name)
-            .or_else(|| resolved_uid.and_then(|value| accounts.user_name_for_id(value))),
-        group: group_resolution
-            .and_then(|value| value.name)
-            .or_else(|| resolved_gid.and_then(|value| accounts.group_name_for_id(value))),
+        owner: resolved_owner,
+        group: resolved_group,
         status: OwnershipPlanStatus::Planned,
+        accounts,
     })
 }
 
@@ -719,15 +725,15 @@ fn ownership_status_label(status: &OwnershipPlanStatus) -> (&'static str, Option
 }
 
 fn metadata_owner_name(metadata: &std::fs::Metadata, plan: &OwnershipPlan) -> Option<String> {
-    plan.owner.clone().or_else(|| {
-        metadata_uid(metadata).and_then(|uid| PlatformAccounts::load().user_name_for_id(uid))
-    })
+    plan.owner
+        .clone()
+        .or_else(|| metadata_uid(metadata).and_then(|uid| plan.accounts.user_name_for_id(uid)))
 }
 
 fn metadata_group_name(metadata: &std::fs::Metadata, plan: &OwnershipPlan) -> Option<String> {
-    plan.group.clone().or_else(|| {
-        metadata_gid(metadata).and_then(|gid| PlatformAccounts::load().group_name_for_id(gid))
-    })
+    plan.group
+        .clone()
+        .or_else(|| metadata_gid(metadata).and_then(|gid| plan.accounts.group_name_for_id(gid)))
 }
 
 fn validate_file_push_request(path: &str, mode: u32) -> Result<()> {

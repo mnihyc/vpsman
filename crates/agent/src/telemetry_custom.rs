@@ -1,9 +1,8 @@
-use std::process::Stdio;
+use std::{collections::HashSet, process::Stdio};
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use serde::Deserialize;
 use tokio::process::Command;
-use tracing::warn;
 use vpsman_common::{
     AgentConfig, AgentMetrics, AgentTelemetrySource, CpuStat, DiskStat, LoadAverage, MemoryStat,
     NetworkStat, RuntimeTunnelCommand, RuntimeTunnelStat, MAX_TELEMETRY_DISKS,
@@ -12,7 +11,13 @@ use vpsman_common::{
 
 use crate::child_process::{run_child_with_bounded_output, ChildCleanupPolicy, ChildRunResult};
 
+const MAX_CUSTOM_HOSTNAME_BYTES: usize = 255;
+const MAX_CUSTOM_MOUNTPOINT_BYTES: usize = 4096;
+const MAX_CUSTOM_INTERFACE_NAME_BYTES: usize = 64;
+const MAX_CUSTOM_LOAD_AVERAGE: f64 = 1_000_000.0;
+
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CustomMetricsPatch {
     hostname: Option<String>,
     uptime_secs: Option<u64>,
@@ -24,6 +29,7 @@ struct CustomMetricsPatch {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CpuPatch {
     load: Option<LoadAverage>,
     cores: Option<u16>,
@@ -36,23 +42,25 @@ pub(crate) fn custom_metrics_replaces_linux(config: &AgentConfig) -> bool {
 pub(crate) async fn apply_custom_metrics_if_configured(
     config: &AgentConfig,
     metrics: &mut AgentMetrics,
-) {
+) -> Result<()> {
     if !matches!(
         config.telemetry.source,
         AgentTelemetrySource::CustomCommand | AgentTelemetrySource::LinuxProcfsAndCustomCommand
     ) {
-        return;
+        return Ok(());
     }
-    let Some(command) = &config.telemetry.custom_metrics_command else {
-        return;
-    };
-    match run_custom_metrics_command(config, command).await {
-        Ok(patch) => apply_patch(metrics, patch),
-        Err(error) => warn!(
-            error = %error,
-            "custom telemetry source failed; keeping available metrics"
-        ),
+    let command = config
+        .telemetry
+        .custom_metrics_command
+        .as_ref()
+        .context("custom telemetry source has no configured command")?;
+    let patch = run_custom_metrics_command(config, command).await?;
+    validate_custom_metrics_patch(&patch)?;
+    if custom_metrics_replaces_linux(config) {
+        validate_complete_custom_metrics_patch(&patch)?;
     }
+    apply_patch(metrics, patch);
+    Ok(())
 }
 
 async fn run_custom_metrics_command(
@@ -111,12 +119,8 @@ fn render_custom_metrics_argv(
 }
 
 fn apply_patch(metrics: &mut AgentMetrics, patch: CustomMetricsPatch) {
-    if let Some(hostname) = patch
-        .hostname
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    {
-        metrics.hostname = hostname;
+    if let Some(hostname) = patch.hostname {
+        metrics.hostname = hostname.trim().to_string();
     }
     if let Some(uptime_secs) = patch.uptime_secs {
         metrics.uptime_secs = uptime_secs;
@@ -125,7 +129,7 @@ fn apply_patch(metrics: &mut AgentMetrics, patch: CustomMetricsPatch) {
         if let Some(load) = cpu.load {
             metrics.cpu.load = load;
         }
-        if let Some(cores) = cpu.cores.filter(|cores| *cores > 0) {
+        if let Some(cores) = cpu.cores {
             metrics.cpu.cores = cores;
         }
     }
@@ -133,14 +137,155 @@ fn apply_patch(metrics: &mut AgentMetrics, patch: CustomMetricsPatch) {
         metrics.memory = memory;
     }
     if let Some(disks) = patch.disks {
-        metrics.disks = disks.into_iter().take(MAX_TELEMETRY_DISKS).collect();
+        metrics.disks = disks;
     }
     if let Some(networks) = patch.networks {
-        metrics.networks = networks.into_iter().take(MAX_TELEMETRY_NETWORKS).collect();
+        metrics.networks = networks;
     }
     if let Some(tunnels) = patch.tunnels {
-        metrics.tunnels = tunnels.into_iter().take(MAX_TELEMETRY_TUNNELS).collect();
+        metrics.tunnels = tunnels;
     }
+}
+
+fn validate_custom_metrics_patch(patch: &CustomMetricsPatch) -> Result<()> {
+    ensure!(
+        patch.hostname.is_some()
+            || patch.uptime_secs.is_some()
+            || patch.cpu.is_some()
+            || patch.memory.is_some()
+            || patch.disks.is_some()
+            || patch.networks.is_some()
+            || patch.tunnels.is_some(),
+        "custom telemetry patch is empty"
+    );
+    if let Some(hostname) = patch.hostname.as_deref() {
+        let normalized = hostname.trim();
+        ensure!(
+            !normalized.is_empty()
+                && normalized.len() <= MAX_CUSTOM_HOSTNAME_BYTES
+                && !hostname.chars().any(char::is_control),
+            "custom telemetry patch has invalid hostname"
+        );
+    }
+    if let Some(cpu) = patch.cpu.as_ref() {
+        ensure!(
+            cpu.load.is_some() || cpu.cores.is_some(),
+            "custom telemetry patch has an empty cpu override"
+        );
+        if let Some(load) = cpu.load.as_ref() {
+            ensure!(
+                [load.one, load.five, load.fifteen]
+                    .into_iter()
+                    .all(|value| {
+                        value.is_finite() && (0.0..=MAX_CUSTOM_LOAD_AVERAGE).contains(&value)
+                    }),
+                "custom telemetry patch has invalid cpu.load"
+            );
+        }
+        if let Some(cores) = cpu.cores {
+            ensure!(cores > 0, "custom telemetry patch has invalid cpu.cores");
+        }
+    }
+    if let Some(memory) = patch.memory.as_ref() {
+        ensure!(
+            memory.total_bytes > 0 && memory.available_bytes <= memory.total_bytes,
+            "custom telemetry patch has invalid memory"
+        );
+    }
+    if let Some(disks) = patch.disks.as_ref() {
+        ensure!(
+            disks.len() <= MAX_TELEMETRY_DISKS,
+            "custom telemetry patch has too many disks"
+        );
+        ensure!(
+            disks.iter().all(|disk| {
+                !disk.mountpoint.is_empty()
+                    && disk.mountpoint.len() <= MAX_CUSTOM_MOUNTPOINT_BYTES
+                    && !disk.mountpoint.chars().any(char::is_control)
+                    && disk.available_bytes <= disk.total_bytes
+            }),
+            "custom telemetry patch has an invalid disk"
+        );
+    }
+    if let Some(networks) = patch.networks.as_ref() {
+        ensure!(
+            networks.len() <= MAX_TELEMETRY_NETWORKS,
+            "custom telemetry patch has too many networks"
+        );
+        let mut interfaces = HashSet::new();
+        ensure!(
+            networks.iter().all(|network| {
+                !network.interface.is_empty()
+                    && network.interface.len() <= MAX_CUSTOM_INTERFACE_NAME_BYTES
+                    && !network.interface.chars().any(char::is_control)
+                    && interfaces.insert(network.interface.as_str())
+            }),
+            "custom telemetry patch has an invalid or duplicate network"
+        );
+    }
+    if let Some(tunnels) = patch.tunnels.as_ref() {
+        ensure!(
+            tunnels.len() <= MAX_TELEMETRY_TUNNELS,
+            "custom telemetry patch has too many tunnels"
+        );
+        ensure!(
+            tunnels.iter().all(|tunnel| {
+                !tunnel.interface.is_empty()
+                    && tunnel.interface.len() <= MAX_CUSTOM_INTERFACE_NAME_BYTES
+                    && !tunnel.interface.chars().any(char::is_control)
+                    && tunnel
+                        .latency_avg_ms
+                        .is_none_or(|value| value.is_finite() && value >= 0.0)
+                    && tunnel
+                        .packet_loss_ratio
+                        .is_none_or(|value| value.is_finite() && (0.0..=1.0).contains(&value))
+            }),
+            "custom telemetry patch has an invalid tunnel"
+        );
+    }
+    Ok(())
+}
+
+fn validate_complete_custom_metrics_patch(patch: &CustomMetricsPatch) -> Result<()> {
+    ensure!(
+        patch
+            .hostname
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty()),
+        "custom telemetry replacement is missing hostname"
+    );
+    ensure!(
+        patch.uptime_secs.is_some(),
+        "custom telemetry replacement is missing uptime_secs"
+    );
+    let cpu = patch
+        .cpu
+        .as_ref()
+        .context("custom telemetry replacement is missing cpu")?;
+    cpu.load
+        .as_ref()
+        .context("custom telemetry replacement is missing cpu.load")?;
+    ensure!(
+        cpu.cores.is_some(),
+        "custom telemetry replacement is missing cpu.cores"
+    );
+    patch
+        .memory
+        .as_ref()
+        .context("custom telemetry replacement is missing memory")?;
+    ensure!(
+        patch.disks.is_some(),
+        "custom telemetry replacement is missing disks"
+    );
+    ensure!(
+        patch.networks.is_some(),
+        "custom telemetry replacement is missing networks"
+    );
+    ensure!(
+        patch.tunnels.is_some(),
+        "custom telemetry replacement is missing tunnels"
+    );
+    Ok(())
 }
 
 pub(crate) fn empty_custom_metrics_snapshot(observed_unix: u64) -> AgentMetrics {
@@ -195,5 +340,169 @@ mod tests {
                 "bgp,lax".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn custom_patch_rejects_empty_and_invalid_overlay_values() {
+        assert!(
+            validate_custom_metrics_patch(&CustomMetricsPatch::default())
+                .unwrap_err()
+                .to_string()
+                .contains("patch is empty")
+        );
+
+        let hostname_error = validate_custom_metrics_patch(&CustomMetricsPatch {
+            hostname: Some(" \t ".to_string()),
+            ..CustomMetricsPatch::default()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(hostname_error.contains("invalid hostname"));
+
+        let cores_error = validate_custom_metrics_patch(&CustomMetricsPatch {
+            cpu: Some(CpuPatch {
+                cores: Some(0),
+                ..CpuPatch::default()
+            }),
+            ..CustomMetricsPatch::default()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(cores_error.contains("invalid cpu.cores"));
+
+        let load_error = validate_custom_metrics_patch(&CustomMetricsPatch {
+            cpu: Some(CpuPatch {
+                load: Some(LoadAverage {
+                    one: -0.1,
+                    five: 0.0,
+                    fifteen: 0.0,
+                }),
+                cores: None,
+            }),
+            ..CustomMetricsPatch::default()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(load_error.contains("invalid cpu.load"));
+
+        let memory_error = validate_custom_metrics_patch(&CustomMetricsPatch {
+            memory: Some(MemoryStat {
+                total_bytes: 100,
+                available_bytes: 101,
+            }),
+            ..CustomMetricsPatch::default()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(memory_error.contains("invalid memory"));
+    }
+
+    #[test]
+    fn custom_patch_rejects_over_cardinality_arrays() {
+        let disks_error = validate_custom_metrics_patch(&CustomMetricsPatch {
+            disks: Some(vec![DiskStat::default(); MAX_TELEMETRY_DISKS + 1]),
+            ..CustomMetricsPatch::default()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(disks_error.contains("too many disks"));
+
+        let networks_error = validate_custom_metrics_patch(&CustomMetricsPatch {
+            networks: Some(vec![NetworkStat::default(); MAX_TELEMETRY_NETWORKS + 1]),
+            ..CustomMetricsPatch::default()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(networks_error.contains("too many networks"));
+
+        let tunnels_error = validate_custom_metrics_patch(&CustomMetricsPatch {
+            tunnels: Some(vec![
+                RuntimeTunnelStat::default();
+                MAX_TELEMETRY_TUNNELS + 1
+            ]),
+            ..CustomMetricsPatch::default()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(tunnels_error.contains("too many tunnels"));
+    }
+
+    #[test]
+    fn custom_patch_rejects_invalid_collection_rows() {
+        let disk_error = validate_custom_metrics_patch(&CustomMetricsPatch {
+            disks: Some(vec![DiskStat {
+                mountpoint: "/".to_string(),
+                total_bytes: 100,
+                available_bytes: 101,
+            }]),
+            ..CustomMetricsPatch::default()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(disk_error.contains("invalid disk"));
+
+        let network = NetworkStat {
+            interface: "eth0".to_string(),
+            rx_bytes: 1,
+            tx_bytes: 2,
+        };
+        let network_error = validate_custom_metrics_patch(&CustomMetricsPatch {
+            networks: Some(vec![network.clone(), network]),
+            ..CustomMetricsPatch::default()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(network_error.contains("duplicate network"));
+
+        let tunnel_error = validate_custom_metrics_patch(&CustomMetricsPatch {
+            tunnels: Some(vec![RuntimeTunnelStat {
+                interface: "wg0".to_string(),
+                packet_loss_ratio: Some(1.1),
+                ..RuntimeTunnelStat::default()
+            }]),
+            ..CustomMetricsPatch::default()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(tunnel_error.contains("invalid tunnel"));
+    }
+
+    #[test]
+    fn custom_overlay_accepts_valid_partial_metrics() {
+        validate_custom_metrics_patch(&CustomMetricsPatch {
+            cpu: Some(CpuPatch {
+                load: Some(LoadAverage {
+                    one: 0.5,
+                    five: 0.4,
+                    fifteen: 0.3,
+                }),
+                cores: None,
+            }),
+            networks: Some(Vec::new()),
+            ..CustomMetricsPatch::default()
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn custom_patch_rejects_unknown_fields() {
+        let error = serde_json::from_str::<CustomMetricsPatch>(
+            r#"{"hostname":"edge-a","unexpected_metric":1}"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn custom_replacement_adds_completeness_to_shared_validation() {
+        let patch = CustomMetricsPatch {
+            hostname: Some("edge-a".to_string()),
+            ..CustomMetricsPatch::default()
+        };
+        validate_custom_metrics_patch(&patch).unwrap();
+        let error = validate_complete_custom_metrics_patch(&patch)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("uptime_secs"));
     }
 }

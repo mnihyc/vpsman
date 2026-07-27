@@ -24,13 +24,13 @@ use crate::{
     security::{operator_has_scope, SCOPE_SCHEDULES_READ},
     selector_expression::parse_selector_expression,
     state::AppState,
+    util::limit_or_default,
 };
 use vpsman_common::{encode_json, payload_hash, JobCommand, PrivilegeAssertion};
 
 #[derive(Clone, Copy)]
 enum ScheduleTargetResolutionMode {
     RequireLiveTargets,
-    SavedSnapshot,
 }
 
 pub(crate) async fn list_schedules(
@@ -41,6 +41,10 @@ pub(crate) async fn list_schedules(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_SCHEDULES_READ)
         .await?;
+    let query = ListQuery {
+        limit: Some(limit_or_default(query.limit)),
+        ..query
+    };
     Ok(Json(state.repo.query_schedules(&query).await?))
 }
 
@@ -120,27 +124,17 @@ pub(crate) async fn update_schedule_targets(
             .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
     }
     let schedule = state.repo.schedule_by_id(schedule_id).await?;
-    verify_schedule_privilege_for_definition(
+    require_valid_schedule_operation(&schedule)?;
+    verify_schedule_privilege_for_stored_view(
         &state,
         "schedule.targets.update",
-        Some(schedule_id),
-        ScheduleDefinitionRef {
-            name: &schedule.name,
-            operation: &schedule.operation,
-            selector_expression: &selector_expression,
-            target_client_ids: &target_client_ids,
-            cron_expr: &schedule.cron_expr,
-            timezone: &schedule.timezone,
-            enabled: schedule.enabled,
-            catch_up_policy: &schedule.catch_up_policy,
-            catch_up_limit: schedule.catch_up_limit,
-            retry_delay_secs: schedule.retry_delay_secs,
-            max_failures: schedule.max_failures,
-        },
+        &schedule,
+        &selector_expression,
+        &target_client_ids,
+        schedule.enabled,
         schedule.deferred_until.as_deref(),
         false,
         request.privilege_assertion.clone(),
-        ScheduleTargetResolutionMode::RequireLiveTargets,
     )
     .await?;
     Ok(Json(
@@ -186,6 +180,7 @@ pub(crate) async fn defer_schedule(
     validate_defer_schedule_request(&request)?;
     require_schedule_confirmed(request.confirmed)?;
     let schedule = state.repo.schedule_by_id(schedule_id).await?;
+    require_valid_schedule_operation(&schedule)?;
     verify_schedule_privilege_for_view(
         &state,
         "schedule.defer",
@@ -223,6 +218,7 @@ pub(crate) async fn apply_schedule_now(
     }
     require_schedule_confirmed(request.confirmed)?;
     let schedule = state.repo.schedule_by_id(schedule_id).await?;
+    let operation = require_valid_schedule_operation(&schedule)?.clone();
     verify_schedule_privilege_for_view(
         &state,
         "schedule.apply_now",
@@ -241,7 +237,7 @@ pub(crate) async fn apply_schedule_now(
         confirmed: true,
         command: String::new(),
         argv: Vec::new(),
-        operation: Some(schedule.operation.clone()),
+        operation: Some(operation),
         max_timeout_secs: Some(state.schedule_apply_now_max_timeout_secs()),
         force_unprivileged: false,
         privileged: true,
@@ -291,6 +287,12 @@ async fn mutate_schedule_enabled(
         .await?;
     require_schedule_confirmed(request.confirmed)?;
     let schedule = state.repo.schedule_by_id(schedule_id).await?;
+    if enabled {
+        require_valid_schedule_operation(&schedule)?;
+    }
+    if enabled && schedule.cadence_error.is_some() {
+        return Err(ApiError::bad_request("schedule_cron_invalid"));
+    }
     verify_schedule_privilege_for_view(
         &state,
         if enabled {
@@ -417,9 +419,6 @@ async fn verify_schedule_privilege_for_definition(
         ScheduleTargetResolutionMode::RequireLiveTargets => {
             resolved_schedule_targets(state, request.target_client_ids).await?
         }
-        ScheduleTargetResolutionMode::SavedSnapshot => {
-            normalized_target_client_ids(request.target_client_ids)?
-        }
     };
     let operation_payload = encode_json(request.operation)
         .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
@@ -456,17 +455,63 @@ async fn verify_schedule_privilege_for_view(
     deleted: bool,
     assertion: Option<PrivilegeAssertion>,
 ) -> Result<(), ApiError> {
-    verify_schedule_privilege_for_definition(
+    verify_schedule_privilege_for_stored_view(
         state,
         action,
-        Some(schedule.id),
-        ScheduleDefinitionRef::from_view(schedule, enabled),
+        schedule,
+        &schedule.selector_expression,
+        &schedule.target_client_ids,
+        enabled,
         deferred_until,
         deleted,
         assertion,
-        ScheduleTargetResolutionMode::SavedSnapshot,
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn verify_schedule_privilege_for_stored_view(
+    state: &AppState,
+    action: &str,
+    schedule: &ScheduleView,
+    selector_expression: &str,
+    target_client_ids: &[String],
+    enabled: bool,
+    deferred_until: Option<&str>,
+    deleted: bool,
+    assertion: Option<PrivilegeAssertion>,
+) -> Result<(), ApiError> {
+    let resolved_targets = normalized_target_client_ids(target_client_ids)?;
+    let schedule_id = schedule.id.to_string();
+    let privilege_intent = SchedulePrivilegeIntent::new(SchedulePrivilegeIntentInput {
+        action,
+        schedule_id: Some(&schedule_id),
+        name: &schedule.name,
+        command_type: &schedule.command_type,
+        operation_payload_hash: &schedule.operation_payload_hash,
+        selector_expression,
+        resolved_targets: &resolved_targets,
+        cron_expr: &schedule.cron_expr,
+        timezone: &schedule.timezone,
+        enabled,
+        catch_up_policy: &schedule.catch_up_policy,
+        catch_up_limit: schedule.catch_up_limit,
+        retry_delay_secs: schedule.retry_delay_secs,
+        max_failures: schedule.max_failures,
+        deferred_until,
+        deleted,
+    });
+    verify_privilege_intent(state, &privilege_intent, assertion).await
+}
+
+fn require_valid_schedule_operation(schedule: &ScheduleView) -> Result<&JobCommand, ApiError> {
+    if schedule.operation_error.is_some() {
+        return Err(ApiError::conflict("schedule_operation_invalid"));
+    }
+    schedule
+        .operation
+        .as_ref()
+        .ok_or_else(|| ApiError::conflict("schedule_operation_invalid"))
 }
 
 async fn resolved_schedule_targets(
@@ -537,22 +582,6 @@ impl<'a> ScheduleDefinitionRef<'a> {
             catch_up_limit: request.catch_up_limit,
             retry_delay_secs: request.retry_delay_secs,
             max_failures: request.max_failures,
-        }
-    }
-
-    fn from_view(schedule: &'a ScheduleView, enabled: bool) -> Self {
-        Self {
-            name: &schedule.name,
-            operation: &schedule.operation,
-            selector_expression: &schedule.selector_expression,
-            target_client_ids: &schedule.target_client_ids,
-            cron_expr: &schedule.cron_expr,
-            timezone: &schedule.timezone,
-            enabled,
-            catch_up_policy: &schedule.catch_up_policy,
-            catch_up_limit: schedule.catch_up_limit,
-            retry_delay_secs: schedule.retry_delay_secs,
-            max_failures: schedule.max_failures,
         }
     }
 }

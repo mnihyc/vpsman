@@ -52,6 +52,54 @@ CREATE INDEX schedules_visible_name_idx
     ON schedules (name, id)
     WHERE deleted_at IS NULL;
 
+CREATE TABLE job_approvals (
+    id UUID PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'pending',
+    job_id UUID NOT NULL,
+    command_type TEXT NOT NULL,
+    selector_expression TEXT NOT NULL,
+    target_client_ids TEXT[] NOT NULL,
+    target_count INTEGER NOT NULL DEFAULT 0,
+    privileged BOOLEAN NOT NULL DEFAULT TRUE,
+    destructive BOOLEAN NOT NULL DEFAULT FALSE,
+    force_unprivileged BOOLEAN NOT NULL DEFAULT FALSE,
+    max_timeout_secs BIGINT NOT NULL DEFAULT 30,
+    payload_hash TEXT NOT NULL,
+    request_fingerprint TEXT NOT NULL,
+    requester_id UUID REFERENCES operators(id) ON DELETE SET NULL,
+    requester_username TEXT NOT NULL,
+    requester_role TEXT NOT NULL,
+    request_reason TEXT,
+    risk TEXT NOT NULL DEFAULT 'standard',
+    job_request JSONB NOT NULL,
+    decision_by UUID REFERENCES operators(id) ON DELETE SET NULL,
+    decision_username TEXT,
+    decision_reason TEXT,
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    decided_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (status IN ('pending', 'approved', 'rejected')),
+    CHECK (target_count >= 0),
+    CHECK (max_timeout_secs > 0),
+    CHECK (length(trim(command_type)) > 0),
+    CHECK (length(trim(requester_username)) > 0),
+    CHECK (length(trim(requester_role)) > 0),
+    CHECK (length(trim(risk)) BETWEEN 1 AND 64),
+    CHECK (
+        (status = 'pending' AND decided_at IS NULL)
+        OR (status <> 'pending' AND decided_at IS NOT NULL)
+    )
+);
+
+CREATE INDEX job_approvals_status_requested_idx
+    ON job_approvals (status, requested_at DESC, id DESC);
+
+CREATE INDEX job_approvals_job_idx
+    ON job_approvals (job_id);
+
+CREATE INDEX job_approvals_requester_idx
+    ON job_approvals (requester_username, requested_at DESC);
+
 CREATE TABLE jobs (
     id UUID PRIMARY KEY,
     actor_id UUID REFERENCES operators(id),
@@ -62,6 +110,7 @@ CREATE TABLE jobs (
     payload_hash TEXT NOT NULL,
     operation JSONB,
     source_schedule_id UUID REFERENCES schedules(id),
+    approval_id UUID REFERENCES job_approvals(id),
     request_fingerprint TEXT NOT NULL,
     max_timeout_secs BIGINT NOT NULL DEFAULT 30,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -91,6 +140,29 @@ CREATE INDEX jobs_active_status_idx
     ON jobs (status, id)
     WHERE completed_at IS NULL;
 
+CREATE UNIQUE INDEX jobs_approval_id_idx
+    ON jobs (approval_id)
+    WHERE approval_id IS NOT NULL;
+
+CREATE INDEX jobs_fleet_alert_candidates_idx
+    ON jobs (
+        (CASE WHEN status = 'partial_success' THEN 1 ELSE 0 END),
+        (COALESCE(completed_at, created_at)) DESC,
+        id DESC
+    )
+    WHERE status IN (
+        'failed',
+        'agent_timeout',
+        'control_timeout',
+        'partial_success',
+        'rejected',
+        'canceled'
+    );
+
+CREATE INDEX jobs_active_dashboard_idx
+    ON jobs (created_at DESC, id DESC)
+    WHERE status IN ('queued', 'running');
+
 CREATE TABLE job_targets (
     job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
     client_id TEXT NOT NULL,
@@ -110,7 +182,20 @@ CREATE TABLE job_targets (
     cancel_acked_at TIMESTAMPTZ,
     result_received_at TIMESTAMPTZ,
     last_dispatch_error TEXT,
+    capability_degraded_reason TEXT,
+    capability_degraded_hint TEXT,
     PRIMARY KEY (job_id, client_id),
+    CONSTRAINT job_targets_capability_degraded_pair_check CHECK (
+        (capability_degraded_reason IS NULL) = (capability_degraded_hint IS NULL)
+    ),
+    CONSTRAINT job_targets_capability_degraded_reason_check CHECK (
+        capability_degraded_reason IS NULL
+        OR length(trim(capability_degraded_reason)) BETWEEN 1 AND 256
+    ),
+    CONSTRAINT job_targets_capability_degraded_hint_check CHECK (
+        capability_degraded_hint IS NULL
+        OR length(trim(capability_degraded_hint)) BETWEEN 1 AND 2048
+    ),
     CONSTRAINT job_targets_status_common_check CHECK (status IN (
         'queued',
         'dispatching',
@@ -143,6 +228,77 @@ CREATE INDEX job_targets_active_status_idx
 CREATE INDEX job_targets_recent_terminal_idx
     ON job_targets (status, completed_at DESC, job_id, client_id)
     WHERE completed_at IS NOT NULL;
+
+CREATE INDEX job_targets_capability_degraded_idx
+    ON job_targets (
+        (COALESCE(completed_at, started_at)) DESC,
+        job_id DESC,
+        client_id
+    )
+    WHERE capability_degraded_reason IS NOT NULL;
+
+CREATE INDEX job_targets_client_capability_degraded_idx
+    ON job_targets (
+        client_id,
+        (COALESCE(completed_at, started_at)) DESC,
+        job_id DESC
+    )
+    WHERE capability_degraded_reason IS NOT NULL;
+
+CREATE TABLE job_rollouts (
+    job_id UUID PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'running',
+    canary_client_ids TEXT[] NOT NULL,
+    batch_size INTEGER NOT NULL,
+    max_failures INTEGER NOT NULL,
+    pause_after_canary BOOLEAN NOT NULL DEFAULT TRUE,
+    batch_delay_secs BIGINT NOT NULL DEFAULT 0,
+    current_batch INTEGER NOT NULL DEFAULT 0,
+    total_batches INTEGER NOT NULL,
+    failure_baseline INTEGER NOT NULL DEFAULT 0,
+    pause_reason TEXT,
+    next_batch_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    completed_at TIMESTAMPTZ,
+    CONSTRAINT job_rollouts_status_check
+        CHECK (status IN ('running', 'paused', 'completed', 'aborted')),
+    CONSTRAINT job_rollouts_canary_nonempty
+        CHECK (cardinality(canary_client_ids) BETWEEN 1 AND 25),
+    CONSTRAINT job_rollouts_batch_size_check
+        CHECK (batch_size BETWEEN 1 AND 100),
+    CONSTRAINT job_rollouts_max_failures_check
+        CHECK (max_failures BETWEEN 0 AND 100),
+    CONSTRAINT job_rollouts_batch_delay_check
+        CHECK (batch_delay_secs BETWEEN 0 AND 86400),
+    CONSTRAINT job_rollouts_batch_index_check
+        CHECK (current_batch >= 0 AND total_batches >= 1 AND current_batch < total_batches),
+    CONSTRAINT job_rollouts_failure_baseline_check
+        CHECK (failure_baseline >= 0),
+    CONSTRAINT job_rollouts_terminal_shape_check
+        CHECK (
+            (status IN ('completed', 'aborted') AND completed_at IS NOT NULL)
+            OR (status IN ('running', 'paused') AND completed_at IS NULL)
+        )
+);
+
+CREATE TABLE job_rollout_targets (
+    job_id UUID NOT NULL,
+    client_id TEXT NOT NULL,
+    batch_index INTEGER NOT NULL,
+    PRIMARY KEY (job_id, client_id),
+    FOREIGN KEY (job_id, client_id)
+        REFERENCES job_targets(job_id, client_id)
+        ON DELETE CASCADE,
+    CONSTRAINT job_rollout_targets_batch_index_check CHECK (batch_index >= 0)
+);
+
+CREATE INDEX job_rollouts_active_idx
+    ON job_rollouts (status, next_batch_at, updated_at, job_id)
+    WHERE completed_at IS NULL;
+
+CREATE INDEX job_rollout_targets_batch_idx
+    ON job_rollout_targets (job_id, batch_index, client_id);
 
 CREATE TABLE job_terminal_events (
     id UUID PRIMARY KEY,
@@ -308,6 +464,7 @@ CREATE TABLE terminal_sessions (
     last_job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
     last_command_type TEXT NOT NULL,
     last_seq INTEGER NOT NULL,
+    opened_at TIMESTAMPTZ,
     observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (client_id, session_id),
     CONSTRAINT terminal_sessions_argv_array CHECK (jsonb_typeof(argv) = 'array'),

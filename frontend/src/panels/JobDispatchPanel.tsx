@@ -248,10 +248,16 @@ function jobRequestFromConfirmation(
 async function loadUploadSourceArtifactFile(
   sources: FileTransferSourceArtifactRecord[],
   sourceArtifactId: string,
+  sourcesTruncated: boolean,
   downloadSource: (downloadPath: string) => Promise<Blob>,
 ): Promise<File> {
   const artifact = sources.find((source) => source.id === sourceArtifactId);
   if (!artifact) {
+    if (sourceArtifactId && sourcesTruncated) {
+      throw new Error(
+        "The selected reusable source is not in the loaded source page; older artifacts may exist. Select a loaded source before review.",
+      );
+    }
     throw new Error("Select a reusable source");
   }
   const blob = await downloadSource(artifact.download_path);
@@ -271,7 +277,9 @@ async function loadUploadSourceArtifactFile(
 export function JobDispatchPanel({
   agents,
   fileTransferSources,
+  fileTransferSourcesTruncated,
   commandTemplates,
+  commandTemplatesTruncated,
   dispatchPreset,
   fixedMode,
   surface = "jobs",
@@ -299,7 +307,9 @@ export function JobDispatchPanel({
 }: {
   agents: AgentView[];
   fileTransferSources: FileTransferSourceArtifactRecord[];
+  fileTransferSourcesTruncated: boolean;
   commandTemplates: CommandTemplateRecord[];
+  commandTemplatesTruncated: boolean;
   dispatchPreset?: JobDispatchPreset | null;
   fixedMode?: DispatchMode;
   surface?: "jobs" | "terminal";
@@ -472,6 +482,13 @@ export function JobDispatchPanel({
         (template) => template.id === dispatchPreset.commandTemplateId,
       )
     ) {
+      if (commandTemplatesTruncated) {
+        appliedDispatchPresetRequestId.current = dispatchPreset.requestId;
+        setActionError(
+          "The requested command template is not in the loaded template page; older templates may exist. Select a loaded template before review.",
+        );
+        onDispatchPresetApplied?.();
+      }
       return;
     }
     appliedDispatchPresetRequestId.current = dispatchPreset.requestId;
@@ -554,7 +571,12 @@ export function JobDispatchPanel({
     setActionError(null);
     clearExecutionResults();
     onDispatchPresetApplied?.();
-  }, [commandTemplates, dispatchPreset, onDispatchPresetApplied]);
+  }, [
+    commandTemplates,
+    commandTemplatesTruncated,
+    dispatchPreset,
+    onDispatchPresetApplied,
+  ]);
 
   useEffect(() => {
     if (!terminalComposerAction) {
@@ -1014,6 +1036,7 @@ export function JobDispatchPanel({
           ? await loadUploadSourceArtifactFile(
               fileTransferSources,
               fileTransferSourceArtifactId,
+              fileTransferSourcesTruncated,
               onDownloadFileTransferSource,
             )
           : filePushSource;
@@ -1649,6 +1672,9 @@ export function JobDispatchPanel({
                 </label>
                 <span className="templateToolbarStatus">
                   {selectedTemplate ? `${selectedTemplate.scope_kind}${selectedTemplate.scope_value ? `:${selectedTemplate.scope_value}` : ""}` : "Optional"}
+                  {commandTemplatesTruncated
+                    ? ` · ${commandTemplates.length} templates loaded; older templates may not appear`
+                    : ""}
                 </span>
               </div>
               <details className="templateManageDrawer">
@@ -1826,6 +1852,7 @@ export function JobDispatchPanel({
           fileTransferMultiTargetPolicy={fileTransferMultiTargetPolicy}
           fileTransferSourceArtifactId={fileTransferSourceArtifactId}
           fileTransferSources={fileTransferSources}
+          fileTransferSourcesTruncated={fileTransferSourcesTruncated}
           fileTransferUploadSourceKind={fileTransferUploadSourceKind}
           fileTransferRateLimit={fileTransferRateLimit}
           fileTransferResumeToken={fileTransferResumeToken}

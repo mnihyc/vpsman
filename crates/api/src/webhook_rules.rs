@@ -131,33 +131,20 @@ impl AppState {
             None if dry_run => format!("{event_kind}:{}", unix_now()),
             None => anyhow::bail!("webhook_rule_dispatch_event_id_required"),
         };
-        let rule_limit = if request.rule_id.is_some() {
-            1000
+        let rules = if let Some(rule_id) = request.rule_id {
+            vec![self
+                .repo
+                .webhook_rule_by_id(rule_id)
+                .await?
+                .with_context(|| format!("webhook_rule_not_found:{rule_id}"))?]
         } else {
-            request.limit.unwrap_or(100).clamp(1, 1000)
+            self.repo
+                .list_webhook_rules(request.limit.unwrap_or(100).clamp(1, 1000), Some(true))
+                .await?
         };
-        let rules = self
-            .repo
-            .list_webhook_rules(
-                rule_limit,
-                if request.rule_id.is_some() {
-                    None
-                } else {
-                    Some(true)
-                },
-            )
-            .await?;
         let agents = self.repo.list_agents().await?;
         let mut candidates = Vec::new();
-        let mut matched_rule_id = request.rule_id.is_none();
         for rule in rules {
-            if request
-                .rule_id
-                .is_some_and(|requested_rule_id| rule.id != requested_rule_id)
-            {
-                continue;
-            }
-            matched_rule_id = true;
             if let Some(candidate) = webhook_candidate_for_rule(
                 &rule,
                 event_kind,
@@ -168,14 +155,6 @@ impl AppState {
                 candidates.push(candidate);
             }
         }
-        anyhow::ensure!(
-            matched_rule_id,
-            "webhook_rule_not_found:{}",
-            request
-                .rule_id
-                .map(|rule_id| rule_id.to_string())
-                .unwrap_or_default()
-        );
         let preview_hash =
             webhook_dispatch_preview_hash(request, event_kind, &event_id, &candidates)?;
         if dry_run {

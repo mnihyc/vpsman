@@ -1,7 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 
 use hmac::{Hmac, Mac};
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -97,9 +96,7 @@ impl PrivilegeAssertionReplayCache {
 }
 
 pub fn random_nonce() -> [u8; 16] {
-    let mut nonce = [0_u8; 16];
-    rand::thread_rng().fill_bytes(&mut nonce);
-    nonce
+    rand::random()
 }
 
 pub fn derive_super_key(password: &str, salt: &[u8]) -> [u8; 32] {

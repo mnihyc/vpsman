@@ -25,7 +25,6 @@ import type { PrivilegeMaterial } from "./privilege";
 import {
   defaultSubpages,
   FLEET_DETAIL_LIMIT,
-  HISTORY_DETAIL_LIMIT,
   isActionableFleetAlertState,
   navItems,
   normalizeSubpage,
@@ -50,6 +49,19 @@ import type {
 import { retryableLazy } from "./lazyImport";
 
 type ReleaseRouteTarget = AgentView | string;
+
+function combineErrors(
+  ...errors: Array<string | null | undefined>
+): string | null {
+  const messages = Array.from(
+    new Set(
+      errors.filter(
+        (error): error is string => Boolean(error && error.trim()),
+      ),
+    ),
+  );
+  return messages.length > 0 ? messages.join(" · ") : null;
+}
 
 type ConsoleRouteState = {
   subpage: string;
@@ -750,11 +762,43 @@ export function App() {
   const hasFleetScope =
     fleetViews.fleetQuery.trim().length > 0 ||
     fleetViews.activeSavedViewId !== null;
+  const runtimeConfigEvidenceState = dashboard.runtimeConfigApplyLoading
+    ? "loading"
+    : dashboard.runtimeConfigApplyEvidenceAvailable
+      ? "available"
+      : "unavailable";
+  const configInventoryEvidenceState = dashboard.tagsLoading
+    ? "loading"
+    : dashboard.tagInventoryEvidenceAvailable &&
+        dashboard.tagsError === null
+      ? "available"
+      : "unavailable";
+  const homeEvidenceLoading =
+    dashboard.dashboardOverviewLoading ||
+    dashboard.jobsLoading ||
+    dashboard.backupsLoading ||
+    dashboard.auditLoading ||
+    dashboard.schedulesLoading ||
+    dashboard.systemDashboardLoading;
+  const scopedFleetAlertsEvidenceAvailable =
+    dashboard.fleetAlertsEvidenceAvailable &&
+    (!hasFleetScope || dashboard.fleetCoreEvidenceAvailable);
+  const homeJobsEvidenceAvailable =
+    dashboard.fleetCoreEvidenceAvailable &&
+    dashboard.jobsEvidenceAvailable &&
+    !dashboard.jobsLoading;
+  const homeBackupsEvidenceAvailable =
+    dashboard.fleetCoreEvidenceAvailable &&
+    dashboard.backupsEvidenceAvailable &&
+    !dashboard.backupsLoading;
   const recordPageBounds = {
-    backupArtifacts: dashboard.backupArtifacts.length >= HISTORY_DETAIL_LIMIT,
-    backups: dashboard.backups.length >= HISTORY_DETAIL_LIMIT,
-    fileTransfers: dashboard.fileTransfers.length >= FLEET_DETAIL_LIMIT,
+    audits: dashboard.auditsTruncated,
+    backupArtifacts: dashboard.backupArtifactsTruncated,
+    backups: dashboard.backupsTruncated,
+    fileTransfers: dashboard.fileTransfersTruncated,
     fleetAlerts: dashboard.fleetAlerts.length >= FLEET_DETAIL_LIMIT,
+    jobs: dashboard.jobsTruncated,
+    schedules: dashboard.schedulesTruncated,
   };
   const shellSummary =
     hasFleetScope || activeView === "Home" || activeView === "Fleet"
@@ -762,15 +806,13 @@ export function App() {
       : dashboard.summary;
   const summaryScopeLabel = hasFleetScope ? "Current scope" : "Entire fleet";
   const shellAlertCounts = useMemo(() => {
-    const scopedClientIds = new Set(
-      (hasFleetScope ? visibleAgents : dashboard.agents).map(
-        (agent) => agent.id,
-      ),
-    );
+    const scopedClientIds = new Set(visibleAgents.map((agent) => agent.id));
     const activeAlerts = dashboard.fleetAlerts.filter(
       (alert) =>
         isActionableFleetAlertState(alert.operator_state) &&
-        (alert.client_id === null || scopedClientIds.has(alert.client_id)),
+        (!hasFleetScope ||
+          alert.client_id === null ||
+          scopedClientIds.has(alert.client_id)),
     );
     const critical = activeAlerts.filter(
       (alert) => alert.severity === "critical",
@@ -786,7 +828,7 @@ export function App() {
       truncated: dashboard.fleetAlerts.length >= FLEET_DETAIL_LIMIT,
       warning,
     };
-  }, [dashboard.agents, dashboard.fleetAlerts, hasFleetScope, visibleAgents]);
+  }, [dashboard.fleetAlerts, hasFleetScope, visibleAgents]);
   const homeScopedRecords = useMemo(() => {
     if (!hasFleetScope) {
       return {
@@ -828,13 +870,22 @@ export function App() {
     visibleAgents,
   ]);
   const onlineRatio = useMemo(() => {
+    if (!dashboard.fleetCoreEvidenceAvailable) {
+      return "Unknown";
+    }
     if (shellSummary.total === 0) {
       return "0%";
     }
     return `${Math.round((shellSummary.online / shellSummary.total) * 100)}%`;
-  }, [shellSummary.online, shellSummary.total]);
+  }, [
+    dashboard.fleetCoreEvidenceAvailable,
+    shellSummary.online,
+    shellSummary.total,
+  ]);
   const pageDescription =
-    activeView === "Fleet" && hasFleetScope
+    activeView === "Fleet" && !dashboard.fleetCoreEvidenceAvailable
+      ? "Fleet inventory evidence unavailable; retry before assuming the fleet is empty"
+      : activeView === "Fleet" && hasFleetScope
       ? `${visibleSummary.online} visible live / ${visibleSummary.never + visibleSummary.unknown} no contact / ${visibleSummary.total} visible / ${dashboard.summary.total} total`
       : activeView === "Fleet"
         ? `${visibleSummary.online} live / ${visibleSummary.never + visibleSummary.unknown} no contact / ${visibleSummary.total} total`
@@ -1236,8 +1287,16 @@ export function App() {
       id: `schedule:${schedule.id}`,
       group: "Schedule" as const,
       label: `Schedule ${schedule.name}`,
-      detail: `${schedule.enabled ? "enabled" : "disabled"} · ${schedule.cron_expr} · ${schedule.selector_expression}`,
-      keywords: `${schedule.id} ${schedule.name} ${schedule.command_type} ${schedule.selector_expression} ${schedule.target_client_ids.join(" ")}`,
+      detail: `${
+        schedule.cadence_error
+          ? "invalid cadence"
+          : schedule.enabled
+            ? "enabled"
+            : "disabled"
+      } · ${schedule.cron_expr} · ${schedule.selector_expression}`,
+      keywords: `${schedule.id} ${schedule.name} ${schedule.command_type} ${
+        schedule.cadence_error ?? ""
+      } ${schedule.selector_expression} ${schedule.target_client_ids.join(" ")}`,
       onSelect: () => selectView("Automation", "schedules"),
     }));
     const savedViewItems = fleetViews.savedViews.map((view) => ({
@@ -1283,13 +1342,44 @@ export function App() {
         auditLogs={dashboard.audits}
         backupArtifacts={homeScopedRecords.backupArtifacts}
         backups={homeScopedRecords.backups}
-        dashboardError={dashboard.dashboardOverviewError}
-        dashboardLoading={dashboard.dashboardOverviewLoading}
+        backupsEvidenceAvailable={homeBackupsEvidenceAvailable}
+        dashboardError={combineErrors(
+          dashboard.dashboardOverviewError,
+          dashboard.apiError,
+          dashboard.jobsError,
+          dashboard.backupsError,
+          dashboard.auditError,
+          dashboard.schedulesError,
+          dashboard.systemDashboardError,
+        )}
+        dashboardLoading={homeEvidenceLoading}
         dashboardPreferences={dashboard.dashboardPreferences}
         dashboardWindow={dashboard.dashboardOverviewWindow}
         fileTransfers={homeScopedRecords.fileTransfers}
+        fleetAlertsEvidenceAvailable={scopedFleetAlertsEvidenceAvailable}
         fleetAlerts={homeScopedRecords.fleetAlerts}
+        fleetCoreEvidenceAvailable={dashboard.fleetCoreEvidenceAvailable}
+        homeEvidenceComplete={
+          !homeEvidenceLoading &&
+          dashboard.fleetCoreEvidenceAvailable &&
+          scopedFleetAlertsEvidenceAvailable &&
+          dashboard.dashboardOverview !== null &&
+          dashboard.jobsEvidenceAvailable &&
+          dashboard.backupsEvidenceAvailable &&
+          dashboard.auditEvidenceAvailable &&
+          dashboard.schedulesEvidenceAvailable &&
+          dashboard.systemDashboard !== null &&
+          combineErrors(
+            dashboard.dashboardOverviewError,
+            dashboard.jobsError,
+            dashboard.backupsError,
+            dashboard.auditError,
+            dashboard.schedulesError,
+            dashboard.systemDashboardError,
+          ) === null
+        }
         jobs={dashboard.jobs}
+        jobsEvidenceAvailable={homeJobsEvidenceAvailable}
         recordBounds={recordPageBounds}
         schedules={homeScopedRecords.schedules}
         scopeFiltered={hasFleetScope}
@@ -1332,6 +1422,7 @@ export function App() {
         activeSubpage={panelSubpage}
         agents={visibleAgents}
         apiError={dashboard.apiError}
+        fleetCoreEvidenceAvailable={dashboard.fleetCoreEvidenceAvailable}
         sourceTemplateAssignments={dashboard.sourceTemplateAssignments}
         sourceStatus={dashboard.sourceStatus}
         fleetAlerts={dashboard.fleetAlerts}
@@ -1424,7 +1515,15 @@ export function App() {
       <VpsDetailPanel
         agent={selectedAgentForDetail}
         agents={dashboard.agents}
-        apiError={dashboard.apiError}
+        apiError={combineErrors(
+          dashboard.apiError,
+          dashboard.jobsError,
+          dashboard.backupsError,
+          dashboard.auditError,
+          dashboard.tagsError,
+          dashboard.runtimeConfigApplyError,
+          dashboard.topologyError,
+        )}
         audits={dashboard.audits}
         backupArtifacts={dashboard.backupArtifacts}
         backups={dashboard.backups}
@@ -1433,12 +1532,14 @@ export function App() {
         fleetAlertsTruncated={recordPageBounds.fleetAlerts}
         fleetAlertPolicies={dashboard.fleetAlertPolicies}
         jobs={dashboard.jobs}
+        recordBounds={recordPageBounds}
         loading={
           dashboard.jobsLoading ||
           dashboard.backupsLoading ||
           dashboard.topologyLoading ||
           dashboard.auditLoading ||
-          dashboard.tagsLoading
+          dashboard.tagsLoading ||
+          dashboard.runtimeConfigApplyLoading
         }
         networkObservations={dashboard.networkObservations}
         networkTrends={dashboard.networkTrends}
@@ -1472,6 +1573,7 @@ export function App() {
         onOpenTerminal={releaseRoutes.openTerminal}
         policyAlerts={dashboard.policyAlerts}
         runtimeConfigApplyStates={dashboard.runtimeConfigApplyStates}
+        runtimeConfigEvidenceState={runtimeConfigEvidenceState}
         sourceStatus={dashboard.sourceStatus}
         sourceTemplateAssignments={dashboard.sourceTemplateAssignments}
         summary={visibleSummary}
@@ -1493,12 +1595,24 @@ export function App() {
         sourceTemplateAssignments={dashboard.sourceTemplateAssignments}
         sourceTemplates={dashboard.sourceTemplates}
         sourceStatus={dashboard.sourceStatus}
-        error={dashboard.tagsError}
+        fleetConfigEvidenceAvailable={
+          dashboard.fleetCoreEvidenceAvailable &&
+          dashboard.configPolicyEvidenceAvailable
+        }
+        inventoryEvidenceState={configInventoryEvidenceState}
+        error={combineErrors(
+          dashboard.apiError,
+          dashboard.tagsError,
+          dashboard.runtimeConfigApplyError,
+        )}
         runtimeConfigApplyStates={dashboard.runtimeConfigApplyStates}
+        runtimeConfigEvidenceState={runtimeConfigEvidenceState}
         runtimeConfigPatchGenerators={dashboard.runtimeConfigPatchGenerators}
         fleetAlertPolicies={dashboard.fleetAlertPolicies}
         jobs={dashboard.jobs}
-        loading={dashboard.tagsLoading}
+        loading={
+          dashboard.tagsLoading || dashboard.runtimeConfigApplyLoading
+        }
         onSubmitRuntimeConfigPatch={dashboard.submitRuntimeConfigPatch}
         onCreateJob={dashboard.createJob}
         onLoadJobOutputs={dashboard.loadJobOutputs}
@@ -1650,6 +1764,7 @@ export function App() {
           onOpenJobHistory={() => selectView("Jobs", "history")}
           onRefresh={dashboard.loadJobs}
           releases={dashboard.agentUpdateReleases}
+          releasesTruncated={dashboard.agentUpdateReleasesTruncated}
           suiteConfig={canInspectSuitePolicy ? dashboard.suiteConfig : null}
           suiteConfigError={
             suitePolicyRoleError ??
@@ -1694,6 +1809,7 @@ export function App() {
           onOpenJobDetails={openJobDetails}
           onUpdateRollout={dashboard.updateJobRollout}
           rollouts={dashboard.jobRollouts}
+          rolloutsTruncated={dashboard.jobRolloutsTruncated}
         />
       </section>
     );
@@ -1704,6 +1820,7 @@ export function App() {
       <RunbooksPanel
         agents={dashboard.agents}
         commandTemplates={dashboard.commandTemplates}
+        commandTemplatesTruncated={dashboard.commandTemplatesTruncated}
         jobs={dashboard.jobs}
         loading={dashboard.jobsLoading}
         onOpenDispatchPreset={openJobDispatchPreset}
@@ -1757,8 +1874,10 @@ export function App() {
         jobs={dashboard.jobs}
         schedules={dashboard.schedules}
         commandTemplates={dashboard.commandTemplates}
+        commandTemplatesTruncated={dashboard.commandTemplatesTruncated}
         dispatchPreset={jobDispatchPreset}
         fileTransferSources={dashboard.fileTransferSources}
+        fileTransferSourcesTruncated={dashboard.fileTransferSourcesTruncated}
         lastJobOutputEvent={dashboard.lastJobOutputEvent}
         loading={dashboard.jobsLoading}
         onApproveJobApproval={dashboard.approveJobApproval}
@@ -1804,9 +1923,12 @@ export function App() {
         activeSubpage={panelSubpage}
         agents={dashboard.agents}
         commandTemplates={dashboard.commandTemplates}
+        commandTemplatesTruncated={dashboard.commandTemplatesTruncated}
         dispatchPreset={jobDispatchPreset}
         fileTransfers={dashboard.fileTransfers}
+        fileTransfersTruncated={dashboard.fileTransfersTruncated}
         fileTransferSources={dashboard.fileTransferSources}
+        fileTransferSourcesTruncated={dashboard.fileTransferSourcesTruncated}
         lastTerminalOutputEvent={dashboard.lastTerminalOutputEvent}
         loading={dashboard.jobsLoading}
         initialTargetIntent={
@@ -1852,8 +1974,12 @@ export function App() {
         privilegeMaterial={privilegeMaterial}
         privilegeUnlockOpen={privilegeUnlockOpen}
         processSupervisorInventory={dashboard.processSupervisorInventory}
+        processSupervisorInventoryTruncated={
+          dashboard.processSupervisorInventoryTruncated
+        }
         setPrivilegeMaterial={setPrivilegeMaterial}
         terminalSessions={dashboard.terminalSessions}
+        terminalSessionsTruncated={dashboard.terminalSessionsTruncated}
         transferTargetIntent={transferTargetIntent}
       />
     );
@@ -1874,6 +2000,7 @@ export function App() {
     return (
       <section className="workspace singleColumn">
         <ServerJobsPanel
+          error={dashboard.serverJobsError}
           jobs={dashboard.serverJobs}
           loading={dashboard.jobsLoading}
           onCancelJob={dashboard.cancelServerJob}
@@ -1887,10 +2014,11 @@ export function App() {
 
   function renderSchedulesPanel() {
     return (
-      <SchedulesPanel
+        <SchedulesPanel
         activeSubpage="registry"
         agents={dashboard.agents}
         commandTemplates={dashboard.commandTemplates}
+        commandTemplatesTruncated={dashboard.commandTemplatesTruncated}
         error={dashboard.schedulesError}
         loading={dashboard.schedulesLoading}
         onApplyScheduleNow={dashboard.applyScheduleNow}
@@ -1907,6 +2035,7 @@ export function App() {
         onUpdateScheduleTargets={dashboard.updateScheduleTargets}
         privilegeMaterial={privilegeMaterial}
         schedules={dashboard.schedules}
+        schedulesTruncated={dashboard.schedulesTruncated}
       />
     );
   }
@@ -1916,7 +2045,11 @@ export function App() {
       <TopologyPanel
         activeSubpage={panelSubpage}
         agents={dashboard.agents}
-        error={dashboard.topologyError}
+        error={combineErrors(
+          dashboard.topologyError,
+          dashboard.tagsError,
+          dashboard.runtimeConfigApplyError,
+        )}
         jobs={dashboard.jobs}
         loading={dashboard.topologyLoading}
         initialPlanWorkflow={networkPlanWorkflowIntent}
@@ -1935,6 +2068,7 @@ export function App() {
         portForwardError={dashboard.portForwardError}
         portForwardLoading={dashboard.portForwardLoading}
         portForwardRules={dashboard.portForwardRules}
+        runtimeConfigEvidenceState={runtimeConfigEvidenceState}
         runtimeConfigApplyStates={dashboard.runtimeConfigApplyStates}
         onAllocateTunnelEndpoints={dashboard.allocateTunnelEndpoints}
         onCreateJob={dashboard.createJob}
@@ -1945,6 +2079,9 @@ export function App() {
         onLoadNetworkTrends={dashboard.loadNetworkTrends}
         onLoadOspfRecommendations={dashboard.loadOspfRecommendations}
         onLoadOspfUpdatePlans={dashboard.loadOspfUpdatePlans}
+        onLoadRuntimeConfigApplyStates={
+          dashboard.loadRuntimeConfigApplyStates
+        }
         onLoadSourceTemplates={dashboard.loadSourceTemplates}
         onLoadTopologyGraph={dashboard.loadTopologyGraph}
         onLoadOutputs={dashboard.loadJobOutputs}
@@ -1979,6 +2116,7 @@ export function App() {
         sourceTemplates={dashboard.sourceTemplates}
         topologyGraph={dashboard.topologyGraph}
         telemetryTunnels={dashboard.telemetryTunnels}
+        tunnelPlanCorruptions={dashboard.tunnelPlanCorruptions}
         tunnelPlans={dashboard.tunnelPlans}
       />
     );
@@ -1989,6 +2127,7 @@ export function App() {
       <AuditLogPanel
         activeSubpage={panelSubpage}
         audits={dashboard.audits}
+        auditsTruncated={dashboard.auditsTruncated}
         error={dashboard.auditError}
         historyExport={dashboard.historyExport}
         historyPruneResult={dashboard.historyPruneResult}
@@ -2009,6 +2148,7 @@ export function App() {
         agents={dashboard.agents}
         artifacts={dashboard.backupArtifacts}
         backupPolicies={dashboard.backupPolicies}
+        backupPoliciesTruncated={dashboard.backupPoliciesTruncated}
         backups={dashboard.backups}
         fileTransfers={dashboard.fileTransfers}
         jobs={dashboard.jobs}
@@ -2022,6 +2162,7 @@ export function App() {
         }
         loading={dashboard.backupsLoading}
         onCreateBackupPolicy={dashboard.createBackupPolicy}
+        onUpdateBackupPolicy={dashboard.updateBackupPolicy}
         onCreateJob={dashboard.createJob}
         onCreateMigrationLink={dashboard.createMigrationLink}
         onCreateMigrationRun={dashboard.createMigrationRun}
@@ -2102,6 +2243,8 @@ export function App() {
     return (
       <SystemPanel
         activeSubpage={panelSubpage}
+        accessError={dashboard.accessError}
+        accessLoading={dashboard.accessLoading}
         dashboard={dashboard.systemDashboard}
         dashboardError={dashboard.systemDashboardError}
         dashboardLoading={dashboard.systemDashboardLoading}
@@ -2123,7 +2266,9 @@ export function App() {
         onValidateSuiteConfig={dashboard.validateSuiteConfig}
         operator={dashboard.operator}
         operatorAuthEvents={dashboard.operatorAuthEvents}
+        operatorAuthEventsTruncated={dashboard.operatorAuthEventsTruncated}
         operatorSessions={dashboard.operatorSessions}
+        operatorSessionsTruncated={dashboard.operatorSessionsTruncated}
         operators={dashboard.operators}
         privilegeMaterial={privilegeMaterial}
         suiteConfig={dashboard.suiteConfig}
@@ -2202,8 +2347,20 @@ export function App() {
         return (
           <JobArtifactsPanel
             agentUpdateReleases={dashboard.agentUpdateReleases}
+            agentUpdateReleasesTruncated={
+              dashboard.agentUpdateReleasesTruncated
+            }
             backupArtifacts={dashboard.backupArtifacts}
+            backupArtifactsTruncated={dashboard.backupArtifactsTruncated}
             fileTransferSources={dashboard.fileTransferSources}
+            fileTransferSourcesTruncated={
+              dashboard.fileTransferSourcesTruncated
+            }
+            error={combineErrors(
+              dashboard.jobsError,
+              dashboard.backupsError,
+            )}
+            loading={dashboard.jobsLoading || dashboard.backupsLoading}
             onOpenAgentUpdates={() => selectView("Automation", "agent_updates")}
             onOpenBackupsArtifacts={() => selectView("Backups", "artifacts")}
             onOpenTransfers={() => selectView("Remote Operations", "transfers")}
@@ -2252,8 +2409,10 @@ export function App() {
           <JobEvidencePanel
             agents={dashboard.agents}
             audits={dashboard.audits}
+            auditsTruncated={dashboard.auditsTruncated}
             error={dashboard.jobsError ?? dashboard.auditError}
             jobs={dashboard.jobs}
+            jobsTruncated={dashboard.jobsTruncated}
             loading={dashboard.jobsLoading || dashboard.auditLoading}
             onLoadJobOutputs={dashboard.loadJobOutputs}
             onLoadJobTargets={dashboard.loadJobTargets}
@@ -2272,7 +2431,9 @@ export function App() {
           <SessionEvidencePanel
             agents={dashboard.agents}
             audits={dashboard.audits}
+            auditsTruncated={dashboard.auditsTruncated}
             jobs={dashboard.jobs}
+            jobsTruncated={dashboard.jobsTruncated}
             loading={
               dashboard.jobsLoading ||
               dashboard.auditLoading ||
@@ -2286,8 +2447,13 @@ export function App() {
             }}
             operator={dashboard.operator}
             operatorAuthEvents={dashboard.operatorAuthEvents}
+            operatorAuthEventsTruncated={
+              dashboard.operatorAuthEventsTruncated
+            }
             operatorSessions={dashboard.operatorSessions}
+            operatorSessionsTruncated={dashboard.operatorSessionsTruncated}
             terminalSessions={dashboard.terminalSessions}
+            terminalSessionsTruncated={dashboard.terminalSessionsTruncated}
           />
         );
       }
@@ -2313,6 +2479,7 @@ export function App() {
         <AuthPanel
           apiError={dashboard.apiError}
           onAuth={dashboard.handleAuth}
+          sessionNotice={dashboard.logoutWarning}
         />
       </main>
     );
@@ -2337,10 +2504,15 @@ export function App() {
           agents={dashboard.agents}
           alertCounts={shellAlertCounts}
           apiToken={dashboard.apiToken}
+          authRefreshError={dashboard.authRefreshError}
           commandItems={commandItems}
           onlineRatio={onlineRatio}
           draftSavedFleetViewName={fleetViews.draftSavedViewName}
           filteredAgentCount={visibleAgents.length}
+          fleetAlertsEvidenceAvailable={
+            scopedFleetAlertsEvidenceAvailable
+          }
+          fleetCoreEvidenceAvailable={dashboard.fleetCoreEvidenceAvailable}
           fleetQuery={fleetViews.fleetQuery}
           hideFleetStatusSummary={
             activeView === "Fleet" && activeSubpage.startsWith("instance_detail")
@@ -2354,6 +2526,7 @@ export function App() {
           onFleetQueryChange={fleetViews.setFleetQuery}
           onLockPrivilege={lockPrivilege}
           onOpenAccessControls={openPrivilegeUnlock}
+          onRetryAuthRefresh={() => void dashboard.retryAuthRefresh()}
           onSaveFleetView={fleetViews.saveFleetView}
           onSelectView={selectView}
           onSavedFleetViewNameChange={fleetViews.setDraftSavedViewName}

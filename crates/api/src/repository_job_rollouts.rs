@@ -15,6 +15,7 @@ const ROLLOUT_STATUS_RUNNING: &str = "running";
 const ROLLOUT_STATUS_PAUSED: &str = "paused";
 const ROLLOUT_STATUS_COMPLETED: &str = "completed";
 const ROLLOUT_STATUS_ABORTED: &str = "aborted";
+const ROLLOUT_PAUSE_CURRENT_BATCH_ASSIGNMENT_MISSING: &str = "current_batch_assignment_missing";
 
 impl Repository {
     pub(crate) async fn list_job_rollouts(&self, limit: i64) -> Result<Vec<JobRolloutView>> {
@@ -303,8 +304,9 @@ impl Repository {
                               AND target.status <> 'completed'
                         ) AS failure_count
                     FROM locked_rollouts rollout
-                    JOIN job_rollout_targets assignment ON assignment.job_id = rollout.job_id
-                    JOIN job_targets target
+                    LEFT JOIN job_rollout_targets assignment
+                      ON assignment.job_id = rollout.job_id
+                    LEFT JOIN job_targets target
                       ON target.job_id = assignment.job_id
                      AND target.client_id = assignment.client_id
                     GROUP BY
@@ -323,13 +325,31 @@ impl Repository {
                 .await?;
                 let mut changed = 0;
                 for row in rows {
+                    let job_id: Uuid = row.try_get("job_id")?;
                     let current_count: i64 = row.try_get("current_count")?;
                     let terminal_count: i64 = row.try_get("current_terminal_count")?;
-                    ensure!(current_count > 0, "job_rollout_current_batch_empty");
+                    if current_count == 0 {
+                        let result = sqlx::query(
+                            r#"
+                            UPDATE job_rollouts
+                            SET
+                                status = 'paused',
+                                pause_reason = $2,
+                                next_batch_at = now(),
+                                updated_at = now()
+                            WHERE job_id = $1 AND status = 'running'
+                            "#,
+                        )
+                        .bind(job_id)
+                        .bind(ROLLOUT_PAUSE_CURRENT_BATCH_ASSIGNMENT_MISSING)
+                        .execute(&mut *tx)
+                        .await?;
+                        changed += usize::try_from(result.rows_affected())?;
+                        continue;
+                    }
                     if terminal_count != current_count {
                         continue;
                     }
-                    let job_id: Uuid = row.try_get("job_id")?;
                     let current_batch: i32 = row.try_get("current_batch")?;
                     let total_batches: i32 = row.try_get("total_batches")?;
                     let failure_count: i64 = row.try_get("failure_count")?;
@@ -435,10 +455,14 @@ async fn reconcile_memory_rollouts(memory: &MemoryState, limit: i64) -> Result<u
                         == Some(&rollout.current_batch)
             })
             .collect::<Vec<_>>();
-        ensure!(
-            !current_targets.is_empty(),
-            "job_rollout_current_batch_empty"
-        );
+        if current_targets.is_empty() {
+            rollout.status = ROLLOUT_STATUS_PAUSED.to_string();
+            rollout.pause_reason = Some(ROLLOUT_PAUSE_CURRENT_BATCH_ASSIGNMENT_MISSING.to_string());
+            rollout.next_batch_unix = now_unix;
+            rollout.updated_at = now.clone();
+            changed += 1;
+            continue;
+        }
         if current_targets
             .iter()
             .any(|target| target.completed_at.is_none())
@@ -834,6 +858,93 @@ mod tests {
         assert_eq!(completed.status, "completed");
         assert!(completed.completed_at.is_some());
         assert_eq!(completed.targets.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn malformed_current_batch_is_paused_without_starving_healthy_rollout() {
+        let repo = Repository::Memory(MemoryState::default());
+        let operator = test_operator();
+        let malformed_job_id = Uuid::new_v4();
+        let mut malformed_request =
+            rollout_request(&["broken-a", "broken-b", "broken-c", "broken-d"]);
+        malformed_request
+            .rollout
+            .as_mut()
+            .unwrap()
+            .pause_after_canary = false;
+        repo.record_dispatching_job(
+            malformed_job_id,
+            &malformed_request,
+            "malformed-command-hash",
+            "malformed-request-fingerprint",
+            &operator,
+            &malformed_request.target_client_ids,
+        )
+        .await
+        .unwrap();
+
+        let healthy_job_id = Uuid::new_v4();
+        let mut healthy_request = rollout_request(&["healthy-a", "healthy-b", "healthy-c"]);
+        healthy_request.rollout.as_mut().unwrap().pause_after_canary = false;
+        repo.record_dispatching_job(
+            healthy_job_id,
+            &healthy_request,
+            "healthy-command-hash",
+            "healthy-request-fingerprint",
+            &operator,
+            &healthy_request.target_client_ids,
+        )
+        .await
+        .unwrap();
+
+        if let Repository::Memory(memory) = &repo {
+            memory
+                .job_rollouts
+                .write()
+                .await
+                .iter_mut()
+                .find(|rollout| rollout.job_id == malformed_job_id)
+                .unwrap()
+                .current_batch = 1;
+            memory
+                .job_rollout_targets
+                .write()
+                .await
+                .retain(|(job_id, _), batch| *job_id != malformed_job_id || *batch != 1);
+            let now = unix_now().to_string();
+            let mut targets = memory.job_targets.write().await;
+            let healthy_canary = targets
+                .iter_mut()
+                .find(|target| target.job_id == healthy_job_id && target.client_id == "healthy-a")
+                .unwrap();
+            healthy_canary.status = "completed".to_string();
+            healthy_canary.completed_at = Some(now);
+        }
+
+        assert_eq!(repo.reconcile_job_rollouts(1).await.unwrap(), 1);
+        let malformed = repo
+            .get_job_rollout(malformed_job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(malformed.status, ROLLOUT_STATUS_PAUSED);
+        assert_eq!(
+            malformed.pause_reason.as_deref(),
+            Some(ROLLOUT_PAUSE_CURRENT_BATCH_ASSIGNMENT_MISSING)
+        );
+        assert_eq!(
+            repo.get_job_rollout(healthy_job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .current_batch,
+            0
+        );
+
+        assert_eq!(repo.reconcile_job_rollouts(1).await.unwrap(), 1);
+        let healthy = repo.get_job_rollout(healthy_job_id).await.unwrap().unwrap();
+        assert_eq!(healthy.status, ROLLOUT_STATUS_RUNNING);
+        assert_eq!(healthy.current_batch, 1);
     }
 
     #[tokio::test]

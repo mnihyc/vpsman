@@ -1,6 +1,8 @@
 use std::{
+    collections::HashSet,
     ffi::OsStr,
     io::{self, Read, Write},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -17,6 +19,7 @@ use vpsman_common::{
 };
 
 use crate::command_worker::{CommandCancelToken, CommandCanceled};
+use crate::file_browser::MAX_FILE_TREE_SCAN_ENTRIES;
 use crate::file_pull::{
     chunked_output, stream_buffered_payload_output, COMMAND_OUTPUT_CHUNK_BYTES,
 };
@@ -464,6 +467,8 @@ fn build_directory_download_artifact(
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| OsStr::new("root"));
         let archive_name = PathBuf::from(Path::new(name));
+        let mut visited_directories = HashSet::new();
+        let mut scanned_entries = 0;
         append_tar_path_checked(
             &mut builder,
             &archive_name,
@@ -471,6 +476,8 @@ fn build_directory_download_artifact(
             &metadata,
             follow_symlinks,
             cancel_token,
+            &mut visited_directories,
+            &mut scanned_entries,
         )?;
         builder.finish().context("failed to finish tar archive")?;
     }
@@ -487,15 +494,26 @@ fn append_tar_path_checked<W: Write>(
     metadata: &std::fs::Metadata,
     follow_symlinks: bool,
     cancel_token: &CommandCancelToken,
+    visited_directories: &mut HashSet<(u64, u64)>,
+    scanned_entries: &mut usize,
 ) -> Result<()> {
     cancel_token.check("file_download")?;
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        let directory_identity = (metadata.dev(), metadata.ino());
+        if !visited_directories.insert(directory_identity) {
+            anyhow::bail!("file download archive encountered a previously visited directory");
+        }
         builder
             .append_dir(archive_path, fs_path)
             .with_context(|| format!("failed to archive directory {}", fs_path.display()))?;
-        let mut entries = std::fs::read_dir(fs_path)
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(fs_path)
             .with_context(|| format!("failed to read {}", fs_path.display()))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        {
+            cancel_token.check("file_download")?;
+            count_file_download_scan_entry(scanned_entries)?;
+            entries.push(entry?);
+        }
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
             cancel_token.check("file_download")?;
@@ -517,6 +535,8 @@ fn append_tar_path_checked<W: Write>(
                 &metadata,
                 follow_symlinks,
                 cancel_token,
+                visited_directories,
+                scanned_entries,
             )?;
         }
         return Ok(());
@@ -534,6 +554,8 @@ fn build_directory_manifest(
     cancel_token: &CommandCancelToken,
 ) -> Result<FileDownloadManifestSummary> {
     let mut builder = FileDownloadManifestBuilder::new();
+    let mut visited_directories = HashSet::new();
+    let mut scanned_entries = 0;
     collect_manifest_entries(
         source,
         source,
@@ -541,6 +563,8 @@ fn build_directory_manifest(
         follow_symlinks,
         &mut builder,
         cancel_token,
+        &mut visited_directories,
+        &mut scanned_entries,
     )?;
     Ok(builder.finish())
 }
@@ -592,11 +616,24 @@ fn collect_manifest_entries(
     follow_symlinks: bool,
     builder: &mut FileDownloadManifestBuilder,
     cancel_token: &CommandCancelToken,
+    visited_directories: &mut HashSet<(u64, u64)>,
+    scanned_entries: &mut usize,
 ) -> Result<()> {
     cancel_token.check("file_download")?;
-    let mut entries = std::fs::read_dir(current)
+    let current_metadata = std::fs::metadata(current)
+        .with_context(|| format!("failed to stat directory {}", current.display()))?;
+    let directory_identity = (current_metadata.dev(), current_metadata.ino());
+    if !visited_directories.insert(directory_identity) {
+        anyhow::bail!("file download manifest encountered a previously visited directory");
+    }
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(current)
         .with_context(|| format!("failed to read {}", current.display()))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    {
+        cancel_token.check("file_download")?;
+        count_file_download_scan_entry(scanned_entries)?;
+        entries.push(entry?);
+    }
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
         cancel_token.check("file_download")?;
@@ -641,12 +678,17 @@ fn collect_manifest_entries(
                 follow_symlinks,
                 builder,
                 cancel_token,
+                visited_directories,
+                scanned_entries,
             )?;
             continue;
         }
         if metadata.is_file() {
             builder.file_count = builder.file_count.saturating_add(1);
-            builder.total_file_bytes = builder.total_file_bytes.saturating_add(metadata.len());
+            builder.total_file_bytes = builder
+                .total_file_bytes
+                .checked_add(metadata.len())
+                .context("file download source size overflow")?;
             if builder.total_file_bytes > max_bytes {
                 anyhow::bail!(
                     "download source exceeds limit: {} > {max_bytes} bytes",
@@ -670,6 +712,20 @@ fn collect_manifest_entries(
             sha256_hex: None,
             symlink_target: None,
         });
+    }
+    Ok(())
+}
+
+fn count_file_download_scan_entry(scanned_entries: &mut usize) -> Result<()> {
+    *scanned_entries = scanned_entries
+        .checked_add(1)
+        .context("file download source entry count overflow")?;
+    if *scanned_entries > MAX_FILE_TREE_SCAN_ENTRIES {
+        anyhow::bail!(
+            "file download source exceeds entry scan limit: {} > {}",
+            *scanned_entries,
+            MAX_FILE_TREE_SCAN_ENTRIES
+        );
     }
     Ok(())
 }
@@ -1048,7 +1104,7 @@ fn download_status_output(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, os::unix::fs::symlink};
 
     use super::*;
 
@@ -1072,5 +1128,70 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(fs::read_to_string(nested.join("keep.txt")).unwrap(), "keep");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn directory_download_manifest_rejects_revisited_symlinked_directory() {
+        let root =
+            std::env::temp_dir().join(format!("vpsman-file-download-manifest-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        symlink(&root, root.join("loop")).unwrap();
+
+        let error = build_directory_manifest(
+            &root,
+            MAX_DIRECT_FILE_DOWNLOAD_BYTES,
+            true,
+            &CommandCancelToken::default(),
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("file download manifest encountered a previously visited directory"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn directory_download_archive_rejects_revisited_symlinked_directory() {
+        let root =
+            std::env::temp_dir().join(format!("vpsman-file-download-archive-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        symlink(&root, root.join("loop")).unwrap();
+        let metadata = fs::metadata(&root).unwrap();
+        let mut archive = Vec::new();
+        let mut visited_directories = HashSet::new();
+        let mut scanned_entries = 0;
+        let error = {
+            let mut writer = LimitedVecWriter::new(&mut archive, MAX_DIRECT_FILE_DOWNLOAD_BYTES);
+            let mut builder = tar::Builder::new(&mut writer);
+            builder.follow_symlinks(true);
+            append_tar_path_checked(
+                &mut builder,
+                Path::new("download"),
+                &root,
+                &metadata,
+                true,
+                &CommandCancelToken::default(),
+                &mut visited_directories,
+                &mut scanned_entries,
+            )
+            .unwrap_err()
+        };
+
+        assert!(error
+            .to_string()
+            .contains("file download archive encountered a previously visited directory"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn directory_download_scan_entry_limit_fails_closed() {
+        let mut scanned_entries = MAX_FILE_TREE_SCAN_ENTRIES;
+
+        let error = count_file_download_scan_entry(&mut scanned_entries).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("file download source exceeds entry scan limit"));
     }
 }

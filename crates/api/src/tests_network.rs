@@ -37,6 +37,22 @@ async fn saved_plan_is_explicit_and_has_no_ospf_state_when_ospf_is_off() {
 }
 
 #[tokio::test]
+async fn memory_management_list_preserves_typed_tunnel_identity() {
+    let repo = Repository::Memory(MemoryState::default());
+    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let plan = plan_tunnel(&input).unwrap();
+    let created = repo
+        .record_tunnel_plan(&input, &plan, false, &network_test_operator())
+        .await
+        .unwrap();
+    let items = repo.list_tunnel_plan_items().await.unwrap();
+    assert!(matches!(
+        items.as_slice(),
+        [crate::model::TunnelPlanListItem::Plan(plan)] if plan.id == created.id
+    ));
+}
+
+#[tokio::test]
 async fn connection_assessment_is_audited_revision_bound_and_cleared_by_plan_changes() {
     let repo = Repository::Memory(MemoryState::default());
     let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);

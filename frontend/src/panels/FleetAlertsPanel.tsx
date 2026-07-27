@@ -90,7 +90,9 @@ function ConsoleFreshnessBanner({ error }: { error: string | null }) {
   }
   return (
     <div className="consoleFreshnessBanner">
-      <span>Using cached data. Last refresh failed: {error}</span>
+      <span>
+        Last refresh failed; any previously loaded data remains visible: {error}
+      </span>
     </div>
   );
 }

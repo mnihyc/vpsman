@@ -42,6 +42,10 @@ binary path, or one accounting source is not enough.
     `os_release_file`.
   - Custom source: bounded JSON command can replace or overlay hostname,
     uptime, CPU, memory, disk, network, and tunnel metrics.
+  - A replacement command must return every core metric field, including
+    explicit empty arrays where no disk, network, or tunnel rows exist. Source
+    read, parse, timeout, or command failures reject the complete sample; they
+    never publish a fresh zero-filled snapshot.
   - Template domain: `telemetry_metrics_source`, with built-in default,
     shared custom, and VPS-local custom templates.
 - Runtime tunnel traffic accounting:

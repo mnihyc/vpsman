@@ -1,3 +1,9 @@
+#[cfg(unix)]
+use std::path::Path;
+
+#[cfg(unix)]
+use anyhow::Context;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AccountIdentity {
     pub(crate) uid: u32,
@@ -23,11 +29,43 @@ pub(crate) struct PlatformAccounts {
 }
 
 impl PlatformAccounts {
-    pub(crate) fn load() -> Self {
-        Self {
-            users: load_platform_users(),
-            groups: load_platform_groups(),
-        }
+    #[cfg(unix)]
+    pub(crate) fn load() -> anyhow::Result<Self> {
+        Self::load_from_paths(Path::new("/etc/passwd"), Path::new("/etc/group"))
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn load() -> anyhow::Result<Self> {
+        Ok(Self::default())
+    }
+
+    #[cfg(unix)]
+    fn load_from_paths(passwd_path: &Path, group_path: &Path) -> anyhow::Result<Self> {
+        let passwd = std::fs::read_to_string(passwd_path).with_context(|| {
+            format!(
+                "failed to read platform user database {}",
+                passwd_path.display()
+            )
+        })?;
+        let users = parse_unix_passwd(&passwd).with_context(|| {
+            format!(
+                "failed to parse platform user database {}",
+                passwd_path.display()
+            )
+        })?;
+        let group = std::fs::read_to_string(group_path).with_context(|| {
+            format!(
+                "failed to read platform group database {}",
+                group_path.display()
+            )
+        })?;
+        let groups = parse_unix_group(&group).with_context(|| {
+            format!(
+                "failed to parse platform group database {}",
+                group_path.display()
+            )
+        })?;
+        Ok(Self { users, groups })
     }
 
     pub(crate) fn find_user_identity(&self, user: &str) -> Option<AccountIdentity> {
@@ -137,61 +175,67 @@ impl NameIdEntries {
 }
 
 #[cfg(unix)]
-fn load_platform_users() -> NameIdEntries {
-    parse_unix_passwd(&std::fs::read_to_string("/etc/passwd").unwrap_or_default())
-}
-
-#[cfg(not(unix))]
-fn load_platform_users() -> NameIdEntries {
-    NameIdEntries::default()
-}
-
-#[cfg(unix)]
-fn load_platform_groups() -> NameIdEntries {
-    parse_unix_group(&std::fs::read_to_string("/etc/group").unwrap_or_default())
-}
-
-#[cfg(not(unix))]
-fn load_platform_groups() -> NameIdEntries {
-    NameIdEntries::default()
-}
-
-#[cfg(unix)]
-fn parse_unix_passwd(data: &str) -> NameIdEntries {
-    let entries = data
-        .lines()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.split(':').collect();
-            if parts.len() < 4 {
-                return None;
-            }
-            Some(NameIdEntry {
-                name: parts[0].to_string(),
-                id: parts[2].parse().ok()?,
-                primary_group_id: Some(parts[3].parse().ok()?),
-            })
-        })
-        .collect();
-    NameIdEntries { entries }
+fn parse_unix_passwd(data: &str) -> anyhow::Result<NameIdEntries> {
+    let mut entries = Vec::new();
+    for (index, line) in data.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let line_number = index + 1;
+        let parts = line.split(':').collect::<Vec<_>>();
+        anyhow::ensure!(
+            parts.len() >= 4,
+            "passwd line {line_number} has fewer than four fields"
+        );
+        anyhow::ensure!(
+            !parts[0].is_empty(),
+            "passwd line {line_number} has an empty account name"
+        );
+        let uid = parts[2]
+            .parse::<u32>()
+            .with_context(|| format!("passwd line {line_number} has invalid uid `{}`", parts[2]))?;
+        let gid = parts[3].parse::<u32>().with_context(|| {
+            format!(
+                "passwd line {line_number} has invalid primary gid `{}`",
+                parts[3]
+            )
+        })?;
+        entries.push(NameIdEntry {
+            name: parts[0].to_string(),
+            id: uid,
+            primary_group_id: Some(gid),
+        });
+    }
+    Ok(NameIdEntries { entries })
 }
 
 #[cfg(unix)]
-fn parse_unix_group(data: &str) -> NameIdEntries {
-    let entries = data
-        .lines()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.split(':').collect();
-            if parts.len() < 3 {
-                return None;
-            }
-            Some(NameIdEntry {
-                name: parts[0].to_string(),
-                id: parts[2].parse().ok()?,
-                primary_group_id: None,
-            })
-        })
-        .collect();
-    NameIdEntries { entries }
+fn parse_unix_group(data: &str) -> anyhow::Result<NameIdEntries> {
+    let mut entries = Vec::new();
+    for (index, line) in data.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let line_number = index + 1;
+        let parts = line.split(':').collect::<Vec<_>>();
+        anyhow::ensure!(
+            parts.len() >= 3,
+            "group line {line_number} has fewer than three fields"
+        );
+        anyhow::ensure!(
+            !parts[0].is_empty(),
+            "group line {line_number} has an empty group name"
+        );
+        let gid = parts[2]
+            .parse::<u32>()
+            .with_context(|| format!("group line {line_number} has invalid gid `{}`", parts[2]))?;
+        entries.push(NameIdEntry {
+            name: parts[0].to_string(),
+            id: gid,
+            primary_group_id: None,
+        });
+    }
+    Ok(NameIdEntries { entries })
 }
 
 pub(crate) fn current_effective_uid() -> u32 {
@@ -277,7 +321,8 @@ mod tests {
     fn parses_unix_passwd_with_primary_group() {
         let users = parse_unix_passwd(
             "root:x:0:0:root:/root:/bin/sh\nalice:x:1000:1001::/home/alice:/bin/sh\n",
-        );
+        )
+        .unwrap();
         assert_eq!(
             users.identity_for_name("alice"),
             Some(AccountIdentity {
@@ -290,8 +335,41 @@ mod tests {
 
     #[test]
     fn parses_unix_group_entries() {
-        let groups = parse_unix_group("root:x:0:\noperators:x:1001:alice\n");
+        let groups = parse_unix_group("root:x:0:\noperators:x:1001:alice\n").unwrap();
         assert_eq!(groups.id_for_name("operators"), Some(1001));
         assert_eq!(groups.name_for_id(0), Some("root".to_string()));
+    }
+
+    #[test]
+    fn rejects_invalid_unix_passwd_entry_with_line_context() {
+        let error = parse_unix_passwd("root:x:0:0:root:/root:/bin/sh\nalice:x:not-a-uid:1001\n")
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("passwd line 2 has invalid uid `not-a-uid`"));
+    }
+
+    #[test]
+    fn rejects_invalid_unix_group_entry_with_line_context() {
+        let error = parse_unix_group("root:x:0:\noperators:x:not-a-gid:alice\n").unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("group line 2 has invalid gid `not-a-gid`"));
+    }
+
+    #[test]
+    fn account_database_read_error_identifies_the_source() {
+        let missing_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test-fixtures/definitely-missing-platform-account-database");
+        let error = PlatformAccounts::load_from_paths(&missing_path, &missing_path).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("failed to read platform user database"));
+        assert!(error
+            .to_string()
+            .contains(&missing_path.display().to_string()));
     }
 }

@@ -279,11 +279,12 @@ fn tls_stream(
 ) -> Result<StreamOwned<ClientConnection, TcpStream>> {
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let tls_config = ClientConfig::builder_with_provider(Arc::new(rustls_rustcrypto::provider()))
-        .with_safe_default_protocol_versions()
-        .context("failed to configure API TLS protocol versions")?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let tls_config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .context("failed to configure API TLS protocol versions")?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
     let server_name = ServerName::try_from(parsed.host.clone())
         .context("API URL host is not a valid TLS server name")?;
     let connection = ClientConnection::new(Arc::new(tls_config), server_name)

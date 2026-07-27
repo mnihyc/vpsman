@@ -20,7 +20,7 @@ use crate::{
         validate_artifact_metadata, validate_artifact_object_key, MAX_BACKUP_ARTIFACT_UPLOAD_BYTES,
     },
     commands_schedules::{resolve_schedule_target_ids, selector_expression_from_targets},
-    http::{http_get, http_post_json},
+    http::{http_get, http_post_json, http_put_json},
     jobs::resolve_target_ids,
     privilege::{
         build_privilege_for_job_command, build_privilege_for_schedule, load_super_password,
@@ -33,6 +33,7 @@ const RESTORE_DESTINATION_ROOT_BASE_ENV: &str = "VPSMAN_RESTORE_DESTINATION_ROOT
 const DEFAULT_RESTORE_DESTINATION_ROOT_BASE: &str = "/var/lib/vpsman/restores";
 
 pub(crate) struct BackupPolicyUpsertOptions {
+    pub(crate) schedule_id: Option<Uuid>,
     pub(crate) name: String,
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
@@ -49,7 +50,72 @@ pub(crate) struct BackupPolicyUpsertOptions {
     pub(crate) retention_days: Option<i32>,
     pub(crate) keep_last: Option<i32>,
     pub(crate) rotation_generation: Option<String>,
+    pub(crate) clear_rotation_generation: bool,
     pub(crate) confirmed: bool,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct BackupPolicyUpsertTarget {
+    pub(crate) action: &'static str,
+    pub(crate) path: String,
+    pub(crate) schedule_id: Option<String>,
+}
+
+pub(crate) fn backup_policy_upsert_target(schedule_id: Option<Uuid>) -> BackupPolicyUpsertTarget {
+    match schedule_id {
+        Some(schedule_id) => {
+            let schedule_id = schedule_id.to_string();
+            BackupPolicyUpsertTarget {
+                action: "backup_policy.update",
+                path: format!("/api/v1/backup-policies/{schedule_id}"),
+                schedule_id: Some(schedule_id),
+            }
+        }
+        None => BackupPolicyUpsertTarget {
+            action: "backup_policy.create",
+            path: "/api/v1/backup-policies".to_string(),
+            schedule_id: None,
+        },
+    }
+}
+
+pub(crate) fn validate_backup_policy_upsert_mode(
+    schedule_id: Option<Uuid>,
+    retention_days: Option<i32>,
+    keep_last: Option<i32>,
+    rotation_generation: Option<&str>,
+    clear_rotation_generation: bool,
+) -> Result<()> {
+    ensure!(
+        !(rotation_generation.is_some() && clear_rotation_generation),
+        "--rotation-generation and --clear-rotation-generation are mutually exclusive"
+    );
+    if let Some(rotation_generation) = rotation_generation {
+        ensure!(
+            !rotation_generation.trim().is_empty(),
+            "--rotation-generation requires a non-empty value"
+        );
+    }
+    if schedule_id.is_some() {
+        ensure!(
+            retention_days.is_some(),
+            "backup-policy-upsert updates require --retention-days"
+        );
+        ensure!(
+            keep_last.is_some(),
+            "backup-policy-upsert updates require --keep-last"
+        );
+        ensure!(
+            rotation_generation.is_some() || clear_rotation_generation,
+            "backup-policy-upsert updates require --rotation-generation or --clear-rotation-generation"
+        );
+    } else {
+        ensure!(
+            !clear_rotation_generation,
+            "--clear-rotation-generation requires --schedule-id"
+        );
+    }
+    Ok(())
 }
 
 pub(crate) struct BackupRunOptions {
@@ -198,8 +264,55 @@ pub(crate) fn backup_artifacts(api_url: &str, token: Option<&str>, limit: u16) -
     Ok(())
 }
 
-pub(crate) fn backup_policies(api_url: &str, token: Option<&str>) -> Result<()> {
-    println!("{}", http_get(api_url, "/api/v1/backup-policies", token)?);
+pub(crate) fn backup_policy_list_path(limit: u16, offset: u32) -> Result<String> {
+    ensure!(
+        (1..=1000).contains(&limit),
+        "backup-policies --limit must be between 1 and 1000"
+    );
+    ensure!(
+        offset <= 100_000,
+        "backup-policies --offset must not exceed 100000"
+    );
+    Ok(format!(
+        "/api/v1/backup-policies?limit={limit}&offset={offset}"
+    ))
+}
+
+pub(crate) fn fetch_backup_policy_page(
+    api_url: &str,
+    token: Option<&str>,
+    limit: u16,
+    offset: u32,
+) -> Result<(String, bool)> {
+    let response = http_get(api_url, &backup_policy_list_path(limit, offset)?, token)?;
+    let rows = serde_json::from_str::<Vec<serde_json::Value>>(&response)
+        .context("backup-policies response was not a JSON array")?;
+    Ok((response, rows.len() >= usize::from(limit)))
+}
+
+pub(crate) fn backup_policy_cap_notice(limit: u16, offset: u32) -> String {
+    let next_offset = offset.saturating_add(u32::from(limit));
+    if next_offset > 100_000 {
+        return format!(
+            "loaded {limit} backup policies at offset {offset}; more may exist beyond the supported paging boundary"
+        );
+    }
+    format!(
+        "loaded {limit} backup policies at offset {offset}; more may exist; rerun with --offset {next_offset}"
+    )
+}
+
+pub(crate) fn backup_policies(
+    api_url: &str,
+    token: Option<&str>,
+    limit: u16,
+    offset: u32,
+) -> Result<()> {
+    let (response, cap_reached) = fetch_backup_policy_page(api_url, token, limit, offset)?;
+    println!("{response}");
+    if cap_reached {
+        eprintln!("{}", backup_policy_cap_notice(limit, offset));
+    }
     Ok(())
 }
 
@@ -247,6 +360,13 @@ pub(crate) fn backup_policy_upsert(
     token: Option<&str>,
     options: BackupPolicyUpsertOptions,
 ) -> Result<()> {
+    validate_backup_policy_upsert_mode(
+        options.schedule_id,
+        options.retention_days,
+        options.keep_last,
+        options.rotation_generation.as_deref(),
+        options.clear_rotation_generation,
+    )?;
     validate_backup_scope(&options.paths, options.include_config)?;
     anyhow::ensure!(
         !options.clients.is_empty() || !options.tags.is_empty(),
@@ -266,10 +386,11 @@ pub(crate) fn backup_policy_upsert(
     };
     let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
     let salt_hex = load_super_salt_hex(None)?;
+    let target = backup_policy_upsert_target(options.schedule_id);
     let privilege_assertion = build_privilege_for_schedule(
         SchedulePrivilegeRequest {
-            action: "backup_policy.create",
-            schedule_id: None,
+            action: target.action,
+            schedule_id: target.schedule_id.as_deref(),
             name: &options.name,
             command: &operation,
             command_type: "backup",
@@ -289,35 +410,37 @@ pub(crate) fn backup_policy_upsert(
         &salt_hex,
         300,
     )?;
-    println!(
-        "{}",
-        http_post_json(
-            api_url,
-            "/api/v1/backup-policies",
-            token,
-            &serde_json::json!({
-                "name": options.name,
-                "paths": options.paths,
-                "include_config": options.include_config,
-                "follow_symlinks": options.follow_symlinks,
-                "missing_path_policy": backup_missing_path_policy(options.skip_missing_paths),
-                "selector_expression": selector_expression,
-                "target_client_ids": target_ids,
-                "cron_expr": options.cron_expr,
-                "timezone": "UTC",
-                "enabled": options.enabled,
-                "catch_up_policy": options.catch_up_policy,
-                "catch_up_limit": options.catch_up_limit,
-                "retry_delay_secs": options.retry_delay_secs,
-                "max_failures": options.max_failures,
-                "retention_days": options.retention_days,
-                "keep_last": options.keep_last,
-                "rotation_generation": options.rotation_generation,
-                "confirmed": options.confirmed,
-                "privilege_assertion": privilege_assertion,
-            }),
-        )?
-    );
+    let payload = serde_json::json!({
+        "name": options.name,
+        "paths": options.paths,
+        "include_config": options.include_config,
+        "follow_symlinks": options.follow_symlinks,
+        "missing_path_policy": backup_missing_path_policy(options.skip_missing_paths),
+        "selector_expression": selector_expression,
+        "target_client_ids": target_ids,
+        "cron_expr": options.cron_expr,
+        "timezone": "UTC",
+        "enabled": options.enabled,
+        "catch_up_policy": options.catch_up_policy,
+        "catch_up_limit": options.catch_up_limit,
+        "retry_delay_secs": options.retry_delay_secs,
+        "max_failures": options.max_failures,
+        "retention_days": options.retention_days,
+        "keep_last": options.keep_last,
+        "rotation_generation": if options.clear_rotation_generation {
+            None
+        } else {
+            options.rotation_generation
+        },
+        "confirmed": options.confirmed,
+        "privilege_assertion": privilege_assertion,
+    });
+    let response = if target.schedule_id.is_some() {
+        http_put_json(api_url, &target.path, token, &payload)?
+    } else {
+        http_post_json(api_url, &target.path, token, &payload)?
+    };
+    println!("{response}");
     Ok(())
 }
 
@@ -1341,9 +1464,10 @@ pub(crate) fn restore_run_operation(
 #[cfg(test)]
 mod tests {
     use super::{
-        backup_policy_prune_payload, build_restore_plan_privilege,
+        backup_policy_cap_notice, backup_policy_list_path, backup_policy_prune_payload,
+        backup_policy_upsert_target, build_restore_plan_privilege,
         generated_restore_destination_root_with_base, restore_rollback_operation_from_outputs,
-        restore_run_operation, JobOutputRecord, BASE64,
+        restore_run_operation, validate_backup_policy_upsert_mode, JobOutputRecord, BASE64,
     };
     use base64::Engine as _;
     use uuid::Uuid;
@@ -1356,6 +1480,106 @@ mod tests {
     const TEST_RESTORE_ARCHIVE_PATH: &str = "/etc/hostname";
     const TEST_RESTORE_DESTINATION_PATH: &str = "/restore/etc/hostname";
     const TEST_RESTORE_ROLLBACK_PATH: &str = "/restore/etc/.vpsman-restore-hostname.bak";
+
+    #[test]
+    fn backup_policy_upsert_target_selects_create_or_update() {
+        let create = backup_policy_upsert_target(None);
+        assert_eq!(create.action, "backup_policy.create");
+        assert_eq!(create.path, "/api/v1/backup-policies");
+        assert_eq!(create.schedule_id, None);
+
+        let schedule_id = Uuid::parse_str("52ff9113-03bd-4fa5-a166-3243681826fe").unwrap();
+        let update = backup_policy_upsert_target(Some(schedule_id));
+        assert_eq!(update.action, "backup_policy.update");
+        assert_eq!(
+            update.path,
+            "/api/v1/backup-policies/52ff9113-03bd-4fa5-a166-3243681826fe"
+        );
+        assert_eq!(
+            update.schedule_id.as_deref(),
+            Some("52ff9113-03bd-4fa5-a166-3243681826fe")
+        );
+    }
+
+    #[test]
+    fn backup_policy_updates_require_explicit_retention_values() {
+        let schedule_id = Some(Uuid::new_v4());
+        assert!(validate_backup_policy_upsert_mode(
+            schedule_id,
+            None,
+            Some(7),
+            Some("keyring/v2"),
+            false,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("--retention-days"));
+        assert!(validate_backup_policy_upsert_mode(
+            schedule_id,
+            Some(30),
+            None,
+            Some("keyring/v2"),
+            false,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("--keep-last"));
+        validate_backup_policy_upsert_mode(
+            schedule_id,
+            Some(30),
+            Some(7),
+            Some("keyring/v2"),
+            false,
+        )
+        .unwrap();
+        validate_backup_policy_upsert_mode(None, None, None, None, false).unwrap();
+    }
+
+    #[test]
+    fn backup_policy_updates_require_explicit_rotation_intent() {
+        let schedule_id = Some(Uuid::new_v4());
+        assert!(
+            validate_backup_policy_upsert_mode(schedule_id, Some(30), Some(7), None, false)
+                .unwrap_err()
+                .to_string()
+                .contains("--rotation-generation or --clear-rotation-generation")
+        );
+        validate_backup_policy_upsert_mode(schedule_id, Some(30), Some(7), None, true).unwrap();
+        assert!(validate_backup_policy_upsert_mode(
+            schedule_id,
+            Some(30),
+            Some(7),
+            Some("keyring/v2"),
+            true,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("mutually exclusive"));
+        assert!(
+            validate_backup_policy_upsert_mode(None, None, None, None, true)
+                .unwrap_err()
+                .to_string()
+                .contains("requires --schedule-id")
+        );
+    }
+
+    #[test]
+    fn backup_policy_pages_are_explicit_and_disclose_a_reached_cap() {
+        assert_eq!(
+            backup_policy_list_path(200, 400).unwrap(),
+            "/api/v1/backup-policies?limit=200&offset=400"
+        );
+        assert!(backup_policy_list_path(0, 0).is_err());
+        assert!(backup_policy_list_path(1000, 100_001).is_err());
+        assert_eq!(
+            backup_policy_cap_notice(200, 400),
+            "loaded 200 backup policies at offset 400; more may exist; rerun with --offset 600"
+        );
+        assert_eq!(
+            backup_policy_cap_notice(200, 100_000),
+            "loaded 200 backup policies at offset 100000; more may exist beyond the supported paging boundary"
+        );
+    }
 
     #[test]
     fn builds_restore_rollback_operation_from_restore_status_output() {

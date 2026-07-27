@@ -967,6 +967,201 @@ async fn filter_limit_regression_policy_evaluator_is_unbounded() {
 }
 
 #[tokio::test]
+async fn policy_evaluator_isolates_malformed_persisted_group_selector() {
+    let repo = Repository::Memory(MemoryState::default());
+    let healthy = repo
+        .upsert_fleet_alert_policy(
+            &CreateFleetAlertPolicyRequest {
+                id: None,
+                name: "healthy-policy".to_string(),
+                enabled: true,
+                selector_expression: "id:healthy-policy-target".to_string(),
+                rules: vec![PolicyRuleRequest {
+                    id: None,
+                    name: "healthy threshold".to_string(),
+                    enabled: true,
+                    traffic_selector: None,
+                    condition_expression: "cpu.load_1 >= 1".to_string(),
+                    window_secs: 0,
+                    severity: "warning".to_string(),
+                }],
+                notes: None,
+                confirmed: true,
+                preview_hash: None,
+            },
+            &test_operator(),
+        )
+        .await
+        .unwrap();
+    let malformed_id = Uuid::new_v4();
+    if let Repository::Memory(memory) = &repo {
+        memory.agents.write().await.push(AgentView {
+            id: "healthy-policy-target".to_string(),
+            display_name: "Healthy policy target".to_string(),
+            status: "online".to_string(),
+            tags: Vec::new(),
+            registration_ip: None,
+            last_ip: None,
+            last_seen_at: None,
+            arch: None,
+            internal_build_number: 1,
+            process_incarnation_id: None,
+            stale_since: None,
+            stale_reason: None,
+            capabilities: AgentCapabilitySnapshot::default(),
+        });
+        memory
+            .telemetry_rollups
+            .write()
+            .await
+            .push(alert_test_rollup("healthy-policy-target", 2.0, 500, 1500));
+        let mut malformed = healthy.clone();
+        malformed.id = malformed_id;
+        malformed.name = "malformed-persisted-policy".to_string();
+        malformed.selector_expression = "(id:broken".to_string();
+        for rule in &mut malformed.rules {
+            rule.id = Uuid::new_v4();
+            rule.group_id = malformed_id;
+        }
+        memory.policy_groups.write().await.insert(0, malformed);
+    }
+
+    let error = repo.evaluate_policy_rules().await.unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("fleet_alert_policy_evaluation_partial_failure"));
+    assert!(message.contains(&malformed_id.to_string()));
+    assert!(message.contains("malformed-persisted-policy"));
+    if let Repository::Memory(memory) = &repo {
+        let alerts = memory.policy_alerts.read().await;
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].policy_group_id, healthy.id);
+        assert_eq!(alerts[0].client_id, "healthy-policy-target");
+    }
+}
+
+#[tokio::test]
+async fn policy_evaluator_rejects_malformed_persisted_traffic_selector_without_fallback() {
+    let repo = Repository::Memory(MemoryState::default());
+    let policy = repo
+        .upsert_fleet_alert_policy(
+            &CreateFleetAlertPolicyRequest {
+                id: None,
+                name: "malformed-traffic-selector-policy".to_string(),
+                enabled: true,
+                selector_expression: "id:traffic-policy-target".to_string(),
+                rules: vec![PolicyRuleRequest {
+                    id: None,
+                    name: "traffic threshold".to_string(),
+                    enabled: true,
+                    traffic_selector: Some("eth1".to_string()),
+                    condition_expression: "traffic.cycle.total >= 1".to_string(),
+                    window_secs: 0,
+                    severity: "warning".to_string(),
+                }],
+                notes: None,
+                confirmed: true,
+                preview_hash: None,
+            },
+            &test_operator(),
+        )
+        .await
+        .unwrap();
+    let client_id = "traffic-policy-target";
+    let now_unix = i64::try_from(unix_now()).unwrap();
+    if let Repository::Memory(memory) = &repo {
+        memory.agents.write().await.push(AgentView {
+            id: client_id.to_string(),
+            display_name: "Traffic policy target".to_string(),
+            status: "online".to_string(),
+            tags: Vec::new(),
+            registration_ip: None,
+            last_ip: None,
+            last_seen_at: None,
+            arch: None,
+            internal_build_number: 1,
+            process_incarnation_id: None,
+            stale_since: None,
+            stale_reason: None,
+            capabilities: AgentCapabilitySnapshot::default(),
+        });
+        let stored_rule =
+            |key: &str, value_raw: &str, value_json: serde_json::Value| VpsRuleValueRecord {
+                client_id: client_id.to_string(),
+                key: key.to_string(),
+                value_raw: value_raw.to_string(),
+                value_json,
+                parsed_display: value_raw.to_string(),
+                state: "ok".to_string(),
+                validation_errors: Vec::new(),
+                source_kind: "test".to_string(),
+                source_id: None,
+                updated_by: None,
+                updated_at: now_unix.to_string(),
+            };
+        memory.vps_rule_values.write().await.extend([
+            stored_rule(VPS_RULE_KEY_TRAFFIC_RESET_DAY, "1", json!({"day": 1})),
+            stored_rule(
+                VPS_RULE_KEY_TRAFFIC_SELECTORS,
+                "eth0",
+                json!({"selectors": []}),
+            ),
+            stored_rule(
+                VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
+                "1GB",
+                json!({"bytes": 1_000_000_000_i64}),
+            ),
+        ]);
+        memory.traffic_counter_samples.write().await.extend([
+            TrafficCounterSampleRecord {
+                client_id: client_id.to_string(),
+                source_kind: "host".to_string(),
+                interface: "eth0".to_string(),
+                observed_at: (now_unix - 60).to_string(),
+                observed_unix: now_unix - 60,
+                rx_bytes: 100,
+                tx_bytes: 100,
+                counter_epoch: 1,
+                sample_source: "test".to_string(),
+            },
+            TrafficCounterSampleRecord {
+                client_id: client_id.to_string(),
+                source_kind: "host".to_string(),
+                interface: "eth0".to_string(),
+                observed_at: (now_unix - 1).to_string(),
+                observed_unix: now_unix - 1,
+                rx_bytes: 1_000,
+                tx_bytes: 1_000,
+                counter_epoch: 1,
+                sample_source: "test".to_string(),
+            },
+        ]);
+        let mut groups = memory.policy_groups.write().await;
+        let stored = groups
+            .iter_mut()
+            .find(|group| group.id == policy.id)
+            .unwrap();
+        stored.rules[0].traffic_selector = Some("host:".to_string());
+    }
+
+    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 0);
+    if let Repository::Memory(memory) = &repo {
+        assert!(memory.policy_alerts.read().await.is_empty());
+        let states = memory.policy_rule_states.read().await;
+        let state = states
+            .iter()
+            .find(|state| {
+                state.policy_rule_id == policy.rules[0].id && state.client_id == client_id
+            })
+            .unwrap();
+        assert!(state.incomplete);
+        assert!(!state.condition_true);
+        assert!(state.incomplete_reasons.iter().any(|reason| {
+            reason == "traffic.policy_selector invalid: traffic_selector_interface_required"
+        }));
+    }
+}
+
+#[tokio::test]
 async fn policy_rollups_exceed_public_page_without_truncating_preview_or_evaluation() {
     const CLIENT_COUNT: usize = 5_001;
     const PUBLIC_PAGE_SIZE: i64 = 5_000;
@@ -1658,6 +1853,58 @@ async fn fleet_alerts_merge_operator_state_and_filter_muted_alerts() {
 }
 
 #[tokio::test]
+async fn fleet_alert_notification_dispatch_rejects_channel_overflow_explicitly() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        let mut channels = memory.fleet_alert_notification_channels.write().await;
+        for index in 0..=1_000 {
+            channels.push(
+                crate::model_alert_notifications::FleetAlertNotificationChannelView {
+                    id: Uuid::new_v4(),
+                    name: format!("channel-{index:04}"),
+                    scope_kind: "global".to_string(),
+                    scope_value: None,
+                    min_severity: "warning".to_string(),
+                    categories: Vec::new(),
+                    operator_states: Vec::new(),
+                    delivery_kind: "webhook".to_string(),
+                    target: "https://hooks.acme.com/fleet".to_string(),
+                    cooldown_secs: 60,
+                    enabled: true,
+                    configuration_error: None,
+                    notes: None,
+                    actor_id: None,
+                    created_at: "0".to_string(),
+                    updated_at: "0".to_string(),
+                },
+            );
+        }
+    }
+
+    let state = alert_test_state(repo);
+    let error = state
+        .dispatch_fleet_alert_notifications(
+            &FleetAlertNotificationDispatchRequest {
+                limit: Some(1),
+                client_id: None,
+                severity: None,
+                category: None,
+                operator_state: None,
+                include_muted: None,
+                dry_run: Some(true),
+                preview_hash: None,
+                confirmed: false,
+            },
+            &test_operator(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("fleet_alert_notification_dispatch_channel_limit_exceeded"));
+}
+
+#[tokio::test]
 async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = test_operator();
@@ -2268,7 +2515,22 @@ async fn deleted_alert_notification_channel_preserves_and_cancels_delivery_histo
         .await
         .unwrap();
 
-    repo.delete_fleet_alert_notification_channel(channel_id, &operator)
+    let error = repo
+        .delete_fleet_alert_notification_channel(channel_id, "stale-name", &operator)
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("fleet_alert_notification_channel_delete_review_stale"));
+    assert_eq!(
+        repo.list_fleet_alert_notification_channels(20, None, None, None, None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    repo.delete_fleet_alert_notification_channel(channel_id, "deleted-edge-webhook", &operator)
         .await
         .unwrap();
 
@@ -2446,7 +2708,18 @@ async fn deleted_webhook_rule_preserves_and_cancels_delivery_history() {
         .await
         .unwrap();
 
-    repo.delete_webhook_rule(rule_id, &operator).await.unwrap();
+    let error = repo
+        .delete_webhook_rule(rule_id, "stale-name", &operator)
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("webhook_rule_delete_review_stale"));
+    assert_eq!(repo.list_webhook_rules(20, None).await.unwrap().len(), 1);
+
+    repo.delete_webhook_rule(rule_id, "deleted-edge-rule", &operator)
+        .await
+        .unwrap();
 
     let stale_dispatch = repo
         .record_webhook_rule_deliveries(&[
@@ -2595,6 +2868,28 @@ async fn webhook_rule_dispatch_can_be_scoped_to_one_rule() {
         .await
         .unwrap();
     }
+    if let Repository::Memory(memory) = &repo {
+        let mut rules = memory.webhook_rules.write().await;
+        let scoped_rule = rules
+            .iter()
+            .find(|rule| rule.id == scoped_rule_id)
+            .cloned()
+            .unwrap();
+        rules.extend((0..1_000).map(|index| {
+            let mut rule = scoped_rule.clone();
+            rule.id = Uuid::new_v4();
+            rule.name = format!("filler-webhook-{index:04}");
+            rule
+        }));
+    }
+    assert!(
+        repo.list_webhook_rules(1_000, None)
+            .await
+            .unwrap()
+            .iter()
+            .all(|rule| rule.id != scoped_rule_id),
+        "the scoped rule must be outside the broad list cap for this regression"
+    );
 
     let state = alert_test_state(repo);
     let broad_preview = state

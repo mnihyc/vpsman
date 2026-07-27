@@ -52,6 +52,8 @@ const customMockTests = new Set([
   "fleet telemetry refresh keeps successful domains current when one domain fails",
   "fleet metrics freshness uses exact sample time instead of the coarse chart bucket",
   "system maintenance presents an empty cleanup preview as a neutral no-op",
+  "config surfaces unavailable runtime apply evidence without trusting health claims",
+  "malformed notification channels remain visible and fail closed",
 ]);
 
 test.beforeEach(async ({ page }, testInfo) => {
@@ -3028,7 +3030,7 @@ test("jobs approvals and scheduled runs stay separate", async ({
   ).toBeVisible();
   const schedulesGrid = page.getByLabel("Schedule records data grid");
   await expect(page.getByLabel("Schedule execution policy")).toContainText(
-    "Enabled schedules automatically dispatch future jobs",
+    "Enabled schedules with a valid cadence automatically dispatch future jobs",
   );
   await expect(schedulesGrid).toContainText("edge-health-hourly");
   await expect(schedulesGrid).toContainText("Hourly at minute 0");
@@ -3561,6 +3563,52 @@ test("config overview focuses on drift risk and routes to config workflows", asy
   await expect(page.getByRole("heading", { name: "VPS Rules" })).toBeVisible();
 });
 
+test("config surfaces unavailable runtime apply evidence without trusting health claims", async ({
+  page,
+}) => {
+  await installConsoleApiMock(page, { runtimeConfigApplyFailure: true });
+  await gotoConsoleHome(page);
+  await openConsoleSubpage(page, "Config", "Overview");
+
+  const health = page.getByLabel("Config health posture");
+  await expect(health).toContainText("Evidence incomplete");
+  await expect(health).toContainText(
+    "Health, drift, and zero-value claims remain unknown",
+  );
+  await expect(health.getByText("Healthy", { exact: true })).toHaveCount(0);
+  await expect(
+    page.getByLabel("Current config state by VPS"),
+  ).toContainText("Evidence unavailable");
+  await expect(
+    page.getByLabel("Historical config apply state"),
+  ).toHaveCount(0);
+  const runtimeRisk = page
+    .getByLabel("Config drift summary")
+    .locator(".configRiskRow", { hasText: "Runtime apply state" });
+  await expect(runtimeRisk).toContainText("Current runtime apply evidence is unavailable.");
+  await expect(runtimeRisk).toContainText("Unknown");
+
+  await page.goto("/#/fleet/instance-detail/agent-sfo-01");
+  await waitForConsoleShell(page);
+  const detail = page.getByLabel("Canonical VPS detail");
+  const detailSection = detail.getByLabel("VPS detail section");
+  if (await detailSection.isVisible()) {
+    await detailSection.selectOption("Config");
+  } else {
+    await detail.getByRole("tab", { name: "Config", exact: true }).click();
+  }
+  await expect(detail.getByLabel("VPS config posture")).toContainText(
+    "Apply unknown",
+  );
+  await expect(detail.getByLabel("VPS config posture")).toContainText(
+    "cached state is not treated as current",
+  );
+  await expect(
+    detail.getByText("Apply state unavailable", { exact: true }),
+  ).toBeVisible();
+  await expect(detail.getByText("Current", { exact: true })).toHaveCount(0);
+});
+
 test("config templates summarizes coverage and links to canonical automation authoring", async ({
   page,
 }, testInfo) => {
@@ -3924,6 +3972,79 @@ test("observability alerts and webhooks are explicit separate pages", async ({
   await expect(
     page.getByRole("heading", { name: "Notification channels" }),
   ).toHaveCount(0);
+});
+
+test("malformed notification channels remain visible and fail closed", async ({
+  page,
+}) => {
+  const channelId = "fcfcfcfc-2222-4222-8222-222222222222";
+  await installConsoleApiMock(page, {
+    fleetAlertNotificationChannelsOverride: [
+      {
+        actor_id: null,
+        categories: [],
+        configuration_error:
+          "fleet_alert_notification_channel_filters_invalid",
+        cooldown_secs: 3600,
+        created_at: "2026-06-02T10:00:00Z",
+        delivery_kind: "webhook",
+        enabled: true,
+        id: channelId,
+        min_severity: "warning",
+        name: "invalid-stored-channel",
+        notes: null,
+        operator_states: [],
+        scope_kind: "global",
+        scope_value: null,
+        target: "https://hooks.example/vpsman/fleet",
+        updated_at: "2026-06-02T10:00:00Z",
+      },
+    ],
+  });
+  await gotoConsoleHome(page);
+  await openConsoleSubpage(page, "Observability", "Alerts");
+  await activate(page.getByRole("tab", { name: /Destinations/ }));
+
+  const grid = page.getByLabel("Alert notification channels data grid");
+  await expect(grid).toContainText("invalid-stored-channel");
+  await expect(grid).toContainText("Invalid stored filters");
+  await expect(grid).toContainText("Channel is skipped until replaced");
+  await expect(page.getByRole("button", { name: "Preview match" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Queue dispatch" })).toBeDisabled();
+
+  await grid
+    .getByLabel(`Select Alert notification channels row ${channelId}`)
+    .check();
+  await grid.getByRole("button", { name: "Actions" }).click();
+  await expect(page.getByRole("menuitem", { name: "Edit" })).toHaveAttribute(
+    "data-disabled",
+    "",
+  );
+  await expect(page.getByRole("menuitem", { name: "Enable" })).toHaveAttribute(
+    "data-disabled",
+    "",
+  );
+  await expect(page.getByRole("menuitem", { name: "Disable" })).toHaveAttribute(
+    "data-disabled",
+    "",
+  );
+  await expect(
+    page.getByRole("menuitem", { name: "Review deletion" }),
+  ).not.toHaveAttribute("data-disabled", "");
+  await activate(page.getByRole("menuitem", { name: "Details" }));
+  await expect(
+    page.getByText("Notification channel details", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("invalid — skipped", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText(
+      "Stored filters are invalid; delete and replace this channel",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Edit channel" }),
+  ).toBeDisabled();
 });
 
 test("observability alert policy editor is a focused create flow", async ({
@@ -5114,7 +5235,7 @@ test("audit sessions correlates terminal and auth evidence without emulator cont
     "Audit-linked terminals",
   );
   await expect(panel.getByLabel("Session evidence summary")).toContainText(
-    "stale terminal states hidden from open count",
+    /stale terminal states? hidden from open count/,
   );
   await expect(panel.getByLabel("Session evidence summary")).toContainText(
     "expired bearer sessions",
@@ -5961,12 +6082,15 @@ test("backups policies keep authoring separate and review prune preview before a
   ).toBeVisible();
   const records = page.locator(".fleetPanel");
   const policySummary = page.getByLabel("Backup policy summary");
-  await expect(policySummary).toContainText("enabled");
+  await expect(policySummary).toContainText("automatic");
   await expect(policySummary).toContainText("paused");
-  await expect(policySummary).toContainText("failing");
+  await expect(policySummary).toContainText("invalid cadence");
+  await expect(policySummary).toContainText("execution failures");
   await expect(records).toContainText("Backup policy records");
   await expect(records).toContainText("Scheduled backup policies");
-  await expect(records).toContainText("Enabled policies run automatically");
+  await expect(records).toContainText(
+    "Enabled policies with a valid cadence run automatically",
+  );
   await expect(records).toContainText("No scheduled backups");
   await expect(records).toContainText("Create a policy for automatic backups");
   await expect(records).not.toContainText("Backup request records");

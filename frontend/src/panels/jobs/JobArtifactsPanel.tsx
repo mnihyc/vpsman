@@ -4,6 +4,8 @@ import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
+import { ActionFeedback } from "../../components/ActionFeedback";
+import { formatLowerBoundCount } from "../../constants";
 import type {
   AgentUpdateReleaseRecord,
   BackupArtifactRecord,
@@ -13,8 +15,13 @@ import { formatTime, shortHash, shortId } from "../../utils";
 
 type JobArtifactsPanelProps = {
   agentUpdateReleases: AgentUpdateReleaseRecord[];
+  agentUpdateReleasesTruncated: boolean;
   backupArtifacts: BackupArtifactRecord[];
+  backupArtifactsTruncated: boolean;
+  error: string | null;
   fileTransferSources: FileTransferSourceArtifactRecord[];
+  fileTransferSourcesTruncated: boolean;
+  loading: boolean;
   onOpenAgentUpdates: () => void;
   onOpenBackupsArtifacts: () => void;
   onOpenTransfers: () => void;
@@ -45,13 +52,22 @@ type ArtifactInventoryRow = {
 
 export function JobArtifactsPanel({
   agentUpdateReleases,
+  agentUpdateReleasesTruncated,
   backupArtifacts,
+  backupArtifactsTruncated,
+  error,
   fileTransferSources,
+  fileTransferSourcesTruncated,
+  loading,
   onOpenAgentUpdates,
   onOpenBackupsArtifacts,
   onOpenTransfers,
 }: JobArtifactsPanelProps) {
   const [typeFilter, setTypeFilter] = useState("all");
+  const rowsTruncated =
+    agentUpdateReleasesTruncated ||
+    backupArtifactsTruncated ||
+    fileTransferSourcesTruncated;
   const rows = buildArtifactInventoryRows({
     agentUpdateReleases,
     backupArtifacts,
@@ -214,24 +230,39 @@ export function JobArtifactsPanel({
             </span>
           </div>
         </div>
+        <ActionFeedback
+          className="localActionFeedback"
+          message={error ?? (loading ? "Refreshing artifact inventory" : null)}
+          tone={error ? "danger" : "progress"}
+        />
         <section
           className="jobArtifactsSummary"
           aria-label="Job artifact inventory summary"
         >
           <div>
             <span>Artifact types</span>
-            <strong>{artifactTypes.length}</strong>
-            <small>backup, transfer, and update artifact types</small>
+            <strong>
+              {formatLowerBoundCount(artifactTypes.length, rowsTruncated)}
+            </strong>
+            <small>
+              {rowsTruncated
+                ? "types in loaded backup, transfer, and update pages"
+                : "backup, transfer, and update artifact types"}
+            </small>
           </div>
           <div>
             <span>Records</span>
-            <strong>{rows.length}</strong>
-            <small>linked to source workflows</small>
+            <strong>{formatLowerBoundCount(rows.length, rowsTruncated)}</strong>
+            <small>
+              linked to source workflows{rowsTruncated ? " in loaded pages" : ""}
+            </small>
           </div>
           <div>
             <span>Stored bytes</span>
-            <strong>{formatBytes(totalBytes)}</strong>
-            <small>known artifact sizes only</small>
+            <strong>{rowsTruncated ? "≥" : ""}{formatBytes(totalBytes)}</strong>
+            <small>
+              known artifact sizes only{rowsTruncated ? " in loaded pages" : ""}
+            </small>
           </div>
           <div>
             <span>Cleanup boundary</span>
@@ -337,6 +368,7 @@ export function JobArtifactsPanel({
             </div>
           )}
           rows={visibleRows}
+          rowsTruncated={rowsTruncated}
           searchPlaceholder="Search artifacts"
           selectable={false}
           storageKey="vpsman.grid.jobs.artifacts"

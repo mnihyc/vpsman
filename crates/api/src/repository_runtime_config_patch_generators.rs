@@ -127,6 +127,7 @@ impl Repository {
                 Ok(saved)
             }
             Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
                 let row = sqlx::query(
                     r#"
                     INSERT INTO runtime_config_patch_generators (
@@ -177,7 +178,7 @@ impl Repository {
                 .bind(&generator.raw_generator_body)
                 .bind(SqlJson(&generator.docs_metadata))
                 .bind(operator.operator.id)
-                .fetch_optional(pool)
+                .fetch_optional(&mut *tx)
                 .await?;
                 let row =
                     row.with_context(|| "runtime_config_patch_generator_builtin_immutable")?;
@@ -196,8 +197,9 @@ impl Repository {
                 .bind(runtime_config_patch_generator_audit_metadata(
                     &saved, operator,
                 ))
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
+                tx.commit().await?;
                 Ok(saved)
             }
         }
@@ -236,6 +238,7 @@ impl Repository {
     pub(crate) async fn delete_runtime_config_patch_generator(
         &self,
         generator_id: Uuid,
+        reviewed_name: &str,
         operator: &AuthContext,
     ) -> Result<()> {
         match self {
@@ -252,6 +255,10 @@ impl Repository {
                     !existing.built_in,
                     "runtime_config_patch_generator_builtin_immutable"
                 );
+                anyhow::ensure!(
+                    existing.name == reviewed_name.trim(),
+                    "runtime_config_patch_generator_delete_review_stale"
+                );
                 generators.retain(|generator| generator.id != generator_id);
                 memory
                     .audits
@@ -266,6 +273,27 @@ impl Repository {
                 Ok(())
             }
             Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let current = sqlx::query(
+                    r#"
+                    SELECT name, built_in
+                    FROM runtime_config_patch_generators
+                    WHERE id = $1
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(generator_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .with_context(|| "runtime_config_patch_generator_not_found")?;
+                anyhow::ensure!(
+                    !current.try_get::<bool, _>("built_in")?,
+                    "runtime_config_patch_generator_builtin_immutable"
+                );
+                anyhow::ensure!(
+                    current.try_get::<String, _>("name")? == reviewed_name.trim(),
+                    "runtime_config_patch_generator_delete_review_stale"
+                );
                 let row = sqlx::query(
                     r#"
                     DELETE FROM runtime_config_patch_generators
@@ -286,7 +314,7 @@ impl Repository {
                     "#,
                 )
                 .bind(generator_id)
-                .fetch_optional(pool)
+                .fetch_optional(&mut *tx)
                 .await?;
                 let deleted = row
                     .map(patch_generator_from_row)
@@ -306,8 +334,9 @@ impl Repository {
                 .bind(runtime_config_patch_generator_audit_metadata(
                     &deleted, operator,
                 ))
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
+                tx.commit().await?;
                 Ok(())
             }
         }

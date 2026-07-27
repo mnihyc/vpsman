@@ -19,6 +19,7 @@ import {
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
 import { VpsCombobox } from "../../components/VpsCombobox";
+import { formatLowerBoundCount } from "../../constants";
 import {
   artifactLifecycleStatusBadgeClass,
   fileTransferSessionStatusBadgeClass,
@@ -82,7 +83,9 @@ export function FileTransferSessionsPanel({
   initialUploadPath,
   initialUploadTargetClientId,
   transfers,
+  transfersTruncated,
   sources,
+  sourcesTruncated,
   loading,
   onCreateHandoff,
   onDownloadSource,
@@ -100,7 +103,9 @@ export function FileTransferSessionsPanel({
   initialUploadPath?: string | null;
   initialUploadTargetClientId?: string | null;
   transfers: FileTransferSessionRecord[];
+  transfersTruncated: boolean;
   sources: FileTransferSourceArtifactRecord[];
+  sourcesTruncated: boolean;
   loading: boolean;
   onCreateHandoff: (
     clientId: string,
@@ -206,7 +211,9 @@ export function FileTransferSessionsPanel({
     selectedHandoffKeySet.has(transferKey(transfer)),
   );
   const handoffBusy = handoffPendingKey !== null;
-  const handoffSummary = `${downloadTransfers.length} downloads, ${uploadTransfers.length} uploads tracked`;
+  const handoffSummary = transfersTruncated
+    ? `${formatLowerBoundCount(downloadTransfers.length, true)} downloads, ${formatLowerBoundCount(uploadTransfers.length, true)} uploads in loaded sessions`
+    : `${downloadTransfers.length} downloads, ${uploadTransfers.length} uploads tracked`;
   const handoffFeedbackMessage = handoffError ?? handoffProgress;
   const handoffFeedbackTone = handoffError ? "danger" : "progress";
   const sourceArtifactFeedbackMessage =
@@ -796,27 +803,43 @@ export function FileTransferSessionsPanel({
         <span>
           <strong>Ready downloads</strong>
           <small
-            title={`${handoffCandidates.length} ready, ${unavailableCompletedDownloads} unavailable`}
+            title={
+              transfersTruncated
+                ? `${formatLowerBoundCount(handoffCandidates.length, true)} ready, ${unavailableCompletedDownloads} unavailable in loaded sessions`
+                : `${handoffCandidates.length} ready, ${unavailableCompletedDownloads} unavailable`
+            }
           >
-            {handoffCandidates.length} ready, {unavailableCompletedDownloads}{" "}
-            unavailable
+            {transfersTruncated
+              ? `${formatLowerBoundCount(handoffCandidates.length, true)} ready, ${unavailableCompletedDownloads} unavailable in loaded sessions`
+              : `${handoffCandidates.length} ready, ${unavailableCompletedDownloads} unavailable`}
           </small>
         </span>
         <span>
           <strong>Transfers</strong>
           <small
-            title={`${downloadTransfers.length} downloads, ${uploadTransfers.length} uploads`}
+            title={
+              transfersTruncated
+                ? `${formatLowerBoundCount(downloadTransfers.length, true)} downloads, ${formatLowerBoundCount(uploadTransfers.length, true)} uploads in loaded sessions`
+                : `${downloadTransfers.length} downloads, ${uploadTransfers.length} uploads`
+            }
           >
-            {downloadTransfers.length} downloads, {uploadTransfers.length}{" "}
-            uploads
+            {transfersTruncated
+              ? `${formatLowerBoundCount(downloadTransfers.length, true)} downloads, ${formatLowerBoundCount(uploadTransfers.length, true)} uploads in loaded sessions`
+              : `${downloadTransfers.length} downloads, ${uploadTransfers.length} uploads`}
           </small>
         </span>
         <span className={failedTransfers.length > 0 ? "attention" : undefined}>
           <strong>Retries</strong>
           <small
-            title={`${failedTransfers.length} failed sessions need metadata review`}
+            title={
+              transfersTruncated
+                ? `${formatLowerBoundCount(failedTransfers.length, true)} failed sessions in the loaded page need metadata review`
+                : `${failedTransfers.length} failed sessions need metadata review`
+            }
           >
-            {failedTransfers.length} failed sessions need metadata review
+            {transfersTruncated
+              ? `${formatLowerBoundCount(failedTransfers.length, true)} failed sessions in the loaded page need metadata review`
+              : `${failedTransfers.length} failed sessions need metadata review`}
           </small>
         </span>
       </div>
@@ -827,8 +850,16 @@ export function FileTransferSessionsPanel({
             <small title={focusPath}>{focusPath}</small>
           </span>
           <span>
-            <strong>{focusedTransfers.length} matching sessions</strong>
-            <small>{focusedHandoffReady} ready to download</small>
+            <strong>
+              {transfersTruncated
+                ? `${focusedTransfers.length} matching in loaded sessions`
+                : `${focusedTransfers.length} matching sessions`}
+            </strong>
+            <small>
+              {transfersTruncated
+                ? `${formatLowerBoundCount(focusedHandoffReady, true)} ready in loaded sessions; more may exist`
+                : `${focusedHandoffReady} ready to download`}
+            </small>
           </span>
         </div>
       )}
@@ -996,11 +1027,15 @@ export function FileTransferSessionsPanel({
         <span className="historyPrimary">
           <strong>Ready downloads</strong>
           <small
-            title={`${handoffCandidates.length} ready to download, ${unavailableCompletedDownloads} unavailable, ${selectedHandoffTransfers.length} selected`}
+            title={
+              transfersTruncated
+                ? `${formatLowerBoundCount(handoffCandidates.length, true)} ready in loaded sessions, ${unavailableCompletedDownloads} unavailable in loaded sessions, ${selectedHandoffTransfers.length} selected`
+                : `${handoffCandidates.length} ready to download, ${unavailableCompletedDownloads} unavailable, ${selectedHandoffTransfers.length} selected`
+            }
           >
-            {handoffCandidates.length} ready to download,{" "}
-            {unavailableCompletedDownloads} unavailable,{" "}
-            {selectedHandoffTransfers.length} selected
+            {transfersTruncated
+              ? `${formatLowerBoundCount(handoffCandidates.length, true)} ready in loaded sessions, ${unavailableCompletedDownloads} unavailable in loaded sessions, ${selectedHandoffTransfers.length} selected`
+              : `${handoffCandidates.length} ready to download, ${unavailableCompletedDownloads} unavailable, ${selectedHandoffTransfers.length} selected`}
           </small>
         </span>
         <span className="handoffBulkActions">
@@ -1285,6 +1320,7 @@ export function FileTransferSessionsPanel({
           </div>
         )}
         rows={transfers}
+        rowsTruncated={transfersTruncated}
         rowActions={transferRowActions}
         searchPlaceholder="Search transfers"
         selectable={false}
@@ -1296,7 +1332,11 @@ export function FileTransferSessionsPanel({
         <summary>
           <span>
             <strong>Advanced: source artifacts</strong>
-            <small>{sources.length} source artifacts</small>
+            <small>
+              {sourcesTruncated
+                ? `${sources.length} source artifacts loaded; more may exist`
+                : `${sources.length} source artifacts`}
+            </small>
           </span>
           <Database size={16} />
         </summary>
@@ -1419,6 +1459,7 @@ export function FileTransferSessionsPanel({
               </div>
             )}
             rows={sources}
+            rowsTruncated={sourcesTruncated}
             searchPlaceholder="Search source artifacts"
             selectable={false}
             storageKey="vpsman.jobs.fileTransferSources"

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
+use uuid::Uuid;
 use vpsman_common::{observed_ospf_cost, payload_hash, OspfControlMode};
 
 use crate::{
@@ -15,9 +16,19 @@ use crate::{
 };
 
 const OSPF_EVIDENCE_WINDOW_MINUTES: i64 = 10;
-const OSPF_EVIDENCE_QUERY_LIMIT: i64 = 10_000;
 const MAX_RECENT_PROBE_SAMPLES_PER_PLAN: usize = 20;
 const MAX_RECENT_SPEED_SAMPLES_PER_PLAN: usize = 10;
+
+pub(crate) struct AutomaticOspfUpdatePlanBatch {
+    pub(crate) updates: Vec<NetworkOspfUpdatePlanView>,
+    pub(crate) failures: Vec<AutomaticOspfUpdatePlanFailure>,
+}
+
+pub(crate) struct AutomaticOspfUpdatePlanFailure {
+    pub(crate) plan_id: Uuid,
+    pub(crate) phase: &'static str,
+    pub(crate) error: anyhow::Error,
+}
 
 impl Repository {
     pub(crate) async fn list_network_ospf_recommendations(
@@ -25,20 +36,11 @@ impl Repository {
         limit: i64,
     ) -> Result<Vec<NetworkOspfRecommendationView>> {
         let plans = self.list_tunnel_plans().await?;
-        let observations = self.recent_ospf_observations().await?;
-        let mut recommendations = plans
-            .iter()
-            .filter(|plan| plan.enabled && plan.plan.ospf.is_some())
-            .map(|plan| recommend_plan_ospf_cost(plan, &observations).view)
-            .collect::<Vec<_>>();
-        recommendations.sort_by(|left, right| {
-            compare_optional_timestamps_desc(
-                left.latest_observed_at.as_deref(),
-                right.latest_observed_at.as_deref(),
-            )
-            .then_with(|| left.plan_name.cmp(&right.plan_name))
-        });
-        Ok(recommendations.into_iter().take(limit as usize).collect())
+        let mut recommendations = self
+            .list_network_ospf_recommendations_for_plans(&plans)
+            .await?;
+        recommendations.truncate(limit as usize);
+        Ok(recommendations)
     }
 
     pub(crate) async fn list_network_ospf_recommendations_for_plans(
@@ -56,24 +58,7 @@ impl Repository {
             .iter()
             .map(|plan| plan.id)
             .collect::<Vec<_>>();
-        let since = (Utc::now() - Duration::minutes(OSPF_EVIDENCE_WINDOW_MINUTES)).timestamp();
-        let observations = self
-            .list_network_observations_for_plans_since(
-                &plan_ids,
-                since,
-                MAX_RECENT_PROBE_SAMPLES_PER_PLAN,
-                MAX_RECENT_SPEED_SAMPLES_PER_PLAN,
-            )
-            .await?;
-        let observations_by_plan = observations.into_iter().fold(
-            HashMap::<uuid::Uuid, Vec<NetworkObservationView>>::new(),
-            |mut grouped, observation| {
-                if let Some(plan_id) = observation.plan_id {
-                    grouped.entry(plan_id).or_default().push(observation);
-                }
-                grouped
-            },
-        );
+        let observations_by_plan = self.recent_ospf_observations_for_plans(&plan_ids).await?;
         let mut recommendations = eligible_plans
             .iter()
             .map(|plan| {
@@ -101,18 +86,125 @@ impl Repository {
         &self,
         limit: i64,
     ) -> Result<Vec<NetworkOspfUpdatePlanView>> {
-        let plans = self.list_tunnel_plans().await?;
-        let observations = self.recent_ospf_observations().await?;
+        self.list_network_ospf_update_plans_matching(limit).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn list_automatic_network_ospf_update_plans(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<NetworkOspfUpdatePlanView>> {
+        let plan_ids = self
+            .list_automatic_tunnel_plan_ids_for_controller(limit.clamp(1, 1_000) as usize)
+            .await?;
+        let AutomaticOspfUpdatePlanBatch { updates, failures } = self
+            .list_automatic_network_ospf_update_plan_batch(&plan_ids)
+            .await?;
+        if let Some(failure) = failures.into_iter().next() {
+            return Err(anyhow::anyhow!(
+                "automatic OSPF update plan {} failed during {}: {:#}",
+                failure.plan_id,
+                failure.phase,
+                failure.error
+            ));
+        }
+        Ok(updates)
+    }
+
+    pub(crate) async fn list_automatic_network_ospf_update_plan_batch(
+        &self,
+        plan_ids: &[Uuid],
+    ) -> Result<AutomaticOspfUpdatePlanBatch> {
+        let mut failures = Vec::new();
+        let plans = self
+            .tunnel_plan_record_attempts(plan_ids)
+            .await?
+            .into_iter()
+            .filter_map(|attempt| match attempt.plan {
+                Ok(plan)
+                    if plan.enabled
+                        && plan
+                            .plan
+                            .ospf
+                            .as_ref()
+                            .is_some_and(|ospf| ospf.mode == OspfControlMode::Automatic) =>
+                {
+                    Some(plan)
+                }
+                Ok(_) => None,
+                Err(error) => {
+                    failures.push(AutomaticOspfUpdatePlanFailure {
+                        plan_id: attempt.plan_id,
+                        phase: "automatic_plan_decode",
+                        error,
+                    });
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let plan_ids = plans.iter().map(|plan| plan.id).collect::<Vec<_>>();
+        let observations_by_plan = self.recent_ospf_observations_for_plans(&plan_ids).await?;
         let templates = self
             .list_source_templates(Some("routing_cost_adapter"))
             .await?;
-        let mut update_plans = plans
+        let mut updates = Vec::with_capacity(plans.len());
+        for plan in &plans {
+            match build_ospf_update_plan(
+                plan,
+                recommend_plan_ospf_cost(
+                    plan,
+                    observations_by_plan
+                        .get(&plan.id)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]),
+                ),
+                &templates,
+            ) {
+                Ok(update) => updates.push(update),
+                Err(error) => failures.push(AutomaticOspfUpdatePlanFailure {
+                    plan_id: plan.id,
+                    phase: "automatic_update_plan_build",
+                    error,
+                }),
+            }
+        }
+        updates.sort_by(|left, right| {
+            update_plan_priority(right)
+                .cmp(&update_plan_priority(left))
+                .then_with(|| left.plan_name.cmp(&right.plan_name))
+        });
+        Ok(AutomaticOspfUpdatePlanBatch { updates, failures })
+    }
+
+    async fn list_network_ospf_update_plans_matching(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<NetworkOspfUpdatePlanView>> {
+        let plans = self.list_tunnel_plans().await?;
+        let eligible_plans = plans
             .iter()
             .filter(|plan| plan.enabled && plan.plan.ospf.is_some())
+            .collect::<Vec<_>>();
+        let plan_ids = eligible_plans
+            .iter()
+            .map(|plan| plan.id)
+            .collect::<Vec<_>>();
+        let observations_by_plan = self.recent_ospf_observations_for_plans(&plan_ids).await?;
+        let templates = self
+            .list_source_templates(Some("routing_cost_adapter"))
+            .await?;
+        let mut update_plans = eligible_plans
+            .iter()
             .map(|plan| {
                 build_ospf_update_plan(
                     plan,
-                    recommend_plan_ospf_cost(plan, &observations),
+                    recommend_plan_ospf_cost(
+                        plan,
+                        observations_by_plan
+                            .get(&plan.id)
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]),
+                    ),
                     &templates,
                 )
             })
@@ -125,10 +217,59 @@ impl Repository {
         Ok(update_plans.into_iter().take(limit as usize).collect())
     }
 
-    async fn recent_ospf_observations(&self) -> Result<Vec<NetworkObservationView>> {
+    pub(crate) async fn network_ospf_update_plan_by_id(
+        &self,
+        plan_id: uuid::Uuid,
+    ) -> Result<Option<NetworkOspfUpdatePlanView>> {
+        let Some(plan) = self.get_tunnel_plan(plan_id).await? else {
+            return Ok(None);
+        };
+        if !plan.enabled || plan.plan.ospf.is_none() {
+            return Ok(None);
+        }
+        let observations_by_plan = self.recent_ospf_observations_for_plans(&[plan_id]).await?;
+        let templates = self
+            .list_source_templates(Some("routing_cost_adapter"))
+            .await?;
+        build_ospf_update_plan(
+            &plan,
+            recommend_plan_ospf_cost(
+                &plan,
+                observations_by_plan
+                    .get(&plan_id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+            ),
+            &templates,
+        )
+        .map(Some)
+    }
+
+    async fn recent_ospf_observations_for_plans(
+        &self,
+        plan_ids: &[uuid::Uuid],
+    ) -> Result<HashMap<uuid::Uuid, Vec<NetworkObservationView>>> {
+        if plan_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
         let since = (Utc::now() - Duration::minutes(OSPF_EVIDENCE_WINDOW_MINUTES)).timestamp();
-        self.list_network_observations_since(since, OSPF_EVIDENCE_QUERY_LIMIT)
-            .await
+        let observations = self
+            .list_network_observations_for_plans_since(
+                plan_ids,
+                since,
+                MAX_RECENT_PROBE_SAMPLES_PER_PLAN,
+                MAX_RECENT_SPEED_SAMPLES_PER_PLAN,
+            )
+            .await?;
+        Ok(observations.into_iter().fold(
+            HashMap::<uuid::Uuid, Vec<NetworkObservationView>>::new(),
+            |mut grouped, observation| {
+                if let Some(plan_id) = observation.plan_id {
+                    grouped.entry(plan_id).or_default().push(observation);
+                }
+                grouped
+            },
+        ))
     }
 }
 
@@ -166,8 +307,7 @@ fn recommend_plan_ospf_cost(
     });
     let packet_loss_avg_ratio = average_observation_value(&probe_observations, |observation| {
         observation.packet_loss_ratio
-    })
-    .unwrap_or(0.0);
+    });
     let throughput_avg_mbps = average_observation_value(&speed_observations, |observation| {
         observation.throughput_mbps
     });
@@ -193,17 +333,20 @@ fn recommend_plan_ospf_cost(
     let healthy_probe_streak = probe_observations
         .iter()
         .take_while(|observation| {
-            observation.healthy == Some(true) && observation.latency_avg_ms.is_some()
+            observation.healthy == Some(true)
+                && observation.latency_avg_ms.is_some()
+                && observation.packet_loss_ratio.is_some()
         })
         .count();
 
-    let (recommended_ospf_cost, effective_bandwidth, confidence, reason) = match latency_avg_ms {
-        Some(latency) => {
+    let (recommended_ospf_cost, effective_bandwidth, confidence, reason) =
+        match (latency_avg_ms, packet_loss_avg_ratio) {
+        (Some(latency), Some(packet_loss)) => {
             let (cost, bandwidth) = observed_ospf_cost(
                 ospf.policy,
                 plan.input.bandwidth_mbps,
                 latency,
-                packet_loss_avg_ratio,
+                packet_loss,
                 ospf.preference,
                 throughput_avg_mbps,
             );
@@ -222,7 +365,19 @@ fn recommend_plan_ospf_cost(
                 },
             )
         }
-        None => (
+        (Some(_), None) => (
+            planned_cost,
+            plan.input.bandwidth_mbps,
+            "incomplete_probe",
+            "recent latency exists, but recent packet-loss evidence is unavailable; using the planned cost",
+        ),
+        (None, Some(_)) => (
+            planned_cost,
+            plan.input.bandwidth_mbps,
+            "incomplete_probe",
+            "recent packet-loss evidence exists, but recent latency is unavailable; using the planned cost",
+        ),
+        (None, None) => (
             planned_cost,
             plan.input.bandwidth_mbps,
             if throughput_avg_mbps.is_some() {
@@ -240,7 +395,7 @@ fn recommend_plan_ospf_cost(
 
     let evidence_summary = ospf_evidence_summary(
         latency_avg_ms,
-        latency_avg_ms.map(|_| packet_loss_avg_ratio),
+        packet_loss_avg_ratio,
         throughput_avg_mbps,
         throughput_max_mbps,
         sample_count,
@@ -270,7 +425,7 @@ fn recommend_plan_ospf_cost(
             recommended_ospf_cost,
             cost_delta: recommended_ospf_cost - planned_cost,
             latency_avg_ms,
-            packet_loss_avg_ratio: latency_avg_ms.map(|_| packet_loss_avg_ratio),
+            packet_loss_avg_ratio,
             throughput_avg_mbps,
             throughput_max_mbps,
             sample_count,
@@ -498,6 +653,8 @@ fn automatic_evidence_ready(
     healthy_probe_streak: usize,
 ) -> bool {
     if healthy_probe_streak < usize::from(healthy_windows)
+        || recommendation.latency_avg_ms.is_none()
+        || recommendation.packet_loss_avg_ratio.is_none()
         || !matches!(
             recommendation.confidence.as_str(),
             "measured" | "latency_only"

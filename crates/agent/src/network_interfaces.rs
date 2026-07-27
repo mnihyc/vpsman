@@ -37,8 +37,10 @@ struct NetworkInterfaceSnapshot {
     link_type: Option<u32>,
     flags: Vec<String>,
     addresses: Vec<NetworkInterfaceAddress>,
-    rx_bytes: u64,
-    tx_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rx_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tx_bytes: Option<u64>,
     metasource_templates: Vec<String>,
 }
 
@@ -74,7 +76,15 @@ async fn inspect_network_interfaces(
 ) -> Result<Vec<CommandOutput>> {
     let proc_root = Path::new(&input.config.telemetry.proc_root);
     let sys_class_net = Path::new(&input.config.telemetry.sys_class_net_dir);
-    let counters = network_counters(proc_root).unwrap_or_default();
+    let counter_result = network_counters(proc_root);
+    let (counters, counter_status, counter_error) = match counter_result {
+        Ok(counters) => (counters, "ok", None),
+        Err(error) => (
+            HashMap::new(),
+            "error",
+            Some(truncate_string(&format!("{error:#}"), 240)),
+        ),
+    };
     let address_result = interface_addresses_from_getifaddrs();
     let (addresses, address_status, address_error) = match address_result {
         Ok(addresses) => (addresses, "ok", None),
@@ -108,8 +118,9 @@ async fn inspect_network_interfaces(
             "error": sysfs_error,
         },
         "counter_source": {
-            "status": if counters.is_empty() { "empty" } else { "ok" },
+            "status": counter_status,
             "path": proc_root.join("net/dev"),
+            "error": counter_error,
         },
         "address_source": {
             "status": address_status,
@@ -122,11 +133,13 @@ async fn inspect_network_interfaces(
         job_id: input.job_id,
         stream: OutputStream::Status,
         data: serde_json::to_vec(&status)?,
-        exit_code: Some(if sysfs_status == "ok" && address_status == "ok" {
-            0
-        } else {
-            1
-        }),
+        exit_code: Some(
+            if sysfs_status == "ok" && address_status == "ok" && counter_status == "ok" {
+                0
+            } else {
+                1
+            },
+        ),
         done: true,
     }])
 }
@@ -165,8 +178,8 @@ fn collect_sysfs_interfaces(
                 .get(&name)
                 .map(|value| value.addresses.clone())
                 .unwrap_or_default(),
-            rx_bytes: counter.map(|value| value.rx_bytes).unwrap_or_default(),
-            tx_bytes: counter.map(|value| value.tx_bytes).unwrap_or_default(),
+            rx_bytes: counter.map(|value| value.rx_bytes),
+            tx_bytes: counter.map(|value| value.tx_bytes),
             metasource_templates: vec!["sysfs".to_string()],
         };
         if counter.is_some() {
@@ -188,8 +201,8 @@ fn collect_sysfs_interfaces(
             name: name.clone(),
             flags: iface_addresses.flags.clone(),
             addresses: iface_addresses.addresses.clone(),
-            rx_bytes: counter.map(|value| value.rx_bytes).unwrap_or_default(),
-            tx_bytes: counter.map(|value| value.tx_bytes).unwrap_or_default(),
+            rx_bytes: counter.map(|value| value.rx_bytes),
+            tx_bytes: counter.map(|value| value.tx_bytes),
             metasource_templates: vec!["getifaddrs".to_string()],
             ..NetworkInterfaceSnapshot::default()
         });
@@ -212,8 +225,8 @@ fn interfaces_from_addresses(
             name: name.clone(),
             flags: iface_addresses.flags.clone(),
             addresses: iface_addresses.addresses.clone(),
-            rx_bytes: counter.map(|value| value.rx_bytes).unwrap_or_default(),
-            tx_bytes: counter.map(|value| value.tx_bytes).unwrap_or_default(),
+            rx_bytes: counter.map(|value| value.rx_bytes),
+            tx_bytes: counter.map(|value| value.tx_bytes),
             metasource_templates: vec!["getifaddrs".to_string()],
             ..NetworkInterfaceSnapshot::default()
         });
@@ -394,32 +407,56 @@ fn ipv6_scope(ip: Ipv6Addr, flags: libc::c_uint) -> &'static str {
 fn network_counters(proc_root: &Path) -> Result<HashMap<String, InterfaceCounters>> {
     let contents = std::fs::read_to_string(proc_root.join("net/dev"))
         .with_context(|| format!("failed to read {}", proc_root.join("net/dev").display()))?;
-    Ok(network_counters_from_proc_net_dev(&contents))
+    network_counters_from_proc_net_dev(&contents)
 }
 
-fn network_counters_from_proc_net_dev(contents: &str) -> HashMap<String, InterfaceCounters> {
+fn network_counters_from_proc_net_dev(
+    contents: &str,
+) -> Result<HashMap<String, InterfaceCounters>> {
+    let mut lines = contents.lines();
+    anyhow::ensure!(
+        lines.next().is_some_and(|line| line.contains("Receive")),
+        "network counter source is missing its receive header"
+    );
+    anyhow::ensure!(
+        lines.next().is_some_and(|line| line.contains("bytes")),
+        "network counter source is missing its counter header"
+    );
     let mut counters = HashMap::new();
-    for line in contents.lines().skip(2) {
-        let Some((name, values)) = line.split_once(':') else {
+    for line in lines {
+        if line.trim().is_empty() {
             continue;
-        };
+        }
+        let (name, values) = line
+            .split_once(':')
+            .context("network counter row is missing ':'")?;
         let name = name.trim();
-        if !valid_interface_name(name) {
-            continue;
-        }
+        anyhow::ensure!(
+            valid_interface_name(name),
+            "network counter row has an invalid interface name"
+        );
         let fields = values.split_whitespace().collect::<Vec<_>>();
-        if fields.len() < 16 {
-            continue;
-        }
+        anyhow::ensure!(
+            fields.len() >= 16,
+            "network counter row for {name} has incomplete counters"
+        );
         counters.insert(
             name.to_string(),
             InterfaceCounters {
-                rx_bytes: fields[0].parse().unwrap_or_default(),
-                tx_bytes: fields[8].parse().unwrap_or_default(),
+                rx_bytes: fields[0]
+                    .parse()
+                    .with_context(|| format!("RX counter for {name} is not numeric"))?,
+                tx_bytes: fields[8]
+                    .parse()
+                    .with_context(|| format!("TX counter for {name} is not numeric"))?,
             },
         );
     }
-    counters
+    anyhow::ensure!(
+        !counters.is_empty(),
+        "network counter source contains no interface counters"
+    );
+    Ok(counters)
 }
 
 fn read_small_trimmed(path: &Path) -> Option<String> {
@@ -463,12 +500,22 @@ mod tests {
     fn parses_proc_net_dev_counters() {
         let counters = network_counters_from_proc_net_dev(
             "Inter-| Receive | Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n  lo: 12 0 0 0 0 0 0 0 34 0 0 0 0 0 0 0\neth0: 1000 0 0 0 0 0 0 0 2000 0 0 0 0 0 0 0\n",
-        );
+        )
+        .unwrap();
 
         assert_eq!(counters.get("lo").unwrap().rx_bytes, 12);
         assert_eq!(counters.get("lo").unwrap().tx_bytes, 34);
         assert_eq!(counters.get("eth0").unwrap().rx_bytes, 1000);
         assert_eq!(counters.get("eth0").unwrap().tx_bytes, 2000);
+    }
+
+    #[test]
+    fn malformed_proc_net_dev_is_an_explicit_source_error() {
+        let error = network_counters_from_proc_net_dev(
+            "Inter-| Receive | Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\neth0: broken 0 0 0 0 0 0 0 2000 0 0 0 0 0 0 0\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("RX counter"));
     }
 
     #[test]

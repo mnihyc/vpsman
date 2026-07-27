@@ -1,6 +1,6 @@
 use axum::{
     body::{to_bytes, Body},
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{
         header::{AUTHORIZATION, CONTENT_TYPE},
         Request, StatusCode,
@@ -29,21 +29,23 @@ use crate::{
         BackupArtifactUploadCommitRequest, BackupArtifactUploadSessionCreateRequest,
         BackupPolicyPruneRequest, BackupRequestStatus, CreateBackupPolicyRequest,
         CreateBackupRequest, CreateJobRequest, JobHistoryView, JobOutputView, JobTargetView,
-        OperatorView, RecordBackupArtifactMetadataRequest, UploadBackupArtifactRequest,
+        ListQuery, OperatorView, RecordBackupArtifactMetadataRequest, UpdateBackupPolicyRequest,
+        UploadBackupArtifactRequest,
     },
     object_store::BackupObjectStore,
     repository::{MemoryState, Repository},
     repository_backups::BackupRequestSourceLink,
     repository_ingest::upsert_memory_agent,
     repository_job_outputs,
+    repository_schedules::ScheduleCreateInput,
     routes_backups::{
         abort_backup_artifact_upload_session, commit_backup_artifact_upload_session,
         create_backup_artifact_handoff, create_backup_artifact_upload_session,
         create_backup_policy, create_backup_request, download_backup_artifact,
         list_backup_policies, prune_backup_policies, record_backup_artifact_metadata,
-        upload_backup_artifact, upload_backup_artifact_session_chunk,
+        update_backup_policy, upload_backup_artifact, upload_backup_artifact_session_chunk,
         validate_backup_artifact_metadata_request, validate_create_backup_policy_request,
-        validate_create_backup_request,
+        validate_create_backup_request, validate_update_backup_policy_request,
     },
     routes_jobs::create_job,
     state::AppState,
@@ -154,6 +156,77 @@ fn backup_policy_validation_requires_targets_retention_and_confirmation() {
             .code,
         "backup_policy_keep_last_out_of_range"
     );
+    request.keep_last = Some(7);
+    validate_update_backup_policy_request(&request).unwrap();
+    request.retention_days = None;
+    assert_eq!(
+        validate_update_backup_policy_request(&request)
+            .unwrap_err()
+            .code,
+        "backup_policy_retention_days_required"
+    );
+    request.retention_days = Some(30);
+    request.keep_last = None;
+    assert_eq!(
+        validate_update_backup_policy_request(&request)
+            .unwrap_err()
+            .code,
+        "backup_policy_keep_last_required"
+    );
+}
+
+#[test]
+fn backup_policy_update_wire_contract_requires_complete_definition() {
+    let full = serde_json::json!({
+        "name": "nightly",
+        "selector_expression": "id:client-a",
+        "target_client_ids": ["client-a"],
+        "paths": ["/etc"],
+        "include_config": true,
+        "follow_symlinks": false,
+        "missing_path_policy": "fail",
+        "retention_days": 30,
+        "keep_last": 7,
+        "rotation_generation": null,
+        "cron_expr": "0 3 * * *",
+        "timezone": "UTC",
+        "enabled": false,
+        "catch_up_policy": "run_once",
+        "catch_up_limit": 1,
+        "retry_delay_secs": 120,
+        "max_failures": 5,
+        "confirmed": true
+    });
+    let parsed: UpdateBackupPolicyRequest = serde_json::from_value(full.clone()).unwrap();
+    assert!(parsed.rotation_generation.is_none());
+
+    for required in [
+        "name",
+        "selector_expression",
+        "target_client_ids",
+        "paths",
+        "include_config",
+        "follow_symlinks",
+        "missing_path_policy",
+        "retention_days",
+        "keep_last",
+        "rotation_generation",
+        "cron_expr",
+        "timezone",
+        "enabled",
+        "catch_up_policy",
+        "catch_up_limit",
+        "retry_delay_secs",
+        "max_failures",
+        "confirmed",
+    ] {
+        let mut incomplete = full.clone();
+        incomplete.as_object_mut().unwrap().remove(required);
+        assert!(
+            serde_json::from_value::<UpdateBackupPolicyRequest>(incomplete).is_err(),
+            "missing {required} must be rejected"
+        );
+    }
 }
 
 #[test]
@@ -392,19 +465,30 @@ async fn backup_job_dispatch_terminal_failure_marks_backup_request_failed() {
         )
         .await
         .unwrap();
-    let terminal = repo
-        .mark_open_backup_request_execution_terminal(
-            source_job_id,
-            "client-a",
-            BackupRequestStatus::ExecutionFailed,
-            Some(&operator),
-        )
-        .await
-        .unwrap();
+    repo.record_backup_request_terminal_for_target_status(
+        Uuid::new_v4(),
+        "client-a",
+        vpsman_server_core::TARGET_STATUS_FAILED,
+        Some(&operator),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        repo.list_backup_requests(10).await.unwrap()[0].status,
+        "requested_metadata_only"
+    );
+    repo.record_backup_request_terminal_for_target_status(
+        source_job_id,
+        "client-a",
+        vpsman_server_core::TARGET_STATUS_FAILED,
+        Some(&operator),
+    )
+    .await
+    .unwrap();
     let backups = repo.list_backup_requests(10).await.unwrap();
     let audits = repo.list_audit_logs(10).await.unwrap();
 
-    assert_eq!(terminal.as_ref().map(|view| view.id), Some(backup.id));
+    assert_eq!(backups[0].id, backup.id);
     assert_eq!(backups.len(), 1);
     assert_eq!(backups[0].status, "execution_failed");
     assert!(backups[0].artifact_id.is_none());
@@ -683,7 +767,39 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
         create_backup_policy(State(state.clone()), headers.clone(), Json(request))
             .await
             .unwrap();
-    let Json(policies) = list_backup_policies(State(state), headers).await.unwrap();
+    repo.create_schedule_record(
+        ScheduleCreateInput {
+            name: "000-generic-backup-schedule".to_string(),
+            operation: JobCommand::Backup {
+                paths: vec!["/var/lib/generic".to_string()],
+                include_config: false,
+                follow_symlinks: false,
+                missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
+            },
+            selector_expression: "id:client-a".to_string(),
+            target_client_ids: vec!["client-a".to_string()],
+            cron_expr: "0 3 * * *".to_string(),
+            timezone: "UTC".to_string(),
+            enabled: true,
+            catch_up_policy: "skip_missed".to_string(),
+            catch_up_limit: 1,
+            retry_delay_secs: 300,
+            max_failures: 3,
+        },
+        &backup_test_operator(),
+    )
+    .await
+    .unwrap();
+    let Json(policies) = list_backup_policies(
+        State(state),
+        headers,
+        Query(ListQuery {
+            limit: Some(1),
+            ..ListQuery::default()
+        }),
+    )
+    .await
+    .unwrap();
     let schedules = repo.list_schedules().await.unwrap();
     let audits = repo.list_audit_logs(10).await.unwrap();
     let audit_json = serde_json::to_string(&audits).unwrap();
@@ -706,10 +822,14 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
     assert_eq!(view.next_runs.len(), 5);
     assert_eq!(policies.len(), 1);
     assert_eq!(policies[0].schedule_id, view.schedule_id);
-    assert_eq!(schedules.len(), 1);
-    assert_eq!(schedules[0].command_type, "backup");
+    assert_eq!(schedules.len(), 2);
+    let policy_schedule = schedules
+        .iter()
+        .find(|schedule| schedule.id == view.schedule_id)
+        .unwrap();
+    assert_eq!(policy_schedule.command_type, "backup");
     assert!(matches!(
-        &schedules[0].operation,
+        policy_schedule.operation.as_ref().unwrap(),
         JobCommand::Backup {
             paths,
             include_config,
@@ -723,6 +843,170 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
         .iter()
         .any(|audit| audit.action == "backup_policy.upserted"));
     assert!(!audit_json.contains("recipient_public_key"));
+}
+
+#[tokio::test]
+async fn backup_policy_query_preserves_requested_order_after_filter_and_limit() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = backup_test_operator();
+    let request = |name: &str| CreateBackupPolicyRequest {
+        name: name.to_string(),
+        selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: false,
+        follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
+        retention_days: Some(30),
+        keep_last: Some(7),
+        rotation_generation: None,
+        cron_expr: "0 3 * * *".to_string(),
+        timezone: "UTC".to_string(),
+        enabled: true,
+        catch_up_policy: "skip_missed".to_string(),
+        catch_up_limit: 1,
+        retry_delay_secs: 300,
+        max_failures: 3,
+        confirmed: true,
+        privilege_assertion: None,
+    };
+    for name in [
+        "zzzz-excluded-policy",
+        "zeta-kept-policy",
+        "middle-kept-policy",
+        "alpha-kept-policy",
+    ] {
+        repo.create_backup_policy(request(name), &operator)
+            .await
+            .unwrap();
+    }
+    if let Repository::Memory(memory) = &repo {
+        let mut schedules = memory.schedules.write().await;
+        for schedule in schedules.iter_mut() {
+            schedule.next_run_at = match schedule.name.as_str() {
+                "zeta-kept-policy" => "9999",
+                "middle-kept-policy" => "1",
+                "alpha-kept-policy" => "5000",
+                _ => "0",
+            }
+            .to_string();
+        }
+    }
+
+    let policies = repo
+        .list_backup_policies(&ListQuery {
+            limit: Some(2),
+            sort: Some("name".to_string()),
+            dir: Some("desc".to_string()),
+            q: Some("kept".to_string()),
+            ..ListQuery::default()
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        policies
+            .iter()
+            .map(|policy| policy.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["zeta-kept-policy", "middle-kept-policy"]
+    );
+}
+
+#[tokio::test]
+async fn backup_policy_update_repairs_cadence_without_replacing_schedule() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_backup_agent_id(&repo, "client-a").await;
+    let object_root =
+        std::env::temp_dir().join(format!("vpsman-backup-policy-update-{}", Uuid::new_v4()));
+    let state = test_state_with_store(
+        repo.clone(),
+        BackupObjectStore::filesystem(object_root.clone()).unwrap(),
+    );
+    let headers = crate::test_auth_headers(&state).await;
+    let (_, Json(created)) = create_backup_policy(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateBackupPolicyRequest {
+            name: "legacy-backup".to_string(),
+            selector_expression: "id:client-a".to_string(),
+            target_client_ids: vec!["client-a".to_string()],
+            paths: vec!["/etc".to_string()],
+            include_config: true,
+            follow_symlinks: false,
+            missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
+            retention_days: Some(30),
+            keep_last: Some(7),
+            rotation_generation: None,
+            cron_expr: "0 3 * * *".to_string(),
+            timezone: "UTC".to_string(),
+            enabled: false,
+            catch_up_policy: "skip_missed".to_string(),
+            catch_up_limit: 1,
+            retry_delay_secs: 300,
+            max_failures: 3,
+            confirmed: true,
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap();
+    if let Repository::Memory(memory) = &repo {
+        let mut schedules = memory.schedules.write().await;
+        let legacy = schedules
+            .iter_mut()
+            .find(|schedule| schedule.id == created.schedule_id)
+            .unwrap();
+        legacy.cron_expr = "0 0 31 2 *".to_string();
+        legacy.next_runs.clear();
+        legacy.cadence_error = Some("schedule_cron_no_future_occurrence".to_string());
+    }
+
+    let Json(updated) = update_backup_policy(
+        State(state),
+        headers,
+        Path(created.schedule_id),
+        Json(UpdateBackupPolicyRequest {
+            name: "repaired-backup".to_string(),
+            selector_expression: "id:client-a".to_string(),
+            target_client_ids: vec!["client-a".to_string()],
+            paths: vec!["/etc".to_string(), "/var/lib/app".to_string()],
+            include_config: false,
+            follow_symlinks: false,
+            missing_path_policy: vpsman_common::BackupMissingPathPolicy::Skip,
+            retention_days: 45,
+            keep_last: 10,
+            rotation_generation: Some("keyring/v2".to_string()),
+            cron_expr: "30 2 * * *".to_string(),
+            timezone: "UTC".to_string(),
+            enabled: true,
+            catch_up_policy: "run_once".to_string(),
+            catch_up_limit: 1,
+            retry_delay_secs: 120,
+            max_failures: 5,
+            confirmed: true,
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(updated.schedule_id, created.schedule_id);
+    assert_eq!(updated.name, "repaired-backup");
+    assert_eq!(updated.cron_expr, "30 2 * * *");
+    assert!(updated.cadence_error.is_none());
+    assert_eq!(updated.next_runs.len(), 5);
+    assert!(updated.enabled);
+    assert_eq!(updated.paths, vec!["/etc", "/var/lib/app"]);
+    assert_eq!(updated.retention_days, 45);
+    assert_eq!(updated.keep_last, 10);
+    assert_eq!(repo.list_schedules().await.unwrap().len(), 1);
+    assert!(repo.list_audit_logs(20).await.unwrap().iter().any(|audit| {
+        audit.action == "backup_policy.upserted"
+            && audit.target == format!("backup_policy:{}", created.schedule_id)
+    }));
+
+    let _ = tokio::fs::remove_dir_all(object_root).await;
 }
 
 #[tokio::test]

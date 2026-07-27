@@ -69,11 +69,14 @@ type ConsoleShellProps = {
     warning: number;
   };
   apiToken: string;
+  authRefreshError: string | null;
   children: ReactNode;
   commandItems: CommandPaletteItem[];
   onlineRatio: string;
   draftSavedFleetViewName: string;
   filteredAgentCount: number;
+  fleetAlertsEvidenceAvailable: boolean;
+  fleetCoreEvidenceAvailable: boolean;
   fleetQuery: string;
   hideFleetStatusSummary?: boolean;
   onApplySavedFleetView: (viewId: string) => void;
@@ -82,6 +85,7 @@ type ConsoleShellProps = {
   onDeleteSavedFleetView: () => void;
   onFleetQueryChange: (query: string) => void;
   onOpenAccessControls: () => void;
+  onRetryAuthRefresh: () => void;
   onLockPrivilege: () => void;
   onSaveFleetView: () => void;
   onSelectView: (view: ActiveView, subpage?: string) => void;
@@ -103,11 +107,14 @@ export function ConsoleShell({
   agents,
   alertCounts,
   apiToken,
+  authRefreshError,
   children,
   commandItems,
   onlineRatio,
   draftSavedFleetViewName,
   filteredAgentCount,
+  fleetAlertsEvidenceAvailable,
+  fleetCoreEvidenceAvailable,
   fleetQuery,
   hideFleetStatusSummary = false,
   onApplySavedFleetView,
@@ -117,6 +124,7 @@ export function ConsoleShell({
   onFleetQueryChange,
   onLockPrivilege,
   onOpenAccessControls,
+  onRetryAuthRefresh,
   onSaveFleetView,
   onSelectView,
   onSavedFleetViewNameChange,
@@ -165,17 +173,21 @@ export function ConsoleShell({
     activeView === "Home" || (activeView === "Fleet" && activeSubpage === "monitor");
   const noContactCount = summary.never + summary.unknown;
   const unavailableCount = summary.offline + summary.stale + noContactCount;
-  const fleetStatusTitle = `${summaryScopeLabel}: ${summary.total} VPS; ${summary.online} online; ${summary.offline} offline; ${summary.stale} stale; ${noContactCount} no contact; ${summary.running_jobs} running jobs`;
-  const fleetStatusText = [
-    `${summaryScopeLabel}: ${summary.total} VPS`,
-    `${summary.online} online`,
-    summary.offline > 0 ? `${summary.offline} offline` : null,
-    summary.stale > 0 ? `${summary.stale} stale` : null,
-    noContactCount > 0 ? `${noContactCount} no contact` : null,
-    `${summary.running_jobs} running job${summary.running_jobs === 1 ? "" : "s"}`,
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  const fleetStatusTitle = fleetCoreEvidenceAvailable
+    ? `${summaryScopeLabel}: ${summary.total} VPS; ${summary.online} online; ${summary.offline} offline; ${summary.stale} stale; ${noContactCount} no contact; ${summary.running_jobs} running jobs`
+    : `${summaryScopeLabel}: fleet status evidence unavailable`;
+  const fleetStatusText = fleetCoreEvidenceAvailable
+    ? [
+        `${summaryScopeLabel}: ${summary.total} VPS`,
+        `${summary.online} online`,
+        summary.offline > 0 ? `${summary.offline} offline` : null,
+        summary.stale > 0 ? `${summary.stale} stale` : null,
+        noContactCount > 0 ? `${noContactCount} no contact` : null,
+        `${summary.running_jobs} running job${summary.running_jobs === 1 ? "" : "s"}`,
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : `${summaryScopeLabel}: fleet status unavailable`;
   const activeViewLabel = viewLabel(activeView);
   const activeSubpageBase = activeSubpage.split(":")[0];
   const activeSubpageLabel = subpageLabel(activeView, activeSubpage);
@@ -676,7 +688,11 @@ export function ConsoleShell({
         <header className="topbar" ref={topbarRef}>
           <div className="scopeSelectorGroup">
             <button
-              aria-label={`Edit fleet scope: ${scopeName}. ${filteredAgentCount} of ${summary.total} resources shown`}
+              aria-label={
+                fleetCoreEvidenceAvailable
+                  ? `Edit fleet scope: ${scopeName}. ${filteredAgentCount} of ${summary.total} resources shown`
+                  : `Edit fleet scope: ${scopeName}. Fleet inventory unavailable`
+              }
               className="scopeSelector"
               onClick={openFleetScopeEditor}
               title="Edit fleet scope in search"
@@ -686,7 +702,9 @@ export function ConsoleShell({
               <span className="scopeMeta">
                 <strong>{scopeName}</strong>
                 <small>
-                  {filteredAgentCount} / {summary.total} resources
+                  {fleetCoreEvidenceAvailable
+                    ? `${filteredAgentCount} / ${summary.total} resources`
+                    : "Inventory unavailable"}
                 </small>
               </span>
             </button>
@@ -702,7 +720,7 @@ export function ConsoleShell({
             </button>
           </div>
           <SearchExpressionInput
-            agents={agents}
+            agents={fleetCoreEvidenceAvailable ? agents : undefined}
             ariaLabel="Search fleet"
             className="search"
             inputId="fleet-search"
@@ -801,7 +819,24 @@ export function ConsoleShell({
           </div>
         </header>
 
-        {controlPlaneTone !== "ok" && (
+        {authRefreshError ? (
+          <div
+            aria-live="assertive"
+            className="controlPlaneNotice danger"
+            role="alert"
+          >
+            <RadioTower aria-hidden="true" size={17} />
+            <strong>Session refresh unavailable</strong>
+            <span>{authRefreshError}</span>
+            <button
+              className="secondaryAction compactAction"
+              onClick={onRetryAuthRefresh}
+              type="button"
+            >
+              Retry
+            </button>
+          </div>
+        ) : controlPlaneTone !== "ok" ? (
           <div
             aria-live="polite"
             className={`controlPlaneNotice ${controlPlaneTone}`}
@@ -811,7 +846,7 @@ export function ConsoleShell({
             <strong>{controlPlaneLabel}</strong>
             <span>{controlPlaneDetail}</span>
           </div>
-        )}
+        ) : null}
 
         <section
           className={`consoleHeader${hideFleetStatusSummary ? " withoutFleetStatus" : ""}`}
@@ -829,7 +864,9 @@ export function ConsoleShell({
               </span>
               <span>
                 <strong>Resources</strong>
-                {filteredAgentCount} / {agents.length}
+                {fleetCoreEvidenceAvailable
+                  ? `${filteredAgentCount} / ${agents.length}`
+                  : "Unknown"}
               </span>
               <span>
                 <strong>Section</strong>
@@ -840,34 +877,77 @@ export function ConsoleShell({
           {hideFleetStatusSummary ? null : showFullFleetMetrics ? (
             <div className="quickStats" aria-label="Fleet status summary">
               <span className="summaryScopeLabel">{summaryScopeLabel}</span>
-              <Metric label="Online" value={String(summary.online)} tone="green" />
+              <Metric
+                label="Online"
+                value={
+                  fleetCoreEvidenceAvailable ? String(summary.online) : "Unknown"
+                }
+                tone={fleetCoreEvidenceAvailable ? "green" : "neutral"}
+              />
               <Metric
                 label="Offline"
-                value={String(summary.offline)}
-                tone={summary.offline > 0 ? "yellow" : "neutral"}
+                value={
+                  fleetCoreEvidenceAvailable
+                    ? String(summary.offline)
+                    : "Unknown"
+                }
+                tone={
+                  fleetCoreEvidenceAvailable && summary.offline > 0
+                    ? "yellow"
+                    : "neutral"
+                }
               />
               <Metric
                 label="Stale"
-                value={String(summary.stale)}
-                tone={summary.stale > 0 ? "yellow" : "neutral"}
+                value={
+                  fleetCoreEvidenceAvailable ? String(summary.stale) : "Unknown"
+                }
+                tone={
+                  fleetCoreEvidenceAvailable && summary.stale > 0
+                    ? "yellow"
+                    : "neutral"
+                }
               />
               <Metric
                 label="No contact"
                 title="Never-connected VPSs plus records whose reported online state lacks trustworthy gateway contact evidence"
-                value={String(summary.never + summary.unknown)}
-                tone={summary.never + summary.unknown > 0 ? "yellow" : "neutral"}
+                value={
+                  fleetCoreEvidenceAvailable
+                    ? String(summary.never + summary.unknown)
+                    : "Unknown"
+                }
+                tone={
+                  fleetCoreEvidenceAvailable &&
+                  summary.never + summary.unknown > 0
+                    ? "yellow"
+                    : "neutral"
+                }
               />
               <Metric
                 label="Unavailable"
                 title="Offline, stale, never-connected, and contact-unknown VPSs"
-                value={String(unavailableCount)}
-                tone={unavailableCount > 0 ? "yellow" : "neutral"}
+                value={
+                  fleetCoreEvidenceAvailable
+                    ? String(unavailableCount)
+                    : "Unknown"
+                }
+                tone={
+                  fleetCoreEvidenceAvailable && unavailableCount > 0
+                    ? "yellow"
+                    : "neutral"
+                }
               />
               <Metric
                 label="Alerts"
-                title={`${alertCounts.critical} critical, ${alertCounts.warning} warning, ${alertCounts.info} info${alertCounts.truncated ? " in the loaded alert page; additional matching alerts may exist" : ""}`}
+                title={
+                  fleetAlertsEvidenceAvailable
+                    ? `${alertCounts.critical} critical, ${alertCounts.warning} warning, ${alertCounts.info} info${alertCounts.truncated ? " in the loaded alert page; additional matching alerts may exist" : ""}`
+                    : "Fleet alert evidence is unavailable."
+                }
                 value={
-                  alertCounts.truncated && alertCounts.total === 0
+                  !fleetAlertsEvidenceAvailable
+                    ? "Unknown"
+                    : alertCounts.truncated && alertCounts.total === 0
                     ? "0 loaded"
                     : formatLowerBoundCount(
                         alertCounts.total,
@@ -875,7 +955,9 @@ export function ConsoleShell({
                       )
                 }
                 tone={
-                  alertCounts.total > 0 || alertCounts.truncated
+                  !fleetAlertsEvidenceAvailable
+                    ? "neutral"
+                    : alertCounts.total > 0 || alertCounts.truncated
                     ? "yellow"
                     : "green"
                 }
@@ -883,8 +965,12 @@ export function ConsoleShell({
               <Metric
                 label="Running jobs"
                 title="Jobs that have not reached a terminal state"
-                value={String(summary.running_jobs)}
-                tone="blue"
+                value={
+                  fleetCoreEvidenceAvailable
+                    ? String(summary.running_jobs)
+                    : "Unknown"
+                }
+                tone={fleetCoreEvidenceAvailable ? "blue" : "neutral"}
               />
             </div>
           ) : (
@@ -893,16 +979,34 @@ export function ConsoleShell({
                 {fleetStatusText}
               </strong>
               <strong className="fleetStatusCompact" title={fleetStatusTitle}>
-                {summary.total} VPS · {summary.online} online · {unavailableCount} unavailable · {summary.running_jobs} running
+                {fleetCoreEvidenceAvailable
+                  ? `${summary.total} VPS · ${summary.online} online · ${unavailableCount} unavailable · ${summary.running_jobs} running`
+                  : "Fleet status unavailable"}
               </strong>
-              <span className={alertCounts.critical > 0 || alertCounts.warning > 0 || alertCounts.truncated ? "warn" : "ok"}>
-                {alertCounts.total > 0
+              <span
+                className={
+                  !fleetAlertsEvidenceAvailable
+                    ? "unknown"
+                    : alertCounts.critical > 0 ||
+                        alertCounts.warning > 0 ||
+                        alertCounts.truncated
+                      ? "warn"
+                      : "ok"
+                }
+              >
+                {!fleetAlertsEvidenceAvailable
+                  ? "Alert evidence unavailable"
+                  : alertCounts.total > 0
                   ? `${formatLowerBoundCount(alertCounts.total, alertCounts.truncated)} open · ${alertCounts.critical} critical · ${alertCounts.warning} warning · ${alertCounts.info} info${alertCounts.truncated ? " in loaded alerts" : ""}`
                   : alertCounts.truncated
                     ? "No matching alerts in the loaded page · more may exist"
                     : "No active alerts"}
               </span>
-              <small>{onlineRatio} online</small>
+              <small className={fleetCoreEvidenceAvailable ? undefined : "unknown"}>
+                {fleetCoreEvidenceAvailable
+                  ? `${onlineRatio} online`
+                  : "Online evidence unavailable"}
+              </small>
             </div>
           )}
         </section>

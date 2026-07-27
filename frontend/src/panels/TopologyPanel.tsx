@@ -21,6 +21,7 @@ import {
   Route,
   Search,
   Settings2,
+  ShieldAlert,
   Trash2,
   X,
 } from "lucide-react";
@@ -133,6 +134,7 @@ export function TopologyPanel({
   onExportTunnelPlan,
   onInitialPlanWorkflowConsumed,
   onInitialTargetIntentConsumed,
+  onLoadRuntimeConfigApplyStates,
   onLoadNetworkObservations,
   onLoadNetworkTrends,
   onLoadOspfRecommendations,
@@ -166,11 +168,13 @@ export function TopologyPanel({
   portForwardLoading,
   portForwardRules,
   privilegeMaterial,
+  runtimeConfigEvidenceState,
   runtimeConfigApplyStates,
   setPrivilegeMaterial,
   sourceTemplates,
   telemetryTunnels,
   topologyGraph,
+  tunnelPlanCorruptions,
   tunnelPlans,
 }: TopologyPanelProps) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
@@ -185,7 +189,12 @@ export function TopologyPanel({
   >(null);
 
   useEffect(() => {
-    if (activeSubpage === "graph") void onLoadTopologyGraph();
+    if (activeSubpage === "graph") {
+      void Promise.all([
+        onLoadTopologyGraph(),
+        onLoadRuntimeConfigApplyStates(),
+      ]);
+    }
     if (activeSubpage === "overview") {
       void Promise.all([onLoadTopologyGraph(), onLoadOspfUpdatePlans()]);
     }
@@ -213,6 +222,7 @@ export function TopologyPanel({
     }
   }, [
     activeSubpage,
+    onLoadRuntimeConfigApplyStates,
     onLoadNetworkObservations,
     onLoadNetworkTrends,
     onLoadOspfRecommendations,
@@ -257,7 +267,13 @@ export function TopologyPanel({
         loading={loading}
         onInitialSelectionConsumed={onInitialTargetIntentConsumed}
         onOpenVpsDetail={onOpenVpsDetail}
-        onRefresh={onLoadTopologyGraph}
+        onRefresh={async () => {
+          await Promise.all([
+            onLoadTopologyGraph(),
+            onLoadRuntimeConfigApplyStates(),
+          ]);
+        }}
+        runtimeConfigEvidenceState={runtimeConfigEvidenceState}
         runtimeConfigApplyStates={runtimeConfigApplyStates}
       />
     );
@@ -362,6 +378,7 @@ export function TopologyPanel({
       onUpdateTunnelPlan={onUpdateTunnelPlan}
       sourceTemplates={sourceTemplates}
       topologyGraph={topologyGraph}
+      tunnelPlanCorruptions={tunnelPlanCorruptions}
       tunnelPlans={tunnelPlans}
     />
   );
@@ -482,6 +499,7 @@ function TunnelPlansWorkspace({
   onUpdateTunnelPlan,
   sourceTemplates,
   topologyGraph,
+  tunnelPlanCorruptions,
   tunnelPlans,
 }: {
   agents: AgentView[];
@@ -502,6 +520,7 @@ function TunnelPlansWorkspace({
   onUpdateTunnelPlan: (planId: string, request: UpdateTunnelPlanRequest) => Promise<TunnelPlanMutationResponse>;
   sourceTemplates: SourceTemplateRecord[];
   topologyGraph: TopologyGraph;
+  tunnelPlanCorruptions: import("../types").TunnelPlanCorruptRecord[];
   tunnelPlans: TunnelPlanRecord[];
 }) {
   const [query, setQuery] = useState("");
@@ -704,6 +723,23 @@ function TunnelPlansWorkspace({
             </button>
           </div>
         </div>
+        {tunnelPlanCorruptions.length > 0 && (
+          <div className="portForwardRemovalNotice" role="alert">
+            <ShieldAlert size={17} />
+            <div>
+              <strong>
+                {tunnelPlanCorruptions.length} persisted tunnel plan
+                {tunnelPlanCorruptions.length === 1 ? "" : "s"} need repair
+              </strong>
+              {tunnelPlanCorruptions.map((plan) => (
+                <div key={plan.id} title={plan.configuration_error}>
+                  {plan.name} · {plan.left_client_id} / {plan.right_client_id} ·
+                  revision {plan.revision}: {plan.configuration_error}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         <ActionFeedback className="localActionFeedback topologyPlanActionFeedback" message={error ?? feedback?.message} tone={error ? "danger" : feedback?.tone} />
         <div className="tunnelRegistryToolbar">
           <label className="searchControl compactSearch">
@@ -2447,6 +2483,7 @@ type TopologyPanelProps = {
   onExportTunnelPlan: (planId: string) => Promise<TunnelPlan>;
   onInitialPlanWorkflowConsumed: () => void;
   onInitialTargetIntentConsumed?: (requestId: string) => void;
+  onLoadRuntimeConfigApplyStates: () => Promise<void>;
   onLoadNetworkObservations: () => Promise<void>;
   onLoadNetworkTrends: () => Promise<void>;
   onLoadOspfRecommendations: () => Promise<void>;
@@ -2493,12 +2530,14 @@ type TopologyPanelProps = {
   ospfUpdatePlans: NetworkOspfUpdatePlanRecord[];
   portForwardError: string | null;
   portForwardLoading: boolean;
-  portForwardRules: import("../types").PortForwardRuleRecord[];
+  portForwardRules: import("../types").PortForwardRuleListItem[];
   privilegeMaterial: PrivilegeMaterial | null;
+  runtimeConfigEvidenceState: "available" | "loading" | "unavailable";
   runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
   sourceTemplates: SourceTemplateRecord[];
   telemetryTunnels: TelemetryTunnelRecord[];
   topologyGraph: TopologyGraph;
+  tunnelPlanCorruptions: import("../types").TunnelPlanCorruptRecord[];
   tunnelPlans: TunnelPlanRecord[];
 };

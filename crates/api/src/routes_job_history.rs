@@ -28,7 +28,9 @@ use crate::{
         NetworkObservationView, ProcessSupervisorInventoryView,
     },
     model_command_templates::{JobOutputComparisonQuery, JobOutputComparisonView},
-    repository_job_outputs::{JobOutputCursor, JobOutputListFilter},
+    repository_job_outputs::{
+        JobOutputCursor, JobOutputListFilter, PROCESS_SUPERVISOR_INVENTORY_SCAN_LIMIT_ERROR,
+    },
     routes_file_transfers::{map_verified_object_error, streaming_artifact_file_body},
     security::{SCOPE_AUDIT_READ, SCOPE_FLEET_READ, SCOPE_JOBS_READ, SCOPE_NETWORK_READ},
     state::AppState,
@@ -1308,12 +1310,26 @@ pub(crate) async fn list_process_supervisor_inventory(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_JOBS_READ)
         .await?;
-    Ok(Json(
-        state
-            .repo
-            .list_process_supervisor_inventory(limit_or_default(query.limit))
-            .await?,
-    ))
+    let inventory = state
+        .repo
+        .list_process_supervisor_inventory(limit_or_default(query.limit))
+        .await
+        .map_err(map_process_supervisor_inventory_error)?;
+    Ok(Json(inventory))
+}
+
+fn map_process_supervisor_inventory_error(error: anyhow::Error) -> ApiError {
+    if error
+        .chain()
+        .any(|cause| cause.to_string() == PROCESS_SUPERVISOR_INVENTORY_SCAN_LIMIT_ERROR)
+    {
+        ApiError::conflict_with_message(
+            PROCESS_SUPERVISOR_INVENTORY_SCAN_LIMIT_ERROR,
+            "Exact process inventory exceeds the bounded history scan. Request a smaller limit or prune retained job-output history before retrying.",
+        )
+    } else {
+        error.into()
+    }
 }
 
 pub(crate) async fn list_audit_logs(
@@ -1373,5 +1389,19 @@ mod tests {
             std::fs::metadata(parent).unwrap().permissions().mode() & 0o777,
             0o700
         );
+    }
+
+    #[test]
+    fn process_inventory_scan_limit_is_an_explicit_incomplete_signal() {
+        let error = map_process_supervisor_inventory_error(anyhow::anyhow!(
+            PROCESS_SUPERVISOR_INVENTORY_SCAN_LIMIT_ERROR
+        ));
+
+        assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
+        assert_eq!(error.code, PROCESS_SUPERVISOR_INVENTORY_SCAN_LIMIT_ERROR);
+        assert!(error
+            .public_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Exact process inventory")));
     }
 }

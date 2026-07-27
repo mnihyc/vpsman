@@ -148,6 +148,7 @@ impl Repository {
                 ));
             }
             Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
                 let row = sqlx::query(
                     r#"
                     INSERT INTO history_retention_policies (
@@ -182,7 +183,7 @@ impl Repository {
                 .bind(policy.export_enabled)
                 .bind(&policy.notes)
                 .bind(operator.operator.id)
-                .fetch_one(pool)
+                .fetch_one(&mut *tx)
                 .await?;
                 policy.updated_at = row.try_get("updated_at")?;
                 sqlx::query(
@@ -209,8 +210,9 @@ impl Repository {
                     "operator_role": &operator.operator.role,
                     "session_id": operator.session_id,
                 }))
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
+                tx.commit().await?;
             }
         }
         Ok(policy)

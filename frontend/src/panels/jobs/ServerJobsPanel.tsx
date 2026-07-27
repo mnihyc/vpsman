@@ -6,6 +6,10 @@ import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
+import {
+  FLEET_DETAIL_LIMIT,
+  formatLowerBoundCount,
+} from "../../constants";
 import { useReviewGenerationGuard, waitForReviewRender } from "../../hooks/useReviewGenerationGuard";
 import { serverJobStatusBadgeClass } from "../../jobStatusPresentation";
 import type {
@@ -40,6 +44,7 @@ const artifactCleanupDomainOptions: Array<{
 ];
 
 export function ServerJobsPanel({
+  error: loadError,
   jobs,
   loading,
   onCancelJob,
@@ -47,6 +52,7 @@ export function ServerJobsPanel({
   onPreviewCleanup,
   onRefresh,
 }: {
+  error: string | null;
   jobs: ServerJobRecord[];
   loading: boolean;
   onCancelJob: (jobId: string) => Promise<ServerJobRecord>;
@@ -89,10 +95,11 @@ export function ServerJobsPanel({
     [advancedExpression, artifactState, objectPrefix, olderThanDays],
   );
   const expressionValid = expression.trim().length > 0 && !expression.startsWith("__invalid__");
+  const jobsTruncated = jobs.length >= FLEET_DETAIL_LIMIT;
   const summary = preview
     ? `${preview.matched_count} artifacts previewed, ${formatBytes(preview.matched_bytes)}`
-    : `${jobs.length} maintenance jobs`;
-  const cleanupPageFeedbackMessage = error;
+    : `${formatLowerBoundCount(jobs.length, jobsTruncated)} maintenance jobs${jobsTruncated ? " loaded" : ""}`;
+  const cleanupPageFeedbackMessage = error ?? loadError;
   const cleanupActionFeedbackMessage = previewStatus;
   const previewExpressionMatches = preview?.expression === expression;
   const previewDomainsMatch = preview ? sameDomains(preview.domains, domains) : false;
@@ -637,7 +644,10 @@ export function ServerJobsPanel({
         <div className="sectionHeader">
           <div>
             <h2>Maintenance jobs</h2>
-            <span>{jobs.length} retained control-plane maintenance jobs</span>
+            <span>
+              {formatLowerBoundCount(jobs.length, jobsTruncated)} retained
+              control-plane maintenance jobs{jobsTruncated ? " loaded" : ""}
+            </span>
           </div>
           <button
             className="secondaryAction"
@@ -681,6 +691,7 @@ export function ServerJobsPanel({
             </div>
           )}
           rows={jobs}
+          rowsTruncated={jobsTruncated}
           searchPlaceholder="Search maintenance jobs"
           selectable={false}
           storageKey="vpsman.jobs.serverJobs"

@@ -13,11 +13,11 @@ import {
   UserPlus,
 } from "lucide-react";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
+import { ActionFeedback } from "../components/ActionFeedback";
 import { VpsCombobox } from "../components/VpsCombobox";
 import { agentDisplayState } from "../agentDisplayState";
 import {
   formatLowerBoundCount,
-  HISTORY_DETAIL_LIMIT,
   isActionableFleetAlertState,
 } from "../constants";
 import type { FileTransferSessionRecord } from "../typesFileTransfer";
@@ -46,18 +46,24 @@ type HomePanelProps = {
   auditLogs: AuditLogRecord[];
   backupArtifacts: BackupArtifactRecord[];
   backups: BackupRequestRecord[];
+  backupsEvidenceAvailable: boolean;
   dashboardError: string | null;
   dashboardLoading: boolean;
   dashboardPreferences: DashboardPreferences;
   dashboardWindow: DashboardWindow;
   fileTransfers: FileTransferSessionRecord[];
+  fleetAlertsEvidenceAvailable: boolean;
   fleetAlerts: FleetAlertRecord[];
+  fleetCoreEvidenceAvailable: boolean;
+  homeEvidenceComplete: boolean;
   jobs: JobHistoryRecord[];
+  jobsEvidenceAvailable: boolean;
   recordBounds: {
     backupArtifacts: boolean;
     backups: boolean;
     fileTransfers: boolean;
     fleetAlerts: boolean;
+    jobs: boolean;
   };
   schedules: ScheduleRecord[];
   summary: FleetSummary;
@@ -116,9 +122,16 @@ export function HomePanel({
   auditLogs,
   backupArtifacts,
   backups,
+  backupsEvidenceAvailable,
+  dashboardError,
+  dashboardLoading,
   fileTransfers,
+  fleetAlertsEvidenceAvailable,
   fleetAlerts,
+  fleetCoreEvidenceAvailable,
+  homeEvidenceComplete,
   jobs,
+  jobsEvidenceAvailable,
   recordBounds,
   schedules,
   scopeFiltered,
@@ -157,7 +170,7 @@ export function HomePanel({
   const loadedRunningJobs = jobs.filter((job) => isActiveJobStatus(job.status)).length;
   const runningJobs = Math.max(loadedRunningJobs, summary.running_jobs);
   const alertsTruncated = recordBounds.fleetAlerts;
-  const runningJobsTruncated = jobs.length >= HISTORY_DETAIL_LIMIT;
+  const runningJobsTruncated = recordBounds.jobs;
   const backupsTruncated = recordBounds.backups;
   const failedJobs = jobs.filter((job) => isFailedJobStatus(job.status)).length;
   const failedBackups = backups.filter((backup) => isFailedBackupStatus(backup.status)).length;
@@ -296,6 +309,14 @@ export function HomePanel({
 
   return (
     <div className="homeWorkspace">
+      <ActionFeedback
+        className="localActionFeedback"
+        message={
+          dashboardError ??
+          (dashboardLoading ? "Refreshing dashboard evidence" : null)
+        }
+        tone={dashboardError ? "danger" : "progress"}
+      />
       <section className="homeReleaseLayer" aria-labelledby="home-release-title">
         <div className="homeCommandBand">
           <div className="homeCommandIntro">
@@ -304,16 +325,50 @@ export function HomePanel({
               Scan VPS health, pick a target, and jump into reviewed operations without hunting through subsystem pages.
             </p>
             <div className="homeInlineStatus" aria-label="Home fleet posture">
-              <ConsoleStatusBadge tone={visibleOnline === agents.length && criticalAlerts === 0 ? "ok" : "warning"}>
-                {visibleOnline}/{agents.length} visible live
+              <ConsoleStatusBadge
+                tone={
+                  fleetCoreEvidenceAvailable
+                    ? visibleOnline === agents.length && criticalAlerts === 0
+                      ? "ok"
+                      : "warning"
+                    : "neutral"
+                }
+              >
+                {fleetCoreEvidenceAvailable
+                  ? `${visibleOnline}/${agents.length} visible live`
+                  : "Fleet status unavailable"}
               </ConsoleStatusBadge>
-              <ConsoleStatusBadge tone={criticalAlerts > 0 ? "critical" : warningAlerts > 0 ? "warning" : infoAlerts > 0 || alertsTruncated ? "info" : "ok"}>
-                {criticalAlerts} critical / {warningAlerts} warning / {infoAlerts} info
-                {alertsTruncated ? " in loaded page" : ""}
+              <ConsoleStatusBadge
+                tone={
+                  !fleetAlertsEvidenceAvailable
+                    ? "neutral"
+                    : criticalAlerts > 0
+                      ? "critical"
+                      : warningAlerts > 0
+                        ? "warning"
+                        : infoAlerts > 0 || alertsTruncated
+                          ? "info"
+                          : "ok"
+                }
+              >
+                {fleetAlertsEvidenceAvailable
+                  ? `${criticalAlerts} critical / ${warningAlerts} warning / ${infoAlerts} info${alertsTruncated ? " in loaded page" : ""}`
+                  : "Alert evidence unavailable"}
               </ConsoleStatusBadge>
-              <ConsoleStatusBadge tone={runningJobs > 0 || runningJobsTruncated ? "info" : "neutral"}>
-                {formatLowerBoundCount(runningJobs, runningJobsTruncated)}{" "}
-                {scopeFiltered ? "fleet " : ""}running jobs
+              <ConsoleStatusBadge
+                tone={
+                  !jobsEvidenceAvailable
+                    ? "neutral"
+                    : runningJobs > 0 || runningJobsTruncated
+                      ? "info"
+                      : "neutral"
+                }
+              >
+                {jobsEvidenceAvailable
+                  ? `${formatLowerBoundCount(runningJobs, runningJobsTruncated)} ${
+                      scopeFiltered ? "fleet " : ""
+                    }running jobs`
+                  : "Job evidence unavailable"}
               </ConsoleStatusBadge>
             </div>
           </div>
@@ -389,11 +444,13 @@ export function HomePanel({
               <div className="homeQuietState" aria-label="Home empty scope notice">
                 <ShieldAlert size={18} />
                 <span>
-                  {allAgents.length === 0
+                  {!fleetCoreEvidenceAvailable
+                    ? "Fleet inventory is unavailable. Retry before assuming no VPS is registered or changing identities."
+                    : allAgents.length === 0
                     ? "No VPS is registered yet. Register the first identity, then run its generated install command."
                     : "No VPS matches the current scope. Adjust the fleet scope to restore quick actions."}
                 </span>
-                {allAgents.length === 0 ? (
+                {fleetCoreEvidenceAvailable && allAgents.length === 0 ? (
                   <button
                     className="primaryAction compactAction"
                     onClick={onRegisterVps}
@@ -411,51 +468,152 @@ export function HomePanel({
 
         <div className="homePostureStrip" aria-label="Home posture strip">
           <HomePostureMetric
-            detail={`${visibleOnline} live, ${visibleContactUnknown} contact unknown`}
+            detail={
+              fleetCoreEvidenceAvailable
+                ? `${visibleOnline} live, ${visibleContactUnknown} contact unknown`
+                : "Fleet status evidence is unavailable"
+            }
             label="Live VPS"
-            tone={visibleOnline === agents.length ? "ok" : "warning"}
-            value={`${visibleOnline}/${agents.length}`}
+            tone={
+              !fleetCoreEvidenceAvailable
+                ? "neutral"
+                : visibleOnline === agents.length
+                  ? "ok"
+                  : "warning"
+            }
+            value={
+              fleetCoreEvidenceAvailable
+                ? `${visibleOnline}/${agents.length}`
+                : "Unknown"
+            }
           />
           <HomePostureMetric
-            detail={`${visibleStale} stale, ${visibleContactUnknown} contact unknown, ${visibleOffline} offline`}
+            detail={
+              fleetCoreEvidenceAvailable
+                ? `${visibleStale} stale, ${visibleContactUnknown} contact unknown, ${visibleOffline} offline`
+                : "Reachability evidence is unavailable"
+            }
             label="Reachability gaps"
-            tone={visibleReview || visibleOffline ? "warning" : "ok"}
-            value={String(visibleReview + visibleOffline)}
+            tone={
+              !fleetCoreEvidenceAvailable
+                ? "neutral"
+                : visibleReview || visibleOffline
+                  ? "warning"
+                  : "ok"
+            }
+            value={
+              fleetCoreEvidenceAvailable
+                ? String(visibleReview + visibleOffline)
+                : "Unknown"
+            }
           />
           <HomePostureMetric
-            detail={`${criticalAlerts} critical, ${warningAlerts} warning, ${infoAlerts} info${alertsTruncated ? " in loaded page" : ""}`}
+            detail={
+              fleetAlertsEvidenceAvailable
+                ? `${criticalAlerts} critical, ${warningAlerts} warning, ${infoAlerts} info${alertsTruncated ? " in loaded page" : ""}`
+                : "Fleet alert evidence is unavailable"
+            }
             label="Open alerts"
-            tone={criticalAlerts ? "critical" : warningAlerts ? "warning" : infoAlerts || alertsTruncated ? "info" : "ok"}
-            value={formatLowerBoundCount(activeAlerts.length, alertsTruncated)}
+            tone={
+              !fleetAlertsEvidenceAvailable
+                ? "neutral"
+                : criticalAlerts
+                  ? "critical"
+                  : warningAlerts
+                    ? "warning"
+                    : infoAlerts || alertsTruncated
+                      ? "info"
+                      : "ok"
+            }
+            value={
+              fleetAlertsEvidenceAvailable
+                ? formatLowerBoundCount(activeAlerts.length, alertsTruncated)
+                : "Unknown"
+            }
           />
           <HomePostureMetric
-            detail={`${formatLowerBoundCount(failedJobs, jobs.length >= HISTORY_DETAIL_LIMIT)} failed in ${scopeFiltered ? "fleet " : ""}loaded history`}
+            detail={
+              jobsEvidenceAvailable
+                ? `${formatLowerBoundCount(failedJobs, runningJobsTruncated)} failed in ${scopeFiltered ? "fleet " : ""}loaded history`
+                : "Job history evidence is unavailable"
+            }
             label={scopeFiltered ? "Fleet jobs" : "Running jobs"}
-            tone={failedJobs ? "critical" : runningJobs || runningJobsTruncated ? "info" : "ok"}
-            value={formatLowerBoundCount(runningJobs, runningJobsTruncated)}
+            tone={
+              !jobsEvidenceAvailable
+                ? "neutral"
+                : failedJobs
+                  ? "critical"
+                  : runningJobs || runningJobsTruncated
+                    ? "info"
+                    : "ok"
+            }
+            value={
+              jobsEvidenceAvailable
+                ? formatLowerBoundCount(runningJobs, runningJobsTruncated)
+                : "Unknown"
+            }
           />
           <HomePostureMetric
-            detail={`${formatLowerBoundCount(failedBackups, backupsTruncated)} failed${backupsTruncated ? " in loaded history" : ""}, ${formatLowerBoundCount(backupArtifacts.length, recordBounds.backupArtifacts)} artifacts${recordBounds.backupArtifacts ? " in the loaded page" : ""}`}
+            detail={
+              backupsEvidenceAvailable
+                ? `${formatLowerBoundCount(failedBackups, backupsTruncated)} failed${backupsTruncated ? " in loaded history" : ""}, ${formatLowerBoundCount(backupArtifacts.length, recordBounds.backupArtifacts)} artifacts${recordBounds.backupArtifacts ? " in the loaded page" : ""}`
+                : "Backup request or artifact evidence is unavailable"
+            }
             label="Backups"
-            tone={failedBackups ? "critical" : backupsTruncated || recordBounds.backupArtifacts ? "info" : "ok"}
-            value={formatLowerBoundCount(backups.length, backupsTruncated)}
+            tone={
+              !backupsEvidenceAvailable
+                ? "neutral"
+                : failedBackups
+                  ? "critical"
+                  : backupsTruncated || recordBounds.backupArtifacts
+                    ? "info"
+                    : "ok"
+            }
+            value={
+              backupsEvidenceAvailable
+                ? formatLowerBoundCount(backups.length, backupsTruncated)
+                : "Unknown"
+            }
           />
           <HomePostureMetric
-            detail={`${formatLowerBoundCount(activeTransfers, recordBounds.fileTransfers)} active transfer sessions${recordBounds.fileTransfers ? " in loaded history" : ""}`}
+            detail={
+              jobsEvidenceAvailable
+                ? `${formatLowerBoundCount(activeTransfers, recordBounds.fileTransfers)} active transfer sessions${recordBounds.fileTransfers ? " in loaded history" : ""}`
+                : "File-transfer evidence is unavailable"
+            }
             label="Transfers"
-            tone={activeTransfers || recordBounds.fileTransfers ? "info" : "ok"}
-            value={formatLowerBoundCount(
-              fileTransfers.length,
-              recordBounds.fileTransfers,
-            )}
+            tone={
+              !jobsEvidenceAvailable
+                ? "neutral"
+                : activeTransfers || recordBounds.fileTransfers
+                  ? "info"
+                  : "ok"
+            }
+            value={
+              jobsEvidenceAvailable
+                ? formatLowerBoundCount(
+                    fileTransfers.length,
+                    recordBounds.fileTransfers,
+                  )
+                : "Unknown"
+            }
           />
         </div>
 
         <div className="homeWorkGrid">
           <HomeActionPanel
-            badge={`${runningWorkItems.length} active`}
+            badge={
+              homeEvidenceComplete
+                ? `${runningWorkItems.length} shown`
+                : `${runningWorkItems.length} shown · evidence incomplete`
+            }
             emptyIcon={<Clock3 size={18} />}
-            emptyText="No running jobs, transfers, or backup requests in loaded records."
+            emptyText={
+              homeEvidenceComplete
+                ? "No running jobs, transfers, or backup requests in loaded records."
+                : "No running work found in available evidence; some home sources are unavailable."
+            }
+            evidenceComplete={homeEvidenceComplete}
             id="home-running-work-title"
             items={runningWorkItems}
             subtitle={
@@ -466,9 +624,18 @@ export function HomePanel({
             title={scopeFiltered ? "Running work and fleet jobs" : "Running work"}
           />
           <HomeActionPanel
-            badge={`${recentFailureItems.length} recent`}
+            badge={
+              homeEvidenceComplete
+                ? `${recentFailureItems.length} shown`
+                : `${recentFailureItems.length} shown · evidence incomplete`
+            }
             emptyIcon={<ShieldAlert size={18} />}
-            emptyText="No recent failures or unacknowledged warning alerts in loaded records."
+            emptyText={
+              homeEvidenceComplete
+                ? "No recent failures or unacknowledged warning alerts in loaded records."
+                : "No recent issues found in available evidence; some home sources are unavailable."
+            }
+            evidenceComplete={homeEvidenceComplete}
             id="home-recent-issues-title"
             items={recentFailureItems}
             subtitle={
@@ -491,14 +658,30 @@ export function HomePanel({
                     : "Failed work, stale agents, backup risk, degraded network, and access capability gaps."}
                 </span>
               </div>
-              <ConsoleStatusBadge tone={attentionItems.length ? "warning" : "ok"}>
-                {attentionItems.length} item{attentionItems.length === 1 ? "" : "s"}
+              <ConsoleStatusBadge
+                tone={
+                  attentionItems.length
+                    ? "warning"
+                    : homeEvidenceComplete
+                      ? "ok"
+                      : "neutral"
+                }
+              >
+                {homeEvidenceComplete
+                  ? `${attentionItems.length} shown`
+                  : `${attentionItems.length} shown · evidence incomplete`}
               </ConsoleStatusBadge>
             </div>
             {attentionItems.length === 0 ? (
-              <div className="homeQuietState">
+              <div
+                className={`homeQuietState${homeEvidenceComplete ? "" : " evidenceIncomplete"}`}
+              >
                 <ShieldAlert size={18} />
-                <span>No loaded evidence needs attention.</span>
+                <span>
+                  {homeEvidenceComplete
+                    ? "No loaded evidence needs attention."
+                    : "No issue found in available evidence; some home sources are unavailable."}
+                </span>
               </div>
             ) : (
               <div className="homeActionList">
@@ -531,12 +714,22 @@ export function HomePanel({
                     : "Audit, job, backup, transfer, and schedule evidence from loaded records."}
                 </span>
               </div>
-              <ConsoleStatusBadge tone="neutral">{activityItems.length} shown</ConsoleStatusBadge>
+              <ConsoleStatusBadge tone="neutral">
+                {homeEvidenceComplete
+                  ? `${activityItems.length} shown`
+                  : `${activityItems.length} shown · evidence incomplete`}
+              </ConsoleStatusBadge>
             </div>
             {activityItems.length === 0 ? (
-              <div className="homeQuietState">
+              <div
+                className={`homeQuietState${homeEvidenceComplete ? "" : " evidenceIncomplete"}`}
+              >
                 <Clock3 size={18} />
-                <span>No recent activity loaded.</span>
+                <span>
+                  {homeEvidenceComplete
+                    ? "No recent activity loaded."
+                    : "No recent activity found in available evidence; some home sources are unavailable."}
+                </span>
               </div>
             ) : (
               <div className="homeActivityList">
@@ -570,7 +763,7 @@ function HomePostureMetric({
 }: {
   detail: string;
   label: string;
-  tone: "critical" | "warning" | "info" | "ok";
+  tone: "critical" | "warning" | "info" | "ok" | "neutral";
   value: string;
 }) {
   return (
@@ -586,6 +779,7 @@ function HomeActionPanel({
   badge,
   emptyIcon,
   emptyText,
+  evidenceComplete,
   id,
   items,
   subtitle,
@@ -594,6 +788,7 @@ function HomeActionPanel({
   badge: string;
   emptyIcon: ReactNode;
   emptyText: string;
+  evidenceComplete: boolean;
   id: string;
   items: HomeActionItem[];
   subtitle: string;
@@ -606,10 +801,16 @@ function HomeActionPanel({
           <h2 id={id}>{title}</h2>
           <span>{subtitle}</span>
         </div>
-        <ConsoleStatusBadge tone={items.length ? "info" : "ok"}>{badge}</ConsoleStatusBadge>
+        <ConsoleStatusBadge
+          tone={!evidenceComplete ? "neutral" : items.length ? "info" : "ok"}
+        >
+          {badge}
+        </ConsoleStatusBadge>
       </div>
       {items.length === 0 ? (
-        <div className="homeQuietState">
+        <div
+          className={`homeQuietState${evidenceComplete ? "" : " evidenceIncomplete"}`}
+        >
           {emptyIcon}
           <span>{emptyText}</span>
         </div>
@@ -1013,7 +1214,13 @@ function buildActivityItems({
   }));
   const scheduleItems = schedules.map((schedule) => ({
     id: `schedule:${schedule.id}`,
-    label: `${schedule.name} ${schedule.enabled ? "enabled" : "paused"}`,
+    label: `${schedule.name} ${
+      schedule.cadence_error
+        ? "invalid cadence"
+        : schedule.enabled
+          ? "enabled"
+          : "paused"
+    }`,
     meta: `${readableJobCommand(schedule.command_type)} / ${schedule.selector_expression}`,
     onOpen: onOpenSchedule,
     time: schedule.updated_at,

@@ -979,6 +979,7 @@ async fn fleet_read_only_cannot_read_sensitive_payload_surfaces() {
         routes_backups::list_backup_policies(
             axum::extract::State(state.clone()),
             viewer_headers.clone(),
+            axum::extract::Query(ListQuery::default()),
         )
         .await,
     );
@@ -1222,6 +1223,58 @@ async fn fleet_websocket_auth_rejects_revoked_sessions() {
 }
 
 #[tokio::test]
+async fn revoke_operator_session_returns_the_exact_session_beyond_the_list_cap() {
+    let state = memory_test_state();
+    let (actor_token, _) = issue_test_operator_headers(&state, "admin", &["*"]).await;
+    let actor = state
+        .repo
+        .authenticate_access_token(&actor_token)
+        .await
+        .unwrap()
+        .unwrap();
+    let target_auth = state
+        .repo
+        .issue_session(actor.operator.clone())
+        .await
+        .unwrap();
+    let target = state
+        .repo
+        .authenticate_access_token(&target_auth.access_token)
+        .await
+        .unwrap()
+        .unwrap();
+    for _ in 0..200 {
+        state
+            .repo
+            .issue_session(actor.operator.clone())
+            .await
+            .unwrap();
+    }
+    let Repository::Memory(memory) = &state.repo else {
+        unreachable!("test uses memory repository");
+    };
+    for (index, session) in memory.sessions.write().await.iter_mut().enumerate() {
+        session.created_unix = index as u64;
+    }
+    assert!(!state
+        .repo
+        .list_operator_sessions(200, actor.session_id)
+        .await
+        .unwrap()
+        .iter()
+        .any(|session| session.id == target.session_id));
+
+    let revoked = state
+        .repo
+        .revoke_operator_session(target.session_id, &actor)
+        .await
+        .unwrap()
+        .expect("exact session lookup should return the revoked session");
+    assert_eq!(revoked.id, target.session_id);
+    assert!(revoked.revoked);
+}
+
+#[tokio::test]
 async fn matching_sensitive_read_scopes_cross_authorization_boundary() {
     let state = memory_test_state();
     let (fleet_token, _) = issue_test_operator_headers(&state, "viewer", &[SCOPE_FLEET_READ]).await;
@@ -1443,6 +1496,7 @@ async fn matching_sensitive_read_scopes_cross_authorization_boundary() {
         routes_backups::list_backup_policies(
             axum::extract::State(state.clone()),
             backups_headers.clone(),
+            axum::extract::Query(ListQuery::default()),
         )
         .await,
     );

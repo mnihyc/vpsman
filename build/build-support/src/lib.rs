@@ -40,7 +40,7 @@ pub fn emit_component_build_number_for(component_env: &str, component_name: &str
     println!("cargo:rerun-if-changed={}", counter_path.display());
 
     let build_number = if is_github_actions() {
-        read_counter(&counter_path).max(1)
+        read_counter(&counter_path).unwrap_or_else(|error| panic!("{error}"))
     } else {
         increment_counter(&counter_path)
     };
@@ -118,8 +118,14 @@ fn increment_counter(path: &Path) -> u64 {
     }
 
     let _lock = CounterLock::acquire(path.with_extension("lock"));
-    let current = read_counter(path);
-    let next = current.saturating_add(1).max(1);
+    let current = match read_counter(path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => panic!("{error}"),
+    };
+    let next = current
+        .checked_add(1)
+        .expect("build-number counter exhausted u64");
     let mut file = OpenOptions::new()
         .create(true)
         .write(true)
@@ -130,15 +136,50 @@ fn increment_counter(path: &Path) -> u64 {
     next
 }
 
-fn read_counter(path: &Path) -> u64 {
+fn read_counter(path: &Path) -> std::io::Result<u64> {
     let mut value = String::new();
-    let Ok(mut file) = OpenOptions::new().read(true).open(path) else {
-        return 0;
-    };
-    if file.read_to_string(&mut value).is_err() {
-        return 0;
+    let mut file = OpenOptions::new().read(true).open(path).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!(
+                "failed to open build-number counter {}: {error}",
+                path.display()
+            ),
+        )
+    })?;
+    file.read_to_string(&mut value).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!(
+                "failed to read build-number counter {}: {error}",
+                path.display()
+            ),
+        )
+    })?;
+    parse_counter(path, &value)
+}
+
+fn parse_counter(path: &Path, value: &str) -> std::io::Result<u64> {
+    let trimmed = value.trim();
+    let parsed = trimmed.parse::<u64>().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "build-number counter {} must contain one positive integer",
+                path.display()
+            ),
+        )
+    })?;
+    if parsed == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "build-number counter {} must be greater than zero",
+                path.display()
+            ),
+        ));
     }
-    value.trim().parse::<u64>().unwrap_or(0)
+    Ok(parsed)
 }
 
 fn is_github_actions() -> bool {
@@ -174,7 +215,9 @@ impl Drop for CounterLock {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_release_identity;
+    use std::path::Path;
+
+    use super::{parse_counter, resolve_release_identity};
 
     fn env_from<'a>(pairs: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<String> + 'a {
         |name| {
@@ -227,5 +270,17 @@ mod tests {
             ]),
             "0.1.0",
         );
+    }
+
+    #[test]
+    fn build_counter_requires_one_positive_integer() {
+        let path = Path::new("build/build-numbers/agent.txt");
+        assert_eq!(parse_counter(path, "42\n").unwrap(), 42);
+        for invalid in ["", "0", "-1", "1.5", "not-a-number", "1\n2"] {
+            assert!(
+                parse_counter(path, invalid).is_err(),
+                "accepted invalid build counter {invalid:?}"
+            );
+        }
     }
 }

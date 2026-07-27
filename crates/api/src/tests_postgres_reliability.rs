@@ -9,10 +9,12 @@ use sqlx::{
 use tokio::sync::broadcast;
 use uuid::Uuid;
 use vpsman_common::{
-    payload_hash, plan_tunnel, AgentCapabilitySnapshot, AgentHello, AgentMetrics,
-    AgentUpdateHeartbeat, CommandOutput, CpuStat, GatewayAgentHelloIngest, GatewayTelemetryIngest,
-    JobCommand, LoadAverage, OutputStream, RuntimeTunnelControl, RuntimeTunnelManager,
-    TelemetryEnvelope, TunnelAddressPair, TunnelKind, TunnelPlanInput,
+    pair_port_expressions, payload_hash, plan_tunnel, AgentCapabilitySnapshot, AgentHello,
+    AgentMetrics, AgentUpdateHeartbeat, CommandOutput, CpuStat, GatewayAgentHelloIngest,
+    GatewayTelemetryIngest, JobCommand, LoadAverage, OspfControlMode, OspfCostPolicy, OutputStream,
+    PortForwardProtocol, PortForwardRuntimeSnapshot, PortForwardRuntimeStatus,
+    RuntimeTunnelControl, RuntimeTunnelManager, TelemetryEnvelope, TunnelAddressPair, TunnelKind,
+    TunnelOspfConfig, TunnelPlanInput,
 };
 use vpsman_server_core::{
     JOB_STATUS_CANCELED, JOB_STATUS_COMPLETED, JOB_STATUS_CONTROL_TIMEOUT, JOB_STATUS_FAILED,
@@ -23,9 +25,12 @@ use vpsman_server_core::{
 use crate::{
     gateway_client::GatewayDispatchClient,
     model::{
-        AuthContext, BackupRequestStatus, BootstrapOperatorRequest, CreateBackupRequest,
-        CreateScheduleRequest, DeleteAgentRequest, FleetAlertQuery, JobOutputView, LoginRequest,
-        NewServerArtifact, WsEvent,
+        AssignSourceTemplateRequest, AuthContext, BackupRequestStatus, BootstrapOperatorRequest,
+        CloneSourceTemplateRequest, CreateBackupPolicyRequest, CreateBackupRequest,
+        CreateScheduleRequest, CreateSourceTemplateRequest, DeleteAgentRequest, FleetAlertQuery,
+        JobOutputView, JobRolloutPolicy, ListQuery, LoginRequest, NewServerArtifact,
+        SchedulePrivilegeMutationRequest, UpdateSourceTemplateRequest,
+        UpsertRuntimeConfigPatchGeneratorRequest, WsEvent,
     },
     model_alert_notifications::{
         CreateFleetAlertNotificationChannelRequest, FleetAlertNotificationCandidate,
@@ -34,11 +39,16 @@ use crate::{
         CreateFleetAlertPolicyRequest, PolicyAlertQuery, PolicyDryRunRequest, PolicyRuleRequest,
         VpsRuleQuery,
     },
+    model_command_templates::UpsertCommandTemplateRequest,
+    model_history::UpsertHistoryRetentionPolicyRequest,
     model_history::{HistoryDomain, HistoryRetentionPrunePlan},
+    model_port_forwarding::{CreatePortForwardRuleRequest, UpdatePortForwardRuleRequest},
+    model_terminal::TerminalSessionView,
     model_webhook_rules::{CreateWebhookRuleRequest, WebhookRuleDeliveryCandidate},
     repository::Repository,
     repository_backups::BackupRequestSourceLink,
     repository_job_outputs::{JobOutputPersistConfig, JobOutputWriteResult},
+    repository_terminal_sessions::upsert_postgres_terminal_session,
     state::{AppState, DispatcherRuntimeConfig, DEFAULT_ARTIFACT_MAX_BYTES},
 };
 
@@ -72,7 +82,7 @@ async fn postgres_deleted_delivery_owners_reject_stale_dispatch_snapshots() {
         .await
         .unwrap();
     db.repo
-        .delete_fleet_alert_notification_channel(channel_id, &operator)
+        .delete_fleet_alert_notification_channel(channel_id, "deleted-channel", &operator)
         .await
         .unwrap();
     let notification_deliveries = db
@@ -118,7 +128,7 @@ async fn postgres_deleted_delivery_owners_reject_stale_dispatch_snapshots() {
         .await
         .unwrap();
     db.repo
-        .delete_webhook_rule(rule_id, &operator)
+        .delete_webhook_rule(rule_id, "deleted-rule", &operator)
         .await
         .unwrap();
     let webhook_deliveries = db
@@ -150,6 +160,1948 @@ struct PgReliabilityTestDb {
     pool: PgPool,
     admin_pool: PgPool,
     db_name: String,
+}
+
+#[tokio::test]
+async fn postgres_rollout_reconciler_isolates_missing_current_batch_assignment() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+    let rollout_policy = |canary: &str| JobRolloutPolicy {
+        canary_client_ids: vec![canary.to_string()],
+        batch_size: 1,
+        max_failures: 0,
+        pause_after_canary: false,
+        batch_delay_secs: 0,
+    };
+
+    let malformed_job_id = Uuid::new_v4();
+    let mut malformed_request = crate::tests::operation_job_request(
+        JobCommand::AgentUpdateCheck {
+            version_url: None,
+            activate: false,
+            restart_agent: false,
+        },
+        &["broken-a", "broken-b", "broken-c"],
+    );
+    malformed_request.rollout = Some(rollout_policy("broken-a"));
+    db.repo
+        .record_dispatching_job(
+            malformed_job_id,
+            &malformed_request,
+            "malformed-command-hash",
+            "malformed-request-fingerprint",
+            &operator,
+            &malformed_request.target_client_ids,
+        )
+        .await
+        .unwrap();
+
+    let healthy_job_id = Uuid::new_v4();
+    let mut healthy_request = crate::tests::operation_job_request(
+        JobCommand::AgentUpdateCheck {
+            version_url: None,
+            activate: false,
+            restart_agent: false,
+        },
+        &["healthy-a", "healthy-b", "healthy-c"],
+    );
+    healthy_request.rollout = Some(rollout_policy("healthy-a"));
+    db.repo
+        .record_dispatching_job(
+            healthy_job_id,
+            &healthy_request,
+            "healthy-command-hash",
+            "healthy-request-fingerprint",
+            &operator,
+            &healthy_request.target_client_ids,
+        )
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "UPDATE job_rollouts SET current_batch = 1, updated_at = to_timestamp(1) WHERE job_id = $1",
+    )
+    .bind(malformed_job_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM job_rollout_targets WHERE job_id = $1 AND batch_index = 1")
+        .bind(malformed_job_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE job_rollouts SET updated_at = to_timestamp(2) WHERE job_id = $1")
+        .bind(healthy_job_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE job_targets
+        SET status = 'completed', exit_code = 0, completed_at = now()
+        WHERE job_id = $1 AND client_id = 'healthy-a'
+        "#,
+    )
+    .bind(healthy_job_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(db.repo.reconcile_job_rollouts(1).await.unwrap(), 1);
+    let malformed = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT status, pause_reason FROM job_rollouts WHERE job_id = $1",
+    )
+    .bind(malformed_job_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        malformed,
+        (
+            "paused".to_string(),
+            Some("current_batch_assignment_missing".to_string())
+        )
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>("SELECT current_batch FROM job_rollouts WHERE job_id = $1",)
+            .bind(healthy_job_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        0
+    );
+
+    assert_eq!(db.repo.reconcile_job_rollouts(1).await.unwrap(), 1);
+    let healthy = sqlx::query_as::<_, (String, i32, Option<String>)>(
+        "SELECT status, current_batch, pause_reason FROM job_rollouts WHERE job_id = $1",
+    )
+    .bind(healthy_job_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(healthy, ("running".to_string(), 1, None));
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_schedule_query_without_limit_returns_all_rows() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO schedules (
+            id,
+            name,
+            operation,
+            selector_expression,
+            target_client_ids,
+            cron_expr,
+            next_run_at
+        )
+        SELECT
+            md5('schedule-no-limit-' || series::text)::uuid,
+            'schedule-no-limit-' || series::text,
+            '{"type":"shell","argv":["/bin/true"],"pty":false}'::jsonb,
+            'tag:edge',
+            ARRAY['client-a']::text[],
+            '0 * * * *',
+            now() + interval '1 hour'
+        FROM generate_series(1, 1001) AS series
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        db.repo
+            .query_schedules(&ListQuery::default())
+            .await
+            .unwrap()
+            .len(),
+        1_001
+    );
+    assert_eq!(
+        db.repo
+            .query_schedules(&ListQuery {
+                limit: Some(1_000),
+                ..ListQuery::default()
+            })
+            .await
+            .unwrap()
+            .len(),
+        1_000
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_internal_dispatch_queries_do_not_silently_omit_after_one_thousand() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO fleet_alert_notification_channels (
+            id,
+            name,
+            scope_kind,
+            min_severity,
+            delivery_kind,
+            target
+        )
+        SELECT
+            md5('notification-overflow-' || series::text)::uuid,
+            'notification-overflow-' || series::text,
+            'global',
+            'warning',
+            'webhook',
+            'https://hooks.acme.com/fleet'
+        FROM generate_series(1, 1001) AS series
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let notification_error = db
+        .repo
+        .list_enabled_fleet_alert_notification_channels_for_dispatch()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(notification_error.contains("fleet_alert_notification_dispatch_channel_limit_exceeded"));
+
+    let targeted_rule_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO webhook_rules (id, name, expression, target)
+        SELECT
+            md5('webhook-filler-' || series::text)::uuid,
+            'webhook-filler-' || lpad(series::text, 4, '0'),
+            'interval.30sec',
+            'https://hooks.acme.com/filler'
+        FROM generate_series(1, 1000) AS series
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO webhook_rules (id, name, expression, target)
+        VALUES ($1, 'zzzz-targeted-webhook', 'interval.30sec', 'https://hooks.acme.com/targeted')
+        "#,
+    )
+    .bind(targeted_rule_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert!(db
+        .repo
+        .list_webhook_rules(1_000, None)
+        .await
+        .unwrap()
+        .iter()
+        .all(|rule| rule.id != targeted_rule_id));
+    assert_eq!(
+        db.repo
+            .webhook_rule_by_id(targeted_rule_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        targeted_rule_id
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_invalid_notification_channel_filters_are_visible_but_never_dispatched() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+    let healthy_id = Uuid::new_v4();
+    let invalid_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO fleet_alert_notification_channels (
+            id,
+            name,
+            scope_kind,
+            min_severity,
+            categories,
+            operator_states,
+            delivery_kind,
+            target
+        )
+        VALUES
+            (
+                $1,
+                'healthy-channel',
+                'global',
+                'warning',
+                '["agent_status"]'::jsonb,
+                '["open"]'::jsonb,
+                'webhook',
+                'https://hooks.acme.com/healthy'
+            ),
+            (
+                $2,
+                'invalid-channel',
+                'global',
+                'warning',
+                '[42]'::jsonb,
+                '["open"]'::jsonb,
+                'webhook',
+                'https://hooks.acme.com/invalid'
+            )
+        "#,
+    )
+    .bind(healthy_id)
+    .bind(invalid_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let listed = db
+        .repo
+        .list_fleet_alert_notification_channels(10, None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 2);
+    let invalid = listed
+        .iter()
+        .find(|channel| channel.id == invalid_id)
+        .unwrap();
+    assert_eq!(
+        invalid.configuration_error.as_deref(),
+        Some("fleet_alert_notification_channel_filters_invalid")
+    );
+
+    let dispatchable = db
+        .repo
+        .list_enabled_fleet_alert_notification_channels_for_dispatch()
+        .await
+        .unwrap();
+    assert_eq!(
+        dispatchable
+            .iter()
+            .map(|channel| channel.id)
+            .collect::<Vec<_>>(),
+        vec![healthy_id]
+    );
+
+    db.repo
+        .delete_fleet_alert_notification_channel(invalid_id, "invalid-channel", &operator)
+        .await
+        .unwrap();
+    assert_eq!(
+        db.repo
+            .list_fleet_alert_notification_channels(10, None, None, None, None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_topology_evidence_is_bounded_per_plan_beyond_global_caps() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    for client_id in [
+        "topology-noisy-left",
+        "topology-noisy-right",
+        "topology-quiet-left",
+        "topology-quiet-right",
+    ] {
+        insert_client(&db.pool, client_id, None).await;
+    }
+    let operator = postgres_network_operator(&db.repo).await;
+    let mut noisy_input = postgres_alert_test_tunnel_input();
+    noisy_input.name = "topology-noisy".to_string();
+    noisy_input.interface_name = "tun-noisy".to_string();
+    noisy_input.runtime_control = Default::default();
+    noisy_input.left_client_id = "topology-noisy-left".to_string();
+    noisy_input.right_client_id = "topology-noisy-right".to_string();
+    noisy_input.address_pool_cidr = "10.70.0.0/30".to_string();
+    noisy_input.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.70.0.0".to_string(),
+        right: "10.70.0.1".to_string(),
+        prefix_len: 31,
+    });
+    let noisy_plan = db
+        .repo
+        .record_tunnel_plan(
+            &noisy_input,
+            &plan_tunnel(&noisy_input).unwrap(),
+            true,
+            &operator,
+        )
+        .await
+        .unwrap();
+    let mut quiet_input = noisy_input.clone();
+    quiet_input.name = "topology-quiet".to_string();
+    quiet_input.interface_name = "tun-quiet".to_string();
+    quiet_input.left_client_id = "topology-quiet-left".to_string();
+    quiet_input.right_client_id = "topology-quiet-right".to_string();
+    quiet_input.address_pool_cidr = "10.70.0.4/30".to_string();
+    quiet_input.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.70.0.4".to_string(),
+        right: "10.70.0.5".to_string(),
+        prefix_len: 31,
+    });
+    let quiet_plan = db
+        .repo
+        .record_tunnel_plan(
+            &quiet_input,
+            &plan_tunnel(&quiet_input).unwrap(),
+            true,
+            &operator,
+        )
+        .await
+        .unwrap();
+    let noisy_identity =
+        crate::repository_network_observations::topology_identity_hash_for_plan(&noisy_plan);
+    let quiet_identity =
+        crate::repository_network_observations::topology_identity_hash_for_plan(&quiet_plan);
+    let noisy_job_id = Uuid::new_v4();
+    let quiet_job_id = Uuid::new_v4();
+    insert_job_target(
+        &db.pool,
+        noisy_job_id,
+        "topology-noisy-left",
+        "completed",
+        true,
+        None,
+    )
+    .await;
+    insert_job_target(
+        &db.pool,
+        quiet_job_id,
+        "topology-quiet-left",
+        "completed",
+        true,
+        None,
+    )
+    .await;
+    sqlx::query(
+        r#"
+        INSERT INTO network_observations (
+            id,
+            job_id,
+            client_id,
+            seq,
+            kind,
+            plan_id,
+            topology_identity_hash,
+            plan_name,
+            interface_name,
+            peer_client_id,
+            healthy,
+            latency_avg_ms,
+            packet_loss_ratio,
+            observed_at
+        )
+        SELECT
+            md5('topology-noisy-observation-' || series::text)::uuid,
+            $1,
+            'topology-noisy-left',
+            series::integer,
+            'network_probe',
+            $2,
+            $3,
+            'topology-noisy',
+            'tun-noisy',
+            'topology-noisy-right',
+            TRUE,
+            5.0,
+            0.0,
+            to_timestamp(2000 + series)
+        FROM generate_series(1, 1001) AS series
+        "#,
+    )
+    .bind(noisy_job_id)
+    .bind(noisy_plan.id)
+    .bind(&noisy_identity)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO network_observations (
+            id,
+            job_id,
+            client_id,
+            seq,
+            kind,
+            plan_id,
+            topology_identity_hash,
+            plan_name,
+            interface_name,
+            peer_client_id,
+            healthy,
+            latency_avg_ms,
+            packet_loss_ratio,
+            observed_at
+        )
+        VALUES (
+            $1,
+            $2,
+            'topology-quiet-left',
+            1,
+            'network_probe',
+            $3,
+            $4,
+            'topology-quiet',
+            'tun-quiet',
+            'topology-quiet-right',
+            FALSE,
+            42.0,
+            0.1,
+            to_timestamp(1000)
+        )
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(quiet_job_id)
+    .bind(quiet_plan.id)
+    .bind(&quiet_identity)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let observations = db
+        .repo
+        .list_network_observations_for_topology(
+            &[
+                (
+                    noisy_plan.id,
+                    noisy_identity.clone(),
+                    noisy_plan.left_client_id.clone(),
+                    noisy_plan.right_client_id.clone(),
+                ),
+                (
+                    quiet_plan.id,
+                    quiet_identity.clone(),
+                    quiet_plan.left_client_id.clone(),
+                    quiet_plan.right_client_id.clone(),
+                ),
+            ],
+            24,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        observations
+            .iter()
+            .filter(|observation| observation.plan_id == Some(noisy_plan.id))
+            .count(),
+        24
+    );
+    assert!(observations
+        .iter()
+        .any(|observation| observation.plan_id == Some(quiet_plan.id)));
+    let graph = db.repo.topology_graph(24).await.unwrap();
+    let quiet_edge = graph
+        .edges
+        .iter()
+        .find(|edge| edge.plan_id == quiet_plan.id)
+        .unwrap();
+    assert_eq!(quiet_edge.sample_count, 1);
+    assert_eq!(quiet_edge.probe_state, "degraded");
+    assert_eq!(quiet_edge.latency_series_ms, vec![42.0]);
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_process_inventory_bounds_only_relevant_history_and_fails_explicitly() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    insert_client(&db.pool, "process-bound-client", None).await;
+    let shell_job_id = Uuid::new_v4();
+    let process_job_id = Uuid::new_v4();
+    insert_job_target(
+        &db.pool,
+        shell_job_id,
+        "process-bound-client",
+        "completed",
+        true,
+        None,
+    )
+    .await;
+    insert_job_target(
+        &db.pool,
+        process_job_id,
+        "process-bound-client",
+        "completed",
+        true,
+        None,
+    )
+    .await;
+    sqlx::query("UPDATE jobs SET command_type = 'process_status' WHERE id = $1")
+        .bind(process_job_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO job_outputs (
+            job_id, client_id, seq, stream, data, done, created_at
+        )
+        SELECT
+            $1,
+            'process-bound-client',
+            series,
+            'stdout',
+            convert_to('unrelated shell output', 'UTF8'),
+            FALSE,
+            to_timestamp(20000 + series)
+        FROM generate_series(0, 10000) AS series
+        "#,
+    )
+    .bind(shell_job_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO job_outputs (
+            job_id, client_id, seq, stream, data, done, created_at
+        )
+        VALUES (
+            $1,
+            'process-bound-client',
+            0,
+            'stdout',
+            convert_to(
+                '{"type":"process_status","processes":[{"name":"worker","status":"running"}]}',
+                'UTF8'
+            ),
+            FALSE,
+            to_timestamp(10000)
+        )
+        "#,
+    )
+    .bind(process_job_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let exact = db.repo.list_process_supervisor_inventory(2).await.unwrap();
+    assert_eq!(exact.len(), 1);
+    assert_eq!(exact[0].name, "worker");
+
+    sqlx::query(
+        r#"
+        INSERT INTO job_outputs (
+            job_id, client_id, seq, stream, data, done, created_at
+        )
+        SELECT
+            $1,
+            'process-bound-client',
+            series,
+            'stdout',
+            convert_to(
+                '{"type":"process_status","processes":[{"name":"worker","status":"running"}]}',
+                'UTF8'
+            ),
+            FALSE,
+            to_timestamp(10000 + series)
+        FROM generate_series(1, 10000) AS series
+        "#,
+    )
+    .bind(process_job_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        db.repo
+            .list_process_supervisor_inventory(2)
+            .await
+            .unwrap_err()
+            .to_string(),
+        crate::repository_job_outputs::PROCESS_SUPERVISOR_INVENTORY_SCAN_LIMIT_ERROR
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_ospf_controller_batches_persist_fair_rotation() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    insert_client(&db.pool, "ospf-fair-left", None).await;
+    insert_client(&db.pool, "ospf-fair-right", None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+    let mut created_plans = Vec::new();
+    for index in 0..7_u8 {
+        let network = 80_u8 + index;
+        let mut input = postgres_alert_test_tunnel_input();
+        input.name = format!("ospf-fair-{index}");
+        input.interface_name = format!("of{index}");
+        input.left_client_id = "ospf-fair-left".to_string();
+        input.right_client_id = "ospf-fair-right".to_string();
+        input.address_pool_cidr = format!("10.{network}.0.0/30");
+        input.ipv4_tunnel = Some(TunnelAddressPair {
+            left: format!("10.{network}.0.0"),
+            right: format!("10.{network}.0.1"),
+            prefix_len: 31,
+        });
+        input.ospf = Some(TunnelOspfConfig {
+            mode: OspfControlMode::Automatic,
+            planned_latency_ms: 20.0,
+            planned_packet_loss_ratio: 0.0,
+            preference: 1.0,
+            policy: OspfCostPolicy::default(),
+            min_cost_delta: 5,
+            healthy_windows: 1,
+            left_adapter_template_id: Uuid::new_v4().to_string(),
+            right_adapter_template_id: Uuid::new_v4().to_string(),
+        });
+        created_plans.push(
+            db.repo
+                .record_tunnel_plan(&input, &plan_tunnel(&input).unwrap(), true, &operator)
+                .await
+                .unwrap(),
+        );
+    }
+    let staged_plan = &created_plans[0];
+    db.repo
+        .mark_pending_tunnel_plans_reconciled(&[staged_plan.id])
+        .await
+        .unwrap();
+    db.repo
+        .stage_tunnel_plan_ospf_jobs(
+            staged_plan.id,
+            staged_plan.revision,
+            None,
+            None,
+            None,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert!(sqlx::query_scalar::<_, Option<String>>(
+        "SELECT pending_ospf_reconciled_at::text FROM tunnel_plans WHERE id = $1",
+    )
+    .bind(staged_plan.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap()
+    .is_none());
+    sqlx::query(
+        "UPDATE tunnel_plans SET ospf_status = 'pending', left_ospf_status = 'pending', right_ospf_status = 'pending'",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let first = db
+        .repo
+        .list_automatic_tunnel_plan_ids_for_controller(3)
+        .await
+        .unwrap();
+    db.repo
+        .mark_automatic_tunnel_plans_scanned(&first)
+        .await
+        .unwrap();
+    let second = db
+        .repo
+        .list_automatic_tunnel_plan_ids_for_controller(3)
+        .await
+        .unwrap();
+    assert!(first.iter().all(|plan_id| !second.contains(plan_id)));
+
+    let pending_first = db
+        .repo
+        .list_pending_tunnel_plan_ids_for_reconciliation(3)
+        .await
+        .unwrap();
+    db.repo
+        .mark_pending_tunnel_plans_reconciled(&pending_first)
+        .await
+        .unwrap();
+    let pending_second = db
+        .repo
+        .list_pending_tunnel_plan_ids_for_reconciliation(3)
+        .await
+        .unwrap();
+    assert!(pending_first
+        .iter()
+        .all(|plan_id| !pending_second.contains(plan_id)));
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_ospf_controller_advances_past_malformed_selected_plans() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    insert_client(&db.pool, "ospf-poison-left", None).await;
+    insert_client(&db.pool, "ospf-poison-right", None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+
+    let mut input = postgres_alert_test_tunnel_input();
+    input.name = "ospf-poison".to_string();
+    input.interface_name = "op0".to_string();
+    input.left_client_id = "ospf-poison-left".to_string();
+    input.right_client_id = "ospf-poison-right".to_string();
+    input.address_pool_cidr = "10.90.0.0/30".to_string();
+    input.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.90.0.0".to_string(),
+        right: "10.90.0.1".to_string(),
+        prefix_len: 31,
+    });
+    input.ospf = Some(TunnelOspfConfig {
+        mode: OspfControlMode::Automatic,
+        planned_latency_ms: 20.0,
+        planned_packet_loss_ratio: 0.0,
+        preference: 1.0,
+        policy: OspfCostPolicy::default(),
+        min_cost_delta: 5,
+        healthy_windows: 1,
+        left_adapter_template_id: Uuid::new_v4().to_string(),
+        right_adapter_template_id: Uuid::new_v4().to_string(),
+    });
+    let malformed = db
+        .repo
+        .record_tunnel_plan(&input, &plan_tunnel(&input).unwrap(), true, &operator)
+        .await
+        .unwrap();
+
+    input.name = "ospf-healthy-after-poison".to_string();
+    input.interface_name = "op1".to_string();
+    input.address_pool_cidr = "10.90.0.4/30".to_string();
+    input.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.90.0.4".to_string(),
+        right: "10.90.0.5".to_string(),
+        prefix_len: 31,
+    });
+    let healthy = db
+        .repo
+        .record_tunnel_plan(&input, &plan_tunnel(&input).unwrap(), true, &operator)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        r#"
+        UPDATE tunnel_plans
+        SET input = '{}'::jsonb,
+            plan = '{"ospf":{"mode":"automatic"}}'::jsonb,
+            ospf_status = 'pending',
+            left_ospf_status = 'pending',
+            right_ospf_status = 'pending',
+            updated_at = now() - interval '10 minutes'
+        WHERE id = $1
+        "#,
+    )
+    .bind(malformed.id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    crate::network_ospf_controller::run_controller_sweep(&postgres_app_state(&db))
+        .await
+        .unwrap();
+
+    let malformed_markers = sqlx::query_as::<_, (bool, bool)>(
+        r#"
+        SELECT
+            automatic_ospf_scanned_at IS NOT NULL,
+            pending_ospf_reconciled_at IS NOT NULL
+        FROM tunnel_plans
+        WHERE id = $1
+        "#,
+    )
+    .bind(malformed.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(malformed_markers, (true, true));
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT automatic_ospf_scanned_at IS NOT NULL FROM tunnel_plans WHERE id = $1",
+    )
+    .bind(healthy.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap());
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_ospf_results_are_atomic_and_concurrency_safe() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    insert_client(&db.pool, "ospf-result-left", None).await;
+    insert_client(&db.pool, "ospf-result-right", None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+    let mut input = postgres_alert_test_tunnel_input();
+    input.name = "ospf-result-atomic".to_string();
+    input.interface_name = "or0".to_string();
+    input.left_client_id = "ospf-result-left".to_string();
+    input.right_client_id = "ospf-result-right".to_string();
+    input.address_pool_cidr = "10.91.0.0/30".to_string();
+    input.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.91.0.0".to_string(),
+        right: "10.91.0.1".to_string(),
+        prefix_len: 31,
+    });
+    input.ospf = Some(TunnelOspfConfig {
+        mode: OspfControlMode::Automatic,
+        planned_latency_ms: 20.0,
+        planned_packet_loss_ratio: 0.0,
+        preference: 1.0,
+        policy: OspfCostPolicy::default(),
+        min_cost_delta: 5,
+        healthy_windows: 1,
+        left_adapter_template_id: Uuid::new_v4().to_string(),
+        right_adapter_template_id: Uuid::new_v4().to_string(),
+    });
+    let plan = db
+        .repo
+        .record_tunnel_plan(&input, &plan_tunnel(&input).unwrap(), true, &operator)
+        .await
+        .unwrap();
+    let left_job_id = Uuid::new_v4();
+    let right_job_id = Uuid::new_v4();
+    db.repo
+        .stage_tunnel_plan_ospf_jobs(
+            plan.id,
+            plan.revision,
+            None,
+            None,
+            None,
+            left_job_id,
+            right_job_id,
+            &operator,
+        )
+        .await
+        .unwrap();
+
+    sqlx::query(
+        r#"
+        CREATE FUNCTION reject_test_ospf_aggregate_update() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            RAISE EXCEPTION 'forced OSPF aggregate failure';
+        END
+        $$
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        CREATE TRIGGER reject_test_ospf_aggregate_update
+        BEFORE UPDATE OF ospf_status ON tunnel_plans
+        FOR EACH ROW EXECUTE FUNCTION reject_test_ospf_aggregate_update()
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let error = db
+        .repo
+        .record_tunnel_plan_ospf_job_result(
+            plan.id,
+            vpsman_common::TunnelEndpointSide::Left,
+            left_job_id,
+            Some(100),
+            true,
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("forced OSPF aggregate failure"));
+    assert_eq!(
+        sqlx::query_as::<_, (String, String, Option<i32>)>(
+            r#"
+            SELECT left_ospf_status, ospf_status, left_current_ospf_cost
+            FROM tunnel_plans
+            WHERE id = $1
+            "#,
+        )
+        .bind(plan.id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        ("pending".to_string(), "pending".to_string(), None)
+    );
+
+    sqlx::query("DROP TRIGGER reject_test_ospf_aggregate_update ON tunnel_plans")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION reject_test_ospf_aggregate_update()")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let left_result = db.repo.record_tunnel_plan_ospf_job_result(
+        plan.id,
+        vpsman_common::TunnelEndpointSide::Left,
+        left_job_id,
+        Some(100),
+        true,
+    );
+    let right_result = db.repo.record_tunnel_plan_ospf_job_result(
+        plan.id,
+        vpsman_common::TunnelEndpointSide::Right,
+        right_job_id,
+        Some(100),
+        true,
+    );
+    let (left_result, right_result) = tokio::join!(left_result, right_result);
+    assert!(left_result.unwrap().is_some());
+    assert!(right_result.unwrap().is_some());
+    assert_eq!(
+        sqlx::query_as::<_, (String, String, String, Option<i32>, Option<i32>)>(
+            r#"
+            SELECT
+                ospf_status,
+                left_ospf_status,
+                right_ospf_status,
+                left_current_ospf_cost,
+                right_current_ospf_cost
+            FROM tunnel_plans
+            WHERE id = $1
+            "#,
+        )
+        .bind(plan.id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (
+            "verified".to_string(),
+            "verified".to_string(),
+            "verified".to_string(),
+            Some(100),
+            Some(100),
+        )
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_legacy_invalid_schedule_cadences_remain_visible_and_repairable() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    insert_client(&db.pool, "legacy-cadence-client", None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+
+    let valid = db
+        .repo
+        .create_schedule(
+            postgres_shell_schedule_request("cadence-valid", "legacy-cadence-client"),
+            &operator,
+        )
+        .await
+        .unwrap();
+    let impossible = db
+        .repo
+        .create_schedule(
+            postgres_shell_schedule_request("cadence-impossible", "legacy-cadence-client"),
+            &operator,
+        )
+        .await
+        .unwrap();
+    let malformed = db
+        .repo
+        .create_schedule(
+            postgres_shell_schedule_request("cadence-malformed", "legacy-cadence-client"),
+            &operator,
+        )
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE schedules
+        SET cron_expr = CASE
+            WHEN id = $1 THEN '0 0 31 2 *'
+            WHEN id = $2 THEN 'not a cron'
+            ELSE cron_expr
+        END
+        WHERE id IN ($1, $2)
+        "#,
+    )
+    .bind(impossible.id)
+    .bind(malformed.id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let schedules = db
+        .repo
+        .query_schedules(&ListQuery {
+            limit: Some(10),
+            q: Some("cadence-".to_string()),
+            sort: Some("name".to_string()),
+            dir: Some("asc".to_string()),
+            ..ListQuery::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(schedules.len(), 3);
+    assert_eq!(
+        schedules
+            .iter()
+            .find(|schedule| schedule.id == valid.id)
+            .unwrap()
+            .cadence_error,
+        None
+    );
+    let impossible_view = schedules
+        .iter()
+        .find(|schedule| schedule.id == impossible.id)
+        .unwrap();
+    assert!(impossible_view.next_runs.is_empty());
+    assert_eq!(
+        impossible_view.cadence_error.as_deref(),
+        Some("schedule_cron_no_future_occurrence")
+    );
+    let malformed_view = db.repo.schedule_by_id(malformed.id).await.unwrap();
+    assert!(malformed_view.next_runs.is_empty());
+    assert_eq!(
+        malformed_view.cadence_error.as_deref(),
+        Some("schedule_cron_invalid")
+    );
+
+    let backup = db
+        .repo
+        .create_backup_policy(
+            CreateBackupPolicyRequest {
+                name: "cadence-backup".to_string(),
+                selector_expression: String::new(),
+                target_client_ids: vec!["legacy-cadence-client".to_string()],
+                paths: vec!["/etc/hostname".to_string()],
+                include_config: false,
+                follow_symlinks: false,
+                missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
+                retention_days: Some(7),
+                keep_last: Some(2),
+                rotation_generation: None,
+                cron_expr: "0 3 * * *".to_string(),
+                timezone: "UTC".to_string(),
+                enabled: false,
+                catch_up_policy: "skip_missed".to_string(),
+                catch_up_limit: 1,
+                retry_delay_secs: 120,
+                max_failures: 3,
+                confirmed: true,
+                privilege_assertion: None,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE schedules SET cron_expr = '0 0 31 2 *' WHERE id = $1")
+        .bind(backup.schedule_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let backup_view = db
+        .repo
+        .list_backup_policies(&ListQuery::default())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|policy| policy.schedule_id == backup.schedule_id)
+        .unwrap();
+    assert!(backup_view.next_runs.is_empty());
+    assert_eq!(
+        backup_view.cadence_error.as_deref(),
+        Some("schedule_cron_no_future_occurrence")
+    );
+    let repaired_backup = db
+        .repo
+        .update_backup_policy(
+            backup.schedule_id,
+            CreateBackupPolicyRequest {
+                name: "cadence-backup-repaired".to_string(),
+                selector_expression: String::new(),
+                target_client_ids: vec!["legacy-cadence-client".to_string()],
+                paths: vec!["/etc/hostname".to_string()],
+                include_config: true,
+                follow_symlinks: false,
+                missing_path_policy: vpsman_common::BackupMissingPathPolicy::Skip,
+                retention_days: Some(14),
+                keep_last: Some(4),
+                rotation_generation: None,
+                cron_expr: "30 3 * * *".to_string(),
+                timezone: "UTC".to_string(),
+                enabled: true,
+                catch_up_policy: "skip_missed".to_string(),
+                catch_up_limit: 1,
+                retry_delay_secs: 120,
+                max_failures: 3,
+                confirmed: true,
+                privilege_assertion: None,
+            },
+            &operator,
+        )
+        .await
+        .unwrap()
+        .expect("existing backup policy should remain updateable");
+    assert_eq!(repaired_backup.schedule_id, backup.schedule_id);
+    assert_eq!(repaired_backup.cron_expr, "30 3 * * *");
+    assert!(repaired_backup.cadence_error.is_none());
+    assert!(repaired_backup.enabled);
+    assert_eq!(repaired_backup.retention_days, 14);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM schedules WHERE id = $1")
+            .bind(backup.schedule_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        1
+    );
+
+    let state = postgres_app_state(&db);
+    let session = db
+        .repo
+        .issue_session(operator.operator.clone())
+        .await
+        .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        AUTHORIZATION,
+        format!("Bearer {}", session.access_token).parse().unwrap(),
+    );
+    let error = crate::routes_schedules::enable_schedule(
+        axum::extract::State(state),
+        headers,
+        axum::extract::Path(impossible.id),
+        axum::Json(SchedulePrivilegeMutationRequest {
+            confirmed: true,
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(error.code, "schedule_cron_invalid");
+
+    let repair = postgres_shell_schedule_request("cadence-impossible", "legacy-cadence-client");
+    let repaired = db
+        .repo
+        .update_schedule_record(
+            impossible.id,
+            crate::repository_schedules::ScheduleCreateInput {
+                name: repair.name,
+                operation: repair.operation,
+                selector_expression: repair.selector_expression,
+                target_client_ids: repair.target_client_ids,
+                cron_expr: repair.cron_expr,
+                timezone: repair.timezone,
+                enabled: repair.enabled,
+                catch_up_policy: repair.catch_up_policy,
+                catch_up_limit: repair.catch_up_limit,
+                retry_delay_secs: repair.retry_delay_secs,
+                max_failures: repair.max_failures,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(repaired.cadence_error, None);
+    assert!(!repaired.next_runs.is_empty());
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_malformed_schedule_operation_is_listable_isolated_and_repairable() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+    insert_client(&db.pool, "malformed-schedule-client", None).await;
+    let malformed = db
+        .repo
+        .create_schedule(
+            postgres_shell_schedule_request(
+                "malformed-schedule-operation",
+                "malformed-schedule-client",
+            ),
+            &operator,
+        )
+        .await
+        .unwrap();
+    let healthy = db
+        .repo
+        .create_schedule(
+            postgres_shell_schedule_request(
+                "healthy-schedule-operation",
+                "malformed-schedule-client",
+            ),
+            &operator,
+        )
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE schedules SET operation = '{\"type\":\"removed_legacy_operation\"}'::jsonb WHERE id = $1",
+    )
+    .bind(malformed.id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let page = db
+        .repo
+        .query_schedules(&ListQuery {
+            limit: Some(10),
+            q: Some("schedule-operation".to_string()),
+            ..ListQuery::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.len(), 2);
+    assert!(page.iter().any(|schedule| schedule.id == healthy.id));
+    let visible = page
+        .iter()
+        .find(|schedule| schedule.id == malformed.id)
+        .unwrap();
+    assert!(visible.operation.is_none());
+    assert_eq!(
+        visible.operation_error.as_deref(),
+        Some("schedule_operation_invalid")
+    );
+    assert_eq!(visible.operation_payload_hash.len(), 64);
+    assert!(db
+        .repo
+        .update_schedule_targets(
+            malformed.id,
+            "tag:new".to_string(),
+            vec!["malformed-schedule-client".to_string()],
+            &operator,
+        )
+        .await
+        .is_err());
+    assert!(db
+        .repo
+        .set_schedule_enabled(malformed.id, true, &operator)
+        .await
+        .is_err());
+    assert!(
+        !db.repo
+            .set_schedule_enabled(malformed.id, false, &operator)
+            .await
+            .unwrap()
+            .enabled
+    );
+
+    let repair =
+        postgres_shell_schedule_request("repaired-schedule-operation", "malformed-schedule-client");
+    let repaired = db
+        .repo
+        .update_schedule_record(
+            malformed.id,
+            crate::repository_schedules::ScheduleCreateInput {
+                name: repair.name,
+                operation: repair.operation,
+                selector_expression: repair.selector_expression,
+                target_client_ids: repair.target_client_ids,
+                cron_expr: repair.cron_expr,
+                timezone: repair.timezone,
+                enabled: false,
+                catch_up_policy: repair.catch_up_policy,
+                catch_up_limit: repair.catch_up_limit,
+                retry_delay_secs: repair.retry_delay_secs,
+                max_failures: repair.max_failures,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert!(repaired.operation.is_some());
+    assert!(repaired.operation_error.is_none());
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_audited_mutations_roll_back_when_audit_insert_fails() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    insert_client(&db.pool, "atomic-a", None).await;
+    insert_client(&db.pool, "atomic-b", None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+
+    let schedule = db
+        .repo
+        .create_schedule(
+            postgres_shell_schedule_request("atomic-existing-schedule", "atomic-a"),
+            &operator,
+        )
+        .await
+        .unwrap();
+    let command_template = db
+        .repo
+        .upsert_command_template(
+            &UpsertCommandTemplateRequest {
+                name: "atomic-command".to_string(),
+                scope_kind: "global".to_string(),
+                scope_value: None,
+                display_group: None,
+                operation: serde_json::json!({
+                    "type": "shell",
+                    "argv": ["/usr/bin/uptime"],
+                    "pty": false
+                }),
+                defaults: serde_json::json!({}),
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    let builtin_generator = db
+        .repo
+        .list_runtime_config_patch_generators()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|generator| generator.built_in)
+        .unwrap();
+    let patch_generator = db
+        .repo
+        .upsert_runtime_config_patch_generator(
+            &UpsertRuntimeConfigPatchGeneratorRequest {
+                id: None,
+                name: "Atomic generator".to_string(),
+                category: builtin_generator.category.clone(),
+                domain: builtin_generator.domain.clone(),
+                description: "Atomic rollback fixture".to_string(),
+                field_schema: builtin_generator.field_schema.clone(),
+                raw_generator_body: builtin_generator.raw_generator_body.clone(),
+                docs_metadata: builtin_generator.docs_metadata.clone(),
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    let source_template = db
+        .repo
+        .create_source_template(
+            &CreateSourceTemplateRequest {
+                domain: "runtime_traffic_accounting_source".to_string(),
+                name: "shared:atomic".to_string(),
+                scope: "shared".to_string(),
+                owner_client_id: None,
+                description: Some("Atomic source fixture".to_string()),
+                definition: serde_json::json!({"source": "proc_net_dev"}),
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+
+    let mut tunnel_input = postgres_alert_test_tunnel_input();
+    tunnel_input.name = "atomic-ospf-plan".to_string();
+    tunnel_input.interface_name = "gre77".to_string();
+    tunnel_input.kind = TunnelKind::Gre;
+    tunnel_input.left_client_id = "atomic-a".to_string();
+    tunnel_input.right_client_id = "atomic-b".to_string();
+    tunnel_input.runtime_control = RuntimeTunnelControl {
+        manager: RuntimeTunnelManager::AgentIproute2Managed,
+        ..Default::default()
+    };
+    tunnel_input.ospf = Some(vpsman_common::TunnelOspfConfig {
+        mode: vpsman_common::OspfControlMode::Reviewed,
+        planned_latency_ms: 10.0,
+        planned_packet_loss_ratio: 0.0,
+        preference: 1.0,
+        policy: vpsman_common::OspfCostPolicy::default(),
+        min_cost_delta: 5,
+        healthy_windows: 2,
+        left_adapter_template_id: Uuid::new_v4().to_string(),
+        right_adapter_template_id: Uuid::new_v4().to_string(),
+    });
+    let tunnel_plan = plan_tunnel(&tunnel_input).unwrap();
+    let tunnel = db
+        .repo
+        .record_tunnel_plan(&tunnel_input, &tunnel_plan, true, &operator)
+        .await
+        .unwrap();
+
+    install_rejected_audit_action_trigger(&db.pool).await;
+
+    set_rejected_audit_action(&db.pool, "source_template.saved").await;
+    assert_forced_audit_failure(
+        db.repo
+            .create_source_template(
+                &CreateSourceTemplateRequest {
+                    domain: "runtime_traffic_accounting_source".to_string(),
+                    name: "shared:atomic-create-fails".to_string(),
+                    scope: "shared".to_string(),
+                    owner_client_id: None,
+                    description: Some("Must roll back with its audit".to_string()),
+                    definition: serde_json::json!({"source": "proc_net_dev"}),
+                },
+                &operator,
+            )
+            .await,
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM source_templates WHERE name = $1")
+            .bind("shared:atomic-create-fails")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        0
+    );
+
+    set_rejected_audit_action(&db.pool, "schedule.created").await;
+    assert_forced_audit_failure(
+        db.repo
+            .create_schedule(
+                postgres_shell_schedule_request("atomic-new-schedule", "atomic-a"),
+                &operator,
+            )
+            .await,
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM schedules WHERE name = $1")
+            .bind("atomic-new-schedule")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        0
+    );
+
+    set_rejected_audit_action(&db.pool, "schedule.updated").await;
+    assert_forced_audit_failure(
+        db.repo
+            .update_schedule_record(
+                schedule.id,
+                crate::repository_schedules::ScheduleCreateInput {
+                    name: "atomic-updated-schedule".to_string(),
+                    operation: JobCommand::Shell {
+                        argv: vec!["/usr/bin/uptime".to_string()],
+                        pty: false,
+                    },
+                    selector_expression: "id:atomic-a".to_string(),
+                    target_client_ids: vec!["atomic-a".to_string()],
+                    cron_expr: "30 * * * *".to_string(),
+                    timezone: "UTC".to_string(),
+                    enabled: true,
+                    catch_up_policy: "skip_missed".to_string(),
+                    catch_up_limit: 1,
+                    retry_delay_secs: 120,
+                    max_failures: 2,
+                },
+                &operator,
+            )
+            .await,
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT name FROM schedules WHERE id = $1")
+            .bind(schedule.id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        "atomic-existing-schedule"
+    );
+
+    set_rejected_audit_action(&db.pool, "schedule.targets_updated").await;
+    assert_forced_audit_failure(
+        db.repo
+            .update_schedule_targets(
+                schedule.id,
+                "id:atomic-b".to_string(),
+                vec!["atomic-b".to_string()],
+                &operator,
+            )
+            .await,
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT selector_expression FROM schedules WHERE id = $1",)
+            .bind(schedule.id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        ""
+    );
+
+    set_rejected_audit_action(&db.pool, "schedule.disabled").await;
+    assert_forced_audit_failure(
+        db.repo
+            .set_schedule_enabled(schedule.id, false, &operator)
+            .await,
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT enabled FROM schedules WHERE id = $1")
+            .bind(schedule.id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap()
+    );
+
+    set_rejected_audit_action(&db.pool, "schedule.deferred").await;
+    assert_forced_audit_failure(
+        db.repo
+            .defer_schedule(
+                schedule.id,
+                "2030-01-01T00:00:00Z",
+                Some("atomic rollback"),
+                &operator,
+            )
+            .await,
+    );
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT deferred_until IS NULL FROM schedules WHERE id = $1",
+    )
+    .bind(schedule.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap());
+
+    set_rejected_audit_action(&db.pool, "schedule.deleted").await;
+    assert_forced_audit_failure(db.repo.soft_delete_schedule(schedule.id, &operator).await);
+    assert_eq!(
+        sqlx::query_as::<_, (bool, bool)>(
+            "SELECT enabled, deleted_at IS NULL FROM schedules WHERE id = $1",
+        )
+        .bind(schedule.id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (true, true)
+    );
+
+    set_rejected_audit_action(&db.pool, "command_template.upserted").await;
+    assert_forced_audit_failure(
+        db.repo
+            .upsert_command_template(
+                &UpsertCommandTemplateRequest {
+                    name: "atomic-command".to_string(),
+                    scope_kind: "global".to_string(),
+                    scope_value: None,
+                    display_group: Some("changed".to_string()),
+                    operation: serde_json::json!({
+                        "type": "shell",
+                        "argv": ["/usr/bin/uptime"],
+                        "pty": false
+                    }),
+                    defaults: serde_json::json!({}),
+                    confirmed: true,
+                },
+                &operator,
+            )
+            .await,
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT display_group FROM command_templates WHERE id = $1",
+        )
+        .bind(command_template.id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        command_template.display_group
+    );
+
+    set_rejected_audit_action(&db.pool, "command_template.deleted").await;
+    assert_forced_audit_failure(
+        db.repo
+            .delete_command_template(command_template.id, &command_template.name, &operator)
+            .await,
+    );
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM command_templates WHERE id = $1)",
+    )
+    .bind(command_template.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap());
+
+    let history_policy_before =
+        sqlx::query_as::<_, (i32, i32, bool, bool, bool, Option<String>, Option<Uuid>)>(
+            r#"
+        SELECT
+            retention_days,
+            prune_limit,
+            enabled,
+            metadata_only,
+            export_enabled,
+            notes,
+            updated_by
+        FROM history_retention_policies
+        WHERE domain = 'audit_logs'
+        "#,
+        )
+        .fetch_optional(&db.pool)
+        .await
+        .unwrap();
+    set_rejected_audit_action(&db.pool, "history_retention.policy_updated").await;
+    assert_forced_audit_failure(
+        db.repo
+            .upsert_history_retention_policy(
+                UpsertHistoryRetentionPolicyRequest {
+                    domain: "audit_logs".to_string(),
+                    retention_days: Some(30),
+                    prune_limit: Some(100),
+                    enabled: Some(true),
+                    metadata_only: Some(false),
+                    export_enabled: Some(false),
+                    notes: Some("atomic rollback".to_string()),
+                    clear_notes: false,
+                    confirmed: true,
+                },
+                &operator,
+            )
+            .await,
+    );
+    let history_policy_after =
+        sqlx::query_as::<_, (i32, i32, bool, bool, bool, Option<String>, Option<Uuid>)>(
+            r#"
+        SELECT
+            retention_days,
+            prune_limit,
+            enabled,
+            metadata_only,
+            export_enabled,
+            notes,
+            updated_by
+        FROM history_retention_policies
+        WHERE domain = 'audit_logs'
+        "#,
+        )
+        .fetch_optional(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(history_policy_after, history_policy_before);
+
+    set_rejected_audit_action(&db.pool, "runtime_config_patch_generator.saved").await;
+    assert_forced_audit_failure(
+        db.repo
+            .upsert_runtime_config_patch_generator(
+                &UpsertRuntimeConfigPatchGeneratorRequest {
+                    id: Some(patch_generator.id),
+                    name: "Atomic generator changed".to_string(),
+                    category: patch_generator.category.clone(),
+                    domain: patch_generator.domain.clone(),
+                    description: patch_generator.description.clone(),
+                    field_schema: patch_generator.field_schema.clone(),
+                    raw_generator_body: patch_generator.raw_generator_body.clone(),
+                    docs_metadata: patch_generator.docs_metadata.clone(),
+                    confirmed: true,
+                },
+                &operator,
+            )
+            .await,
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT name FROM runtime_config_patch_generators WHERE id = $1",
+        )
+        .bind(patch_generator.id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        "Atomic generator"
+    );
+
+    set_rejected_audit_action(&db.pool, "runtime_config_patch_generator.deleted").await;
+    assert_forced_audit_failure(
+        db.repo
+            .delete_runtime_config_patch_generator(
+                patch_generator.id,
+                &patch_generator.name,
+                &operator,
+            )
+            .await,
+    );
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM runtime_config_patch_generators WHERE id = $1)",
+    )
+    .bind(patch_generator.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap());
+
+    set_rejected_audit_action(&db.pool, "source_template.updated").await;
+    assert_forced_audit_failure(
+        db.repo
+            .update_source_template(
+                source_template.id,
+                &UpdateSourceTemplateRequest {
+                    description: Some("Changed source".to_string()),
+                    definition: serde_json::json!({"source": "changed"}),
+                    confirmed: true,
+                    keep_description: false,
+                    preview_hash: None,
+                    privilege_assertion: None,
+                },
+                &operator,
+            )
+            .await,
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT description FROM source_templates WHERE id = $1",
+        )
+        .bind(source_template.id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        Some("Atomic source fixture".to_string())
+    );
+
+    set_rejected_audit_action(&db.pool, "source_template.cloned").await;
+    assert_forced_audit_failure(
+        db.repo
+            .clone_source_template(
+                source_template.id,
+                &CloneSourceTemplateRequest {
+                    name: "shared:atomic-clone".to_string(),
+                    scope: "shared".to_string(),
+                    owner_client_id: None,
+                    description: None,
+                },
+                &operator,
+            )
+            .await,
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM source_templates WHERE name = $1")
+            .bind("shared:atomic-clone")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        0
+    );
+
+    set_rejected_audit_action(&db.pool, "source_template.assigned").await;
+    assert_forced_audit_failure(
+        db.repo
+            .assign_source_template(
+                &AssignSourceTemplateRequest {
+                    domain: source_template.domain.clone(),
+                    template_id: source_template.id,
+                    selector_expression: "id:atomic-a".to_string(),
+                    target_client_ids: vec!["atomic-a".to_string()],
+                    confirmed: true,
+                    preview_hash: None,
+                    privilege_assertion: None,
+                },
+                &operator,
+            )
+            .await,
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM client_source_template_assignments WHERE template_id = $1",
+        )
+        .bind(source_template.id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0
+    );
+
+    set_rejected_audit_action(&db.pool, "backup_policy.upserted").await;
+    assert_forced_audit_failure(
+        db.repo
+            .create_backup_policy(
+                CreateBackupPolicyRequest {
+                    name: "atomic-backup-policy".to_string(),
+                    selector_expression: "id:atomic-a".to_string(),
+                    target_client_ids: vec!["atomic-a".to_string()],
+                    paths: vec!["/etc/hostname".to_string()],
+                    include_config: true,
+                    follow_symlinks: false,
+                    missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
+                    retention_days: Some(30),
+                    keep_last: Some(7),
+                    rotation_generation: None,
+                    cron_expr: "0 3 * * *".to_string(),
+                    timezone: "UTC".to_string(),
+                    enabled: true,
+                    catch_up_policy: "skip_missed".to_string(),
+                    catch_up_limit: 1,
+                    retry_delay_secs: 300,
+                    max_failures: 3,
+                    confirmed: true,
+                    privilege_assertion: None,
+                },
+                &operator,
+            )
+            .await,
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM schedules WHERE name = $1")
+            .bind("atomic-backup-policy")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE action = 'schedule.created' AND metadata->>'name' = $1",
+        )
+        .bind("atomic-backup-policy")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0
+    );
+
+    set_rejected_audit_action(&db.pool, "network.tunnel_plan_disabled").await;
+    assert_forced_audit_failure(
+        db.repo
+            .set_tunnel_plan_enabled(tunnel.id, tunnel.revision, false, &operator)
+            .await,
+    );
+    let enabled_state = sqlx::query_as::<_, (bool, i64)>(
+        "SELECT enabled, revision FROM tunnel_plans WHERE id = $1",
+    )
+    .bind(tunnel.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(enabled_state, (true, tunnel.revision));
+
+    set_rejected_audit_action(&db.pool, "network.ospf_jobs_staged").await;
+    assert_forced_audit_failure(
+        db.repo
+            .stage_tunnel_plan_ospf_jobs(
+                tunnel.id,
+                tunnel.revision,
+                None,
+                None,
+                None,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                &operator,
+            )
+            .await,
+    );
+    let ospf_state = sqlx::query_as::<_, (String, Option<Uuid>, Option<Uuid>)>(
+        "SELECT ospf_status, left_ospf_job_id, right_ospf_job_id FROM tunnel_plans WHERE id = $1",
+    )
+    .bind(tunnel.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(ospf_state, ("unverified".to_string(), None, None));
+
+    db.cleanup().await;
 }
 
 #[tokio::test]
@@ -2080,6 +4032,231 @@ async fn insert_client(pool: &PgPool, client_id: &str, incarnation: Option<Uuid>
     .unwrap();
 }
 
+async fn install_rejected_audit_action_trigger(pool: &PgPool) {
+    sqlx::query("CREATE TABLE rejected_test_audit_actions (action TEXT PRIMARY KEY)")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+        CREATE FUNCTION reject_test_audit_action() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1
+                FROM rejected_test_audit_actions rejected
+                WHERE rejected.action = NEW.action
+            ) THEN
+                RAISE EXCEPTION 'forced audit failure for %', NEW.action;
+            END IF;
+            RETURN NEW;
+        END
+        $$
+        "#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        CREATE TRIGGER reject_test_audit_action
+        BEFORE INSERT ON audit_logs
+        FOR EACH ROW EXECUTE FUNCTION reject_test_audit_action()
+        "#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn set_rejected_audit_action(pool: &PgPool, action: &str) {
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("DELETE FROM rejected_test_audit_actions")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO rejected_test_audit_actions (action) VALUES ($1)")
+        .bind(action)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+}
+
+async fn install_invalid_job_operation_audit_rejection_trigger(pool: &PgPool) {
+    sqlx::query(
+        r#"
+        CREATE FUNCTION reject_invalid_job_operation_audit() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            IF NEW.action = 'job.target_result'
+               AND NEW.metadata->>'reason' = 'invalid_job_operation'
+            THEN
+                RAISE EXCEPTION 'forced invalid job operation audit failure';
+            END IF;
+            RETURN NEW;
+        END
+        $$
+        "#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        CREATE TRIGGER reject_invalid_job_operation_audit
+        BEFORE INSERT ON audit_logs
+        FOR EACH ROW EXECUTE FUNCTION reject_invalid_job_operation_audit()
+        "#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn remove_invalid_job_operation_audit_rejection_trigger(pool: &PgPool) {
+    sqlx::query("DROP TRIGGER reject_invalid_job_operation_audit ON audit_logs")
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+fn assert_forced_audit_failure<T>(result: anyhow::Result<T>) {
+    let error = match result {
+        Ok(_) => panic!("audit rejection must fail the mutation"),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}").contains("forced audit failure"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[tokio::test]
+async fn postgres_terminal_merge_preserves_terminal_state_nulls_and_true_open_time() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "terminal-merge-client";
+    let session_id = Uuid::new_v4();
+    let delayed_job = Uuid::new_v4();
+    let close_job = Uuid::new_v4();
+    let later_poll_job = Uuid::new_v4();
+    insert_client(&db.pool, client_id, None).await;
+    for job_id in [delayed_job, close_job, later_poll_job] {
+        insert_job_target(&db.pool, job_id, client_id, "completed", true, None).await;
+    }
+
+    let terminal_view = |state: &str,
+                         last_status: &str,
+                         last_event: &str,
+                         job_id: Uuid,
+                         observed_at: &str,
+                         opened_at: &str| TerminalSessionView {
+        session_id,
+        client_id: client_id.to_string(),
+        state: state.to_string(),
+        last_status: last_status.to_string(),
+        argv: vec!["/bin/sh".to_string()],
+        cwd: None,
+        cols: None,
+        rows: None,
+        idle_timeout_secs: None,
+        flow_window_bytes: None,
+        output_first_seq: None,
+        output_next_seq: None,
+        output_retained_first_seq: None,
+        output_retained_bytes: None,
+        output_dropped_bytes: None,
+        output_dropped_chunks: None,
+        output_replay_truncated: false,
+        last_input_seq: None,
+        session_exited: false,
+        close_reason: (state == "closed").then(|| "operator".to_string()),
+        last_event: last_event.to_string(),
+        last_job_id: job_id,
+        last_command_type: last_event.to_string(),
+        last_seq: 0,
+        opened_at: Some(opened_at.to_string()),
+        observed_at: observed_at.to_string(),
+    };
+
+    upsert_postgres_terminal_session(
+        &db.pool,
+        &terminal_view(
+            "open",
+            "polled",
+            "terminal_poll",
+            delayed_job,
+            "1970-01-01T00:03:20Z",
+            "1970-01-01T00:03:20Z",
+        ),
+    )
+    .await
+    .unwrap();
+    upsert_postgres_terminal_session(
+        &db.pool,
+        &terminal_view(
+            "closed",
+            "closed",
+            "terminal_close",
+            close_job,
+            "1970-01-01T00:01:40Z",
+            "1970-01-01T00:00:50Z",
+        ),
+    )
+    .await
+    .unwrap();
+    upsert_postgres_terminal_session(
+        &db.pool,
+        &terminal_view(
+            "open",
+            "polled",
+            "terminal_poll",
+            later_poll_job,
+            "1970-01-01T00:05:00Z",
+            "1970-01-01T00:03:20Z",
+        ),
+    )
+    .await
+    .unwrap();
+
+    let row = sqlx::query(
+        r#"
+        SELECT
+            state,
+            session_exited,
+            output_next_seq,
+            EXTRACT(EPOCH FROM opened_at)::bigint AS opened_at_unix,
+            EXTRACT(EPOCH FROM observed_at)::bigint AS observed_at_unix,
+            last_event,
+            last_job_id
+        FROM terminal_sessions
+        WHERE client_id = $1 AND session_id = $2
+        "#,
+    )
+    .bind(client_id)
+    .bind(session_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(row.try_get::<String, _>("state").unwrap(), "closed");
+    assert!(!row.try_get::<bool, _>("session_exited").unwrap());
+    assert_eq!(
+        row.try_get::<Option<i64>, _>("output_next_seq").unwrap(),
+        None
+    );
+    assert_eq!(row.try_get::<i64, _>("opened_at_unix").unwrap(), 50);
+    assert_eq!(row.try_get::<i64, _>("observed_at_unix").unwrap(), 100);
+    assert_eq!(
+        row.try_get::<String, _>("last_event").unwrap(),
+        "terminal_close"
+    );
+    assert_eq!(row.try_get::<Uuid, _>("last_job_id").unwrap(), close_job);
+
+    db.cleanup().await;
+}
+
 #[tokio::test]
 async fn postgres_agent_delete_returns_retired_peers_and_rejects_hidden_endpoint_reuse() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
@@ -2174,6 +4351,194 @@ async fn postgres_tunnel_underlay_and_operator_assessment_round_trip_without_con
         Some("Application traffic verified across NAT")
     );
     assert_eq!(assessed.connection_assessed_by, Some(operator.operator.id));
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_network_json_corruption_is_visible_isolated_and_replaceable() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    insert_client(&db.pool, "client-a", None).await;
+    insert_client(&db.pool, "client-b", None).await;
+    insert_client(&db.pool, "edge-a", None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+
+    let healthy_input =
+        crate::tests_network::test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let healthy_plan = plan_tunnel(&healthy_input).unwrap();
+    db.repo
+        .record_tunnel_plan(&healthy_input, &healthy_plan, true, &operator)
+        .await
+        .unwrap();
+    let mut repair_input = healthy_input.clone();
+    repair_input.name = "repair-corrupt-tunnel".to_string();
+    repair_input.interface_name = "vpsman-repair".to_string();
+    let repair_plan = plan_tunnel(&repair_input).unwrap();
+    let corrupt_tunnel = db
+        .repo
+        .record_tunnel_plan(&repair_input, &repair_plan, true, &operator)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tunnel_plans SET plan = $2 WHERE id = $1")
+        .bind(corrupt_tunnel.id)
+        .bind(sqlx::types::Json(serde_json::json!({"name": 42})))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let tunnel_items = db.repo.list_tunnel_plan_items().await.unwrap();
+    assert_eq!(tunnel_items.len(), 2);
+    assert!(tunnel_items.iter().any(|item| matches!(
+        item,
+        crate::model::TunnelPlanListItem::Corrupt(corrupt)
+            if corrupt.id == corrupt_tunnel.id
+                && corrupt.configuration_error.contains("invalid")
+    )));
+    assert_eq!(db.repo.list_tunnel_plans().await.unwrap().len(), 1);
+    db.repo
+        .update_tunnel_plan(
+            corrupt_tunnel.id,
+            corrupt_tunnel.revision,
+            &repair_input,
+            &repair_plan,
+            true,
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(db.repo.list_tunnel_plans().await.unwrap().len(), 2);
+
+    let mappings_a = pair_port_expressions("8080", "80").unwrap();
+    let mappings_b = pair_port_expressions("8081", "81").unwrap();
+    let healthy_rule = db
+        .repo
+        .create_port_forward_rule(
+            &CreatePortForwardRuleRequest {
+                client_id: "edge-a".to_string(),
+                name: "healthy-web".to_string(),
+                protocol: PortForwardProtocol::Tcp,
+                target_ip: "192.0.2.10".parse().unwrap(),
+                mappings: mappings_a,
+                masquerade: true,
+                enabled: true,
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    let corrupt_rule = db
+        .repo
+        .create_port_forward_rule(
+            &CreatePortForwardRuleRequest {
+                client_id: "edge-a".to_string(),
+                name: "repair-web".to_string(),
+                protocol: PortForwardProtocol::Tcp,
+                target_ip: "192.0.2.11".parse().unwrap(),
+                mappings: mappings_b.clone(),
+                masquerade: true,
+                enabled: true,
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE port_forward_rules SET mappings = $2 WHERE id = $1")
+        .bind(corrupt_rule.id)
+        .bind(sqlx::types::Json(serde_json::json!([{"broken": true}])))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let rule_items = db.repo.list_port_forward_rule_items().await.unwrap();
+    assert_eq!(rule_items.len(), 2);
+    assert!(rule_items.iter().any(|item| matches!(
+        item,
+        crate::model_port_forwarding::PortForwardRuleListItem::Corrupt(corrupt)
+            if corrupt.id == corrupt_rule.id
+                && corrupt.configuration_error.contains("invalid")
+    )));
+    assert_eq!(db.repo.list_port_forward_rules().await.unwrap().len(), 1);
+    assert!(db
+        .repo
+        .port_forwarding_config_for_client("edge-a")
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("port_forward_rule_configuration_corrupt"));
+
+    db.repo
+        .update_port_forward_rule(
+            corrupt_rule.id,
+            &UpdatePortForwardRuleRequest {
+                expected_revision: corrupt_rule.revision,
+                name: "repair-web".to_string(),
+                protocol: PortForwardProtocol::Tcp,
+                target_ip: "192.0.2.11".parse().unwrap(),
+                mappings: mappings_b,
+                masquerade: true,
+                enabled: true,
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        db.repo
+            .port_forwarding_config_for_client("edge-a")
+            .await
+            .unwrap()
+            .rules
+            .len(),
+        2
+    );
+
+    sqlx::query(
+        r#"
+        INSERT INTO port_forward_runtime_state (client_id, snapshot, observed_at)
+        VALUES ('edge-a', $1, now())
+        "#,
+    )
+    .bind(sqlx::types::Json(
+        serde_json::json!({"status": "not-a-runtime-status"}),
+    ))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let rules = db.repo.list_port_forward_rules().await.unwrap();
+    assert_eq!(rules.len(), 2);
+    assert!(rules.iter().all(|rule| {
+        rule.runtime_status == "failed"
+            && rule.runtime_error_code.as_deref() == Some("port_forward_runtime_snapshot_corrupt")
+    }));
+    db.repo
+        .record_port_forward_runtime_snapshot(
+            "edge-a",
+            &PortForwardRuntimeSnapshot {
+                status: PortForwardRuntimeStatus::Unknown,
+                ..PortForwardRuntimeSnapshot::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(db
+        .repo
+        .list_port_forward_rules()
+        .await
+        .unwrap()
+        .iter()
+        .all(|rule| rule.runtime_error_code.as_deref()
+            != Some("port_forward_runtime_snapshot_corrupt")));
+    assert!(db
+        .repo
+        .get_port_forward_rule(healthy_rule.id)
+        .await
+        .unwrap()
+        .is_some());
 
     db.cleanup().await;
 }
@@ -2914,6 +5279,189 @@ async fn postgres_artifact_cleanup_job_persists_reviewed_artifact_identity() {
 }
 
 #[tokio::test]
+async fn postgres_dispatch_claim_quarantines_null_operation_and_keeps_healthy_progress() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let poison_job_id = Uuid::new_v4();
+    let healthy_job_id = Uuid::new_v4();
+    let deferred_healthy_job_id = Uuid::new_v4();
+    let poison_client_id = "pg-claim-null-operation";
+    let healthy_client_id = "pg-claim-healthy-operation";
+    let deferred_healthy_client_id = "pg-claim-deferred-healthy-operation";
+    insert_client(&db.pool, poison_client_id, Some(Uuid::new_v4())).await;
+    insert_client(&db.pool, healthy_client_id, Some(Uuid::new_v4())).await;
+    insert_client(&db.pool, deferred_healthy_client_id, Some(Uuid::new_v4())).await;
+    insert_job_target(
+        &db.pool,
+        poison_job_id,
+        poison_client_id,
+        "queued",
+        false,
+        None,
+    )
+    .await;
+    insert_job_target(
+        &db.pool,
+        deferred_healthy_job_id,
+        deferred_healthy_client_id,
+        "queued",
+        false,
+        None,
+    )
+    .await;
+    insert_job_target(
+        &db.pool,
+        healthy_job_id,
+        healthy_client_id,
+        "queued",
+        false,
+        None,
+    )
+    .await;
+    sqlx::query(
+        r#"
+        UPDATE jobs
+        SET operation = NULL,
+            created_at = now() - interval '10 minutes'
+        WHERE id = $1
+        "#,
+    )
+    .bind(poison_job_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    install_invalid_job_operation_audit_rejection_trigger(&db.pool).await;
+    let claimed = db.repo.claim_due_job_targets(2, 30, 0).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert!([healthy_job_id, deferred_healthy_job_id].contains(&claimed[0].job_id));
+    let initially_claimed_job_id = claimed[0].job_id;
+    let deferred_claim = db.repo.claim_due_job_targets(1, 30, 0).await.unwrap();
+    assert_eq!(deferred_claim.len(), 1);
+    assert!([healthy_job_id, deferred_healthy_job_id].contains(&deferred_claim[0].job_id));
+    assert_ne!(deferred_claim[0].job_id, initially_claimed_job_id);
+    assert_eq!(
+        target_status(&db.pool, poison_job_id, poison_client_id).await,
+        "dispatching"
+    );
+    assert_eq!(job_status(&db.pool, poison_job_id).await, "running");
+    assert_eq!(
+        target_status(&db.pool, healthy_job_id, healthy_client_id).await,
+        "dispatching"
+    );
+    assert_eq!(
+        target_status(
+            &db.pool,
+            deferred_healthy_job_id,
+            deferred_healthy_client_id
+        )
+        .await,
+        "dispatching"
+    );
+    let poison_completed_at: Option<String> = sqlx::query_scalar(
+        "SELECT completed_at::text FROM job_targets WHERE job_id = $1 AND client_id = $2",
+    )
+    .bind(poison_job_id)
+    .bind(poison_client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(poison_completed_at.is_none());
+    let poison_lease: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT dispatch_lease_until::text
+        FROM job_targets
+        WHERE job_id = $1 AND client_id = $2
+        "#,
+    )
+    .bind(poison_job_id)
+    .bind(poison_client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(poison_lease.is_some());
+    let poison_dispatch_error: Option<String> = sqlx::query_scalar(
+        "SELECT last_dispatch_error FROM job_targets WHERE job_id = $1 AND client_id = $2",
+    )
+    .bind(poison_job_id)
+    .bind(poison_client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(poison_dispatch_error
+        .as_deref()
+        .is_some_and(|error| error.starts_with("invalid_job_operation:")));
+    let poison_audit_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM audit_logs
+        WHERE action = 'job.target_result'
+          AND metadata->>'job_id' = $1
+        "#,
+    )
+    .bind(poison_job_id.to_string())
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(poison_audit_count, 0);
+
+    remove_invalid_job_operation_audit_rejection_trigger(&db.pool).await;
+    sqlx::query(
+        r#"
+        UPDATE job_targets
+        SET dispatch_lease_until = now() - interval '1 second'
+        WHERE job_id = $1 AND client_id = $2
+        "#,
+    )
+    .bind(poison_job_id)
+    .bind(poison_client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert!(db
+        .repo
+        .claim_due_job_targets(10, 30, 0)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        target_status(&db.pool, poison_job_id, poison_client_id).await,
+        TARGET_STATUS_FAILED
+    );
+    assert_eq!(job_status(&db.pool, poison_job_id).await, JOB_STATUS_FAILED);
+    let poison_lease: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT dispatch_lease_until::text
+        FROM job_targets
+        WHERE job_id = $1 AND client_id = $2
+        "#,
+    )
+    .bind(poison_job_id)
+    .bind(poison_client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(poison_lease.is_none());
+    let audit: sqlx::types::Json<serde_json::Value> = sqlx::query_scalar(
+        r#"
+        SELECT metadata
+        FROM audit_logs
+        WHERE action = 'job.target_result'
+          AND metadata->>'job_id' = $1
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(poison_job_id.to_string())
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(audit.0["reason"], "invalid_job_operation");
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_dispatch_claim_binds_incarnation_and_keeps_deadline_immutable() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -3192,6 +5740,118 @@ async fn postgres_command_output_ingest_rejects_late_new_output_after_terminal_t
 }
 
 #[tokio::test]
+async fn postgres_changed_incarnation_isolates_missing_and_malformed_job_operations() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "pg-client-reconnect-invalid-operation";
+    let old_incarnation = Uuid::new_v4();
+    let new_incarnation = Uuid::new_v4();
+    let missing_job_id = Uuid::new_v4();
+    let malformed_job_id = Uuid::new_v4();
+    let healthy_job_id = Uuid::new_v4();
+    insert_client(&db.pool, client_id, Some(old_incarnation)).await;
+    insert_job_target(
+        &db.pool,
+        missing_job_id,
+        client_id,
+        "running",
+        true,
+        Some(old_incarnation),
+    )
+    .await;
+    insert_job_target(
+        &db.pool,
+        malformed_job_id,
+        client_id,
+        "running",
+        true,
+        Some(old_incarnation),
+    )
+    .await;
+    insert_job_target(
+        &db.pool,
+        healthy_job_id,
+        client_id,
+        "running",
+        true,
+        Some(old_incarnation),
+    )
+    .await;
+    sqlx::query("UPDATE jobs SET operation = NULL WHERE id = $1")
+        .bind(missing_job_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE jobs SET operation = '{}'::jsonb WHERE id = $1")
+        .bind(malformed_job_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    assert!(db
+        .repo
+        .upsert_agent_hello(&hello_event(client_id, new_incarnation, None))
+        .await
+        .unwrap());
+
+    for job_id in [missing_job_id, malformed_job_id, healthy_job_id] {
+        assert_eq!(
+            target_status(&db.pool, job_id, client_id).await,
+            TARGET_STATUS_AGENT_LOST
+        );
+    }
+    let client_incarnation: Uuid =
+        sqlx::query_scalar("SELECT process_incarnation_id FROM clients WHERE id = $1")
+            .bind(client_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(client_incarnation, new_incarnation);
+    for job_id in [missing_job_id, malformed_job_id] {
+        let audit: sqlx::types::Json<serde_json::Value> = sqlx::query_scalar(
+            r#"
+            SELECT metadata
+            FROM audit_logs
+            WHERE action = 'job.target_result'
+              AND metadata->>'job_id' = $1
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(job_id.to_string())
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            audit.0["reason"],
+            "agent_process_incarnation_changed_invalid_job_operation"
+        );
+        assert_eq!(audit.0["operation_decode_failed"], true);
+    }
+    let healthy_audit: sqlx::types::Json<serde_json::Value> = sqlx::query_scalar(
+        r#"
+        SELECT metadata
+        FROM audit_logs
+        WHERE action = 'job.target_result'
+          AND metadata->>'job_id' = $1
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(healthy_job_id.to_string())
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        healthy_audit.0["reason"],
+        "agent_process_incarnation_changed"
+    );
+    assert_eq!(healthy_audit.0["operation_decode_failed"], false);
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_changed_incarnation_matching_update_heartbeat_completes_activation() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -3293,6 +5953,189 @@ async fn postgres_changed_incarnation_matching_job_but_wrong_hash_fails_activati
     assert_eq!(output["activation_job_id"], job_id.to_string());
     assert_eq!(output["artifact_sha256_hex"], observed_sha256_hex);
     assert_eq!(output["staged_sha256_hex"], staged_sha256_hex);
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_deadline_expiry_quarantines_malformed_operation_and_expires_healthy_row() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let poison_job_id = Uuid::new_v4();
+    let healthy_job_id = Uuid::new_v4();
+    let deferred_healthy_job_id = Uuid::new_v4();
+    let poison_client_id = "pg-deadline-malformed-operation";
+    let healthy_client_id = "pg-deadline-healthy-operation";
+    let deferred_healthy_client_id = "pg-deadline-deferred-healthy-operation";
+    insert_client(&db.pool, poison_client_id, Some(Uuid::new_v4())).await;
+    insert_client(&db.pool, healthy_client_id, Some(Uuid::new_v4())).await;
+    insert_client(&db.pool, deferred_healthy_client_id, Some(Uuid::new_v4())).await;
+    for (job_id, client_id) in [
+        (poison_job_id, poison_client_id),
+        (healthy_job_id, healthy_client_id),
+        (deferred_healthy_job_id, deferred_healthy_client_id),
+    ] {
+        insert_job_target_with_operation(
+            &db.pool,
+            job_id,
+            client_id,
+            JobCommand::Shell {
+                argv: vec![
+                    "/bin/sh".to_string(),
+                    "-lc".to_string(),
+                    "sleep 99".to_string(),
+                ],
+                pty: false,
+            },
+            "shell",
+            None,
+            "running",
+            true,
+            Some(Uuid::new_v4()),
+            1,
+            true,
+        )
+        .await;
+    }
+    sqlx::query(
+        r#"
+        UPDATE jobs
+        SET operation = '{"type":"removed_legacy_operation"}'::jsonb
+        WHERE id = $1
+        "#,
+    )
+    .bind(poison_job_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE job_targets
+        SET deadline_at = now() - interval '10 minutes',
+            started_at = now() - interval '20 minutes'
+        WHERE job_id = $1
+        "#,
+    )
+    .bind(poison_job_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    install_invalid_job_operation_audit_rejection_trigger(&db.pool).await;
+    let expired = db.repo.expire_control_timeout_targets(2, 0).await.unwrap();
+    assert_eq!(expired.len(), 1);
+    assert!([healthy_job_id, deferred_healthy_job_id].contains(&expired[0].job_id));
+    assert_eq!(expired[0].status, TARGET_STATUS_CONTROL_TIMEOUT);
+    let initially_expired_job_id = expired[0].job_id;
+    let deferred_expiry = db.repo.expire_control_timeout_targets(1, 0).await.unwrap();
+    assert_eq!(deferred_expiry.len(), 1);
+    assert!([healthy_job_id, deferred_healthy_job_id].contains(&deferred_expiry[0].job_id));
+    assert_ne!(deferred_expiry[0].job_id, initially_expired_job_id);
+    assert_eq!(deferred_expiry[0].status, TARGET_STATUS_CONTROL_TIMEOUT);
+    assert_eq!(
+        target_status(&db.pool, poison_job_id, poison_client_id).await,
+        "running"
+    );
+    assert_eq!(
+        target_status(&db.pool, healthy_job_id, healthy_client_id).await,
+        TARGET_STATUS_CONTROL_TIMEOUT
+    );
+    assert_eq!(
+        target_status(
+            &db.pool,
+            deferred_healthy_job_id,
+            deferred_healthy_client_id
+        )
+        .await,
+        TARGET_STATUS_CONTROL_TIMEOUT
+    );
+    assert_eq!(job_status(&db.pool, poison_job_id).await, "running");
+    assert_eq!(
+        job_status(&db.pool, healthy_job_id).await,
+        JOB_STATUS_CONTROL_TIMEOUT
+    );
+    assert_eq!(
+        job_status(&db.pool, deferred_healthy_job_id).await,
+        JOB_STATUS_CONTROL_TIMEOUT
+    );
+    let poison_terminal_fields: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+        r#"
+        SELECT completed_at::text, cancel_requested_at::text, last_dispatch_error
+        FROM job_targets
+        WHERE job_id = $1 AND client_id = $2
+        "#,
+    )
+    .bind(poison_job_id)
+    .bind(poison_client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(poison_terminal_fields.0.is_none());
+    assert!(poison_terminal_fields.1.is_none());
+    assert!(poison_terminal_fields
+        .2
+        .as_deref()
+        .is_some_and(|error| error.starts_with("invalid_job_operation:")));
+    let poison_audit_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM audit_logs
+        WHERE action = 'job.target_result'
+          AND metadata->>'job_id' = $1
+        "#,
+    )
+    .bind(poison_job_id.to_string())
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(poison_audit_count, 0);
+
+    remove_invalid_job_operation_audit_rejection_trigger(&db.pool).await;
+    sqlx::query(
+        r#"
+        UPDATE job_targets
+        SET dispatch_lease_until = now() - interval '1 second'
+        WHERE job_id = $1 AND client_id = $2
+        "#,
+    )
+    .bind(poison_job_id)
+    .bind(poison_client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let retry = db.repo.expire_control_timeout_targets(1, 0).await.unwrap();
+    assert_eq!(retry.len(), 1);
+    assert_eq!(retry[0].job_id, poison_job_id);
+    assert_eq!(retry[0].status, TARGET_STATUS_CONTROL_TIMEOUT);
+    assert_eq!(
+        target_status(&db.pool, poison_job_id, poison_client_id).await,
+        TARGET_STATUS_CONTROL_TIMEOUT
+    );
+    assert_eq!(
+        job_status(&db.pool, poison_job_id).await,
+        JOB_STATUS_CONTROL_TIMEOUT
+    );
+    let audit: sqlx::types::Json<serde_json::Value> = sqlx::query_scalar(
+        r#"
+        SELECT metadata
+        FROM audit_logs
+        WHERE action = 'job.target_result'
+          AND metadata->>'job_id' = $1
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(poison_job_id.to_string())
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(audit.0["reason"], "invalid_job_operation");
+    assert!(db
+        .repo
+        .expire_control_timeout_targets(10, 0)
+        .await
+        .unwrap()
+        .is_empty());
     db.cleanup().await;
 }
 

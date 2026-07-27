@@ -359,21 +359,9 @@ pub(crate) async fn delete_runtime_config_patch_generator(
         &request.reviewed_name,
         "runtime_config_patch_generator_delete_review_invalid",
     )?;
-    let existing = state
-        .repo
-        .list_runtime_config_patch_generators()
-        .await?
-        .into_iter()
-        .find(|generator| generator.id == generator_id)
-        .ok_or_else(|| ApiError::not_found("runtime_config_patch_generator_not_found"))?;
-    if existing.name != request.reviewed_name.trim() {
-        return Err(ApiError::conflict(
-            "runtime_config_patch_generator_delete_review_stale",
-        ));
-    }
     state
         .repo
-        .delete_runtime_config_patch_generator(generator_id, &operator)
+        .delete_runtime_config_patch_generator(generator_id, &request.reviewed_name, &operator)
         .await
         .map_err(runtime_config_patch_generator_error)?;
     Ok(StatusCode::NO_CONTENT)
@@ -1127,6 +1115,8 @@ fn runtime_config_patch_generator_error(error: anyhow::Error) -> ApiError {
         ApiError::not_found("runtime_config_patch_generator_not_found")
     } else if message.contains("runtime_config_patch_generator_builtin_immutable") {
         ApiError::conflict("runtime_config_patch_generator_builtin_immutable")
+    } else if message.contains("runtime_config_patch_generator_delete_review_stale") {
+        ApiError::conflict("runtime_config_patch_generator_delete_review_stale")
     } else {
         ApiError::from(error)
     }

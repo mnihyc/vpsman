@@ -11,6 +11,7 @@ import {
   type ConsoleDataGridAction,
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
+import { HISTORY_DETAIL_LIMIT } from "../../constants";
 import {
   artifactLifecycleStatusBadgeClass,
   backupRequestStatusBadgeClass,
@@ -38,10 +39,12 @@ export function BackupHistoryTables({
   activeSubpage,
   artifacts,
   backupPolicies,
+  backupPoliciesTruncated,
   backups,
   clientLabel,
   migrationLinks,
   onCreatePolicy,
+  onEditPolicy,
   onDownloadArtifact,
   onOpenRequestArtifact,
   onPlanRestoreSource,
@@ -52,10 +55,12 @@ export function BackupHistoryTables({
   activeSubpage: string;
   artifacts: BackupArtifactRecord[];
   backupPolicies: BackupPolicyRecord[];
+  backupPoliciesTruncated: boolean;
   backups: BackupRequestRecord[];
   clientLabel: (clientId: string) => string;
   migrationLinks: MigrationLinkRecord[];
   onCreatePolicy?: () => void;
+  onEditPolicy?: (policy: BackupPolicyRecord) => void;
   onDownloadArtifact?: (
     artifact: BackupArtifactRecord,
     backup: BackupRequestRecord | null,
@@ -69,11 +74,17 @@ export function BackupHistoryTables({
   onRetryBackup?: (backup: BackupRequestRecord) => void;
   restorePlans: RestorePlanRecord[];
 }) {
+  const artifactsTruncated = artifacts.length >= HISTORY_DETAIL_LIMIT;
+  const backupsTruncated = backups.length >= HISTORY_DETAIL_LIMIT;
+  const migrationLinksTruncated =
+    migrationLinks.length >= HISTORY_DETAIL_LIMIT;
   if (activeSubpage === "policies") {
     return (
       <BackupPoliciesTable
         onCreatePolicy={onCreatePolicy}
+        onEditPolicy={onEditPolicy}
         policies={backupPolicies}
+        rowsTruncated={backupPoliciesTruncated}
       />
     );
   }
@@ -85,6 +96,7 @@ export function BackupHistoryTables({
         clientLabel={clientLabel}
         onDownloadArtifact={onDownloadArtifact}
         onRestoreArtifact={onRestoreArtifact}
+        rowsTruncated={artifactsTruncated}
       />
     );
   }
@@ -95,6 +107,7 @@ export function BackupHistoryTables({
         backups={backups}
         clientLabel={clientLabel}
         onPlanRestoreSource={onPlanRestoreSource}
+        rowsTruncated={backupsTruncated}
         restorePlans={restorePlans}
       />
     );
@@ -106,6 +119,7 @@ export function BackupHistoryTables({
         backups={backups}
         clientLabel={clientLabel}
         migrationLinks={migrationLinks}
+        rowsTruncated={migrationLinksTruncated}
         restorePlans={restorePlans}
       />
     );
@@ -117,16 +131,21 @@ export function BackupHistoryTables({
       clientLabel={clientLabel}
       onOpenRequestArtifact={onOpenRequestArtifact}
       onRetryBackup={onRetryBackup}
+      rowsTruncated={backupsTruncated}
     />
   );
 }
 
 function BackupPoliciesTable({
   onCreatePolicy,
+  onEditPolicy,
   policies,
+  rowsTruncated,
 }: {
   onCreatePolicy?: () => void;
+  onEditPolicy?: (policy: BackupPolicyRecord) => void;
   policies: BackupPolicyRecord[];
+  rowsTruncated: boolean;
 }) {
   const columns: ConsoleDataGridColumn<BackupPolicyRecord>[] = [
     {
@@ -170,15 +189,23 @@ function BackupPoliciesTable({
       minSize: 140,
       sortValue: (policy) => policy.cron_expr,
       searchValue: (policy) =>
-        `${policy.cron_expr} ${describeCronExpression(policy.cron_expr)} ${policy.timezone}`,
-      cell: (policy) => (
-        <span className="historyPrimary">
-          <strong>{describeCronExpression(policy.cron_expr)}</strong>
-          <small>
-            {policy.cron_expr} · {policy.timezone}
-          </small>
-        </span>
-      ),
+        `${policy.cron_expr} ${describeCronExpression(policy.cron_expr)} ${policy.timezone} ${policy.cadence_error ?? ""}`,
+      cell: (policy) => {
+        const cadenceError = policyCadenceErrorDetail(policy);
+        return (
+          <span className="historyPrimary">
+            {cadenceError ? (
+              <strong className="status warn">Invalid cadence</strong>
+            ) : (
+              <strong>{describeCronExpression(policy.cron_expr)}</strong>
+            )}
+            <small>
+              {policy.cron_expr} · {policy.timezone}
+            </small>
+            {cadenceError ? <small>{cadenceError}</small> : null}
+          </span>
+        );
+      },
     },
     {
       id: "nextRun",
@@ -256,10 +283,23 @@ function BackupPoliciesTable({
   return (
     <GridSection
       title="Scheduled backup policies"
-      summary="Enabled policies run automatically on their UTC cadence; prune is separate retention maintenance."
+      summary="Enabled policies with a valid cadence run automatically; invalid cadence requires editing. Prune is separate retention maintenance."
     >
       <ConsoleDataGrid
         actions={[
+          ...(onEditPolicy
+            ? [
+                {
+                  disabled: (rows: BackupPolicyRecord[]) => rows.length !== 1,
+                  label: "Edit policy",
+                  onSelect: (rows: BackupPolicyRecord[]) => {
+                    if (rows[0]) {
+                      onEditPolicy(rows[0]);
+                    }
+                  },
+                },
+              ]
+            : []),
           copyIdsAction<BackupPolicyRecord>(
             "Copy schedule IDs",
             (policy) => policy.schedule_id,
@@ -291,7 +331,9 @@ function BackupPoliciesTable({
             <span>{policyScopeLabel(policy)}</span>
             <span>{describeCronExpression(policy.cron_expr)}</span>
             <span>
-              {policy.enabled
+              {policy.cadence_error
+                ? "Invalid cadence — edit required; automatic backups blocked"
+                : policy.enabled
                 ? `${policy.next_runs.length} next run${policy.next_runs.length === 1 ? "" : "s"} reported`
                 : "Paused; no scheduled runs dispatch"}
             </span>
@@ -306,6 +348,7 @@ function BackupPoliciesTable({
           </div>
         )}
         rows={policies}
+        rowsTruncated={rowsTruncated}
         storageKey="vpsman.grid.backups.policies"
         title="Backup policy records"
       />
@@ -319,12 +362,14 @@ function BackupRequestsTable({
   clientLabel,
   onOpenRequestArtifact,
   onRetryBackup,
+  rowsTruncated,
 }: {
   artifacts: BackupArtifactRecord[];
   backups: BackupRequestRecord[];
   clientLabel: (clientId: string) => string;
   onOpenRequestArtifact?: (backup: BackupRequestRecord) => void;
   onRetryBackup?: (backup: BackupRequestRecord) => void;
+  rowsTruncated: boolean;
 }) {
   const artifactForBackup = (backup: BackupRequestRecord) =>
     backup.artifact_id
@@ -616,6 +661,7 @@ function BackupRequestsTable({
         }}
         rowActions={rowActions}
         rows={backups}
+        rowsTruncated={rowsTruncated}
         storageKey="vpsman.grid.backups.requests"
         title="Backup request records"
       />
@@ -629,6 +675,7 @@ function ArtifactHistoryTable({
   clientLabel,
   onDownloadArtifact,
   onRestoreArtifact,
+  rowsTruncated,
 }: {
   artifacts: BackupArtifactRecord[];
   backups: BackupRequestRecord[];
@@ -641,6 +688,7 @@ function ArtifactHistoryTable({
     artifact: BackupArtifactRecord,
     backup: BackupRequestRecord | null,
   ) => void;
+  rowsTruncated: boolean;
 }) {
   const backupForArtifact = (artifact: BackupArtifactRecord) =>
     backups.find((backup) => backup.artifact_id === artifact.id) ?? null;
@@ -869,6 +917,7 @@ function ArtifactHistoryTable({
           </div>
         )}
         rows={artifacts}
+        rowsTruncated={rowsTruncated}
         storageKey="vpsman.grid.backups.artifacts"
         title="Artifact inventory records"
       />
@@ -912,12 +961,14 @@ function RestoreSourcesTable({
   clientLabel,
   onPlanRestoreSource,
   restorePlans,
+  rowsTruncated,
 }: {
   artifacts: BackupArtifactRecord[];
   backups: BackupRequestRecord[];
   restorePlans: RestorePlanRecord[];
   clientLabel: (clientId: string) => string;
   onPlanRestoreSource?: (backup: BackupRequestRecord) => void;
+  rowsTruncated: boolean;
 }) {
   const artifactForBackup = (backup: BackupRequestRecord) =>
     backup.artifact_id
@@ -1162,6 +1213,7 @@ function RestoreSourcesTable({
           );
         }}
         rows={backups}
+        rowsTruncated={rowsTruncated}
         storageKey="vpsman.grid.backups.restoreSources"
         title="Restore source records"
       />
@@ -1175,12 +1227,14 @@ function MigrationLinksTable({
   migrationLinks,
   clientLabel,
   restorePlans,
+  rowsTruncated,
 }: {
   artifacts: BackupArtifactRecord[];
   backups: BackupRequestRecord[];
   migrationLinks: MigrationLinkRecord[];
   clientLabel: (clientId: string) => string;
   restorePlans: RestorePlanRecord[];
+  rowsTruncated: boolean;
 }) {
   const sourceBackupForLink = (link: MigrationLinkRecord) =>
     backups.find((backup) => backup.id === link.source_backup_request_id) ??
@@ -1341,6 +1395,7 @@ function MigrationLinksTable({
           </div>
         )}
         rows={migrationLinks}
+        rowsTruncated={rowsTruncated}
         storageKey="vpsman.grid.backups.migrations"
         title="Migration mapping records"
       />
@@ -1587,6 +1642,15 @@ function policyNextRunState(policy: BackupPolicyRecord): {
   title: string;
   tone: "info" | "neutral" | "warn";
 } {
+  const cadenceError = policyCadenceErrorDetail(policy);
+  if (cadenceError) {
+    return {
+      detail: "edit required",
+      label: "Invalid cadence",
+      title: `Invalid cadence — edit required. ${cadenceError}`,
+      tone: "warn",
+    };
+  }
   if (!policy.enabled) {
     return {
       detail: "policy disabled",
@@ -1628,6 +1692,15 @@ function policyLastResult(policy: BackupPolicyRecord): {
   title: string;
   tone: "neutral" | "ok" | "warn";
 } {
+  const cadenceError = policyCadenceErrorDetail(policy);
+  if (cadenceError) {
+    return {
+      detail: "automatic execution blocked; edit cadence",
+      label: "Cadence invalid",
+      title: `No backup execution failure is inferred. ${cadenceError}`,
+      tone: "warn",
+    };
+  }
   if (policy.last_error) {
     return {
       detail: policy.last_error,
@@ -1665,6 +1738,13 @@ function policyState(policy: BackupPolicyRecord): {
   label: string;
   tone: "neutral" | "ok" | "warn";
 } {
+  if (policy.cadence_error) {
+    return {
+      detail: "edit required; automatic backups blocked",
+      label: "Invalid cadence",
+      tone: "warn",
+    };
+  }
   if (!policy.enabled) {
     return { detail: "manual only", label: "Paused", tone: "neutral" };
   }
@@ -1672,6 +1752,21 @@ function policyState(policy: BackupPolicyRecord): {
     return { detail: "failure limit reached", label: "Blocked", tone: "warn" };
   }
   return { detail: "runs automatically", label: "Automatic", tone: "ok" };
+}
+
+function policyCadenceErrorDetail(
+  policy: BackupPolicyRecord,
+): string | null {
+  if (!policy.cadence_error) {
+    return null;
+  }
+  if (policy.cadence_error === "schedule_cron_invalid") {
+    return "The saved cron expression is invalid.";
+  }
+  if (policy.cadence_error === "schedule_cron_no_future_occurrence") {
+    return "The saved cron expression has no future occurrence.";
+  }
+  return `The API reported ${policy.cadence_error.replace(/_/g, " ")}.`;
 }
 
 function restoreSourceReadiness(

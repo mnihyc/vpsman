@@ -36,6 +36,7 @@ import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
+import { FLEET_DETAIL_LIMIT, formatLowerBoundCount } from "../constants";
 import { SystemUsersPanel } from "./SystemPanel";
 import {
   useReviewGenerationGuard,
@@ -468,6 +469,16 @@ export function AccessPanel({
   const activeGatewaySessions = gatewaySessions.filter(
     (session) => !session.ended_at,
   ).length;
+  const gatewaySessionsTruncated =
+    gatewaySessions.length >= FLEET_DETAIL_LIMIT;
+  const operatorSessionsTruncated =
+    operatorSessions.length >= FLEET_DETAIL_LIMIT;
+  const operatorAuthEventsTruncated =
+    operatorAuthEvents.length >= FLEET_DETAIL_LIMIT;
+  const clientKeyRevocationsTruncated =
+    clientKeyRevocations.length >= FLEET_DETAIL_LIMIT;
+  const terminalSessionsTruncated =
+    terminalSessions.length >= FLEET_DETAIL_LIMIT;
   const accessFeedbackMessage = error ?? (loading ? "Refreshing access records" : null);
   const accessFeedbackTone = error ? "danger" : "progress";
   const totpStateLabel = operator?.totp_enabled
@@ -478,7 +489,9 @@ export function AccessPanel({
   const totpFeedbackMessage = totpError ?? (totpPending ? "Updating TOTP" : null);
   const totpFeedbackTone = totpError ? "danger" : "progress";
   const gatewayInstallDefaultsNeedReview =
-    canManageOperators && activeGatewaySessions === 0;
+    canManageOperators &&
+    activeGatewaySessions === 0 &&
+    !gatewaySessionsTruncated;
   const activeOperatorSessions = operatorSessions.filter(
     isOperatorSessionActive,
   ).length;
@@ -512,17 +525,23 @@ export function AccessPanel({
   const bearerSessionValue = canManageOperators
     ? operatorSessions.length === 0
       ? "0 listed"
-      : `${activeOperatorSessions} active / ${expiredOperatorSessions} expired`
+      : `${formatLowerBoundCount(
+          activeOperatorSessions,
+          operatorSessionsTruncated,
+        )} active / ${formatLowerBoundCount(
+          expiredOperatorSessions,
+          operatorSessionsTruncated,
+        )} expired${operatorSessionsTruncated ? " in loaded sessions" : ""}`
     : "Admin only";
   const bearerSessionDetail = canManageOperators
     ? operatorSessions.length === 0
       ? "No API bearer-session inventory is listed for this operator account."
-      : `${activeOperatorSessions} active API bearer session${activeOperatorSessions === 1 ? "" : "s"} after expiry validation; current bearer record ${currentBearerSessionState}. Console, privilege, terminal, and gateway scopes are separate.`
+      : `${formatLowerBoundCount(activeOperatorSessions, operatorSessionsTruncated)} active API bearer session${activeOperatorSessions === 1 ? "" : "s"}${operatorSessionsTruncated ? " in loaded records" : ""} after expiry validation; current bearer record ${currentBearerSessionState}. Console, privilege, terminal, and gateway scopes are separate.`
     : "Bearer-session inventory includes other human operators and is intentionally visible only to admins. This does not mean that zero sessions exist.";
   const terminalSessionDetail =
     terminalSessions.length === 0
       ? "No terminal session records are loaded; terminal shells are managed in Remote and audited separately."
-      : `${replayableTerminalSessions} replayable terminal session${replayableTerminalSessions === 1 ? "" : "s"}; shell streams stay in Remote and audit evidence.`;
+      : `${formatLowerBoundCount(replayableTerminalSessions, terminalSessionsTruncated)} replayable terminal session${replayableTerminalSessions === 1 ? "" : "s"}${terminalSessionsTruncated ? " in loaded records" : ""}; shell streams stay in Remote and audit evidence.`;
   const identityClientIdError = validateIdentityClientId(identityClientId);
   const identityDraftReady =
     canManageOperators &&
@@ -1182,12 +1201,15 @@ export function AccessPanel({
     canManageOperators && expiredOperatorSessions > 0
       ? {
           action: "Manage sessions",
-          detail: `${expiredOperatorSessions} listed bearer session${expiredOperatorSessions === 1 ? "" : "s"} expired and are excluded from active-session counts.`,
+          detail: `${formatLowerBoundCount(expiredOperatorSessions, operatorSessionsTruncated)} listed bearer session${expiredOperatorSessions === 1 ? "" : "s"}${operatorSessionsTruncated ? " in loaded records" : ""} expired and are excluded from active-session counts.`,
           icon: <Clock size={16} />,
           label: "Expired bearer sessions",
           onClick: onOpenSystemSessions,
           tone: "attention",
-          value: `${expiredOperatorSessions} expired`,
+          value: `${formatLowerBoundCount(
+            expiredOperatorSessions,
+            operatorSessionsTruncated,
+          )} expired${operatorSessionsTruncated ? " loaded" : ""}`,
         }
       : null,
     canManageOperators && blockedOrPendingClientCount > 0
@@ -1240,7 +1262,7 @@ export function AccessPanel({
     {
       action: "Open identities",
       detail: canManageOperators
-        ? `${keyLifecycleReport?.revocation_count ?? clientKeyRevocations.length} revocation records; ${revokedClientCount} current keys blocked.`
+        ? `${keyLifecycleReport?.revocation_count ?? formatLowerBoundCount(clientKeyRevocations.length, clientKeyRevocationsTruncated)} revocation records${!keyLifecycleReport && clientKeyRevocationsTruncated ? " loaded" : ""}; ${revokedClientCount} current keys blocked.`
         : "VPS public-key registration, rotation, and revocation inventory are intentionally visible only to admins.",
       icon: <Fingerprint size={16} />,
       label: "VPS identities",
@@ -1273,9 +1295,11 @@ export function AccessPanel({
       label: "API bearer sessions",
       onClick: onOpenSystemSessions,
       tone: canManageOperators
-        ? operatorSessions.length === 0 || expiredOperatorSessions > 0
+        ? expiredOperatorSessions > 0 || operatorSessions.length === 0
           ? "attention"
-          : "ready"
+          : operatorSessionsTruncated
+            ? "neutral"
+            : "ready"
         : "neutral",
       value: bearerSessionValue,
     },
@@ -1301,21 +1325,40 @@ export function AccessPanel({
       label: "Terminal sessions",
       onClick: onOpenTerminalSessions,
       tone: openTerminalSessions > 0 ? "ready" : "neutral",
-      value: `${openTerminalSessions} open / ${terminalSessions.length} recent`,
+      value: `${formatLowerBoundCount(
+        openTerminalSessions,
+        terminalSessionsTruncated,
+      )} open / ${formatLowerBoundCount(
+        terminalSessions.length,
+        terminalSessionsTruncated,
+      )} recent${terminalSessionsTruncated ? " loaded" : ""}`,
     },
     {
       action: "Open sessions",
       detail:
         activeGatewaySessions > 0
-          ? `${gatewaySessions.length} recent gateway sessions; install defaults are owned by Suite Config.`
+          ? `${formatLowerBoundCount(gatewaySessions.length, gatewaySessionsTruncated)} recent${gatewaySessionsTruncated ? " loaded" : ""} gateway sessions; install defaults are owned by Suite Config.`
+          : gatewaySessionsTruncated
+            ? "No active gateway session appears in the loaded history; more records may exist."
           : canManageOperators
             ? "No active gateway sessions. Configure gateway endpoint and server key in Suite Config."
             : "No active gateway sessions are visible. An admin manages shared gateway endpoint and server-key defaults in Suite Config.",
       icon: <Wifi size={16} />,
       label: "Gateway sessions",
       onClick: () => openAccessSubpage("Gateway sessions"),
-      tone: activeGatewaySessions > 0 ? "ready" : "attention",
-      value: `${activeGatewaySessions} active / ${gatewaySessions.length} recent`,
+      tone:
+        activeGatewaySessions > 0
+          ? "ready"
+          : gatewaySessionsTruncated
+            ? "neutral"
+            : "attention",
+      value: `${formatLowerBoundCount(
+        activeGatewaySessions,
+        gatewaySessionsTruncated,
+      )} active / ${formatLowerBoundCount(
+        gatewaySessions.length,
+        gatewaySessionsTruncated,
+      )} recent${gatewaySessionsTruncated ? " loaded" : ""}`,
     },
   ];
   const activePanelHeader = accessPanelHeader(activeSubpage);
@@ -1362,6 +1405,7 @@ export function AccessPanel({
           (canManageOperators ? (
             <SystemUsersPanel
               authEvents={operatorAuthEvents}
+              authEventsTruncated={operatorAuthEventsTruncated}
               currentOperator={operator}
               onClearOperatorTotp={onClearOperatorTotp}
               onCreateOperator={onCreateOperator}
@@ -1373,6 +1417,7 @@ export function AccessPanel({
               operators={operators}
               privilegeMaterial={privilegeMaterial}
               sessions={operatorSessions}
+              sessionsTruncated={operatorSessionsTruncated}
             />
           ) : (
             <div className="workspaceSection">
@@ -1784,7 +1829,14 @@ export function AccessPanel({
             <section className="controlPanel">
               <div className="sectionHeader compact">
                 <h2>Client key revocations</h2>
-                <span>{clientKeyRevocations.length} retained records</span>
+                <span>
+                  {formatLowerBoundCount(
+                    clientKeyRevocations.length,
+                    clientKeyRevocationsTruncated,
+                  )}{" "}
+                  {clientKeyRevocationsTruncated ? "loaded " : ""}retained
+                  records
+                </span>
               </div>
               <ConsoleDataGrid
                 columns={revocationColumns}
@@ -1800,6 +1852,7 @@ export function AccessPanel({
                   />
                 )}
                 rows={clientKeyRevocations}
+                rowsTruncated={clientKeyRevocationsTruncated}
                 searchPlaceholder="Search VPS, key hash, reason, or operator"
                 selectable={false}
                 singleExpandedRow
@@ -1832,8 +1885,16 @@ export function AccessPanel({
                 <div className="sectionHeader compact">
                   <h2>Gateway sessions</h2>
                   <span>
-                    {activeGatewaySessions} active / {gatewaySessions.length}{" "}
-                    recent
+                    {formatLowerBoundCount(
+                      activeGatewaySessions,
+                      gatewaySessionsTruncated,
+                    )}{" "}
+                    active /{" "}
+                    {formatLowerBoundCount(
+                      gatewaySessions.length,
+                      gatewaySessionsTruncated,
+                    )}{" "}
+                    recent{gatewaySessionsTruncated ? " loaded" : ""}
                   </span>
                 </div>
                 <ConsoleDataGrid
@@ -1850,6 +1911,7 @@ export function AccessPanel({
                     />
                   )}
                   rows={gatewaySessions}
+                  rowsTruncated={gatewaySessionsTruncated}
                   searchPlaceholder="Search gateway, VPS, state, remote IP, or version"
                   selectable={false}
                   singleExpandedRow

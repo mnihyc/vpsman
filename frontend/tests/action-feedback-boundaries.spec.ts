@@ -221,3 +221,228 @@ test("keeps action feedback in dedicated local containers", () => {
     /\{networkSnapshot\s*===\s*null\s*&&\s*visibleJobProgress\s*&&/,
   );
 });
+
+test("does not present stale bounded data as complete after refresh failures", () => {
+  const jobsData = source("hooks/useJobsData.ts");
+  expect(jobsData).toMatch(
+    /serverJobsResult\.status === "fulfilled"[\s\S]{0,180}else \{\s*setServerJobs\(\[\]\)/,
+  );
+  expect(jobsData).toContain("Maintenance job inventory unavailable");
+  expect(source("constants.ts")).toContain(
+    "export const FLEET_DETAIL_LIMIT = 200",
+  );
+  expect(jobsData).toContain(
+    "/api/v1/command-templates?limit=${FLEET_DETAIL_LIMIT}",
+  );
+  expect(jobsData).toContain(
+    "commandTemplatesResult.value.length >= FLEET_DETAIL_LIMIT",
+  );
+  const serverJobsLoader = jobsData.slice(
+    jobsData.indexOf("const loadServerJobs"),
+    jobsData.indexOf("const loadJobTargets"),
+  );
+  expect(serverJobsLoader).toContain("setServerJobsError");
+  expect(serverJobsLoader).not.toContain("setJobsError");
+
+  const inventoryData = source("hooks/useInventoryData.ts");
+  const runtimeApplyLoader = inventoryData.slice(
+    inventoryData.indexOf("const loadRuntimeConfigApplyStates"),
+    inventoryData.indexOf("const createTag"),
+  );
+  expect(runtimeApplyLoader).toContain("setRuntimeConfigApplyError");
+  expect(runtimeApplyLoader).not.toContain("setTagsError");
+  expect(runtimeApplyLoader).toMatch(
+    /if \(isApiUnauthorized\(error\)\) \{[\s\S]{0,240}setRuntimeConfigApplyStates\(\[\]\)/,
+  );
+  expect(runtimeApplyLoader).toMatch(
+    /return;\s*\}\s*setRuntimeConfigApplyEvidenceAvailable\(false\);\s*setRuntimeConfigApplyError\(/,
+  );
+
+  expect(source("hooks/useSchedulesData.ts")).toContain("schedulesTruncated");
+  expect(source("hooks/useAuditData.ts")).toContain("auditsTruncated");
+
+  const backupsData = source("hooks/useBackupsData.ts");
+  expect(backupsData).toContain("Promise.allSettled");
+  expect(backupsData).toContain("backupsLoadGeneration");
+  expect(backupsData).toContain(
+    "backupsLoadGeneration.current !== generation",
+  );
+  expect(backupsData).toContain(
+    "if (backupsLoadGeneration.current === generation)",
+  );
+  for (const label of [
+    "Backup requests",
+    "Backup policies",
+    "Backup artifacts",
+    "Restore plans",
+    "Migration links",
+  ]) {
+    expect(backupsData).toContain(`settledSourceFailure("${label}"`);
+  }
+  expect(backupsData).toContain("upload-session cleanup also failed");
+
+  const fleetWorkspace = source("panels/FleetWorkspace.tsx");
+  expect(fleetWorkspace).toContain('"Traffic counters", snapshot.counter_source');
+  expect(fleetWorkspace).toContain(
+    ': "unknown";\n  return `RX ${rx} / TX ${tx}`',
+  );
+
+  const artifactsPanel = source("panels/jobs/JobArtifactsPanel.tsx");
+  expect(artifactsPanel).toContain("agentUpdateReleasesTruncated");
+  expect(artifactsPanel).toContain("backupArtifactsTruncated");
+  expect(artifactsPanel).toContain("fileTransferSourcesTruncated");
+  expect(artifactsPanel).toContain("rowsTruncated={rowsTruncated}");
+
+  const vpsDetail = source("panels/VpsDetailPanel.tsx");
+  expect(vpsDetail).toContain("type VpsDetailRecordBounds");
+  expect(vpsDetail).toContain("recordBounds.backupArtifacts");
+  expect(vpsDetail).toContain("recordBounds.fileTransfers");
+  expect(vpsDetail).toContain("recordBounds.fleetAlerts");
+
+  const schedulesPanel = source("panels/SchedulesPanel.tsx");
+  expect(schedulesPanel).toContain(
+    "Invalid cadence — edit required",
+  );
+  expect(schedulesPanel).toContain("const maxMinuteChecks = 32 * 24 * 60");
+  expect(schedulesPanel).toContain("hasCronFieldShape(cronExpr)");
+  expect(schedulesPanel).toContain(
+    "No run appears in the short local preview; the server validates this cadence when saved.",
+  );
+  expect(source("panels/backups/BackupHistoryTables.tsx")).toContain(
+    "Enabled policies with a valid cadence run automatically",
+  );
+
+  expect(source("panels/HomePanel.tsx")).toContain(
+    "Refreshing dashboard evidence",
+  );
+  expect(source("panels/jobs/JobArtifactsPanel.tsx")).toContain(
+    'message={error ?? (loading ? "Refreshing artifact inventory" : null)}',
+  );
+  expect(source("panels/SystemPanel.tsx")).toContain(
+    'loadError ??\n          (loadLoading ? "Refreshing operator access records" : null)',
+  );
+});
+
+test("attributes partial refresh failures to stable source names", () => {
+  const inventoryData = source("hooks/useInventoryData.ts");
+  expect(inventoryData).toContain("Promise.allSettled");
+  expect(inventoryData).toContain(
+    'if (tagsResult.status === "fulfilled")',
+  );
+  for (const label of [
+    "tags",
+    "source template assignments",
+    "source status",
+    "runtime configuration patch generators",
+  ]) {
+    expect(inventoryData).toContain(`"${label}"`);
+  }
+  expect(inventoryData).toContain(
+    'settledSourceError(\n            "Source templates"',
+  );
+  expect(inventoryData).toContain(
+    '"Runtime configuration source unavailable"',
+  );
+
+  const auditData = source("hooks/useAuditData.ts");
+  expect(auditData).toContain("Promise.allSettled");
+  expect(auditData).toContain(
+    'if (auditResult.status === "fulfilled")',
+  );
+  expect(auditData).toContain('"audit log"');
+  expect(auditData).toContain('"history retention policies"');
+
+  const topologyData = source("hooks/useTopologyData.ts");
+  for (const sourceName of [
+    "tunnelPlans",
+    "networkObservations",
+    "networkTrends",
+    "ospfRecommendations",
+    "ospfUpdatePlans",
+    "topologyGraph",
+  ]) {
+    expect(topologyData).toContain(`"${sourceName}"`);
+  }
+  expect(topologyData).toContain("topologyPendingLoads");
+  expect(topologyData).toContain("topologyLoadGenerations");
+  expect(topologyData).toContain(
+    "TOPOLOGY_SOURCE_ORDER.flatMap",
+  );
+
+  const fleetData = source("hooks/useFleetData.ts");
+  expect(fleetData).toContain("FLEET_DETAIL_SOURCE_LABELS");
+  expect(fleetData).toContain("FLEET_CORE_SOURCE_LABELS");
+  expect(fleetData).toContain("FLEET_TELEMETRY_SOURCE_LABELS");
+  expect(fleetData).toContain(
+    '"Some fleet detail sources are unavailable"',
+  );
+  expect(fleetData).toContain(
+    '"Some live fleet sources are unavailable"',
+  );
+
+  const jobsData = source("hooks/useJobsData.ts");
+  expect(jobsData).toContain("JOB_SOURCE_LABELS");
+  expect(jobsData).toContain('"Some job sources are unavailable"');
+  expect(jobsData).toContain("`Maintenance jobs: ${");
+});
+
+test("preserves source errors and unknown health evidence", () => {
+  const fleetData = source("hooks/useFleetData.ts");
+  expect(fleetData).toContain("FLEET_ERROR_SOURCE_ORDER");
+  expect(fleetData).toContain('publishFleetError("core", null)');
+  expect(fleetData).toContain('publishFleetError(\n          "detail"');
+  expect(fleetData).toContain('publishFleetError(\n          "telemetry"');
+
+  const topologyEvidence = source(
+    "panels/topology/TopologyEvidencePanel.tsx",
+  );
+  expect(topologyEvidence).toContain(
+    "lossRatio: observation.packet_loss_ratio ?? null",
+  );
+  expect(topologyEvidence).toContain("point.lossRatio === null");
+  expect(source("styles/jobs.css")).toContain(
+    ".latencyCurve span.unknown",
+  );
+
+  const systemPanel = source("panels/SystemPanel.tsx");
+  expect(systemPanel).toContain(
+    'dbPressure === null\n      ? "neutral"',
+  );
+  expect(systemPanel).toContain(
+    'queueDepth === null ? "Unknown" : `${queueDepth} queued`',
+  );
+  expect(systemPanel).toContain(
+    "Control-plane health is unavailable until dashboard data loads.",
+  );
+});
+
+test("refreshes partial tunnel mutations and clears every session source", () => {
+  const topologyData = source("hooks/useTopologyData.ts");
+  const lifecycleMutation = topologyData.slice(
+    topologyData.indexOf("const setTunnelPlanEnabled"),
+    topologyData.indexOf("const deleteTunnelPlan"),
+  );
+  expect(lifecycleMutation).toContain("Promise.allSettled");
+  expect(lifecycleMutation).toContain("const refreshResults");
+  expect(lifecycleMutation).toContain("failures.join");
+
+  const dashboardData = source("hooks/useDashboardData.ts");
+  for (const clearName of [
+    "clearAccess",
+    "clearDashboardOverview",
+    "clearFleet",
+    "clearAudits",
+    "clearInventory",
+    "clearJobs",
+    "clearSchedules",
+    "clearSystem",
+    "clearTopology",
+    "clearPortForwarding",
+    "clearBackups",
+  ]) {
+    expect(dashboardData).toContain(`.${clearName}()`);
+  }
+  expect(dashboardData).toContain(
+    "clearDashboardDataRef.current = clearDashboardData",
+  );
+});

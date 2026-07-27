@@ -17,6 +17,7 @@ import {
   buildPrivilegeForJobOperation,
   type PrivilegeMaterial,
 } from "../../privilege";
+import { formatLowerBoundCount } from "../../constants";
 import { selectorExpressionForClientIds } from "../../searchExpression";
 import type { SupervisorAction } from "../jobDispatchModel";
 import type {
@@ -35,6 +36,7 @@ export function ProcessSupervisorInventoryPanel({
   initialTargetClientId,
   initialTargetRequestId,
   inventory,
+  inventoryTruncated,
   loading,
   onCreateJob,
   onLoadTargets,
@@ -51,6 +53,7 @@ export function ProcessSupervisorInventoryPanel({
   initialTargetClientId?: string | null;
   initialTargetRequestId?: string | null;
   inventory: ProcessSupervisorInventoryRecord[];
+  inventoryTruncated: boolean;
   loading: boolean;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
@@ -487,7 +490,9 @@ export function ProcessSupervisorInventoryPanel({
         <div>
           <h2>Process supervisor inventory</h2>
           <span>
-            {countPhrase(runningCount, "observed running process", "observed running processes")}, {countPhrase(desiredOnlyLimitCount, "desired-only limit")}, {countPhrase(restartedCount, "process with automatic restarts", "processes with automatic restarts")}
+            {inventoryTruncated
+              ? `${formatLowerBoundCount(runningCount, true)} observed running in loaded page, ${formatLowerBoundCount(desiredOnlyLimitCount, true)} desired-only limits in loaded page, ${formatLowerBoundCount(restartedCount, true)} with automatic restarts in loaded page`
+              : `${countPhrase(runningCount, "observed running process", "observed running processes")}, ${countPhrase(desiredOnlyLimitCount, "desired-only limit")}, ${countPhrase(restartedCount, "process with automatic restarts", "processes with automatic restarts")}`}
           </span>
         </div>
         <div className="headerActionStack">
@@ -571,28 +576,32 @@ export function ProcessSupervisorInventoryPanel({
       ) : null}
       <div className="processSupervisorSummaryStrip" aria-label="Process supervisor health summary">
         <span>
-          <strong>{runningCount} / {scopedInventory.length}</strong>
-          <small>Observed running</small>
+          <strong>{formatLowerBoundCount(runningCount, inventoryTruncated)} / {scopedInventory.length}</strong>
+          <small>{inventoryTruncated ? "Observed running in loaded page" : "Observed running"}</small>
         </span>
         <span className={desiredOnlyLimitCount > 0 ? "attention" : undefined}>
-          <strong>{desiredOnlyLimitCount}</strong>
-          <small>Desired-only limits</small>
+          <strong>{formatLowerBoundCount(desiredOnlyLimitCount, inventoryTruncated)}</strong>
+          <small>{inventoryTruncated ? "Desired-only limits in loaded page" : "Desired-only limits"}</small>
         </span>
         <span className={restartedCount > 0 ? "attention" : undefined}>
-          <strong>{restartedCount}</strong>
-          <small>With automatic restarts</small>
+          <strong>{formatLowerBoundCount(restartedCount, inventoryTruncated)}</strong>
+          <small>{inventoryTruncated ? "With restarts in loaded page" : "With automatic restarts"}</small>
         </span>
         <span>
           <strong>{formatBytes(retainedMemoryBytes)}</strong>
-          <small>Cgroup memory</small>
+          <small>{inventoryTruncated ? "Cgroup memory in loaded page" : "Cgroup memory"}</small>
         </span>
         <span className={chronologyWarningCount > 0 ? "attention" : undefined}>
-          <strong>{countPhrase(chronologyWarningCount, "warning")}</strong>
-          <small>Chronology</small>
+          <strong>
+            {inventoryTruncated
+              ? formatLowerBoundCount(chronologyWarningCount, true)
+              : countPhrase(chronologyWarningCount, "warning")}
+          </strong>
+          <small>{inventoryTruncated ? "Chronology warnings in loaded page" : "Chronology"}</small>
         </span>
         <span>
-          <strong>{logBackedCount}</strong>
-          <small>With log paths</small>
+          <strong>{formatLowerBoundCount(logBackedCount, inventoryTruncated)}</strong>
+          <small>{inventoryTruncated ? "With log paths in loaded page" : "With log paths"}</small>
         </span>
       </div>
       <ConfirmationPrompt
@@ -664,7 +673,9 @@ export function ProcessSupervisorInventoryPanel({
             <strong>No supervised processes</strong>
             <span>
               {focusedAgent
-                ? `No supervised process is retained for ${clientLabel(focusedAgent.id)}.`
+                ? inventoryTruncated
+                  ? `No supervised process for ${clientLabel(focusedAgent.id)} appears in the loaded global page; more records may exist.`
+                  : `No supervised process is retained for ${clientLabel(focusedAgent.id)}.`
                 : "Process start, status, restart, log, and stop jobs populate this inventory."}
             </span>
           </div>
@@ -725,7 +736,9 @@ export function ProcessSupervisorInventoryPanel({
               <strong>No supervised processes</strong>
               <span>
                 {focusedAgent
-                  ? `No supervised process is retained for ${clientLabel(focusedAgent.id)}.`
+                  ? inventoryTruncated
+                    ? `No supervised process for ${clientLabel(focusedAgent.id)} appears in the loaded global page; more records may exist.`
+                    : `No supervised process is retained for ${clientLabel(focusedAgent.id)}.`
                   : "Process start, status, restart, log, and stop jobs populate this inventory."}
               </span>
             </div>
@@ -771,6 +784,7 @@ export function ProcessSupervisorInventoryPanel({
             </div>
           )}
           rows={scopedInventory}
+          rowsTruncated={inventoryTruncated}
           searchPlaceholder="Search processes"
           selectable={false}
           storageKey="vpsman.jobs.processSupervisorInventory"

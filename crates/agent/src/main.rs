@@ -50,13 +50,18 @@ use clap::Parser;
 use cli::{load_config, Args, Command};
 use runtime::run_agent;
 use telemetry::{collect_metrics_for_config, TelemetryRuntimeState};
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let log_writer = std::io::stderr
+        .with_max_level(tracing::Level::WARN)
+        .or_else(std::io::stdout.with_min_level(tracing::Level::INFO));
     tracing_subscriber::fmt()
+        .with_writer(log_writer)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "vpsman_agent=info".into()),
+                .unwrap_or_else(|_| "warn,vpsman_agent=info".into()),
         )
         .init();
 

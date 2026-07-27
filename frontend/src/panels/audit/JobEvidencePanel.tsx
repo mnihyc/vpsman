@@ -5,6 +5,7 @@ import {
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
 import { ActionFeedback } from "../../components/ActionFeedback";
+import { formatLowerBoundCount } from "../../constants";
 import {
   jobStatusBadgeClass,
   jobTargetStatusBadgeClass,
@@ -56,8 +57,10 @@ const EMPTY_EVIDENCE_STATE: EvidenceLoadState = {
 export function JobEvidencePanel({
   agents,
   audits,
+  auditsTruncated,
   error,
   jobs,
+  jobsTruncated,
   loading,
   onLoadJobOutputs,
   onLoadJobTargets,
@@ -66,8 +69,10 @@ export function JobEvidencePanel({
 }: {
   agents: AgentView[];
   audits: AuditLogRecord[];
+  auditsTruncated: boolean;
   error: string | null;
   jobs: JobHistoryRecord[];
+  jobsTruncated: boolean;
   loading: boolean;
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
@@ -76,6 +81,7 @@ export function JobEvidencePanel({
 }) {
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [evidenceByJob, setEvidenceByJob] = useState<Record<string, EvidenceLoadState>>({});
+  const correlationTruncated = jobsTruncated || auditsTruncated;
 
   useEffect(() => {
     if (!selectedJobId && jobs.length > 0) {
@@ -232,11 +238,11 @@ export function JobEvidencePanel({
         header: "Audit",
         minSize: 130,
         searchValue: (row) =>
-          auditEvidenceState(row).searchText,
+          auditEvidenceState(row, auditsTruncated).searchText,
         size: 150,
         sortValue: (row) => (row.auditMatches.length > 0 ? 1 : 0),
         cell: (row) => {
-          const state = auditEvidenceState(row);
+          const state = auditEvidenceState(row, auditsTruncated);
           return <span className={`status ${state.tone}`}>{state.label}</span>;
         },
       },
@@ -253,7 +259,7 @@ export function JobEvidencePanel({
         },
       },
     ],
-    [evidenceByJob],
+    [auditsTruncated, evidenceByJob],
   );
 
   return (
@@ -279,23 +285,43 @@ export function JobEvidencePanel({
       <div className="metricGrid" aria-label="Job evidence summary">
         <div className="metricCard">
           <ClipboardCheck size={18} />
-          <strong>{jobs.length}</strong>
-          <small>Jobs in ledger</small>
+          <strong>{formatLowerBoundCount(jobs.length, jobsTruncated)}</strong>
+          <small>{jobsTruncated ? "Jobs loaded from ledger" : "Jobs in ledger"}</small>
         </div>
         <div className="metricCard">
           <ShieldCheck size={18} />
-          <strong>{privilegedJobs}</strong>
-          <small>Privileged jobs</small>
+          <strong>{formatLowerBoundCount(privilegedJobs, jobsTruncated)}</strong>
+          <small>{jobsTruncated ? "Privileged among loaded jobs" : "Privileged jobs"}</small>
         </div>
         <div className="metricCard">
           <Link2 size={18} />
-          <strong>{matchedJobs}</strong>
-          <small>Jobs with audit rows</small>
+          <strong>
+            {formatLowerBoundCount(matchedJobs, correlationTruncated)}
+          </strong>
+          <small>
+            {correlationTruncated
+              ? "Audit-linked in loaded evidence"
+              : "Jobs with audit rows"}
+          </small>
         </div>
-        <div className={`metricCard ${auditGapCount > 0 ? "attention" : ""}`}>
+        <div
+          className={`metricCard ${
+            auditGapCount > 0 && !auditsTruncated ? "attention" : ""
+          }`}
+        >
           <FileText size={18} />
-          <strong>{auditGapCount}</strong>
-          <small>Audit gaps</small>
+          <strong>
+            {auditsTruncated
+              ? `${auditGapCount} loaded`
+              : formatLowerBoundCount(auditGapCount, jobsTruncated)}
+          </strong>
+          <small>
+            {auditsTruncated
+              ? "Unlinked in loaded audit history"
+              : jobsTruncated
+                ? "Audit gaps among loaded jobs"
+                : "Audit gaps"}
+          </small>
         </div>
       </div>
 
@@ -317,6 +343,7 @@ export function JobEvidencePanel({
         openRowLabel="Select proof"
         openRowTitle={(row) => `Show evidence proof for job ${row.job.id}.`}
         rows={evidenceRows}
+        rowsTruncated={jobsTruncated}
         searchPlaceholder="Search job ID, actor, status, hash, command, or audit action"
         selectable={false}
         storageKey="audit-job-evidence-grid"
@@ -330,6 +357,7 @@ export function JobEvidencePanel({
       {selectedRecord && (
         <JobEvidenceDetail
           agentNameById={agentNameById}
+          auditsTruncated={auditsTruncated}
           evidence={selectedEvidence}
           onOpenJobDetails={onOpenJobDetails}
           record={selectedRecord}
@@ -341,11 +369,13 @@ export function JobEvidencePanel({
 
 function JobEvidenceDetail({
   agentNameById,
+  auditsTruncated,
   evidence,
   onOpenJobDetails,
   record,
 }: {
   agentNameById: Map<string, string>;
+  auditsTruncated: boolean;
   evidence: EvidenceLoadState;
   onOpenJobDetails?: (jobId: string) => void;
   record: EvidenceRecord;
@@ -355,8 +385,12 @@ function JobEvidenceDetail({
     Boolean(output.artifact_object_key || output.artifact_sha256_hex),
   ).length;
   const streams = Array.from(new Set(evidence.outputs.map((output) => output.stream))).sort();
-  const approvalLabel = approvalStateLabel(record.job, record.auditMatches);
-  const auditState = auditEvidenceState(record);
+  const approvalLabel = approvalStateLabel(
+    record.job,
+    record.auditMatches,
+    auditsTruncated,
+  );
+  const auditState = auditEvidenceState(record, auditsTruncated);
   const outputState = outputEvidenceState(record.job, evidence);
 
   return (
@@ -436,7 +470,9 @@ function JobEvidenceDetail({
             <small>
               {record.auditMatches.length > 0
                 ? `${record.auditMatches.length} row${record.auditMatches.length === 1 ? "" : "s"}`
-                : "Audit event missing"}
+                : auditsTruncated
+                  ? "Not linked in loaded audit history"
+                  : "Audit event missing"}
             </small>
           </div>
           {record.auditMatches.length > 0 ? (
@@ -553,7 +589,10 @@ function jsonValueContainsExactText(value: JsonValue, expected: string): boolean
   return false;
 }
 
-function auditEvidenceState(record: EvidenceRecord): EvidenceStateLabel {
+function auditEvidenceState(
+  record: EvidenceRecord,
+  auditsTruncated = false,
+): EvidenceStateLabel {
   if (record.auditMatches.length > 0) {
     const actions = record.auditMatches.map((audit) => audit.action).join(" ");
     return {
@@ -561,6 +600,14 @@ function auditEvidenceState(record: EvidenceRecord): EvidenceStateLabel {
       label: `${record.auditMatches.length} matched`,
       searchText: `${actions} matched audit linked`,
       tone: "ok",
+    };
+  }
+  if (auditsTruncated) {
+    return {
+      detail: "No audit row matched this job ID in the loaded audit history",
+      label: "Not linked in loaded history",
+      searchText: "audit not linked loaded history",
+      tone: "neutral",
     };
   }
   return {
@@ -656,7 +703,11 @@ function jobActorLabel(job: JobHistoryRecord, audits: AuditLogRecord[]): string 
   return "system / automation";
 }
 
-function approvalStateLabel(job: JobHistoryRecord, audits: AuditLogRecord[]): string {
+function approvalStateLabel(
+  job: JobHistoryRecord,
+  audits: AuditLogRecord[],
+  auditsTruncated = false,
+): string {
   const approvalAudit = audits.find((audit) =>
     `${audit.action} ${JSON.stringify(audit.metadata)}`.toLowerCase().includes("approval"),
   );
@@ -664,7 +715,9 @@ function approvalStateLabel(job: JobHistoryRecord, audits: AuditLogRecord[]): st
     return `${approvalAudit.action} · ${formatTime(approvalAudit.created_at)}`;
   }
   return job.privileged
-    ? "no approval record exposed"
+    ? auditsTruncated
+      ? "no approval record in loaded audit history"
+      : "no approval record exposed"
     : "approval not required by job record";
 }
 

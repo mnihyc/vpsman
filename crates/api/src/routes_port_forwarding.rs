@@ -13,8 +13,8 @@ use crate::{
     model_port_forwarding::{
         CreatePortForwardRuleRequest, PortForwardBulkAction, PortForwardBulkRequest,
         PortForwardBulkResponse, PortForwardClientSyncView, PortForwardMutationRequest,
-        PortForwardMutationResponse, PortForwardRuleView, PortForwardSyncView,
-        ResolveHostnameRequest, ResolveHostnameResponse, ResolvedAddressView,
+        PortForwardMutationResponse, PortForwardRuleListItem, PortForwardRuleView,
+        PortForwardSyncView, ResolveHostnameRequest, ResolveHostnameResponse, ResolvedAddressView,
         UpdatePortForwardRuleRequest,
     },
     runtime_config::dispatch_runtime_config_for_clients,
@@ -25,11 +25,11 @@ use crate::{
 pub(crate) async fn list_port_forward_rules(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<PortForwardRuleView>>, ApiError> {
+) -> Result<Json<Vec<PortForwardRuleListItem>>, ApiError> {
     let _operator = state
         .require_operator_scope(&headers, SCOPE_NETWORK_READ)
         .await?;
-    Ok(Json(state.repo.list_port_forward_rules().await?))
+    Ok(Json(state.repo.list_port_forward_rule_items().await?))
 }
 
 pub(crate) async fn create_port_forward_rule(
@@ -58,7 +58,10 @@ pub(crate) async fn create_port_forward_rule(
         .unwrap_or(created);
     Ok((
         StatusCode::CREATED,
-        Json(PortForwardMutationResponse { rule, sync }),
+        Json(PortForwardMutationResponse {
+            rule: rule.into(),
+            sync,
+        }),
     ))
 }
 
@@ -69,7 +72,12 @@ pub(crate) async fn update_port_forward_rule(
     Json(request): Json<UpdatePortForwardRuleRequest>,
 ) -> Result<Json<PortForwardMutationResponse>, ApiError> {
     let operator = network_writer(&state, &headers).await?;
-    let existing = required_active_rule(&state, rule_id).await?;
+    let existing = state
+        .repo
+        .get_port_forward_rule_identity(rule_id)
+        .await?
+        .filter(|rule| rule.deleted_at.is_none())
+        .ok_or_else(|| ApiError::not_found("port_forward_rule_not_found"))?;
     if existing.revision != request.expected_revision {
         return Err(ApiError::conflict("port_forward_rule_snapshot_stale"));
     }
@@ -96,7 +104,10 @@ pub(crate) async fn update_port_forward_rule(
         .get_port_forward_rule(rule_id)
         .await?
         .unwrap_or(changed);
-    Ok(Json(PortForwardMutationResponse { rule, sync }))
+    Ok(Json(PortForwardMutationResponse {
+        rule: rule.into(),
+        sync,
+    }))
 }
 
 pub(crate) async fn enable_port_forward_rule(
@@ -125,10 +136,50 @@ pub(crate) async fn delete_port_forward_rule(
 ) -> Result<Json<PortForwardMutationResponse>, ApiError> {
     let operator = network_writer(&state, &headers).await?;
     require_confirmed(request.confirmed)?;
-    let existing = required_active_rule(&state, rule_id).await?;
-    if existing.revision != request.expected_revision {
+    let identity = state
+        .repo
+        .get_port_forward_rule_identity(rule_id)
+        .await?
+        .filter(|rule| rule.deleted_at.is_none())
+        .ok_or_else(|| ApiError::not_found("port_forward_rule_not_found"))?;
+    if identity.revision != request.expected_revision {
         return Err(ApiError::conflict("port_forward_rule_snapshot_stale"));
     }
+    let existing = state.repo.get_port_forward_rule(rule_id).await?;
+    if existing.is_none() {
+        let configuration_error = state
+            .repo
+            .port_forward_rule_configuration_error(rule_id)
+            .await?
+            .ok_or_else(|| ApiError::conflict("port_forward_rule_configuration_unavailable"))?;
+        let deleted = state
+            .repo
+            .delete_corrupt_port_forward_rule(
+                rule_id,
+                request.expected_revision,
+                request.reason.as_deref(),
+                &configuration_error,
+                &operator,
+            )
+            .await
+            .map_err(port_forward_repository_error)?;
+        let sync = if !identity.enabled && identity.revision == 1 {
+            no_sync("retired_disabled_draft")
+        } else {
+            sync_client(
+                &state,
+                &operator,
+                &identity.client_id,
+                "port_forward_rule_deleted",
+            )
+            .await
+        };
+        return Ok(Json(PortForwardMutationResponse {
+            rule: PortForwardRuleListItem::Corrupt(Box::new(deleted)),
+            sync,
+        }));
+    }
+    let existing = existing.expect("checked above");
     let deleted = state
         .repo
         .delete_port_forward_rule(
@@ -155,7 +206,10 @@ pub(crate) async fn delete_port_forward_rule(
         .get_port_forward_rule(rule_id)
         .await?
         .unwrap_or(deleted);
-    Ok(Json(PortForwardMutationResponse { rule, sync }))
+    Ok(Json(PortForwardMutationResponse {
+        rule: rule.into(),
+        sync,
+    }))
 }
 
 pub(crate) async fn forget_port_forward_rule(
@@ -179,7 +233,7 @@ pub(crate) async fn forget_port_forward_rule(
         .await
         .map_err(port_forward_repository_error)?;
     Ok(Json(PortForwardMutationResponse {
-        rule,
+        rule: rule.into(),
         sync: no_sync("forgotten_without_host_cleanup"),
     }))
 }
@@ -204,7 +258,10 @@ pub(crate) async fn reapply_port_forward_rule(
         "port_forward_table_reapply",
     )
     .await;
-    Ok(Json(PortForwardMutationResponse { rule, sync }))
+    Ok(Json(PortForwardMutationResponse {
+        rule: rule.into(),
+        sync,
+    }))
 }
 
 pub(crate) async fn bulk_mutate_port_forward_rules(
@@ -339,7 +396,7 @@ async fn mutate_enabled(
     }
     if existing.enabled == enabled {
         return Ok(Json(PortForwardMutationResponse {
-            rule: existing,
+            rule: existing.into(),
             sync: no_sync("already_in_requested_state"),
         }));
     }
@@ -364,7 +421,10 @@ async fn mutate_enabled(
         .get_port_forward_rule(rule_id)
         .await?
         .unwrap_or(changed);
-    Ok(Json(PortForwardMutationResponse { rule, sync }))
+    Ok(Json(PortForwardMutationResponse {
+        rule: rule.into(),
+        sync,
+    }))
 }
 
 async fn network_writer(state: &AppState, headers: &HeaderMap) -> Result<AuthContext, ApiError> {

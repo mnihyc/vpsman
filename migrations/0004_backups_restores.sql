@@ -10,6 +10,9 @@ CREATE TABLE backup_artifacts (
 CREATE UNIQUE INDEX backup_artifacts_object_key_unique
     ON backup_artifacts (object_key);
 
+CREATE INDEX backup_artifacts_client_idx
+    ON backup_artifacts (client_id);
+
 CREATE TABLE backup_requests (
     id UUID PRIMARY KEY,
     actor_id UUID REFERENCES operators(id),
@@ -17,6 +20,7 @@ CREATE TABLE backup_requests (
     paths TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
     include_config BOOLEAN NOT NULL DEFAULT FALSE,
     follow_symlinks BOOLEAN NOT NULL DEFAULT FALSE,
+    missing_path_policy TEXT NOT NULL DEFAULT 'fail',
     status TEXT NOT NULL,
     payload_hash TEXT NOT NULL,
     command_scope TEXT NOT NULL,
@@ -31,7 +35,9 @@ CREATE TABLE backup_requests (
             'artifact_metadata_recorded',
             'execution_failed',
             'execution_canceled'
-        ))
+        )),
+    CONSTRAINT backup_requests_missing_path_policy_check
+        CHECK (missing_path_policy IN ('fail', 'skip'))
 );
 
 CREATE INDEX backup_requests_client_created_idx
@@ -39,6 +45,10 @@ CREATE INDEX backup_requests_client_created_idx
 
 CREATE INDEX backup_requests_status_created_idx
     ON backup_requests (status, created_at DESC, id DESC);
+
+CREATE INDEX backup_requests_failed_client_idx
+    ON backup_requests (client_id, created_at DESC, id DESC)
+    WHERE status = 'execution_failed';
 
 CREATE INDEX backup_requests_source_schedule_created_idx
     ON backup_requests (source_schedule_id, client_id, created_at DESC, id DESC)
@@ -64,6 +74,9 @@ CREATE TABLE restore_plans (
 
 CREATE INDEX restore_plans_source_created_idx
     ON restore_plans (source_backup_request_id, created_at DESC, id DESC);
+
+CREATE INDEX restore_plans_source_client_idx
+    ON restore_plans (source_client_id);
 
 CREATE INDEX restore_plans_target_created_idx
     ON restore_plans (target_client_id, created_at DESC, id DESC);
@@ -102,6 +115,10 @@ CREATE TABLE backup_policies (
     retention_days INTEGER NOT NULL DEFAULT 30 CHECK (retention_days BETWEEN 1 AND 3650),
     keep_last INTEGER NOT NULL DEFAULT 7 CHECK (keep_last BETWEEN 1 AND 1000),
     rotation_generation TEXT,
+    retention_scanned_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE INDEX backup_policies_retention_scan_idx
+    ON backup_policies (retention_scanned_at ASC NULLS FIRST, schedule_id ASC);

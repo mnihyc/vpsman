@@ -33,6 +33,34 @@ pub(crate) struct PortForwardRuleView {
     pub(crate) forgotten_at: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(untagged)]
+pub(crate) enum PortForwardRuleListItem {
+    Rule(Box<PortForwardRuleView>),
+    Corrupt(Box<PortForwardRuleCorruptView>),
+}
+
+impl From<PortForwardRuleView> for PortForwardRuleListItem {
+    fn from(value: PortForwardRuleView) -> Self {
+        Self::Rule(Box::new(value))
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct PortForwardRuleCorruptView {
+    pub(crate) id: Uuid,
+    pub(crate) client_id: String,
+    pub(crate) name: String,
+    pub(crate) enabled: bool,
+    pub(crate) revision: i64,
+    pub(crate) created_at: String,
+    pub(crate) updated_at: String,
+    pub(crate) deleted_at: Option<String>,
+    pub(crate) removal_confirmed_at: Option<String>,
+    pub(crate) forgotten_at: Option<String>,
+    pub(crate) configuration_error: String,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct PortForwardRuleRecord {
     pub(crate) id: Uuid,
@@ -105,7 +133,7 @@ pub(crate) struct PortForwardSyncView {
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct PortForwardMutationResponse {
-    pub(crate) rule: PortForwardRuleView,
+    pub(crate) rule: PortForwardRuleListItem,
     pub(crate) sync: PortForwardSyncView,
 }
 
@@ -167,7 +195,8 @@ pub(crate) struct ResolveHostnameResponse {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PortForwardRuntimeRecord {
-    pub(crate) snapshot: PortForwardRuntimeSnapshot,
+    pub(crate) snapshot: Option<PortForwardRuntimeSnapshot>,
+    pub(crate) configuration_error: Option<String>,
 }
 
 const fn default_true() -> bool {

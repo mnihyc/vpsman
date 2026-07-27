@@ -73,18 +73,23 @@ pub(crate) async fn delete_webhook_rule(
         128,
         "webhook_rule_delete_review_invalid",
     )?;
-    let existing = state
+    state
         .repo
-        .list_webhook_rules(1000, None)
-        .await?
-        .into_iter()
-        .find(|rule| rule.id == rule_id)
-        .ok_or_else(|| ApiError::not_found("webhook_rule_not_found"))?;
-    if existing.name != request.reviewed_name.trim() {
-        return Err(ApiError::conflict("webhook_rule_delete_review_stale"));
-    }
-    state.repo.delete_webhook_rule(rule_id, &operator).await?;
+        .delete_webhook_rule(rule_id, &request.reviewed_name, &operator)
+        .await
+        .map_err(webhook_rule_delete_error)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn webhook_rule_delete_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("webhook_rule_not_found") {
+        return ApiError::not_found("webhook_rule_not_found");
+    }
+    if message.contains("webhook_rule_delete_review_stale") {
+        return ApiError::conflict("webhook_rule_delete_review_stale");
+    }
+    ApiError::from(error)
 }
 
 pub(crate) async fn dry_run_webhook_rule(
@@ -175,8 +180,14 @@ pub(crate) async fn process_webhook_rule_deliveries(
 
 fn webhook_delivery_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
+    if message.contains("webhook_rule_not_found") {
+        return ApiError::not_found("webhook_rule_not_found");
+    }
     if message.contains("preview_hash_mismatch") {
         return ApiError::conflict("webhook_rule_delivery_preview_hash_mismatch");
+    }
+    if message.contains("webhook_delivery_rotation_changed_during_confirmation") {
+        return ApiError::conflict("webhook_delivery_rotation_confirmation_stale");
     }
     ApiError::from(error)
 }

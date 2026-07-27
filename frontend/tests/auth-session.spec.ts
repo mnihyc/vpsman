@@ -127,6 +127,69 @@ test("refreshes a stored session before returning to sign in", async ({
   ).toHaveCount(0);
 });
 
+test("keeps a stored session visible and retryable when refresh is temporarily unavailable", async ({
+  page,
+}) => {
+  const expiredAccessToken = "expired".repeat(10).slice(0, 64);
+  let refreshAvailable = false;
+  await page.addInitScript(
+    ({ access, refresh }) => {
+      window.localStorage.setItem("vpsman.accessToken", access);
+      window.localStorage.setItem("vpsman.refreshToken", refresh);
+    },
+    { access: expiredAccessToken, refresh: refreshToken },
+  );
+  await installAuthSessionApiMock(page);
+  await page.unroute("**/api/v1/auth/refresh");
+  await page.route("**/api/v1/auth/refresh", async (route) => {
+    if (!refreshAvailable) {
+      await route.fulfill({
+        contentType: "application/json",
+        json: { error: "refresh_service_unavailable" },
+        status: 503,
+      });
+      return;
+    }
+    await route.fulfill({
+      contentType: "application/json",
+      json: {
+        access_token: rotatedAccessToken,
+        expires_in_secs: 900,
+        operator: {
+          id: "99999999-aaaa-4bbb-8ccc-000000000001",
+          preferences,
+          role: "admin",
+          scopes: ["*"],
+          totp_enabled: false,
+          username: "session-admin",
+        },
+        refresh_expires_in_secs: 1209600,
+        refresh_token: rotatedRefreshToken,
+        token_type: "Bearer",
+      },
+    });
+  });
+
+  await page.goto("/");
+  const refreshNotice = page.getByRole("alert").filter({
+    hasText: "Session refresh unavailable",
+  });
+  await expect(refreshNotice).toBeVisible();
+  expect(await readSessionStorage(page)).toEqual({
+    access: expiredAccessToken,
+    refresh: refreshToken,
+  });
+
+  refreshAvailable = true;
+  await activate(refreshNotice.getByRole("button", { name: "Retry" }));
+  await expectAuthenticatedConsoleShell(page);
+  await expect(refreshNotice).toHaveCount(0);
+  expect(await readSessionStorage(page)).toEqual({
+    access: rotatedAccessToken,
+    refresh: rotatedRefreshToken,
+  });
+});
+
 test("sign out revokes the bearer session and clears privilege before reauthentication", async ({
   page,
 }) => {
@@ -203,6 +266,11 @@ test("sign out clears local authentication when server revocation fails", async 
   await activate(page.getByRole("button", { name: "Clear operator session" }));
 
   await expectOperatorAccessShell(page);
+  await expect(
+    page.getByText(
+      /Signed out locally, but the server could not revoke this session/,
+    ),
+  ).toBeVisible();
   expect(await readSessionStorage(page)).toEqual({
     access: null,
     refresh: null,

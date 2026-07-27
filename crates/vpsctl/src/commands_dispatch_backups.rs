@@ -17,11 +17,12 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             commands_backups::backup_artifacts(api_url, token, limit)?;
             Ok(None)
         }
-        Command::BackupPolicies => {
-            commands_backups::backup_policies(api_url, token)?;
+        Command::BackupPolicies { limit, offset } => {
+            commands_backups::backup_policies(api_url, token, limit, offset)?;
             Ok(None)
         }
         Command::BackupPolicyUpsert {
+            schedule_id,
             name,
             paths,
             include_config,
@@ -38,12 +39,14 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             retention_days,
             keep_last,
             rotation_generation,
+            clear_rotation_generation,
             confirmed,
         } => {
             commands_backups::backup_policy_upsert(
                 api_url,
                 token,
                 commands_backups::BackupPolicyUpsertOptions {
+                    schedule_id,
                     name,
                     paths,
                     include_config,
@@ -60,6 +63,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                     retention_days,
                     keep_last,
                     rotation_generation,
+                    clear_rotation_generation,
                     confirmed,
                 },
             )?;

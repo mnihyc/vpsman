@@ -5,7 +5,10 @@ use vpsman_common::{
     job_command_type_label, AgentHello, CommandOutput, GatewayAgentHelloIngest,
     GatewayTerminalOutputIngest, JobCommand,
 };
-use vpsman_server_core::{TARGET_STATUS_AGENT_LOST, TARGET_STATUS_SKIPPED};
+use vpsman_server_core::{
+    TARGET_STATUS_AGENT_LOST, TARGET_STATUS_CONTROL_TIMEOUT, TARGET_STATUS_DISPATCHING,
+    TARGET_STATUS_FAILED, TARGET_STATUS_SKIPPED,
+};
 
 #[tokio::test]
 async fn fleet_summary_accounts_for_every_visible_connection_state() {
@@ -1609,6 +1612,144 @@ async fn memory_dispatch_claim_promotes_parent_job_to_running() {
     let targets = repo.list_job_targets(job_id).await.unwrap();
     assert_eq!(job.status, "running");
     assert_eq!(targets[0].status, "dispatching");
+}
+
+#[tokio::test]
+async fn memory_dispatch_claim_quarantines_missing_operation_and_keeps_healthy_progress() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    let poison_request = test_job_request(&["poison-client"]);
+    let healthy_request = test_job_request(&["healthy-client"]);
+    let command = poison_request.job_command().unwrap();
+    let command_hash = payload_hash(&encode_json(&command).unwrap());
+    let poison_job_id = repo
+        .record_dispatching_job(
+            Uuid::new_v4(),
+            &poison_request,
+            &command_hash,
+            "missing_operation_poison",
+            &operator,
+            &["poison-client".to_string()],
+        )
+        .await
+        .unwrap();
+    let healthy_job_id = repo
+        .record_dispatching_job(
+            Uuid::new_v4(),
+            &healthy_request,
+            &command_hash,
+            "missing_operation_healthy",
+            &operator,
+            &["healthy-client".to_string()],
+        )
+        .await
+        .unwrap();
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    memory.job_operations.write().await.remove(&poison_job_id);
+
+    let first_claim = repo.claim_due_job_targets(1, 30, 0).await.unwrap();
+    assert!(first_claim.is_empty());
+    let claimed = repo.claim_due_job_targets(1, 30, 0).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].job_id, healthy_job_id);
+    assert_eq!(
+        repo.list_job_targets(poison_job_id).await.unwrap()[0].status,
+        TARGET_STATUS_FAILED
+    );
+    assert_eq!(
+        repo.get_job(poison_job_id).await.unwrap().unwrap().status,
+        "failed"
+    );
+    assert_eq!(
+        repo.list_job_targets(healthy_job_id).await.unwrap()[0].status,
+        TARGET_STATUS_DISPATCHING
+    );
+
+    let outputs = memory.job_outputs.read().await;
+    let output = outputs
+        .iter()
+        .find(|output| output.job_id == poison_job_id && output.client_id == "poison-client")
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(
+        &base64::engine::general_purpose::STANDARD
+            .decode(&output.data_base64)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(payload["code"], "invalid_job_operation");
+    assert_eq!(payload["phase"], "dispatch_claim");
+    drop(outputs);
+    assert!(memory.audits.read().await.iter().any(|audit| {
+        audit.metadata["job_id"] == poison_job_id.to_string()
+            && audit.metadata["reason"] == "invalid_job_operation"
+    }));
+}
+
+#[tokio::test]
+async fn memory_deadline_expiry_marks_missing_operation_without_blocking_healthy_target() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    let command = test_job_request(&["poison-client"]).job_command().unwrap();
+    let command_hash = payload_hash(&encode_json(&command).unwrap());
+    let poison_request = test_job_request(&["poison-client"]);
+    let healthy_request = test_job_request(&["healthy-client"]);
+    let poison_job_id = repo
+        .record_dispatching_job(
+            Uuid::new_v4(),
+            &poison_request,
+            &command_hash,
+            "deadline_missing_operation_poison",
+            &operator,
+            &["poison-client".to_string()],
+        )
+        .await
+        .unwrap();
+    let healthy_job_id = repo
+        .record_dispatching_job(
+            Uuid::new_v4(),
+            &healthy_request,
+            &command_hash,
+            "deadline_missing_operation_healthy",
+            &operator,
+            &["healthy-client".to_string()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.claim_due_job_targets(10, 30, 0).await.unwrap().len(),
+        2
+    );
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    memory.job_operations.write().await.remove(&poison_job_id);
+    for target in memory.job_targets.write().await.iter_mut() {
+        target.started_at = Some("0".to_string());
+    }
+
+    let expired = repo.expire_control_timeout_targets(10, 0).await.unwrap();
+    assert_eq!(expired.len(), 2);
+    assert!(expired.iter().any(|target| {
+        target.job_id == poison_job_id && target.status == TARGET_STATUS_CONTROL_TIMEOUT
+    }));
+    assert!(expired.iter().any(|target| {
+        target.job_id == healthy_job_id && target.status == TARGET_STATUS_CONTROL_TIMEOUT
+    }));
+    let outputs = memory.job_outputs.read().await;
+    let output = outputs
+        .iter()
+        .find(|output| output.job_id == poison_job_id && output.client_id == "poison-client")
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(
+        &base64::engine::general_purpose::STANDARD
+            .decode(&output.data_base64)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(payload["code"], "invalid_job_operation");
+    assert_eq!(payload["phase"], "control_deadline_expiry");
 }
 
 #[tokio::test]

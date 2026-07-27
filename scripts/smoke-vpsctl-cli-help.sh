@@ -120,6 +120,8 @@ done
 
 file_transfer_upload_help="$("$bin" file-transfer-upload --help)"
 [[ "$file_transfer_upload_help" == *"--source-artifact-id"* ]] || smoke_fail "file-transfer-upload help missing --source-artifact-id"
+backup_policy_upsert_help="$("$bin" backup-policy-upsert --help)"
+[[ "$backup_policy_upsert_help" == *"--schedule-id"* ]] || smoke_fail "backup-policy-upsert help missing --schedule-id"
 tunnel_plan_help="$("$bin" tunnel-plan --help)"
 [[ "$tunnel_plan_help" == *"--update-plan-id"* ]] || smoke_fail "tunnel-plan help missing --update-plan-id"
 [[ "$tunnel_plan_help" == *"--expected-revision"* ]] || smoke_fail "tunnel-plan help missing --expected-revision"

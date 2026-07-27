@@ -26,6 +26,10 @@ pub(crate) use vpsman_server_core::aggregate_job_status_from_statuses;
 const EXCLUSIVE_DISPATCH_ADVISORY_LOCK_CLASS: i32 = 0x5650_534d;
 const MAX_CAPABILITY_DEGRADED_REASON_CHARS: usize = 256;
 const MAX_CAPABILITY_DEGRADED_HINT_CHARS: usize = 2048;
+const INVALID_JOB_OPERATION_CODE: &str = "invalid_job_operation";
+const MAX_JOB_OPERATION_DECODE_ERROR_CHARS: usize = 1024;
+const INVALID_JOB_OPERATION_RETRY_DEFER_SECS: i32 = 30;
+const INVALID_JOB_OPERATION_RETRY_MARKER: &str = "invalid_job_operation:";
 
 use crate::model::*;
 use crate::model_webhook_rules::WebhookEventCandidate;
@@ -403,6 +407,64 @@ fn synthetic_terminal_outcome(
     }
 }
 
+fn decode_persisted_job_operation(
+    operation: Option<sqlx::types::Json<Value>>,
+) -> std::result::Result<JobCommand, String> {
+    let operation = operation
+        .map(|operation| operation.0)
+        .ok_or_else(|| "operation is null".to_string())?;
+    serde_json::from_value(operation).map_err(|error| {
+        error
+            .to_string()
+            .chars()
+            .take(MAX_JOB_OPERATION_DECODE_ERROR_CHARS)
+            .collect()
+    })
+}
+
+fn invalid_job_operation_message(context: &str, decode_error: &str) -> String {
+    let decode_error = decode_error
+        .chars()
+        .take(MAX_JOB_OPERATION_DECODE_ERROR_CHARS)
+        .collect::<String>();
+    format!("{context}: {decode_error}")
+}
+
+struct InvalidJobOperationEvidence<'a> {
+    phase: &'a str,
+    message: &'a str,
+    decode_error: &'a str,
+    process_incarnation_id: Option<Uuid>,
+}
+
+struct InvalidJobOperationTarget {
+    job_id: Uuid,
+    client_id: String,
+    message: String,
+    decode_error: String,
+    process_incarnation_id: Option<Uuid>,
+}
+
+fn invalid_job_operation_status_output_value(
+    job_id: Uuid,
+    client_id: &str,
+    status: &str,
+    evidence: &InvalidJobOperationEvidence<'_>,
+) -> Value {
+    json!({
+        "type": "dispatch_error",
+        "status": status,
+        "code": INVALID_JOB_OPERATION_CODE,
+        "reason": INVALID_JOB_OPERATION_CODE,
+        "phase": evidence.phase,
+        "message": evidence.message,
+        "decode_error": evidence.decode_error,
+        "job_id": job_id,
+        "client_id": client_id,
+        "process_incarnation_id": evidence.process_incarnation_id,
+    })
+}
+
 pub(crate) async fn enqueue_target_terminal_event_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     job_id: Uuid,
@@ -598,6 +660,30 @@ mod tests {
         assert!(!exclusive.contains(&"network_speed_test"));
         assert!(!exclusive.contains(&"network_status"));
     }
+
+    #[test]
+    fn persisted_job_operation_decode_is_explicit_for_null_and_invalid_shapes() {
+        assert_eq!(
+            decode_persisted_job_operation(None).unwrap_err(),
+            "operation is null"
+        );
+        assert!(
+            decode_persisted_job_operation(Some(sqlx::types::Json(json!({
+                "type": "removed_legacy_operation"
+            }))))
+            .unwrap_err()
+            .contains("unknown variant")
+        );
+        assert!(matches!(
+            decode_persisted_job_operation(Some(sqlx::types::Json(json!({
+                "type": "shell",
+                "argv": ["/bin/true"],
+                "pty": false
+            }))))
+            .unwrap(),
+            JobCommand::Shell { .. }
+        ));
+    }
 }
 
 fn agent_lost_status_output_value(
@@ -716,6 +802,111 @@ pub(crate) async fn append_synthetic_status_output_in_tx(
         }
     }
     bail!("agent_lost_output_sequence_conflict:{job_id}:{client_id}")
+}
+
+async fn terminalize_invalid_job_operation_target_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    target: &InvalidJobOperationTarget,
+    status: &str,
+    phase: &str,
+    request_cancel: bool,
+    control_deadline_extra_secs: Option<i32>,
+) -> Result<bool> {
+    let updated = sqlx::query(
+        r#"
+        UPDATE job_targets target
+        SET
+            status = $3,
+            message = $4,
+            exit_code = NULL,
+            started_at = COALESCE(started_at, now()),
+            completed_at = now(),
+            result_received_at = now(),
+            dispatch_lease_until = NULL,
+            cancel_requested_at = CASE
+                WHEN $5 THEN COALESCE(cancel_requested_at, now())
+                ELSE cancel_requested_at
+            END,
+            last_dispatch_error = $4
+        FROM jobs job
+        WHERE target.job_id = $1
+          AND target.client_id = $2
+          AND job.id = target.job_id
+          AND target.completed_at IS NULL
+          AND target.status IN ('dispatching', 'running')
+          AND (
+            $6::integer IS NULL
+            OR (
+              target.deadline_at IS NOT NULL
+              AND target.deadline_at <= now()
+              AND target.started_at IS NOT NULL
+              AND target.started_at
+                    + make_interval(secs => (job.max_timeout_secs + $6)::integer) <= now()
+              AND (
+                ($7::uuid IS NULL AND target.process_incarnation_id IS NULL)
+                OR target.process_incarnation_id = $7::uuid
+              )
+            )
+          )
+        "#,
+    )
+    .bind(target.job_id)
+    .bind(&target.client_id)
+    .bind(status)
+    .bind(&target.message)
+    .bind(request_cancel)
+    .bind(control_deadline_extra_secs)
+    .bind(target.process_incarnation_id)
+    .execute(&mut **tx)
+    .await?;
+    if updated.rows_affected() == 0 {
+        return Ok(false);
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs (
+            id, actor_id, action, target, command_hash, metadata
+        )
+        VALUES ($1, NULL, 'job.target_result', $2, NULL, $3)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(format!("client:{}", target.client_id))
+    .bind(json!({
+        "job_id": target.job_id,
+        "status": status,
+        "message": target.message,
+        "reason": INVALID_JOB_OPERATION_CODE,
+        "phase": phase,
+        "decode_error": target.decode_error,
+        "process_incarnation_id": target.process_incarnation_id,
+    }))
+    .execute(&mut **tx)
+    .await?;
+    finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(tx, target.job_id).await?;
+    Ok(true)
+}
+
+async fn terminalize_invalid_job_operation_target(
+    pool: &sqlx::PgPool,
+    target: &InvalidJobOperationTarget,
+    status: &str,
+    phase: &str,
+    request_cancel: bool,
+    control_deadline_extra_secs: Option<i32>,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let terminalized = terminalize_invalid_job_operation_target_in_tx(
+        &mut tx,
+        target,
+        status,
+        phase,
+        request_cancel,
+        control_deadline_extra_secs,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(terminalized)
 }
 
 pub(crate) async fn finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(
@@ -3545,10 +3736,12 @@ impl Repository {
                     .collect::<std::collections::HashSet<_>>();
                 let mut targets = memory.job_targets.write().await;
                 let mut claimed = Vec::new();
+                let mut selected = 0_usize;
+                let mut invalid_operations = Vec::new();
                 for target in targets.iter_mut().filter(|target| {
                     target.completed_at.is_none() && target.status == TARGET_STATUS_QUEUED
                 }) {
-                    if claimed.len() >= limit.clamp(1, 500) as usize {
+                    if selected >= limit.clamp(1, 500) as usize {
                         break;
                     }
                     let Some(job) = jobs.iter().find(|job| job.id == target.job_id) else {
@@ -3579,6 +3772,41 @@ impl Repository {
                         }
                     }
                     let Some(operation) = operations.get(&target.job_id).cloned() else {
+                        selected += 1;
+                        let decode_error =
+                            "operation is missing from the in-memory job record".to_string();
+                        let message = invalid_job_operation_message(
+                            "stored job operation is invalid; target was not dispatched",
+                            &decode_error,
+                        );
+                        let output_data = invalid_job_operation_status_output_value(
+                            target.job_id,
+                            &target.client_id,
+                            TARGET_STATUS_FAILED,
+                            &InvalidJobOperationEvidence {
+                                phase: "dispatch_claim",
+                                message: &message,
+                                decode_error: &decode_error,
+                                process_incarnation_id: None,
+                            },
+                        )
+                        .to_string()
+                        .into_bytes();
+                        target.status = TARGET_STATUS_FAILED.to_string();
+                        target.message = Some(message.clone());
+                        target.exit_code = None;
+                        target.started_at = Some(now.clone());
+                        target.completed_at = Some(now.clone());
+                        invalid_operations.push((
+                            InvalidJobOperationTarget {
+                                job_id: target.job_id,
+                                client_id: target.client_id.clone(),
+                                message,
+                                decode_error,
+                                process_incarnation_id: None,
+                            },
+                            output_data,
+                        ));
                         continue;
                     };
                     let is_exclusive =
@@ -3588,6 +3816,7 @@ impl Repository {
                     {
                         continue;
                     }
+                    selected += 1;
                     let max_timeout_secs = timeouts
                         .get(&target.job_id)
                         .copied()
@@ -3615,8 +3844,13 @@ impl Repository {
                     .iter()
                     .map(|target| target.job_id)
                     .collect::<std::collections::HashSet<_>>();
+                let invalid_job_ids = invalid_operations
+                    .iter()
+                    .map(|(target, _)| target.job_id)
+                    .collect::<std::collections::HashSet<_>>();
                 drop(targets);
-                if !claimed_job_ids.is_empty() {
+                if !claimed_job_ids.is_empty() || !invalid_job_ids.is_empty() {
+                    let target_snapshot = memory.job_targets.read().await.clone();
                     let mut jobs = memory.jobs.write().await;
                     for job in jobs.iter_mut().filter(|job| {
                         claimed_job_ids.contains(&job.id)
@@ -3625,10 +3859,94 @@ impl Repository {
                     }) {
                         job.status = JOB_STATUS_RUNNING.to_string();
                     }
+                    for job_id in invalid_job_ids {
+                        let job_targets = target_snapshot
+                            .iter()
+                            .filter(|target| target.job_id == job_id)
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if job_targets.is_empty()
+                            || job_targets
+                                .iter()
+                                .any(|target| target_status_is_active(&target.status))
+                        {
+                            continue;
+                        }
+                        if let Some(job) = jobs
+                            .iter_mut()
+                            .find(|job| job.id == job_id && job.completed_at.is_none())
+                        {
+                            job.status =
+                                aggregate_job_status_from_targets(&job_targets).to_string();
+                            job.completed_at = Some(now.clone());
+                        }
+                    }
+                }
+                if !invalid_operations.is_empty() {
+                    {
+                        let mut outputs = memory.job_outputs.write().await;
+                        for (target, data) in &invalid_operations {
+                            let seq = outputs
+                                .iter()
+                                .filter(|output| {
+                                    output.job_id == target.job_id
+                                        && output.client_id == target.client_id
+                                })
+                                .map(|output| output.seq)
+                                .max()
+                                .unwrap_or(-1)
+                                .saturating_add(1);
+                            outputs.push(JobOutputView {
+                                job_id: target.job_id,
+                                client_id: target.client_id.clone(),
+                                seq,
+                                stream: "status".to_string(),
+                                data_base64: base64::engine::general_purpose::STANDARD.encode(data),
+                                storage: "inline".to_string(),
+                                artifact_object_key: None,
+                                artifact_sha256_hex: None,
+                                artifact_size_bytes: None,
+                                exit_code: None,
+                                done: true,
+                                received_at: Some(now.clone()),
+                                created_at: now.clone(),
+                            });
+                        }
+                    }
+                    {
+                        let mut audits = memory.audits.write().await;
+                        for (target, _) in &invalid_operations {
+                            audits.push(AuditLogView {
+                                id: Uuid::new_v4(),
+                                actor_id: None,
+                                action: "job.target_result".to_string(),
+                                target: format!("client:{}", target.client_id),
+                                command_hash: None,
+                                metadata: json!({
+                                    "job_id": target.job_id,
+                                    "status": TARGET_STATUS_FAILED,
+                                    "message": target.message,
+                                    "reason": INVALID_JOB_OPERATION_CODE,
+                                    "phase": "dispatch_claim",
+                                    "decode_error": target.decode_error,
+                                }),
+                                created_at: now.clone(),
+                            });
+                        }
+                    }
+                    for (target, _) in &invalid_operations {
+                        warn!(
+                            job_id = %target.job_id,
+                            client_id = %target.client_id,
+                            error = %target.decode_error,
+                            "terminalized dispatch target with invalid stored job operation"
+                        );
+                    }
                 }
                 Ok(claimed)
             }
             Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
                 let rows = sqlx::query(
                     r#"
                     WITH due AS (
@@ -3938,26 +4256,94 @@ impl Repository {
                 .bind(exclusive_operation_types())
                 .bind(EXCLUSIVE_DISPATCH_ADVISORY_LOCK_CLASS)
                 .bind(control_deadline_extra_secs.min(i32::MAX as u64) as i32)
-                .fetch_all(pool)
+                .fetch_all(&mut *tx)
                 .await?;
-                rows.into_iter()
-                    .map(|row| {
-                        let operation: sqlx::types::Json<JobCommand> = row.try_get("operation")?;
-                        let max_timeout_secs =
-                            row.try_get::<i64, _>("max_timeout_secs")?.max(1) as u64;
-                        Ok(ClaimedJobTarget {
-                            job_id: row.try_get("job_id")?,
-                            client_id: row.try_get("client_id")?,
-                            actor_id: row.try_get("actor_id")?,
-                            command_type: row.try_get("command_type")?,
-                            payload_hash: row.try_get("payload_hash")?,
-                            process_incarnation_id: row.try_get("process_incarnation_id")?,
-                            operation: operation.0,
-                            source_schedule_id: row.try_get("source_schedule_id")?,
-                            max_timeout_secs,
-                        })
-                    })
-                    .collect()
+                let mut claimed = Vec::with_capacity(rows.len());
+                let mut invalid_operations = Vec::new();
+                for row in rows {
+                    let job_id: Uuid = row.try_get("job_id")?;
+                    let client_id: String = row.try_get("client_id")?;
+                    let process_incarnation_id: Uuid = row.try_get("process_incarnation_id")?;
+                    let raw_operation: Option<sqlx::types::Json<Value>> =
+                        row.try_get("operation")?;
+                    let operation = match decode_persisted_job_operation(raw_operation) {
+                        Ok(operation) => operation,
+                        Err(decode_error) => {
+                            let message = invalid_job_operation_message(
+                                "stored job operation is invalid; target was not dispatched",
+                                &decode_error,
+                            );
+                            sqlx::query(
+                                r#"
+                                UPDATE job_targets
+                                SET last_dispatch_error = $3
+                                WHERE job_id = $1
+                                  AND client_id = $2
+                                  AND completed_at IS NULL
+                                  AND status = 'dispatching'
+                                "#,
+                            )
+                            .bind(job_id)
+                            .bind(&client_id)
+                            .bind(format!("{INVALID_JOB_OPERATION_RETRY_MARKER} {message}"))
+                            .execute(&mut *tx)
+                            .await?;
+                            invalid_operations.push(InvalidJobOperationTarget {
+                                job_id,
+                                client_id,
+                                message,
+                                decode_error,
+                                process_incarnation_id: Some(process_incarnation_id),
+                            });
+                            continue;
+                        }
+                    };
+                    let max_timeout_secs = row.try_get::<i64, _>("max_timeout_secs")?.max(1) as u64;
+                    claimed.push(ClaimedJobTarget {
+                        job_id,
+                        client_id,
+                        actor_id: row.try_get("actor_id")?,
+                        command_type: row.try_get("command_type")?,
+                        payload_hash: row.try_get("payload_hash")?,
+                        process_incarnation_id,
+                        operation,
+                        source_schedule_id: row.try_get("source_schedule_id")?,
+                        max_timeout_secs,
+                    });
+                }
+                tx.commit().await?;
+                for target in invalid_operations {
+                    match terminalize_invalid_job_operation_target(
+                        pool,
+                        &target,
+                        TARGET_STATUS_FAILED,
+                        "dispatch_claim",
+                        false,
+                        None,
+                    )
+                    .await
+                    {
+                        Ok(true) => warn!(
+                            job_id = %target.job_id,
+                            client_id = %target.client_id,
+                            error = %target.decode_error,
+                            "terminalized dispatch target with invalid stored job operation"
+                        ),
+                        Ok(false) => warn!(
+                            job_id = %target.job_id,
+                            client_id = %target.client_id,
+                            "invalid stored job operation target changed before terminalization"
+                        ),
+                        Err(error) => warn!(
+                            job_id = %target.job_id,
+                            client_id = %target.client_id,
+                            decode_error = %target.decode_error,
+                            error = %error,
+                            "failed to terminalize dispatch target with invalid stored job operation"
+                        ),
+                    }
+                }
+                Ok(claimed)
             }
         }
     }
@@ -4529,6 +4915,7 @@ impl Repository {
                 let mut expired = Vec::new();
                 let mut synthetic_outputs = Vec::new();
                 let mut terminalized_inputs = Vec::new();
+                let mut invalid_operation_evidence = Vec::new();
                 let mut targets = memory.job_targets.write().await;
                 for target in targets
                     .iter_mut()
@@ -4557,58 +4944,98 @@ impl Repository {
                     if now.saturating_sub(started_at) < max_timeout_secs {
                         continue;
                     }
-                    let (status, message, output_value, exit_code) = if matches!(
-                        operations.get(&target.job_id),
-                        Some(JobCommand::AgentUpdateActivate {
-                            restart_agent: true,
-                            ..
-                        })
-                    ) {
-                        let message = "agent update activation restart did not reconnect with matching heartbeat before deadline".to_string();
-                        (
-                            TARGET_STATUS_AGENT_LOST,
+                    let (status, message, output_value, exit_code, invalid_decode_error) =
+                        match operations.get(&target.job_id) {
+                            None => {
+                                let decode_error =
+                                    "operation is missing from the in-memory job record"
+                                        .to_string();
+                                let message = invalid_job_operation_message(
+                                    "control deadline elapsed and stored job operation is invalid",
+                                    &decode_error,
+                                );
+                                (
+                                    TARGET_STATUS_CONTROL_TIMEOUT,
+                                    message.clone(),
+                                    invalid_job_operation_status_output_value(
+                                        target.job_id,
+                                        &target.client_id,
+                                        TARGET_STATUS_CONTROL_TIMEOUT,
+                                        &InvalidJobOperationEvidence {
+                                            phase: "control_deadline_expiry",
+                                            message: &message,
+                                            decode_error: &decode_error,
+                                            process_incarnation_id: target.process_incarnation_id,
+                                        },
+                                    ),
+                                    None,
+                                    Some(decode_error),
+                                )
+                            }
+                            Some(JobCommand::AgentUpdateActivate {
+                                restart_agent: true,
+                                ..
+                            }) => {
+                                let message = "agent update activation restart did not reconnect with matching heartbeat before deadline".to_string();
+                                (
+                                    TARGET_STATUS_AGENT_LOST,
+                                    message.clone(),
+                                    agent_lost_status_output_value(
+                                        target.job_id,
+                                        &target.client_id,
+                                        &message,
+                                        target.process_incarnation_id,
+                                        None,
+                                        "agent_update_restart_missing_heartbeat",
+                                    ),
+                                    None,
+                                    None,
+                                )
+                            }
+                            Some(_) => {
+                                let message =
+                                    "control deadline elapsed before final command output"
+                                        .to_string();
+                                (
+                                    TARGET_STATUS_CONTROL_TIMEOUT,
+                                    message.clone(),
+                                    json!({
+                                        "type": "control_timeout",
+                                        "status": TARGET_STATUS_CONTROL_TIMEOUT,
+                                        "code": "control_deadline_elapsed",
+                                        "message": message,
+                                        "job_id": target.job_id,
+                                        "client_id": &target.client_id,
+                                        "process_incarnation_id": target.process_incarnation_id,
+                                    }),
+                                    None,
+                                    None,
+                                )
+                            }
+                        };
+                    if let Some(decode_error) = invalid_decode_error {
+                        invalid_operation_evidence.push((
+                            target.job_id,
+                            target.client_id.clone(),
                             message.clone(),
-                            agent_lost_status_output_value(
-                                target.job_id,
-                                &target.client_id,
-                                &message,
-                                target.process_incarnation_id,
-                                None,
-                                "agent_update_restart_missing_heartbeat",
-                            ),
-                            None,
-                        )
+                            decode_error,
+                        ));
                     } else {
-                        let message =
-                            "control deadline elapsed before final command output".to_string();
-                        (
-                            TARGET_STATUS_CONTROL_TIMEOUT,
-                            message.clone(),
-                            json!({
-                                "type": "control_timeout",
-                                "status": TARGET_STATUS_CONTROL_TIMEOUT,
-                                "code": "control_deadline_elapsed",
-                                "message": message,
-                                "job_id": target.job_id,
-                                "client_id": &target.client_id,
-                                "process_incarnation_id": target.process_incarnation_id,
-                            }),
-                            None,
-                        )
-                    };
+                        terminalized_inputs.push((
+                            target.job_id,
+                            target.client_id.clone(),
+                            status.to_string(),
+                        ));
+                    }
+                    let output_data = output_value.to_string().into_bytes();
                     target.status = status.to_string();
                     target.message = Some(message.clone());
                     target.completed_at = Some(completed_at.clone());
                     synthetic_outputs.push((
                         target.job_id,
                         target.client_id.clone(),
-                        output_value,
+                        output_data,
                         exit_code,
-                    ));
-                    terminalized_inputs.push((
-                        target.job_id,
-                        target.client_id.clone(),
-                        status.to_string(),
                     ));
                     expired.push(DeadlineExpiredJobTarget {
                         job_id: target.job_id,
@@ -4625,8 +5052,7 @@ impl Repository {
                 }
                 if !synthetic_outputs.is_empty() {
                     let mut outputs = memory.job_outputs.write().await;
-                    for (job_id, client_id, output_value, exit_code) in synthetic_outputs {
-                        let data = serde_json::to_vec(&output_value)?;
+                    for (job_id, client_id, data, exit_code) in synthetic_outputs {
                         let seq = outputs
                             .iter()
                             .filter(|output| {
@@ -4653,6 +5079,36 @@ impl Repository {
                         });
                     }
                 }
+                if !invalid_operation_evidence.is_empty() {
+                    let mut audits = memory.audits.write().await;
+                    for (job_id, client_id, message, decode_error) in &invalid_operation_evidence {
+                        audits.push(AuditLogView {
+                            id: Uuid::new_v4(),
+                            actor_id: None,
+                            action: "job.target_result".to_string(),
+                            target: format!("client:{client_id}"),
+                            command_hash: None,
+                            metadata: json!({
+                                "job_id": job_id,
+                                "status": TARGET_STATUS_CONTROL_TIMEOUT,
+                                "message": message,
+                                "reason": INVALID_JOB_OPERATION_CODE,
+                                "phase": "control_deadline_expiry",
+                                "decode_error": decode_error,
+                            }),
+                            created_at: completed_at.clone(),
+                        });
+                    }
+                    drop(audits);
+                    for (job_id, client_id, _, decode_error) in invalid_operation_evidence {
+                        warn!(
+                            %job_id,
+                            client_id,
+                            error = %decode_error,
+                            "terminalized expired target with invalid stored job operation"
+                        );
+                    }
+                }
                 Ok(expired)
             }
             Self::Postgres(pool) => {
@@ -4669,6 +5125,10 @@ impl Repository {
                     JOIN jobs job ON job.id = target.job_id
                     WHERE target.completed_at IS NULL
                       AND target.status IN ('dispatching', 'running')
+                      AND NOT (
+                        COALESCE(target.last_dispatch_error LIKE ($3 || '%'), false)
+                        AND COALESCE(target.dispatch_lease_until > now(), false)
+                      )
                       AND target.deadline_at IS NOT NULL
                       AND target.deadline_at <= now()
                       AND target.started_at IS NOT NULL
@@ -4680,18 +5140,57 @@ impl Repository {
                 )
                 .bind(limit.clamp(1, 500))
                 .bind(control_deadline_extra_secs.min(i32::MAX as u64) as i32)
+                .bind(INVALID_JOB_OPERATION_RETRY_MARKER)
                 .fetch_all(&mut *tx)
                 .await?;
                 let mut expired = Vec::new();
+                let mut invalid_operations = Vec::new();
                 for row in rows {
                     let job_id: Uuid = row.try_get("job_id")?;
                     let client_id: String = row.try_get("client_id")?;
                     let process_incarnation_id: Option<Uuid> =
                         row.try_get("process_incarnation_id")?;
                     let last_dispatch_error: Option<String> = row.try_get("last_dispatch_error")?;
-                    let operation: sqlx::types::Json<JobCommand> = row.try_get("operation")?;
+                    let raw_operation: Option<sqlx::types::Json<Value>> =
+                        row.try_get("operation")?;
+                    let operation = match decode_persisted_job_operation(raw_operation) {
+                        Ok(operation) => operation,
+                        Err(decode_error) => {
+                            let message = invalid_job_operation_message(
+                                "control deadline elapsed and stored job operation is invalid",
+                                &decode_error,
+                            );
+                            sqlx::query(
+                                r#"
+                                UPDATE job_targets
+                                SET
+                                    dispatch_lease_until =
+                                        now() + make_interval(secs => $3::integer),
+                                    last_dispatch_error = $4
+                                WHERE job_id = $1
+                                  AND client_id = $2
+                                  AND completed_at IS NULL
+                                  AND status IN ('dispatching', 'running')
+                                "#,
+                            )
+                            .bind(job_id)
+                            .bind(&client_id)
+                            .bind(INVALID_JOB_OPERATION_RETRY_DEFER_SECS)
+                            .bind(format!("{INVALID_JOB_OPERATION_RETRY_MARKER} {message}"))
+                            .execute(&mut *tx)
+                            .await?;
+                            invalid_operations.push(InvalidJobOperationTarget {
+                                job_id,
+                                client_id,
+                                message,
+                                decode_error,
+                                process_incarnation_id,
+                            });
+                            continue;
+                        }
+                    };
                     let missing_update_heartbeat = matches!(
-                        operation.0,
+                        operation,
                         JobCommand::AgentUpdateActivate {
                             restart_agent: true,
                             ..
@@ -4816,6 +5315,46 @@ impl Repository {
                     });
                 }
                 tx.commit().await?;
+                let control_deadline_extra_secs =
+                    control_deadline_extra_secs.min(i32::MAX as u64) as i32;
+                for target in invalid_operations {
+                    match terminalize_invalid_job_operation_target(
+                        pool,
+                        &target,
+                        TARGET_STATUS_CONTROL_TIMEOUT,
+                        "control_deadline_expiry",
+                        true,
+                        Some(control_deadline_extra_secs),
+                    )
+                    .await
+                    {
+                        Ok(true) => {
+                            warn!(
+                                job_id = %target.job_id,
+                                client_id = %target.client_id,
+                                error = %target.decode_error,
+                                "terminalized expired target with invalid stored job operation"
+                            );
+                            expired.push(DeadlineExpiredJobTarget {
+                                job_id: target.job_id,
+                                client_id: target.client_id,
+                                status: TARGET_STATUS_CONTROL_TIMEOUT.to_string(),
+                            });
+                        }
+                        Ok(false) => warn!(
+                            job_id = %target.job_id,
+                            client_id = %target.client_id,
+                            "invalid stored job operation target no longer meets deadline terminalization conditions"
+                        ),
+                        Err(error) => warn!(
+                            job_id = %target.job_id,
+                            client_id = %target.client_id,
+                            decode_error = %target.decode_error,
+                            error = %error,
+                            "failed to terminalize expired target with invalid stored job operation"
+                        ),
+                    }
+                }
                 Ok(expired)
             }
         }
@@ -5753,12 +6292,9 @@ impl Repository {
         let Some(backup_status) = backup_request_terminal_status_for_target(target_status) else {
             return Ok(());
         };
-        let Some(operation) = self.job_operation(job_id).await? else {
-            return Ok(());
-        };
-        if !matches!(operation, JobCommand::Backup { .. }) {
-            return Ok(());
-        }
+        // The linked backup request is the authoritative relation here. Avoid
+        // decoding jobs.operation while consuming a terminal event: a corrupt
+        // legacy operation must not poison terminal side-effect delivery.
         self.mark_open_backup_request_execution_terminal(
             job_id,
             client_id,

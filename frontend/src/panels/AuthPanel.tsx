@@ -12,9 +12,11 @@ type BootstrapStatusResponse = {
 export function AuthPanel({
   apiError,
   onAuth,
+  sessionNotice,
 }: {
   apiError: string | null;
   onAuth: (auth: AuthResponse) => Promise<void>;
+  sessionNotice: string | null;
 }) {
   const [mode, setMode] = useState<AuthMode>("checking");
   const [username, setUsername] = useState("");
@@ -130,7 +132,9 @@ export function AuthPanel({
   return (
     <section className="authWorkspace" aria-labelledby="operator-access-title">
       <form
-        aria-describedby="auth-mode-summary operator-access-status auth-submit-requirements"
+        aria-describedby={`auth-mode-summary operator-access-status auth-submit-requirements${
+          sessionNotice ? " auth-session-notice" : ""
+        }`}
         aria-label="Operator authentication"
         className="authPanel"
         onSubmit={submit}
@@ -151,6 +155,16 @@ export function AuthPanel({
             </div>
           </div>
         </div>
+        {sessionNotice ? (
+          <div
+            aria-live="polite"
+            className="authNotice"
+            id="auth-session-notice"
+            role="alert"
+          >
+            {sessionNotice}
+          </div>
+        ) : null}
         {error ? (
           <div
             aria-live="polite"

@@ -1,6 +1,8 @@
 use std::{
+    collections::HashSet,
     ffi::{OsStr, OsString},
     io::{self, Read, Write},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
@@ -23,7 +25,7 @@ use crate::{
 };
 
 const MAX_FILE_LIST_LIMIT: u32 = 1000;
-const MAX_FILE_LIST_SCAN_ENTRIES: usize = 10_000;
+pub(crate) const MAX_FILE_TREE_SCAN_ENTRIES: usize = 10_000;
 const MAX_FILE_READ_BYTES: u64 = 1024 * 1024;
 const MAX_FILE_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -279,7 +281,7 @@ async fn execute_file_list_dir(
         .await
         .with_context(|| format!("failed to read directory entry in {path}"))?
     {
-        if scanned_entries >= MAX_FILE_LIST_SCAN_ENTRIES {
+        if scanned_entries >= MAX_FILE_TREE_SCAN_ENTRIES {
             truncated_by_scan_cap = true;
             break;
         }
@@ -329,7 +331,7 @@ async fn execute_file_list_dir(
         "total_entries": total_entries,
         "scanned_entries": scanned_entries,
         "visible_entries_scanned": visible_entries_scanned,
-        "scan_cap_entries": MAX_FILE_LIST_SCAN_ENTRIES,
+        "scan_cap_entries": MAX_FILE_TREE_SCAN_ENTRIES,
         "truncated_by_scan_cap": truncated_by_scan_cap,
         "truncated": truncated_by_scan_cap || end < exact_total_entries,
         "entries": rendered,
@@ -1428,6 +1430,7 @@ fn chmod_path(
     if metadata.is_symlink() && !follow_symlinks {
         anyhow::bail!("chmod target is a symlink");
     }
+    let mut visited_directories = HashSet::new();
     chmod_child(
         parent.dir(),
         parent.name(),
@@ -1437,6 +1440,7 @@ fn chmod_path(
         true,
         cancel_token,
         operation_type,
+        &mut visited_directories,
     )?;
     Ok(())
 }
@@ -1450,6 +1454,7 @@ fn chmod_child(
     top_level: bool,
     cancel_token: &CommandCancelToken,
     operation_type: &'static str,
+    visited_directories: &mut HashSet<(u64, u64)>,
 ) -> Result<()> {
     cancel_token.check(operation_type)?;
     let metadata = safe_fs::stat_child(parent, name, false)?
@@ -1462,9 +1467,15 @@ fn chmod_child(
     }
     let file = safe_fs::open_child_file_read(parent, name, follow_symlinks)
         .with_context(|| format!("failed to open {}", name.to_string_lossy()))?;
+    let opened_metadata = file.metadata()?;
+    if recursive
+        && opened_metadata.is_dir()
+        && !visited_directories.insert((opened_metadata.dev(), opened_metadata.ino()))
+    {
+        anyhow::bail!("recursive chmod encountered a previously visited directory");
+    }
     safe_fs::fchmod_file(&file, mode)
         .with_context(|| format!("failed to chmod {}", name.to_string_lossy()))?;
-    let opened_metadata = safe_fs::stat_file(&file)?;
     if recursive && opened_metadata.is_dir() {
         for entry_name in safe_fs::read_dir_names(&file)? {
             chmod_child(
@@ -1476,6 +1487,7 @@ fn chmod_child(
                 false,
                 cancel_token,
                 operation_type,
+                visited_directories,
             )?;
         }
         safe_fs::sync_dir_best_effort(&file);
@@ -1518,7 +1530,7 @@ fn resolve_owner_group(
             status: OwnershipResolutionStatus::Unchanged,
         });
     }
-    let accounts = PlatformAccounts::load();
+    let accounts = PlatformAccounts::load()?;
     let mut missing = Vec::new();
     let owner_id = resolve_name_or_id(owner, true, &accounts, "owner", &mut missing);
     let group_id = resolve_name_or_id(group, false, &accounts, "group", &mut missing);
@@ -1695,6 +1707,7 @@ fn copy_path(
 ) -> Result<()> {
     cancel_token.check(operation_type)?;
     let source_parent = safe_fs::resolve_parent(source)?;
+    let mut visited_directories = HashSet::new();
     copy_child_to_path(
         source_parent.dir(),
         source_parent.name(),
@@ -1704,6 +1717,8 @@ fn copy_path(
         cancel_token,
         operation_type,
         follow_symlinks,
+        None,
+        &mut visited_directories,
     )
 }
 
@@ -1716,6 +1731,8 @@ fn copy_child_to_path(
     cancel_token: &CommandCancelToken,
     operation_type: &'static str,
     follow_symlinks: bool,
+    source_root_identity: Option<(u64, u64)>,
+    visited_directories: &mut HashSet<(u64, u64)>,
 ) -> Result<()> {
     cancel_token.check(operation_type)?;
     let link_metadata =
@@ -1781,6 +1798,12 @@ fn copy_child_to_path(
             &metadata.identity,
             "copy source directory changed before open",
         )?;
+        let opened_metadata = source_dir.metadata()?;
+        let source_identity = (opened_metadata.dev(), opened_metadata.ino());
+        if !visited_directories.insert(source_identity) {
+            anyhow::bail!("recursive copy encountered a previously visited directory");
+        }
+        let source_root_identity = source_root_identity.unwrap_or(source_identity);
         copy_open_dir_to_path(
             &source_dir,
             destination,
@@ -1789,6 +1812,8 @@ fn copy_child_to_path(
             cancel_token,
             operation_type,
             follow_symlinks,
+            source_root_identity,
+            visited_directories,
         )?;
         return Ok(());
     }
@@ -1885,9 +1910,29 @@ fn copy_open_dir_to_path(
     cancel_token: &CommandCancelToken,
     operation_type: &'static str,
     follow_symlinks: bool,
+    source_root_identity: (u64, u64),
+    visited_directories: &mut HashSet<(u64, u64)>,
 ) -> Result<()> {
     let destination = resolve_copy_destination_for_write(destination, overwrite, follow_symlinks)?;
     let parent = safe_fs::resolve_parent(&destination)?;
+    let source_metadata = source_dir.metadata()?;
+    let source_identity = (source_metadata.dev(), source_metadata.ino());
+    let destination_parent_within_root = opened_directory_is_same_or_within(
+        parent.dir(),
+        source_root_identity,
+        cancel_token,
+        operation_type,
+    )?;
+    let destination_parent_within_current_source = source_identity != source_root_identity
+        && opened_directory_is_same_or_within(
+            parent.dir(),
+            source_identity,
+            cancel_token,
+            operation_type,
+        )?;
+    if destination_parent_within_root || destination_parent_within_current_source {
+        anyhow::bail!("refusing to copy a directory into itself");
+    }
     let destination_dir = match parent.child_stat_nofollow()? {
         Some(metadata) => {
             if metadata.is_symlink() {
@@ -1903,6 +1948,11 @@ fn copy_open_dir_to_path(
         }
         None => safe_fs::create_child_dir(parent.dir(), parent.name(), mode)?,
     };
+    let destination_metadata = destination_dir.metadata()?;
+    let destination_identity = (destination_metadata.dev(), destination_metadata.ino());
+    if destination_identity == source_root_identity || destination_identity == source_identity {
+        anyhow::bail!("refusing to copy a directory into itself");
+    }
     safe_fs::fchmod_file(&destination_dir, mode)?;
     for entry_name in safe_fs::read_dir_names(source_dir)? {
         cancel_token.check(operation_type)?;
@@ -1916,11 +1966,39 @@ fn copy_open_dir_to_path(
             cancel_token,
             operation_type,
             follow_symlinks,
+            Some(source_root_identity),
+            visited_directories,
         )?;
     }
     safe_fs::sync_dir_best_effort(&destination_dir);
     safe_fs::sync_dir_best_effort(parent.dir());
     Ok(())
+}
+
+fn opened_directory_is_same_or_within(
+    directory: &std::fs::File,
+    ancestor_identity: (u64, u64),
+    cancel_token: &CommandCancelToken,
+    operation_type: &'static str,
+) -> Result<bool> {
+    let mut current = directory
+        .try_clone()
+        .context("failed to inspect copy destination parent")?;
+    loop {
+        cancel_token.check(operation_type)?;
+        let metadata = current.metadata()?;
+        let current_identity = (metadata.dev(), metadata.ino());
+        if current_identity == ancestor_identity {
+            return Ok(true);
+        }
+        let parent = safe_fs::open_child_dir_no_symlinks(&current, OsStr::new(".."))
+            .context("failed to inspect copy destination ancestry")?;
+        let parent_metadata = parent.metadata()?;
+        if (parent_metadata.dev(), parent_metadata.ino()) == current_identity {
+            return Ok(false);
+        }
+        current = parent;
+    }
 }
 
 fn resolve_copy_destination_for_write(
@@ -2042,12 +2120,16 @@ fn build_tar_archive(
         std::fs::symlink_metadata(source).map_err(Into::into)
     }
     .with_context(|| format!("failed to stat archive source {}", source.display()))?;
+    let mut estimate_visited_directories = HashSet::new();
+    let mut estimate_scanned_entries = 0;
     let estimated_size = estimate_archive_input_bytes(
         source,
         &metadata,
         follow_symlinks,
         cancel_token,
         operation_type,
+        &mut estimate_visited_directories,
+        &mut estimate_scanned_entries,
     )?;
     if estimated_size > max_bytes {
         anyhow::bail!("archive source exceeds limit: {estimated_size} > {max_bytes}");
@@ -2062,6 +2144,8 @@ fn build_tar_archive(
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| OsStr::new("root"));
         let archive_name = PathBuf::from(Path::new(name));
+        let mut archive_visited_directories = HashSet::new();
+        let mut archive_scanned_entries = 0;
         append_tar_path_checked(
             &mut builder,
             &archive_name,
@@ -2070,6 +2154,8 @@ fn build_tar_archive(
             follow_symlinks,
             cancel_token,
             operation_type,
+            &mut archive_visited_directories,
+            &mut archive_scanned_entries,
         )?;
         builder.finish().context("failed to finish tar archive")?;
     }
@@ -2087,9 +2173,15 @@ fn append_tar_path_checked<W: Write>(
     follow_symlinks: bool,
     cancel_token: &CommandCancelToken,
     operation_type: &'static str,
+    visited_directories: &mut HashSet<(u64, u64)>,
+    scanned_entries: &mut usize,
 ) -> Result<()> {
     cancel_token.check(operation_type)?;
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        let directory_identity = (metadata.dev(), metadata.ino());
+        if !visited_directories.insert(directory_identity) {
+            anyhow::bail!("archive traversal encountered a previously visited directory");
+        }
         builder
             .append_dir(archive_path, fs_path)
             .with_context(|| format!("failed to archive directory {}", fs_path.display()))?;
@@ -2097,6 +2189,8 @@ fn append_tar_path_checked<W: Write>(
         for entry in std::fs::read_dir(fs_path)
             .with_context(|| format!("failed to read {}", fs_path.display()))?
         {
+            cancel_token.check(operation_type)?;
+            count_archive_scan_entry(scanned_entries)?;
             let entry = entry?;
             entries.push((entry.file_name(), entry.path()));
         }
@@ -2120,6 +2214,8 @@ fn append_tar_path_checked<W: Write>(
                 follow_symlinks,
                 cancel_token,
                 operation_type,
+                visited_directories,
+                scanned_entries,
             )?;
         }
         return Ok(());
@@ -2136,6 +2232,8 @@ fn estimate_archive_input_bytes(
     follow_symlinks: bool,
     cancel_token: &CommandCancelToken,
     operation_type: &'static str,
+    visited_directories: &mut HashSet<(u64, u64)>,
+    scanned_entries: &mut usize,
 ) -> Result<u64> {
     cancel_token.check(operation_type)?;
     if metadata.is_file() {
@@ -2144,10 +2242,16 @@ fn estimate_archive_input_bytes(
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Ok(0);
     }
+    let directory_identity = (metadata.dev(), metadata.ino());
+    if !visited_directories.insert(directory_identity) {
+        anyhow::bail!("archive size estimation encountered a previously visited directory");
+    }
     let mut total = 0_u64;
     for entry in
         std::fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))?
     {
+        cancel_token.check(operation_type)?;
+        count_archive_scan_entry(scanned_entries)?;
         let entry = entry?;
         let entry_path = entry.path();
         let entry_metadata = std::fs::symlink_metadata(&entry_path)?;
@@ -2157,15 +2261,33 @@ fn estimate_archive_input_bytes(
         } else {
             entry_metadata
         };
-        total = total.saturating_add(estimate_archive_input_bytes(
-            &entry_path,
-            &entry_metadata,
-            follow_symlinks,
-            cancel_token,
-            operation_type,
-        )?);
+        total = total
+            .checked_add(estimate_archive_input_bytes(
+                &entry_path,
+                &entry_metadata,
+                follow_symlinks,
+                cancel_token,
+                operation_type,
+                visited_directories,
+                scanned_entries,
+            )?)
+            .context("archive source size overflow")?;
     }
     Ok(total)
+}
+
+fn count_archive_scan_entry(scanned_entries: &mut usize) -> Result<()> {
+    *scanned_entries = scanned_entries
+        .checked_add(1)
+        .context("archive source entry count overflow")?;
+    if *scanned_entries > MAX_FILE_TREE_SCAN_ENTRIES {
+        anyhow::bail!(
+            "archive source exceeds entry scan limit: {} > {}",
+            *scanned_entries,
+            MAX_FILE_TREE_SCAN_ENTRIES
+        );
+    }
+    Ok(())
 }
 
 fn archive_filename(path: &str) -> String {
@@ -2305,7 +2427,7 @@ mod tests {
     async fn list_dir_reports_scan_cap_without_exact_total() {
         let root = test_root("list-scan-cap");
         fs::create_dir_all(&root).unwrap();
-        for index in 0..=MAX_FILE_LIST_SCAN_ENTRIES {
+        for index in 0..=MAX_FILE_TREE_SCAN_ENTRIES {
             fs::write(root.join(format!("entry-{index:05}.txt")), "x").unwrap();
         }
 
@@ -2316,11 +2438,11 @@ mod tests {
 
         assert_eq!(status["entries"].as_array().unwrap().len(), 50);
         assert_eq!(status["total_entries"], Value::Null);
-        assert_eq!(status["scan_cap_entries"], MAX_FILE_LIST_SCAN_ENTRIES);
-        assert_eq!(status["scanned_entries"], MAX_FILE_LIST_SCAN_ENTRIES);
+        assert_eq!(status["scan_cap_entries"], MAX_FILE_TREE_SCAN_ENTRIES);
+        assert_eq!(status["scanned_entries"], MAX_FILE_TREE_SCAN_ENTRIES);
         assert_eq!(
             status["visible_entries_scanned"],
-            MAX_FILE_LIST_SCAN_ENTRIES
+            MAX_FILE_TREE_SCAN_ENTRIES
         );
         assert_eq!(status["truncated_by_scan_cap"], true);
         assert_eq!(status["truncated"], true);
@@ -2598,6 +2720,87 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn recursive_copy_rejects_revisited_symlinked_directory() {
+        let root = test_root("copy-directory-cycle");
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source).unwrap();
+        symlink(&source, source.join("loop")).unwrap();
+
+        let error = copy_path(
+            &source,
+            &destination,
+            true,
+            false,
+            &CommandCancelToken::default(),
+            "file_copy",
+            true,
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("recursive copy encountered a previously visited directory"));
+        assert!(!destination.join("loop").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn recursive_copy_rejects_real_destination_inside_symlinked_source() {
+        let root = test_root("copy-symlinked-source-self");
+        let source = root.join("source");
+        let source_link = root.join("source-link");
+        let destination_parent = source.join("nested");
+        let destination = destination_parent.join("copy");
+        fs::create_dir_all(&destination_parent).unwrap();
+        symlink(&source, &source_link).unwrap();
+
+        let error = copy_path(
+            &source_link,
+            &destination,
+            true,
+            false,
+            &CommandCancelToken::default(),
+            "file_copy",
+            true,
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("refusing to copy a directory into itself"));
+        assert!(!destination.exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn recursive_copy_rejects_destination_reached_through_source_symlink() {
+        let root = test_root("copy-source-symlink-to-destination");
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&destination).unwrap();
+        symlink(&destination, source.join("external")).unwrap();
+
+        let error = copy_path(
+            &source,
+            &destination,
+            true,
+            true,
+            &CommandCancelToken::default(),
+            "file_copy",
+            true,
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("refusing to copy a directory into itself"));
+        assert!(!destination.join("external").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn rename_overwrite_does_not_delete_incompatible_destination() {
         let root = test_root("rename-incompatible-destination");
@@ -2740,6 +2943,29 @@ mod tests {
     }
 
     #[test]
+    fn recursive_chmod_rejects_revisited_symlinked_directory() {
+        let root = test_root("chmod-directory-cycle");
+        let source = root.join("source");
+        fs::create_dir_all(&source).unwrap();
+        symlink(&source, source.join("loop")).unwrap();
+
+        let error = chmod_path(
+            &source,
+            0o755,
+            true,
+            true,
+            &CommandCancelToken::default(),
+            "file_chmod",
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("recursive chmod encountered a previously visited directory"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn tar_archive_observes_cancel_before_walking_tree() {
         let root = test_root("archive-cancel");
         let nested = root.join("nested");
@@ -2759,6 +2985,71 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(fs::read_to_string(nested.join("keep.txt")).unwrap(), "keep");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tar_archive_estimate_rejects_revisited_symlinked_directory() {
+        let root = test_root("archive-estimate-directory-cycle");
+        fs::create_dir_all(&root).unwrap();
+        symlink(&root, root.join("loop")).unwrap();
+
+        let error = build_tar_archive(
+            &root,
+            MAX_FILE_ARCHIVE_BYTES,
+            true,
+            &CommandCancelToken::default(),
+            "file_archive_tar",
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("archive size estimation encountered a previously visited directory"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tar_archive_walk_rejects_revisited_symlinked_directory() {
+        let root = test_root("archive-walk-directory-cycle");
+        fs::create_dir_all(&root).unwrap();
+        symlink(&root, root.join("loop")).unwrap();
+        let metadata = fs::metadata(&root).unwrap();
+        let mut archive = Vec::new();
+        let mut visited_directories = HashSet::new();
+        let mut scanned_entries = 0;
+        let error = {
+            let mut writer = LimitedVecWriter::new(&mut archive, MAX_FILE_ARCHIVE_BYTES);
+            let mut builder = tar::Builder::new(&mut writer);
+            builder.follow_symlinks(true);
+            append_tar_path_checked(
+                &mut builder,
+                Path::new("archive"),
+                &root,
+                &metadata,
+                true,
+                &CommandCancelToken::default(),
+                "file_archive_tar",
+                &mut visited_directories,
+                &mut scanned_entries,
+            )
+            .unwrap_err()
+        };
+
+        assert!(error
+            .to_string()
+            .contains("archive traversal encountered a previously visited directory"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn archive_scan_entry_limit_fails_closed() {
+        let mut scanned_entries = MAX_FILE_TREE_SCAN_ENTRIES;
+
+        let error = count_archive_scan_entry(&mut scanned_entries).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("archive source exceeds entry scan limit"));
     }
 
     fn test_root(name: &str) -> PathBuf {

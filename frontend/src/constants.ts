@@ -488,7 +488,9 @@ export const emptySummary: FleetSummary = {
 };
 
 export const FLEET_DETAIL_LIMIT = 200;
+export const FLEET_TELEMETRY_SNAPSHOT_LIMIT = 5_000;
 export const HISTORY_DETAIL_LIMIT = 1_000;
+export const TOPOLOGY_EVIDENCE_LIMIT = 50;
 
 export function isActionableFleetAlertState(operatorState: string): boolean {
   return operatorState === "open" || operatorState === "escalated";

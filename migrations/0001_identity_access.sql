@@ -72,6 +72,10 @@ CREATE INDEX clients_visible_last_ip_idx
     ON clients (last_ip)
     WHERE hidden_at IS NULL;
 
+CREATE UNIQUE INDEX clients_public_key_unique_idx
+    ON clients (public_key)
+    WHERE octet_length(public_key) > 0;
+
 CREATE TABLE client_status_history (
     id UUID PRIMARY KEY,
     client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
@@ -135,7 +139,7 @@ CREATE TABLE operator_auth_throttle (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (scope_kind, scope_key),
     CONSTRAINT operator_auth_throttle_scope_kind_check
-        CHECK (scope_kind IN ('username', 'ip')),
+        CHECK (scope_kind IN ('username', 'username_ip', 'ip')),
     CONSTRAINT operator_auth_throttle_failed_attempts_check
         CHECK (failed_attempts >= 0)
 );
@@ -179,6 +183,9 @@ CREATE TABLE client_key_revocations (
 
 CREATE INDEX client_key_revocations_client_created_idx
     ON client_key_revocations (client_id, created_at DESC);
+
+CREATE UNIQUE INDEX client_key_revocations_public_key_unique_idx
+    ON client_key_revocations (public_key_sha256_hex);
 
 CREATE TABLE audit_logs (
     id UUID PRIMARY KEY,

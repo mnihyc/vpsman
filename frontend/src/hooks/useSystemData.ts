@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { apiGet, apiPost, apiPut, isApiUnauthorized } from "../api";
 import type {
   SuiteConfigResponse,
@@ -19,12 +19,21 @@ export function useSystemData(apiToken: string, onUnauthorized: () => void) {
   const [suiteConfig, setSuiteConfig] = useState<SuiteConfigResponse | null>(null);
   const [suiteConfigLoading, setSuiteConfigLoading] = useState(false);
   const [suiteConfigError, setSuiteConfigError] = useState<string | null>(null);
+  const systemDashboardLoadGeneration = useRef(0);
+  const suiteConfigLoadGeneration = useRef(0);
+  const currentApiToken = useRef(apiToken);
+  currentApiToken.current = apiToken;
 
   const loadSystemDashboard = useCallback(
     async (
       nextWindow = systemDashboardWindow,
       nextDensity = systemDashboardPointDensity,
     ) => {
+      if (currentApiToken.current !== apiToken) {
+        return;
+      }
+      const generation = systemDashboardLoadGeneration.current + 1;
+      systemDashboardLoadGeneration.current = generation;
       setSystemDashboardLoading(true);
       try {
         const params = new URLSearchParams({
@@ -32,27 +41,66 @@ export function useSystemData(apiToken: string, onUnauthorized: () => void) {
           window: nextWindow,
         });
         const record = await apiGet<SystemDashboardRecord>(`/api/v1/system/dashboard?${params.toString()}`, apiToken);
+        if (
+          systemDashboardLoadGeneration.current !== generation ||
+          currentApiToken.current !== apiToken
+        ) {
+          return;
+        }
         setSystemDashboard(record);
         setSystemDashboardError(null);
       } catch (error) {
+        if (
+          systemDashboardLoadGeneration.current !== generation ||
+          currentApiToken.current !== apiToken
+        ) {
+          return;
+        }
         handleSystemError(error, onUnauthorized, setSystemDashboardError, "System overview unavailable");
       } finally {
-        setSystemDashboardLoading(false);
+        if (
+          systemDashboardLoadGeneration.current === generation &&
+          currentApiToken.current === apiToken
+        ) {
+          setSystemDashboardLoading(false);
+        }
       }
     },
     [apiToken, onUnauthorized, systemDashboardPointDensity, systemDashboardWindow],
   );
 
   const loadSuiteConfig = useCallback(async () => {
+    if (currentApiToken.current !== apiToken) {
+      return;
+    }
+    const generation = suiteConfigLoadGeneration.current + 1;
+    suiteConfigLoadGeneration.current = generation;
     setSuiteConfigLoading(true);
     try {
       const record = await apiGet<SuiteConfigResponse>("/api/v1/admin/suite-config", apiToken);
+      if (
+        suiteConfigLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return;
+      }
       setSuiteConfig(record);
       setSuiteConfigError(null);
     } catch (error) {
+      if (
+        suiteConfigLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return;
+      }
       handleSystemError(error, onUnauthorized, setSuiteConfigError, "Suite config unavailable");
     } finally {
-      setSuiteConfigLoading(false);
+      if (
+        suiteConfigLoadGeneration.current === generation &&
+        currentApiToken.current === apiToken
+      ) {
+        setSuiteConfigLoading(false);
+      }
     }
   }, [apiToken, onUnauthorized]);
 
@@ -69,6 +117,9 @@ export function useSystemData(apiToken: string, onUnauthorized: () => void) {
         privilege_assertion: privilegeAssertion,
         toml,
       });
+      if (currentApiToken.current !== apiToken) {
+        return response;
+      }
       await loadSuiteConfig();
       return response;
     },
@@ -91,7 +142,20 @@ export function useSystemData(apiToken: string, onUnauthorized: () => void) {
     [loadSystemDashboard, systemDashboardWindow],
   );
 
+  const clearSystem = useCallback(() => {
+    systemDashboardLoadGeneration.current += 1;
+    suiteConfigLoadGeneration.current += 1;
+    currentApiToken.current = "";
+    setSystemDashboard(null);
+    setSystemDashboardLoading(false);
+    setSystemDashboardError(null);
+    setSuiteConfig(null);
+    setSuiteConfigLoading(false);
+    setSuiteConfigError(null);
+  }, []);
+
   return {
+    clearSystem,
     loadSuiteConfig,
     loadSystemDashboard,
     setSystemDashboardPointDensity: setSystemDashboardPointDensityAndReload,

@@ -6,7 +6,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::{
@@ -59,7 +59,7 @@ use crate::{
     restore_rollback::{execute_restore_rollback_command, RestoreRollbackCommandInput},
     runtime_config_cache::RuntimeConfigCache,
     supervisor::reconcile_supervised_processes_on_start,
-    telemetry::{collect_metrics_for_config, read_optional, TelemetryRuntimeState},
+    telemetry::{collect_metrics_for_config, TelemetryRuntimeState},
     terminal::{
         close_all_terminal_sessions_for_lifecycle, drain_pending_terminal_final_events,
         execute_terminal_command_with_stream_sink, mark_gateway_connected,
@@ -204,6 +204,7 @@ async fn connect_and_stream(
     command_runtime: &mut AgentCommandRuntime,
     process_incarnation_id: uuid::Uuid,
 ) -> Result<()> {
+    let os_release = configured_os_release(config.telemetry.os_release_file.as_deref())?;
     info!(%endpoint, "connecting to gateway");
     let tcp = connect_tcp_endpoint(endpoint, config.auth.gateway_connect_timeout_secs).await?;
     let mut stream = connect_noise_stream(tcp, config).await?;
@@ -214,12 +215,7 @@ async fn connect_and_stream(
         process_incarnation_id,
         agent_version: crate::build_info::agent_release_version().to_string(),
         internal_build_number: crate::build_info::agent_build_number(),
-        os_release: config
-            .telemetry
-            .os_release_file
-            .as_deref()
-            .and_then(read_optional)
-            .unwrap_or_default(),
+        os_release,
         arch: std::env::consts::ARCH.to_string(),
         update_heartbeat: read_activation_heartbeat().unwrap_or_else(|error| {
             warn!(%error, "failed to read update activation heartbeat marker");
@@ -288,7 +284,13 @@ async fn connect_and_stream(
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                let metrics = collect_metrics_for_config(config, &mut telemetry_runtime_state).await?;
+                let metrics = match collect_metrics_for_config(config, &mut telemetry_runtime_state).await {
+                    Ok(metrics) => metrics,
+                    Err(error) => {
+                        warn!(%error, "telemetry collection failed; no sample published");
+                        continue;
+                    }
+                };
                 let telemetry = TelemetryEnvelope {
                     client_id: config.client_id.clone(),
                     metrics,
@@ -473,6 +475,19 @@ async fn connect_and_stream(
             }
         }
     }
+}
+
+fn configured_os_release(path: Option<&str>) -> Result<String> {
+    let Some(path) = path else {
+        return Ok(String::new());
+    };
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read configured OS release file {path}"))?;
+    ensure!(
+        !contents.trim().is_empty(),
+        "configured OS release file {path} is empty"
+    );
+    Ok(contents)
 }
 
 async fn request_runtime_config_reload(
@@ -2659,6 +2674,47 @@ async fn finish_active_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_os_release_read_failure_is_explicit() {
+        let path = std::env::temp_dir().join(format!(
+            "vpsman-missing-os-release-{}",
+            uuid::Uuid::new_v4()
+        ));
+
+        let error = configured_os_release(path.to_str()).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("failed to read configured OS release file"));
+        assert!(format!("{error:#}").contains("No such file or directory"));
+    }
+
+    #[test]
+    fn configured_os_release_rejects_blank_content() {
+        let path = std::env::temp_dir().join(format!("vpsman-os-release-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, " \n\t").unwrap();
+
+        let error = configured_os_release(path.to_str()).unwrap_err();
+
+        assert!(error.to_string().contains("OS release file"));
+        assert!(error.to_string().contains("is empty"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn configured_os_release_preserves_valid_content_and_optional_absence() {
+        let path = std::env::temp_dir().join(format!("vpsman-os-release-{}", uuid::Uuid::new_v4()));
+        let contents = "NAME=Example Linux\nVERSION_ID=1\n";
+        std::fs::write(&path, contents).unwrap();
+
+        assert_eq!(
+            configured_os_release(path.to_str()).unwrap(),
+            contents.to_string()
+        );
+        assert_eq!(configured_os_release(None).unwrap(), "");
+        std::fs::remove_file(path).ok();
+    }
 
     #[test]
     fn recent_command_cache_keeps_payload_hash_and_evicts_oldest() {

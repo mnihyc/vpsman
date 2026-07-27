@@ -14,6 +14,10 @@ import {
   topologyRuntimeStateBadgeClass,
 } from "../../jobStatusPresentation";
 import { ActionFeedback } from "../../components/ActionFeedback";
+import {
+  formatLowerBoundCount,
+  TOPOLOGY_EVIDENCE_LIMIT,
+} from "../../constants";
 import type {
   JobHistoryRecord,
   JobOutputRecord,
@@ -143,7 +147,7 @@ export function TopologyEvidencePanel({
     .map((row) => ({
       jobId: row.job.id,
       latencyAvgMs: row.latencyAvgMs ?? 0,
-      lossRatio: row.lossRatio ?? 0,
+      lossRatio: row.lossRatio ?? null,
     }))
     .concat(
       observations
@@ -155,7 +159,7 @@ export function TopologyEvidencePanel({
         .map((observation) => ({
           jobId: observation.id,
           latencyAvgMs: observation.latency_avg_ms ?? 0,
-          lossRatio: observation.packet_loss_ratio ?? 0,
+          lossRatio: observation.packet_loss_ratio ?? null,
         })),
     );
   const maxLatency = Math.max(
@@ -170,19 +174,57 @@ export function TopologyEvidencePanel({
     probePoints.length > 1 && latencyGroups.length === 0;
   const hasMeasurementEvidence =
     hasStandaloneProbeCurve || latencyGroups.length > 0 || trendRows.length > 0;
+  const observationsTruncated =
+    observations.length >= TOPOLOGY_EVIDENCE_LIMIT;
+  const trendsTruncated = trends.length >= TOPOLOGY_EVIDENCE_LIMIT;
+  const recommendationsTruncated =
+    ospfRecommendations.length >= TOPOLOGY_EVIDENCE_LIMIT;
+  const updatePlansTruncated =
+    ospfUpdatePlans.length >= TOPOLOGY_EVIDENCE_LIMIT;
+  const boundedEvidenceLists = [
+    observationsTruncated ? "observations" : null,
+    trendsTruncated ? "trends" : null,
+    recommendationsTruncated ? "OSPF recommendations" : null,
+    updatePlansTruncated ? "OSPF update plans" : null,
+  ].filter((label): label is string => label !== null);
+  const evidenceBoundaryNotice =
+    boundedEvidenceLists.length > 0
+      ? `Loaded the newest ${TOPOLOGY_EVIDENCE_LIMIT} ${boundedEvidenceLists.join(
+          ", ",
+        )}; older records are not included in this view.`
+      : null;
   const status = ospfUpdatePlans.length > 0
-    ? `${ospfUpdatePlans.length} OSPF update plans`
+    ? `${formatLowerBoundCount(
+        ospfUpdatePlans.length,
+        updatePlansTruncated,
+      )}${updatePlansTruncated ? " loaded" : ""} OSPF update plans`
     : ospfRecommendations.length > 0
-      ? `${ospfRecommendations.length} OSPF recommendations`
+      ? `${formatLowerBoundCount(
+          ospfRecommendations.length,
+          recommendationsTruncated,
+        )}${recommendationsTruncated ? " loaded" : ""} OSPF recommendations`
       : trends.length > 0
-        ? `${observations.length} observations / ${trends.length} trends`
+        ? `${formatLowerBoundCount(
+            observations.length,
+            observationsTruncated,
+          )}${observationsTruncated ? " loaded" : ""} observations / ${formatLowerBoundCount(
+            trends.length,
+            trendsTruncated,
+          )}${trendsTruncated ? " loaded" : ""} trends`
         : observations.length > 0
-          ? `${observations.length} persisted observations`
+          ? `${formatLowerBoundCount(
+              observations.length,
+              observationsTruncated,
+            )}${observationsTruncated ? " loaded" : ""} persisted observations`
           : networkJobs.length === 0
             ? "No network jobs"
             : `${networkJobs.length} recent network jobs`;
   const evidenceFeedbackMessage =
-    refreshError ?? (refreshing ? "Refreshing network evidence" : refreshNotice);
+    refreshError ??
+    (refreshing
+      ? "Refreshing network evidence"
+      : ([refreshNotice, evidenceBoundaryNotice].filter(Boolean).join(" ") ||
+        null));
   const outputFeedbackMessage =
     outputError ?? (outputLoading ? "Loading retained command output" : outputNotice);
 
@@ -258,7 +300,15 @@ export function TopologyEvidencePanel({
           </button>
           <ActionFeedback
             message={evidenceFeedbackMessage}
-            tone={refreshError ? "danger" : refreshing ? "progress" : "success"}
+            tone={
+              refreshError
+                ? "danger"
+                : refreshing
+                  ? "progress"
+                  : evidenceBoundaryNotice
+                    ? "info"
+                    : "success"
+            }
           />
         </div>
       </div>
@@ -453,12 +503,22 @@ export function TopologyEvidencePanel({
             >
               {probePoints.map((point) => (
                 <span
-                  className={point.lossRatio > 0 ? "warn" : "ok"}
+                  className={
+                    point.lossRatio === null
+                      ? "unknown"
+                      : point.lossRatio > 0
+                        ? "warn"
+                        : "ok"
+                  }
                   key={point.jobId}
                   style={{
                     height: `${Math.max(8, Math.round((point.latencyAvgMs / maxLatency) * 44))}px`,
                   }}
-                  title={`${formatMetric(point.latencyAvgMs)} ms avg`}
+                  title={`${formatMetric(point.latencyAvgMs)} ms avg; packet loss ${
+                    point.lossRatio === null
+                      ? "unknown"
+                      : `${formatMetric(point.lossRatio * 100)}%`
+                  }`}
                 />
               ))}
             </div>
@@ -480,12 +540,22 @@ export function TopologyEvidencePanel({
                   >
                     {group.points.map((point, index) => (
                       <span
-                        className={point.lossRatio > 0 ? "warn" : "ok"}
+                        className={
+                          point.lossRatio === null
+                            ? "unknown"
+                            : point.lossRatio > 0
+                              ? "warn"
+                              : "ok"
+                        }
                         key={`${group.key}-${index}`}
                         style={{
                           height: `${Math.max(8, Math.round((point.latencyAvgMs / group.maxLatency) * 38))}px`,
                         }}
-                        title={`${formatMetric(point.latencyAvgMs)} ms avg`}
+                        title={`${formatMetric(point.latencyAvgMs)} ms avg; packet loss ${
+                          point.lossRatio === null
+                            ? "unknown"
+                            : `${formatMetric(point.lossRatio * 100)}%`
+                        }`}
                       />
                     ))}
                   </div>
@@ -691,7 +761,7 @@ type LatencyCurveGroup = {
   maxLatency: number;
   points: {
     latencyAvgMs: number;
-    lossRatio: number;
+    lossRatio: number | null;
   }[];
 };
 
@@ -1402,7 +1472,7 @@ function buildLatencyCurveGroups(
         .slice(-24);
       const points = sorted.map((row) => ({
         latencyAvgMs: row.latency_avg_ms ?? 0,
-        lossRatio: row.packet_loss_ratio ?? 0,
+        lossRatio: row.packet_loss_ratio ?? null,
       }));
       const latest = sorted[sorted.length - 1];
       return {

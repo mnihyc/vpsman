@@ -546,6 +546,7 @@ export type FleetAlertNotificationChannelRecord = {
   target: string;
   cooldown_secs: number;
   enabled: boolean;
+  configuration_error: string | null;
   notes: string | null;
   actor_id: string | null;
   created_at: string;
@@ -831,6 +832,24 @@ export type PortForwardRuleRecord = {
   forgotten_at?: string | null;
 };
 
+export type PortForwardRuleCorruptRecord = {
+  id: string;
+  client_id: string;
+  name: string;
+  enabled: boolean;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+  deleted_at?: string | null;
+  removal_confirmed_at?: string | null;
+  forgotten_at?: string | null;
+  configuration_error: string;
+};
+
+export type PortForwardRuleListItem =
+  | PortForwardRuleRecord
+  | PortForwardRuleCorruptRecord;
+
 export type PortForwardRuleInput = {
   name: string;
   protocol: PortForwardProtocol;
@@ -862,7 +881,7 @@ export type PortForwardSyncRecord = {
 };
 
 export type PortForwardMutationResponse = {
-  rule: PortForwardRuleRecord;
+  rule: PortForwardRuleListItem;
   sync: PortForwardSyncRecord;
 };
 
@@ -1264,10 +1283,13 @@ export type ScheduleRecord = {
   name: string;
   enabled: boolean;
   command_type: string;
-  operation: JobOperation;
+  operation: JobOperation | null;
+  operation_error?: string | null;
+  operation_payload_hash?: string;
   selector_expression: string;
   target_client_ids: string[];
   cron_expr: string;
+  cadence_error: string | null;
   timezone: "UTC" | string;
   next_runs: string[];
   catch_up_policy: string;
@@ -1457,6 +1479,22 @@ export type TunnelPlanRecord = {
   deleted_by: string | null;
   deleted_reason: string | null;
 };
+
+export type TunnelPlanCorruptRecord = {
+  id: string;
+  name: string;
+  kind: string;
+  enabled: boolean;
+  revision: number;
+  left_client_id: string;
+  right_client_id: string;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+  configuration_error: string;
+};
+
+export type TunnelPlanListItem = TunnelPlanRecord | TunnelPlanCorruptRecord;
 
 export type TunnelPlanEndpointRuntimeConfig = {
   client_id: string;
@@ -2495,6 +2533,7 @@ export type BackupPolicyRecord = {
   keep_last: number;
   rotation_generation: string | null;
   cron_expr: string;
+  cadence_error: string | null;
   timezone: "UTC" | string;
   next_runs: string[];
   catch_up_policy: string;
@@ -2529,6 +2568,15 @@ export type CreateBackupPolicyRequest = {
   max_failures: number;
   confirmed: boolean;
   privilege_assertion?: PrivilegeAssertion | null;
+};
+
+export type UpdateBackupPolicyRequest = Omit<
+  CreateBackupPolicyRequest,
+  "retention_days" | "keep_last" | "rotation_generation"
+> & {
+  retention_days: number;
+  keep_last: number;
+  rotation_generation: string | null;
 };
 
 export type CreateTunnelPlanRequest = TunnelPlanInput & {

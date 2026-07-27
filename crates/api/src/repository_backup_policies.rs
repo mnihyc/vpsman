@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sqlx::Row;
 use uuid::Uuid;
 use vpsman_common::JobCommand;
@@ -8,10 +8,14 @@ use vpsman_common::JobCommand;
 use crate::{
     model::{
         AuditLogView, AuthContext, BackupPolicyMetadata, BackupPolicyPrunePolicyView,
-        BackupPolicyView, BackupRequestStatus, CreateBackupPolicyRequest, ScheduleView,
+        BackupPolicyView, BackupRequestStatus, CreateBackupPolicyRequest, ListQuery, ScheduleView,
     },
     repository::Repository,
-    repository_schedules::ScheduleCreateInput,
+    repository_schedules::{
+        apply_schedule_update_memory, backup_policy_schedule_by_id_postgres,
+        backup_policy_schedule_by_id_postgres_in_tx, create_schedule_record_postgres_in_tx,
+        record_memory_schedule_audit, update_schedule_record_postgres_in_tx, ScheduleCreateInput,
+    },
     unix_now,
 };
 
@@ -19,25 +23,60 @@ const DEFAULT_BACKUP_POLICY_RETENTION_DAYS: i32 = 30;
 const DEFAULT_BACKUP_POLICY_KEEP_LAST: i32 = 7;
 
 impl Repository {
-    pub(crate) async fn list_backup_policies(&self) -> Result<Vec<BackupPolicyView>> {
-        let schedules = self.list_schedules().await?;
-        let metadata = self.backup_policy_metadata_by_schedule_id().await?;
-        let mut policies = schedules
+    pub(crate) async fn list_backup_policies(
+        &self,
+        query: &ListQuery,
+    ) -> Result<Vec<BackupPolicyView>> {
+        let mut bounded_query = query.clone();
+        bounded_query.limit = Some(query.limit.unwrap_or(1000));
+        let schedules = self.query_backup_policy_schedules(&bounded_query).await?;
+        let schedule_ids = schedules
+            .iter()
+            .map(|schedule| schedule.id)
+            .collect::<Vec<_>>();
+        let metadata = self
+            .backup_policy_metadata_by_schedule_id(&schedule_ids)
+            .await?;
+        let policies = schedules
             .into_iter()
             .filter_map(|schedule| {
-                let metadata = metadata
+                metadata
                     .get(&schedule.id)
                     .cloned()
-                    .unwrap_or_else(|| default_backup_policy_metadata(&schedule));
-                backup_policy_view(schedule, metadata)
+                    .and_then(|metadata| backup_policy_view(schedule, metadata))
             })
             .collect::<Vec<_>>();
-        policies.sort_by(|left, right| {
-            left.next_run_at
-                .cmp(&right.next_run_at)
-                .then_with(|| left.name.cmp(&right.name))
-        });
         Ok(policies)
+    }
+
+    pub(crate) async fn backup_policy_by_schedule_id(
+        &self,
+        schedule_id: Uuid,
+    ) -> Result<Option<BackupPolicyView>> {
+        let schedule = match self {
+            Self::Memory(memory) => memory
+                .schedules
+                .read()
+                .await
+                .iter()
+                .find(|schedule| {
+                    schedule.id == schedule_id
+                        && schedule.deleted_at.is_none()
+                        && matches!(schedule.operation, Some(JobCommand::Backup { .. }))
+                })
+                .cloned(),
+            Self::Postgres(pool) => {
+                backup_policy_schedule_by_id_postgres(pool, schedule_id).await?
+            }
+        };
+        let Some(schedule) = schedule else {
+            return Ok(None);
+        };
+        let metadata = self
+            .backup_policy_metadata_by_schedule_id(&[schedule_id])
+            .await?
+            .remove(&schedule_id);
+        Ok(metadata.and_then(|metadata| backup_policy_view(schedule, metadata)))
     }
 
     pub(crate) async fn create_backup_policy(
@@ -49,40 +88,122 @@ impl Repository {
             .retention_days
             .unwrap_or(DEFAULT_BACKUP_POLICY_RETENTION_DAYS);
         let keep_last = request.keep_last.unwrap_or(DEFAULT_BACKUP_POLICY_KEEP_LAST);
-        let rotation_generation = normalize_policy_generation(request.rotation_generation);
-        let schedule_request = ScheduleCreateInput {
-            name: request.name,
-            operation: JobCommand::Backup {
-                paths: request.paths,
-                include_config: request.include_config,
-                follow_symlinks: request.follow_symlinks,
-                missing_path_policy: request.missing_path_policy,
-            },
-            selector_expression: request.selector_expression,
-            target_client_ids: request.target_client_ids,
-            cron_expr: request.cron_expr,
-            timezone: request.timezone,
-            enabled: request.enabled,
-            catch_up_policy: request.catch_up_policy,
-            catch_up_limit: request.catch_up_limit,
-            retry_delay_secs: request.retry_delay_secs,
-            max_failures: request.max_failures,
+        let rotation_generation = normalize_policy_generation(request.rotation_generation.clone());
+        let schedule_request = backup_policy_schedule_input(&request);
+        let (schedule, metadata) = match self {
+            Self::Memory(memory) => {
+                let schedule = self
+                    .create_schedule_record(schedule_request, operator)
+                    .await?;
+                let metadata = upsert_backup_policy_metadata_memory(
+                    memory,
+                    schedule.id,
+                    retention_days,
+                    keep_last,
+                    rotation_generation,
+                )
+                .await;
+                record_backup_policy_audit_memory(memory, &schedule, &metadata, operator).await;
+                (schedule, metadata)
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let schedule =
+                    create_schedule_record_postgres_in_tx(&mut tx, &schedule_request, operator)
+                        .await?;
+                let metadata = upsert_backup_policy_metadata_postgres_in_tx(
+                    &mut tx,
+                    schedule.id,
+                    retention_days,
+                    keep_last,
+                    rotation_generation,
+                )
+                .await?;
+                insert_backup_policy_audit_postgres_in_tx(&mut tx, &schedule, &metadata, operator)
+                    .await?;
+                tx.commit().await?;
+                (schedule, metadata)
+            }
         };
-        let schedule = self
-            .create_schedule_record(schedule_request, operator)
-            .await?;
-        let metadata = self
-            .upsert_backup_policy_metadata(
-                schedule.id,
-                retention_days,
-                keep_last,
-                rotation_generation,
-            )
-            .await?;
-        self.audit_backup_policy_upserted(&schedule, &metadata, operator)
-            .await?;
         Ok(backup_policy_view(schedule, metadata)
             .expect("backup policy schedule must carry backup operation"))
+    }
+
+    pub(crate) async fn update_backup_policy(
+        &self,
+        schedule_id: Uuid,
+        request: CreateBackupPolicyRequest,
+        operator: &AuthContext,
+    ) -> Result<Option<BackupPolicyView>> {
+        let retention_days = request
+            .retention_days
+            .context("backup_policy_retention_days_required")?;
+        let keep_last = request
+            .keep_last
+            .context("backup_policy_keep_last_required")?;
+        let rotation_generation = normalize_policy_generation(request.rotation_generation.clone());
+        let schedule_request = backup_policy_schedule_input(&request);
+        let (schedule, metadata) = match self {
+            Self::Memory(memory) => {
+                let mut schedules = memory.schedules.write().await;
+                let Some(schedule) = schedules.iter_mut().find(|schedule| {
+                    schedule.id == schedule_id
+                        && schedule.deleted_at.is_none()
+                        && matches!(schedule.operation, Some(JobCommand::Backup { .. }))
+                }) else {
+                    return Ok(None);
+                };
+                let mut policies = memory.backup_policies.write().await;
+                let Some(metadata) = policies
+                    .iter_mut()
+                    .find(|metadata| metadata.schedule_id == schedule_id)
+                else {
+                    return Ok(None);
+                };
+                let schedule = apply_schedule_update_memory(schedule, &schedule_request)?;
+                metadata.retention_days = retention_days;
+                metadata.keep_last = keep_last;
+                metadata.rotation_generation = rotation_generation;
+                metadata.updated_at = unix_now().to_string();
+                let metadata = metadata.clone();
+                drop(policies);
+                drop(schedules);
+                record_memory_schedule_audit(memory, &schedule, operator, "schedule.updated").await;
+                record_backup_policy_audit_memory(memory, &schedule, &metadata, operator).await;
+                (schedule, metadata)
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                if backup_policy_schedule_by_id_postgres_in_tx(&mut tx, schedule_id)
+                    .await?
+                    .is_none()
+                {
+                    return Ok(None);
+                }
+                let schedule = update_schedule_record_postgres_in_tx(
+                    &mut tx,
+                    schedule_id,
+                    &schedule_request,
+                    operator,
+                )
+                .await?;
+                let metadata = upsert_backup_policy_metadata_postgres_in_tx(
+                    &mut tx,
+                    schedule.id,
+                    retention_days,
+                    keep_last,
+                    rotation_generation,
+                )
+                .await?;
+                insert_backup_policy_audit_postgres_in_tx(&mut tx, &schedule, &metadata, operator)
+                    .await?;
+                tx.commit().await?;
+                (schedule, metadata)
+            }
+        };
+        Ok(Some(backup_policy_view(schedule, metadata).expect(
+            "updated backup policy must carry backup operation",
+        )))
     }
 
     pub(crate) async fn list_backup_policy_prune_candidates(
@@ -356,13 +477,18 @@ impl Repository {
 
     async fn backup_policy_metadata_by_schedule_id(
         &self,
+        schedule_ids: &[Uuid],
     ) -> Result<HashMap<Uuid, BackupPolicyMetadata>> {
+        if schedule_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
         match self {
             Self::Memory(memory) => Ok(memory
                 .backup_policies
                 .read()
                 .await
                 .iter()
+                .filter(|metadata| schedule_ids.contains(&metadata.schedule_id))
                 .cloned()
                 .map(|metadata| (metadata.schedule_id, metadata))
                 .collect()),
@@ -376,8 +502,10 @@ impl Repository {
                         rotation_generation,
                         updated_at::text AS updated_at
                     FROM backup_policies
+                    WHERE schedule_id = ANY($1)
                     "#,
                 )
+                .bind(schedule_ids)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
@@ -395,126 +523,137 @@ impl Repository {
             }
         }
     }
+}
 
-    async fn upsert_backup_policy_metadata(
-        &self,
-        schedule_id: Uuid,
-        retention_days: i32,
-        keep_last: i32,
-        rotation_generation: Option<String>,
-    ) -> Result<BackupPolicyMetadata> {
-        match self {
-            Self::Memory(memory) => {
-                let updated_at = unix_now().to_string();
-                let metadata = BackupPolicyMetadata {
-                    schedule_id,
-                    retention_days,
-                    keep_last,
-                    rotation_generation,
-                    updated_at,
-                };
-                let mut policies = memory.backup_policies.write().await;
-                if let Some(existing) = policies
-                    .iter_mut()
-                    .find(|existing| existing.schedule_id == schedule_id)
-                {
-                    *existing = metadata.clone();
-                } else {
-                    policies.push(metadata.clone());
-                }
-                Ok(metadata)
-            }
-            Self::Postgres(pool) => {
-                let row = sqlx::query(
-                    r#"
-                    INSERT INTO backup_policies (
-                        schedule_id,
-                        retention_days,
-                        keep_last,
-                        rotation_generation
-                    )
-                    VALUES ($1, $2, $3, $4)
-                    ON CONFLICT (schedule_id) DO UPDATE SET
-                        retention_days = EXCLUDED.retention_days,
-                        keep_last = EXCLUDED.keep_last,
-                        rotation_generation = EXCLUDED.rotation_generation,
-                        updated_at = now()
-                    RETURNING
-                        schedule_id,
-                        retention_days,
-                        keep_last,
-                        rotation_generation,
-                        updated_at::text AS updated_at
-                    "#,
-                )
-                .bind(schedule_id)
-                .bind(retention_days)
-                .bind(keep_last)
-                .bind(&rotation_generation)
-                .fetch_one(pool)
-                .await?;
-                Ok(BackupPolicyMetadata {
-                    schedule_id: row.try_get("schedule_id")?,
-                    retention_days: row.try_get("retention_days")?,
-                    keep_last: row.try_get("keep_last")?,
-                    rotation_generation: row.try_get("rotation_generation")?,
-                    updated_at: row.try_get("updated_at")?,
-                })
-            }
-        }
+async fn upsert_backup_policy_metadata_memory(
+    memory: &crate::repository::MemoryState,
+    schedule_id: Uuid,
+    retention_days: i32,
+    keep_last: i32,
+    rotation_generation: Option<String>,
+) -> BackupPolicyMetadata {
+    let metadata = BackupPolicyMetadata {
+        schedule_id,
+        retention_days,
+        keep_last,
+        rotation_generation,
+        updated_at: unix_now().to_string(),
+    };
+    let mut policies = memory.backup_policies.write().await;
+    if let Some(existing) = policies
+        .iter_mut()
+        .find(|existing| existing.schedule_id == schedule_id)
+    {
+        *existing = metadata.clone();
+    } else {
+        policies.push(metadata.clone());
     }
+    metadata
+}
 
-    async fn audit_backup_policy_upserted(
-        &self,
-        schedule: &ScheduleView,
-        metadata: &BackupPolicyMetadata,
-        operator: &AuthContext,
-    ) -> Result<()> {
-        let audit_metadata = serde_json::json!({
-            "name": &schedule.name,
-            "selector_expression": &schedule.selector_expression,
-            "cron_expr": &schedule.cron_expr,
-            "timezone": &schedule.timezone,
-            "next_runs": &schedule.next_runs,
-            "retention_days": metadata.retention_days,
-            "keep_last": metadata.keep_last,
-            "rotation_generation": &metadata.rotation_generation,
-            "operator_username": &operator.operator.username,
-            "session_id": operator.session_id,
-        });
-        match self {
-            Self::Memory(memory) => {
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: Some(operator.operator.id),
-                    action: "backup_policy.upserted".to_string(),
-                    target: format!("backup_policy:{}", schedule.id),
-                    command_hash: None,
-                    metadata: audit_metadata,
-                    created_at: unix_now().to_string(),
-                });
-                Ok(())
-            }
-            Self::Postgres(pool) => {
-                sqlx::query(
-                    r#"
-                    INSERT INTO audit_logs (
-                        id, actor_id, action, target, command_hash, metadata
-                    )
-                    VALUES ($1, $2, $3, $4, NULL, $5)
-                    "#,
-                )
-                .bind(Uuid::new_v4())
-                .bind(operator.operator.id)
-                .bind("backup_policy.upserted")
-                .bind(format!("backup_policy:{}", schedule.id))
-                .bind(audit_metadata)
-                .execute(pool)
-                .await?;
-                Ok(())
-            }
-        }
-    }
+async fn record_backup_policy_audit_memory(
+    memory: &crate::repository::MemoryState,
+    schedule: &ScheduleView,
+    metadata: &BackupPolicyMetadata,
+    operator: &AuthContext,
+) {
+    memory.audits.write().await.push(AuditLogView {
+        id: Uuid::new_v4(),
+        actor_id: Some(operator.operator.id),
+        action: "backup_policy.upserted".to_string(),
+        target: format!("backup_policy:{}", schedule.id),
+        command_hash: None,
+        metadata: backup_policy_audit_metadata(schedule, metadata, operator),
+        created_at: unix_now().to_string(),
+    });
+}
+
+async fn upsert_backup_policy_metadata_postgres_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    schedule_id: Uuid,
+    retention_days: i32,
+    keep_last: i32,
+    rotation_generation: Option<String>,
+) -> Result<BackupPolicyMetadata> {
+    let row = sqlx::query(
+        r#"
+        INSERT INTO backup_policies (
+            schedule_id,
+            retention_days,
+            keep_last,
+            rotation_generation
+        )
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (schedule_id) DO UPDATE SET
+            retention_days = EXCLUDED.retention_days,
+            keep_last = EXCLUDED.keep_last,
+            rotation_generation = EXCLUDED.rotation_generation,
+            updated_at = now()
+        RETURNING
+            schedule_id,
+            retention_days,
+            keep_last,
+            rotation_generation,
+            updated_at::text AS updated_at
+        "#,
+    )
+    .bind(schedule_id)
+    .bind(retention_days)
+    .bind(keep_last)
+    .bind(rotation_generation)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(BackupPolicyMetadata {
+        schedule_id: row.try_get("schedule_id")?,
+        retention_days: row.try_get("retention_days")?,
+        keep_last: row.try_get("keep_last")?,
+        rotation_generation: row.try_get("rotation_generation")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn backup_policy_audit_metadata(
+    schedule: &ScheduleView,
+    metadata: &BackupPolicyMetadata,
+    operator: &AuthContext,
+) -> serde_json::Value {
+    serde_json::json!({
+        "name": &schedule.name,
+        "selector_expression": &schedule.selector_expression,
+        "cron_expr": &schedule.cron_expr,
+        "timezone": &schedule.timezone,
+        "next_runs": &schedule.next_runs,
+        "cadence_error": &schedule.cadence_error,
+        "retention_days": metadata.retention_days,
+        "keep_last": metadata.keep_last,
+        "rotation_generation": &metadata.rotation_generation,
+        "operator_username": &operator.operator.username,
+        "session_id": operator.session_id,
+    })
+}
+
+async fn insert_backup_policy_audit_postgres_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    schedule: &ScheduleView,
+    metadata: &BackupPolicyMetadata,
+    operator: &AuthContext,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs (
+            id, actor_id, action, target, command_hash, metadata
+        )
+        VALUES ($1, $2, $3, $4, NULL, $5)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(operator.operator.id)
+    .bind("backup_policy.upserted")
+    .bind(format!("backup_policy:{}", schedule.id))
+    .bind(backup_policy_audit_metadata(schedule, metadata, operator))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -757,12 +896,12 @@ fn backup_policy_view(
     schedule: ScheduleView,
     metadata: BackupPolicyMetadata,
 ) -> Option<BackupPolicyView> {
-    let JobCommand::Backup {
+    let Some(JobCommand::Backup {
         paths,
         include_config,
         follow_symlinks,
         missing_path_policy,
-    } = schedule.operation.clone()
+    }) = schedule.operation.clone()
     else {
         return None;
     };
@@ -782,6 +921,7 @@ fn backup_policy_view(
         cron_expr: schedule.cron_expr,
         timezone: schedule.timezone,
         next_runs: schedule.next_runs,
+        cadence_error: schedule.cadence_error,
         catch_up_policy: schedule.catch_up_policy,
         catch_up_limit: schedule.catch_up_limit,
         retry_delay_secs: schedule.retry_delay_secs,
@@ -795,20 +935,31 @@ fn backup_policy_view(
     })
 }
 
-fn default_backup_policy_metadata(schedule: &ScheduleView) -> BackupPolicyMetadata {
-    BackupPolicyMetadata {
-        schedule_id: schedule.id,
-        retention_days: DEFAULT_BACKUP_POLICY_RETENTION_DAYS,
-        keep_last: DEFAULT_BACKUP_POLICY_KEEP_LAST,
-        rotation_generation: None,
-        updated_at: schedule.created_at.clone(),
-    }
-}
-
 fn normalize_policy_generation(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn backup_policy_schedule_input(request: &CreateBackupPolicyRequest) -> ScheduleCreateInput {
+    ScheduleCreateInput {
+        name: request.name.clone(),
+        operation: JobCommand::Backup {
+            paths: request.paths.clone(),
+            include_config: request.include_config,
+            follow_symlinks: request.follow_symlinks,
+            missing_path_policy: request.missing_path_policy,
+        },
+        selector_expression: request.selector_expression.clone(),
+        target_client_ids: request.target_client_ids.clone(),
+        cron_expr: request.cron_expr.clone(),
+        timezone: request.timezone.clone(),
+        enabled: request.enabled,
+        catch_up_policy: request.catch_up_policy.clone(),
+        catch_up_limit: request.catch_up_limit,
+        retry_delay_secs: request.retry_delay_secs,
+        max_failures: request.max_failures,
+    }
 }
 
 fn timestamp_before_unix_string(value: &str, cutoff_unix: u64) -> bool {

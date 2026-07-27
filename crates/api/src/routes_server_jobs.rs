@@ -113,6 +113,18 @@ fn artifact_cleanup_error(error: anyhow::Error) -> ApiError {
     if message.contains("artifact_cleanup_preview_hash_mismatch") {
         return ApiError::conflict("artifact_cleanup_preview_hash_mismatch");
     }
+    if message.contains("artifact_cleanup_match_limit_exceeded") {
+        return ApiError::bad_request_with_message(
+            "artifact_cleanup_review_scope_too_large",
+            "This cleanup matches too many artifacts for one reviewed action. Narrow the domains or selector, then review it again.",
+        );
+    }
+    if message.contains("artifact_cleanup_review_numeric_invalid") {
+        return ApiError::conflict_with_message(
+            "artifact_cleanup_review_data_invalid",
+            "Cleanup review stopped because matched artifact size metadata is invalid. Repair the artifact metadata or narrow the selector before reviewing again.",
+        );
+    }
     if message.contains("artifact_cleanup_expression_required") {
         return ApiError::bad_request("artifact_cleanup_expression_required");
     }

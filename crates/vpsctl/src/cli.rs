@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use uuid::Uuid;
 use vpsman_common::DEFAULT_MAX_JOB_TIMEOUT_SECS;
 
 use crate::cli_access::{
@@ -849,8 +850,16 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 50)]
         limit: u16,
     },
-    BackupPolicies,
+    BackupPolicies {
+        #[arg(long, default_value_t = 200)]
+        limit: u16,
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
+    },
     BackupPolicyUpsert {
+        /// Existing backup-policy schedule UUID to update; omit to create.
+        #[arg(long, value_name = "UUID")]
+        schedule_id: Option<Uuid>,
         #[arg(long)]
         name: String,
         #[arg(long, value_delimiter = ',')]
@@ -878,12 +887,17 @@ pub(crate) enum Command {
         retry_delay_secs: i64,
         #[arg(long, default_value_t = 3)]
         max_failures: i32,
+        /// Retention days; required with --schedule-id.
         #[arg(long)]
         retention_days: Option<i32>,
+        /// Minimum retained runs; required with --schedule-id.
         #[arg(long)]
         keep_last: Option<i32>,
         #[arg(long)]
         rotation_generation: Option<String>,
+        /// Explicitly clear rotation generation on an existing policy.
+        #[arg(long, default_value_t = false, conflicts_with = "rotation_generation")]
+        clear_rotation_generation: bool,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
     },
@@ -1127,6 +1141,65 @@ mod tests {
     use clap::Parser;
 
     use super::{Args, Command};
+
+    #[test]
+    fn backup_policy_upsert_accepts_an_explicit_update_target() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let schedule_id =
+                    uuid::Uuid::parse_str("52ff9113-03bd-4fa5-a166-3243681826fe").unwrap();
+                let parsed = Args::try_parse_from([
+                    "vpsctl",
+                    "backup-policy-upsert",
+                    "--schedule-id",
+                    "52ff9113-03bd-4fa5-a166-3243681826fe",
+                    "--name",
+                    "nightly-edge",
+                    "--include-config",
+                    "--clients",
+                    "edge-a",
+                    "--confirmed",
+                ])
+                .unwrap();
+                let Command::BackupPolicyUpsert {
+                    schedule_id: parsed_schedule_id,
+                    ..
+                } = parsed.command
+                else {
+                    panic!("expected backup-policy-upsert command");
+                };
+                assert_eq!(parsed_schedule_id, Some(schedule_id));
+            })
+            .expect("spawn CLI parser test")
+            .join()
+            .expect("CLI parser test panicked");
+    }
+
+    #[test]
+    fn backup_policy_listing_accepts_explicit_page_bounds() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let parsed = Args::try_parse_from([
+                    "vpsctl",
+                    "backup-policies",
+                    "--limit",
+                    "500",
+                    "--offset",
+                    "1000",
+                ])
+                .unwrap();
+                let Command::BackupPolicies { limit, offset } = parsed.command else {
+                    panic!("expected backup-policies command");
+                };
+                assert_eq!(limit, 500);
+                assert_eq!(offset, 1000);
+            })
+            .expect("spawn CLI parser test")
+            .join()
+            .expect("CLI parser test panicked");
+    }
 
     #[test]
     fn agent_update_check_activation_is_explicit() {

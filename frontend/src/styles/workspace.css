@@ -421,6 +421,10 @@
   color: var(--success);
 }
 
+.homeQuietState.evidenceIncomplete svg {
+  color: var(--muted);
+}
+
 .homeDashboardLayer {
   min-width: 0;
 }

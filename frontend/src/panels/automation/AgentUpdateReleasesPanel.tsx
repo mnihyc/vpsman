@@ -11,6 +11,7 @@ import {
   type JobDispatchPresetInput,
 } from "../../jobDispatchPreset";
 import { agentUpdateReleaseStatusBadgeClass } from "../../jobStatusPresentation";
+import { formatLowerBoundCount } from "../../constants";
 import type {
   AgentView,
   AgentUpdateReleaseRecord,
@@ -50,6 +51,7 @@ export function AgentUpdateReleasesPanel({
   onOpenJobHistory,
   onRefresh,
   releases,
+  releasesTruncated,
   suiteConfig,
   suiteConfigError,
   suiteConfigLoading,
@@ -65,6 +67,7 @@ export function AgentUpdateReleasesPanel({
   onOpenJobHistory: () => void;
   onRefresh: () => void;
   releases: AgentUpdateReleaseRecord[];
+  releasesTruncated: boolean;
   suiteConfig: SuiteConfigResponse | null;
   suiteConfigError: string | null;
   suiteConfigLoading: boolean;
@@ -119,7 +122,7 @@ export function AgentUpdateReleasesPanel({
   const releasePostureItems = [
     {
       detail: latestRelease
-        ? `${latestRelease.name} ${latestRelease.version} on ${latestRelease.channel}. ${releases.length} release record${releases.length === 1 ? "" : "s"} loaded.`
+        ? `${latestRelease.name} ${latestRelease.version} on ${latestRelease.channel}. ${formatLowerBoundCount(releases.length, releasesTruncated)} release record${releases.length === 1 ? "" : "s"}${releasesTruncated ? " represented in the loaded page" : " loaded"}.`
         : "No available version has been recorded in the release registry yet.",
       label: "Available version",
       value: latestRelease ? latestRelease.version : "None",
@@ -350,8 +353,9 @@ export function AgentUpdateReleasesPanel({
         <div>
           <h2>Agent update registry</h2>
           <span>
-            {releases.length} registered external artifact
-            {releases.length === 1 ? "" : "s"}
+            {releasesTruncated
+              ? `${releases.length} registered external artifacts loaded; more may exist`
+              : `${releases.length} registered external artifact${releases.length === 1 ? "" : "s"}`}
           </span>
         </div>
         <div className="sectionActions">
@@ -709,6 +713,7 @@ export function AgentUpdateReleasesPanel({
           </div>
         )}
         rows={releases}
+        rowsTruncated={releasesTruncated}
         searchPlaceholder="Search releases"
         selectable={false}
         storageKey="vpsman.automation.agentUpdateReleases"

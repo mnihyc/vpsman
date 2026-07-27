@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::{
@@ -919,6 +920,10 @@ impl Repository {
                 })
             }
             Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                    .execute(&mut *tx)
+                    .await?;
                 let client_rows = sqlx::query(
                     r#"
                     SELECT id, display_name, status, public_key
@@ -927,30 +932,9 @@ impl Repository {
                     ORDER BY display_name, id
                     "#,
                 )
-                .fetch_all(pool)
+                .fetch_all(&mut *tx)
                 .await?;
-                let revocation_rows = sqlx::query(
-                    r#"
-                    SELECT
-                        id,
-                        client_id,
-                        public_key_sha256_hex,
-                        reason,
-                        revoked_by,
-                        EXTRACT(EPOCH FROM created_at)::bigint AS created_unix
-                    FROM client_key_revocations
-                    ORDER BY created_at DESC
-                    LIMIT 5000
-                    "#,
-                )
-                .fetch_all(pool)
-                .await?;
-                let revocations = revocation_rows
-                    .into_iter()
-                    .map(client_key_revocation_from_row)
-                    .collect::<Result<Vec<_>>>()?;
-                let mut current_key_revoked_count = 0usize;
-                let clients = client_rows
+                let raw_clients = client_rows
                     .into_iter()
                     .map(|row| {
                         let client_id: String = row.try_get("id")?;
@@ -959,26 +943,89 @@ impl Repository {
                         let public_key: Vec<u8> = row.try_get("public_key")?;
                         let fingerprint =
                             (!public_key.is_empty()).then(|| public_key_sha256_hex(&public_key));
-                        let latest = latest_current_revocation(
-                            &revocations,
-                            &client_id,
-                            fingerprint.as_deref(),
-                        );
+                        Ok((client_id, display_name, status, fingerprint))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let current_key_pairs = raw_clients
+                    .iter()
+                    .filter_map(|(client_id, _, _, fingerprint)| {
+                        fingerprint
+                            .as_ref()
+                            .map(|fingerprint| (client_id.clone(), fingerprint.clone()))
+                    })
+                    .collect::<Vec<_>>();
+                let current_client_ids = current_key_pairs
+                    .iter()
+                    .map(|(client_id, _)| client_id.clone())
+                    .collect::<Vec<_>>();
+                let current_fingerprints = current_key_pairs
+                    .iter()
+                    .map(|(_, fingerprint)| fingerprint.clone())
+                    .collect::<Vec<_>>();
+                let latest_revocation_rows = if current_client_ids.is_empty() {
+                    Vec::new()
+                } else {
+                    sqlx::query(
+                        r#"
+                            SELECT
+                                current_keys.client_id,
+                                revocation.reason,
+                                EXTRACT(EPOCH FROM revocation.created_at)::bigint
+                                    AS created_unix
+                            FROM unnest($1::text[], $2::text[])
+                                AS current_keys(client_id, fingerprint)
+                            JOIN LATERAL (
+                                SELECT reason, created_at
+                                FROM client_key_revocations
+                                WHERE client_id = current_keys.client_id
+                                  AND public_key_sha256_hex = current_keys.fingerprint
+                                ORDER BY created_at DESC, id DESC
+                                LIMIT 1
+                            ) revocation ON true
+                            "#,
+                    )
+                    .bind(&current_client_ids)
+                    .bind(&current_fingerprints)
+                    .fetch_all(&mut *tx)
+                    .await?
+                };
+                let latest_revocations = latest_revocation_rows
+                    .into_iter()
+                    .map(|row| {
+                        Ok((
+                            row.try_get::<String, _>("client_id")?,
+                            (
+                                row.try_get::<i64, _>("created_unix")?.to_string(),
+                                row.try_get::<Option<String>, _>("reason")?,
+                            ),
+                        ))
+                    })
+                    .collect::<Result<HashMap<_, _>>>()?;
+                let revocation_count = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*)::bigint FROM client_key_revocations",
+                )
+                .fetch_one(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                let mut current_key_revoked_count = 0usize;
+                let clients = raw_clients
+                    .into_iter()
+                    .map(|(client_id, display_name, status, fingerprint)| {
+                        let latest = latest_revocations.get(&client_id);
                         if latest.is_some() {
                             current_key_revoked_count += 1;
                         }
-                        Ok(KeyLifecycleClientView {
+                        KeyLifecycleClientView {
                             client_id,
                             display_name,
                             status,
                             current_public_key_sha256_hex: fingerprint,
                             current_key_revoked: latest.is_some(),
-                            latest_revoked_at: latest.map(|record| record.created_at.clone()),
-                            latest_revocation_reason: latest
-                                .and_then(|record| record.reason.clone()),
-                        })
+                            latest_revoked_at: latest.map(|(created_at, _)| created_at.clone()),
+                            latest_revocation_reason: latest.and_then(|(_, reason)| reason.clone()),
+                        }
                     })
-                    .collect::<Result<Vec<_>>>()?;
+                    .collect::<Vec<_>>();
                 let direct_identity_client_count = clients
                     .iter()
                     .filter(|client| client.current_public_key_sha256_hex.is_some())
@@ -986,7 +1033,8 @@ impl Repository {
                 Ok(KeyLifecycleReportView {
                     direct_identity_client_count,
                     current_key_revoked_count,
-                    revocation_count: revocations.len(),
+                    revocation_count: usize::try_from(revocation_count)
+                        .context("client key revocation count is invalid")?,
                     clients,
                 })
             }
@@ -1323,4 +1371,40 @@ fn normalize_tags(tags: &[String]) -> Vec<String> {
 
 pub(crate) fn public_key_sha256_hex(public_key: &[u8]) -> String {
     hex::encode(Sha256::digest(public_key))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_key_revocation_is_found_beyond_the_legacy_report_horizon() {
+        let client_id = "edge-current";
+        let fingerprint = "a".repeat(64);
+        let mut revocations = (0..5_000)
+            .map(|index| ClientKeyRevocationView {
+                id: Uuid::new_v4(),
+                client_id: format!("other-{index}"),
+                public_key_sha256_hex: format!("{index:064x}"),
+                reason: None,
+                revoked_by: None,
+                created_at: index.to_string(),
+            })
+            .collect::<Vec<_>>();
+        revocations.push(ClientKeyRevocationView {
+            id: Uuid::new_v4(),
+            client_id: client_id.to_string(),
+            public_key_sha256_hex: fingerprint.clone(),
+            reason: Some("retired".to_string()),
+            revoked_by: None,
+            created_at: "0".to_string(),
+        });
+
+        let latest = latest_current_revocation(&revocations, client_id, Some(fingerprint.as_str()));
+
+        assert_eq!(
+            latest.and_then(|record| record.reason.as_deref()),
+            Some("retired")
+        );
+    }
 }

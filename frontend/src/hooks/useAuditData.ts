@@ -1,5 +1,6 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { apiGet, apiPost, buildListPath, isApiUnauthorized } from "../api";
+import { HISTORY_DETAIL_LIMIT } from "../constants";
 import type {
   AuditLogRecord,
   HistoryExportRecord,
@@ -11,49 +12,106 @@ import type {
 
 export function useAuditData(apiToken: string, onUnauthorized: () => void) {
   const [audits, setAudits] = useState<AuditLogRecord[]>([]);
+  const [auditsTruncated, setAuditsTruncated] = useState(false);
   const [historyRetentionPolicies, setHistoryRetentionPolicies] = useState<HistoryRetentionPolicyRecord[]>([]);
   const [historyPruneResult, setHistoryPruneResult] = useState<HistoryRetentionPruneResponse | null>(null);
   const [historyExport, setHistoryExport] = useState<HistoryExportRecord | null>(null);
   const [auditError, setAuditError] = useState<string | null>(null);
   const [auditLoading, setAuditLoading] = useState(false);
+  const [auditEvidenceAvailable, setAuditEvidenceAvailable] = useState(false);
+  const auditLoadGeneration = useRef(0);
+  const historyExportLoadGeneration = useRef(0);
+  const historyPruneMutationGeneration = useRef(0);
+  const currentApiToken = useRef(apiToken);
+  currentApiToken.current = apiToken;
 
   const handleAuditError = useCallback(
     (error: unknown, fallback: string) => {
+      if (currentApiToken.current !== apiToken) {
+        return;
+      }
       if (isApiUnauthorized(error)) {
         onUnauthorized();
         setAudits([]);
+        setAuditsTruncated(false);
+        setHistoryRetentionPolicies([]);
         setAuditError("Operator login required");
         return;
       }
       setAuditError(error instanceof Error ? error.message : fallback);
     },
-    [onUnauthorized],
+    [apiToken, onUnauthorized],
   );
 
   const loadAudits = useCallback(async () => {
+    if (currentApiToken.current !== apiToken) {
+      return;
+    }
+    const generation = auditLoadGeneration.current + 1;
+    auditLoadGeneration.current = generation;
     setAuditLoading(true);
     setAuditError(null);
     try {
-      const [auditRows, retentionRows] = await Promise.all([
-        apiGet<AuditLogRecord[]>(buildListPath("/api/v1/audit", { limit: 1000, sort: "created_at", dir: "desc" }), apiToken),
+      const [auditResult, retentionResult] = await Promise.allSettled([
+        apiGet<AuditLogRecord[]>(buildListPath("/api/v1/audit", { limit: HISTORY_DETAIL_LIMIT, sort: "created_at", dir: "desc" }), apiToken),
         apiGet<HistoryRetentionPolicyRecord[]>("/api/v1/history/retention-policies", apiToken),
       ]);
-      setAudits(auditRows);
-      setHistoryRetentionPolicies(retentionRows);
-    } catch (error) {
-      handleAuditError(error, "Audit log unavailable");
+      if (
+        auditLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return;
+      }
+      const results = [auditResult, retentionResult];
+      if (
+        results.some(
+          (result) =>
+            result.status === "rejected" &&
+            isApiUnauthorized(result.reason),
+        )
+      ) {
+        onUnauthorized();
+        setAuditEvidenceAvailable(false);
+        setAudits([]);
+        setAuditsTruncated(false);
+        setHistoryRetentionPolicies([]);
+        setAuditError("Operator login required");
+        return;
+      }
+      if (auditResult.status === "fulfilled") {
+        setAudits(auditResult.value);
+        setAuditsTruncated(auditResult.value.length >= HISTORY_DETAIL_LIMIT);
+      }
+      setAuditEvidenceAvailable(auditResult.status === "fulfilled");
+      if (retentionResult.status === "fulfilled") {
+        setHistoryRetentionPolicies(retentionResult.value);
+      }
+      setAuditError(
+        unavailableAuditSources([auditResult, retentionResult]),
+      );
     } finally {
-      setAuditLoading(false);
+      if (
+        auditLoadGeneration.current === generation &&
+        currentApiToken.current === apiToken
+      ) {
+        setAuditLoading(false);
+      }
     }
-  }, [apiToken, handleAuditError]);
+  }, [apiToken, onUnauthorized]);
 
   const upsertHistoryRetentionPolicy = useCallback(
     async (request: HistoryRetentionPolicyRequest) => {
       setAuditError(null);
       try {
         await apiPost<HistoryRetentionPolicyRecord>("/api/v1/history/retention-policies", apiToken, request);
+        if (currentApiToken.current !== apiToken) {
+          return;
+        }
         await loadAudits();
       } catch (error) {
+        if (currentApiToken.current !== apiToken) {
+          return;
+        }
         handleAuditError(error, "History retention policy update failed");
         throw error;
       }
@@ -63,6 +121,9 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
 
   const pruneHistoryRetention = useCallback(
     async (request: HistoryRetentionPruneRequest) => {
+      const operationGeneration =
+        historyPruneMutationGeneration.current + 1;
+      historyPruneMutationGeneration.current = operationGeneration;
       setAuditError(null);
       try {
         const response = await apiPost<HistoryRetentionPruneResponse>(
@@ -70,10 +131,22 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
           apiToken,
           request,
         );
+        if (
+          currentApiToken.current !== apiToken ||
+          historyPruneMutationGeneration.current !== operationGeneration
+        ) {
+          return response;
+        }
         setHistoryPruneResult(response);
         await loadAudits();
         return response;
       } catch (error) {
+        if (
+          currentApiToken.current !== apiToken ||
+          historyPruneMutationGeneration.current !== operationGeneration
+        ) {
+          throw error;
+        }
         handleAuditError(error, "History retention prune failed");
         throw error;
       }
@@ -85,15 +158,32 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
     async (
       domains = "audit_logs,system_metric_rollups,telemetry_rollups,telemetry_network_rates,traffic_counter_samples,job_outputs,backup_artifacts,network_observations,topology_history,client_status_history,gateway_sessions",
     ) => {
+      if (currentApiToken.current !== apiToken) {
+        throw new Error("Operator session changed; retry the history export");
+      }
+      const generation = historyExportLoadGeneration.current + 1;
+      historyExportLoadGeneration.current = generation;
       setAuditError(null);
       try {
         const response = await apiGet<HistoryExportRecord>(
           `/api/v1/history/export?limit=1000&domains=${encodeURIComponent(domains)}`,
           apiToken,
         );
+        if (
+          currentApiToken.current !== apiToken ||
+          historyExportLoadGeneration.current !== generation
+        ) {
+          return response;
+        }
         setHistoryExport(response);
         return response;
       } catch (error) {
+        if (
+          currentApiToken.current !== apiToken ||
+          historyExportLoadGeneration.current !== generation
+        ) {
+          throw error;
+        }
         handleAuditError(error, "History export unavailable");
         throw error;
       }
@@ -101,10 +191,28 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
     [apiToken, handleAuditError],
   );
 
+  const clearAudits = useCallback(() => {
+    auditLoadGeneration.current += 1;
+    historyExportLoadGeneration.current += 1;
+    historyPruneMutationGeneration.current += 1;
+    currentApiToken.current = "";
+    setAudits([]);
+    setAuditsTruncated(false);
+    setHistoryRetentionPolicies([]);
+    setHistoryPruneResult(null);
+    setHistoryExport(null);
+    setAuditError(null);
+    setAuditLoading(false);
+    setAuditEvidenceAvailable(false);
+  }, []);
+
   return {
     auditError,
+    auditEvidenceAvailable,
     auditLoading,
     audits,
+    auditsTruncated,
+    clearAudits,
     historyExport,
     historyPruneResult,
     historyRetentionPolicies,
@@ -113,4 +221,16 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
     pruneHistoryRetention,
     upsertHistoryRetentionPolicy,
   };
+}
+
+function unavailableAuditSources(
+  results: readonly PromiseSettledResult<unknown>[],
+): string | null {
+  const labels = ["audit log", "history retention policies"] as const;
+  const failures = results.flatMap((result, index) =>
+    result.status === "rejected" ? [labels[index]] : [],
+  );
+  return failures.length > 0
+    ? `Some audit sources are unavailable: ${failures.join(", ")}`
+    : null;
 }

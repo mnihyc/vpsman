@@ -61,6 +61,15 @@ type VpsDetailTab =
   | "Network"
   | "Activity";
 
+type VpsDetailRecordBounds = {
+  audits: boolean;
+  backupArtifacts: boolean;
+  backups: boolean;
+  fileTransfers: boolean;
+  fleetAlerts: boolean;
+  jobs: boolean;
+};
+
 type VpsDetailPanelProps = {
   agent: AgentView | null;
   agents: AgentView[];
@@ -73,6 +82,7 @@ type VpsDetailPanelProps = {
   fleetAlertsTruncated: boolean;
   fleetAlertPolicies: FleetAlertPolicyRecord[];
   jobs: JobHistoryRecord[];
+  recordBounds: VpsDetailRecordBounds;
   loading: boolean;
   networkObservations: NetworkObservationRecord[];
   networkTrends: NetworkObservationTrendRecord[];
@@ -93,6 +103,7 @@ type VpsDetailPanelProps = {
   onOpenTerminal: (agent: AgentView) => void;
   policyAlerts: PolicyAlertRecord[];
   runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
+  runtimeConfigEvidenceState: "available" | "loading" | "unavailable";
   sourceStatus: SourceStatusRecord[];
   sourceTemplateAssignments: SourceTemplateAssignmentRecord[];
   summary: FleetSummary;
@@ -125,6 +136,7 @@ export function VpsDetailPanel({
   fleetAlertsTruncated,
   fleetAlertPolicies,
   jobs,
+  recordBounds,
   loading,
   networkObservations,
   networkTrends,
@@ -145,6 +157,7 @@ export function VpsDetailPanel({
   onOpenTerminal,
   policyAlerts,
   runtimeConfigApplyStates,
+  runtimeConfigEvidenceState,
   sourceStatus,
   sourceTemplateAssignments,
   telemetryNetworkRates,
@@ -168,7 +181,10 @@ export function VpsDetailPanel({
             networkObservations,
             networkTrends,
             policyAlerts,
-            runtimeConfigApplyStates,
+            runtimeConfigApplyStates:
+              runtimeConfigEvidenceState === "available"
+                ? runtimeConfigApplyStates
+                : [],
             sourceStatus,
             sourceTemplateAssignments,
             telemetryNetworkRates,
@@ -190,6 +206,7 @@ export function VpsDetailPanel({
       networkTrends,
       policyAlerts,
       runtimeConfigApplyStates,
+      runtimeConfigEvidenceState,
       sourceStatus,
       sourceTemplateAssignments,
       telemetryNetworkRates,
@@ -363,9 +380,23 @@ export function VpsDetailPanel({
             <VpsResourceFact
               icon={<History size={16} />}
               label="Active jobs"
-              value={`${activeJobCount}`}
-              detail={`${related.relatedJobs.length} related job records`}
-              tone={activeJobCount > 0 ? "warning" : "neutral"}
+              value={
+                recordBounds.jobs && activeJobCount === 0
+                  ? "None in loaded history"
+                  : `${formatLowerBoundCount(
+                      activeJobCount,
+                      recordBounds.jobs,
+                    )} active${recordBounds.jobs ? " loaded" : ""}`
+              }
+              detail={`${formatLowerBoundCount(
+                related.relatedJobs.length,
+                recordBounds.jobs,
+              )} related job records${recordBounds.jobs ? " in loaded history; more may exist" : ""}`}
+              tone={
+                activeJobCount > 0 || recordBounds.jobs
+                  ? "warning"
+                  : "neutral"
+              }
             />
           </div>
         </div>
@@ -420,6 +451,7 @@ export function VpsDetailPanel({
               latestJob={latestJob}
               loading={loading}
               related={related}
+              recordBounds={recordBounds}
               onOpenFleetAlerts={onOpenFleetAlerts}
               onOpenFleetMetrics={() => onOpenFleetMetrics(agent)}
               onOpenJob={onOpenJob}
@@ -448,8 +480,21 @@ export function VpsDetailPanel({
               description="Browse, transfer, edit, and review file operations from Remote / Files."
               primary={{ label: "Browse files", onClick: () => onOpenFiles(agent) }}
               rows={[
-                ["Transfer sessions", String(related.fileTransfers.length)],
-                ["Latest transfer", related.fileTransfers[0] ? `${related.fileTransfers[0].direction} ${related.fileTransfers[0].status}` : "No transfer record"],
+                [
+                  "Transfer sessions",
+                  `${formatLowerBoundCount(
+                    related.fileTransfers.length,
+                    recordBounds.fileTransfers,
+                  )}${recordBounds.fileTransfers ? " loaded" : ""}`,
+                ],
+                [
+                  "Latest transfer",
+                  related.fileTransfers[0]
+                    ? `${related.fileTransfers[0].direction} ${related.fileTransfers[0].status}`
+                    : recordBounds.fileTransfers
+                      ? "None in loaded history; more may exist"
+                      : "No transfer record",
+                ],
                 ["Latest path", related.fileTransfers[0]?.path ?? "No path recorded"],
               ]}
             />
@@ -473,6 +518,7 @@ export function VpsDetailPanel({
               agent={agent}
               loading={loading}
               related={related}
+              runtimeConfigEvidenceState={runtimeConfigEvidenceState}
               onOpenConfig={() => onOpenConfig(agent)}
             />
           )}
@@ -480,6 +526,7 @@ export function VpsDetailPanel({
             <BackupsTab
               loading={loading}
               related={related}
+              recordBounds={recordBounds}
               onOpenBackup={() => onOpenBackup(agent)}
               onOpenJob={onOpenJob}
             />
@@ -499,6 +546,7 @@ export function VpsDetailPanel({
             <ActivityTab
               loading={loading}
               related={related}
+              recordBounds={recordBounds}
               onOpenAudit={onOpenAudit}
               onOpenFleetAlerts={onOpenFleetAlerts}
               onOpenJob={onOpenJob}
@@ -516,6 +564,7 @@ function SummaryTab({
   latestJob,
   loading,
   related,
+  recordBounds,
   onOpenFleetAlerts,
   onOpenFleetMetrics,
   onOpenJob,
@@ -524,6 +573,7 @@ function SummaryTab({
   latestJob: JobHistoryRecord | null;
   loading: boolean;
   related: VpsDetailContext;
+  recordBounds: VpsDetailRecordBounds;
   onOpenFleetAlerts: () => void;
   onOpenFleetMetrics: () => void;
   onOpenJob: (jobId: string) => void;
@@ -582,7 +632,19 @@ function SummaryTab({
             </span>
           </button>
         ) : (
-          <DetailState loading={loading} title="No related job evidence" detail={`No retained job target evidence is loaded for ${displayNameOrUnnamed(agent.display_name)}.`} />
+          <DetailState
+            loading={loading}
+            title={
+              recordBounds.jobs
+                ? "No related job in loaded history"
+                : "No related job evidence"
+            }
+            detail={
+              recordBounds.jobs
+                ? `No retained job target evidence for ${displayNameOrUnnamed(agent.display_name)} appears in the loaded job page; more history may exist.`
+                : `No retained job target evidence is loaded for ${displayNameOrUnnamed(agent.display_name)}.`
+            }
+          />
         )}
         {related.backups[0] ? (
           <span className="vpsDetailRecord static">
@@ -592,6 +654,12 @@ function SummaryTab({
               <DetailTime value={related.backups[0].created_at} />
             </span>
           </span>
+        ) : recordBounds.backups ? (
+          <DetailState
+            loading={loading}
+            title="No backup in loaded history"
+            detail="More backup history may exist outside the loaded page."
+          />
         ) : null}
       </DetailBlock>
     </div>
@@ -633,14 +701,19 @@ function ConfigTab({
   agent,
   loading,
   related,
+  runtimeConfigEvidenceState,
   onOpenConfig,
 }: {
   agent: AgentView;
   loading: boolean;
   related: VpsDetailContext;
+  runtimeConfigEvidenceState: "available" | "loading" | "unavailable";
   onOpenConfig: () => void;
 }) {
-  const configPosture = buildConfigPosture(related);
+  const configPosture = buildConfigPosture(
+    related,
+    runtimeConfigEvidenceState,
+  );
   const sourceIssueRows = sourceRowsNeedingAttention(related.sourceStatus);
   const applyState = related.runtimeApplyState;
 
@@ -712,8 +785,26 @@ function ConfigTab({
           <VpsFact label="Source assignments" value={String(related.sourceAssignments.length)} />
           <VpsFact label="Readiness records" value={String(related.sourceStatus.length)} />
           <VpsFact label="VPS rules" value={String(related.vpsRules.length)} />
-          <VpsFact label="Last apply" value={runtimeApplyTimeLabel(applyState)} />
-          <VpsFact label="Apply status" value={runtimeApplyStatusLabel(applyState)} />
+          <VpsFact
+            label="Last apply"
+            value={
+              runtimeConfigEvidenceState === "loading"
+                ? "Checking evidence"
+                : runtimeConfigEvidenceState === "unavailable"
+                  ? "Evidence unavailable"
+                  : runtimeApplyTimeLabel(applyState)
+            }
+          />
+          <VpsFact
+            label="Apply status"
+            value={
+              runtimeConfigEvidenceState === "loading"
+                ? "Checking apply state"
+                : runtimeConfigEvidenceState === "unavailable"
+                  ? "Apply state unavailable"
+                  : runtimeApplyStatusLabel(applyState)
+            }
+          />
         </DetailBlock>
         <DetailBlock title="Rules and raw details" icon={<FileCog size={18} />}>
           {related.vpsRules.length === 0 ? (
@@ -753,11 +844,13 @@ function ConfigTab({
 function BackupsTab({
   loading,
   related,
+  recordBounds,
   onOpenBackup,
   onOpenJob,
 }: {
   loading: boolean;
   related: VpsDetailContext;
+  recordBounds: VpsDetailRecordBounds;
   onOpenBackup: () => void;
   onOpenJob: (jobId: string) => void;
 }) {
@@ -768,7 +861,19 @@ function BackupsTab({
           <span>Open backup workflow</span>
         </button>
         {related.backups.length === 0 ? (
-          <DetailState loading={loading} title="No backup requests" detail="No current backup request record is loaded for this VPS." />
+          <DetailState
+            loading={loading}
+            title={
+              recordBounds.backups
+                ? "No backup request in loaded history"
+                : "No backup requests"
+            }
+            detail={
+              recordBounds.backups
+                ? "No backup request for this VPS appears in the loaded page; more history may exist."
+                : "No current backup request record is loaded for this VPS."
+            }
+          />
         ) : (
           related.backups.slice(0, 5).map((backup) => (
             <span className="vpsDetailRecord static" key={backup.id}>
@@ -788,7 +893,19 @@ function BackupsTab({
       </DetailBlock>
       <DetailBlock title="Artifacts" icon={<Boxes size={18} />}>
         {related.backupArtifacts.length === 0 ? (
-          <DetailState loading={loading} title="No artifacts" detail="No retained backup artifact metadata is loaded for this VPS." />
+          <DetailState
+            loading={loading}
+            title={
+              recordBounds.backupArtifacts
+                ? "No artifact in loaded history"
+                : "No artifacts"
+            }
+            detail={
+              recordBounds.backupArtifacts
+                ? "No backup artifact for this VPS appears in the loaded page; more history may exist."
+                : "No retained backup artifact metadata is loaded for this VPS."
+            }
+          />
         ) : (
           related.backupArtifacts.slice(0, 5).map((artifact) => (
             <span className="vpsDetailRecord static" key={artifact.id}>
@@ -925,6 +1042,7 @@ function NetworkTab({
 function ActivityTab({
   loading,
   related,
+  recordBounds,
   onOpenAudit,
   onOpenFleetAlerts,
   onOpenJob,
@@ -932,6 +1050,7 @@ function ActivityTab({
 }: {
   loading: boolean;
   related: VpsDetailContext;
+  recordBounds: VpsDetailRecordBounds;
   onOpenAudit: () => void;
   onOpenFleetAlerts: () => void;
   onOpenJob: (jobId: string) => void;
@@ -941,7 +1060,19 @@ function ActivityTab({
     <div className="vpsDetailGrid">
       <DetailBlock title="Correlated events" icon={<History size={18} />}>
         {related.activity.length === 0 ? (
-          <DetailState loading={loading} title="No correlated activity" detail="Loaded activity does not include target-scoped records for this VPS yet." />
+          <DetailState
+            loading={loading}
+            title="No correlated activity"
+            detail={
+              recordBounds.audits ||
+              recordBounds.jobs ||
+              recordBounds.backups ||
+              recordBounds.fileTransfers ||
+              recordBounds.fleetAlerts
+                ? "No target-scoped record for this VPS appears in the loaded history pages; more activity may exist."
+                : "Loaded activity does not include target-scoped records for this VPS yet."
+            }
+          />
         ) : (
           related.activity.slice(0, 8).map((event) => (
             <button
@@ -962,10 +1093,52 @@ function ActivityTab({
         )}
       </DetailBlock>
       <DetailBlock title="Evidence coverage" icon={<Boxes size={18} />}>
-        <VpsFact label="Alerts" value={String(related.alerts.length)} />
-        <VpsFact label="Audits" value={String(related.audits.length)} />
-        <VpsFact label="Backups" value={String(related.backups.length)} />
-        <VpsFact label="Transfers" value={String(related.fileTransfers.length)} />
+        <VpsFact
+          label="Alerts"
+          value={
+            recordBounds.fleetAlerts && related.alerts.length === 0
+              ? "None in loaded history"
+              : `${formatLowerBoundCount(
+                  related.alerts.length,
+                  recordBounds.fleetAlerts,
+                )}${recordBounds.fleetAlerts ? " loaded" : ""}`
+          }
+        />
+        <VpsFact
+          label="Jobs"
+          value={`${formatLowerBoundCount(
+            related.relatedJobs.length,
+            recordBounds.jobs,
+          )}${recordBounds.jobs ? " loaded" : ""}`}
+        />
+        <VpsFact
+          label="Audits"
+          value={`${formatLowerBoundCount(
+            related.audits.length,
+            recordBounds.audits,
+          )}${recordBounds.audits ? " loaded" : ""}`}
+        />
+        <VpsFact
+          label="Backups"
+          value={`${formatLowerBoundCount(
+            related.backups.length,
+            recordBounds.backups,
+          )}${recordBounds.backups ? " loaded" : ""}`}
+        />
+        <VpsFact
+          label="Artifacts"
+          value={`${formatLowerBoundCount(
+            related.backupArtifacts.length,
+            recordBounds.backupArtifacts,
+          )}${recordBounds.backupArtifacts ? " loaded" : ""}`}
+        />
+        <VpsFact
+          label="Transfers"
+          value={`${formatLowerBoundCount(
+            related.fileTransfers.length,
+            recordBounds.fileTransfers,
+          )}${recordBounds.fileTransfers ? " loaded" : ""}`}
+        />
         <VpsFact label="Network events" value={String(related.networkObservations.length)} />
         <DetailState loading={loading} title="Job target loading note" detail="Job history rows expose target records after opening a job, so direct job correlation is shown only when backup, transfer, output, or loaded target evidence carries this VPS ID." />
       </DetailBlock>
@@ -1250,12 +1423,20 @@ type ConfigPostureItem = {
   value: ReactNode;
 };
 
-function buildConfigPosture(related: VpsDetailContext): ConfigPostureItem[] {
+function buildConfigPosture(
+  related: VpsDetailContext,
+  runtimeConfigEvidenceState: "available" | "loading" | "unavailable",
+): ConfigPostureItem[] {
   const sourceIssues = sourceRowsNeedingAttention(related.sourceStatus);
   const ruleErrors = related.vpsRules.flatMap((rule) => rule.validation_errors);
   const applyState = related.runtimeApplyState;
+  const applyEvidenceDetail =
+    runtimeConfigEvidenceState === "loading"
+      ? "Runtime apply evidence is still loading"
+      : "Runtime apply evidence is unavailable";
+  const applyEvidenceKnown = runtimeConfigEvidenceState === "available";
   const lastError =
-    (applyState?.pending_status === "failed"
+    (applyEvidenceKnown && applyState?.pending_status === "failed"
       ? dispatchFailureReason(
           applyState.pending_error,
           applyState.pending_status,
@@ -1294,22 +1475,64 @@ function buildConfigPosture(related: VpsDetailContext): ConfigPostureItem[] {
       value: sourceIssues.length > 0 ? "Needs configuration" : related.sourceStatus.length > 0 ? "Ready" : "Unknown",
     },
     {
-      detail: configDriftDetail(applyState, sourceIssues.length, ruleErrors.length),
+      detail: applyEvidenceKnown
+        ? configDriftDetail(
+            applyState,
+            sourceIssues.length,
+            ruleErrors.length,
+          )
+        : `${applyEvidenceDetail}; cached state is not used for drift claims.`,
       label: "Drift state",
-      tone: configDriftTone(applyState, sourceIssues.length, ruleErrors.length),
-      value: configDriftLabel(applyState, sourceIssues.length, ruleErrors.length),
+      tone: applyEvidenceKnown
+        ? configDriftTone(
+            applyState,
+            sourceIssues.length,
+            ruleErrors.length,
+          )
+        : sourceIssues.length > 0 || ruleErrors.length > 0
+          ? "warning"
+          : "neutral",
+      value: applyEvidenceKnown
+        ? configDriftLabel(
+            applyState,
+            sourceIssues.length,
+            ruleErrors.length,
+          )
+        : runtimeConfigEvidenceState === "loading"
+          ? "Checking apply"
+          : "Apply unknown",
     },
     {
-      detail: runtimeApplyDetail(applyState),
+      detail: applyEvidenceKnown
+        ? runtimeApplyDetail(applyState)
+        : `${applyEvidenceDetail}; cached state is not treated as current.`,
       label: "Last apply",
-      tone: applyState?.pending_status === "failed" ? "critical" : applyState?.applied_at ? "ok" : "neutral",
-      value: runtimeApplyTimeLabel(applyState),
+      tone: applyEvidenceKnown
+        ? applyState?.pending_status === "failed"
+          ? "critical"
+          : applyState?.applied_at
+            ? "ok"
+            : "neutral"
+        : "neutral",
+      value: applyEvidenceKnown
+        ? runtimeApplyTimeLabel(applyState)
+        : runtimeConfigEvidenceState === "loading"
+          ? "Checking evidence"
+          : "Unavailable",
     },
     {
-      detail: lastError ?? "No loaded config error",
+      detail:
+        lastError ??
+        (applyEvidenceKnown
+          ? "No loaded config error"
+          : `${applyEvidenceDetail}; a latest apply error cannot be confirmed.`),
       label: "Last error",
-      tone: lastError ? "warning" : "ok",
-      value: lastError ? "Needs review" : "None",
+      tone: lastError ? "warning" : applyEvidenceKnown ? "ok" : "neutral",
+      value: lastError
+        ? "Needs review"
+        : applyEvidenceKnown
+          ? "None"
+          : "Unknown",
     },
   ];
 }

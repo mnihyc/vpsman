@@ -1,11 +1,12 @@
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use serde_json::json;
 use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
 use vpsman_common::{
     expression_matches, parse_expression, payload_hash, Expression, ExpressionContext,
-    ARTIFACT_CLEANUP_RUNNING_TIMEOUT_SECS, SERVER_JOB_STATUS_CANCELED, SERVER_JOB_STATUS_FAILED,
-    SERVER_JOB_STATUS_QUEUED, SERVER_JOB_STATUS_RUNNING, SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
+    ARTIFACT_CLEANUP_RUNNING_TIMEOUT_SECS, MAX_ARTIFACT_CLEANUP_REVIEWED_TARGETS,
+    SERVER_JOB_STATUS_CANCELED, SERVER_JOB_STATUS_FAILED, SERVER_JOB_STATUS_QUEUED,
+    SERVER_JOB_STATUS_RUNNING, SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
 };
 
 use crate::{
@@ -16,6 +17,8 @@ use crate::{
     repository::Repository,
     unix_now,
 };
+
+const ARTIFACT_CLEANUP_CANDIDATE_PAGE_SIZE: i64 = 500;
 
 impl Repository {
     pub(crate) async fn register_server_artifact(&self, artifact: NewServerArtifact) -> Result<()> {
@@ -192,12 +195,10 @@ impl Repository {
     )> {
         let expression = normalize_cleanup_expression(expression)?;
         let parsed = parse_cleanup_expression(&expression)?;
-        let candidates = self.artifact_cleanup_candidates(domains).await?;
-        let matched = candidates
-            .into_iter()
-            .filter(|candidate| artifact_matches_cleanup_expression(candidate, parsed.as_ref()))
-            .collect::<Vec<_>>();
-        let preview = cleanup_preview_from_matches(expression, domains, &matched);
+        let matched = self
+            .artifact_cleanup_matches(domains, parsed.as_ref())
+            .await?;
+        let preview = cleanup_preview_from_matches(expression, domains, &matched)?;
         Ok((preview, matched))
     }
 
@@ -449,86 +450,116 @@ impl Repository {
         }
     }
 
-    async fn artifact_cleanup_candidates(
+    async fn artifact_cleanup_matches(
         &self,
         domains: &[String],
+        expression: Option<&Expression>,
     ) -> Result<Vec<ServerArtifactCleanupCandidate>> {
         match self {
             Self::Memory(memory) => {
                 let internal_domains = artifact_cleanup_internal_domains(domains);
                 let backup_requests = memory.backup_requests.read().await.clone();
                 let backup_artifacts = memory.backup_artifacts.read().await.clone();
-                Ok(memory
-                    .server_artifacts
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|artifact| {
-                        matches!(
-                            artifact.status.as_str(),
-                            "creating" | "active" | "deleting" | "delete_failed"
-                        ) && internal_domains.contains(&artifact.domain)
-                    })
-                    .map(|artifact| {
-                        let mut artifact = artifact.clone();
-                        artifact.reference_protected = artifact.domain == "backup_artifact"
-                            && backup_requests.iter().any(|request| {
-                                request.artifact_id.is_some_and(|request_artifact_id| {
-                                    artifact.backup_artifact_id == Some(request_artifact_id)
-                                        || backup_artifacts.iter().any(|backup_artifact| {
-                                            backup_artifact.id == request_artifact_id
-                                                && backup_artifact.object_key == artifact.object_key
-                                        })
-                                })
-                            });
-                        artifact
-                    })
-                    .collect())
+                let artifacts = memory.server_artifacts.read().await;
+                let mut matched = Vec::new();
+                for artifact in artifacts.iter().filter(|artifact| {
+                    matches!(
+                        artifact.status.as_str(),
+                        "creating" | "active" | "deleting" | "delete_failed"
+                    ) && internal_domains.contains(&artifact.domain)
+                }) {
+                    let mut artifact = artifact.clone();
+                    artifact.reference_protected = artifact.domain == "backup_artifact"
+                        && backup_requests.iter().any(|request| {
+                            request.artifact_id.is_some_and(|request_artifact_id| {
+                                artifact.backup_artifact_id == Some(request_artifact_id)
+                                    || backup_artifacts.iter().any(|backup_artifact| {
+                                        backup_artifact.id == request_artifact_id
+                                            && backup_artifact.object_key == artifact.object_key
+                                    })
+                            })
+                        });
+                    if artifact_matches_cleanup_expression(&artifact, expression) {
+                        ensure_artifact_cleanup_match_capacity(matched.len())?;
+                        matched.push(artifact);
+                    }
+                }
+                Ok(matched)
             }
             Self::Postgres(pool) => {
                 let internal_domains = artifact_cleanup_internal_domains(domains);
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        artifact.id,
-                        artifact.domain,
-                        artifact.object_key,
-                        artifact.sha256_hex,
-                        artifact.size_bytes,
-                        artifact.status,
-                        artifact.job_id,
-                        artifact.client_id,
-                        artifact.stream,
-                        artifact.seq,
-                        artifact.backup_artifact_id,
-                        artifact.created_at::text AS created_at,
-                        CASE
-                            WHEN artifact.domain = 'backup_artifact' THEN EXISTS (
-                                SELECT 1
-                                FROM backup_requests requests
-                                JOIN backup_artifacts artifacts ON artifacts.id = requests.artifact_id
-                                WHERE (
-                                    artifact.backup_artifact_id IS NOT NULL
-                                    AND artifacts.id = artifact.backup_artifact_id
+                let mut tx = pool.begin().await?;
+                sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                    .execute(&mut *tx)
+                    .await?;
+                let mut matched = Vec::new();
+                let mut after_id = None;
+                loop {
+                    let rows = sqlx::query(
+                        r#"
+                        SELECT
+                            artifact.id,
+                            artifact.domain,
+                            artifact.object_key,
+                            artifact.sha256_hex,
+                            artifact.size_bytes,
+                            artifact.status,
+                            artifact.job_id,
+                            artifact.client_id,
+                            artifact.stream,
+                            artifact.seq,
+                            artifact.backup_artifact_id,
+                            artifact.created_at::text AS created_at,
+                            CASE
+                                WHEN artifact.domain = 'backup_artifact' THEN EXISTS (
+                                    SELECT 1
+                                    FROM backup_requests requests
+                                    JOIN backup_artifacts artifacts
+                                      ON artifacts.id = requests.artifact_id
+                                    WHERE (
+                                        artifact.backup_artifact_id IS NOT NULL
+                                        AND artifacts.id = artifact.backup_artifact_id
+                                    )
+                                    OR artifacts.object_key = artifact.object_key
                                 )
-                                OR artifacts.object_key = artifact.object_key
-                            )
-                            ELSE false
-                        END AS reference_protected
-                    FROM server_artifacts artifact
-                    WHERE artifact.status IN ('creating', 'active', 'deleting', 'delete_failed')
-                      AND artifact.domain = ANY($1)
-                    ORDER BY artifact.created_at DESC, artifact.object_key ASC
-                    LIMIT 10000
-                    "#,
-                )
-                .bind(internal_domains)
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter()
-                    .map(server_artifact_candidate_from_row)
-                    .collect::<std::result::Result<Vec<_>, sqlx::Error>>()
-                    .map_err(Into::into)
+                                ELSE false
+                            END AS reference_protected
+                        FROM server_artifacts artifact
+                        WHERE artifact.status IN (
+                            'creating',
+                            'active',
+                            'deleting',
+                            'delete_failed'
+                        )
+                          AND artifact.domain = ANY($1)
+                          AND ($2::uuid IS NULL OR artifact.id > $2)
+                        ORDER BY artifact.id ASC
+                        LIMIT $3
+                        "#,
+                    )
+                    .bind(&internal_domains)
+                    .bind(after_id)
+                    .bind(ARTIFACT_CLEANUP_CANDIDATE_PAGE_SIZE)
+                    .fetch_all(&mut *tx)
+                    .await?;
+                    if rows.is_empty() {
+                        break;
+                    }
+                    let row_count = rows.len();
+                    for row in rows {
+                        let candidate = server_artifact_candidate_from_row(row)?;
+                        after_id = Some(candidate.id);
+                        if artifact_matches_cleanup_expression(&candidate, expression) {
+                            ensure_artifact_cleanup_match_capacity(matched.len())?;
+                            matched.push(candidate);
+                        }
+                    }
+                    if row_count < ARTIFACT_CLEANUP_CANDIDATE_PAGE_SIZE as usize {
+                        break;
+                    }
+                }
+                tx.commit().await?;
+                Ok(matched)
             }
         }
     }
@@ -539,6 +570,10 @@ async fn insert_server_artifact_in_tx(
     artifact: &NewServerArtifact,
     status: &str,
 ) -> Result<()> {
+    ensure!(
+        artifact.size_bytes >= 0,
+        "server_artifact_size_bytes_invalid"
+    );
     let row = sqlx::query(
         r#"
         INSERT INTO server_artifacts (
@@ -711,13 +746,35 @@ fn artifact_matches_cleanup_expression(
     expression_matches(&context, expression)
 }
 
+fn ensure_artifact_cleanup_match_capacity(current: usize) -> Result<()> {
+    ensure!(
+        current < MAX_ARTIFACT_CLEANUP_REVIEWED_TARGETS,
+        "artifact_cleanup_match_limit_exceeded: selector matches more than \
+         {MAX_ARTIFACT_CLEANUP_REVIEWED_TARGETS} artifacts; narrow the domains or expression"
+    );
+    Ok(())
+}
+
 fn cleanup_preview_from_matches(
     expression: String,
     domains: &[String],
     matched: &[ServerArtifactCleanupCandidate],
-) -> ArtifactCleanupPreviewView {
-    let matched_count = matched.len() as i64;
-    let matched_bytes = matched.iter().map(|candidate| candidate.size_bytes).sum();
+) -> Result<ArtifactCleanupPreviewView> {
+    let matched_count = i64::try_from(matched.len())
+        .context("artifact_cleanup_review_numeric_invalid: matched count overflow")?;
+    let matched_bytes = matched.iter().try_fold(0_i64, |total, candidate| {
+        ensure!(
+            candidate.size_bytes >= 0,
+            "artifact_cleanup_review_numeric_invalid: artifact {} has a negative size",
+            candidate.id
+        );
+        total.checked_add(candidate.size_bytes).with_context(|| {
+            format!(
+                "artifact_cleanup_review_numeric_invalid: matched byte total overflow at artifact {}",
+                candidate.id
+            )
+        })
+    })?;
     let reference_protected_count = matched
         .iter()
         .filter(|candidate| candidate.reference_protected)
@@ -764,7 +821,7 @@ fn cleanup_preview_from_matches(
     identity.sort();
     identity.insert(0, format!("domains:{}", domains.join(",")));
     let preview_hash = payload_hash(identity.join("\n").as_bytes());
-    ArtifactCleanupPreviewView {
+    Ok(ArtifactCleanupPreviewView {
         expression,
         domains: domains.to_vec(),
         preview_hash,
@@ -776,7 +833,7 @@ fn cleanup_preview_from_matches(
         reference_protected_count,
         representative_objects,
         full_list_download_url: None,
-    }
+    })
 }
 
 fn artifact_cleanup_internal_domains(domains: &[String]) -> Vec<String> {
@@ -800,6 +857,10 @@ pub(crate) async fn upsert_memory_server_artifact(
     artifact: NewServerArtifact,
     status: &str,
 ) -> Result<()> {
+    ensure!(
+        artifact.size_bytes >= 0,
+        "server_artifact_size_bytes_invalid"
+    );
     let mut artifacts = memory.server_artifacts.write().await;
     if let Some(existing) = artifacts
         .iter_mut()
@@ -915,6 +976,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cleanup_review_limit_fails_instead_of_returning_a_partial_preview() {
+        assert!(
+            ensure_artifact_cleanup_match_capacity(MAX_ARTIFACT_CLEANUP_REVIEWED_TARGETS - 1)
+                .is_ok()
+        );
+        let error = ensure_artifact_cleanup_match_capacity(MAX_ARTIFACT_CLEANUP_REVIEWED_TARGETS)
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("narrow the domains or expression"));
+    }
+
+    #[test]
+    fn cleanup_preview_rejects_invalid_or_overflowing_size_totals() {
+        let candidate = |id, size_bytes| ServerArtifactCleanupCandidate {
+            id,
+            domain: "job_output".to_string(),
+            object_key: format!("job-outputs/{id}"),
+            sha256_hex: "a".repeat(64),
+            size_bytes,
+            status: "active".to_string(),
+            job_id: None,
+            client_id: Some("edge-a".to_string()),
+            stream: Some("stdout".to_string()),
+            seq: Some(0),
+            backup_artifact_id: None,
+            created_at: "2026-07-01T00:00:00Z".to_string(),
+            reference_protected: false,
+        };
+        let preview = |matched: &[ServerArtifactCleanupCandidate]| {
+            cleanup_preview_from_matches(
+                "artifact.status = \"active\"".to_string(),
+                &["job_output".to_string()],
+                matched,
+            )
+        };
+
+        assert!(preview(&[candidate(Uuid::new_v4(), -1)]).is_err());
+        assert!(preview(&[
+            candidate(Uuid::new_v4(), i64::MAX),
+            candidate(Uuid::new_v4(), 1),
+        ])
+        .is_err());
+    }
+
+    #[test]
     fn cleanup_preview_includes_age_protection_and_representative_objects() {
         let first_id = Uuid::parse_str("11111111-2222-4333-8444-555555555555").unwrap();
         let second_id = Uuid::parse_str("22222222-2222-4333-8444-555555555555").unwrap();
@@ -955,7 +1062,8 @@ mod tests {
             "artifact.status = \"active\"".to_string(),
             &["file_transfer".to_string(), "backup_artifact".to_string()],
             &matched,
-        );
+        )
+        .unwrap();
 
         assert_eq!(preview.matched_count, 2);
         assert_eq!(preview.matched_bytes, 30);

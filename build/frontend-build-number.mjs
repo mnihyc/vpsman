@@ -16,7 +16,7 @@ const counterDir = process.env.VPSMAN_BUILD_NUMBER_DIR
 const counterPath = path.join(counterDir, `${COMPONENT}.txt`);
 
 if (isGithubActions()) {
-  const buildNumber = await readCounter(counterPath);
+  const buildNumber = await readCounter(counterPath, false);
   console.log(`frontend build number ${buildNumber}`);
 } else {
   const buildNumber = await incrementCounter(counterPath);
@@ -27,8 +27,11 @@ async function incrementCounter(filePath) {
   await mkdir(path.dirname(filePath), { recursive: true });
   const release = await acquireLock(`${filePath}.lock`);
   try {
-    const current = await readCounter(filePath);
-    const next = Math.max(current + 1, 1);
+    const current = await readCounter(filePath, true);
+    if (current >= Number.MAX_SAFE_INTEGER) {
+      throw new Error(`frontend build-number counter is exhausted: ${filePath}`);
+    }
+    const next = current + 1;
     await writeFile(filePath, `${next}\n`, "utf8");
     return next;
   } finally {
@@ -36,13 +39,30 @@ async function incrementCounter(filePath) {
   }
 }
 
-async function readCounter(filePath) {
+async function readCounter(filePath, allowMissing) {
   try {
     const value = await readFile(filePath, "utf8");
-    const parsed = Number.parseInt(value.trim(), 10);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+    const trimmed = value.trim();
+    if (!/^[1-9]\d*$/.test(trimmed)) {
+      throw new Error(
+        `build-number counter ${filePath} must contain one positive integer`,
+      );
+    }
+    const parsed = Number(trimmed);
+    if (!Number.isSafeInteger(parsed)) {
+      throw new Error(
+        `build-number counter ${filePath} exceeds JavaScript's safe integer range`,
+      );
+    }
+    return parsed;
   } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+    if (
+      allowMissing &&
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
       return 0;
     }
     throw error;

@@ -393,15 +393,10 @@ impl Repository {
         target_status: &str,
         message: Option<&str>,
     ) -> Result<()> {
-        let Some(operation) = self.job_operation(job_id).await? else {
-            return Ok(());
-        };
-        if !matches!(
-            operation,
-            vpsman_common::JobCommand::RuntimeConfigSync { .. }
-        ) {
-            return Ok(());
-        }
+        // pending_job_id is the durable relation between a runtime-config apply
+        // and its target job. The update helpers below are compare-and-set
+        // no-ops for unrelated jobs, so terminal processing does not need to
+        // decode jobs.operation (which may be corrupt legacy data).
         if target_status == vpsman_server_core::TARGET_STATUS_COMPLETED {
             self.promote_runtime_config_apply_for_job(job_id, client_id)
                 .await?;

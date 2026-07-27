@@ -81,6 +81,7 @@ type AuditWorkflowCoverage = {
 export function AuditLogPanel({
   activeSubpage,
   audits,
+  auditsTruncated,
   error,
   historyExport,
   historyPruneResult,
@@ -93,6 +94,7 @@ export function AuditLogPanel({
 }: {
   activeSubpage: string;
   audits: AuditLogRecord[];
+  auditsTruncated: boolean;
   error: string | null;
   historyExport: HistoryExportRecord | null;
   historyPruneResult: HistoryRetentionPruneResponse | null;
@@ -474,12 +476,16 @@ export function AuditLogPanel({
             <div className="auditEventMetric">
               <span>Visible events</span>
               <strong>
-                {filteredAudits.length} / {audits.length}
+                {hasAuditFilters
+                  ? `${filteredAudits.length} / ${auditsTruncated ? "≥" : ""}${audits.length}`
+                  : `${auditsTruncated ? "≥" : ""}${audits.length}`}
               </strong>
               <p>
                 {hasAuditFilters
-                  ? `${activeFilterCount} active filters`
-                  : "All returned events"}
+                  ? `${activeFilterCount} active filters${auditsTruncated ? "; more matches may exist" : ""}`
+                  : auditsTruncated
+                    ? "All loaded events; more may exist"
+                    : "All returned events"}
               </p>
             </div>
             <div className="auditEventMetric">
@@ -670,7 +676,9 @@ export function AuditLogPanel({
                 </strong>
                 <span>
                   {hasAuditFilters
-                    ? "Clear filters or broaden the time window to inspect available events."
+                    ? auditsTruncated
+                      ? "Clear filters or broaden the time window; more records may exist outside the loaded audit page."
+                      : "Clear filters or broaden the time window to inspect available events."
                     : "Expected login, unlock, dispatch, file, key, backup, topology, and system events are not evidenced by the API response."}
                 </span>
               </div>
@@ -682,6 +690,7 @@ export function AuditLogPanel({
               <AuditEventDetailPanel audit={audit} />
             )}
             rows={filteredAudits}
+            rowsTruncated={auditsTruncated}
             storageKey="vpsman.grid.audit.events"
             title="Audit records"
           />

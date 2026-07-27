@@ -2,7 +2,10 @@ use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::Utc;
 use sqlx::{postgres::PgRow, Row};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, BTreeSet, BinaryHeap},
+};
 use uuid::Uuid;
 use vpsman_common::{payload_hash, CommandOutput, OutputStream};
 use vpsman_server_core::{
@@ -21,6 +24,10 @@ use crate::repository_terminal_sessions::finalize_active_terminal_input_request_
 use crate::{output_stream_name, unix_now, TargetDispatchOutcome};
 
 const JOB_OUTPUT_ARTIFACT_PREFIX: &str = "job-outputs";
+const PROCESS_SUPERVISOR_INVENTORY_PAGE_SIZE: i64 = 500;
+const PROCESS_SUPERVISOR_INVENTORY_SCAN_LIMIT: usize = 10_000;
+pub(crate) const PROCESS_SUPERVISOR_INVENTORY_SCAN_LIMIT_ERROR: &str =
+    "process_supervisor_inventory_scan_limit_exceeded";
 
 #[derive(Clone, Copy)]
 pub(crate) struct JobOutputPersistConfig<'a> {
@@ -320,7 +327,6 @@ impl Repository {
         &self,
         limit: i64,
     ) -> Result<Vec<ProcessSupervisorInventoryView>> {
-        let scan_limit = limit.saturating_mul(32).clamp(50, 5_000);
         match self {
             Self::Memory(memory) => {
                 let command_types = memory
@@ -330,12 +336,37 @@ impl Repository {
                     .iter()
                     .map(|job| (job.id, job.command_type.clone()))
                     .collect::<BTreeMap<_, _>>();
-                let mut outputs = memory
-                    .job_outputs
-                    .read()
-                    .await
-                    .iter()
-                    .filter_map(|output| {
+                let stored = memory.job_outputs.read().await;
+                let mut newest = BinaryHeap::<Reverse<(String, Uuid, String, i32, usize)>>::new();
+                for (index, output) in stored.iter().enumerate() {
+                    if !command_types
+                        .get(&output.job_id)
+                        .is_some_and(|command_type| is_process_supervisor_command(command_type))
+                    {
+                        continue;
+                    }
+                    newest.push(Reverse((
+                        output.created_at.clone(),
+                        output.job_id,
+                        output.client_id.clone(),
+                        output.seq,
+                        index,
+                    )));
+                    if newest.len() > PROCESS_SUPERVISOR_INVENTORY_SCAN_LIMIT + 1 {
+                        newest.pop();
+                    }
+                }
+                let history_exhausted = newest.len() <= PROCESS_SUPERVISOR_INVENTORY_SCAN_LIMIT;
+                let mut newest = newest
+                    .into_iter()
+                    .map(|Reverse(row)| row)
+                    .collect::<Vec<_>>();
+                newest.sort_by(|left, right| right.cmp(left));
+                let outputs = newest
+                    .into_iter()
+                    .take(PROCESS_SUPERVISOR_INVENTORY_SCAN_LIMIT)
+                    .filter_map(|(_, _, _, _, index)| {
+                        let output = stored.get(index)?;
                         let command_type = command_types.get(&output.job_id)?;
                         if !is_process_supervisor_command(command_type) {
                             return None;
@@ -351,55 +382,133 @@ impl Repository {
                         })
                     })
                     .collect::<Vec<_>>();
-                outputs.sort_by(|left, right| {
-                    right
-                        .created_at
-                        .cmp(&left.created_at)
-                        .then_with(|| right.job_id.cmp(&left.job_id))
-                        .then_with(|| right.stream.cmp(&left.stream))
-                });
-                Ok(build_process_supervisor_inventory(outputs, limit))
+                let inventory = build_process_supervisor_inventory(outputs, limit);
+                ensure_process_supervisor_inventory_complete(
+                    inventory.len(),
+                    limit.clamp(1, 200) as usize,
+                    history_exhausted,
+                )?;
+                Ok(inventory)
             }
             Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        output.job_id,
-                        output.client_id,
-                        output.stream,
-                        output.data,
-                        output.created_at::text AS created_at,
-                        job.command_type
-                    FROM job_outputs output
-                    JOIN jobs job ON job.id = output.job_id
-                    WHERE job.command_type IN (
-                        'process_start',
-                        'process_stop',
-                        'process_restart',
-                        'process_status',
-                        'process_logs'
+                let wanted = limit.clamp(1, 200) as usize;
+                let mut tx = pool.begin().await?;
+                sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                    .execute(&mut *tx)
+                    .await?;
+                let mut inventory = Vec::new();
+                let mut seen = BTreeSet::new();
+                let mut after_created_at: Option<String> = None;
+                let mut after_job_id: Option<Uuid> = None;
+                let mut after_client_id: Option<String> = None;
+                let mut after_seq: Option<i32> = None;
+                let mut scanned = 0_usize;
+                let mut history_exhausted = false;
+                while scanned < PROCESS_SUPERVISOR_INVENTORY_SCAN_LIMIT {
+                    let remaining = PROCESS_SUPERVISOR_INVENTORY_SCAN_LIMIT - scanned;
+                    let fetch_limit =
+                        if remaining <= PROCESS_SUPERVISOR_INVENTORY_PAGE_SIZE as usize {
+                            remaining + 1
+                        } else {
+                            PROCESS_SUPERVISOR_INVENTORY_PAGE_SIZE as usize
+                        };
+                    let rows = sqlx::query(
+                        r#"
+                        SELECT
+                            output.job_id,
+                            output.client_id,
+                            output.seq,
+                            output.stream,
+                            output.data,
+                            output.created_at::text AS created_at,
+                            job.command_type
+                        FROM job_outputs output
+                        JOIN jobs job ON job.id = output.job_id
+                        WHERE job.command_type IN (
+                            'process_start',
+                            'process_stop',
+                            'process_restart',
+                            'process_status',
+                            'process_logs'
+                        )
+                          AND (
+                            $1::text IS NULL
+                            OR (
+                                output.created_at,
+                                output.job_id,
+                                output.client_id,
+                                output.seq
+                            ) < (
+                                $1::timestamptz,
+                                $2::uuid,
+                                $3::text,
+                                $4::integer
+                            )
+                          )
+                        ORDER BY
+                            output.created_at DESC,
+                            output.job_id DESC,
+                            output.client_id DESC,
+                            output.seq DESC
+                        LIMIT $5
+                        "#,
                     )
-                    ORDER BY output.created_at DESC, output.job_id DESC, output.seq DESC
-                    LIMIT $1
-                    "#,
-                )
-                .bind(scan_limit)
-                .fetch_all(pool)
-                .await?;
-                let outputs = rows
-                    .into_iter()
-                    .map(|row| {
-                        Ok(SupervisorInventoryOutput {
-                            job_id: row.try_get("job_id")?,
-                            client_id: row.try_get("client_id")?,
-                            stream: row.try_get("stream")?,
-                            data: row.try_get("data")?,
-                            created_at: row.try_get("created_at")?,
-                            command_type: row.try_get("command_type")?,
-                        })
-                    })
-                    .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?;
-                Ok(build_process_supervisor_inventory(outputs, limit))
+                    .bind(after_created_at.as_deref())
+                    .bind(after_job_id)
+                    .bind(after_client_id.as_deref())
+                    .bind(after_seq)
+                    .bind(fetch_limit as i64)
+                    .fetch_all(&mut *tx)
+                    .await?;
+                    if rows.is_empty() {
+                        history_exhausted = true;
+                        break;
+                    }
+                    let row_count = rows.len();
+                    let rows_to_process = row_count.min(remaining);
+                    let mut outputs = Vec::with_capacity(rows_to_process);
+                    for row in rows.into_iter().take(rows_to_process) {
+                        let job_id: Uuid = row.try_get("job_id")?;
+                        let client_id: String = row.try_get("client_id")?;
+                        let seq: i32 = row.try_get("seq")?;
+                        let created_at: String = row.try_get("created_at")?;
+                        after_created_at = Some(created_at.clone());
+                        after_job_id = Some(job_id);
+                        after_client_id = Some(client_id.clone());
+                        after_seq = Some(seq);
+                        let command_type: String = row.try_get("command_type")?;
+                        if is_process_supervisor_command(&command_type) {
+                            outputs.push(SupervisorInventoryOutput {
+                                job_id,
+                                client_id,
+                                stream: row.try_get("stream")?,
+                                data: row.try_get("data")?,
+                                created_at,
+                                command_type,
+                            });
+                        }
+                    }
+                    scanned += rows_to_process;
+                    if append_process_supervisor_inventory(
+                        outputs,
+                        &mut seen,
+                        &mut inventory,
+                        wanted,
+                    ) {
+                        break;
+                    }
+                    if row_count < fetch_limit {
+                        history_exhausted = true;
+                        break;
+                    }
+                }
+                ensure_process_supervisor_inventory_complete(
+                    inventory.len(),
+                    wanted,
+                    history_exhausted,
+                )?;
+                tx.commit().await?;
+                Ok(inventory)
             }
         }
     }
@@ -2040,18 +2149,39 @@ fn build_process_supervisor_inventory(
     let mut seen = BTreeSet::<(String, String)>::new();
     let mut inventory = Vec::new();
     let limit = limit.clamp(1, 200) as usize;
+    append_process_supervisor_inventory(outputs, &mut seen, &mut inventory, limit);
+    inventory
+}
+
+fn ensure_process_supervisor_inventory_complete(
+    inventory_len: usize,
+    wanted: usize,
+    history_exhausted: bool,
+) -> Result<()> {
+    if inventory_len < wanted && !history_exhausted {
+        anyhow::bail!(PROCESS_SUPERVISOR_INVENTORY_SCAN_LIMIT_ERROR);
+    }
+    Ok(())
+}
+
+fn append_process_supervisor_inventory(
+    outputs: impl IntoIterator<Item = SupervisorInventoryOutput>,
+    seen: &mut BTreeSet<(String, String)>,
+    inventory: &mut Vec<ProcessSupervisorInventoryView>,
+    limit: usize,
+) -> bool {
     for output in outputs {
         for item in parse_process_supervisor_inventory_output(&output) {
             let key = (item.client_id.clone(), item.name.clone());
             if seen.insert(key) {
                 inventory.push(item);
                 if inventory.len() >= limit {
-                    return inventory;
+                    return true;
                 }
             }
         }
     }
-    inventory
+    false
 }
 
 fn parse_process_supervisor_inventory_output(
@@ -2164,11 +2294,14 @@ fn is_process_supervisor_command(command_type: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_process_supervisor_inventory, JobOutputPersistConfig, JobOutputWriteResult,
-        SupervisorInventoryOutput,
+        append_process_supervisor_inventory, build_process_supervisor_inventory,
+        ensure_process_supervisor_inventory_complete, JobOutputPersistConfig, JobOutputWriteResult,
+        SupervisorInventoryOutput, PROCESS_SUPERVISOR_INVENTORY_PAGE_SIZE,
+        PROCESS_SUPERVISOR_INVENTORY_SCAN_LIMIT_ERROR,
     };
     use crate::{object_store::BackupObjectStore, repository::MemoryState, Repository};
     use base64::Engine as _;
+    use std::collections::BTreeSet;
     use uuid::Uuid;
     use vpsman_common::{payload_hash, CommandOutput, OutputStream};
 
@@ -2599,5 +2732,57 @@ mod tests {
         );
 
         assert!(inventory.is_empty());
+    }
+
+    #[test]
+    fn supervisor_inventory_continues_past_repeated_output_pages() {
+        let process_output = |name: &str, created_at: usize| SupervisorInventoryOutput {
+            job_id: Uuid::new_v4(),
+            client_id: "edge-a".to_string(),
+            stream: "stdout".to_string(),
+            data: serde_json::to_vec(&serde_json::json!({
+                "type": "process_status",
+                "processes": [{ "name": name, "status": "running" }]
+            }))
+            .unwrap(),
+            created_at: format!("{created_at:05}"),
+            command_type: "process_status".to_string(),
+        };
+        let mut outputs = (1..=5_001)
+            .rev()
+            .map(|created_at| process_output("frequent", created_at))
+            .collect::<Vec<_>>();
+        outputs.push(process_output("quiet", 0));
+        let mut outputs = outputs.into_iter();
+        let mut seen = BTreeSet::new();
+        let mut inventory = Vec::new();
+        loop {
+            let page = outputs
+                .by_ref()
+                .take(PROCESS_SUPERVISOR_INVENTORY_PAGE_SIZE as usize)
+                .collect::<Vec<_>>();
+            if page.is_empty() {
+                break;
+            }
+            if append_process_supervisor_inventory(page, &mut seen, &mut inventory, 2) {
+                break;
+            }
+        }
+
+        assert_eq!(inventory.len(), 2);
+        assert_eq!(inventory[0].name, "frequent");
+        assert_eq!(inventory[1].name, "quiet");
+    }
+
+    #[test]
+    fn supervisor_inventory_never_returns_an_incomplete_bounded_scan() {
+        ensure_process_supervisor_inventory_complete(2, 2, false).unwrap();
+        ensure_process_supervisor_inventory_complete(1, 2, true).unwrap();
+        assert_eq!(
+            ensure_process_supervisor_inventory_complete(1, 2, false)
+                .unwrap_err()
+                .to_string(),
+            PROCESS_SUPERVISOR_INVENTORY_SCAN_LIMIT_ERROR
+        );
     }
 }

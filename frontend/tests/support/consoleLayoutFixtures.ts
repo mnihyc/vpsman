@@ -12,10 +12,14 @@ import { installTransferJobApiMock } from "./transferJobMock";
 import { JOB_COMMAND_TYPE_BY_OPERATION_TYPE } from "../../src/generated/protocolContracts";
 import type {
   AuditLogRecord,
+  BackupPolicyRecord,
+  FleetAlertNotificationChannelRecord,
   HostPackageUpdatePlanRecord,
   HostServiceInventoryRecord,
   HostStorageInventoryRecord,
   JobRolloutRecord,
+  OperatorAuthEventRecord,
+  ScheduleRecord,
 } from "../../src/types";
 
 type FixtureJobOutput = {
@@ -1427,22 +1431,24 @@ const policyDryRunFixture = {
 
 const fleetAlertNotificationChannels = [
   {
+    actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
     categories: ["agent_status", "network"],
+    configuration_error: null,
     cooldown_secs: 3600,
     created_at: "2026-06-02T10:00:00Z",
-    created_by: "99999999-aaaa-4bbb-8ccc-000000000001",
     delivery_kind: "webhook",
     enabled: true,
     id: "fcfcfcfc-1111-4111-8111-111111111111",
     min_severity: "warning",
     name: "edge-webhook-channel",
+    notes: null,
     operator_states: ["open", "escalated"],
     scope_kind: "tag",
     scope_value: "edge",
     target: "https://hooks.example/vpsman/fleet",
     updated_at: "2026-06-02T10:00:00Z",
   },
-];
+] satisfies FleetAlertNotificationChannelRecord[];
 
 const fleetAlertNotifications = [
   {
@@ -2894,6 +2900,7 @@ const schedules = [
     command_type: "shell_argv",
     created_at: "2026-05-31T09:00:00Z",
     cron_expr: "0 * * * *",
+    cadence_error: null,
     enabled: true,
     failure_count: 0,
     id: "51515151-6161-4717-8abc-defdefdefdef",
@@ -3350,6 +3357,7 @@ export async function installConsoleApiMock(
     agentDeleteRequestFailure?: boolean;
     agentDeleteSyncJobIds?: string[];
     auditLogsOverride?: AuditLogRecord[];
+    backupPoliciesOverride?: BackupPolicyRecord[];
     backupArtifactsOverride?: typeof backupArtifacts;
     bulkResolveFailure?: boolean;
     dashboardLatestSampleAtOverride?: string;
@@ -3357,13 +3365,17 @@ export async function installConsoleApiMock(
     dashboardSummaryOverride?: Partial<typeof dashboardOverview.summary>;
     fileTransferSourceArtifactsOverride?: typeof fileTransferSourceArtifacts;
     fileTransfersOverride?: typeof fileTransfers;
+    fleetAlertNotificationChannelsOverride?: FleetAlertNotificationChannelRecord[];
     recordPagesSaturated?: boolean;
+    runtimeConfigApplyFailure?: boolean;
     hostServiceInventoryOverride?: ReturnType<typeof hostServiceInventory>;
     hostStorageInventoryOverride?: ReturnType<typeof hostStorageInventory>;
     hostPackageUpdatePlansOverride?: ReturnType<typeof hostPackageUpdatePlans>;
     jobRolloutsOverride?: JobRolloutRecord[];
     ospfUpdatePlansOverride?: typeof ospfUpdatePlans;
     operatorRoleOverride?: "admin" | "operator" | "viewer";
+    operatorAuthEventsOverride?: OperatorAuthEventRecord[];
+    schedulesOverride?: ScheduleRecord[];
     telemetryFailurePath?: "network-rates" | "rollups" | "tunnels";
     telemetryNetworkRateScales?: number[];
     terminalSessionsOverride?: typeof terminalSessions;
@@ -3380,6 +3392,7 @@ export async function installConsoleApiMock(
       agentUpdateReleasesFixture,
       auditLogsFixture,
       artifactsFixture,
+      backupPoliciesFixture,
       backupsFixture,
       bulkResolveFailureFixture,
       dashboardOverviewFixture,
@@ -3391,6 +3404,7 @@ export async function installConsoleApiMock(
       sourceTemplatesFixture,
       sourceStatusFixture,
       runtimeConfigApplyStatesFixture,
+      runtimeConfigApplyFailureFixture,
       runtimeConfigPatchGeneratorsFixture,
       jobCommandTypeByOperationTypeFixture,
       commandTemplatesFixture,
@@ -3420,6 +3434,7 @@ export async function installConsoleApiMock(
       ospfUpdatePlansFixture,
       networkTrendsFixture,
       operatorPreferencesFixture,
+      operatorAuthEventsFixture,
       operatorRoleOverrideFixture,
       processSupervisorInventoryFixture,
       schedulesFixture,
@@ -3595,6 +3610,7 @@ export async function installConsoleApiMock(
       const requests = {
         backupArtifactHandoffs: [] as unknown[],
         backupPolicies: [] as unknown[],
+        backupPolicyUpdates: [] as unknown[],
         backupPolicyPrunes: [] as unknown[],
         agentDeletes: [] as unknown[],
         artifactCleanupJobs: [] as unknown[],
@@ -3780,6 +3796,7 @@ export async function installConsoleApiMock(
           "shell_argv",
         created_at: schedule.created_at ?? "2026-06-02T10:00:00Z",
         cron_expr: schedule.cron_expr ?? "0 * * * *",
+        cadence_error: schedule.cadence_error ?? null,
         deferred_until: schedule.deferred_until ?? null,
         deleted_at: schedule.deleted_at ?? null,
         enabled: schedule.enabled ?? true,
@@ -3797,11 +3814,16 @@ export async function installConsoleApiMock(
           "2026-06-02T14:00:00Z",
           "2026-06-02T15:00:00Z",
         ],
-        operation: schedule.operation ?? {
-          argv: ["uptime"],
-          pty: false,
-          type: "shell",
-        },
+        operation:
+          "operation" in schedule
+            ? schedule.operation
+            : {
+                argv: ["uptime"],
+                pty: false,
+                type: "shell",
+              },
+        operation_error: schedule.operation_error ?? null,
+        operation_payload_hash: schedule.operation_payload_hash,
         retry_delay_secs: schedule.retry_delay_secs ?? 300,
         selector_expression: schedule.selector_expression ?? "id:*",
         target_client_ids: Array.isArray(schedule.target_client_ids)
@@ -4764,8 +4786,9 @@ export async function installConsoleApiMock(
           requests.fleetAlertNotificationChannels.push(body);
           return jsonResponse({
             ...(body as Record<string, unknown>),
+            actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+            configuration_error: null,
             created_at: "2026-06-02T10:02:00Z",
-            created_by: "99999999-aaaa-4bbb-8ccc-000000000001",
             id: "efefefef-1111-4111-8111-111111111111",
             updated_at: "2026-06-02T10:02:00Z",
           });
@@ -5203,7 +5226,7 @@ export async function installConsoleApiMock(
           return jsonResponse(session);
         }
         if (pathname === "/api/v1/operator-auth-events" && method === "GET")
-          return jsonResponse([
+          return jsonResponse(operatorAuthEventsFixture ?? [
             {
               id: "77777777-aaaa-4bbb-8ccc-000000000001",
               operator_id: "99999999-aaaa-4bbb-8ccc-000000000001",
@@ -5691,6 +5714,12 @@ export async function installConsoleApiMock(
           pathname === "/api/v1/runtime-config/apply-state" &&
           method === "GET"
         ) {
+          if (runtimeConfigApplyFailureFixture) {
+            return jsonResponse(
+              { error: "runtime_config_apply_state_unavailable" },
+              503,
+            );
+          }
           return jsonResponse(runtimeConfigApplyStatesFixture);
         }
         if (
@@ -6814,11 +6843,24 @@ export async function installConsoleApiMock(
           }
         }
         if (pathname === "/api/v1/backup-policies" && method === "GET") {
-          return jsonResponse([]);
+          return jsonResponse(backupPoliciesFixture);
         }
-        if (pathname === "/api/v1/backup-policies" && method === "POST") {
+        const backupPolicyUpdateMatch = pathname.match(
+          /^\/api\/v1\/backup-policies\/([^/]+)$/,
+        );
+        if (
+          (pathname === "/api/v1/backup-policies" && method === "POST") ||
+          (backupPolicyUpdateMatch && method === "PUT")
+        ) {
           const body = await readJsonBody(input, init);
-          requests.backupPolicies.push(body);
+          if (backupPolicyUpdateMatch) {
+            requests.backupPolicyUpdates.push({
+              body,
+              schedule_id: decodeURIComponent(backupPolicyUpdateMatch[1]),
+            });
+          } else {
+            requests.backupPolicies.push(body);
+          }
           const request = body as {
             catch_up_limit?: number;
             catch_up_policy?: string;
@@ -6837,7 +6879,7 @@ export async function installConsoleApiMock(
             target_client_ids?: string[];
             timezone?: string;
           };
-          return jsonResponse({
+          const updatedPolicy = {
             catch_up_limit: request.catch_up_limit ?? 1,
             catch_up_policy: request.catch_up_policy ?? "skip_missed",
             created_at: "2026-06-02T10:11:00Z",
@@ -6847,6 +6889,7 @@ export async function installConsoleApiMock(
             follow_symlinks: request.follow_symlinks ?? false,
             include_config: request.include_config ?? true,
             keep_last: request.keep_last ?? 7,
+            cadence_error: null,
             last_error: null,
             last_run_at: null,
             max_failures: request.max_failures ?? 3,
@@ -6857,12 +6900,25 @@ export async function installConsoleApiMock(
             retry_delay_secs: request.retry_delay_secs ?? 300,
             retention_days: request.retention_days ?? 30,
             rotation_generation: request.rotation_generation ?? null,
-            schedule_id: "62626262-6161-4717-8abc-defdefdefdef",
+            schedule_id:
+              backupPolicyUpdateMatch?.[1] ??
+              "62626262-6161-4717-8abc-defdefdefdef",
             selector_expression: request.selector_expression ?? "id:*",
             target_client_ids: request.target_client_ids ?? [],
             timezone: request.timezone ?? "UTC",
             updated_at: "2026-06-02T10:11:00Z",
-          });
+          } as BackupPolicyRecord;
+          if (backupPolicyUpdateMatch) {
+            const updatedIndex = backupPoliciesFixture.findIndex(
+              (policy) => policy.schedule_id === updatedPolicy.schedule_id,
+            );
+            if (updatedIndex >= 0) {
+              backupPoliciesFixture.splice(updatedIndex, 1, updatedPolicy);
+            } else {
+              backupPoliciesFixture.push(updatedPolicy);
+            }
+          }
+          return jsonResponse(updatedPolicy);
         }
         if (pathname === "/api/v1/backup-policies/prune" && method === "POST") {
           const body = await readJsonBody(input, init);
@@ -8018,6 +8074,7 @@ export async function installConsoleApiMock(
       agentsFixture: agents,
       agentUpdateReleasesFixture: agentUpdateReleases,
       auditLogsFixture: options.auditLogsOverride ?? auditLogs,
+      backupPoliciesFixture: options.backupPoliciesOverride ?? [],
       artifactsFixture:
         options.backupArtifactsOverride ??
         (options.recordPagesSaturated
@@ -8059,12 +8116,16 @@ export async function installConsoleApiMock(
       sourceTemplatesFixture: sourceTemplates,
       sourceStatusFixture: sourceStatus,
       runtimeConfigApplyStatesFixture: runtimeConfigApplyStates,
+      runtimeConfigApplyFailureFixture:
+        options.runtimeConfigApplyFailure ?? false,
       runtimeConfigPatchGeneratorsFixture: runtimeConfigPatchGenerators,
       jobCommandTypeByOperationTypeFixture: JOB_COMMAND_TYPE_BY_OPERATION_TYPE,
       commandTemplatesFixture: commandTemplates,
       clientKeyRevocationsFixture: clientKeyRevocations,
       keyLifecycleReportFixture: keyLifecycleReport,
-      fleetAlertNotificationChannelsFixture: fleetAlertNotificationChannels,
+      fleetAlertNotificationChannelsFixture:
+        options.fleetAlertNotificationChannelsOverride ??
+        fleetAlertNotificationChannels,
       fleetAlertNotificationsFixture: options.alertEvidenceSaturated
         ? Array.from({ length: 200 }, (_, index) => ({
             ...fleetAlertNotifications[0],
@@ -8162,9 +8223,10 @@ export async function installConsoleApiMock(
         options.ospfUpdatePlansOverride ?? ospfUpdatePlans,
       networkTrendsFixture: networkTrends,
       operatorPreferencesFixture: operatorPreferences,
+      operatorAuthEventsFixture: options.operatorAuthEventsOverride ?? null,
       operatorRoleOverrideFixture: options.operatorRoleOverride ?? "admin",
       processSupervisorInventoryFixture: processSupervisorInventory,
-      schedulesFixture: schedules,
+      schedulesFixture: options.schedulesOverride ?? schedules,
       summaryFixture: summary,
       suiteConfigRedactedFixture: suiteConfigRedacted,
       suiteConfigTomlFixture: suiteConfigToml,

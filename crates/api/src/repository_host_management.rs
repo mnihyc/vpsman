@@ -68,42 +68,60 @@ impl Repository {
                         )
                         .then_with(|| right_job.id.cmp(&left_job.id))
                 });
-                let latest_attempt = attempts.first().map(|(job, target)| HostJobAttemptView {
-                    job_id: job.id,
-                    status: target.status.clone(),
-                    message: target.message.clone(),
-                    completed_at: target.completed_at.clone(),
-                });
-                let latest_success_job_id = attempts
-                    .iter()
-                    .find(|(_, target)| target.status == "completed")
-                    .map(|(job, _)| job.id);
-                Ok(HostJobEvidence {
-                    latest_attempt,
-                    latest_success_job_id,
-                })
+                let attempts = attempts
+                    .into_iter()
+                    .map(|(job, target)| HostJobAttemptView {
+                        job_id: job.id,
+                        status: target.status.clone(),
+                        message: target.message.clone(),
+                        completed_at: target.completed_at.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                Ok(host_job_evidence_from_newest_attempts(&attempts))
             }
             Self::Postgres(pool) => {
-                let rows = sqlx::query(
+                let row = sqlx::query(
                     r#"
                     SELECT
-                        job.id AS job_id,
-                        target.status,
-                        target.message,
-                        target.completed_at::text AS completed_at
-                    FROM jobs job
-                    JOIN job_targets target ON target.job_id = job.id
-                    WHERE job.command_type = $2
-                      AND target.client_id = $1
-                    ORDER BY COALESCE(target.completed_at, job.created_at) DESC, job.id DESC
-                    LIMIT 200
+                        latest_attempt.job_id,
+                        latest_attempt.status,
+                        latest_attempt.message,
+                        latest_attempt.completed_at,
+                        latest_success.job_id AS latest_success_job_id
+                    FROM LATERAL (
+                        SELECT
+                            job.id AS job_id,
+                            target.status,
+                            target.message,
+                            target.completed_at::text AS completed_at
+                        FROM jobs job
+                        JOIN job_targets target ON target.job_id = job.id
+                        WHERE job.command_type = $2
+                          AND target.client_id = $1
+                        ORDER BY
+                            COALESCE(target.completed_at, job.created_at) DESC,
+                            job.id DESC
+                        LIMIT 1
+                    ) latest_attempt
+                    LEFT JOIN LATERAL (
+                        SELECT job.id AS job_id
+                        FROM jobs job
+                        JOIN job_targets target ON target.job_id = job.id
+                        WHERE job.command_type = $2
+                          AND target.client_id = $1
+                          AND target.status = 'completed'
+                        ORDER BY
+                            COALESCE(target.completed_at, job.created_at) DESC,
+                            job.id DESC
+                        LIMIT 1
+                    ) latest_success ON true
                     "#,
                 )
                 .bind(client_id)
                 .bind(command_type)
-                .fetch_all(pool)
+                .fetch_optional(pool)
                 .await?;
-                let latest_attempt = if let Some(row) = rows.first() {
+                let latest_attempt = if let Some(row) = row.as_ref() {
                     Some(HostJobAttemptView {
                         job_id: row.try_get("job_id")?,
                         status: row.try_get("status")?,
@@ -113,17 +131,62 @@ impl Repository {
                 } else {
                     None
                 };
-                let latest_success_job_id = rows.iter().find_map(|row| {
-                    let status = row.try_get::<String, _>("status").ok()?;
-                    (status == "completed")
-                        .then(|| row.try_get("job_id").ok())
-                        .flatten()
-                });
+                let latest_success_job_id = row
+                    .as_ref()
+                    .map(|row| row.try_get("latest_success_job_id"))
+                    .transpose()?
+                    .flatten();
                 Ok(HostJobEvidence {
                     latest_attempt,
                     latest_success_job_id,
                 })
             }
         }
+    }
+}
+
+fn host_job_evidence_from_newest_attempts(attempts: &[HostJobAttemptView]) -> HostJobEvidence {
+    HostJobEvidence {
+        latest_attempt: attempts.first().cloned(),
+        latest_success_job_id: attempts
+            .iter()
+            .find(|attempt| attempt.status == "completed")
+            .map(|attempt| attempt.job_id),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn successful_evidence_is_not_lost_behind_recent_failed_attempts() {
+        let successful_job_id = Uuid::new_v4();
+        let mut attempts = (0..201)
+            .map(|_| HostJobAttemptView {
+                job_id: Uuid::new_v4(),
+                status: "failed".to_string(),
+                message: None,
+                completed_at: None,
+            })
+            .collect::<Vec<_>>();
+        attempts.push(HostJobAttemptView {
+            job_id: successful_job_id,
+            status: "completed".to_string(),
+            message: None,
+            completed_at: None,
+        });
+
+        let evidence = host_job_evidence_from_newest_attempts(&attempts);
+
+        assert_eq!(
+            evidence
+                .latest_attempt
+                .as_ref()
+                .map(|attempt| attempt.status.as_str()),
+            Some("failed")
+        );
+        assert_eq!(evidence.latest_success_job_id, Some(successful_job_id));
     }
 }

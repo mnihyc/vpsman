@@ -11,6 +11,55 @@ use crate::{
 };
 
 impl Repository {
+    pub(crate) async fn latest_agent_update_release(
+        &self,
+        name: &str,
+        channel: &str,
+    ) -> Result<Option<AgentUpdateReleaseView>> {
+        let name = name.trim();
+        let channel = channel.trim().to_ascii_lowercase();
+        match self {
+            Self::Memory(memory) => Ok(memory
+                .agent_update_releases
+                .read()
+                .await
+                .iter()
+                .rev()
+                .find(|release| release.name == name && release.channel == channel)
+                .cloned()),
+            Self::Postgres(pool) => {
+                let row = sqlx::query(
+                    r#"
+                    SELECT
+                        id,
+                        actor_id,
+                        name,
+                        version,
+                        channel,
+                        status,
+                        artifact_sha256_hex,
+                        artifact_url_sha256_hex,
+                        rollback_artifact_sha256_hex,
+                        rollback_artifact_url_sha256_hex,
+                        rollback_size_bytes,
+                        size_bytes,
+                        notes,
+                        created_at::text AS created_at
+                    FROM agent_update_releases
+                    WHERE name = $1 AND channel = $2
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                    "#,
+                )
+                .bind(name)
+                .bind(channel)
+                .fetch_optional(pool)
+                .await?;
+                row.map(agent_update_release_from_row).transpose()
+            }
+        }
+    }
+
     pub(crate) async fn list_agent_update_releases(
         &self,
         limit: i64,

@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -134,14 +134,14 @@ async fn record_scheduled_memory_job(
         confirmed: true,
         command: "operation".to_string(),
         argv: Vec::new(),
-        operation: Some(schedule.operation.clone()),
+        operation: schedule.operation.clone(),
         max_timeout_secs: Some(30),
         force_unprivileged: false,
         privileged: false,
         privilege_assertion: None,
         rollout: None,
     };
-    let command_hash = payload_hash(&encode_json(&schedule.operation).unwrap());
+    let command_hash = payload_hash(&encode_json(schedule.operation.as_ref().unwrap()).unwrap());
     repo.record_dispatching_job_from_schedule(
         Uuid::new_v4(),
         &request,
@@ -183,6 +183,188 @@ async fn schedule_create_lists_durable_selector_without_plaintext_privilege_mate
     assert!(!serde_json::to_string(&audits[0].metadata)
         .unwrap()
         .contains("correct horse"));
+}
+
+#[tokio::test]
+async fn malformed_memory_schedule_stays_visible_blocks_partial_actions_and_can_be_repaired() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = schedule_test_operator();
+    let malformed = repo
+        .create_schedule(
+            shell_schedule_request("malformed-operation", true),
+            &operator,
+        )
+        .await
+        .unwrap();
+    let healthy = repo
+        .create_schedule(shell_schedule_request("healthy-operation", true), &operator)
+        .await
+        .unwrap();
+    let raw_operation = serde_json::json!({"type": "removed_legacy_operation"});
+    let raw_hash = payload_hash(raw_operation.to_string().as_bytes());
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    let mut schedules = memory.schedules.write().await;
+    let stored = schedules
+        .iter_mut()
+        .find(|schedule| schedule.id == malformed.id)
+        .unwrap();
+    stored.operation = None;
+    stored.operation_error = Some("schedule_operation_invalid".to_string());
+    stored.operation_payload_hash = raw_hash.clone();
+    stored.command_type = "invalid_operation".to_string();
+    drop(schedules);
+
+    let page = repo
+        .query_schedules(&ListQuery {
+            limit: Some(10),
+            ..ListQuery::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.len(), 2);
+    assert!(page.iter().any(|schedule| schedule.id == healthy.id));
+    let visible = page
+        .iter()
+        .find(|schedule| schedule.id == malformed.id)
+        .unwrap();
+    assert!(visible.operation.is_none());
+    assert_eq!(
+        visible.operation_error.as_deref(),
+        Some("schedule_operation_invalid")
+    );
+    assert_eq!(visible.operation_payload_hash, raw_hash);
+    assert!(repo
+        .update_schedule_targets(
+            malformed.id,
+            "tag:new".to_string(),
+            vec!["client-a".to_string()],
+            &operator,
+        )
+        .await
+        .is_err());
+    assert!(repo
+        .defer_schedule(malformed.id, "2099-01-01T00:00:00Z", None, &operator,)
+        .await
+        .is_err());
+    assert!(repo
+        .set_schedule_enabled(malformed.id, true, &operator)
+        .await
+        .is_err());
+    assert!(
+        !repo
+            .set_schedule_enabled(malformed.id, false, &operator)
+            .await
+            .unwrap()
+            .enabled
+    );
+
+    let repaired = repo
+        .update_schedule_record(
+            malformed.id,
+            UpdateScheduleRequest {
+                name: "repaired-operation".to_string(),
+                operation: JobCommand::Shell {
+                    argv: vec!["/bin/true".to_string()],
+                    pty: false,
+                },
+                selector_expression: "tag:edge".to_string(),
+                target_client_ids: vec!["client-a".to_string()],
+                cron_expr: "0 * * * *".to_string(),
+                timezone: "UTC".to_string(),
+                enabled: false,
+                catch_up_policy: "skip_missed".to_string(),
+                catch_up_limit: 1,
+                retry_delay_secs: 60,
+                max_failures: 3,
+                privilege_assertion: None,
+                confirmed: true,
+            }
+            .into(),
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert!(repaired.operation.is_some());
+    assert!(repaired.operation_error.is_none());
+}
+
+#[tokio::test]
+async fn tag_impact_preview_includes_schedules_beyond_one_thousand() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = schedule_test_operator();
+    seed_never_connected_agent(&repo, "client-a").await;
+    let schedule = repo
+        .create_schedule(
+            shell_schedule_request("edge-schedule-0000", true),
+            &operator,
+        )
+        .await
+        .unwrap();
+    if let Repository::Memory(memory) = &repo {
+        let mut schedules = memory.schedules.write().await;
+        schedules.extend((1..=1_000).map(|index| {
+            let mut schedule = schedule.clone();
+            schedule.id = Uuid::new_v4();
+            schedule.name = format!("edge-schedule-{index:04}");
+            schedule
+        }));
+    }
+
+    let preview = repo
+        .assign_agent_tag_mutation("client-a", "edge", false)
+        .await
+        .unwrap();
+
+    assert_eq!(preview.schedule_impacts.len(), 1_001);
+    assert!(preview.confirmation_required);
+}
+
+#[tokio::test]
+async fn public_schedule_list_is_bounded_while_internal_listing_remains_complete() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = schedule_test_operator();
+    let schedule = repo
+        .create_schedule(
+            shell_schedule_request("public-list-schedule-0000", true),
+            &operator,
+        )
+        .await
+        .unwrap();
+    if let Repository::Memory(memory) = &repo {
+        let mut schedules = memory.schedules.write().await;
+        schedules.extend((1..=1_000).map(|index| {
+            let mut schedule = schedule.clone();
+            schedule.id = Uuid::new_v4();
+            schedule.name = format!("public-list-schedule-{index:04}");
+            schedule
+        }));
+    }
+    let state = schedule_test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+
+    let Json(default_page) = crate::routes_schedules::list_schedules(
+        State(state.clone()),
+        headers.clone(),
+        Query(ListQuery::default()),
+    )
+    .await
+    .unwrap();
+    let Json(max_page) = crate::routes_schedules::list_schedules(
+        State(state),
+        headers,
+        Query(ListQuery {
+            limit: Some(10_000),
+            ..ListQuery::default()
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(default_page.len(), 100);
+    assert_eq!(max_page.len(), 1_000);
+    assert_eq!(repo.list_schedules().await.unwrap().len(), 1_001);
 }
 
 #[tokio::test]
@@ -703,6 +885,11 @@ fn schedule_validation_rejects_unsafe_or_empty_requests() {
         validate_schedule_request(&request).unwrap_err().status,
         axum::http::StatusCode::BAD_REQUEST
     );
+    request.cron_expr = "0 0 31 2 *".to_string();
+    assert_eq!(
+        validate_schedule_request(&request).unwrap_err().status,
+        axum::http::StatusCode::BAD_REQUEST
+    );
     request.cron_expr = "*/5 * * * *".to_string();
     request.timezone = "America/New_York".to_string();
     assert_eq!(
@@ -750,4 +937,30 @@ fn schedule_validation_rejects_unsafe_or_empty_requests() {
         validate_schedule_request(&request).unwrap_err().status,
         axum::http::StatusCode::BAD_REQUEST
     );
+}
+
+#[test]
+fn schedule_update_validation_rejects_cadence_without_a_future_occurrence() {
+    let request = UpdateScheduleRequest {
+        name: "legacy-cadence-repair".to_string(),
+        operation: JobCommand::Shell {
+            argv: vec!["/bin/true".to_string()],
+            pty: false,
+        },
+        selector_expression: "tag:edge".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
+        cron_expr: "0 0 31 2 *".to_string(),
+        timezone: "UTC".to_string(),
+        enabled: true,
+        catch_up_policy: "skip_missed".to_string(),
+        catch_up_limit: 1,
+        retry_delay_secs: 300,
+        max_failures: 3,
+        privilege_assertion: None,
+        confirmed: true,
+    };
+
+    let error = crate::routes_schedules::validate_update_schedule_request(&request).unwrap_err();
+    assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(error.code, "schedule_cron_invalid");
 }

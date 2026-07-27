@@ -345,7 +345,8 @@ fn resolve_terminal_user(
             status: "agent_user",
         });
     };
-    let Some(identity) = PlatformAccounts::load().find_user_identity(user) else {
+    let accounts = PlatformAccounts::load()?;
+    let Some(identity) = accounts.find_user_identity(user) else {
         return terminal_user_unavailable(policy, "requested_terminal_user_not_found");
     };
     let current_uid = current_effective_uid();

@@ -46,6 +46,24 @@ async fn desired_rules_reject_overlap_and_stale_mutations() {
 }
 
 #[tokio::test]
+async fn memory_management_list_preserves_typed_rule_identity() {
+    let repo = port_forward_repo().await;
+    let created = repo
+        .create_port_forward_rule(
+            &create_request("memory-visible", "18080", "8080", false),
+            &port_forward_operator(),
+        )
+        .await
+        .unwrap();
+    let items = repo.list_port_forward_rule_items().await.unwrap();
+    assert!(matches!(
+        items.as_slice(),
+        [crate::model_port_forwarding::PortForwardRuleListItem::Rule(rule)]
+            if rule.id == created.id
+    ));
+}
+
+#[tokio::test]
 async fn runtime_state_is_hash_bound_and_cleanup_is_evidence_bound() {
     let repo = port_forward_repo().await;
     let operator = port_forward_operator();

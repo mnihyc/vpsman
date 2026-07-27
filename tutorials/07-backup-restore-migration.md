@@ -35,6 +35,45 @@ Inspect policies:
 cargo run -p vpsctl -- backup-policies
 ```
 
+The CLI and VTY load 200 policies by default. If a page reaches its requested
+cap, they explicitly warn that more may exist; continue with
+`backup-policies --limit 200 --offset 200`.
+
+Policies imported from older releases remain visible even when their stored
+cron is malformed or has no future occurrence. These rows have an empty
+`next_runs` list and an explicit `cadence_error`. If an enabled invalid policy
+becomes due, the worker creates no job, disables it, records
+`schedule.due_failed`, and emits `schedule.failed`.
+
+Use **Edit** in the UI to repair the complete policy, or pass its schedule UUID
+to the same CLI command:
+
+```sh
+cargo run -p vpsctl -- backup-policy-upsert \
+  --schedule-id <policy_schedule_uuid> \
+  --name nightly-edge \
+  --paths /etc/hostname \
+  --include-config \
+  --tags backup-critical \
+  --cron-expr "0 3 * * *" \
+  --retention-days 30 \
+  --keep-last 7 \
+  --rotation-generation keyring/v2 \
+  --disabled \
+  --confirmed
+```
+
+The update replaces the full reviewed definition rather than patching selected
+fields, so include every intended path, target, retention, and rotation option.
+Updates require `--retention-days`, `--keep-last`, and an explicit rotation
+choice; pass `--rotation-generation <id>` to retain/set one or
+`--clear-rotation-generation` to clear it. Omission is rejected instead of
+silently applying create defaults or clearing metadata. A valid update clears
+the cadence and prior failure state. Direct API `PUT` callers must send every
+material field; use an explicit `rotation_generation: null` to clear rotation
+rather than omitting it. `--disabled` keeps
+the repaired policy paused; omit it only when automatic runs should resume.
+
 Preview or apply policy-linked retention pruning. Dry run is safe and returns
 the per-policy rows that would be pruned. A confirmed non-metadata-only prune
 also deletes linked object-store keys; `--metadata-only true` clears server
@@ -54,6 +93,7 @@ In VTY:
 ```text
 backup-policies
 backup-policy-upsert nightly-edge --path /etc/hostname --include-config tag:backup-critical --confirmed
+backup-policy-upsert nightly-edge --schedule-id <policy_schedule_uuid> --path /etc/hostname --include-config --retention-days 30 --keep-last 7 --rotation-generation keyring/v2 --disabled tag:backup-critical --confirmed
 backup-policy-prune --dry-run
 ```
 

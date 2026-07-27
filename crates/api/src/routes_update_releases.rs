@@ -63,10 +63,8 @@ pub(crate) async fn latest_agent_update_release(
     let channel = query.channel.trim().to_ascii_lowercase();
     let release = state
         .repo
-        .list_agent_update_releases(200)
+        .latest_agent_update_release(query.name.trim(), &channel)
         .await?
-        .into_iter()
-        .find(|release| release.name == query.name.trim() && release.channel == channel)
         .ok_or_else(|| ApiError::not_found("agent_update_release_not_found"))?;
     Ok(Json(release))
 }

@@ -1,7 +1,7 @@
 use crate::state::UpdateReleasePolicy;
 use crate::*;
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::{header::AUTHORIZATION, HeaderMap},
     Json,
 };
@@ -52,6 +52,52 @@ async fn agent_update_release_registry_records_sanitized_external_metadata() {
     assert!(audit_json.contains("artifact_url_sha256_hex"));
     assert!(audit_json.contains("\"artifact_url_stored\":false"));
     assert!(!audit_json.contains("https://updates.example"));
+}
+
+#[tokio::test]
+async fn latest_release_lookup_is_not_limited_by_release_history_page_size() {
+    let repo = Repository::Memory(MemoryState::default());
+    let state = test_state(repo.clone(), Default::default(), false);
+    let target = repo
+        .record_agent_update_release(
+            &external_release_request("vpsman-agent", "1.2.3", "stable"),
+            &test_operator(),
+        )
+        .await
+        .unwrap();
+    let Repository::Memory(memory) = &repo else {
+        unreachable!("test uses memory repository");
+    };
+    let mut releases = memory.agent_update_releases.write().await;
+    for index in 0..200 {
+        releases.push(AgentUpdateReleaseView {
+            id: Uuid::new_v4(),
+            name: format!("unrelated-agent-{index}"),
+            version: format!("1.0.{index}"),
+            created_at: index.to_string(),
+            ..target.clone()
+        });
+    }
+    drop(releases);
+    assert!(!repo
+        .list_agent_update_releases(200)
+        .await
+        .unwrap()
+        .iter()
+        .any(|release| release.id == target.id));
+
+    let headers = crate::test_auth_headers(&state).await;
+    let Json(latest) = routes_update_releases::latest_agent_update_release(
+        State(state),
+        headers,
+        Query(routes_update_releases::LatestReleaseQuery {
+            name: "vpsman-agent".to_string(),
+            channel: "STABLE".to_string(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(latest.id, target.id);
 }
 
 #[test]

@@ -70,6 +70,11 @@ runtime directories. Deleting `runtime/data` removes filesystem object data.
 Deleting `runtime/postgres/data` removes the database metadata and should be
 treated as destructive.
 
+Compose caps each container at five rotated 10 MiB JSON log files by default;
+`.env` can override the size and file count. vpsman informational events and
+Nginx access records use stdout, while warnings/errors use stderr. Dependency
+logs default to warning level, with a separate filter for each vpsman service.
+
 ## Config Versus Runtime
 
 `config/vpsman.toml` is the single compose suite config for non-secret product

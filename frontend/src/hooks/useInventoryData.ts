@@ -39,25 +39,75 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
   const [runtimeConfigApplyStates, setRuntimeConfigApplyStates] = useState<RuntimeConfigApplyStateRecord[]>([]);
   const [runtimeConfigPatchGenerators, setRuntimeConfigPatchGenerators] = useState<RuntimeConfigPatchGeneratorRecord[]>([]);
   const [tagsError, setTagsError] = useState<string | null>(null);
+  const [runtimeConfigApplyError, setRuntimeConfigApplyError] =
+    useState<string | null>(null);
   const [tagsLoading, setTagsLoading] = useState(false);
-  const loadTagInventoryInFlight = useRef<Promise<void> | null>(null);
+  const [runtimeConfigApplyLoading, setRuntimeConfigApplyLoading] =
+    useState(false);
+  const [
+    tagInventoryEvidenceAvailable,
+    setTagInventoryEvidenceAvailable,
+  ] = useState(false);
+  const [
+    runtimeConfigApplyEvidenceAvailable,
+    setRuntimeConfigApplyEvidenceAvailable,
+  ] = useState(false);
+  const loadTagInventoryInFlight = useRef<{
+    request: Promise<void>;
+    token: string;
+  } | null>(null);
+  const tagInventoryLoadGeneration = useRef(0);
+  const sourceTemplatesLoadGeneration = useRef(0);
+  const runtimeConfigApplyLoadGeneration = useRef(0);
+  const tagOrderMutationGeneration = useRef(0);
+  const tagInventoryError = useRef<string | null>(null);
+  const sourceTemplatesError = useRef<string | null>(null);
+  const currentApiToken = useRef(apiToken);
+  currentApiToken.current = apiToken;
 
-  const loadTagInventory = useCallback(async () => {
-    if (loadTagInventoryInFlight.current) {
-      return loadTagInventoryInFlight.current;
+  const publishTagsError = useCallback(() => {
+    const errors = [
+      tagInventoryError.current,
+      sourceTemplatesError.current,
+    ].filter((message): message is string => Boolean(message));
+    setTagsError(errors.length > 0 ? errors.join("; ") : null);
+  }, []);
+
+  const loadTagInventory = useCallback(async (forceFresh = false) => {
+    if (currentApiToken.current !== apiToken) {
+      return;
     }
+    if (
+      !forceFresh &&
+      loadTagInventoryInFlight.current?.token === apiToken
+    ) {
+      return loadTagInventoryInFlight.current.request;
+    }
+    const generation = tagInventoryLoadGeneration.current + 1;
+    tagInventoryLoadGeneration.current = generation;
+    const sourceTemplatesGeneration =
+      sourceTemplatesLoadGeneration.current + 1;
+    sourceTemplatesLoadGeneration.current = sourceTemplatesGeneration;
+    const runtimeApplyGeneration =
+      runtimeConfigApplyLoadGeneration.current + 1;
+    runtimeConfigApplyLoadGeneration.current = runtimeApplyGeneration;
     const request = (async () => {
       setTagsLoading(true);
-      setTagsError(null);
+      tagInventoryError.current = null;
+      sourceTemplatesError.current = null;
+      publishTagsError();
+      setRuntimeConfigApplyError(null);
+      setRuntimeConfigApplyLoading(true);
+      setTagInventoryEvidenceAvailable(false);
       try {
         const [
-          nextTags,
-          nextSourceTemplates,
-          nextSourceTemplateAssignments,
-          nextSourceStatus,
-          nextRuntimeConfigApplyStates,
-          nextPatchGenerators,
-        ] = await Promise.all([
+          tagsResult,
+          sourceTemplatesResult,
+          sourceTemplateAssignmentsResult,
+          sourceStatusResult,
+          runtimeConfigApplyStatesResult,
+          patchGeneratorsResult,
+        ] = await Promise.allSettled([
           apiGet<TagView[]>("/api/v1/tags", apiToken),
           apiGet<SourceTemplateRecord[]>("/api/v1/source-templates", apiToken),
           apiGet<SourceTemplateAssignmentRecord[]>("/api/v1/source-template-assignments", apiToken),
@@ -65,14 +115,27 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
           apiGet<RuntimeConfigApplyStateRecord[]>("/api/v1/runtime-config/apply-state", apiToken),
           apiGet<RuntimeConfigPatchGeneratorRecord[]>("/api/v1/runtime-config/patch-generators", apiToken),
         ]);
-        setTags(nextTags);
-        setSourceTemplates(nextSourceTemplates);
-        setSourceTemplateAssignments(nextSourceTemplateAssignments);
-        setSourceStatus(nextSourceStatus);
-        setRuntimeConfigApplyStates(nextRuntimeConfigApplyStates);
-        setRuntimeConfigPatchGenerators(nextPatchGenerators);
-      } catch (error) {
-        if (isApiUnauthorized(error)) {
+        if (
+          tagInventoryLoadGeneration.current !== generation ||
+          currentApiToken.current !== apiToken
+        ) {
+          return;
+        }
+        const results = [
+          tagsResult,
+          sourceTemplatesResult,
+          sourceTemplateAssignmentsResult,
+          sourceStatusResult,
+          runtimeConfigApplyStatesResult,
+          patchGeneratorsResult,
+        ];
+        if (
+          results.some(
+            (result) =>
+              result.status === "rejected" &&
+              isApiUnauthorized(result.reason),
+          )
+        ) {
           onUnauthorized();
           setTags([]);
           setSourceTemplates([]);
@@ -80,48 +143,212 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
           setSourceStatus([]);
           setRuntimeConfigApplyStates([]);
           setRuntimeConfigPatchGenerators([]);
-          setTagsError("Operator login required");
+          setTagInventoryEvidenceAvailable(false);
+          setRuntimeConfigApplyEvidenceAvailable(false);
+          tagInventoryError.current = "Operator login required";
+          sourceTemplatesError.current = null;
+          publishTagsError();
+          setRuntimeConfigApplyError("Operator login required");
           return;
         }
-        setTagsError(error instanceof Error ? error.message : "Tag inventory unavailable");
+        if (tagsResult.status === "fulfilled") {
+          setTags(tagsResult.value);
+        }
+        if (
+          sourceTemplatesLoadGeneration.current ===
+            sourceTemplatesGeneration &&
+          sourceTemplatesResult.status === "fulfilled"
+        ) {
+          setSourceTemplates(sourceTemplatesResult.value);
+        }
+        if (sourceTemplateAssignmentsResult.status === "fulfilled") {
+          setSourceTemplateAssignments(sourceTemplateAssignmentsResult.value);
+        }
+        if (sourceStatusResult.status === "fulfilled") {
+          setSourceStatus(sourceStatusResult.value);
+        }
+        if (runtimeConfigApplyStatesResult.status === "fulfilled") {
+          if (
+            runtimeConfigApplyLoadGeneration.current ===
+            runtimeApplyGeneration
+          ) {
+            setRuntimeConfigApplyStates(runtimeConfigApplyStatesResult.value);
+            setRuntimeConfigApplyEvidenceAvailable(true);
+          }
+        }
+        if (patchGeneratorsResult.status === "fulfilled") {
+          setRuntimeConfigPatchGenerators(patchGeneratorsResult.value);
+        }
+        setTagInventoryEvidenceAvailable(
+          [
+            tagsResult,
+            sourceTemplatesResult,
+            sourceTemplateAssignmentsResult,
+            sourceStatusResult,
+            patchGeneratorsResult,
+          ].every((result) => result.status === "fulfilled"),
+        );
+        tagInventoryError.current = unavailableSourceSummary(
+          "Some inventory sources are unavailable",
+          [
+            tagsResult,
+            sourceTemplateAssignmentsResult,
+            sourceStatusResult,
+            patchGeneratorsResult,
+          ],
+          [
+            "tags",
+            "source template assignments",
+            "source status",
+            "runtime configuration patch generators",
+          ],
+        );
+        if (
+          sourceTemplatesLoadGeneration.current === sourceTemplatesGeneration
+        ) {
+          sourceTemplatesError.current = settledSourceError(
+            "Source templates",
+            sourceTemplatesResult,
+          );
+        }
+        publishTagsError();
+        if (
+          runtimeConfigApplyLoadGeneration.current === runtimeApplyGeneration
+        ) {
+          if (runtimeConfigApplyStatesResult.status === "rejected") {
+            setRuntimeConfigApplyEvidenceAvailable(false);
+          }
+          setRuntimeConfigApplyError(
+            unavailableSourceSummary(
+              "Runtime configuration source unavailable",
+              [runtimeConfigApplyStatesResult],
+              ["apply state"],
+            ),
+          );
+        }
       } finally {
-        setTagsLoading(false);
+        if (
+          tagInventoryLoadGeneration.current === generation &&
+          currentApiToken.current === apiToken
+        ) {
+          setTagsLoading(false);
+        }
+        if (
+          runtimeConfigApplyLoadGeneration.current === runtimeApplyGeneration &&
+          currentApiToken.current === apiToken
+        ) {
+          setRuntimeConfigApplyLoading(false);
+        }
       }
     })();
-    loadTagInventoryInFlight.current = request;
+    loadTagInventoryInFlight.current = { request, token: apiToken };
     try {
       await request;
     } finally {
-      if (loadTagInventoryInFlight.current === request) {
+      if (loadTagInventoryInFlight.current?.request === request) {
         loadTagInventoryInFlight.current = null;
       }
     }
-  }, [apiToken, onUnauthorized]);
+  }, [apiToken, onUnauthorized, publishTagsError]);
+
+  const refreshTagInventoryAfterMutation = useCallback(
+    () => loadTagInventory(true),
+    [loadTagInventory],
+  );
 
   const loadSourceTemplates = useCallback(async () => {
+    if (currentApiToken.current !== apiToken) {
+      return;
+    }
+    const generation = sourceTemplatesLoadGeneration.current + 1;
+    sourceTemplatesLoadGeneration.current = generation;
+    sourceTemplatesError.current = null;
+    publishTagsError();
     try {
-      setSourceTemplates(
-        await apiGet<SourceTemplateRecord[]>("/api/v1/source-templates", apiToken),
+      const records = await apiGet<SourceTemplateRecord[]>(
+        "/api/v1/source-templates",
+        apiToken,
       );
+      if (
+        sourceTemplatesLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return;
+      }
+      setSourceTemplates(records);
+      sourceTemplatesError.current = null;
+      publishTagsError();
     } catch (error) {
+      if (
+        sourceTemplatesLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return;
+      }
       if (isApiUnauthorized(error)) {
         onUnauthorized();
         setSourceTemplates([]);
+        sourceTemplatesError.current = "Operator login required";
+        publishTagsError();
         throw new Error("Operator login required");
       }
+      sourceTemplatesError.current =
+        error instanceof Error
+          ? `Source templates: ${error.message}`
+          : "Source templates unavailable";
+      publishTagsError();
       throw error;
     }
-  }, [apiToken, onUnauthorized]);
+  }, [apiToken, onUnauthorized, publishTagsError]);
 
   const loadRuntimeConfigApplyStates = useCallback(async () => {
+    if (currentApiToken.current !== apiToken) {
+      return;
+    }
+    const generation = runtimeConfigApplyLoadGeneration.current + 1;
+    runtimeConfigApplyLoadGeneration.current = generation;
+    setRuntimeConfigApplyError(null);
+    setRuntimeConfigApplyLoading(true);
     try {
-      setRuntimeConfigApplyStates(
-        await apiGet<RuntimeConfigApplyStateRecord[]>("/api/v1/runtime-config/apply-state", apiToken),
+      const records = await apiGet<RuntimeConfigApplyStateRecord[]>(
+        "/api/v1/runtime-config/apply-state",
+        apiToken,
       );
+      if (
+        runtimeConfigApplyLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return;
+      }
+      setRuntimeConfigApplyStates(records);
+      setRuntimeConfigApplyEvidenceAvailable(true);
+      setRuntimeConfigApplyError(null);
     } catch (error) {
+      if (
+        runtimeConfigApplyLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return;
+      }
       if (isApiUnauthorized(error)) {
         onUnauthorized();
         setRuntimeConfigApplyStates([]);
+        setRuntimeConfigApplyEvidenceAvailable(false);
+        setRuntimeConfigApplyError("Operator login required");
+        return;
+      }
+      setRuntimeConfigApplyEvidenceAvailable(false);
+      setRuntimeConfigApplyError(
+        error instanceof Error
+          ? error.message
+          : "Runtime configuration apply state unavailable",
+      );
+    } finally {
+      if (
+        runtimeConfigApplyLoadGeneration.current === generation &&
+        currentApiToken.current === apiToken
+      ) {
+        setRuntimeConfigApplyLoading(false);
       }
     }
   }, [apiToken, onUnauthorized]);
@@ -129,20 +356,32 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
   const createTag = useCallback(
     async (name: string, privilegeAssertion: PrivilegeAssertion) => {
       await apiPost("/api/v1/tags", apiToken, { confirmed: true, name, privilege_assertion: privilegeAssertion });
-      await loadTagInventory();
+      if (currentApiToken.current !== apiToken) {
+        return;
+      }
+      await refreshTagInventoryAfterMutation();
     },
-    [apiToken, loadTagInventory],
+    [apiToken, refreshTagInventoryAfterMutation],
   );
 
   const updateTagOrder = useCallback(
     async (orderedTags: string[]) => {
+      const operationGeneration = tagOrderMutationGeneration.current + 1;
+      tagOrderMutationGeneration.current = operationGeneration;
       const response = await apiPut<TagView[]>("/api/v1/tags/order", apiToken, {
         ordered_tags: orderedTags,
       });
+      if (
+        currentApiToken.current !== apiToken ||
+        tagOrderMutationGeneration.current !== operationGeneration
+      ) {
+        return response;
+      }
       setTags(response);
+      await refreshTagInventoryAfterMutation();
       return response;
     },
-    [apiToken],
+    [apiToken, refreshTagInventoryAfterMutation],
   );
 
   const assignTag = useCallback(
@@ -152,10 +391,13 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
         privilege_assertion: privilegeAssertion,
         tag,
       });
-      await Promise.all([onFleetChanged(), loadTagInventory()]);
+      if (currentApiToken.current !== apiToken) {
+        return response;
+      }
+      await Promise.all([onFleetChanged(), refreshTagInventoryAfterMutation()]);
       return response;
     },
-    [apiToken, loadTagInventory, onFleetChanged],
+    [apiToken, onFleetChanged, refreshTagInventoryAfterMutation],
   );
 
   const bulkMutateTags = useCallback(
@@ -165,12 +407,15 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
         apiToken,
         request,
       );
+      if (currentApiToken.current !== apiToken) {
+        return response;
+      }
       if (!response.confirmation_required) {
-        await Promise.all([onFleetChanged(), loadTagInventory()]);
+        await Promise.all([onFleetChanged(), refreshTagInventoryAfterMutation()]);
       }
       return response;
     },
-    [apiToken, loadTagInventory, onFleetChanged],
+    [apiToken, onFleetChanged, refreshTagInventoryAfterMutation],
   );
 
   const deleteTag = useCallback(
@@ -185,28 +430,37 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
         preview_hash: previewHash ?? null,
         privilege_assertion: privilegeAssertion,
       });
+      if (currentApiToken.current !== apiToken) {
+        return response;
+      }
       if (!response.confirmation_required) {
-        await Promise.all([onFleetChanged(), loadTagInventory()]);
+        await Promise.all([onFleetChanged(), refreshTagInventoryAfterMutation()]);
       }
       return response;
     },
-    [apiToken, loadTagInventory, onFleetChanged],
+    [apiToken, onFleetChanged, refreshTagInventoryAfterMutation],
   );
 
   const createSourceTemplate = useCallback(
     async (request: CreateSourceTemplateRequest) => {
       await apiPost("/api/v1/source-templates", apiToken, request);
-      await loadTagInventory();
+      if (currentApiToken.current !== apiToken) {
+        return;
+      }
+      await refreshTagInventoryAfterMutation();
     },
-    [apiToken, loadTagInventory],
+    [apiToken, refreshTagInventoryAfterMutation],
   );
 
   const cloneSourceTemplate = useCallback(
     async (templateId: string, request: CloneSourceTemplateRequest) => {
       await apiPost(`/api/v1/source-templates/${encodeURIComponent(templateId)}/clone`, apiToken, request);
-      await loadTagInventory();
+      if (currentApiToken.current !== apiToken) {
+        return;
+      }
+      await refreshTagInventoryAfterMutation();
     },
-    [apiToken, loadTagInventory],
+    [apiToken, refreshTagInventoryAfterMutation],
   );
 
   const diffSourceTemplate = useCallback(
@@ -236,10 +490,13 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
         apiToken,
         request,
       );
-      await loadTagInventory();
+      if (currentApiToken.current !== apiToken) {
+        return response;
+      }
+      await refreshTagInventoryAfterMutation();
       return response;
     },
-    [apiToken, loadTagInventory],
+    [apiToken, refreshTagInventoryAfterMutation],
   );
 
   const assignSourceTemplate = useCallback(
@@ -249,10 +506,13 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
         apiToken,
         request,
       );
-      await loadTagInventory();
+      if (currentApiToken.current !== apiToken) {
+        return response;
+      }
+      await refreshTagInventoryAfterMutation();
       return response;
     },
-    [apiToken, loadTagInventory],
+    [apiToken, refreshTagInventoryAfterMutation],
   );
 
   const renderTemplateRuntimeConfig = useCallback(
@@ -271,10 +531,13 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
         apiToken,
         request,
       );
-      await loadTagInventory();
+      if (currentApiToken.current !== apiToken) {
+        return response;
+      }
+      await refreshTagInventoryAfterMutation();
       return response;
     },
-    [apiToken, loadTagInventory],
+    [apiToken, refreshTagInventoryAfterMutation],
   );
 
   const renderRuntimeConfigPatchGenerator = useCallback(
@@ -294,6 +557,9 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
         apiToken,
         request,
       );
+      if (currentApiToken.current !== apiToken) {
+        return response;
+      }
       await loadRuntimeConfigApplyStates();
       return response;
     },
@@ -303,9 +569,12 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
   const deleteRuntimeConfigPatchGenerator = useCallback(
     async (generatorId: string, request: DeleteRuntimeConfigPatchGeneratorRequest) => {
       await apiDelete(`/api/v1/runtime-config/patch-generators/${encodeURIComponent(generatorId)}`, apiToken, request);
-      await loadTagInventory();
+      if (currentApiToken.current !== apiToken) {
+        return;
+      }
+      await refreshTagInventoryAfterMutation();
     },
-    [apiToken, loadTagInventory],
+    [apiToken, refreshTagInventoryAfterMutation],
   );
 
   const resolveBulkPreview = useCallback(
@@ -322,10 +591,34 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
     [apiToken],
   );
 
+  const clearInventory = useCallback(() => {
+    tagInventoryLoadGeneration.current += 1;
+    sourceTemplatesLoadGeneration.current += 1;
+    runtimeConfigApplyLoadGeneration.current += 1;
+    tagOrderMutationGeneration.current += 1;
+    loadTagInventoryInFlight.current = null;
+    currentApiToken.current = "";
+    tagInventoryError.current = null;
+    sourceTemplatesError.current = null;
+    setTags([]);
+    setSourceTemplates([]);
+    setSourceTemplateAssignments([]);
+    setSourceStatus([]);
+    setRuntimeConfigApplyStates([]);
+    setRuntimeConfigPatchGenerators([]);
+    setTagsError(null);
+    setRuntimeConfigApplyError(null);
+    setTagInventoryEvidenceAvailable(false);
+    setRuntimeConfigApplyEvidenceAvailable(false);
+    setRuntimeConfigApplyLoading(false);
+    setTagsLoading(false);
+  }, []);
+
   return {
     assignSourceTemplate,
     assignTag,
     bulkMutateTags,
+    clearInventory,
     submitRuntimeConfigPatch,
     cloneSourceTemplate,
     createSourceTemplate,
@@ -339,6 +632,9 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
     loadTagInventory,
     loadSourceTemplates,
     loadRuntimeConfigApplyStates,
+    runtimeConfigApplyEvidenceAvailable,
+    runtimeConfigApplyError,
+    runtimeConfigApplyLoading,
     runtimeConfigApplyStates,
     runtimeConfigPatchGenerators,
     renderTemplateRuntimeConfig,
@@ -346,6 +642,7 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
     resolveBulkPreview,
     resolveJobTargets,
     testSourceTemplate,
+    tagInventoryEvidenceAvailable,
     tags,
     tagsError,
     tagsLoading,
@@ -353,4 +650,29 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
     updateSourceTemplate,
     upsertRuntimeConfigPatchGenerator,
   };
+}
+
+function unavailableSourceSummary(
+  prefix: string,
+  results: readonly PromiseSettledResult<unknown>[],
+  labels: readonly string[],
+): string | null {
+  const failedLabels = results.flatMap((result, index) =>
+    result.status === "rejected" ? [labels[index]] : [],
+  );
+  return failedLabels.length > 0
+    ? `${prefix}: ${failedLabels.join(", ")}`
+    : null;
+}
+
+function settledSourceError(
+  label: string,
+  result: PromiseSettledResult<unknown>,
+): string | null {
+  if (result.status === "fulfilled") {
+    return null;
+  }
+  return result.reason instanceof Error
+    ? `${label}: ${result.reason.message}`
+    : `${label} unavailable`;
 }

@@ -49,9 +49,14 @@ export function useDashboardOverviewData(
     dashboardPreferencesToParams(dashboardPreferences).toString(),
   );
   const loadSequence = useRef(0);
+  const currentApiToken = useRef(apiToken);
+  currentApiToken.current = apiToken;
 
   const loadDashboardOverview = useCallback(
     async (nextPreferences?: DashboardPreferences) => {
+      if (currentApiToken.current !== apiToken) {
+        return;
+      }
       const requestPreferences =
         nextPreferences ?? dashboardPreferencesRef.current;
       const sequence = loadSequence.current + 1;
@@ -65,14 +70,21 @@ export function useDashboardOverviewData(
           `/api/v1/dashboard/overview?${requestKey}`,
           apiToken,
         );
-        if (requestKey !== desiredRequestKey.current) {
+        if (
+          sequence !== loadSequence.current ||
+          requestKey !== desiredRequestKey.current ||
+          currentApiToken.current !== apiToken
+        ) {
           return;
         }
         dashboardOverviewRef.current = overview;
         setDashboardOverview(overview);
         setDashboardOverviewError(null);
       } catch (error) {
-        if (sequence !== loadSequence.current) {
+        if (
+          sequence !== loadSequence.current ||
+          currentApiToken.current !== apiToken
+        ) {
           return;
         }
         if (isApiUnauthorized(error)) {
@@ -132,9 +144,12 @@ export function useDashboardOverviewData(
   );
 
   const clearDashboardOverview = useCallback(() => {
+    loadSequence.current += 1;
+    currentApiToken.current = "";
     dashboardOverviewRef.current = null;
     setDashboardOverview(null);
     setDashboardOverviewError(null);
+    setDashboardOverviewLoading(false);
   }, []);
 
   return {

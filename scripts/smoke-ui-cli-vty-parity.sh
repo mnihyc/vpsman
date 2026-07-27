@@ -41,9 +41,12 @@ fi
 root_help="$("$bin" --help)"
 vty_help="$(printf 'help\nexit\n' | "$bin" --api-url http://127.0.0.1:1 vty)"
 file_transfer_upload_help="$("$bin" file-transfer-upload --help)"
+backup_policy_upsert_help="$("$bin" backup-policy-upsert --help)"
 
 require_contains "$file_transfer_upload_help" "--source-artifact-id" "vpsctl file-transfer-upload source artifact help"
 require_contains "$vty_help" "--source-artifact-id" "VTY file-transfer-upload source artifact help"
+require_contains "$backup_policy_upsert_help" "--schedule-id" "vpsctl backup-policy-upsert update help"
+require_contains "$vty_help" "--schedule-id" "VTY backup-policy-upsert update help"
 require_contains "$vty_help" "disable" "VTY privilege disable help"
 require_contains "$vty_help" "show privilege" "VTY privilege status help"
 require_contains "$vty_help" "show capabilities" "VTY capability display help"

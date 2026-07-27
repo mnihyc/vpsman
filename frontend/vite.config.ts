@@ -225,10 +225,15 @@ function readBuildNumber(component: string): string {
   const counterPath = path.join(counterDir, `${component}.txt`);
   try {
     const value = fs.readFileSync(counterPath, "utf8").trim();
-    return /^\d+$/.test(value) ? value : "0";
+    if (!/^[1-9]\d*$/.test(value)) {
+      throw new Error(
+        `build-number counter ${counterPath} must contain one positive integer`,
+      );
+    }
+    return value;
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
-      return "0";
+      throw new Error(`build-number counter is missing: ${counterPath}`);
     }
     throw error;
   }

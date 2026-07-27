@@ -33,10 +33,8 @@ pub(crate) fn encrypt_totp_secret(password: &str, secret: &[u8]) -> Result<Encry
         secret.len() >= 16 && secret.len() <= 64,
         "TOTP secret length out of range"
     );
-    let mut salt = [0_u8; 16];
-    let mut nonce = [0_u8; 12];
-    rand::thread_rng().fill_bytes(&mut salt);
-    rand::thread_rng().fill_bytes(&mut nonce);
+    let salt = rand::random::<[u8; 16]>();
+    let nonce = rand::random::<[u8; 12]>();
     let key = argon2_digest(password.as_bytes(), &salt)?;
     let cipher = ChaCha20Poly1305::new((&key).into());
     let ciphertext = cipher

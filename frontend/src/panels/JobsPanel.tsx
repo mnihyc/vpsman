@@ -18,6 +18,11 @@ import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
+import {
+  FLEET_DETAIL_LIMIT,
+  formatLowerBoundCount,
+  HISTORY_DETAIL_LIMIT,
+} from "../constants";
 import { ActionFeedback } from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { usePanelDisplaySettings } from "../panelDisplay";
@@ -157,6 +162,21 @@ function scheduledRunScheduleLabel(
     : "Scheduled run";
 }
 
+function scheduledRunCadenceLabel(schedule: ScheduleRecord): string {
+  return schedule.cadence_error
+    ? "Invalid cadence"
+    : describeCronExpression(schedule.cron_expr);
+}
+
+function scheduledRunNextRunLabel(schedule: ScheduleRecord): string {
+  if (schedule.cadence_error) {
+    return "Unavailable — invalid cadence";
+  }
+  return schedule.next_run_at
+    ? formatTime(schedule.next_run_at)
+    : "Not reported";
+}
+
 function describeCronExpression(expr: string): string {
   const fields = expr.trim().split(/\s+/);
   if (fields.length !== 5) {
@@ -219,10 +239,12 @@ export function JobsPanel({
   agents,
   error,
   fileTransferSources,
+  fileTransferSourcesTruncated,
   jobApprovals,
   jobs,
   schedules,
   commandTemplates,
+  commandTemplatesTruncated,
   dispatchPreset,
   lastJobOutputEvent,
   loading,
@@ -262,10 +284,12 @@ export function JobsPanel({
   agents: AgentView[];
   error: string | null;
   fileTransferSources: FileTransferSourceArtifactRecord[];
+  fileTransferSourcesTruncated: boolean;
   jobApprovals: JobApprovalRecord[];
   jobs: JobHistoryRecord[];
   schedules: ScheduleRecord[];
   commandTemplates: CommandTemplateRecord[];
+  commandTemplatesTruncated: boolean;
   dispatchPreset?: JobDispatchPreset | null;
   lastJobOutputEvent: WsJobOutputEvent | null;
   loading: boolean;
@@ -390,6 +414,8 @@ export function JobsPanel({
   const pendingApprovalCount = jobApprovals.filter(
     (approval) => approval.status === "pending",
   ).length;
+  const jobHistoryTruncated = jobs.length >= HISTORY_DETAIL_LIMIT;
+  const approvalsTruncated = jobApprovals.length >= FLEET_DETAIL_LIMIT;
   const approvalActionFeedbackMessage =
     approvalActionError ??
     (approvalActionPending ? "Recording approval decision" : null);
@@ -785,9 +811,9 @@ export function JobsPanel({
           return (
             <span className="historyPrimary">
               <strong>{scheduledRunScheduleLabel(job, schedule)}</strong>
-              <small>
+              <small title={schedule?.cadence_error ?? undefined}>
                 {schedule
-                  ? describeCronExpression(schedule.cron_expr)
+                  ? scheduledRunCadenceLabel(schedule)
                   : job.source_schedule_id
                     ? "Saved schedule source"
                     : "Worker-created run"}
@@ -1426,7 +1452,9 @@ export function JobsPanel({
           <JobDispatchPanel
             agents={agents}
             fileTransferSources={fileTransferSources}
+            fileTransferSourcesTruncated={fileTransferSourcesTruncated}
             commandTemplates={commandTemplates}
+            commandTemplatesTruncated={commandTemplatesTruncated}
             dispatchPreset={dispatchPreset}
             onDispatchPresetApplied={onDispatchPresetApplied}
             onCreateJob={onCreateJob}
@@ -1574,6 +1602,7 @@ export function JobsPanel({
                   </div>
                 )}
                 rows={jobs}
+                rowsTruncated={jobHistoryTruncated}
                 storageKey="vpsman.grid.jobs.history"
                 title="Job records"
               />
@@ -2046,8 +2075,15 @@ export function JobsPanel({
                 <div>
                   <h2>Approvals</h2>
                   <span>
-                    {pendingApprovalCount} pending · {jobApprovals.length} total
-                    request{jobApprovals.length === 1 ? "" : "s"}
+                    {approvalsTruncated
+                      ? `${formatLowerBoundCount(
+                          pendingApprovalCount,
+                          true,
+                        )} pending in ${formatLowerBoundCount(
+                          jobApprovals.length,
+                          true,
+                        )} loaded requests`
+                      : `${pendingApprovalCount} pending · ${jobApprovals.length} total request${jobApprovals.length === 1 ? "" : "s"}`}
                   </span>
                 </div>
                 <div className="inlineActions">
@@ -2264,6 +2300,7 @@ export function JobsPanel({
                   },
                 ]}
                 rows={jobApprovals}
+                rowsTruncated={approvalsTruncated}
                 searchPlaceholder="Search approvals"
                 singleExpandedRow
                 storageKey="vpsman.jobs.approvals"
@@ -2279,7 +2316,10 @@ export function JobsPanel({
                 <div>
                   <h2>Scheduled runs</h2>
                   <span>
-                    {`${scheduleRunJobs.length} schedule-created ${
+                    {`${formatLowerBoundCount(
+                      scheduleRunJobs.length,
+                      jobHistoryTruncated,
+                    )}${jobHistoryTruncated ? " loaded" : ""} schedule-created ${
                       scheduleRunJobs.length === 1 ? "run" : "runs"
                     }`}
                   </span>
@@ -2332,13 +2372,13 @@ export function JobsPanel({
                         <span>Cadence</span>
                         <strong>
                           {schedule
-                            ? `${describeCronExpression(schedule.cron_expr)} · ${schedule.timezone}`
+                            ? `${scheduledRunCadenceLabel(schedule)} · ${schedule.timezone}`
                             : "Open schedule registry"}
                         </strong>
                         <span>Current next run</span>
                         <strong>
                           {schedule
-                            ? formatTime(schedule.next_run_at)
+                            ? scheduledRunNextRunLabel(schedule)
                             : "Data unavailable"}
                         </strong>
                         <span>Job</span>
@@ -2377,6 +2417,7 @@ export function JobsPanel({
                     );
                   }}
                   rows={scheduleRunJobs}
+                  rowsTruncated={jobHistoryTruncated}
                   searchPlaceholder="Search scheduled runs"
                   selectable={false}
                   singleExpandedRow

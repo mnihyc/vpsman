@@ -118,6 +118,8 @@ pub(crate) struct MemoryState {
     pub(crate) schedules: Arc<RwLock<Vec<ScheduleView>>>,
     pub(crate) backup_policies: Arc<RwLock<Vec<BackupPolicyMetadata>>>,
     pub(crate) tunnel_plans: Arc<RwLock<Vec<TunnelPlanView>>>,
+    pub(crate) automatic_ospf_plan_scans: Arc<RwLock<HashMap<Uuid, u64>>>,
+    pub(crate) pending_ospf_plan_reconciliations: Arc<RwLock<HashMap<Uuid, u64>>>,
     pub(crate) port_forward_rules:
         Arc<RwLock<Vec<crate::model_port_forwarding::PortForwardRuleRecord>>>,
     pub(crate) port_forward_runtime:

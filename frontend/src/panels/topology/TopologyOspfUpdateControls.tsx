@@ -11,6 +11,10 @@ import {
 import { ActionFeedback, type ActionFeedbackTone } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
+import {
+  TOPOLOGY_EVIDENCE_LIMIT,
+  formatLowerBoundCount,
+} from "../../constants";
 import { sha256Hex } from "../../fileTransfer";
 import { usePanelDisplaySettings } from "../../panelDisplay";
 import {
@@ -65,6 +69,8 @@ export function TopologyOspfUpdateControls({
   tunnelPlans: TunnelPlanRecord[];
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
+  const ospfUpdatePlansTruncated =
+    ospfUpdatePlans.length >= TOPOLOGY_EVIDENCE_LIMIT;
   const [expandedPlanId, setExpandedPlanId] = useState<string | null>(
     ospfUpdatePlans[0]?.plan_id ?? null,
   );
@@ -234,8 +240,13 @@ export function TopologyOspfUpdateControls({
         <div>
           <h2>OSPF cost control</h2>
           <span>
-            {ospfUpdatePlans.length} explicit routing adapter workflow
+            {formatLowerBoundCount(
+              ospfUpdatePlans.length,
+              ospfUpdatePlansTruncated,
+            )}{" "}
+            explicit routing adapter workflow
             {ospfUpdatePlans.length === 1 ? "" : "s"}
+            {ospfUpdatePlansTruncated ? " loaded" : ""}
           </span>
         </div>
         <div className="headerActionStack">

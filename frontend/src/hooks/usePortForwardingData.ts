@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { apiGet, apiPost, apiPut, isApiUnauthorized } from "../api";
 import type {
   CreatePortForwardRuleRequest,
@@ -6,7 +6,7 @@ import type {
   PortForwardBulkResponse,
   PortForwardMutationRequest,
   PortForwardMutationResponse,
-  PortForwardRuleRecord,
+  PortForwardRuleListItem,
   ResolveHostnameResponse,
   UpdatePortForwardRuleRequest,
 } from "../types";
@@ -16,18 +16,40 @@ export function usePortForwardingData(
   onUnauthorized: () => void,
   onAuditChanged: () => Promise<void>,
 ) {
-  const [portForwardRules, setPortForwardRules] = useState<PortForwardRuleRecord[]>([]);
+  const [portForwardRules, setPortForwardRules] = useState<PortForwardRuleListItem[]>([]);
   const [portForwardError, setPortForwardError] = useState<string | null>(null);
   const [portForwardLoading, setPortForwardLoading] = useState(false);
+  const portForwardLoadGeneration = useRef(0);
+  const currentApiToken = useRef(apiToken);
+  currentApiToken.current = apiToken;
 
   const loadPortForwardRules = useCallback(async () => {
+    if (currentApiToken.current !== apiToken) {
+      return;
+    }
+    const generation = portForwardLoadGeneration.current + 1;
+    portForwardLoadGeneration.current = generation;
     setPortForwardLoading(true);
     setPortForwardError(null);
     try {
-      setPortForwardRules(
-        await apiGet<PortForwardRuleRecord[]>("/api/v1/port-forward-rules", apiToken),
+      const records = await apiGet<PortForwardRuleListItem[]>(
+        "/api/v1/port-forward-rules",
+        apiToken,
       );
+      if (
+        portForwardLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return;
+      }
+      setPortForwardRules(records);
     } catch (error) {
+      if (
+        portForwardLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) {
+        return;
+      }
       if (isApiUnauthorized(error)) {
         onUnauthorized();
         setPortForwardRules([]);
@@ -38,7 +60,12 @@ export function usePortForwardingData(
         error instanceof Error ? error.message : "Port-forward rules unavailable",
       );
     } finally {
-      setPortForwardLoading(false);
+      if (
+        portForwardLoadGeneration.current === generation &&
+        currentApiToken.current === apiToken
+      ) {
+        setPortForwardLoading(false);
+      }
     }
   }, [apiToken, onUnauthorized]);
 
@@ -53,6 +80,9 @@ export function usePortForwardingData(
         apiToken,
         request,
       );
+      if (currentApiToken.current !== apiToken) {
+        return response;
+      }
       await refreshAfterMutation();
       return response;
     },
@@ -66,6 +96,9 @@ export function usePortForwardingData(
         apiToken,
         request,
       );
+      if (currentApiToken.current !== apiToken) {
+        return response;
+      }
       await refreshAfterMutation();
       return response;
     },
@@ -83,6 +116,9 @@ export function usePortForwardingData(
         apiToken,
         request,
       );
+      if (currentApiToken.current !== apiToken) {
+        return response;
+      }
       await refreshAfterMutation();
       return response;
     },
@@ -100,6 +136,9 @@ export function usePortForwardingData(
         apiToken,
         { action, confirmed: true, items, reason: reason || null },
       );
+      if (currentApiToken.current !== apiToken) {
+        return response;
+      }
       await refreshAfterMutation();
       return response;
     },
@@ -116,8 +155,17 @@ export function usePortForwardingData(
     [apiToken],
   );
 
+  const clearPortForwarding = useCallback(() => {
+    portForwardLoadGeneration.current += 1;
+    currentApiToken.current = "";
+    setPortForwardRules([]);
+    setPortForwardError(null);
+    setPortForwardLoading(false);
+  }, []);
+
   return {
     bulkMutatePortForwardRules,
+    clearPortForwarding,
     createPortForwardRule,
     loadPortForwardRules,
     mutatePortForwardRule,

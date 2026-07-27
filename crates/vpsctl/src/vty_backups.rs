@@ -4,12 +4,12 @@ use vpsman_common::{BackupMissingPathPolicy, JobCommand, MAX_CONFIGURABLE_JOB_TI
 
 use crate::{
     commands_backups::{
-        build_backup_metadata_privilege, build_restore_plan_privilege,
+        backup_policy_upsert_target, build_backup_metadata_privilege, build_restore_plan_privilege,
         restore_rollback_operation_from_api, restore_run_with_credentials,
-        restore_scope_from_backup, RestoreRunWithCredentials,
+        restore_scope_from_backup, validate_backup_policy_upsert_mode, RestoreRunWithCredentials,
     },
     commands_schedules::{resolve_schedule_target_ids, selector_expression_from_targets},
-    http::http_post_json,
+    http::{http_post_json, http_put_json},
     privilege::{
         build_privilege_for_schedule, load_super_password, load_super_salt_hex,
         SchedulePrivilegeRequest,
@@ -70,6 +70,7 @@ pub(crate) struct VtyBackupRunRequest {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct VtyBackupPolicyUpsert {
+    pub(crate) schedule_id: Option<Uuid>,
     pub(crate) name: String,
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
@@ -85,6 +86,7 @@ pub(crate) struct VtyBackupPolicyUpsert {
     pub(crate) retention_days: Option<i32>,
     pub(crate) keep_last: Option<i32>,
     pub(crate) rotation_generation: Option<String>,
+    pub(crate) clear_rotation_generation: bool,
 }
 
 pub(crate) fn parse_vty_backup_request(tokens: &[&str]) -> Result<VtyBackupRequest> {
@@ -238,8 +240,9 @@ pub(crate) fn parse_vty_backup_run(tokens: &[&str]) -> Result<VtyBackupRunReques
 pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBackupPolicyUpsert> {
     let name = tokens
         .first()
-        .context("usage: backup-policy-upsert <name> [--path <abs>] [--include-config] [--follow-symlinks] [--skip-missing-paths] [--cron <min> <hour> <dom> <mon> <dow>] [--retention-days <n>] [--keep-last <n>] [--rotation-generation <id>] [--disabled] <target>... --confirmed")?
+        .context("usage: backup-policy-upsert <name> [--schedule-id <uuid>] [--path <abs>] [--include-config] [--follow-symlinks] [--skip-missing-paths] [--cron <min> <hour> <dom> <mon> <dow>] [--retention-days <n>] [--keep-last <n>] [--rotation-generation <id> | --clear-rotation-generation] [--disabled] <target>... --confirmed")?
         .to_string();
+    let mut schedule_id = None;
     let mut paths = Vec::new();
     let mut include_config = false;
     let mut follow_symlinks = false;
@@ -253,10 +256,29 @@ pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBacku
     let mut retention_days = None;
     let mut keep_last = None;
     let mut rotation_generation = None;
+    let mut clear_rotation_generation = false;
     let mut target_tokens = Vec::new();
     let mut index = 1;
     while index < tokens.len() {
         match tokens[index] {
+            "--schedule-id" => {
+                schedule_id = Some(
+                    Uuid::parse_str(
+                        tokens
+                            .get(index + 1)
+                            .context("--schedule-id requires a value")?,
+                    )
+                    .context("invalid --schedule-id")?,
+                );
+                index += 2;
+            }
+            value if value.starts_with("--schedule-id=") => {
+                schedule_id = Some(
+                    Uuid::parse_str(value.trim_start_matches("--schedule-id="))
+                        .context("invalid --schedule-id")?,
+                );
+                index += 1;
+            }
             "--include-config" => {
                 include_config = true;
                 index += 1;
@@ -362,6 +384,10 @@ pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBacku
                 );
                 index += 1;
             }
+            "--clear-rotation-generation" => {
+                clear_rotation_generation = true;
+                index += 1;
+            }
             "--catch-up-policy" => {
                 catch_up_policy = tokens
                     .get(index + 1)
@@ -443,7 +469,15 @@ pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBacku
         selection.confirmed,
         "backup-policy-upsert requires --confirmed"
     );
+    validate_backup_policy_upsert_mode(
+        schedule_id,
+        retention_days,
+        keep_last,
+        rotation_generation.as_deref(),
+        clear_rotation_generation,
+    )?;
     Ok(VtyBackupPolicyUpsert {
+        schedule_id,
         name,
         paths,
         include_config,
@@ -459,6 +493,7 @@ pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBacku
         retention_days,
         keep_last,
         rotation_generation,
+        clear_rotation_generation,
     })
 }
 
@@ -754,6 +789,13 @@ pub(crate) fn submit_vty_backup_policy_upsert(
     token: Option<&str>,
     request: VtyBackupPolicyUpsert,
 ) -> Result<String> {
+    validate_backup_policy_upsert_mode(
+        request.schedule_id,
+        request.retention_days,
+        request.keep_last,
+        request.rotation_generation.as_deref(),
+        request.clear_rotation_generation,
+    )?;
     let selector_expression =
         selector_expression_from_targets(&request.selection.clients, &request.selection.tags);
     let target_client_ids = resolve_schedule_target_ids(api_url, token, &selector_expression)?;
@@ -765,10 +807,11 @@ pub(crate) fn submit_vty_backup_policy_upsert(
     };
     let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
     let salt_hex = load_super_salt_hex(None)?;
+    let target = backup_policy_upsert_target(request.schedule_id);
     let privilege_assertion = build_privilege_for_schedule(
         SchedulePrivilegeRequest {
-            action: "backup_policy.create",
-            schedule_id: None,
+            action: target.action,
+            schedule_id: target.schedule_id.as_deref(),
             name: &request.name,
             command: &operation,
             command_type: "backup",
@@ -788,32 +831,36 @@ pub(crate) fn submit_vty_backup_policy_upsert(
         &salt_hex,
         300,
     )?;
-    http_post_json(
-        api_url,
-        "/api/v1/backup-policies",
-        token,
-        &serde_json::json!({
-            "name": request.name,
-            "paths": request.paths,
-            "include_config": request.include_config,
-            "follow_symlinks": request.follow_symlinks,
-            "missing_path_policy": backup_missing_path_policy(request.skip_missing_paths),
-            "selector_expression": selector_expression,
-            "target_client_ids": target_client_ids,
-            "cron_expr": request.cron_expr,
-            "timezone": "UTC",
-            "enabled": request.enabled,
-            "catch_up_policy": request.catch_up_policy,
-            "catch_up_limit": request.catch_up_limit,
-            "retry_delay_secs": request.retry_delay_secs,
-            "max_failures": request.max_failures,
-            "retention_days": request.retention_days,
-            "keep_last": request.keep_last,
-            "rotation_generation": request.rotation_generation,
-            "confirmed": request.selection.confirmed,
-            "privilege_assertion": privilege_assertion,
-        }),
-    )
+    let payload = serde_json::json!({
+        "name": request.name,
+        "paths": request.paths,
+        "include_config": request.include_config,
+        "follow_symlinks": request.follow_symlinks,
+        "missing_path_policy": backup_missing_path_policy(request.skip_missing_paths),
+        "selector_expression": selector_expression,
+        "target_client_ids": target_client_ids,
+        "cron_expr": request.cron_expr,
+        "timezone": "UTC",
+        "enabled": request.enabled,
+        "catch_up_policy": request.catch_up_policy,
+        "catch_up_limit": request.catch_up_limit,
+        "retry_delay_secs": request.retry_delay_secs,
+        "max_failures": request.max_failures,
+        "retention_days": request.retention_days,
+        "keep_last": request.keep_last,
+        "rotation_generation": if request.clear_rotation_generation {
+            None
+        } else {
+            request.rotation_generation
+        },
+        "confirmed": request.selection.confirmed,
+        "privilege_assertion": privilege_assertion,
+    });
+    if target.schedule_id.is_some() {
+        http_put_json(api_url, &target.path, token, &payload)
+    } else {
+        http_post_json(api_url, &target.path, token, &payload)
+    }
 }
 
 pub(crate) fn submit_vty_restore_plan(

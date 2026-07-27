@@ -117,6 +117,7 @@ export function ConsoleDataGrid<T>({
   renderSelectionPanel,
   rowActions = [],
   rows,
+  rowsTruncated = false,
   selectable = true,
   singleExpandedRow = false,
   searchPlaceholder = "Search",
@@ -146,6 +147,7 @@ export function ConsoleDataGrid<T>({
   renderSelectionPanel?: (rows: T[]) => ReactNode;
   rowActions?: ConsoleDataGridAction<T>[];
   rows: T[];
+  rowsTruncated?: boolean;
   selectable?: boolean;
   singleExpandedRow?: boolean;
   searchPlaceholder?: string;
@@ -683,8 +685,16 @@ export function ConsoleDataGrid<T>({
     if (rows.length > 0 && globalFilter.trim()) {
       return (
         <div className="emptyState compactEmpty">
-          <strong>No matching {itemLabel}</strong>
-          <span>Try another search or clear the current search.</span>
+          <strong>
+            {rowsTruncated
+              ? `No loaded ${itemLabel} match`
+              : `No matching ${itemLabel}`}
+          </strong>
+          <span>
+            {rowsTruncated
+              ? "Try another search or clear it; more records may exist outside the loaded page."
+              : "Try another search or clear the current search."}
+          </span>
           <button
             className="secondaryAction compactAction"
             onClick={() => setGlobalFilter("")}
@@ -693,6 +703,13 @@ export function ConsoleDataGrid<T>({
             <X size={14} />
             <span>Clear search</span>
           </button>
+        </div>
+      );
+    }
+    if (rowsTruncated && rows.length === 0) {
+      return (
+        <div className="emptyState compactEmpty">
+          No {itemLabel} appear in the loaded page; more may exist.
         </div>
       );
     }
@@ -709,7 +726,11 @@ export function ConsoleDataGrid<T>({
         <div className="gridCounts">
           <strong>{title}</strong>
           <span>
-            {filteredRows.length} of {rows.length} {itemLabel}
+            {rowsTruncated
+              ? globalFilter.trim().length > 0
+                ? `${filteredRows.length} matching in ${rows.length} loaded; more may exist`
+                : `${rows.length} loaded; more may exist`
+              : `${filteredRows.length} of ${rows.length} ${itemLabel}`}
           </span>
           {selectable && <span>{selectedRows.length} selected</span>}
         </div>
