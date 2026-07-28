@@ -412,6 +412,7 @@ project does not maintain a separate rolling changelog.
 
 ## Documentation
 
+- [Development and update maintenance](DEVELOPMENT.md)
 - [Tutorial index](tutorials/README.md)
 - [Operator quickstart](tutorials/00-operator-quickstart.md)
 - [Local control plane](tutorials/01-local-control-plane.md)

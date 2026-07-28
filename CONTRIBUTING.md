@@ -17,6 +17,11 @@ exploit details. Follow [SECURITY.md](SECURITY.md) for vulnerabilities.
 
 ## Development
 
+Before starting a product update, follow the durable
+[development and update maintenance checklist](DEVELOPMENT.md). It defines the
+required design review, migration/protocol discipline, validation, release
+verification, and cleanup lifecycle.
+
 Use the repository-pinned Rust and Node toolchains. The common local gates are:
 
 ```sh
