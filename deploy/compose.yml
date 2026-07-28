@@ -137,12 +137,8 @@ services:
       - api
     logging: *default-logging
     networks:
-      frontend_api:
-        ipv4_address: 172.31.255.2
+      - frontend_api
 
 networks:
   backend:
   frontend_api:
-    ipam:
-      config:
-        - subnet: 172.31.255.0/29

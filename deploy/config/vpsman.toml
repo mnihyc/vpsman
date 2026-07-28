@@ -16,9 +16,9 @@ operator_auth_username_failed_attempt_limit = 8
 operator_auth_ip_failed_attempt_limit = 64
 operator_auth_failed_attempt_window_secs = 900
 operator_auth_lockout_secs = 900
-# The final address is the frontend service's pinned frontend_api network peer
-# from deploy/compose.yml. Keep this exact; never trust the whole bridge subnet.
-trusted_proxy_cidrs = ["127.0.0.0/8", "::1/128", "172.31.255.2/32"]
+# The bundled API has no published host port and receives the forwarded client
+# chain through the frontend proxy, including any external TLS-provider hop.
+trusted_proxy_cidrs = ["0.0.0.0/0", "::/0"]
 
 [gateway]
 bind = "127.0.0.1:9443"

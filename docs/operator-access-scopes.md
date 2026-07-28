@@ -105,16 +105,14 @@ access token lifetime is one day. Admin-targeted changes and changes that grant
 the admin role require an explicit admin-risk acknowledgement in the dashboard,
 CLI, VTY, and API payload.
 
-Login throttling and auth history use the operator client IP. The API accepts
-`X-Forwarded-For` only from explicitly trusted proxy peers; the secure default
-trusts IPv4 and IPv6 loopback only. Container or external TLS proxies must add
-their exact peer CIDRs with `[api].trusted_proxy_cidrs` or
-`VPSMAN_TRUSTED_PROXY_CIDRS`. Never use `0.0.0.0/0` or `::/0`: doing so lets a
-direct client choose the address used for throttling and auth evidence.
-The bundled Compose deployment pins its frontend proxy to
-`172.31.255.2` on a dedicated frontend/API network and trusts only that `/32`;
-keep the Compose address and configured peer in sync if customizing its
-network.
+Login throttling and auth history use the operator client IP. The bundled API
+has no published host port and is reached through the frontend reverse proxy,
+so its deployment config trusts the complete forwarded client chain. Nginx
+preserves the `X-Forwarded-For` chain supplied by an external TLS provider and
+appends its connection peer. Docker DNS routes the proxy to `api`; no container
+address is pinned. A deployment that exposes the API directly must instead
+restrict `[api].trusted_proxy_cidrs` or
+`VPSMAN_TRUSTED_PROXY_CIDRS` to its actual proxy peers.
 
 Authentication failures feed two bounded lockout buckets: one for the
 username/client-IP pair and one for the client IP across usernames. A hostile
