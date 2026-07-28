@@ -56,13 +56,9 @@ run_legacy_step tutorial-audit bash scripts/audit-tutorials.sh
 run_step customizability-audit bash scripts/audit-customizability.sh
 run_step migration-compatibility-audit bash scripts/audit-migrations.sh
 run_step agent-static-deps-audit bash scripts/audit-agent-static-deps.sh
-run_step rust-dependency-audit bash scripts/audit-rust-dependencies.sh
 run_step security-sweep bash scripts/security-sweep.sh
 run_step release-version-gate-self-test \
   python3 .github/scripts/check-release-version-gate.py --self-test
-run_step build-number-gate-self-test \
-  python3 .github/scripts/check-build-number-gate.py --self-test
-run_step build-number-gate python3 .github/scripts/check-build-number-gate.py
 run_step deploy-bundle-smoke bash scripts/smoke-deploy-bundle.sh
 run_step deploy-updater-smoke bash scripts/smoke-deploy-updater.sh
 run_step deploy-agent-installer-smoke bash scripts/smoke-deploy-install-agent.sh

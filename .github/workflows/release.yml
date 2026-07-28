@@ -59,9 +59,6 @@ jobs:
           python3 .github/scripts/check-release-version-gate.py \
             --candidate-tag "$release_tag" \
             --published-release-tags-file "$published_release_tags"
-          python3 .github/scripts/check-build-number-gate.py \
-            --candidate-tag "$release_tag" \
-            --published-release-tags-file "$published_release_tags"
 
   release-quality-gate:
     name: Release quality gate

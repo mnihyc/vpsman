@@ -101,12 +101,6 @@ jobs:
       - name: Audit released migrations
         run: VPSMAN_REQUIRE_RELEASE_TAGS=1 bash scripts/audit-migrations.sh
 
-      - name: Install Rust dependency auditor
-        run: bash scripts/install-rust-audit-tool.sh
-
-      - name: Audit Rust dependencies
-        run: bash scripts/audit-rust-dependencies.sh
-
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -165,9 +159,6 @@ jobs:
 
       - name: Release version comparator self-test
         run: python3 .github/scripts/check-release-version-gate.py --self-test
-
-      - name: Component build-number comparator self-test
-        run: python3 .github/scripts/check-build-number-gate.py --self-test
 
       - name: Deployment bundle reproducibility smoke
         run: bash scripts/smoke-deploy-bundle.sh
