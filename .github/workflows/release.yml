@@ -225,9 +225,6 @@ jobs:
         working-directory: frontend
         run: npm run build
 
-      - name: Audit frontend installer acquisition
-        run: bash scripts/audit-frontend-installer-asset.sh
-
       - name: Package frontend
         run: tar -czf vpsman-frontend-dist.tar.gz -C frontend dist -C .. LICENSE-APACHE LICENSE-MIT
 
@@ -297,7 +294,6 @@ jobs:
           cp release-downloads/vpsman-linux-binaries/* release-assets/
           cp release-downloads/vpsman-frontend-dist/vpsman-frontend-dist.tar.gz release-assets/
           install -m 0644 LICENSE-APACHE LICENSE-MIT release-assets/
-          install -m 0755 deploy/install-agent.sh release-assets/install-agent.sh
           SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$RELEASE_COMMIT")" \
             bash scripts/package-deploy-bundle.sh "$RELEASE_TAG" release-assets
           python3 -c '
@@ -324,13 +320,12 @@ jobs:
               }
           metadata.update(
               {
-                  "schema_version": 2,
+                  "schema_version": 3,
                   "project": "vpsman",
                   "tag": release_tag,
                   "version": os.environ["RELEASE_VERSION"],
                   "commit": os.environ["RELEASE_COMMIT"],
                   "assets": [release_asset(name) for name in asset_names],
-                  "checksum_manifest": release_asset("SHA256SUMS"),
               }
           )
           (root / "version.json").write_text(
@@ -348,8 +343,6 @@ jobs:
           if metadata.get("version") != os.environ["RELEASE_VERSION"]:
               raise SystemExit("version.json version does not match release version")
           '
-          (cd release-assets && sha256sum -- * > SHA256SUMS)
-
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

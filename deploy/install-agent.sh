@@ -504,20 +504,6 @@ release_base_url() {
   fi
 }
 
-release_pinned_base_url() {
-  local tag="$1"
-  if [[ -n "${VPSMAN_RELEASE_BASE_URL:-}" ]]; then
-    printf '%s\n' "${VPSMAN_RELEASE_BASE_URL%/}"
-  else
-    printf 'https://github.com/%s/releases/download/%s\n' "${VPSMAN_RELEASE_REPO:-mnihyc/vpsman}" "$tag"
-  fi
-}
-
-extract_release_tag() {
-  local metadata="$1"
-  sed -n 's/.*"tag"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$metadata" | head -n 1
-}
-
 agent_release_asset() {
   local machine
   machine="$(uname -m)"
@@ -526,6 +512,74 @@ agent_release_asset() {
     aarch64|arm64) printf 'vpsman-agent-linux-aarch64-musl\n' ;;
     *) die "unsupported machine architecture for default agent download: $machine" ;;
   esac
+}
+
+read_release_manifest_selection() {
+  local metadata="$1"
+  local selected_asset="$2"
+
+  awk -v selected_asset="$selected_asset" '
+    function json_string_value(line, key, prefix) {
+      prefix = "^[[:space:]]*\\\"" key "\\\"[[:space:]]*:[[:space:]]*\\\""
+      if (line !~ prefix || line !~ /"[[:space:]]*,?[[:space:]]*$/) {
+        return ""
+      }
+      sub(prefix, "", line)
+      sub(/"[[:space:]]*,?[[:space:]]*$/, "", line)
+      if (line ~ /["\\]/) {
+        invalid = 1
+        return ""
+      }
+      return line
+    }
+
+    /^[[:space:]]*"schema_version"[[:space:]]*:/ {
+      line = $0
+      sub(/^[[:space:]]*"schema_version"[[:space:]]*:[[:space:]]*/, "", line)
+      sub(/[[:space:]]*,?[[:space:]]*$/, "", line)
+      schema_count++
+      schema = line
+    }
+    /^[[:space:]]*"project"[[:space:]]*:/ {
+      project_count++
+      project = json_string_value($0, "project")
+    }
+    /^[[:space:]]*"tag"[[:space:]]*:/ {
+      tag_count++
+      tag = json_string_value($0, "tag")
+    }
+    /^[[:space:]]*\{[[:space:]]*$/ {
+      object_open = 1
+      object_name = ""
+      object_url = ""
+      next
+    }
+    object_open && /^[[:space:]]*"name"[[:space:]]*:/ {
+      object_name = json_string_value($0, "name")
+      next
+    }
+    object_open && /^[[:space:]]*"download_url"[[:space:]]*:/ {
+      object_url = json_string_value($0, "download_url")
+      next
+    }
+    object_open && /^[[:space:]]*\}[[:space:]]*,?[[:space:]]*$/ {
+      if (object_name == selected_asset) {
+        selected_count++
+        selected_url = object_url
+      }
+      object_open = 0
+    }
+    END {
+      valid = !invalid && schema_count == 1 && (schema == "2" || schema == "3")
+      valid = valid && project_count == 1 && project == "vpsman"
+      valid = valid && tag_count == 1 && tag != ""
+      valid = valid && selected_count == 1 && selected_url != ""
+      if (!valid) {
+        exit 1
+      }
+      printf "%s\t%s\n", tag, selected_url
+    }
+  ' "$metadata"
 }
 
 download_release_asset() {
@@ -540,17 +594,19 @@ download_release_asset() {
 
 download_default_agent_binary() {
   local output="$1"
-  local asset base_url pinned_base_url download_dir resolved_tag
+  local asset asset_url base_url download_dir manifest_selection resolved_tag
   asset="$(agent_release_asset)"
   base_url="$(release_base_url)"
   create_registered_temp download_dir disposable -d
 
   require_tool curl
-  require_tool sha256sum
-  require_tool awk
 
   download_release_asset "$base_url/version.json" "$download_dir/version.json"
-  resolved_tag="$(extract_release_tag "$download_dir/version.json")"
+  manifest_selection="$(
+    read_release_manifest_selection "$download_dir/version.json" "$asset"
+  )" ||
+    die "release manifest schema, identity, or selected agent asset is invalid"
+  IFS=$'\t' read -r resolved_tag asset_url <<<"$manifest_selection"
   valid_release_tag "$resolved_tag" ||
     die "release manifest does not contain a valid semantic-version tag"
   if [[ "$requested_release" != "latest" && "$resolved_tag" != "$requested_release" ]]; then
@@ -559,21 +615,12 @@ download_default_agent_binary() {
   if [[ "$requested_release" == "latest" && "$resolved_tag" == *-* ]]; then
     die "the stable latest endpoint resolved prerelease $resolved_tag"
   fi
-  pinned_base_url="$(release_pinned_base_url "$resolved_tag")"
-  log "downloading $asset from $pinned_base_url"
-  download_release_asset "$pinned_base_url/SHA256SUMS" "$download_dir/SHA256SUMS"
-  download_release_asset "$pinned_base_url/$asset" "$download_dir/$asset"
-  awk -v asset="$asset" \
-    '$2 == asset || $2 == "version.json" {
-       print
-       seen[$2]++
-     }
-     END {
-       exit (seen[asset] == 1 && seen["version.json"] == 1) ? 0 : 1
-     }' \
-    "$download_dir/SHA256SUMS" >"$download_dir/SHA256SUMS.selected" \
-    || die "release checksum manifest does not contain the agent and version manifest exactly once"
-  (cd "$download_dir" && sha256sum -c SHA256SUMS.selected >/dev/null)
+  [[ "$asset_url" =~ ^https://[^/?#[:space:]@]+/[^#[:space:]]+$ &&
+    "$asset_url" =~ ^[!-~]+$ &&
+    "$asset_url" != *\\* ]] ||
+    die "release manifest selected an invalid HTTPS download URL for $asset"
+  log "downloading $asset selected by release $resolved_tag"
+  download_release_asset "$asset_url" "$download_dir/$asset"
   install -m 0755 "$download_dir/$asset" "$output"
 }
 
@@ -773,7 +820,7 @@ case "$binary_source" in
     require_tool sha256sum
     ;;
   release)
-    for tool in awk curl head sed sha256sum uname; do
+    for tool in awk curl uname; do
       require_tool "$tool"
     done
     agent_release_asset >/dev/null

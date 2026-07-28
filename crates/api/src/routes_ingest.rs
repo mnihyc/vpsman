@@ -1097,7 +1097,6 @@ fn validate_agent_update_verification_event(
         || event.request.job_id == uuid::Uuid::nil()
         || !is_bounded_non_empty(&event.request.version_url, 4096)
         || !is_bounded_non_empty(&event.request.artifact_url, 4096)
-        || !is_bounded_non_empty(&event.request.checksum_url, 4096)
         || !is_bounded_non_empty(&event.request.asset_name, 256)
         || event.request.sha256_hex.len() != 64
         || !event

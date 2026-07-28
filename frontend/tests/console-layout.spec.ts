@@ -1,5 +1,4 @@
 import { expect, test, type Locator } from "@playwright/test";
-import { createHash } from "node:crypto";
 import {
   backupId,
   installConsoleApiMock,
@@ -3474,27 +3473,10 @@ test("registers VPS identities and revokes current keys from the access panel", 
     'agent_install_tmp="$(mktemp -d)"',
   );
   await expect(installCommand).toContainText(
-    /install-agent-[0-9a-f]{40}-[0-9a-f]{64}\.sh/,
-  );
-  await expect(installCommand).toContainText(
-    /raw\.githubusercontent\.com\/mnihyc\/vpsman\/[0-9a-f]{40}\/deploy\/install-agent\.sh/,
-  );
-  await expect(installCommand).toContainText(
-    "sha256sum -c -",
+    "https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-agent.sh",
   );
   const installCommandText =
     (await installCommand.locator("pre code").textContent()) ?? "";
-  const emittedInstallerUrl = installCommandText.match(
-    /https?:\/\/[^' ]+\/install-agent-[0-9a-f]{40}-[0-9a-f]{64}\.sh/,
-  )?.[0];
-  expect(emittedInstallerUrl).toBeTruthy();
-  const emittedInstaller = await page.request.get(emittedInstallerUrl!);
-  expect(emittedInstaller.ok()).toBe(true);
-  const emittedInstallerSha256 = createHash("sha256")
-    .update(await emittedInstaller.body())
-    .digest("hex");
-  expect(emittedInstallerUrl).toContain(emittedInstallerSha256);
-  expect(installCommandText).toContain(emittedInstallerSha256);
   await expect(installCommand).toContainText("VPSMAN_AGENT_RELEASE='latest'");
   await expect(installCommand).toContainText("VPSMAN_INSTALL_MODE='root'");
   await expect(installCommand).toContainText(

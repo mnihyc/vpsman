@@ -14,6 +14,7 @@ missing_curl_bin="$SMOKE_TMPDIR/missing-curl-bin"
 missing_sha_bin="$SMOKE_TMPDIR/missing-sha-bin"
 fail_mv_bin="$SMOKE_TMPDIR/fail-mv-bin"
 interrupt_mktemp_bin="$SMOKE_TMPDIR/interrupt-mktemp-bin"
+release_download_bin="$SMOKE_TMPDIR/release-download-bin"
 fake_systemctl_log="$SMOKE_TMPDIR/systemctl.log"
 active_systemctl_log="$SMOKE_TMPDIR/systemctl-active.log"
 atomic_failure_systemctl_log="$SMOKE_TMPDIR/systemctl-atomic-failure.log"
@@ -25,6 +26,9 @@ agent_home="$SMOKE_TMPDIR/agent-home"
 staged_home="$SMOKE_TMPDIR/staged-home"
 path_home="$SMOKE_TMPDIR/path-home"
 download_home="$SMOKE_TMPDIR/download-home"
+release_download_home="$SMOKE_TMPDIR/release-download-home"
+release_manifest="$SMOKE_TMPDIR/version.json"
+release_curl_log="$SMOKE_TMPDIR/release-curl.log"
 invalid_fresh_home="$SMOKE_TMPDIR/invalid-fresh-home"
 
 mkdir -p \
@@ -33,7 +37,8 @@ mkdir -p \
   "$missing_curl_bin" \
   "$missing_sha_bin" \
   "$fail_mv_bin" \
-  "$interrupt_mktemp_bin"
+  "$interrupt_mktemp_bin" \
+  "$release_download_bin"
 cat >"$fake_bin_dir/systemctl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -208,6 +213,36 @@ if [[ "$count" == "${VPSMAN_SMOKE_ABORT_AFTER_MKTEMP_AT:-}" &&
 fi
 SH
 chmod 0755 "$interrupt_mktemp_bin/mktemp"
+cat >"$release_download_bin/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+output=""
+url="${!#}"
+while (($#)); do
+  if [[ "$1" == "-o" ]]; then
+    output="${2:?}"
+    break
+  fi
+  shift
+done
+
+[[ -n "$output" ]] || exit 64
+printf '%s\n' "$url" >>"${VPSMAN_SMOKE_RELEASE_CURL_LOG:?}"
+case "$url" in
+  "${VPSMAN_SMOKE_RELEASE_MANIFEST_URL:?}")
+    cp "${VPSMAN_SMOKE_RELEASE_MANIFEST:?}" "$output"
+    ;;
+  "${VPSMAN_SMOKE_RELEASE_ASSET_URL:?}")
+    cp "${VPSMAN_SMOKE_RELEASE_AGENT:?}" "$output"
+    ;;
+  *)
+    printf 'unexpected release URL: %s\n' "$url" >&2
+    exit 22
+    ;;
+esac
+SH
+chmod 0755 "$release_download_bin/curl"
 for tool in bash cat chmod flock id install ln mkdir mktemp mv rm rmdir stat; do
   ln -s "$(command -v "$tool")" "$no_systemctl_bin/$tool"
   ln -s "$(command -v "$tool")" "$missing_curl_bin/$tool"
@@ -1767,6 +1802,47 @@ env \
   bash deploy/install-agent.sh >"$SMOKE_TMPDIR/custom-url.log" 2>&1
 
 test -x "$download_home/bin/vpsman-agent"
+
+release_manifest_url="https://releases.example.invalid/v1.2.3/version.json"
+case "$(uname -m)" in
+  x86_64 | amd64)
+    release_asset_name="vpsman-agent-linux-x86_64-musl"
+    ;;
+  aarch64 | arm64)
+    release_asset_name="vpsman-agent-linux-aarch64-musl"
+    ;;
+  *)
+    echo "unsupported smoke-test architecture: $(uname -m)" >&2
+    exit 1
+    ;;
+esac
+release_asset_url="https://artifacts.example.invalid/opaque/$release_asset_name"
+jq -n \
+  --arg name "$release_asset_name" \
+  --arg url "$release_asset_url" \
+  '{assets:[{download_url:$url,name:$name}],project:"vpsman",schema_version:3,tag:"v1.2.3"}' \
+  >"$release_manifest"
+env \
+  PATH="$release_download_bin:$fake_bin_dir:$PATH" \
+  VPSMAN_AGENT_HOME="$release_download_home" \
+  VPSMAN_AGENT_BINARY_PATH= \
+  VPSMAN_AGENT_BINARY_URL= \
+  VPSMAN_AGENT_USE_PATH=0 \
+  VPSMAN_AGENT_RELEASE=v1.2.3 \
+  VPSMAN_RELEASE_BASE_URL="${release_manifest_url%/version.json}" \
+  VPSMAN_AGENT_ENABLE_SERVICE=0 \
+  VPSMAN_SMOKE_RELEASE_CURL_LOG="$release_curl_log" \
+  VPSMAN_SMOKE_RELEASE_MANIFEST_URL="$release_manifest_url" \
+  VPSMAN_SMOKE_RELEASE_MANIFEST="$release_manifest" \
+  VPSMAN_SMOKE_RELEASE_ASSET_URL="$release_asset_url" \
+  VPSMAN_SMOKE_RELEASE_AGENT="$fake_agent" \
+  "${common_env[@]}" \
+  bash deploy/install-agent.sh >"$SMOKE_TMPDIR/release-download.log" 2>&1
+
+test "$("$release_download_home/bin/vpsman-agent")" = "vpsman-agent-deploy-smoke"
+grep -Fqx "$release_manifest_url" "$release_curl_log"
+grep -Fqx "$release_asset_url" "$release_curl_log"
+test "$(awk 'END { print NR }' "$release_curl_log")" -eq 2
 
 run_invalid_source_preflight \
   missing-curl \

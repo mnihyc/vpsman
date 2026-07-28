@@ -265,17 +265,15 @@ release_base_url() {
   fi
 }
 
-release_pinned_base_url() {
-  printf 'https://github.com/%s/releases/download/%s\n' "$REPO" "$1"
-}
-
 read_validated_manifest() {
   local metadata="$1"
-  python3 - "$metadata" <<'PY'
+  shift
+  python3 - "$metadata" "$@" <<'PY'
 import json
 import pathlib
 import re
 import sys
+import urllib.parse
 
 path = pathlib.Path(sys.argv[1])
 try:
@@ -283,8 +281,8 @@ try:
 except (OSError, UnicodeError, json.JSONDecodeError) as error:
     raise SystemExit(f"invalid release manifest JSON: {error}")
 
-if data.get("schema_version") != 2:
-    raise SystemExit("release manifest schema_version must be 2")
+if data.get("schema_version") not in (2, 3):
+    raise SystemExit("release manifest schema_version must be 2 or 3")
 if data.get("project") != "vpsman":
     raise SystemExit("release manifest project must be vpsman")
 tag = data.get("tag")
@@ -306,17 +304,38 @@ if not isinstance(commit, str) or re.fullmatch(r"[0-9a-fA-F]{40}", commit) is No
 assets = data.get("assets")
 if not isinstance(assets, list) or not assets:
     raise SystemExit("release manifest assets must be a non-empty list")
-names = []
+asset_urls = {}
 for asset in assets:
-    if not isinstance(asset, dict) or not isinstance(asset.get("name"), str):
+    if (
+        not isinstance(asset, dict)
+        or not isinstance(asset.get("name"), str)
+        or not isinstance(asset.get("download_url"), str)
+    ):
         raise SystemExit("release manifest contains an invalid asset entry")
     name = asset["name"]
     if re.fullmatch(r"[0-9A-Za-z._-]+", name) is None:
         raise SystemExit("release manifest contains an unsafe asset name")
-    names.append(name)
-if len(names) != len(set(names)):
-    raise SystemExit("release manifest contains duplicate asset names")
-print(f"{tag}\t{commit.lower()}")
+    if name in asset_urls:
+        raise SystemExit("release manifest contains duplicate asset names")
+    download_url = asset["download_url"].strip()
+    parsed = urllib.parse.urlsplit(download_url)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+        or any(ord(character) < 32 or ord(character) == 127 for character in download_url)
+    ):
+        raise SystemExit(f"release manifest contains an invalid download URL for {name}")
+    asset_urls[name] = download_url
+selected_urls = []
+for name in sys.argv[2:]:
+    try:
+        selected_urls.append(asset_urls[name])
+    except KeyError:
+        raise SystemExit(f"release manifest does not contain required asset {name}")
+print("\t".join([tag, commit.lower(), *selected_urls]))
 PY
 }
 
@@ -620,37 +639,9 @@ payloads_complete() {
   done
 }
 
-write_selected_asset_identity() {
-  local checksums="$1"
-  local output="$2"
-  local role asset digest candidate name extra
-  local -a roles=(server frontend cli)
-  local -a assets=("$SERVER_ASSET" "$FRONTEND_ASSET" "$CLI_ASSET")
-  local index
-
-  : >"$output"
-  for index in "${!roles[@]}"; do
-    role="${roles[$index]}"
-    asset="${assets[$index]}"
-    digest=""
-    while read -r candidate name extra; do
-      [[ "$name" == "$asset" ]] || continue
-      [[ -z "$digest" ]] ||
-        fail "release checksum manifest contains duplicate selected asset $asset"
-      [[ "$candidate" =~ ^[0-9A-Fa-f]{64}$ && -z "${extra:-}" ]] ||
-        fail "release checksum manifest contains an invalid digest for $asset"
-      digest="${candidate,,}"
-    done <"$checksums"
-    [[ -n "$digest" ]] ||
-      fail "release checksum manifest does not contain selected asset $asset"
-    printf '%s\t%s\t%s\n' "$role" "$asset" "$digest" >>"$output"
-  done
-}
-
 current_release_identity_matches() {
   local verified_manifest="$1"
-  local verified_assets="$2"
-  local expected_tag="$3"
+  local expected_tag="$2"
   local kind
 
   [[ -f "$script_dir/RELEASE_TAG" ]] || return 1
@@ -659,10 +650,6 @@ current_release_identity_matches() {
     cmp -s \
       "$verified_manifest" \
       "$runtime_dir/$kind/current/.vpsman-release.json" ||
-      return 1
-    cmp -s \
-      "$verified_assets" \
-      "$runtime_dir/$kind/current/.vpsman-assets.tsv" ||
       return 1
   done
 }
@@ -1040,7 +1027,6 @@ fi
 require_tool curl
 require_tool cmp
 require_tool diff
-require_tool sha256sum
 require_tool tar
 require_tool unzip
 
@@ -1067,8 +1053,17 @@ mkdir -p "$transaction/downloads"
 
 base_url="$(release_base_url "$target")"
 download_url "$base_url/version.json" "$transaction/downloads/version.json"
-IFS=$'\t' read -r resolved_tag resolved_commit < <(
-  read_validated_manifest "$transaction/downloads/version.json"
+IFS=$'\t' read -r \
+  resolved_tag \
+  resolved_commit \
+  server_download_url \
+  frontend_download_url \
+  cli_download_url < <(
+  read_validated_manifest \
+    "$transaction/downloads/version.json" \
+    "$SERVER_ASSET" \
+    "$FRONTEND_ASSET" \
+    "$CLI_ASSET"
 )
 require_supported_release "$resolved_tag"
 if [[ "$target" != "latest" && "$resolved_tag" != "$target" ]]; then
@@ -1080,34 +1075,9 @@ fi
 write_transaction_value "$transaction" tag "$resolved_tag"
 write_transaction_value "$transaction" commit "$resolved_commit"
 
-pinned_base_url="$(release_pinned_base_url "$resolved_tag")"
-download_url "$pinned_base_url/SHA256SUMS" "$transaction/downloads/SHA256SUMS"
-download_url "$pinned_base_url/$SERVER_ASSET" "$transaction/downloads/$SERVER_ASSET"
-download_url "$pinned_base_url/$FRONTEND_ASSET" "$transaction/downloads/$FRONTEND_ASSET"
-download_url "$pinned_base_url/$CLI_ASSET" "$transaction/downloads/$CLI_ASSET"
-
-awk \
-  -v server="$SERVER_ASSET" \
-  -v frontend="$FRONTEND_ASSET" \
-  -v cli="$CLI_ASSET" \
-  '$2 == server || $2 == frontend || $2 == cli || $2 == "version.json" {
-     print
-     seen[$2]++
-   }
-   END {
-     valid = seen[server] == 1 &&
-       seen[frontend] == 1 &&
-       seen[cli] == 1 &&
-       seen["version.json"] == 1
-     exit valid ? 0 : 1
-   }' \
-  "$transaction/downloads/SHA256SUMS" \
-  >"$transaction/downloads/SHA256SUMS.selected" ||
-  fail "release checksum manifest does not contain each required asset exactly once"
-(cd "$transaction/downloads" && sha256sum -c SHA256SUMS.selected)
-write_selected_asset_identity \
-  "$transaction/downloads/SHA256SUMS.selected" \
-  "$transaction/selected-assets.tsv"
+download_url "$server_download_url" "$transaction/downloads/$SERVER_ASSET"
+download_url "$frontend_download_url" "$transaction/downloads/$FRONTEND_ASSET"
+download_url "$cli_download_url" "$transaction/downloads/$CLI_ASSET"
 
 validate_archives \
   "$transaction/downloads/$SERVER_ASSET" \
@@ -1146,8 +1116,6 @@ chmod +x \
 for kind in server frontend cli; do
   cp "$transaction/downloads/version.json" \
     "$transaction/staged-$kind/.vpsman-release.json"
-  cp "$transaction/selected-assets.tsv" \
-    "$transaction/staged-$kind/.vpsman-assets.tsv"
 done
 
 active_release_tag=""
@@ -1157,9 +1125,8 @@ fi
 if [[ "$mode" == "update" && "$active_release_tag" == "$resolved_tag" ]]; then
   current_release_identity_matches \
     "$transaction/downloads/version.json" \
-    "$transaction/selected-assets.tsv" \
     "$resolved_tag" ||
-    fail "release $resolved_tag is already marked active, but its persisted manifest or selected asset identities differ from the verified target; refusing a same-tag replacement to preserve the rollback payload"
+    fail "release $resolved_tag is already marked active, but its persisted version manifest differs from the target; refusing a same-tag replacement to preserve the rollback payload"
   if ! current_payload_layout_is_valid ||
     ! current_payloads_match_staged; then
     fail "release $resolved_tag is already marked active, but the current payload layout or contents are incomplete or corrupt; refusing a same-tag replacement to preserve the rollback payload"
@@ -1176,8 +1143,6 @@ fi
 mkdir -p "$runtime_dir/downloads"
 cp "$transaction/downloads/version.json" \
   "$runtime_dir/downloads/version-$resolved_tag.json"
-cp "$transaction/downloads/SHA256SUMS" \
-  "$runtime_dir/downloads/SHA256SUMS-$resolved_tag"
 
 if [[ "$mode" == "first-start" ]]; then
   prepare_first_start_secrets "$transaction/staged-cli/vpsctl"

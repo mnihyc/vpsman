@@ -263,28 +263,31 @@ chmod 0755 "$RELEASE_DIR/vpsctl-linux-x86_64-musl"
 
 cat >"$RELEASE_DIR/version.json" <<'JSON'
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "project": "vpsman",
   "tag": "v9.8.7",
   "version": "9.8.7",
   "commit": "1111111111111111111111111111111111111111",
   "assets": [
-    {"name": "vpsman-server-linux-x86_64.zip"},
-    {"name": "vpsman-server-linux-x86_64-alt.zip"},
-    {"name": "vpsman-frontend-dist.tar.gz"},
-    {"name": "vpsctl-linux-x86_64-musl"}
+    {
+      "name": "vpsman-server-linux-x86_64.zip",
+      "download_url": "https://github.com/example/vpsman/releases/download/v9.8.7/vpsman-server-linux-x86_64.zip"
+    },
+    {
+      "name": "vpsman-server-linux-x86_64-alt.zip",
+      "download_url": "https://github.com/example/vpsman/releases/download/v9.8.7/vpsman-server-linux-x86_64-alt.zip"
+    },
+    {
+      "name": "vpsman-frontend-dist.tar.gz",
+      "download_url": "https://github.com/example/vpsman/releases/download/v9.8.7/vpsman-frontend-dist.tar.gz"
+    },
+    {
+      "name": "vpsctl-linux-x86_64-musl",
+      "download_url": "https://github.com/example/vpsman/releases/download/v9.8.7/vpsctl-linux-x86_64-musl"
+    }
   ]
 }
 JSON
-(
-  cd "$RELEASE_DIR"
-  sha256sum \
-    version.json \
-    vpsman-server-linux-x86_64.zip \
-    vpsman-server-linux-x86_64-alt.zip \
-    vpsman-frontend-dist.tar.gz \
-    vpsctl-linux-x86_64-musl >SHA256SUMS
-)
 
 RELEASE_V988_DIR="$SMOKE_ROOT/release-v9.8.8"
 cp -a "$RELEASE_DIR" "$RELEASE_V988_DIR"
@@ -307,17 +310,13 @@ manifest = json.loads(path.read_text(encoding="utf-8"))
 manifest["tag"] = "v9.8.8"
 manifest["version"] = "9.8.8"
 manifest["commit"] = "2222222222222222222222222222222222222222"
+for asset in manifest["assets"]:
+    asset["download_url"] = (
+        "https://github.com/example/vpsman/releases/download/v9.8.8/"
+        + asset["name"]
+    )
 path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 PY
-(
-  cd "$RELEASE_V988_DIR"
-  sha256sum \
-    version.json \
-    vpsman-server-linux-x86_64.zip \
-    vpsman-server-linux-x86_64-alt.zip \
-    vpsman-frontend-dist.tar.gz \
-    vpsctl-linux-x86_64-musl >SHA256SUMS
-)
 
 prepare_deployment() {
   local destination="$1"
@@ -424,14 +423,9 @@ for kind in server frontend cli; do
     fail "first-start did not activate $kind"
   [[ -f "$FIRST_START/runtime/$kind/current/.vpsman-release.json" ]] ||
     fail "first-start did not record $kind release identity"
-  [[ -f "$FIRST_START/runtime/$kind/current/.vpsman-assets.tsv" ]] ||
-    fail "first-start did not record selected $kind asset identity"
   [[ ! -e "$FIRST_START/runtime/$kind/previous" ]] ||
     fail "first-start unexpectedly created previous $kind"
 done
-grep -Fq $'server\tvpsman-server-linux-x86_64.zip\t' \
-  "$FIRST_START/runtime/server/current/.vpsman-assets.tsv" ||
-  fail "first-start did not persist the selected server asset name and digest"
 [[ -L "$FIRST_START/vpsctl" ]] || fail "first-start did not create the CLI link"
 [[ "$(<"$FIRST_START/RELEASE_TAG")" == "v9.8.7" ]] ||
   fail "first-start did not commit the active release marker"
@@ -586,52 +580,29 @@ done
 
 repeat_state_before="$(release_state_digest "$FIRST_START")"
 
-: >"$FIRST_START/docker.log"
-if VPSMAN_SERVER_ASSET=vpsman-server-linux-x86_64-alt.zip \
-  run_updater "$FIRST_START" v9.8.7 \
-    >"$FIRST_START/repeat-asset-override.log" 2>&1; then
-  fail "same-tag update accepted a different selected server asset"
-fi
-grep -Fq 'persisted manifest or selected asset identities differ' \
-  "$FIRST_START/repeat-asset-override.log" ||
-  fail "same-tag asset override refusal was not explicit"
-[[ "$(release_state_digest "$FIRST_START")" == "$repeat_state_before" ]] ||
-  fail "same-tag asset override mutated current, previous, or release records"
-assert_no_service_mutation "$FIRST_START" "same-tag asset override"
-assert_no_active_transaction "$FIRST_START" "same-tag asset override"
-
-DRIFT_RELEASE="$SMOKE_ROOT/release-checksum-drift"
-DRIFT_SERVER_STAGE="$SMOKE_ROOT/server-stage-checksum-drift"
+DRIFT_RELEASE="$SMOKE_ROOT/release-payload-drift"
+DRIFT_SERVER_STAGE="$SMOKE_ROOT/server-stage-payload-drift"
 cp -a "$RELEASE_DIR" "$DRIFT_RELEASE"
 cp -a "$SERVER_STAGE" "$DRIFT_SERVER_STAGE"
-printf 'same-tag checksum drift\n' >"$DRIFT_SERVER_STAGE/checksum-drift"
+printf 'same-tag payload drift\n' >"$DRIFT_SERVER_STAGE/payload-drift"
 rm -f "$DRIFT_RELEASE/vpsman-server-linux-x86_64.zip"
 (
   cd "$DRIFT_SERVER_STAGE"
   zip -qr "$DRIFT_RELEASE/vpsman-server-linux-x86_64.zip" .
 )
-(
-  cd "$DRIFT_RELEASE"
-  sha256sum \
-    version.json \
-    vpsman-server-linux-x86_64.zip \
-    vpsman-server-linux-x86_64-alt.zip \
-    vpsman-frontend-dist.tar.gz \
-    vpsctl-linux-x86_64-musl >SHA256SUMS
-)
 : >"$FIRST_START/docker.log"
 if RELEASE_DIR="$DRIFT_RELEASE" \
   run_updater "$FIRST_START" v9.8.7 \
-    >"$FIRST_START/repeat-checksum-drift.log" 2>&1; then
+    >"$FIRST_START/repeat-payload-drift.log" 2>&1; then
   fail "same-tag update accepted changed selected asset contents"
 fi
-grep -Fq 'persisted manifest or selected asset identities differ' \
-  "$FIRST_START/repeat-checksum-drift.log" ||
-  fail "same-tag checksum drift refusal was not explicit"
+grep -Fq 'current payload layout or contents are incomplete or corrupt' \
+  "$FIRST_START/repeat-payload-drift.log" ||
+  fail "same-tag payload drift refusal was not explicit"
 [[ "$(release_state_digest "$FIRST_START")" == "$repeat_state_before" ]] ||
-  fail "same-tag checksum drift mutated current, previous, or release records"
-assert_no_service_mutation "$FIRST_START" "same-tag checksum drift"
-assert_no_active_transaction "$FIRST_START" "same-tag checksum drift"
+  fail "same-tag payload drift mutated current, previous, or release records"
+assert_no_service_mutation "$FIRST_START" "same-tag payload drift"
+assert_no_active_transaction "$FIRST_START" "same-tag payload drift"
 
 saved_frontend_index="$SMOKE_ROOT/current-frontend-index"
 mv "$FIRST_START/runtime/frontend/current/dist/index.html" "$saved_frontend_index"
@@ -686,8 +657,6 @@ run_updater "$FIRST_START" v9.8.7 >"$FIRST_START/repeat-exact.log" 2>&1
 grep -Fq 'release v9.8.7 payloads and live services are already active and verified' \
   "$FIRST_START/repeat-exact.log" ||
   fail "exact same-release update did not report its verified no-op"
-grep -Fq 'version.json: OK' "$FIRST_START/repeat-exact.log" ||
-  fail "exact same-release no-op happened before release checksum verification"
 [[ "$(release_state_digest "$FIRST_START")" == "$repeat_state_before" ]] ||
   fail "exact same-release no-op mutated current, previous, or release records"
 grep -Fq 'http://127.0.0.1/api/v1/build-info' "$FIRST_START/docker.log" ||
@@ -700,8 +669,6 @@ run_updater "$FIRST_START" latest >"$FIRST_START/repeat-latest.log" 2>&1
 grep -Fq 'release v9.8.7 payloads and live services are already active and verified' \
   "$FIRST_START/repeat-latest.log" ||
   fail "latest resolving to the current release did not report its verified no-op"
-grep -Fq 'version.json: OK' "$FIRST_START/repeat-latest.log" ||
-  fail "latest same-release no-op happened before release checksum verification"
 [[ "$(release_state_digest "$FIRST_START")" == "$repeat_state_before" ]] ||
   fail "latest same-release no-op mutated current, previous, or release records"
 grep -Fq 'http://127.0.0.1/api/v1/build-info' "$FIRST_START/docker.log" ||
@@ -1041,14 +1008,6 @@ import zipfile
 with zipfile.ZipFile(sys.argv[1], "w") as archive:
     archive.writestr("../escaped", "must not escape")
 PY
-(
-  cd "$MALICIOUS_RELEASE"
-  sha256sum \
-    version.json \
-    vpsman-server-linux-x86_64.zip \
-    vpsman-frontend-dist.tar.gz \
-    vpsctl-linux-x86_64-musl >SHA256SUMS
-)
 MALICIOUS="$SMOKE_ROOT/malicious"
 prepare_deployment "$MALICIOUS"
 if (
@@ -1063,4 +1022,4 @@ grep -Fq 'unsafe server archive path' "$MALICIOUS/update.log" ||
   fail "path-traversal archive escaped its transaction directory"
 
 printf '%s\n' \
-  '{"deploy_updater_smoke":"ok","checks":["first_start","selected_asset_identity_persistence","atomic_validated_backup","successful_version_update","successful_rollback","finalization_mutation_failure_guard","finalization_mutation_failure_recovery","same_release_recovery_guard","same_tag_asset_override_guard","same_tag_checksum_drift_guard","same_tag_missing_payload_guard","same_tag_stopped_service_guard","same_tag_unready_service_guard","exact_same_release_noop","latest_same_release_noop","failed_first_start_database_restore","pg_dump_partial_cleanup","backup_validation_failure_cleanup","backup_collision_refusal","abandoned_backup_partial_cleanup","suspicious_backup_partial_refusal","missing_backup_recovery_guard","recovery_stop_failure_guard","interrupted_activation_recovery","healthy_finalize_recovery","finalized_journal_cleanup","abandoned_staging_cleanup","placeholder_password_refusal","invalid_tag_refusal","zero_padded_core_tag_refusal","noncanonical_health_timeout_refusal","unsafe_asset_refusal","archive_path_traversal_refusal"]}'
+  '{"deploy_updater_smoke":"ok","checks":["first_start","version_manifest_asset_selection","atomic_validated_backup","successful_version_update","successful_rollback","finalization_mutation_failure_guard","finalization_mutation_failure_recovery","same_release_recovery_guard","same_tag_payload_drift_guard","same_tag_missing_payload_guard","same_tag_stopped_service_guard","same_tag_unready_service_guard","exact_same_release_noop","latest_same_release_noop","failed_first_start_database_restore","pg_dump_partial_cleanup","backup_validation_failure_cleanup","backup_collision_refusal","abandoned_backup_partial_cleanup","suspicious_backup_partial_refusal","missing_backup_recovery_guard","recovery_stop_failure_guard","interrupted_activation_recovery","healthy_finalize_recovery","finalized_journal_cleanup","abandoned_staging_cleanup","placeholder_password_refusal","invalid_tag_refusal","zero_padded_core_tag_refusal","noncanonical_health_timeout_refusal","unsafe_asset_refusal","archive_path_traversal_refusal"]}'

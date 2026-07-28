@@ -136,9 +136,6 @@ jobs:
         working-directory: frontend
         run: npm run build
 
-      - name: Audit frontend installer acquisition
-        run: bash scripts/audit-frontend-installer-asset.sh
-
       - name: Audit frontend dependencies
         working-directory: frontend
         run: npm audit --audit-level=moderate

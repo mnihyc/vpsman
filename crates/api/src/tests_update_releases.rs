@@ -705,31 +705,23 @@ fn local_update_manifest_url(arch_hashes: &[(&str, String)]) -> String {
     let root =
         std::env::temp_dir().join(format!("vpsman-update-manifest-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
-    let sums_path = root.join("SHA256SUMS");
-    let mut sums = String::new();
     let assets = arch_hashes
         .iter()
-        .map(|(arch, artifact_sha256_hex)| {
+        .map(|(arch, _artifact_sha256_hex)| {
             let asset_name = agent_update_asset_name_for_arch(arch).unwrap();
-            sums.push_str(&format!("{artifact_sha256_hex}  {asset_name}\n"));
             serde_json::json!({
                 "name": asset_name,
                 "download_url": format!("https://updates.example/{asset_name}")
             })
         })
         .collect::<Vec<_>>();
-    std::fs::write(&sums_path, sums).unwrap();
     let manifest_path = root.join("version.json");
     let manifest = serde_json::json!({
-        "schema_version": 2,
+        "schema_version": 3,
         "project": "vpsman",
         "version": "99.0.0",
         "tag": "v99.0.0",
-        "assets": assets,
-        "checksum_manifest": {
-            "name": "SHA256SUMS",
-            "download_url": format!("file://{}", sums_path.display())
-        }
+        "assets": assets
     });
     std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     format!("file://{}", manifest_path.display())
@@ -793,7 +785,6 @@ async fn active_update_check_verification_fixture(
                 job_id,
                 version_url: "https://updates.example/version.json".to_string(),
                 artifact_url: "https://updates.example/vpsman-agent".to_string(),
-                checksum_url: "https://updates.example/SHA256SUMS".to_string(),
                 asset_name: "vpsman-agent-linux-x86_64-musl".to_string(),
                 sha256_hex,
             },

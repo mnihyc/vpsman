@@ -125,7 +125,6 @@ if [[ "${VPSMAN_RELEASE_SKIP_FRONTEND:-0}" == "1" ]]; then
   skip_step frontend-npm-install "VPSMAN_RELEASE_SKIP_FRONTEND=1"
   skip_step check-frontend-contracts "VPSMAN_RELEASE_SKIP_FRONTEND=1"
   skip_step frontend-build "VPSMAN_RELEASE_SKIP_FRONTEND=1"
-  skip_step frontend-installer-asset-audit "VPSMAN_RELEASE_SKIP_FRONTEND=1"
   skip_step frontend-audit "VPSMAN_RELEASE_SKIP_FRONTEND=1"
 else
   if [[ "${VPSMAN_RELEASE_SKIP_NPM_INSTALL:-0}" == "1" ]]; then
@@ -135,7 +134,6 @@ else
   fi
   run_step check-frontend-contracts bash scripts/check-frontend-contracts.sh
   run_shell_step frontend-build "cd frontend && npm run build"
-  run_step frontend-installer-asset-audit bash scripts/audit-frontend-installer-asset.sh
   run_shell_step frontend-audit "cd frontend && npm audit --audit-level=moderate"
   run_step frontend-console-layout bash scripts/smoke-frontend-console-layout.sh
   run_step frontend-screenshot-review bash scripts/smoke-frontend-screenshot-review.sh

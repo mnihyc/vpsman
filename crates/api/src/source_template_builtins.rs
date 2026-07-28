@@ -291,14 +291,13 @@ pub(crate) fn builtin_source_templates() -> Vec<BuiltInSourceTemplate> {
         BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-0000000000a1",
             domain: "update_artifact_source",
-            name: "builtin:github_release_sha256",
+            name: "builtin:github_release_manifest",
             is_default: false,
             description:
-                "GitHub Releases update artifact source using version.json download URLs and SHA256SUMS",
+                "GitHub Releases update artifact source using authoritative version.json download URLs",
             definition: serde_json::json!({
                 "provider": "github_release",
-                "requires_sha256": true,
-                "manifest": "version_json_download_urls_sha256sums"
+                "manifest": "version_json_download_urls"
             }),
         },
         BuiltInSourceTemplate {

@@ -4309,16 +4309,14 @@ mod schedule_tests {
         db.cleanup().await;
     }
 
-    fn local_update_manifest_url(artifact_sha256_hex: &str) -> String {
+    fn local_update_manifest_url(_artifact_sha256_hex: &str) -> String {
         let root =
             std::env::temp_dir().join(format!("vpsman-worker-update-manifest-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let asset_name = vpsman_common::agent_update_asset_name_for_arch("x86_64").unwrap();
-        let sums_path = root.join("SHA256SUMS");
-        std::fs::write(&sums_path, format!("{artifact_sha256_hex}  {asset_name}\n")).unwrap();
         let manifest_path = root.join("version.json");
         let manifest = serde_json::json!({
-            "schema_version": 2,
+            "schema_version": 3,
             "project": "vpsman",
             "version": "99.0.0",
             "tag": "v99.0.0",
@@ -4327,11 +4325,7 @@ mod schedule_tests {
                     "name": asset_name,
                     "download_url": format!("https://updates.example/{asset_name}")
                 }
-            ],
-            "checksum_manifest": {
-                "name": "SHA256SUMS",
-                "download_url": format!("file://{}", sums_path.display())
-            }
+            ]
         });
         std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         format!("file://{}", manifest_path.display())

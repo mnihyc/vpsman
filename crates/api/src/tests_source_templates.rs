@@ -169,7 +169,7 @@ async fn curated_builtin_source_templates_are_selectable_not_default() {
         "builtin:usr_bin_w",
         "builtin:busybox_ash_argv",
         "builtin:s3_path_style_reserved",
-        "builtin:github_release_sha256",
+        "builtin:github_release_manifest",
     ];
     for name in curated_names {
         let template = templates
@@ -244,7 +244,7 @@ async fn curated_builtin_source_templates_are_selectable_not_default() {
 
     for template_name in [
         "builtin:s3_path_style_reserved",
-        "builtin:github_release_sha256",
+        "builtin:github_release_manifest",
     ] {
         let template = templates
             .iter()

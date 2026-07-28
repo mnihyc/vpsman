@@ -56,7 +56,7 @@ UIs. `vpsman` targets a different operating model:
 | Network | Explicit NAT-safe tunnel plans, per-VPS owned nftables port forwarding, exact endpoint evidence, topology, bounded network tests, and optional daemon-neutral routing-cost adapters. |
 | Observability | Current fleet monitor cards, scoped retained resource/network charts, explicit freshness and coverage, alert policies, event webhooks, and bounded automatic telemetry retention. |
 | Access and audit | Operator roles/scopes, sessions, TOTP, direct gateway identities, key rotation/revocation, audit logs, and evidence views. |
-| Releases | GitHub release assets, checksum manifests, compose updater, agent update jobs, and rollback-friendly deployment layout. |
+| Releases | Authoritative `version.json` metadata, GitHub release assets, compose updater, agent update jobs, and rollback-friendly deployment layout. |
 
 ## Architecture
 
@@ -85,7 +85,7 @@ Core packages:
 
 ## Quick Start
 
-For a real deployment, start from a checksum-verified, versioned GitHub release
+For a real deployment, start from an exact-tag, versioned GitHub release
 bundle. For development or evaluation, use the local control-plane tutorial.
 
 Prerequisites depend on the path you choose:
@@ -95,8 +95,8 @@ Prerequisites depend on the path you choose:
 - Rust via `rustup` for source builds; the repo pins the toolchain in
   [rust-toolchain.toml](rust-toolchain.toml).
 - Node matching [frontend/.nvmrc](frontend/.nvmrc) for frontend development.
-- `curl`, `env`, `flock`, `mktemp`, `sha256sum`, and `awk` for the generated verified
-  agent installer command, plus systemd for the default root/user service path;
+- `awk`, `curl`, `env`, `flock`, and `mktemp` for the generated agent installer
+  command, plus systemd for the default root/user service path;
   staged no-systemd installs are also supported.
 
 ### Deploy from GitHub Releases
@@ -105,11 +105,6 @@ Prerequisites depend on the path you choose:
 export VPSMAN_RELEASE_TAG=vX.Y.Z
 release_url="https://github.com/mnihyc/vpsman/releases/download/${VPSMAN_RELEASE_TAG}"
 curl -fLO "${release_url}/vpsman-deploy-${VPSMAN_RELEASE_TAG}.tar.gz"
-curl -fLO "${release_url}/SHA256SUMS"
-grep "  vpsman-deploy-${VPSMAN_RELEASE_TAG}.tar.gz$" SHA256SUMS \
-  > SHA256SUMS.deploy
-test "$(wc -l < SHA256SUMS.deploy)" -eq 1
-sha256sum -c SHA256SUMS.deploy
 tar -xzf "vpsman-deploy-${VPSMAN_RELEASE_TAG}.tar.gz"
 cd "vpsman-deploy-${VPSMAN_RELEASE_TAG}"
 
@@ -123,9 +118,9 @@ export VPSMAN_SUPER_PASSWORD='<local_super_password>'
 unset VPSMAN_SUPER_PASSWORD
 ```
 
-The updater downloads release assets, verifies `SHA256SUMS`, creates missing
-compose secrets, stages server/frontend/CLI payloads under the deployment's
-`runtime/` directory, and starts the stack.
+The updater reads the release's authoritative `version.json`, downloads its
+server/frontend/CLI assets, validates their layouts, creates missing compose
+secrets, stages the payloads under `runtime/`, and starts the stack.
 
 Open `http://127.0.0.1:5173` after first start. When no operator exists, the
 console shows **Create first operator** and creates the initial admin session
@@ -221,16 +216,12 @@ console:
 6. Fill gateway install defaults once.
 7. Copy the generated one-line installer to the VPS.
 
-The generated command verifies the installer pinned to a source build's exact
-commit, falling back to the same verified content-addressed installer emitted
-by that console, or uses the exact tag checksum manifest in a release build.
-It then installs that tagged agent release or the latest stable agent from a
-source build. Neither a public raw-commit URL nor a private console origin is
-guaranteed to be reachable from every managed VPS; when both are unavailable,
-download the emitted installer through the console origin and transfer it
-manually. Root service, user service, and explicitly staged no-systemd installs
-are supported. Staging prints the exact foreground command needed to start the
-agent.
+The generated command downloads the stable repository installer. That
+bootstrap reads authoritative `version.json` metadata and installs the
+control-plane build's tagged agent release, or the latest stable release from a
+source build. Root service, user service, and explicitly staged no-systemd
+installs are supported. Staging prints the exact foreground command needed to
+start the agent.
 
 CLI/manual equivalent:
 
@@ -247,8 +238,8 @@ vpsctl agent-identity-upsert \
   --tags country:JP,role:edge \
   --confirmed
 
-# Copy install-agent.sh from the checksum-verified vX.Y.Z deployment bundle to
-# the target VPS, then run:
+# Download the stable installer once, then run it with the reviewed release:
+curl -fLO https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-agent.sh
 env \
   VPSMAN_AGENT_RELEASE=vX.Y.Z \
   VPSMAN_INSTALL_MODE=root \
@@ -335,8 +326,8 @@ cd /path/to/the/versioned-deployment
 ./update.sh rollback
 ```
 
-The updater verifies checksums and does not delete PostgreSQL or object-store
-data.
+The updater validates the selected version manifest and payload layouts and
+does not delete PostgreSQL or object-store data.
 
 ### Desired state and runtime evidence
 
@@ -401,15 +392,13 @@ The release workflow publishes:
 - `vpsctl-linux-aarch64-musl`
 - `vpsman-frontend-dist.tar.gz`
 - `vpsman-deploy-vX.Y.Z.tar.gz`
-- `install-agent.sh`
 - `LICENSE-APACHE`
 - `LICENSE-MIT`
 - `version.json`
-- `SHA256SUMS`
 
-The release tag is the canonical shipped version. `version.json` is generated
-from [version-template.json](version-template.json), stamped with the tag,
-commit, asset list, checksum manifest, and tag-pinned download URLs.
+`version.json` is the authoritative asset manifest for its immutable release
+tag. It is generated from [version-template.json](version-template.json) and
+stamped with the tag, commit, asset list, and tag-pinned download URLs.
 Tag-triggered releases run the release version gate first, then the reusable
 release quality workflow in
 [.github/workflows/release-quality-gate.yml](.github/workflows/release-quality-gate.yml)

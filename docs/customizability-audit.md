@@ -238,7 +238,8 @@ binary path, or one accounting source is not enough.
   host-mounted proc/sys telemetry, `vnstat` JSON traffic accounting, pinned
   `/usr/bin/ping`, host-mounted process inventory, pinned `w`/`who`, BusyBox
   `ash`, runtime iproute2/tc reconciliation, S3/MinIO backup object storage,
-  and external HTTPS/GitHub update artifact metadata with SHA-256 verification.
+  external HTTPS update artifacts with an explicit SHA-256, and GitHub release
+  assets selected by authoritative `version.json` metadata.
   These are selectable templates, not automatic defaults.
 
 2026-06-02 03:19 PDT scan:

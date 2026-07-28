@@ -22,7 +22,7 @@ use crate::{
 const MAX_UPDATE_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(20);
 const UPDATE_ROOT_CERT_PEM_ENV: &str = "VPSMAN_UPDATE_ROOT_CERT_PEM";
-const VERSION_MANIFEST_SCHEMA_VERSION: u16 = 2;
+const VERSION_MANIFEST_SCHEMA_VERSION: u16 = 3;
 
 #[derive(Clone)]
 pub(crate) struct AgentUpdateInput<'a> {
@@ -177,18 +177,10 @@ struct VersionManifest {
     commit: Option<String>,
     #[serde(default)]
     assets: Vec<VersionManifestAsset>,
-    #[serde(default)]
-    checksum_manifest: Option<VersionManifestDownload>,
 }
 
 #[derive(Debug, Deserialize)]
 struct VersionManifestAsset {
-    name: String,
-    download_url: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct VersionManifestDownload {
     name: String,
     download_url: String,
 }
@@ -204,10 +196,26 @@ async fn stage_update_artifact(input: UpdateStageInput<'_>) -> Result<CommandOut
             input.expected_sha256_hex
         );
     }
-    let staged_path = staged_path(input.current_exe)?;
-    let rollback_path = rollback_path(input.current_exe)?;
-    input.cancel_token.check("agent_update")?;
-    persist_staged_artifact(input.current_exe, &staged_path, &rollback_path, &artifact)?;
+    stage_downloaded_update_artifact(
+        input.job_id,
+        input.current_exe,
+        input.cancel_token,
+        &artifact,
+        &observed_sha256_hex,
+    )
+}
+
+fn stage_downloaded_update_artifact(
+    job_id: uuid::Uuid,
+    current_exe: &Path,
+    cancel_token: &CommandCancelToken,
+    artifact: &[u8],
+    observed_sha256_hex: &str,
+) -> Result<CommandOutput> {
+    let staged_path = staged_path(current_exe)?;
+    let rollback_path = rollback_path(current_exe)?;
+    cancel_token.check("agent_update")?;
+    persist_staged_artifact(current_exe, &staged_path, &rollback_path, artifact)?;
     let status = serde_json::json!({
         "type": "agent_update",
         "status": "staged",
@@ -218,7 +226,7 @@ async fn stage_update_artifact(input: UpdateStageInput<'_>) -> Result<CommandOut
         "activation": "manual_restart_required",
     });
     Ok(CommandOutput {
-        job_id: input.job_id,
+        job_id,
         stream: OutputStream::Status,
         data: serde_json::to_vec(&status)?,
         exit_code: Some(0),
@@ -234,7 +242,7 @@ async fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStage
     input.cancel_token.check("agent_update_check")?;
     let header: VersionManifestHeader = serde_json::from_slice(&manifest_bytes)
         .context("failed to parse update manifest header")?;
-    if header.schema_version != VERSION_MANIFEST_SCHEMA_VERSION {
+    if !matches!(header.schema_version, 2 | VERSION_MANIFEST_SCHEMA_VERSION) {
         anyhow::bail!(
             "unsupported update manifest schema {}",
             header.schema_version
@@ -333,32 +341,20 @@ async fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStage
         });
     };
 
-    let checksum_manifest = manifest
-        .checksum_manifest
-        .as_ref()
-        .context("update manifest checksum entry is missing")?;
-    if checksum_manifest.name != "SHA256SUMS" {
-        anyhow::bail!("update manifest checksum entry must be SHA256SUMS");
-    }
     let artifact_url = manifest_download_url(&asset.download_url, asset_name)?;
-    let sums_url = manifest_download_url(&checksum_manifest.download_url, "SHA256SUMS")?;
-    let sums = String::from_utf8(
-        fetch_update_artifact(&sums_url)
-            .await
-            .with_context(|| format!("failed to fetch update checksum manifest {sums_url}"))?,
-    )
-    .context("update checksum manifest is not UTF-8")?;
+    let artifact = fetch_update_artifact(&artifact_url)
+        .await
+        .with_context(|| format!("failed to fetch update artifact {artifact_url}"))?;
     input.cancel_token.check("agent_update_check")?;
-    let expected_sha256_hex = checksum_for_asset(&sums, asset_name)?;
+    let observed_sha256_hex = sha256_hex(&artifact);
     verify_agent_update_candidate(
         &input,
         AgentUpdateVerificationRequest {
             job_id: input.job_id,
             version_url: input.version_url.to_string(),
             artifact_url: artifact_url.clone(),
-            checksum_url: sums_url.clone(),
             asset_name: asset_name.to_string(),
-            sha256_hex: expected_sha256_hex.clone(),
+            sha256_hex: observed_sha256_hex.clone(),
         },
     )
     .await?;
@@ -371,22 +367,21 @@ async fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStage
         "commit": manifest.commit,
         "asset": asset_name,
         "artifact_url": artifact_url,
-        "sha256_hex": expected_sha256_hex,
+        "sha256_hex": observed_sha256_hex,
         "version_url": input.version_url,
     });
     let mut outputs = vec![status_output(input.job_id, check_status, None, false)?];
-    let staged = stage_update_artifact(UpdateStageInput {
-        job_id: input.job_id,
-        artifact_url: &artifact_url,
-        expected_sha256_hex: &expected_sha256_hex,
-        current_exe: input.current_exe,
-        cancel_token: input.cancel_token,
-    })
-    .await?;
+    let staged = stage_downloaded_update_artifact(
+        input.job_id,
+        input.current_exe,
+        input.cancel_token,
+        &artifact,
+        &observed_sha256_hex,
+    )?;
     outputs.push(staged);
     Ok(CheckStageResult {
         outputs,
-        staged_sha256_hex: Some(expected_sha256_hex),
+        staged_sha256_hex: Some(observed_sha256_hex),
     })
 }
 
@@ -493,11 +488,7 @@ fn status_output(
 }
 
 fn agent_asset_name() -> Option<&'static str> {
-    match std::env::consts::ARCH {
-        "x86_64" => Some("vpsman-agent-linux-x86_64-musl"),
-        "aarch64" => Some("vpsman-agent-linux-aarch64-musl"),
-        _ => None,
-    }
+    vpsman_common::agent_update_asset_name_for_arch(std::env::consts::ARCH)
 }
 
 fn manifest_download_url(value: &str, asset_name: &str) -> Result<String> {
@@ -511,24 +502,6 @@ fn manifest_download_url(value: &str, asset_name: &str) -> Result<String> {
     parse_artifact_url(value)
         .with_context(|| format!("update manifest download URL for {asset_name} is invalid"))?;
     Ok(value.to_string())
-}
-
-fn checksum_for_asset(checksums: &str, asset_name: &str) -> Result<String> {
-    for line in checksums.lines() {
-        let mut parts = line.split_whitespace();
-        let Some(hash) = parts.next() else {
-            continue;
-        };
-        let Some(name) = parts.next() else {
-            continue;
-        };
-        let name = name.trim_start_matches('*');
-        let basename = name.rsplit('/').next().unwrap_or(name);
-        if name == asset_name || basename == asset_name {
-            return normalize_sha256(hash);
-        }
-    }
-    anyhow::bail!("update checksum manifest does not contain {asset_name}");
 }
 
 async fn fetch_update_artifact(artifact_url: &str) -> Result<Vec<u8>> {
@@ -908,7 +881,7 @@ mod tests {
         fs::write(
             &manifest_path,
             serde_json::json!({
-                "schema_version": 2,
+                "schema_version": 3,
                 "project": "vpsman",
                 "version": current_version,
                 "tag": format!("v{current_version}"),
@@ -968,7 +941,7 @@ mod tests {
         fs::write(
             &manifest_path,
             serde_json::json!({
-                "schema_version": 2,
+                "schema_version": 3,
                 "project": "vpsman",
                 "version": older_version,
                 "tag": format!("v{older_version}"),
@@ -1010,7 +983,7 @@ mod tests {
         fs::write(
             &manifest_path,
             serde_json::json!({
-                "schema_version": 2,
+                "schema_version": 3,
                 "project": "vpsman",
                 "version": "dev-build",
                 "tag": "dev-build",
@@ -1051,18 +1024,15 @@ mod tests {
         fs::create_dir_all(&asset_dir).unwrap();
         let current = dir.join("vpsman-agent");
         let artifact = asset_dir.join(asset_name);
-        let sums = asset_dir.join("SHA256SUMS");
         let manifest_path = manifest_dir.join("version.json");
         fs::write(&current, b"old-agent").unwrap();
         fs::write(&artifact, b"new-agent").unwrap();
         let artifact_sha = sha256_hex(b"new-agent");
-        fs::write(&sums, format!("{artifact_sha}  {asset_name}\n")).unwrap();
         let artifact_url = format!("file://{}", artifact.display());
-        let sums_url = format!("file://{}", sums.display());
         fs::write(
             &manifest_path,
             serde_json::json!({
-                "schema_version": 2,
+                "schema_version": 3,
                 "project": "vpsman",
                 "version": "999.0.0",
                 "tag": "v999.0.0",
@@ -1072,11 +1042,7 @@ mod tests {
                         "name": asset_name,
                         "download_url": artifact_url.clone(),
                     }
-                ],
-                "checksum_manifest": {
-                    "name": "SHA256SUMS",
-                    "download_url": sums_url.clone(),
-                }
+                ]
             })
             .to_string(),
         )

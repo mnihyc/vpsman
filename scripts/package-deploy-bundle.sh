@@ -60,7 +60,6 @@ install -m 0644 "$repo_root/deploy/.env.example" "$bundle_root/.env.example"
 install -m 0644 "$repo_root/deploy/compose.yml" "$bundle_root/compose.yml"
 install -m 0644 "$repo_root/deploy/nginx.conf" "$bundle_root/nginx.conf"
 install -m 0755 "$repo_root/deploy/update.sh" "$bundle_root/update.sh"
-install -m 0755 "$repo_root/deploy/install-agent.sh" "$bundle_root/install-agent.sh"
 install -m 0644 "$repo_root/deploy/README.md" "$bundle_root/README.md"
 # deploy/README.md lives one directory below repo docs but becomes the bundle
 # root README, so adjust its one repository-relative runbook link.

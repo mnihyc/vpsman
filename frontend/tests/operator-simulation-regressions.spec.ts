@@ -296,7 +296,7 @@ test("shows the effective agent update policy without inferring from optional TO
     "https://github.com/mnihyc/vpsman/releases/latest/download/version.json",
   );
   await expect(composer).toContainText(
-    "stages a newer checksum-verified artifact without activating or restarting it",
+    "stages its newer architecture-specific artifact without activating or restarting it",
   );
   await expect(composer).toContainText(
     "Activation is a separate reviewed action",

@@ -20,10 +20,10 @@ export VPSMAN_SUPER_PASSWORD='<local_super_password>'
 ./update.sh first-start latest
 ```
 
-`update.sh first-start` downloads GitHub release assets, verifies
-`SHA256SUMS`, installs server, frontend, and host CLI payloads under
-`runtime/`, generates missing compose secrets from `VPSMAN_SUPER_PASSWORD`,
-and starts compose.
+`update.sh first-start` reads the release's `version.json`, downloads its
+server, frontend, and host CLI assets, validates their layouts, installs them
+under `runtime/`, generates missing compose secrets from
+`VPSMAN_SUPER_PASSWORD`, and starts compose.
 
 After the stack starts, open `http://127.0.0.1:5173`. The console discovers
 whether any operator exists: an empty control plane shows **Create first

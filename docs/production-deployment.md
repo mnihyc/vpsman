@@ -8,7 +8,7 @@ database, deployment secrets, or release state.
 
 Production installations should start from a versioned GitHub release bundle,
 not a mutable source branch or `latest`. Set the repository and reviewed stable
-tag, then verify the bundle against the release checksum manifest:
+tag, then download that exact bundle:
 
 ```sh
 export VPSMAN_RELEASE_REPO=mnihyc/vpsman
@@ -16,24 +16,19 @@ export VPSMAN_RELEASE_TAG=vX.Y.Z
 release_url="https://github.com/${VPSMAN_RELEASE_REPO}/releases/download/${VPSMAN_RELEASE_TAG}"
 
 curl -fLO "${release_url}/vpsman-deploy-${VPSMAN_RELEASE_TAG}.tar.gz"
-curl -fLO "${release_url}/SHA256SUMS"
-grep "  vpsman-deploy-${VPSMAN_RELEASE_TAG}.tar.gz$" SHA256SUMS \
-  > SHA256SUMS.deploy
-test "$(wc -l < SHA256SUMS.deploy)" -eq 1
-sha256sum -c SHA256SUMS.deploy
 
 tar -xzf "vpsman-deploy-${VPSMAN_RELEASE_TAG}.tar.gz"
 cd "vpsman-deploy-${VPSMAN_RELEASE_TAG}"
 ```
 
 The control-plane host currently needs x86-64 Linux, Docker Engine with
-Compose, `cmp`, `curl`, `diff`, `flock`, `python3`, `sha256sum`, `sha384sum`,
+Compose, `cmp`, `curl`, `diff`, `flock`, `python3`, `sha384sum`,
 `tar`, and `unzip`. ARM64 remains supported for agents and the standalone
 `vpsctl` artifact, but the published server bundle is currently x86-64 only.
 
-The bundle and `SHA256SUMS` pin the vpsman application payloads, but the shipped
-Compose file currently uses upstream major/minor image tags rather than
-repository-owned digest pins. Those PostgreSQL, Debian, and Nginx tags are
+The exact release's `version.json` selects the vpsman application payloads, but
+the shipped Compose file currently uses upstream major/minor image tags rather
+than repository-owned digest pins. Those PostgreSQL, Debian, and Nginx tags are
 mutable, so two otherwise pinned installations can resolve different container
 image bytes. Production operators that require fully reproducible images must
 mirror and digest-pin reviewed images in their maintained Compose file, record
@@ -218,8 +213,7 @@ rehearsal cannot compete with the production control plane for live agents.
 
 1. Read and export the tag with
    `export VPSMAN_RELEASE_TAG="$(tar -xOf deployment-files.tar.gz RELEASE_TAG)"`,
-   then obtain and
-   checksum-verify that exact deployment bundle. Review
+   then obtain that exact deployment bundle. Review
    [Migration Compatibility](migration-compatibility.md) before choosing a
    different release.
 2. Extract the deployment bundle, then extract `deployment-files.tar.gz` into
@@ -269,9 +263,9 @@ Before every production upgrade:
 1. Read the target release notes, this runbook, `SECURITY.md`, and
    [Migration Compatibility](migration-compatibility.md).
 2. Take and test a control-plane backup.
-3. Download and checksum-verify the target deployment bundle.
-4. Compare its `.env.example`, `compose.yml`, `nginx.conf`, `update.sh`,
-   `install-agent.sh`, and `config/vpsman.toml` with the installed deployment.
+3. Download the exact-tag target deployment bundle.
+4. Compare its `.env.example`, `compose.yml`, `nginx.conf`, `update.sh`, and
+   `config/vpsman.toml` with the installed deployment.
    Merge reviewed deployment changes without overwriting `.env`,
    `config/secrets/`, or `runtime/`.
 5. Run `./update.sh vX.Y.Z`, then check `/health`, `docker compose ps`, recent

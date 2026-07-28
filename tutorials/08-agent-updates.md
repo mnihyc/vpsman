@@ -15,9 +15,9 @@ updates disabled. Bootstrap intentionally rejects runtime-policy environment
 variables, including `VPSMAN_AGENT_UNMANAGED_UPDATE_ENABLED`; enable
 `update.unmanaged_enabled` later through a reviewed incremental config patch.
 When enabled, the autonomous updater reads
-`version.json`, checks `SHA256SUMS`, downloads the matching musl agent asset
-from the release, stages it, activates it, and restarts the agent according to
-local update settings.
+`version.json`, downloads its matching architecture-specific musl agent asset,
+records its content identity, stages it, activates it, and restarts the agent
+according to local update settings.
 
 The release tag owns the shipped version. Release binaries embed the same
 tag-derived version that appears in `version.json`, so an agent reports
@@ -124,9 +124,9 @@ When `require_registered_agent_updates` is enabled, every explicit update
 lifecycle job is hash-bound to the release registry: manual staging and
 activation require the registered primary artifact SHA, rollback requires the
 registered rollback artifact SHA. Manifest-check jobs are dispatched to the
-agent, which resolves the manifest for its own architecture, computes the
-stageable artifact hash from `SHA256SUMS`, and asks the gateway/API to approve
-that hash before staging. Missing manifests, unsupported architectures,
+agent, which resolves the manifest for its own architecture, downloads that
+asset, computes its content identity, and asks the gateway/API to approve the
+observed artifact before staging. Missing manifests, unsupported architectures,
 unregistered hashes, or verification round-trip failures terminalize the check
 job without staging.
 
@@ -138,8 +138,8 @@ VPSs prefilled and the default GitHub manifest URL selected.
 
 Manifest-check jobs are privileged mutating jobs when activation is enabled. They
 read the supplied external `version.json`, use the explicit release asset URLs in
-that manifest, verify `SHA256SUMS`, stage the binary, and can activate/restart
-the agent in the same reviewed job. Agents only stage semver-newer manifests;
+that manifest, stage the selected binary, and can activate/restart the agent in
+the same reviewed job. Agents only stage semver-newer manifests;
 current versions report `current`, older versions report `downgrade_blocked`,
 and non-semver versions report `version_not_orderable`:
 

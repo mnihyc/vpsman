@@ -1087,7 +1087,6 @@ pub struct AgentUpdateVerificationRequest {
     pub job_id: Uuid,
     pub version_url: String,
     pub artifact_url: String,
-    pub checksum_url: String,
     pub asset_name: String,
     pub sha256_hex: String,
 }

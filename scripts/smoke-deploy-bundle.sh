@@ -28,7 +28,7 @@ bundle_root="$extract_dir/vpsman-deploy-v1.2.3"
 
 test "$(cat "$bundle_root/RELEASE_TAG")" = "v1.2.3"
 test -x "$bundle_root/update.sh"
-test -x "$bundle_root/install-agent.sh"
+test ! -e "$bundle_root/install-agent.sh"
 test -f "$bundle_root/compose.yml"
 test -f "$bundle_root/nginx.conf"
 test -f "$bundle_root/config/vpsman.toml"

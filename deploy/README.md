@@ -2,7 +2,7 @@
 
 This directory is the Docker Compose deployment root. It can be renamed or
 copied outside a source checkout; paths below are relative to this directory.
-Production installations should use the checksum-verified
+Production installations should use the exact-tag
 `vpsman-deploy-vX.Y.Z.tar.gz` asset from the selected GitHub release. See the
 [production deployment and recovery runbook](../docs/production-deployment.md)
 for pinned installation, network exposure, backup, restore, upgrade, and
@@ -15,8 +15,7 @@ rollback procedures. The same runbook is stored at
 |-- .env.example                 # template for .env
 |-- compose.yml                  # compose service graph and volume mounts
 |-- nginx.conf                   # frontend reverse-proxy config
-|-- update.sh                    # release download, verify, start, rollback
-|-- install-agent.sh             # remote agent installer helper
+|-- update.sh                    # manifest-driven release start/update/rollback
 |-- AGENT_GATEWAY_INSTALL.md     # agent install notes
 |-- vpsctl -> runtime/cli/current/vpsctl  # updater-created host CLI link
 |-- config/
@@ -34,7 +33,7 @@ rollback procedures. The same runbook is stored at
     |           |-- job-outputs/             # large retained job outputs
     |           |-- file-transfers/          # file-transfer handoff artifacts
     |           `-- file-transfer-sources/   # uploaded source artifacts
-    |-- downloads/               # downloaded release metadata/checksums
+    |-- downloads/               # downloaded release metadata
     |-- update-backups/          # automatic pre-activation database dumps
     |-- transactions/            # interrupted update recovery state
     |-- update.lock              # updater concurrency lock
@@ -120,13 +119,13 @@ After first start, open the browser console. An empty control plane shows
 operator exists, the same unauthenticated page shows **Sign in**.
 
 `update.sh latest` updates the same three release payloads for an existing
-deployment. It verifies checksums and migration compatibility, stops application
-writers, stores a PostgreSQL dump under `runtime/update-backups/`, activates
-the release transactionally, and verifies readiness and release identity.
-Repeating the active tag is a no-op only after selected asset identities,
-current payload contents, and live build readiness all match the verified
-release. Same-tag identity drift, corruption, or unready services fail closed
-without replacing the older rollback payload.
+deployment. It validates authoritative `version.json` metadata, asset layouts,
+and migration compatibility, stops application writers, stores a PostgreSQL
+dump under `runtime/update-backups/`, activates the release transactionally,
+and verifies readiness and release identity. Repeating the active tag is a
+no-op only after the version manifest, current payload contents, and live build
+readiness all match. Same-tag manifest drift, corruption, or unready services
+fail closed without replacing the older rollback payload.
 Rollback applies the same safeguards before swapping `current` and `previous`
 for server, frontend, and CLI together. Use `update.sh recover` after an
 interrupted transaction. Successful activation updates `RELEASE_TAG`; a rollback
@@ -148,6 +147,6 @@ additional recovery layer, and product-managed VPS backups do not cover the
 control plane itself. Automatic first-start, update, and rollback dumps are
 mode-restricted but are not encrypted or pruned; monitor
 `runtime/update-backups/` and apply the deployment's reviewed retention policy.
-The application payload is checksum-pinned, but the upstream Compose image tags
-are mutable; the production runbook documents that residual and the
-operator-owned digest-pinning boundary.
+The application payload is selected by the exact release manifest, but the
+upstream Compose image tags are mutable; the production runbook documents that
+residual and the operator-owned digest-pinning boundary.

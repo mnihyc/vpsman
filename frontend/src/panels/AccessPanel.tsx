@@ -48,12 +48,7 @@ import { clearPrivilegeVault, hasPrivilegeVault } from "../vault";
 import { generateNoiseKeypair } from "../noiseKeygen";
 import { scrollIntoViewWithMotion } from "../motion";
 import { usePanelDisplaySettings } from "../panelDisplay";
-import {
-  INSTALLER_ASSET_NAME,
-  INSTALLER_SHA256,
-  RELEASE_TAG,
-  SOURCE_COMMIT,
-} from "../buildInfo";
+import { RELEASE_TAG } from "../buildInfo";
 import type {
   GatewaySessionRecord,
   LifecycleOutcomeRecord,
@@ -121,15 +116,8 @@ type LocalActionFeedback = {
   tone: ActionFeedbackTone;
 };
 
-const AGENT_INSTALL_SOURCE_URL = INSTALLER_ASSET_NAME
-  ? new URL(`/${INSTALLER_ASSET_NAME}`, window.location.origin).toString()
-  : null;
-const AGENT_INSTALL_COMMIT_URL = INSTALLER_ASSET_NAME
-  ? `https://raw.githubusercontent.com/mnihyc/vpsman/${SOURCE_COMMIT}/deploy/install-agent.sh`
-  : null;
-const AGENT_INSTALL_RELEASE_URL = RELEASE_TAG
-  ? `https://github.com/mnihyc/vpsman/releases/download/${RELEASE_TAG}`
-  : null;
+const AGENT_INSTALL_SCRIPT_URL =
+  "https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-agent.sh";
 const DEFAULT_AGENT_INSTALL_RELEASE = RELEASE_TAG || "latest";
 const INSTALLER_CURL_FLAGS =
   "-fL --retry 2 --connect-timeout 5 --max-time 30";
@@ -2986,7 +2974,6 @@ function InstallCommand({
   const gatewayEndpointsInputId = `${installControlId}-gateway-endpoints`;
   const gatewayEndpointsErrorId = `${gatewayEndpointsInputId}-error`;
   const installModeInputId = `${installControlId}-install-mode`;
-  const installerErrorId = `${installControlId}-installer-error`;
   const [installMode, setInstallMode] = useState<AgentInstallMode>(
     () => operatorPreferences?.agent_install_mode ?? "root",
   );
@@ -3011,14 +2998,7 @@ function InstallCommand({
     normalizedGatewayEndpoints,
   );
   const gatewayEndpointsValid = gatewayEndpointsError === null;
-  const installerVerified =
-    AGENT_INSTALL_RELEASE_URL !== null ||
-    (AGENT_INSTALL_SOURCE_URL !== null &&
-      /^[0-9a-f]{64}$/.test(INSTALLER_SHA256));
-  const canBuildCommand =
-    installerVerified &&
-    gatewayKeyValid &&
-    gatewayEndpointsValid;
+  const canBuildCommand = gatewayKeyValid && gatewayEndpointsValid;
   const gatewayValidationDescription = [
     !gatewayKeyValid ? gatewayKeyErrorId : null,
     !gatewayEndpointsValid ? gatewayEndpointsErrorId : null,
@@ -3028,7 +3008,6 @@ function InstallCommand({
   const installValidationDescription = [
     !gatewayKeyValid ? gatewayKeyErrorId : null,
     !gatewayEndpointsValid ? gatewayEndpointsErrorId : null,
-    !installerVerified ? installerErrorId : null,
   ]
     .filter(Boolean)
     .join(" ") || undefined;
@@ -3061,16 +3040,10 @@ function InstallCommand({
         installMode,
         privateKeyHex,
       })
-    : installerVerified
-      ? [
-          "Enter the gateway server public key and endpoints to generate",
-          "the paste-ready verified agent install command.",
-        ].join(" ")
-      : [
-          "Installer command unavailable: rebuild from a Git checkout that",
-          "contains the embedded source commit, or use a tagged release build.",
-          "Valid gateway defaults can still be saved for a manual install.",
-        ].join(" ");
+    : [
+        "Enter the gateway server public key and endpoints to generate",
+        "the paste-ready agent install command.",
+      ].join(" ");
   const foregroundStartCommand =
     'env VPSMAN_AGENT_STATE_DIR="$PWD/vpsman-agent/state" ' +
     '"$PWD/vpsman-agent/bin/vpsman-agent" ' +
@@ -3150,12 +3123,12 @@ function InstallCommand({
         <div>
           <strong>Agent install command</strong>
           <span>
-            {installerVerified
-              ? "Builds a paste-ready installer line pinned to this control-plane build and verifies it before passing identity material. The private key is shown once and is not saved by the console; the copied line contains it, so use a trusted shell with history disabled and clear the clipboard afterward. Gateway values can be saved as this operator's reusable installer defaults."
-              : "Command generation is disabled because this build has no verified installer asset. Valid gateway defaults can still be saved for a manual or reviewed install; use a full Git checkout or a tagged release build to copy a verified command."}
-            {!RELEASE_TAG && INSTALLER_ASSET_NAME
-              ? " Source builds try the exact public commit first, then this console origin; transfer the installer manually if neither is reachable from the VPS."
-              : ""}
+            Uses the stable repository installer, which resolves the selected
+            agent release through version.json. The private key is shown once
+            and is not saved by the console; the copied line contains it, so
+            use a trusted shell with history disabled and clear the clipboard
+            afterward. Gateway values can be saved as this operator&apos;s
+            reusable installer defaults.
           </span>
         </div>
         <div className="sectionActions">
@@ -3266,13 +3239,6 @@ function InstallCommand({
             {gatewayEndpointsError}
           </small>
         ) : null}
-        {!installerVerified ? (
-          <small className="installCommandHint warn" id={installerErrorId}>
-            This source build could not read the pinned installer from its Git
-            commit. Saving valid gateway defaults remains available; use a full
-            Git checkout or a tagged release build to copy a verified command.
-          </small>
-        ) : null}
       </div>
       <ActionFeedback
         className="localActionFeedback"
@@ -3319,25 +3285,10 @@ function buildAgentInstallCommand({
   if (installMode === "staged") {
     environment.push(["VPSMAN_AGENT_ENABLE_SERVICE", "0"]);
   }
-  const acquisition = AGENT_INSTALL_RELEASE_URL
-    ? [
-        `curl ${INSTALLER_CURL_FLAGS} ${AGENT_INSTALL_RELEASE_URL}/install-agent.sh -o "$agent_install_tmp/install-agent.sh" &&`,
-        `curl ${INSTALLER_CURL_FLAGS} ${AGENT_INSTALL_RELEASE_URL}/SHA256SUMS -o "$agent_install_tmp/SHA256SUMS" &&`,
-        `awk '$2 == "install-agent.sh" { print; seen++ } END { exit seen == 1 ? 0 : 1 }' "$agent_install_tmp/SHA256SUMS" > "$agent_install_tmp/SHA256SUMS.installer" &&`,
-        `(cd "$agent_install_tmp" && sha256sum -c SHA256SUMS.installer) &&`,
-      ]
-    : AGENT_INSTALL_SOURCE_URL && AGENT_INSTALL_COMMIT_URL
-      ? [
-          `((curl ${INSTALLER_CURL_FLAGS} ${shellQuote(AGENT_INSTALL_COMMIT_URL)} -o "$agent_install_tmp/install-agent.sh" &&`,
-          `printf '%s  %s\\n' ${shellQuote(INSTALLER_SHA256)} "$agent_install_tmp/install-agent.sh" | sha256sum -c -) ||`,
-          `(curl ${INSTALLER_CURL_FLAGS} ${shellQuote(AGENT_INSTALL_SOURCE_URL)} -o "$agent_install_tmp/install-agent.sh" &&`,
-          `printf '%s  %s\\n' ${shellQuote(INSTALLER_SHA256)} "$agent_install_tmp/install-agent.sh" | sha256sum -c -)) &&`,
-        ]
-      : [];
   return [
     'agent_install_tmp="$(mktemp -d)" &&',
     `(trap 'rm -rf -- "$agent_install_tmp"' EXIT;`,
-    ...acquisition,
+    `curl ${INSTALLER_CURL_FLAGS} ${shellQuote(AGENT_INSTALL_SCRIPT_URL)} -o "$agent_install_tmp/install-agent.sh" &&`,
     "env",
     ...environment.map(([name, value]) => `${name}=${shellQuote(value)}`),
     'bash "$agent_install_tmp/install-agent.sh")',

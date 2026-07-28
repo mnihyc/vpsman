@@ -860,7 +860,7 @@ export function JobOperationEditor({
         <PackageCheck size={18} />
         <div>
           <strong>Version manifest</strong>
-          <span>Checks version.json and stages a newer checksum-verified artifact without activating or restarting it</span>
+          <span>Checks version.json and stages its newer architecture-specific artifact without activating or restarting it</span>
         </div>
         <label className="wideField">
           <span>Manifest URL</span>
