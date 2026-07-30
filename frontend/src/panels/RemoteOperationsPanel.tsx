@@ -253,7 +253,7 @@ export function RemoteOperationsPanel({
   privilegeUnlockOpen: boolean;
   processSupervisorInventory: ProcessSupervisorInventoryRecord[];
   processSupervisorInventoryTruncated: boolean;
-  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
   terminalSessions: TerminalSessionRecord[];
   terminalSessionsTruncated: boolean;
   transferTargetIntent?: {

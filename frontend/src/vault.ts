@@ -1,4 +1,7 @@
-import { normalizeHex, type PrivilegeMaterial } from "./privilege";
+import {
+  normalizeHex,
+  type EnteredPrivilegeMaterial,
+} from "./privilege";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -17,14 +20,21 @@ type StoredEncryptedVault = {
 };
 
 export function hasPrivilegeVault(): boolean {
-  return window.localStorage.getItem(PRIVILEGE_STORAGE_KEY) !== null;
+  try {
+    return window.localStorage.getItem(PRIVILEGE_STORAGE_KEY) !== null;
+  } catch {
+    return false;
+  }
 }
 
 export function clearPrivilegeVault(): void {
   window.localStorage.removeItem(PRIVILEGE_STORAGE_KEY);
 }
 
-export async function savePrivilegeVault(material: PrivilegeMaterial, passphrase: string): Promise<void> {
+export async function savePrivilegeVault(
+  material: EnteredPrivilegeMaterial,
+  passphrase: string,
+): Promise<void> {
   if (passphrase.length < MIN_VAULT_PASSPHRASE_LENGTH) {
     throw new Error(
       `Vault passphrase must be at least ${MIN_VAULT_PASSPHRASE_LENGTH} characters`,
@@ -41,7 +51,9 @@ export async function savePrivilegeVault(material: PrivilegeMaterial, passphrase
   window.localStorage.setItem(PRIVILEGE_STORAGE_KEY, JSON.stringify(record));
 }
 
-export async function loadPrivilegeVault(passphrase: string): Promise<PrivilegeMaterial> {
+export async function loadPrivilegeVault(
+  passphrase: string,
+): Promise<EnteredPrivilegeMaterial> {
   if (!passphrase) {
     throw new Error("Vault passphrase is required");
   }
@@ -49,7 +61,9 @@ export async function loadPrivilegeVault(passphrase: string): Promise<PrivilegeM
   if (!raw) {
     throw new Error("No privilege vault exists");
   }
-  const material = await decryptVaultPayload<Partial<PrivilegeMaterial>>(raw, passphrase);
+  const material = await decryptVaultPayload<
+    Partial<EnteredPrivilegeMaterial>
+  >(raw, passphrase);
   if (typeof material.superPassword !== "string" || typeof material.superSaltHex !== "string") {
     throw new Error("Privilege vault payload is invalid");
   }

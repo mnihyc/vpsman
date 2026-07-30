@@ -88,7 +88,7 @@ export function TopologyNetworkTestControls({
   onOpenPrivilegeUnlock: () => void;
   onOpenTunnelPlans: () => void;
   privilegeMaterial: PrivilegeMaterial | null;
-  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
   tunnelPlans: TunnelPlanRecord[];
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
@@ -920,9 +920,9 @@ export function TopologyNetworkTestControls({
       <PrivilegeVaultBox
         lastPayloadHash={lastPayloadHash}
         onOpenUnlock={onOpenPrivilegeUnlock}
-        onPrivilegeMaterialChange={(material) => {
+        onPrivilegeMaterialChange={async (material) => {
           clearNetworkReview();
-          setPrivilegeMaterial(material);
+          await setPrivilegeMaterial(material);
         }}
         privilegeMaterial={privilegeMaterial}
       />

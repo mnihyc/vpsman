@@ -155,7 +155,7 @@ export function ConfigurationSourcesPanel({
   ) => Promise<UpdateConfigurationPresetResponse>;
   presets: ConfigurationPresetRecord[];
   privilegeMaterial: PrivilegeMaterial | null;
-  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
   sources: ConfigurationSourceView[];
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();

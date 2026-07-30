@@ -1,4 +1,6 @@
 use std::{
+    error::Error as StdError,
+    fmt,
     sync::{Arc, RwLock as StdRwLock},
     time::Duration,
 };
@@ -18,6 +20,25 @@ use vpsman_common::{
 };
 
 const CONTROL_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Debug)]
+pub(crate) struct GatewayControlResponseError {
+    pub(crate) status_code: u16,
+    status_line: String,
+    response_body: String,
+}
+
+impl fmt::Display for GatewayControlResponseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "gateway control returned {}: {}",
+            self.status_line, self.response_body
+        )
+    }
+}
+
+impl StdError for GatewayControlResponseError {}
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct GatewayDispatchClient {
@@ -360,16 +381,63 @@ where
         .context("invalid gateway control response")?;
     let headers = std::str::from_utf8(&response[..header_end])
         .context("gateway control response headers are not UTF-8")?;
-    let status = headers
+    let status_line = headers
         .lines()
         .next()
         .context("missing gateway control status line")?;
+    let status_code = status_line
+        .split_ascii_whitespace()
+        .nth(1)
+        .context("missing gateway control status code")?
+        .parse::<u16>()
+        .context("invalid gateway control status code")?;
     let body = &response[header_end + 4..];
-    if !status.contains(" 2") {
-        return Err(anyhow!(
-            "gateway control returned {status}: {}",
-            String::from_utf8_lossy(body)
-        ));
+    if !(200..300).contains(&status_code) {
+        return Err(GatewayControlResponseError {
+            status_code,
+            status_line: status_line.to_string(),
+            response_body: String::from_utf8_lossy(body).into_owned(),
+        }
+        .into());
     }
     Ok(serde_json::from_slice(body)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::duplex;
+
+    #[tokio::test]
+    async fn preserves_gateway_control_error_status() {
+        let (mut client, mut server) = duplex(4_096);
+        let server_task = tokio::spawn(async move {
+            let mut request = vec![0_u8; 4_096];
+            let _ = server.read(&mut request).await.unwrap();
+            server
+                .write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: 32\r\nConnection: close\r\n\r\n{\"error\":\"verifier unavailable\"}",
+                )
+                .await
+                .unwrap();
+        });
+
+        let error = send_gateway_control_request::<_, serde_json::Value>(
+            &mut client,
+            "gateway-control",
+            "/internal/v1/gateway/privilege/verify",
+            b"{}",
+            "internal-token",
+            GatewayClientTimeouts::default(),
+        )
+        .await
+        .unwrap_err();
+        server_task.await.unwrap();
+
+        let response = error
+            .downcast_ref::<GatewayControlResponseError>()
+            .expect("structured gateway response error");
+        assert_eq!(response.status_code, 503);
+        assert!(response.response_body.contains("verifier unavailable"));
+    }
 }

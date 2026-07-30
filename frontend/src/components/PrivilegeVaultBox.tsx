@@ -2,6 +2,7 @@ import { useId, useState } from "react";
 import { LockKeyhole, Save, ShieldCheck, Trash2 } from "lucide-react";
 import { ActionFeedback } from "./ActionFeedback";
 import { ConfirmationPrompt } from "./ConfirmationPrompt";
+import { PrivilegeLockPrompt } from "./PrivilegeLockPrompt";
 import { normalizeHex, type PrivilegeMaterial } from "../privilege";
 import {
   clearPrivilegeVault,
@@ -15,8 +16,11 @@ import { runPanelAction, shortHash } from "../utils";
 type PrivilegeVaultBoxProps = {
   labelPrefix?: string;
   lastPayloadHash: string | null;
-  onPrivilegeMaterialChange: (material: PrivilegeMaterial | null) => void;
+  onPrivilegeMaterialChange: (
+    material: PrivilegeMaterial | null,
+  ) => Promise<void>;
   onOpenUnlock?: () => void;
+  onUnlocked?: () => void;
   onVaultAvailabilityChange?: (available: boolean) => void;
   privilegeMaterial: PrivilegeMaterial | null;
   clearVaultLabel?: string;
@@ -34,6 +38,7 @@ export function PrivilegeVaultBox({
   lockPrivilegeLabel = "Lock privilege",
   onOpenUnlock,
   onPrivilegeMaterialChange,
+  onUnlocked,
   onVaultAvailabilityChange,
   privilegeMaterial,
   unlockRedirectLabel = "Unlock privilege",
@@ -52,17 +57,18 @@ export function PrivilegeVaultBox({
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [clearVaultPromptOpen, setClearVaultPromptOpen] = useState(false);
+  const [lockPromptOpen, setLockPromptOpen] = useState(false);
   const vaultPassphraseHintId = useId();
   const privilegeStatus = privilegeMaterial
-    ? "Unlocked"
+    ? "Verified and unlocked"
     : vaultAvailable
       ? "Locked, saved local vault available"
       : "Locked";
   const unlockScope = privilegeMaterial
-    ? "This browser tab"
+    ? "This browser, including restarts"
     : "Current browser only";
   const unlockedUntil = privilegeMaterial
-    ? "Until Lock now, refresh, or sign-out"
+    ? "Until Lock, sign-out, or operator change"
     : "Not active";
   const localVaultState = vaultAvailable ? "Saved locally" : "Not saved";
   const label = (value: string) => {
@@ -86,8 +92,10 @@ export function PrivilegeVaultBox({
 
   async function unlockVault() {
     await runPanelAction(setPending, setActionError, async () => {
-      onPrivilegeMaterialChange(await loadPrivilegeVault(unlockPassphrase));
+      const material = await loadPrivilegeVault(unlockPassphrase);
+      await onPrivilegeMaterialChange(material);
       setUnlockPassphrase("");
+      onUnlocked?.();
     });
   }
 
@@ -97,30 +105,39 @@ export function PrivilegeVaultBox({
         superPassword,
         superSaltHex: normalizeHex(superSaltHex),
       };
-      if (saveToVault) {
-        await savePrivilegeVault(material, vaultPassphrase);
-        setVaultAvailable(true);
-        onVaultAvailabilityChange?.(true);
-        setVaultPassphrase("");
+      await onPrivilegeMaterialChange(material);
+      try {
+        if (saveToVault) {
+          await savePrivilegeVault(material, vaultPassphrase);
+          setVaultAvailable(true);
+          onVaultAvailabilityChange?.(true);
+          setVaultPassphrase("");
+        }
+      } catch (error) {
+        await onPrivilegeMaterialChange(null);
+        throw error;
       }
-      onPrivilegeMaterialChange(material);
       setSuperPassword("");
       setSuperSaltHex("");
+      onUnlocked?.();
     });
   }
 
-  function lockPrivilege() {
-    onPrivilegeMaterialChange(null);
-    setActionError(null);
+  async function lockPrivilege() {
+    setLockPromptOpen(false);
+    await runPanelAction(setPending, setActionError, async () => {
+      await onPrivilegeMaterialChange(null);
+    });
   }
 
-  function removeVault() {
+  async function removeVault() {
     setClearVaultPromptOpen(false);
-    clearPrivilegeVault();
-    setVaultAvailable(false);
-    onVaultAvailabilityChange?.(false);
-    onPrivilegeMaterialChange(null);
-    setActionError(null);
+    await runPanelAction(setPending, setActionError, async () => {
+      clearPrivilegeVault();
+      setVaultAvailable(false);
+      onVaultAvailabilityChange?.(false);
+      await onPrivilegeMaterialChange(null);
+    });
   }
 
   function vaultClearButton(disabled = false) {
@@ -143,7 +160,7 @@ export function PrivilegeVaultBox({
         confirmLabel={clearVaultLabel}
         detail="This removes the encrypted local privilege vault from this browser and locks locally cached privilege material."
         onCancel={() => setClearVaultPromptOpen(false)}
-        onConfirm={removeVault}
+        onConfirm={() => void removeVault()}
         open={clearVaultPromptOpen}
         pending={pending}
         title="Confirm privilege vault clear"
@@ -151,6 +168,14 @@ export function PrivilegeVaultBox({
       />
     );
   }
+
+  const lockConfirmation = (
+    <PrivilegeLockPrompt
+      onCancel={() => setLockPromptOpen(false)}
+      onConfirm={() => void lockPrivilege()}
+      open={lockPromptOpen}
+    />
+  );
 
   const stateGrid = (
     <div className="privilegeStateGrid" aria-label="Privilege vault state">
@@ -189,8 +214,8 @@ export function PrivilegeVaultBox({
         </div>
         <div className="privilegeActionRow">
           <button
-            className="secondaryAction dangerAction"
-            onClick={lockPrivilege}
+            className="secondaryAction"
+            onClick={() => setLockPromptOpen(true)}
             type="button"
           >
             <LockKeyhole size={17} />
@@ -199,6 +224,7 @@ export function PrivilegeVaultBox({
           {showVaultClear && vaultClearButton(!vaultAvailable)}
         </div>
         {clearVaultConfirmation()}
+        {lockConfirmation}
       </div>
     );
   }
@@ -257,7 +283,7 @@ export function PrivilegeVaultBox({
           >
             <div>
               <h3>Unlock saved local vault</h3>
-              <p>Use the browser-local vault passphrase to unlock this tab.</p>
+              <p>Use the browser-local vault passphrase to unlock privilege.</p>
             </div>
             <input
               aria-label={label("Vault passphrase")}
@@ -288,7 +314,7 @@ export function PrivilegeVaultBox({
           }}
         >
           <div>
-            <h3>Unlock for this browser session</h3>
+            <h3>Unlock in this browser</h3>
             <p>
               Enter the privilege material only when a privileged workflow needs
               it. Routine read-only work stays separate.
@@ -378,6 +404,7 @@ export function PrivilegeVaultBox({
         </div>
       )}
       {clearVaultConfirmation()}
+      {lockConfirmation}
     </div>
   );
 }

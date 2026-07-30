@@ -7,6 +7,7 @@ import {
 } from "./support/consoleLayoutFixtures";
 import { DEFAULT_UPDATE_VERSION_URL } from "../src/jobDispatchPreset";
 import {
+  lockPrivilegeFromTop,
   openConsoleSubpage,
   unlockPrivilegeFromTop,
   waitForConsoleShell,
@@ -1008,7 +1009,16 @@ test("clears browser-local console selections without deleting session or privil
   );
 
   await page.goto("/");
+  await waitForConsoleShell(page);
   await page.evaluate(() => {
+    window.localStorage.setItem(
+      "vpsman.privilegeGrant",
+      JSON.stringify({
+        material: { superKeyHex: "c".repeat(64) },
+        operatorId: "99999999-aaaa-4bbb-8ccc-000000000001",
+        version: 1,
+      }),
+    );
     window.localStorage.setItem("vpsman.privilegeVault", "preserved-privilege");
     window.localStorage.setItem(
       "vpsman.dashboardPreferences",
@@ -1050,12 +1060,16 @@ test("clears browser-local console selections without deleting session or privil
       "vpsman.dashboardPreferences",
     ),
     grid: window.localStorage.getItem("vpsman.grid.example"),
+    privilegeGrant: window.localStorage.getItem("vpsman.privilegeGrant"),
     privilegeVault: window.localStorage.getItem("vpsman.privilegeVault"),
     refreshToken: window.localStorage.getItem("vpsman.refreshToken"),
     sidebarSubpanels: window.localStorage.getItem("vpsman.sidebarSubpanels"),
   }));
   const sidebarSubpanels = storage.sidebarSubpanels
     ? JSON.parse(storage.sidebarSubpanels)
+    : null;
+  const privilegeGrant = storage.privilegeGrant
+    ? JSON.parse(storage.privilegeGrant)
     : null;
   expect(storage).toMatchObject({
     accessToken:
@@ -1069,6 +1083,11 @@ test("clears browser-local console selections without deleting session or privil
   expect(sidebarSubpanels).toMatchObject({
     defaultMode: "active",
     state: {},
+  });
+  expect(privilegeGrant).toMatchObject({
+    material: { superKeyHex: "c".repeat(64) },
+    operatorId: "99999999-aaaa-4bbb-8ccc-000000000001",
+    version: 1,
   });
 });
 
@@ -4514,10 +4533,10 @@ test("shows access posture, MFA risk, identity lifecycle, and gateway readiness"
     privilegePanel.getByRole("button", { name: "Unlock", exact: true }),
   );
   await expect(page.getByLabel("Privilege vault state")).toContainText(
-    "Unlocked",
+    "Verified and unlocked",
   );
   await expect(page.getByLabel("Privilege vault state")).toContainText(
-    "This browser tab",
+    "This browser, including restarts",
   );
   await expect(page.getByRole("button", { name: "Lock now" })).toBeVisible();
   await expect(
@@ -5486,10 +5505,7 @@ test("generates local privilege assertions before dispatching a privileged job",
   await expect(
     topbar.getByRole("button", { name: "Lock privilege" }),
   ).toBeVisible();
-  await activate(topbar.getByRole("button", { name: "Lock privilege" }));
-  await expect(
-    topbar.getByRole("button", { name: "Open privilege unlock" }),
-  ).toBeVisible();
+  await lockPrivilegeFromTop(page);
   await expect(
     page.locator(".commandComposer").getByLabel("Super password"),
   ).toHaveCount(0);

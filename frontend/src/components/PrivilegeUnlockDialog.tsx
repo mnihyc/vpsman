@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { ShieldCheck, X } from "lucide-react";
+import { ActionFeedback } from "./ActionFeedback";
 import { PrivilegeVaultBox } from "./PrivilegeVaultBox";
 import type { PrivilegeMaterial } from "../privilege";
 
@@ -11,12 +12,16 @@ type ModalSiblingState = {
 };
 
 export function PrivilegeUnlockDialog({
+  error = null,
   onClose,
   onPrivilegeMaterialChange,
   open,
 }: {
+  error?: string | null;
   onClose: () => void;
-  onPrivilegeMaterialChange: (material: PrivilegeMaterial | null) => void;
+  onPrivilegeMaterialChange: (
+    material: PrivilegeMaterial | null,
+  ) => Promise<void>;
   open: boolean;
 }) {
   const overlayRef = useRef<HTMLDivElement | null>(null);
@@ -137,15 +142,16 @@ export function PrivilegeUnlockDialog({
             <X size={16} />
           </button>
         </header>
+        <ActionFeedback
+          className="localActionFeedback"
+          message={error}
+          tone="danger"
+        />
         <PrivilegeVaultBox
           labelPrefix="Unlock"
           lastPayloadHash={null}
-          onPrivilegeMaterialChange={(material) => {
-            onPrivilegeMaterialChange(material);
-            if (material) {
-              onClose();
-            }
-          }}
+          onPrivilegeMaterialChange={onPrivilegeMaterialChange}
+          onUnlocked={onClose}
           privilegeMaterial={null}
           showVaultClear={false}
           usePrivilegeLabel="Unlock"

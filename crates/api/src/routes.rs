@@ -6,6 +6,7 @@ use axum::{
 
 use crate::{
     backup_upload_sessions::MAX_BACKUP_ARTIFACT_UPLOAD_CHUNK_BYTES,
+    privilege::verify_privilege_unlock,
     routes_alerts::{
         bulk_unset_vps_rules, bulk_upsert_vps_rules, delete_fleet_alert_notification_channel,
         delete_fleet_alert_policy, dispatch_fleet_alert_notifications, dry_run_fleet_alert_policy,
@@ -154,6 +155,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/api/v1/auth/logout", post(logout_operator_session))
         .route("/api/v1/auth/refresh", post(refresh_operator_session))
         .route("/api/v1/auth/me", get(current_operator))
+        .route(
+            "/api/v1/auth/privilege/verify",
+            post(verify_privilege_unlock),
+        )
         .route("/api/v1/auth/preferences", put(update_operator_preferences))
         .route("/api/v1/auth/totp/setup", post(setup_operator_totp))
         .route("/api/v1/auth/totp/confirm", post(confirm_operator_totp))

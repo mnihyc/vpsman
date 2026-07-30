@@ -265,6 +265,19 @@ export async function unlockPrivilegeFromTop(page: Page) {
   ).toBeVisible();
 }
 
+export async function lockPrivilegeFromTop(page: Page) {
+  const topbar = page.locator(".topbar");
+  await activate(topbar.getByRole("button", { name: "Lock privilege" }));
+  const prompt = page.getByLabel("Confirm privilege lock");
+  await expect(prompt).toBeVisible();
+  await activate(
+    prompt.getByRole("button", { name: "Lock privilege", exact: true }),
+  );
+  await expect(
+    topbar.getByRole("button", { name: "Open privilege unlock" }),
+  ).toBeVisible();
+}
+
 async function loginMockConsoleSession(page: Page) {
   const mockInstalled = await page
     .evaluate(() => Boolean((window as typeof window & { __vpsmanTestRequests?: unknown }).__vpsmanTestRequests))

@@ -248,7 +248,7 @@ type AccessPanelProps = {
   clientKeyRevocations: ClientKeyRevocationView[];
   keyLifecycleReport: KeyLifecycleReportView | null;
   privilegeMaterial: PrivilegeMaterial | null;
-  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
   terminalSessions: TerminalSessionRecord[];
   wsState: string;
 };
@@ -1294,7 +1294,7 @@ export function AccessPanel({
     {
       action: privilegeMaterial ? "Open vault" : "Unlock",
       detail: privilegeMaterial
-        ? "Privilege material is local-only and used for request-bound assertions in this browser tab."
+        ? "Privilege material is local-only and used for request-bound assertions in this browser."
         : "Privilege unlock is local; locking it does not revoke console, bearer, terminal, or gateway sessions.",
       icon: <LockKeyhole size={16} />,
       label: "Privilege unlock",

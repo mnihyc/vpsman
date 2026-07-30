@@ -120,7 +120,7 @@ export function MultiFileActionsPanel({
   onOpenPrivilegeUnlock: () => void;
   onResolveTargets: (selection: JobTargetSelection) => Promise<BulkResolveResponse>;
   privilegeMaterial: PrivilegeMaterial | null;
-  setPrivilegeMaterial: (value: PrivilegeMaterial | null) => void;
+  setPrivilegeMaterial: (value: PrivilegeMaterial | null) => Promise<void>;
 }) {
   const {
     captureReviewGeneration,

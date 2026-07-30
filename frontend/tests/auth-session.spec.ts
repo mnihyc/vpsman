@@ -345,6 +345,20 @@ async function installAuthSessionApiMock(page: import("@playwright/test").Page) 
   await page.route("**/api/v1/auth/logout", async (route) => {
     await route.fulfill({ status: 204 });
   });
+  await page.route("**/api/v1/auth/privilege/verify", async (route) => {
+    if (!isAuthorized(route.request())) {
+      await route.fulfill({
+        contentType: "application/json",
+        json: { error: "missing_bearer_token" },
+        status: 401,
+      });
+      return;
+    }
+    await route.fulfill({
+      contentType: "application/json",
+      json: { verified: true },
+    });
+  });
   await page.route("**/api/v1/auth/refresh", async (route) => {
     const body = (await route.request().postDataJSON()) as {
       refresh_token?: string;

@@ -3301,6 +3301,8 @@ export async function installConsoleApiMock(
     ospfUpdatePlansOverride?: typeof ospfUpdatePlans;
     operatorRoleOverride?: "admin" | "operator" | "viewer";
     operatorAuthEventsOverride?: OperatorAuthEventRecord[];
+    privilegeVerificationDelayMs?: number;
+    privilegeVerificationFailure?: "denied" | "unavailable";
     schedulesOverride?: ScheduleRecord[];
     telemetryFailurePath?: "network-rates" | "rollups" | "tunnels";
     telemetryNetworkRateScales?: number[];
@@ -3368,6 +3370,8 @@ export async function installConsoleApiMock(
       operatorPreferencesFixture,
       operatorAuthEventsFixture,
       operatorRoleOverrideFixture,
+      privilegeVerificationDelayMsFixture,
+      privilegeVerificationFailureFixture,
       processSupervisorInventoryFixture,
       schedulesFixture,
       summaryFixture,
@@ -3595,6 +3599,7 @@ export async function installConsoleApiMock(
         migrationLinks: [] as unknown[],
         operatorActions: [] as unknown[],
         operatorPreferences: [] as unknown[],
+        privilegeVerifications: [] as unknown[],
         portForwardRules: [] as unknown[],
         restorePlans: [] as unknown[],
         scheduleActions: [] as unknown[],
@@ -5081,6 +5086,37 @@ export async function installConsoleApiMock(
         }
         if (pathname === "/api/v1/auth/me" && method === "GET")
           return jsonResponse(operatorView(currentOperatorRecord));
+        if (
+          pathname === "/api/v1/auth/privilege/verify" &&
+          method === "POST"
+        ) {
+          const body = await readJsonBody(input, init);
+          requests.privilegeVerifications.push(body);
+          if (privilegeVerificationDelayMsFixture > 0) {
+            await new Promise((resolve) =>
+              window.setTimeout(resolve, privilegeVerificationDelayMsFixture),
+            );
+          }
+          if (privilegeVerificationFailureFixture === "denied") {
+            return jsonResponse(
+              {
+                error: "privilege_verification_failed",
+                message: "The privilege assertion was rejected.",
+              },
+              403,
+            );
+          }
+          if (privilegeVerificationFailureFixture === "unavailable") {
+            return jsonResponse(
+              {
+                error: "privilege_verification_unavailable",
+                message: "The gateway could not verify privilege material.",
+              },
+              503,
+            );
+          }
+          return jsonResponse({ verified: true });
+        }
         if (pathname === "/api/v1/auth/preferences" && method === "PUT") {
           const body = await readJsonBody(input, init);
           requests.operatorPreferences.push(body);
@@ -8447,6 +8483,10 @@ export async function installConsoleApiMock(
       operatorPreferencesFixture: operatorPreferences,
       operatorAuthEventsFixture: options.operatorAuthEventsOverride ?? null,
       operatorRoleOverrideFixture: options.operatorRoleOverride ?? "admin",
+      privilegeVerificationDelayMsFixture:
+        options.privilegeVerificationDelayMs ?? 0,
+      privilegeVerificationFailureFixture:
+        options.privilegeVerificationFailure ?? null,
       processSupervisorInventoryFixture: processSupervisorInventory,
       schedulesFixture: options.schedulesOverride ?? schedules,
       summaryFixture: summary,

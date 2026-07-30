@@ -72,7 +72,7 @@ export function TopologyOspfUpdateControls({
     request: UpdateTunnelPlanOspfCostRequest,
   ) => Promise<TunnelPlanOspfJobsResponse>;
   privilegeMaterial: PrivilegeMaterial | null;
-  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
   tunnelPlans: TunnelPlanRecord[];
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();

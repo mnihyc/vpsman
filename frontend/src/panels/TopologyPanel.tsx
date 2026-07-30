@@ -2921,7 +2921,7 @@ type TopologyPanelProps = {
   privilegeMaterial: PrivilegeMaterial | null;
   runtimeConfigEvidenceState: "available" | "loading" | "unavailable";
   runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
-  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
   networkAdapterDefinitions: NetworkAdapterDefinitionRecord[];
   telemetryTunnels: TelemetryTunnelRecord[];
   topologyGraph: TopologyGraph;

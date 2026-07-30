@@ -841,6 +841,48 @@ async fn rejected_identity_rotation_does_not_request_gateway_disconnect() {
     assert_eq!(paths, vec!["/internal/v1/gateway/privilege/verify"]);
 }
 
+#[tokio::test]
+async fn privilege_unlock_verification_is_authenticated_and_non_mutating() {
+    let state = identity_route_test_state(
+        crate::gateway_client::GatewayDispatchClient::test_privilege_auto_approve(),
+    );
+    let headers = crate::test_auth_headers(&state).await;
+
+    let axum::Json(response) = crate::privilege::verify_privilege_unlock(
+        axum::extract::State(state),
+        headers,
+        axum::Json(crate::privilege::PrivilegeUnlockVerificationRequest {
+            privilege_assertion: Some(dummy_privilege_assertion()),
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert!(response.verified);
+}
+
+#[tokio::test]
+async fn privilege_unlock_reports_gateway_unavailability_without_denial() {
+    let state = identity_route_test_state(crate::gateway_client::GatewayDispatchClient::new(
+        Some("http://127.0.0.1:9".to_string()),
+        Some("gateway-secret-at-least-32-characters".to_string()),
+    ));
+    let headers = crate::test_auth_headers(&state).await;
+
+    let error = crate::privilege::verify_privilege_unlock(
+        axum::extract::State(state),
+        headers,
+        axum::Json(crate::privilege::PrivilegeUnlockVerificationRequest {
+            privilege_assertion: Some(dummy_privilege_assertion()),
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error.code, "privilege_verification_unavailable");
+}
+
 fn identity_operator() -> AuthContext {
     AuthContext {
         operator: OperatorView {

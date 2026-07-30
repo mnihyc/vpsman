@@ -12,10 +12,18 @@ const encoder = new TextEncoder();
 const SUPER_KEY_DOMAIN = "vpsman-super-key-v1";
 const PRIVILEGE_ASSERTION_DOMAIN = "vpsman-gateway-privilege-assertion-v1";
 
-export type PrivilegeMaterial = {
+export type EnteredPrivilegeMaterial = {
   superPassword: string;
   superSaltHex: string;
 };
+
+export type DerivedPrivilegeMaterial = {
+  superKeyHex: string;
+};
+
+export type PrivilegeMaterial =
+  | EnteredPrivilegeMaterial
+  | DerivedPrivilegeMaterial;
 
 export type BuiltJobPrivilege = {
   payloadHashHex: string;
@@ -257,6 +265,20 @@ export async function deriveSuperKeyHex(superPassword: string, superSaltHex: str
   return bytesToHex(keyBytes);
 }
 
+export async function derivePrivilegeMaterial(
+  material: PrivilegeMaterial,
+): Promise<DerivedPrivilegeMaterial> {
+  if ("superKeyHex" in material) {
+    return { superKeyHex: normalizeSha256Hex(material.superKeyHex) };
+  }
+  return {
+    superKeyHex: await deriveSuperKeyHex(
+      material.superPassword,
+      material.superSaltHex,
+    ),
+  };
+}
+
 export async function operationPayloadHashHex(operation: JobOperation): Promise<string> {
   return sha256Hex(operationPayloadBytes(operation));
 }
@@ -303,7 +325,7 @@ export async function buildPrivilegeAssertion({
   privilegeMaterial: PrivilegeMaterial;
   ttlSecs?: number;
 }): Promise<PrivilegeAssertion> {
-  const superKey = await deriveSuperHmacKey(privilegeMaterial.superPassword, privilegeMaterial.superSaltHex);
+  const superKey = await deriveSuperHmacKey(privilegeMaterial);
   const intentHashHex = await sha256Hex(encoder.encode(intent));
   const issuedUnix = Math.floor(Date.now() / 1000);
   if (!Number.isFinite(ttlSecs) || !Number.isInteger(ttlSecs) || ttlSecs < 15 || ttlSecs > 300) {
@@ -852,8 +874,10 @@ function rustAsciiKeyCompare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-async function deriveSuperHmacKey(superPassword: string, saltHex: string): Promise<CryptoKey> {
-  const keyBytes = hexToBytes(await deriveSuperKeyHex(superPassword, saltHex));
+async function deriveSuperHmacKey(material: PrivilegeMaterial): Promise<CryptoKey> {
+  const keyBytes = hexToBytes(
+    (await derivePrivilegeMaterial(material)).superKeyHex,
+  );
   return cryptoProvider().subtle.importKey("raw", bufferSource(keyBytes), { name: "HMAC", hash: "SHA-256" }, false, [
     "sign",
   ]);

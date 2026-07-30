@@ -279,7 +279,7 @@ export function ConfigPanel({
     request: UpsertRuntimeConfigPatchGeneratorRequest,
   ) => Promise<RuntimeConfigPatchGeneratorRecord>;
   privilegeMaterial: PrivilegeMaterial | null;
-  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
 }) {
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
@@ -1494,7 +1494,7 @@ function BulkConfigApply({
   pending: boolean;
   privilegeMaterial: PrivilegeMaterial | null;
   runAction: (action: () => Promise<void>) => Promise<void>;
-  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
 }) {
   const [selectorExpression, setSelectorExpression] = useState(() =>
     readLocalString(CONFIG_BULK_SELECTOR_STORAGE_KEY),
@@ -2252,8 +2252,8 @@ function BulkConfigApply({
           labelPrefix="Runtime config"
           lastPayloadHash={null}
           onOpenUnlock={onOpenPrivilegeUnlock}
-          onPrivilegeMaterialChange={(material) => {
-            setPrivilegeMaterial(material);
+          onPrivilegeMaterialChange={async (material) => {
+            await setPrivilegeMaterial(material);
             clearBulkConfigReview();
           }}
           privilegeMaterial={privilegeMaterial}
@@ -2678,7 +2678,7 @@ function SingleVpsConfig({
   pending: boolean;
   privilegeMaterial: PrivilegeMaterial | null;
   runAction: (action: () => Promise<void>) => Promise<void>;
-  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [clientId, setClientId] = useState(() => readSingleConfigClientId());
@@ -3258,9 +3258,9 @@ function SingleVpsConfig({
               labelPrefix="Runtime config apply"
               lastPayloadHash={overrideValidation?.payloadHashHex ?? null}
               onOpenUnlock={onOpenPrivilegeUnlock}
-              onPrivilegeMaterialChange={(material) => {
+              onPrivilegeMaterialChange={async (material) => {
                 clearSingleConfigReview();
-                setPrivilegeMaterial(material);
+                await setPrivilegeMaterial(material);
               }}
               privilegeMaterial={privilegeMaterial}
               unlockRedirectLabel="Unlock privilege for runtime config apply"

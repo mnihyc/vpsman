@@ -9,6 +9,7 @@ import {
 } from "../bulkJobProgress";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ExecutionResultPanel } from "../components/ExecutionResultPanel";
+import { PrivilegeLockPrompt } from "../components/PrivilegeLockPrompt";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { ActionFeedback } from "../components/ActionFeedback";
 import { VpsCombobox } from "../components/VpsCombobox";
@@ -343,7 +344,7 @@ export function JobDispatchPanel({
   ) => Promise<CommandTemplateRecord>;
   onUpsertCommandTemplate: (request: UpsertCommandTemplateRequest) => Promise<CommandTemplateRecord>;
   privilegeMaterial: PrivilegeMaterial | null;
-  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
 }) {
   const appliedDispatchPresetRequestId = useRef<string | null>(null);
   const [mode, setModeState] = useState<DispatchMode>(fixedMode ?? "shell");
@@ -431,6 +432,7 @@ export function JobDispatchPanel({
   const [transferProgress, setTransferProgress] = useState<ResumableUploadProgress | ResumableDownloadProgress | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [dispatchPromptOpen, setDispatchPromptOpen] = useState(false);
+  const [lockPromptOpen, setLockPromptOpen] = useState(false);
   const [dispatchConfirmation, setDispatchConfirmation] = useState<DispatchConfirmationSnapshot | null>(null);
   const [dispatchReviewIntent, setDispatchReviewIntent] = useState<
     "dispatch" | "approval"
@@ -906,8 +908,9 @@ export function JobDispatchPanel({
   const dispatchFeedbackTone =
     actionError || selectorVerificationError ? "danger" : "progress";
 
-  function lockPrivilege() {
-    setPrivilegeMaterial(null);
+  async function lockPrivilege() {
+    setLockPromptOpen(false);
+    await setPrivilegeMaterial(null);
     setActionError(null);
     clearDispatchReview();
   }
@@ -1593,7 +1596,11 @@ export function JobDispatchPanel({
         </div>
         <div className="headerActionStack">
           {privilegeMaterial ? (
-            <button className="secondaryAction" onClick={lockPrivilege} type="button">
+            <button
+              className="secondaryAction"
+              onClick={() => setLockPromptOpen(true)}
+              type="button"
+            >
               <LockKeyhole size={17} />
               Lock
             </button>
@@ -2151,6 +2158,11 @@ export function JobDispatchPanel({
         onOpenUnlock={onOpenPrivilegeUnlock}
         onPrivilegeMaterialChange={setPrivilegeMaterial}
         privilegeMaterial={privilegeMaterial}
+      />
+      <PrivilegeLockPrompt
+        onCancel={() => setLockPromptOpen(false)}
+        onConfirm={() => void lockPrivilege()}
+        open={lockPromptOpen}
       />
     </section>
   );

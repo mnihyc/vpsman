@@ -10,6 +10,7 @@ import {
   ConsoleShell,
   type CommandPaletteItem,
 } from "./components/ConsoleShell";
+import { PrivilegeLockPrompt } from "./components/PrivilegeLockPrompt";
 import { PrivilegeUnlockDialog } from "./components/PrivilegeUnlockDialog";
 import { AdminRoleBoundary } from "./components/RoleBoundary";
 import { WorkspaceErrorBoundary } from "./components/WorkspaceErrorBoundary";
@@ -20,8 +21,16 @@ import { JobEvidencePanel } from "./panels/audit/JobEvidencePanel";
 import { SessionEvidencePanel } from "./panels/audit/SessionEvidencePanel";
 import { JobArtifactsPanel } from "./panels/jobs/JobArtifactsPanel";
 import { PanelDisplayProvider } from "./panelDisplay";
+import { ApiResponseError, apiPost } from "./api";
 import type { ActiveView, AgentView, FleetSummary } from "./types";
-import type { PrivilegeMaterial } from "./privilege";
+import {
+  buildPrivilegeAssertion,
+  canonicalDbPrivilegeIntent,
+  derivePrivilegeMaterial,
+  normalizeHex,
+  type DerivedPrivilegeMaterial,
+  type PrivilegeMaterial,
+} from "./privilege";
 import {
   defaultSubpages,
   FLEET_DETAIL_LIMIT,
@@ -49,6 +58,141 @@ import type {
 import { retryableLazy } from "./lazyImport";
 
 type ReleaseRouteTarget = AgentView | string;
+
+const PRIVILEGE_GRANT_STORAGE_KEY = "vpsman.privilegeGrant";
+const PRIVILEGE_UNLOCK_ACTION = "privilege.unlock";
+
+type PrivilegeGrant = {
+  material: DerivedPrivilegeMaterial;
+  operatorId: string;
+};
+
+type StoredPrivilegeGrant = PrivilegeGrant & {
+  version: 1;
+};
+
+type PrivilegeVerificationResponse = {
+  verified: boolean;
+};
+
+class PrivilegeVerificationDeniedError extends Error {}
+class PrivilegeVerificationSupersededError extends Error {}
+
+type StoredPrivilegeGrantRead = {
+  clearInvalidRecord: boolean;
+  error: string | null;
+  grant: PrivilegeGrant | null;
+};
+
+function readStoredPrivilegeGrant(): StoredPrivilegeGrantRead {
+  if (typeof window === "undefined") {
+    return { clearInvalidRecord: false, error: null, grant: null };
+  }
+  let raw: string | null;
+  try {
+    raw = window.localStorage.getItem(PRIVILEGE_GRANT_STORAGE_KEY);
+  } catch {
+    return {
+      clearInvalidRecord: false,
+      error:
+        "Browser storage is unavailable, so the saved privilege unlock could not be read. The console remains locked.",
+      grant: null,
+    };
+  }
+  if (!raw) {
+    return { clearInvalidRecord: false, error: null, grant: null };
+  }
+  try {
+    const stored = JSON.parse(raw) as Partial<StoredPrivilegeGrant>;
+    if (
+      stored.version !== 1 ||
+      typeof stored.operatorId !== "string" ||
+      !stored.operatorId.trim() ||
+      typeof stored.material?.superKeyHex !== "string"
+    ) {
+      throw new Error("record shape is invalid");
+    }
+    const superKeyHex = normalizeHex(stored.material.superKeyHex);
+    if (superKeyHex.length !== 64) {
+      throw new Error("derived signing key is invalid");
+    }
+    return {
+      clearInvalidRecord: false,
+      error: null,
+      grant: {
+        material: { superKeyHex },
+        operatorId: stored.operatorId,
+      },
+    };
+  } catch {
+    return {
+      clearInvalidRecord: true,
+      error:
+        "The saved privilege unlock was invalid and has been cleared. Enter the current super password and privilege salt again.",
+      grant: null,
+    };
+  }
+}
+
+function persistPrivilegeGrant(grant: PrivilegeGrant | null): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  if (!grant) {
+    window.localStorage.removeItem(PRIVILEGE_GRANT_STORAGE_KEY);
+    return;
+  }
+  const stored: StoredPrivilegeGrant = {
+    ...grant,
+    version: 1,
+  };
+  window.localStorage.setItem(
+    PRIVILEGE_GRANT_STORAGE_KEY,
+    JSON.stringify(stored),
+  );
+}
+
+async function verifyPrivilegeMaterial(
+  apiToken: string,
+  operatorId: string,
+  material: PrivilegeMaterial,
+): Promise<DerivedPrivilegeMaterial> {
+  const derivedMaterial = await derivePrivilegeMaterial(material);
+  const intent = canonicalDbPrivilegeIntent({
+    action: PRIVILEGE_UNLOCK_ACTION,
+    confirmed: true,
+    target: operatorId,
+  });
+  const privilegeAssertion = await buildPrivilegeAssertion({
+    intent,
+    privilegeMaterial: derivedMaterial,
+    ttlSecs: 60,
+  });
+  try {
+    const response = await apiPost<PrivilegeVerificationResponse>(
+      "/api/v1/auth/privilege/verify",
+      apiToken,
+      { privilege_assertion: privilegeAssertion },
+    );
+    if (response.verified !== true) {
+      throw new Error(
+        "Privilege verification returned no approval. The console remains locked.",
+      );
+    }
+    return derivedMaterial;
+  } catch (error) {
+    if (
+      error instanceof ApiResponseError &&
+      error.status === 403 &&
+      error.code.startsWith("privilege_verification")
+    ) {
+      throw new PrivilegeVerificationDeniedError(
+        "Super password or privilege salt did not match. Check both values and try again.",
+      );
+    }
+    throw error;
+  }
+}
 
 function combineErrors(
   ...errors: Array<string | null | undefined>
@@ -681,50 +825,245 @@ export function App() {
     useState<"register" | null>(null);
   const [networkAdapterWorkflowIntent, setNetworkAdapterWorkflowIntent] =
     useState<"runtime_tunnel" | "routing_cost" | null>(null);
-  const [privilegeGrant, setPrivilegeGrant] = useState<{
-    material: PrivilegeMaterial;
-    operatorId: string;
-  } | null>(null);
+  const [privilegeGrant, setPrivilegeGrant] = useState<PrivilegeGrant | null>(
+    null,
+  );
+  const [storedPrivilegeGrant, setStoredPrivilegeGrant] = useState(() =>
+    readStoredPrivilegeGrant(),
+  );
   const [privilegeUnlockOpen, setPrivilegeUnlockOpen] = useState(false);
+  const [privilegeLockPromptOpen, setPrivilegeLockPromptOpen] = useState(false);
+  const [privilegeRestoreError, setPrivilegeRestoreError] = useState<
+    string | null
+  >(storedPrivilegeGrant.error);
+  const privilegeOperationGenerationRef = useRef(0);
+  const privilegeRestoreInFlightRef = useRef<{
+    key: string;
+    promise: Promise<void>;
+  } | null>(null);
   const closePrivilegeUnlock = useCallback(
-    () => setPrivilegeUnlockOpen(false),
+    () => {
+      setPrivilegeUnlockOpen(false);
+      setPrivilegeRestoreError(null);
+    },
     [],
   );
   const dashboard = useDashboardData(activeView);
+  const privilegeAuthContextRef = useRef({
+    apiToken: dashboard.apiToken,
+    operatorId: dashboard.operator?.id ?? null,
+  });
+  privilegeAuthContextRef.current = {
+    apiToken: dashboard.apiToken,
+    operatorId: dashboard.operator?.id ?? null,
+  };
   const privilegeMaterial =
     privilegeGrant &&
     dashboard.apiToken &&
     dashboard.operator?.id === privilegeGrant.operatorId
       ? privilegeGrant.material
       : null;
+  const clearPrivilegeMaterial = useCallback(() => {
+    privilegeOperationGenerationRef.current += 1;
+    privilegeRestoreInFlightRef.current = null;
+    persistPrivilegeGrant(null);
+    setPrivilegeGrant(null);
+    setStoredPrivilegeGrant({
+      clearInvalidRecord: false,
+      error: null,
+      grant: null,
+    });
+  }, []);
   const setPrivilegeMaterial = useCallback(
-    (material: PrivilegeMaterial | null) => {
-      if (!material || !dashboard.apiToken || !dashboard.operator?.id) {
-        setPrivilegeGrant(null);
+    async (material: PrivilegeMaterial | null) => {
+      if (!material) {
+        clearPrivilegeMaterial();
         return;
       }
-      setPrivilegeGrant({
-        material,
-        operatorId: dashboard.operator.id,
-      });
+      if (!dashboard.apiToken || !dashboard.operator?.id) {
+        throw new Error(
+          "An authenticated operator profile is required before privilege can be verified.",
+        );
+      }
+      const apiToken = dashboard.apiToken;
+      const operatorId = dashboard.operator.id;
+      const generation = privilegeOperationGenerationRef.current + 1;
+      privilegeOperationGenerationRef.current = generation;
+      const operationIsCurrent = () => {
+        const current = privilegeAuthContextRef.current;
+        return (
+          privilegeOperationGenerationRef.current === generation &&
+          Boolean(current.apiToken) &&
+          current.operatorId === operatorId
+        );
+      };
+      let verifiedMaterial: DerivedPrivilegeMaterial;
+      try {
+        verifiedMaterial = await verifyPrivilegeMaterial(
+          apiToken,
+          operatorId,
+          material,
+        );
+      } catch (error) {
+        if (!operationIsCurrent()) {
+          throw new PrivilegeVerificationSupersededError();
+        }
+        throw error;
+      }
+      if (!operationIsCurrent()) {
+        throw new PrivilegeVerificationSupersededError();
+      }
+      const grant = {
+        material: verifiedMaterial,
+        operatorId,
+      };
+      persistPrivilegeGrant(grant);
+      setPrivilegeGrant(grant);
+      setPrivilegeRestoreError(null);
     },
-    [dashboard.apiToken, dashboard.operator?.id],
+    [clearPrivilegeMaterial, dashboard.apiToken, dashboard.operator?.id],
   );
   useEffect(() => {
-    if (!dashboard.apiToken) {
-      setPrivilegeGrant(null);
-      setPrivilegeUnlockOpen(false);
+    if (!storedPrivilegeGrant.clearInvalidRecord) {
+      return;
     }
-  }, [dashboard.apiToken]);
+    try {
+      persistPrivilegeGrant(null);
+    } catch {
+      setPrivilegeRestoreError(
+        "The saved privilege unlock is invalid, but browser storage prevented clearing it. Privilege remains locked; allow local storage and retry.",
+      );
+    }
+  }, [storedPrivilegeGrant.clearInvalidRecord]);
+  useEffect(() => {
+    if (!dashboard.apiToken && dashboard.authRequired) {
+      clearPrivilegeMaterial();
+      setPrivilegeUnlockOpen(false);
+      setPrivilegeLockPromptOpen(false);
+    }
+  }, [clearPrivilegeMaterial, dashboard.apiToken, dashboard.authRequired]);
   useEffect(() => {
     if (
       privilegeGrant &&
-      privilegeGrant.operatorId !== dashboard.operator?.id
+      dashboard.operator &&
+      privilegeGrant.operatorId !== dashboard.operator.id
     ) {
-      setPrivilegeGrant(null);
+      clearPrivilegeMaterial();
       setPrivilegeUnlockOpen(false);
+      setPrivilegeLockPromptOpen(false);
     }
-  }, [dashboard.operator?.id, privilegeGrant]);
+  }, [clearPrivilegeMaterial, dashboard.operator, privilegeGrant]);
+  useEffect(() => {
+    const stored = storedPrivilegeGrant.grant;
+    if (!stored || !dashboard.apiToken || !dashboard.operator?.id) {
+      return undefined;
+    }
+    if (stored.operatorId !== dashboard.operator.id) {
+      persistPrivilegeGrant(null);
+      setStoredPrivilegeGrant({
+        clearInvalidRecord: false,
+        error: null,
+        grant: null,
+      });
+      return undefined;
+    }
+    let disposed = false;
+    const restoreKey = `${stored.operatorId}:${stored.material.superKeyHex}`;
+    let restore = privilegeRestoreInFlightRef.current;
+    if (!restore || restore.key !== restoreKey) {
+      restore = {
+        key: restoreKey,
+        promise: setPrivilegeMaterial(stored.material),
+      };
+      privilegeRestoreInFlightRef.current = restore;
+    }
+    const restorePromise = restore.promise;
+    void restorePromise
+      .then(() => {
+        if (!disposed) {
+          setStoredPrivilegeGrant({
+            clearInvalidRecord: false,
+            error: null,
+            grant: null,
+          });
+        }
+      })
+      .catch((error: unknown) => {
+        if (disposed) {
+          return;
+        }
+        if (error instanceof PrivilegeVerificationSupersededError) {
+          return;
+        }
+        setPrivilegeGrant(null);
+        setStoredPrivilegeGrant({
+          clearInvalidRecord: false,
+          error: null,
+          grant: null,
+        });
+        const denied = error instanceof PrivilegeVerificationDeniedError;
+        if (denied) {
+          persistPrivilegeGrant(null);
+        }
+        setPrivilegeRestoreError(
+          denied
+            ? `The saved privilege unlock is no longer accepted and was cleared. ${error.message}`
+            : error instanceof Error
+              ? `The saved privilege unlock could not be verified. It remains saved; refresh to retry when the verifier is available. ${error.message}`
+              : "The saved privilege unlock could not be verified. It remains saved; refresh to retry when the verifier is available.",
+        );
+        setPrivilegeUnlockOpen(true);
+      })
+      .finally(() => {
+        if (privilegeRestoreInFlightRef.current?.promise === restorePromise) {
+          privilegeRestoreInFlightRef.current = null;
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [
+    dashboard.apiToken,
+    dashboard.operator?.id,
+    setPrivilegeMaterial,
+    storedPrivilegeGrant.grant,
+  ]);
+  useEffect(() => {
+    if (privilegeRestoreError && dashboard.apiToken && dashboard.operator?.id) {
+      setPrivilegeUnlockOpen(true);
+    }
+  }, [dashboard.apiToken, dashboard.operator?.id, privilegeRestoreError]);
+  useEffect(() => {
+    const handlePrivilegeStorage = (event: StorageEvent) => {
+      if (
+        event.key !== PRIVILEGE_GRANT_STORAGE_KEY ||
+        event.storageArea !== window.localStorage
+      ) {
+        return;
+      }
+      privilegeOperationGenerationRef.current += 1;
+      privilegeRestoreInFlightRef.current = null;
+      setPrivilegeGrant(null);
+      setPrivilegeLockPromptOpen(false);
+      if (event.newValue === null) {
+        setStoredPrivilegeGrant({
+          clearInvalidRecord: false,
+          error: null,
+          grant: null,
+        });
+        setPrivilegeRestoreError(null);
+        setPrivilegeUnlockOpen(false);
+        return;
+      }
+      const stored = readStoredPrivilegeGrant();
+      setStoredPrivilegeGrant(stored);
+      setPrivilegeRestoreError(stored.error);
+    };
+    window.addEventListener("storage", handlePrivilegeStorage);
+    return () => {
+      window.removeEventListener("storage", handlePrivilegeStorage);
+    };
+  }, []);
   const fleetViews = useFleetViews(dashboard.agents);
   const operatorPreferences = useMemo(
     () => sanitizeOperatorPreferences(dashboard.operator?.preferences),
@@ -1066,9 +1405,15 @@ export function App() {
     setPrivilegeUnlockOpen(true);
   }
 
+  function requestPrivilegeLock() {
+    setPrivilegeLockPromptOpen(true);
+  }
+
   function lockPrivilege() {
-    setPrivilegeMaterial(null);
+    clearPrivilegeMaterial();
     setPrivilegeUnlockOpen(false);
+    setPrivilegeLockPromptOpen(false);
+    setPrivilegeRestoreError(null);
   }
 
   function clearOperatorSession() {
@@ -2549,7 +2894,7 @@ export function App() {
           onClearFleetView={fleetViews.clearFleetView}
           onDeleteSavedFleetView={fleetViews.deleteSavedFleetView}
           onFleetQueryChange={fleetViews.setFleetQuery}
-          onLockPrivilege={lockPrivilege}
+          onLockPrivilege={requestPrivilegeLock}
           onOpenAccessControls={openPrivilegeUnlock}
           onRetryAuthRefresh={() => void dashboard.retryAuthRefresh()}
           onSaveFleetView={fleetViews.saveFleetView}
@@ -2562,6 +2907,11 @@ export function App() {
           summaryScopeLabel={summaryScopeLabel}
           wsState={dashboard.wsState}
         >
+          <PrivilegeLockPrompt
+            onCancel={() => setPrivilegeLockPromptOpen(false)}
+            onConfirm={lockPrivilege}
+            open={privilegeLockPromptOpen}
+          />
           <WorkspaceErrorBoundary
             resetKey={`${activeView}:${activeSubpage}`}
             subpageLabel={pageTitle}
@@ -2573,6 +2923,7 @@ export function App() {
           </WorkspaceErrorBoundary>
         </ConsoleShell>
         <PrivilegeUnlockDialog
+          error={privilegeRestoreError}
           onClose={closePrivilegeUnlock}
           onPrivilegeMaterialChange={setPrivilegeMaterial}
           open={privilegeUnlockOpen}

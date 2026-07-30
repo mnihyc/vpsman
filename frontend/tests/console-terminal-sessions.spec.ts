@@ -1,7 +1,11 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
 import { terminalSessions } from "./support/jobSessionFixtures";
-import { openConsoleSubpage, unlockPrivilegeFromTop } from "./support/consoleNavigation";
+import {
+  lockPrivilegeFromTop,
+  openConsoleSubpage,
+  unlockPrivilegeFromTop,
+} from "./support/consoleNavigation";
 
 test.beforeEach(async ({ page }, testInfo) => {
   const retainedRangeSessions = terminalSessions.map((session, index) =>
@@ -274,7 +278,7 @@ test("reconciles terminal launcher and input feedback after privilege unlock", a
     "Unlock privilege, then open the terminal from this launcher.",
   );
 
-  await page.locator(".topbar").getByRole("button", { name: "Lock privilege" }).click();
+  await lockPrivilegeFromTop(page);
   const input = panel.getByLabel("Terminal input bytes");
   await input.fill("preserved terminal input");
   await panel.getByRole("button", { name: "Send input" }).click();

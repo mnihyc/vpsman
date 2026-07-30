@@ -167,7 +167,7 @@ type BackupsPanelProps = {
   onRefresh: () => Promise<void>;
   onSelectSubpage: (subpage: string) => void;
   privilegeMaterial: PrivilegeMaterial | null;
-  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
 };
 
 type RestoreRunInput = {
@@ -3056,8 +3056,8 @@ export function BackupsPanel({
               <PrivilegeVaultBox
                 lastPayloadHash={lastPayloadHash}
                 onOpenUnlock={onOpenPrivilegeUnlock}
-                onPrivilegeMaterialChange={(material) => {
-                  setPrivilegeMaterial(material);
+                onPrivilegeMaterialChange={async (material) => {
+                  await setPrivilegeMaterial(material);
                   clearBackupConfirmations([
                     "restore-plan",
                     "restore-run",
@@ -3168,8 +3168,8 @@ export function BackupsPanel({
               <PrivilegeVaultBox
                 lastPayloadHash={lastPayloadHash}
                 onOpenUnlock={onOpenPrivilegeUnlock}
-                onPrivilegeMaterialChange={(material) => {
-                  setPrivilegeMaterial(material);
+                onPrivilegeMaterialChange={async (material) => {
+                  await setPrivilegeMaterial(material);
                   clearBackupConfirmations(["migration-link", "migration-run"]);
                 }}
                 privilegeMaterial={privilegeMaterial}

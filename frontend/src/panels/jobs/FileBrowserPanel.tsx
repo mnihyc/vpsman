@@ -136,7 +136,7 @@ export function FileBrowserPanel({
   onOpenTransfers?: (path: string) => void;
   onOpenPrivilegeUnlock: () => void;
   privilegeMaterial: PrivilegeMaterial | null;
-  setPrivilegeMaterial: (value: PrivilegeMaterial | null) => void;
+  setPrivilegeMaterial: (value: PrivilegeMaterial | null) => Promise<void>;
 }) {
   const saved = readBrowserState();
   const [targetClientId, setTargetClientId] = useState(saved.targetClientId || agents[0]?.id || "");

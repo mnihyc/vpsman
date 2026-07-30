@@ -88,6 +88,14 @@ terminal session evidence, while Access > Gateway sessions shows live and ended
 agent streams. Access > VPS identities owns agent key lifecycle, and Access >
 Privilege vault owns local privilege unlock state.
 
+Unlock verifies a non-mutating, request-bound assertion with the gateway before
+the console reports success. The entered super password and privilege salt stay
+in the browser. The console keeps only the derived signing capability in local
+storage, bound to the signed-in operator, so refreshes and browser restarts
+remain unlocked after gateway re-verification. Lock, sign-out, or an operator
+change clears it. The optional encrypted local vault is separate and still
+requires its local passphrase when used.
+
 Identity registration, key rotation, key revocation, and VPS deletion separate
 the durable identity change from follow-up work. The API returns explicit
 gateway-disconnect and terminal-reconciliation outcomes after the committed

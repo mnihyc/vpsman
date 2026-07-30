@@ -2,10 +2,33 @@ import { expect, test, type Page } from "@playwright/test";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
 import {
   activate,
+  lockPrivilegeFromTop,
   openConsoleSubpage,
   unlockPrivilegeFromTop,
   waitForConsoleShell,
 } from "./support/consoleNavigation";
+
+async function seedAuthenticatedStoredPrivilegeGrant(
+  page: Page,
+  grant: string,
+) {
+  await page.addInitScript(
+    ({ storedGrant }) => {
+      window.localStorage.setItem("vpsman.accessToken", "a".repeat(64));
+      window.localStorage.setItem("vpsman.refreshToken", "b".repeat(64));
+      window.localStorage.setItem("vpsman.privilegeGrant", storedGrant);
+    },
+    { storedGrant: grant },
+  );
+}
+
+function validStoredPrivilegeGrant() {
+  return JSON.stringify({
+    material: { superKeyHex: "c".repeat(64) },
+    operatorId: "99999999-aaaa-4bbb-8ccc-000000000001",
+    version: 1,
+  });
+}
 
 test("presents admin-only records as role boundaries without forbidden config reads", async ({
   page,
@@ -138,6 +161,309 @@ test("submits the privilege unlock form with Enter", async ({ page }, testInfo) 
   ).toBeVisible();
 });
 
+test("restores a persistent verified unlock after refresh and confirms before locking", async ({
+  context,
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "topbar privilege persistence is covered in the desktop console",
+  );
+  await installConsoleApiMock(page);
+  await page.goto("/");
+  await unlockPrivilegeFromTop(page);
+
+  await expect(
+    page.getByLabel("Privilege verified for this browser"),
+  ).toBeVisible();
+  const storedGrant = await page.evaluate(() => {
+    const raw = window.localStorage.getItem("vpsman.privilegeGrant");
+    return raw ? (JSON.parse(raw) as Record<string, unknown>) : null;
+  });
+  expect(storedGrant).toMatchObject({
+    material: { superKeyHex: expect.stringMatching(/^[0-9a-f]{64}$/) },
+    operatorId: "99999999-aaaa-4bbb-8ccc-000000000001",
+    version: 1,
+  });
+  expect(JSON.stringify(storedGrant)).not.toContain("local-super-password");
+  expect(JSON.stringify(storedGrant)).not.toContain(
+    "00112233445566778899aabbccddeeff",
+  );
+  expect(
+    await page.evaluate(() =>
+      window.sessionStorage.getItem("vpsman.privilegeGrant"),
+    ),
+  ).toBeNull();
+
+  await page.reload();
+  await waitForConsoleShell(page);
+  await expect(
+    page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
+  ).toBeVisible();
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const requests = (
+          window as typeof window & {
+            __vpsmanTestRequests?: { privilegeVerifications?: unknown[] };
+          }
+        ).__vpsmanTestRequests;
+        return requests?.privilegeVerifications?.length ?? 0;
+      }),
+    )
+    .toBe(1);
+
+  await activate(
+    page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
+  );
+  const prompt = page.getByLabel("Confirm privilege lock");
+  await expect(prompt).toBeVisible();
+  await expect
+    .poll(async () => {
+      const [bounds, viewport] = await Promise.all([
+        prompt.boundingBox(),
+        Promise.resolve(page.viewportSize()),
+      ]);
+      return Boolean(
+        bounds &&
+          viewport &&
+          bounds.y >= 0 &&
+          bounds.y + bounds.height <= viewport.height,
+      );
+    })
+    .toBe(true);
+  await activate(prompt.getByRole("button", { name: "Cancel" }));
+  await expect(
+    page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(() =>
+      window.localStorage.getItem("vpsman.privilegeGrant"),
+    ),
+  ).not.toBeNull();
+
+  const peerPage = await context.newPage();
+  await installConsoleApiMock(peerPage);
+  await peerPage.goto("/");
+  await waitForConsoleShell(peerPage);
+  await expect(
+    peerPage.locator(".topbar").getByRole("button", {
+      name: "Lock privilege",
+    }),
+  ).toBeVisible();
+
+  await lockPrivilegeFromTop(page);
+  expect(
+    await page.evaluate(() =>
+      window.localStorage.getItem("vpsman.privilegeGrant"),
+    ),
+  ).toBeNull();
+  await expect(
+    peerPage.locator(".topbar").getByRole("button", {
+      name: "Open privilege unlock",
+    }),
+  ).toBeVisible();
+  await peerPage.close();
+  await page.reload();
+  await waitForConsoleShell(page);
+  await expect(
+    page
+      .locator(".topbar")
+      .getByRole("button", { name: "Open privilege unlock" }),
+  ).toBeVisible();
+});
+
+test("keeps a saved unlock when restore verification is temporarily unavailable", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "persistent privilege restoration is covered in the desktop console",
+  );
+  await installConsoleApiMock(page, {
+    privilegeVerificationFailure: "unavailable",
+  });
+  await seedAuthenticatedStoredPrivilegeGrant(
+    page,
+    validStoredPrivilegeGrant(),
+  );
+  await page.goto("/");
+  await waitForConsoleShell(page);
+
+  const dialog = page.getByRole("dialog", { name: "Unlock privilege" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator(".actionFeedbackDanger")).toContainText(
+    "It remains saved",
+  );
+  expect(
+    await page.evaluate(() =>
+      window.localStorage.getItem("vpsman.privilegeGrant"),
+    ),
+  ).not.toBeNull();
+});
+
+test("explains and clears a malformed saved privilege unlock", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "stored privilege recovery feedback is covered in the desktop console",
+  );
+  await installConsoleApiMock(page);
+  await seedAuthenticatedStoredPrivilegeGrant(page, "{malformed");
+  await page.goto("/");
+  await waitForConsoleShell(page);
+
+  const dialog = page.getByRole("dialog", { name: "Unlock privilege" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator(".actionFeedbackDanger")).toContainText(
+    "saved privilege unlock was invalid and has been cleared",
+  );
+  expect(
+    await page.evaluate(() =>
+      window.localStorage.getItem("vpsman.privilegeGrant"),
+    ),
+  ).toBeNull();
+});
+
+test("does not restore privilege after sign-out wins a delayed verification race", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "privilege restore race handling is covered in the desktop console",
+  );
+  await installConsoleApiMock(page, {
+    privilegeVerificationDelayMs: 5_000,
+  });
+  await seedAuthenticatedStoredPrivilegeGrant(
+    page,
+    validStoredPrivilegeGrant(),
+  );
+  await page.goto("/");
+  await waitForConsoleShell(page);
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const requests = (
+          window as typeof window & {
+            __vpsmanTestRequests?: { privilegeVerifications?: unknown[] };
+          }
+        ).__vpsmanTestRequests;
+        return requests?.privilegeVerifications?.length ?? 0;
+      }),
+    )
+    .toBe(1);
+
+  await activate(
+    page.locator(".topbar").getByRole("button", { name: "Open sessions" }),
+  );
+  await activate(
+    page
+      .locator(".auditSessionEvidencePanel")
+      .getByRole("button", { name: "Sign out", exact: true }),
+  );
+
+  await expect(
+    page.getByRole("heading", { name: "Sign in" }),
+  ).toBeVisible();
+  await page.waitForTimeout(5_500);
+  await expect
+    .poll(async () =>
+      page.evaluate(() =>
+        window.localStorage.getItem("vpsman.privilegeGrant"),
+      ),
+    )
+    .toBeNull();
+});
+
+test("keeps privilege locked when password or salt verification is denied", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "privilege verification feedback is shared with the desktop unlock dialog",
+  );
+  await installConsoleApiMock(page, {
+    privilegeVerificationFailure: "denied",
+  });
+  await page.goto("/");
+  await waitForConsoleShell(page);
+  await activate(
+    page
+      .locator(".topbar")
+      .getByRole("button", { name: "Open privilege unlock" }),
+  );
+  const dialog = page.getByRole("dialog", { name: "Unlock privilege" });
+  await dialog.getByLabel(/super password/i).fill("wrong-password");
+  await dialog
+    .getByLabel(/(privilege salt|verifier salt hex)/i)
+    .fill("00112233445566778899aabbccddeeff");
+  await dialog
+    .getByRole("checkbox", { name: /Keep encrypted in this browser/ })
+    .check();
+  await dialog
+    .getByLabel(/new vault passphrase/i)
+    .fill("local-vault-passphrase");
+  await activate(
+    dialog
+      .getByLabel("Unlock with privilege material")
+      .getByRole("button", { name: "Unlock", exact: true }),
+  );
+
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator(".actionFeedbackDanger")).toContainText(
+    "Super password or privilege salt did not match",
+  );
+  await expect(
+    page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
+  ).toHaveCount(0);
+  expect(
+    await page.evaluate(() =>
+      window.localStorage.getItem("vpsman.privilegeGrant"),
+    ),
+  ).toBeNull();
+  expect(
+    await page.evaluate(() =>
+      window.localStorage.getItem("vpsman.privilegeVault"),
+    ),
+  ).toBeNull();
+});
+
+test("reports verifier unavailability without accusing the entered material", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "privilege verification feedback is shared with the desktop unlock dialog",
+  );
+  await installConsoleApiMock(page, {
+    privilegeVerificationFailure: "unavailable",
+  });
+  await page.goto("/");
+  await waitForConsoleShell(page);
+  await activate(
+    page
+      .locator(".topbar")
+      .getByRole("button", { name: "Open privilege unlock" }),
+  );
+  const dialog = page.getByRole("dialog", { name: "Unlock privilege" });
+  await dialog.getByLabel(/super password/i).fill("local-super-password");
+  await dialog
+    .getByLabel(/(privilege salt|verifier salt hex)/i)
+    .fill("00112233445566778899aabbccddeeff");
+  await activate(
+    dialog
+      .getByLabel("Unlock with privilege material")
+      .getByRole("button", { name: "Unlock", exact: true }),
+  );
+
+  const feedback = dialog.locator(".actionFeedbackDanger");
+  await expect(feedback).toContainText("Privilege Verification Unavailable");
+  await expect(feedback).not.toContainText("did not match");
+  await expect(dialog).toBeVisible();
+});
+
 test("privilege unlock reaches refreshable session actions while Audit evidence rows stay read-only", async ({
   page,
 }, testInfo) => {
@@ -196,9 +522,7 @@ test("privilege unlock reaches refreshable session actions while Audit evidence 
       .getByRole("button", { name: "Cancel" }),
   );
 
-  await activate(
-    page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
-  );
+  await lockPrivilegeFromTop(page);
   await openConsoleSubpage(page, "Audit", "Sessions");
   await expect(
     page

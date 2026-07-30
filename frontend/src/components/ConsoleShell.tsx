@@ -797,16 +797,27 @@ export function ConsoleShell({
               </button>
             )}
             {privilegeUnlocked ? (
-              <button
-                aria-label="Lock privilege"
-                className="secondaryAction"
-                onClick={onLockPrivilege}
-                title="Lock privilege unlock in browser memory"
-                type="button"
-              >
-                <LockKeyhole size={18} />
-                <span>Lock</span>
-              </button>
+              <>
+                <span
+                  aria-label="Privilege verified for this browser"
+                  className="controlPlanePill"
+                  role="status"
+                  title="Privilege is gateway-verified and remains unlocked in this browser"
+                >
+                  <ShieldCheck size={17} />
+                  <span>Verified</span>
+                </span>
+                <button
+                  aria-label="Lock privilege"
+                  className="secondaryAction"
+                  onClick={onLockPrivilege}
+                  title="Clear the saved privilege unlock and lock privileged actions"
+                  type="button"
+                >
+                  <LockKeyhole size={18} />
+                  <span>Lock</span>
+                </button>
+              </>
             ) : (
               <button
                 aria-label="Open privilege unlock"

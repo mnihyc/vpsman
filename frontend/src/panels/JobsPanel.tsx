@@ -356,7 +356,7 @@ export function JobsPanel({
   ) => Promise<CommandTemplateRecord>;
   pendingSelectedJobId?: string | null;
   privilegeMaterial: PrivilegeMaterial | null;
-  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
 }) {
   const { preferences, vpsNameDisplayMode } = usePanelDisplaySettings();
   const targetDetailRef = useRef<HTMLDivElement | null>(null);
