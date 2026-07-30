@@ -11,9 +11,9 @@ fn test_plan(manager: RuntimeTunnelManager) -> TunnelPlan {
         kind: TunnelKind::Gre,
         runtime_control: RuntimeTunnelControl {
             manager,
-            left_adapter_template_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+            left_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
                 .then(|| "11111111-1111-4111-8111-111111111111".to_string()),
-            right_adapter_template_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+            right_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
                 .then(|| "22222222-2222-4222-8222-222222222222".to_string()),
             ..RuntimeTunnelControl::default()
         },

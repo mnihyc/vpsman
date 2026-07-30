@@ -918,9 +918,9 @@
   min-width: 260px;
 }
 
-.fileBrowserPanel input:not([type="checkbox"]):not([type="file"]),
+.fileBrowserPanel input:not([type="checkbox"]):not([type="file"]):not(.searchExpressionEditor):not(.vpsComboboxEditor),
 .fileBrowserPanel select,
-.multiFilePanel input:not([type="checkbox"]):not([type="file"]),
+.multiFilePanel input:not([type="checkbox"]):not([type="file"]):not(.searchExpressionEditor):not(.vpsComboboxEditor),
 .multiFilePanel select,
 .multiFilePanel textarea {
   box-sizing: border-box;
@@ -933,9 +933,9 @@
   padding: 7px 10px;
 }
 
-.fileBrowserPanel input:not([type="checkbox"]):not([type="file"]):focus,
+.fileBrowserPanel input:not([type="checkbox"]):not([type="file"]):not(.searchExpressionEditor):not(.vpsComboboxEditor):focus,
 .fileBrowserPanel select:focus,
-.multiFilePanel input:not([type="checkbox"]):not([type="file"]):focus,
+.multiFilePanel input:not([type="checkbox"]):not([type="file"]):not(.searchExpressionEditor):not(.vpsComboboxEditor):focus,
 .multiFilePanel select:focus,
 .multiFilePanel textarea:focus {
   border-color: var(--primary);

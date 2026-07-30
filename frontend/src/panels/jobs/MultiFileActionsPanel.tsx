@@ -50,6 +50,7 @@ import type {
   JobTargetSelection,
 } from "../../types";
 import { runPanelAction, shortId, statusClass } from "../../utils";
+import { LocalTargetPreview } from "../TargetImpactPreview";
 
 const SELECTOR_STORAGE_KEY = "vpsman.multiFile.selectorExpression";
 const BULK_JOB_TIMEOUT_SECS = 60;
@@ -148,6 +149,9 @@ export function MultiFileActionsPanel({
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [reviewStatus, setReviewStatus] = useState<string | null>(null);
+  const [feedbackLocation, setFeedbackLocation] = useState<
+    "refresh" | "operation"
+  >("operation");
   const [lastPayloadHash, setLastPayloadHash] = useState<string | null>(null);
   const [pendingConfirmation, setPendingConfirmation] = useState<PendingBulkConfirmation | null>(null);
   const [lastSummary, setLastSummary] = useState<BulkSummaryGroup[]>([]);
@@ -189,6 +193,7 @@ export function MultiFileActionsPanel({
   }
 
   async function refreshPreview() {
+    setFeedbackLocation("refresh");
     const reviewGeneration = captureReviewGeneration();
     const reviewSelectorExpression = selectorExpression.trim();
     setReviewStatus("Resolving bulk file scope");
@@ -212,6 +217,7 @@ export function MultiFileActionsPanel({
   }
 
   async function prepareBulkOperation() {
+    setFeedbackLocation("operation");
     const reviewGeneration = captureReviewGeneration();
     const reviewSelectorExpression = selectorExpression.trim();
     setReviewStatus("Preparing bulk file run");
@@ -328,6 +334,7 @@ export function MultiFileActionsPanel({
   }
 
   async function executeBulkOperation(confirmation: PendingBulkConfirmation) {
+    setFeedbackLocation("operation");
     clearExecutionResults();
     await runPanelAction(setPending, setActionError, async () => {
       if (!privilegeMaterial) {
@@ -472,11 +479,13 @@ export function MultiFileActionsPanel({
         </div>
       </div>
 
-      <ActionFeedback
-        className="localActionFeedback"
-        message={actionFeedbackMessage}
-        tone={actionFeedbackTone}
-      />
+      {feedbackLocation === "refresh" ? (
+        <ActionFeedback
+          className="localActionFeedback"
+          message={actionFeedbackMessage}
+          tone={actionFeedbackTone}
+        />
+      ) : null}
 
       <div className="multiFileLayout">
         <section className="multiFileComposer">
@@ -497,6 +506,10 @@ export function MultiFileActionsPanel({
               verification={localMatches.length > 0 ? "valid" : "neutral"}
             />
           </label>
+          <LocalTargetPreview
+            agents={localMatches}
+            ariaLabel="Bulk file local VPS preview"
+          />
           <div className="multiFilePrimaryActions">
             <button
               aria-pressed={action === "download_files"}
@@ -826,6 +839,13 @@ export function MultiFileActionsPanel({
             <ShieldCheck size={14} />
             <span>{runBulkActionLabel(action)}</span>
           </button>
+          {feedbackLocation === "operation" ? (
+            <ActionFeedback
+              className="localActionFeedback"
+              message={actionFeedbackMessage}
+              tone={actionFeedbackTone}
+            />
+          ) : null}
         </section>
 
         <section className="bulkSummaryPane">
@@ -905,16 +925,13 @@ export function MultiFileActionsPanel({
           {preview && lastSummary.length === 0 && (
             <div className="targetImpactPreview">
               <div className="targetImpactHeader">
-                <strong>Target preview</strong>
+                <strong>Server target preview</strong>
                 <span>{vpsCountLabel(preview.target_count)}</span>
               </div>
-              <div className="bulkSummaryClients">
-                {preview.targets.slice(0, 40).map((target) => (
-                  <span key={target.id} title={target.id}>
-                    {targetDisplayName(target)}
-                  </span>
-                ))}
-              </div>
+              <LocalTargetPreview
+                agents={preview.targets}
+                ariaLabel="Bulk file server VPS preview"
+              />
             </div>
           )}
         </section>

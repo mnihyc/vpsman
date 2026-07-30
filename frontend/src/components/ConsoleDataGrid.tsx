@@ -70,7 +70,6 @@ export type ConsoleDataGridColumn<T> = {
   searchValue?: (row: T) => string | number | boolean | null | undefined;
   size?: number;
   sortValue?: (row: T) => string | number | boolean | null | undefined;
-  stickyEnd?: boolean;
 };
 
 export type ConsoleDataGridAction<T> = {
@@ -103,7 +102,6 @@ export function ConsoleDataGrid<T>({
   getRowId,
   itemLabel = "rows",
   mobileFieldLayout = "auto",
-  mobileRowActionLimit = 3,
   expandOnRowClick,
   mobileLayout = "cards",
   onExpandedRowChange,
@@ -112,6 +110,7 @@ export function ConsoleDataGrid<T>({
   openRowLabel = "Open",
   openRowTitle,
   showMobileOpenRowAction = true,
+  showMobileRowActions = true,
   onSelectionChange,
   renderExpandedRow,
   renderSelectionPanel,
@@ -134,7 +133,6 @@ export function ConsoleDataGrid<T>({
   getRowId: (row: T) => string;
   itemLabel?: string;
   mobileFieldLayout?: "auto" | "stacked";
-  mobileRowActionLimit?: number;
   mobileLayout?: "cards" | "table";
   onExpandedRowChange?: (row: T | null) => void;
   onOpenRow?: (row: T) => void;
@@ -142,6 +140,7 @@ export function ConsoleDataGrid<T>({
   openRowLabel?: string;
   openRowTitle?: (row: T) => string;
   showMobileOpenRowAction?: boolean;
+  showMobileRowActions?: boolean;
   onSelectionChange?: (rows: T[]) => void;
   renderExpandedRow?: (row: T) => ReactNode;
   renderSelectionPanel?: (rows: T[]) => ReactNode;
@@ -298,7 +297,6 @@ export function ConsoleDataGrid<T>({
         minSize: column.minSize ?? 96,
         size: column.size ?? 160,
         enableHiding: column.enableHiding ?? true,
-        meta: { stickyEnd: column.stickyEnd === true },
         cell: ({ row }: { row: Row<T> }) => (
           <span
             className={
@@ -366,11 +364,21 @@ export function ConsoleDataGrid<T>({
     .getSelectedRowModel()
     .rows.map((row) => row.original);
   const selectedRowSignature = selectedRows.map(getRowId).join("\u001f");
-  const visibleSelectionActions = actions.filter(
+  const selectionRowActions =
+    selectedRows.length === 1
+      ? rowActions.filter(
+          (rowAction) =>
+            !actions.some(
+              (action) =>
+                action === rowAction || action.label === rowAction.label,
+            ),
+        )
+      : [];
+  const selectionActions = [...actions, ...selectionRowActions];
+  const visibleSelectionActions = selectionActions.filter(
     (action) => !action.hidden?.(selectedRows),
   );
   const contextRowActions = rowActions.length > 0 ? rowActions : actions;
-  const showContextSelectionActions = false;
   const pageCount = table.getPageCount() || 1;
   const currentPage = table.getState().pagination.pageIndex + 1;
   const currentPageRows = table.getRowModel().rows;
@@ -505,14 +513,18 @@ export function ConsoleDataGrid<T>({
       }) ??
       dataCells[1] ??
       null;
-    const primaryRowActions = rowActions
-      .filter((action) => !action.hidden?.([row.original]))
-      .slice(0, Math.max(1, Math.min(6, Math.trunc(mobileRowActionLimit))));
+    const primaryRowActions = showMobileRowActions
+      ? contextRowActions.filter((action) => !action.hidden?.([row.original]))
+      : [];
     const showOpenRowAction = Boolean(onOpenRow && showMobileOpenRowAction);
+    const showExpandedRowAction = showMobileRowActions && Boolean(renderExpandedRow)
+      && !primaryRowActions.some(
+        (action) => action.label.trim().toLowerCase() === "details",
+      );
     const hasCardActions =
       primaryRowActions.length > 0 ||
       showOpenRowAction ||
-      Boolean(renderExpandedRow);
+      showExpandedRowAction;
     const detailCells = dataCells.filter((cell) => {
       if (cell.id === primaryCell?.id || cell.id === stateCell?.id) {
         return false;
@@ -532,9 +544,38 @@ export function ConsoleDataGrid<T>({
 
     return (
       <div
+        aria-expanded={
+          renderExpandedRow ? Boolean(expandedRows[row.id]) : undefined
+        }
         aria-label={`${title} mobile card ${rowId}`}
         className={cardClassName}
+        onClick={() => {
+          if (rowClickExpands) {
+            toggleExpandedRow(row.id, row.original);
+            return;
+          }
+          if (openRowOnClick) {
+            onOpenRow?.(row.original);
+          }
+        }}
+        onKeyDown={(event) => {
+          if (
+            event.target !== event.currentTarget ||
+            (event.key !== "Enter" && event.key !== " ")
+          ) {
+            return;
+          }
+          event.preventDefault();
+          if (rowClickExpands) {
+            toggleExpandedRow(row.id, row.original);
+            return;
+          }
+          if (openRowOnClick) {
+            onOpenRow?.(row.original);
+          }
+        }}
         role="group"
+        tabIndex={rowClickExpands || (openRowOnClick && onOpenRow) ? 0 : undefined}
       >
         <div className="gridMobileCardHeader">
           {selectable ? (
@@ -592,7 +633,7 @@ export function ConsoleDataGrid<T>({
           </div>
         ) : null}
 
-        {(primaryRowActions.length > 0 || showOpenRowAction || renderExpandedRow) && (
+        {(primaryRowActions.length > 0 || showOpenRowAction || showExpandedRowAction) && (
           <div className="gridMobileActions">
             {primaryRowActions.map((action) => {
               const sourceRows = [row.original];
@@ -631,7 +672,7 @@ export function ConsoleDataGrid<T>({
                 {openRowLabel}
               </button>
             ) : null}
-            {renderExpandedRow ? (
+            {showExpandedRowAction ? (
               <button
                 aria-label={`${expandedRows[row.id] ? "Hide" : "Show"} details for ${title} row ${rowId}`}
                 aria-expanded={Boolean(expandedRows[row.id])}
@@ -766,15 +807,23 @@ export function ConsoleDataGrid<T>({
               </span>
             </button>
           )}
-          {selectable && visibleSelectionActions.length > 0 && (
+          {selectable && (actions.length > 0 || rowActions.length > 0) && (
             <DropdownMenu.Root>
               <DropdownMenu.Trigger asChild>
                 <button
                   className="secondaryAction compactAction"
-                  disabled={selectedRows.length === 0}
+                  disabled={
+                    selectedRows.length === 0
+                    || visibleSelectionActions.length === 0
+                    || (actions.length === 0 && selectedRows.length !== 1)
+                  }
                   title={
                     selectedRows.length === 0
                       ? "Select table rows to use actions."
+                      : visibleSelectionActions.length === 0
+                        ? "No actions are available for the selected rows."
+                      : actions.length === 0 && selectedRows.length !== 1
+                        ? "Select exactly one row to use row actions."
                       : `Open actions for ${selectedRows.length} selected ${
                           selectedRows.length === 1 ? "row" : "rows"
                         }.`
@@ -808,6 +857,8 @@ export function ConsoleDataGrid<T>({
                           }
                           disabled={
                             selectedRows.length === 0 ||
+                            (selectionRowActions.includes(action)
+                              && selectedRows.length !== 1) ||
                             action.disabled?.(selectedRows)
                           }
                           onSelect={() => invokeAction(action)}
@@ -872,7 +923,7 @@ export function ConsoleDataGrid<T>({
               onChange={(event) => setPageSize(Number(event.target.value))}
               value={pageSize}
             >
-              {[defaultPageSize, 10, 25, 50, 100]
+              {[defaultPageSize, 10, 25, 50, 100, 250, 500, 1000]
                 .filter(
                   (value, index, values) => values.indexOf(value) === index,
                 )
@@ -998,11 +1049,7 @@ export function ConsoleDataGrid<T>({
                       >
                         {row.getVisibleCells().map((cell) => (
                           <div
-                            className={
-                              gridColumnSticksToEnd(cell.column)
-                                ? "gridCell stickyEndColumn"
-                                : "gridCell"
-                            }
+                            className="gridCell"
                             key={cell.id}
                             role="gridcell"
                             style={gridColumnStyle(cell.column)}
@@ -1037,8 +1084,7 @@ export function ConsoleDataGrid<T>({
                     )}
                   </div>
                 </ContextMenu.Trigger>
-                {(visibleContextRowActions.length > 0 ||
-                  showContextSelectionActions) && (
+                {visibleContextRowActions.length > 0 && (
                   <ContextMenu.Portal>
                     <ContextMenu.Content
                       className="consoleMenu"
@@ -1075,40 +1121,6 @@ export function ConsoleDataGrid<T>({
                               </ContextMenu.Item>
                             );
                           })}
-                        </>
-                      )}
-                      {showContextSelectionActions && (
-                        <>
-                          <ContextMenu.Label className="consoleMenuLabel">
-                            Actions
-                          </ContextMenu.Label>
-                          {actions.map((action, index) => (
-                            <Fragment key={`selection:${action.label}`}>
-                              {action.separatorBefore && index > 0 && (
-                                <ContextMenu.Separator className="consoleMenuSeparator" />
-                              )}
-                              <ContextMenu.Item
-                                className={
-                                  action.tone === "danger"
-                                    ? "consoleMenuItem danger"
-                                    : "consoleMenuItem"
-                                }
-                                disabled={
-                                  selectedRows.length === 0 ||
-                                  action.disabled?.(selectedRows)
-                                }
-                                onSelect={() => invokeAction(action)}
-                                title={actionDescription(action, selectedRows)}
-                              >
-                                {action.icon && (
-                                  <span className="consoleMenuIcon" aria-hidden>
-                                    {action.icon}
-                                  </span>
-                                )}
-                                <span>{action.label}</span>
-                              </ContextMenu.Item>
-                            </Fragment>
-                          ))}
                         </>
                       )}
                     </ContextMenu.Content>
@@ -1211,7 +1223,6 @@ function SortableHeaderCell<T>({
   });
   const headerClassName = [
     "gridHeaderCell",
-    gridColumnSticksToEnd(header.column) ? "stickyEndColumn" : "",
     isDragging ? "dragging" : "",
   ]
     .filter(Boolean)
@@ -1289,10 +1300,6 @@ function gridColumnStyle<T>(column: Header<T, unknown>["column"]) {
     minWidth: minSize,
     width: size,
   };
-}
-
-function gridColumnSticksToEnd<T>(column: Header<T, unknown>["column"]): boolean {
-  return Boolean((column.columnDef.meta as { stickyEnd?: boolean } | undefined)?.stickyEnd);
 }
 
 function reconcileColumnOrder(current: string[], defaults: string[]): string[] {

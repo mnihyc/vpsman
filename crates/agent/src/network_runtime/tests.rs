@@ -17,8 +17,8 @@ fn command(argv: &[&str]) -> RuntimeTunnelCommand {
 
 fn adapter() -> RuntimeTunnelAdapterCommands {
     RuntimeTunnelAdapterCommands {
-        template_id: LEFT_ADAPTER_ID.to_string(),
-        template_name: "wireguard-runtime".to_string(),
+        definition_id: LEFT_ADAPTER_ID.to_string(),
+        definition_name: "wireguard-runtime".to_string(),
         definition_hash: "ab".repeat(32),
         startup: Some(command(&[
             "/opt/vpsman-adapters/wg-runtime",
@@ -60,9 +60,9 @@ fn plan(manager: RuntimeTunnelManager) -> TunnelPlan {
         },
         runtime_control: RuntimeTunnelControl {
             manager,
-            left_adapter_template_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+            left_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
                 .then(|| LEFT_ADAPTER_ID.to_string()),
-            right_adapter_template_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+            right_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
                 .then(|| RIGHT_ADAPTER_ID.to_string()),
             ..RuntimeTunnelControl::default()
         },

@@ -1,4 +1,4 @@
-import { expect, test, type Locator } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
 import { openConsoleSubpage } from "./support/consoleNavigation";
 
@@ -8,6 +8,22 @@ test.beforeEach(async ({ page }) => {
 
 async function activate(locator: Locator) {
   await locator.evaluate((element) => (element as HTMLElement).click());
+}
+
+async function invokeTransferAction(
+  page: Page,
+  rowId: string,
+  action: string,
+) {
+  const grid = page.getByLabel("Transfer sessions data grid");
+  await grid
+    .getByLabel(`Select Transfer sessions row ${rowId}`)
+    .check();
+  await grid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  await activate(page.getByRole("menuitem", { name: action, exact: true }));
 }
 
 test("downloads a completed transfer when it is ready", async ({ page }, testInfo) => {
@@ -22,14 +38,24 @@ test("downloads a completed transfer when it is ready", async ({ page }, testInf
   await expect(panel.getByText("Transfer sessions").first()).toBeVisible();
   await expect(panel.getByText("Upload to VPS").first()).toBeVisible();
   await expect(panel.getByText("Download from VPS").first()).toBeVisible();
-  await expect(panel.getByText("Upload complete").first()).toBeVisible();
+  const transferGrid = panel.getByLabel("Transfer sessions data grid");
+  const completedUpload = transferGrid
+    .locator(".gridBody [role=row]", { hasText: "/opt/vpsman/app.bin" })
+    .first();
+  await expect(completedUpload).toContainText("Upload to VPS");
+  await expect(completedUpload).toContainText("Completed");
+  await expect(completedUpload).toContainText("Fresh session");
   await expect(panel.getByText("100 Mbps cap")).toBeVisible();
   await expect(panel.getByText("No transfer cap").first()).toBeVisible();
   await expect(panel.getByText("No handoff")).toHaveCount(0);
   await expect(panel.getByText("core-fra-02 (ra02)").first()).toBeVisible();
   await expect(panel.getByText("51515151").first()).toBeVisible();
   await expect(panel.getByText("Ready to download").first()).toBeVisible();
-  await activate(panel.getByRole("button", { name: "Ready to download session 51515151" }));
+  await invokeTransferAction(
+    page,
+    "agent-fra-02:51515151-2222-4333-8444-555555555555",
+    "Download",
+  );
   await expect(panel.getByLabel("Confirm ready download")).toBeVisible();
   await page.screenshot({
     fullPage: true,
@@ -175,7 +201,11 @@ test("opens failed transfer retry metadata in resumable dispatch", async ({ page
   await expect(panel.getByText("aborted")).toBeVisible();
   await expect(panel.getByText("/var/log/nginx/error.log")).toBeVisible();
 
-  await activate(panel.getByRole("button", { name: "Retry transfer session 53535353" }));
+  await invokeTransferAction(
+    page,
+    "agent-sfo-01:53535353-2222-4333-8444-555555555555",
+    "Retry",
+  );
   const review = panel.getByRole("region", { name: "Transfer retry review" });
   await expect(review).toContainText("Failed transfer retry review");
   await expect(review).toContainText("edge-sfo-01 (fo01)");
@@ -245,7 +275,11 @@ test("streams a ready download to a browser file handle", async ({ page }, testI
 
   const panel = page.locator(".fleetPanel", { hasText: "File transfer sessions" });
   await panel.getByLabel("Ready download save method").selectOption("stream-to-file");
-  await activate(panel.getByRole("button", { name: "Ready to download session 51515151" }));
+  await invokeTransferAction(
+    page,
+    "agent-fra-02:51515151-2222-4333-8444-555555555555",
+    "Download",
+  );
   await expect(panel.getByLabel("Confirm ready download")).toBeVisible();
   await activate(
     panel

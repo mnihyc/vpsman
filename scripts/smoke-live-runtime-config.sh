@@ -22,7 +22,8 @@ internal_token="smoke-internal-$(date +%s%N)"
 postgres_url="postgres://vpsman:vpsman@127.0.0.1:$pg_port/vpsman"
 operator_password="runtime-config-smoke-password"
 client_id="runtime-config-smoke-$(date +%s)"
-runtime_proc_root="$SMOKE_TMPDIR/runtime-proc-root"
+rejected_proc_root="$SMOKE_TMPDIR/rejected-proc-root"
+runtime_status_probe_timeout_secs=7
 super_password="smoke-super-password"
 super_salt_hex="00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 privilege_verifier_key_hex="$(smoke_privilege_verifier_key_hex "$super_password" "$super_salt_hex")"
@@ -36,6 +37,7 @@ api_log=""
 gateway_log="$SMOKE_TMPDIR/gateway.log"
 agent_log="$SMOKE_TMPDIR/agent.log"
 agent_config="$SMOKE_TMPDIR/agent.toml"
+preset_owned_patch="$SMOKE_TMPDIR/preset-owned-config-patch.toml"
 runtime_patch="$SMOKE_TMPDIR/runtime-config-patch.toml"
 
 cleanup_live_runtime_config_smoke() {
@@ -241,12 +243,12 @@ assert_runtime_config_visible() {
   local read_job_id outputs_json
   read_job_id="$(submit_config_read)"
   outputs_json="$(api_get "/api/v1/jobs/$read_job_id/outputs")"
-  jq -e --arg proc_root "$runtime_proc_root" '
+  jq -e --arg timeout "$runtime_status_probe_timeout_secs" '
     .items[] | select(.stream == "status" and .done == true and .exit_code == 0)
     | (.data_base64 | @base64d | fromjson)
     | .type == "config_read"
-      and (.toml | contains("[telemetry]"))
-      and (.toml | contains("proc_root = \"" + $proc_root + "\""))
+      and (.toml | contains("[network]"))
+      and (.toml | contains("status_probe_timeout_secs = " + $timeout))
   ' <<<"$outputs_json" >/dev/null
 }
 
@@ -284,10 +286,13 @@ smoke_create_direct_agent_config \
   "runtime-config-smoke" \
   "$gateway_public_hex" \
   "primary=$gateway_addr=10"
-mkdir -p "$runtime_proc_root"
-cat >"$runtime_patch" <<PATCH
+cat >"$preset_owned_patch" <<PATCH
 [telemetry]
-proc_root = "$runtime_proc_root"
+proc_root = "$rejected_proc_root"
+PATCH
+cat >"$runtime_patch" <<PATCH
+[network]
+status_probe_timeout_secs = $runtime_status_probe_timeout_secs
 PATCH
 
 smoke_start_local_agent \
@@ -296,6 +301,36 @@ smoke_start_local_agent \
   "$SMOKE_TMPDIR/agent-work" \
   "vpsman_agent=warn"
 wait_agent_online
+
+rejected_preset_body="$(jq -nc \
+  --arg client "$client_id" \
+  --rawfile toml "$preset_owned_patch" \
+  '{
+    selector_expression: ("id:" + $client),
+    target_client_ids: [$client],
+    toml: $toml,
+    reason: "smoke reject preset-owned field",
+    confirmed: true,
+  }')"
+rejected_preset_json="$SMOKE_TMPDIR/rejected-preset-owned.json"
+rejected_preset_status="$(curl -sS -o "$rejected_preset_json" -w "%{http_code}" \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $access_token" \
+  -d "$rejected_preset_body" \
+  "$api_url/api/v1/runtime-config/patch")"
+if [[ "$rejected_preset_status" != "400" ]]; then
+  echo "expected preset-owned runtime config patch to return 400, got $rejected_preset_status" >&2
+  cat "$rejected_preset_json" >&2 || true
+  exit 1
+fi
+jq -e '
+  .error == "runtime_config_patch_configuration_preset_field_forbidden"
+    and .status == 400
+' "$rejected_preset_json" >/dev/null
+if grep -Fq "$rejected_proc_root" "$agent_config"; then
+  echo "rejected preset-owned patch changed bootstrap config" >&2
+  exit 1
+fi
 
 reject_body="$(jq -nc \
   --arg client "$client_id" \
@@ -319,7 +354,7 @@ if [[ "$reject_status" != "403" ]]; then
   exit 1
 fi
 jq -e '.error == "privilege_assertion_required" and .status == 403' "$reject_json" >/dev/null
-if grep -q "$runtime_proc_root" "$agent_config"; then
+if grep -Fq "status_probe_timeout_secs = $runtime_status_probe_timeout_secs" "$agent_config"; then
   echo "runtime config patch changed bootstrap config after no-privilege-unlock rejection" >&2
   exit 1
 fi
@@ -335,7 +370,7 @@ job_id="$(jq -r '.sync_job_ids[0]' <<<"$push_json")"
 jq -e '.target_count == 1 and (.sync_job_ids | length == 1)' <<<"$push_json" >/dev/null
 smoke_wait_api_job_status "$api_url" "$job_id" completed 45 >/dev/null
 
-if grep -q "$runtime_proc_root" "$agent_config"; then
+if grep -Fq "status_probe_timeout_secs = $runtime_status_probe_timeout_secs" "$agent_config"; then
   echo "runtime config patch mutated immutable bootstrap config file" >&2
   exit 1
 fi
@@ -351,15 +386,16 @@ assert_runtime_config_sync_persisted
 jq -n \
   --arg client_id "$client_id" \
   --arg job_id "$job_id" \
-  --arg proc_root "$runtime_proc_root" \
+  --argjson status_probe_timeout_secs "$runtime_status_probe_timeout_secs" \
   '{
     live_runtime_config_smoke: "ok",
     postgres_backed: true,
     auth_session: "persisted",
     api_restart: "verified",
+    preset_owned_field_rejected: true,
     no_privilege_unlock_rejected: true,
     client_id: $client_id,
     job_id: $job_id,
-    runtime_proc_root: $proc_root,
+    runtime_status_probe_timeout_secs: $status_probe_timeout_secs,
     bootstrap_config_immutable: true
   }'

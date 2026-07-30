@@ -809,25 +809,25 @@ pub(crate) async fn bind_declared_network_plan(
     if plan.runtime_control.manager != RuntimeTunnelManager::ExternalManagedAdapter {
         return Ok(());
     }
-    let (template_id, client_id) = match side {
+    let (definition_id, client_id) = match side {
         TunnelEndpointSide::Left => (
-            plan.runtime_control.left_adapter_template_id.as_deref(),
+            plan.runtime_control.left_adapter_definition_id.as_deref(),
             plan.left_client_id.as_str(),
         ),
         TunnelEndpointSide::Right => (
-            plan.runtime_control.right_adapter_template_id.as_deref(),
+            plan.runtime_control.right_adapter_definition_id.as_deref(),
             plan.right_client_id.as_str(),
         ),
     };
-    let template_id = template_id
-        .ok_or_else(|| ApiError::bad_request("runtime_tunnel_adapter_template_required"))?;
+    let definition_id = definition_id
+        .ok_or_else(|| ApiError::bad_request("runtime_tunnel_adapter_definition_required"))?;
     *runtime_adapter = Some(
         state
             .repo
-            .resolve_runtime_tunnel_adapter(template_id, client_id)
+            .resolve_runtime_tunnel_adapter(definition_id)
             .await
             .map_err(|error| {
-                warn!(%error, %client_id, %template_id, "network status adapter binding failed");
+                warn!(%error, %client_id, %definition_id, "network status adapter binding failed");
                 ApiError::conflict("runtime_tunnel_adapter_unavailable")
             })?,
     );

@@ -5,6 +5,7 @@ import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { createJobTargetCount, waitForBulkJobTargets } from "../../bulkJobProgress";
 import {
   ConsoleDataGrid,
+  type ConsoleDataGridAction,
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
 import { VpsCombobox } from "../../components/VpsCombobox";
@@ -18,6 +19,7 @@ import {
   type PrivilegeMaterial,
 } from "../../privilege";
 import { formatLowerBoundCount } from "../../constants";
+import { scrollIntoViewWithMotion } from "../../motion";
 import { selectorExpressionForClientIds } from "../../searchExpression";
 import type { SupervisorAction } from "../jobDispatchModel";
 import type {
@@ -82,6 +84,7 @@ export function ProcessSupervisorInventoryPanel({
     [onSelectedClientIdChange],
   );
   const appliedInitialTargetRequestRef = useRef<string | null>(null);
+  const actionFeedbackRef = useRef<HTMLDivElement | null>(null);
   const [restartProcess, setRestartProcess] =
     useState<ProcessSupervisorInventoryRecord | null>(null);
   const [stopProcess, setStopProcess] =
@@ -122,6 +125,17 @@ export function ProcessSupervisorInventoryPanel({
     initialTargetRequestId,
     onInitialTargetConsumed,
   ]);
+
+  useEffect(() => {
+    if ((!actionError && !actionStatus) || restartProcess || stopProcess) {
+      return;
+    }
+    const feedback = actionFeedbackRef.current;
+    if (feedback) {
+      scrollIntoViewWithMotion(feedback, { block: "nearest" });
+    }
+  }, [actionError, actionStatus, restartProcess, stopProcess]);
+
   const executeProcessAction = useCallback(
     async (
       row: ProcessSupervisorInventoryRecord,
@@ -337,6 +351,60 @@ export function ProcessSupervisorInventoryPanel({
     ),
     [actionPending, executeProcessAction, onOpenDispatchPreset, privilegeMaterial],
   );
+  const rowActions = useMemo<
+    ConsoleDataGridAction<ProcessSupervisorInventoryRecord>[]
+  >(
+    () => [
+      {
+        description: ([row]) =>
+          row
+            ? `Open a log request for ${row.name} with its VPS preselected.`
+            : "Open process logs.",
+        icon: <FileText size={13} />,
+        label: "Logs",
+        onSelect: ([row]) => {
+          if (row) {
+            onOpenDispatchPreset(supervisorPreset(row, "logs"));
+          }
+        },
+      },
+      {
+        description: ([row]) =>
+          row
+            ? privilegeMaterial
+              ? `Review restart of ${row.name}.`
+              : "Unlock privilege before restarting this process."
+            : "Review a process restart.",
+        disabled: () => actionPending,
+        icon: <RotateCcw size={13} />,
+        label: "Restart",
+        onSelect: ([row]) => {
+          if (row) {
+            setActionError(null);
+            setRestartProcess(row);
+          }
+        },
+      },
+      {
+        description: ([row]) =>
+          row?.status === "running"
+            ? `Review stopping ${row.name}.`
+            : "Stop is available only while the process is running.",
+        disabled: ([row]) =>
+          !row || row.status !== "running" || actionPending,
+        icon: <Square size={12} />,
+        label: "Stop",
+        onSelect: ([row]) => {
+          if (row) {
+            setActionError(null);
+            setStopProcess(row);
+          }
+        },
+        tone: "danger",
+      },
+    ],
+    [actionPending, onOpenDispatchPreset, privilegeMaterial],
+  );
   const columns = useMemo<ConsoleDataGridColumn<ProcessSupervisorInventoryRecord>[]>(
     () => [
       {
@@ -471,17 +539,8 @@ export function ProcessSupervisorInventoryPanel({
         size: 108,
         sortValue: (row) => row.last_exit_unix ?? -1,
       },
-      {
-        cell: (row) => renderProcessActions(row),
-        enableHiding: false,
-        header: "Actions",
-        id: "actions",
-        minSize: 124,
-        size: 132,
-        stickyEnd: true,
-      },
     ],
-    [clientLabel, renderProcessActions],
+    [clientLabel],
   );
 
   return (
@@ -544,19 +603,6 @@ export function ProcessSupervisorInventoryPanel({
               <span>Refresh status</span>
             </button>
           </div>
-          <ActionFeedback
-            className="localActionFeedback"
-            message={!stopProcess && !restartProcess ? actionError ?? actionStatus : null}
-            tone={
-              actionError
-                ? "danger"
-                : actionPending
-                  ? "progress"
-                  : actionWarning
-                    ? "warning"
-                    : "success"
-            }
-          />
         </div>
       </div>
       {focusedAgent ? (
@@ -665,6 +711,20 @@ export function ProcessSupervisorInventoryPanel({
         pending={actionPending}
         title="Confirm process stop"
         tone="danger"
+      />
+      <ActionFeedback
+        className="localActionFeedback processSupervisorActionFeedback"
+        message={!stopProcess && !restartProcess ? actionError ?? actionStatus : null}
+        ref={actionFeedbackRef}
+        tone={
+          actionError
+            ? "danger"
+            : actionPending
+              ? "progress"
+              : actionWarning
+                ? "warning"
+                : "success"
+        }
       />
       <div className="processMobileList" aria-label="Process supervisor mobile cards">
         {scopedInventory.length === 0 ? (
@@ -783,10 +843,10 @@ export function ProcessSupervisorInventoryPanel({
               <strong>{formatObservedTime(row.observed_at)}</strong>
             </div>
           )}
+          rowActions={rowActions}
           rows={scopedInventory}
           rowsTruncated={inventoryTruncated}
           searchPlaceholder="Search processes"
-          selectable={false}
           storageKey="vpsman.jobs.processSupervisorInventory"
           title="Process health inventory"
         />

@@ -114,11 +114,11 @@ else
   run_step cargo-build-agent-x86_64-musl \
     cargo build -p vpsman-agent --release --target x86_64-unknown-linux-musl
   run_step cargo-build-agent-aarch64-musl \
-    cargo build -p vpsman-agent --target aarch64-unknown-linux-musl
+    cargo build -p vpsman-agent --release --target aarch64-unknown-linux-musl
   run_step cargo-build-vpsctl-x86_64-musl \
-    cargo build -p vpsctl --target x86_64-unknown-linux-musl
+    cargo build -p vpsctl --release --target x86_64-unknown-linux-musl
   run_step cargo-build-vpsctl-aarch64-musl \
-    cargo build -p vpsctl --target aarch64-unknown-linux-musl
+    cargo build -p vpsctl --release --target aarch64-unknown-linux-musl
 fi
 
 if [[ "${VPSMAN_RELEASE_SKIP_FRONTEND:-0}" == "1" ]]; then
@@ -166,7 +166,7 @@ if [[ "${VPSMAN_RELEASE_SKIP_SMOKES:-0}" == "1" ]]; then
   skip_step smoke-backup-chunked-upload "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-minio-backup-artifact "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-live-runtime-config "VPSMAN_RELEASE_SKIP_SMOKES=1"
-  skip_step smoke-live-source-template-runtime-config "VPSMAN_RELEASE_SKIP_SMOKES=1"
+  skip_step smoke-live-configuration-presets "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-live-agent-update "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-live-runtime-tunnel-sync "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-network-adapter-contract "VPSMAN_RELEASE_SKIP_SMOKES=1"
@@ -214,8 +214,8 @@ else
   fi
   run_step smoke-live-runtime-config \
     env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-live-runtime-config.sh
-  run_step smoke-live-source-template-runtime-config \
-    env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-live-source-template-runtime-config.sh
+  run_step smoke-live-configuration-presets \
+    env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-live-configuration-presets.sh
   run_step smoke-live-agent-update \
     env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-live-agent-update.sh
   run_step smoke-live-runtime-tunnel-sync \

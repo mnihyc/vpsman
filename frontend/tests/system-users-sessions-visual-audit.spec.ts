@@ -81,7 +81,7 @@ test("captures Access operators and Audit sessions interaction loop", async ({
     "Operator accounts",
     "99999999-aaaa-4bbb-8ccc-000000000001",
   );
-  await runGridAction(page, "Operator accounts", "Edit selected");
+  await runGridAction(page, "Operator accounts", "Edit");
   await expect(page.getByRole("heading", { name: "Edit user" })).toBeVisible();
   await activate(
     userEditor.getByRole("button", { name: "Disable", exact: true }),
@@ -106,7 +106,7 @@ test("captures Access operators and Audit sessions interaction loop", async ({
     "Operator accounts",
     "99999999-aaaa-4bbb-8ccc-000000000002",
   );
-  await runGridAction(page, "Operator accounts", "Edit selected");
+  await runGridAction(page, "Operator accounts", "Edit");
   await expect(userEditor.getByLabel("Operator username")).toHaveValue(
     "noc-operator",
   );

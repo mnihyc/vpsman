@@ -41,7 +41,7 @@ struct NetworkInterfaceSnapshot {
     rx_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tx_bytes: Option<u64>,
-    metasource_templates: Vec<String>,
+    metadata_sources: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
@@ -180,15 +180,13 @@ fn collect_sysfs_interfaces(
                 .unwrap_or_default(),
             rx_bytes: counter.map(|value| value.rx_bytes),
             tx_bytes: counter.map(|value| value.tx_bytes),
-            metasource_templates: vec!["sysfs".to_string()],
+            metadata_sources: vec!["sysfs".to_string()],
         };
         if counter.is_some() {
-            snapshot
-                .metasource_templates
-                .push("proc_net_dev".to_string());
+            snapshot.metadata_sources.push("proc_net_dev".to_string());
         }
         if !snapshot.addresses.is_empty() {
-            snapshot.metasource_templates.push("getifaddrs".to_string());
+            snapshot.metadata_sources.push("getifaddrs".to_string());
         }
         interfaces.push(snapshot);
     }
@@ -203,7 +201,7 @@ fn collect_sysfs_interfaces(
             addresses: iface_addresses.addresses.clone(),
             rx_bytes: counter.map(|value| value.rx_bytes),
             tx_bytes: counter.map(|value| value.tx_bytes),
-            metasource_templates: vec!["getifaddrs".to_string()],
+            metadata_sources: vec!["getifaddrs".to_string()],
             ..NetworkInterfaceSnapshot::default()
         });
     }
@@ -227,7 +225,7 @@ fn interfaces_from_addresses(
             addresses: iface_addresses.addresses.clone(),
             rx_bytes: counter.map(|value| value.rx_bytes),
             tx_bytes: counter.map(|value| value.tx_bytes),
-            metasource_templates: vec!["getifaddrs".to_string()],
+            metadata_sources: vec!["getifaddrs".to_string()],
             ..NetworkInterfaceSnapshot::default()
         });
     }
@@ -240,8 +238,8 @@ fn sort_and_limit_interfaces(interfaces: &mut Vec<NetworkInterfaceSnapshot>) {
         interface.flags.dedup();
         interface.addresses.sort();
         interface.addresses.dedup();
-        interface.metasource_templates.sort();
-        interface.metasource_templates.dedup();
+        interface.metadata_sources.sort();
+        interface.metadata_sources.dedup();
     }
     interfaces.sort_by(|left, right| left.name.cmp(&right.name));
     interfaces.truncate(MAX_INTERFACE_COUNT);

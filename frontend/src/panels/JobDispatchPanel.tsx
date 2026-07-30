@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { CheckCircle2, LockKeyhole, Play, ShieldCheck } from "lucide-react";
+import { LockKeyhole, Play, ShieldCheck } from "lucide-react";
 import {
   buildBulkJobProgress,
   createJobTargetCount,
@@ -11,6 +11,7 @@ import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ExecutionResultPanel } from "../components/ExecutionResultPanel";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { ActionFeedback } from "../components/ActionFeedback";
+import { VpsCombobox } from "../components/VpsCombobox";
 import { FILE_TRANSFER_CHUNK_BYTES, readFilePushPayload, sha256Hex } from "../fileTransfer";
 import {
   JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE,
@@ -929,30 +930,6 @@ export function JobDispatchPanel({
     setReviewStatus(null);
   }
 
-  async function previewTargets() {
-    if (selectorParse.error) {
-      setActionError(selectorParse.error);
-      return;
-    }
-    const reviewGeneration = captureReviewGeneration();
-    const selection = targetSelection();
-    setReviewStatus("Resolving dispatch targets");
-    try {
-      await runPanelAction(setPending, setActionError, async () => {
-        await waitForReviewRender();
-        const resolved = await onResolveTargets(selection);
-        if (!isReviewGenerationCurrent(reviewGeneration)) {
-          return;
-        }
-        setPreview(resolved);
-      });
-    } finally {
-      if (isReviewGenerationCurrent(reviewGeneration)) {
-        setReviewStatus(null);
-      }
-    }
-  }
-
   async function submitJob(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await prepareJobReview("dispatch");
@@ -1627,11 +1604,6 @@ export function JobDispatchPanel({
       </div>
 
       <form className="dispatchForm" onSubmit={submitJob}>
-        <ActionFeedback
-          className="localActionFeedback"
-          message={dispatchFeedbackMessage}
-          tone={dispatchFeedbackTone}
-        />
         {!terminalSurface && (
           <>
             <div className="templateToolbar" aria-label="Command template controls">
@@ -1693,7 +1665,12 @@ export function JobDispatchPanel({
                     <span>Scope</span>
                     <select
                       aria-label="Command template scope"
-                      onChange={(event) => setTemplateScopeKind(event.target.value as typeof templateScopeKind)}
+                      onChange={(event) => {
+                        setTemplateScopeKind(
+                          event.target.value as typeof templateScopeKind,
+                        );
+                        setTemplateScopeValue("");
+                      }}
                       value={templateScopeKind}
                     >
                       <option value="global">Global</option>
@@ -1702,16 +1679,35 @@ export function JobDispatchPanel({
                       <option value="client">Client</option>
                     </select>
                   </label>
-                  <label>
-                    <span>Scope value</span>
-                    <input
-                      aria-label="Command template scope value"
-                      disabled={templateScopeKind === "global"}
-                      onChange={(event) => setTemplateScopeValue(event.target.value)}
-                      placeholder={templateScopeKind}
-                      value={templateScopeKind === "global" ? "" : templateScopeValue}
-                    />
-                  </label>
+                  {templateScopeKind === "client" ? (
+                    <label>
+                      <span>Scope VPS</span>
+                      <VpsCombobox
+                        agents={agents}
+                        ariaLabel="Command template scope VPS"
+                        onChange={setTemplateScopeValue}
+                        placeholder="Search VPS name or ID"
+                        value={templateScopeValue}
+                      />
+                    </label>
+                  ) : (
+                    <label>
+                      <span>Scope value</span>
+                      <input
+                        aria-label="Command template scope value"
+                        disabled={templateScopeKind === "global"}
+                        onChange={(event) =>
+                          setTemplateScopeValue(event.target.value)
+                        }
+                        placeholder={templateScopeKind}
+                        value={
+                          templateScopeKind === "global"
+                            ? ""
+                            : templateScopeValue
+                        }
+                      />
+                    </label>
+                  )}
                   <div className="templateToolbarActions">
                     <button
                       className="secondaryAction"
@@ -1974,18 +1970,13 @@ export function JobDispatchPanel({
                   <div className="rolloutControlGrid">
                     <label>
                       <span>Canary VPS</span>
-                      <select
-                        aria-label="Rollout canary VPS"
-                        onChange={(event) => setRolloutCanaryClientId(event.target.value)}
+                      <VpsCombobox
+                        agents={impactTargets}
+                        ariaLabel="Rollout canary VPS"
+                        onChange={setRolloutCanaryClientId}
+                        placeholder="Search resolved VPSs"
                         value={rolloutCanaryClientId}
-                      >
-                        <option value="">Select canary</option>
-                        {impactTargets.map((target) => (
-                          <option key={target.id} value={target.id}>
-                            {target.display_name || target.id} · {target.id}
-                          </option>
-                        ))}
-                      </select>
+                      />
                     </label>
                     <RolloutNumberField
                       label="Batch size"
@@ -2041,6 +2032,7 @@ export function JobDispatchPanel({
               ? `Queues ${dispatchConfirmationOperationLabel} on ${vpsCountLabel(dispatchConfirmationTargets.length)} for review. Nothing runs until a pending request is approved.`
               : `${dispatchConfirmationOperationLabel} on ${vpsCountLabel(dispatchConfirmationTargets.length)}.`
           }
+          error={actionError}
           items={dispatchConfirmationItems}
           onCancel={clearDispatchReview}
           onConfirm={() =>
@@ -2103,16 +2095,14 @@ export function JobDispatchPanel({
         )}
 
         {!dispatchPromptOpen && (
+          <ActionFeedback
+            className="localActionFeedback"
+            message={dispatchFeedbackMessage}
+            tone={dispatchFeedbackTone}
+          />
+        )}
+        {!dispatchPromptOpen && (
           <div className="dispatchActions">
-            <button
-              className="secondaryAction"
-              disabled={pending}
-              onClick={previewTargets}
-              type="button"
-            >
-              <CheckCircle2 size={17} />
-              Refresh target preview
-            </button>
             {approvalRequestSupported ? (
               <button
                 className="secondaryAction"

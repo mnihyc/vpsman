@@ -23,9 +23,11 @@ test("dispatches and operates a durable staged rollout", async ({
 
   await activate(composer.locator("details.dispatchExecutionOptions summary"));
   await composer.getByLabel("Staged rollout").check();
-  await composer
-    .getByLabel("Rollout canary VPS")
-    .selectOption("agent-sfo-01");
+  await composer.getByLabel("Rollout canary VPS").fill("edge-sfo");
+  await page
+    .getByRole("listbox", { name: "Rollout canary VPS options" })
+    .getByRole("option", { name: /edge-sfo-01/ })
+    .click();
   await composer.getByLabel("Batch size").fill("1");
   await composer.getByLabel("Tolerated failures").fill("0");
   await composer.getByLabel("Stage delay (seconds)").fill("30");
@@ -145,10 +147,19 @@ test("keeps a rejected stage release beside the reviewed rollout action", async 
   if (await reviewButton.isVisible()) {
     await activate(reviewButton);
   } else {
-    await page
-      .getByRole("button", { name: "Actions for rollout 55555555" })
+    const grid = page.getByLabel("Rollout history data grid");
+    await grid
+      .getByLabel(
+        "Select Rollout history row 55555555-aaaa-4bbb-8ccc-dddddddddddd",
+      )
+      .check();
+    await grid
+      .locator(".gridToolbarActions")
+      .getByRole("button", { name: "Actions", exact: true })
       .click();
-    await activate(page.getByRole("menuitem", { name: "Review rollout" }));
+    await activate(
+      page.getByRole("menuitem", { name: "Review rollout", exact: true }),
+    );
   }
   const detail = page.locator(".consoleDetailPanel", {
     hasText: "Rollout 55555555",

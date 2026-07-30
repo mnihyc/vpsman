@@ -94,6 +94,14 @@ test("keeps host services routable and exposes logs plus snapshot-bound actions"
   await expect(
     panel.getByText(/Restarted sshd\.service on edge-sfo-01/),
   ).toBeVisible();
+  await expect
+    .poll(() =>
+      panel.locator(".hostServiceActionFeedback").evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        return bounds.top >= 0 && bounds.bottom <= window.innerHeight;
+      }),
+    )
+    .toBe(true);
 
   expect(await lastServiceActionRequest(page)).toMatchObject({
     command: "service_action",
@@ -169,7 +177,11 @@ test("keeps an unsupported service provider visible and non-mutating", async ({
   await expect(panel.getByText(/^Unsupported:/)).toContainText("PID 1 is \"tini\"");
   await expect(panel.getByText("Not detected", { exact: true })).toBeVisible();
   await expect(panel.getByText("Service provider not checked")).toBeVisible();
-  await expect(panel.getByRole("button", { name: /Actions for/ })).toHaveCount(0);
+  await expect(
+    panel
+      .getByLabel("Host service inventory data grid")
+      .getByRole("button", { name: "Actions", exact: true }),
+  ).toBeDisabled();
   expect(await serviceMutationRequestCount(page)).toBe(0);
 });
 
@@ -187,7 +199,13 @@ async function invokeServiceAction(
     await activate(card.getByRole("button", { name: action, exact: true }));
     return;
   }
-  await grid.getByRole("button", { name: `Actions for ${service}` }).click();
+  await grid
+    .getByLabel(`Select Host service inventory row ${service}`)
+    .check();
+  await grid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
   await activate(page.getByRole("menuitem", { name: action, exact: true }));
 }
 

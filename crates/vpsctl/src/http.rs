@@ -58,6 +58,14 @@ pub(crate) fn http_get(base_url: &str, path: &str, bearer_token: Option<&str>) -
     http_request(base_url, "GET", path, bearer_token, None)
 }
 
+pub(crate) fn http_delete(
+    base_url: &str,
+    path: &str,
+    bearer_token: Option<&str>,
+) -> Result<String> {
+    http_request(base_url, "DELETE", path, bearer_token, None)
+}
+
 pub(crate) fn http_get_bytes(
     base_url: &str,
     path: &str,

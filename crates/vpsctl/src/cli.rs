@@ -6,19 +6,20 @@ use vpsman_common::DEFAULT_MAX_JOB_TIMEOUT_SECS;
 
 use crate::cli_access::{
     AgentIdentityUpsertCommand, AgentTagCommand, AlertPoliciesCommand, AlertPolicyCommand,
-    BootstrapCommand, BulkResolveCommand, ClientKeyRevokeCommand, FleetAlertExportCommand,
-    FleetAlertNotificationChannelUpsertCommand, FleetAlertNotificationChannelsCommand,
-    FleetAlertNotificationDispatchCommand, FleetAlertNotificationProcessCommand,
-    FleetAlertNotificationsCommand, FleetAlertStateUpdateCommand, FleetAlertStatesCommand,
-    FleetAlertsCommand, LimitCommand, LoginCommand, NameCommand, OperatorAuthEventsCommand,
-    OperatorCreateCommand, OperatorLifecycleCommand, OperatorPasswordResetCommand,
-    OperatorSessionRevokeCommand, OperatorSessionsCommand, OperatorUpdateCommand, RefreshCommand,
-    ScheduleCreateCommand, ScheduleDeferCommand, ScheduleMutationCommand, ScheduleUpdateCommand,
-    SourceStatusCommand, SourceTemplateAssignCommand, SourceTemplateAssignmentListCommand,
-    SourceTemplateCloneCommand, SourceTemplateCreateCommand, SourceTemplateDiffCommand,
-    SourceTemplateListCommand, SourceTemplateTestCommand, SourceTemplateUpdateCommand,
+    BootstrapCommand, BulkResolveCommand, ClientKeyRevokeCommand, ConfigPresetCloneCommand,
+    ConfigPresetCreateCommand, ConfigPresetDeleteCommand, ConfigPresetListCommand,
+    ConfigPresetPreviewCommand, ConfigPresetUpdateCommand, ConfigRenderCommand,
+    ConfigSourceResetCommand, ConfigSourceSetCommand, ConfigSourcesCommand,
+    FleetAlertExportCommand, FleetAlertNotificationChannelUpsertCommand,
+    FleetAlertNotificationChannelsCommand, FleetAlertNotificationDispatchCommand,
+    FleetAlertNotificationProcessCommand, FleetAlertNotificationsCommand,
+    FleetAlertStateUpdateCommand, FleetAlertStatesCommand, FleetAlertsCommand, LimitCommand,
+    LoginCommand, NameCommand, OperatorAuthEventsCommand, OperatorCreateCommand,
+    OperatorLifecycleCommand, OperatorPasswordResetCommand, OperatorSessionRevokeCommand,
+    OperatorSessionsCommand, OperatorUpdateCommand, RefreshCommand, ScheduleCreateCommand,
+    ScheduleDeferCommand, ScheduleMutationCommand, ScheduleUpdateCommand,
     TelemetryNetworkRatesCommand, TelemetryRollupsCommand, TelemetryTunnelsCommand,
-    TemplateRuntimeConfigCommand, TotpConfirmCommand, TotpPasswordCommand, VpsRulesCommand,
+    TotpConfirmCommand, TotpPasswordCommand, VpsRulesCommand,
 };
 use crate::cli_update::{AgentUpdateReleaseLatestArgs, AgentUpdateReleaseRecordArgs};
 use crate::commands_host_management::{
@@ -117,16 +118,26 @@ pub(crate) enum Command {
     Tags,
     TagCreate(NameCommand),
     AgentTag(AgentTagCommand),
-    SourceTemplates(SourceTemplateListCommand),
-    SourceTemplateCreate(SourceTemplateCreateCommand),
-    SourceTemplateClone(SourceTemplateCloneCommand),
-    SourceTemplateDiff(SourceTemplateDiffCommand),
-    SourceTemplateTest(SourceTemplateTestCommand),
-    SourceTemplateUpdate(SourceTemplateUpdateCommand),
-    SourceStatus(SourceStatusCommand),
-    SourceTemplateAssignments(SourceTemplateAssignmentListCommand),
-    TemplateRuntimeConfig(TemplateRuntimeConfigCommand),
-    SourceTemplateAssign(SourceTemplateAssignCommand),
+    /// List immutable system and operator-created configuration presets.
+    ConfigPresets(ConfigPresetListCommand),
+    /// Create a reusable custom configuration preset.
+    ConfigPresetCreate(ConfigPresetCreateCommand),
+    /// Clone a system or custom preset into an editable custom preset.
+    ConfigPresetClone(ConfigPresetCloneCommand),
+    /// Preview a complete custom-preset definition and its affected VPSs.
+    ConfigPresetPreview(ConfigPresetPreviewCommand),
+    /// Preview or confirm a custom-preset update.
+    ConfigPresetUpdate(ConfigPresetUpdateCommand),
+    /// Delete an unused custom preset.
+    ConfigPresetDelete(ConfigPresetDeleteCommand),
+    /// Show each VPS's effective preset, origin, readiness, and runtime sync.
+    ConfigSources(ConfigSourcesCommand),
+    /// Preview or set an explicit configuration-preset override.
+    ConfigSourceSet(ConfigSourceSetCommand),
+    /// Preview or remove overrides so VPSs inherit the system default.
+    ConfigSourceReset(ConfigSourceResetCommand),
+    /// Render one VPS's complete effective agent configuration.
+    ConfigRender(ConfigRenderCommand),
     Jobs {
         #[arg(long, default_value_t = 50)]
         limit: u16,

@@ -7,6 +7,7 @@ use vpsman_common::{AgentCapabilitySnapshot, AgentPrivilegeMode};
 async fn fleet_alerts_derive_actionable_current_status() {
     let repo = Repository::Memory(MemoryState::default());
     let tunnel_input = alert_test_tunnel_input();
+    crate::tests_network::seed_test_plan_adapter_definitions(&repo, &tunnel_input).await;
     let tunnel_plan = vpsman_common::plan_tunnel(&tunnel_input).unwrap();
     let saved_tunnel = repo
         .record_tunnel_plan(&tunnel_input, &tunnel_plan, true, &test_operator())
@@ -179,7 +180,6 @@ async fn fleet_alerts_derive_actionable_current_status() {
     assert_alert_category(&alerts, "network");
     assert_alert_category(&alerts, "backup");
     assert_alert_category(&alerts, "capability_degraded");
-    assert_alert_category(&alerts, "source_readiness");
     let capability_alert = alerts
         .iter()
         .find(|alert| alert.category == "capability_degraded")
@@ -240,6 +240,7 @@ async fn tunnel_adapter_failures_only_degrade_external_managed_plans() {
     ] {
         let repo = Repository::Memory(MemoryState::default());
         let input = crate::tests_network::test_plan_input(manager, false);
+        crate::tests_network::seed_test_plan_adapter_definitions(&repo, &input).await;
         let plan = vpsman_common::plan_tunnel(&input).unwrap();
         let saved = repo
             .record_tunnel_plan(&input, &plan, true, &test_operator())
@@ -313,49 +314,7 @@ async fn tunnel_adapter_failures_only_degrade_external_managed_plans() {
                     latency_healthy_windows: None,
                     latency_missed_windows: None,
                 });
-            let template_id = Uuid::new_v4();
-            memory
-                .source_templates
-                .write()
-                .await
-                .push(SourceTemplateView {
-                    id: template_id,
-                    domain: "runtime_tunnel_adapter".to_string(),
-                    name: format!("shared:{manager_label}"),
-                    scope: "shared".to_string(),
-                    built_in: false,
-                    is_default: false,
-                    owner_client_id: None,
-                    description: None,
-                    definition: json!({"manager": manager_label}),
-                    assigned_client_count: 1,
-                    created_at: "100".to_string(),
-                    updated_at: "100".to_string(),
-                });
-            memory
-                .source_template_assignments
-                .write()
-                .await
-                .push(SourceTemplateAssignmentView {
-                    client_id: "client-a".to_string(),
-                    domain: "runtime_tunnel_adapter".to_string(),
-                    template_id,
-                    template_name: format!("shared:{manager_label}"),
-                    template_scope: "shared".to_string(),
-                    assigned_at: "100".to_string(),
-                });
         }
-
-        let source_status = repo
-            .list_source_status(Some("client-a"), Some("runtime_tunnel_adapter"))
-            .await
-            .unwrap();
-        assert_eq!(source_status.len(), 1, "{manager_label}");
-        assert_eq!(
-            source_status[0].status == "degraded",
-            expected_degraded,
-            "{manager_label}"
-        );
 
         let alerts = alert_test_state(repo)
             .list_fleet_alerts(FleetAlertQuery {
@@ -1303,6 +1262,7 @@ async fn policy_rollups_exceed_public_page_without_truncating_preview_or_evaluat
 async fn fleet_alert_candidates_are_not_hidden_by_public_page_caps() {
     let repo = Repository::Memory(MemoryState::default());
     let tunnel_input = alert_test_tunnel_input();
+    crate::tests_network::seed_test_plan_adapter_definitions(&repo, &tunnel_input).await;
     let tunnel_plan = vpsman_common::plan_tunnel(&tunnel_input).unwrap();
     let saved_tunnel = repo
         .record_tunnel_plan(&tunnel_input, &tunnel_plan, true, &test_operator())
@@ -1525,38 +1485,6 @@ async fn fleet_alert_candidates_are_not_hidden_by_public_page_caps() {
         failed_tunnel.adapter_health.as_mut().unwrap().reason =
             Some("adapter status command failed".to_string());
         memory.telemetry_tunnels.write().await.push(failed_tunnel);
-
-        let source_template_id = Uuid::new_v4();
-        memory
-            .source_templates
-            .write()
-            .await
-            .push(SourceTemplateView {
-                id: source_template_id,
-                domain: "runtime_tunnel_adapter".to_string(),
-                name: "shared:runtime-adapter".to_string(),
-                scope: "shared".to_string(),
-                built_in: false,
-                is_default: false,
-                owner_client_id: None,
-                description: None,
-                definition: json!({"manager": "external_managed_adapter"}),
-                assigned_client_count: 1,
-                created_at: "00000".to_string(),
-                updated_at: "00000".to_string(),
-            });
-        memory
-            .source_template_assignments
-            .write()
-            .await
-            .push(SourceTemplateAssignmentView {
-                client_id: "edge-a".to_string(),
-                domain: "runtime_tunnel_adapter".to_string(),
-                template_id: source_template_id,
-                template_name: "shared:runtime-adapter".to_string(),
-                template_scope: "shared".to_string(),
-                assigned_at: "00000".to_string(),
-            });
     }
 
     assert!(!repo
@@ -1689,36 +1617,6 @@ async fn fleet_alert_candidates_are_not_hidden_by_public_page_caps() {
         .unwrap();
     assert_eq!(tunnel_alerts.len(), 1);
     assert_eq!(tunnel_alerts[0].status, "tunnel_adapter_degraded");
-
-    let source_alerts = state
-        .list_fleet_alerts(FleetAlertQuery {
-            limit: Some(100),
-            client_id: Some("edge-a".to_string()),
-            severity: Some("warning".to_string()),
-            category: Some("source_readiness".to_string()),
-            operator_state: None,
-            include_muted: None,
-        })
-        .await
-        .unwrap();
-    let source_alert = source_alerts
-        .iter()
-        .find(|alert| alert.evidence["domain"] == "runtime_tunnel_adapter")
-        .unwrap();
-    assert_eq!(source_alert.status, "degraded");
-    assert_eq!(source_alert.evidence["evidence"]["sample_count"], 5_001);
-    assert_eq!(source_alert.evidence["evidence"]["truncated_count"], 4_901);
-    assert_eq!(
-        source_alert.evidence["evidence"]["samples"]
-            .as_array()
-            .unwrap()
-            .len(),
-        100
-    );
-    assert_eq!(
-        source_alert.evidence["evidence"]["samples"][0]["adapter_status"],
-        "failed"
-    );
 }
 
 #[tokio::test]
@@ -3133,8 +3031,8 @@ fn alert_test_tunnel_input() -> vpsman_common::TunnelPlanInput {
         kind: vpsman_common::TunnelKind::Gre,
         runtime_control: vpsman_common::RuntimeTunnelControl {
             manager: vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter,
-            left_adapter_template_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
-            right_adapter_template_id: Some("22222222-2222-4222-8222-222222222222".to_string()),
+            left_adapter_definition_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+            right_adapter_definition_id: Some("22222222-2222-4222-8222-222222222222".to_string()),
             ..Default::default()
         },
         runtime_topology: Default::default(),

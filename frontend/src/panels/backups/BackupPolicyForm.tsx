@@ -8,6 +8,7 @@ import {
 } from "../../presets/backupPathPresets";
 import { PathPresetButtons } from "./PathPresetButtons";
 import type { AgentView, BackupMissingPathPolicy } from "../../types";
+import { LocalTargetPreview } from "../TargetImpactPreview";
 
 type BackupPolicyFormProps = {
   agents: AgentView[];
@@ -38,6 +39,7 @@ type BackupPolicyFormProps = {
   retentionDays: number;
   rotationGeneration: string;
   targetCount: number;
+  targetAgents: AgentView[];
   targetExpressionMessage: string;
   targetExpressionValid: boolean;
   targetsText: string;
@@ -72,6 +74,7 @@ export function BackupPolicyForm({
   retentionDays,
   rotationGeneration,
   targetCount,
+  targetAgents,
   targetExpressionMessage,
   targetExpressionValid,
   targetsText,
@@ -116,6 +119,10 @@ export function BackupPolicyForm({
                 : "neutral"
             }
             verificationMessage={targetExpressionMessage}
+          />
+          <LocalTargetPreview
+            agents={targetAgents}
+            ariaLabel="Backup policy local VPS preview"
           />
           <small className="formHint">
             The confirmation saves the resolved VPS list as fixed targets; the

@@ -813,8 +813,9 @@ fn network_routing_command(apply: bool) -> JobCommand {
         max_output_bytes: 4096,
     };
     let adapter = vpsman_common::RoutingCostAdapterCommands {
-        template_id: Uuid::new_v4().to_string(),
-        template_name: "routing-adapter".to_string(),
+        source: vpsman_common::RoutingCostCommandSource::PlanOverride,
+        definition_id: Uuid::new_v4().to_string(),
+        definition_name: "routing-adapter".to_string(),
         definition_hash: "a".repeat(64),
         status: command.clone(),
         update: command,

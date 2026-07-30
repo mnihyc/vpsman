@@ -4,7 +4,7 @@ use vpsman_common::{
 };
 
 use crate::{
-    model::{AgentView, AuthContext, DeleteAgentRequest, OperatorPreferences, OperatorView},
+    model::{AgentView, AuthContext, OperatorPreferences, OperatorView},
     model_port_forwarding::{
         CreatePortForwardRuleRequest, PortForwardBulkAction, PortForwardBulkItem,
         UpdatePortForwardRuleRequest,
@@ -362,17 +362,9 @@ async fn agent_delete_archives_clean_disabled_drafts() {
         .await
         .unwrap();
 
-    repo.delete_agent(
-        "edge-a",
-        &DeleteAgentRequest {
-            confirmed: true,
-            reason: Some("retired".to_string()),
-            privilege_assertion: None,
-        },
-        &operator,
-    )
-    .await
-    .unwrap();
+    repo.delete_agent("edge-a", Some("retired"), &operator)
+        .await
+        .unwrap();
 
     assert!(repo.list_port_forward_rules().await.unwrap().is_empty());
 }
@@ -386,15 +378,7 @@ async fn agent_delete_rejects_enabled_port_forwarding_state() {
         .unwrap();
 
     let error = repo
-        .delete_agent(
-            "edge-a",
-            &DeleteAgentRequest {
-                confirmed: true,
-                reason: Some("retired".to_string()),
-                privilege_assertion: None,
-            },
-            &operator,
-        )
+        .delete_agent("edge-a", Some("retired"), &operator)
         .await
         .unwrap_err();
 

@@ -7,15 +7,17 @@ use super::{
 #[test]
 fn recognizes_inventory_commands() {
     assert!(is_vty_inventory_command(
-        "source-templates --domain telemetry_metrics_source"
+        "config-presets --behavior host_metrics"
     ));
     assert!(is_vty_inventory_command(
-        "source-template-assign --domain telemetry_metrics_source"
+        "config-source-set --behavior host_metrics"
     ));
     assert!(is_vty_inventory_command(
-        "source-template-update --template-id 11111111-1111-4111-8111-111111111111"
+        "config-preset-update --preset-id 11111111-1111-4111-8111-111111111111"
     ));
-    assert!(is_vty_inventory_command("source-status --client-id edge-a"));
+    assert!(is_vty_inventory_command(
+        "config-sources --client-id edge-a"
+    ));
     assert!(is_vty_inventory_command("fleet-alerts --severity warning"));
     assert!(is_vty_inventory_command(
         "fleet-alert-export --include-muted"
@@ -41,9 +43,7 @@ fn recognizes_inventory_commands() {
     assert!(is_vty_inventory_command(
         "fleet-alert-notification-process --dry-run"
     ));
-    assert!(is_vty_inventory_command(
-        "template-runtime-config --client-id edge-a"
-    ));
+    assert!(is_vty_inventory_command("config-render --client-id edge-a"));
     assert!(is_vty_inventory_command("bulk-resolve edge bgp"));
     assert!(is_vty_inventory_command(
         "telemetry-rollups --client-id edge-a"
@@ -66,102 +66,112 @@ fn parses_inventory_commands() {
         }
     );
     assert_eq!(
-        parse_vty_inventory_command("source-templates --domain=telemetry_metrics_source").unwrap(),
-        VtyInventoryCommand::SourceTemplates {
-            domain: Some("telemetry_metrics_source".to_string()),
+        parse_vty_inventory_command("config-presets --behavior=host_metrics").unwrap(),
+        VtyInventoryCommand::ConfigPresets {
+            behavior: Some("host_metrics".to_string()),
         }
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "source-template-create --domain=runtime_traffic_accounting_source --name=shared:vnstat --definition-json={\"source\":\"vnstat\"}",
+            "config-preset-create --behavior=tunnel_traffic --name=vnstat --definition-json={\"source\":\"vnstat\",\"vnstat_argv\":[\"/usr/bin/vnstat\"]}",
         )
         .unwrap(),
-        VtyInventoryCommand::SourceTemplateCreate {
-            domain: "runtime_traffic_accounting_source".to_string(),
-            name: "shared:vnstat".to_string(),
-            scope: "shared".to_string(),
-            owner_client_id: None,
+        VtyInventoryCommand::ConfigPresetCreate {
+            behavior: "tunnel_traffic".to_string(),
+            name: "vnstat".to_string(),
             description: None,
-            definition: serde_json::json!({"source": "vnstat"}),
+            definition: serde_json::json!({
+                "source": "vnstat",
+                "vnstat_argv": ["/usr/bin/vnstat"]
+            }),
         }
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "source-template-clone --template-id=11111111-1111-4111-8111-111111111111 --name=shared:copy --description copied",
+            "config-preset-clone --preset-id=11111111-1111-4111-8111-111111111111 --name=copy --description copied",
         )
         .unwrap(),
-        VtyInventoryCommand::SourceTemplateClone {
-            source_template_id: "11111111-1111-4111-8111-111111111111".to_string(),
-            name: "shared:copy".to_string(),
-            scope: "shared".to_string(),
-            owner_client_id: None,
+        VtyInventoryCommand::ConfigPresetClone {
+            preset_id: "11111111-1111-4111-8111-111111111111".to_string(),
+            name: "copy".to_string(),
             description: Some("copied".to_string()),
         }
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "source-template-diff --template-id=11111111-1111-4111-8111-111111111111 --definition-json={\"source\":\"vnstat\"}",
+            "config-preset-preview --preset-id=11111111-1111-4111-8111-111111111111 --definition-json={\"source\":\"interface_counters\"}",
         )
         .unwrap(),
-        VtyInventoryCommand::SourceTemplateDiff {
-            template_id: "11111111-1111-4111-8111-111111111111".to_string(),
+        VtyInventoryCommand::ConfigPresetPreview {
+            preset_id: "11111111-1111-4111-8111-111111111111".to_string(),
             description: None,
             clear_description: false,
-            definition: serde_json::json!({"source": "vnstat"}),
-        }
-    );
-    assert_eq!(
-        parse_vty_inventory_command(
-            "source-template-test --template-id=11111111-1111-4111-8111-111111111111 --definition-json={\"source\":\"interface_counters\"}",
-        )
-        .unwrap(),
-        VtyInventoryCommand::SourceTemplateTest {
-            template_id: "11111111-1111-4111-8111-111111111111".to_string(),
             definition: serde_json::json!({"source": "interface_counters"}),
         }
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "source-template-update --template-id 11111111-1111-4111-8111-111111111111 --clear-description --definition-json={\"source\":\"vnstat\"} --confirmed",
+            "config-preset-update --preset-id 11111111-1111-4111-8111-111111111111 --clear-description --definition-json={\"source\":\"interface_counters\"} --preview-hash aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --confirmed",
         )
         .unwrap(),
-        VtyInventoryCommand::SourceTemplateUpdate {
-            template_id: "11111111-1111-4111-8111-111111111111".to_string(),
+        VtyInventoryCommand::ConfigPresetUpdate {
+            preset_id: "11111111-1111-4111-8111-111111111111".to_string(),
             description: None,
             clear_description: true,
-            definition: serde_json::json!({"source": "vnstat"}),
+            definition: serde_json::json!({"source": "interface_counters"}),
+            preview_hash: Some(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()
+            ),
             confirmed: true,
         }
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "source-template-assign --domain runtime_traffic_accounting_source --template-id 11111111-1111-4111-8111-111111111111 --client edge-a --tag bgp --confirmed",
+            "config-source-set --behavior tunnel_traffic --preset-id 11111111-1111-4111-8111-111111111111 --selector provider:alpha&&country:US --client edge-a --tag bgp --preview-hash bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb --confirmed",
         )
         .unwrap(),
-        VtyInventoryCommand::SourceTemplateAssign {
-            domain: "runtime_traffic_accounting_source".to_string(),
-            template_id: "11111111-1111-4111-8111-111111111111".to_string(),
+        VtyInventoryCommand::ConfigSourceChange {
+            action: "set".to_string(),
+            behavior: "tunnel_traffic".to_string(),
+            preset_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+            selector: Some("provider:alpha&&country:US".to_string()),
             clients: vec!["edge-a".to_string()],
             tags: vec!["bgp".to_string()],
+            preview_hash: Some(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()
+            ),
             confirmed: true,
         }
     );
     assert_eq!(
-        parse_vty_inventory_command("template-runtime-config --client-id=edge/a --format=json")
-            .unwrap(),
-        VtyInventoryCommand::TemplateRuntimeConfig {
+        parse_vty_inventory_command(
+            "config-source-reset --behavior=tunnel_traffic --client=edge/a"
+        )
+        .unwrap(),
+        VtyInventoryCommand::ConfigSourceChange {
+            action: "reset".to_string(),
+            behavior: "tunnel_traffic".to_string(),
+            preset_id: None,
+            selector: None,
+            clients: vec!["edge/a".to_string()],
+            tags: Vec::new(),
+            preview_hash: None,
+            confirmed: false,
+        }
+    );
+    assert_eq!(
+        parse_vty_inventory_command("config-render --client-id=edge/a --format=json").unwrap(),
+        VtyInventoryCommand::ConfigRender {
             client_id: "edge/a".to_string(),
             format: "json".to_string(),
         }
     );
     assert_eq!(
-        parse_vty_inventory_command(
-            "source-status --client-id=edge/a --domain=runtime_traffic_accounting_source"
-        )
-        .unwrap(),
-        VtyInventoryCommand::SourceStatus {
+        parse_vty_inventory_command("config-sources --client-id=edge/a --behavior=tunnel_traffic")
+            .unwrap(),
+        VtyInventoryCommand::ConfigSources {
             client_id: Some("edge/a".to_string()),
-            domain: Some("runtime_traffic_accounting_source".to_string()),
+            behavior: Some("tunnel_traffic".to_string()),
         }
     );
     assert_eq!(
@@ -342,14 +352,30 @@ fn parses_inventory_commands() {
 #[test]
 fn rejects_invalid_inventory_commands() {
     assert!(parse_vty_inventory_command("agent-tag edge-a").is_err());
-    assert!(parse_vty_inventory_command("source-template-create --name x").is_err());
-    assert!(parse_vty_inventory_command("source-template-clone --name x").is_err());
-    assert!(parse_vty_inventory_command("source-template-diff --confirmed").is_err());
+    assert!(parse_vty_inventory_command("config-preset-create --name x").is_err());
+    assert!(parse_vty_inventory_command("config-preset-clone --name x").is_err());
+    assert!(parse_vty_inventory_command("config-preset-preview --confirmed").is_err());
     assert!(parse_vty_inventory_command(
-        "source-template-update --description x --clear-description"
+        "config-preset-update --description x --clear-description"
     )
     .is_err());
-    assert!(parse_vty_inventory_command("source-template-assign --domain x").is_err());
+    assert!(parse_vty_inventory_command("config-source-set --behavior x").is_err());
+    assert!(parse_vty_inventory_command(
+        "config-source-set --behavior tunnel_traffic --preset-id 11111111-1111-4111-8111-111111111111 --client edge-a --confirmed"
+    )
+    .is_err());
+    assert!(parse_vty_inventory_command(
+        "config-source-reset --behavior tunnel_traffic --client edge-a --preview-hash aaaa"
+    )
+    .is_err());
+    assert!(parse_vty_inventory_command(
+        "config-preset-update --preset-id 11111111-1111-4111-8111-111111111111 --definition-json={\"source\":\"interface_counters\"} --confirmed"
+    )
+    .is_err());
+    assert!(parse_vty_inventory_command(
+        "config-source-reset --behavior x --preset-id 11111111-1111-4111-8111-111111111111"
+    )
+    .is_err());
     assert!(parse_vty_inventory_command("unknown").is_err());
     assert!(gateway_sessions_path("gateway-sessions --limit=0").is_err());
     assert!(gateway_sessions_path("gateway-sessions extra").is_err());
@@ -374,22 +400,47 @@ fn rejects_invalid_inventory_commands() {
         "/api/v1/telemetry/tunnels?limit=10&client_id=edge%2Fa&interface=tun%2F0"
     );
     assert_eq!(
-        super::source_templates_path(Some("telemetry/source")),
-        "/api/v1/source-templates?domain=telemetry%2Fsource"
+        super::config_presets_path(Some("host/metrics")),
+        "/api/v1/configuration-presets?behavior=host%2Fmetrics"
     );
     assert_eq!(
-        super::source_template_assignments_path(Some("edge/a"), Some("telemetry/source")),
-        "/api/v1/source-template-assignments?client_id=edge%2Fa&domain=telemetry%2Fsource"
+        super::config_sources_path(Some("edge/a"), Some("host/metrics")),
+        "/api/v1/configuration-sources?client_id=edge%2Fa&behavior=host%2Fmetrics"
     );
     assert_eq!(
-        super::source_status_path(Some("edge/a"), Some("telemetry/source")),
-        "/api/v1/source-status?client_id=edge%2Fa&domain=telemetry%2Fsource"
+        super::config_render_path("edge/a"),
+        "/api/v1/effective-agent-config?client_id=edge%2Fa"
+    );
+    assert!(parse_vty_inventory_command("config-render --format xml").is_err());
+    assert_eq!(
+        crate::commands_inventory::configuration_source_selector(
+            Some("provider:alpha && country:US"),
+            &["edge".to_string()]
+        )
+        .unwrap(),
+        "(provider:alpha && country:US) || (tag:edge)"
     );
     assert_eq!(
-        super::template_runtime_config_path("edge/a"),
-        "/api/v1/template-runtime-config?client_id=edge%2Fa"
+        crate::commands_inventory::configuration_source_preview_target_ids(&serde_json::json!({
+            "targets": [
+                {"client_id": "edge-b"},
+                {"client_id": "edge-a"},
+                {"client_id": "edge-b"}
+            ]
+        }))
+        .unwrap(),
+        vec!["edge-a".to_string(), "edge-b".to_string()]
     );
-    assert!(parse_vty_inventory_command("template-runtime-config --format xml").is_err());
+    assert!(
+        crate::commands_inventory::require_matching_reviewed_preview_hash(
+            Some("reviewed"),
+            "changed",
+            "config-source-set"
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("rerun without --confirmed")
+    );
     assert!(parse_vty_inventory_command("fleet-alerts --severity noisy").is_err());
     assert!(parse_vty_inventory_command("fleet-alerts --limit=0").is_err());
     assert!(parse_vty_inventory_command("fleet-alerts --operator-state noisy").is_err());

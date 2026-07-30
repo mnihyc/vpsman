@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
@@ -7,10 +7,12 @@ use vpsman_common::{observed_ospf_cost, payload_hash, OspfControlMode};
 
 use crate::{
     model::{
-        NetworkObservationView, NetworkOspfRecommendationView, NetworkOspfUpdateEvidenceView,
-        NetworkOspfUpdatePlanView, SourceTemplateView, TunnelPlanView,
+        NetworkAdapterDefinitionView, NetworkObservationView, NetworkOspfRecommendationView,
+        NetworkOspfUpdateEvidenceView, NetworkOspfUpdatePlanView, ResolvedOspfCommandSource,
+        TunnelPlanView,
     },
     repository::Repository,
+    repository_configuration_presets::validate_network_adapter_definition_view,
     repository_network_observations::topology_identity_hash_for_plan,
     util::compare_timestamps_desc,
 };
@@ -144,8 +146,11 @@ impl Repository {
             .collect::<Vec<_>>();
         let plan_ids = plans.iter().map(|plan| plan.id).collect::<Vec<_>>();
         let observations_by_plan = self.recent_ospf_observations_for_plans(&plan_ids).await?;
-        let templates = self
-            .list_source_templates(Some("routing_cost_adapter"))
+        let adapters = self
+            .list_network_adapter_definitions(Some("routing_cost"))
+            .await?;
+        let fallback_sources = self
+            .effective_ospf_command_sources_for_clients(&ospf_fallback_client_ids(plans.iter()))
             .await?;
         let mut updates = Vec::with_capacity(plans.len());
         for plan in &plans {
@@ -158,7 +163,8 @@ impl Repository {
                         .map(Vec::as_slice)
                         .unwrap_or(&[]),
                 ),
-                &templates,
+                &adapters,
+                &fallback_sources,
             ) {
                 Ok(update) => updates.push(update),
                 Err(error) => failures.push(AutomaticOspfUpdatePlanFailure {
@@ -190,8 +196,13 @@ impl Repository {
             .map(|plan| plan.id)
             .collect::<Vec<_>>();
         let observations_by_plan = self.recent_ospf_observations_for_plans(&plan_ids).await?;
-        let templates = self
-            .list_source_templates(Some("routing_cost_adapter"))
+        let adapters = self
+            .list_network_adapter_definitions(Some("routing_cost"))
+            .await?;
+        let fallback_sources = self
+            .effective_ospf_command_sources_for_clients(&ospf_fallback_client_ids(
+                eligible_plans.iter().copied(),
+            ))
             .await?;
         let mut update_plans = eligible_plans
             .iter()
@@ -205,7 +216,8 @@ impl Repository {
                             .map(Vec::as_slice)
                             .unwrap_or(&[]),
                     ),
-                    &templates,
+                    &adapters,
+                    &fallback_sources,
                 )
             })
             .collect::<Result<Vec<_>>>()?;
@@ -228,8 +240,13 @@ impl Repository {
             return Ok(None);
         }
         let observations_by_plan = self.recent_ospf_observations_for_plans(&[plan_id]).await?;
-        let templates = self
-            .list_source_templates(Some("routing_cost_adapter"))
+        let adapters = self
+            .list_network_adapter_definitions(Some("routing_cost"))
+            .await?;
+        let fallback_sources = self
+            .effective_ospf_command_sources_for_clients(&ospf_fallback_client_ids(std::iter::once(
+                &plan,
+            )))
             .await?;
         build_ospf_update_plan(
             &plan,
@@ -240,7 +257,8 @@ impl Repository {
                     .map(Vec::as_slice)
                     .unwrap_or(&[]),
             ),
-            &templates,
+            &adapters,
+            &fallback_sources,
         )
         .map(Some)
     }
@@ -441,7 +459,8 @@ fn recommend_plan_ospf_cost(
 fn build_ospf_update_plan(
     plan: &TunnelPlanView,
     recommendation: OspfRecommendationCandidate,
-    templates: &[SourceTemplateView],
+    adapters: &[NetworkAdapterDefinitionView],
+    fallback_sources: &BTreeMap<String, Option<ResolvedOspfCommandSource>>,
 ) -> Result<NetworkOspfUpdatePlanView> {
     let healthy_probe_streak = recommendation.healthy_probe_streak;
     let recommendation = recommendation.view;
@@ -450,9 +469,19 @@ fn build_ospf_update_plan(
         .ospf
         .as_ref()
         .expect("OSPF update plans only include OSPF-enabled plans");
-    let left_template = adapter_snapshot(templates, &ospf.left_adapter_template_id)?;
-    let right_template = adapter_snapshot(templates, &ospf.right_adapter_template_id)?;
-    let adapters_ready = left_template.is_some() && right_template.is_some();
+    let left_definition = updater_snapshot(
+        adapters,
+        fallback_sources,
+        &recommendation.left_client_id,
+        ospf.left_adapter_definition_id.as_deref(),
+    )?;
+    let right_definition = updater_snapshot(
+        adapters,
+        fallback_sources,
+        &recommendation.right_client_id,
+        ospf.right_adapter_definition_id.as_deref(),
+    )?;
+    let adapters_ready = left_definition.is_some() && right_definition.is_some();
     let endpoints_verified =
         plan.left_ospf_status == "verified" && plan.right_ospf_status == "verified";
     let current_costs_complete =
@@ -477,7 +506,7 @@ fn build_ospf_update_plan(
     );
     let change_summary = if !endpoints_verified {
         format!(
-            "Check both routing adapters before applying cost {} on {}",
+            "Check both endpoint OSPF updaters before applying cost {} on {}",
             recommendation.recommended_ospf_cost, recommendation.interface_name
         )
     } else if !current_costs_complete {
@@ -511,12 +540,22 @@ fn build_ospf_update_plan(
         left_client_id: recommendation.left_client_id.clone(),
         right_client_id: recommendation.right_client_id.clone(),
         control_mode: ospf_control_mode(ospf.mode).to_string(),
-        left_adapter_template_id: ospf.left_adapter_template_id.clone(),
-        right_adapter_template_id: ospf.right_adapter_template_id.clone(),
-        left_adapter_template_name: left_template.as_ref().map(|value| value.0.clone()),
-        right_adapter_template_name: right_template.as_ref().map(|value| value.0.clone()),
-        left_adapter_definition_hash: left_template.map(|value| value.1),
-        right_adapter_definition_hash: right_template.map(|value| value.1),
+        left_updater_source: left_definition
+            .as_ref()
+            .map_or_else(|| "unconfigured".to_string(), |value| value.origin.clone()),
+        right_updater_source: right_definition
+            .as_ref()
+            .map_or_else(|| "unconfigured".to_string(), |value| value.origin.clone()),
+        left_adapter_definition_id: left_definition.as_ref().map(|value| value.id.clone()),
+        right_adapter_definition_id: right_definition.as_ref().map(|value| value.id.clone()),
+        left_adapter_definition_name: left_definition.as_ref().map(|value| value.name.clone()),
+        right_adapter_definition_name: right_definition.as_ref().map(|value| value.name.clone()),
+        left_adapter_definition_hash: left_definition
+            .as_ref()
+            .map(|value| value.definition_hash.clone()),
+        right_adapter_definition_hash: right_definition
+            .as_ref()
+            .map(|value| value.definition_hash.clone()),
         left_current_ospf_cost: plan.left_current_ospf_cost,
         right_current_ospf_cost: plan.right_current_ospf_cost,
         left_ospf_status: plan.left_ospf_status.clone(),
@@ -551,18 +590,65 @@ fn build_ospf_update_plan(
     })
 }
 
-fn adapter_snapshot(
-    templates: &[SourceTemplateView],
-    template_id: &str,
-) -> Result<Option<(String, String)>> {
-    let Ok(template_id) = uuid::Uuid::parse_str(template_id) else {
-        return Ok(None);
-    };
-    let Some(template) = templates.iter().find(|template| template.id == template_id) else {
-        return Ok(None);
-    };
-    let definition = serde_json::to_vec(&template.definition)?;
-    Ok(Some((template.name.clone(), payload_hash(&definition))))
+struct OspfUpdaterSnapshot {
+    origin: String,
+    id: String,
+    name: String,
+    definition_hash: String,
+}
+
+fn updater_snapshot(
+    adapters: &[NetworkAdapterDefinitionView],
+    fallback_sources: &BTreeMap<String, Option<ResolvedOspfCommandSource>>,
+    client_id: &str,
+    override_definition_id: Option<&str>,
+) -> Result<Option<OspfUpdaterSnapshot>> {
+    if let Some(definition_id) = override_definition_id {
+        let Ok(definition_id) = uuid::Uuid::parse_str(definition_id) else {
+            return Ok(None);
+        };
+        let Some(definition) = adapters
+            .iter()
+            .find(|definition| definition.id == definition_id)
+        else {
+            return Ok(None);
+        };
+        validate_network_adapter_definition_view(definition)?;
+        let definition_json = serde_json::to_vec(&definition.definition)?;
+        return Ok(Some(OspfUpdaterSnapshot {
+            origin: "plan_override".to_string(),
+            id: definition.id.to_string(),
+            name: definition.name.clone(),
+            definition_hash: payload_hash(&definition_json),
+        }));
+    }
+    Ok(fallback_sources
+        .get(client_id)
+        .and_then(Option::as_ref)
+        .map(|source| OspfUpdaterSnapshot {
+            origin: source.origin.clone(),
+            id: source.id.to_string(),
+            name: source.name.clone(),
+            definition_hash: source.definition_hash.clone(),
+        }))
+}
+
+fn ospf_fallback_client_ids<'a>(
+    plans: impl IntoIterator<Item = &'a TunnelPlanView>,
+) -> Vec<String> {
+    let mut clients = BTreeSet::new();
+    for plan in plans {
+        let Some(ospf) = plan.plan.ospf.as_ref() else {
+            continue;
+        };
+        if ospf.left_adapter_definition_id.is_none() {
+            clients.insert(plan.left_client_id.clone());
+        }
+        if ospf.right_adapter_definition_id.is_none() {
+            clients.insert(plan.right_client_id.clone());
+        }
+    }
+    clients.into_iter().collect()
 }
 
 fn ospf_recommendation_id(

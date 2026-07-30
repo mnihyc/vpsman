@@ -50,6 +50,7 @@ import {
   type PrivilegeMaterial,
 } from "../privilege";
 import {
+  agentsMatchingExpression,
   parseSearchExpression,
   selectorExpressionForClientIds,
 } from "../searchExpression";
@@ -59,6 +60,7 @@ import {
   DEFAULT_MAX_JOB_TIMEOUT_SECS,
   MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
 } from "./jobDispatchModel";
+import { LocalTargetPreview } from "./TargetImpactPreview";
 import type {
   AgentView,
   BulkResolveResponse,
@@ -67,9 +69,8 @@ import type {
   CreateJobRequest,
   CreateJobResponse,
   FleetAlertPolicyRecord,
-  SourceTemplateAssignmentRecord,
-  SourceTemplateRecord,
-  SourceStatusRecord,
+  ConfigurationPresetRecord,
+  ConfigurationSourceView,
   DeleteRuntimeConfigPatchGeneratorRequest,
   RuntimeConfigApplyStateRecord,
   RuntimeConfigDispatchRecord,
@@ -189,9 +190,9 @@ export function ConfigPanel({
   agents,
   trafficAccounting,
   vpsRuleValues,
-  sourceTemplateAssignments,
-  sourceTemplates,
-  sourceStatus,
+  configurationPresets,
+  configurationSources,
+  configurationSourcesEvidenceState,
   fleetConfigEvidenceAvailable,
   inventoryEvidenceState,
   error,
@@ -205,11 +206,11 @@ export function ConfigPanel({
   onCreateJob,
   onLoadJobOutputs,
   onLoadJobTargets,
+  onLoadConfigurationSources,
   onDeleteRuntimeConfigPatchGenerator,
   onOpenJobDetails,
   onOpenJobHistory,
   onOpenPrivilegeUnlock,
-  onOpenSourceTemplates,
   onOpenAlerts,
   onRefresh,
   onBulkUnsetVpsRules,
@@ -226,9 +227,9 @@ export function ConfigPanel({
   agents: AgentView[];
   trafficAccounting: TrafficAccountingRecord[];
   vpsRuleValues: VpsRuleValueRecord[];
-  sourceTemplateAssignments: SourceTemplateAssignmentRecord[];
-  sourceTemplates: SourceTemplateRecord[];
-  sourceStatus: SourceStatusRecord[];
+  configurationPresets: ConfigurationPresetRecord[];
+  configurationSources: ConfigurationSourceView[];
+  configurationSourcesEvidenceState: EvidenceState;
   fleetConfigEvidenceAvailable: boolean;
   inventoryEvidenceState: EvidenceState;
   error: string | null;
@@ -249,6 +250,7 @@ export function ConfigPanel({
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
+  onLoadConfigurationSources: () => Promise<void>;
   onDeleteRuntimeConfigPatchGenerator: (
     generatorId: string,
     request: DeleteRuntimeConfigPatchGeneratorRequest,
@@ -256,7 +258,6 @@ export function ConfigPanel({
   onOpenJobDetails: (jobId: string) => void;
   onOpenJobHistory: () => void;
   onOpenPrivilegeUnlock: () => void;
-  onOpenSourceTemplates: () => void;
   onOpenAlerts: () => void;
   onRefresh: () => void;
   onBulkUnsetVpsRules: (
@@ -296,6 +297,16 @@ export function ConfigPanel({
     setActionError(null);
   }, [subpage]);
 
+  useEffect(() => {
+    if (subpage === "overview") {
+      void runPanelAction(
+        setPending,
+        setActionError,
+        onLoadConfigurationSources,
+      );
+    }
+  }, [onLoadConfigurationSources, subpage]);
+
   return (
     <section className="workspace singleColumn configWorkspace">
       <div className="fleetPanel">
@@ -328,9 +339,11 @@ export function ConfigPanel({
         {subpage === "overview" && (
           <ConfigOverview
             agents={agents}
-            sourceTemplateAssignments={sourceTemplateAssignments}
-            sourceTemplates={sourceTemplates}
-            sourceStatus={sourceStatus}
+            configurationPresets={configurationPresets}
+            configurationSources={configurationSources}
+            configurationSourcesEvidenceState={
+              configurationSourcesEvidenceState
+            }
             fleetConfigEvidenceAvailable={fleetConfigEvidenceAvailable}
             inventoryEvidenceState={inventoryEvidenceState}
             runtimeConfigApplyStates={runtimeConfigApplyStates}
@@ -389,15 +402,6 @@ export function ConfigPanel({
             setPrivilegeMaterial={setPrivilegeMaterial}
           />
         )}
-        {subpage === "templates" && (
-          <ConfigTemplateSummary
-            agents={agents}
-            assignments={sourceTemplateAssignments}
-            onOpenSourceTemplates={onOpenSourceTemplates}
-            sourceStatus={sourceStatus}
-            templates={sourceTemplates}
-          />
-        )}
         {subpage === "rules" && (
           <VpsRulesPanel
             agents={agents}
@@ -418,9 +422,9 @@ export function ConfigPanel({
 
 function ConfigOverview({
   agents,
-  sourceTemplateAssignments,
-  sourceTemplates,
-  sourceStatus,
+  configurationPresets,
+  configurationSources,
+  configurationSourcesEvidenceState,
   fleetConfigEvidenceAvailable,
   inventoryEvidenceState,
   runtimeConfigApplyStates,
@@ -431,9 +435,9 @@ function ConfigOverview({
   onSelectSubpage,
 }: {
   agents: AgentView[];
-  sourceTemplateAssignments: SourceTemplateAssignmentRecord[];
-  sourceTemplates: SourceTemplateRecord[];
-  sourceStatus: SourceStatusRecord[];
+  configurationPresets: ConfigurationPresetRecord[];
+  configurationSources: ConfigurationSourceView[];
+  configurationSourcesEvidenceState: EvidenceState;
   fleetConfigEvidenceAvailable: boolean;
   inventoryEvidenceState: EvidenceState;
   runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
@@ -456,20 +460,33 @@ function ConfigOverview({
       ["config_read", "runtime_config_sync"].includes(job.command_type),
     )
     .slice(0, 5);
-  const sourceRiskRows = sourceStatus.filter(
-    (row) => !isReadySourceStatus(row.status),
+  const sourceRiskRows = configurationSources.filter(
+    configurationSourceNeedsAttention,
   );
-  const sourceReadyRows = sourceStatus.length - sourceRiskRows.length;
+  const sourceReadyRows = configurationSources.filter(
+    configurationSourceIsReady,
+  );
+  const sourceNeutralRows = Math.max(
+    configurationSources.length -
+      sourceRiskRows.length -
+      sourceReadyRows.length,
+    0,
+  );
   const runtimeEvidenceAvailable =
     runtimeConfigEvidenceState === "available";
   const inventoryEvidenceAvailable = inventoryEvidenceState === "available";
+  const configurationSourcesEvidenceAvailable =
+    configurationSourcesEvidenceState === "available";
   const currentStateEvidenceAvailable =
     runtimeEvidenceAvailable && fleetConfigEvidenceAvailable;
   const completeSummaryEvidence =
-    currentStateEvidenceAvailable && inventoryEvidenceAvailable;
+    currentStateEvidenceAvailable &&
+    inventoryEvidenceAvailable &&
+    configurationSourcesEvidenceAvailable;
   const evidenceLoading =
     runtimeConfigEvidenceState === "loading" ||
-    inventoryEvidenceState === "loading";
+    inventoryEvidenceState === "loading" ||
+    configurationSourcesEvidenceState === "loading";
   const trustedRuntimeConfigApplyStates =
     runtimeEvidenceAvailable
       ? runtimeConfigApplyStates
@@ -497,18 +514,24 @@ function ConfigOverview({
       .filter((row) => row.resourceAvailable && row.statusKind === "current")
       .map((row) => row.clientId),
   );
-  const assignedClientIds = new Set(
-    sourceTemplateAssignments.map((assignment) => assignment.client_id),
+  const sourceClientIds = new Set(
+    configurationSources.map((source) => source.client_id),
   );
   const missingApplyStates = currentStateRows.filter(
     (row) => row.resourceAvailable && row.statusKind === "unknown",
   ).length;
-  const missingTemplateCoverage = Math.max(
-    agents.length - assignedClientIds.size,
+  const missingSourceEvidence = Math.max(
+    agents.length - sourceClientIds.size,
     0,
   );
-  const customTemplateCount = sourceTemplates.filter(
-    (template) => !template.built_in,
+  const customPresetCount = configurationPresets.filter(
+    (preset) => preset.kind === "custom",
+  ).length;
+  const effectivePresetCount = new Set(
+    configurationSources.map((source) => source.effective_preset_id),
+  ).size;
+  const explicitOverrideCount = configurationSources.filter(
+    (source) => source.selection_origin === "explicit_override",
   ).length;
   const invalidRuleRows = vpsRuleValues.filter(
     (row) => row.state !== "ok",
@@ -529,9 +552,10 @@ function ConfigOverview({
           failedSyncs,
           invalidRuleRows,
           missingApplyStates,
-          missingTemplateCoverage,
+          missingSourceEvidence,
           pendingSyncs,
           staleApplyRows,
+          sourceNeutralCount: sourceNeutralRows,
           sourceRiskCount: sourceRiskRows.length,
           totalRuleRows: vpsRuleValues.length,
           validRuleRows,
@@ -588,11 +612,11 @@ function ConfigOverview({
       title: "Bulk patch",
     },
     {
-      action: "Open Template coverage",
+      action: "Open Sources",
       detail:
-        "Review coverage and assignments; persistent authoring belongs to Source templates.",
-      subpage: "templates",
-      title: "Template coverage",
+        "Review effective presets, inherited defaults, overrides, sync, and readiness.",
+      subpage: "sources",
+      title: "Sources",
     },
     {
       action: "Open Rules",
@@ -620,7 +644,7 @@ function ConfigOverview({
           <div>
             <h3>Config health</h3>
             <span>
-              Runtime apply state, template coverage, source readiness, and
+              Runtime apply state, effective sources, readiness, and
               traffic/accounting rule risk.
             </span>
           </div>
@@ -655,11 +679,11 @@ function ConfigOverview({
           </span>
           <span>
             <strong>
-              {inventoryEvidenceAvailable
-                ? `${sourceReadyRows}/${sourceStatus.length}`
+              {configurationSourcesEvidenceAvailable
+                ? `${sourceReadyRows.length}/${configurationSources.length}`
                 : "Unknown"}
             </strong>
-            <small>source checks ready</small>
+            <small>verified source checks</small>
           </span>
           <span>
             <strong>
@@ -787,21 +811,24 @@ function ConfigOverview({
             />
             <ConfigOverviewRiskRow
               detail={
-                inventoryEvidenceAvailable
-                  ? sourceRiskRows[0]?.status_reason ??
-                    `${sourceReadyRows} source checks are ready`
-                  : inventoryEvidenceState === "loading"
+                configurationSourcesEvidenceAvailable
+                  ? configurationSourceAttentionReason(sourceRiskRows[0]) ??
+                    `${sourceReadyRows.length} verified ready; ${sourceNeutralRows} offline or not yet verified`
+                  : configurationSourcesEvidenceState === "loading"
                     ? "Source readiness evidence is still loading."
                     : "Source readiness evidence is unavailable."
               }
               label="Source readiness drift"
               tone={
-                !inventoryEvidenceAvailable || sourceRiskRows.length
+                !configurationSourcesEvidenceAvailable ||
+                sourceRiskRows.length
                   ? "warning"
-                  : "ok"
+                  : sourceNeutralRows
+                    ? "neutral"
+                    : "ok"
               }
               value={
-                inventoryEvidenceAvailable
+                configurationSourcesEvidenceAvailable
                   ? sourceRiskRows.length
                   : "Unknown"
               }
@@ -827,21 +854,22 @@ function ConfigOverview({
 
         <section
           className="configOverviewBlock"
-          aria-label="Config template coverage"
+          aria-label="Configuration source summary"
         >
           <div className="configOverviewBlockHeader">
-            <h3>Template coverage</h3>
+            <h3>Configuration sources</h3>
             <ConsoleStatusBadge
               tone={
-                !inventoryEvidenceAvailable ||
+                !configurationSourcesEvidenceAvailable ||
                 !fleetConfigEvidenceAvailable ||
-                missingTemplateCoverage
+                missingSourceEvidence
                   ? "warning"
                   : "ok"
               }
             >
-              {inventoryEvidenceAvailable && fleetConfigEvidenceAvailable
-                ? `${assignedClientIds.size}/${agents.length} VPSs`
+              {configurationSourcesEvidenceAvailable &&
+              fleetConfigEvidenceAvailable
+                ? `${sourceClientIds.size}/${agents.length} VPSs`
                 : evidenceLoading
                   ? "Checking evidence"
                   : "Evidence incomplete"}
@@ -850,41 +878,41 @@ function ConfigOverview({
           <div className="configCoverageGrid">
             <span>
               <strong>
-                {inventoryEvidenceAvailable
-                  ? sourceTemplates.length
+                {configurationSourcesEvidenceAvailable
+                  ? effectivePresetCount
                   : "Unknown"}
               </strong>
-              <small>templates</small>
+              <small>effective presets</small>
             </span>
             <span>
               <strong>
-                {inventoryEvidenceAvailable
-                  ? customTemplateCount
+                {configurationSourcesEvidenceAvailable
+                  ? customPresetCount
                   : "Unknown"}
               </strong>
-              <small>custom templates</small>
+              <small>custom presets</small>
             </span>
             <span>
               <strong>
-                {inventoryEvidenceAvailable
-                  ? sourceTemplateAssignments.length
+                {configurationSourcesEvidenceAvailable
+                  ? explicitOverrideCount
                   : "Unknown"}
               </strong>
-              <small>assignments</small>
+              <small>explicit overrides</small>
             </span>
             <span>
               <strong>
-                {inventoryEvidenceAvailable && fleetConfigEvidenceAvailable
-                  ? missingTemplateCoverage
+                {configurationSourcesEvidenceAvailable &&
+                fleetConfigEvidenceAvailable
+                  ? missingSourceEvidence
                   : "Unknown"}
               </strong>
-              <small>VPS without assignment evidence</small>
+              <small>VPS without source evidence</small>
             </span>
           </div>
           <p>
-            Persistent source-template authoring stays in Automation / Source
-            Templates; Config uses assignments and rendered runtime state for
-            operator review.
+            Open Sources to see the exact preset distribution across the
+            fleet. No single VPS is treated as the fleet-wide desired source.
           </p>
         </section>
       </div>
@@ -1272,578 +1300,42 @@ function ruleValidityLabel(validRows: number, totalRows: number): string {
     : "No rule rows";
 }
 
-type ConfigTemplateCoverageRow = {
-  assignedClients: number;
-  assignments: number;
-  attentionLabel: string;
-  attentionChecks: number;
-  attentionRows: SourceStatusRecord[];
-  domain: string;
-  domainLabel: string;
-  desiredDetail: string;
-  desiredSource: string;
-  fixDetail: string;
-  fixFilter: string;
-  fixLabel: string;
-  readyChecks: number;
-  readinessTotal: number;
-  storedDetail: string;
-  storedLabel: string;
-  templates: number;
-  updatedAt: string;
-};
-
-function ConfigTemplateSummary({
-  agents,
-  assignments,
-  onOpenSourceTemplates,
-  sourceStatus,
-  templates,
-}: {
-  agents: AgentView[];
-  assignments: SourceTemplateAssignmentRecord[];
-  onOpenSourceTemplates: () => void;
-  sourceStatus: SourceStatusRecord[];
-  templates: SourceTemplateRecord[];
-}) {
-  const { vpsNameDisplayMode } = usePanelDisplaySettings();
-  const assignedClientIds = useMemo(
-    () => new Set(assignments.map((assignment) => assignment.client_id)),
-    [assignments],
-  );
-  const readyStatusCount = sourceStatus.filter((row) =>
-    isReadySourceStatus(row.status),
-  ).length;
-  const attentionStatusRows = sourceStatus.filter(
-    (row) => !isReadySourceStatus(row.status),
-  );
-  const customTemplateCount = templates.filter(
-    (template) => !template.built_in,
-  ).length;
-  const coverageRows = useMemo<ConfigTemplateCoverageRow[]>(() => {
-    const domains = Array.from(
-      new Set([
-        ...templates.map((template) => template.domain),
-        ...assignments.map((assignment) => assignment.domain),
-        ...sourceStatus.map((row) => row.domain),
-      ]),
-    ).sort((left, right) => left.localeCompare(right));
-    return domains.map((domain) => {
-      const domainTemplates = templates.filter(
-        (template) => template.domain === domain,
-      );
-      const domainAssignments = assignments.filter(
-        (assignment) => assignment.domain === domain,
-      );
-      const domainStatus = sourceStatus.filter((row) => row.domain === domain);
-      const defaultTemplate =
-        domainTemplates.find((template) => template.is_default)?.name ??
-        domainTemplates[0]?.name ??
-        "";
-      const attentionRows = domainStatus.filter(
-        (row) => !isReadySourceStatus(row.status),
-      );
-      const readyChecks = domainStatus.filter((row) =>
-        isReadySourceStatus(row.status),
-      ).length;
-      const primaryStatus = attentionRows[0] ?? domainStatus[0] ?? null;
-      const desiredSource =
-        primaryStatus?.template_name ?? defaultTemplate ?? "No selected source";
-      const desiredDetail = primaryStatus
-        ? `${sourceDomainLabel(domain)} uses ${sourceTokenLabel(
-            primaryStatus.source_kind,
-          )}`
-        : defaultTemplate
-          ? "Domain default from template registry"
-          : "No source status or template record loaded";
-      const storedLabel =
-        domainTemplates.length > 0
-          ? `${domainTemplates.length} stored`
-          : primaryStatus?.template_name
-            ? "Runtime selected only"
-            : "No stored template";
-      const storedDetail =
-        domainTemplates.length > 0
-          ? [
-              `${domainTemplates.filter((template) => template.built_in).length} built-in`,
-              `${domainTemplates.filter((template) => !template.built_in).length} custom`,
-              defaultTemplate ? `default ${defaultTemplate}` : null,
-            ]
-              .filter(Boolean)
-              .join(" · ")
-          : primaryStatus?.template_name
-            ? `${primaryStatus.template_name} is visible from source status, not the registry`
-            : "Create or import a source template before assignment";
-      const attentionLabel =
-        attentionRows.length > 0
-          ? sourceStatusLabel(attentionRows[0].status)
-          : domainStatus.length > 0
-            ? "No attention"
-            : "No checks";
-      const fixLabel =
-        attentionRows.length > 0
-          ? "Fix source"
-          : domainTemplates.length === 0
-            ? "Add"
-            : "Review";
-      const fixFilter = [
-        sourceDomainLabel(domain),
-        domain,
-        primaryStatus?.template_name,
-        primaryStatus?.source_kind,
-      ]
-        .filter(Boolean)
-        .join(" ");
-      const fixDetail =
-        attentionRows.length > 0
-          ? `${formatVpsName(
-              attentionRows[0],
-              vpsNameDisplayMode,
-            )}: ${sourceStatusLabel(attentionRows[0].status)}`
-          : domainTemplates.length === 0
-            ? "Open authoring filtered to this source domain"
-            : "Open the source template registry for this domain";
-      const updatedAt =
-        domainTemplates
-          .map((template) => template.updated_at)
-          .filter(Boolean)
-          .sort((left, right) => right.localeCompare(left))[0] ??
-        domainAssignments
-          .map((assignment) => assignment.assigned_at)
-          .filter(Boolean)
-          .sort((left, right) => right.localeCompare(left))[0] ??
-        "";
-      return {
-        assignedClients: new Set(
-          domainAssignments.map((assignment) => assignment.client_id),
-        ).size,
-        assignments: domainAssignments.length,
-        attentionChecks: attentionRows.length,
-        attentionLabel,
-        attentionRows,
-        domain,
-        domainLabel: sourceDomainLabel(domain),
-        desiredDetail,
-        desiredSource,
-        fixDetail,
-        fixFilter,
-        fixLabel,
-        readyChecks,
-        readinessTotal: domainStatus.length,
-        storedDetail,
-        storedLabel,
-        templates: domainTemplates.length,
-        updatedAt,
-      };
-    });
-  }, [assignments, sourceStatus, templates, vpsNameDisplayMode]);
-  const openCoverageFix = (row: ConfigTemplateCoverageRow) => {
-    seedSourceTemplateSearch(row.fixFilter);
-    onOpenSourceTemplates();
-  };
-  const coverageColumns = useMemo<
-    ConsoleDataGridColumn<ConfigTemplateCoverageRow>[]
-  >(
-    () => [
-      {
-        cell: (row) => (
-          <span className="historyPrimary sourceCoverageCellText">
-            <strong>{row.domainLabel}</strong>
-            <small>Desired source: {row.desiredSource}</small>
-          </span>
-        ),
-        header: "Desired source",
-        id: "desired",
-        minSize: 220,
-        searchValue: (row) =>
-          `${row.domain} ${row.domainLabel} ${row.desiredSource} ${row.desiredDetail}`,
-        sortValue: (row) => row.domainLabel,
-      },
-      {
-        cell: (row) => (
-          <span className="historyPrimary sourceCoverageCellText">
-            <strong>{row.storedLabel}</strong>
-            <small>{row.storedDetail}</small>
-          </span>
-        ),
-        header: "Stored/available",
-        id: "stored",
-        minSize: 220,
-        searchValue: (row) => `${row.storedLabel} ${row.storedDetail}`,
-        sortValue: (row) => row.templates,
-      },
-      {
-        cell: (row) => (
-          <span className="historyPrimary sourceCoverageCellText">
-            <strong>
-              {row.assignedClients}/{agents.length} VPSs
-            </strong>
-            <small>{row.assignments} assignment rows</small>
-          </span>
-        ),
-        header: "Assigned VPS",
-        id: "assignments",
-        minSize: 150,
-        searchValue: (row) =>
-          `${row.assignedClients} VPSs ${row.assignments} assignment rows`,
-        sortValue: (row) => row.assignedClients,
-      },
-      {
-        cell: (row) => (
-          <ConsoleStatusBadge tone={row.readyChecks > 0 ? "ok" : "neutral"}>
-            {row.readinessTotal > 0
-              ? `${row.readyChecks}/${row.readinessTotal} ready`
-              : "No checks"}
-          </ConsoleStatusBadge>
-        ),
-        header: "Ready",
-        id: "ready",
-        searchValue: (row) =>
-          `${row.readyChecks} ready ${row.readinessTotal} checks`,
-        sortValue: (row) => row.readyChecks,
-      },
-      {
-        cell: (row) => (
-          <span className="historyPrimary sourceCoverageCellText">
-            <ConsoleStatusBadge
-              tone={row.attentionChecks > 0 ? "warning" : "ok"}
-            >
-              {row.attentionChecks > 0
-                ? `${row.attentionChecks} attention`
-                : "None"}
-            </ConsoleStatusBadge>
-            <small>{row.attentionLabel}</small>
-          </span>
-        ),
-        header: "Attention",
-        id: "attention",
-        minSize: 170,
-        searchValue: (row) =>
-          `${row.attentionChecks} attention ${row.attentionLabel}`,
-        sortValue: (row) => row.attentionChecks,
-      },
-      {
-        cell: (row) => (
-          <button
-            className="secondaryAction compactAction sourceCoverageFixAction"
-            onClick={(event) => {
-              event.stopPropagation();
-              openCoverageFix(row);
-            }}
-            title={row.fixDetail}
-            type="button"
-          >
-            <FileSliders size={15} />
-            <span>{row.fixLabel}</span>
-          </button>
-        ),
-        header: "Fix",
-        id: "fix",
-        minSize: 150,
-        searchValue: (row) => `${row.fixLabel} ${row.fixDetail}`,
-        sortValue: (row) => row.attentionChecks,
-      },
-    ],
-    [agents.length, onOpenSourceTemplates],
-  );
+function configurationSourceNeedsAttention(
+  source: ConfigurationSourceView,
+): boolean {
   return (
-    <div
-      className="configOverviewStack configTemplateSummary"
-      aria-label="Config template summary"
-    >
-      <section
-        className="configHealthPanel"
-        aria-label="Config template coverage summary"
-      >
-        <div className="configHealthHeader">
-          <div>
-            <h3>Template coverage</h3>
-            <span>
-              Read-only source coverage for Config: selected source, stored
-              template, assigned VPSs, readiness, and fix target.
-            </span>
-          </div>
-          <ConsoleStatusBadge
-            tone={attentionStatusRows.length > 0 ? "warning" : "ok"}
-          >
-            {attentionStatusRows.length > 0 ? "Needs review" : "Ready"}
-          </ConsoleStatusBadge>
-        </div>
-        <div className="configHealthSummary">
-          <span>
-            <strong>{templates.length}</strong>
-            <small>templates</small>
-          </span>
-          <span>
-            <strong>{customTemplateCount}</strong>
-            <small>custom</small>
-          </span>
-          <span>
-            <strong>{assignments.length}</strong>
-            <small>assignments</small>
-          </span>
-          <span>
-            <strong>
-              {assignedClientIds.size}/{agents.length}
-            </strong>
-            <small>VPS coverage</small>
-          </span>
-          <span>
-            <strong>{readyStatusCount}</strong>
-            <small>ready checks</small>
-          </span>
-          <span>
-            <strong>{attentionStatusRows.length}</strong>
-            <small>needs review</small>
-          </span>
-        </div>
-      </section>
-
-      <section
-        className="configOverviewBlock configTemplateCanonical"
-        aria-label="Source template canonical home"
-      >
-        <div className="configOverviewBlockHeader">
-          <h3>Source template authoring</h3>
-          <span>Automation / Source Templates</span>
-        </div>
-        <p>
-          Config shows runtime source coverage only. Create, clone, diff, test,
-          update, assign, and render persistent templates in Automation so
-          emergency config patches and source authoring stay separate.
-        </p>
-        <button
-          className="primaryAction"
-          onClick={onOpenSourceTemplates}
-          type="button"
-        >
-          <FileSliders size={16} />
-          Open Source Templates
-        </button>
-      </section>
-
-      <ConsoleDataGrid
-        columns={coverageColumns}
-        defaultPageSize={8}
-        empty={
-          <div className="emptyState compactEmpty">
-            No template domains are loaded.
-          </div>
-        }
-        expandOnRowClick
-        getRowId={(row) => row.domain}
-        itemLabel="template domains"
-        renderExpandedRow={(row) => (
-          <div className="consoleInlineDetailGrid">
-            <span>
-              <strong>Desired source</strong>
-              <span>{row.desiredSource}</span>
-            </span>
-            <span>
-              <strong>Stored/available</strong>
-              <span>{row.storedDetail}</span>
-            </span>
-            <span>
-              <strong>Assigned VPS</strong>
-              <span>
-                {row.assignedClients}/{agents.length} VPSs from{" "}
-                {row.assignments} assignments
-              </span>
-            </span>
-            <span>
-              <strong>Ready</strong>
-              <span>
-                {row.readinessTotal > 0
-                  ? `${row.readyChecks}/${row.readinessTotal} source checks`
-                  : "No source checks loaded"}
-              </span>
-            </span>
-            <span>
-              <strong>Attention</strong>
-              <span>{row.attentionLabel}</span>
-            </span>
-            <span>
-              <strong>Latest evidence</strong>
-              <span>
-                {row.updatedAt
-                  ? formatTime(row.updatedAt)
-                  : "No update evidence"}
-              </span>
-            </span>
-            <span>
-              <strong>Fix target</strong>
-              <span>{row.fixDetail}</span>
-            </span>
-          </div>
-        )}
-        rows={coverageRows}
-        searchPlaceholder="Search source coverage"
-        selectable={false}
-        storageKey="vpsman.config.templateSummary.domains"
-        title="Source coverage by domain"
-      />
-
-      <section
-        className="configOverviewBlock"
-        aria-label="Config source readiness exceptions"
-      >
-        <div className="configOverviewBlockHeader">
-          <h3>Source readiness exceptions</h3>
-          <span>{attentionStatusRows.length} records need review</span>
-        </div>
-        <div className="configRiskList">
-          {attentionStatusRows.slice(0, 6).map((row) => (
-            <div
-              className="configRiskRow"
-              key={`${row.client_id}:${row.domain}`}
-            >
-              <span>
-                <strong>
-                  {formatVpsName(row, vpsNameDisplayMode)} /{" "}
-                  {sourceDomainLabel(row.domain)}
-                </strong>
-                <small>
-                  {row.template_name} / {row.status_reason}
-                </small>
-              </span>
-              <div className="sourceCoverageExceptionActions">
-                <ConsoleStatusBadge tone="warning">
-                  {sourceStatusLabel(row.status)}
-                </ConsoleStatusBadge>
-                <button
-                  className="secondaryAction compactAction sourceCoverageFixAction"
-                  onClick={() => {
-                    seedSourceTemplateSearch(
-                      [
-                        sourceDomainLabel(row.domain),
-                        row.domain,
-                        row.template_name,
-                        row.source_kind,
-                      ]
-                        .filter(Boolean)
-                        .join(" "),
-                    );
-                    onOpenSourceTemplates();
-                  }}
-                  type="button"
-                >
-                  <FileSliders size={15} />
-                  <span>Fix source</span>
-                </button>
-              </div>
-            </div>
-          ))}
-          {attentionStatusRows.length === 0 && (
-            <div className="emptyState compactEmpty">
-              All loaded source checks are ready.
-            </div>
-          )}
-        </div>
-      </section>
-    </div>
+    ["failed", "stale"].includes(source.runtime_sync.state) ||
+    ["degraded", "failed", "invalid"].includes(source.readiness.state)
   );
 }
 
-function seedSourceTemplateSearch(filter: string) {
-  const trimmed = filter.trim();
-  if (!trimmed || typeof window === "undefined") {
-    return;
-  }
-  for (const storageKey of [
-    "vpsman.sourceTemplates.registry",
-    "vpsman.sourceTemplates.activeSources",
-  ]) {
-    try {
-      const current = window.localStorage.getItem(storageKey);
-      const parsed = current ? JSON.parse(current) : {};
-      const preferences =
-        parsed && typeof parsed === "object" && !Array.isArray(parsed)
-          ? parsed
-          : {};
-      window.localStorage.setItem(
-        storageKey,
-        JSON.stringify({ ...preferences, globalFilter: trimmed }),
-      );
-    } catch {
-      window.localStorage.setItem(
-        storageKey,
-        JSON.stringify({ globalFilter: trimmed }),
-      );
-    }
-  }
+function configurationSourceIsReady(
+  source: ConfigurationSourceView,
+): boolean {
+  return (
+    source.runtime_sync.state === "applied" &&
+    source.readiness.state === "ready"
+  );
 }
 
-function sourceStatusLabel(status: SourceStatusRecord["status"]): string {
-  switch (status) {
-    case "ok":
-    case "ready":
-      return "Ready";
-    case "ready_on_demand":
-      return "Ready on demand";
-    case "selected":
-      return "Selected";
-    case "selected_workflow":
-      return "Workflow selected";
-    case "metadata_only":
-      return "Metadata only";
-    case "agent_offline":
-      return "VPS offline";
-    case "unknown_domain":
-      return "Unknown source domain";
-    case "selected_no_store":
-      return "Server storage missing";
-    case "selected_no_artifacts":
-      return "No artifacts yet";
-    case "selected_no_limits":
-      return "No limits planned";
-    case "selected_no_samples":
-      return "Awaiting first sample";
-    case "degraded":
-      return "Degraded";
-    default:
-      return sourceTokenLabel(status);
+function configurationSourceAttentionReason(
+  source: ConfigurationSourceView | undefined,
+): string | null {
+  if (!source) return null;
+  if (["failed", "stale"].includes(source.runtime_sync.state)) {
+    return source.runtime_sync.reason;
   }
-}
-
-function sourceDomainLabel(value: string): string {
-  return sourceTokenLabel(value)
-    .replace(/\bospf\b/gi, "OSPF")
-    .replace(/\bvps\b/gi, "VPS");
-}
-
-function sourceTokenLabel(value: string | null | undefined): string {
-  const trimmed = value?.trim() ?? "";
-  if (!trimmed) {
-    return "Not configured";
-  }
-  return trimmed
-    .replace(/[_:-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/\b\w/g, (character) => character.toUpperCase());
-}
-
-function isReadySourceStatus(status: SourceStatusRecord["status"]): boolean {
-  return [
-    "ok",
-    "ready",
-    "ready_on_demand",
-    "selected",
-    "selected_workflow",
-    "metadata_only",
-    "selected_no_artifacts",
-    "selected_no_limits",
-    "selected_no_samples",
-  ].includes(status);
+  return source.readiness.reason;
 }
 
 function configHealthStatus({
   failedSyncs,
   invalidRuleRows,
   missingApplyStates,
-  missingTemplateCoverage,
+  missingSourceEvidence,
   pendingSyncs,
   staleApplyRows,
+  sourceNeutralCount,
   sourceRiskCount,
   totalRuleRows,
   validRuleRows,
@@ -1851,9 +1343,10 @@ function configHealthStatus({
   failedSyncs: number;
   invalidRuleRows: number;
   missingApplyStates: number;
-  missingTemplateCoverage: number;
+  missingSourceEvidence: number;
   pendingSyncs: number;
   staleApplyRows: number;
+  sourceNeutralCount: number;
   sourceRiskCount: number;
   totalRuleRows: number;
   validRuleRows: number;
@@ -1871,7 +1364,7 @@ function configHealthStatus({
     sourceRiskCount > 0 ||
     invalidRuleRows > 0 ||
     missingApplyStates > 0 ||
-    missingTemplateCoverage > 0
+    missingSourceEvidence > 0
   ) {
     return {
       detail: `${pendingSyncs} applies are queued, ${sourceRiskCount} source checks need review, ${missingApplyStates} VPSs lack apply-state evidence, and ${ruleValidityLabel(validRuleRows, totalRuleRows)}.`,
@@ -1879,9 +1372,16 @@ function configHealthStatus({
       tone: "warning",
     };
   }
+  if (sourceNeutralCount > 0) {
+    return {
+      detail: `No actionable configuration blockers were found. ${sourceNeutralCount} source checks remain neutral because the VPS is offline or readiness has not yet been verified.`,
+      label: "No blockers",
+      tone: "ok",
+    };
+  }
   return {
     detail:
-      "All loaded VPSs have applied runtime state, source readiness, template assignment evidence, and valid rule rows.",
+      "All loaded VPSs have applied runtime state, verified-ready configuration sources, and valid rule rows.",
     label: "Healthy",
     tone: "ok",
   };
@@ -2046,6 +1546,13 @@ function BulkConfigApply({
   const selectorParse = useMemo(
     () => parseSearchExpression(selectorExpression),
     [selectorExpression],
+  );
+  const localSelectorTargets = useMemo(
+    () =>
+      selectorExpression.trim() && !selectorParse.error
+        ? agentsMatchingExpression(agents, selectorExpression)
+        : [],
+    [agents, selectorExpression, selectorParse.error],
   );
   const previewToml =
     patchMode === "temporary" ? temporaryToml.trim() : rendered?.toml.trim();
@@ -2669,26 +2176,27 @@ function BulkConfigApply({
             (preview
               ? `${preview.target_count}/${agents.length}`
               : selectorExpression.trim()
-                ? "not previewed"
+                ? `${localSelectorTargets.length}/${agents.length} local`
                 : "no selector")
           }
         />
         <div className="bulkTargetState">
           <strong>
             {preview
-              ? `${bulkVpsCountLabel(preview.target_count)} resolved`
+              ? `${bulkVpsCountLabel(preview.target_count)} verified`
               : selectorExpression.trim()
-                ? "Selector not previewed"
+                ? `${bulkVpsCountLabel(localSelectorTargets.length)} matched locally`
                 : "No target selector"}
           </strong>
           <span>
             {preview
               ? "The final Apply confirmation will freeze this selector and re-resolve it before submission."
               : selectorExpression.trim()
-                ? "Preview changes to show the resolved VPS count and per-VPS patch summary."
+                ? "The matching VPSs update immediately below. Preview changes verifies them on the server and builds the per-VPS patch summary."
                 : "Add a selector; an empty selector is never treated as all VPSs."}
           </span>
         </div>
+        <LocalTargetPreview agents={localSelectorTargets} />
         <button
           className="secondaryAction"
           disabled={pending || !canPreviewChanges}
@@ -2795,6 +2303,11 @@ function BulkConfigApply({
             </button>
           </div>
           <>
+            <ActionFeedback
+              className="localActionFeedback patchGeneratorActionFeedback"
+              message={patchGeneratorStatus}
+              tone="success"
+            />
             <ConsoleDataGrid
               actions={patchGeneratorActions}
               columns={patchGeneratorColumns}
@@ -2841,11 +2354,6 @@ function BulkConfigApply({
                   <span>New generator</span>
                 </button>
               }
-            />
-            <ActionFeedback
-              className="localActionFeedback patchGeneratorActionFeedback"
-              message={patchGeneratorStatus}
-              tone="success"
             />
             {patchGeneratorEditor ? (
               <section
@@ -4236,9 +3744,27 @@ function VpsRulesPanel({
   const [reviewSnapshot, setReviewSnapshot] =
     useState<VpsRulesReviewSnapshot | null>(null);
   const [reviewPromptOpen, setReviewPromptOpen] = useState(false);
-  const [pending, setPending] = useState(false);
+  const [reviewPending, setReviewPending] = useState(false);
+  const [applyPending, setApplyPending] = useState(false);
+  const pending = reviewPending || applyPending;
   const [status, setStatus] = useState<string | null>(null);
   const [statusTone, setStatusTone] = useState<ActionFeedbackTone>("info");
+  const {
+    captureReviewGeneration,
+    invalidateReviewGeneration,
+    isReviewGenerationCurrent,
+  } = useReviewGenerationGuard();
+  const parsedSelector = useMemo(
+    () => parseSearchExpression(selectorExpression),
+    [selectorExpression],
+  );
+  const localSelectorTargets = useMemo(
+    () =>
+      selectorExpression.trim() && !parsedSelector.error
+        ? agentsMatchingExpression(agents, selectorExpression)
+        : [],
+    [agents, parsedSelector.error, selectorExpression],
+  );
   const agentNameById = useMemo(
     () =>
       new Map(
@@ -4470,18 +3996,22 @@ function VpsRulesPanel({
 
   useEffect(() => {
     writeLocalString(CONFIG_VPS_RULES_SELECTOR_STORAGE_KEY, selectorExpression);
-    setPreview(null);
-    setReviewSnapshot(null);
-    setReviewPromptOpen(false);
-    setStatus(null);
   }, [selectorExpression]);
 
   useEffect(() => {
+    invalidateReviewGeneration();
     setPreview(null);
     setReviewSnapshot(null);
     setReviewPromptOpen(false);
+    setReviewPending(false);
     setStatus(null);
-  }, [editMode, valuesText, unsetKeys]);
+  }, [
+    editMode,
+    invalidateReviewGeneration,
+    selectorExpression,
+    unsetKeys,
+    valuesText,
+  ]);
 
   function parseSetValues(): Record<string, string> {
     const values: Record<string, string> = {};
@@ -4519,7 +4049,8 @@ function VpsRulesPanel({
   }
 
   async function dryRun(operation: "upsert" | "unset") {
-    setPending(true);
+    const reviewGeneration = captureReviewGeneration();
+    setReviewPending(true);
     setReviewPromptOpen(false);
     setRuleStatus(
       operation === "upsert"
@@ -4539,6 +4070,9 @@ function VpsRulesPanel({
         values,
         keys,
       });
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
       const nextPreview = buildOperatorVpsRulesPreview(rawPreview);
       setPreview(nextPreview);
       setReviewSnapshot(
@@ -4559,13 +4093,17 @@ function VpsRulesPanel({
         nextPreview.changed_row_count === 0 ? "warning" : "success",
       );
     } catch (error) {
-      setRuleStatus(
-        error instanceof Error ? error.message : "VPS rules dry-run failed",
-        "danger",
-      );
-      setReviewSnapshot(null);
+      if (isReviewGenerationCurrent(reviewGeneration)) {
+        setRuleStatus(
+          error instanceof Error ? error.message : "VPS rules dry-run failed",
+          "danger",
+        );
+        setReviewSnapshot(null);
+      }
     } finally {
-      setPending(false);
+      if (isReviewGenerationCurrent(reviewGeneration)) {
+        setReviewPending(false);
+      }
     }
   }
 
@@ -4580,7 +4118,7 @@ function VpsRulesPanel({
       setReviewSnapshot(null);
       return;
     }
-    setPending(true);
+    setApplyPending(true);
     setRuleStatus("applying VPS rule changes", "progress");
     try {
       const rawPreview =
@@ -4611,7 +4149,7 @@ function VpsRulesPanel({
         "danger",
       );
     } finally {
-      setPending(false);
+      setApplyPending(false);
     }
   }
 
@@ -4629,10 +4167,20 @@ function VpsRulesPanel({
         <label>
           <span>VPS selector expression</span>
           <SearchExpressionInput
+            agents={agents}
             ariaLabel="VPS rules selector expression"
+            disabled={applyPending}
             onChange={setSelectorExpression}
             placeholder="provider:hetzner && tag:edge"
+            showMatchCount
             value={selectorExpression}
+            verification={
+              parsedSelector.error
+                ? "invalid"
+                : selectorExpression.trim()
+                  ? "valid"
+                  : "neutral"
+            }
           />
         </label>
         <label>
@@ -4670,6 +4218,7 @@ function VpsRulesPanel({
           <span>Show incomplete only</span>
         </label>
       </div>
+      <LocalTargetPreview agents={localSelectorTargets} />
       <div className="consoleInlineDetailGrid vpsRulesSummary">
         <span>
           <strong>Rule rows</strong>
@@ -4778,6 +4327,7 @@ function VpsRulesPanel({
         )}
         rows={filteredRules}
         searchPlaceholder="Search VPS rules by VPS, key, value, or source"
+        selectable={false}
         storageKey="vpsman.grid.config.vpsRules"
         title="VPS rule values"
       />
@@ -4802,6 +4352,7 @@ function VpsRulesPanel({
               <button
                 aria-pressed={editMode === "upsert"}
                 className={editMode === "upsert" ? "selected" : ""}
+                disabled={applyPending}
                 onClick={() => {
                   setEditMode("upsert");
                 }}
@@ -4812,6 +4363,7 @@ function VpsRulesPanel({
               <button
                 aria-pressed={editMode === "unset"}
                 className={editMode === "unset" ? "selected" : ""}
+                disabled={applyPending}
                 onClick={() => {
                   setEditMode("unset");
                 }}
@@ -4837,6 +4389,13 @@ function VpsRulesPanel({
             </button>
           </div>
         </div>
+        {!preview ? (
+          <ActionFeedback
+            className="localActionFeedback vpsRulesActionFeedback"
+            message={status}
+            tone={statusTone}
+          />
+        ) : null}
         <div className="vpsRulesBulkEditor">
           <section
             className="vpsRulesEditorSection vpsRulesModeLegend"
@@ -4866,6 +4425,7 @@ function VpsRulesPanel({
               <div className="consoleOperationsActions">
                 <button
                   className="secondaryAction compactAction"
+                  disabled={applyPending}
                   onClick={() => setSelectorExpression("")}
                   type="button"
                 >
@@ -4911,6 +4471,7 @@ function VpsRulesPanel({
                     </span>
                     <input
                       aria-label={field.label}
+                      disabled={applyPending}
                       inputMode={field.inputMode ?? "text"}
                       onChange={(event) =>
                         setValuesText((current) =>
@@ -4933,6 +4494,7 @@ function VpsRulesPanel({
                 <summary>Advanced raw key/value</summary>
                 <textarea
                   aria-label="VPS rule set values"
+                  disabled={applyPending}
                   value={valuesText}
                   onChange={(event) => setValuesText(event.target.value)}
                 />
@@ -4954,6 +4516,7 @@ function VpsRulesPanel({
                     <input
                       aria-label={`Unset ${key}`}
                       checked={unsetKeys.includes(key)}
+                      disabled={applyPending}
                       onChange={(event) =>
                         toggleUnsetKey(key, event.target.checked)
                       }
@@ -4972,13 +4535,10 @@ function VpsRulesPanel({
             onRequestApply={() => setReviewPromptOpen(true)}
             pending={pending}
             preview={preview}
+            status={status}
+            statusTone={statusTone}
           />
         ) : null}
-        <ActionFeedback
-          className="localActionFeedback vpsRulesActionFeedback"
-          message={status}
-          tone={statusTone}
-        />
       </section>
       <ConfirmationPrompt
         confirmLabel={
@@ -5109,11 +4669,15 @@ function VpsRulesPreviewTable({
   onRequestApply,
   pending,
   preview,
+  status,
+  statusTone,
 }: {
   columns: ConsoleDataGridColumn<VpsRuleChangePreview>[];
   onRequestApply: () => void;
   pending: boolean;
   preview: VpsRulesOperatorPreview;
+  status: string | null;
+  statusTone: ActionFeedbackTone;
 }) {
   const finalActionLabel = `Apply ${preview.changed_row_count} ${preview.changed_row_count === 1 ? "change" : "changes"}`;
   const finalActionSummary = `${preview.changed_row_count} effective ${
@@ -5153,6 +4717,11 @@ function VpsRulesPreviewTable({
       {preview.changed_row_count === 0 ? (
         <div className="emptyState compactEmpty">No changes detected</div>
       ) : null}
+      <ActionFeedback
+        className="localActionFeedback vpsRulesActionFeedback"
+        message={status}
+        tone={statusTone}
+      />
       <ConsoleDataGrid
         columns={columns}
         defaultPageSize={10}
@@ -5224,8 +4793,6 @@ function configTitle(subpage: string): string {
       return "Per-VPS config";
     case "rules":
       return "VPS Rules";
-    case "templates":
-      return "Template coverage";
     default:
       return "Runtime config overview";
   }
@@ -5239,8 +4806,6 @@ function configSubtitle(subpage: string): string {
       return "Reviewed runtime config patch workflow";
     case "single":
       return "Read and compare one VPS runtime config";
-    case "templates":
-      return "Read-only runtime template coverage and source readiness";
     default:
       return "Runtime config workflows";
   }
@@ -5248,7 +4813,7 @@ function configSubtitle(subpage: string): string {
 
 function normalizeConfigSubpage(
   value: string,
-): "overview" | "bulk" | "single" | "rules" | "templates" {
+): "overview" | "bulk" | "single" | "rules" {
   const base = value.split(":")[0];
   if (base === "per_vps") {
     return "single";
@@ -5259,8 +4824,7 @@ function normalizeConfigSubpage(
   if (
     base === "bulk" ||
     base === "single" ||
-    base === "rules" ||
-    base === "templates"
+    base === "rules"
   ) {
     return base;
   }

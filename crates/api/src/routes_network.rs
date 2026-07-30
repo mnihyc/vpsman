@@ -1,5 +1,3 @@
-use std::{collections::HashSet, net::IpAddr};
-
 use axum::{
     extract::{Path, Query, State},
     http::HeaderMap,
@@ -29,6 +27,7 @@ use crate::{
     },
     model_topology::TopologyGraphView,
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
+    repository_configuration_presets::validate_network_adapter_definition_view,
     routes_jobs::create_job_from_internal_operator_mutation,
     runtime_config::{dispatch_runtime_config_for_clients, operator_dispatch_error},
     security::{SCOPE_FLEET_READ, SCOPE_NETWORK_READ},
@@ -80,7 +79,11 @@ pub(crate) async fn create_tunnel_plan(
     {
         return Err(ApiError::conflict("tunnel_plan_name_conflict"));
     }
-    validate_tunnel_plan_resource_conflicts(&state, &plan, None).await?;
+    state
+        .repo
+        .validate_tunnel_plan_resource_conflicts(&plan, None)
+        .await
+        .map_err(tunnel_plan_repository_error)?;
     validate_tunnel_plan_adapter_bindings(&state, &plan).await?;
     let view = state
         .repo
@@ -157,7 +160,11 @@ pub(crate) async fn update_tunnel_plan(
         &request.input.right_client_id,
     )
     .await?;
-    validate_tunnel_plan_resource_conflicts(&state, &plan, Some(plan_id)).await?;
+    state
+        .repo
+        .validate_tunnel_plan_resource_conflicts(&plan, Some(plan_id))
+        .await
+        .map_err(tunnel_plan_repository_error)?;
     validate_tunnel_plan_adapter_bindings(&state, &plan).await?;
     let view = state
         .repo
@@ -627,22 +634,22 @@ async fn validate_tunnel_plan_adapter_bindings(
     if plan.runtime_control.manager == RuntimeTunnelManager::ExternalManagedAdapter {
         let left_id = plan
             .runtime_control
-            .left_adapter_template_id
+            .left_adapter_definition_id
             .as_deref()
-            .ok_or_else(|| ApiError::bad_request("runtime_tunnel_adapter_template_required"))?;
+            .ok_or_else(|| ApiError::bad_request("runtime_tunnel_adapter_definition_required"))?;
         let right_id = plan
             .runtime_control
-            .right_adapter_template_id
+            .right_adapter_definition_id
             .as_deref()
-            .ok_or_else(|| ApiError::bad_request("runtime_tunnel_adapter_template_required"))?;
+            .ok_or_else(|| ApiError::bad_request("runtime_tunnel_adapter_definition_required"))?;
         let left = state
             .repo
-            .resolve_runtime_tunnel_adapter(left_id, &plan.left_client_id)
+            .resolve_runtime_tunnel_adapter(left_id)
             .await
             .map_err(|_| ApiError::conflict("runtime_tunnel_left_adapter_unavailable"))?;
         let right = state
             .repo
-            .resolve_runtime_tunnel_adapter(right_id, &plan.right_client_id)
+            .resolve_runtime_tunnel_adapter(right_id)
             .await
             .map_err(|_| ApiError::conflict("runtime_tunnel_right_adapter_unavailable"))?;
         if !plan.runtime_control.traffic_limit.is_default()
@@ -653,58 +660,10 @@ async fn validate_tunnel_plan_adapter_bindings(
             ));
         }
     }
-    if let Some(ospf) = &plan.ospf {
-        resolve_routing_adapter(state, &ospf.left_adapter_template_id, &plan.left_client_id)
-            .await?;
-        resolve_routing_adapter(
-            state,
-            &ospf.right_adapter_template_id,
-            &plan.right_client_id,
-        )
-        .await?;
+    if plan.ospf.is_some() {
+        resolve_routing_adapters_for_tunnel_plan(state, plan).await?;
     }
     Ok(())
-}
-
-async fn validate_tunnel_plan_resource_conflicts(
-    state: &AppState,
-    plan: &TunnelPlan,
-    excluded_plan_id: Option<Uuid>,
-) -> Result<(), ApiError> {
-    let requested_addresses = tunnel_plan_addresses(plan);
-    for existing in state
-        .repo
-        .list_tunnel_plans()
-        .await?
-        .into_iter()
-        .filter(|existing| Some(existing.id) != excluded_plan_id)
-    {
-        let shares_endpoint_interface = [
-            (&plan.left_client_id, &existing.left_client_id),
-            (&plan.left_client_id, &existing.right_client_id),
-            (&plan.right_client_id, &existing.left_client_id),
-            (&plan.right_client_id, &existing.right_client_id),
-        ]
-        .iter()
-        .any(|(requested, saved)| requested == saved)
-            && plan.interface_name == existing.plan.interface_name;
-        if shares_endpoint_interface {
-            return Err(ApiError::conflict("tunnel_plan_interface_conflict"));
-        }
-        if !requested_addresses.is_disjoint(&tunnel_plan_addresses(&existing.plan)) {
-            return Err(ApiError::conflict("tunnel_plan_address_conflict"));
-        }
-    }
-    Ok(())
-}
-
-fn tunnel_plan_addresses(plan: &TunnelPlan) -> HashSet<IpAddr> {
-    [plan.ipv4_tunnel.as_ref(), plan.ipv6_tunnel.as_ref()]
-        .into_iter()
-        .flatten()
-        .flat_map(|pair| [&pair.left, &pair.right])
-        .filter_map(|address| address.parse().ok())
-        .collect()
 }
 
 fn validate_tunnel_plan_ospf_cost_request(
@@ -793,10 +752,18 @@ fn tunnel_plan_repository_error(error: anyhow::Error) -> ApiError {
         ApiError::conflict("tunnel_plan_name_conflict")
     } else if message.contains("tunnel_plan_snapshot_stale") {
         ApiError::conflict("tunnel_plan_snapshot_stale")
+    } else if message.contains("tunnel_plan_interface_conflict") {
+        ApiError::conflict("tunnel_plan_interface_conflict")
+    } else if message.contains("tunnel_plan_address_conflict") {
+        ApiError::conflict("tunnel_plan_address_conflict")
     } else if message.contains("tunnel_plan_name_is_immutable") {
         ApiError::bad_request("tunnel_plan_name_is_immutable")
     } else if message.contains("tunnel_plan_endpoint_agent_not_found") {
         ApiError::conflict("tunnel_plan_endpoint_agent_not_found")
+    } else if message.contains("tunnel_plan_adapter_definition_id_invalid") {
+        ApiError::bad_request("tunnel_plan_adapter_definition_id_invalid")
+    } else if message.contains("tunnel_plan_adapter_definition_unavailable") {
+        ApiError::conflict("tunnel_plan_adapter_definition_unavailable")
     } else if message.contains("tunnel_plan_endpoints_must_differ") {
         ApiError::bad_request("tunnel_plan_endpoints_must_differ")
     } else if message.contains("tunnel_connection_assessment_requires_enabled_plan") {
@@ -852,50 +819,68 @@ pub(crate) async fn resolve_plan_routing_adapters(
     state: &AppState,
     plan: &TunnelPlanView,
 ) -> Result<(RoutingCostAdapterCommands, RoutingCostAdapterCommands), ApiError> {
+    resolve_routing_adapters_for_tunnel_plan(state, &plan.plan).await
+}
+
+async fn resolve_routing_adapters_for_tunnel_plan(
+    state: &AppState,
+    plan: &TunnelPlan,
+) -> Result<(RoutingCostAdapterCommands, RoutingCostAdapterCommands), ApiError> {
     let ospf = plan
-        .plan
         .ospf
         .as_ref()
         .ok_or_else(|| ApiError::conflict("tunnel_plan_ospf_disabled"))?;
-    let left = resolve_routing_adapter(state, &ospf.left_adapter_template_id, &plan.left_client_id)
-        .await?;
-    let right = resolve_routing_adapter(
-        state,
-        &ospf.right_adapter_template_id,
-        &plan.right_client_id,
-    )
-    .await?;
+    let fallback_clients = [
+        ospf.left_adapter_definition_id
+            .is_none()
+            .then(|| plan.left_client_id.clone()),
+        ospf.right_adapter_definition_id
+            .is_none()
+            .then(|| plan.right_client_id.clone()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    let fallback_sources = state
+        .repo
+        .effective_ospf_command_sources_for_clients(&fallback_clients)
+        .await
+        .map_err(ApiError::from)?;
+    let left = if let Some(definition_id) = ospf.left_adapter_definition_id.as_deref() {
+        resolve_routing_adapter(state, definition_id).await?
+    } else {
+        routing_commands_from_configuration_preset(
+            fallback_sources
+                .get(&plan.left_client_id)
+                .and_then(Option::as_ref),
+        )?
+    };
+    let right = if let Some(definition_id) = ospf.right_adapter_definition_id.as_deref() {
+        resolve_routing_adapter(state, definition_id).await?
+    } else {
+        routing_commands_from_configuration_preset(
+            fallback_sources
+                .get(&plan.right_client_id)
+                .and_then(Option::as_ref),
+        )?
+    };
     Ok((left, right))
 }
 
 async fn resolve_routing_adapter(
     state: &AppState,
-    template_id: &str,
-    client_id: &str,
+    definition_id: &str,
 ) -> Result<RoutingCostAdapterCommands, ApiError> {
-    let template_id = Uuid::parse_str(template_id)
-        .map_err(|_| ApiError::bad_request("routing_cost_adapter_template_id_invalid"))?;
-    let template = state
+    let definition_id = Uuid::parse_str(definition_id)
+        .map_err(|_| ApiError::bad_request("routing_cost_adapter_definition_id_invalid"))?;
+    let definition = state
         .repo
-        .source_template_by_id_in_domain(template_id, "routing_cost_adapter")
+        .network_adapter_definition_by_id(definition_id, Some("routing_cost"))
         .await?
-        .ok_or_else(|| ApiError::conflict("routing_cost_adapter_template_not_found"))?;
-    if template.domain != "routing_cost_adapter" {
-        return Err(ApiError::conflict(
-            "routing_cost_adapter_template_domain_mismatch",
-        ));
-    }
-    if template.scope == "vps_local" && template.owner_client_id.as_deref() != Some(client_id) {
-        return Err(ApiError::conflict(
-            "routing_cost_adapter_template_scope_mismatch",
-        ));
-    }
-    if !matches!(template.scope.as_str(), "shared" | "vps_local") {
-        return Err(ApiError::conflict(
-            "routing_cost_adapter_template_scope_invalid",
-        ));
-    }
-    let contract_version = template
+        .ok_or_else(|| ApiError::conflict("routing_cost_adapter_definition_not_found"))?;
+    validate_network_adapter_definition_view(&definition)
+        .map_err(|_| ApiError::conflict("routing_cost_adapter_definition_invalid"))?;
+    let contract_version = definition
         .definition
         .get("contract_version")
         .and_then(serde_json::Value::as_u64);
@@ -908,16 +893,31 @@ async fn resolve_routing_adapter(
             "routing_cost_adapter_contract_version_invalid",
         ));
     }
-    let status = routing_adapter_command(&template.definition, "status_command")?;
-    let update = routing_adapter_command(&template.definition, "update_command")?;
-    let definition = serde_json::to_vec(&template.definition)
+    let status = routing_adapter_command(&definition.definition, "status_command")?;
+    let update = routing_adapter_command(&definition.definition, "update_command")?;
+    let definition_json = serde_json::to_vec(&definition.definition)
         .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
     Ok(RoutingCostAdapterCommands {
-        template_id: template.id.to_string(),
-        template_name: template.name,
-        definition_hash: payload_hash(&definition),
+        source: vpsman_common::RoutingCostCommandSource::PlanOverride,
+        definition_id: definition.id.to_string(),
+        definition_name: definition.name,
+        definition_hash: payload_hash(&definition_json),
         status,
         update,
+    })
+}
+
+fn routing_commands_from_configuration_preset(
+    source: Option<&crate::model::ResolvedOspfCommandSource>,
+) -> Result<RoutingCostAdapterCommands, ApiError> {
+    let source = source.ok_or_else(|| ApiError::conflict("ospf_update_command_unconfigured"))?;
+    Ok(RoutingCostAdapterCommands {
+        source: vpsman_common::RoutingCostCommandSource::ConfigurationPreset,
+        definition_id: source.id.to_string(),
+        definition_name: source.name.clone(),
+        definition_hash: source.definition_hash.clone(),
+        status: source.status.clone(),
+        update: source.update.clone(),
     })
 }
 
@@ -958,6 +958,14 @@ pub(crate) async fn dispatch_routing_jobs(
     right_adapter: RoutingCostAdapterCommands,
     apply: Option<(Option<u16>, Option<u16>, u16)>,
 ) -> (Vec<CreateJobResponse>, Vec<TunnelPlanOspfDispatchView>) {
+    // Network command protocol v1 requires both OSPF adapter identifiers in the
+    // plan. Freeze the effective per-endpoint source into this job-only snapshot
+    // so published agents can execute preset-backed jobs without re-resolving it.
+    let mut resolved_plan = plan.plan.clone();
+    if let Some(ospf) = resolved_plan.ospf.as_mut() {
+        ospf.left_adapter_definition_id = Some(left_adapter.definition_id.clone());
+        ospf.right_adapter_definition_id = Some(right_adapter.definition_id.clone());
+    }
     let specs = [
         (
             TunnelEndpointSide::Left,
@@ -980,7 +988,7 @@ pub(crate) async fn dispatch_routing_jobs(
         let operation = if let Some((expected_current_cost, desired_cost)) = endpoint_apply {
             JobCommand::NetworkRoutingApply {
                 plan_id: plan.id.to_string(),
-                plan: Box::new(plan.plan.clone()),
+                plan: Box::new(resolved_plan.clone()),
                 side,
                 adapter: adapter.clone(),
                 expected_current_cost,
@@ -989,7 +997,7 @@ pub(crate) async fn dispatch_routing_jobs(
         } else {
             JobCommand::NetworkRoutingStatus {
                 plan_id: plan.id.to_string(),
-                plan: Box::new(plan.plan.clone()),
+                plan: Box::new(resolved_plan.clone()),
                 side,
                 adapter: adapter.clone(),
             }

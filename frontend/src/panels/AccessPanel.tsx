@@ -1736,7 +1736,7 @@ export function AccessPanel({
               <ConsoleDataGrid
                 actions={[
                   {
-                    label: "Rotate selected",
+                    label: "Rotate",
                     description: (rows) =>
                       rows.length === 1
                         ? `Prefill key rotation for ${rows[0].display_name}.`
@@ -1746,7 +1746,7 @@ export function AccessPanel({
                     onSelect: (rows) => prepareIdentityRotation(rows[0]),
                   },
                   {
-                    label: "Revoke selected",
+                    label: "Revoke",
                     description: (rows) =>
                       rows.length === 1
                         ? `Prefill current key revocation for ${rows[0].display_name}.`
@@ -1778,24 +1778,6 @@ export function AccessPanel({
                       .join(", ")}
                   />
                 )}
-                rowActions={[
-                  {
-                    label: "Prepare rotation",
-                    description: (rows) =>
-                      `Prefill key rotation for ${rows[0].display_name}.`,
-                    icon: <KeyRound size={14} />,
-                    onSelect: (rows) => prepareIdentityRotation(rows[0]),
-                  },
-                  {
-                    label: "Prepare revoke",
-                    description: (rows) =>
-                      `Prefill current key revocation for ${rows[0].display_name}.`,
-                    icon: <Ban size={14} />,
-                    onSelect: (rows) =>
-                      prepareClientKeyRevoke(rows[0].client_id),
-                    tone: "danger",
-                  },
-                ]}
                 rows={lifecycleClients}
                 searchPlaceholder="Search VPS, status, key, or revocation"
                 singleExpandedRow
@@ -2031,6 +2013,7 @@ export function AccessPanel({
                   aria-invalid={Boolean(identityClientIdError)}
                   aria-label="Agent identity client ID"
                   disabled={!canManageOperators || identityPending}
+                  readOnly={identityMode === "rotate"}
                   onChange={(event) => {
                     setIdentityClientId(event.target.value);
                     clearIdentityReview();

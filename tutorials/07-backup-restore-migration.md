@@ -8,6 +8,10 @@ compatible object storage is implemented as an optional adapter for deployments
 that need remote backup or update artifact storage, and is covered by
 adapter-specific smokes.
 
+Object storage is deployment configuration, not a per-VPS configuration
+preset. Backup readiness comes from the backup workflow and retained artifact
+evidence; it is not represented by a synthetic “source” preset.
+
 ## Schedule Backup Policies
 
 Create a policy for a client, pool, or tag selector. Privilege is verified when
@@ -160,7 +164,7 @@ A selected directory captures regular files recursively. Direct backups are
 bounded configuration snapshots, not unbounded application-data backups: a
 scanned-path ceiling bounds traversal, while file count, uncompressed bytes,
 and archive bytes bound captured content.
-The panel presets therefore cover host, service, reverse-proxy, and Docker
+The backup path presets therefore cover host, service, reverse-proxy, and Docker
 daemon configuration; they do not claim to protect Docker volumes or arbitrary
 `/srv` and `/opt` data.
 
@@ -168,8 +172,9 @@ Missing selected roots fail by default. For a reviewed cross-distribution or
 heterogeneous-fleet scope, add `--skip-missing-paths` (or select **Skip missing
 roots** in the panel). Only roots that do not exist are omitted; unreadable
 paths, traversal errors, size limits, and an empty captured scope still fail.
-The artifact status records omitted paths and reasons. The OS, web, and Docker
-configuration presets select this policy explicitly, while the Identity preset
+The artifact status records omitted paths and reasons. The OS config, Web
+config, and Docker config backup path presets select this policy explicitly,
+while the Identity preset
 remains strict.
 
 ```sh

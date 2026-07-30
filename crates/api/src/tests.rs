@@ -358,15 +358,7 @@ async fn deleting_memory_agent_removes_inventory_access_and_bulk_targets() {
         .unwrap();
 
     let response = repo
-        .delete_agent(
-            "client-delete",
-            &DeleteAgentRequest {
-                confirmed: true,
-                reason: Some("retired".to_string()),
-                privilege_assertion: None,
-            },
-            &test_operator(),
-        )
+        .delete_agent("client-delete", Some("retired"), &test_operator())
         .await
         .unwrap();
 

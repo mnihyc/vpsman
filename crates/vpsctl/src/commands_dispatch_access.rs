@@ -501,19 +501,17 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             )?;
             Ok(None)
         }
-        Command::SourceTemplates(command) => {
-            commands_inventory::source_templates(api_url, token, command.domain)?;
+        Command::ConfigPresets(command) => {
+            commands_inventory::config_presets(api_url, token, command.behavior)?;
             Ok(None)
         }
-        Command::SourceTemplateCreate(command) => {
-            commands_inventory::source_template_create(
+        Command::ConfigPresetCreate(command) => {
+            commands_inventory::config_preset_create(
                 api_url,
                 token,
-                commands_inventory::SourceTemplateCreateOptions {
-                    domain: command.domain,
+                commands_inventory::ConfigPresetCreateOptions {
+                    behavior: command.behavior,
                     name: command.name,
-                    scope: command.scope,
-                    owner_client_id: command.owner_client_id,
                     description: command.description,
                     definition_json: command.definition_json,
                     definition_file: command.definition_file,
@@ -521,23 +519,21 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             )?;
             Ok(None)
         }
-        Command::SourceTemplateClone(command) => {
-            commands_inventory::source_template_clone(
+        Command::ConfigPresetClone(command) => {
+            commands_inventory::config_preset_clone(
                 api_url,
                 token,
-                command.source_template_id,
+                command.preset_id,
                 command.name,
-                command.scope,
-                command.owner_client_id,
                 command.description,
             )?;
             Ok(None)
         }
-        Command::SourceTemplateDiff(command) => {
-            commands_inventory::source_template_diff(
+        Command::ConfigPresetPreview(command) => {
+            commands_inventory::config_preset_preview(
                 api_url,
                 token,
-                command.template_id,
+                command.preset_id,
                 command.description,
                 command.clear_description,
                 command.definition_json,
@@ -545,65 +541,76 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             )?;
             Ok(None)
         }
-        Command::SourceTemplateTest(command) => {
-            commands_inventory::source_template_test(
+        Command::ConfigPresetUpdate(command) => {
+            commands_inventory::config_preset_update(
                 api_url,
                 token,
-                command.template_id,
-                command.definition_json,
-                command.definition_file,
-            )?;
-            Ok(None)
-        }
-        Command::SourceTemplateUpdate(command) => {
-            commands_inventory::source_template_update(
-                api_url,
-                token,
-                commands_inventory::SourceTemplateUpdateOptions {
-                    template_id: command.template_id,
+                commands_inventory::ConfigPresetUpdateOptions {
+                    preset_id: command.preset_id,
                     description: command.description,
                     clear_description: command.clear_description,
                     definition_json: command.definition_json,
                     definition_file: command.definition_file,
+                    preview_hash: command.preview_hash,
                     confirmed: command.confirmed,
                 },
             )?;
             Ok(None)
         }
-        Command::SourceStatus(command) => {
-            commands_inventory::source_status(api_url, token, command.client_id, command.domain)?;
-            Ok(None)
-        }
-        Command::SourceTemplateAssignments(command) => {
-            commands_inventory::source_template_assignments(
+        Command::ConfigPresetDelete(command) => {
+            commands_inventory::config_preset_delete(
                 api_url,
                 token,
-                command.client_id,
-                command.domain,
+                command.preset_id,
+                command.confirmed,
             )?;
             Ok(None)
         }
-        Command::TemplateRuntimeConfig(command) => {
-            commands_inventory::template_runtime_config(
+        Command::ConfigSources(command) => {
+            commands_inventory::config_sources(
                 api_url,
                 token,
                 command.client_id,
-                command.format,
+                command.behavior,
             )?;
             Ok(None)
         }
-        Command::SourceTemplateAssign(command) => {
-            commands_inventory::source_template_assign(
+        Command::ConfigSourceSet(command) => {
+            commands_inventory::config_source_change(
                 api_url,
                 token,
-                commands_inventory::SourceTemplateAssignOptions {
-                    domain: command.domain,
-                    template_id: command.template_id,
+                commands_inventory::ConfigSourceChangeOptions {
+                    action: "set",
+                    behavior: command.behavior,
+                    preset_id: Some(command.preset_id),
+                    selector: command.selector,
                     clients: command.clients,
                     tags: command.tags,
+                    preview_hash: command.preview_hash,
                     confirmed: command.confirmed,
                 },
             )?;
+            Ok(None)
+        }
+        Command::ConfigSourceReset(command) => {
+            commands_inventory::config_source_change(
+                api_url,
+                token,
+                commands_inventory::ConfigSourceChangeOptions {
+                    action: "reset",
+                    behavior: command.behavior,
+                    preset_id: None,
+                    selector: command.selector,
+                    clients: command.clients,
+                    tags: command.tags,
+                    preview_hash: command.preview_hash,
+                    confirmed: command.confirmed,
+                },
+            )?;
+            Ok(None)
+        }
+        Command::ConfigRender(command) => {
+            commands_inventory::config_render(api_url, token, command.client_id, command.format)?;
             Ok(None)
         }
         Command::BulkResolve(command) => {

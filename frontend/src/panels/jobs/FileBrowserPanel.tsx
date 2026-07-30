@@ -258,7 +258,10 @@ export function FileBrowserPanel({
             };
 
   useEffect(() => {
-    if (!targetClientId && agents[0]?.id) {
+    if (
+      agents[0]?.id &&
+      (!targetClientId || !agents.some((agent) => agent.id === targetClientId))
+    ) {
       setTargetClientId(agents[0].id);
     }
   }, [agents, targetClientId]);

@@ -103,6 +103,51 @@ export function resolveAgentsById(agents: AgentView[], clientIds: string[]): Age
   return clientIds.map((clientId) => byId.get(clientId)).filter((agent): agent is AgentView => Boolean(agent));
 }
 
+export function LocalTargetPreview({
+  agents,
+  ariaLabel = "Local VPS match preview",
+}: {
+  agents: AgentView[];
+  ariaLabel?: string;
+}) {
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
+  const [expanded, setExpanded] = useState(false);
+  const visibleAgents = expanded
+    ? agents
+    : agents.slice(0, COLLAPSED_TARGET_CHIP_LIMIT);
+  const remaining = agents.length - visibleAgents.length;
+
+  if (agents.length === 0) {
+    return null;
+  }
+  return (
+    <div aria-label={ariaLabel} className="targetChipList">
+      {visibleAgents.map((agent) => (
+        <span className="targetChip" key={agent.id} title={agent.id}>
+          {formatVpsName(agent, vpsNameDisplayMode)}
+        </span>
+      ))}
+      {remaining > 0 ? (
+        <button
+          className="targetChip mutedChip showMoreChip"
+          onClick={() => setExpanded(true)}
+          type="button"
+        >
+          Show {remaining} more
+        </button>
+      ) : expanded && agents.length > COLLAPSED_TARGET_CHIP_LIMIT ? (
+        <button
+          className="targetChip mutedChip showMoreChip"
+          onClick={() => setExpanded(false)}
+          type="button"
+        >
+          Show fewer
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function buildTargetImpactGroups(
   targets: AgentView[],
   mode: TargetImpactMode,

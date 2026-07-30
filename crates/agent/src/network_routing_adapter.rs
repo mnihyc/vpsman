@@ -120,7 +120,7 @@ pub(crate) async fn execute_network_routing_adapter_command(
         plan_id: input.plan_id.to_string(),
         endpoint_side: input.side,
         client_id: input.client_id.to_string(),
-        adapter_template_id: input.adapter.template_id.clone(),
+        adapter_definition_id: input.adapter.definition_id.clone(),
         adapter_definition_hash: input.adapter.definition_hash.clone(),
         before: before_result,
         update: update_result,
@@ -226,11 +226,11 @@ async fn run_adapter_command(
 }
 
 fn validate_adapter_snapshot(adapter: &RoutingCostAdapterCommands) -> Result<()> {
-    if adapter.template_id.trim().is_empty() || adapter.template_id.len() > 128 {
-        anyhow::bail!("routing adapter template id is invalid");
+    if adapter.definition_id.trim().is_empty() || adapter.definition_id.len() > 128 {
+        anyhow::bail!("routing adapter definition id is invalid");
     }
-    if adapter.template_name.trim().is_empty() || adapter.template_name.len() > 160 {
-        anyhow::bail!("routing adapter template name is invalid");
+    if adapter.definition_name.trim().is_empty() || adapter.definition_name.len() > 160 {
+        anyhow::bail!("routing adapter definition name is invalid");
     }
     if adapter.definition_hash.len() != 64
         || !adapter

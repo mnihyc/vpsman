@@ -4,17 +4,145 @@ use axum::{extract::State, Json};
 use tokio::sync::broadcast;
 use vpsman_common::{
     plan_tunnel, JobCommand, OspfControlMode, OspfCostPolicy, RoutingCostAdapterCommands,
-    RuntimeTunnelAdapterCommands, RuntimeTunnelCommand, RuntimeTunnelControl, RuntimeTunnelManager,
-    TunnelAddressFamily, TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelOspfConfig,
-    TunnelPlanInput,
+    RoutingCostCommandSource, RuntimeTunnelAdapterCommands, RuntimeTunnelCommand,
+    RuntimeTunnelControl, RuntimeTunnelManager, TunnelAddressFamily, TunnelAddressPair,
+    TunnelEndpointSide, TunnelKind, TunnelOspfConfig, TunnelPlanInput,
 };
 
-use crate::{gateway_client::GatewayDispatchClient, job_request::validate_job_command};
+use crate::{
+    gateway_client::GatewayDispatchClient,
+    job_request::validate_job_command,
+    model::{ConfigurationPresetOverrideRecord, CreateConfigurationPresetRequest},
+};
 
 const LEFT_RUNTIME_ADAPTER: &str = "11111111-1111-4111-8111-111111111111";
 const RIGHT_RUNTIME_ADAPTER: &str = "22222222-2222-4222-8222-222222222222";
 const LEFT_ROUTING_ADAPTER: &str = "33333333-3333-4333-8333-333333333333";
 const RIGHT_ROUTING_ADAPTER: &str = "44444444-4444-4444-8444-444444444444";
+
+#[tokio::test]
+async fn ospf_updater_uses_endpoint_preset_unless_that_plan_overrides_it() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_online_agent(&repo, "client-a").await;
+    seed_online_agent(&repo, "client-b").await;
+    let preset = assign_test_ospf_preset(&repo, "client-a", "global-left").await;
+    let preset_id = preset.id.to_string();
+    let mut input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);
+    input.ospf.as_mut().unwrap().left_adapter_definition_id = None;
+    seed_test_plan_adapter_definitions(&repo, &input).await;
+    let plan = plan_tunnel(&input).unwrap();
+    let saved = repo
+        .record_tunnel_plan(&input, &plan, true, &network_test_operator())
+        .await
+        .unwrap();
+
+    let state = test_state(repo);
+    let (left, right) = crate::routes_network::resolve_plan_routing_adapters(&state, &saved)
+        .await
+        .unwrap();
+
+    assert_eq!(left.source, RoutingCostCommandSource::ConfigurationPreset);
+    assert_eq!(left.definition_id, preset_id);
+    assert_eq!(left.update.argv[0], "/usr/bin/global-left-update");
+    assert_eq!(right.source, RoutingCostCommandSource::PlanOverride);
+    assert_eq!(right.definition_id, RIGHT_ROUTING_ADAPTER);
+
+    let left_job_id = Uuid::new_v4();
+    let right_job_id = Uuid::new_v4();
+    let (jobs, _) = crate::routes_network::dispatch_routing_jobs(
+        &state,
+        &network_test_operator(),
+        &saved,
+        left_job_id,
+        right_job_id,
+        left,
+        right,
+        None,
+    )
+    .await;
+    assert_eq!(jobs.len(), 2);
+    let Repository::Memory(memory) = &state.repo else {
+        unreachable!()
+    };
+    let operations = memory.job_operations.read().await;
+    let JobCommand::NetworkRoutingStatus { plan, adapter, .. } =
+        operations.get(&left_job_id).unwrap()
+    else {
+        panic!("left endpoint must receive a routing status job");
+    };
+    let ospf = plan.ospf.as_ref().unwrap();
+    assert_eq!(
+        ospf.left_adapter_definition_id.as_deref(),
+        Some(preset_id.as_str())
+    );
+    assert_eq!(
+        ospf.right_adapter_definition_id.as_deref(),
+        Some(RIGHT_ROUTING_ADAPTER)
+    );
+    assert_eq!(
+        adapter.source,
+        RoutingCostCommandSource::ConfigurationPreset
+    );
+    let wire = serde_json::to_value(operations.get(&left_job_id).unwrap()).unwrap();
+    assert_eq!(wire["plan"]["ospf"]["left_adapter_template_id"], preset_id);
+    assert_eq!(wire["adapter"]["template_id"], preset_id);
+    assert!(wire["plan"]["ospf"]
+        .get("left_adapter_definition_id")
+        .is_none());
+}
+
+#[tokio::test]
+async fn invalid_plan_ospf_override_never_falls_back_to_a_vps_preset() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_online_agent(&repo, "client-a").await;
+    seed_online_agent(&repo, "client-b").await;
+    assign_test_ospf_preset(&repo, "client-a", "must-not-run").await;
+    let mut input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);
+    input.ospf.as_mut().unwrap().left_adapter_definition_id =
+        Some("55555555-5555-4555-8555-555555555555".to_string());
+    seed_test_plan_adapter_definitions(&repo, &input).await;
+    let plan = plan_tunnel(&input).unwrap();
+    let saved = repo
+        .record_tunnel_plan(&input, &plan, true, &network_test_operator())
+        .await
+        .unwrap();
+    let Repository::Memory(memory) = &repo else {
+        unreachable!()
+    };
+    memory
+        .network_adapter_definitions
+        .write()
+        .await
+        .retain(|definition| definition.id.to_string() != "55555555-5555-4555-8555-555555555555");
+
+    let error = crate::routes_network::resolve_plan_routing_adapters(&test_state(repo), &saved)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, "routing_cost_adapter_definition_not_found");
+}
+
+#[tokio::test]
+async fn unconfigured_endpoint_ospf_preset_is_an_explicit_error() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_online_agent(&repo, "client-a").await;
+    seed_online_agent(&repo, "client-b").await;
+    let mut input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);
+    let ospf = input.ospf.as_mut().unwrap();
+    ospf.left_adapter_definition_id = None;
+    ospf.right_adapter_definition_id = None;
+    let plan = plan_tunnel(&input).unwrap();
+    let saved = repo
+        .record_tunnel_plan(&input, &plan, true, &network_test_operator())
+        .await
+        .unwrap();
+
+    let error = crate::routes_network::resolve_plan_routing_adapters(&test_state(repo), &saved)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, "ospf_update_command_unconfigured");
+}
 
 #[tokio::test]
 async fn saved_plan_is_explicit_and_has_no_ospf_state_when_ospf_is_off() {
@@ -56,6 +184,7 @@ async fn memory_management_list_preserves_typed_tunnel_identity() {
 async fn connection_assessment_is_audited_revision_bound_and_cleared_by_plan_changes() {
     let repo = Repository::Memory(MemoryState::default());
     let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);
+    seed_test_plan_adapter_definitions(&repo, &input).await;
     let plan = plan_tunnel(&input).unwrap();
     let saved = repo
         .record_tunnel_plan(&input, &plan, true, &network_test_operator())
@@ -142,6 +271,7 @@ async fn connection_assessment_is_audited_revision_bound_and_cleared_by_plan_cha
 async fn enabled_ospf_plan_starts_unverified_and_stages_exact_endpoint_jobs() {
     let repo = Repository::Memory(MemoryState::default());
     let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);
+    seed_test_plan_adapter_definitions(&repo, &input).await;
     let plan = plan_tunnel(&input).unwrap();
     let saved = repo
         .record_tunnel_plan(&input, &plan, true, &network_test_operator())
@@ -227,6 +357,7 @@ async fn ospf_dispatch_reports_each_endpoint_when_one_target_disappears() {
     let repo = Repository::Memory(MemoryState::default());
     seed_online_agent(&repo, "client-a").await;
     let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);
+    seed_test_plan_adapter_definitions(&repo, &input).await;
     let plan = plan_tunnel(&input).unwrap();
     let saved = repo
         .record_tunnel_plan(&input, &plan, true, &network_test_operator())
@@ -274,59 +405,6 @@ async fn ospf_dispatch_reports_each_endpoint_when_one_target_disappears() {
     let refreshed = repo.get_tunnel_plan(saved.id).await.unwrap().unwrap();
     assert_eq!(refreshed.left_ospf_status, "pending");
     assert_eq!(refreshed.right_ospf_status, "failed");
-}
-
-#[tokio::test]
-async fn routing_template_update_marks_only_bound_endpoint_state_stale() {
-    let repo = Repository::Memory(MemoryState::default());
-    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);
-    let plan = plan_tunnel(&input).unwrap();
-    let saved = repo
-        .record_tunnel_plan(&input, &plan, true, &network_test_operator())
-        .await
-        .unwrap();
-    let left_job = Uuid::new_v4();
-    let right_job = Uuid::new_v4();
-    repo.stage_tunnel_plan_ospf_jobs(
-        saved.id,
-        saved.revision,
-        None,
-        None,
-        None,
-        left_job,
-        right_job,
-        &network_test_operator(),
-    )
-    .await
-    .unwrap();
-
-    repo.mark_routing_adapter_template_stale(Uuid::parse_str(LEFT_ROUTING_ADAPTER).unwrap())
-        .await
-        .unwrap();
-    let stale = repo.get_tunnel_plan(saved.id).await.unwrap().unwrap();
-    assert_eq!(stale.left_ospf_status, "stale");
-    assert_eq!(stale.right_ospf_status, "pending");
-    assert_eq!(stale.left_ospf_job_id, None);
-    assert_eq!(stale.ospf_status, "pending");
-}
-
-#[tokio::test]
-async fn routing_template_update_leaves_disabled_plan_state_disabled() {
-    let repo = Repository::Memory(MemoryState::default());
-    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);
-    let plan = plan_tunnel(&input).unwrap();
-    let saved = repo
-        .record_tunnel_plan(&input, &plan, false, &network_test_operator())
-        .await
-        .unwrap();
-
-    repo.mark_routing_adapter_template_stale(Uuid::parse_str(LEFT_ROUTING_ADAPTER).unwrap())
-        .await
-        .unwrap();
-    let unchanged = repo.get_tunnel_plan(saved.id).await.unwrap().unwrap();
-    assert_eq!(unchanged.ospf_status, "disabled");
-    assert_eq!(unchanged.left_ospf_status, "disabled");
-    assert_eq!(unchanged.right_ospf_status, "disabled");
 }
 
 #[tokio::test]
@@ -506,6 +584,127 @@ async fn tunnel_plan_create_rejects_duplicates_and_update_rejects_stale_revision
     .unwrap_err();
     assert_eq!(stale_lifecycle.code, "tunnel_plan_snapshot_stale");
     assert_eq!(repo.list_tunnel_plans().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn tunnel_plan_repository_write_boundary_rechecks_resource_conflicts() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = network_test_operator();
+    let first_input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let first_plan = plan_tunnel(&first_input).unwrap();
+    repo.record_tunnel_plan(&first_input, &first_plan, false, &operator)
+        .await
+        .unwrap();
+
+    let mut second_input = first_input.clone();
+    second_input.name = "edge-a-edge-c".to_string();
+    second_input.interface_name = "tunac".to_string();
+    second_input.right_client_id = "client-c".to_string();
+    second_input.address_pool_cidr = "10.11.0.0/29".to_string();
+    second_input.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.11.0.0".to_string(),
+        right: "10.11.0.1".to_string(),
+        prefix_len: 31,
+    });
+    let second_plan = plan_tunnel(&second_input).unwrap();
+    let second = repo
+        .record_tunnel_plan(&second_input, &second_plan, false, &operator)
+        .await
+        .unwrap();
+
+    let mut create_interface_conflict = second_input.clone();
+    create_interface_conflict.name = "create-interface-conflict".to_string();
+    create_interface_conflict.interface_name = first_input.interface_name.clone();
+    create_interface_conflict.address_pool_cidr = "10.12.0.0/29".to_string();
+    create_interface_conflict.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.12.0.0".to_string(),
+        right: "10.12.0.1".to_string(),
+        prefix_len: 31,
+    });
+    let error = repo
+        .record_tunnel_plan(
+            &create_interface_conflict,
+            &plan_tunnel(&create_interface_conflict).unwrap(),
+            false,
+            &operator,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "tunnel_plan_interface_conflict");
+
+    let mut create_address_conflict = second_input.clone();
+    create_address_conflict.name = "create-address-conflict".to_string();
+    create_address_conflict.interface_name = "tun-address".to_string();
+    create_address_conflict.address_pool_cidr = first_input.address_pool_cidr.clone();
+    create_address_conflict.ipv4_tunnel = first_input.ipv4_tunnel.clone();
+    let error = repo
+        .record_tunnel_plan(
+            &create_address_conflict,
+            &plan_tunnel(&create_address_conflict).unwrap(),
+            false,
+            &operator,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "tunnel_plan_address_conflict");
+
+    let mut update_interface_conflict = second_input.clone();
+    update_interface_conflict.interface_name = first_input.interface_name.clone();
+    let error = repo
+        .update_tunnel_plan(
+            second.id,
+            second.revision,
+            &update_interface_conflict,
+            &plan_tunnel(&update_interface_conflict).unwrap(),
+            false,
+            &operator,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "tunnel_plan_interface_conflict");
+
+    let mut update_address_conflict = second_input.clone();
+    update_address_conflict.address_pool_cidr = first_input.address_pool_cidr;
+    update_address_conflict.ipv4_tunnel = first_input.ipv4_tunnel;
+    let error = repo
+        .update_tunnel_plan(
+            second.id,
+            second.revision,
+            &update_address_conflict,
+            &plan_tunnel(&update_address_conflict).unwrap(),
+            false,
+            &operator,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "tunnel_plan_address_conflict");
+
+    let unchanged = repo
+        .update_tunnel_plan(
+            second.id,
+            second.revision,
+            &second_input,
+            &second_plan,
+            false,
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(unchanged.revision, second.revision + 1);
+}
+
+#[tokio::test]
+async fn tunnel_plan_repository_write_boundary_rejects_invalid_addresses() {
+    let repo = Repository::Memory(MemoryState::default());
+    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let mut plan = plan_tunnel(&input).unwrap();
+    plan.ipv4_tunnel.as_mut().unwrap().left = "not-an-ip".to_string();
+
+    let error = repo
+        .record_tunnel_plan(&input, &plan, false, &network_test_operator())
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "tunnel_plan_address_invalid");
 }
 
 #[tokio::test]
@@ -965,9 +1164,9 @@ pub(super) fn test_plan_input(manager: RuntimeTunnelManager, ospf: bool) -> Tunn
         },
         runtime_control: RuntimeTunnelControl {
             manager,
-            left_adapter_template_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+            left_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
                 .then(|| LEFT_RUNTIME_ADAPTER.to_string()),
-            right_adapter_template_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+            right_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
                 .then(|| RIGHT_RUNTIME_ADAPTER.to_string()),
             ..RuntimeTunnelControl::default()
         },
@@ -997,21 +1196,121 @@ pub(super) fn test_plan_input(manager: RuntimeTunnelManager, ospf: bool) -> Tunn
             policy: OspfCostPolicy::default(),
             min_cost_delta: 5,
             healthy_windows: 2,
-            left_adapter_template_id: LEFT_ROUTING_ADAPTER.to_string(),
-            right_adapter_template_id: RIGHT_ROUTING_ADAPTER.to_string(),
+            left_adapter_definition_id: Some(LEFT_ROUTING_ADAPTER.to_string()),
+            right_adapter_definition_id: Some(RIGHT_ROUTING_ADAPTER.to_string()),
         }),
     }
 }
 
-fn runtime_adapter(template_id: &str) -> RuntimeTunnelAdapterCommands {
+pub(super) async fn seed_test_plan_adapter_definitions(repo: &Repository, input: &TunnelPlanInput) {
+    let mut references = Vec::<(Uuid, &'static str)>::new();
+    let mut add_reference = |raw_id: &str, adapter_kind: &'static str| {
+        let id = Uuid::parse_str(raw_id).unwrap();
+        if !references.contains(&(id, adapter_kind)) {
+            references.push((id, adapter_kind));
+        }
+    };
+    if input.runtime_control.manager == RuntimeTunnelManager::ExternalManagedAdapter {
+        add_reference(
+            input
+                .runtime_control
+                .left_adapter_definition_id
+                .as_deref()
+                .unwrap(),
+            "runtime_tunnel",
+        );
+        add_reference(
+            input
+                .runtime_control
+                .right_adapter_definition_id
+                .as_deref()
+                .unwrap(),
+            "runtime_tunnel",
+        );
+    }
+    if let Some(ospf) = &input.ospf {
+        if let Some(id) = ospf.left_adapter_definition_id.as_deref() {
+            add_reference(id, "routing_cost");
+        }
+        if let Some(id) = ospf.right_adapter_definition_id.as_deref() {
+            add_reference(id, "routing_cost");
+        }
+    }
+
+    for (id, adapter_kind) in references {
+        let command = |verb: &str| {
+            serde_json::json!({
+                "argv": [format!("/usr/bin/test-{verb}")],
+                "max_timeout_secs": 10,
+                "max_output_bytes": 16384
+            })
+        };
+        let definition = if adapter_kind == "runtime_tunnel" {
+            serde_json::json!({
+                "manager": "external_managed_adapter",
+                "contract_version": 1,
+                "startup_command": command("start"),
+                "cleanup_command": command("cleanup"),
+                "status_command": command("status")
+            })
+        } else {
+            serde_json::json!({
+                "contract_version": 1,
+                "status_command": command("status"),
+                "update_command": command("update")
+            })
+        };
+        let name = format!("test-{adapter_kind}-{}", id.simple());
+        match repo {
+            Repository::Memory(memory) => {
+                let mut definitions = memory.network_adapter_definitions.write().await;
+                if definitions.iter().any(|definition| definition.id == id) {
+                    continue;
+                }
+                let now = crate::unix_now().to_string();
+                definitions.push(
+                    crate::model_configuration_presets::NetworkAdapterDefinitionView {
+                        id,
+                        adapter_kind: adapter_kind.to_string(),
+                        name,
+                        description: None,
+                        definition,
+                        created_at: now.clone(),
+                        updated_at: now,
+                    },
+                );
+            }
+            Repository::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+                    INSERT INTO network_adapter_definitions (
+                        id, adapter_kind, name, definition
+                    )
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (id) DO NOTHING
+                    "#,
+                )
+                .bind(id)
+                .bind(adapter_kind)
+                .bind(name)
+                .bind(sqlx::types::Json(definition))
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+        }
+    }
+}
+
+fn runtime_adapter(definition_id: &str) -> RuntimeTunnelAdapterCommands {
     let command = |verb: &str| RuntimeTunnelCommand {
         argv: vec!["/opt/vpsman-adapters/runtime".to_string(), verb.to_string()],
         max_timeout_secs: 10,
         max_output_bytes: 16 * 1024,
     };
     RuntimeTunnelAdapterCommands {
-        template_id: template_id.to_string(),
-        template_name: "runtime-adapter".to_string(),
+        definition_id: definition_id.to_string(),
+        definition_name: "runtime-adapter".to_string(),
         definition_hash: "ab".repeat(32),
         startup: Some(command("start")),
         stop: Some(command("stop")),
@@ -1022,19 +1321,64 @@ fn runtime_adapter(template_id: &str) -> RuntimeTunnelAdapterCommands {
     }
 }
 
-fn routing_adapter(template_id: &str) -> RoutingCostAdapterCommands {
+fn routing_adapter(definition_id: &str) -> RoutingCostAdapterCommands {
     let command = |verb: &str| RuntimeTunnelCommand {
         argv: vec!["/opt/vpsman-adapters/routing".to_string(), verb.to_string()],
         max_timeout_secs: 10,
         max_output_bytes: 16 * 1024,
     };
     RoutingCostAdapterCommands {
-        template_id: template_id.to_string(),
-        template_name: "routing-adapter".to_string(),
+        source: vpsman_common::RoutingCostCommandSource::PlanOverride,
+        definition_id: definition_id.to_string(),
+        definition_name: "routing-adapter".to_string(),
         definition_hash: "cd".repeat(32),
         status: command("status"),
         update: command("update"),
     }
+}
+
+async fn assign_test_ospf_preset(
+    repo: &Repository,
+    client_id: &str,
+    executable_prefix: &str,
+) -> crate::model::ConfigurationPresetView {
+    let command = |verb: &str| {
+        serde_json::json!({
+            "argv": [format!("/usr/bin/{executable_prefix}-{verb}")],
+            "max_timeout_secs": 10,
+            "max_output_bytes": 16384
+        })
+    };
+    let preset = repo
+        .create_configuration_preset(
+            &CreateConfigurationPresetRequest {
+                behavior: "ospf_update_command".to_string(),
+                name: format!("{client_id} OSPF updater"),
+                description: None,
+                definition: serde_json::json!({
+                    "contract_version": 1,
+                    "status_command": command("status"),
+                    "update_command": command("update")
+                }),
+            },
+            &network_test_operator(),
+        )
+        .await
+        .unwrap();
+    let Repository::Memory(memory) = repo else {
+        unreachable!()
+    };
+    memory
+        .configuration_preset_overrides
+        .write()
+        .await
+        .push(ConfigurationPresetOverrideRecord {
+            client_id: client_id.to_string(),
+            behavior: "ospf_update_command".to_string(),
+            preset_id: preset.id,
+            updated_at: crate::unix_now().to_string(),
+        });
+    preset
 }
 
 async fn seed_online_agent(repo: &Repository, client_id: &str) {

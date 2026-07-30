@@ -116,20 +116,7 @@ export function JobArtifactsPanel({
     },
     {
       cell: (row) => (
-        <button
-          className="linkButton"
-          onClick={(event) => {
-            event.stopPropagation();
-            openSourceWorkflow(row, {
-              onOpenAgentUpdates,
-              onOpenBackupsArtifacts,
-              onOpenTransfers,
-            });
-          }}
-          type="button"
-        >
-          {row.sourceWorkflow}
-        </button>
+        <span>{row.sourceWorkflow}</span>
       ),
       header: "Source workflow",
       id: "source",
@@ -189,32 +176,6 @@ export function JobArtifactsPanel({
         `${row.verification} ${row.verificationDetail} ${row.rawStatus}`,
       size: 190,
       sortValue: (row) => row.verification,
-    },
-    {
-      cell: (row) => (
-        <button
-          className="secondaryAction compactAction"
-          onClick={(event) => {
-            event.stopPropagation();
-            openSourceWorkflow(row, {
-              onOpenAgentUpdates,
-              onOpenBackupsArtifacts,
-              onOpenTransfers,
-            });
-          }}
-          type="button"
-        >
-          {row.actionLabel}
-        </button>
-      ),
-      enableHiding: false,
-      header: "Action",
-      id: "action",
-      minSize: 130,
-      stickyEnd: true,
-      searchValue: (row) => row.actionLabel,
-      size: 150,
-      sortValue: (row) => row.actionLabel,
     },
   ];
 
@@ -300,6 +261,22 @@ export function JobArtifactsPanel({
           </button>
         </section>
         <ConsoleDataGrid
+          actions={[
+            {
+              description: (rows) =>
+                rows.length === 1
+                  ? `${rows[0].actionLabel} for this artifact.`
+                  : "Select exactly one artifact to open its source workflow.",
+              disabled: (rows) => rows.length !== 1,
+              label: "Open source workflow",
+              onSelect: (rows) =>
+                openSourceWorkflow(rows[0], {
+                  onOpenAgentUpdates,
+                  onOpenBackupsArtifacts,
+                  onOpenTransfers,
+                }),
+            },
+          ]}
           columns={columns}
           defaultColumnVisibility={{ created: false }}
           defaultPageSize={10}
@@ -370,7 +347,6 @@ export function JobArtifactsPanel({
           rows={visibleRows}
           rowsTruncated={rowsTruncated}
           searchPlaceholder="Search artifacts"
-          selectable={false}
           storageKey="vpsman.grid.jobs.artifacts"
           toolbarActions={
             <label className="jobArtifactTypeFilter">

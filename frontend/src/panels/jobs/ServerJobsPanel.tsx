@@ -194,29 +194,8 @@ export function ServerJobsPanel({
         searchValue: (job) => formatTime(job.created_at),
         sortValue: (job) => job.created_at,
       },
-      {
-        cell: (job) => (
-          <button
-            className="secondaryAction compactAction dangerAction"
-            disabled={pendingJobId === job.id || job.status !== "queued"}
-            onClick={(event) => {
-              event.stopPropagation();
-              reviewCancelJob(job);
-            }}
-            title="Cancel queued maintenance job"
-            type="button"
-          >
-            <XCircle size={14} />
-            Cancel
-          </button>
-        ),
-        enableHiding: false,
-        header: "Action",
-        id: "action",
-        stickyEnd: true,
-      },
     ],
-    [pendingJobId],
+    [],
   );
 
   async function previewCleanup() {
@@ -660,6 +639,22 @@ export function ServerJobsPanel({
           </button>
         </div>
         <ConsoleDataGrid
+          actions={[
+            {
+              description: (rows) =>
+                rows.length === 1
+                  ? "Cancel this queued maintenance job."
+                  : "Select one queued maintenance job to cancel.",
+              disabled: (rows) =>
+                rows.length !== 1 ||
+                rows[0].status !== "queued" ||
+                pendingJobId === rows[0].id,
+              icon: <XCircle size={14} />,
+              label: "Cancel queued job",
+              onSelect: (rows) => reviewCancelJob(rows[0]),
+              tone: "danger",
+            },
+          ]}
           columns={serverJobColumns}
           defaultPageSize={10}
           expandOnRowClick
@@ -693,7 +688,6 @@ export function ServerJobsPanel({
           rows={jobs}
           rowsTruncated={jobsTruncated}
           searchPlaceholder="Search maintenance jobs"
-          selectable={false}
           storageKey="vpsman.jobs.serverJobs"
           title="Maintenance job records"
         />

@@ -127,7 +127,7 @@ test("submits the privilege unlock form with Enter", async ({ page }, testInfo) 
     }),
   );
   const dialog = page.getByRole("dialog", { name: "Unlock privilege" });
-  await dialog.getByLabel(/privilege secret/i).fill("local-super-password");
+  await dialog.getByLabel(/super password/i).fill("local-super-password");
   const verifier = dialog.getByLabel(/(privilege salt|verifier salt hex)/i);
   await verifier.fill("00112233445566778899aabbccddeeff");
   await verifier.press("Enter");
@@ -138,7 +138,7 @@ test("submits the privilege unlock form with Enter", async ({ page }, testInfo) 
   ).toBeVisible();
 });
 
-test("privilege unlock reaches refreshable session actions while Audit stays read-only", async ({
+test("privilege unlock reaches refreshable session actions while Audit evidence rows stay read-only", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -155,7 +155,7 @@ test("privilege unlock reaches refreshable session actions while Audit stays rea
     const dialog = page.getByRole("dialog", { name: "Unlock privilege" });
     await expect(dialog).toBeVisible();
     await dialog
-      .getByLabel(/privilege secret/i)
+      .getByLabel(/super password/i)
       .fill("local-super-password");
     await dialog
       .getByLabel(/(privilege salt|verifier salt hex)/i)
@@ -168,14 +168,27 @@ test("privilege unlock reaches refreshable session actions while Audit stays rea
     await expect(dialog).toBeHidden();
   };
 
-  const operatorRevoke = page
-    .getByLabel("Operator accounts data grid")
-    .getByRole("button", { name: "Revoke sessions" })
-    .first();
-  await expect(operatorRevoke).toBeEnabled();
-  await activate(operatorRevoke);
+  const operatorGrid = page.getByLabel("Operator accounts data grid");
+  await operatorGrid
+    .getByLabel(
+      "Select Operator accounts row 99999999-aaaa-4bbb-8ccc-000000000001",
+    )
+    .check();
+  const revokeSelectedSessions = async () => {
+    await operatorGrid
+      .locator(".gridToolbarActions")
+      .getByRole("button", { name: "Actions", exact: true })
+      .click();
+    const revoke = page.getByRole("menuitem", {
+      name: "Revoke sessions",
+      exact: true,
+    });
+    await expect(revoke).toBeEnabled();
+    await activate(revoke);
+  };
+  await revokeSelectedSessions();
   await unlockCurrentDialog();
-  await activate(operatorRevoke);
+  await revokeSelectedSessions();
   await expect(page.getByLabel("Confirm admin user action")).toBeVisible();
   await activate(
     page
@@ -187,6 +200,11 @@ test("privilege unlock reaches refreshable session actions while Audit stays rea
     page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
   );
   await openConsoleSubpage(page, "Audit", "Sessions");
+  await expect(
+    page
+      .locator(".auditSessionEvidencePanel")
+      .getByRole("button", { name: "Sign out", exact: true }),
+  ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Revoke session for console-admin" }),
   ).toHaveCount(0);
@@ -460,6 +478,13 @@ test("keeps compact fleet and transfer controls usable on mobile", async ({
   await waitForConsoleShell(page);
 
   await openConsoleSubpage(page, "Fleet", "Assignments");
+  const assignmentGrid = page.getByLabel("VPS group assignments data grid");
+  await activate(
+    assignmentGrid
+      .getByLabel(/VPS group assignments mobile card/)
+      .first()
+      .getByRole("button", { name: "Edit groups" }),
+  );
   const addGroup = page.locator(".inlineTagAdd").first();
   await expect(addGroup.getByRole("button")).toBeVisible();
   const addGroupBounds = await addGroup.boundingBox();
@@ -484,6 +509,40 @@ test("keeps compact fleet and transfer controls usable on mobile", async ({
   const reviewCheckBounds = await reviewCheck.boundingBox();
   expect(reviewCheckBounds?.width ?? 0).toBeLessThanOrEqual(20);
   expect(reviewCheckBounds?.height ?? 0).toBeLessThanOrEqual(20);
+
+  await openConsoleSubpage(page, "Automation", "Schedules");
+  const scheduleGrid = page.getByLabel("Schedule records data grid");
+  const scheduleCard = scheduleGrid
+    .getByLabel(/Schedule records mobile card/)
+    .first();
+  for (const action of [
+    "Update targets",
+    "Defer",
+    "Review deletion",
+  ]) {
+    await expect(
+      scheduleCard.getByRole("button", { name: action, exact: true }),
+    ).toHaveCount(0);
+  }
+  await activate(scheduleCard);
+  await expect(scheduleCard).toHaveAttribute("aria-expanded", "true");
+  await expect(scheduleGrid.locator(".gridExpandedRow")).toContainText(
+    "edge-sfo-01 (agent-sfo-01)",
+  );
+  await expect(scheduleGrid.locator(".gridExpandedRow")).toContainText(
+    "Audit selector",
+  );
+  await scheduleCard.getByLabel(/Select Schedule records row/).check();
+  await scheduleGrid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  for (const action of ["Update targets", "Defer", "Review deletion"]) {
+    await expect(
+      page.getByRole("menuitem", { name: action, exact: true }),
+    ).toBeVisible();
+  }
+  await page.keyboard.press("Escape");
 
   await openConsoleSubpage(page, "Remote Operations", "Transfers");
   const direction = page.getByLabel("Transfer direction");
@@ -510,6 +569,71 @@ test("keeps compact fleet and transfer controls usable on mobile", async ({
         document.documentElement.clientWidth,
     ),
   ).toBeLessThanOrEqual(1);
+});
+
+test("keeps group-assignment feedback with the VPS whose mutation produced it", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "desktop context actions cover the in-flight target-switch boundary",
+  );
+  await installConsoleApiMock(page, { bulkTagMutationDelayMs: 500 });
+  await page.goto("/");
+  await waitForConsoleShell(page);
+  await unlockPrivilegeFromTop(page);
+  await openConsoleSubpage(page, "Fleet", "Assignments");
+
+  const assignmentsGrid = page.getByLabel("VPS group assignments data grid");
+  const sfoRow = assignmentsGrid
+    .getByRole("row")
+    .filter({ hasText: "edge-sfo-01" })
+    .first();
+  await sfoRow.click({ button: "right" });
+  await activate(
+    page.getByRole("menuitem", { name: "Edit groups", exact: true }),
+  );
+  const sfoDrawer = page.getByLabel(/^Edit groups · edge-sfo-01/);
+  await sfoDrawer
+    .getByRole("button", { name: "Remove role:edge from edge-sfo-01" })
+    .click();
+  await activate(
+    sfoDrawer.getByRole("button", {
+      name: /^Close Edit groups · edge-sfo-01/,
+    }),
+  );
+
+  const fraRow = assignmentsGrid
+    .getByRole("row")
+    .filter({ hasText: "core-fra-02" })
+    .first();
+  await fraRow.click({ button: "right" });
+  await expect(
+    page.getByRole("menuitem", { name: "Edit groups", exact: true }),
+  ).toHaveAttribute("data-disabled", "");
+  await page.keyboard.press("Escape");
+
+  await expect
+    .poll(async () => {
+      return page.evaluate(() => {
+        const requestLog = (
+          window as unknown as {
+            __vpsmanTestRequests: {
+              bulkTagMutations: Array<Record<string, unknown>>;
+            };
+          }
+        ).__vpsmanTestRequests;
+        return requestLog.bulkTagMutations.length;
+      });
+    })
+    .toBe(1);
+  await fraRow.click({ button: "right" });
+  await activate(
+    page.getByRole("menuitem", { name: "Edit groups", exact: true }),
+  );
+  const fraDrawer = page.getByLabel(/^Edit groups · core-fra-02/);
+  await expect(fraDrawer).toBeVisible();
+  await expect(fraDrawer.locator(".localActionFeedback")).toHaveCount(0);
 });
 
 test("reports group creation beside the registry action", async ({

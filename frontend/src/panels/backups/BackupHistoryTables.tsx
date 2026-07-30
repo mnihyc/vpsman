@@ -328,6 +328,12 @@ function BackupPoliciesTable({
           <div className="gridDetailLine">
             <strong>{policy.name}</strong>
             <span>{policyTargetLabel(policy)}</span>
+            <span
+              className="monoValue"
+              title={policyTargetAssignmentLabel(policy)}
+            >
+              Fixed targets: {policyTargetAssignmentLabel(policy)}
+            </span>
             <span>{policyScopeLabel(policy)}</span>
             <span>{describeCronExpression(policy.cron_expr)}</span>
             <span>
@@ -557,46 +563,6 @@ function BackupRequestsTable({
         <span className="monoValue">{shortHash(backup.payload_hash)}</span>
       ),
     },
-    {
-      id: "action",
-      header: "Action",
-      stickyEnd: true,
-      size: 135,
-      minSize: 125,
-      sortValue: (backup) =>
-        canOpenArtifact(backup) ? "open artifact" : "retry",
-      searchValue: () => "open artifact retry",
-      cell: (backup) =>
-        canOpenArtifact(backup) ? (
-          <button
-            className="secondaryAction compactAction"
-            disabled={!onOpenRequestArtifact}
-            onClick={(event) => {
-              event.stopPropagation();
-              onOpenRequestArtifact?.(backup);
-            }}
-            title="Open the artifact inventory for this backup request."
-            type="button"
-          >
-            <ExternalLink size={15} />
-            <span>Open artifact</span>
-          </button>
-        ) : (
-          <button
-            className="secondaryAction compactAction"
-            disabled={!onRetryBackup}
-            onClick={(event) => {
-              event.stopPropagation();
-              onRetryBackup?.(backup);
-            }}
-            title="Prefill the backup request workflow from this request."
-            type="button"
-          >
-            <RotateCcw size={15} />
-            <span>Retry</span>
-          </button>
-        ),
-    },
   ];
   return (
     <GridSection
@@ -796,77 +762,11 @@ function ArtifactHistoryTable({
         );
       },
     },
-    {
-      id: "restore",
-      header: "Restore",
-      size: 105,
-      minSize: 95,
-      sortValue: (artifact) =>
-        backupForArtifact(artifact) && artifactPackageReady(artifact)
-          ? "restore"
-          : "disabled",
-      searchValue: (artifact) =>
-        `restore ${artifactPackageReady(artifact) ? "available package" : "unverified package"}`,
-      cell: (artifact) => {
-        const backup = backupForArtifact(artifact);
-        const restoreReady = Boolean(backup && artifactPackageReady(artifact));
-        return (
-          <button
-            className="secondaryAction compactAction"
-            disabled={!restoreReady || !onRestoreArtifact}
-            onClick={(event) => {
-              event.stopPropagation();
-              if (backup && restoreReady) {
-                onRestoreArtifact?.(artifact, backup);
-              }
-            }}
-            title={artifactRestoreActionTitle(backup, restoreReady)}
-            type="button"
-          >
-            <RotateCcw size={15} />
-            <span>Restore</span>
-          </button>
-        );
-      },
-    },
-    {
-      id: "download",
-      header: "Download",
-      size: 120,
-      minSize: 105,
-      sortValue: (artifact) =>
-        backupForArtifact(artifact) && artifactPackageReady(artifact)
-          ? "download"
-          : "disabled",
-      searchValue: (artifact) =>
-        `download package transfer package ${artifactPackageReady(artifact) ? "available package" : "unverified package"}`,
-      cell: (artifact) => {
-        const backup = backupForArtifact(artifact);
-        const downloadReady = Boolean(backup && artifactPackageReady(artifact));
-        return (
-          <button
-            className="secondaryAction compactAction"
-            disabled={!downloadReady || !onDownloadArtifact}
-            onClick={(event) => {
-              event.stopPropagation();
-              if (backup && downloadReady) {
-                onDownloadArtifact?.(artifact, backup);
-              }
-            }}
-            title={artifactDownloadActionTitle(backup, downloadReady)}
-            type="button"
-          >
-            <Download size={15} />
-            <span>Download</span>
-          </button>
-        );
-      },
-    },
   ];
   return (
     <GridSection
       title="Artifact inventory"
-      summary="Restore and download actions stay on the package row; object lineage is in details."
+      summary="Select a package and use Actions; object lineage stays in row details."
     >
       <ConsoleDataGrid
         actions={[
@@ -916,6 +816,52 @@ function ArtifactHistoryTable({
             </span>
           </div>
         )}
+        rowActions={[
+          {
+            description: ([artifact]) => {
+              const backup = artifact ? backupForArtifact(artifact) : null;
+              return artifactRestoreActionTitle(
+                backup,
+                Boolean(artifact && backup && artifactPackageReady(artifact)),
+              );
+            },
+            disabled: ([artifact]) =>
+              !artifact ||
+              !onRestoreArtifact ||
+              !backupForArtifact(artifact) ||
+              !artifactPackageReady(artifact),
+            icon: <RotateCcw size={15} />,
+            label: "Restore",
+            onSelect: ([artifact]) => {
+              const backup = artifact ? backupForArtifact(artifact) : null;
+              if (artifact && backup && artifactPackageReady(artifact)) {
+                onRestoreArtifact?.(artifact, backup);
+              }
+            },
+          },
+          {
+            description: ([artifact]) => {
+              const backup = artifact ? backupForArtifact(artifact) : null;
+              return artifactDownloadActionTitle(
+                backup,
+                Boolean(artifact && backup && artifactPackageReady(artifact)),
+              );
+            },
+            disabled: ([artifact]) =>
+              !artifact ||
+              !onDownloadArtifact ||
+              !backupForArtifact(artifact) ||
+              !artifactPackageReady(artifact),
+            icon: <Download size={15} />,
+            label: "Download",
+            onSelect: ([artifact]) => {
+              const backup = artifact ? backupForArtifact(artifact) : null;
+              if (artifact && backup && artifactPackageReady(artifact)) {
+                onDownloadArtifact?.(artifact, backup);
+              }
+            },
+          },
+        ]}
         rows={artifacts}
         rowsTruncated={rowsTruncated}
         storageKey="vpsman.grid.backups.artifacts"
@@ -1127,40 +1073,6 @@ function RestoreSourcesTable({
         );
       },
     },
-    {
-      id: "action",
-      header: "Action",
-      stickyEnd: true,
-      size: 125,
-      minSize: 115,
-      sortValue: () => "restore",
-      searchValue: () => "restore choose artifact draft restore",
-      cell: (backup) => {
-        const readiness = restoreSourceReadiness(
-          backup,
-          artifactForBackup(backup),
-        );
-        return (
-          <button
-            className="secondaryAction compactAction"
-            disabled={!onPlanRestoreSource}
-            onClick={(event) => {
-              event.stopPropagation();
-              onPlanRestoreSource?.(backup);
-            }}
-            title={
-              readiness.tone === "ok"
-                ? "Choose this artifact and continue to destination/path behavior."
-                : "Choose this source, but verify the artifact before live restore."
-            }
-            type="button"
-          >
-            <RotateCcw size={15} />
-            <span>Restore</span>
-          </button>
-        );
-      },
-    },
   ];
   return (
     <GridSection
@@ -1212,6 +1124,30 @@ function RestoreSourcesTable({
             </div>
           );
         }}
+        rowActions={[
+          {
+            description: ([backup]) => {
+              if (!backup) {
+                return "Choose a backup source.";
+              }
+              const readiness = restoreSourceReadiness(
+                backup,
+                artifactForBackup(backup),
+              );
+              return readiness.tone === "ok"
+                ? "Choose this artifact and continue to destination and path behavior."
+                : "Choose this source, but verify the artifact before live restore.";
+            },
+            disabled: () => !onPlanRestoreSource,
+            icon: <RotateCcw size={15} />,
+            label: "Plan restore",
+            onSelect: ([backup]) => {
+              if (backup) {
+                onPlanRestoreSource?.(backup);
+              }
+            },
+          },
+        ]}
         rows={backups}
         rowsTruncated={rowsTruncated}
         storageKey="vpsman.grid.backups.restoreSources"
@@ -1552,7 +1488,15 @@ function policyTargetLabel(policy: BackupPolicyRecord): string {
     return "no fixed targets";
   }
   const preview = ids.slice(0, 3).join(", ");
-  return `${ids.length} VPS${ids.length === 1 ? "" : "s"}${preview ? ` · ${preview}` : ""}`;
+  const remainder = ids.length - 3;
+  return `${ids.length} VPS${ids.length === 1 ? "" : "s"}${preview ? ` · ${preview}` : ""}${remainder > 0 ? ` +${remainder} more` : ""}`;
+}
+
+function policyTargetAssignmentLabel(policy: BackupPolicyRecord): string {
+  const ids = Array.isArray(policy.target_client_ids)
+    ? policy.target_client_ids
+    : [];
+  return ids.join(", ") || "none";
 }
 
 function policyTargetCountLabel(policy: BackupPolicyRecord): string {

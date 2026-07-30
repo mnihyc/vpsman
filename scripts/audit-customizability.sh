@@ -33,7 +33,7 @@ matches="$(rg -n --no-heading \
   -e '\bping\b' \
   crates frontend/src scripts docs README.md 2>/dev/null || true)"
 
-classified_pattern='#!|preset|config|argv|source|adapter|definition|default|fixture|test|smoke|placeholder|managed|platform_accounts|port_forwarding|initd_dir|generate_frontend_contracts|file_transfer|vpsman-tunnels|vpsman-ospf|docs/|README.md|customizability|render_template_runtime_config'
+classified_pattern='#!|preset|config|argv|source|adapter|definition|default|fixture|test|smoke|placeholder|managed|platform_accounts|port_forwarding|initd_dir|generate_frontend_contracts|file_transfer|vpsman-tunnels|vpsman-ospf|docs/|README.md|customizability|effective_agent_config'
 classified="$(printf '%s\n' "$matches" | rg -i "$classified_pattern" || true)"
 open_candidates="$(printf '%s\n' "$matches" | rg -v -i "$classified_pattern" || true)"
 

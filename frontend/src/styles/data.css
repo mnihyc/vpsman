@@ -1523,7 +1523,7 @@
   line-height: 1.35;
 }
 
-.consoleField input,
+.consoleField input:not(.searchExpressionEditor):not(.vpsComboboxEditor),
 .consoleField select,
 .consoleField textarea {
   width: 100%;
@@ -1534,7 +1534,7 @@
   color: var(--text);
 }
 
-.consoleField input,
+.consoleField input:not(.searchExpressionEditor):not(.vpsComboboxEditor),
 .consoleField select {
   min-height: 36px;
   padding: 0 9px;
@@ -1573,6 +1573,21 @@
   border-radius: 6px;
   padding: 0 9px;
   background: var(--surface);
+}
+
+.consoleField .checkLine {
+  min-height: 36px;
+  justify-content: flex-start;
+}
+
+.consoleField .checkLine input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 18px;
+  min-width: 18px;
+  height: 18px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
 }
 
 .consoleField .borderedToggle input[type="checkbox"] {
@@ -1989,58 +2004,6 @@
 .tagGrid {
   grid-template-columns: minmax(190px, 1fr) 90px;
   min-width: max(100%, 360px);
-}
-
-.sourceTemplateGrid {
-  grid-template-columns:
-    minmax(190px, 1fr) minmax(180px, 1fr) minmax(110px, 0.5fr)
-    90px minmax(170px, 0.8fr);
-  min-width: max(100%, 760px);
-}
-
-.sourceStatusSection {
-  display: grid;
-  gap: 10px;
-  border-top: 1px solid var(--border-subtle);
-  padding: 14px 18px 0;
-}
-
-.sourceStatusSection summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 36px;
-  color: var(--text);
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.sourceStatusSection summary span {
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.sourceStatusSection summary:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
-}
-
-.sourceStatusGridWrap {
-  padding-top: 10px;
-}
-
-.sourceStatusGrid {
-  grid-template-columns:
-    minmax(150px, 0.9fr)
-    minmax(180px, 1fr)
-    minmax(170px, 1fr)
-    minmax(120px, 0.65fr)
-    minmax(120px, 0.65fr)
-    minmax(150px, 0.8fr);
-  min-width: max(100%, 900px);
 }
 
 .metricGrid {
@@ -3264,12 +3227,7 @@
   min-width: 0;
 }
 
-.templateManagementGrid {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 430px), 1fr));
-  align-items: start;
-}
-
-.templateForm {
+.structuredDefinitionForm {
   display: grid;
   align-content: start;
   gap: 10px;
@@ -3280,48 +3238,50 @@
   padding: 12px;
 }
 
-.templateForm > strong {
+.configurationDrawerFields {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.structuredDefinitionForm > strong,
+.structuredDefinitionForm > .configurationDrawerFields > strong {
   border-bottom: 1px solid var(--border-subtle);
   color: var(--text);
   font-size: 14px;
   padding-bottom: 8px;
 }
 
-.templateForm .formHint {
+.structuredDefinitionForm .formHint {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
 }
 
-.templateForm label {
+.structuredDefinitionForm label {
   display: grid;
   gap: 6px;
   min-width: 0;
 }
 
-.templateForm label span {
+.structuredDefinitionForm label span {
   color: var(--muted);
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
 }
 
-.templateFormRow {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
-}
-
-.templateLifecycleActions {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 120px), 1fr));
-}
-
-.templateForm input,
-.templateForm select,
-.templateForm textarea {
+.structuredDefinitionForm input,
+.structuredDefinitionForm select,
+.structuredDefinitionForm textarea {
   width: 100%;
   min-width: 0;
 }
 
-.templateForm textarea {
+.structuredDefinitionForm textarea {
   min-height: 82px;
 }
 
@@ -3349,53 +3309,6 @@
   flex-wrap: wrap;
   font-size: 12px;
   gap: 10px;
-}
-
-.templateAssignmentSummary {
-  border-top: 1px solid var(--border-subtle);
-  padding-top: 18px;
-}
-
-.sourceTemplateDetailStack {
-  display: grid;
-  gap: 14px;
-  min-width: 0;
-}
-
-.sourceTemplateWorkflowPanel {
-  display: grid;
-  gap: 14px;
-  min-width: 0;
-}
-
-.templateDetailTabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  min-width: 0;
-}
-
-.templateDetailTabs button {
-  min-height: 34px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--surface);
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-weight: 700;
-  padding: 0 12px;
-}
-
-.templateDetailTabs button.selected,
-.templateDetailTabs button[aria-selected="true"] {
-  border-color: var(--primary);
-  background: var(--primary-soft);
-  color: var(--primary-text);
-}
-
-.templateDetailTabs button:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
 }
 
 .historyRow > span,
@@ -3478,7 +3391,8 @@
   font-weight: 500;
 }
 
-.consoleInlineDetailGrid > span > pre {
+.consoleInlineDetailGrid > span > pre,
+.consoleInlineDetailGrid > strong > pre {
   max-height: 220px;
   margin: 0;
   overflow: auto;
@@ -3491,6 +3405,13 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.scheduleExpandedDetail span span {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .consoleInlineDetailGrid:has(> strong) {

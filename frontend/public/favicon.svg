@@ -1,4 +1,33 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-  <rect width="24" height="24" rx="4" fill="#1a73e8"/>
-  <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>vpsman</title>
+  <defs>
+    <linearGradient id="cloud" x1="5" y1="13" x2="58" y2="43" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8beaff"/>
+      <stop offset="1" stop-color="#38baf1"/>
+    </linearGradient>
+    <linearGradient id="v" x1="13" y1="9" x2="53" y2="55" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#35b5f6"/>
+      <stop offset=".52" stop-color="#238eea"/>
+      <stop offset="1" stop-color="#365de5"/>
+    </linearGradient>
+    <filter id="lift" x="-20%" y="-20%" width="140%" height="150%" color-interpolation-filters="sRGB">
+      <feDropShadow dx=".3" dy=".8" stdDeviation=".8" flood-color="#174ea6" flood-opacity=".3"/>
+    </filter>
+  </defs>
+  <g
+    fill="none"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    stroke-width="4.4"
+  >
+    <path
+      d="M25.5 42H14.5C9 42 5 38 5 32.5c0-3.3 1.3-6.1 3.7-8.1H18c2-7 7.4-11.4 14.2-11.4 5.1 0 9.5 2.6 12.1 6.5H49c6.1 0 11 4.9 11 11v1.2C60 37.4 55.4 42 49.7 42H40Z"
+      stroke="url(#cloud)"
+    />
+    <path
+      d="M13.5 9.5c5.2 3.4 7.7 10 9.1 18.1l4.7 24c.5 2.7 4 3.6 5.8 1.4 6.1-7.4 9.4-16.2 13.6-25.4 3.8-8.2 7.8-13.8 13.3-16.3"
+      filter="url(#lift)"
+      stroke="url(#v)"
+    />
+  </g>
 </svg>

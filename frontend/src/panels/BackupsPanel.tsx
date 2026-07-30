@@ -488,14 +488,16 @@ export function BackupsPanel({
     () => parseSearchExpression(policyTargetsText),
     [policyTargetsText],
   );
-  const policyTargetIds = useMemo(
+  const policyTargetAgents = useMemo(
     () =>
       !policyTargetsText.trim() || policyTargetParse.error
         ? []
-        : agentsMatchingExpression(agents, policyTargetsText).map(
-            (agent) => agent.id,
-          ),
+        : agentsMatchingExpression(agents, policyTargetsText),
     [agents, policyTargetParse.error, policyTargetsText],
+  );
+  const policyTargetIds = useMemo(
+    () => policyTargetAgents.map((agent) => agent.id),
+    [policyTargetAgents],
   );
   const policyTargetCount = policyTargetIds.length;
   const agentNameById = useMemo(
@@ -1924,12 +1926,8 @@ export function BackupsPanel({
             label: "Preview",
             value: policySnapshot
               ? policySnapshot.targets
-                  .slice(0, 4)
                   .map((target) => formatVpsName(target, vpsNameDisplayMode))
-                  .join(", ") +
-                (policySnapshot.targets.length > 4
-                  ? `, +${policySnapshot.targets.length - 4} more`
-                  : "")
+                  .join(", ")
               : "Review policy to freeze targets",
           },
         ];
@@ -2763,6 +2761,7 @@ export function BackupsPanel({
                 retentionDays={policyRetentionDays}
                 rotationGeneration={policyRotationGeneration}
                 targetCount={policyTargetCount}
+                targetAgents={policyTargetAgents}
                 targetExpressionMessage={
                   policyTargetParse.error ??
                   `${policyTargetCount}/${agents.length}`

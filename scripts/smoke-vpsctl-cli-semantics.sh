@@ -90,8 +90,8 @@ routed_plan="$("$bin" tunnel-plan \
   --bandwidth-mbps 1234 \
   --ospf \
   --ospf-latency-ms 20 \
-  --left-routing-adapter-template-id 33333333-3333-4333-8333-333333333333 \
-  --right-routing-adapter-template-id 44444444-4444-4444-8444-444444444444)"
+  --left-routing-adapter-definition-id 33333333-3333-4333-8333-333333333333 \
+  --right-routing-adapter-definition-id 44444444-4444-4444-8444-444444444444)"
 require_contains "$routed_plan" '"mode": "reviewed"' "OSPF tunnel plan"
 require_contains "$routed_plan" '"left_adapter_template_id": "33333333-3333-4333-8333-333333333333"' "OSPF left adapter"
 require_contains "$routed_plan" '"recommended_ospf_cost"' "OSPF tunnel plan"
@@ -158,6 +158,33 @@ require_contains "$update_help" "--artifact-url" "agent-update help"
 require_contains "$update_help" "--sha256-hex" "agent-update help"
 config_patch_help="$("$bin" config-patch --help)"
 require_contains "$config_patch_help" "--config-file" "config-patch help"
+
+if "$bin" config-source-set \
+  --behavior host_metrics \
+  --preset-id 11111111-1111-4111-8111-111111111111 \
+  --clients edge-a \
+  --confirmed \
+  >"$tmp_dir/config-source-set-no-preview.out" \
+  2>"$tmp_dir/config-source-set-no-preview.err"; then
+  fail "config-source-set accepted --confirmed without a reviewed preview hash"
+fi
+require_contains \
+  "$(cat "$tmp_dir/config-source-set-no-preview.err")" \
+  "--confirmed requires --preview-hash" \
+  "configuration source reviewed preview"
+
+if "$bin" config-preset-update \
+  --preset-id 11111111-1111-4111-8111-111111111111 \
+  --definition-json '{"source":"interface_counters"}' \
+  --confirmed \
+  >"$tmp_dir/config-preset-update-no-preview.out" \
+  2>"$tmp_dir/config-preset-update-no-preview.err"; then
+  fail "config-preset-update accepted --confirmed without a reviewed preview hash"
+fi
+require_contains \
+  "$(cat "$tmp_dir/config-preset-update-no-preview.err")" \
+  "--confirmed requires --preview-hash" \
+  "configuration preset reviewed preview"
 
 printf '[auth]\nmax_job_timeout_secs = 10\n' >"$tmp_dir/bad-config-patch.toml"
 if "$bin" config-patch \

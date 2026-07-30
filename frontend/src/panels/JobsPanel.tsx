@@ -763,29 +763,8 @@ export function JobsPanel({
           </time>
         ),
       },
-      {
-        id: "open",
-        header: "Open",
-        size: 96,
-        minSize: 86,
-        enableHiding: false,
-        stickyEnd: true,
-        sortValue: (job) => job.created_at,
-        cell: (job) => (
-          <button
-            className="secondaryAction compactAction"
-            onClick={(event) => {
-              event.stopPropagation();
-              void openTargets(job.id);
-            }}
-            type="button"
-          >
-            Open
-          </button>
-        ),
-      },
     ],
-    [openTargets],
+    [],
   );
 
   const scheduledRunColumns = useMemo<
@@ -899,29 +878,8 @@ export function JobsPanel({
         searchValue: (job) => formatJobDuration(job),
         cell: (job) => formatJobDuration(job),
       },
-      {
-        id: "open",
-        header: "Open",
-        size: 96,
-        minSize: 86,
-        enableHiding: false,
-        stickyEnd: true,
-        sortValue: (job) => job.created_at,
-        cell: (job) => (
-          <button
-            className="secondaryAction compactAction"
-            onClick={(event) => {
-              event.stopPropagation();
-              void openTargets(job.id);
-            }}
-            type="button"
-          >
-            Open
-          </button>
-        ),
-      },
     ],
-    [openTargets, scheduleById],
+    [scheduleById],
   );
 
   const approvalColumns = useMemo<ConsoleDataGridColumn<JobApprovalRecord>[]>(
@@ -1031,38 +989,8 @@ export function JobsPanel({
         searchValue: (approval) => approval.requested_at,
         cell: (approval) => formatTime(approval.requested_at),
       },
-      {
-        id: "actions",
-        header: "Decision",
-        size: 130,
-        minSize: 118,
-        enableHiding: false,
-        stickyEnd: true,
-        cell: (approval) => (
-          <span className="inlineActions">
-            <button
-              aria-label="Review job approval"
-              className="secondaryAction compactAction"
-              disabled={approval.status !== "pending" || approvalActionPending}
-              onClick={(event) => {
-                event.stopPropagation();
-                openApprovalReview(approval);
-              }}
-              title={
-                approval.status === "pending"
-                  ? "Review the frozen job request before approving or rejecting"
-                  : "Decision already recorded"
-              }
-              type="button"
-            >
-              <ShieldCheck size={14} />
-              <span>Review</span>
-            </button>
-          </span>
-        ),
-      },
     ],
-    [approvalActionPending],
+    [],
   );
 
   const targetColumns = useMemo<ConsoleDataGridColumn<JobTargetRecord>[]>(
@@ -1130,58 +1058,8 @@ export function JobsPanel({
         searchValue: (target) => target.completed_at ?? "",
         sortValue: (target) => target.completed_at ?? "",
       },
-      {
-        cell: (target) => (
-          <span className="inlineActions">
-            {onOpenVpsDetail ? (
-              <button
-                aria-label="Open VPS detail"
-                className="secondaryAction compactAction"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onOpenVpsDetail(target.client_id);
-                }}
-                title="Open VPS detail"
-                type="button"
-              >
-                <Server size={14} />
-                <span>VPS detail</span>
-              </button>
-            ) : null}
-            {fileDownloadStatusByClient.has(target.client_id) ? (
-              <button
-                className="secondaryAction compactAction"
-                disabled={fileDownloadPendingClientId === target.client_id}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  void downloadFileForClient(target.client_id);
-                }}
-                type="button"
-              >
-                <Download size={14} />
-                <span>
-                  {fileDownloadPendingClientId === target.client_id
-                    ? "Downloading"
-                    : "Download file"}
-                </span>
-              </button>
-            ) : onOpenVpsDetail ? null : (
-              "-"
-            )}
-          </span>
-        ),
-        enableHiding: false,
-        header: "Actions",
-        id: "actions",
-        stickyEnd: true,
-      },
     ],
-    [
-      agentNameById,
-      fileDownloadPendingClientId,
-      fileDownloadStatusByClient,
-      onOpenVpsDetail,
-    ],
+    [agentNameById],
   );
   const comparisonGroupColumns = useMemo<
     ConsoleDataGridColumn<JobOutputComparisonGroup>[]
@@ -1566,6 +1444,7 @@ export function JobsPanel({
                 onOpenRow={(job) => void openTargets(job.id)}
                 openRowLabel="Open targets"
                 openRowTitle={(job) => `Load target results for job ${job.id}.`}
+                showMobileOpenRowAction={false}
                 renderExpandedRow={(job) => (
                   <div className="consoleInlineDetailGrid">
                     <span>Job ID</span>
@@ -1679,9 +1558,42 @@ export function JobsPanel({
                       </strong>
                     </div>
                   )}
+                  rowActions={[
+                    {
+                      description: ([target]) =>
+                        target
+                          ? `Open VPS detail for ${clientLabel(target.client_id)}.`
+                          : "Open VPS detail.",
+                      disabled: () => !onOpenVpsDetail,
+                      hidden: () => !onOpenVpsDetail,
+                      icon: <Server size={14} />,
+                      label: "Open VPS",
+                      onSelect: ([target]) => {
+                        if (target) {
+                          onOpenVpsDetail?.(target.client_id);
+                        }
+                      },
+                    },
+                    {
+                      description: () =>
+                        "Download the file retained for this target.",
+                      disabled: ([target]) =>
+                        !target ||
+                        fileDownloadPendingClientId === target.client_id,
+                      hidden: ([target]) =>
+                        !target ||
+                        !fileDownloadStatusByClient.has(target.client_id),
+                      icon: <Download size={14} />,
+                      label: "Download file",
+                      onSelect: ([target]) => {
+                        if (target) {
+                          void downloadFileForClient(target.client_id);
+                        }
+                      },
+                    },
+                  ]}
                   rows={targets}
                   searchPlaceholder="Search targets"
-                  selectable={false}
                   storageKey="vpsman.jobs.history.targets"
                   title="Target result records"
                 />
@@ -2420,6 +2332,7 @@ export function JobsPanel({
                   rowsTruncated={jobHistoryTruncated}
                   searchPlaceholder="Search scheduled runs"
                   selectable={false}
+                  showMobileOpenRowAction={false}
                   singleExpandedRow
                   storageKey="vpsman.jobs.scheduledRuns"
                   title="Schedule run records"

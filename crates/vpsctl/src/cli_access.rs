@@ -185,17 +185,12 @@ pub(crate) struct ComposeSecretsCommand {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct SourceTemplateListCommand {
-    #[arg(long)]
-    pub(crate) domain: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct SourceStatusCommand {
-    #[arg(long)]
-    pub(crate) client_id: Option<String>,
-    #[arg(long)]
-    pub(crate) domain: Option<String>,
+pub(crate) struct ConfigPresetListCommand {
+    #[arg(
+        long,
+        help = "Limit to host_metrics, tunnel_traffic, latency_probe, process_inventory, user_sessions, command_execution, or ospf_update_command"
+    )]
+    pub(crate) behavior: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -494,15 +489,11 @@ pub(crate) struct FleetAlertNotificationProcessCommand {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct SourceTemplateCreateCommand {
-    #[arg(long)]
-    pub(crate) domain: String,
+pub(crate) struct ConfigPresetCreateCommand {
+    #[arg(long, help = "Supported agent behavior configured by this preset")]
+    pub(crate) behavior: String,
     #[arg(long)]
     pub(crate) name: String,
-    #[arg(long, default_value = "shared")]
-    pub(crate) scope: String,
-    #[arg(long)]
-    pub(crate) owner_client_id: Option<String>,
     #[arg(long)]
     pub(crate) description: Option<String>,
     #[arg(long)]
@@ -512,23 +503,19 @@ pub(crate) struct SourceTemplateCreateCommand {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct SourceTemplateCloneCommand {
+pub(crate) struct ConfigPresetCloneCommand {
     #[arg(long)]
-    pub(crate) source_template_id: String,
+    pub(crate) preset_id: String,
     #[arg(long)]
     pub(crate) name: String,
-    #[arg(long, default_value = "shared")]
-    pub(crate) scope: String,
-    #[arg(long)]
-    pub(crate) owner_client_id: Option<String>,
     #[arg(long)]
     pub(crate) description: Option<String>,
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct SourceTemplateDiffCommand {
+pub(crate) struct ConfigPresetPreviewCommand {
     #[arg(long)]
-    pub(crate) template_id: String,
+    pub(crate) preset_id: String,
     #[arg(long)]
     pub(crate) description: Option<String>,
     #[arg(long, default_value_t = false)]
@@ -540,19 +527,9 @@ pub(crate) struct SourceTemplateDiffCommand {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct SourceTemplateTestCommand {
+pub(crate) struct ConfigPresetUpdateCommand {
     #[arg(long)]
-    pub(crate) template_id: String,
-    #[arg(long)]
-    pub(crate) definition_json: Option<String>,
-    #[arg(long)]
-    pub(crate) definition_file: Option<PathBuf>,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct SourceTemplateUpdateCommand {
-    #[arg(long)]
-    pub(crate) template_id: String,
+    pub(crate) preset_id: String,
     #[arg(long)]
     pub(crate) description: Option<String>,
     #[arg(long, default_value_t = false)]
@@ -561,20 +538,34 @@ pub(crate) struct SourceTemplateUpdateCommand {
     pub(crate) definition_json: Option<String>,
     #[arg(long)]
     pub(crate) definition_file: Option<PathBuf>,
+    #[arg(
+        long,
+        requires = "confirmed",
+        help = "Hash returned by the separately reviewed preview"
+    )]
+    pub(crate) preview_hash: Option<String>,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct SourceTemplateAssignmentListCommand {
+pub(crate) struct ConfigPresetDeleteCommand {
     #[arg(long)]
-    pub(crate) client_id: Option<String>,
-    #[arg(long)]
-    pub(crate) domain: Option<String>,
+    pub(crate) preset_id: String,
+    #[arg(long, default_value_t = false)]
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct TemplateRuntimeConfigCommand {
+pub(crate) struct ConfigSourcesCommand {
+    #[arg(long)]
+    pub(crate) client_id: Option<String>,
+    #[arg(long, help = "Limit effective sources to one supported behavior")]
+    pub(crate) behavior: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ConfigRenderCommand {
     #[arg(long)]
     pub(crate) client_id: String,
     #[arg(long, default_value = "toml")]
@@ -582,15 +573,49 @@ pub(crate) struct TemplateRuntimeConfigCommand {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct SourceTemplateAssignCommand {
+pub(crate) struct ConfigSourceSetCommand {
+    #[arg(long, help = "Supported agent behavior to override")]
+    pub(crate) behavior: String,
     #[arg(long)]
-    pub(crate) domain: String,
-    #[arg(long)]
-    pub(crate) template_id: String,
-    #[arg(long, value_delimiter = ',')]
+    pub(crate) preset_id: String,
+    #[arg(
+        long,
+        help = "Target selector expression, combined with --clients/--tags"
+    )]
+    pub(crate) selector: Option<String>,
+    #[arg(long, value_delimiter = ',', help = "Explicit VPS IDs")]
     pub(crate) clients: Vec<String>,
-    #[arg(long, value_delimiter = ',')]
+    #[arg(long, value_delimiter = ',', help = "Target tags or selector tokens")]
     pub(crate) tags: Vec<String>,
+    #[arg(
+        long,
+        requires = "confirmed",
+        help = "Hash returned by the separately reviewed preview"
+    )]
+    pub(crate) preview_hash: Option<String>,
+    #[arg(long, default_value_t = false)]
+    pub(crate) confirmed: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ConfigSourceResetCommand {
+    #[arg(long, help = "Supported agent behavior to return to inheritance")]
+    pub(crate) behavior: String,
+    #[arg(
+        long,
+        help = "Target selector expression, combined with --clients/--tags"
+    )]
+    pub(crate) selector: Option<String>,
+    #[arg(long, value_delimiter = ',', help = "Explicit VPS IDs")]
+    pub(crate) clients: Vec<String>,
+    #[arg(long, value_delimiter = ',', help = "Target tags or selector tokens")]
+    pub(crate) tags: Vec<String>,
+    #[arg(
+        long,
+        requires = "confirmed",
+        help = "Hash returned by the separately reviewed preview"
+    )]
+    pub(crate) preview_hash: Option<String>,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
 }

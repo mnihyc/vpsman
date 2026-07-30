@@ -95,8 +95,20 @@ pub struct TunnelOspfConfig {
     pub min_cost_delta: u16,
     #[serde(default = "default_ospf_healthy_windows")]
     pub healthy_windows: u8,
-    pub left_adapter_template_id: String,
-    pub right_adapter_template_id: String,
+    #[serde(
+        default,
+        rename = "left_adapter_template_id",
+        alias = "left_adapter_definition_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub left_adapter_definition_id: Option<String>,
+    #[serde(
+        default,
+        rename = "right_adapter_template_id",
+        alias = "right_adapter_definition_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub right_adapter_definition_id: Option<String>,
 }
 
 pub fn default_ospf_min_cost_delta() -> u16 {
@@ -126,17 +138,31 @@ pub struct RuntimeTunnelCommand {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RoutingCostAdapterCommands {
-    pub template_id: String,
-    pub template_name: String,
+    #[serde(default)]
+    pub source: RoutingCostCommandSource,
+    #[serde(rename = "template_id", alias = "definition_id")]
+    pub definition_id: String,
+    #[serde(rename = "template_name", alias = "definition_name")]
+    pub definition_name: String,
     pub definition_hash: String,
     pub status: RuntimeTunnelCommand,
     pub update: RuntimeTunnelCommand,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingCostCommandSource {
+    #[default]
+    PlanOverride,
+    ConfigurationPreset,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RuntimeTunnelAdapterCommands {
-    pub template_id: String,
-    pub template_name: String,
+    #[serde(rename = "template_id", alias = "definition_id")]
+    pub definition_id: String,
+    #[serde(rename = "template_name", alias = "definition_name")]
+    pub definition_name: String,
     pub definition_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup: Option<RuntimeTunnelCommand>,
@@ -197,7 +223,8 @@ pub struct RoutingCostAdapterJobResult {
     pub plan_id: String,
     pub endpoint_side: TunnelEndpointSide,
     pub client_id: String,
-    pub adapter_template_id: String,
+    #[serde(rename = "adapter_template_id", alias = "adapter_definition_id")]
+    pub adapter_definition_id: String,
     pub adapter_definition_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before: Option<RoutingCostAdapterResponse>,
@@ -293,10 +320,20 @@ impl RuntimeTunnelTopologyIntent {
 pub struct RuntimeTunnelControl {
     #[serde(default)]
     pub manager: RuntimeTunnelManager,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub left_adapter_template_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub right_adapter_template_id: Option<String>,
+    #[serde(
+        default,
+        rename = "left_adapter_template_id",
+        alias = "left_adapter_definition_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub left_adapter_definition_id: Option<String>,
+    #[serde(
+        default,
+        rename = "right_adapter_template_id",
+        alias = "right_adapter_definition_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub right_adapter_definition_id: Option<String>,
     #[serde(default, skip_serializing_if = "RuntimeTunnelTrafficLimit::is_default")]
     pub traffic_limit: RuntimeTunnelTrafficLimit,
     #[serde(default, skip_serializing_if = "RuntimeTunnelFouOptions::is_default")]

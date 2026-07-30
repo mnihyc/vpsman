@@ -167,6 +167,12 @@ async fn process_automatic_ospf_update(
             return Ok(0);
         }
     };
+    if update.left_adapter_definition_hash.as_deref() != Some(left_adapter.definition_hash.as_str())
+        || update.right_adapter_definition_hash.as_deref()
+            != Some(right_adapter.definition_hash.as_str())
+    {
+        return Ok(0);
+    }
     let left_job_id = Uuid::new_v4();
     let right_job_id = Uuid::new_v4();
     let desired_cost = should_apply

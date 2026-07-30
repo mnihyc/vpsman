@@ -9,7 +9,6 @@ import {
 } from "lucide-react";
 import { ActionFeedback } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
-import { ConsoleActionMenu } from "../../components/ConsoleLayout";
 import { ConsoleDetailPanel } from "../../components/ConsoleDetailPanel";
 import {
   ConsoleDataGrid,
@@ -26,6 +25,7 @@ import {
   buildPrivilegeForJobOperation,
   type PrivilegeMaterial,
 } from "../../privilege";
+import { scrollIntoViewWithMotion } from "../../motion";
 import {
   beginSubmission,
   createSubmissionGuard,
@@ -90,6 +90,7 @@ export function HostServicesPanel({
   const [pendingAction, setPendingAction] =
     useState<PendingServiceAction | null>(null);
   const [logs, setLogs] = useState<HostServiceLogSnapshot | null>(null);
+  const actionFeedbackRef = useRef<HTMLDivElement | null>(null);
   const logsPanelRef = useRef<HTMLDivElement | null>(null);
   const selectedAgent = selectedClientId
     ? agents.find((agent) => agent.id === selectedClientId) ?? null
@@ -160,6 +161,16 @@ export function HostServicesPanel({
       logsPanelRef.current?.focus({ preventScroll: true });
     });
   }, [logs]);
+
+  useEffect(() => {
+    if ((!error && !status) || pendingAction) {
+      return;
+    }
+    const feedback = actionFeedbackRef.current;
+    if (feedback) {
+      scrollIntoViewWithMotion(feedback, { block: "nearest" });
+    }
+  }, [error, pendingAction, status]);
 
   function selectClient(clientId: string | null) {
     setServiceClientRoute(clientId);
@@ -558,40 +569,6 @@ export function HostServicesPanel({
     ],
     [capability, pending, privilegeMaterial],
   );
-  const columnsWithActions = useMemo<ConsoleDataGridColumn<HostServiceRecord>[]>(
-    () => [
-      ...columns,
-      {
-        align: "end",
-        cell: (service) => {
-          const actions = rowActions
-            .filter((action) => !action.hidden?.([service]))
-            .map((action) => ({
-              disabled: action.disabled?.([service]),
-              label: action.label,
-              onSelect: () => action.onSelect([service]),
-              title: action.description?.([service]),
-              tone: action.tone,
-            }));
-          return (
-            <span onClick={(event) => event.stopPropagation()}>
-              <ConsoleActionMenu
-                actions={actions}
-                label={`Actions for ${service.name}`}
-              />
-            </span>
-          );
-        },
-        enableHiding: false,
-        header: "Actions",
-        id: "actions",
-        minSize: 56,
-        size: 64,
-        stickyEnd: true,
-      },
-    ],
-    [columns, rowActions],
-  );
   const refreshUnavailable = !selectedAgent
     ? "Choose one VPS before refreshing services"
     : selectedAgent.status !== "online"
@@ -630,21 +607,6 @@ export function HostServicesPanel({
                 <span>{pending ? "Working" : "Refresh inventory"}</span>
               </button>
             </div>
-            <ActionFeedback
-              className="localActionFeedback"
-              message={!pendingAction ? error ?? status : null}
-              tone={
-                error
-                  ? inventory?.source_job_id
-                    ? "warning"
-                    : "danger"
-                  : pending || loading
-                    ? "progress"
-                    : warning
-                      ? "warning"
-                      : "success"
-              }
-            />
           </div>
         </div>
 
@@ -697,8 +659,25 @@ export function HostServicesPanel({
           </span>
         </div>
 
+        <ActionFeedback
+          className="localActionFeedback hostServiceActionFeedback"
+          message={!pendingAction ? error ?? status : null}
+          ref={actionFeedbackRef}
+          tone={
+            error
+              ? inventory?.source_job_id
+                ? "warning"
+                : "danger"
+              : pending || loading
+                ? "progress"
+                : warning
+                  ? "warning"
+                  : "success"
+          }
+        />
+
         <ConsoleDataGrid
-          columns={columnsWithActions}
+          columns={columns}
           defaultPageSize={25}
           empty={
             <div className="emptyState compactEmpty">
@@ -722,7 +701,6 @@ export function HostServicesPanel({
           expandOnRowClick
           getRowId={(service) => service.name}
           itemLabel="services"
-          mobileRowActionLimit={4}
           renderExpandedRow={(service) => (
             <div className="consoleInlineDetailGrid">
               <span>Service</span>
@@ -756,7 +734,6 @@ export function HostServicesPanel({
           rowActions={rowActions}
           rows={services}
           searchPlaceholder="Search service, description, or state"
-          selectable={false}
           singleExpandedRow
           storageKey="vpsman.remote.hostServices"
           title="Host service inventory"

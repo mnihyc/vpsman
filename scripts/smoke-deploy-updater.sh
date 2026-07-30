@@ -257,6 +257,33 @@ if [ "${1:-}" = "--version" ]; then
   printf 'vpsctl 9.8.7 (cli build 1)\n'
   exit 0
 fi
+if [ "${1:-}" = "compose-secrets" ]; then
+  shift
+  secrets_dir=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --secrets-dir)
+        secrets_dir="$2"
+        shift 2
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+  done
+  [ -n "${VPSMAN_SUPER_PASSWORD:-}" ] && [ -n "$secrets_dir" ] || exit 1
+  umask 077
+  mkdir -p "$secrets_dir"
+  printf '%064d\n' 0 >"$secrets_dir/vpsman_internal_token"
+  printf '%064d\n' 1 >"$secrets_dir/vpsman_gateway_private_key_hex"
+  printf '%064d\n' 2 >"$secrets_dir/vpsman_privilege_verifier_key_hex"
+  printf '%064d\n' 3 >"$secrets_dir/vpsman_gateway_public_key_hex"
+  printf '%s\n' \
+    'export VPSMAN_SUPER_SALT_HEX=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' \
+    >"$secrets_dir/operator-privilege.env"
+  printf '%s\n' '{"compose_secrets":"ok"}'
+  exit 0
+fi
 exit 1
 SH
 chmod 0755 "$RELEASE_DIR/vpsctl-linux-x86_64-musl"
@@ -295,6 +322,33 @@ cat >"$RELEASE_V988_DIR/vpsctl-linux-x86_64-musl" <<'SH'
 #!/bin/sh
 if [ "${1:-}" = "--version" ]; then
   printf 'vpsctl 9.8.8 (cli build 2)\n'
+  exit 0
+fi
+if [ "${1:-}" = "compose-secrets" ]; then
+  shift
+  secrets_dir=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --secrets-dir)
+        secrets_dir="$2"
+        shift 2
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+  done
+  [ -n "${VPSMAN_SUPER_PASSWORD:-}" ] && [ -n "$secrets_dir" ] || exit 1
+  umask 077
+  mkdir -p "$secrets_dir"
+  printf '%064d\n' 0 >"$secrets_dir/vpsman_internal_token"
+  printf '%064d\n' 1 >"$secrets_dir/vpsman_gateway_private_key_hex"
+  printf '%064d\n' 2 >"$secrets_dir/vpsman_privilege_verifier_key_hex"
+  printf '%064d\n' 3 >"$secrets_dir/vpsman_gateway_public_key_hex"
+  printf '%s\n' \
+    'export VPSMAN_SUPER_SALT_HEX=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' \
+    >"$secrets_dir/operator-privilege.env"
+  printf '%s\n' '{"compose_secrets":"ok"}'
   exit 0
 fi
 exit 1
@@ -336,11 +390,13 @@ EOF
     vpsman_internal_token \
     vpsman_gateway_private_key_hex \
     vpsman_privilege_verifier_key_hex \
-    vpsman_gateway_public_key_hex \
-    operator-privilege.env
+    vpsman_gateway_public_key_hex
   do
     printf 'updater-smoke-secret\n' >"$destination/config/secrets/$secret"
   done
+  printf '%s\n' \
+    'export VPSMAN_SUPER_SALT_HEX=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' \
+    >"$destination/config/secrets/operator-privilege.env"
 }
 
 run_updater() {
@@ -417,7 +473,17 @@ assert_backup_mode_0600() {
 
 FIRST_START="$SMOKE_ROOT/first-start"
 prepare_deployment "$FIRST_START"
-run_updater "$FIRST_START" first-start v9.8.7 >"$FIRST_START/update.log" 2>&1
+for secret in \
+  vpsman_internal_token \
+  vpsman_gateway_private_key_hex \
+  vpsman_privilege_verifier_key_hex \
+  vpsman_gateway_public_key_hex \
+  operator-privilege.env
+do
+  rm -f -- "$FIRST_START/config/secrets/$secret"
+done
+VPSMAN_SUPER_PASSWORD='updater-super-password-must-not-print' \
+  run_updater "$FIRST_START" first-start v9.8.7 >"$FIRST_START/update.log" 2>&1
 for kind in server frontend cli; do
   [[ -d "$FIRST_START/runtime/$kind/current" ]] ||
     fail "first-start did not activate $kind"
@@ -453,6 +519,17 @@ grep -Fq 'pg_restore --list' "$FIRST_START/docker.log" ||
   fail "first-start left an active transaction"
 grep -Fq 'started vpsman deployment at v9.8.7' "$FIRST_START/update.log" ||
   fail "first-start did not report the activated release"
+grep -Fq \
+  'VPSMAN_SUPER_SALT_HEX=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' \
+  "$FIRST_START/update.log" ||
+  fail "first-start did not print its generated privilege salt"
+grep -Fq \
+  'persistent copy: ./config/secrets/operator-privilege.env (keep private)' \
+  "$FIRST_START/update.log" ||
+  fail "first-start did not identify the persistent operator salt file"
+if grep -Fq 'updater-super-password-must-not-print' "$FIRST_START/update.log"; then
+  fail "first-start printed the super password"
+fi
 
 VERSION_FLOW="$SMOKE_ROOT/version-flow"
 MUTATION_FAILURE="$SMOKE_ROOT/mutation-failure"
@@ -1022,4 +1099,4 @@ grep -Fq 'unsafe server archive path' "$MALICIOUS/update.log" ||
   fail "path-traversal archive escaped its transaction directory"
 
 printf '%s\n' \
-  '{"deploy_updater_smoke":"ok","checks":["first_start","version_manifest_asset_selection","atomic_validated_backup","successful_version_update","successful_rollback","finalization_mutation_failure_guard","finalization_mutation_failure_recovery","same_release_recovery_guard","same_tag_payload_drift_guard","same_tag_missing_payload_guard","same_tag_stopped_service_guard","same_tag_unready_service_guard","exact_same_release_noop","latest_same_release_noop","failed_first_start_database_restore","pg_dump_partial_cleanup","backup_validation_failure_cleanup","backup_collision_refusal","abandoned_backup_partial_cleanup","suspicious_backup_partial_refusal","missing_backup_recovery_guard","recovery_stop_failure_guard","interrupted_activation_recovery","healthy_finalize_recovery","finalized_journal_cleanup","abandoned_staging_cleanup","placeholder_password_refusal","invalid_tag_refusal","zero_padded_core_tag_refusal","noncanonical_health_timeout_refusal","unsafe_asset_refusal","archive_path_traversal_refusal"]}'
+  '{"deploy_updater_smoke":"ok","checks":["first_start","first_start_privilege_salt_output","version_manifest_asset_selection","atomic_validated_backup","successful_version_update","successful_rollback","finalization_mutation_failure_guard","finalization_mutation_failure_recovery","same_release_recovery_guard","same_tag_payload_drift_guard","same_tag_missing_payload_guard","same_tag_stopped_service_guard","same_tag_unready_service_guard","exact_same_release_noop","latest_same_release_noop","failed_first_start_database_restore","pg_dump_partial_cleanup","backup_validation_failure_cleanup","backup_collision_refusal","abandoned_backup_partial_cleanup","suspicious_backup_partial_refusal","missing_backup_recovery_guard","recovery_stop_failure_guard","interrupted_activation_recovery","healthy_finalize_recovery","finalized_journal_cleanup","abandoned_staging_cleanup","placeholder_password_refusal","invalid_tag_refusal","zero_padded_core_tag_refusal","noncanonical_health_timeout_refusal","unsafe_asset_refusal","archive_path_traversal_refusal"]}'

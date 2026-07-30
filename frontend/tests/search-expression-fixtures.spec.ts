@@ -204,6 +204,25 @@ test("generic table autocomplete values keep parseable unmatched expressions bel
   );
 });
 
+test("generic table autocomplete computes each row's search fields once", () => {
+  const rows = Array.from({ length: 20 }, (_, index) => ({
+    values: [`event-${index}`, `target:${index}`, `status:${index % 2 ? "online" : "offline"}`],
+  }));
+  let fieldBuilds = 0;
+
+  const suggestions = buildParseableSearchValueSuggestions(
+    rows,
+    (row) => row.values,
+    (row) => {
+      fieldBuilds += 1;
+      return searchFieldsForSearchValues(row.values);
+    },
+  );
+
+  expect(suggestions.length).toBeGreaterThan(0);
+  expect(fieldBuilds).toBe(rows.length);
+});
+
 function fieldsForContext(context: FixtureContext): SearchFields {
   const agent = agentFromContext(context);
   const providerTags = agent.tags.filter((tag) => tag.toLocaleLowerCase().startsWith("provider:"));

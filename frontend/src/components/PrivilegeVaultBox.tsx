@@ -68,7 +68,7 @@ export function PrivilegeVaultBox({
   const label = (value: string) => {
     if (!labelPrefix) {
       if (value === "Super password") {
-        return "Privilege secret";
+        return "Super password";
       }
       if (value === "Super salt hex") {
         return "Privilege salt";
@@ -76,7 +76,7 @@ export function PrivilegeVaultBox({
       return value;
     }
     if (value === "Super password") {
-      return `${labelPrefix} privilege secret`;
+      return `${labelPrefix} super password`;
     }
     if (value === "Super salt hex") {
       return `${labelPrefix} privilege salt`;
@@ -296,13 +296,13 @@ export function PrivilegeVaultBox({
           </div>
           <div className="privilegeFields">
             <label>
-              <span>Privilege secret</span>
+              <span>Super password</span>
               <input
                 aria-label={label("Super password")}
                 autoComplete="off"
                 name="privilege_secret"
                 onChange={(event) => setSuperPassword(event.target.value)}
-                placeholder="enter privilege secret"
+                placeholder="enter super password"
                 type="password"
                 value={superPassword}
               />
@@ -314,7 +314,7 @@ export function PrivilegeVaultBox({
                 autoComplete="off"
                 name="privilege_salt_hex"
                 onChange={(event) => setSuperSaltHex(event.target.value)}
-                placeholder="paste 64-character hex salt"
+                placeholder="paste salt printed by first-start"
                 value={superSaltHex}
               />
             </label>

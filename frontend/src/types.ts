@@ -2,7 +2,6 @@ import type {
   GeneratedCreateJobRequestField,
   GeneratedAgentUpdateReleaseStatus,
   GeneratedBackupRequestStatus,
-  GeneratedSourceReadinessStatus,
   GeneratedFleetAlertNotificationDeliveryProcessStatus,
   GeneratedFleetAlertNotificationDeliveryStatus,
   GeneratedMigrationLinkStatus,
@@ -46,7 +45,6 @@ export type JobTargetStatus = GeneratedJobTargetStatus;
 export type JobCommandType = GeneratedJobCommandType;
 export type AgentUpdateReleaseStatus = GeneratedAgentUpdateReleaseStatus;
 export type BackupRequestStatus = GeneratedBackupRequestStatus;
-export type SourceReadinessStatus = GeneratedSourceReadinessStatus;
 export type FleetAlertNotificationDeliveryProcessStatus =
   GeneratedFleetAlertNotificationDeliveryProcessStatus;
 export type FleetAlertNotificationDeliveryStatus =
@@ -1328,6 +1326,7 @@ export type RuntimeTunnelCommand = {
 };
 
 export type RoutingCostAdapterCommands = {
+  source?: "plan_override" | "configuration_preset";
   template_id: string;
   template_name: string;
   definition_hash: string;
@@ -1386,8 +1385,8 @@ export type TunnelOspfConfig = {
   policy: OspfCostPolicy;
   min_cost_delta: number;
   healthy_windows: number;
-  left_adapter_template_id: string;
-  right_adapter_template_id: string;
+  left_adapter_template_id?: string | null;
+  right_adapter_template_id?: string | null;
 };
 
 export type TunnelPlanInput = {
@@ -1971,8 +1970,13 @@ export type NetworkOspfUpdatePlanRecord = {
   left_client_id: string;
   right_client_id: string;
   control_mode: OspfControlMode;
-  left_adapter_template_id: string;
-  right_adapter_template_id: string;
+  left_updater_source: "plan_override" | "configuration_preset" | "unconfigured";
+  right_updater_source:
+    | "plan_override"
+    | "configuration_preset"
+    | "unconfigured";
+  left_adapter_template_id: string | null;
+  right_adapter_template_id: string | null;
   left_adapter_template_name: string | null;
   right_adapter_template_name: string | null;
   left_adapter_definition_hash: string | null;
@@ -2931,146 +2935,164 @@ export type ScheduleImpactRecord = {
   summary: string;
 };
 
-export type SourceTemplateRecord = {
+export type ConfigurationBehavior =
+  | "host_metrics"
+  | "tunnel_traffic"
+  | "latency_probe"
+  | "ospf_update_command"
+  | "process_inventory"
+  | "user_sessions"
+  | "command_execution";
+
+export type NetworkAdapterKind = "runtime_tunnel" | "routing_cost";
+
+export type NetworkAdapterDefinitionRecord = {
   id: string;
-  domain: string;
+  adapter_kind: NetworkAdapterKind;
   name: string;
-  scope: string;
-  built_in: boolean;
-  is_default: boolean;
-  owner_client_id: string | null;
   description: string | null;
   definition: JsonValue;
-  assigned_client_count: number;
   created_at: string;
   updated_at: string;
 };
 
-export type SourceTemplateAssignmentRecord = {
-  client_id: string;
-  domain: string;
-  template_id: string;
-  template_name: string;
-  template_scope: string;
-  assigned_at: string;
-};
-
-export type SourceStatusRecord = {
-  client_id: string;
-  display_name: string;
-  client_status: string;
-  domain: string;
-  module: string;
-  template_id: string;
-  template_name: string;
-  template_scope: string;
-  source_kind: string;
-  status: SourceReadinessStatus;
-  status_reason: string;
-  evidence: JsonValue;
-  assigned_at: string;
-};
-
-export type CreateSourceTemplateRequest = {
-  domain: string;
+export type UpsertNetworkAdapterDefinitionRequest = {
+  adapter_kind: NetworkAdapterKind;
   name: string;
-  scope: string;
-  owner_client_id: string | null;
-  description: string | null;
+  description?: string | null;
   definition: JsonValue;
 };
 
-export type CloneSourceTemplateRequest = {
+export type ConfigurationPresetRecord = {
+  id: string;
+  behavior: ConfigurationBehavior;
   name: string;
-  scope: string;
-  owner_client_id: string | null;
-  description: string | null;
-};
-
-export type SourceTemplateDiffRequest = {
+  kind: "system" | "custom";
+  is_default: boolean;
   description: string | null;
   definition: JsonValue;
-  keep_description?: boolean;
+  effective_vps_count: number;
+  override_vps_count: number;
+  created_at: string;
+  updated_at: string;
 };
 
-export type SourceTemplateDiffResponse = {
-  template_id: string;
-  domain: string;
-  template_name: string;
+export type ConfigurationSourceSyncState =
+  | "applied"
+  | "queued"
+  | "failed"
+  | "stale"
+  | "unknown";
+
+export type ConfigurationSourceView = {
+  client_id: string;
+  behavior: ConfigurationBehavior;
+  effective_preset_id: string;
+  effective_preset_name: string;
+  effective_preset_kind: "system" | "custom";
+  selection_origin: "system_default" | "explicit_override";
+  override_updated_at: string | null;
+  runtime_sync: {
+    state: ConfigurationSourceSyncState;
+    reason: string;
+  };
+  readiness: {
+    state: string;
+    reason: string;
+    evidence: JsonValue;
+  };
+};
+
+export type CreateConfigurationPresetRequest = {
+  behavior: ConfigurationBehavior;
+  name: string;
+  description?: string | null;
+  definition: JsonValue;
+};
+
+export type CloneConfigurationPresetRequest = {
+  name: string;
+  description?: string | null;
+};
+
+export type PreviewConfigurationPresetRequest = {
+  description?: string | null;
+  definition: JsonValue;
+};
+
+export type ConfigurationPresetPreview = {
+  preset_id: string;
+  behavior: ConfigurationBehavior;
+  name: string;
   current_description: string | null;
   candidate_description: string | null;
   current_definition: JsonValue;
   candidate_definition: JsonValue;
-  description_changed: boolean;
-  definition_changed: boolean;
   changed_keys: string[];
-  affected_client_count: number;
-};
-
-export type SourceTemplateTestRequest = {
-  definition: JsonValue;
-};
-
-export type SourceTemplateTestResponse = {
-  template_id: string;
-  domain: string;
-  template_name: string;
-  affected_client_count: number;
-  valid: boolean;
-  renderable: boolean;
-  error: string | null;
-  sections: JsonValue;
-  toml: string;
-  unsupported_domains: string[];
-  render_notes: string[];
-  generated_at: string;
-};
-
-export type UpdateSourceTemplateRequest = {
-  description: string | null;
-  definition: JsonValue;
-  confirmed: boolean;
-  keep_description?: boolean;
-  preview_hash?: string | null;
-  privilege_assertion?: PrivilegeAssertion | null;
-};
-
-export type UpdateSourceTemplateResponse = {
-  template: SourceTemplateRecord;
-  diff: SourceTemplateDiffResponse;
   affected_client_ids: string[];
   affected_client_count: number;
-  confirmation_required: boolean;
-  preview_hash?: string | null;
-  sync: RuntimeConfigDispatchRecord[];
+  sections: JsonValue;
+  toml: string;
+  preview_hash: string;
 };
 
-export type AssignSourceTemplateRequest = {
-  domain: string;
-  template_id: string;
-  selector_expression: string;
-  target_client_ids: string[];
-  confirmed: boolean;
-  preview_hash?: string | null;
+export type UpdateConfigurationPresetRequest = {
+  description?: string | null;
+  definition: JsonValue;
+  preview_hash: string;
   privilege_assertion?: PrivilegeAssertion | null;
 };
 
-export type AssignSourceTemplateResponse = {
-  template: SourceTemplateRecord;
-  target_count: number;
-  confirmation_required: boolean;
-  assignments: SourceTemplateAssignmentRecord[];
-  preview_hash?: string | null;
+export type UpdateConfigurationPresetResponse = {
+  preset: ConfigurationPresetRecord;
+  preview: ConfigurationPresetPreview;
   sync: RuntimeConfigDispatchRecord[];
 };
 
-export type TemplateRuntimeConfigResponse = {
+export type ConfigurationSourceOverrideAction = "set" | "reset";
+
+export type ConfigurationSourceOverrideRequest = {
+  action: ConfigurationSourceOverrideAction;
+  behavior: ConfigurationBehavior;
+  preset_id?: string | null;
+  selector_expression: string;
+  target_client_ids: string[];
+};
+
+export type ConfigurationSourceOverridePreview = {
+  action: ConfigurationSourceOverrideAction;
+  behavior: ConfigurationBehavior;
+  preset: ConfigurationPresetRecord | null;
+  selector_expression: string;
+  target_count: number;
+  targets: Array<{
+    client_id: string;
+    before_preset_id: string;
+    before_preset_name: string;
+    before_origin: "system_default" | "explicit_override";
+    after_preset_id: string;
+    after_preset_name: string;
+    after_origin: "system_default" | "explicit_override";
+  }>;
+  preview_hash: string;
+};
+
+export type ApplyConfigurationSourceOverrideRequest =
+  ConfigurationSourceOverrideRequest & {
+    preview_hash: string;
+    privilege_assertion: PrivilegeAssertion;
+  };
+
+export type ApplyConfigurationSourceOverrideResponse =
+  ConfigurationSourceOverridePreview & {
+    sync: RuntimeConfigDispatchRecord[];
+  };
+
+export type EffectiveAgentConfigResponse = {
   client_id: string;
   sections: JsonValue;
   toml: string;
-  assignments: SourceTemplateAssignmentRecord[];
-  unsupported_domains: string[];
-  render_notes: string[];
+  sources: ConfigurationSourceView[];
   generated_at: string;
 };
 

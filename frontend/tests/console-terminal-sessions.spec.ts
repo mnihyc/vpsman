@@ -57,6 +57,37 @@ async function selectNewTerminalTarget(page: Page) {
   await expect(target).toHaveValue("edge-sfo-01 (fo01)");
 }
 
+const activeTerminalRow =
+  "agent-sfo-01:61616161-2222-4333-8444-555555555555";
+const closedTerminalRow =
+  "agent-fra-02:71717171-2222-4333-8444-555555555555";
+
+async function openTerminalActionMenu(page: Page, rowId: string) {
+  const grid = page.getByLabel("Session inventory and controls data grid");
+  const checkedRows = grid.locator(
+    'input[aria-label^="Select Session inventory and controls row "]:checked',
+  );
+  while ((await checkedRows.count()) > 0) {
+    await checkedRows.first().uncheck();
+  }
+  await grid
+    .getByLabel(`Select Session inventory and controls row ${rowId}`)
+    .check();
+  await grid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+}
+
+async function invokeTerminalAction(
+  page: Page,
+  rowId: string,
+  action: string,
+) {
+  await openTerminalActionMenu(page, rowId);
+  await activate(page.getByRole("menuitem", { name: action, exact: true }));
+}
+
 test("prepares terminal reconnect actions from retained session inventory", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.includes("mobile"), "terminal reconnect actions are covered in the desktop job composer");
 
@@ -71,45 +102,53 @@ test("prepares terminal reconnect actions from retained session inventory", asyn
   await expect(page.getByText("Idle timeout 10m; 64.0 KiB flow window").first()).toBeVisible();
   await expect(page.getByText("1 -> 4")).toHaveCount(0);
   await expect(page.getByText("4 -> 5")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Stop following terminal session 61616161" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Durable replay terminal session 61616161" })).toContainText("Replay");
-  await expect(page.getByRole("button", { name: "Attach terminal session 61616161" })).toContainText("Attach");
-  await expect(page.getByRole("button", { name: "Close terminal session 61616161" })).toContainText("Close");
+  await openTerminalActionMenu(page, activeTerminalRow);
+  for (const action of ["Stop follow", "Replay", "Attach", "Close"]) {
+    await expect(
+      page.getByRole("menuitem", { name: action, exact: true }),
+    ).toBeVisible();
+  }
+  await page.keyboard.press("Escape");
   await activate(grid.getByText("Seq 1-3 retained, next 4").first());
   await expect(page.getByText("Opened by")).toBeVisible();
   await expect(page.getByText("Not reported by terminal API").first()).toBeVisible();
-  await expect(page.getByRole("button", { name: "Poll terminal session 71717171" })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Input terminal session 71717171" })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Close terminal session 71717171" })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Follow terminal session 71717171" })).toBeDisabled();
+  await openTerminalActionMenu(page, closedTerminalRow);
+  for (const action of ["Poll", "Input", "Close", "Follow"]) {
+    await expect(
+      page.getByRole("menuitem", { name: action, exact: true }),
+    ).toBeDisabled();
+  }
   const disabledCloseColor = await page
-    .getByRole("button", { name: "Close terminal session 71717171" })
+    .getByRole("menuitem", { name: "Close", exact: true })
     .evaluate((element) => getComputedStyle(element).color);
   const disabledPollColor = await page
-    .getByRole("button", { name: "Poll terminal session 71717171" })
+    .getByRole("menuitem", { name: "Poll", exact: true })
     .evaluate((element) => getComputedStyle(element).color);
+  await page.keyboard.press("Escape");
+  await openTerminalActionMenu(page, activeTerminalRow);
   const activeCloseColor = await page
-    .getByRole("button", { name: "Close terminal session 61616161" })
+    .getByRole("menuitem", { name: "Close", exact: true })
     .evaluate((element) => getComputedStyle(element).color);
   expect(disabledCloseColor).toBe(disabledPollColor);
   expect(activeCloseColor).not.toBe(disabledCloseColor);
+  await page.keyboard.press("Escape");
   await unlockTerminalPrivilege(page);
 
   const composer = page.locator(".commandComposer");
-  await activate(page.getByRole("button", { name: "Attach terminal session 61616161" }));
+  await invokeTerminalAction(page, activeTerminalRow, "Attach");
   await expect(composer.getByLabel("Terminal action")).toHaveValue("open");
   await expect(composer.getByLabel("Terminal session id")).toHaveValue("61616161-2222-4333-8444-555555555555");
   await expect(composer.getByLabel("Terminal argv")).toHaveValue("/bin/sh -l");
   await expect(composer.getByLabel("Terminal replay from sequence")).toHaveValue("1");
   await expect(composer.getByLabel("Bulk target selector expression")).toHaveValue("id:agent-sfo-01");
 
-  await activate(page.getByRole("button", { name: "Poll terminal session 61616161" }));
+  await invokeTerminalAction(page, activeTerminalRow, "Poll");
   await expect(composer.getByLabel("Terminal action")).toHaveValue("poll");
   await expect(composer.getByLabel("Terminal session id")).toHaveValue("61616161-2222-4333-8444-555555555555");
   await expect(composer.getByLabel("Terminal replay from sequence")).toHaveValue("1");
   await expect(composer.getByLabel("Bulk target selector expression")).toHaveValue("id:agent-sfo-01");
 
-  await activate(page.getByRole("button", { name: "Input terminal session 61616161" }));
+  await invokeTerminalAction(page, activeTerminalRow, "Input");
   const terminalInput = page.getByLabel("Terminal input composer");
   const inputBytes = terminalInput.getByLabel("Terminal input bytes");
   await expect(inputBytes).toBeFocused();
@@ -149,7 +188,11 @@ test("keeps a closed replayable terminal out of live-follow state", async ({ pag
 
   const panel = page.locator(".terminalSessionsPanel");
   await expect(panel.getByText("Not following", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Follow terminal session 61616161" })).toBeDisabled();
+  await openTerminalActionMenu(page, activeTerminalRow);
+  await expect(
+    page.getByRole("menuitem", { name: "Follow", exact: true }),
+  ).toBeDisabled();
+  await page.keyboard.press("Escape");
   await panel.locator(".terminalActiveHeader").getByRole("button", { name: "Replay" }).click();
   await expect(panel.getByLabel("Durable terminal replay status")).toContainText("retained replay");
   await expect(panel.getByLabel("Durable terminal replay status")).not.toContainText("following live output");
@@ -215,7 +258,7 @@ test("reconciles terminal launcher and input feedback after privilege unlock", a
   await expect(panel).toContainText("Unlock privilege, then open the terminal from this launcher.");
 
   const dialog = page.getByRole("dialog", { name: "Unlock privilege" });
-  await dialog.getByLabel(/privilege secret/i).fill("local-super-password");
+  await dialog.getByLabel(/super password/i).fill("local-super-password");
   await dialog
     .getByLabel(/(privilege salt|verifier salt hex)/i)
     .fill("00112233445566778899aabbccddeeff");
@@ -237,7 +280,7 @@ test("reconciles terminal launcher and input feedback after privilege unlock", a
   await panel.getByRole("button", { name: "Send input" }).click();
   await expect(panel).toContainText("Unlock local privilege, then send this preserved input.");
 
-  await dialog.getByLabel(/privilege secret/i).fill("local-super-password");
+  await dialog.getByLabel(/super password/i).fill("local-super-password");
   await dialog
     .getByLabel(/(privilege salt|verifier salt hex)/i)
     .fill("00112233445566778899aabbccddeeff");
@@ -267,14 +310,12 @@ test("unlocks before presenting one exact terminal close review", async ({
   await openConsoleSubpage(page, "Remote Operations", "Terminal");
 
   const panel = page.locator(".terminalSessionsPanel");
-  await panel
-    .getByRole("button", { name: "Close terminal session 61616161" })
-    .click();
+  await invokeTerminalAction(page, activeTerminalRow, "Close");
   const dialog = page.getByRole("dialog", { name: "Unlock privilege" });
   await expect(dialog).toBeVisible();
   await expect(panel.getByLabel("Confirm terminal close")).toHaveCount(0);
 
-  await dialog.getByLabel(/privilege secret/i).fill("local-super-password");
+  await dialog.getByLabel(/super password/i).fill("local-super-password");
   await dialog
     .getByLabel(/(privilege salt|verifier salt hex)/i)
     .fill("00112233445566778899aabbccddeeff");
@@ -322,7 +363,7 @@ test("dispatches terminal poll from retained session inventory", async ({ page }
   await unlockTerminalPrivilege(page);
 
   const composer = page.locator(".commandComposer");
-  await activate(page.getByRole("button", { name: "Poll terminal session 61616161" }));
+  await invokeTerminalAction(page, activeTerminalRow, "Poll");
   await expect(composer.getByLabel("Terminal action")).toHaveValue("poll");
   await dispatchWithPrompt(composer);
 
@@ -466,7 +507,7 @@ test("keeps focused terminal input modal, unlockable, and bound to the active se
   const unlock = page.getByRole("dialog", { name: "Unlock privilege" });
   await expect(unlock).toBeVisible();
   await expect(focusedSurface).toHaveAttribute("inert", "");
-  await unlock.getByLabel(/privilege secret/i).fill("local-super-password");
+  await unlock.getByLabel(/super password/i).fill("local-super-password");
   await unlock
     .getByLabel(/(privilege salt|verifier salt hex)/i)
     .fill("00112233445566778899aabbccddeeff");

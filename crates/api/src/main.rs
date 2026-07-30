@@ -24,18 +24,18 @@ mod model_alert_policies;
 mod model_alert_states;
 mod model_backups;
 mod model_command_templates;
+mod model_configuration_presets;
 mod model_dashboard;
 mod model_file_transfer;
 mod model_history;
 mod model_host_management;
 mod model_port_forwarding;
+mod model_runtime_config;
 mod model_server_jobs;
-mod model_source_templates;
 mod model_terminal;
 mod model_topology;
 mod model_webhook_rules;
 mod network_ospf_controller;
-mod source_template_builtins;
 pub(crate) mod object_store {
     pub(crate) use vpsman_object_store::*;
 }
@@ -51,6 +51,7 @@ mod repository_backup_artifacts;
 mod repository_backup_policies;
 mod repository_backups;
 mod repository_command_templates;
+mod repository_configuration_presets;
 mod repository_file_transfer_sources;
 mod repository_file_transfers;
 mod repository_gateway_sessions;
@@ -74,12 +75,9 @@ mod repository_runtime_config;
 mod repository_runtime_config_patch_generators;
 mod repository_schedules;
 mod repository_server_jobs;
-mod repository_source_status;
-mod repository_source_templates;
 mod repository_suite_config;
 mod repository_system_dashboard;
 mod repository_telemetry_rollups;
-mod repository_template_runtime_config;
 mod repository_terminal_sessions;
 mod repository_topology_graph;
 mod repository_webhook_rules;
@@ -88,6 +86,7 @@ mod routes_alerts;
 mod routes_auth;
 mod routes_backups;
 mod routes_command_templates;
+mod routes_configuration_presets;
 mod routes_dashboard;
 mod routes_file_transfers;
 mod routes_history;
@@ -889,8 +888,6 @@ mod tests_restores;
 mod tests_rollouts;
 #[cfg(test)]
 mod tests_schedules;
-#[cfg(test)]
-mod tests_source_templates;
 #[cfg(test)]
 mod tests_terminal;
 #[cfg(test)]

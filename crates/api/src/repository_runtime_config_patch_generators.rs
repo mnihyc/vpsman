@@ -224,6 +224,7 @@ impl Repository {
         let patch: toml::Value =
             toml::from_str(&rendered).context("failed to parse rendered config patch TOML")?;
         let affected_sections = validate_rendered_patch(&patch)?;
+        crate::runtime_config::validate_runtime_config_patch_toml(&rendered)?;
         Ok(RuntimeConfigPatchGeneratorRenderView {
             generator_id: generator.id,
             name: generator.name,
@@ -425,6 +426,7 @@ fn validate_patch_generator_renderable(body: &str, field_schema: &JsonValue) -> 
     let patch: toml::Value =
         toml::from_str(&rendered).context("failed to parse config generator TOML")?;
     validate_rendered_patch(&patch)?;
+    crate::runtime_config::validate_runtime_config_patch_toml(&rendered)?;
     Ok(())
 }
 
@@ -520,35 +522,6 @@ fn validate_rendered_patch(patch: &toml::Value) -> Result<Vec<String>> {
 
 fn builtin_patch_generators() -> Vec<RuntimeConfigPatchGeneratorView> {
     vec![
-        predefined_patch_generator(
-            "11111111-1111-4111-8111-111111111111",
-            "Telemetry source",
-            "telemetry",
-            "metrics",
-            "Switch telemetry collection source and optional Linux paths.",
-            serde_json::json!({
-                "fields": {
-                    "source": {"type": "string", "enum": ["linux_procfs", "custom_command", "linux_procfs_and_custom_command"], "default": "linux_procfs"},
-                    "proc_root": {"type": "string", "default": "/proc"},
-                    "sys_class_net_dir": {"type": "string", "default": "/sys/class/net"}
-                }
-            }),
-            "[telemetry]\nsource = {{source}}\nproc_root = {{proc_root}}\nsys_class_net_dir = {{sys_class_net_dir}}\n",
-        ),
-        predefined_patch_generator(
-            "22222222-2222-4222-8222-222222222222",
-            "Execution policy",
-            "execution",
-            "command",
-            "Set command execution environment and PTY policy.",
-            serde_json::json!({
-                "fields": {
-                    "environment_policy": {"type": "string", "enum": ["inherit", "clean", "minimal_path"], "default": "inherit"},
-                    "pty_policy": {"type": "string", "enum": ["native_pty", "disabled"], "default": "native_pty"}
-                }
-            }),
-            "[execution]\nenvironment_policy = {{environment_policy}}\npty_policy = {{pty_policy}}\n",
-        ),
         predefined_patch_generator(
             "55555555-5555-4555-8555-555555555555",
             "Autonomous updater enabled",

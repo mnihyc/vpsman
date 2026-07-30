@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import {
   DndContext,
   KeyboardSensor,
@@ -17,13 +24,18 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { GripVertical, Plus, RefreshCw, ShieldCheck, Tag, Trash2, X } from "lucide-react";
-import { ActionFeedback } from "../components/ActionFeedback";
+import {
+  ActionFeedback,
+  type ActionFeedbackTone,
+} from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
+import { ConsoleActionDrawer } from "../components/ConsoleLayout";
 import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
+import { scrollIntoViewWithMotion } from "../motion";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import { agentDisplayState } from "../agentDisplayState";
@@ -39,6 +51,7 @@ import type {
 import { buildPrivilegeAssertion, canonicalDbPrivilegeIntent, type PrivilegeMaterial, type PrivilegeAssertion } from "../privilege";
 import { agentsMatchingExpression, parseSearchExpression, selectorExpressionForClientIds } from "../searchExpression";
 import { formatVpsName, runPanelAction } from "../utils";
+import { LocalTargetPreview } from "./TargetImpactPreview";
 
 const TAG_BULK_SELECTOR_STORAGE_KEY = "vpsman.tags.bulk.selectorExpression";
 
@@ -115,6 +128,11 @@ export function FleetGroupsPanel({
     setLastMutation(null);
     return runPanelAction(setPending, setActionError, action);
   };
+  const clearGroupActionFeedback = useCallback(() => {
+    setActionError(null);
+    setActionStatus(null);
+    setLastMutation(null);
+  }, []);
 
   useEffect(() => {
     setActionError(null);
@@ -138,13 +156,17 @@ export function FleetGroupsPanel({
             <ActionFeedback message={groupsPageFeedbackMessage} tone={groupsPageFeedbackTone} />
           </div>
         </div>
-        <ActionFeedback
-          className="localActionFeedback"
-          message={groupsActionFeedbackMessage}
-          tone={groupsActionFeedbackTone}
-        />
+        {subpage !== "registry" && subpage !== "assignments" && (
+          <ActionFeedback
+            className="localActionFeedback"
+            message={groupsActionFeedbackMessage}
+            tone={groupsActionFeedbackTone}
+          />
+        )}
         {subpage === "registry" && (
           <TagRegistry
+            actionFeedbackMessage={groupsActionFeedbackMessage}
+            actionFeedbackTone={groupsActionFeedbackTone}
             onCreateTag={onCreateTag}
             onDeleteTag={onDeleteTag}
             onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
@@ -162,9 +184,12 @@ export function FleetGroupsPanel({
         {subpage !== "registry" && <GroupSummaryStrip summary={groupSummary} />}
         {subpage === "assignments" && (
           <TagAssignments
+            actionFeedbackMessage={groupsActionFeedbackMessage}
+            actionFeedbackTone={groupsActionFeedbackTone}
             agents={agents}
             onAssignTag={onAssignTag}
             onBulkMutateTags={onBulkMutateTags}
+            onClearActionFeedback={clearGroupActionFeedback}
             onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
             pending={pending}
             privilegeMaterial={privilegeMaterial}
@@ -509,6 +534,8 @@ function escapeRegExp(value: string) {
 }
 
 function TagRegistry({
+  actionFeedbackMessage,
+  actionFeedbackTone,
   onCreateTag,
   onDeleteTag,
   onOpenPrivilegeUnlock,
@@ -522,6 +549,8 @@ function TagRegistry({
   summary,
   tags,
 }: {
+  actionFeedbackMessage: string | null;
+  actionFeedbackTone: "danger" | "success";
   onCreateTag: (name: string, privilegeAssertion: PrivilegeAssertion) => Promise<void>;
   onDeleteTag: (
     tag: string,
@@ -656,28 +685,8 @@ function TagRegistry({
         searchValue: (tag) => tag.clients.length,
         sortValue: (tag) => tag.clients.length,
       },
-      {
-        cell: (tag) => (
-          <button
-            className="secondaryAction compactAction dangerAction"
-            disabled={pending}
-            onClick={(event) => {
-              event.stopPropagation();
-              void previewDelete(tag);
-            }}
-            type="button"
-          >
-            <Trash2 size={13} />
-            <span>Delete</span>
-          </button>
-        ),
-        enableHiding: false,
-        header: "Action",
-        id: "action",
-        stickyEnd: true,
-      },
     ],
-    [pending],
+    [],
   );
 
   return (
@@ -710,6 +719,11 @@ function TagRegistry({
             "Use the group later in selectors, schedules, alerts, and bulk operations."}
         </small>
       </form>
+      <ActionFeedback
+        className="localActionFeedback"
+        message={actionFeedbackMessage}
+        tone={actionFeedbackTone}
+      />
       <ConsoleDataGrid
         columns={tagColumns}
         defaultPageSize={12}
@@ -751,7 +765,6 @@ function TagRegistry({
         ]}
         rows={tags}
         searchPlaceholder="Search groups or namespaces"
-        selectable={false}
         storageKey="vpsman.tags.registry"
         title="Group registry"
       />
@@ -930,10 +943,13 @@ function SortableTagOrderRow({
 }
 
 function TagAssignments({
+  actionFeedbackMessage,
+  actionFeedbackTone,
   agents,
   fleetAlertPolicies,
   onAssignTag,
   onBulkMutateTags,
+  onClearActionFeedback,
   onOpenPrivilegeUnlock,
   pending,
   privilegeMaterial,
@@ -942,10 +958,13 @@ function TagAssignments({
   setLastMutation,
   tags,
 }: {
+  actionFeedbackMessage: string | null;
+  actionFeedbackTone: ActionFeedbackTone;
   agents: AgentView[];
   fleetAlertPolicies: FleetAlertPolicyRecord[];
   onAssignTag: (clientId: string, tag: string, privilegeAssertion: PrivilegeAssertion) => Promise<TagMutationResponse>;
   onBulkMutateTags: (request: BulkTagMutationRequest) => Promise<TagMutationResponse>;
+  onClearActionFeedback: () => void;
   onOpenPrivilegeUnlock: () => void;
   pending: boolean;
   privilegeMaterial: PrivilegeMaterial | null;
@@ -955,6 +974,7 @@ function TagAssignments({
   tags: TagView[];
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
+  const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
   const [tagByAgent, setTagByAgent] = useState<Record<string, string>>({});
   const [recentRemoval, setRecentRemoval] = useState<{
     agentId: string;
@@ -963,11 +983,32 @@ function TagAssignments({
     selectorExpression: string;
     tag: string;
   } | null>(null);
+  const actionFeedbackRef = useRef<HTMLDivElement | null>(null);
+  const editingAgent =
+    agents.find((agent) => agent.id === editingAgentId) ?? null;
   const tagNames = useMemo(() => tags.map((tag) => tag.name), [tags]);
   const tagOptions = useMemo(() => tags.map(groupOption), [tags]);
   const suggestionsText = tagOptions.length
     ? `Suggestions: ${tagOptions.slice(0, 4).map((option) => option.label).join(", ")}`
     : "No saved operator groups yet";
+
+  useEffect(() => {
+    if (editingAgentId && !editingAgent) {
+      setEditingAgentId(null);
+    }
+  }, [editingAgent, editingAgentId]);
+
+  useEffect(() => {
+    if (!actionFeedbackMessage) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (actionFeedbackRef.current) {
+        scrollIntoViewWithMotion(actionFeedbackRef.current, {
+          block: "nearest",
+        });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [actionFeedbackMessage]);
 
   const addTag = useCallback(async (agent: AgentView) => {
     const tag = tagByAgent[agent.id]?.trim();
@@ -1094,22 +1135,14 @@ function TagAssignments({
               const dependencyLabel = dependencySummaryText(dependencies);
               const hasDependencies = dependencies.total > 0;
               return (
-                <button
-                  aria-label={`Remove ${tag} from ${formatVpsName(agent, vpsNameDisplayMode)}`}
+                <span
                   className={`tagRemoveChip${hasDependencies ? " linked" : ""}`}
-                  disabled={pending}
                   key={tag}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void removeTag(agent, tag);
-                  }}
-                  title={`Remove ${tag} (${groupKindLabel(tag).toLowerCase()}). ${dependencyLabel}`}
-                  type="button"
+                  title={`${tag} (${groupKindLabel(tag).toLowerCase()}). ${dependencyLabel}`}
                 >
                   <span>{tag}</span>
                   {hasDependencies && <small>{dependencyLabel}</small>}
-                  <X size={12} />
-                </button>
+                </span>
               );
             })}
           </span>
@@ -1119,60 +1152,12 @@ function TagAssignments({
         searchValue: (agent) => agent.tags.join(" "),
         sortValue: (agent) => agent.tags.join(" "),
       },
-      {
-        cell: (agent) => (
-          <span className="inlineTagAddStack">
-            <span className="formRow inlineTagAdd">
-              <input
-                aria-describedby={`group-suggestions-${agent.id}`}
-                aria-label={`Group to add to ${agent.display_name}`}
-                list="tag-options"
-                onChange={(event) => setTagByAgent((current) => ({ ...current, [agent.id]: event.target.value }))}
-                onClick={(event) => event.stopPropagation()}
-                placeholder="group name"
-                value={tagByAgent[agent.id] ?? ""}
-              />
-              <button
-                aria-label={`Add group to ${formatVpsName(agent, vpsNameDisplayMode)}`}
-                className="secondaryAction compactAction"
-                disabled={pending || !(tagByAgent[agent.id] ?? "").trim()}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  void addTag(agent);
-                }}
-                type="button"
-              >
-                <Plus size={13} />
-              </button>
-            </span>
-            <small id={`group-suggestions-${agent.id}`}>{suggestionsText}</small>
-          </span>
-        ),
-        enableHiding: false,
-        header: "Add group",
-        id: "addTag",
-      },
     ],
-    [addTag, fleetAlertPolicies, pending, removeTag, schedules, suggestionsText, tagByAgent, vpsNameDisplayMode],
+    [fleetAlertPolicies, schedules, vpsNameDisplayMode],
   );
 
   return (
     <>
-      {recentRemoval && (
-        <div className="tagAssignmentNotice" role="status" aria-live="polite">
-          <span>
-            Removed <strong>{recentRemoval.tag}</strong> from <strong>{recentRemoval.agentLabel}</strong>.
-          </span>
-          {recentRemoval.scheduleImpactCount > 0 && (
-            <small>
-              Used by {recentRemoval.scheduleImpactCount} schedule{recentRemoval.scheduleImpactCount === 1 ? "" : "s"}; saved targets stay fixed until updated.
-            </small>
-          )}
-          <button className="secondaryAction compactAction" disabled={pending} onClick={undoRemoveTag} type="button">
-            Undo
-          </button>
-        </div>
-      )}
       <ConsoleDataGrid
         columns={assignmentColumns}
         defaultPageSize={10}
@@ -1191,12 +1176,159 @@ function TagAssignments({
             <strong>{agent.tags.join(", ") || "None"}</strong>
           </div>
         )}
+        rowActions={[
+          {
+            description: (rows) =>
+              pending
+                ? "Wait for the current group change to finish before editing another VPS."
+                : rows[0]
+                ? `Edit groups assigned to ${formatVpsName(rows[0], vpsNameDisplayMode)}.`
+                : "Select one VPS to edit its groups.",
+            disabled: (rows) => pending || rows.length !== 1,
+            icon: <Tag size={14} />,
+            label: "Edit groups",
+            onSelect: (rows) => {
+              onClearActionFeedback();
+              setRecentRemoval(null);
+              setEditingAgentId(rows[0]?.id ?? null);
+            },
+          },
+        ]}
         rows={agents}
         searchPlaceholder="Search VPS assignments"
-        selectable={false}
         storageKey="vpsman.tags.assignments"
         title="VPS group assignments"
       />
+      <ConsoleActionDrawer
+        description={
+          editingAgent
+            ? `${agentDisplayState(editingAgent).label} · ${editingAgent.tags.length} assigned group${editingAgent.tags.length === 1 ? "" : "s"}`
+            : undefined
+        }
+        onClose={() => {
+          onClearActionFeedback();
+          setEditingAgentId(null);
+          setRecentRemoval(null);
+        }}
+        open={editingAgent !== null}
+        title={
+          editingAgent
+            ? `Edit groups · ${formatVpsName(editingAgent, vpsNameDisplayMode)}`
+            : "Edit VPS groups"
+        }
+      >
+        {editingAgent ? (
+          <div className="compactForm">
+            <div className="consoleInlineDetailGrid">
+              <span>VPS</span>
+              <strong>{formatVpsName(editingAgent, vpsNameDisplayMode)}</strong>
+              <span>Client ID</span>
+              <strong>{editingAgent.id}</strong>
+              <span>Reachability</span>
+              <strong>{agentDisplayState(editingAgent).label}</strong>
+            </div>
+            <ActionFeedback
+              className="localActionFeedback"
+              message={actionFeedbackMessage}
+              ref={actionFeedbackRef}
+              tone={actionFeedbackTone}
+            />
+            <strong>Assigned groups</strong>
+            {editingAgent.tags.length > 0 ? (
+              <span className="tagChipList">
+                {editingAgent.tags.map((tag) => {
+                  const dependencies = groupDependencySummary(
+                    tag,
+                    schedules,
+                    fleetAlertPolicies,
+                  );
+                  const dependencyLabel = dependencySummaryText(dependencies);
+                  return (
+                    <button
+                      aria-label={`Remove ${tag} from ${formatVpsName(editingAgent, vpsNameDisplayMode)}`}
+                      className={`tagRemoveChip${dependencies.total > 0 ? " linked" : ""}`}
+                      disabled={pending}
+                      key={tag}
+                      onClick={() => void removeTag(editingAgent, tag)}
+                      title={`Remove ${tag} (${groupKindLabel(tag).toLowerCase()}). ${dependencyLabel}`}
+                      type="button"
+                    >
+                      <span>{tag}</span>
+                      {dependencies.total > 0 && (
+                        <small>{dependencyLabel}</small>
+                      )}
+                      <X size={12} />
+                    </button>
+                  );
+                })}
+              </span>
+            ) : (
+              <span className="formHint">No groups assigned.</span>
+            )}
+            <label>
+              <span>Add group</span>
+              <span className="formRow inlineTagAdd">
+                <input
+                  aria-describedby={`group-suggestions-${editingAgent.id}`}
+                  aria-label={`Group to add to ${editingAgent.display_name}`}
+                  data-action-drawer-initial-focus="true"
+                  list="tag-options"
+                  onChange={(event) =>
+                    setTagByAgent((current) => ({
+                      ...current,
+                      [editingAgent.id]: event.target.value,
+                    }))
+                  }
+                  placeholder="group name"
+                  value={tagByAgent[editingAgent.id] ?? ""}
+                />
+                <button
+                  aria-label={`Add group to ${formatVpsName(editingAgent, vpsNameDisplayMode)}`}
+                  className="secondaryAction compactAction"
+                  disabled={
+                    pending || !(tagByAgent[editingAgent.id] ?? "").trim()
+                  }
+                  onClick={() => void addTag(editingAgent)}
+                  type="button"
+                >
+                  <Plus size={13} />
+                  Add
+                </button>
+              </span>
+              <small id={`group-suggestions-${editingAgent.id}`}>
+                {suggestionsText}
+              </small>
+            </label>
+            {recentRemoval?.agentId === editingAgent.id ? (
+              <div
+                aria-live="polite"
+                className="tagAssignmentNotice"
+                role="status"
+              >
+                <span>
+                  Removed <strong>{recentRemoval.tag}</strong> from{" "}
+                  <strong>{recentRemoval.agentLabel}</strong>.
+                </span>
+                {recentRemoval.scheduleImpactCount > 0 && (
+                  <small>
+                    Used by {recentRemoval.scheduleImpactCount} schedule
+                    {recentRemoval.scheduleImpactCount === 1 ? "" : "s"}; saved
+                    targets stay fixed until updated.
+                  </small>
+                )}
+                <button
+                  className="secondaryAction compactAction"
+                  disabled={pending}
+                  onClick={undoRemoveTag}
+                  type="button"
+                >
+                  Undo
+                </button>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </ConsoleActionDrawer>
       <datalist id="tag-options">
         {tagNames.map((tag) => (
           <option key={tag} label={groupOptionLabel(tag, tagClientsCount(tags, tag))} value={tag} />
@@ -1516,6 +1648,10 @@ function BulkTagPanel({
                   : "Server resolution runs before confirmation."}
               </span>
             </div>
+            <LocalTargetPreview
+              agents={localTargets}
+              ariaLabel="Bulk group local VPS preview"
+            />
             <label
               className="inlineCheck tightCheck compactReviewCheck"
               title="Default excludes contact-unknown, stale, and degraded targets from the final mutation. Enable only when you intentionally want those targets included."

@@ -22,8 +22,8 @@ const OSPF_MIN_COST = 5;
 const OSPF_MAX_COST = 65535;
 
 export type RuntimeControlFormValues = {
-  leftAdapterTemplateId?: string;
-  rightAdapterTemplateId?: string;
+  leftAdapterDefinitionId?: string;
+  rightAdapterDefinitionId?: string;
   ingressKbps: string;
   egressKbps: string;
   burstKb: string;
@@ -57,8 +57,8 @@ export function buildRuntimeControl(
   if (manager === "external_managed_adapter") {
     return {
       manager,
-      left_adapter_template_id: values.leftAdapterTemplateId?.trim() || null,
-      right_adapter_template_id: values.rightAdapterTemplateId?.trim() || null,
+      left_adapter_template_id: values.leftAdapterDefinitionId?.trim() || null,
+      right_adapter_template_id: values.rightAdapterDefinitionId?.trim() || null,
       traffic_limit: trafficLimit,
       ...fouPayload,
     };

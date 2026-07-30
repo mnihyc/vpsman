@@ -13,7 +13,7 @@ expected_files=(
   "02-install-agents.md"
   "03-fleet-organization.md"
   "04-daily-operations.md"
-  "05-source-templates.md"
+  "05-configuration-presets.md"
   "06-tunnels-routing-adapters.md"
   "07-backup-restore-migration.md"
   "08-agent-updates.md"
@@ -50,9 +50,9 @@ for file in "${expected_files[@]}"; do
       grep -qi 'direct' "$path" || fail "$path must cover direct gateway identity"
       grep -qi 'noise' "$path" || fail "$path must cover Noise key provisioning"
       ;;
-    05-source-templates.md)
-      grep -qi 'template' "$path" || fail "$path must cover selectable source templates"
-      grep -qi 'VPS-local' "$path" || fail "$path must cover VPS-local customization"
+    05-configuration-presets.md)
+      grep -qi 'system default' "$path" || fail "$path must explain configuration preset inheritance"
+      grep -qi 'explicit.*override' "$path" || fail "$path must cover explicit per-VPS overrides"
       ;;
     04-daily-operations.md)
       grep -qi 'record-table' "$path" || fail "$path must cover panel record-table controls"

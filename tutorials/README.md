@@ -19,8 +19,8 @@ Use these in order for a new deployment:
 5. `04-daily-operations.md`: run commands, inspect job/audit history, manage
    retention/export, use terminal sessions, file transfers, process
    supervision, and schedules.
-6. `05-source-templates.md`: choose default, shared, and VPS-local data
-   source presets without hardcoding provider assumptions.
+6. `05-configuration-presets.md`: understand system inheritance, assign or
+   reset explicit VPS overrides, and verify effective and applied state.
 7. `06-tunnels-routing-adapters.md`: declare native, observed, or
    adapter-managed tunnels; inspect topology and tests; and optionally control
    OSPF costs through operator-owned adapters.
@@ -45,7 +45,7 @@ Common environment when running the control plane manually from source:
 export VPSMAN_API_URL=http://127.0.0.1:8080
 export VPSMAN_API_TOKEN=<operator_token>
 export VPSMAN_SUPER_PASSWORD=<local_super_password>
-export VPSMAN_SUPER_SALT_HEX=<64_hex_salt>
+source ./path/to/secrets/operator-privilege.env
 ```
 
 The Compose deployment intentionally keeps port 8080 private. For its bundled
@@ -55,7 +55,9 @@ CLI, use the Nginx console/API origin instead:
 export VPSMAN_API_URL=http://127.0.0.1:5173
 ```
 
-`VPSMAN_API_TOKEN` authenticates the operator to the API. The super password
-and salt stay local to the browser/CLI/VTY and are used to build request-bound
-privilege assertions for the private gateway. Keep them out of shell history
-where possible.
+`VPSMAN_API_TOKEN` authenticates the operator to the API. First-start prints the
+generated salt and keeps it in `./config/secrets/operator-privilege.env`; manual
+`compose-secrets` writes the same file under its selected secrets directory.
+The super password and salt stay local to the browser/CLI/VTY and are used to
+build request-bound privilege assertions for the private gateway. Keep them out
+of shell history where possible.

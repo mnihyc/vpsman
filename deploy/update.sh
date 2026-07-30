@@ -36,7 +36,9 @@ Environment:
 The updater accepts only release v0.2.0 or newer. Before payload activation it
 verifies any existing migration history against the target release and saves a
 PostgreSQL archive under runtime/update-backups/. Updates and rollbacks stop
-application writers before taking that archive.
+application writers before taking that archive. A successful first-start prints
+the generated privilege salt that operators must save for browser and CLI
+privilege unlock.
 USAGE
 }
 
@@ -52,6 +54,7 @@ transaction=""
 transaction_can_cleanup=0
 mode="update"
 target="${1:-latest}"
+operator_privilege_salt=""
 
 if [[ "$target" == "first-start" ]]; then
   mode="first-start"
@@ -213,6 +216,27 @@ secret_file_status() {
     fi
   done
   printf '%s:%s\n' "$present" "$missing"
+}
+
+read_operator_privilege_salt() {
+  local path contents salt
+  path="$script_dir/config/secrets/operator-privilege.env"
+  [[ -f "$path" && ! -L "$path" ]] ||
+    fail "operator privilege salt file must be a regular file: ./config/secrets/operator-privilege.env"
+  contents="$(<"$path")"
+  [[ "$contents" =~ ^export[[:space:]]+VPSMAN_SUPER_SALT_HEX=([0-9A-Fa-f]+)$ ]] ||
+    fail "operator privilege salt file is invalid: expected one export VPSMAN_SUPER_SALT_HEX=<hex> line"
+  salt="${BASH_REMATCH[1]}"
+  (( ${#salt} % 2 == 0 )) ||
+    fail "operator privilege salt file is invalid: VPSMAN_SUPER_SALT_HEX must contain whole bytes"
+  printf '%s\n' "$salt"
+}
+
+report_operator_privilege_salt() {
+  local salt="$1"
+  log "save this privilege salt; it is required with the super password for browser and CLI privilege unlock:"
+  log "VPSMAN_SUPER_SALT_HEX=$salt"
+  log "persistent copy: ./config/secrets/operator-privilege.env (keep private)"
 }
 
 prepare_first_start_secrets() {
@@ -1146,6 +1170,7 @@ cp "$transaction/downloads/version.json" \
 
 if [[ "$mode" == "first-start" ]]; then
   prepare_first_start_secrets "$transaction/staged-cli/vpsctl"
+  operator_privilege_salt="$(read_operator_privilege_salt)"
   wait_for_postgres || fail "PostgreSQL did not become ready for first-start preflight"
   if [[ "$(database_migration_ledger_status)" == "t" ]]; then
     verify_database_compatible_with \
@@ -1181,6 +1206,7 @@ activate_transaction "$transaction" "$mode" "$resolved_tag"
 if [[ "$mode" == "first-start" ]]; then
   log "started vpsman deployment at $resolved_tag"
   log "pre-start database backup: runtime/update-backups/$backup_name"
+  report_operator_privilege_salt "$operator_privilege_salt"
 else
   log "updated vpsman deployment to $resolved_tag"
   log "pre-update database backup: runtime/update-backups/$backup_name"

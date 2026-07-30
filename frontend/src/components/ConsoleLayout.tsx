@@ -1,8 +1,15 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
+import * as ContextMenu from "@radix-ui/react-context-menu";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { ChevronDown, GripVertical, MoreVertical, X } from "lucide-react";
+import { ChevronDown, GripVertical, X } from "lucide-react";
 import { scrollIntoViewWithMotion } from "../motion";
 
 export function ConsoleActionDrawer({
@@ -110,24 +117,31 @@ export function ConsoleStatusBadge({
   return <span className={`consoleStatusBadge ${tone}`}>{children}</span>;
 }
 
+export type ConsoleMenuAction = {
+  disabled?: boolean;
+  label: string;
+  onSelect: () => void;
+  title?: string;
+  tone?: "danger" | "normal";
+};
+
 export function ConsoleActionMenu({
   actions,
   label = "Actions",
 }: {
-  actions: Array<{
-    disabled?: boolean;
-    label: string;
-    onSelect: () => void;
-    title?: string;
-    tone?: "danger" | "normal";
-  }>;
+  actions: ConsoleMenuAction[];
   label?: string;
 }) {
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>
-        <button aria-label={label} className="iconButton" type="button">
-          <MoreVertical size={18} />
+        <button
+          aria-label={label}
+          className="secondaryAction compactAction"
+          type="button"
+        >
+          <span>Actions</span>
+          <ChevronDown size={16} />
         </button>
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
@@ -152,6 +166,79 @@ export function ConsoleActionMenu({
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>
+  );
+}
+
+export function ConsoleInlineActions({
+  actions,
+  label,
+}: {
+  actions: ConsoleMenuAction[];
+  label: string;
+}) {
+  return (
+    <div aria-label={label} className="gridMobileActions">
+      {actions.map((action) => (
+        <button
+          className={
+            action.tone === "danger"
+              ? "secondaryAction compactAction danger"
+              : "secondaryAction compactAction"
+          }
+          disabled={action.disabled}
+          key={action.label}
+          onClick={action.onSelect}
+          title={action.title}
+          type="button"
+        >
+          <span>{action.label}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function ConsoleContextActionMenu({
+  actions,
+  children,
+  label = "Row actions",
+}: {
+  actions: ConsoleMenuAction[];
+  children: ReactElement;
+  label?: string;
+}) {
+  return (
+    <ContextMenu.Root>
+      <ContextMenu.Trigger asChild>{children}</ContextMenu.Trigger>
+      {actions.length > 0 && (
+        <ContextMenu.Portal>
+          <ContextMenu.Content
+            className="consoleMenu"
+            collisionPadding={12}
+            loop
+          >
+            <ContextMenu.Label className="consoleMenuLabel">
+              {label}
+            </ContextMenu.Label>
+            {actions.map((action) => (
+              <ContextMenu.Item
+                className={
+                  action.tone === "danger"
+                    ? "consoleMenuItem danger"
+                    : "consoleMenuItem"
+                }
+                disabled={action.disabled}
+                key={action.label}
+                onSelect={action.onSelect}
+                title={action.title}
+              >
+                {action.label}
+              </ContextMenu.Item>
+            ))}
+          </ContextMenu.Content>
+        </ContextMenu.Portal>
+      )}
+    </ContextMenu.Root>
   );
 }
 

@@ -3,6 +3,7 @@ import {
   formatCompactTime,
   formatFullTime,
   formatTime,
+  retainMutationSuccessAfterRefresh,
   timestampMillis,
 } from "../src/utils";
 
@@ -16,4 +17,16 @@ test("formats Unix-second and Unix-millisecond timestamp strings", () => {
     expect(formatter(seconds, "UTC")).not.toBe(seconds);
     expect(formatter(milliseconds, "UTC")).not.toBe(milliseconds);
   }
+});
+
+test("keeps a completed mutation successful when its visible refresh fails", async () => {
+  let refreshAttempted = false;
+
+  await expect(
+    retainMutationSuccessAfterRefresh(async () => {
+      refreshAttempted = true;
+      throw new Error("refresh unavailable");
+    }),
+  ).resolves.toBeUndefined();
+  expect(refreshAttempted).toBe(true);
 });

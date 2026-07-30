@@ -41,6 +41,17 @@ export async function runPanelAction(
   }
 }
 
+export async function retainMutationSuccessAfterRefresh(
+  refresh: () => Promise<void>,
+): Promise<void> {
+  try {
+    await refresh();
+  } catch {
+    // Refresh loaders expose their own error/evidence state. A completed
+    // mutation must not be reported as failed or invite a duplicate retry.
+  }
+}
+
 export function toggleValue(values: string[], value: string): string[] {
   return values.includes(value)
     ? values.filter((existing) => existing !== value)
@@ -83,11 +94,11 @@ export function getPageDescription(view: ActiveView): string {
     case "Remote Operations":
       return "Browser terminal, file management, transfers, processes, and bulk file work without SSH or SCP";
     case "Automation":
-      return "Schedules, runbooks, source templates, and agent update workflows";
+      return "Schedules, runbooks, and agent update workflows";
     case "Network":
       return "Topology, tunnels, port forwarding, tests, routing, and evidence";
     case "Config":
-      return "Runtime config patches, persistent templates, and guarded per-VPS reads";
+      return "Runtime config patches, configuration presets, and guarded per-VPS reads";
     case "Observability":
       return "Read-only fleet, network, process, alert, webhook, and dashboard analysis";
     case "Audit":

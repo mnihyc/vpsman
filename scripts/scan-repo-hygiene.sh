@@ -51,7 +51,7 @@ canonical_repo_slug_escaped="${canonical_repo_slug//\//\\/}"
 
 is_scanned_file() {
   case "$1" in
-    ./.git/*|./target/*|./tmp/*|./deploy/runtime/*|./frontend/tmp/*|./frontend/node_modules/*|./frontend/dist/*|./frontend/test-results/*|./frontend/playwright-report/*|./.tmp/*)
+    ./.git/*|./target/*|./deploy/runtime/*|./frontend/tmp/*|./frontend/node_modules/*|./frontend/dist/*|./frontend/test-results/*|./frontend/playwright-report/*|./.tmp/*)
       return 1
       ;;
   esac
@@ -77,6 +77,7 @@ report_fixed_match() {
   local output
   local filtered=""
   local line
+  local line_content
   if [[ -z "$needle" ]]; then
     return
   fi
@@ -85,6 +86,18 @@ report_fixed_match() {
     return
   fi
   while IFS= read -r line; do
+    line_content="${line#*:}"
+    case "$file" in
+      ./Cargo.toml)
+        [[ "$line_content" == "authors = [\"$needle\"]" ]] && continue
+        ;;
+      ./frontend/package.json)
+        [[ "$line_content" == "  \"author\": \"$needle\"," ]] && continue
+        ;;
+      ./LICENSE-MIT)
+        [[ "$line_content" == "Copyright (c) "*"$needle" ]] && continue
+        ;;
+    esac
     if [[ -n "$canonical_repo_slug" ]] &&
       { [[ "$line" == *"$canonical_repo_slug"* ]] || [[ "$line" == *"$canonical_repo_slug_escaped"* ]]; }; then
       continue
@@ -173,7 +186,7 @@ done < <(
       done
   else
     find . \
-      \( -path './.git' -o -path './target' -o -path './tmp' -o -path './deploy/runtime' \
+      \( -path './.git' -o -path './target' -o -path './deploy/runtime' \
          -o -path './frontend/tmp' -o -path './frontend/node_modules' -o -path './frontend/dist' \
          -o -path './frontend/test-results' -o -path './frontend/playwright-report' -o -path './.tmp' \) \
       -prune -o -type f -print0

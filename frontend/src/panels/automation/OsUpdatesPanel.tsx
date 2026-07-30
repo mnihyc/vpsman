@@ -10,7 +10,6 @@ import {
 import { ActionFeedback } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import {
-  ConsoleActionMenu,
 } from "../../components/ConsoleLayout";
 import {
   ConsoleDataGrid,
@@ -585,30 +584,8 @@ export function OsUpdatesPanel({
         size: 174,
         sortValue: (row) => packageRowState(row).label,
       },
-      {
-        align: "end",
-        cell: (row) => (
-          <span onClick={(event) => event.stopPropagation()}>
-            <ConsoleActionMenu
-              actions={rowActions.map((action) => ({
-                disabled: action.disabled?.([row]),
-                label: action.label,
-                onSelect: () => action.onSelect([row]),
-                title: action.description?.([row]),
-              }))}
-              label={`Actions for ${agentLabel(row.agent)}`}
-            />
-          </span>
-        ),
-        enableHiding: false,
-        header: "Actions",
-        id: "actions",
-        minSize: 56,
-        size: 64,
-        stickyEnd: true,
-      },
     ],
-    [rowActions],
+    [],
   );
 
   return (
@@ -678,7 +655,6 @@ export function OsUpdatesPanel({
           expandOnRowClick
           getRowId={(row) => row.agent.id}
           itemLabel="VPSs"
-          mobileRowActionLimit={3}
           renderExpandedRow={(row) => (
             <div className="consoleInlineDetailGrid">
               <span>VPS</span>
@@ -702,7 +678,6 @@ export function OsUpdatesPanel({
           rowActions={rowActions}
           rows={rows}
           searchPlaceholder="Search VPS, distro, provider, or state"
-          selectable={false}
           singleExpandedRow
           storageKey="vpsman.automation.osUpdates"
           title="Fleet package posture"
@@ -929,6 +904,31 @@ function PackagePlanDetail({
       onClose={onClose}
       title={`${agentLabel(row.agent)} package plan`}
     >
+      <ActionFeedback
+        className="localActionFeedback"
+        message={feedback?.message ?? null}
+        tone={feedback?.tone}
+      />
+      {applyEvidence ? (
+        <div className="osUpdateApplyEvidence">
+          {!feedback ? (
+            <ActionFeedback
+              className="localActionFeedback"
+              message={`${applyEvidence.result.applied_package_count} package${applyEvidence.result.applied_package_count === 1 ? "" : "s"} applied; ${applyEvidence.result.remaining_packages.length} remaining on ${agentLabel(row.agent)}. Package posture refreshed.${applyEvidence.result.reboot_required_after ? " The OS reports that a reboot is required; no reboot was started." : " No reboot was started."}`}
+              tone={applyEvidence.result.completed ? "success" : "warning"}
+            />
+          ) : null}
+          <button
+            className="secondaryAction compactAction"
+            onClick={() => onOpenJobDetails(applyEvidence.jobId)}
+            title={`Open update job ${applyEvidence.jobId}`}
+            type="button"
+          >
+            <ExternalLink size={14} />
+            Update evidence
+          </button>
+        </div>
+      ) : null}
       <div className="consoleInlineDetailGrid osUpdatePlanSummary">
         <span>Capability</span>
         <strong className={`status ${state.tone}`} title={state.reason}>
@@ -1022,32 +1022,6 @@ function PackagePlanDetail({
         selectable={false}
         storageKey={`vpsman.automation.osUpdatePlan.${row.agent.id}`}
         title="Reviewed package candidates"
-      />
-
-      {applyEvidence ? (
-        <div className="osUpdateApplyEvidence">
-          {!feedback ? (
-            <ActionFeedback
-              className="localActionFeedback"
-              message={`${applyEvidence.result.applied_package_count} package${applyEvidence.result.applied_package_count === 1 ? "" : "s"} applied; ${applyEvidence.result.remaining_packages.length} remaining on ${agentLabel(row.agent)}. Package posture refreshed.${applyEvidence.result.reboot_required_after ? " The OS reports that a reboot is required; no reboot was started." : " No reboot was started."}`}
-              tone={applyEvidence.result.completed ? "success" : "warning"}
-            />
-          ) : null}
-          <button
-            className="secondaryAction compactAction"
-            onClick={() => onOpenJobDetails(applyEvidence.jobId)}
-            title={`Open update job ${applyEvidence.jobId}`}
-            type="button"
-          >
-            <ExternalLink size={14} />
-            Update evidence
-          </button>
-        </div>
-      ) : null}
-      <ActionFeedback
-        className="localActionFeedback"
-        message={feedback?.message ?? null}
-        tone={feedback?.tone}
       />
     </ConsoleDetailPanel>
   );

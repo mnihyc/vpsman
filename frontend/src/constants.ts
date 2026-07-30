@@ -200,12 +200,6 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
       description: "Reusable reviewed operations and parameters",
     },
     {
-      id: "source_templates",
-      label: "Source templates",
-      description:
-        "Persistent source template registry and render/test workflow",
-    },
-    {
       id: "os_updates",
       label: "OS updates",
       description:
@@ -222,7 +216,13 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
       id: "overview",
       label: "Overview",
       description:
-        "Config health, drift, template coverage, recent changes, and workflow entry points",
+        "Config health, drift, effective source state, recent changes, and workflow entry points",
+    },
+    {
+      id: "sources",
+      label: "Sources",
+      description:
+        "Effective per-VPS configuration, explicit overrides, and reusable presets",
     },
     {
       id: "per_vps",
@@ -234,13 +234,6 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
       label: "Bulk patch",
       description:
         "Temporary incremental patches and reusable patch generators",
-    },
-    {
-      id: "templates",
-      label: "Template coverage",
-      description:
-        "Runtime template coverage summary with links to source templates",
-      route: "template-coverage",
     },
     {
       id: "rules",

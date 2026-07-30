@@ -250,7 +250,7 @@ export async function unlockPrivilegeFromTop(page: Page) {
   await activate(topbar.getByRole("button", { name: "Open privilege unlock" }));
   const dialog = page.getByRole("dialog", { name: "Unlock privilege" });
   await expect(dialog).toBeVisible();
-  await dialog.getByLabel(/privilege secret/i).fill("local-super-password");
+  await dialog.getByLabel(/super password/i).fill("local-super-password");
   await dialog
     .getByLabel(/(privilege salt|verifier salt hex)/i)
     .fill("00112233445566778899aabbccddeeff");

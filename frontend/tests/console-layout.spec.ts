@@ -11,6 +11,60 @@ import {
   unlockPrivilegeFromTop,
   waitForConsoleShell,
 } from "./support/consoleNavigation";
+import type { ScheduleRecord } from "../src/types";
+
+const bulkTargetUpdateSchedules: ScheduleRecord[] = [
+  {
+    cadence_error: null,
+    catch_up_limit: 1,
+    catch_up_policy: "run_once",
+    command_type: "shell_argv",
+    created_at: "2026-05-31T09:00:00Z",
+    cron_expr: "0 * * * *",
+    deferred_until: null,
+    deleted_at: null,
+    enabled: true,
+    failure_count: 0,
+    id: "51515151-6161-4717-8abc-defdefdefdef",
+    last_error: null,
+    last_run_at: "2026-05-31T10:00:00Z",
+    max_failures: 3,
+    name: "edge-health-hourly",
+    next_run_at: "2026-05-31T11:00:00Z",
+    next_runs: ["2026-05-31T11:00:00Z"],
+    operation: { argv: ["uptime"], pty: false, type: "shell" },
+    retry_delay_secs: 300,
+    selector_expression: "id:agent-sfo-01 || provider:alpha",
+    target_client_ids: ["agent-sfo-01", "agent-fra-02"],
+    timezone: "UTC",
+    updated_at: "2026-05-31T10:00:00Z",
+  },
+  {
+    cadence_error: null,
+    catch_up_limit: 1,
+    catch_up_policy: "skip_missed",
+    command_type: "shell_argv",
+    created_at: "2026-05-31T09:05:00Z",
+    cron_expr: "30 * * * *",
+    deferred_until: null,
+    deleted_at: null,
+    enabled: false,
+    failure_count: 0,
+    id: "52525252-6161-4717-8abc-defdefdefdef",
+    last_error: null,
+    last_run_at: null,
+    max_failures: 3,
+    name: "us-capacity-hourly",
+    next_run_at: "2026-05-31T11:30:00Z",
+    next_runs: ["2026-05-31T11:30:00Z"],
+    operation: { argv: ["df", "-h"], pty: false, type: "shell" },
+    retry_delay_secs: 300,
+    selector_expression: "country:US",
+    target_client_ids: ["agent-fra-02"],
+    timezone: "UTC",
+    updated_at: "2026-05-31T10:00:00Z",
+  },
+];
 
 test.beforeEach(async ({ page }, testInfo) => {
   const options = testInfo.tags.includes("@delete-request-failure")
@@ -40,7 +94,28 @@ test.beforeEach(async ({ page }, testInfo) => {
             })),
           }
         : undefined;
-  await installConsoleApiMock(page, options);
+  await installConsoleApiMock(page, {
+    ...options,
+    bulkResolveDelayMs: testInfo.tags.includes("@bulk-resolve-delay")
+      ? 250
+      : undefined,
+    bulkResolveFailure: testInfo.tags.includes("@bulk-resolve-failure"),
+    configurationSourceApplyFailure: testInfo.tags.includes(
+      "@configuration-source-apply-failure",
+    ),
+    configurationSourceSyncFailure: testInfo.tags.includes(
+      "@configuration-source-sync-failure",
+    ),
+    fleetAlertStateFailure: testInfo.tags.includes(
+      "@fleet-alert-state-failure",
+    ),
+    schedulesOverride: testInfo.tags.includes("@bulk-schedule-targets")
+      ? bulkTargetUpdateSchedules
+      : undefined,
+    vpsRulesApplyDelayMs: testInfo.tags.includes("@vps-rules-apply-delay")
+      ? 1_000
+      : undefined,
+  });
 });
 
 async function activate(locator: Locator) {
@@ -260,6 +335,20 @@ test("keeps VPS combobox menus above clipped workflow panels", async ({
   const menu = page.locator(".vpsComboboxMenu");
   await expect(menu).toBeVisible();
   await expect(terminalPanel.locator(".vpsComboboxMenu")).toHaveCount(0);
+  const placement = await Promise.all([
+    targetPicker.boundingBox(),
+    menu.boundingBox(),
+  ]);
+  expect(placement[0]).not.toBeNull();
+  expect(placement[1]).not.toBeNull();
+  const inputBox = placement[0]!;
+  const menuBox = placement[1]!;
+  const verticalGap =
+    menuBox.y >= inputBox.y + inputBox.height
+      ? menuBox.y - (inputBox.y + inputBox.height)
+      : inputBox.y - (menuBox.y + menuBox.height);
+  expect(verticalGap).toBeGreaterThanOrEqual(0);
+  expect(verticalGap).toBeLessThanOrEqual(6);
   const edgeOption = menu.getByRole("option", { name: /edge-sfo-01/ });
   await expect(edgeOption).toBeVisible();
   await expect(edgeOption).toHaveAttribute(
@@ -277,35 +366,39 @@ test("keeps search expression autocomplete above clipped workflow panels", async
   );
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Automation", "Source templates");
+  await openConsoleSubpage(page, "Config", "Sources");
 
-  const templatePanel = page.locator(".sourceTemplatePanel");
-  const templateRegistryGrid = templatePanel.getByLabel(
-    "Template registry data grid",
-  );
-  await activate(
-    templateRegistryGrid
-      .locator(".gridBody .gridRow")
-      .filter({ hasText: "shared:vnstat-json" })
-      .first(),
-  );
-  await activate(
-    templateRegistryGrid
-      .getByLabel("Template workflow actions for shared:vnstat-json")
-      .getByRole("button", { name: "Assign" }),
-  );
-
-  const drawer = templatePanel.getByLabel("shared:vnstat-json", {
-    exact: true,
+  const panel = page.locator(".configurationSourcesPanel");
+  await activate(panel.getByRole("button", { name: "Change configuration" }));
+  const drawer = page.getByRole("complementary", {
+    name: "Change effective configuration",
   });
+  await drawer.getByText("Add targets by selector", { exact: true }).click();
   const targetExpression = drawer.getByRole("combobox", {
-    name: "Template assignment target expression",
+    name: "Configuration target selector",
   });
   await targetExpression.fill("provider:");
 
   const autocomplete = page.locator(".searchExpressionAutocomplete");
   await expect(autocomplete).toBeVisible();
   await expect(drawer.locator(".searchExpressionAutocomplete")).toHaveCount(0);
+  const expressionControl = targetExpression.locator(
+    "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' searchExpressionInput ')][1]",
+  );
+  const placement = await Promise.all([
+    expressionControl.boundingBox(),
+    autocomplete.boundingBox(),
+  ]);
+  expect(placement[0]).not.toBeNull();
+  expect(placement[1]).not.toBeNull();
+  const inputBox = placement[0]!;
+  const menuBox = placement[1]!;
+  const verticalGap =
+    menuBox.y >= inputBox.y + inputBox.height
+      ? menuBox.y - (inputBox.y + inputBox.height)
+      : inputBox.y - (menuBox.y + menuBox.height);
+  expect(verticalGap).toBeGreaterThanOrEqual(0);
+  expect(verticalGap).toBeLessThanOrEqual(6);
   const providerOption = autocomplete.getByRole("option", {
     name: /^provider:alpha$/,
   });
@@ -406,7 +499,7 @@ test("renders an operational cloud-console fleet workspace", async ({
       await expect(edgeRow).toContainText(label);
     }
     await expect(
-      edgeRow.getByRole("button", { name: /Open VPS/ }),
+      edgeRow.getByRole("button", { name: "Open detail", exact: true }),
     ).toBeVisible();
   } else {
     for (const column of [
@@ -420,7 +513,6 @@ test("renders an operational cloud-console fleet workspace", async ({
       "Memory",
       "Disk",
       "Alerts",
-      "Action",
     ]) {
       await expect(
         fleetGrid
@@ -531,11 +623,12 @@ test("renders an operational cloud-console fleet workspace", async ({
         .locator(".gridBody [role=row]", { hasText: "core-fra-02" })
         .first();
   if (testInfo.project.name.includes("mobile")) {
-    await activate(coreRecord.getByRole("button", { name: /Open VPS/ }));
-  } else {
     await activate(
-      coreRecord.getByRole("button", { name: /Open core-fra-02.*detail/ }),
+      coreRecord.getByRole("button", { name: "Open detail", exact: true }),
     );
+  } else {
+    await selectGridRow(page, "VPS instance records", "agent-fra-02");
+    await runGridAction(page, "VPS instance records", "Open detail");
   }
   await expect(
     page.getByRole("heading", { level: 1, name: "Instance detail" }),
@@ -587,10 +680,6 @@ test("deletes a VPS through grid actions and explicit confirmation", async ({
   const backupRow = fleetGrid
     .locator(".gridBody [role=row]", { hasText: "backup-nyc-03" })
     .first();
-  await expect(
-    backupRow.getByRole("button", { name: /Open .* detail/ }),
-  ).toBeVisible();
-
   await backupRow.getByLabel("Select VPS instance records row").check();
   await fleetGrid
     .locator(".gridToolbarActions")
@@ -598,6 +687,9 @@ test("deletes a VPS through grid actions and explicit confirmation", async ({
     .click();
   await expect(
     page.getByRole("menuitem", { name: "Review VPS deletion" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Open detail", exact: true }),
   ).toBeVisible();
   await page.getByRole("menuitem", { name: "Review VPS deletion" }).click();
   const prompt = page.locator(".fleetInstancesPanel > .confirmationPrompt");
@@ -662,9 +754,7 @@ test(
     const warning = page.locator(
       ".fleetInstancesPanel > .actionFeedbackWarning",
     );
-    await expect(warning).toContainText(
-      "Tunnel cleanup for agent-fra-02",
-    );
+    await expect(warning).toContainText("Tunnel cleanup for agent-fra-02");
     await expect(warning).toContainText(
       "Desired state remains saved; inspect API logs and retry",
     );
@@ -682,9 +772,7 @@ test(
 
     await page.goto("/");
     await openConsoleSubpage(page, "System", "Preferences");
-    await page
-      .getByLabel("Review prompt display mode")
-      .selectOption("overlay");
+    await page.getByLabel("Review prompt display mode").selectOption("overlay");
     await page.getByRole("button", { name: "Save preferences" }).click();
     await unlockPrivilegeFromTop(page);
     await openConsoleSubpage(page, "Fleet", "Instances");
@@ -1122,7 +1210,9 @@ test("supports interactive fleet data grid controls", async ({
   await page.keyboard.press("Escape");
 
   if (mobileFleetGrid) {
-    await coreRow.getByRole("button", { name: /Open VPS/ }).click();
+    await coreRow
+      .getByRole("button", { name: "Open detail", exact: true })
+      .click();
   } else {
     await coreRow.click({ button: "right" });
     await expect(page.getByText("Row actions")).toBeVisible();
@@ -1165,10 +1255,8 @@ test("exposes traffic columns and the VPS Traffic & Rules drilldown", async ({
     grid.getByRole("columnheader", { name: /Traffic State/ }),
   ).toBeVisible();
 
-  const edgeRow = grid
-    .locator(".gridBody [role=row]", { hasText: "edge-sfo-01" })
-    .first();
-  await edgeRow.getByRole("button", { name: "Open" }).click();
+  await selectGridRow(page, "VPS instance records", "agent-sfo-01");
+  await runGridAction(page, "VPS instance records", "Open detail");
   await expect(
     page
       .locator(".consoleHeader")
@@ -1211,9 +1299,9 @@ test("exposes traffic columns and the VPS Traffic & Rules drilldown", async ({
   );
 });
 
-test("supports Config VPS Rules dry-run, confirm, and explicit unset", async ({
-  page,
-}, testInfo) => {
+test("supports Config VPS Rules dry-run, confirm, and explicit unset", {
+  tag: "@vps-rules-apply-delay",
+}, async ({ page }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
     "VPS Rules bulk editor is covered in desktop layout",
@@ -1290,8 +1378,18 @@ test("supports Config VPS Rules dry-run, confirm, and explicit unset", async ({
   await expect(applyPrompt).toBeVisible();
   await applyPrompt.getByRole("button", { name: "Apply 1 change" }).click();
   await expect(
+    page.getByLabel("VPS rules selector expression"),
+  ).toBeDisabled();
+  await expect(editor.getByLabel("Total quota")).toBeDisabled();
+  await expect(
+    editor.getByRole("button", { name: "Preview changes", exact: true }),
+  ).toBeDisabled();
+  await expect(
     page.locator(".vpsRulesActionFeedback.actionFeedbackSuccess"),
   ).toContainText("applied 1 VPS rule changes");
+  await expect(
+    page.getByLabel("VPS rules selector expression"),
+  ).toBeEnabled();
   await expect(
     page.locator(".vpsRulesWorkspace > .fleetPolicyStatus"),
   ).toHaveCount(0);
@@ -1544,6 +1642,41 @@ test("keeps fleet alert policy actions selection-scoped", async ({
   }
 });
 
+test(
+  "keeps a failed fleet alert triage inside its reviewed confirmation",
+  { tag: "@fleet-alert-state-failure" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "the same triage handler is covered through the desktop grid action",
+    );
+
+    await page.goto("/");
+    await openConsoleSubpage(page, "Fleet", "Alerts");
+
+    const grid = page.getByLabel("Fleet alerts data grid");
+    const alertRow = grid
+      .getByRole("row")
+      .filter({ hasText: "Tunnel adapter status failed" })
+      .first();
+    await alertRow.getByRole("checkbox").check();
+    await grid.getByRole("button", { name: "Actions", exact: true }).click();
+    await activate(
+      page.getByRole("menuitem", {
+        name: "Acknowledge open",
+        exact: true,
+      }),
+    );
+
+    const prompt = page.getByLabel("Confirm fleet alert triage");
+    await activate(prompt.getByRole("button", { name: "Acknowledge" }));
+    await expect(prompt).toBeVisible();
+    await expect(prompt.locator(".confirmationPromptError")).toContainText(
+      "Simulated fleet alert triage failure",
+    );
+  },
+);
+
 test("exposes console route state through URL, browser history, and reload", async ({
   page,
 }) => {
@@ -1740,13 +1873,13 @@ test("keeps console layout usable on desktop and mobile widths", async ({
       exact: true,
     });
     await expect(mobilePageSelector).toBeVisible();
-    await mobilePageSelector.selectOption("Config::templates");
+    await mobilePageSelector.selectOption("Config::sources");
     await expect(
       page.getByRole("heading", { name: "Config", exact: true }),
     ).toBeVisible();
-    await expect(page.getByLabel("Config template coverage")).toContainText(
-      "Template coverage",
-    );
+    await expect(
+      page.getByRole("heading", { name: "Configuration sources" }),
+    ).toBeVisible();
   }
 });
 
@@ -1945,7 +2078,7 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
   });
   await expect(privilegeDialog).toBeVisible();
   await privilegeDialog
-    .getByLabel(/privilege secret/i)
+    .getByLabel(/super password/i)
     .fill("local-super-password");
   await privilegeDialog
     .getByLabel(/(privilege salt|verifier salt hex)/i)
@@ -1989,7 +2122,7 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
 
 test("surfaces operator users under Access and session evidence under Audit", async ({
   page,
-}) => {
+}, testInfo) => {
   await page.goto("/");
 
   await unlockPrivilegeFor(page, "Access", "Operators");
@@ -2023,30 +2156,48 @@ test("surfaces operator users under Access and session evidence under Audit", as
   );
   await expect(governance).toContainText("Policy evidence boundary");
   const operatorGrid = page.getByLabel("Operator accounts data grid");
-  await expect(
-    operatorGrid.getByRole("row", { name: /Last login/ }).first(),
-  ).toBeVisible();
-  await expect(
-    operatorGrid.getByRole("button", { name: "Manage" }).first(),
-  ).toBeVisible();
-  await expect(
-    operatorGrid.getByRole("button", { name: "Revoke sessions" }).first(),
-  ).toBeVisible();
+  if (testInfo.project.name.includes("mobile")) {
+    const adminCard = operatorGrid.getByLabel(
+      "Operator accounts mobile card 99999999-aaaa-4bbb-8ccc-000000000001",
+    );
+    await expect(adminCard).toBeVisible();
+    await expect(adminCard).toContainText("Last login");
+    await expect(
+      adminCard.getByRole("button", { name: "Edit", exact: true }),
+    ).toBeVisible();
+  } else {
+    await expect(
+      operatorGrid.getByRole("row", { name: /Last login/ }).first(),
+    ).toBeVisible();
+  }
   await selectGridRow(
     page,
     "Operator accounts",
     "99999999-aaaa-4bbb-8ccc-000000000001",
   );
-  await runGridAction(page, "Operator accounts", "Edit selected");
+  await operatorGrid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  await expect(
+    page.getByRole("menuitem", { name: "Edit", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", {
+      name: "Revoke sessions",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+  await runGridAction(page, "Operator accounts", "Edit");
+  const operatorEditor = page.locator(".operatorEditorPanel");
   await expect(page.getByLabel("Operator username")).toHaveValue(
     "console-admin",
   );
   const adminEvidence = page.getByLabel("Operator access evidence");
   await expect(adminEvidence).toContainText("Policy recommends MFA");
   await expect(adminEvidence).toContainText("365d - over admin target");
-  await expect(adminEvidence).toContainText(
-    "unavailable for this operator",
-  );
+  await expect(adminEvidence).toContainText("unavailable for this operator");
   const revokeAdminSessions = adminEvidence.getByRole("button", {
     name: "Revoke sessions",
   });
@@ -2055,7 +2206,9 @@ test("surfaces operator users under Access and session evidence under Audit", as
     "title",
     /No non-current active sessions/,
   );
-  await activate(page.getByRole("button", { name: "Disable" }));
+  await activate(
+    operatorEditor.getByRole("button", { name: "Disable", exact: true }),
+  );
   await expect(page.getByText("Preparing review")).toBeVisible();
   await expect(page.getByLabel("Confirm admin user action")).toBeVisible();
   await expect(
@@ -2063,7 +2216,9 @@ test("surfaces operator users under Access and session evidence under Audit", as
   ).toBeVisible();
   await page.getByLabel("Session refresh TTL days").fill("31");
   await expect(page.getByLabel("Confirm admin user action")).toBeHidden();
-  await activate(page.getByRole("button", { name: "Disable" }));
+  await activate(
+    operatorEditor.getByRole("button", { name: "Disable", exact: true }),
+  );
   await expect(page.getByLabel("Confirm admin user action")).toBeVisible();
   await activate(page.getByRole("button", { name: "Cancel" }));
 
@@ -2077,7 +2232,7 @@ test("surfaces operator users under Access and session evidence under Audit", as
     "Operator accounts",
     "99999999-aaaa-4bbb-8ccc-000000000002",
   );
-  await runGridAction(page, "Operator accounts", "Edit selected");
+  await runGridAction(page, "Operator accounts", "Edit");
   await expect(page.getByLabel("Operator username")).toHaveValue(
     "noc-operator",
   );
@@ -2090,11 +2245,13 @@ test("surfaces operator users under Access and session evidence under Audit", as
     /Refresh-token\/session lifetime/,
   );
   await expect(
-    page.getByRole("button", { name: "Save", exact: true }),
+    operatorEditor.getByRole("button", { name: "Save", exact: true }),
   ).toHaveAttribute("title", /never changes the password/);
   await page.getByLabel("Operator role").selectOption("admin");
   await expect(page.getByText(/Admin role grants require/)).toBeVisible();
-  await activate(page.getByRole("button", { name: "Save", exact: true }));
+  await activate(
+    operatorEditor.getByRole("button", { name: "Save", exact: true }),
+  );
   const adminGrantPrompt = page.getByLabel("Confirm admin user action");
   await expect(adminGrantPrompt).toBeVisible();
   await expect(adminGrantPrompt).toContainText(
@@ -2103,7 +2260,9 @@ test("surfaces operator users under Access and session evidence under Audit", as
   await activate(adminGrantPrompt.getByRole("button", { name: "Cancel" }));
   await page.getByLabel("Operator role").selectOption("operator");
   await page.getByLabel("Operator password").fill("replacement-password-123");
-  await activate(page.getByRole("button", { name: "Save", exact: true }));
+  await activate(
+    operatorEditor.getByRole("button", { name: "Save", exact: true }),
+  );
   await expect(page.getByText("Preparing review")).toBeVisible();
   const savePrompt = page.getByLabel("Confirm user action");
   await expect(savePrompt).toBeVisible();
@@ -2168,16 +2327,16 @@ test("marks saturated operator auth history without changing normal counts", asy
 }) => {
   await installConsoleApiMock(page, {
     operatorAuthEventsOverride: Array.from({ length: 200 }, (_, index) => ({
-        created_at: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
-        id: `auth-failure-${String(index).padStart(3, "0")}`,
-        operator_id: "99999999-aaaa-4bbb-8ccc-000000000001",
-        reason: "invalid_credentials",
-        remote_ip: "127.0.0.1",
-        result: "failure",
-        session_id: null,
-        user_agent: "Playwright",
-        username: "console-admin",
-      })),
+      created_at: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
+      id: `auth-failure-${String(index).padStart(3, "0")}`,
+      operator_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+      reason: "invalid_credentials",
+      remote_ip: "127.0.0.1",
+      result: "failure",
+      session_id: null,
+      user_agent: "Playwright",
+      username: "console-admin",
+    })),
   });
   await page.goto("/");
 
@@ -2193,10 +2352,8 @@ test("marks saturated operator auth history without changing normal counts", asy
     "Operator accounts",
     "99999999-aaaa-4bbb-8ccc-000000000001",
   );
-  await runGridAction(page, "Operator accounts", "Edit selected");
-  const selectedOperatorEvidence = page.getByLabel(
-    "Operator access evidence",
-  );
+  await runGridAction(page, "Operator accounts", "Edit");
+  const selectedOperatorEvidence = page.getByLabel("Operator access evidence");
   await expect(selectedOperatorEvidence).toContainText("Failed logins");
   await expect(selectedOperatorEvidence).toContainText("≥200 loaded");
 });
@@ -2210,62 +2367,62 @@ test("keeps legacy invalid schedule cadences visible and blocks only automatic r
   );
   await installConsoleApiMock(page, {
     schedulesOverride: [
-        {
-          cadence_error: "schedule_cron_no_future_occurrence",
-          catch_up_limit: 1,
-          catch_up_policy: "skip_missed",
-          command_type: "shell_argv",
-          created_at: "2026-01-01T00:00:00Z",
-          cron_expr: "0 0 31 2 *",
-          deferred_until: null,
-          deleted_at: null,
-          enabled: true,
-          failure_count: 0,
-          id: "legacy-invalid-schedule",
-          last_error: null,
-          last_run_at: null,
-          max_failures: 3,
-          name: "legacy impossible cadence",
-          next_run_at: "",
-          next_runs: [],
-          operation: { argv: ["uptime"], pty: false, type: "shell" },
-          retry_delay_secs: 300,
-          selector_expression: "id:agent-sfo-01",
-          target_client_ids: ["agent-sfo-01"],
-          timezone: "UTC",
-          updated_at: "2026-01-01T00:00:00Z",
-        },
-      ],
+      {
+        cadence_error: "schedule_cron_no_future_occurrence",
+        catch_up_limit: 1,
+        catch_up_policy: "skip_missed",
+        command_type: "shell_argv",
+        created_at: "2026-01-01T00:00:00Z",
+        cron_expr: "0 0 31 2 *",
+        deferred_until: null,
+        deleted_at: null,
+        enabled: true,
+        failure_count: 0,
+        id: "legacy-invalid-schedule",
+        last_error: null,
+        last_run_at: null,
+        max_failures: 3,
+        name: "legacy impossible cadence",
+        next_run_at: "",
+        next_runs: [],
+        operation: { argv: ["uptime"], pty: false, type: "shell" },
+        retry_delay_secs: 300,
+        selector_expression: "id:agent-sfo-01",
+        target_client_ids: ["agent-sfo-01"],
+        timezone: "UTC",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+    ],
     backupPoliciesOverride: [
-        {
-          cadence_error: "schedule_cron_invalid",
-          catch_up_limit: 4,
-          catch_up_policy: "run_all_limited",
-          created_at: "2026-01-01T00:00:00Z",
-          cron_expr: "not a cron",
-          enabled: true,
-          failure_count: 0,
-          follow_symlinks: false,
-          include_config: true,
-          keep_last: 11,
-          last_error: null,
-          last_run_at: null,
-          max_failures: 9,
-          missing_path_policy: "skip",
-          name: "legacy invalid backup cadence",
-          next_run_at: "",
-          next_runs: [],
-          paths: ["/etc", "/srv/data"],
-          retention_days: 45,
-          retry_delay_secs: 777,
-          rotation_generation: "quarterly-2026",
-          schedule_id: "legacy-invalid-backup-policy",
-          selector_expression: "id:agent-sfo-01",
-          target_client_ids: ["agent-sfo-01"],
-          timezone: "UTC",
-          updated_at: "2026-01-01T00:00:00Z",
-        },
-      ],
+      {
+        cadence_error: "schedule_cron_invalid",
+        catch_up_limit: 4,
+        catch_up_policy: "run_all_limited",
+        created_at: "2026-01-01T00:00:00Z",
+        cron_expr: "not a cron",
+        enabled: true,
+        failure_count: 0,
+        follow_symlinks: false,
+        include_config: true,
+        keep_last: 11,
+        last_error: null,
+        last_run_at: null,
+        max_failures: 9,
+        missing_path_policy: "skip",
+        name: "legacy invalid backup cadence",
+        next_run_at: "",
+        next_runs: [],
+        paths: ["/etc", "/srv/data"],
+        retention_days: 45,
+        retry_delay_secs: 777,
+        rotation_generation: "quarterly-2026",
+        schedule_id: "legacy-invalid-backup-policy",
+        selector_expression: "id:agent-sfo-01",
+        target_client_ids: ["agent-sfo-01"],
+        timezone: "UTC",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+    ],
   });
 
   await page.goto("/");
@@ -2316,12 +2473,8 @@ test("keeps legacy invalid schedule cadences visible and blocks only automatic r
   await expect(page.getByLabel("Backup policy selected paths")).toHaveValue(
     "/etc\n/srv/data",
   );
-  await page
-    .getByLabel("Backup policy UTC cron expression")
-    .fill("30 2 * * *");
-  await activate(
-    page.getByRole("button", { name: "Review policy update" }),
-  );
+  await page.getByLabel("Backup policy UTC cron expression").fill("30 2 * * *");
+  await activate(page.getByRole("button", { name: "Review policy update" }));
   const updatePrompt = page.locator(".confirmationPrompt").last();
   await expect(updatePrompt).toContainText("Confirm backup policy update");
   await expect(updatePrompt).toContainText("/etc, /srv/data");
@@ -2366,6 +2519,71 @@ test("keeps legacy invalid schedule cadences visible and blocks only automatic r
   await expect(policyGrid).not.toContainText("Invalid cadence");
   await expect(policyGrid).toContainText("30 2 * * * · UTC");
   await expect(policyGrid).toContainText("Automatic");
+});
+
+test("shows every saved fixed target in expanded backup policy details", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the shared expanded-row content is covered in the desktop data grid",
+  );
+  const fixedTargets = [
+    "agent-sfo-01",
+    "agent-fra-02",
+    "agent-nyc-03",
+    "agent-lon-04",
+    "agent-sin-05",
+  ];
+  await installConsoleApiMock(page, {
+    backupPoliciesOverride: [
+      {
+        cadence_error: null,
+        catch_up_limit: 1,
+        catch_up_policy: "skip_missed",
+        created_at: "2026-01-01T00:00:00Z",
+        cron_expr: "0 2 * * *",
+        enabled: true,
+        failure_count: 0,
+        follow_symlinks: false,
+        include_config: true,
+        keep_last: 7,
+        last_error: null,
+        last_run_at: null,
+        max_failures: 3,
+        missing_path_policy: "skip",
+        name: "worldwide fixed targets",
+        next_run_at: "2026-01-02T02:00:00Z",
+        next_runs: ["2026-01-02T02:00:00Z"],
+        paths: ["/etc"],
+        retention_days: 30,
+        retry_delay_secs: 300,
+        rotation_generation: null,
+        schedule_id: "worldwide-fixed-targets",
+        selector_expression: "tag:backup",
+        target_client_ids: fixedTargets,
+        timezone: "UTC",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+    ],
+  });
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Backups", "Policies");
+  const grid = page.getByLabel("Backup policy records data grid");
+  await grid
+    .getByLabel(
+      "Expand Backup policy records row worldwide-fixed-targets",
+    )
+    .click();
+
+  const details = grid.locator(".gridExpandedRow");
+  await expect(details).toContainText(
+    "5 VPSs · agent-sfo-01, agent-fra-02, agent-nyc-03 +2 more",
+  );
+  await expect(details.locator(".monoValue")).toHaveText(
+    `Fixed targets: ${fixedTargets.join(", ")}`,
+  );
 });
 
 test("keeps malformed schedule operations visible with only repair and removal actions", async ({
@@ -2427,7 +2645,7 @@ test("keeps malformed schedule operations visible with only repair and removal a
     page.getByRole("menuitem", { name: "Review enable" }),
   ).toBeDisabled();
   await expect(
-    page.getByRole("menuitem", { name: "Review target update" }),
+    page.getByRole("menuitem", { name: "Update targets" }),
   ).toBeDisabled();
   await expect(page.getByRole("menuitem", { name: "Defer" })).toBeDisabled();
   await expect(
@@ -2437,7 +2655,417 @@ test("keeps malformed schedule operations visible with only repair and removal a
     page.getByRole("menuitem", { name: "Review deletion" }),
   ).toBeEnabled();
   await expect(page.getByRole("menuitem", { name: "Edit" })).toBeEnabled();
+  await page.keyboard.press("Escape");
+  await scheduleGrid
+    .getByRole("row")
+    .filter({ hasText: "malformed operation" })
+    .first()
+    .click({ button: "right" });
+  await expect(
+    page.getByRole("menuitem", { name: "Update targets" }),
+  ).toBeDisabled();
+  await expect(page.getByRole("menuitem", { name: "Defer" })).toBeDisabled();
+  await expect(
+    page.getByRole("menuitem", { name: "Review deletion" }),
+  ).toBeEnabled();
 });
+
+test("updates only a schedule's frozen targets through the table action", {
+  tag: "@bulk-resolve-delay",
+}, async ({ page }, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the shared mobile card action path is covered by the responsive audit",
+  );
+
+  await page.goto("/");
+  await unlockPrivilegeFor(page, "Automation", "Schedules");
+  const grid = page.getByLabel("Schedule records data grid");
+  await expect(
+    grid.getByRole("columnheader", { name: /^Actions?$/ }),
+  ).toHaveCount(0);
+  const pageSize = grid.getByLabel("Schedule records page size");
+  await expect(pageSize.locator('option[value="1000"]')).toHaveCount(1);
+  await pageSize.selectOption("1000");
+  await expect(pageSize).toHaveValue("1000");
+  const scheduleRow = grid
+    .getByRole("row")
+    .filter({ hasText: "edge-health-hourly" })
+    .first();
+  const expand = scheduleRow.getByRole("button", {
+    name: /Expand Schedule records row/,
+  });
+  await expect(expand).toHaveAttribute("aria-expanded", "false");
+  await scheduleRow.click();
+  await expect(
+    grid.getByLabel(
+      "Collapse Schedule records row 51515151-6161-4717-8abc-defdefdefdef",
+    ),
+  ).toHaveAttribute("aria-expanded", "true");
+  const expandedDetail = grid.locator(".gridExpandedRow");
+  await expect(expandedDetail).toBeVisible();
+  await expect(expandedDetail).toContainText("Run only one missed run");
+  await expect(expandedDetail).toContainText("edge-sfo-01 (agent-sfo-01)");
+  await expect(expandedDetail).toContainText("core-fra-02 (agent-fra-02)");
+  await expect
+    .poll(() =>
+      expandedDetail.evaluate(
+        (element) => window.getComputedStyle(element).animationName,
+      ),
+    )
+    .toBe("grid-detail-reveal");
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Schedules" }),
+  ).toBeVisible();
+  await selectGridRow(
+    page,
+    "Schedule records",
+    "51515151-6161-4717-8abc-defdefdefdef",
+  );
+  await grid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  const updateTargets = page.getByRole("menuitem", {
+    name: "Update targets",
+    exact: true,
+  });
+  await expect(updateTargets).toBeEnabled();
+  await expect(updateTargets).toHaveAttribute(
+    "title",
+    /only fixed target IDs change/i,
+  );
+  await updateTargets.click();
+  await grid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  await expect(page.getByRole("menuitem", { name: "Edit" })).toBeDisabled();
+  await expect(
+    page.getByRole("menuitem", { name: "Review deletion" }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("menuitem", { name: "Update targets", exact: true }),
+  ).toBeDisabled();
+  await page.keyboard.press("Escape");
+
+  const prompt = page.getByRole("region", {
+    name: "Update schedule targets",
+  });
+  await expect(prompt).toContainText("2 VPSs");
+  await expect(prompt).toContainText("1 VPS");
+  await expect(prompt).toContainText(
+    "No other schedule setting changes",
+  );
+  await activate(prompt.getByRole("button", { name: "Update targets" }));
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const actions = (
+          window as unknown as {
+            __vpsmanTestRequests: {
+              scheduleActions: Array<{
+                body: Record<string, unknown>;
+                method: string;
+                path: string;
+              }>;
+            };
+          }
+        ).__vpsmanTestRequests.scheduleActions;
+        return actions.find((action) => action.path.endsWith("/targets")) ?? null;
+      }),
+    )
+    .not.toBeNull();
+  const targetUpdate = await page.evaluate(() => {
+    const actions = (
+      window as unknown as {
+        __vpsmanTestRequests: {
+          scheduleActions: Array<{
+            body: Record<string, unknown>;
+            method: string;
+            path: string;
+          }>;
+        };
+      }
+    ).__vpsmanTestRequests.scheduleActions;
+    return actions.find((action) => action.path.endsWith("/targets"));
+  });
+  expect(targetUpdate).toMatchObject({
+    method: "POST",
+    path: "/api/v1/schedules/51515151-6161-4717-8abc-defdefdefdef/targets",
+    body: {
+      confirmed: true,
+      selector_expression: "id:agent-sfo-01 || provider:alpha",
+      target_client_ids: ["agent-sfo-01"],
+      privilege_assertion: expect.objectContaining({
+        assertion_hex: expect.any(String),
+      }),
+    },
+  });
+  expect(targetUpdate?.body).not.toHaveProperty("cron_expr");
+  expect(targetUpdate?.body).not.toHaveProperty("name");
+  expect(targetUpdate?.body).not.toHaveProperty("operation");
+
+  await expect(grid).toContainText("1 fixed VPS");
+  await grid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  await expect(
+    page.getByRole("menuitem", { name: "Update targets", exact: true }),
+  ).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await grid
+    .getByRole("row")
+    .filter({ hasText: "edge-health-hourly" })
+    .first()
+    .click({ button: "right" });
+  await expect(
+    page.getByRole("menuitem", { name: "Update targets", exact: true }),
+  ).toBeDisabled();
+});
+
+test(
+  "bulk-updates each selected schedule from its own saved selector",
+  { tag: "@bulk-schedule-targets" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "bulk selection uses the shared table toolbar covered on desktop",
+    );
+
+    await page.goto("/");
+    await unlockPrivilegeFor(page, "Automation", "Schedules");
+    const grid = page.getByLabel("Schedule records data grid");
+    for (const scheduleId of [
+      "51515151-6161-4717-8abc-defdefdefdef",
+      "52525252-6161-4717-8abc-defdefdefdef",
+    ]) {
+      await selectGridRow(page, "Schedule records", scheduleId);
+    }
+    await grid
+      .locator(".gridToolbarActions")
+      .getByRole("button", { name: "Actions", exact: true })
+      .click();
+    const updateTargets = page.getByRole("menuitem", {
+      name: "Update targets",
+      exact: true,
+    });
+    await expect(updateTargets).toBeEnabled();
+    await expect(updateTargets).toHaveAttribute(
+      "title",
+      /Update 2 of 2 selected schedules/,
+    );
+    await updateTargets.click();
+
+    const prompt = page.getByRole("region", {
+      name: "Update schedule targets",
+    });
+    await expect(prompt).toContainText("Selected schedules");
+    await expect(prompt).toContainText("Changed snapshots");
+    await expect(prompt).toContainText("edge-health-hourly");
+    await expect(prompt).toContainText("us-capacity-hourly");
+    await expect(prompt).toContainText("Saved fixed target IDs");
+    await expect(prompt).toContainText("Added:");
+    await expect(prompt).toContainText("Removed:");
+    await expect(prompt).toContainText("core-fra-02 (agent-fra-02)");
+    await expect(prompt.locator(".configurationReviewList")).toHaveCSS(
+      "overflow-y",
+      "auto",
+    );
+    await activate(prompt.getByRole("button", { name: "Update targets" }));
+
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const actions = (
+            window as unknown as {
+              __vpsmanTestRequests: {
+                scheduleActions: Array<{ path: string }>;
+              };
+            }
+          ).__vpsmanTestRequests.scheduleActions;
+          return actions.filter((action) => action.path.endsWith("/targets"))
+            .length;
+        }),
+      )
+      .toBe(2);
+    const updates = await page.evaluate(() => {
+      const actions = (
+        window as unknown as {
+          __vpsmanTestRequests: {
+            scheduleActions: Array<{
+              body: Record<string, unknown>;
+              path: string;
+            }>;
+          };
+        }
+      ).__vpsmanTestRequests.scheduleActions;
+      return actions.filter((action) => action.path.endsWith("/targets"));
+    });
+    expect(updates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "/api/v1/schedules/51515151-6161-4717-8abc-defdefdefdef/targets",
+          body: expect.objectContaining({
+            selector_expression: "id:agent-sfo-01 || provider:alpha",
+            target_client_ids: ["agent-sfo-01"],
+          }),
+        }),
+        expect.objectContaining({
+          path: "/api/v1/schedules/52525252-6161-4717-8abc-defdefdefdef/targets",
+          body: expect.objectContaining({
+            selector_expression: "country:US",
+            target_client_ids: expect.arrayContaining([
+              "agent-sfo-01",
+              "agent-nyc-03",
+            ]),
+          }),
+        }),
+      ]),
+    );
+    for (const update of updates) {
+      expect(update.body).not.toHaveProperty("cron_expr");
+      expect(update.body).not.toHaveProperty("name");
+      expect(update.body).not.toHaveProperty("operation");
+    }
+  },
+);
+
+test(
+  "edit and save re-resolves schedule targets and ignores a late older review",
+  { tag: "@bulk-resolve-delay" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "the schedule composer logic is shared across responsive layouts",
+    );
+
+    await page.goto("/");
+    await unlockPrivilegeFor(page, "Automation", "Schedules");
+    await selectGridRow(
+      page,
+      "Schedule records",
+      "51515151-6161-4717-8abc-defdefdefdef",
+    );
+    await runGridAction(page, "Schedule records", "Edit");
+
+    const selector = page.getByRole("combobox", {
+      name: "Schedule target expression",
+    });
+    const reviewUpdate = page.getByRole("button", {
+      name: "Review update",
+      exact: true,
+    });
+    await selector.fill("country:DE");
+    await activate(reviewUpdate);
+    await selector.fill("country:US");
+    await page.waitForTimeout(500);
+    await expect(
+      page.getByRole("region", { name: "Confirm schedule update" }),
+    ).toHaveCount(0);
+
+    await activate(reviewUpdate);
+    const prompt = page.getByRole("region", {
+      name: "Confirm schedule update",
+    });
+    await expect(prompt).toContainText("country:US");
+    await expect(prompt).toContainText("agent-sfo-01");
+    await expect(prompt).toContainText("agent-nyc-03");
+    await activate(prompt.getByRole("button", { name: "Update schedule" }));
+
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const actions = (
+            window as unknown as {
+              __vpsmanTestRequests: {
+                scheduleActions: Array<{
+                  body: Record<string, unknown>;
+                  method: string;
+                  path: string;
+                }>;
+              };
+            }
+          ).__vpsmanTestRequests.scheduleActions;
+          return actions.find((action) => action.method === "PUT") ?? null;
+        }),
+      )
+      .not.toBeNull();
+    const saved = await page.evaluate(() => {
+      const actions = (
+        window as unknown as {
+          __vpsmanTestRequests: {
+            scheduleActions: Array<{
+              body: Record<string, unknown>;
+              method: string;
+            }>;
+          };
+        }
+      ).__vpsmanTestRequests.scheduleActions;
+      return actions.find((action) => action.method === "PUT");
+    });
+    expect(saved?.body).toMatchObject({
+      selector_expression: "country:US",
+      target_client_ids: expect.arrayContaining([
+        "agent-sfo-01",
+        "agent-nyc-03",
+      ]),
+    });
+    expect(saved?.body.target_client_ids).toHaveLength(2);
+
+    const grid = page.getByLabel("Schedule records data grid");
+    await expect(grid).toContainText("2 fixed VPSs");
+    await grid
+      .locator(".gridToolbarActions")
+      .getByRole("button", { name: "Actions", exact: true })
+      .click();
+    await expect(
+      page.getByRole("menuitem", { name: "Update targets", exact: true }),
+    ).toBeDisabled();
+  },
+);
+
+test(
+  "ignores a late failed schedule review after the draft changes",
+  { tag: ["@bulk-resolve-delay", "@bulk-resolve-failure"] },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "the schedule composer logic is shared across responsive layouts",
+    );
+
+    await page.goto("/");
+    await unlockPrivilegeFor(page, "Automation", "Schedules");
+    await selectGridRow(
+      page,
+      "Schedule records",
+      "51515151-6161-4717-8abc-defdefdefdef",
+    );
+    await runGridAction(page, "Schedule records", "Edit");
+
+    const selector = page.getByRole("combobox", {
+      name: "Schedule target expression",
+    });
+    const reviewUpdate = page.getByRole("button", {
+      name: "Review update",
+      exact: true,
+    });
+    await selector.fill("country:DE");
+    await activate(reviewUpdate);
+    await selector.fill("country:US");
+    await page.waitForTimeout(500);
+
+    await expect(
+      page.getByRole("region", { name: "Confirm schedule update" }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByText("Target inventory could not be read", { exact: true }),
+    ).toHaveCount(0);
+    await expect(reviewUpdate).toBeEnabled();
+  },
+);
 
 test("accepts server-valid leap-day, named, and extended cadences without treating the short preview as validation", async ({
   page,
@@ -2481,30 +3109,30 @@ test("accepts server-valid leap-day, named, and extended cadences without treati
 test("discloses the exact schedule fetch cap", async ({ page }) => {
   await installConsoleApiMock(page, {
     schedulesOverride: Array.from({ length: 1000 }, (_, index) => ({
-        cadence_error: null,
-        catch_up_limit: 1,
-        catch_up_policy: "skip_missed",
-        command_type: "shell_argv",
-        created_at: "2026-01-01T00:00:00Z",
-        cron_expr: "0 * * * *",
-        deferred_until: null,
-        deleted_at: null,
-        enabled: false,
-        failure_count: 0,
-        id: `schedule-cap-${String(index).padStart(4, "0")}`,
-        last_error: null,
-        last_run_at: null,
-        max_failures: 3,
-        name: `bounded schedule ${index}`,
-        next_run_at: "",
-        next_runs: [],
-        operation: { argv: ["uptime"], pty: false, type: "shell" },
-        retry_delay_secs: 300,
-        selector_expression: "",
-        target_client_ids: [],
-        timezone: "UTC",
-        updated_at: "2026-01-01T00:00:00Z",
-      })),
+      cadence_error: null,
+      catch_up_limit: 1,
+      catch_up_policy: "skip_missed",
+      command_type: "shell_argv",
+      created_at: "2026-01-01T00:00:00Z",
+      cron_expr: "0 * * * *",
+      deferred_until: null,
+      deleted_at: null,
+      enabled: false,
+      failure_count: 0,
+      id: `schedule-cap-${String(index).padStart(4, "0")}`,
+      last_error: null,
+      last_run_at: null,
+      max_failures: 3,
+      name: `bounded schedule ${index}`,
+      next_run_at: "",
+      next_runs: [],
+      operation: { argv: ["uptime"], pty: false, type: "shell" },
+      retry_delay_secs: 300,
+      selector_expression: "",
+      target_client_ids: [],
+      timezone: "UTC",
+      updated_at: "2026-01-01T00:00:00Z",
+    })),
   });
 
   await page.goto("/");
@@ -2515,7 +3143,6 @@ test("discloses the exact schedule fetch cap", async ({ page }) => {
   await expect(page.getByLabel("Schedule records data grid")).toContainText(
     "1000 loaded; more may exist",
   );
-
 });
 
 test("discloses the exact audit fetch cap", async ({ page }) => {
@@ -2532,9 +3159,7 @@ test("discloses the exact audit fetch cap", async ({ page }) => {
   });
   await page.goto("/");
   await openConsoleSubpage(page, "Audit", "Events");
-  await expect(page.getByLabel("Audit event summary")).toContainText(
-    "≥1000",
-  );
+  await expect(page.getByLabel("Audit event summary")).toContainText("≥1000");
   await expect(page.getByLabel("Audit event summary")).toContainText(
     "All loaded events; more may exist",
   );
@@ -2592,394 +3217,540 @@ test("packs dense metric rows by label length", async ({ page }, testInfo) => {
   expect(shortest / longest).toBeLessThan(0.6);
 });
 
-test("manages template assignments from automation source templates", async ({
+test("reviews one authoritative configuration target union and applies its frozen VPS list", async ({
   page,
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "dense template management is covered in the desktop console layout",
+    "the dense configuration source registry is covered on desktop",
   );
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Automation", "Source templates");
   await unlockPrivilegeFromTop(page);
-  await openConsoleSubpage(page, "Automation", "Source templates");
+  await openConsoleSubpage(page, "Config", "Sources");
 
-  const panel = page.locator(".sourceTemplatePanel");
-  const sourceStatusSection = panel.locator(".sourceStatusSection");
-  const activeSourcesSearch = panel.getByRole("combobox", {
-    name: "Active sources search",
-  });
-  await expect(sourceStatusSection.locator("summary")).toContainText(
-    "Active source status",
-  );
-  await expect(sourceStatusSection.locator("summary")).toContainText(
-    "need review",
-  );
-  await expect(activeSourcesSearch).toBeHidden();
-  await activate(sourceStatusSection.locator("summary"));
-  const activeSourcesGrid = panel.getByLabel("Active sources data grid");
-  const activeSourceRows = activeSourcesGrid.locator(".gridBody .gridRow");
-  await expect(activeSourcesGrid).toBeVisible();
-  await expect(activeSourcesSearch).toBeVisible();
-  await expect(activeSourcesGrid.locator(".gridCounts")).not.toContainText(
-    "selected",
-  );
+  const panel = page.locator(".configurationSourcesPanel");
   await expect(
-    activeSourcesGrid.locator('.gridHeaderGroup input[type="checkbox"]'),
-  ).toHaveCount(0);
-  await activeSourcesSearch.fill("not-a-real-source");
-  await expect(
-    activeSourcesGrid.getByText("No matching sources"),
+    panel.getByRole("heading", { name: "Configuration sources" }),
   ).toBeVisible();
-  await expect(panel.getByText(/No selected source records/)).toHaveCount(0);
-  await activeSourcesSearch.fill("");
-  await expect(panel.getByText(/\d+ of \d+ sources/)).toBeVisible();
-  await expect(panel.getByText(/1 \/ \d+/).first()).toBeVisible();
-  await expect(
-    activeSourceRows.filter({ hasText: "shared:vnstat-json" }),
-  ).toBeVisible();
-  await expect(panel.locator(".sourceStatusSection")).toContainText(
-    "shared:vnstat-json",
+  await expect(panel.locator(".sectionHeader").first()).toContainText(
+    "3 VPSs · 1 setting needs attention · 1 setting unconfigured",
   );
+  const effectiveGrid = panel.getByLabel("Effective configuration data grid");
   await expect(
-    panel
-      .locator(".sourceStatusSection")
-      .getByText("no server store, 2 artifacts"),
-  ).toBeVisible();
-  await expect(panel.locator(".sourceStatusSection")).toContainText(
-    "Source selected; server storage not configured",
-  );
-  await expect(panel.locator(".sourceStatusSection")).not.toContainText(
-    "selected_no_store",
-  );
-  await expect(
-    activeSourceRows
-      .filter({ hasText: "Update artifact source" })
-      .filter({ hasText: "Ready" }),
-  ).toBeVisible();
-  await activeSourcesSearch.fill("vnstat");
-  await expect(
-    activeSourceRows.filter({ hasText: "shared:vnstat-json" }),
-  ).toBeVisible();
-  await activeSourcesSearch.fill("");
+    effectiveGrid.locator(".gridBody .gridRow").filter({
+      hasText: "Edge vnStat",
+    }),
+  ).toContainText("Explicit override");
+  await effectiveGrid
+    .getByLabel("Effective configuration page size")
+    .selectOption("25");
+  await expect(effectiveGrid).toContainText("Not Observed");
 
-  const templatePanel = page.locator(".sourceTemplatePanel");
-  const templateRegistrySearch = templatePanel.getByRole("combobox", {
-    name: "Template registry search",
+  await activate(panel.getByRole("button", { name: "Change configuration" }));
+  const drawer = page.getByRole("complementary", {
+    name: "Change effective configuration",
   });
-  await expect(
-    templatePanel
-      .locator(".sectionHeader")
-      .getByRole("heading", { name: "Source templates" }),
-  ).toBeVisible();
-  const templateRegistryGrid = templatePanel.getByLabel(
-    "Template registry data grid",
+  await drawer
+    .getByLabel("Configuration behavior")
+    .selectOption("tunnel_traffic");
+  await drawer
+    .getByLabel("Configuration preset")
+    .selectOption("11111111-1111-4111-8111-111111111111");
+  await chooseVpsBySearch(
+    drawer,
+    "Add configuration target VPS",
+    "edge-sfo",
+    /edge-sfo-01/,
   );
-  const templateRows = templateRegistryGrid.locator(".gridBody .gridRow");
-  await expect(templateRegistryGrid).toBeVisible();
-  await expect(templateRegistrySearch).toBeVisible();
-  await expect(templateRegistryGrid.locator(".gridCounts")).toContainText(
-    "0 selected",
+  await expect(drawer.getByLabel("Configuration target preview")).toContainText(
+    "edge-sfo-01",
   );
+  await drawer.getByText("Add targets by selector", { exact: true }).click();
+  await drawer
+    .getByLabel("Configuration target selector")
+    .fill("id:agent-sfo-01 || country:DE");
+  await activate(drawer.getByRole("button", { name: "Review change" }));
+
+  const prompt = page.locator(".confirmationPrompt").last();
+  await expect(prompt).toContainText("Review effective configuration change");
+  await expect(prompt).toContainText("edge-sfo-01");
+  await expect(prompt).toContainText("agent-sfo-01");
+  await expect(prompt).toContainText("core-fra-02");
+  await expect(prompt).toContainText("agent-fra-02");
+  await expect(prompt.locator(".configurationReviewList")).toHaveCount(3);
   await expect(
-    templateRegistryGrid.locator('.gridHeaderGroup input[type="checkbox"]'),
-  ).toHaveCount(1);
-  await expect(
-    templateRegistryGrid.getByRole("button", { name: "New template" }),
-  ).toBeVisible();
-  await expect(
-    templateRegistryGrid.getByRole("button", { name: "Action" }),
-  ).toBeDisabled();
-  await expect(
-    templatePanel.getByLabel("Template assignment target expression"),
-  ).toHaveCount(0);
-  await expect(
-    templatePanel.getByLabel("Template definition JSON"),
-  ).toHaveCount(0);
-  await expect(templatePanel.getByText("Assign selected template")).toHaveCount(
-    0,
+    prompt.locator(".configurationReviewList").first(),
+  ).toHaveCSS("white-space", "normal");
+  await expect(prompt).toContainText(
+    "Interface traffic counters → Edge vnStat",
   );
-  await expect(templatePanel.getByText("Render selected config")).toHaveCount(
-    0,
+  await expect(prompt).toContainText("Unchanged targets");
+  await expect(prompt).toContainText(
+    "Edge vnStat already selected; included for runtime resync",
   );
-  await expect(templatePanel.getByText(/selected templates/)).toHaveCount(0);
-  await expect(
-    templatePanel.getByText(/selected template records/),
-  ).toHaveCount(0);
-  await expect(
-    templateRows.filter({ hasText: "builtin:interface_counters" }),
-  ).toBeVisible();
-  await expect(
-    templateRows.filter({ hasText: "shared:vnstat-json" }),
-  ).toBeVisible();
-  const newTemplateButton = templateRegistryGrid.getByRole("button", {
-    name: "New template",
+  await confirmVisiblePrompt(page, "Save selection");
+
+  const requests = await page.evaluate(() => {
+    return (
+      window as unknown as {
+        __vpsmanTestRequests: {
+          configurationSourceOverrides: Array<{
+            body: Record<string, unknown>;
+            pathname: string;
+          }>;
+        };
+      }
+    ).__vpsmanTestRequests.configurationSourceOverrides;
   });
-  await newTemplateButton.focus();
-  await activate(newTemplateButton);
-  await expect(
-    templatePanel.getByLabel("New source template", { exact: true }),
-  ).toBeVisible();
-  await expect(templatePanel.getByLabel("Template domain")).toBeFocused();
-  await expect(
-    templatePanel.getByLabel("Template definition JSON"),
-  ).toBeVisible();
-  await expect(
-    templatePanel.getByLabel("Template definition JSON"),
-  ).toHaveValue('{\n  "source": "interface_counters"\n}');
-  await expect(templatePanel.getByLabel("Template name")).toHaveAttribute(
+  expect(requests[0]).toMatchObject({
+    pathname: "/api/v1/configuration-source-overrides/preview",
+    body: {
+      action: "set",
+      behavior: "tunnel_traffic",
+      preset_id: "11111111-1111-4111-8111-111111111111",
+      selector_expression: "id:agent-sfo-01 || country:DE",
+      target_client_ids: ["agent-sfo-01"],
+    },
+  });
+  expect(requests.at(-1)).toMatchObject({
+    pathname: "/api/v1/configuration-source-overrides/apply",
+    body: {
+      preview_hash: "8".repeat(64),
+      selector_expression: "id:agent-sfo-01 || country:DE",
+      target_client_ids: ["agent-fra-02", "agent-sfo-01"],
+    },
+  });
+  expectPrivilegeAssertion(requests.at(-1)?.body);
+  await expect(panel).toContainText(
+    "Selection saved and runtime sync queued for 2 VPSs",
+  );
+});
+
+test("rejects a same-preset no-op without inventing a configuration change", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the dense configuration source registry is covered on desktop",
+  );
+
+  await page.goto("/");
+  await unlockPrivilegeFromTop(page);
+  await openConsoleSubpage(page, "Config", "Sources");
+
+  const panel = page.locator(".configurationSourcesPanel");
+  await activate(panel.getByRole("button", { name: "Change configuration" }));
+  const unchangedDrawer = page.getByRole("complementary", {
+    name: "Change effective configuration",
+  });
+  await unchangedDrawer
+    .getByLabel("Configuration behavior")
+    .selectOption("tunnel_traffic");
+  await unchangedDrawer
+    .getByLabel("Configuration preset")
+    .selectOption("11111111-1111-4111-8111-111111111111");
+  await chooseVpsBySearch(
+    unchangedDrawer,
+    "Add configuration target VPS",
+    "edge-sfo",
+    /edge-sfo-01/,
+  );
+  await activate(
+    unchangedDrawer.getByRole("button", { name: "Review change" }),
+  );
+  await expect(unchangedDrawer.getByRole("alert")).toContainText(
+    "Every reviewed VPS already has this configuration selection; nothing would change.",
+  );
+  await expect(page.locator(".confirmationPrompt")).toHaveCount(0);
+});
+
+test("keeps the primary one-VPS preset and inheritance path direct and explicit", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await unlockPrivilegeFromTop(page);
+  await openConsoleSubpage(page, "Config", "Sources");
+
+  const panel = page.locator(".configurationSourcesPanel");
+  await activate(panel.getByRole("button", { name: "Change configuration" }));
+  let drawer = page.getByRole("complementary", {
+    name: "Change effective configuration",
+  });
+  await drawer
+    .getByLabel("Configuration behavior")
+    .selectOption("tunnel_traffic");
+  await drawer
+    .getByLabel("Configuration preset")
+    .selectOption("11111111-1111-4111-8111-111111111111");
+
+  const emptyReview = drawer.getByRole("button", { name: "Review change" });
+  await expect(emptyReview).toBeDisabled();
+  await expect(emptyReview).toHaveAttribute(
     "title",
-    "shared:runtime-traffic-accounting-source",
+    "Choose at least one VPS directly or with a matching selector.",
   );
-  await templatePanel
-    .getByLabel("Template name")
-    .fill("shared:operator-sim-traffic");
-  await activate(templatePanel.getByRole("button", { name: "Save template" }));
-  await expect(
-    templatePanel
-      .getByLabel("New source template", { exact: true })
-      .locator(".sourceTemplateActionFeedback.actionFeedbackSuccess"),
-  ).toContainText("Created source template shared:operator-sim-traffic");
-  await activate(
-    templatePanel.getByRole("button", { name: "Close New source template" }),
-  );
-  await expect(
-    templatePanel.getByLabel("New source template", { exact: true }),
-  ).toHaveCount(0);
-  await expect(newTemplateButton).toBeFocused();
 
-  await activate(
-    templateRows.filter({ hasText: "shared:vnstat-json" }).first(),
+  await chooseVpsBySearch(
+    drawer,
+    "Add configuration target VPS",
+    "core-fra",
+    /core-fra-02/,
   );
   await activate(
-    templateRegistryGrid
-      .getByLabel("Template workflow actions for shared:vnstat-json")
-      .getByRole("button", { name: "Assign" }),
+    drawer.getByRole("button", { name: "Inspect current effective config" }),
   );
-  await expect(
-    templatePanel.getByLabel("shared:vnstat-json", { exact: true }),
-  ).toBeVisible();
-  await expect(
-    templatePanel.getByRole("tab", { name: "Assign" }),
-  ).toHaveAttribute("aria-selected", "true");
-  await expect(
-    templatePanel.getByLabel("Template assignment target expression"),
-  ).toBeVisible();
-  await expect(templatePanel.getByText("Add a selector")).toBeVisible();
-  await expect(templatePanel.getByText("3/3 matching VPSs")).toHaveCount(0);
-  await expect(
-    templatePanel.getByLabel("Template definition JSON"),
-  ).toHaveCount(0);
-  await templateRegistrySearch.fill("runtime_traffic_accounting_source");
-  await expect(
-    templateRows.filter({ hasText: "builtin:interface_counters" }),
-  ).toBeVisible();
-  await templateRegistrySearch.fill("");
-  await templatePanel
-    .getByLabel("Assignment domain")
-    .selectOption("runtime_traffic_accounting_source");
-  await templatePanel
-    .getByLabel("Template assignment template")
-    .selectOption("11111111-1111-4111-8111-111111111111");
-  await templatePanel
-    .getByRole("combobox", {
-      name: "Template assignment target expression",
-    })
-    .fill("(provider:alpha && country:US) || id:agent-fra-02");
-  await expect(templatePanel.getByText("2/3 matching VPSs")).toBeVisible();
-  await activate(
-    templatePanel.getByRole("button", { name: "Review assignment" }),
+  await expect(drawer.getByLabel("Effective agent config TOML")).toBeVisible();
+  await expect(drawer).toContainText("Current server-rendered configuration");
+  await expect(drawer).toContainText(
+    /core-fra-02(?: \(ra02\))? · agent-fra-02/,
   );
-  await expect(
-    templatePanel.getByText("Confirm template assignment"),
-  ).toBeVisible();
-  const assignmentPrompt = templatePanel.getByLabel(
-    "Confirm template assignment",
-  );
-  await expect(assignmentPrompt).toContainText(
-    "Runtime Traffic Accounting Source",
-  );
-  await expect(assignmentPrompt).not.toContainText(
-    "runtime_traffic_accounting_source",
-  );
-  await confirmVisiblePrompt(page, "Apply template assignment");
 
-  const request = await page.evaluate(() => {
-    const requests = (
+  await activate(drawer.getByRole("button", { name: "Review change" }));
+  let prompt = page.locator(".confirmationPrompt").last();
+  await expect(prompt).toContainText("Direct VPS choices only");
+  await expect(prompt).toContainText("core-fra-02");
+  await expect(prompt).not.toContainText("edge-sfo-01");
+  await confirmVisiblePrompt(page, "Save selection");
+
+  await activate(panel.getByRole("button", { name: "Change configuration" }));
+  drawer = page.getByRole("complementary", {
+    name: "Change effective configuration",
+  });
+  await drawer
+    .getByLabel("Configuration behavior")
+    .selectOption("tunnel_traffic");
+  await chooseVpsBySearch(
+    drawer,
+    "Add configuration target VPS",
+    "core-fra",
+    /core-fra-02/,
+  );
+  await activate(
+    drawer.getByRole("button", {
+      name: "Review reset to system default",
+    }),
+  );
+  prompt = page.locator(".confirmationPrompt").last();
+  await expect(prompt).toContainText(
+    "Edge vnStat → Interface traffic counters",
+  );
+  await confirmVisiblePrompt(page, "Reset to system default");
+
+  const requests = await page.evaluate(() => {
+    return (
       window as unknown as {
-        __vpsmanTestRequests: { sourceTemplateAssignments: unknown[] };
+        __vpsmanTestRequests: {
+          configurationSourceOverrides: Array<{
+            body: Record<string, unknown>;
+            pathname: string;
+          }>;
+        };
       }
-    ).__vpsmanTestRequests;
-    return requests.sourceTemplateAssignments.at(-1);
+    ).__vpsmanTestRequests.configurationSourceOverrides;
   });
-  expect(request).toMatchObject({
-    confirmed: true,
-    domain: "runtime_traffic_accounting_source",
-    template_id: "11111111-1111-4111-8111-111111111111",
-    selector_expression: "(provider:alpha && country:US) || id:agent-fra-02",
-    target_client_ids: ["agent-fra-02", "agent-sfo-01"],
+  expect(requests.at(-1)).toMatchObject({
+    pathname: "/api/v1/configuration-source-overrides/apply",
+    body: {
+      action: "reset",
+      behavior: "tunnel_traffic",
+      selector_expression: "",
+      target_client_ids: ["agent-fra-02"],
+    },
   });
-  await expect(
-    templatePanel.locator("> .sectionHeader .actionFeedback"),
-  ).toHaveCount(0);
-  await expect(
-    templatePanel.locator(
-      ".actionDrawer .sourceTemplateActionFeedback.actionFeedbackProgress",
-    ),
-  ).toContainText(
-    "Template assignment saved for 2 VPSs; runtime apply queued for 2 endpoints",
-  );
-  await expect(
-    templatePanel.getByLabel("shared:vnstat-json", { exact: true }),
-  ).toBeInViewport();
-  await activate(templatePanel.getByRole("tab", { name: "Test / update" }));
-  await expect(templatePanel.getByLabel("Clone template name")).toHaveValue(
-    "shared:vnstat-json (cloned)",
-  );
-  await activate(templatePanel.getByRole("button", { name: "Clone" }));
-  await expect(
-    templatePanel.locator(
-      ".actionDrawer .sourceTemplateActionFeedback.actionFeedbackSuccess",
-    ),
-  ).toContainText("Cloned template as shared:vnstat-json (cloned)");
-  await templatePanel
-    .getByLabel("Lifecycle template description")
-    .fill("Provider image with vnstat installed, reviewed");
-  const diffButton = templatePanel.getByRole("button", { name: "Diff" });
-  await expect(diffButton).toBeEnabled();
-  await activate(diffButton);
-  await expect(
-    templatePanel.locator(
-      ".actionDrawer .sourceTemplateActionFeedback.actionFeedbackSuccess",
-    ),
-  ).toContainText("Description changed; 1 assigned VPS affected");
-  await expect(templatePanel.locator(".lifecyclePreview")).toContainText(
-    "description changed · no definition changes",
-  );
 });
 
-test("keeps external network adapters bound only through tunnel plans", async ({
+test("preserves multiline preset drafts and rejects ambiguous environment rows", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await openConsoleSubpage(page, "Config", "Sources");
+
+  const panel = page.locator(".configurationSourcesPanel");
+  await activate(panel.getByRole("tab", { name: "Configuration presets" }));
+  await activate(panel.getByRole("button", { name: "New preset" }));
+  const drawer = page.getByRole("complementary", {
+    name: "New configuration preset",
+  });
+  await drawer.getByLabel("Preset behavior").selectOption("command_execution");
+  await drawer.getByLabel("Preset name").fill("Strict command execution");
+
+  const argv = drawer.getByLabel("Shell command arguments");
+  await argv.focus();
+  await page.keyboard.press("Control+End");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("--noprofile");
+  await expect(argv).toHaveValue("/bin/sh\n-lc\n--noprofile");
+
+  const keep = drawer.getByLabel("Environment names to keep");
+  await keep.type("TERM");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("LANG");
+  await expect(keep).toHaveValue("TERM\nLANG");
+
+  const values = drawer.getByLabel("Command environment values");
+  await values.type("FOO=one");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("FOO=two");
+  await expect(values).toHaveValue("FOO=one\nFOO=two");
+  await activate(drawer.getByRole("button", { name: "Create preset" }));
+  await expect(drawer.locator(".actionFeedbackDanger")).toContainText(
+    "Environment name FOO is repeated on line 2",
+  );
+
+  await values.fill("FOO=one\nBROKEN");
+  await activate(drawer.getByRole("button", { name: "Create preset" }));
+  await expect(drawer.locator(".actionFeedbackDanger")).toContainText(
+    "Environment values line 2 must use KEY=value",
+  );
+
+  await values.fill("FOO=one\nBAR=two");
+  await activate(drawer.getByRole("button", { name: "Create preset" }));
+  await expect(drawer).toBeHidden();
+
+  const mutation = await page.evaluate(() => {
+    return (
+      window as unknown as {
+        __vpsmanTestRequests: {
+          configurationPresetMutations: Array<{
+            action: string;
+            body: Record<string, unknown>;
+          }>;
+        };
+      }
+    ).__vpsmanTestRequests.configurationPresetMutations.at(-1);
+  });
+  expect(mutation).toMatchObject({
+    action: "create",
+    body: {
+      definition: {
+        environment_keep: ["TERM", "LANG"],
+        environment_set: { BAR: "two", FOO: "one" },
+        shell_script_argv: ["/bin/sh", "-lc", "--noprofile"],
+      },
+    },
+  });
+});
+
+test("authors OSPF updater presets only with paired bounded commands", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await openConsoleSubpage(page, "Config", "Sources");
+
+  const panel = page.locator(".configurationSourcesPanel");
+  await activate(panel.getByRole("tab", { name: "Configuration presets" }));
+  await activate(panel.getByRole("button", { name: "New preset" }));
+  const drawer = page.getByRole("complementary", {
+    name: "New configuration preset",
+  });
+  await drawer
+    .getByLabel("Preset behavior")
+    .selectOption("ospf_update_command");
+  await drawer.getByLabel("Preset name").fill("FRR edge updater");
+  await drawer
+    .getByLabel("Read current OSPF cost arguments")
+    .fill("/usr/bin/vtysh\n-c\nshow ip ospf interface");
+
+  await activate(drawer.getByRole("button", { name: "Create preset" }));
+  await expect(drawer.locator(".actionFeedbackDanger")).toContainText(
+    "Update OSPF cost arguments require an executable",
+  );
+
+  await drawer
+    .getByLabel("Update OSPF cost arguments")
+    .fill("/usr/bin/vtysh\n-c\nconfigure terminal");
+  await activate(drawer.getByRole("button", { name: "Create preset" }));
+  await expect(drawer).toBeHidden();
+
+  const mutation = await page.evaluate(() => {
+    return (
+      window as unknown as {
+        __vpsmanTestRequests: {
+          configurationPresetMutations: Array<{
+            action: string;
+            body: Record<string, unknown>;
+          }>;
+        };
+      }
+    ).__vpsmanTestRequests.configurationPresetMutations.at(-1);
+  });
+  expect(mutation).toMatchObject({
+    action: "create",
+    body: {
+      behavior: "ospf_update_command",
+      name: "FRR edge updater",
+      definition: {
+        contract_version: 1,
+        status_command: {
+          argv: ["/usr/bin/vtysh", "-c", "show ip ospf interface"],
+          max_output_bytes: 16384,
+          max_timeout_secs: 5,
+        },
+        update_command: {
+          argv: ["/usr/bin/vtysh", "-c", "configure terminal"],
+          max_output_bytes: 16384,
+          max_timeout_secs: 5,
+        },
+      },
+    },
+  });
+});
+
+test(
+  "keeps a failed configuration apply diagnosis inside its confirmation",
+  { tag: "@configuration-source-apply-failure" },
+  async ({ page }) => {
+    await page.goto("/");
+    await unlockPrivilegeFromTop(page);
+    await openConsoleSubpage(page, "Config", "Sources");
+
+    const panel = page.locator(".configurationSourcesPanel");
+    await activate(panel.getByRole("button", { name: "Change configuration" }));
+    const drawer = page.getByRole("complementary", {
+      name: "Change effective configuration",
+    });
+    await drawer
+      .getByLabel("Configuration behavior")
+      .selectOption("tunnel_traffic");
+    await drawer
+      .getByLabel("Configuration preset")
+      .selectOption("11111111-1111-4111-8111-111111111111");
+    await chooseVpsBySearch(
+      drawer,
+      "Add configuration target VPS",
+      "core-fra",
+      /core-fra-02/,
+    );
+    await activate(drawer.getByRole("button", { name: "Review change" }));
+    await confirmVisiblePrompt(page, "Save selection");
+
+    const prompt = page.locator(".confirmationPrompt").last();
+    await expect(prompt).toBeVisible();
+    await expect(prompt.locator(".confirmationPromptError")).toContainText(
+      "Review the current action snapshot",
+    );
+  },
+);
+
+test(
+  "uses warning feedback when a saved preset selection does not fully queue",
+  { tag: "@configuration-source-sync-failure" },
+  async ({ page }) => {
+    await page.goto("/");
+    await unlockPrivilegeFromTop(page);
+    await openConsoleSubpage(page, "Config", "Sources");
+
+    const panel = page.locator(".configurationSourcesPanel");
+    await activate(panel.getByRole("button", { name: "Change configuration" }));
+    const drawer = page.getByRole("complementary", {
+      name: "Change effective configuration",
+    });
+    await drawer
+      .getByLabel("Configuration behavior")
+      .selectOption("tunnel_traffic");
+    await drawer
+      .getByLabel("Configuration preset")
+      .selectOption("11111111-1111-4111-8111-111111111111");
+    await chooseVpsBySearch(
+      drawer,
+      "Add configuration target VPS",
+      "core-fra",
+      /core-fra-02/,
+    );
+    await activate(drawer.getByRole("button", { name: "Review change" }));
+    await confirmVisiblePrompt(page, "Save selection");
+
+    await expect(panel.locator(".actionFeedbackWarning")).toContainText(
+      "Selection saved for 1 VPS; runtime sync needs attention on 1",
+    );
+    await expect(
+      panel.locator(".actionFeedbackSuccess", {
+        hasText: "runtime sync needs attention",
+      }),
+    ).toHaveCount(0);
+  },
+);
+
+test("authors adapter definitions with the exact alternative lifecycle contract", async ({
   page,
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "dense adapter lifecycle controls are covered in the desktop console",
+    "the dense tunnel-plan adapter registry is covered on desktop",
   );
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Automation", "Source templates");
+  await openConsoleSubpage(page, "Network", "Tunnel plans");
 
-  const panel = page.locator(".sourceTemplatePanel");
-  const registry = panel.getByLabel("Template registry data grid");
-  const adapterRow = registry
-    .locator(".gridBody .gridRow")
-    .filter({ hasText: "shared:tunnel-lifecycle-v1" })
-    .first();
-  await activate(adapterRow);
-
-  const rowActions = registry.getByLabel(
-    "Template workflow actions for shared:tunnel-lifecycle-v1",
-  );
-  await expect(rowActions.getByRole("button", { name: "Assign" })).toHaveCount(
-    0,
-  );
-  await expect(rowActions.getByRole("button", { name: "Render" })).toHaveCount(
-    0,
-  );
-  await activate(rowActions.getByRole("button", { name: "Test/update" }));
-
-  const drawer = panel.getByLabel("shared:tunnel-lifecycle-v1", {
-    exact: true,
-  });
-  await expect(drawer.getByRole("tab")).toHaveCount(1);
+  const registry = page.getByLabel("Network adapter definitions");
   await expect(
-    drawer.getByRole("tab", { name: "Test / update" }),
-  ).toHaveAttribute("aria-selected", "true");
-  await expect(drawer.getByText("Bound from tunnel plans")).toBeVisible();
-  await expect(drawer).toContainText("never ambient VPS configuration");
-  await activate(drawer.getByRole("button", { name: "Open tunnel plans" }));
-  await expect(page.getByText("vpsman / Network / Tunnel plans")).toBeVisible();
-});
-
-test("keeps source template assignment review while unlocking privilege inline", async ({
-  page,
-}, testInfo) => {
-  test.skip(
-    testInfo.project.name.includes("mobile"),
-    "dense template management is covered in the desktop console layout",
-  );
-
-  await page.goto("/");
-  await openConsoleSubpage(page, "Automation", "Source templates");
-
-  const templatePanel = page.locator(".sourceTemplatePanel");
-  const templateRows = templatePanel
-    .getByLabel("Template registry data grid")
-    .locator(".gridBody .gridRow");
+    registry.getByRole("heading", { name: "Adapter definitions" }),
+  ).toBeVisible();
+  await expect(registry).toContainText("SFO routing cost");
   await activate(
-    templateRows.filter({ hasText: "shared:vnstat-json" }).first(),
-  );
-  await activate(
-    templatePanel
-      .getByLabel("Template workflow actions for shared:vnstat-json")
-      .getByRole("button", { name: "Assign" }),
-  );
-  await templatePanel
-    .getByLabel("Assignment domain")
-    .selectOption("runtime_traffic_accounting_source");
-  await templatePanel
-    .getByLabel("Template assignment template")
-    .selectOption("11111111-1111-4111-8111-111111111111");
-  await templatePanel
-    .getByRole("combobox", {
-      name: "Template assignment target expression",
-    })
-    .fill("(provider:alpha && country:US) || id:agent-fra-02");
-  await activate(
-    templatePanel.getByRole("button", { name: "Review assignment" }),
+    registry.getByRole("button", { name: "Tunnel runtime adapter" }),
   );
 
-  const prompt = templatePanel.locator(".confirmationPrompt").last();
-  const applyButton = prompt.getByRole("button", {
-    name: "Apply template assignment",
+  const drawer = page.getByRole("complementary", {
+    name: "New tunnel runtime adapter",
   });
-  await expect(prompt).toContainText("Confirm template assignment");
-  await expect(prompt).toContainText("2 resolved and frozen");
-  await expect(applyButton).toBeDisabled();
-  await expect(prompt.locator(".privilegeManager")).toContainText(
-    "Local-only privilege material",
-  );
-
-  await prompt
-    .getByLabel("Source templates privilege secret")
-    .fill("local-super-password");
-  await prompt
-    .getByLabel("Source templates privilege salt")
-    .fill("00112233445566778899aabbccddeeff");
+  await expect(
+    drawer.getByLabel("Start adapter command", { exact: true }),
+  ).toHaveValue("");
+  await expect(drawer.getByLabel("Status adapter command")).toHaveValue("");
+  await drawer.getByLabel("Adapter definition name").fill("Custom lifecycle");
+  await drawer
+    .getByLabel("Status adapter command")
+    .fill("/opt/operator/tunnel-adapter\nstatus");
+  await drawer
+    .getByLabel("Restart adapter command")
+    .fill("/opt/operator/tunnel-adapter\nrestart");
+  await drawer
+    .getByLabel("Cleanup adapter command")
+    .fill("/opt/operator/tunnel-adapter\ncleanup");
   await activate(
-    prompt.getByRole("button", { name: "Unlock source template apply" }),
+    drawer.getByRole("button", { name: "Create adapter definition" }),
   );
-  await expect(applyButton).toBeEnabled();
-  await activate(applyButton);
 
   const request = await page.evaluate(() => {
-    const requests = (
+    return (
       window as unknown as {
-        __vpsmanTestRequests: { sourceTemplateAssignments: unknown[] };
+        __vpsmanTestRequests: {
+          networkAdapterMutations: Array<{
+            action: string;
+            body: Record<string, unknown>;
+          }>;
+        };
       }
-    ).__vpsmanTestRequests;
-    return requests.sourceTemplateAssignments.at(-1);
+    ).__vpsmanTestRequests.networkAdapterMutations.at(-1);
   });
   expect(request).toMatchObject({
-    confirmed: true,
-    domain: "runtime_traffic_accounting_source",
-    preview_hash: "8".repeat(64),
-    selector_expression: "(provider:alpha && country:US) || id:agent-fra-02",
-    target_client_ids: ["agent-fra-02", "agent-sfo-01"],
-    template_id: "11111111-1111-4111-8111-111111111111",
+    action: "create",
+    body: {
+      adapter_kind: "runtime_tunnel",
+      name: "Custom lifecycle",
+      definition: {
+        manager: "external_managed_adapter",
+        contract_version: 1,
+        status_command: {
+          argv: ["/opt/operator/tunnel-adapter", "status"],
+        },
+        restart_command: {
+          argv: ["/opt/operator/tunnel-adapter", "restart"],
+        },
+        cleanup_command: {
+          argv: ["/opt/operator/tunnel-adapter", "cleanup"],
+        },
+      },
+    },
   });
-  expectPrivilegeAssertion(request);
+  expect(
+    (request?.body.definition as Record<string, unknown>).startup_command,
+  ).toBeUndefined();
+  expect(
+    (request?.body.definition as Record<string, unknown>).stop_command,
+  ).toBeUndefined();
 });
 
 test("prefills registered agent update shortcuts into dispatch", async ({
@@ -3098,7 +3869,7 @@ test("renders patch generators and submits explicit runtime config patch modes",
   ).toHaveValue(
     /\[update\][\s\S]*unmanaged_enabled = false[\s\S]*version\.json/,
   );
-  await expect(bulk.getByText("1 VPS resolved")).toBeVisible();
+  await expect(bulk.getByText("1 VPS verified")).toBeVisible();
   await expect(bulk.getByLabel("Bulk patch change summary")).toContainText(
     "edge-sfo-01",
   );
@@ -3261,6 +4032,12 @@ test("creates a cron schedule from a command template with target preview", asyn
   await expect(
     page.getByText("2 VPSs in local preview; server resolves before save"),
   ).toBeVisible();
+  await expect(page.getByLabel("Schedule local VPS preview")).toContainText(
+    "edge-sfo-01",
+  );
+  await expect(page.getByLabel("Schedule local VPS preview")).toContainText(
+    "backup-nyc-03",
+  );
   await expect(
     page.getByText(/Every 15 minutes\. Times shown in browser timezone\./),
   ).toBeVisible();
@@ -3491,9 +4268,7 @@ test("registers VPS identities and revokes current keys from the access panel", 
   await expect(installCommand).toContainText(
     "VPSMAN_GATEWAY_ENDPOINTS='primary=gw.example.com:9443=10'",
   );
-  const gatewayKey = installCommand.getByLabel(
-    "Gateway server public key hex",
-  );
+  const gatewayKey = installCommand.getByLabel("Gateway server public key hex");
   await expect(gatewayKey).toHaveAttribute("aria-invalid", "false");
   await gatewayKey.fill("not-a-key");
   await expect(gatewayKey).toHaveAttribute("aria-invalid", "true");
@@ -3511,9 +4286,8 @@ test("registers VPS identities and revokes current keys from the access panel", 
   await expect(gatewayEndpoints).toHaveAttribute("aria-invalid", "true");
   await gatewayEndpoints.fill("primary=gw.example.com:not-a-port=10");
   await expect(gatewayEndpoints).toHaveAttribute("aria-invalid", "true");
-  const gatewayEndpointsErrorId = await gatewayEndpoints.getAttribute(
-    "aria-errormessage",
-  );
+  const gatewayEndpointsErrorId =
+    await gatewayEndpoints.getAttribute("aria-errormessage");
   expect(gatewayEndpointsErrorId).toBeTruthy();
   await expect(page.locator(`#${gatewayEndpointsErrorId}`)).toContainText(
     "numeric port from 1 to 65535",
@@ -3608,7 +4382,7 @@ test("registers VPS identities and revokes current keys from the access panel", 
   );
 
   await selectGridRow(page, "VPS identities", "agent-sfo-01");
-  await runGridAction(page, "VPS identities", "Revoke selected");
+  await runGridAction(page, "VPS identities", "Revoke");
   await expect(
     inspector.getByRole("heading", { name: "Revoke VPS key" }),
   ).toBeVisible();
@@ -3695,9 +4469,9 @@ test("shows access posture, MFA risk, identity lifecycle, and gateway readiness"
     has: page.getByRole("heading", { level: 2, name: "Privilege vault" }),
   });
   await expect(page.getByText("Admin MFA is off")).toBeVisible();
-  await expect(page.getByLabel(/super password/i)).toHaveCount(0);
+  await expect(page.getByLabel(/^super password$/i)).toHaveCount(0);
   await expect(page.getByLabel(/super salt/i)).toHaveCount(0);
-  await expect(page.getByLabel(/access privilege secret/i)).toBeVisible();
+  await expect(page.getByLabel(/access super password/i)).toBeVisible();
   await expect(page.getByLabel(/access privilege salt/i)).toBeVisible();
   await expect(page.getByLabel("Privilege vault state")).toContainText(
     "Locked",
@@ -3732,9 +4506,7 @@ test("shows access posture, MFA risk, identity lifecycle, and gateway readiness"
   await expect(
     page.getByRole("button", { name: "Set up TOTP" }),
   ).toBeDisabled();
-  await page
-    .getByLabel(/access privilege secret/i)
-    .fill("local-super-password");
+  await page.getByLabel(/access super password/i).fill("local-super-password");
   await page
     .getByLabel(/access privilege salt/i)
     .fill("00112233445566778899aabbccddeeff");
@@ -3863,9 +4635,7 @@ test("keeps access action feedback out of headings and durable labels", async ({
   await expect(
     privilegePanel.locator(".privilegeVaultNotice strong"),
   ).toHaveText("Local-only privilege material");
-  await page
-    .getByLabel(/access privilege secret/i)
-    .fill("local-super-password");
+  await page.getByLabel(/access super password/i).fill("local-super-password");
   await page.getByLabel(/access privilege salt/i).fill("not-hex");
   await activate(
     privilegePanel.getByRole("button", { name: "Unlock", exact: true }),
@@ -3911,7 +4681,7 @@ test("rotates an existing agent key through the access panel", async ({
   await activate(accessTabs.getByRole("button", { name: "VPS identities" }));
 
   await selectGridRow(page, "VPS identities", "agent-sfo-01");
-  await runGridAction(page, "VPS identities", "Rotate selected");
+  await runGridAction(page, "VPS identities", "Rotate");
 
   const inspector = page.locator(".accessInspector");
   await expect(
@@ -3923,7 +4693,12 @@ test("rotates an existing agent key through the access panel", async ({
   await expect(displayNameInput).toBeDisabled();
   await expect(tagsInput).toBeDisabled();
 
-  await inspector.getByLabel("Agent identity client ID").fill("agent-sfo-01");
+  await expect(
+    inspector.getByLabel("Agent identity client ID"),
+  ).toHaveAttribute("readonly");
+  await expect(
+    inspector.getByLabel("Agent identity client ID"),
+  ).toHaveValue("agent-sfo-01");
   await inspector
     .getByLabel("Agent identity public key hex")
     .fill("b".repeat(64));
@@ -4144,7 +4919,7 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   const commandSignals = evidence
     .getByLabel("Related command jobs")
     .locator(".status");
-  for (let index = 0; index < await commandSignals.count(); index += 1) {
+  for (let index = 0; index < (await commandSignals.count()); index += 1) {
     const signal = commandSignals.nth(index);
     await expect(signal).toHaveAttribute("title", await signal.innerText());
   }
@@ -4155,10 +4930,17 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   await expect(
     page.getByRole("heading", { level: 1, name: "Network OSPF" }),
   ).toBeVisible();
-  await expect(page.getByRole("button", { name: "Apply" })).toBeVisible();
+  const ospfTable = page.getByLabel("OSPF updater plans data grid");
+  await expect(ospfTable).toContainText("14");
+  const ospfPlanRow = ospfTable
+    .getByRole("row")
+    .filter({ hasText: "sfo-fra-gre" })
+    .first();
+  await ospfPlanRow.click({ button: "right" });
   await expect(
-    page.getByRole("table", { name: "OSPF adapter update plans" }),
-  ).toContainText("14");
+    page.getByRole("menuitem", { name: "Apply cost", exact: true }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
   await openConsoleSubpage(page, "Network", "Tunnel plans");
   const planTable = page.getByRole("table", { name: "Tunnel plans" });
   await expect(planTable).toContainText("22 cost");
@@ -4181,9 +4963,23 @@ test("authors explicit tunnel plans with endpoint-scoped adapters", async ({
   await expect(planTable).toContainText("External observed");
   await expect(planTable).toContainText("Tunnel only");
 
-  await activate(
-    planTable.getByRole("button", { name: "Disable sfo-fra-gre" }),
-  );
+  await planTable
+    .getByRole("row", { name: /sfo-fra-gre/ })
+    .click({ button: "right" });
+  await expect(
+    page.getByRole("menuitem", { name: "Edit", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Disable", exact: true }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  await planTable.getByLabel("Select sfo-fra-gre").check();
+  const planActions = page.getByRole("button", {
+    name: "Actions for 1 selected tunnel plan",
+  });
+  await planActions.click();
+  await activate(page.getByRole("menuitem", { name: "Disable", exact: true }));
   const lifecyclePrompt = page.locator(".confirmationPrompt", {
     hasText: "Confirm tunnel plan disable",
   });
@@ -4192,9 +4988,16 @@ test("authors explicit tunnel plans with endpoint-scoped adapters", async ({
     "OSPF control stops; existing external daemon costs are not reverted",
   );
   await confirmVisiblePrompt(page, "Disable plans");
+  await planTable.getByLabel("Select sfo-fra-gre").check();
+  await page
+    .getByRole("button", {
+      name: "Actions for 1 selected tunnel plan",
+    })
+    .click();
   await expect(
-    planTable.getByRole("button", { name: "Enable sfo-fra-gre" }),
-  ).toBeVisible();
+    page.getByRole("menuitem", { name: "Enable", exact: true }),
+  ).toBeEnabled();
+  await page.keyboard.press("Escape");
 
   await activate(page.getByRole("button", { name: "Create plan" }));
   const composer = page.locator(".tunnelPlanComposer");
@@ -4250,13 +5053,28 @@ test("authors explicit tunnel plans with endpoint-scoped adapters", async ({
   );
   await composer.getByLabel("Tunnel interface", { exact: true }).fill("ovpn70");
 
-  await composer.getByText("Enable OSPF adapter workflow").click();
+  await composer.getByText("Enable OSPF cost control").click();
+  const resolvedOspfCommands = composer.getByLabel(
+    "Resolved endpoint OSPF commands",
+  );
+  await expect(resolvedOspfCommands).toContainText(
+    "FRR OSPF updater · VPS override · Ready",
+  );
+  await expect(
+    composer.getByRole("button", { name: "Manage VPS presets" }),
+  ).toBeVisible();
   await composer
-    .getByLabel("Left routing adapter", { exact: true })
+    .getByLabel("Left OSPF command override (optional)", { exact: true })
     .selectOption("44444444-4444-4444-8444-444444444444");
   await composer
-    .getByLabel("Right routing adapter", { exact: true })
+    .getByLabel("Right OSPF command override (optional)", { exact: true })
     .selectOption("55555555-5555-4555-8555-555555555555");
+  await expect(resolvedOspfCommands).toContainText(
+    "Per-plan override · SFO routing cost",
+  );
+  await expect(resolvedOspfCommands).toContainText(
+    "Per-plan override · FRA routing cost",
+  );
   const bandwidth = composer.getByLabel("Tunnel bandwidth");
   const liveCost = composer
     .getByLabel("Live OSPF cost preview")
@@ -4278,7 +5096,13 @@ test("authors explicit tunnel plans with endpoint-scoped adapters", async ({
   });
   await expect(confirmation).toContainText("External observed");
   await expect(confirmation).toContainText("Reviewed · planned cost");
-  await expect(confirmation).toContainText("Routing adapters");
+  await expect(confirmation).toContainText("OSPF command overrides");
+  await expect(confirmation).toContainText(
+    "Per-plan override · SFO routing cost",
+  );
+  await expect(confirmation).toContainText(
+    "Per-plan override · FRA routing cost",
+  );
   await expect(confirmation).toContainText("OSPF gates");
   await expect(confirmation).toContainText("Save disabled");
   await confirmVisiblePrompt(page, "Save plan");
@@ -4324,7 +5148,16 @@ test("inspects disabled tunnel cleanup without exposing probe or speed mutations
   await page.goto("/");
   await openConsoleSubpage(page, "Network", "Tunnel plans");
   const planName = "external-openvpn-observed";
-  await activate(page.getByRole("button", { name: `Disable ${planName}` }));
+  const planTable = page.getByRole("table", { name: "Tunnel plans" });
+  await planTable.getByLabel(`Select ${planName}`).check();
+  await page
+    .getByRole("button", {
+      name: "Actions for 1 selected tunnel plan",
+    })
+    .click();
+  await activate(
+    page.getByRole("menuitem", { name: "Disable", exact: true }),
+  );
   await confirmVisiblePrompt(page, "Disable plans");
 
   await openConsoleSubpage(page, "Network", "Tests");
@@ -4371,12 +5204,19 @@ test(
 
     await page.goto("/");
     await openConsoleSubpage(page, "Network", "OSPF");
-    const table = page.getByRole("table", {
-      name: "OSPF adapter update plans",
-    });
+    const table = page.getByLabel("OSPF updater plans data grid");
     await expect(table).toContainText("Planned baseline");
-    await expect(table.getByRole("button", { name: "Apply" })).toBeEnabled();
-    await activate(table.getByRole("button", { name: "Apply" }));
+    const planRow = table
+      .getByRole("row")
+      .filter({ hasText: "sfo-fra-gre" })
+      .first();
+    await planRow.click({ button: "right" });
+    const applyAction = page.getByRole("menuitem", {
+      name: "Apply cost",
+      exact: true,
+    });
+    await expect(applyAction).toBeEnabled();
+    await activate(applyAction);
     const prompt = page.locator(".confirmationPrompt.warning", {
       hasText: "Confirm OSPF cost update",
     });
@@ -4458,8 +5298,15 @@ test("retires an enabled tunnel plan immediately from a frozen revision", async 
   await page.goto("/");
   await openConsoleSubpage(page, "Network", "Tunnel plans");
   const planTable = page.getByRole("table", { name: "Tunnel plans" });
-  const deleteButton = planTable.getByRole("button", {
-    name: "Delete sfo-fra-gre",
+  await planTable.getByLabel("Select sfo-fra-gre").check();
+  await page
+    .getByRole("button", {
+      name: "Actions for 1 selected tunnel plan",
+    })
+    .click();
+  const deleteButton = page.getByRole("menuitem", {
+    name: "Delete",
+    exact: true,
   });
   await expect(deleteButton).toBeEnabled();
   await expect(deleteButton).toHaveAttribute(
@@ -4472,13 +5319,9 @@ test("retires an enabled tunnel plan immediately from a frozen revision", async 
     hasText: "Confirm tunnel plan deletion",
   });
   await expect(confirmation).toContainText("sfo-fra-gre (r3)");
-  await expect(confirmation).toContainText(
-    "Queue removal on both endpoints",
-  );
+  await expect(confirmation).toContainText("Queue removal on both endpoints");
   await expect(confirmation).toContainText("Current stateEnabled");
-  await expect(confirmation).toContainText(
-    "Stop control; keep daemon cost",
-  );
+  await expect(confirmation).toContainText("Stop control; keep daemon cost");
   await confirmVisiblePrompt(page, "Delete plan");
 
   await expect(planTable).not.toContainText("sfo-fra-gre");
@@ -4565,8 +5408,12 @@ test("keeps each expanded VPS chart scoped to that VPS", async ({
     name: /^core-fra-02 \(ra02\) network rate curves/,
   });
 
-  await expect(edgeChart).toContainText("Latest values: RX 19 Mbps, TX 18 Mbps");
-  await expect(coreChart).toContainText("Latest values: RX 3.1 Mbps, TX 2.8 Mbps");
+  await expect(edgeChart).toContainText(
+    "Latest values: RX 19 Mbps, TX 18 Mbps",
+  );
+  await expect(coreChart).toContainText(
+    "Latest values: RX 3.1 Mbps, TX 2.8 Mbps",
+  );
   await expect(edgeChart).not.toContainText("RX 22 Mbps");
   await expect(coreChart).not.toContainText("RX 22 Mbps");
 });
@@ -4581,11 +5428,12 @@ test("shows grouped execution summaries for job output details", async ({
 
   await page.goto("/");
   await openConsoleSubpage(page, "Jobs", "History");
-  const scheduledJobRow = page
-    .getByLabel("Job records data grid")
+  const jobGrid = page.getByLabel("Job records data grid");
+  const scheduledJobRow = jobGrid
     .locator(".gridBody [role=row]", { hasText: "network speed test" })
     .first();
-  await activate(scheduledJobRow.getByRole("button", { name: "Open" }));
+  await scheduledJobRow.getByRole("checkbox").check();
+  await runGridAction(page, "Job records", "Open target detail");
 
   await expect(
     page.getByRole("heading", { name: "Execution summary" }),
@@ -4706,7 +5554,6 @@ test("generates local privilege assertions before dispatching a privileged job",
   await page
     .getByLabel("Bulk target selector expression")
     .fill("id:agent-sfo-01");
-  await activate(page.getByRole("button", { name: "Refresh target preview" }));
   await expect(page.getByText("1/3 resolved from selector")).toBeVisible();
   await dispatchWithPrompt(page.locator(".commandComposer"));
 
@@ -4944,8 +5791,6 @@ test("previews degraded update targets and sends explicit force override", async
     page.getByRole("option", { name: /backup-nyc-03.*agent-nyc-03/ }),
   ).toBeVisible();
   await page.keyboard.press("Enter");
-  await activate(page.getByRole("button", { name: "Refresh target preview" }));
-
   const impact = page.locator(".commandComposer .targetImpactPreview");
   await expect(impact.getByText("1 target / agent update")).toBeVisible();
   await expect(impact.locator(".targetImpactGroup")).toHaveCount(3);
@@ -5152,9 +5997,9 @@ test("dispatches executable restores with agent-local archive metadata only", as
   await activate(
     restoreWorkflow.getByRole("button", { name: "Review draft restore" }),
   );
-  await expect(
-    restoreWorkflow.getByLabel("Confirm draft restore"),
-  ).toBeVisible({ timeout: 15_000 });
+  await expect(restoreWorkflow.getByLabel("Confirm draft restore")).toBeVisible(
+    { timeout: 15_000 },
+  );
   await activate(
     restoreWorkflow
       .getByLabel("Confirm draft restore")
@@ -5612,31 +6457,44 @@ test("dispatches topology network tests and OSPF plan updates with local privile
   await expect(
     page.getByRole("heading", { name: "OSPF cost control" }),
   ).toBeVisible();
-  const ospfTable = page.getByRole("table", {
-    name: "OSPF adapter update plans",
-  });
+  const ospfTable = page.getByLabel("OSPF updater plans data grid");
   await expect(ospfTable).toContainText("sfo-fra-gre");
   await expect(ospfTable).toContainText("Reviewed");
   await expect(ospfTable).toContainText("Review required");
   await expect(ospfTable).toContainText("max delta +8");
   await expect(ospfTable).toContainText("5 samples, 0 degraded");
   const ospfPlanRow = ospfTable
-    .locator("tbody > tr")
+    .getByRole("row")
     .filter({ hasText: "sfo-fra-gre" })
     .first();
+  await ospfPlanRow.click({ button: "right" });
+  await expect(
+    page.getByRole("menuitem", { name: "Check updater", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Apply cost", exact: true }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
   if ((await ospfPlanRow.getAttribute("aria-expanded")) !== "true") {
     await activate(ospfPlanRow);
   }
   await expect(
-    ospfTable.getByRole("button", { name: "Close details for sfo-fra-gre" }),
+    ospfTable.getByRole("button", {
+      name: "Close OSPF updater plans row details",
+    }),
   ).toBeVisible();
-  await expect(ospfTable).toContainText("sfo:routing-cost-v1");
-  await expect(ospfTable).toContainText("fra:routing-cost-v1");
+  await expect(ospfTable).toContainText("FRR OSPF updater");
+  await expect(ospfTable).toContainText("VPS Configuration preset");
+  await expect(ospfTable).toContainText("Plan override");
+  await expect(ospfTable).toContainText("FRA routing cost");
   await expect(ospfTable).toContainText("Operator review required");
   await expect(ospfTable).toContainText("14 / 14");
   await expect(ospfTable).toContainText("22 · max delta +8");
   await expect(ospfTable).toContainText("3 consecutive · 2 required");
-  await activate(ospfTable.getByRole("button", { name: "Apply" }));
+  await ospfPlanRow.click({ button: "right" });
+  await activate(
+    page.getByRole("menuitem", { name: "Apply cost", exact: true }),
+  );
   const ospfPrompt = page.locator(".confirmationPrompt").last();
   await expect(ospfPrompt).toBeVisible();
   await expect(ospfPrompt).toContainText("Confirm OSPF cost update");
@@ -5646,7 +6504,7 @@ test("dispatches topology network tests and OSPF plan updates with local privile
     `r${ospfUpdatePlans[0].plan_revision}`,
   );
   await expect(ospfPrompt).toContainText("Desired cost");
-  await expect(ospfPrompt).toContainText("Adapter snapshots");
+  await expect(ospfPrompt).toContainText("Updater snapshots");
   await expect(ospfPrompt).toContainText(ospfUpdatePlans[0].evidence_summary);
   await activate(
     ospfPrompt.getByRole("button", { name: "Apply routing cost" }),

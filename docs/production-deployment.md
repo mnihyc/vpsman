@@ -61,6 +61,11 @@ curl -fsS http://127.0.0.1:5173/health
 ./runtime/cli/current/vpsctl --version
 ```
 
+Save the `VPSMAN_SUPER_SALT_HEX=...` line printed by first-start. Operators need
+that generated salt together with the super password for browser and CLI
+privilege unlock. The deployment keeps a private persistent copy at
+`./config/secrets/operator-privilege.env`.
+
 Create the first operator before allowing other users to reach the console.
 Treat the one-time bootstrap boundary as administrative access.
 First-start snapshots PostgreSQL before launching the API, including when the
@@ -252,9 +257,9 @@ docker compose ps
 ```
 
 Do not bypass SQLx migration checksum failures or edit `_sqlx_migrations`.
-No `v0.1.x` database can be upgraded in place to the deliberately clean v0.2.0
-baseline. Keep it with its matching release, or move reviewed data through a
-separate export/import procedure into a fresh v0.2.0 database.
+The current canonical schema supports fresh databases only. Keep an existing
+database with its matching application release, or move reviewed data through
+a separate export/import procedure into a fresh database.
 
 ## Upgrade and Rollback
 

@@ -37,6 +37,7 @@ rm -rf "$VPSMAN_GATEWAY_SPOOL_DIR"
 export VPSMAN_SUPER_PASSWORD='<local_super_password>'
 cargo run -p vpsctl -- compose-secrets --secrets-dir .tmp/quickstart-secrets
 unset VPSMAN_SUPER_PASSWORD
+source .tmp/quickstart-secrets/operator-privilege.env
 export VPSMAN_INTERNAL_TOKEN="$(<.tmp/quickstart-secrets/vpsman_internal_token)"
 
 # In each of three shells, repeat the shared exports above, then run one service.
@@ -76,7 +77,7 @@ Keep privilege unlock material local:
 
 ```sh
 export VPSMAN_SUPER_PASSWORD=<local_super_password>
-export VPSMAN_SUPER_SALT_HEX=<64_hex_salt>
+source .tmp/quickstart-secrets/operator-privilege.env
 ```
 
 The API token authenticates the operator. The super password and salt are used
@@ -133,6 +134,10 @@ targets before bulk work:
 cargo run -p vpsctl -- bulk-resolve --tags edge,provider:provider-a,region:sfo
 ```
 
+`bulk-resolve` is the headless equivalent. Browser workflows preview targets
+in place; their **Review** step asks the server to resolve and freeze the exact
+list, without a separate bulk page.
+
 ## 5. Run A Privileged Command
 
 ```sh
@@ -163,18 +168,19 @@ cargo run -p vpsctl -- terminal-poll \
 Terminal input order is assigned by the server for the selected client and
 session; operators submit only the bytes to write.
 
-## 6. Choose Templates
+## 6. Inspect Configuration Sources
 
-Use templates instead of editing hardcoded commands per VPS:
+Start with system-default inheritance and inspect what the VPS effectively uses:
 
 ```sh
-cargo run -p vpsctl -- source-templates --domain telemetry_metrics_source
-cargo run -p vpsctl -- source-status --client-id "$EDGE_CLIENT_ID"
-cargo run -p vpsctl -- template-runtime-config --client-id "$EDGE_CLIENT_ID" --format toml
+cargo run -p vpsctl -- config-presets --behavior host_metrics
+cargo run -p vpsctl -- config-sources --client-id "$EDGE_CLIENT_ID"
+cargo run -p vpsctl -- config-render --client-id "$EDGE_CLIENT_ID" --format toml
 ```
 
-Assign shared templates to tags or explicit clients, and reserve VPS-local templates
-for machine-specific custom commands.
+Create and assign a custom preset only when the system choices do not fit.
+Assignments are explicit per-VPS overrides; reset them to resume system-default
+inheritance. See [Tutorial 05](05-configuration-presets.md).
 
 ## 7. Back Up And Restore
 
@@ -222,9 +228,10 @@ cargo run -p vpsctl -- migration-run \
 Use this loop while managing 20+ VPSs:
 
 1. Inspect `summary`, `agents`, `fleet-alerts`, and `gateway-sessions`.
-2. Resolve exact targets with `bulk-resolve`.
+2. Resolve exact targets with the browser workflow's inline preview and
+   **Review**, or with `bulk-resolve` when operating headlessly.
 3. Dispatch through panel, CLI, or VTY with confirmation and local privilege unlock.
 4. Observe `jobs`, `job-targets`, `job-target-status-download`,
    `job-outputs`, and alerts.
-5. Recover with rollback commands, direct identity key rotation, or source template
-   changes instead of manual per-host edits.
+5. Recover with rollback commands, direct identity key rotation, or reviewed
+   configuration-preset changes instead of manual per-host edits.

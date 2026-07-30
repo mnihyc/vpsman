@@ -7,6 +7,45 @@ test.beforeEach(async ({ page }) => {
   await installTwentyFourTargetFileMock(page);
 });
 
+test("VPS combobox keyboard navigation stays on visible options", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "keyboard navigation is covered in the desktop combobox",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Network", "Port forwards");
+  await page.getByRole("button", { name: "Create rule" }).click();
+  const target = page.getByRole("combobox", { name: "Port-forward rule VPS" });
+  await target.click();
+  const options = page.getByRole("listbox", {
+    name: "Port-forward rule VPS options",
+  });
+  await expect(options.getByRole("option")).toHaveCount(24);
+  for (let index = 0; index < 15; index += 1) {
+    await target.press("ArrowDown");
+  }
+  const selectedOption = options.getByRole("option").nth(14);
+  await expect(selectedOption).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  const [menuBox, optionBox] = await Promise.all([
+    options.boundingBox(),
+    selectedOption.boundingBox(),
+  ]);
+  expect(menuBox).not.toBeNull();
+  expect(optionBox).not.toBeNull();
+  expect(optionBox!.y).toBeGreaterThanOrEqual(menuBox!.y);
+  expect(optionBox!.y + optionBox!.height).toBeLessThanOrEqual(
+    menuBox!.y + menuBox!.height,
+  );
+  await target.press("Enter");
+  await expect(target).toHaveValue(/edge-us-14/);
+});
+
 test("bulk file operations remain scannable with 24 VPS targets", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.includes("mobile"), "bulk file operations are a dense desktop panel");
 
@@ -15,6 +54,12 @@ test("bulk file operations remain scannable with 24 VPS targets", async ({ page 
   await openConsoleSubpage(page, "Remote Operations", "Bulk files");
   await expect(page.getByRole("heading", { name: "Bulk files" })).toBeVisible();
   await unlockPrivilege(page);
+
+  const localPreview = page.getByLabel("Bulk file local VPS preview");
+  await expect(localPreview).toContainText("edge-us-00");
+  await activate(localPreview.getByRole("button", { name: "Show 16 more" }));
+  await expect(localPreview).toContainText("edge-us-23");
+  await expect(localPreview.getByRole("button", { name: "Show fewer" })).toBeVisible();
 
   await activate(page.getByRole("button", { name: "Refresh scope" }));
   await expect(page.getByText("24 VPSs resolved")).toBeVisible();
@@ -25,8 +70,13 @@ test("bulk file operations remain scannable with 24 VPS targets", async ({ page 
   await expect(page.getByLabel("Bulk file attention targets")).toContainText("edge-us-23");
   await expect(preflight).toContainText("384.0 MiB");
   await expect(preflight).toContainText("Stale agents may still reject with a command-version mismatch");
-  await expect(page.getByText("edge-us-00", { exact: true })).toBeVisible();
-  await expect(page.locator(".bulkSummaryClients span").filter({ hasText: "edge-us-00" }).first()).toHaveAttribute("title", "a0000000-target-00");
+  const serverPreview = page.getByLabel("Bulk file server VPS preview");
+  await expect(serverPreview).toContainText("edge-us-00");
+  await activate(serverPreview.getByRole("button", { name: "Show 16 more" }));
+  await expect(serverPreview).toContainText("edge-us-23");
+  await expect(
+    serverPreview.locator('[title="a0000000-target-00"]'),
+  ).toBeVisible();
 
   await page.getByLabel("Bulk file path").fill("/var/log/nginx/");
   await activate(page.getByRole("button", { name: "Run download" }));
@@ -108,6 +158,11 @@ async function installTwentyFourTargetFileMock(page: Page) {
         can_attempt_privileged_ops: true,
         can_manage_runtime_tunnels: true,
         effective_uid: 0,
+        port_forwarding: {
+          nft_version: "nftables v1.1.3",
+          reason: null,
+          status: "supported",
+        },
         privilege_mode: "root",
         unprivileged_hint: null,
       },

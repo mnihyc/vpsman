@@ -1093,8 +1093,8 @@ fn runtime_tunnel_control_identity_matches(
         vpsman_common::RuntimeTunnelManager::AgentIproute2Managed => left.fou == right.fou,
         vpsman_common::RuntimeTunnelManager::ExternalObserved => true,
         vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter => {
-            left.left_adapter_template_id == right.left_adapter_template_id
-                && left.right_adapter_template_id == right.right_adapter_template_id
+            left.left_adapter_definition_id == right.left_adapter_definition_id
+                && left.right_adapter_definition_id == right.right_adapter_definition_id
                 && left.traffic_limit == right.traffic_limit
         }
     }
@@ -3563,14 +3563,14 @@ mod tests {
         let mut plan = runtime_sync_test_plan("203.0.113.20", "10.255.0.0", "10.255.0.1");
         plan.runtime_control = vpsman_common::RuntimeTunnelControl {
             manager: vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter,
-            left_adapter_template_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
-            right_adapter_template_id: Some("22222222-2222-4222-8222-222222222222".to_string()),
+            left_adapter_definition_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+            right_adapter_definition_id: Some("22222222-2222-4222-8222-222222222222".to_string()),
             ..Default::default()
         };
         let mut telemetry_plan = runtime_sync_test_telemetry_plan(plan);
         telemetry_plan.runtime_adapter = Some(vpsman_common::RuntimeTunnelAdapterCommands {
-            template_id: "11111111-1111-4111-8111-111111111111".to_string(),
-            template_name: "status-only-test".to_string(),
+            definition_id: "11111111-1111-4111-8111-111111111111".to_string(),
+            definition_name: "status-only-test".to_string(),
             definition_hash: "ab".repeat(32),
             startup: None,
             stop: None,

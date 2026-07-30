@@ -99,8 +99,8 @@ jobs:
       - name: Rust format
         run: cargo fmt --all -- --check
 
-      - name: Audit released migrations
-        run: VPSMAN_REQUIRE_RELEASE_TAGS=1 bash scripts/audit-migrations.sh
+      - name: Audit canonical migrations
+        run: bash scripts/audit-migrations.sh
 
       - name: Rust clippy
         run: cargo clippy --workspace --all-targets -- -D warnings

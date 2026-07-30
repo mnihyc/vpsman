@@ -25,8 +25,8 @@ require_log_marker() {
 
 require_log_marker smoke-vpsctl-live-api.log '"tag_bulk"'
 require_log_marker smoke-vpsctl-live-api.log '"backup_request_restore_plan"'
-require_log_marker smoke-vpsctl-live-api.log '"source_template_workflow_readiness"'
-require_log_marker smoke-vpsctl-live-api.log '"source_template_process_limit_readiness"'
+require_log_marker smoke-vpsctl-live-api.log '"configuration_source_system_inheritance"'
+require_log_marker smoke-vpsctl-live-api.log '"system_configuration_presets"'
 require_log_marker smoke-vpsctl-live-api.log '"no_plaintext_password_in_cli_outputs"'
 require_log_marker smoke-postgres-persistence.log '"direct_identity_key_rotation"'
 require_log_marker smoke-postgres-persistence.log '"client_key_revocation"'
@@ -44,7 +44,8 @@ require_log_marker smoke-backup-chunked-upload.log '"backup_chunked_upload_smoke
 require_log_marker smoke-live-agent-update.log '"direct_agent_update_job_flow": "stage_activate_restart_rollback"'
 require_log_marker smoke-live-runtime-tunnel-sync.log '"live_runtime_tunnel_sync_smoke": "ok"'
 require_log_marker smoke-network-adapter-contract.log '"network_adapter_contract_smoke": "ok"'
-require_log_marker smoke-live-source-template-runtime-config.log '"command_execution_policy_fields": "verified"'
+require_log_marker smoke-live-configuration-presets.log '"command_execution_policy_fields": "verified"'
+require_log_marker smoke-live-configuration-presets.log '"reset_to_system_default": "verified"'
 require_log_marker smoke-live-runtime-config.log '"api_restart": "verified"'
 require_log_marker smoke-agent-endpoint-failover.log '"dead_tcp_failover"'
 require_log_marker smoke-agent-resource-budget.log '"cpu_limit_percent"'
@@ -61,5 +62,5 @@ require_log_marker check-frontend-contracts.log '"frontend_protocol_contracts":"
 printf '{\n'
 printf '  "final_e2e_smoke": "ok",\n'
 printf '  "log_dir": "%s",\n' "$log_dir"
-printf '  "checks": ["auth_and_no_plaintext_cli", "direct_identity_persistence", "client_key_revocation", "terminal_sessions", "terminal_retention_flow_window", "resumable_transfers", "backup_restore_rollback", "backup_policy_retention_prune", "backup_chunked_upload", "migration_run_restore", "agent_update_direct_jobs", "runtime_tunnel_sync", "network_adapter_contract", "source_template_workflow_readiness", "source_template_process_limit_readiness", "source_template_runtime_config", "command_execution_policy_fields", "static_endpoint_failover", "low_resource_reconnect", "low_resource_post_telemetry_budget", "ui_cli_vty_parity", "structured_cli_output", "system_dashboard_counters", "long_running_20_plus_fleet_with_api_backlog", "generated_frontend_contracts"]\n'
+printf '  "checks": ["auth_and_no_plaintext_cli", "direct_identity_persistence", "client_key_revocation", "terminal_sessions", "terminal_retention_flow_window", "resumable_transfers", "backup_restore_rollback", "backup_policy_retention_prune", "backup_chunked_upload", "migration_run_restore", "agent_update_direct_jobs", "runtime_tunnel_sync", "network_adapter_contract", "configuration_source_system_inheritance", "configuration_preset_runtime_config", "command_execution_policy_fields", "static_endpoint_failover", "low_resource_reconnect", "low_resource_post_telemetry_budget", "ui_cli_vty_parity", "structured_cli_output", "system_dashboard_counters", "long_running_20_plus_fleet_with_api_backlog", "generated_frontend_contracts"]\n'
 printf '}\n'

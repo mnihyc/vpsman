@@ -11,7 +11,6 @@ import {
   BookmarkPlus,
   ChevronDown,
   ChevronRight,
-  Cloud,
   Command,
   FolderKanban,
   KeyRound,
@@ -80,7 +79,6 @@ type ConsoleShellProps = {
   fleetQuery: string;
   hideFleetStatusSummary?: boolean;
   onApplySavedFleetView: (viewId: string) => void;
-  onClearSession: () => void;
   onClearFleetView: () => void;
   onDeleteSavedFleetView: () => void;
   onFleetQueryChange: (query: string) => void;
@@ -119,7 +117,6 @@ export function ConsoleShell({
   hideFleetStatusSummary = false,
   onApplySavedFleetView,
   onClearFleetView,
-  onClearSession,
   onDeleteSavedFleetView,
   onFleetQueryChange,
   onLockPrivilege,
@@ -613,7 +610,12 @@ export function ConsoleShell({
       </a>
       <aside className="sidebar">
         <div className="brand">
-          <Cloud size={24} />
+          <img
+            alt=""
+            aria-hidden="true"
+            className="brandMark"
+            src="/favicon.svg"
+          />
           <span>vpsman</span>
         </div>
         <nav aria-label="Primary console navigation">
@@ -784,14 +786,14 @@ export function ConsoleShell({
             </button>
             {apiToken && (
               <button
-                aria-label="Clear operator session"
+                aria-label="Open sessions"
                 className="sessionButton"
-                onClick={onClearSession}
-                title="Sign out of the current operator session"
+                onClick={() => onSelectView("Audit", "sessions")}
+                title="Review sessions and sign out"
                 type="button"
               >
                 <KeyRound size={18} />
-                <span>Session</span>
+                <span>Sessions</span>
               </button>
             )}
             {privilegeUnlocked ? (

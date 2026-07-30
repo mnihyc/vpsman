@@ -201,6 +201,16 @@
   align-items: center;
 }
 
+.dispatchForm .checkLine input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+  min-height: 16px;
+  margin: 0;
+  padding: 0;
+}
+
 .backupActionPanel .actionRow {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);

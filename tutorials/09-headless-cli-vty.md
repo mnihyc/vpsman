@@ -16,7 +16,7 @@ Set local privilege unlock material only when dispatching privileged work:
 
 ```sh
 export VPSMAN_SUPER_PASSWORD=<local_super_password>
-export VPSMAN_SUPER_SALT_HEX=<64_hex_salt>
+source ./path/to/secrets/operator-privilege.env
 ```
 
 Check available commands:
@@ -151,6 +151,17 @@ terminal-replay --client-id edge-01 --session-id <uuid> --output-file ./terminal
 host-process-refresh tag:edge --limit 50
 host-processes --client-id edge-01 --limit 50
 process-start edge-worker --argv /usr/bin/sleep --argv 60 tag:edge
+config-presets --behavior host_metrics
+config-sources --client-id edge-01
+config-render --client-id edge-01 --format toml
+config-source-set --behavior host_metrics --preset-id <preset_uuid> --client edge-01
+config-source-set --behavior host_metrics --preset-id <preset_uuid> --client edge-01 --preview-hash <hash_from_previous_output> --confirmed
+config-source-reset --behavior host_metrics --client edge-01
+config-source-reset --behavior host_metrics --client edge-01 --preview-hash <hash_from_previous_output> --confirmed
+# Optional advanced preset customization:
+config-preset-clone --preset-id <system_preset_uuid> --name edge-custom
+config-preset-preview --preset-id <custom_preset_uuid> --definition-json={"source":"linux_procfs","proc_root":"/proc","sys_class_net_dir":"/sys/class/net","hostname_file":"/etc/hostname","os_release_file":"/etc/os-release"}
+config-preset-update --preset-id <custom_preset_uuid> --definition-json={"source":"linux_procfs","proc_root":"/proc","sys_class_net_dir":"/sys/class/net","hostname_file":"/etc/hostname","os_release_file":"/etc/os-release"} --preview-hash <hash_from_previous_output> --confirmed
 tunnel-plans
 tunnel-plan-export --plan-id <saved_plan_uuid> --output-file ./plan.json
 tunnel-plan-disable --plan-id <saved_plan_uuid> --expected-revision <revision> --confirmed
@@ -171,6 +182,14 @@ agent-update --artifact-url https://github.com/<owner>/vpsman/releases/download/
 agent-update-activate --staged-sha256-hex <sha256> tag:edge --restart-agent --confirmed
 agent-update-rollback --rollback-sha256-hex <sha256> tag:edge --confirmed
 ```
+
+For configuration source changes and custom-preset updates, the first command
+returns the human-reviewable preview and hash. A confirmed command must repeat
+the same candidate arguments with that hash. VTY re-previews only to verify the
+reviewed hash and recover its bound VPS IDs; a changed preview is rejected
+before privilege signing or apply. Direct `--client` targeting is the normal
+daily path; direct clients, tags, and `--selector` contribute to the same
+preview/apply workflow for multi-VPS changes.
 
 Host process inventory is read-only and does not require `enable`. Native
 service and OS-package commands are available from the one-shot CLI; see

@@ -88,10 +88,13 @@ Fleet and integrations:
   alert-policies | alert-policy-get | alert-policy-preview | alert-policy-upsert
   fleet-alert-notification-channels | fleet-alert-notification-channel-upsert
   fleet-alert-notifications | fleet-alert-notification-dispatch | fleet-alert-notification-process
-  source-templates | source-template-create | source-template-clone
-  source-template-diff | source-template-test | source-template-update
-  source-status | source-template-assignments | source-template-assign
-  template-runtime-config
+  config-presets | config-preset-create | config-preset-clone
+  config-preset-preview | config-preset-update | config-preset-delete
+  config-sources | config-source-set | config-source-reset | config-render
+  preview config-source-set/reset without --confirmed, then repeat with
+    --preview-hash <reviewed_hash> --confirmed
+  config-preset-update --confirmed also requires the separately reviewed
+    --preview-hash from config-preset-preview
 
 Jobs and schedules:
   jobs | job-create | job-shell | job-targets | job-target-status-download

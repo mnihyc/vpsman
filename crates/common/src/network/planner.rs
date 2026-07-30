@@ -41,7 +41,7 @@ pub enum NetworkPlanError {
     UnsupportedRuntimeManagerTunnelKind,
     #[error("runtime tunnel command must be bounded and use absolute argv")]
     InvalidRuntimeTunnelCommand,
-    #[error("custom adapter requires endpoint source-template bindings")]
+    #[error("custom adapter requires endpoint adapter-definition bindings")]
     RuntimeTunnelAdapterCommandRequired,
     #[error("external observed tunnels cannot include mutating commands or traffic limits")]
     RuntimeTunnelObservedCannotMutate,
@@ -206,13 +206,6 @@ fn validate_bandwidth_mbps(value: u32) -> Result<(), NetworkPlanError> {
 }
 
 fn validate_ospf_config(config: &TunnelOspfConfig) -> Result<(), NetworkPlanError> {
-    let valid_template_id = |value: &str| {
-        !value.is_empty()
-            && value.len() <= 128
-            && value.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
-            })
-    };
     let policy = config.policy;
     let policy_values = [
         policy.latency_weight,
@@ -233,8 +226,14 @@ fn validate_ospf_config(config: &TunnelOspfConfig) -> Result<(), NetworkPlanErro
         || policy_values
             .iter()
             .any(|value| !value.is_finite() || *value < 0.0)
-        || !valid_template_id(&config.left_adapter_template_id)
-        || !valid_template_id(&config.right_adapter_template_id)
+        || !config
+            .left_adapter_definition_id
+            .as_deref()
+            .is_none_or(|value| valid_definition_id(Some(value)))
+        || !config
+            .right_adapter_definition_id
+            .as_deref()
+            .is_none_or(|value| valid_definition_id(Some(value)))
     {
         return Err(NetworkPlanError::InvalidOspfConfig);
     }
@@ -369,15 +368,15 @@ pub fn validate_runtime_tunnel_control(
 ) -> Result<(), NetworkPlanError> {
     match control.manager {
         RuntimeTunnelManager::AgentIproute2Managed => {
-            if control.left_adapter_template_id.is_some()
-                || control.right_adapter_template_id.is_some()
+            if control.left_adapter_definition_id.is_some()
+                || control.right_adapter_definition_id.is_some()
             {
                 return Err(NetworkPlanError::InvalidRuntimeTunnelCommand);
             }
         }
         RuntimeTunnelManager::ExternalObserved => {
-            if control.left_adapter_template_id.is_some()
-                || control.right_adapter_template_id.is_some()
+            if control.left_adapter_definition_id.is_some()
+                || control.right_adapter_definition_id.is_some()
                 || !control.traffic_limit.is_default()
                 || !control.fou.is_default()
             {
@@ -385,8 +384,8 @@ pub fn validate_runtime_tunnel_control(
             }
         }
         RuntimeTunnelManager::ExternalManagedAdapter => {
-            if !valid_template_id(control.left_adapter_template_id.as_deref())
-                || !valid_template_id(control.right_adapter_template_id.as_deref())
+            if !valid_definition_id(control.left_adapter_definition_id.as_deref())
+                || !valid_definition_id(control.right_adapter_definition_id.as_deref())
             {
                 return Err(NetworkPlanError::RuntimeTunnelAdapterCommandRequired);
             }
@@ -397,7 +396,7 @@ pub fn validate_runtime_tunnel_control(
     Ok(())
 }
 
-fn valid_template_id(value: Option<&str>) -> bool {
+fn valid_definition_id(value: Option<&str>) -> bool {
     value.is_some_and(|value| uuid::Uuid::parse_str(value).is_ok())
 }
 

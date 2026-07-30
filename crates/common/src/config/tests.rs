@@ -21,9 +21,9 @@ fn explicit_plan(manager: RuntimeTunnelManager) -> crate::TunnelPlan {
         },
         runtime_control: crate::RuntimeTunnelControl {
             manager,
-            left_adapter_template_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+            left_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
                 .then(|| "11111111-1111-4111-8111-111111111111".to_string()),
-            right_adapter_template_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+            right_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
                 .then(|| "22222222-2222-4222-8222-222222222222".to_string()),
             ..crate::RuntimeTunnelControl::default()
         },
@@ -60,8 +60,8 @@ fn command(name: &str) -> RuntimeTunnelCommand {
 
 fn runtime_adapter() -> RuntimeTunnelAdapterCommands {
     RuntimeTunnelAdapterCommands {
-        template_id: "11111111-1111-4111-8111-111111111111".to_string(),
-        template_name: "edge-a-wireguard".to_string(),
+        definition_id: "11111111-1111-4111-8111-111111111111".to_string(),
+        definition_name: "edge-a-wireguard".to_string(),
         definition_hash: "ab".repeat(32),
         startup: Some(command("start")),
         stop: Some(command("stop")),
@@ -111,6 +111,29 @@ fn network_telemetry_defaults_stay_enabled() {
     assert!(config.network.latency_monitoring_enabled);
     assert_eq!(config.network.latency_monitoring_interval_secs, 60);
     assert_eq!(config.network.latency_down_windows, 3);
+}
+
+#[test]
+fn ospf_updater_commands_are_paired_and_bounded() {
+    let mut config = AgentConfig::default();
+    config.network.ospf_status_command = Some(command("ospf-status"));
+    assert_eq!(
+        validate_agent_config_shape(&config).unwrap_err(),
+        "network_ospf_commands_must_be_configured_together"
+    );
+
+    config.network.ospf_update_command = Some(command("ospf-update"));
+    validate_agent_config_shape(&config).unwrap();
+
+    config
+        .network
+        .ospf_update_command
+        .as_mut()
+        .unwrap()
+        .max_timeout_secs = 0;
+    assert!(validate_agent_config_shape(&config)
+        .unwrap_err()
+        .starts_with("network_ospf_update_command"));
 }
 
 #[test]
@@ -197,7 +220,7 @@ fn external_managed_plan_requires_the_bound_adapter_snapshot() {
         .runtime_adapter
         .as_mut()
         .unwrap()
-        .template_id = "22222222-2222-4222-8222-222222222222".to_string();
+        .definition_id = "22222222-2222-4222-8222-222222222222".to_string();
     assert_eq!(
         validate_agent_config_shape(&config).unwrap_err(),
         "network_runtime_adapter_snapshot_binding_mismatch"

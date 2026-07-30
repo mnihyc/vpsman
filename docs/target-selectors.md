@@ -1,49 +1,59 @@
 # Target Selectors
 
 `vpsman` target selectors are expression strings used for target previews,
-bulk resolution, tag mutation, template assignment, and expression webhook
-rules. Jobs and schedules store the concrete VPS IDs resolved during CLI preview
-or browser confirmation; their `selector_expression` is optional audit context,
-not dispatch authority. It is retained for operator review and for an explicit
-future schedule Target update, never for implicit re-resolution at run time. The
-Rust parser/evaluator lives in `vpsman-common`; the frontend parser mirrors the
-same grammar for local previews and token tooltips.
+bulk resolution, tag mutation, configuration-preset assignment, and expression
+webhook rules. Jobs and schedules store the concrete VPS IDs resolved during
+CLI preview or the browser Review step; their `selector_expression` is optional
+audit context, not dispatch authority. It is retained for operator review and
+for an explicit future schedule **Update targets** action, never for implicit
+re-resolution at run time. The Rust parser/evaluator lives in `vpsman-common`;
+the frontend parser mirrors the same grammar for local previews and token
+tooltips.
 
 ## Fixed Target Workflow
 
 Selectors are operator input and audit context. They are not a live binding for
-job or schedule execution. The panel confirmation step and CLI preview resolve
-the selector to concrete VPS ids and submit that fixed `target_client_ids` list
-to the API. The backend dispatches only that list. Job `selector_expression`
-values may also be free-form audit text; job creation validates only transport
-safety, while schedule create/update keeps valid selector syntax when the audit
-selector is present so Target update can resolve it later.
+job or schedule execution or configuration-preset assignment. The browser
+Review step and CLI preview resolve the selector to concrete VPS IDs. The
+confirmation and API mutation use that fixed `target_client_ids` list; the
+backend dispatches only that list. Job `selector_expression` values may also be
+free-form audit text; job creation validates only transport safety, while
+schedule create/update keeps valid selector syntax when the audit selector is
+present so **Update targets** can resolve it later.
 
 Schedules follow the same rule. A schedule stores both the audit selector and a
 fixed target snapshot. Due runs use the saved snapshot. If a saved target is
 later hidden, deleted, revoked, never connected, missing from inventory, or
 otherwise unavailable, that fixed ID is recorded as a skipped target result for
 the run and the remaining available targets still materialize. If tags, display
-names, or other selector inputs later drift, the operator can choose Target
-update. That review action resolves the audit selector on the backend, opens a
-privilege confirmation only when the resolved set differs from the saved fixed
-target snapshot, and then saves the replacement snapshot.
+names, or other selector inputs later drift, the operator can choose
+**Update targets** from the schedule table Actions menu or row context menu.
+The action supports one or many selected schedules. It resolves each saved
+audit selector on the backend, includes only changed non-empty snapshots in the
+privilege confirmation, and then saves those replacement snapshots.
 
 This keeps human review as the authority for bulk work: changing tags never
 silently changes the targets of an already-created job or schedule.
 
+In the console, selector matches are previewed locally as the expression is
+edited. That preview is for orientation only. Direct VPS choices and selector
+matches contribute to one deduplicated union, and the nearby count/list must
+show that complete local union. **Review** asks the backend to resolve the
+request again and freezes the exact IDs used by the confirmation and mutation.
+An invalid expression or empty union cannot be reviewed.
 
 ## Fixed Target Snapshots
 
 Job submission and schedule creation are fixed-target workflows. Operators
-preview or confirm a selector, then the API receives the resolved
+review a selector, then the API receives the resolved
 `target_client_ids` alongside the audit selector. A later tag or alias change
 does not silently change the VPSs affected by an existing job or schedule.
 
-For schedules, **Update targets** is a deliberate maintenance action for records
-with an audit selector. Pressing that button asks the backend to resolve the
-selector, rejects a no-op if the saved fixed target list already matches, and
-replaces the saved target snapshot only after privilege confirmation. CLI
+For schedules, **Update targets** is a deliberate table action for records
+whose saved audit selector currently resolves to a different non-empty VPS set.
+The action asks the backend to resolve each selected record's selector, rejects
+no-op records whose fixed target list already matches, and replaces only the
+saved target snapshots after privilege confirmation. CLI
 schedule creation follows the same rule: the previewed target set is the saved
 target set.
 

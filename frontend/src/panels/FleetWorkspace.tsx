@@ -16,8 +16,6 @@ import {
   BarChart3,
   Bell,
   Boxes,
-  Check,
-  CircleCheck,
   Clock3,
   DatabaseBackup,
   Eye,
@@ -35,7 +33,6 @@ import {
   Tags,
   TerminalSquare,
   Trash2,
-  VolumeX,
   X,
 } from "lucide-react";
 import { agentDisplayState } from "../agentDisplayState";
@@ -75,6 +72,10 @@ import { Metric } from "../components/Metric";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import { VpsCombobox } from "../components/VpsCombobox";
 import {
+  agentsMatchingExpression,
+  parseSearchExpression,
+} from "../searchExpression";
+import {
   TimeSeriesChart,
   type TimeSeriesChartLine,
 } from "../components/TimeSeriesChart";
@@ -98,6 +99,7 @@ import {
   sortTagsByDisplayOrder,
   type TagDisplayOrder,
 } from "../tagDisplay";
+import { LocalTargetPreview } from "./TargetImpactPreview";
 import {
   buildPrivilegeAssertion,
   buildPrivilegeForJobOperation,
@@ -128,9 +130,8 @@ import type {
   BulkTagMutationRequest,
   CreateJobRequest,
   CreateJobResponse,
-  TemplateRuntimeConfigResponse,
-  SourceTemplateAssignmentRecord,
-  SourceStatusRecord,
+  ConfigurationSourceView,
+  EffectiveAgentConfigResponse,
   FleetAlertPolicyRecord,
   FleetAlertPolicyRequest,
   FleetAlertRecord,
@@ -272,13 +273,13 @@ export function FleetWorkspace({
   webhookRules,
   webhookRuleDeliveries,
   lastLiveEvent,
-  sourceTemplateAssignments,
-  sourceStatus,
+  configurationSources,
   onCreateJob,
   onBulkMutateTags,
   onNavigatePanel,
   onOpenJobDispatchPreset,
-  onRenderTemplateRuntimeConfig,
+  onLoadEffectiveAgentConfig,
+  onLoadConfigurationSources,
   onDeleteFleetAlertNotificationChannel,
   onDeleteFleetAlertPolicy,
   onDeleteWebhookRule,
@@ -326,8 +327,7 @@ export function FleetWorkspace({
   webhookRules: WebhookRuleRecord[];
   webhookRuleDeliveries: WebhookRuleDeliveryRecord[];
   lastLiveEvent: string;
-  sourceTemplateAssignments: SourceTemplateAssignmentRecord[];
-  sourceStatus: SourceStatusRecord[];
+  configurationSources: ConfigurationSourceView[];
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onBulkMutateTags: (
     request: BulkTagMutationRequest,
@@ -338,9 +338,10 @@ export function FleetWorkspace({
     targetClientId?: string,
   ) => void;
   onOpenJobDispatchPreset: (preset: JobDispatchPresetInput) => void;
-  onRenderTemplateRuntimeConfig: (
+  onLoadEffectiveAgentConfig: (
     clientId: string,
-  ) => Promise<TemplateRuntimeConfigResponse>;
+  ) => Promise<EffectiveAgentConfigResponse>;
+  onLoadConfigurationSources: () => Promise<void>;
   onDeleteFleetAlertNotificationChannel: (
     channelId: string,
     reviewedName: string,
@@ -874,27 +875,6 @@ export function FleetWorkspace({
             policyAlertsByClientRef.current.get(agent.id),
           ),
       },
-      {
-        id: "open_instance",
-        header: "Action",
-        size: 76,
-        minSize: 68,
-        enableHiding: false,
-        stickyEnd: true,
-        cell: (agent) => (
-          <button
-            aria-label={`Open ${formatVpsName(agent, vpsNameDisplayMode)} detail`}
-            className="secondaryAction compactAction"
-            onClick={(event) => {
-              event.stopPropagation();
-              openSingleReleaseWorkflow([agent], "Fleet", "instance_detail");
-            }}
-            type="button"
-          >
-            Open
-          </button>
-        ),
-      },
     ],
     [
       preferences.fleet_tag_visibility_overrides,
@@ -1273,7 +1253,8 @@ export function FleetWorkspace({
               onNavigatePanel={onNavigatePanel}
               onOpenJobDetails={onOpenJobDetails}
               onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
-              onRenderTemplateRuntimeConfig={onRenderTemplateRuntimeConfig}
+              onLoadEffectiveAgentConfig={onLoadEffectiveAgentConfig}
+              onLoadConfigurationSources={onLoadConfigurationSources}
               onRequestedTabConsumed={ignoreRequestedFleetDetailTab}
               onUpdateAgentAlias={onUpdateAgentAlias}
               policies={fleetAlertPolicies}
@@ -1283,8 +1264,9 @@ export function FleetWorkspace({
               privilegeMaterial={privilegeMaterial}
               requestedTab={null}
               showCountryFlags={preferences.show_country_flags}
-              sourceStatus={sourceStatus}
-              sourceTemplateAssignments={sourceTemplateAssignments}
+              configurationSources={configurationSources.filter(
+                (source) => source.client_id === agent.id,
+              )}
               summary={summary}
               tagDisplayOrder={tagDisplayOrder}
               tagVisibilityOverrides={
@@ -1511,6 +1493,7 @@ function FleetInstancesPanel({
         openRowOnClick={openRowOnClick}
         openRowLabel={openRowLabel}
         openRowTitle={openRowTitle}
+        showMobileOpenRowAction={false}
         onSelectionChange={onSelectionChange}
         renderExpandedRow={renderExpandedRow}
         renderSelectionPanel={renderSelectionPanel}
@@ -1565,8 +1548,7 @@ function FleetInstancesPanel({
 
 function FleetInstanceDetail({
   agent,
-  sourceTemplateAssignments,
-  sourceStatus,
+  configurationSources,
   lastLiveEvent,
   policyAlerts,
   policyAlertsTruncated,
@@ -1584,7 +1566,8 @@ function FleetInstanceDetail({
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
   onNavigatePanel,
-  onRenderTemplateRuntimeConfig,
+  onLoadEffectiveAgentConfig,
+  onLoadConfigurationSources,
   onUpdateAgentAlias,
   privilegeMaterial,
   showCountryFlags,
@@ -1604,8 +1587,7 @@ function FleetInstanceDetail({
   wsState,
 }: {
   agent: AgentView;
-  sourceTemplateAssignments: SourceTemplateAssignmentRecord[];
-  sourceStatus: SourceStatusRecord[];
+  configurationSources: ConfigurationSourceView[];
   lastLiveEvent: string;
   policyAlerts: PolicyAlertRecord[];
   policyAlertsTruncated: boolean;
@@ -1631,9 +1613,10 @@ function FleetInstanceDetail({
     subpage: string,
     targetClientId?: string,
   ) => void;
-  onRenderTemplateRuntimeConfig: (
+  onLoadEffectiveAgentConfig: (
     clientId: string,
-  ) => Promise<TemplateRuntimeConfigResponse>;
+  ) => Promise<EffectiveAgentConfigResponse>;
+  onLoadConfigurationSources: () => Promise<void>;
   onUpdateAgentAlias: (
     clientId: string,
     displayName: string,
@@ -1684,7 +1667,7 @@ function FleetInstanceDetail({
   const [configPending, setConfigPending] = useState(false);
   const [configError, setConfigError] = useState<string | null>(null);
   const [configPreview, setConfigPreview] =
-    useState<TemplateRuntimeConfigResponse | null>(null);
+    useState<EffectiveAgentConfigResponse | null>(null);
   const country = countryFromTags(agent.tags);
   const provider = providerFromTags(agent.tags);
   const displayOnlyTags = displayTags(
@@ -1698,8 +1681,16 @@ function FleetInstanceDetail({
   const agentLabel = formatVpsName(agent, vpsNameDisplayMode);
   const displayState = agentDisplayState(agent);
   const configPreviewSummary = configPreview
-    ? `${configPreview.assignments.length} assignments · ${configPreview.unsupported_domains.length} unsupported domains`
+    ? `${configPreview.sources.length} effective configuration sources`
     : "Load redacted runtime config view for this VPS.";
+
+  useEffect(() => {
+    void runPanelAction(
+      setConfigPending,
+      setConfigError,
+      onLoadConfigurationSources,
+    );
+  }, [onLoadConfigurationSources]);
 
   useEffect(() => {
     if (requestedTab) {
@@ -1843,7 +1834,7 @@ function FleetInstanceDetail({
 
   async function loadRenderedConfig() {
     await runPanelAction(setConfigPending, setConfigError, async () => {
-      setConfigPreview(await onRenderTemplateRuntimeConfig(agent.id));
+      setConfigPreview(await onLoadEffectiveAgentConfig(agent.id));
     });
   }
 
@@ -2268,10 +2259,7 @@ function FleetInstanceDetail({
               label="Process limits"
               value={yesNo(agent.capabilities.can_apply_process_limits)}
             />
-            <SourceTemplateConfigList
-              assignments={sourceTemplateAssignments}
-              statuses={sourceStatus}
-            />
+            <ConfigurationSourceList sources={configurationSources} />
             <ConfigPreviewBlock
               error={configError}
               onLoad={() => void loadRenderedConfig()}
@@ -2293,126 +2281,67 @@ function FleetInstanceDetail({
   );
 }
 
-function SourceTemplateConfigList({
-  assignments,
-  statuses,
+function ConfigurationSourceList({
+  sources,
 }: {
-  assignments: SourceTemplateAssignmentRecord[];
-  statuses: SourceStatusRecord[];
+  sources: ConfigurationSourceView[];
 }) {
-  const domains = Array.from(
-    new Set(assignments.map((assignment) => assignment.domain)),
-  ).sort();
-  const statusRows = statuses
+  const rows = sources
     .slice()
-    .sort((left, right) =>
-      `${left.domain}:${left.module}`.localeCompare(
-        `${right.domain}:${right.module}`,
-      ),
-    );
+    .sort((left, right) => left.behavior.localeCompare(right.behavior));
+  const explicitCount = rows.filter(
+    (source) => source.selection_origin === "explicit_override",
+  ).length;
   return (
     <div className="fleetConfigRows">
       <div className="detailLine">
         <FileCog size={18} />
         <div>
-          <span>Assigned template domains</span>
+          <span>Effective configuration sources</span>
           <strong>
-            {domains.length === 0
-              ? "No explicit assignments"
-              : domains.join(", ")}
+            {rows.length === 0
+              ? "No source evidence loaded"
+              : `${rows.length} behaviors · ${explicitCount} explicit overrides`}
           </strong>
         </div>
       </div>
-      {assignments.slice(0, 8).map((assignment) => (
+      {rows.slice(0, 8).map((source) => (
         <div
           className="detailLine compactConfigLine"
-          key={`${assignment.client_id}-${assignment.domain}-${assignment.template_id}`}
+          key={`${source.client_id}-${source.behavior}`}
         >
           <Boxes size={18} />
           <div>
-            <span>{assignment.domain}</span>
+            <span>{readableToken(source.behavior)}</span>
             <strong>
-              {assignment.template_name} · {assignment.template_scope}
-            </strong>
-          </div>
-        </div>
-      ))}
-      {assignments.length > 8 && (
-        <small className="mutedText">
-          +{assignments.length - 8} more template assignment
-          {assignments.length - 8 === 1 ? "" : "s"}
-        </small>
-      )}
-      <div className="detailLine">
-        <Activity size={18} />
-        <div>
-          <span>Runtime config sources</span>
-          <strong>{formatSourceStatusSummary(statusRows)}</strong>
-        </div>
-      </div>
-      {statusRows.slice(0, 8).map((row) => (
-        <div
-          className="detailLine compactConfigLine"
-          key={`${row.client_id}-${row.domain}-${row.module}`}
-        >
-          <FileCog size={18} />
-          <div>
-            <span>
-              {row.domain} / {row.module}
-            </span>
-            <strong>
-              {row.status} · {row.template_name} · {row.source_kind}
+              {source.effective_preset_name} ·{" "}
+              {source.selection_origin === "explicit_override"
+                ? "explicit override"
+                : "inherited system default"}
             </strong>
             <small>
-              {row.status_reason || formatSourceTemplateEvidence(row)}
+              Sync {readableToken(source.runtime_sync.state)} · readiness{" "}
+              {readableToken(source.readiness.state)}
             </small>
           </div>
         </div>
       ))}
-      {statusRows.length > 8 && (
+      {rows.length > 8 && (
         <small className="mutedText">
-          +{statusRows.length - 8} more runtime config source
-          {statusRows.length - 8 === 1 ? "" : "s"}
+          +{rows.length - 8} more configuration source
+          {rows.length - 8 === 1 ? "" : "s"}
         </small>
       )}
     </div>
   );
 }
 
-function formatSourceStatusSummary(rows: SourceStatusRecord[]) {
-  if (rows.length === 0) {
-    return "No runtime config source status loaded";
-  }
-  const ok = rows.filter((row) => row.status.toLowerCase() === "ok").length;
-  const degraded = rows.filter(
-    (row) => row.status.toLowerCase() !== "ok",
-  ).length;
-  return `${rows.length} source${rows.length === 1 ? "" : "s"} · ${ok} ok${degraded > 0 ? ` · ${degraded} needs review` : ""}`;
-}
-
-function formatSourceTemplateEvidence(row: SourceStatusRecord) {
-  const evidence = row.evidence;
-  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) {
-    return row.status_reason || "No evidence reported";
-  }
-  const parts: string[] = [];
-  for (const key of [
-    "sample_count",
-    "artifact_count",
-    "release_count",
-    "backup_request_count",
-    "restore_source_count",
-  ]) {
-    const value = evidence[key];
-    if (typeof value === "number") {
-      parts.push(`${key.replace(/_/g, " ")}: ${value}`);
-    }
-  }
-  const objectStoreKind = evidence.server_object_store_kind;
-  if (typeof objectStoreKind === "string" && objectStoreKind) {
-    parts.push(`object store: ${objectStoreKind}`);
-  }
-  return parts.join(" · ") || row.status_reason || "Evidence available";
+function readableToken(value: string): string {
+  return value
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part[0]?.toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function ConfigPreviewBlock({
@@ -2425,7 +2354,7 @@ function ConfigPreviewBlock({
   error: string | null;
   onLoad: () => void;
   pending: boolean;
-  preview: TemplateRuntimeConfigResponse | null;
+  preview: EffectiveAgentConfigResponse | null;
   summary: string;
 }) {
   return (
@@ -4355,6 +4284,10 @@ function policyDraftValidationMessage(
   if (!request.selector_expression.trim()) {
     return "Policy VPS selector expression is required";
   }
+  const selectorParse = parseSearchExpression(request.selector_expression);
+  if (selectorParse.error) {
+    return `Invalid policy VPS selector: ${selectorParse.error}`;
+  }
   if (request.rules.length === 0) {
     return "At least one rule row is required";
   }
@@ -4423,6 +4356,11 @@ export function FleetAlertPolicyManager({
   const [dryRunPending, setDryRunPending] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [statusTone, setStatusTone] = useState<ActionFeedbackTone>("info");
+  const {
+    captureReviewGeneration: capturePolicyReviewGeneration,
+    invalidateReviewGeneration: invalidatePolicyReviewGeneration,
+    isReviewGenerationCurrent: isPolicyReviewGenerationCurrent,
+  } = useReviewGenerationGuard();
   const policyDraftRequest = useMemo<PolicyDryRunRequest>(
     () => ({
       id: editingId ?? undefined,
@@ -4441,6 +4379,17 @@ export function FleetAlertPolicyManager({
   const policySaveValidation = policyDraftValidationMessage(
     policyDraftRequest,
     true,
+  );
+  const policySelectorParse = useMemo(
+    () => parseSearchExpression(selectorExpression),
+    [selectorExpression],
+  );
+  const policyLocalTargets = useMemo(
+    () =>
+      selectorExpression.trim() && !policySelectorParse.error
+        ? agentsMatchingExpression(agents, selectorExpression)
+        : [],
+    [agents, policySelectorParse.error, selectorExpression],
   );
 
   const agentNameById = useMemo(
@@ -4563,14 +4512,26 @@ export function FleetAlertPolicyManager({
   );
 
   useEffect(() => {
+    invalidatePolicyReviewGeneration();
     setSaveSnapshot(null);
     setDryRunPreview(null);
+    setDryRunPending(false);
     setStatus(null);
-  }, [name, selectorExpression, enabled, notes, ruleDrafts]);
+  }, [
+    enabled,
+    invalidatePolicyReviewGeneration,
+    name,
+    notes,
+    ruleDrafts,
+    selectorExpression,
+  ]);
 
   useEffect(() => {
-    return () => onEditorOpenChange?.(false);
-  }, [onEditorOpenChange]);
+    return () => {
+      invalidatePolicyReviewGeneration();
+      onEditorOpenChange?.(false);
+    };
+  }, [invalidatePolicyReviewGeneration, onEditorOpenChange]);
 
   useEffect(() => {
     if (!policyFocusId) {
@@ -4590,9 +4551,12 @@ export function FleetAlertPolicyManager({
     return policyDraftRequest;
   }
 
-  function currentUpsertRequest(previewHash: string): FleetAlertPolicyRequest {
+  function reviewedUpsertRequest(
+    request: PolicyDryRunRequest,
+    previewHash: string,
+  ): FleetAlertPolicyRequest {
     return {
-      ...currentDryRunRequest(),
+      ...request,
       confirmed: true,
       preview_hash: previewHash,
     };
@@ -4686,8 +4650,9 @@ export function FleetAlertPolicyManager({
 
   async function dryRunCurrentPolicy(
     requireLabels = false,
-  ): Promise<PolicyDryRunResponse> {
-    const request = currentDryRunRequest();
+    request = currentDryRunRequest(),
+  ): Promise<PolicyDryRunResponse | null> {
+    const reviewGeneration = capturePolicyReviewGeneration();
     const draftError = policyDraftValidationMessage(request, requireLabels);
     if (draftError) {
       setDryRunPreview(null);
@@ -4698,6 +4663,9 @@ export function FleetAlertPolicyManager({
     setPolicyStatus("dry-running policy", "progress");
     try {
       const preview = await onDryRun(request);
+      if (!isPolicyReviewGenerationCurrent(reviewGeneration)) {
+        return null;
+      }
       setDryRunPreview(preview);
       setPolicyStatus(
         `dry-run matched ${resourceCount(
@@ -4709,20 +4677,28 @@ export function FleetAlertPolicyManager({
       );
       return preview;
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "policy dry-run failed";
-      setPolicyStatus(message, "danger");
+      if (isPolicyReviewGenerationCurrent(reviewGeneration)) {
+        const message =
+          error instanceof Error ? error.message : "policy dry-run failed";
+        setPolicyStatus(message, "danger");
+      }
       throw error;
     } finally {
-      setDryRunPending(false);
+      if (isPolicyReviewGenerationCurrent(reviewGeneration)) {
+        setDryRunPending(false);
+      }
     }
   }
 
   async function reviewSubmit() {
+    const request = currentDryRunRequest();
     try {
-      const preview = await dryRunCurrentPolicy(true);
+      const preview = await dryRunCurrentPolicy(true, request);
+      if (!preview) {
+        return;
+      }
       setSaveSnapshot({
-        request: currentUpsertRequest(preview.preview_hash),
+        request: reviewedUpsertRequest(request, preview.preview_hash),
         preview,
         title: editingId ? "Update alert policy" : "Create alert policy",
       });
@@ -4920,6 +4896,11 @@ export function FleetAlertPolicyManager({
           : "consoleCrudPanel"
       }
     >
+      <ActionFeedback
+        className="localActionFeedback fleetPolicyActionFeedback"
+        message={status}
+        tone={statusTone}
+      />
       <div className="consoleResourceLayout fullWidth">
         {showPolicyList && policyFilterClientId ? (
           <div className="consoleInlineNotice policyFocusNotice">
@@ -5111,9 +5092,31 @@ export function FleetAlertPolicyManager({
                 <SearchExpressionInput
                   agents={agents}
                   ariaLabel="Policy VPS selector expression"
-                  onChange={setSelectorExpression}
+                  onChange={(value) => {
+                    setSelectorExpression(value);
+                    setDryRunPreview(null);
+                    setSaveSnapshot(null);
+                  }}
                   placeholder="tag:edge && provider:hetzner"
+                  showMatchCount
                   value={selectorExpression}
+                  verification={
+                    policySelectorParse.error
+                      ? "invalid"
+                      : selectorExpression.trim()
+                        ? "valid"
+                        : "neutral"
+                  }
+                  verificationMessage={
+                    policySelectorParse.error ??
+                    (selectorExpression.trim()
+                      ? `${policyLocalTargets.length}/${agents.length}`
+                      : "required")
+                  }
+                />
+                <LocalTargetPreview
+                  agents={policyLocalTargets}
+                  ariaLabel="Alert policy local VPS preview"
                 />
               </ConsoleField>
               <ConsoleField label="Notes" className="fieldFull">
@@ -5258,11 +5261,6 @@ export function FleetAlertPolicyManager({
           </ConsoleDetailPanel>
         ) : null}
       </div>
-      <ActionFeedback
-        className="localActionFeedback fleetPolicyActionFeedback"
-        message={status}
-        tone={statusTone}
-      />
       <ConfirmationPrompt
         confirmLabel={saveSnapshot?.title ?? "Save policy"}
         detail="Saves the reviewed policy group and all rule rows with the dry-run preview hash."
@@ -5391,7 +5389,7 @@ function PolicyDryRunPreview({
         ))}
       </div>
       <div className="tokenPreview">
-        {preview.matched_vps.slice(0, 40).map((clientId) => (
+        {preview.matched_vps.map((clientId) => (
           <span className="tokenChip" key={clientId} title={clientId}>
             {agentNameById.get(clientId) ?? clientId}
           </span>
@@ -6384,6 +6382,11 @@ export function FleetAlertNotificationManager({
 
   return (
     <div className="consoleCrudPanel">
+      <ActionFeedback
+        className="localActionFeedback fleetPolicyActionFeedback"
+        message={status}
+        tone={statusTone}
+      />
       <div className="consoleResourceLayout fullWidth">
         <ConsoleDataGrid
           actions={channelActions}
@@ -6487,7 +6490,10 @@ export function FleetAlertNotificationManager({
                 <select
                   aria-label="Notification scope kind"
                   value={scopeKind}
-                  onChange={(event) => setScopeKind(event.target.value)}
+                  onChange={(event) => {
+                    setScopeKind(event.target.value);
+                    setScopeValue("");
+                  }}
                 >
                   <option value="global">global</option>
                   <option value="provider">provider</option>
@@ -6725,11 +6731,6 @@ export function FleetAlertNotificationManager({
         }
         tone={queueConfirmation === "process" ? "danger" : "normal"}
       />
-      <ActionFeedback
-        className="localActionFeedback fleetPolicyActionFeedback"
-        message={status}
-        tone={statusTone}
-      />
       <ConfirmationPrompt
         confirmLabel={saveSnapshot?.title ?? "Save channel"}
         detail="Saves the reviewed notification channel request exactly as shown."
@@ -6930,6 +6931,7 @@ export function NotificationDeliveryHistoryGrid({
       rows={deliveries}
       rowsTruncated={rowsTruncated}
       searchPlaceholder="Search notification deliveries"
+      selectable={false}
       storageKey="vpsman.grid.fleet.notificationDeliveries.v2"
       title={
         preview
@@ -7067,13 +7069,6 @@ export function WebhookRuleManager({
     (delivery) => delivery.status === "queued",
   );
 
-  const selectedPreviewNames = useMemo(() => {
-    return agents
-      .filter((agent) => agent.tags.some((tag) => expression.includes(tag)))
-      .slice(0, 6)
-      .map((agent) => formatVpsName(agent, "name"))
-      .join(", ");
-  }, [agents, expression]);
   const focusedEditorOpen = focusedEditorMode && editorOpen;
   const editingRule = editingId
     ? (rules.find((rule) => rule.id === editingId) ?? null)
@@ -8038,9 +8033,8 @@ export function WebhookRuleManager({
                 </ConsoleField>
               ) : null}
               <ConsoleField label="Local hint" className="fieldFull">
-                <span className="monoValue">
-                  {selectedPreviewNames ||
-                    "Use server dry-run for exact matches."}
+                <span>
+                  Use Test for the exact server-resolved VPS matches.
                 </span>
               </ConsoleField>
             </form>
@@ -8359,10 +8353,7 @@ export function WebhookDryRunNotice({
   agents: AgentView[];
   preview: WebhookRuleDryRunRecord;
 }) {
-  const matchedNames = preview.matched_vps
-    .slice(0, 8)
-    .map((agent) => formatVpsName(agent, "name"))
-    .join(", ");
+  const matchedNames = webhookMatchedVpsNames(preview.matched_vps);
   return (
     <div className="consoleInlineNotice">
       <strong>
@@ -8394,10 +8385,7 @@ function WebhookRuleSamplePreview({
       </div>
     );
   }
-  const matchedNames = preview.matched_vps
-    .slice(0, 6)
-    .map((agent) => formatVpsName(agent, "name"))
-    .join(", ");
+  const matchedNames = webhookMatchedVpsNames(preview.matched_vps);
   const samplePayload = JSON.stringify(preview.payload_context, null, 2);
   return (
     <div className="webhookRuleSamplePreview">
@@ -8499,11 +8487,8 @@ export function WebhookDeliveryHistoryGrid({
         cell: (delivery) => (
           <span className="historyPrimary">
             <strong>{delivery.matched_vps.length}</strong>
-            <small>
-              {delivery.matched_vps
-                .slice(0, 3)
-                .map((agent) => formatVpsName(agent, "name"))
-                .join(", ") || "none"}
+            <small title={webhookMatchedVpsNames(delivery.matched_vps)}>
+              {webhookCompactMatchedVpsNames(delivery.matched_vps, 3)}
             </small>
           </span>
         ),
@@ -8549,6 +8534,12 @@ export function WebhookDeliveryHistoryGrid({
           <span>{delivery.event_kind}</span>
           <span>{delivery.target}</span>
           <span>{delivery.attempt_count} attempts</span>
+          <span
+            className="monoValue"
+            title={webhookMatchedVpsNames(delivery.matched_vps)}
+          >
+            Matched VPS: {webhookMatchedVpsNames(delivery.matched_vps) || "none"}
+          </span>
           {delivery.error && (
             <span className="deliveryErrorText" title={delivery.error}>
               error: {delivery.error}
@@ -8559,10 +8550,27 @@ export function WebhookDeliveryHistoryGrid({
       rows={deliveries}
       rowsTruncated={rowsTruncated}
       searchPlaceholder="Search webhook deliveries"
+      selectable={false}
       storageKey="vpsman.grid.fleet.webhookDeliveries.v2"
       title={preview ? "Webhook delivery preview" : "Webhook delivery history"}
     />
   );
+}
+
+function webhookMatchedVpsNames(agents: AgentView[]): string {
+  return agents.map((agent) => formatVpsName(agent, "name")).join(", ");
+}
+
+function webhookCompactMatchedVpsNames(
+  agents: AgentView[],
+  limit: number,
+): string {
+  if (agents.length === 0) {
+    return "none";
+  }
+  const visible = webhookMatchedVpsNames(agents.slice(0, limit));
+  const remainder = Math.max(0, agents.length - limit);
+  return remainder > 0 ? `${visible} · +${remainder} more` : visible;
 }
 
 export function WebhookDeliveryMaintenancePanel({
@@ -8841,418 +8849,6 @@ function WebhookTemplateEditor({
   return <div className="webhookCodeMirror" ref={containerRef} />;
 }
 
-function FleetAlertList({
-  agents,
-  alerts,
-  stateCount,
-  onUpdate,
-}: {
-  agents: AgentView[];
-  alerts: FleetAlertRecord[];
-  stateCount: number;
-  onUpdate: (request: FleetAlertStateRequest) => Promise<FleetAlertStateRecord>;
-}) {
-  const { vpsNameDisplayMode } = usePanelDisplaySettings();
-  const [pending, setPending] = useState<string | null>(null);
-  const [reviewSnapshot, setReviewSnapshot] = useState<{
-    action: FleetAlertStateRequest["action"];
-    requests: FleetAlertStateRequest[];
-    rows: FleetAlertRecord[];
-  } | null>(null);
-  const criticalCount = alerts.filter(
-    (alert) => alert.severity === "critical",
-  ).length;
-  const warningCount = alerts.filter(
-    (alert) => alert.severity === "warning",
-  ).length;
-  const infoCount = alerts.length - criticalCount - warningCount;
-  const nameById = useMemo(
-    () => agentNamesById(agents, vpsNameDisplayMode),
-    [agents, vpsNameDisplayMode],
-  );
-
-  const alertColumns = useMemo<ConsoleDataGridColumn<FleetAlertRecord>[]>(
-    () => [
-      {
-        id: "severity",
-        header: "Severity",
-        size: 115,
-        minSize: 95,
-        sortValue: (alert) => alert.severity,
-        searchValue: (alert) => alert.severity,
-        cell: (alert) => (
-          <ConsoleStatusBadge tone={alertTone(alert.severity)}>
-            {alert.severity}
-          </ConsoleStatusBadge>
-        ),
-      },
-      {
-        id: "alert",
-        header: "Alert",
-        size: 360,
-        minSize: 240,
-        sortValue: (alert) => alert.title,
-        searchValue: (alert) => `${alert.title} ${alert.detail}`,
-        cell: (alert) => (
-          <span className="historyPrimary">
-            <strong>{alert.title}</strong>
-            <small>{alert.detail}</small>
-          </span>
-        ),
-      },
-      {
-        id: "target",
-        header: "Target",
-        size: 210,
-        minSize: 150,
-        sortValue: (alert) =>
-          alert.client_id
-            ? (nameById.get(alert.client_id) ?? alert.client_id)
-            : alertTargetLabel(alert),
-        searchValue: (alert) =>
-          `${alert.target_kind} ${alert.target_id} ${alert.client_id ?? ""} ${
-            alert.client_id ? (nameById.get(alert.client_id) ?? "") : ""
-          }`,
-        cell: (alert) => {
-          const label = alert.client_id
-            ? (nameById.get(alert.client_id) ?? "Unnamed VPS")
-            : alertTargetLabel(alert);
-          return (
-            <span
-              className="historyPrimary"
-              title={`${alert.target_kind}:${alert.target_id}`}
-            >
-              <strong>{label}</strong>
-              <small>{alert.target_kind}</small>
-            </span>
-          );
-        },
-      },
-      {
-        id: "category",
-        header: "Category",
-        size: 140,
-        minSize: 110,
-        sortValue: (alert) => alert.category,
-        searchValue: (alert) => alert.category,
-        cell: (alert) => <span className="monoValue">{alert.category}</span>,
-      },
-      {
-        id: "state",
-        header: "Operator state",
-        size: 170,
-        minSize: 150,
-        sortValue: alertOperatorState,
-        searchValue: (alert) =>
-          `${alertOperatorState(alert)} ${alert.state_reason ?? ""}`,
-        cell: (alert) => {
-          const operatorState = alertOperatorState(alert);
-          return (
-            <span className="historyPrimary">
-              <ConsoleStatusBadge
-                tone={operatorState === "open" ? "warning" : "info"}
-              >
-                {operatorState}
-              </ConsoleStatusBadge>
-              {alert.state_reason && <small>{alert.state_reason}</small>}
-            </span>
-          );
-        },
-      },
-      {
-        id: "observed",
-        header: "Observed",
-        size: 140,
-        minSize: 110,
-        sortValue: (alert) => alert.observed_at,
-        cell: (alert) => formatCompactTime(alert.observed_at),
-      },
-    ],
-    [nameById],
-  );
-
-  useEffect(() => {
-    setReviewSnapshot((current) => {
-      if (!current) {
-        return current;
-      }
-      const currentAlerts = new Map(alerts.map((alert) => [alert.id, alert]));
-      const reviewIsCurrent = current.rows.every((reviewedAlert) => {
-        const latestAlert = currentAlerts.get(reviewedAlert.id);
-        return (
-          latestAlert != null &&
-          alertOperatorState(latestAlert) === alertOperatorState(reviewedAlert)
-        );
-      });
-      return reviewIsCurrent ? current : null;
-    });
-  }, [alerts]);
-
-  function reviewAlertUpdate(
-    rows: FleetAlertRecord[],
-    action: FleetAlertStateRequest["action"],
-  ) {
-    if (rows.length === 0 || pending) {
-      return;
-    }
-    setReviewSnapshot({
-      action,
-      rows,
-      requests: rows.map((alert) => ({
-        alert_id: alert.id,
-        action,
-        muted_for_secs: action === "mute" ? 4 * 60 * 60 : null,
-        reason:
-          action === "mute"
-            ? "panel mute"
-            : action === "acknowledge"
-              ? "panel acknowledgement"
-              : action === "escalate"
-                ? "panel escalation"
-                : "panel clear",
-        confirmed: true,
-      })),
-    });
-  }
-
-  async function updateReviewedAlerts() {
-    const snapshot = reviewSnapshot;
-    if (!snapshot || pending) {
-      return;
-    }
-    setPending(
-      `${snapshot.action}:${snapshot.rows.map((alert) => alert.id).join(",")}`,
-    );
-    try {
-      for (const request of snapshot.requests) {
-        await onUpdate(request);
-      }
-      setReviewSnapshot(null);
-    } finally {
-      setPending(null);
-    }
-  }
-
-  const openRows = (rows: FleetAlertRecord[]) =>
-    rows.filter((alert) => alertOperatorState(alert) === "open");
-  const triagedRows = (rows: FleetAlertRecord[]) =>
-    rows.filter((alert) => alertOperatorState(alert) !== "open");
-
-  return (
-    <div className="fleetAlertList" aria-label="Fleet alerts">
-      <div className="fleetAlertHeader">
-        <span>
-          <AlertTriangle size={17} />
-          <strong>Fleet alerts</strong>
-        </span>
-        <small>
-          {alerts.length === 0
-            ? "clear"
-            : `${criticalCount} critical / ${warningCount} warning / ${infoCount} info / ${stateCount} triaged`}
-        </small>
-      </div>
-      <ConsoleDataGrid
-        actions={[
-          {
-            label: "Acknowledge open",
-            description: (rows) =>
-              `Acknowledge ${openRows(rows).length} selected open fleet alerts.`,
-            disabled: (rows) => pending != null || openRows(rows).length === 0,
-            icon: <Check size={14} />,
-            onSelect: (rows) =>
-              reviewAlertUpdate(openRows(rows), "acknowledge"),
-          },
-          {
-            label: "Mute open 4h",
-            description: (rows) =>
-              `Mute ${openRows(rows).length} selected open fleet alerts for four hours.`,
-            disabled: (rows) => pending != null || openRows(rows).length === 0,
-            icon: <VolumeX size={14} />,
-            onSelect: (rows) => reviewAlertUpdate(openRows(rows), "mute"),
-          },
-          {
-            label: "Escalate open",
-            description: (rows) =>
-              `Escalate ${openRows(rows).length} selected open fleet alerts.`,
-            disabled: (rows) => pending != null || openRows(rows).length === 0,
-            icon: <ArrowUpCircle size={14} />,
-            onSelect: (rows) => reviewAlertUpdate(openRows(rows), "escalate"),
-          },
-          {
-            label: "Clear triaged",
-            description: (rows) =>
-              `Clear ${triagedRows(rows).length} selected triaged fleet alerts.`,
-            disabled: (rows) =>
-              pending != null || triagedRows(rows).length === 0,
-            icon: <CircleCheck size={14} />,
-            onSelect: (rows) => reviewAlertUpdate(triagedRows(rows), "clear"),
-          },
-        ]}
-        columns={alertColumns}
-        defaultPageSize={10}
-        empty="No active fleet alerts."
-        getRowId={(alert) => alert.id}
-        itemLabel="alerts"
-        renderExpandedRow={(alert) => (
-          <div className="consoleGridDetails">
-            <div className="consoleInlineDetailGrid">
-              <span>
-                <strong>Status</strong>
-                <span>{alert.status}</span>
-              </span>
-              <span>
-                <strong>Target</strong>
-                <span>{alert.target_kind}:{alert.target_id}</span>
-              </span>
-              {alert.muted_until_unix && (
-                <span>
-                  <strong>Muted until</strong>
-                  <span>{formatUnixTime(alert.muted_until_unix)}</span>
-                </span>
-              )}
-              <span>
-                <strong>Escalation</strong>
-                <span>{alert.escalation_level ?? 0}</span>
-              </span>
-              <span>
-                <strong>Evidence</strong>
-                <pre>{JSON.stringify(alert.evidence, null, 2)}</pre>
-              </span>
-            </div>
-          </div>
-        )}
-        rowActions={[
-          {
-            label: "Ack",
-            description: (rows) =>
-              actionTargetDescription(
-                "Acknowledge",
-                "fleet alert",
-                rows[0]?.title,
-                "Marks the open alert as acknowledged.",
-              ),
-            disabled: (rows) =>
-              pending != null ||
-              !rows[0] ||
-              alertOperatorState(rows[0]) !== "open",
-            icon: <Check size={14} />,
-            onSelect: (rows) => reviewAlertUpdate(rows, "acknowledge"),
-          },
-          {
-            label: "Mute",
-            description: (rows) =>
-              actionTargetDescription(
-                "Mute",
-                "fleet alert",
-                rows[0]?.title,
-                "Suppresses the open alert for four hours.",
-              ),
-            disabled: (rows) =>
-              pending != null ||
-              !rows[0] ||
-              alertOperatorState(rows[0]) !== "open",
-            icon: <VolumeX size={14} />,
-            onSelect: (rows) => reviewAlertUpdate(rows, "mute"),
-          },
-          {
-            label: "Escalate",
-            description: (rows) =>
-              actionTargetDescription(
-                "Escalate",
-                "fleet alert",
-                rows[0]?.title,
-                "Raises the open alert escalation level.",
-              ),
-            disabled: (rows) =>
-              pending != null ||
-              !rows[0] ||
-              alertOperatorState(rows[0]) !== "open",
-            icon: <ArrowUpCircle size={14} />,
-            onSelect: (rows) => reviewAlertUpdate(rows, "escalate"),
-          },
-          {
-            label: "Clear",
-            description: (rows) =>
-              actionTargetDescription(
-                "Clear",
-                "fleet alert",
-                rows[0]?.title,
-                "Clears a triaged alert.",
-              ),
-            disabled: (rows) =>
-              pending != null ||
-              !rows[0] ||
-              alertOperatorState(rows[0]) === "open",
-            icon: <CircleCheck size={14} />,
-            onSelect: (rows) => reviewAlertUpdate(rows, "clear"),
-          },
-        ]}
-        renderSelectionPanel={(rows) => {
-          const selectedOpen = openRows(rows).length;
-          const selectedTriaged = triagedRows(rows).length;
-          return (
-            <span>
-              {rows.length} selected · {selectedOpen} open · {selectedTriaged}{" "}
-              triaged
-            </span>
-          );
-        }}
-        rows={alerts}
-        searchPlaceholder="Search alerts by VPS, category, state, or detail"
-        storageKey="vpsman.grid.fleet.alerts.v1"
-        title="Fleet alerts"
-      />
-      <ConfirmationPrompt
-        confirmLabel={fleetAlertActionLabel(reviewSnapshot?.action)}
-        detail="Applies the reviewed operator state update to the selected fleet alerts."
-        items={[
-          {
-            label: "Action",
-            value: fleetAlertActionLabel(reviewSnapshot?.action),
-          },
-          {
-            label: "Alerts",
-            value: selectedRecordSummary(
-              reviewSnapshot?.rows ?? null,
-              "alert",
-              "alerts",
-              (row) => row.title,
-              (row) => row.id,
-            ),
-          },
-        ]}
-        onCancel={() => setReviewSnapshot(null)}
-        onConfirm={() => void updateReviewedAlerts()}
-        open={reviewSnapshot !== null}
-        pending={pending !== null}
-        title="Confirm fleet alert triage"
-        tone={reviewSnapshot?.action === "clear" ? "normal" : "danger"}
-      />
-    </div>
-  );
-}
-
-function formatUnixTime(value: number): string {
-  return formatCompactTime(new Date(value * 1000).toISOString());
-}
-
-function fleetAlertActionLabel(
-  action: FleetAlertStateRequest["action"] | undefined,
-): string {
-  switch (action) {
-    case "acknowledge":
-      return "Acknowledge";
-    case "mute":
-      return "Mute";
-    case "escalate":
-      return "Escalate";
-    case "clear":
-      return "Clear";
-    default:
-      return "Confirm";
-  }
-}
-
 function alertTone(severity: string): "critical" | "warning" | "info" {
   if (severity === "critical") {
     return "critical";
@@ -9261,14 +8857,6 @@ function alertTone(severity: string): "critical" | "warning" | "info" {
     return "warning";
   }
   return "info";
-}
-
-function alertTargetLabel(alert: FleetAlertRecord) {
-  return alert.target_kind === "client" ? "Unknown VPS" : alert.target_id;
-}
-
-function alertOperatorState(alert: FleetAlertRecord): string {
-  return alert.operator_state?.trim() || "open";
 }
 
 function latestTelemetryRollupsByClient(rollups: TelemetryRollupRecord[]) {
@@ -9703,7 +9291,7 @@ type NetworkInterfaceSnapshotRecord = {
   addresses?: NetworkInterfaceAddressRecord[];
   rx_bytes?: number;
   tx_bytes?: number;
-  metasource_templates?: string[];
+  metadata_sources?: string[];
 };
 
 type NetworkInterfaceAddressRecord = {

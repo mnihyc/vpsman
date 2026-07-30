@@ -26,8 +26,8 @@ impl From<RuntimeManagerArg> for RuntimeTunnelManager {
 
 pub(crate) struct RuntimeControlArgs<'a> {
     pub(crate) manager: RuntimeTunnelManager,
-    pub(crate) left_adapter_template_id: Option<&'a str>,
-    pub(crate) right_adapter_template_id: Option<&'a str>,
+    pub(crate) left_adapter_definition_id: Option<&'a str>,
+    pub(crate) right_adapter_definition_id: Option<&'a str>,
     pub(crate) traffic_ingress_kbps: Option<u32>,
     pub(crate) traffic_egress_kbps: Option<u32>,
     pub(crate) traffic_burst_kb: Option<u32>,
@@ -47,8 +47,8 @@ pub(crate) struct RuntimeTopologyArgs<'a> {
 pub(crate) fn build_runtime_control(args: RuntimeControlArgs<'_>) -> RuntimeTunnelControl {
     RuntimeTunnelControl {
         manager: args.manager,
-        left_adapter_template_id: args.left_adapter_template_id.map(str::to_string),
-        right_adapter_template_id: args.right_adapter_template_id.map(str::to_string),
+        left_adapter_definition_id: args.left_adapter_definition_id.map(str::to_string),
+        right_adapter_definition_id: args.right_adapter_definition_id.map(str::to_string),
         traffic_limit: RuntimeTunnelTrafficLimit {
             ingress_kbps: args.traffic_ingress_kbps,
             egress_kbps: args.traffic_egress_kbps,

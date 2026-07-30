@@ -626,15 +626,15 @@ fn validate_network_status_operation(
         vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter => {
             let adapter = adapter
                 .ok_or_else(|| ApiError::bad_request("network_status_adapter_snapshot_required"))?;
-            let expected_template_id = match side {
+            let expected_definition_id = match side {
                 vpsman_common::TunnelEndpointSide::Left => {
-                    plan.runtime_control.left_adapter_template_id.as_deref()
+                    plan.runtime_control.left_adapter_definition_id.as_deref()
                 }
                 vpsman_common::TunnelEndpointSide::Right => {
-                    plan.runtime_control.right_adapter_template_id.as_deref()
+                    plan.runtime_control.right_adapter_definition_id.as_deref()
                 }
             };
-            if expected_template_id != Some(adapter.template_id.as_str()) {
+            if expected_definition_id != Some(adapter.definition_id.as_str()) {
                 return Err(ApiError::bad_request(
                     "network_status_adapter_binding_mismatch",
                 ));
@@ -666,9 +666,9 @@ fn validate_runtime_adapter_snapshot(
     adapter: &vpsman_common::RuntimeTunnelAdapterCommands,
     traffic_limit_required: bool,
 ) -> Result<(), ApiError> {
-    uuid::Uuid::parse_str(&adapter.template_id)
-        .map_err(|_| ApiError::bad_request("network_status_adapter_template_id_invalid"))?;
-    if adapter.template_name.trim().is_empty()
+    uuid::Uuid::parse_str(&adapter.definition_id)
+        .map_err(|_| ApiError::bad_request("network_status_adapter_definition_id_invalid"))?;
+    if adapter.definition_name.trim().is_empty()
         || adapter.definition_hash.len() != 64
         || !adapter
             .definition_hash
@@ -717,14 +717,17 @@ fn validate_network_routing_adapter_operation(
         .ospf
         .as_ref()
         .ok_or_else(|| ApiError::bad_request("network_routing_ospf_disabled"))?;
-    let expected_template_id = match side {
-        vpsman_common::TunnelEndpointSide::Left => &ospf.left_adapter_template_id,
-        vpsman_common::TunnelEndpointSide::Right => &ospf.right_adapter_template_id,
+    let expected_definition_id = match side {
+        vpsman_common::TunnelEndpointSide::Left => ospf.left_adapter_definition_id.as_deref(),
+        vpsman_common::TunnelEndpointSide::Right => ospf.right_adapter_definition_id.as_deref(),
     };
-    if adapter.template_id != *expected_template_id {
-        return Err(ApiError::bad_request(
-            "network_routing_adapter_binding_mismatch",
-        ));
+    match expected_definition_id {
+        Some(expected) if adapter.definition_id == expected => {}
+        _ => {
+            return Err(ApiError::bad_request(
+                "network_routing_adapter_binding_mismatch",
+            ));
+        }
     }
     if adapter.definition_hash.len() != 64
         || !adapter

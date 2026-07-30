@@ -321,6 +321,17 @@ fn validate_network_config(config: &AgentNetworkConfig) -> Result<(), String> {
     if !(1..=60).contains(&config.latency_down_windows) {
         return Err("network_latency_down_windows_out_of_range".to_string());
     }
+    if config.ospf_status_command.is_some() != config.ospf_update_command.is_some() {
+        return Err("network_ospf_commands_must_be_configured_together".to_string());
+    }
+    if let Some(command) = &config.ospf_status_command {
+        validate_network_hook_argv(&command.argv, "network_ospf_status_command_argv")?;
+        validate_runtime_command_budget(command, "network_ospf_status_command")?;
+    }
+    if let Some(command) = &config.ospf_update_command {
+        validate_network_hook_argv(&command.argv, "network_ospf_update_command_argv")?;
+        validate_runtime_command_budget(command, "network_ospf_update_command")?;
+    }
     validate_runtime_status_telemetry_plans(&config.runtime_status_telemetry_plans)?;
     crate::validate_port_forwarding_config(&config.port_forwarding)
         .map_err(|error| format!("network_port_forwarding_invalid:{error}"))?;
@@ -395,19 +406,19 @@ fn validate_runtime_adapter_snapshot(plan: &AgentRuntimeStatusTelemetryPlan) -> 
                 .runtime_adapter
                 .as_ref()
                 .ok_or_else(|| "network_runtime_adapter_snapshot_required".to_string())?;
-            let expected_template_id = match plan.endpoint_side {
+            let expected_definition_id = match plan.endpoint_side {
                 TunnelEndpointSide::Left => plan
                     .plan
                     .runtime_control
-                    .left_adapter_template_id
+                    .left_adapter_definition_id
                     .as_deref(),
                 TunnelEndpointSide::Right => plan
                     .plan
                     .runtime_control
-                    .right_adapter_template_id
+                    .right_adapter_definition_id
                     .as_deref(),
             };
-            if expected_template_id != Some(adapter.template_id.as_str()) {
+            if expected_definition_id != Some(adapter.definition_id.as_str()) {
                 return Err("network_runtime_adapter_snapshot_binding_mismatch".to_string());
             }
             validate_runtime_adapter_commands(adapter)?;
@@ -428,14 +439,14 @@ fn validate_runtime_adapter_snapshot(plan: &AgentRuntimeStatusTelemetryPlan) -> 
 
 fn validate_runtime_adapter_commands(adapter: &RuntimeTunnelAdapterCommands) -> Result<(), String> {
     validate_identifier(
-        &adapter.template_id,
-        "network_runtime_adapter_template_id",
+        &adapter.definition_id,
+        "network_runtime_adapter_definition_id",
         128,
     )?;
-    uuid::Uuid::parse_str(&adapter.template_id)
-        .map_err(|_| "network_runtime_adapter_template_id_invalid".to_string())?;
-    if adapter.template_name.trim().is_empty()
-        || adapter.template_name.len() > 256
+    uuid::Uuid::parse_str(&adapter.definition_id)
+        .map_err(|_| "network_runtime_adapter_definition_id_invalid".to_string())?;
+    if adapter.definition_name.trim().is_empty()
+        || adapter.definition_name.len() > 256
         || adapter.definition_hash.len() != 64
         || !adapter
             .definition_hash

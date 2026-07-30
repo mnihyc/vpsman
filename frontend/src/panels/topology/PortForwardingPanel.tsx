@@ -1,15 +1,8 @@
 import {
   CheckCircle2,
-  ChevronDown,
-  ChevronUp,
   CirclePlus,
-  Copy,
   Info,
-  Pencil,
-  Power,
-  PowerOff,
   RefreshCcw,
-  RotateCcw,
   Search,
   ShieldAlert,
   Trash2,
@@ -26,6 +19,13 @@ import {
 } from "react";
 import { ActionFeedback, type ActionFeedbackTone } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
+import {
+  ConsoleActionMenu,
+  ConsoleContextActionMenu,
+  ConsoleInlineActions,
+  type ConsoleMenuAction,
+} from "../../components/ConsoleLayout";
+import { VpsCombobox } from "../../components/VpsCombobox";
 import { scrollIntoViewWithMotion } from "../../motion";
 import {
   formatPortMappings,
@@ -153,6 +153,7 @@ export function PortForwardingPanel({
     useState<PortForwardRuleCorruptRecord | null>(null);
   const editorRef = useRef<HTMLElement | null>(null);
   const detailRef = useRef<HTMLElement | null>(null);
+  const registryFeedbackRef = useRef<HTMLDivElement | null>(null);
   const writeBoundary = "Operator role and network:write scope required";
   const forgetBoundary = "Admin role and network:write scope required";
   const corruptRules = ruleItems.filter(isCorruptPortForwardRule);
@@ -277,6 +278,18 @@ export function PortForwardingPanel({
   useEffect(() => {
     setForgetReason("");
   }, [expandedRule?.id]);
+
+  useEffect(() => {
+    if (feedback?.anchor !== "registry") return;
+    const frame = window.requestAnimationFrame(() => {
+      if (registryFeedbackRef.current) {
+        scrollIntoViewWithMotion(registryFeedbackRef.current, {
+          block: "nearest",
+        });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [feedback]);
 
   function openCreate() {
     if (!canWrite) return;
@@ -478,6 +491,79 @@ export function PortForwardingPanel({
     }
   }
 
+  function rowActions(rule: PortForwardRuleRecord): ConsoleMenuAction[] {
+    if (rule.deleted_at) return [];
+    const capability = agentById.get(rule.client_id)?.capabilities.port_forwarding;
+    return [
+      {
+        disabled: !canWrite || pending || Boolean(editor),
+        label: "Edit",
+        onSelect: () => openEdit(rule),
+        title: !canWrite ? writeBoundary : "Edit rule",
+      },
+      {
+        disabled: !canWrite || pending || Boolean(editor),
+        label: "Clone",
+        onSelect: () => openClone(rule),
+        title: !canWrite ? writeBoundary : "Clone as a disabled rule",
+      },
+      {
+        disabled:
+          !canWrite ||
+          pending ||
+          Boolean(editor) ||
+          (!rule.enabled && capability?.status !== "supported"),
+        label: rule.enabled ? "Disable" : "Enable",
+        onSelect: () =>
+          setConfirmation({
+            kind: "single",
+            operation: rule.enabled ? "disable" : "enable",
+            origin: "registry",
+            rule,
+          }),
+        title: !canWrite
+          ? writeBoundary
+          : rule.enabled
+            ? "Disable rule"
+            : capabilityActionTitle(agentById.get(rule.client_id), "Enable rule"),
+      },
+      {
+        disabled:
+          !canWrite ||
+          pending ||
+          Boolean(editor) ||
+          capability?.status !== "supported",
+        label: "Reapply",
+        onSelect: () =>
+          setConfirmation({
+            kind: "single",
+            operation: "reapply",
+            origin: "registry",
+            rule,
+          }),
+        title: !canWrite
+          ? writeBoundary
+          : capabilityActionTitle(
+              agentById.get(rule.client_id),
+              "Reapply this VPS's complete forwarding table",
+            ),
+      },
+      {
+        disabled: !canWrite || pending || Boolean(editor),
+        label: "Delete",
+        onSelect: () =>
+          setConfirmation({
+            kind: "single",
+            operation: "delete",
+            origin: "registry",
+            rule,
+          }),
+        title: !canWrite ? writeBoundary : "Delete rule",
+        tone: "danger",
+      },
+    ];
+  }
+
   return (
     <div className="portForwardPage topologyPageStack">
       <section className="fleetPanel portForwardSummary">
@@ -554,10 +640,13 @@ export function PortForwardingPanel({
             <Search size={15} />
             <input aria-label="Search port-forward rules" onChange={(event) => setQuery(event.target.value)} placeholder="Search rules" value={query} />
           </label>
-          <FilterSelect label="VPS" onChange={setClientFilter} value={clientFilter}>
-            <option value="all">All VPSs</option>
-            {agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.display_name || agent.id}</option>)}
-          </FilterSelect>
+          <VpsCombobox
+            agents={agents}
+            ariaLabel="Filter port-forward rules by VPS"
+            onChange={(clientId) => setClientFilter(clientId || "all")}
+            placeholder="All VPSs"
+            value={clientFilter === "all" ? "" : clientFilter}
+          />
           <FilterSelect label="Family" onChange={setFamilyFilter} value={familyFilter}>
             <option value="all">All families</option><option value="ipv4">IPv4</option><option value="ipv6">IPv6</option>
           </FilterSelect>
@@ -574,13 +663,99 @@ export function PortForwardingPanel({
         {selectedRules.length > 0 && (
           <div className="selectionActionBar portForwardBulkBar" aria-label="Selected port-forward actions">
             <span>{selectedRules.length} selected</span>
-            <button className="secondaryAction compactAction" disabled={!canWrite || pending || Boolean(editor) || selectedEnableRules.length === 0} onClick={() => setConfirmation({ kind: "bulk", action: "enable", rules: selectedEnableRules })} title={!canWrite ? writeBoundary : `Enable ${selectedEnableRules.length} eligible selected rule${selectedEnableRules.length === 1 ? "" : "s"}`} type="button"><Power size={14} /> Enable {selectedEnableRules.length}</button>
-            <button className="secondaryAction compactAction" disabled={!canWrite || pending || Boolean(editor) || selectedDisableRules.length === 0} onClick={() => setConfirmation({ kind: "bulk", action: "disable", rules: selectedDisableRules })} title={!canWrite ? writeBoundary : `Disable ${selectedDisableRules.length} eligible selected rule${selectedDisableRules.length === 1 ? "" : "s"}`} type="button"><PowerOff size={14} /> Disable {selectedDisableRules.length}</button>
-            <button className="secondaryAction compactAction" disabled={!canWrite || pending || Boolean(editor) || selectedReapplyRules.length === 0} onClick={() => setConfirmation({ kind: "bulk", action: "reapply", rules: selectedReapplyRules })} title={!canWrite ? writeBoundary : `Reapply complete forwarding tables for ${selectedReapplyRules.length} eligible selected rule${selectedReapplyRules.length === 1 ? "" : "s"}`} type="button"><RotateCcw size={14} /> Reapply {selectedReapplyRules.length}</button>
-            <button className="dangerAction compactAction" disabled={!canWrite || pending || Boolean(editor) || selectedActiveRules.length === 0} onClick={() => setConfirmation({ kind: "bulk", action: "delete", rules: selectedActiveRules })} title={!canWrite ? writeBoundary : `Delete ${selectedActiveRules.length} eligible selected rule${selectedActiveRules.length === 1 ? "" : "s"}`} type="button"><Trash2 size={14} /> Delete {selectedActiveRules.length}</button>
+            <ConsoleActionMenu
+              actions={[
+                {
+                  disabled:
+                    selectedRules.length !== 1 ||
+                    !canWrite ||
+                    pending ||
+                    Boolean(editor),
+                  label: "Edit",
+                  onSelect: () => {
+                    if (selectedRules[0]) openEdit(selectedRules[0]);
+                  },
+                  title: !canWrite ? writeBoundary : undefined,
+                },
+                {
+                  disabled:
+                    selectedRules.length !== 1 ||
+                    !canWrite ||
+                    pending ||
+                    Boolean(editor),
+                  label: "Clone",
+                  onSelect: () => {
+                    if (selectedRules[0]) openClone(selectedRules[0]);
+                  },
+                  title: !canWrite ? writeBoundary : undefined,
+                },
+                {
+                  disabled:
+                    !canWrite ||
+                    pending ||
+                    Boolean(editor) ||
+                    selectedEnableRules.length === 0,
+                  label: `Enable ${selectedEnableRules.length}`,
+                  onSelect: () =>
+                    setConfirmation({
+                      kind: "bulk",
+                      action: "enable",
+                      rules: selectedEnableRules,
+                    }),
+                  title: !canWrite ? writeBoundary : undefined,
+                },
+                {
+                  disabled:
+                    !canWrite ||
+                    pending ||
+                    Boolean(editor) ||
+                    selectedDisableRules.length === 0,
+                  label: `Disable ${selectedDisableRules.length}`,
+                  onSelect: () =>
+                    setConfirmation({
+                      kind: "bulk",
+                      action: "disable",
+                      rules: selectedDisableRules,
+                    }),
+                  title: !canWrite ? writeBoundary : undefined,
+                },
+                {
+                  disabled:
+                    !canWrite ||
+                    pending ||
+                    Boolean(editor) ||
+                    selectedReapplyRules.length === 0,
+                  label: `Reapply ${selectedReapplyRules.length}`,
+                  onSelect: () =>
+                    setConfirmation({
+                      kind: "bulk",
+                      action: "reapply",
+                      rules: selectedReapplyRules,
+                    }),
+                  title: !canWrite ? writeBoundary : undefined,
+                },
+                {
+                  disabled:
+                    !canWrite ||
+                    pending ||
+                    Boolean(editor) ||
+                    selectedActiveRules.length === 0,
+                  label: `Delete ${selectedActiveRules.length}`,
+                  onSelect: () =>
+                    setConfirmation({
+                      kind: "bulk",
+                      action: "delete",
+                      rules: selectedActiveRules,
+                    }),
+                  title: !canWrite ? writeBoundary : undefined,
+                  tone: "danger",
+                },
+              ]}
+              label={`Actions for ${selectedRules.length} selected port-forward rule${selectedRules.length === 1 ? "" : "s"}`}
+            />
           </div>
         )}
-        <ActionFeedback className="localActionFeedback portForwardRegistryFeedback" message={feedback?.anchor === "registry" ? feedback.message : null} tone={feedback?.anchor === "registry" ? feedback.tone : undefined} />
+        <ActionFeedback className="localActionFeedback portForwardRegistryFeedback" message={feedback?.anchor === "registry" ? feedback.message : null} ref={registryFeedbackRef} tone={feedback?.anchor === "registry" ? feedback.tone : undefined} />
         {filtered.length === 0 ? (
           <div className="emptyState compactEmptyState">
             <strong>{rules.length === 0 ? "No port-forward rules" : "No matching rules"}</strong>
@@ -593,31 +768,30 @@ export function PortForwardingPanel({
                 <th className="selectionCell"><input aria-label="Select visible port-forward rules" checked={filtered.every((rule) => selected.has(rule.id))} disabled={!canWrite} title={!canWrite ? writeBoundary : "Select all visible rules"} onChange={(event) => {
                   const next = new Set(selected); for (const rule of filtered) event.target.checked ? next.add(rule.id) : next.delete(rule.id); setSelected(next);
                 }} type="checkbox" /></th>
-                <th>Rule / VPS</th><th>Mapping</th><th>Return</th><th>Desired</th><th>Runtime</th><th>NAT matches</th><th aria-label="Actions" />
+                <th>Rule / VPS</th><th>Mapping</th><th>Return</th><th>Desired</th><th>Runtime</th><th>NAT matches</th>
               </tr></thead>
               <tbody>{filtered.map((rule) => {
                 const agent = agentById.get(rule.client_id);
                 const targetAddress = rule.target_ip.includes(":") ? `[${rule.target_ip}]` : rule.target_ip;
                 const mapping = `${rule.protocol.toUpperCase()} · ${rule.mappings.map((item) => formatPortRange(item.incoming)).join(",")} -> ${targetAddress}:${rule.mappings.map((item) => formatPortRange(item.target)).join(",")}`;
-                return <tr className={expandedId === rule.id ? "expanded" : ""} key={rule.id} onClick={() => setExpandedId((current) => current === rule.id ? null : rule.id)} tabIndex={0} onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); setExpandedId((current) => current === rule.id ? null : rule.id); } }}>
-                  <td className="selectionCell" data-label="Select" onClick={(event) => event.stopPropagation()}><input aria-label={`Select ${rule.name}`} checked={selected.has(rule.id)} disabled={!canWrite} title={!canWrite ? writeBoundary : `Select ${rule.name}`} onChange={(event) => { const next = new Set(selected); event.target.checked ? next.add(rule.id) : next.delete(rule.id); setSelected(next); }} type="checkbox" /></td>
-                  <td data-label="Rule / VPS"><strong className="truncateValue" title={rule.name}>{rule.name}</strong><span className="truncateValue" title={`${agent?.display_name || rule.client_id} (${rule.client_id})`}>{agent?.display_name || rule.client_id}</span><div className="portForwardMobileStatus"><StatusBadge status={rule.desired_status} /><StatusBadge status={rule.runtime_status} title={runtimeStatusTitle(rule)} /></div></td>
-                  <td data-label="Mapping"><span className="truncateValue mappingValue" title={mapping}>{mapping}</span></td>
-                  <td data-label="Return"><span title={rule.masquerade ? "Masquerade only connections DNATed by this rule" : "Preserve the original source address"}>{rule.masquerade ? "Masquerade" : "Preserve source"}</span></td>
-                  <td data-label="Desired"><StatusBadge status={rule.desired_status} /></td>
-                  <td data-label="Runtime"><StatusBadge status={rule.runtime_status} title={runtimeStatusTitle(rule)} /></td>
-                  <td data-label="NAT matches"><span title="First-packet NAT matches since the latest table apply; this is not throughput">{rule.nat_matches.toLocaleString()}</span></td>
-                  <td className="rowActions" data-label="Actions" onClick={(event) => event.stopPropagation()}>
-                    <div className="portForwardDesktopActions">
-                      {!rule.deleted_at && <button className="iconButton" disabled={!canWrite || pending || Boolean(editor)} onClick={() => openEdit(rule)} title={!canWrite ? writeBoundary : "Edit rule"} type="button"><Pencil size={15} /></button>}
-                      {!rule.deleted_at && <button className="iconButton" disabled={!canWrite || pending || Boolean(editor)} onClick={() => openClone(rule)} title={!canWrite ? writeBoundary : "Clone as a disabled rule"} type="button"><Copy size={15} /></button>}
-                      {!rule.deleted_at && <button className="iconButton" disabled={!canWrite || pending || Boolean(editor) || (!rule.enabled && agent?.capabilities.port_forwarding?.status !== "supported")} onClick={() => setConfirmation({ kind: "single", operation: rule.enabled ? "disable" : "enable", origin: "registry", rule })} title={!canWrite ? writeBoundary : rule.enabled ? "Disable rule" : agent?.capabilities.port_forwarding?.status === "supported" ? "Enable rule" : capabilityLabel(agent?.capabilities.port_forwarding?.status, agent?.capabilities.port_forwarding?.reason)} type="button">{rule.enabled ? <PowerOff size={15} /> : <Power size={15} />}</button>}
-                      {!rule.deleted_at && <button className="iconButton" disabled={!canWrite || pending || Boolean(editor) || agent?.capabilities.port_forwarding?.status !== "supported"} onClick={() => setConfirmation({ kind: "single", operation: "reapply", origin: "registry", rule })} title={!canWrite ? writeBoundary : agent?.capabilities.port_forwarding?.status === "supported" ? "Reapply this VPS's complete forwarding table" : capabilityLabel(agent?.capabilities.port_forwarding?.status, agent?.capabilities.port_forwarding?.reason)} type="button"><RotateCcw size={15} /></button>}
-                      {!rule.deleted_at && <button className="iconButton dangerIconButton" disabled={!canWrite || pending || Boolean(editor)} onClick={() => setConfirmation({ kind: "single", operation: "delete", origin: "registry", rule })} title={!canWrite ? writeBoundary : "Delete rule"} type="button"><Trash2 size={15} /></button>}
-                    </div>
-                    <button aria-label={`${expandedId === rule.id ? "Collapse" : "Expand"} ${rule.name} rule details`} className="iconButton portForwardMobileDetailsButton" onClick={() => setExpandedId((current) => current === rule.id ? null : rule.id)} title={`${expandedId === rule.id ? "Close" : "Open"} rule details`} type="button">{expandedId === rule.id ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</button>
-                  </td>
-                </tr>;
+                const actions = rowActions(rule);
+                return (
+                  <ConsoleContextActionMenu
+                    actions={actions}
+                    key={rule.id}
+                    label={`Actions for ${rule.name}`}
+                  >
+                    <tr className={expandedId === rule.id ? "expanded" : ""} onClick={() => setExpandedId((current) => current === rule.id ? null : rule.id)} tabIndex={0} onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); setExpandedId((current) => current === rule.id ? null : rule.id); } }}>
+                      <td className="selectionCell" data-label="Select" onClick={(event) => event.stopPropagation()}><input aria-label={`Select ${rule.name}`} checked={selected.has(rule.id)} disabled={!canWrite} title={!canWrite ? writeBoundary : `Select ${rule.name}`} onChange={(event) => { const next = new Set(selected); event.target.checked ? next.add(rule.id) : next.delete(rule.id); setSelected(next); }} type="checkbox" /></td>
+                      <td data-label="Rule / VPS"><strong className="truncateValue" title={rule.name}>{rule.name}</strong><span className="truncateValue" title={`${agent?.display_name || rule.client_id} (${rule.client_id})`}>{agent?.display_name || rule.client_id}</span><div className="portForwardMobileStatus"><StatusBadge status={rule.desired_status} /><StatusBadge status={rule.runtime_status} title={runtimeStatusTitle(rule)} /></div>{actions.length > 0 && <div className="topologyMobileRowActions" onClick={(event) => event.stopPropagation()}><ConsoleInlineActions actions={actions} label={`Actions for ${rule.name}`} /></div>}</td>
+                      <td data-label="Mapping"><span className="truncateValue mappingValue" title={mapping}>{mapping}</span></td>
+                      <td data-label="Return"><span title={rule.masquerade ? "Masquerade only connections DNATed by this rule" : "Preserve the original source address"}>{rule.masquerade ? "Masquerade" : "Preserve source"}</span></td>
+                      <td data-label="Desired"><StatusBadge status={rule.desired_status} /></td>
+                      <td data-label="Runtime"><StatusBadge status={rule.runtime_status} title={runtimeStatusTitle(rule)} /></td>
+                      <td data-label="NAT matches"><span title="First-packet NAT matches since the latest table apply; this is not throughput">{rule.nat_matches.toLocaleString()}</span></td>
+                    </tr>
+                  </ConsoleContextActionMenu>
+                );
               })}</tbody>
             </table>
           </div>
@@ -649,15 +823,6 @@ export function PortForwardingPanel({
             <Detail display={shortId(expandedRule.observed_hash)} label="Observed table" title={`Latest normalized owned-table hash reported by the agent: ${expandedRule.observed_hash ?? "no owned table hash"}`} value={expandedRule.observed_hash ?? "No owned table hash"} />
           </dl>
           <ActionFeedback className="localActionFeedback portForwardDetailFeedback" message={feedback?.anchor === "detail" ? feedback.message : null} tone={feedback?.anchor === "detail" ? feedback.tone : undefined} />
-          {!expandedRule.deleted_at && (
-            <div aria-label={`Actions for ${expandedRule.name}`} className="portForwardDetailActions">
-              <button className="secondaryAction compactAction" disabled={!canWrite || pending || Boolean(editor)} onClick={() => openEdit(expandedRule)} title={!canWrite ? writeBoundary : "Edit rule"} type="button"><Pencil size={14} /> Edit</button>
-              <button className="secondaryAction compactAction" disabled={!canWrite || pending || Boolean(editor)} onClick={() => openClone(expandedRule)} title={!canWrite ? writeBoundary : "Clone as a disabled rule"} type="button"><Copy size={14} /> Clone</button>
-              <button className="secondaryAction compactAction" disabled={!canWrite || pending || Boolean(editor) || (!expandedRule.enabled && agentById.get(expandedRule.client_id)?.capabilities.port_forwarding?.status !== "supported")} onClick={() => setConfirmation({ kind: "single", operation: expandedRule.enabled ? "disable" : "enable", origin: "detail", rule: expandedRule })} title={!canWrite ? writeBoundary : expandedRule.enabled ? "Disable rule" : capabilityActionTitle(agentById.get(expandedRule.client_id), "Enable rule")} type="button">{expandedRule.enabled ? <PowerOff size={14} /> : <Power size={14} />} {expandedRule.enabled ? "Disable" : "Enable"}</button>
-              <button className="secondaryAction compactAction" disabled={!canWrite || pending || Boolean(editor) || agentById.get(expandedRule.client_id)?.capabilities.port_forwarding?.status !== "supported"} onClick={() => setConfirmation({ kind: "single", operation: "reapply", origin: "detail", rule: expandedRule })} title={!canWrite ? writeBoundary : capabilityActionTitle(agentById.get(expandedRule.client_id), "Reapply this VPS's complete forwarding table")} type="button"><RotateCcw size={14} /> Reapply</button>
-              <button className="dangerAction compactAction" disabled={!canWrite || pending || Boolean(editor)} onClick={() => setConfirmation({ kind: "single", operation: "delete", origin: "detail", rule: expandedRule })} title={!canWrite ? writeBoundary : "Delete rule"} type="button"><Trash2 size={14} /> Delete</button>
-            </div>
-          )}
           {expandedRule.deleted_at && !expandedRule.removal_confirmed_at && (
             <div className="portForwardRemovalNotice">
               <ShieldAlert size={17} />
@@ -793,9 +958,17 @@ const PortForwardEditor = forwardRef<HTMLElement, {
       </div>
       <form className="portForwardForm" onSubmit={onSubmit}>
         <ActionFeedback className="localActionFeedback" message={feedback?.message} tone={feedback?.tone} />
-        <label><span>VPS</span><select disabled={Boolean(editing) || pending} onChange={(event) => onChange({ ...draft, clientId: event.target.value })} required value={draft.clientId}>
-          <option value="">Select a VPS</option>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.display_name || agent.id}</option>)}
-        </select></label>
+        <label>
+          <span>VPS</span>
+          <VpsCombobox
+            agents={agents}
+            ariaLabel="Port-forward rule VPS"
+            disabled={Boolean(editing) || pending}
+            onChange={(clientId) => onChange({ ...draft, clientId })}
+            placeholder="Search VPS name or ID"
+            value={draft.clientId}
+          />
+        </label>
         <label><span>Name</span><input disabled={pending} maxLength={128} onChange={(event) => onChange({ ...draft, name: event.target.value })} placeholder="Public web" required title={draft.name} value={draft.name} /></label>
         <fieldset className="compactFieldset"><legend>Protocol</legend><div className="segmentedControl" role="group" aria-label="Protocol">
           {(["tcp", "udp", "both"] as const).map((protocol) => <button aria-pressed={draft.protocol === protocol} className={draft.protocol === protocol ? "active" : ""} disabled={pending} key={protocol} onClick={() => onChange({ ...draft, protocol })} type="button">{protocol === "both" ? "Both" : protocol.toUpperCase()}</button>)}

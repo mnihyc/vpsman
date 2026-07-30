@@ -235,9 +235,11 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   const primaryVpsRow = fleetGrid
     .locator(".gridBody [role=row]", { hasText: "ams-payments-edge-01" })
     .first();
+  await primaryVpsRow.click({ button: "right" });
   await activate(
-    primaryVpsRow.getByRole("button", {
-      name: /Open ams-payments-edge-01.*detail/,
+    page.getByRole("menuitem", {
+      name: "Open detail",
+      exact: true,
     }),
   );
   await expect(
@@ -295,7 +297,6 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
     .getByLabel("Bulk target selector expression")
     .fill("provider:acmecloud && tag:payments");
   await expect(composer.getByText("24/24").first()).toBeVisible();
-  await activate(composer.getByRole("button", { name: "Refresh target preview" }));
   await expect(composer.getByText("24/24 resolved from selector")).toBeVisible();
 
   const impact = composer.locator(".targetImpactPreview");
@@ -426,6 +427,24 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
     fullPage: true,
     path: testInfo.outputPath("expert-24-vps-registration.png"),
   });
+});
+
+test("one-VPS selector exposes every match in a realistic 24 VPS fleet", async ({
+  page,
+}) => {
+  await installTwentyFourVpsExpertMock(page);
+  await page.goto("/");
+  await openConsoleSubpage(page, "Config", "Per-VPS");
+
+  const target = page.getByRole("combobox", { name: "VPS config target" });
+  await target.click();
+  const options = page
+    .getByRole("listbox", { name: "VPS config target options" })
+    .getByRole("option");
+  await expect(options).toHaveCount(24);
+  await expect(options.nth(10)).toBeAttached();
+  await options.last().click();
+  await expect(target).toHaveValue(/sin-payments-edge-24/);
 });
 
 async function installTwentyFourVpsExpertMock(page: Page) {

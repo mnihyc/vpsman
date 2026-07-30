@@ -18,12 +18,27 @@ test.beforeEach(async ({ page }, testInfo) => {
 
 test("port-forward registry, details, and reviewed create stay revision-bound", async ({
   page,
-}) => {
+}, testInfo) => {
   await expect(page.getByRole("heading", { name: "Port forwarding" }).first()).toBeVisible();
   await expect(page.getByRole("table", { name: "Port-forward rules" })).toContainText(
     "Public web ingress",
   );
-  await page.getByText("Public web ingress", { exact: true }).click();
+  const publicWebRow = page.getByRole("row", { name: /Public web ingress/ });
+  if (testInfo.project.name.startsWith("mobile")) {
+    const actions = publicWebRow.locator(".topologyMobileRowActions");
+    await expect(actions.getByRole("button", { name: "Edit", exact: true })).toBeVisible();
+    await expect(actions.getByRole("button", { name: "Disable", exact: true })).toBeVisible();
+  } else {
+    await publicWebRow.click({ button: "right" });
+    await expect(
+      page.getByRole("menuitem", { name: "Edit", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("menuitem", { name: "Disable", exact: true }),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+  }
+  await publicWebRow.getByText("Public web ingress", { exact: true }).click();
   const details = page.getByRole("region", { name: "Details for Public web ingress" });
   await expect(details).toBeVisible();
   await expect(details).toContainText("IPv4 forwarding");
@@ -36,13 +51,17 @@ test("port-forward registry, details, and reviewed create stay revision-bound", 
   await page.getByRole("button", { name: "Create rule" }).click();
   const editor = page.locator(".portForwardEditor");
   await expect(editor).toBeVisible();
-  await expect(editor.getByLabel("VPS")).toBeFocused();
+  await expect(editor.getByLabel("Port-forward rule VPS")).toBeFocused();
   await expect(editor.getByLabel("Enabled")).not.toBeChecked();
   await expect(editor.locator(".portMappingPreview")).toHaveClass(/idle/);
   await expect(editor.locator(".portMappingPreview")).toContainText(
     "Enter incoming and target ports to preview the exact mappings",
   );
-  await editor.getByLabel("VPS").selectOption({ index: 1 });
+  await editor.getByLabel("Port-forward rule VPS").fill("edge-sfo");
+  await page
+    .getByRole("listbox", { name: "Port-forward rule VPS options" })
+    .getByRole("option", { name: /edge-sfo-01/ })
+    .click();
   await editor.getByLabel("Name", { exact: true }).fill("Internal application");
   await editor.getByRole("button", { name: "Both" }).click();
   await editor.getByLabel("Incoming ports").fill("8080,10000-10010");
@@ -84,7 +103,11 @@ test("port-forward registry, details, and reviewed create stay revision-bound", 
 test("unsupported agents allow disabled drafts but not enabled apply", async ({ page }) => {
   await page.getByRole("button", { name: "Create rule" }).click();
   const editor = page.locator(".portForwardEditor");
-  await editor.getByLabel("VPS").selectOption("agent-nyc-03");
+  await editor.getByLabel("Port-forward rule VPS").fill("backup-nyc");
+  await page
+    .getByRole("listbox", { name: "Port-forward rule VPS options" })
+    .getByRole("option", { name: /backup-nyc-03/ })
+    .click();
   await editor.getByLabel("Name", { exact: true }).fill("Future service");
   await editor.getByLabel("Incoming ports").fill("8443");
   await editor.getByLabel("Target ports").fill("443");
@@ -107,14 +130,12 @@ test("never-applied disabled drafts explain and complete immediate deletion", as
   const row = page.getByRole("row", { name: /Staged SSH alternate/ });
   if (testInfo.project.name.startsWith("mobile")) {
     await row
-      .getByRole("button", { name: "Expand Staged SSH alternate rule details" })
-      .click();
-    await page
-      .getByRole("region", { name: "Details for Staged SSH alternate" })
+      .locator(".topologyMobileRowActions")
       .getByRole("button", { name: "Delete", exact: true })
       .click();
   } else {
-    await row.getByTitle("Delete rule").click();
+    await row.click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
   }
 
   const confirmation = page.getByLabel("Confirm delete");
@@ -150,20 +171,25 @@ test("operators without network write scope keep read-only inspection", async ({
     "Reload latest stored desired state and agent evidence; this does not request a live agent inspection",
   );
 
-  await page.getByText("Public web ingress", { exact: true }).click();
-  const details = page.getByRole("region", { name: "Details for Public web ingress" });
-  await expect(details).toBeVisible();
+  const row = page.getByRole("row", { name: /Public web ingress/ });
   if (testInfo.project.name.startsWith("mobile")) {
     await expect(
-      details.getByRole("button", { name: "Edit", exact: true }),
+      row
+        .locator(".topologyMobileRowActions")
+        .getByRole("button", { name: "Edit", exact: true }),
     ).toBeDisabled();
   } else {
+    await row.click({ button: "right" });
     await expect(
-      page.getByRole("row", { name: /Public web ingress/ }).getByTitle(
-        "Operator role and network:write scope required",
-      ).first(),
+      page.getByRole("menuitem", { name: "Edit", exact: true }),
     ).toBeDisabled();
+    await page.keyboard.press("Escape");
   }
+  await row.getByText("Public web ingress", { exact: true }).click();
+  const details = page.getByRole("region", { name: "Details for Public web ingress" });
+  await expect(details).toBeVisible();
+  await expect(details).toContainText("Observed table");
+  await expect(details.getByRole("button", { name: "Edit", exact: true })).toHaveCount(0);
 });
 
 test("rule names enforce the API UTF-8 byte limit with an exact reason", async ({ page }) => {
@@ -187,14 +213,12 @@ test("delete becomes removal pending instead of disappearing without evidence", 
   const row = page.getByRole("row", { name: /Public web ingress/ });
   if (testInfo.project.name.startsWith("mobile")) {
     await row
-      .getByRole("button", { name: "Expand Public web ingress rule details" })
-      .click();
-    await page
-      .getByRole("region", { name: "Details for Public web ingress" })
+      .locator(".topologyMobileRowActions")
       .getByRole("button", { name: "Delete", exact: true })
       .click();
   } else {
-    await row.getByTitle("Delete rule").click();
+    await row.click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
   }
   const confirmation = page.getByLabel("Confirm delete");
   await expect(confirmation).toContainText("Removal pending");
@@ -204,19 +228,39 @@ test("delete becomes removal pending instead of disappearing without evidence", 
   );
 });
 
+test("removal-pending rules keep ordinary actions hidden and Forget reason-bound", async ({
+  page,
+}, testInfo) => {
+  const row = page.getByRole("row", { name: /Retired DNS relay/ });
+  if (testInfo.project.name.startsWith("mobile")) {
+    await expect(row.locator(".topologyMobileRowActions")).toHaveCount(0);
+  } else {
+    await row.click({ button: "right" });
+    await expect(page.getByRole("menuitem")).toHaveCount(0);
+  }
+
+  await row.getByText("Retired DNS relay", { exact: true }).click();
+  const details = page.getByRole("region", { name: "Details for Retired DNS relay" });
+  await expect(details).toContainText(
+    "Removal pending until the agent confirms the owned table no longer contains this rule.",
+  );
+  const forget = details.getByRole("button", { name: "Forget", exact: true });
+  await expect(forget).toBeDisabled();
+  await details.getByPlaceholder("Decommission reason").fill("VPS decommissioned");
+  await expect(forget).toBeEnabled();
+});
+
 test("mobile port-forward workflow has no page-level horizontal overflow", async ({
   page,
 }, testInfo) => {
   test.skip(!testInfo.project.name.startsWith("mobile"));
   const firstRow = page.getByRole("row", { name: /Public web ingress/ });
-  await expect(firstRow.locator(".portForwardDesktopActions")).toBeHidden();
   await expect(firstRow.locator(".portForwardMobileStatus")).toContainText("enabled");
   await expect(firstRow.locator(".portForwardMobileStatus")).toContainText("applied");
-  await firstRow
-    .getByRole("button", { name: "Expand Public web ingress rule details" })
-    .click();
+  await firstRow.getByText("Public web ingress", { exact: true }).click();
   const details = page.getByRole("region", { name: "Details for Public web ingress" });
-  await expect(details.getByLabel("Actions for Public web ingress")).toBeVisible();
+  await expect(details).toContainText("Observed table");
+  await expect(details.getByLabel("Actions for Public web ingress")).toHaveCount(0);
   await details.getByRole("button", { name: "Close port-forward details" }).click();
   await page.getByRole("button", { name: "Create rule" }).click();
   const editor = page.locator(".portForwardEditor");
@@ -230,7 +274,7 @@ test("mobile port-forward workflow has no page-level horizontal overflow", async
     await previewText.evaluate((element) => element.scrollWidth - element.clientWidth),
   ).toBeLessThanOrEqual(1);
   for (const control of [
-    editor.getByLabel("VPS"),
+    editor.getByLabel("Port-forward rule VPS"),
     editor.getByLabel("Name", { exact: true }),
     editor.getByLabel("Incoming ports"),
     editor.getByLabel("Target ports"),
@@ -267,10 +311,15 @@ test("bulk actions state their exact eligible subset", async ({ page }) => {
   const actions = page.getByLabel("Selected port-forward actions");
 
   await expect(actions).toContainText("4 selected");
-  await expect(actions.getByRole("button", { name: "Enable 0", exact: true })).toBeDisabled();
-  await expect(actions.getByRole("button", { name: "Disable 2", exact: true })).toBeEnabled();
-  await expect(actions.getByRole("button", { name: "Reapply 2", exact: true })).toBeEnabled();
-  await expect(actions.getByRole("button", { name: "Delete 3", exact: true })).toBeEnabled();
+  await actions
+    .getByRole("button", {
+      name: "Actions for 4 selected port-forward rules",
+    })
+    .click();
+  await expect(page.getByRole("menuitem", { name: "Enable 0" })).toBeDisabled();
+  await expect(page.getByRole("menuitem", { name: "Disable 2" })).toBeEnabled();
+  await expect(page.getByRole("menuitem", { name: "Reapply 2" })).toBeEnabled();
+  await expect(page.getByRole("menuitem", { name: "Delete 3" })).toBeEnabled();
 });
 
 test("applied status explains evidence limits", async ({ page }) => {
@@ -320,21 +369,17 @@ test("partial dispatch failure explains saved state, target impact, and recovery
     };
   });
 
-  const isMobile = testInfo.project.name.startsWith("mobile");
   const row = page.getByRole("row", { name: /Public web ingress/ });
-  let feedback = page.locator(".portForwardRegistryFeedback");
-  if (isMobile) {
+  if (testInfo.project.name.startsWith("mobile")) {
     await row
-      .getByRole("button", { name: "Expand Public web ingress rule details" })
+      .locator(".topologyMobileRowActions")
+      .getByRole("button", { name: "Disable", exact: true })
       .click();
-    const details = page.getByRole("region", {
-      name: "Details for Public web ingress",
-    });
-    await details.getByRole("button", { name: "Disable", exact: true }).click();
-    feedback = details.locator(".portForwardDetailFeedback");
   } else {
-    await row.getByTitle("Disable rule").click();
+    await row.click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Disable", exact: true }).click();
   }
+  const feedback = page.locator(".portForwardRegistryFeedback");
   await page
     .getByLabel("Confirm disable")
     .getByRole("button", { name: "Disable rule" })

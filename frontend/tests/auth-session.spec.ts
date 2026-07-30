@@ -20,7 +20,10 @@ async function activate(locator: Locator) {
   await locator.evaluate((element) => (element as HTMLElement).click());
 }
 
-async function expectAuthenticatedConsoleShell(page: Page) {
+async function expectAuthenticatedConsoleShell(
+  page: Page,
+  expected = { heading: "Home", mobileRoute: "Home::overview" },
+) {
   const desktopNav = page.getByRole("navigation", {
     name: "Primary console navigation",
   });
@@ -36,10 +39,14 @@ async function expectAuthenticatedConsoleShell(page: Page) {
     )
     .toBe(true);
   if (await mobileRoute.isVisible().catch(() => false)) {
-    await expect(mobileRoute).toHaveValue("Home::overview");
+    await expect(mobileRoute).toHaveValue(expected.mobileRoute);
   }
   await expect(
-    page.getByRole("heading", { name: "Home", exact: true }),
+    page.getByRole("heading", {
+      level: 1,
+      name: expected.heading,
+      exact: true,
+    }),
   ).toBeVisible();
 }
 
@@ -207,7 +214,7 @@ test("sign out revokes the bearer session and clears privilege before reauthenti
       .getByRole("button", { name: "Open privilege unlock" }),
   );
   const unlock = page.getByRole("dialog", { name: "Unlock privilege" });
-  await unlock.getByLabel(/privilege secret/i).fill("local-super-password");
+  await unlock.getByLabel(/super password/i).fill("local-super-password");
   await unlock
     .getByLabel(/privilege salt/i)
     .fill("00112233445566778899aabbccddeeff");
@@ -220,8 +227,28 @@ test("sign out revokes the bearer session and clears privilege before reauthenti
     page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
   ).toBeVisible();
 
+  await activate(
+    page.locator(".topbar").getByRole("button", { name: "Open sessions" }),
+  );
+  await expect(page).toHaveURL(/#\/audit\/sessions$/);
+  await expect(
+    page.getByRole("heading", {
+      level: 1,
+      name: "Session evidence",
+      exact: true,
+    }),
+  ).toBeVisible();
+  expect(await readSessionStorage(page)).toEqual({
+    access: accessToken,
+    refresh: refreshToken,
+  });
+
   const logoutRequest = page.waitForRequest("**/api/v1/auth/logout");
-  await activate(page.getByRole("button", { name: "Clear operator session" }));
+  await activate(
+    page
+      .locator(".auditSessionEvidencePanel")
+      .getByRole("button", { name: "Sign out", exact: true }),
+  );
   const request = await logoutRequest;
   expect(request.method()).toBe("POST");
   expect(request.headers().authorization).toBe(`Bearer ${accessToken}`);
@@ -234,7 +261,10 @@ test("sign out revokes the bearer session and clears privilege before reauthenti
   await page.getByLabel("Username").fill("session-admin");
   await page.getByLabel("Password").fill("session-password-123");
   await activate(page.getByRole("button", { name: "Sign in" }));
-  await expectAuthenticatedConsoleShell(page);
+  await expectAuthenticatedConsoleShell(page, {
+    heading: "Session evidence",
+    mobileRoute: "Audit::sessions",
+  });
   await expect(
     page
       .locator(".topbar")
@@ -263,12 +293,20 @@ test("sign out clears local authentication when server revocation fails", async 
   await page.getByLabel("Password").fill("session-password-123");
   await activate(page.getByRole("button", { name: "Sign in" }));
   await expectAuthenticatedConsoleShell(page);
-  await activate(page.getByRole("button", { name: "Clear operator session" }));
+  await activate(
+    page.locator(".topbar").getByRole("button", { name: "Open sessions" }),
+  );
+  await expect(page).toHaveURL(/#\/audit\/sessions$/);
+  await activate(
+    page
+      .locator(".auditSessionEvidencePanel")
+      .getByRole("button", { name: "Sign out", exact: true }),
+  );
 
   await expectOperatorAccessShell(page);
   await expect(
     page.getByText(
-      /Signed out locally, but the server could not revoke this session/,
+      /Signed out locally, but the server could not revoke this session.*Audit > Sessions/,
     ),
   ).toBeVisible();
   expect(await readSessionStorage(page)).toEqual({

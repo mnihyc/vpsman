@@ -13,7 +13,7 @@ client-generated job ID and cannot silently change targets:
 
 ```sh
 export VPSMAN_SUPER_PASSWORD=<local_super_password>
-export VPSMAN_SUPER_SALT_HEX=<64_hex_salt>
+source ./path/to/secrets/operator-privilege.env
 
 cargo run -p vpsctl -- job-create --command uptime --tags edge
 cargo run -p vpsctl -- job-create --command /bin/sh --argv '/bin/sh,-lc,uname -a' --clients edge-01
@@ -25,11 +25,12 @@ For PTY-backed noninteractive output:
 cargo run -p vpsctl -- job-create --command /bin/sh --argv '/bin/sh,-lc,tty && id' --pty --tags edge
 ```
 
-Command execution behavior is selected through the `command_execution_policy`
-source template domain. Use it to choose shell argv prefix, default working
+Command execution behavior is selected through the `command_execution`
+configuration behavior. Use its effective preset to choose shell argv prefix, default working
 directory, inherited/clean/minimal environment handling, explicit env values,
 PTY enabled/disabled policy, and process-group or direct-child cleanup for a
-VPS, pool, or tag. Explicit argv jobs remain the preferred frequent-use path.
+VPS. Use one point-in-time target selection to set explicit overrides on
+multiple VPSs. Explicit argv jobs remain the preferred frequent-use path.
 
 ### Target confirmation is the execution boundary
 
@@ -41,8 +42,8 @@ for audit but dispatches only the fixed target list it receives.
 Schedules also store a fixed target snapshot. Tag changes may show schedules
 that involve the edited VPSs, but this is a maintenance notification, not a
 warning that schedule targets changed automatically. Use the Schedules table
-Target Update action when the saved snapshot should be replaced by the selector's
-current resolution.
+**Update targets** table action when the saved snapshot should be replaced by
+the selector's current resolution.
 
 ## Inspect Jobs And Output
 
@@ -117,18 +118,28 @@ residual loss boundary.
 
 ## Use Record Tables In The Panel
 
-Traditional management tabs such as Jobs, Schedules, Audit, and source template
+Traditional management tabs such as Jobs, Schedules, Audit, and configuration
 presets use the same record-table controls. Check the total and filtered row
-counts before acting, use the field selector when you know whether you are
+counts before acting, use the search-field filter when you know whether you are
 searching by VPS, command, status, operator, domain, or preset, and page
 through the result set instead of relying on an unbounded list.
+
+Create and refresh controls are in the table header. Select one or more rows,
+then use the header **Actions** menu for operations on that selection. On
+desktop, right-clicking a row exposes the same row operations without changing
+the selection. On mobile, select the card and use the same header **Actions**
+menu; tap the card to expand its details. There is intentionally no rightmost
+Action column to chase while horizontally scrolling.
 
 For daily 20+ VPS operation, this is the preferred browser pattern:
 
 1. Select the fleet scope, pool, or tag.
 2. Search within the relevant field.
 3. Confirm the filtered count and current page.
-4. Open the row, dispatch the action, or follow the matching audit/job record.
+4. Select the intended rows and use **Actions**, or open **Details** for one
+   record.
+5. Follow local progress and the matching audit/job record; status feedback
+   stays with the workflow that produced it.
 
 ## History Retention And Export
 
@@ -377,8 +388,10 @@ cargo run -p vpsctl -- jobs --limit 20
 In the browser, use the Schedules page and its Schedule runs subpage for the
 same review flow. If tag changes make a schedule selector resolve to a different
 set of VPSs, the schedule shows **Update targets**; use it to deliberately
-replace the saved fixed snapshot. Tag mutation dialogs show this as a target
-update notice, not as an automatic schedule edit.
+replace the saved fixed snapshot. Select several changed schedules to review
+and update their snapshots together; each schedule still uses its own saved
+selector. Tag mutation dialogs show this as a target update notice, not as an
+automatic schedule edit.
 
 If a saved fixed target is later hidden, deleted, revoked, or otherwise no
 longer resolves, due runs and Apply now keep the reviewed schedule runnable by

@@ -223,7 +223,7 @@
 
 .portForwardTable {
   width: 100%;
-  min-width: 1120px;
+  min-width: 900px;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -293,46 +293,18 @@
   text-align: center;
 }
 
-.portForwardTable th:nth-child(2) { width: 16%; }
-.portForwardTable th:nth-child(3) { width: 27%; }
-.portForwardTable th:nth-child(4) { width: 12%; }
-.portForwardTable th:nth-child(5) { width: 10%; }
-.portForwardTable th:nth-child(6) { width: 10%; }
-.portForwardTable th:nth-child(7) { width: 9%; }
-.portForwardTable th:last-child { width: 208px; }
+.portForwardTable th:nth-child(2) { width: 18%; }
+.portForwardTable th:nth-child(3) { width: 31%; }
+.portForwardTable th:nth-child(4) { width: 13%; }
+.portForwardTable th:nth-child(5) { width: 11%; }
+.portForwardTable th:nth-child(6) { width: 11%; }
+.portForwardTable th:nth-child(7) { width: 10%; }
 
-.portForwardTable thead th:last-child,
-.portForwardTable tbody td:last-child {
-  position: sticky;
-  right: 0;
-  z-index: 2;
-  border-left: 1px solid var(--border-subtle);
-  background: inherit;
-  box-shadow: -8px 0 10px -10px rgba(60, 64, 67, 0.4);
+.portForwardMobileStatus {
+  display: none;
 }
 
-.portForwardTable thead th:last-child {
-  z-index: 3;
-  background: var(--surface-subtle);
-}
-
-.portForwardTable .rowActions {
-  white-space: nowrap;
-}
-
-.portForwardTable .rowActions .iconButton {
-  width: 34px;
-  min-width: 34px;
-  height: 34px;
-}
-
-.portForwardTable .rowActions .iconButton + .iconButton {
-  margin-left: 3px;
-}
-
-.portForwardMobileDetailsButton,
-.portForwardMobileStatus,
-.portForwardDetailActions {
+.topologyMobileRowActions {
   display: none;
 }
 
@@ -471,7 +443,7 @@
   font-weight: 700;
 }
 
-.portForwardForm input:not([type="checkbox"]):not([type="radio"]),
+.portForwardForm input:not([type="checkbox"]):not([type="radio"]):not(.searchExpressionEditor):not(.vpsComboboxEditor),
 .portForwardForm select {
   width: 100%;
   min-width: 0;
@@ -485,14 +457,14 @@
   padding: 0 10px;
 }
 
-.portForwardForm input:not([type="checkbox"]):not([type="radio"]):focus-visible,
+.portForwardForm input:not([type="checkbox"]):not([type="radio"]):not(.searchExpressionEditor):not(.vpsComboboxEditor):focus-visible,
 .portForwardForm select:focus-visible {
   border-color: var(--primary);
   outline: 2px solid var(--primary-soft);
   outline-offset: 1px;
 }
 
-.portForwardForm input:not([type="checkbox"]):not([type="radio"]):disabled,
+.portForwardForm input:not([type="checkbox"]):not([type="radio"]):not(.searchExpressionEditor):not(.vpsComboboxEditor):disabled,
 .portForwardForm select:disabled {
   background: var(--surface-neutral);
   color: var(--muted);
@@ -502,6 +474,16 @@
   color: var(--placeholder);
   font-weight: 400;
   opacity: 1;
+}
+
+.portForwardForm .vpsCombobox {
+  height: 38px;
+  min-height: 38px;
+}
+
+.portForwardForm .vpsCombobox input {
+  height: 36px;
+  min-height: 36px;
 }
 
 .portForwardForm input[type="checkbox"],
@@ -630,8 +612,7 @@
   font-size: 13px;
 }
 
-.tunnelPlanTableWrap,
-.topologyOspfTableWrap {
+.tunnelPlanTableWrap {
   max-width: 100%;
   overflow-x: auto;
   overscroll-behavior-x: contain;
@@ -641,16 +622,14 @@
   container-type: inline-size;
 }
 
-.tunnelPlanTable,
-.topologyOspfTable {
+.tunnelPlanTable {
   width: 100%;
-  min-width: 1160px;
+  min-width: 1000px;
   border-collapse: collapse;
   table-layout: fixed;
 }
 
-.tunnelPlanTable th,
-.topologyOspfTable th {
+.tunnelPlanTable th {
   height: 40px;
   color: var(--muted);
   background: var(--surface-subtle);
@@ -660,50 +639,29 @@
 }
 
 .tunnelPlanTable th,
-.tunnelPlanTable td,
-.topologyOspfTable th,
-.topologyOspfTable td {
+.tunnelPlanTable td {
   padding: 8px 12px;
   border-bottom: 1px solid var(--border-subtle);
   vertical-align: middle;
 }
 
-.tunnelPlanTable tbody > tr:not(.tunnelPlanDetailRow),
-.topologyOspfTable tbody > tr:not(.topologyOspfDetailRow) {
+.tunnelPlanTable tbody > tr:not(.tunnelPlanDetailRow) {
   height: 58px;
   cursor: pointer;
 }
 
-.tunnelPlanTable tbody > tr:not(.tunnelPlanDetailRow):hover,
-.topologyOspfTable tbody > tr:not(.topologyOspfDetailRow):hover {
+.tunnelPlanTable tbody > tr:not(.tunnelPlanDetailRow):hover {
   background: var(--surface-subtle);
 }
 
 .tunnelPlanTable tbody > tr.isExpanded,
-.tunnelPlanTable tbody > tr.isSelected,
-.topologyOspfTable tbody > tr.isExpanded {
+.tunnelPlanTable tbody > tr.isSelected {
   background: var(--primary-selected);
 }
 
-.tunnelPlanTable tbody > tr:focus-visible,
-.topologyOspfTable tbody > tr:focus-visible {
+.tunnelPlanTable tbody > tr:focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: -2px;
-}
-
-.tunnelPlanTable thead th:last-child,
-.tunnelPlanTable tbody > tr:not(.tunnelPlanDetailRow) > td:last-child {
-  position: sticky;
-  right: 0;
-  z-index: 2;
-  border-left: 1px solid var(--border-subtle);
-  background: inherit;
-  box-shadow: -8px 0 10px -10px rgba(60, 64, 67, 0.4);
-}
-
-.tunnelPlanTable thead th:last-child {
-  z-index: 3;
-  background: var(--surface-subtle);
 }
 
 .tunnelPlanTable .selectionCell {
@@ -718,14 +676,6 @@
 .tunnelPlanTable th:nth-child(5) { width: 14%; }
 .tunnelPlanTable th:nth-child(6) { width: 17%; }
 .tunnelPlanTable th:nth-child(7) { width: 12%; }
-.tunnelPlanTable th:last-child { width: 118px; }
-
-.topologyOspfTable th:nth-child(1) { width: 18%; }
-.topologyOspfTable th:nth-child(2) { width: 15%; }
-.topologyOspfTable th:nth-child(3) { width: 18%; }
-.topologyOspfTable th:nth-child(4) { width: 15%; }
-.topologyOspfTable th:nth-child(5) { width: 20%; }
-.topologyOspfTable th:last-child { width: 132px; }
 
 .endpointStatusPair,
 .topologyEndpointPair {
@@ -819,8 +769,7 @@
   color: var(--muted);
 }
 
-.tunnelPlanDetailRow td,
-.topologyOspfDetailRow td {
+.tunnelPlanDetailRow td {
   padding: 0;
   background: var(--canvas);
 }
@@ -831,13 +780,13 @@
   display: grid;
   gap: 12px;
   min-width: 0;
-  padding: 16px 52px 16px 18px;
 }
 
 .tunnelPlanDetail {
   box-sizing: border-box;
   width: 100cqw;
   max-width: 100cqw;
+  padding: 16px 52px 16px 18px;
 }
 
 .topologyDetailClose {
@@ -953,10 +902,10 @@
   font-weight: 700;
 }
 
-.topologyFormGrid input:not([type="checkbox"]):not([type="radio"]),
+.topologyFormGrid input:not([type="checkbox"]):not([type="radio"]):not(.searchExpressionEditor):not(.vpsComboboxEditor),
 .topologyFormGrid select,
 .topologyFormGrid textarea,
-.topologyAdvancedFields input:not([type="checkbox"]):not([type="radio"]),
+.topologyAdvancedFields input:not([type="checkbox"]):not([type="radio"]):not(.searchExpressionEditor):not(.vpsComboboxEditor),
 .topologyAdvancedFields select,
 .topologyAdvancedFields textarea {
   width: 100%;
@@ -970,6 +919,17 @@
   padding: 0 10px;
 }
 
+.topologyFormGrid .vpsCombobox {
+  height: 38px;
+  min-height: 38px;
+  border-radius: 6px;
+}
+
+.topologyFormGrid .vpsCombobox input {
+  height: 36px;
+  min-height: 36px;
+}
+
 .topologyFormGrid textarea,
 .topologyAdvancedFields textarea {
   min-height: 88px;
@@ -977,10 +937,10 @@
   resize: vertical;
 }
 
-.topologyFormGrid input:not([type="checkbox"]):not([type="radio"]):focus-visible,
+.topologyFormGrid input:not([type="checkbox"]):not([type="radio"]):not(.searchExpressionEditor):not(.vpsComboboxEditor):focus-visible,
 .topologyFormGrid select:focus-visible,
 .topologyFormGrid textarea:focus-visible,
-.topologyAdvancedFields input:not([type="checkbox"]):not([type="radio"]):focus-visible,
+.topologyAdvancedFields input:not([type="checkbox"]):not([type="radio"]):not(.searchExpressionEditor):not(.vpsComboboxEditor):focus-visible,
 .topologyAdvancedFields select:focus-visible,
 .topologyAdvancedFields textarea:focus-visible {
   border-color: var(--primary);
@@ -988,12 +948,12 @@
   outline-offset: 1px;
 }
 
-.topologyFormGrid input:not([type="checkbox"]):not([type="radio"]):disabled,
-.topologyFormGrid input:not([type="checkbox"]):not([type="radio"]):read-only,
+.topologyFormGrid input:not([type="checkbox"]):not([type="radio"]):not(.searchExpressionEditor):not(.vpsComboboxEditor):disabled,
+.topologyFormGrid input:not([type="checkbox"]):not([type="radio"]):not(.searchExpressionEditor):not(.vpsComboboxEditor):read-only,
 .topologyFormGrid select:disabled,
 .topologyFormGrid textarea:disabled,
-.topologyAdvancedFields input:not([type="checkbox"]):not([type="radio"]):disabled,
-.topologyAdvancedFields input:not([type="checkbox"]):not([type="radio"]):read-only,
+.topologyAdvancedFields input:not([type="checkbox"]):not([type="radio"]):not(.searchExpressionEditor):not(.vpsComboboxEditor):disabled,
+.topologyAdvancedFields input:not([type="checkbox"]):not([type="radio"]):not(.searchExpressionEditor):not(.vpsComboboxEditor):read-only,
 .topologyAdvancedFields select:disabled,
 .topologyAdvancedFields textarea:disabled {
   background: var(--surface-neutral);
@@ -1045,7 +1005,7 @@
   line-height: 1.3;
 }
 
-.templateSelectRow {
+.adapterDefinitionSelectRow {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 36px;
   gap: 6px;
@@ -1279,6 +1239,26 @@
 }
 
 @media (max-width: 720px) {
+  .topologyMobileRowActions {
+    display: block;
+    width: 100%;
+    margin-top: 8px;
+  }
+
+  .topologyMobileRowActions .gridMobileActions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .topologyMobileRowActions .compactAction {
+    flex: 1 1 min(100%, 132px);
+    justify-content: center;
+    height: auto;
+    min-height: 34px;
+    white-space: normal;
+  }
+
   .tunnelPlanComposerHeader {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
@@ -1292,32 +1272,17 @@
     align-self: start;
   }
 
-  .tunnelPlanTable,
-  .topologyOspfTable {
+  .tunnelPlanTable {
     min-width: 100%;
     table-layout: auto;
   }
 
-  .tunnelPlanTable tr > :nth-child(n + 3):nth-child(-n + 7),
-  .topologyOspfTable tr > :nth-child(n + 3):nth-child(-n + 5) {
+  .tunnelPlanTable tr > :nth-child(n + 3):nth-child(-n + 7) {
     display: none;
   }
 
-  .tunnelPlanTable th:nth-child(2),
-  .topologyOspfTable th:first-child {
+  .tunnelPlanTable th:nth-child(2) {
     width: auto;
-  }
-
-  .topologyOspfTable th:nth-child(2) {
-    width: 112px;
-  }
-
-  .tunnelPlanTable th:last-child {
-    width: 150px;
-  }
-
-  .topologyOspfTable th:last-child {
-    width: 138px;
   }
 
   .networkMetricStrip,
@@ -1425,25 +1390,6 @@
     height: auto;
   }
 
-  .portForwardTable th:last-child {
-    width: 52px;
-  }
-
-  .portForwardTable thead th:last-child,
-  .portForwardTable tbody td:last-child {
-    position: static;
-    border-left: 0;
-    box-shadow: none;
-  }
-
-  .portForwardTable .portForwardDesktopActions {
-    display: none;
-  }
-
-  .portForwardTable .portForwardMobileDetailsButton {
-    display: inline-flex;
-  }
-
   .portForwardTable .portForwardMobileStatus {
     display: flex;
     align-items: center;
@@ -1456,28 +1402,6 @@
     min-height: 20px;
     padding: 3px 6px;
     font-size: 10px;
-  }
-
-  .portForwardTable .rowActions {
-    width: 52px;
-    padding-inline: 5px;
-    text-align: center;
-  }
-
-  .portForwardDetailActions {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px;
-    padding: 12px;
-    border-top: 1px solid var(--border-subtle);
-  }
-
-  .portForwardDetailActions > button {
-    width: 100%;
-  }
-
-  .portForwardDetailActions > .dangerAction:last-child {
-    grid-column: 1 / -1;
   }
 
   .portForwardDetailGrid,

@@ -617,11 +617,10 @@ function buildResourceEvidence(
     : chart.times.length === 1
       ? "single sample"
       : formatDuration(sampleDurationMs);
-  const pointsPerVps =
-    sampledClients > 0 ? Math.round(chart.observedPoints / sampledClients) : chart.times.length;
+  const retainedBuckets = chart.times.length;
   const isSparse =
     chart.observedPoints > 0 &&
-    (pointsPerVps <= 3 ||
+    (retainedBuckets <= 3 ||
       (selectedDurationMs > 0 &&
         sampleDurationMs > 0 &&
         sampleDurationMs / selectedDurationMs < 0.25));
@@ -638,7 +637,7 @@ function buildResourceEvidence(
       ? `${formatEvidenceTime(overview.time_range.start_at)} to ${formatEvidenceTime(overview.time_range.end_at)}`
       : "No selected range evidence",
     sparseNotice: isSparse
-      ? `Sparse data: ${pointsPerVps} sample${pointsPerVps === 1 ? "" : "s"} per VPS across the selected ${selectedRangeName}. Treat this as point evidence, not a continuous trend.`
+      ? `Sparse data: ${retainedBuckets} retained time bucket${retainedBuckets === 1 ? "" : "s"} across ${vpsCountLabel(sampledClients)} in the selected ${selectedRangeName}. Treat this as point evidence, not a continuous trend.`
       : null,
   };
 }

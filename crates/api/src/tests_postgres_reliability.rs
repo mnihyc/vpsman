@@ -25,12 +25,11 @@ use vpsman_server_core::{
 use crate::{
     gateway_client::GatewayDispatchClient,
     model::{
-        AssignSourceTemplateRequest, AuthContext, BackupRequestStatus, BootstrapOperatorRequest,
-        CloneSourceTemplateRequest, CreateBackupPolicyRequest, CreateBackupRequest,
-        CreateScheduleRequest, CreateSourceTemplateRequest, DeleteAgentRequest, FleetAlertQuery,
-        JobOutputView, JobRolloutPolicy, ListQuery, LoginRequest, NewServerArtifact,
-        SchedulePrivilegeMutationRequest, UpdateSourceTemplateRequest,
-        UpsertRuntimeConfigPatchGeneratorRequest, WsEvent,
+        AuthContext, BackupRequestStatus, BootstrapOperatorRequest, ConfigurationOverrideAction,
+        CreateBackupPolicyRequest, CreateBackupRequest, CreateConfigurationPresetRequest,
+        CreateScheduleRequest, FleetAlertQuery, JobOutputView, JobRolloutPolicy, ListQuery,
+        LoginRequest, NewServerArtifact, PreviewConfigurationSourceOverrideRequest,
+        SchedulePrivilegeMutationRequest, UpsertRuntimeConfigPatchGeneratorRequest, WsEvent,
     },
     model_alert_notifications::{
         CreateFleetAlertNotificationChannelRequest, FleetAlertNotificationCandidate,
@@ -863,9 +862,10 @@ async fn postgres_ospf_controller_batches_persist_fair_rotation() {
             policy: OspfCostPolicy::default(),
             min_cost_delta: 5,
             healthy_windows: 1,
-            left_adapter_template_id: Uuid::new_v4().to_string(),
-            right_adapter_template_id: Uuid::new_v4().to_string(),
+            left_adapter_definition_id: Some(Uuid::new_v4().to_string()),
+            right_adapter_definition_id: Some(Uuid::new_v4().to_string()),
         });
+        crate::tests_network::seed_test_plan_adapter_definitions(&db.repo, &input).await;
         created_plans.push(
             db.repo
                 .record_tunnel_plan(&input, &plan_tunnel(&input).unwrap(), true, &operator)
@@ -970,9 +970,10 @@ async fn postgres_ospf_controller_advances_past_malformed_selected_plans() {
         policy: OspfCostPolicy::default(),
         min_cost_delta: 5,
         healthy_windows: 1,
-        left_adapter_template_id: Uuid::new_v4().to_string(),
-        right_adapter_template_id: Uuid::new_v4().to_string(),
+        left_adapter_definition_id: Some(Uuid::new_v4().to_string()),
+        right_adapter_definition_id: Some(Uuid::new_v4().to_string()),
     });
+    crate::tests_network::seed_test_plan_adapter_definitions(&db.repo, &input).await;
     let malformed = db
         .repo
         .record_tunnel_plan(&input, &plan_tunnel(&input).unwrap(), true, &operator)
@@ -1065,9 +1066,10 @@ async fn postgres_ospf_results_are_atomic_and_concurrency_safe() {
         policy: OspfCostPolicy::default(),
         min_cost_delta: 5,
         healthy_windows: 1,
-        left_adapter_template_id: Uuid::new_v4().to_string(),
-        right_adapter_template_id: Uuid::new_v4().to_string(),
+        left_adapter_definition_id: Some(Uuid::new_v4().to_string()),
+        right_adapter_definition_id: Some(Uuid::new_v4().to_string()),
     });
+    crate::tests_network::seed_test_plan_adapter_definitions(&db.repo, &input).await;
     let plan = db
         .repo
         .record_tunnel_plan(&input, &plan_tunnel(&input).unwrap(), true, &operator)
@@ -1594,22 +1596,6 @@ async fn postgres_audited_mutations_roll_back_when_audit_insert_fails() {
         )
         .await
         .unwrap();
-    let source_template = db
-        .repo
-        .create_source_template(
-            &CreateSourceTemplateRequest {
-                domain: "runtime_traffic_accounting_source".to_string(),
-                name: "shared:atomic".to_string(),
-                scope: "shared".to_string(),
-                owner_client_id: None,
-                description: Some("Atomic source fixture".to_string()),
-                definition: serde_json::json!({"source": "proc_net_dev"}),
-            },
-            &operator,
-        )
-        .await
-        .unwrap();
-
     let mut tunnel_input = postgres_alert_test_tunnel_input();
     tunnel_input.name = "atomic-ospf-plan".to_string();
     tunnel_input.interface_name = "gre77".to_string();
@@ -1628,9 +1614,10 @@ async fn postgres_audited_mutations_roll_back_when_audit_insert_fails() {
         policy: vpsman_common::OspfCostPolicy::default(),
         min_cost_delta: 5,
         healthy_windows: 2,
-        left_adapter_template_id: Uuid::new_v4().to_string(),
-        right_adapter_template_id: Uuid::new_v4().to_string(),
+        left_adapter_definition_id: Some(Uuid::new_v4().to_string()),
+        right_adapter_definition_id: Some(Uuid::new_v4().to_string()),
     });
+    crate::tests_network::seed_test_plan_adapter_definitions(&db.repo, &tunnel_input).await;
     let tunnel_plan = plan_tunnel(&tunnel_input).unwrap();
     let tunnel = db
         .repo
@@ -1639,31 +1626,6 @@ async fn postgres_audited_mutations_roll_back_when_audit_insert_fails() {
         .unwrap();
 
     install_rejected_audit_action_trigger(&db.pool).await;
-
-    set_rejected_audit_action(&db.pool, "source_template.saved").await;
-    assert_forced_audit_failure(
-        db.repo
-            .create_source_template(
-                &CreateSourceTemplateRequest {
-                    domain: "runtime_traffic_accounting_source".to_string(),
-                    name: "shared:atomic-create-fails".to_string(),
-                    scope: "shared".to_string(),
-                    owner_client_id: None,
-                    description: Some("Must roll back with its audit".to_string()),
-                    definition: serde_json::json!({"source": "proc_net_dev"}),
-                },
-                &operator,
-            )
-            .await,
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM source_templates WHERE name = $1")
-            .bind("shared:atomic-create-fails")
-            .fetch_one(&db.pool)
-            .await
-            .unwrap(),
-        0
-    );
 
     set_rejected_audit_action(&db.pool, "schedule.created").await;
     assert_forced_audit_failure(
@@ -1933,86 +1895,6 @@ async fn postgres_audited_mutations_roll_back_when_audit_insert_fails() {
     .fetch_one(&db.pool)
     .await
     .unwrap());
-
-    set_rejected_audit_action(&db.pool, "source_template.updated").await;
-    assert_forced_audit_failure(
-        db.repo
-            .update_source_template(
-                source_template.id,
-                &UpdateSourceTemplateRequest {
-                    description: Some("Changed source".to_string()),
-                    definition: serde_json::json!({"source": "changed"}),
-                    confirmed: true,
-                    keep_description: false,
-                    preview_hash: None,
-                    privilege_assertion: None,
-                },
-                &operator,
-            )
-            .await,
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, Option<String>>(
-            "SELECT description FROM source_templates WHERE id = $1",
-        )
-        .bind(source_template.id)
-        .fetch_one(&db.pool)
-        .await
-        .unwrap(),
-        Some("Atomic source fixture".to_string())
-    );
-
-    set_rejected_audit_action(&db.pool, "source_template.cloned").await;
-    assert_forced_audit_failure(
-        db.repo
-            .clone_source_template(
-                source_template.id,
-                &CloneSourceTemplateRequest {
-                    name: "shared:atomic-clone".to_string(),
-                    scope: "shared".to_string(),
-                    owner_client_id: None,
-                    description: None,
-                },
-                &operator,
-            )
-            .await,
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM source_templates WHERE name = $1")
-            .bind("shared:atomic-clone")
-            .fetch_one(&db.pool)
-            .await
-            .unwrap(),
-        0
-    );
-
-    set_rejected_audit_action(&db.pool, "source_template.assigned").await;
-    assert_forced_audit_failure(
-        db.repo
-            .assign_source_template(
-                &AssignSourceTemplateRequest {
-                    domain: source_template.domain.clone(),
-                    template_id: source_template.id,
-                    selector_expression: "id:atomic-a".to_string(),
-                    target_client_ids: vec!["atomic-a".to_string()],
-                    confirmed: true,
-                    preview_hash: None,
-                    privilege_assertion: None,
-                },
-                &operator,
-            )
-            .await,
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM client_source_template_assignments WHERE template_id = $1",
-        )
-        .bind(source_template.id)
-        .fetch_one(&db.pool)
-        .await
-        .unwrap(),
-        0
-    );
 
     set_rejected_audit_action(&db.pool, "backup_policy.upserted").await;
     assert_forced_audit_failure(
@@ -2683,12 +2565,13 @@ async fn postgres_fleet_alert_candidates_survive_public_caps_and_parse_real_skip
     .execute(&db.pool)
     .await
     .unwrap();
-    let backup_counts = db
+    let scoped_failed_backups = db
         .repo
-        .source_backup_evidence_counts(&["alert-target-a".to_string()])
+        .list_failed_backup_request_candidates(Some("alert-target-a"), None, None, None, 200)
         .await
         .unwrap();
-    assert_eq!(backup_counts["alert-target-a"].backup_request_count, 1);
+    assert_eq!(scoped_failed_backups.len(), 1);
+    assert_eq!(scoped_failed_backups[0].id, failed_backup_id);
 
     let failed_job_id = Uuid::new_v4();
     let capability_job_id = Uuid::new_v4();
@@ -2784,6 +2667,7 @@ async fn postgres_fleet_alert_candidates_survive_public_caps_and_parse_real_skip
 
     let operator = postgres_network_operator(&db.repo).await;
     let tunnel_input = postgres_alert_test_tunnel_input();
+    crate::tests_network::seed_test_plan_adapter_definitions(&db.repo, &tunnel_input).await;
     let tunnel_plan = plan_tunnel(&tunnel_input).unwrap();
     let saved_tunnel = db
         .repo
@@ -3013,23 +2897,6 @@ async fn postgres_tunnel_adapter_failures_only_degrade_external_managed_plans() 
             true,
         ),
     ];
-    let source_template_id = Uuid::new_v4();
-    sqlx::query(
-        r#"
-        INSERT INTO source_templates (
-            id, domain, name, scope, definition
-        )
-        VALUES (
-            $1, 'runtime_tunnel_adapter', 'shared:adapter-semantics', 'shared',
-            '{"manager":"external_managed_adapter"}'::jsonb
-        )
-        "#,
-    )
-    .bind(source_template_id)
-    .execute(&db.pool)
-    .await
-    .unwrap();
-
     for (index, (manager, manager_label, stored_manager, health_status, expected_degraded)) in
         cases.into_iter().enumerate()
     {
@@ -3051,20 +2918,6 @@ async fn postgres_tunnel_adapter_failures_only_degrade_external_managed_plans() 
             .await
             .unwrap();
         }
-        sqlx::query(
-            r#"
-            INSERT INTO client_source_template_assignments (
-                client_id, domain, template_id
-            )
-            VALUES ($1, 'runtime_tunnel_adapter', $2)
-            "#,
-        )
-        .bind(&left_client_id)
-        .bind(source_template_id)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-
         let mut input = crate::tests_network::test_plan_input(manager, false);
         input.name = format!("adapter-semantics-{index}");
         input.interface_name = format!("tas{index}");
@@ -3076,6 +2929,7 @@ async fn postgres_tunnel_adapter_failures_only_degrade_external_managed_plans() 
             right: format!("10.20.{index}.1"),
             prefix_len: 31,
         });
+        crate::tests_network::seed_test_plan_adapter_definitions(&db.repo, &input).await;
         let plan = plan_tunnel(&input).unwrap();
         let saved = db
             .repo
@@ -3126,17 +2980,6 @@ async fn postgres_tunnel_adapter_failures_only_degrade_external_managed_plans() 
             .await
             .unwrap();
         assert_eq!(!candidates.is_empty(), expected_degraded, "{manager_label}");
-        let source_status = db
-            .repo
-            .list_source_status(Some(&left_client_id), Some("runtime_tunnel_adapter"))
-            .await
-            .unwrap();
-        assert_eq!(source_status.len(), 1, "{manager_label}");
-        assert_eq!(
-            source_status[0].status == "degraded",
-            expected_degraded,
-            "{manager_label}"
-        );
         let network_alerts = postgres_app_state(&db)
             .list_fleet_alerts(FleetAlertQuery {
                 limit: Some(10),
@@ -3960,8 +3803,8 @@ fn postgres_alert_test_tunnel_input() -> TunnelPlanInput {
         kind: TunnelKind::Gre,
         runtime_control: RuntimeTunnelControl {
             manager: RuntimeTunnelManager::ExternalManagedAdapter,
-            left_adapter_template_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
-            right_adapter_template_id: Some("22222222-2222-4222-8222-222222222222".to_string()),
+            left_adapter_definition_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+            right_adapter_definition_id: Some("22222222-2222-4222-8222-222222222222".to_string()),
             ..Default::default()
         },
         runtime_topology: Default::default(),
@@ -4258,6 +4101,77 @@ async fn postgres_terminal_merge_preserves_terminal_state_nulls_and_true_open_ti
 }
 
 #[tokio::test]
+async fn postgres_tunnel_plan_conflict_checks_are_concurrency_safe() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    insert_client(&db.pool, "client-a", None).await;
+    insert_client(&db.pool, "client-b", None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+
+    let mut first_input =
+        crate::tests_network::test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    first_input.name = "concurrent-interface-a".to_string();
+    first_input.address_pool_cidr = "10.96.0.0/29".to_string();
+    first_input.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.96.0.0".to_string(),
+        right: "10.96.0.1".to_string(),
+        prefix_len: 31,
+    });
+    let mut second_input = first_input.clone();
+    second_input.name = "concurrent-interface-b".to_string();
+    second_input.address_pool_cidr = "10.96.0.0/29".to_string();
+    second_input.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.96.0.2".to_string(),
+        right: "10.96.0.3".to_string(),
+        prefix_len: 31,
+    });
+    let first_plan = plan_tunnel(&first_input).unwrap();
+    let second_plan = plan_tunnel(&second_input).unwrap();
+    let (first, second) = tokio::join!(
+        db.repo
+            .record_tunnel_plan(&first_input, &first_plan, false, &operator),
+        db.repo
+            .record_tunnel_plan(&second_input, &second_plan, false, &operator),
+    );
+    match (first, second) {
+        (Ok(_), Err(error)) | (Err(error), Ok(_)) => {
+            assert_eq!(error.to_string(), "tunnel_plan_interface_conflict");
+        }
+        (first, second) => panic!("expected one interface conflict, got {first:?} and {second:?}"),
+    }
+
+    let mut third_input = first_input.clone();
+    third_input.name = "concurrent-address-a".to_string();
+    third_input.interface_name = "addr-a".to_string();
+    third_input.address_pool_cidr = "10.97.0.0/29".to_string();
+    third_input.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.97.0.0".to_string(),
+        right: "10.97.0.1".to_string(),
+        prefix_len: 31,
+    });
+    let mut fourth_input = third_input.clone();
+    fourth_input.name = "concurrent-address-b".to_string();
+    fourth_input.interface_name = "addr-b".to_string();
+    let third_plan = plan_tunnel(&third_input).unwrap();
+    let fourth_plan = plan_tunnel(&fourth_input).unwrap();
+    let (third, fourth) = tokio::join!(
+        db.repo
+            .record_tunnel_plan(&third_input, &third_plan, false, &operator),
+        db.repo
+            .record_tunnel_plan(&fourth_input, &fourth_plan, false, &operator),
+    );
+    match (third, fourth) {
+        (Ok(_), Err(error)) | (Err(error), Ok(_)) => {
+            assert_eq!(error.to_string(), "tunnel_plan_address_conflict");
+        }
+        (third, fourth) => panic!("expected one address conflict, got {third:?} and {fourth:?}"),
+    }
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_agent_delete_returns_retired_peers_and_rejects_hidden_endpoint_reuse() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -4265,6 +4179,41 @@ async fn postgres_agent_delete_returns_retired_peers_and_rejects_hidden_endpoint
     insert_client(&db.pool, "client-a", None).await;
     insert_client(&db.pool, "client-b", None).await;
     let operator = postgres_network_operator(&db.repo).await;
+    db.repo
+        .initialize_system_configuration_presets()
+        .await
+        .unwrap();
+    let preset = db
+        .repo
+        .create_configuration_preset(
+            &CreateConfigurationPresetRequest {
+                behavior: "tunnel_traffic".to_string(),
+                name: "Retired endpoint traffic".to_string(),
+                description: None,
+                definition: serde_json::json!({
+                    "source": "vnstat",
+                    "vnstat_argv": ["/usr/bin/vnstat"]
+                }),
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    let override_preview = db
+        .repo
+        .preview_configuration_source_override(&PreviewConfigurationSourceOverrideRequest {
+            action: ConfigurationOverrideAction::Set,
+            behavior: "tunnel_traffic".to_string(),
+            preset_id: Some(preset.id),
+            selector_expression: String::new(),
+            target_client_ids: vec!["client-a".to_string()],
+        })
+        .await
+        .unwrap();
+    db.repo
+        .apply_configuration_source_override(&override_preview, &operator)
+        .await
+        .unwrap();
     let input =
         crate::tests_network::test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
     let plan = plan_tunnel(&input).unwrap();
@@ -4275,15 +4224,7 @@ async fn postgres_agent_delete_returns_retired_peers_and_rejects_hidden_endpoint
 
     let deleted = db
         .repo
-        .delete_agent(
-            "client-a",
-            &DeleteAgentRequest {
-                confirmed: true,
-                reason: Some("retire endpoint".to_string()),
-                privilege_assertion: None,
-            },
-            &operator,
-        )
+        .delete_agent("client-a", Some("retire endpoint"), &operator)
         .await
         .unwrap();
 
@@ -4292,6 +4233,34 @@ async fn postgres_agent_delete_returns_retired_peers_and_rejects_hidden_endpoint
         vec![("client-a".to_string(), "client-b".to_string())]
     );
     assert!(db.repo.list_tunnel_plans().await.unwrap().is_empty());
+    let released_preset = db
+        .repo
+        .list_configuration_presets(Some("tunnel_traffic"))
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.id == preset.id)
+        .unwrap();
+    assert_eq!(released_preset.override_vps_count, 0);
+    assert_eq!(released_preset.effective_vps_count, 0);
+    assert!(db
+        .repo
+        .apply_configuration_source_override(&override_preview, &operator)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("configuration_source_override_preview_stale"));
+    let remaining_override_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM client_configuration_preset_overrides WHERE client_id = 'client-a'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(remaining_override_count, 0);
+    db.repo
+        .delete_configuration_preset(preset.id, &operator)
+        .await
+        .unwrap();
     assert_eq!(
         db.repo
             .record_tunnel_plan(&input, &plan, true, &operator)
@@ -4300,6 +4269,155 @@ async fn postgres_agent_delete_returns_retired_peers_and_rejects_hidden_endpoint
             .to_string(),
         "tunnel_plan_endpoint_agent_not_found"
     );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_key_revocation_releases_configuration_preset_override() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    insert_client(&db.pool, "client-revoke", None).await;
+    insert_client(&db.pool, "client-revoke-recovery", None).await;
+    sqlx::query("UPDATE clients SET public_key = decode($2, 'hex') WHERE id = $1")
+        .bind("client-revoke")
+        .bind("42".repeat(32))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE clients SET public_key = decode($2, 'hex') WHERE id = $1")
+        .bind("client-revoke-recovery")
+        .bind("43".repeat(32))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let operator = postgres_network_operator(&db.repo).await;
+    db.repo
+        .initialize_system_configuration_presets()
+        .await
+        .unwrap();
+    let preset = db
+        .repo
+        .create_configuration_preset(
+            &CreateConfigurationPresetRequest {
+                behavior: "tunnel_traffic".to_string(),
+                name: "Revoked endpoint traffic".to_string(),
+                description: None,
+                definition: serde_json::json!({
+                    "source": "vnstat",
+                    "vnstat_argv": ["/usr/bin/vnstat"]
+                }),
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    let preview = db
+        .repo
+        .preview_configuration_source_override(&PreviewConfigurationSourceOverrideRequest {
+            action: ConfigurationOverrideAction::Set,
+            behavior: "tunnel_traffic".to_string(),
+            preset_id: Some(preset.id),
+            selector_expression: String::new(),
+            target_client_ids: vec!["client-revoke".to_string()],
+        })
+        .await
+        .unwrap();
+    db.repo
+        .apply_configuration_source_override(&preview, &operator)
+        .await
+        .unwrap();
+
+    db.repo
+        .revoke_current_client_key("client-revoke", Some("compromised"), &operator)
+        .await
+        .unwrap();
+
+    let remaining_override_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM client_configuration_preset_overrides WHERE client_id = 'client-revoke'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(remaining_override_count, 0);
+    let removed_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT (metadata ->> 'removed_configuration_preset_override_count')::bigint
+        FROM audit_logs
+        WHERE action = 'client_key.revoked' AND target = 'client:client-revoke'
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(removed_count, 1);
+
+    let recovery_preview = db
+        .repo
+        .preview_configuration_source_override(&PreviewConfigurationSourceOverrideRequest {
+            action: ConfigurationOverrideAction::Set,
+            behavior: "tunnel_traffic".to_string(),
+            preset_id: Some(preset.id),
+            selector_expression: String::new(),
+            target_client_ids: vec!["client-revoke-recovery".to_string()],
+        })
+        .await
+        .unwrap();
+    db.repo
+        .apply_configuration_source_override(&recovery_preview, &operator)
+        .await
+        .unwrap();
+    let recovery_public_key = vec![0x43; 32];
+    sqlx::query(
+        r#"
+        INSERT INTO client_key_revocations (
+            id, client_id, public_key_sha256_hex, reason, revoked_by
+        )
+        VALUES ($1, $2, $3, $4, $5)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind("client-revoke-recovery")
+    .bind(crate::repository_key_lifecycle::public_key_sha256_hex(
+        &recovery_public_key,
+    ))
+    .bind("existing record")
+    .bind(operator.operator.id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    db.repo
+        .revoke_current_client_key("client-revoke-recovery", Some("retry"), &operator)
+        .await
+        .unwrap();
+    let recovery_override_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM client_configuration_preset_overrides WHERE client_id = 'client-revoke-recovery'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(recovery_override_count, 0);
+    let recovery_removed_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT (metadata ->> 'removed_configuration_preset_override_count')::bigint
+        FROM audit_logs
+        WHERE action = 'client_key.revoked'
+          AND target = 'client:client-revoke-recovery'
+          AND metadata ->> 'recovered_existing_revocation' = 'true'
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(recovery_removed_count, 1);
+    db.repo
+        .delete_configuration_preset(preset.id, &operator)
+        .await
+        .unwrap();
     db.cleanup().await;
 }
 
@@ -4375,6 +4493,12 @@ async fn postgres_network_json_corruption_is_visible_isolated_and_replaceable() 
     let mut repair_input = healthy_input.clone();
     repair_input.name = "repair-corrupt-tunnel".to_string();
     repair_input.interface_name = "vpsman-repair".to_string();
+    repair_input.address_pool_cidr = "10.11.0.0/29".to_string();
+    repair_input.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.11.0.0".to_string(),
+        right: "10.11.0.1".to_string(),
+        prefix_len: 31,
+    });
     let repair_plan = plan_tunnel(&repair_input).unwrap();
     let corrupt_tunnel = db
         .repo
@@ -6548,15 +6672,7 @@ async fn postgres_delete_agent_cleanup_terminal_events_cover_backup_and_queued_s
         .unwrap();
 
     db.repo
-        .delete_agent(
-            client_id,
-            &DeleteAgentRequest {
-                confirmed: true,
-                reason: Some("test delete".to_string()),
-                privilege_assertion: None,
-            },
-            &operator,
-        )
+        .delete_agent(client_id, Some("test delete"), &operator)
         .await
         .unwrap();
     let state = postgres_app_state(&db);

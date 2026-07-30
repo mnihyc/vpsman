@@ -79,29 +79,6 @@ async function reviewBulkTagMutation(page: Page) {
   );
 }
 
-async function openSourceTemplateWorkflow(
-  page: Page,
-  tab: "Assign" | "Render" = "Assign",
-) {
-  const panel = page.locator(".sourceTemplatePanel");
-  const row = panel
-    .locator(".gridBody [role=row]", { hasText: "shared:vnstat-json" })
-    .first();
-  await expect(row).toBeVisible();
-  await row.click();
-  await activate(
-    panel
-      .getByLabel("Template workflow actions for shared:vnstat-json")
-      .getByRole("button", { name: tab === "Render" ? "Render" : "Assign" }),
-  );
-  const drawer = page.getByRole("complementary", {
-    name: "shared:vnstat-json",
-  });
-  await expect(drawer).toBeVisible();
-  await activate(drawer.getByRole("tab", { name: tab }));
-  return drawer;
-}
-
 async function unlockPrivilege(page: Page, subpage: string) {
   await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, "Jobs", subpage);
@@ -110,6 +87,16 @@ async function unlockPrivilege(page: Page, subpage: string) {
 async function unlockPrivilegeFor(page: Page, view: string, subpage: string) {
   await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, view, subpage);
+}
+
+async function reviewOspfCostUpdate(page: Page) {
+  const plans = page.getByLabel("OSPF updater plans data grid");
+  await plans
+    .getByRole("row", { name: /sfo-fra-gre/ })
+    .click({ button: "right" });
+  await activate(
+    page.getByRole("menuitem", { name: "Apply cost", exact: true }),
+  );
 }
 
 function expectPrivilegeAssertion(request: unknown) {
@@ -331,7 +318,7 @@ test("bulk config review uses the current backend-resolved selector instead of a
     .getByRole("combobox", { name: "Bulk patch target expression" })
     .fill("id:agent-sfo-01");
   await activate(panel.getByRole("button", { name: "Preview changes" }));
-  await expect(panel.getByText("1 VPS resolved")).toBeVisible();
+  await expect(panel.getByText("1 VPS verified")).toBeVisible();
   await panel
     .getByRole("combobox", { name: "Bulk patch target expression" })
     .fill("id:agent-fra-02");
@@ -376,6 +363,9 @@ test("bulk tag mutation requires a fresh preview after selector edits", async ({
   await page
     .getByRole("combobox", { name: "Bulk group selector expression" })
     .fill("id:agent-sfo-01");
+  await expect(page.getByLabel("Bulk group local VPS preview")).toContainText(
+    "edge-sfo-01",
+  );
   await includeBulkTagReviewTargets(page);
   await reviewBulkTagMutation(page);
   await expect(page.locator(".bulkTagPreview")).toContainText("edge-sfo-01");
@@ -598,6 +588,9 @@ test("backup policy review submits a frozen target list and privilege assertion"
   await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.type("id:agent-fra-02");
   await page.keyboard.press("Escape");
+  await expect(
+    page.getByLabel("Backup policy local VPS preview"),
+  ).toContainText("core-fra-02");
   await page.getByRole("checkbox", { name: "Skip missing roots" }).check();
   await page.getByRole("checkbox", { name: "Enabled" }).uncheck();
   await activate(page.getByRole("button", { name: "Review policy" }));
@@ -710,52 +703,6 @@ test("backup run dispatches one audited backup job for the reviewed VPS", async 
   ).toMatch(/^[0-9a-f]+$/);
 });
 
-test("template render preview follows the selected VPS without submitting apply jobs", async ({
-  page,
-}, testInfo) => {
-  test.skip(
-    testInfo.project.name.includes("mobile"),
-    "template render consistency is covered in desktop workflow tests",
-  );
-  await installConsoleApiMock(page);
-  await page.goto("/");
-  await openConsoleSubpage(page, "Automation", "Source templates");
-  await unlockPrivilegeFor(page, "Automation", "Source templates");
-
-  const panel = await openSourceTemplateWorkflow(page, "Render");
-  await chooseVpsBySearch(
-    panel,
-    "Template runtime config preview VPS",
-    "sfo",
-    /edge-sfo-01.*agent-sfo-01/,
-  );
-  await activate(panel.getByRole("button", { name: "Render config" }));
-  await expect(
-    panel.getByLabel("Rendered template runtime config TOML"),
-  ).toHaveValue(/agent-sfo-01/);
-  await chooseVpsBySearch(
-    panel,
-    "Template runtime config preview VPS",
-    "fra",
-    /core-fra-02.*agent-fra-02/,
-  );
-  await activate(panel.getByRole("button", { name: "Render config" }));
-  await expect(
-    panel.getByLabel("Rendered template runtime config TOML"),
-  ).toHaveValue(/agent-fra-02/);
-
-  const jobCount = await page.evaluate(() => {
-    const requests = (
-      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
-    ).__vpsmanTestRequests;
-    return requests.jobs.length;
-  });
-  expect(jobCount).toBe(0);
-  await expect(panel.getByRole("button", { name: "Apply patch" })).toHaveCount(
-    0,
-  );
-});
-
 test("bulk config async review preparation ignores stale selector edits", async ({
   page,
 }, testInfo) => {
@@ -800,63 +747,6 @@ test("bulk config async review preparation ignores stale selector edits", async 
       }
     ).__vpsmanTestRequests;
     return requests.runtimeConfigPatches.at(-1);
-  });
-  expect(request).toMatchObject({
-    confirmed: true,
-    selector_expression: "id:agent-fra-02",
-    target_client_ids: ["agent-fra-02"],
-  });
-});
-
-test("template assignment async review ignores stale selector edits", async ({
-  page,
-}, testInfo) => {
-  test.skip(
-    testInfo.project.name.includes("mobile"),
-    "template assignment async review consistency is covered in desktop workflow tests",
-  );
-  await installConsoleApiMock(page);
-  await page.goto("/");
-  await openConsoleSubpage(page, "Automation", "Source templates");
-  await unlockPrivilegeFor(page, "Automation", "Source templates");
-
-  const panel = await openSourceTemplateWorkflow(page, "Assign");
-  const selector = panel.getByRole("combobox", {
-    name: "Template assignment target expression",
-  });
-  await selector.fill("id:agent-sfo-01");
-  await activate(panel.getByRole("button", { name: "Review assignment" }));
-  await expect(
-    page.getByText("Preparing template assignment review"),
-  ).toBeVisible();
-  await selector.fill("id:agent-fra-02");
-  await expect(
-    page.getByText("Preparing template assignment review"),
-  ).toBeHidden();
-  await expect(
-    page.getByRole("region", { name: "Confirm template assignment" }),
-  ).toBeHidden();
-
-  await activate(panel.getByRole("button", { name: "Review assignment" }));
-  await expect(
-    page.getByRole("region", { name: "Confirm template assignment" }),
-  ).toBeVisible();
-  await activate(
-    page
-      .getByRole("region", { name: "Confirm template assignment" })
-      .getByRole("button", {
-        name: "Apply template assignment",
-        exact: true,
-      }),
-  );
-
-  const request = await page.evaluate(() => {
-    const requests = (
-      window as unknown as {
-        __vpsmanTestRequests: { sourceTemplateAssignments: unknown[] };
-      }
-    ).__vpsmanTestRequests;
-    return requests.sourceTemplateAssignments.at(-1);
   });
   expect(request).toMatchObject({
     confirmed: true,
@@ -927,7 +817,7 @@ test("access key lifecycle async reviews ignore stale field edits", async ({
     .locator(".gridBody [role=row]", { hasText: "edge-sfo-01" })
     .first()
     .click({ button: "right" });
-  await page.getByRole("menuitem", { name: "Prepare revoke" }).click();
+  await page.getByRole("menuitem", { name: "Revoke" }).click();
   await expect(
     inspector.getByRole("heading", { name: "Revoke VPS key" }),
   ).toBeVisible();
@@ -1220,7 +1110,7 @@ test("topology async review preparation ignores stale edits", async ({
   });
 
   await openConsoleSubpage(page, "Network", "OSPF");
-  await activate(page.getByRole("button", { name: "Apply" }));
+  await reviewOspfCostUpdate(page);
   await expect(page.getByText("Confirm OSPF cost update")).toBeVisible();
   await activate(
     page.locator(".confirmationPrompt").getByRole("button", {
@@ -1274,7 +1164,7 @@ test("privileged confirmation closes when the local assertion expires", async ({
   await expect(page.getByText("Confirm speed test")).toBeHidden();
 });
 
-test("OSPF cost update submits a frozen endpoint-adapter snapshot", async ({
+test("OSPF cost update submits a frozen endpoint-updater snapshot", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -1286,13 +1176,13 @@ test("OSPF cost update submits a frozen endpoint-adapter snapshot", async ({
   await openConsoleSubpage(page, "Network", "OSPF");
   await unlockPrivilegeFor(page, "Network", "OSPF");
 
-  await activate(page.getByRole("button", { name: "Apply" }));
+  await reviewOspfCostUpdate(page);
   const applyPrompt = page.locator(".confirmationPrompt").last();
   await expect(applyPrompt).toContainText("Confirm OSPF cost update");
   await expect(applyPrompt).toContainText("Current costs");
   await expect(applyPrompt).toContainText("14 / 14");
   await expect(applyPrompt).toContainText("Desired cost");
-  await expect(applyPrompt).toContainText("Adapter snapshots");
+  await expect(applyPrompt).toContainText("Updater snapshots");
   await activate(
     applyPrompt.getByRole("button", {
       name: "Apply routing cost",

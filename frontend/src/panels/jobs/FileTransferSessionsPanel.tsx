@@ -229,6 +229,36 @@ export function FileTransferSessionsPanel({
       {
         description: ([transfer]) =>
           transfer
+            ? `Add ready download ${shortId(transfer.session_id)} to the reviewed download selection.`
+            : "Select a ready download.",
+        hidden: ([transfer]) =>
+          !transfer ||
+          !canCreateHandoff(transfer) ||
+          selectedHandoffKeySet.has(transferKey(transfer)),
+        label: "Select download",
+        onSelect: ([transfer]) => {
+          if (transfer) {
+            toggleHandoffSelection(transfer, true);
+          }
+        },
+      },
+      {
+        description: ([transfer]) =>
+          transfer
+            ? `Remove ready download ${shortId(transfer.session_id)} from the reviewed download selection.`
+            : "Remove a ready download from the selection.",
+        hidden: ([transfer]) =>
+          !transfer || !selectedHandoffKeySet.has(transferKey(transfer)),
+        label: "Unselect download",
+        onSelect: ([transfer]) => {
+          if (transfer) {
+            toggleHandoffSelection(transfer, false);
+          }
+        },
+      },
+      {
+        description: ([transfer]) =>
+          transfer
             ? handoffReadyTitle(transfer)
             : "Download retained transfer output",
         disabled: ([transfer]) =>
@@ -312,36 +342,6 @@ export function FileTransferSessionsPanel({
         searchValue: (source) =>
           `${source.size_bytes} ${formatTime(source.created_at)}`,
         sortValue: (source) => source.size_bytes,
-      },
-      {
-        cell: (source) => (
-          <button
-            aria-label={`Download reusable source ${source.name}`}
-            className="sourceArtifactDownload secondaryAction compactAction"
-            disabled={
-              sourcePendingId === source.id ||
-              source.status === "creating" ||
-              source.status === "deleting"
-            }
-            onClick={(event) => {
-              event.stopPropagation();
-              void downloadSourceArtifact(source);
-            }}
-            title={
-              source.status === "creating" || source.status === "deleting"
-                ? artifactLifecycleStatusTitle(source.status)
-                : "Download reusable upload source"
-            }
-            type="button"
-          >
-            <Download size={14} />
-            <span>Download</span>
-          </button>
-        ),
-        enableHiding: false,
-        header: "Action",
-        id: "action",
-        stickyEnd: true,
       },
     ];
   const transferColumns: ConsoleDataGridColumn<FileTransferSessionRecord>[] = [
@@ -449,89 +449,6 @@ export function FileTransferSessionsPanel({
       searchValue: (transfer) =>
         `${transfer.status} ${transfer.last_event} ${handoffEvidenceLabel(transfer)} ${transferStateLabel(transfer)}`,
       sortValue: (transfer) => `${transfer.status}:${transfer.observed_at}`,
-    },
-    {
-      cell: (transfer) => {
-        const key = transferKey(transfer);
-        const selectable = canCreateHandoff(transfer);
-        const canRetry = canReviewRetry(transfer);
-        const evidenceLabel = handoffEvidenceLabel(transfer);
-        const evidenceTitle = handoffEvidenceTitle(transfer);
-        return (
-          <span className="rowActions">
-            {selectable ? (
-              <>
-                <label className="transferRowSelect">
-                  <input
-                    aria-label={`Select ready download session ${shortId(transfer.session_id)}`}
-                    checked={selectedHandoffKeySet.has(key)}
-                    disabled={handoffBusy}
-                    onChange={(event) =>
-                      toggleHandoffSelection(transfer, event.target.checked)
-                    }
-                    onClick={(event) => event.stopPropagation()}
-                    type="checkbox"
-                  />
-                  <span>Select</span>
-                </label>
-                <button
-                  aria-label={`Ready to download session ${shortId(transfer.session_id)}`}
-                  className="secondaryAction compactAction"
-                  disabled={
-                    handoffPendingKey === key || handoffPendingKey === "bulk"
-                  }
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    reviewHandoff(transfer);
-                  }}
-                  title={handoffReadyTitle(transfer)}
-                  type="button"
-                >
-                  <Download size={14} />
-                  <span>Download</span>
-                </button>
-              </>
-            ) : null}
-            {canRetry ? (
-              <button
-                aria-label={`Retry transfer session ${shortId(transfer.session_id)}`}
-                className="secondaryAction compactAction"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setRetrySnapshot(retryReviewSnapshot(transfer, clientLabel));
-                }}
-                title="Review retry metadata and reopen the resumable transfer composer."
-                type="button"
-              >
-                <RotateCcw size={14} />
-                <span>Retry</span>
-              </button>
-            ) : null}
-            {onOpenJobDetails ? (
-              <button
-                aria-label={`Open transfer job ${shortId(transfer.last_job_id)}`}
-                className="secondaryAction compactAction"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onOpenJobDetails(transfer.last_job_id);
-                }}
-                title="Open the last job that updated this transfer session"
-                type="button"
-              >
-                <ExternalLink size={14} />
-                <span>Job</span>
-              </button>
-            ) : null}
-            {!selectable && !canRetry ? (
-              <small title={evidenceTitle}>{evidenceLabel}</small>
-            ) : null}
-          </span>
-        );
-      },
-      enableHiding: false,
-      header: "Action",
-      id: "action",
-      stickyEnd: true,
     },
   ];
 
@@ -783,11 +700,6 @@ export function FileTransferSessionsPanel({
             <RefreshCw size={14} />
             <span>Refresh</span>
           </button>
-          <ActionFeedback
-            className="localActionFeedback transferHandoffActionFeedback"
-            message={handoffFeedbackMessage}
-            tone={handoffFeedbackTone}
-          />
         </div>
       </div>
       <div
@@ -1257,6 +1169,11 @@ export function FileTransferSessionsPanel({
           </div>
         </section>
       )}
+      <ActionFeedback
+        className="localActionFeedback transferHandoffActionFeedback"
+        message={handoffFeedbackMessage}
+        tone={handoffFeedbackTone}
+      />
       <ConsoleDataGrid
         columns={transferColumns}
         defaultPageSize={8}
@@ -1323,7 +1240,6 @@ export function FileTransferSessionsPanel({
         rowsTruncated={transfersTruncated}
         rowActions={transferRowActions}
         searchPlaceholder="Search transfers"
-        selectable={false}
         mobileFieldLayout="stacked"
         storageKey="vpsman.jobs.fileTransferSessions"
         title="Transfer sessions"
@@ -1460,8 +1376,27 @@ export function FileTransferSessionsPanel({
             )}
             rows={sources}
             rowsTruncated={sourcesTruncated}
+            rowActions={[
+              {
+                description: ([source]) =>
+                  source?.status === "creating" || source?.status === "deleting"
+                    ? artifactLifecycleStatusTitle(source.status)
+                    : "Download this reusable upload source.",
+                disabled: ([source]) =>
+                  !source ||
+                  sourcePendingId === source.id ||
+                  source.status === "creating" ||
+                  source.status === "deleting",
+                icon: <Download size={14} />,
+                label: "Download",
+                onSelect: ([source]) => {
+                  if (source) {
+                    void downloadSourceArtifact(source);
+                  }
+                },
+              },
+            ]}
             searchPlaceholder="Search source artifacts"
-            selectable={false}
             storageKey="vpsman.jobs.fileTransferSources"
             title="Source artifacts"
           />

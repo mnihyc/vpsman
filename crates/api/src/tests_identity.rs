@@ -457,11 +457,7 @@ async fn direct_agent_identity_key_change_requires_explicit_replace_and_blocks_r
 
     repo.revoke_current_client_key(
         "edge-direct-02",
-        &CreateClientKeyRevocationRequest {
-            confirmed: true,
-            reason: Some("provider rebuild with compromised disk snapshot".to_string()),
-            privilege_assertion: None,
-        },
+        Some("provider rebuild with compromised disk snapshot"),
         &operator,
     )
     .await
@@ -531,17 +527,9 @@ async fn deleted_direct_identity_cannot_be_reanimated() {
     .await
     .unwrap();
 
-    repo.delete_agent(
-        "edge-direct-03",
-        &DeleteAgentRequest {
-            confirmed: true,
-            reason: Some("contract terminated".to_string()),
-            privilege_assertion: None,
-        },
-        &operator,
-    )
-    .await
-    .unwrap();
+    repo.delete_agent("edge-direct-03", Some("contract terminated"), &operator)
+        .await
+        .unwrap();
 
     assert!(!repo
         .validate_agent_public_key("edge-direct-03", &"44".repeat(32))

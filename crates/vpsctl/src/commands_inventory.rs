@@ -5,8 +5,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::commands_schedules::selector_expression_from_targets;
-use crate::http::{http_get, http_post_json};
-use crate::jobs::resolve_target_ids;
+use crate::http::{http_delete, http_get, http_post_json, http_put_json};
 use crate::privilege::{
     build_privilege_for_db, load_super_password, load_super_salt_hex, DbPrivilegeRequest,
 };
@@ -719,62 +718,47 @@ pub(crate) fn bulk_resolve(
     Ok(())
 }
 
-pub(crate) fn source_templates(
+pub(crate) fn config_presets(
     api_url: &str,
     token: Option<&str>,
-    domain: Option<String>,
+    behavior: Option<String>,
 ) -> Result<()> {
-    let mut path = "/api/v1/source-templates".to_string();
-    if let Some(domain) = domain {
+    let mut path = "/api/v1/configuration-presets".to_string();
+    if let Some(behavior) = behavior {
         anyhow::ensure!(
-            !domain.is_empty() && domain.len() <= 128,
-            "--domain must be between 1 and 128 bytes"
+            !behavior.is_empty() && behavior.len() <= 128,
+            "--behavior must be between 1 and 128 bytes"
         );
-        path.push_str("?domain=");
-        path.push_str(&percent_encode_query_value(&domain));
+        path.push_str("?behavior=");
+        path.push_str(&percent_encode_query_value(&behavior));
     }
     println!("{}", http_get(api_url, &path, token)?);
     Ok(())
 }
 
-pub(crate) fn source_status(
-    api_url: &str,
-    token: Option<&str>,
-    client_id: Option<String>,
-    domain: Option<String>,
-) -> Result<()> {
-    let path = source_status_path(client_id.as_deref(), domain.as_deref())?;
-    println!("{}", http_get(api_url, &path, token)?);
-    Ok(())
-}
-
-pub(crate) struct SourceTemplateCreateOptions {
-    pub(crate) domain: String,
+pub(crate) struct ConfigPresetCreateOptions {
+    pub(crate) behavior: String,
     pub(crate) name: String,
-    pub(crate) scope: String,
-    pub(crate) owner_client_id: Option<String>,
     pub(crate) description: Option<String>,
     pub(crate) definition_json: Option<String>,
     pub(crate) definition_file: Option<PathBuf>,
 }
 
-pub(crate) fn source_template_create(
+pub(crate) fn config_preset_create(
     api_url: &str,
     token: Option<&str>,
-    options: SourceTemplateCreateOptions,
+    options: ConfigPresetCreateOptions,
 ) -> Result<()> {
-    let definition = template_definition(options.definition_json, options.definition_file)?;
+    let definition = preset_definition(options.definition_json, options.definition_file)?;
     println!(
         "{}",
         http_post_json(
             api_url,
-            "/api/v1/source-templates",
+            "/api/v1/configuration-presets",
             token,
             &serde_json::json!({
-                "domain": options.domain,
+                "behavior": options.behavior,
                 "name": options.name,
-                "scope": options.scope,
-                "owner_client_id": options.owner_client_id,
                 "description": options.description,
                 "definition": definition,
             }),
@@ -783,27 +767,22 @@ pub(crate) fn source_template_create(
     Ok(())
 }
 
-pub(crate) fn source_template_clone(
+pub(crate) fn config_preset_clone(
     api_url: &str,
     token: Option<&str>,
-    source_template_id: String,
+    preset_id: String,
     name: String,
-    scope: String,
-    owner_client_id: Option<String>,
     description: Option<String>,
 ) -> Result<()> {
-    let source_template_id =
-        Uuid::parse_str(&source_template_id).context("invalid --template-id UUID")?;
+    let preset_id = Uuid::parse_str(&preset_id).context("invalid --preset-id UUID")?;
     println!(
         "{}",
         http_post_json(
             api_url,
-            &format!("/api/v1/source-templates/{source_template_id}/clone"),
+            &format!("/api/v1/configuration-presets/{preset_id}/clone"),
             token,
             &serde_json::json!({
                 "name": name,
-                "scope": scope,
-                "owner_client_id": owner_client_id,
                 "description": description,
             }),
         )?
@@ -811,127 +790,169 @@ pub(crate) fn source_template_clone(
     Ok(())
 }
 
-pub(crate) fn source_template_diff(
+pub(crate) fn config_preset_preview(
     api_url: &str,
     token: Option<&str>,
-    template_id: String,
+    preset_id: String,
     description: Option<String>,
     clear_description: bool,
     definition_json: Option<String>,
     definition_file: Option<PathBuf>,
 ) -> Result<()> {
-    let template_id = Uuid::parse_str(&template_id).context("invalid --template-id UUID")?;
-    let definition = template_definition(definition_json, definition_file)?;
-    let keep_description = description.is_none() && !clear_description;
+    let preset_id = Uuid::parse_str(&preset_id).context("invalid --preset-id UUID")?;
+    let definition = preset_definition(definition_json, definition_file)?;
+    let description =
+        preset_candidate_description(api_url, token, preset_id, description, clear_description)?;
     println!(
         "{}",
         http_post_json(
             api_url,
-            &format!("/api/v1/source-templates/{template_id}/diff"),
+            &format!("/api/v1/configuration-presets/{preset_id}/preview"),
             token,
             &serde_json::json!({
                 "description": description,
                 "definition": definition,
-                "keep_description": keep_description,
             }),
         )?
     );
     Ok(())
 }
 
-pub(crate) fn source_template_test(
-    api_url: &str,
-    token: Option<&str>,
-    template_id: String,
-    definition_json: Option<String>,
-    definition_file: Option<PathBuf>,
-) -> Result<()> {
-    let template_id = Uuid::parse_str(&template_id).context("invalid --template-id UUID")?;
-    let definition = template_definition(definition_json, definition_file)?;
-    println!(
-        "{}",
-        http_post_json(
-            api_url,
-            &format!("/api/v1/source-templates/{template_id}/test"),
-            token,
-            &serde_json::json!({
-                "definition": definition,
-            }),
-        )?
-    );
-    Ok(())
-}
-
-pub(crate) struct SourceTemplateUpdateOptions {
-    pub(crate) template_id: String,
+pub(crate) struct ConfigPresetUpdateOptions {
+    pub(crate) preset_id: String,
     pub(crate) description: Option<String>,
     pub(crate) clear_description: bool,
     pub(crate) definition_json: Option<String>,
     pub(crate) definition_file: Option<PathBuf>,
+    pub(crate) preview_hash: Option<String>,
     pub(crate) confirmed: bool,
 }
 
-pub(crate) fn source_template_update(
+pub(crate) fn config_preset_update(
     api_url: &str,
     token: Option<&str>,
-    options: SourceTemplateUpdateOptions,
+    options: ConfigPresetUpdateOptions,
 ) -> Result<()> {
-    let template_id =
-        Uuid::parse_str(&options.template_id).context("invalid --template-id UUID")?;
-    let definition = template_definition(options.definition_json, options.definition_file)?;
-    let keep_description = options.description.is_none() && !options.clear_description;
-    let path = format!("/api/v1/source-templates/{template_id}/update");
-    let mut body = serde_json::json!({
-        "description": options.description,
+    let preset_id = Uuid::parse_str(&options.preset_id).context("invalid --preset-id UUID")?;
+    let reviewed_preview_hash = reviewed_preview_hash_arg(
+        options.confirmed,
+        options.preview_hash.as_deref(),
+        "config-preset-update",
+    )?;
+    let definition = preset_definition(options.definition_json, options.definition_file)?;
+    let description = preset_candidate_description(
+        api_url,
+        token,
+        preset_id,
+        options.description,
+        options.clear_description,
+    )?;
+    let preview_path = format!("/api/v1/configuration-presets/{preset_id}/preview");
+    let preview_body = serde_json::json!({
+        "description": description,
         "definition": definition,
-        "confirmed": options.confirmed,
-        "keep_description": keep_description,
     });
-    if options.confirmed {
-        let mut preview_body = body.clone();
-        preview_body["confirmed"] = Value::Bool(false);
-        let preview_raw = http_post_json(api_url, &path, token, &preview_body)?;
-        let preview = parse_preview_response(&preview_raw)?;
-        if !preview
-            .get("confirmation_required")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            println!("{preview_raw}");
-            return Ok(());
-        }
-        let preview_hash = required_preview_hash(&preview, "source-template-update")?;
-        let affected_client_ids = string_array_field(&preview, "affected_client_ids")?;
-        body["preview_hash"] = Value::String(preview_hash.clone());
-        if !affected_client_ids.is_empty() {
-            let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
-            let salt_hex = load_super_salt_hex(None)?;
-            let target = source_template_privilege_target(template_id);
-            let privilege_assertion = build_privilege_for_db(
-                DbPrivilegeRequest {
-                    action: "source_template.update",
-                    target: &target,
-                    selector_expression: None,
-                    resolved_targets: &affected_client_ids,
-                    confirmed: true,
-                    payload_hash: Some(&preview_hash),
-                },
-                &password,
-                &salt_hex,
-                300,
-            )?;
-            body["privilege_assertion"] = serde_json::to_value(privilege_assertion)?;
-        }
+    let preview_raw = http_post_json(api_url, &preview_path, token, &preview_body)?;
+    if !options.confirmed {
+        println!("{preview_raw}");
+        return Ok(());
     }
-    println!("{}", http_post_json(api_url, &path, token, &body)?);
+    let preview = parse_preview_response(&preview_raw)?;
+    let current_preview_hash = required_preview_hash(&preview, "config-preset-update")?;
+    let preview_hash = require_matching_reviewed_preview_hash(
+        reviewed_preview_hash.as_deref(),
+        &current_preview_hash,
+        "config-preset-update",
+    )?;
+    let affected_client_ids = string_array_field(&preview, "affected_client_ids")?;
+    let mut body = preview_body;
+    body["preview_hash"] = Value::String(preview_hash.clone());
+    if !affected_client_ids.is_empty() {
+        let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
+        let salt_hex = load_super_salt_hex(None)?;
+        let target = config_preset_privilege_target(preset_id);
+        let privilege_assertion = build_privilege_for_db(
+            DbPrivilegeRequest {
+                action: "configuration_preset.update",
+                target: &target,
+                selector_expression: None,
+                resolved_targets: &affected_client_ids,
+                confirmed: true,
+                payload_hash: Some(&preview_hash),
+            },
+            &password,
+            &salt_hex,
+            300,
+        )?;
+        body["privilege_assertion"] = serde_json::to_value(privilege_assertion)?;
+    }
+    println!(
+        "{}",
+        http_put_json(
+            api_url,
+            &format!("/api/v1/configuration-presets/{preset_id}"),
+            token,
+            &body,
+        )?
+    );
     Ok(())
 }
 
-pub(crate) fn source_template_assignments(
+pub(crate) fn config_preset_delete(
+    api_url: &str,
+    token: Option<&str>,
+    preset_id: String,
+    confirmed: bool,
+) -> Result<()> {
+    anyhow::ensure!(
+        confirmed,
+        "config-preset-delete requires --confirmed after verifying the preset has no overrides"
+    );
+    let preset_id = Uuid::parse_str(&preset_id).context("invalid --preset-id UUID")?;
+    let response = http_delete(
+        api_url,
+        &format!("/api/v1/configuration-presets/{preset_id}"),
+        token,
+    )?;
+    if !response.is_empty() {
+        println!("{response}");
+    }
+    Ok(())
+}
+
+pub(crate) fn preset_candidate_description(
+    api_url: &str,
+    token: Option<&str>,
+    preset_id: Uuid,
+    description: Option<String>,
+    clear_description: bool,
+) -> Result<Option<String>> {
+    anyhow::ensure!(
+        description.is_none() || !clear_description,
+        "use only one of --description or --clear-description"
+    );
+    if description.is_some() || clear_description {
+        return Ok(description);
+    }
+    let raw = http_get(api_url, "/api/v1/configuration-presets", token)?;
+    let presets: Vec<Value> =
+        serde_json::from_str(&raw).context("invalid configuration preset list response")?;
+    let preset_id_text = preset_id.to_string();
+    let preset = presets
+        .iter()
+        .find(|preset| preset.get("id").and_then(Value::as_str) == Some(preset_id_text.as_str()))
+        .with_context(|| format!("configuration preset {preset_id} was not found"))?;
+    Ok(preset
+        .get("description")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned))
+}
+
+pub(crate) fn config_sources(
     api_url: &str,
     token: Option<&str>,
     client_id: Option<String>,
-    domain: Option<String>,
+    behavior: Option<String>,
 ) -> Result<()> {
     let mut query = Vec::new();
     if let Some(client_id) = client_id {
@@ -944,23 +965,26 @@ pub(crate) fn source_template_assignments(
             percent_encode_query_value(&client_id)
         ));
     }
-    if let Some(domain) = domain {
+    if let Some(behavior) = behavior {
         anyhow::ensure!(
-            !domain.is_empty() && domain.len() <= 128,
-            "--domain must be between 1 and 128 bytes"
+            !behavior.is_empty() && behavior.len() <= 128,
+            "--behavior must be between 1 and 128 bytes"
         );
-        query.push(format!("domain={}", percent_encode_query_value(&domain)));
+        query.push(format!(
+            "behavior={}",
+            percent_encode_query_value(&behavior)
+        ));
     }
     let path = if query.is_empty() {
-        "/api/v1/source-template-assignments".to_string()
+        "/api/v1/configuration-sources".to_string()
     } else {
-        format!("/api/v1/source-template-assignments?{}", query.join("&"))
+        format!("/api/v1/configuration-sources?{}", query.join("&"))
     };
     println!("{}", http_get(api_url, &path, token)?);
     Ok(())
 }
 
-pub(crate) fn template_runtime_config(
+pub(crate) fn config_render(
     api_url: &str,
     token: Option<&str>,
     client_id: String,
@@ -970,17 +994,17 @@ pub(crate) fn template_runtime_config(
         !client_id.is_empty() && client_id.len() <= 128,
         "--client-id must be between 1 and 128 bytes"
     );
-    let path = template_runtime_config_path(&client_id);
+    let path = config_render_path(&client_id);
     let body = http_get(api_url, &path, token)?;
     match format.as_str() {
         "json" => println!("{body}"),
         "toml" => {
             let value: serde_json::Value =
-                serde_json::from_str(&body).context("invalid source template config response")?;
+                serde_json::from_str(&body).context("invalid effective config response")?;
             let toml = value
                 .get("toml")
                 .and_then(serde_json::Value::as_str)
-                .context("source template config response missing toml")?;
+                .context("effective config response missing toml")?;
             print!("{toml}");
         }
         _ => anyhow::bail!("--format must be toml or json"),
@@ -988,45 +1012,22 @@ pub(crate) fn template_runtime_config(
     Ok(())
 }
 
-pub(crate) struct SourceTemplateAssignOptions {
-    pub(crate) domain: String,
-    pub(crate) template_id: String,
+pub(crate) struct ConfigSourceChangeOptions {
+    pub(crate) action: &'static str,
+    pub(crate) behavior: String,
+    pub(crate) preset_id: Option<String>,
+    pub(crate) selector: Option<String>,
     pub(crate) clients: Vec<String>,
     pub(crate) tags: Vec<String>,
+    pub(crate) preview_hash: Option<String>,
     pub(crate) confirmed: bool,
 }
 
-fn template_runtime_config_path(client_id: &str) -> String {
+fn config_render_path(client_id: &str) -> String {
     format!(
-        "/api/v1/template-runtime-config?client_id={}",
+        "/api/v1/effective-agent-config?client_id={}",
         percent_encode_query_value(client_id)
     )
-}
-
-fn source_status_path(client_id: Option<&str>, domain: Option<&str>) -> Result<String> {
-    let mut query = Vec::new();
-    if let Some(client_id) = client_id {
-        anyhow::ensure!(
-            !client_id.is_empty() && client_id.len() <= 128,
-            "--client-id must be between 1 and 128 bytes"
-        );
-        query.push(format!(
-            "client_id={}",
-            percent_encode_query_value(client_id)
-        ));
-    }
-    if let Some(domain) = domain {
-        anyhow::ensure!(
-            !domain.is_empty() && domain.len() <= 128,
-            "--domain must be between 1 and 128 bytes"
-        );
-        query.push(format!("domain={}", percent_encode_query_value(domain)));
-    }
-    if query.is_empty() {
-        Ok("/api/v1/source-status".to_string())
-    } else {
-        Ok(format!("/api/v1/source-status?{}", query.join("&")))
-    }
 }
 
 fn fleet_alerts_path(
@@ -1604,61 +1605,140 @@ fn validate_alert_policy_scope_kind(scope_kind: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn source_template_assign(
+pub(crate) fn config_source_change(
     api_url: &str,
     token: Option<&str>,
-    options: SourceTemplateAssignOptions,
+    options: ConfigSourceChangeOptions,
 ) -> Result<()> {
-    let template_id =
-        Uuid::parse_str(&options.template_id).context("invalid --template-id UUID")?;
-    let selector_expression = selector_expression_from_targets(&options.clients, &options.tags);
-    let target_client_ids = resolve_target_ids(api_url, token, &options.clients, &options.tags)?;
-    let mut body = serde_json::json!({
-        "domain": options.domain.clone(),
-        "template_id": template_id,
+    anyhow::ensure!(
+        matches!(options.action, "set" | "reset"),
+        "config source action must be set or reset"
+    );
+    let command_name = format!("config-source-{}", options.action);
+    let reviewed_preview_hash = reviewed_preview_hash_arg(
+        options.confirmed,
+        options.preview_hash.as_deref(),
+        &command_name,
+    )?;
+    let preset_id = match options.preset_id {
+        Some(value) => Some(Uuid::parse_str(&value).context("invalid --preset-id UUID")?),
+        None => None,
+    };
+    anyhow::ensure!(
+        (options.action == "set" && preset_id.is_some())
+            || (options.action == "reset" && preset_id.is_none()),
+        "config-source-set requires --preset-id; reset must not include one"
+    );
+    let selector_expression =
+        configuration_source_selector(options.selector.as_deref(), &options.tags)?;
+    let mut target_client_ids = options.clients.clone();
+    target_client_ids.sort();
+    target_client_ids.dedup();
+    anyhow::ensure!(
+        !target_client_ids.is_empty() || !selector_expression.is_empty(),
+        "config-source-{} requires --clients, --tags, or --selector",
+        options.action
+    );
+    let preview_body = serde_json::json!({
+        "action": options.action,
+        "behavior": options.behavior,
+        "preset_id": preset_id,
         "selector_expression": selector_expression.clone(),
         "target_client_ids": target_client_ids.clone(),
-        "confirmed": options.confirmed,
     });
-    if options.confirmed {
-        let mut preview_body = body.clone();
-        preview_body["confirmed"] = Value::Bool(false);
-        let preview_raw = http_post_json(
-            api_url,
-            "/api/v1/source-template-assignments",
-            token,
-            &preview_body,
-        )?;
-        let preview = parse_preview_response(&preview_raw)?;
-        let preview_hash = required_preview_hash(&preview, "source-template-assign")?;
-        let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
-        let salt_hex = load_super_salt_hex(None)?;
-        let target = source_template_privilege_target(template_id);
-        let privilege_assertion = build_privilege_for_db(
-            DbPrivilegeRequest {
-                action: "source_template.assign",
-                target: &target,
-                selector_expression: Some(&selector_expression),
-                resolved_targets: &target_client_ids,
-                confirmed: true,
-                payload_hash: Some(&preview_hash),
-            },
-            &password,
-            &salt_hex,
-            300,
-        )?;
-        body["preview_hash"] = Value::String(preview_hash);
-        body["privilege_assertion"] = serde_json::to_value(privilege_assertion)?;
+    let preview_raw = http_post_json(
+        api_url,
+        "/api/v1/configuration-source-overrides/preview",
+        token,
+        &preview_body,
+    )?;
+    if !options.confirmed {
+        println!("{preview_raw}");
+        return Ok(());
     }
+    let preview = parse_preview_response(&preview_raw)?;
+    let current_preview_hash = required_preview_hash(&preview, &command_name)?;
+    let preview_hash = require_matching_reviewed_preview_hash(
+        reviewed_preview_hash.as_deref(),
+        &current_preview_hash,
+        &command_name,
+    )?;
+    let resolved_target_ids = configuration_source_preview_target_ids(&preview)?;
+    let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
+    let salt_hex = load_super_salt_hex(None)?;
+    let target = match preset_id {
+        Some(preset_id) => format!("configuration_preset:{preset_id}"),
+        None => format!("configuration_behavior:{}", options.behavior),
+    };
+    let privilege_assertion = build_privilege_for_db(
+        DbPrivilegeRequest {
+            action: "configuration_source_override.apply",
+            target: &target,
+            selector_expression: (!selector_expression.is_empty())
+                .then_some(selector_expression.as_str()),
+            resolved_targets: &resolved_target_ids,
+            confirmed: true,
+            payload_hash: Some(&preview_hash),
+        },
+        &password,
+        &salt_hex,
+        300,
+    )?;
+    let mut body = preview_body;
+    body["target_client_ids"] = serde_json::to_value(&resolved_target_ids)?;
+    body["preview_hash"] = Value::String(preview_hash);
+    body["privilege_assertion"] = serde_json::to_value(privilege_assertion)?;
     println!(
         "{}",
-        http_post_json(api_url, "/api/v1/source-template-assignments", token, &body,)?
+        http_post_json(
+            api_url,
+            "/api/v1/configuration-source-overrides/apply",
+            token,
+            &body,
+        )?
     );
     Ok(())
 }
 
-pub(crate) fn source_template_privilege_target(template_id: Uuid) -> String {
-    format!("source_template:{template_id}")
+pub(crate) fn config_preset_privilege_target(preset_id: Uuid) -> String {
+    format!("configuration_preset:{preset_id}")
+}
+
+pub(crate) fn configuration_source_selector(
+    selector: Option<&str>,
+    tags: &[String],
+) -> Result<String> {
+    let selector = selector.map(str::trim).filter(|value| !value.is_empty());
+    let tag_selector = selector_expression_from_targets(&[], tags);
+    match (selector, tag_selector.is_empty()) {
+        (Some(selector), false) => Ok(format!("({selector}) || ({tag_selector})")),
+        (Some(selector), true) => Ok(selector.to_string()),
+        (None, false) => Ok(tag_selector),
+        (None, true) => Ok(String::new()),
+    }
+}
+
+pub(crate) fn configuration_source_preview_target_ids(preview: &Value) -> Result<Vec<String>> {
+    let mut target_ids = preview
+        .get("targets")
+        .and_then(Value::as_array)
+        .context("configuration source preview response missing targets")?
+        .iter()
+        .map(|target| {
+            target
+                .get("client_id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .context("configuration source preview target missing client_id")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    target_ids.sort();
+    target_ids.dedup();
+    anyhow::ensure!(
+        !target_ids.is_empty(),
+        "configuration source preview resolved no targets"
+    );
+    Ok(target_ids)
 }
 
 pub(crate) fn parse_preview_response(raw: &str) -> Result<Value> {
@@ -1672,6 +1752,44 @@ pub(crate) fn required_preview_hash(value: &Value, action: &str) -> Result<Strin
         .filter(|hash| !hash.trim().is_empty())
         .map(ToOwned::to_owned)
         .with_context(|| format!("{action} preview response missing preview_hash"))
+}
+
+pub(crate) fn reviewed_preview_hash_arg(
+    confirmed: bool,
+    submitted: Option<&str>,
+    command: &str,
+) -> Result<Option<String>> {
+    if !confirmed {
+        anyhow::ensure!(
+            submitted.is_none(),
+            "{command} accepts --preview-hash only together with --confirmed"
+        );
+        return Ok(None);
+    }
+    let submitted = submitted
+        .map(str::trim)
+        .filter(|hash| !hash.is_empty())
+        .with_context(|| {
+            format!(
+                "{command} --confirmed requires --preview-hash from a separately reviewed preview"
+            )
+        })?;
+    Ok(Some(submitted.to_string()))
+}
+
+pub(crate) fn require_matching_reviewed_preview_hash(
+    reviewed: Option<&str>,
+    current: &str,
+    command: &str,
+) -> Result<String> {
+    let reviewed = reviewed.with_context(|| {
+        format!("{command} has no reviewed preview hash; rerun without --confirmed and review it")
+    })?;
+    anyhow::ensure!(
+        reviewed == current,
+        "{command} preview changed; rerun without --confirmed, review the new preview, and use its --preview-hash"
+    );
+    Ok(current.to_string())
 }
 
 pub(crate) fn string_array_field(value: &Value, field: &str) -> Result<Vec<String>> {
@@ -1688,7 +1806,7 @@ pub(crate) fn string_array_field(value: &Value, field: &str) -> Result<Vec<Strin
         .collect()
 }
 
-fn template_definition(
+fn preset_definition(
     definition_json: Option<String>,
     definition_file: Option<PathBuf>,
 ) -> Result<serde_json::Value> {
@@ -1702,6 +1820,8 @@ fn template_definition(
                 .with_context(|| format!("failed to read {}", path.display()))?;
             serde_json::from_str(&payload).context("invalid --definition-file JSON")
         }
-        (None, None) => Ok(serde_json::json!({})),
+        (None, None) => {
+            anyhow::bail!("one of --definition-json or --definition-file is required")
+        }
     }
 }

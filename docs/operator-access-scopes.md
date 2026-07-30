@@ -12,7 +12,7 @@ role receives the scopes needed for normal daily operation. The default
 
 - `fleet:read`: fleet metadata, agent inventory, gateway sessions, telemetry,
   job status, target status, fleet and policy alert state, traffic accounting
-  summaries, source readiness, topology summaries, and other non-payload
+  summaries, topology summaries, and other non-payload
   operational status.
 - `jobs:read`: durable job output payloads, output archives, file-download
   payloads, output chunks, output comparison previews, process-supervisor
@@ -28,10 +28,11 @@ role receives the scopes needed for normal daily operation. The default
 - `templates:read`: built-in and user-defined command templates and their operation payloads.
 - `schedules:read`: saved schedule definitions, target snapshots, timing, and
   recurring operation payloads.
-- `config:read`: template definitions, template assignments,
-  diff/test output, rendered runtime config, runtime config patch generators,
-  rendered incremental config patches, per-VPS rule values, Config > Rules
-  dry-runs, and private agent-update release metadata.
+- `config:read`: configuration preset definitions, effective per-VPS sources,
+  preset and override previews, readiness and runtime-sync state, rendered
+  effective runtime config, runtime config patch generators, rendered
+  incremental config patches, per-VPS rule values, Config > Rules dry-runs,
+  and private agent-update release metadata.
 - `network:read`: full tunnel plans, exportable runtime `plan.json` details,
   OSPF update plans, port-forward desired/runtime state, hostname-resolution
   candidates, raw network observations, and topology history exports.
@@ -119,8 +120,8 @@ username/client-IP pair and one for the client IP across usernames. A hostile
 client therefore cannot lock an operator out from every network, while a single
 source still cannot rotate usernames without being throttled. The historical
 `operator_auth_username_failed_attempt_limit` setting controls the
-username/client-IP bucket. Defaults are 8 pair failures and 64 source failures
-within 15 minutes, followed by a 15-minute lockout.
+username/client-IP bucket. Both buckets default to 8 failures within 15
+minutes, followed by a 15-minute lockout.
 
 Fleet WebSocket streams use the same bearer-session authority as HTTP routes.
 The server periodically revalidates token expiry, session revocation, operator

@@ -8,7 +8,8 @@ use vpsman_common::{
 
 use crate::{
     model::{
-        AuthContext, NetworkObservationView, OperatorPreferences, OperatorView, SourceTemplateView,
+        AuthContext, NetworkAdapterDefinitionView, NetworkObservationView, OperatorPreferences,
+        OperatorView,
     },
     repository::Repository,
     repository_network_observations::topology_identity_hash_for_plan,
@@ -51,11 +52,11 @@ async fn reviewed_update_plan_is_daemon_neutral_and_requires_verified_endpoints(
     );
     assert_eq!(update.mutation_mode, "server_issued_adapter_jobs");
     assert_eq!(
-        update.left_adapter_template_name.as_deref(),
+        update.left_adapter_definition_name.as_deref(),
         Some("left-routing")
     );
     assert_eq!(
-        update.right_adapter_template_name.as_deref(),
+        update.right_adapter_definition_name.as_deref(),
         Some("right-routing")
     );
     assert!(update.left_adapter_definition_hash.is_some());
@@ -192,6 +193,12 @@ async fn ospf_evidence_is_bounded_per_plan_instead_of_globally() {
     quiet_input.interface_name = "tunquiet".to_string();
     quiet_input.left_client_id = "quiet-left".to_string();
     quiet_input.right_client_id = "quiet-right".to_string();
+    quiet_input.address_pool_cidr = "10.255.0.4/30".to_string();
+    quiet_input.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.255.0.4".to_string(),
+        right: "10.255.0.5".to_string(),
+        prefix_len: 31,
+    });
     let quiet_planned = plan_tunnel(&quiet_input).unwrap();
     let quiet_plan = repo
         .record_tunnel_plan(&quiet_input, &quiet_planned, true, &operator())
@@ -285,9 +292,9 @@ async fn ospf_recommendations_ignore_observations_outside_the_recent_window() {
 
 async fn seeded_plan(mode: OspfControlMode, healthy_windows: u8) -> (Repository, Uuid) {
     let memory = MemoryState::default();
-    memory.source_templates.write().await.extend([
-        routing_template(LEFT_ADAPTER, "left-routing"),
-        routing_template(RIGHT_ADAPTER, "right-routing"),
+    memory.network_adapter_definitions.write().await.extend([
+        routing_definition(LEFT_ADAPTER, "left-routing"),
+        routing_definition(RIGHT_ADAPTER, "right-routing"),
     ]);
     let repo = Repository::Memory(memory);
     let input = TunnelPlanInput {
@@ -321,8 +328,8 @@ async fn seeded_plan(mode: OspfControlMode, healthy_windows: u8) -> (Repository,
             policy: OspfCostPolicy::default(),
             min_cost_delta: 5,
             healthy_windows,
-            left_adapter_template_id: LEFT_ADAPTER.to_string(),
-            right_adapter_template_id: RIGHT_ADAPTER.to_string(),
+            left_adapter_definition_id: Some(LEFT_ADAPTER.to_string()),
+            right_adapter_definition_id: Some(RIGHT_ADAPTER.to_string()),
         }),
     };
     let plan = plan_tunnel(&input).unwrap();
@@ -500,15 +507,11 @@ fn test_probe_observation(
     }
 }
 
-fn routing_template(id: &str, name: &str) -> SourceTemplateView {
-    SourceTemplateView {
+fn routing_definition(id: &str, name: &str) -> NetworkAdapterDefinitionView {
+    NetworkAdapterDefinitionView {
         id: Uuid::parse_str(id).unwrap(),
-        domain: "routing_cost_adapter".to_string(),
+        adapter_kind: "routing_cost".to_string(),
         name: name.to_string(),
-        scope: "shared".to_string(),
-        built_in: false,
-        is_default: false,
-        owner_client_id: None,
         description: None,
         definition: serde_json::json!({
             "contract_version": 1,
@@ -523,7 +526,6 @@ fn routing_template(id: &str, name: &str) -> SourceTemplateView {
                 "max_output_bytes": 16384
             }
         }),
-        assigned_client_count: 0,
         created_at: crate::unix_now().to_string(),
         updated_at: crate::unix_now().to_string(),
     }

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -7,7 +7,7 @@ use vpsman_common::payload_hash;
 use crate::{
     model::{
         AgentView, BackupRequestView, FleetAlertQuery, FleetAlertView, JobHistoryView,
-        SourceStatusView, TelemetryRollupView, TelemetryTunnelView,
+        TelemetryRollupView, TelemetryTunnelView,
     },
     model_alert_policies::PolicyAlertQuery,
     model_alert_states::FleetAlertStateView,
@@ -27,13 +27,12 @@ const DEFAULT_CPU_LOAD_WARNING: f64 = 2.0;
 const DEFAULT_CPU_LOAD_CRITICAL: f64 = 4.0;
 const FLEET_ALERT_RESULT_LIMIT_MAX: i64 = 200;
 // Historical/event sources are deliberately bounded independently before they
-// are merged with current agent/resource/source-readiness snapshots. Repository
+// are merged with current agent and resource snapshots. Repository
 // selectors must apply native client, category, severity, and dashboard-window
 // filters before this horizon so a narrow query is not crowded out by unrelated
 // fleet history. Saturation is surfaced to dashboard/UI consumers as a lower
 // bound; older event history remains available from its owning workflow.
 const FLEET_EVENT_SOURCE_HORIZON_MAX: i64 = 200;
-const SOURCE_READINESS_EVIDENCE_LIMIT: usize = 100;
 
 #[derive(Clone, Debug)]
 pub(crate) struct FleetAlertPolicy {
@@ -265,19 +264,6 @@ impl AppState {
                 .await?;
             source_saturated |= tunnels.len() >= FLEET_EVENT_SOURCE_HORIZON_MAX as usize;
             append_tunnel_alerts(&mut alerts, &tunnels);
-        }
-
-        if query_allows_category(&query, "source_readiness")
-            && query_allows_any_severity(&query, &["warning", "info"])
-        {
-            let source_status = if let Some(selector) = selector {
-                self.list_source_status_for_agents(selector.agents, None)
-                    .await?
-            } else {
-                self.list_source_status(query.client_id.as_deref(), None)
-                    .await?
-            };
-            append_source_readiness_alerts_at(&mut alerts, &source_status, &snapshot_observed_at);
         }
 
         if query_allows_category(&query, "backup") && query_allows_severity(&query, "critical") {
@@ -548,160 +534,6 @@ fn append_tunnel_alerts(alerts: &mut Vec<FleetAlertView>, tunnels: &[TelemetryTu
             );
         }
     }
-}
-
-#[cfg(test)]
-fn append_source_readiness_alerts(alerts: &mut Vec<FleetAlertView>, rows: &[SourceStatusView]) {
-    let observed_at = unix_now().to_string();
-    append_source_readiness_alerts_at(alerts, rows, &observed_at);
-}
-
-fn append_source_readiness_alerts_at(
-    alerts: &mut Vec<FleetAlertView>,
-    rows: &[SourceStatusView],
-    observed_at: &str,
-) {
-    let mut rows_by_client = BTreeMap::<&str, Vec<&SourceStatusView>>::new();
-    for row in rows {
-        rows_by_client
-            .entry(row.client_id.as_str())
-            .or_default()
-            .push(row);
-    }
-    for client_rows in rows_by_client.values() {
-        append_source_readiness_alerts_for_client_at(alerts, client_rows, observed_at);
-    }
-}
-
-fn append_source_readiness_alerts_for_client_at(
-    alerts: &mut Vec<FleetAlertView>,
-    rows: &[&SourceStatusView],
-    observed_at: &str,
-) {
-    // Source readiness is a current configuration/runtime snapshot. Assignment
-    // time remains evidence, but must not make a presently degraded source look
-    // like a historical event (or let one recent assignment timestamp an older
-    // aggregate).
-    let mut pending_evidence_rows = Vec::new();
-    for &row in rows {
-        if matches!(
-            row.status.as_str(),
-            "selected_no_samples" | "selected_no_artifacts"
-        ) {
-            pending_evidence_rows.push(row);
-            continue;
-        }
-        if !matches!(row.status.as_str(), "degraded" | "selected_no_store") {
-            continue;
-        }
-        push_alert(
-            alerts,
-            AlertInput {
-                severity: "warning",
-                category: "source_readiness",
-                target_kind: "source_template",
-                target_id: &format!("{}:{}", row.client_id, row.domain),
-                client_id: Some(&row.client_id),
-                title: "Selected source template needs attention",
-                detail: format!("{}: {}", row.module, row.status_reason),
-                status: &row.status,
-                evidence: json!({
-                    "domain": &row.domain,
-                    "template_name": &row.template_name,
-                    "source_kind": &row.source_kind,
-                    "assigned_at": &row.assigned_at,
-                    "evidence": &row.evidence,
-                }),
-                observed_at: observed_at.to_string(),
-            },
-        );
-    }
-    if pending_evidence_rows.is_empty() {
-        return;
-    }
-
-    let affected_clients = pending_evidence_rows
-        .iter()
-        .map(|row| row.client_id.clone())
-        .collect::<BTreeSet<_>>();
-    let affected_domains = pending_evidence_rows
-        .iter()
-        .map(|row| row.domain.clone())
-        .collect::<BTreeSet<_>>();
-    let evidence_rows = pending_evidence_rows
-        .iter()
-        .take(SOURCE_READINESS_EVIDENCE_LIMIT)
-        .map(|row| {
-            json!({
-                "client_id": &row.client_id,
-                "display_name": &row.display_name,
-                "domain": &row.domain,
-                "module": &row.module,
-                "template_name": &row.template_name,
-                "source_kind": &row.source_kind,
-                "status": &row.status,
-                "status_reason": &row.status_reason,
-                "assigned_at": &row.assigned_at,
-            })
-        })
-        .collect::<Vec<_>>();
-    let affected_client_count = affected_clients.len();
-    let affected_domain_count = affected_domains.len();
-    let affected_client_samples = affected_clients
-        .iter()
-        .take(SOURCE_READINESS_EVIDENCE_LIMIT)
-        .cloned()
-        .collect::<Vec<_>>();
-    let affected_domain_samples = affected_domains
-        .iter()
-        .take(SOURCE_READINESS_EVIDENCE_LIMIT)
-        .cloned()
-        .collect::<Vec<_>>();
-    let summary_client_id = (affected_client_count == 1)
-        .then(|| affected_clients.iter().next().cloned())
-        .flatten();
-    let target_id = summary_client_id.as_deref().map_or_else(
-        || "fleet:pending_evidence".to_string(),
-        |client_id| format!("client:{client_id}:pending_evidence"),
-    );
-    let status = "selected_pending_evidence";
-    push_alert(
-        alerts,
-        AlertInput {
-            severity: "info",
-            category: "source_readiness",
-            target_kind: "source_template_summary",
-            target_id: &target_id,
-            client_id: summary_client_id.as_deref(),
-            title: "Selected source templates await evidence",
-            detail: format!(
-                "{} selected assignments across {} VPSs and {} source domains have no retained evidence yet",
-                pending_evidence_rows.len(),
-                affected_client_count,
-                affected_domain_count,
-            ),
-            status,
-            evidence: json!({
-                "assignment_count": pending_evidence_rows.len(),
-                "affected_client_count": affected_client_count,
-                "affected_clients": affected_client_samples,
-                "affected_clients_truncated_count":
-                    affected_client_count.saturating_sub(SOURCE_READINESS_EVIDENCE_LIMIT),
-                "affected_domain_count": affected_domain_count,
-                "affected_domains": affected_domain_samples,
-                "affected_domains_truncated_count":
-                    affected_domain_count.saturating_sub(SOURCE_READINESS_EVIDENCE_LIMIT),
-                "assignments": evidence_rows,
-                "assignments_truncated_count": pending_evidence_rows
-                    .len()
-                    .saturating_sub(SOURCE_READINESS_EVIDENCE_LIMIT),
-                "truncated_count": pending_evidence_rows
-                    .len()
-                    .saturating_sub(SOURCE_READINESS_EVIDENCE_LIMIT),
-            }),
-            observed_at: observed_at.to_string(),
-        },
-    );
 }
 
 fn append_job_alerts(alerts: &mut Vec<FleetAlertView>, jobs: &[JobHistoryView]) {
@@ -1054,7 +886,6 @@ fn severity_rank(severity: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
 
     #[test]
     fn fleet_alert_policy_rejects_invalid_thresholds() {
@@ -1113,121 +944,6 @@ mod tests {
             disk.evidence["critical_threshold"].as_f64().unwrap(),
             policy.disk_available_critical_ratio
         );
-    }
-
-    #[test]
-    fn source_readiness_keeps_stable_per_vps_summaries_and_warnings() {
-        let mut alerts = Vec::new();
-        let rows = vec![
-            source_status("edge-a", "telemetry", "selected_no_samples"),
-            source_status("edge-a", "network", "selected_no_artifacts"),
-            source_status("edge-b", "telemetry", "selected_no_samples"),
-            source_status("edge-b", "backup", "degraded"),
-        ];
-
-        append_source_readiness_alerts(&mut alerts, &rows);
-
-        assert_eq!(alerts.len(), 3);
-        let edge_a_summary = alerts
-            .iter()
-            .find(|alert| alert.target_id == "client:edge-a:pending_evidence")
-            .expect("edge-a pending evidence summary");
-        assert_eq!(edge_a_summary.target_kind, "source_template_summary");
-        assert_eq!(edge_a_summary.client_id.as_deref(), Some("edge-a"));
-        assert_eq!(edge_a_summary.evidence["assignment_count"], 2);
-        let edge_b_summary = alerts
-            .iter()
-            .find(|alert| alert.target_id == "client:edge-b:pending_evidence")
-            .expect("edge-b pending evidence summary");
-        assert_eq!(edge_b_summary.client_id.as_deref(), Some("edge-b"));
-        assert_eq!(edge_b_summary.evidence["assignment_count"], 1);
-        let warning = alerts
-            .iter()
-            .find(|alert| alert.severity == "warning")
-            .expect("degraded assignment warning");
-        assert_eq!(warning.client_id.as_deref(), Some("edge-b"));
-        assert_eq!(warning.status, "degraded");
-    }
-
-    #[test]
-    fn source_readiness_summary_remains_visible_to_its_single_vps_scope() {
-        let mut alerts = Vec::new();
-        append_source_readiness_alerts(
-            &mut alerts,
-            &[
-                source_status("edge-a", "telemetry", "selected_no_samples"),
-                source_status("edge-a", "network", "selected_no_artifacts"),
-            ],
-        );
-
-        apply_alert_filters(
-            &mut alerts,
-            &FleetAlertQuery {
-                limit: Some(10),
-                client_id: Some("edge-a".to_string()),
-                severity: Some("info".to_string()),
-                category: Some("source_readiness".to_string()),
-                operator_state: None,
-                include_muted: None,
-            },
-        );
-
-        assert_eq!(alerts.len(), 1);
-        assert_eq!(alerts[0].client_id.as_deref(), Some("edge-a"));
-        assert_eq!(alerts[0].target_id, "client:edge-a:pending_evidence");
-    }
-
-    #[test]
-    fn source_readiness_summary_bounds_every_evidence_collection() {
-        let rows = (0..SOURCE_READINESS_EVIDENCE_LIMIT + 5)
-            .map(|index| {
-                source_status(
-                    "edge-a",
-                    &format!("domain-{index:03}"),
-                    "selected_no_samples",
-                )
-            })
-            .collect::<Vec<_>>();
-        let mut alerts = Vec::new();
-
-        append_source_readiness_alerts(&mut alerts, &rows);
-
-        let summary = alerts.first().expect("pending evidence summary");
-        assert_eq!(summary.evidence["affected_client_count"], 1);
-        assert_eq!(
-            summary.evidence["affected_clients"]
-                .as_array()
-                .expect("affected client samples")
-                .len(),
-            1
-        );
-        assert_eq!(summary.evidence["affected_clients_truncated_count"], 0);
-        assert_eq!(
-            summary.evidence["assignments"]
-                .as_array()
-                .expect("assignment samples")
-                .len(),
-            SOURCE_READINESS_EVIDENCE_LIMIT
-        );
-        assert_eq!(summary.evidence["assignments_truncated_count"], 5);
-    }
-
-    fn source_status(client_id: &str, domain: &str, status: &str) -> SourceStatusView {
-        SourceStatusView {
-            client_id: client_id.to_string(),
-            display_name: client_id.to_string(),
-            client_status: "online".to_string(),
-            domain: domain.to_string(),
-            module: domain.to_string(),
-            template_id: Uuid::new_v4(),
-            template_name: format!("{domain} default"),
-            template_scope: "global".to_string(),
-            source_kind: "builtin".to_string(),
-            status: status.to_string(),
-            status_reason: format!("{domain} is {status}"),
-            evidence: json!({}),
-            assigned_at: "2026-07-13T08:00:00Z".to_string(),
-        }
     }
 
     fn find_status<'a>(alerts: &'a [FleetAlertView], status: &str) -> &'a FleetAlertView {

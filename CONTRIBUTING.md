@@ -46,12 +46,13 @@ run the matching checks documented in [docs/build.md](docs/build.md) and
   difficult-to-reverse operations.
 - Keep desired state, queued work, applied evidence, and current observation
   distinct.
-- Prefer operator-configurable templates and adapters over provider-specific
-  assumptions.
+- Prefer explicit product-owned adapter definitions and operator-configurable
+  configuration presets over provider-specific command assumptions.
 - Add tests for behavior changes and update operator documentation in the same
   pull request.
-- Keep schema migrations append-only after release and document compatibility
-  boundaries.
+- Treat current migrations as a canonical fresh-database model until a deployed
+  schema is explicitly declared a compatibility boundary. Pin that boundary;
+  later compatible changes must be append-only.
 - Avoid unrelated formatting or generated-file churn.
 
 Pull requests should explain the operator problem, the chosen behavior, risk

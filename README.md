@@ -52,7 +52,7 @@ UIs. `vpsman` targets a different operating model:
 | Remote work | Reviewed shell/script jobs, interactive terminal sessions, file browser, file transfer, host and managed processes, native services, read-only storage inventory, and schedules. |
 | Host maintenance | Explicit APT/DNF/YUM/Pacman update plans, stale-plan rejection, per-VPS apply evidence, and durable canary/batch job rollouts. |
 | Backups | Bounded recursive configuration snapshots, chunked artifacts, restore plans, rollback, migration links, and object-store retention. |
-| Runtime config | Source templates, per-VPS overrides, bulk config patches, and visible runtime config sync jobs. |
+| Runtime config | Immutable system presets, reusable custom presets, explicit per-VPS override/reset, effective-config inspection, and visible runtime sync state. |
 | Network | Explicit NAT-safe tunnel plans, per-VPS owned nftables port forwarding, exact endpoint evidence, topology, bounded network tests, and optional daemon-neutral routing-cost adapters. |
 | Observability | Current fleet monitor cards, scoped retained resource/network charts, explicit freshness and coverage, alert policies, event webhooks, and bounded automatic telemetry retention. |
 | Access and audit | Operator roles/scopes, sessions, TOTP, direct gateway identities, key rotation/revocation, audit logs, and evidence views. |
@@ -120,7 +120,10 @@ unset VPSMAN_SUPER_PASSWORD
 
 The updater reads the release's authoritative `version.json`, downloads its
 server/frontend/CLI assets, validates their layouts, creates missing compose
-secrets, stages the payloads under `runtime/`, and starts the stack.
+secrets, stages the payloads under `runtime/`, and starts the stack. On success,
+first-start prints `VPSMAN_SUPER_SALT_HEX`; save that line with the super
+password for browser and CLI privilege unlock. Its persistent deployment copy
+is `./config/secrets/operator-privilege.env`.
 
 Open `http://127.0.0.1:5173` after first start. When no operator exists, the
 console shows **Create first operator** and creates the initial admin session
@@ -229,7 +232,8 @@ CLI/manual equivalent:
 vpsctl noise-keygen
 
 export VPSMAN_SUPER_PASSWORD='<local_super_password>'
-export VPSMAN_SUPER_SALT_HEX='<64_hex_salt>'
+# Source checkout; release deployments use ./config/secrets/operator-privilege.env.
+source .tmp/quickstart-secrets/operator-privilege.env
 
 vpsctl agent-identity-upsert \
   --client-id 1 \
@@ -277,10 +281,10 @@ Read more in [docs/target-selectors.md](docs/target-selectors.md).
 
 Operator API tokens authenticate to the API. Privileged mutations also require a
 request-bound assertion created locally from the operator's super password and
-salt; the API never receives the plaintext super password.
+generated deployment salt; the API never receives either local unlock input.
 
 Access scopes intentionally separate broad fleet metadata from sensitive
-payloads, terminal replay, integrations, schedules, templates, rendered config,
+payloads, terminal replay, integrations, schedules, configuration presets, rendered config,
 and full network plans. See
 [docs/operator-access-scopes.md](docs/operator-access-scopes.md).
 
@@ -308,6 +312,11 @@ Compose deployments keep durable state under their `runtime/` directory:
 - active frontend payload: `runtime/frontend/current`
 - active CLI payload: `runtime/cli/current`
 
+The current canonical database is intentionally fresh-only and does not support
+an in-place update from an earlier schema model; review
+[migration compatibility](docs/migration-compatibility.md) before updating an
+older deployment.
+
 Update an existing deployment:
 
 ```sh
@@ -333,7 +342,7 @@ does not delete PostgreSQL or object-store data.
 
 Host-managed configuration separates durable desired state, per-VPS dispatch,
 matching applied evidence, and current runtime observation. Saving a tunnel,
-port-forward rule, source template, or config patch never implies that every
+port-forward rule, configuration-preset override, or config patch never implies that every
 target has applied it. The console reports partial queue failures by VPS and
 keeps runtime removal visible as pending until the agent confirms cleanup.
 Deleting a tunnel plan retires its desired-state declaration immediately and
@@ -417,7 +426,10 @@ project does not maintain a separate rolling changelog.
 - [Operator quickstart](tutorials/00-operator-quickstart.md)
 - [Local control plane](tutorials/01-local-control-plane.md)
 - [Install agents](tutorials/02-install-agents.md)
+- [Fleet organization](tutorials/03-fleet-organization.md)
 - [Daily operations](tutorials/04-daily-operations.md)
+- [Configuration presets](tutorials/05-configuration-presets.md)
+- [Tunnels and routing adapters](tutorials/06-tunnels-routing-adapters.md)
 - [Backup, restore, and migration](tutorials/07-backup-restore-migration.md)
 - [Agent updates](tutorials/08-agent-updates.md)
 - [Headless CLI/VTY](tutorials/09-headless-cli-vty.md)

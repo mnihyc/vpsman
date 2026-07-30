@@ -3,8 +3,8 @@ use anyhow::{Context, Result};
 use crate::util::percent_encode_query_value;
 use crate::{
     commands_inventory,
-    commands_schedules::{resolve_schedule_target_ids, selector_expression_from_targets},
-    http::{http_get, http_post_json},
+    commands_schedules::selector_expression_from_targets,
+    http::{http_delete, http_get, http_post_json, http_put_json},
     privilege::{
         build_privilege_for_db, load_super_password, load_super_salt_hex, DbPrivilegeRequest,
     },
@@ -21,44 +21,41 @@ enum VtyInventoryCommand {
         tag: String,
         confirmed: bool,
     },
-    SourceTemplates {
-        domain: Option<String>,
+    ConfigPresets {
+        behavior: Option<String>,
     },
-    SourceTemplateCreate {
-        domain: String,
+    ConfigPresetCreate {
+        behavior: String,
         name: String,
-        scope: String,
-        owner_client_id: Option<String>,
         description: Option<String>,
         definition: serde_json::Value,
     },
-    SourceTemplateClone {
-        source_template_id: String,
+    ConfigPresetClone {
+        preset_id: String,
         name: String,
-        scope: String,
-        owner_client_id: Option<String>,
         description: Option<String>,
     },
-    SourceTemplateDiff {
-        template_id: String,
+    ConfigPresetPreview {
+        preset_id: String,
         description: Option<String>,
         clear_description: bool,
         definition: serde_json::Value,
     },
-    SourceTemplateTest {
-        template_id: String,
-        definition: serde_json::Value,
-    },
-    SourceTemplateUpdate {
-        template_id: String,
+    ConfigPresetUpdate {
+        preset_id: String,
         description: Option<String>,
         clear_description: bool,
         definition: serde_json::Value,
+        preview_hash: Option<String>,
         confirmed: bool,
     },
-    SourceStatus {
+    ConfigPresetDelete {
+        preset_id: String,
+        confirmed: bool,
+    },
+    ConfigSources {
         client_id: Option<String>,
-        domain: Option<String>,
+        behavior: Option<String>,
     },
     FleetAlerts {
         limit: u16,
@@ -187,19 +184,18 @@ enum VtyInventoryCommand {
         preview_hash: Option<String>,
         confirmed: bool,
     },
-    SourceTemplateAssignments {
-        client_id: Option<String>,
-        domain: Option<String>,
-    },
-    TemplateRuntimeConfig {
+    ConfigRender {
         client_id: String,
         format: String,
     },
-    SourceTemplateAssign {
-        domain: String,
-        template_id: String,
+    ConfigSourceChange {
+        action: String,
+        behavior: String,
+        preset_id: Option<String>,
+        selector: Option<String>,
         clients: Vec<String>,
         tags: Vec<String>,
+        preview_hash: Option<String>,
         confirmed: bool,
     },
     BulkResolve {
@@ -280,13 +276,16 @@ pub(crate) fn is_vty_inventory_command(command: &str) -> bool {
         name,
         "tag-create"
             | "agent-tag"
-            | "source-templates"
-            | "source-template-create"
-            | "source-template-clone"
-            | "source-template-diff"
-            | "source-template-test"
-            | "source-template-update"
-            | "source-status"
+            | "config-presets"
+            | "config-preset-create"
+            | "config-preset-clone"
+            | "config-preset-preview"
+            | "config-preset-update"
+            | "config-preset-delete"
+            | "config-sources"
+            | "config-source-set"
+            | "config-source-reset"
+            | "config-render"
             | "fleet-alerts"
             | "fleet-alert-export"
             | "fleet-alert-states"
@@ -305,9 +304,6 @@ pub(crate) fn is_vty_inventory_command(command: &str) -> bool {
             | "fleet-alert-notifications"
             | "fleet-alert-notification-dispatch"
             | "fleet-alert-notification-process"
-            | "source-template-assignments"
-            | "template-runtime-config"
-            | "source-template-assign"
             | "bulk-resolve"
             | "telemetry-rollups"
             | "telemetry-network-rates"
@@ -421,135 +417,151 @@ pub(crate) fn submit_vty_inventory_command(
                 }),
             )
         }
-        VtyInventoryCommand::SourceTemplates { domain } => {
-            http_get(api_url, &source_templates_path(domain.as_deref()), token)
+        VtyInventoryCommand::ConfigPresets { behavior } => {
+            http_get(api_url, &config_presets_path(behavior.as_deref()), token)
         }
-        VtyInventoryCommand::SourceTemplateCreate {
-            domain,
+        VtyInventoryCommand::ConfigPresetCreate {
+            behavior,
             name,
-            scope,
-            owner_client_id,
             description,
             definition,
         } => http_post_json(
             api_url,
-            "/api/v1/source-templates",
+            "/api/v1/configuration-presets",
             token,
             &serde_json::json!({
-                "domain": domain,
+                "behavior": behavior,
                 "name": name,
-                "scope": scope,
-                "owner_client_id": owner_client_id,
                 "description": description,
                 "definition": definition,
             }),
         ),
-        VtyInventoryCommand::SourceTemplateClone {
-            source_template_id,
+        VtyInventoryCommand::ConfigPresetClone {
+            preset_id,
             name,
-            scope,
-            owner_client_id,
             description,
         } => http_post_json(
             api_url,
-            &format!("/api/v1/source-templates/{source_template_id}/clone"),
+            &format!("/api/v1/configuration-presets/{preset_id}/clone"),
             token,
             &serde_json::json!({
                 "name": name,
-                "scope": scope,
-                "owner_client_id": owner_client_id,
                 "description": description,
             }),
         ),
-        VtyInventoryCommand::SourceTemplateDiff {
-            template_id,
+        VtyInventoryCommand::ConfigPresetPreview {
+            preset_id,
             description,
             clear_description,
             definition,
         } => {
-            let keep_description = description.is_none() && !clear_description;
+            let preset_id = uuid::Uuid::parse_str(&preset_id).context("invalid preset UUID")?;
+            let description = commands_inventory::preset_candidate_description(
+                api_url,
+                token,
+                preset_id,
+                description,
+                clear_description,
+            )?;
             http_post_json(
                 api_url,
-                &format!("/api/v1/source-templates/{template_id}/diff"),
+                &format!("/api/v1/configuration-presets/{preset_id}/preview"),
                 token,
                 &serde_json::json!({
                     "description": description,
                     "definition": definition,
-                    "keep_description": keep_description,
                 }),
             )
         }
-        VtyInventoryCommand::SourceTemplateTest {
-            template_id,
-            definition,
-        } => http_post_json(
-            api_url,
-            &format!("/api/v1/source-templates/{template_id}/test"),
-            token,
-            &serde_json::json!({
-                "definition": definition,
-            }),
-        ),
-        VtyInventoryCommand::SourceTemplateUpdate {
-            template_id,
+        VtyInventoryCommand::ConfigPresetUpdate {
+            preset_id,
             description,
             clear_description,
             definition,
+            preview_hash,
             confirmed,
         } => {
-            let keep_description = description.is_none() && !clear_description;
-            let template_uuid =
-                uuid::Uuid::parse_str(&template_id).context("invalid template UUID")?;
-            let path = format!("/api/v1/source-templates/{template_id}/update");
-            let mut body = serde_json::json!({
+            let reviewed_preview_hash = commands_inventory::reviewed_preview_hash_arg(
+                confirmed,
+                preview_hash.as_deref(),
+                "config-preset-update",
+            )?;
+            let preset_id = uuid::Uuid::parse_str(&preset_id).context("invalid preset UUID")?;
+            let description = commands_inventory::preset_candidate_description(
+                api_url,
+                token,
+                preset_id,
+                description,
+                clear_description,
+            )?;
+            let preview_path = format!("/api/v1/configuration-presets/{preset_id}/preview");
+            let preview_body = serde_json::json!({
                 "description": description,
                 "definition": definition,
-                "confirmed": confirmed,
-                "keep_description": keep_description,
             });
-            if confirmed {
-                let mut preview_body = body.clone();
-                preview_body["confirmed"] = serde_json::Value::Bool(false);
-                let preview_raw = http_post_json(api_url, &path, token, &preview_body)?;
-                let preview = commands_inventory::parse_preview_response(&preview_raw)?;
-                if !preview
-                    .get("confirmation_required")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false)
-                {
-                    return Ok(preview_raw);
-                }
-                let preview_hash =
-                    commands_inventory::required_preview_hash(&preview, "source-template-update")?;
-                let affected_client_ids =
-                    commands_inventory::string_array_field(&preview, "affected_client_ids")?;
-                body["preview_hash"] = serde_json::Value::String(preview_hash.clone());
-                if !affected_client_ids.is_empty() {
-                    let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
-                    let salt_hex = load_super_salt_hex(None)?;
-                    let target =
-                        commands_inventory::source_template_privilege_target(template_uuid);
-                    let privilege_assertion = build_privilege_for_db(
-                        DbPrivilegeRequest {
-                            action: "source_template.update",
-                            target: &target,
-                            selector_expression: None,
-                            resolved_targets: &affected_client_ids,
-                            confirmed: true,
-                            payload_hash: Some(&preview_hash),
-                        },
-                        &password,
-                        &salt_hex,
-                        300,
-                    )?;
-                    body["privilege_assertion"] = serde_json::to_value(privilege_assertion)?;
-                }
+            let preview_raw = http_post_json(api_url, &preview_path, token, &preview_body)?;
+            if !confirmed {
+                return Ok(preview_raw);
             }
-            http_post_json(api_url, &path, token, &body)
+            let preview = commands_inventory::parse_preview_response(&preview_raw)?;
+            let current_preview_hash =
+                commands_inventory::required_preview_hash(&preview, "config-preset-update")?;
+            let preview_hash = commands_inventory::require_matching_reviewed_preview_hash(
+                reviewed_preview_hash.as_deref(),
+                &current_preview_hash,
+                "config-preset-update",
+            )?;
+            let affected_client_ids =
+                commands_inventory::string_array_field(&preview, "affected_client_ids")?;
+            let mut body = preview_body;
+            body["preview_hash"] = serde_json::Value::String(preview_hash.clone());
+            if !affected_client_ids.is_empty() {
+                let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
+                let salt_hex = load_super_salt_hex(None)?;
+                let target = commands_inventory::config_preset_privilege_target(preset_id);
+                let privilege_assertion = build_privilege_for_db(
+                    DbPrivilegeRequest {
+                        action: "configuration_preset.update",
+                        target: &target,
+                        selector_expression: None,
+                        resolved_targets: &affected_client_ids,
+                        confirmed: true,
+                        payload_hash: Some(&preview_hash),
+                    },
+                    &password,
+                    &salt_hex,
+                    300,
+                )?;
+                body["privilege_assertion"] = serde_json::to_value(privilege_assertion)?;
+            }
+            http_put_json(
+                api_url,
+                &format!("/api/v1/configuration-presets/{preset_id}"),
+                token,
+                &body,
+            )
         }
-        VtyInventoryCommand::SourceStatus { client_id, domain } => http_get(
+        VtyInventoryCommand::ConfigPresetDelete {
+            preset_id,
+            confirmed,
+        } => {
+            anyhow::ensure!(
+                confirmed,
+                "config-preset-delete requires --confirmed after verifying the preset has no overrides"
+            );
+            let preset_id = uuid::Uuid::parse_str(&preset_id).context("invalid preset UUID")?;
+            http_delete(
+                api_url,
+                &format!("/api/v1/configuration-presets/{preset_id}"),
+                token,
+            )
+        }
+        VtyInventoryCommand::ConfigSources {
+            client_id,
+            behavior,
+        } => http_get(
             api_url,
-            &source_status_path(client_id.as_deref(), domain.as_deref()),
+            &config_sources_path(client_id.as_deref(), behavior.as_deref()),
             token,
         ),
         VtyInventoryCommand::FleetAlerts {
@@ -911,78 +923,111 @@ pub(crate) fn submit_vty_inventory_command(
                 "confirmed": confirmed,
             }),
         ),
-        VtyInventoryCommand::SourceTemplateAssignments { client_id, domain } => http_get(
-            api_url,
-            &source_template_assignments_path(client_id.as_deref(), domain.as_deref()),
-            token,
-        ),
-        VtyInventoryCommand::TemplateRuntimeConfig { client_id, format } => {
-            let body = http_get(api_url, &template_runtime_config_path(&client_id), token)?;
+        VtyInventoryCommand::ConfigRender { client_id, format } => {
+            let body = http_get(api_url, &config_render_path(&client_id), token)?;
             match format.as_str() {
                 "json" => Ok(body),
                 "toml" => {
-                    let value: serde_json::Value = serde_json::from_str(&body)
-                        .context("invalid source template config response")?;
+                    let value: serde_json::Value =
+                        serde_json::from_str(&body).context("invalid effective config response")?;
                     Ok(value
                         .get("toml")
                         .and_then(serde_json::Value::as_str)
-                        .context("source template config response missing toml")?
+                        .context("effective config response missing toml")?
                         .to_string())
                 }
                 _ => anyhow::bail!("--format must be toml or json"),
             }
         }
-        VtyInventoryCommand::SourceTemplateAssign {
-            domain,
-            template_id,
+        VtyInventoryCommand::ConfigSourceChange {
+            action,
+            behavior,
+            preset_id,
+            selector,
             clients,
             tags,
+            preview_hash,
             confirmed,
         } => {
-            let selector_expression = selector_expression_from_targets(&clients, &tags);
-            let template_uuid =
-                uuid::Uuid::parse_str(&template_id).context("invalid template UUID")?;
-            let target_client_ids =
-                resolve_schedule_target_ids(api_url, token, &selector_expression)?;
-            let mut body = serde_json::json!({
-                "domain": domain.clone(),
-                "template_id": template_id.clone(),
+            let command_name = format!("config-source-{action}");
+            let reviewed_preview_hash = commands_inventory::reviewed_preview_hash_arg(
+                confirmed,
+                preview_hash.as_deref(),
+                &command_name,
+            )?;
+            anyhow::ensure!(
+                matches!(action.as_str(), "set" | "reset"),
+                "configuration source action must be set or reset"
+            );
+            let selector_expression =
+                commands_inventory::configuration_source_selector(selector.as_deref(), &tags)?;
+            let preset_id = match preset_id {
+                Some(value) => Some(uuid::Uuid::parse_str(&value).context("invalid preset UUID")?),
+                None => None,
+            };
+            let mut target_client_ids = clients;
+            target_client_ids.sort();
+            target_client_ids.dedup();
+            anyhow::ensure!(
+                !target_client_ids.is_empty() || !selector_expression.is_empty(),
+                "config-source-{action} requires --client, --tag, or --selector"
+            );
+            let preview_body = serde_json::json!({
+                "action": action,
+                "behavior": behavior,
+                "preset_id": preset_id,
                 "selector_expression": selector_expression.clone(),
                 "target_client_ids": target_client_ids.clone(),
-                "confirmed": confirmed,
             });
-            if confirmed {
-                let mut preview_body = body.clone();
-                preview_body["confirmed"] = serde_json::Value::Bool(false);
-                let preview_raw = http_post_json(
-                    api_url,
-                    "/api/v1/source-template-assignments",
-                    token,
-                    &preview_body,
-                )?;
-                let preview = commands_inventory::parse_preview_response(&preview_raw)?;
-                let preview_hash =
-                    commands_inventory::required_preview_hash(&preview, "source-template-assign")?;
-                let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
-                let salt_hex = load_super_salt_hex(None)?;
-                let target = commands_inventory::source_template_privilege_target(template_uuid);
-                let privilege_assertion = build_privilege_for_db(
-                    DbPrivilegeRequest {
-                        action: "source_template.assign",
-                        target: &target,
-                        selector_expression: Some(&selector_expression),
-                        resolved_targets: &target_client_ids,
-                        confirmed: true,
-                        payload_hash: Some(&preview_hash),
-                    },
-                    &password,
-                    &salt_hex,
-                    300,
-                )?;
-                body["preview_hash"] = serde_json::Value::String(preview_hash);
-                body["privilege_assertion"] = serde_json::to_value(privilege_assertion)?;
+            let preview_raw = http_post_json(
+                api_url,
+                "/api/v1/configuration-source-overrides/preview",
+                token,
+                &preview_body,
+            )?;
+            if !confirmed {
+                return Ok(preview_raw);
             }
-            http_post_json(api_url, "/api/v1/source-template-assignments", token, &body)
+            let preview = commands_inventory::parse_preview_response(&preview_raw)?;
+            let current_preview_hash =
+                commands_inventory::required_preview_hash(&preview, &command_name)?;
+            let preview_hash = commands_inventory::require_matching_reviewed_preview_hash(
+                reviewed_preview_hash.as_deref(),
+                &current_preview_hash,
+                &command_name,
+            )?;
+            let resolved_target_ids =
+                commands_inventory::configuration_source_preview_target_ids(&preview)?;
+            let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
+            let salt_hex = load_super_salt_hex(None)?;
+            let target = match preset_id {
+                Some(preset_id) => format!("configuration_preset:{preset_id}"),
+                None => format!("configuration_behavior:{behavior}"),
+            };
+            let privilege_assertion = build_privilege_for_db(
+                DbPrivilegeRequest {
+                    action: "configuration_source_override.apply",
+                    target: &target,
+                    selector_expression: (!selector_expression.is_empty())
+                        .then_some(selector_expression.as_str()),
+                    resolved_targets: &resolved_target_ids,
+                    confirmed: true,
+                    payload_hash: Some(&preview_hash),
+                },
+                &password,
+                &salt_hex,
+                300,
+            )?;
+            let mut body = preview_body;
+            body["target_client_ids"] = serde_json::to_value(&resolved_target_ids)?;
+            body["preview_hash"] = serde_json::Value::String(preview_hash);
+            body["privilege_assertion"] = serde_json::to_value(privilege_assertion)?;
+            http_post_json(
+                api_url,
+                "/api/v1/configuration-source-overrides/apply",
+                token,
+                &body,
+            )
         }
         VtyInventoryCommand::BulkResolve { tags } => http_post_json(
             api_url,
@@ -1070,33 +1115,38 @@ fn parse_vty_inventory_command(command: &str) -> Result<VtyInventoryCommand> {
                 confirmed,
             })
         }
-        "source-templates" => {
-            let mut domain = None;
+        "config-presets" => {
+            let mut behavior = None;
             let mut index = 1;
             while index < parts.len() {
                 match parts[index] {
-                    "--domain" => {
-                        domain = Some(
-                            (*parts.get(index + 1).context("--domain requires a value")?)
-                                .to_string(),
+                    "--behavior" => {
+                        behavior = Some(
+                            (*parts
+                                .get(index + 1)
+                                .context("--behavior requires a value")?)
+                            .to_string(),
                         );
                         index += 2;
                     }
-                    value if value.starts_with("--domain=") => {
-                        domain = Some(value.trim_start_matches("--domain=").to_string());
+                    value if value.starts_with("--behavior=") => {
+                        behavior = Some(value.trim_start_matches("--behavior=").to_string());
                         index += 1;
                     }
                     value => anyhow::bail!("unexpected argument {value}"),
                 }
             }
-            Ok(VtyInventoryCommand::SourceTemplates { domain })
+            Ok(VtyInventoryCommand::ConfigPresets { behavior })
         }
-        "source-template-create" => parse_source_template_create(&parts),
-        "source-template-clone" => parse_source_template_clone(&parts),
-        "source-template-diff" => parse_source_template_diff(&parts),
-        "source-template-test" => parse_source_template_test(&parts),
-        "source-template-update" => parse_source_template_update(&parts),
-        "source-status" => parse_source_status(&parts),
+        "config-preset-create" => parse_config_preset_create(&parts),
+        "config-preset-clone" => parse_config_preset_clone(&parts),
+        "config-preset-preview" => parse_config_preset_preview(&parts),
+        "config-preset-update" => parse_config_preset_update(&parts),
+        "config-preset-delete" => parse_config_preset_delete(&parts),
+        "config-sources" => parse_config_sources(&parts),
+        "config-source-set" => parse_config_source_change(&parts, "set"),
+        "config-source-reset" => parse_config_source_change(&parts, "reset"),
+        "config-render" => parse_config_render(&parts),
         "fleet-alerts" => {
             let args = parse_fleet_alert_args(&parts)?;
             Ok(VtyInventoryCommand::FleetAlerts {
@@ -1160,9 +1210,6 @@ fn parse_vty_inventory_command(command: &str) -> Result<VtyInventoryCommand> {
         }
         "fleet-alert-notification-dispatch" => parse_fleet_alert_notification_dispatch(&parts),
         "fleet-alert-notification-process" => parse_fleet_alert_notification_process(&parts),
-        "source-template-assignments" => parse_source_template_assignments(&parts),
-        "template-runtime-config" => parse_template_runtime_config(&parts),
-        "source-template-assign" => parse_source_template_assign(&parts),
         "bulk-resolve" => Ok(VtyInventoryCommand::BulkResolve {
             tags: parts
                 .iter()
@@ -1201,30 +1248,20 @@ fn parse_vty_inventory_command(command: &str) -> Result<VtyInventoryCommand> {
     }
 }
 
-fn parse_source_template_create(parts: &[&str]) -> Result<VtyInventoryCommand> {
-    let mut domain = None;
+fn parse_config_preset_create(parts: &[&str]) -> Result<VtyInventoryCommand> {
+    let mut behavior = None;
     let mut name = None;
-    let mut scope = "shared".to_string();
-    let mut owner_client_id = None;
     let mut description = None;
-    let mut definition = serde_json::json!({});
+    let mut definition = None;
     let mut index = 1;
     while index < parts.len() {
         match parts[index] {
-            "--domain" => {
-                domain = Some(next_arg(parts, index, "--domain")?.to_string());
+            "--behavior" => {
+                behavior = Some(next_arg(parts, index, "--behavior")?.to_string());
                 index += 2;
             }
             "--name" => {
                 name = Some(next_arg(parts, index, "--name")?.to_string());
-                index += 2;
-            }
-            "--scope" => {
-                scope = next_arg(parts, index, "--scope")?.to_string();
-                index += 2;
-            }
-            "--owner-client-id" => {
-                owner_client_id = Some(next_arg(parts, index, "--owner-client-id")?.to_string());
                 index += 2;
             }
             "--description" => {
@@ -1232,24 +1269,18 @@ fn parse_source_template_create(parts: &[&str]) -> Result<VtyInventoryCommand> {
                 index += 2;
             }
             "--definition-json" => {
-                definition = serde_json::from_str(next_arg(parts, index, "--definition-json")?)
-                    .context("invalid --definition-json")?;
+                definition = Some(
+                    serde_json::from_str(next_arg(parts, index, "--definition-json")?)
+                        .context("invalid --definition-json")?,
+                );
                 index += 2;
             }
-            value if value.starts_with("--domain=") => {
-                domain = Some(value.trim_start_matches("--domain=").to_string());
+            value if value.starts_with("--behavior=") => {
+                behavior = Some(value.trim_start_matches("--behavior=").to_string());
                 index += 1;
             }
             value if value.starts_with("--name=") => {
                 name = Some(value.trim_start_matches("--name=").to_string());
-                index += 1;
-            }
-            value if value.starts_with("--scope=") => {
-                scope = value.trim_start_matches("--scope=").to_string();
-                index += 1;
-            }
-            value if value.starts_with("--owner-client-id=") => {
-                owner_client_id = Some(value.trim_start_matches("--owner-client-id=").to_string());
                 index += 1;
             }
             value if value.starts_with("--description=") => {
@@ -1257,66 +1288,48 @@ fn parse_source_template_create(parts: &[&str]) -> Result<VtyInventoryCommand> {
                 index += 1;
             }
             value if value.starts_with("--definition-json=") => {
-                definition = serde_json::from_str(value.trim_start_matches("--definition-json="))
-                    .context("invalid --definition-json")?;
+                definition = Some(
+                    serde_json::from_str(value.trim_start_matches("--definition-json="))
+                        .context("invalid --definition-json")?,
+                );
                 index += 1;
             }
             value => anyhow::bail!("unexpected argument {value}"),
         }
     }
-    Ok(VtyInventoryCommand::SourceTemplateCreate {
-        domain: domain.context("source-template-create requires --domain")?,
-        name: name.context("source-template-create requires --name")?,
-        scope,
-        owner_client_id,
+    Ok(VtyInventoryCommand::ConfigPresetCreate {
+        behavior: behavior.context("config-preset-create requires --behavior")?,
+        name: name.context("config-preset-create requires --name")?,
         description,
-        definition,
+        definition: definition.context("config-preset-create requires --definition-json")?,
     })
 }
 
-fn parse_source_template_clone(parts: &[&str]) -> Result<VtyInventoryCommand> {
-    let mut source_template_id = None;
+fn parse_config_preset_clone(parts: &[&str]) -> Result<VtyInventoryCommand> {
+    let mut preset_id = None;
     let mut name = None;
-    let mut scope = "shared".to_string();
-    let mut owner_client_id = None;
     let mut description = None;
     let mut index = 1;
     while index < parts.len() {
         match parts[index] {
-            "--template-id" => {
-                source_template_id = Some(next_arg(parts, index, "--template-id")?.to_string());
+            "--preset-id" => {
+                preset_id = Some(next_arg(parts, index, "--preset-id")?.to_string());
                 index += 2;
             }
             "--name" => {
                 name = Some(next_arg(parts, index, "--name")?.to_string());
                 index += 2;
             }
-            "--scope" => {
-                scope = next_arg(parts, index, "--scope")?.to_string();
-                index += 2;
-            }
-            "--owner-client-id" => {
-                owner_client_id = Some(next_arg(parts, index, "--owner-client-id")?.to_string());
-                index += 2;
-            }
             "--description" => {
                 description = Some(next_arg(parts, index, "--description")?.to_string());
                 index += 2;
             }
-            value if value.starts_with("--template-id=") => {
-                source_template_id = Some(value.trim_start_matches("--template-id=").to_string());
+            value if value.starts_with("--preset-id=") => {
+                preset_id = Some(value.trim_start_matches("--preset-id=").to_string());
                 index += 1;
             }
             value if value.starts_with("--name=") => {
                 name = Some(value.trim_start_matches("--name=").to_string());
-                index += 1;
-            }
-            value if value.starts_with("--scope=") => {
-                scope = value.trim_start_matches("--scope=").to_string();
-                index += 1;
-            }
-            value if value.starts_with("--owner-client-id=") => {
-                owner_client_id = Some(value.trim_start_matches("--owner-client-id=").to_string());
                 index += 1;
             }
             value if value.starts_with("--description=") => {
@@ -1326,90 +1339,82 @@ fn parse_source_template_clone(parts: &[&str]) -> Result<VtyInventoryCommand> {
             value => anyhow::bail!("unexpected argument {value}"),
         }
     }
-    Ok(VtyInventoryCommand::SourceTemplateClone {
-        source_template_id: source_template_id
-            .context("source-template-clone requires --template-id")?,
-        name: name.context("source-template-clone requires --name")?,
-        scope,
-        owner_client_id,
+    Ok(VtyInventoryCommand::ConfigPresetClone {
+        preset_id: preset_id.context("config-preset-clone requires --preset-id")?,
+        name: name.context("config-preset-clone requires --name")?,
         description,
     })
 }
 
-fn parse_source_template_diff(parts: &[&str]) -> Result<VtyInventoryCommand> {
-    let (template_id, description, clear_description, definition, confirmed) =
-        parse_source_template_candidate_args(parts, "source-template-diff")?;
+fn parse_config_preset_preview(parts: &[&str]) -> Result<VtyInventoryCommand> {
+    let ParsedConfigPresetCandidate {
+        preset_id,
+        description,
+        clear_description,
+        definition,
+        preview_hash,
+        confirmed,
+    } = parse_config_preset_candidate_args(parts, "config-preset-preview")?;
     anyhow::ensure!(
-        !confirmed,
-        "source-template-diff does not accept --confirmed"
+        !confirmed && preview_hash.is_none(),
+        "config-preset-preview does not accept --confirmed or --preview-hash"
     );
-    Ok(VtyInventoryCommand::SourceTemplateDiff {
-        template_id,
+    Ok(VtyInventoryCommand::ConfigPresetPreview {
+        preset_id,
         description,
         clear_description,
         definition,
     })
 }
 
-fn parse_source_template_test(parts: &[&str]) -> Result<VtyInventoryCommand> {
-    let mut template_id = None;
-    let mut definition = serde_json::json!({});
-    let mut index = 1;
-    while index < parts.len() {
-        match parts[index] {
-            "--template-id" => {
-                template_id = Some(next_arg(parts, index, "--template-id")?.to_string());
-                index += 2;
-            }
-            "--definition-json" => {
-                definition = serde_json::from_str(next_arg(parts, index, "--definition-json")?)
-                    .context("invalid --definition-json")?;
-                index += 2;
-            }
-            value if value.starts_with("--template-id=") => {
-                template_id = Some(value.trim_start_matches("--template-id=").to_string());
-                index += 1;
-            }
-            value if value.starts_with("--definition-json=") => {
-                definition = serde_json::from_str(value.trim_start_matches("--definition-json="))
-                    .context("invalid --definition-json")?;
-                index += 1;
-            }
-            value => anyhow::bail!("unexpected argument {value}"),
-        }
-    }
-    Ok(VtyInventoryCommand::SourceTemplateTest {
-        template_id: template_id.context("source-template-test requires --template-id")?,
-        definition,
-    })
-}
-
-fn parse_source_template_update(parts: &[&str]) -> Result<VtyInventoryCommand> {
-    let (template_id, description, clear_description, definition, confirmed) =
-        parse_source_template_candidate_args(parts, "source-template-update")?;
-    Ok(VtyInventoryCommand::SourceTemplateUpdate {
-        template_id,
+fn parse_config_preset_update(parts: &[&str]) -> Result<VtyInventoryCommand> {
+    let ParsedConfigPresetCandidate {
+        preset_id,
         description,
         clear_description,
         definition,
+        preview_hash,
+        confirmed,
+    } = parse_config_preset_candidate_args(parts, "config-preset-update")?;
+    commands_inventory::reviewed_preview_hash_arg(
+        confirmed,
+        preview_hash.as_deref(),
+        "config-preset-update",
+    )?;
+    Ok(VtyInventoryCommand::ConfigPresetUpdate {
+        preset_id,
+        description,
+        clear_description,
+        definition,
+        preview_hash,
         confirmed,
     })
 }
 
-fn parse_source_template_candidate_args(
+struct ParsedConfigPresetCandidate {
+    preset_id: String,
+    description: Option<String>,
+    clear_description: bool,
+    definition: serde_json::Value,
+    preview_hash: Option<String>,
+    confirmed: bool,
+}
+
+fn parse_config_preset_candidate_args(
     parts: &[&str],
     command_name: &str,
-) -> Result<(String, Option<String>, bool, serde_json::Value, bool)> {
-    let mut template_id = None;
+) -> Result<ParsedConfigPresetCandidate> {
+    let mut preset_id = None;
     let mut description = None;
     let mut clear_description = false;
-    let mut definition = serde_json::json!({});
+    let mut definition = None;
+    let mut preview_hash = None;
     let mut confirmed = false;
     let mut index = 1;
     while index < parts.len() {
         match parts[index] {
-            "--template-id" => {
-                template_id = Some(next_arg(parts, index, "--template-id")?.to_string());
+            "--preset-id" => {
+                preset_id = Some(next_arg(parts, index, "--preset-id")?.to_string());
                 index += 2;
             }
             "--description" => {
@@ -1421,16 +1426,22 @@ fn parse_source_template_candidate_args(
                 index += 1;
             }
             "--definition-json" => {
-                definition = serde_json::from_str(next_arg(parts, index, "--definition-json")?)
-                    .context("invalid --definition-json")?;
+                definition = Some(
+                    serde_json::from_str(next_arg(parts, index, "--definition-json")?)
+                        .context("invalid --definition-json")?,
+                );
+                index += 2;
+            }
+            "--preview-hash" => {
+                preview_hash = Some(next_arg(parts, index, "--preview-hash")?.to_string());
                 index += 2;
             }
             "--confirmed" => {
                 confirmed = true;
                 index += 1;
             }
-            value if value.starts_with("--template-id=") => {
-                template_id = Some(value.trim_start_matches("--template-id=").to_string());
+            value if value.starts_with("--preset-id=") => {
+                preset_id = Some(value.trim_start_matches("--preset-id=").to_string());
                 index += 1;
             }
             value if value.starts_with("--description=") => {
@@ -1438,8 +1449,14 @@ fn parse_source_template_candidate_args(
                 index += 1;
             }
             value if value.starts_with("--definition-json=") => {
-                definition = serde_json::from_str(value.trim_start_matches("--definition-json="))
-                    .context("invalid --definition-json")?;
+                definition = Some(
+                    serde_json::from_str(value.trim_start_matches("--definition-json="))
+                        .context("invalid --definition-json")?,
+                );
+                index += 1;
+            }
+            value if value.starts_with("--preview-hash=") => {
+                preview_hash = Some(value.trim_start_matches("--preview-hash=").to_string());
                 index += 1;
             }
             value => anyhow::bail!("unexpected argument {value}"),
@@ -1449,24 +1466,50 @@ fn parse_source_template_candidate_args(
         description.is_none() || !clear_description,
         "use only one of --description or --clear-description"
     );
-    Ok((
-        template_id.with_context(|| format!("{command_name} requires --template-id"))?,
+    Ok(ParsedConfigPresetCandidate {
+        preset_id: preset_id.with_context(|| format!("{command_name} requires --preset-id"))?,
         description,
         clear_description,
-        definition,
+        definition: definition
+            .with_context(|| format!("{command_name} requires --definition-json"))?,
+        preview_hash,
         confirmed,
-    ))
+    })
 }
 
-fn parse_source_template_assignments(parts: &[&str]) -> Result<VtyInventoryCommand> {
-    let (client_id, domain) =
-        parse_source_template_filter_args(parts, "source-template-assignments")?;
-    Ok(VtyInventoryCommand::SourceTemplateAssignments { client_id, domain })
+fn parse_config_preset_delete(parts: &[&str]) -> Result<VtyInventoryCommand> {
+    let mut preset_id = None;
+    let mut confirmed = false;
+    let mut index = 1;
+    while index < parts.len() {
+        match parts[index] {
+            "--preset-id" => {
+                preset_id = Some(next_arg(parts, index, "--preset-id")?.to_string());
+                index += 2;
+            }
+            "--confirmed" => {
+                confirmed = true;
+                index += 1;
+            }
+            value if value.starts_with("--preset-id=") => {
+                preset_id = Some(value.trim_start_matches("--preset-id=").to_string());
+                index += 1;
+            }
+            value => anyhow::bail!("unexpected argument {value}"),
+        }
+    }
+    Ok(VtyInventoryCommand::ConfigPresetDelete {
+        preset_id: preset_id.context("config-preset-delete requires --preset-id")?,
+        confirmed,
+    })
 }
 
-fn parse_source_status(parts: &[&str]) -> Result<VtyInventoryCommand> {
-    let (client_id, domain) = parse_source_template_filter_args(parts, "source-status")?;
-    Ok(VtyInventoryCommand::SourceStatus { client_id, domain })
+fn parse_config_sources(parts: &[&str]) -> Result<VtyInventoryCommand> {
+    let (client_id, behavior) = parse_config_source_filter_args(parts, "config-sources")?;
+    Ok(VtyInventoryCommand::ConfigSources {
+        client_id,
+        behavior,
+    })
 }
 
 fn parse_fleet_alert_args(parts: &[&str]) -> Result<FleetAlertArgs> {
@@ -2622,12 +2665,12 @@ fn validate_alert_severity(value: &str, context: &str) -> Result<()> {
     Ok(())
 }
 
-fn parse_source_template_filter_args(
+fn parse_config_source_filter_args(
     parts: &[&str],
     command_name: &str,
 ) -> Result<(Option<String>, Option<String>)> {
     let mut client_id = None;
-    let mut domain = None;
+    let mut behavior = None;
     let mut index = 1;
     while index < parts.len() {
         match parts[index] {
@@ -2635,16 +2678,16 @@ fn parse_source_template_filter_args(
                 client_id = Some(next_arg(parts, index, "--client-id")?.to_string());
                 index += 2;
             }
-            "--domain" => {
-                domain = Some(next_arg(parts, index, "--domain")?.to_string());
+            "--behavior" => {
+                behavior = Some(next_arg(parts, index, "--behavior")?.to_string());
                 index += 2;
             }
             value if value.starts_with("--client-id=") => {
                 client_id = Some(value.trim_start_matches("--client-id=").to_string());
                 index += 1;
             }
-            value if value.starts_with("--domain=") => {
-                domain = Some(value.trim_start_matches("--domain=").to_string());
+            value if value.starts_with("--behavior=") => {
+                behavior = Some(value.trim_start_matches("--behavior=").to_string());
                 index += 1;
             }
             value => anyhow::bail!("unexpected argument {value}"),
@@ -2656,16 +2699,16 @@ fn parse_source_template_filter_args(
             "{command_name} --client-id must be between 1 and 128 bytes"
         );
     }
-    if let Some(domain) = domain.as_deref() {
+    if let Some(behavior) = behavior.as_deref() {
         anyhow::ensure!(
-            !domain.is_empty() && domain.len() <= 128,
-            "{command_name} --domain must be between 1 and 128 bytes"
+            !behavior.is_empty() && behavior.len() <= 128,
+            "{command_name} --behavior must be between 1 and 128 bytes"
         );
     }
-    Ok((client_id, domain))
+    Ok((client_id, behavior))
 }
 
-fn parse_template_runtime_config(parts: &[&str]) -> Result<VtyInventoryCommand> {
+fn parse_config_render(parts: &[&str]) -> Result<VtyInventoryCommand> {
     let mut client_id = None;
     let mut format = "toml".to_string();
     let mut index = 1;
@@ -2694,27 +2737,33 @@ fn parse_template_runtime_config(parts: &[&str]) -> Result<VtyInventoryCommand> 
         matches!(format.as_str(), "toml" | "json"),
         "--format must be toml or json"
     );
-    Ok(VtyInventoryCommand::TemplateRuntimeConfig {
-        client_id: client_id.context("template-runtime-config requires --client-id")?,
+    Ok(VtyInventoryCommand::ConfigRender {
+        client_id: client_id.context("config-render requires --client-id")?,
         format,
     })
 }
 
-fn parse_source_template_assign(parts: &[&str]) -> Result<VtyInventoryCommand> {
-    let mut domain = None;
-    let mut template_id = None;
+fn parse_config_source_change(parts: &[&str], action: &str) -> Result<VtyInventoryCommand> {
+    let mut behavior = None;
+    let mut preset_id = None;
+    let mut selector = None;
     let mut clients = Vec::new();
     let mut tags = Vec::new();
+    let mut preview_hash = None;
     let mut confirmed = false;
     let mut index = 1;
     while index < parts.len() {
         match parts[index] {
-            "--domain" => {
-                domain = Some(next_arg(parts, index, "--domain")?.to_string());
+            "--behavior" => {
+                behavior = Some(next_arg(parts, index, "--behavior")?.to_string());
                 index += 2;
             }
-            "--template-id" => {
-                template_id = Some(next_arg(parts, index, "--template-id")?.to_string());
+            "--preset-id" if action == "set" => {
+                preset_id = Some(next_arg(parts, index, "--preset-id")?.to_string());
+                index += 2;
+            }
+            "--selector" => {
+                selector = Some(next_arg(parts, index, "--selector")?.to_string());
                 index += 2;
             }
             "--client" => {
@@ -2725,16 +2774,24 @@ fn parse_source_template_assign(parts: &[&str]) -> Result<VtyInventoryCommand> {
                 tags.push(next_arg(parts, index, "--tag")?.to_string());
                 index += 2;
             }
+            "--preview-hash" => {
+                preview_hash = Some(next_arg(parts, index, "--preview-hash")?.to_string());
+                index += 2;
+            }
             "--confirmed" => {
                 confirmed = true;
                 index += 1;
             }
-            value if value.starts_with("--domain=") => {
-                domain = Some(value.trim_start_matches("--domain=").to_string());
+            value if value.starts_with("--behavior=") => {
+                behavior = Some(value.trim_start_matches("--behavior=").to_string());
                 index += 1;
             }
-            value if value.starts_with("--template-id=") => {
-                template_id = Some(value.trim_start_matches("--template-id=").to_string());
+            value if value.starts_with("--preset-id=") && action == "set" => {
+                preset_id = Some(value.trim_start_matches("--preset-id=").to_string());
+                index += 1;
+            }
+            value if value.starts_with("--selector=") => {
+                selector = Some(value.trim_start_matches("--selector=").to_string());
                 index += 1;
             }
             value if value.starts_with("--client=") => {
@@ -2745,14 +2802,33 @@ fn parse_source_template_assign(parts: &[&str]) -> Result<VtyInventoryCommand> {
                 tags.push(value.trim_start_matches("--tag=").to_string());
                 index += 1;
             }
+            value if value.starts_with("--preview-hash=") => {
+                preview_hash = Some(value.trim_start_matches("--preview-hash=").to_string());
+                index += 1;
+            }
             value => anyhow::bail!("unexpected argument {value}"),
         }
     }
-    Ok(VtyInventoryCommand::SourceTemplateAssign {
-        domain: domain.context("source-template-assign requires --domain")?,
-        template_id: template_id.context("source-template-assign requires --template-id")?,
+    if action == "set" {
+        anyhow::ensure!(
+            preset_id.is_some(),
+            "config-source-set requires --preset-id"
+        );
+    }
+    commands_inventory::reviewed_preview_hash_arg(
+        confirmed,
+        preview_hash.as_deref(),
+        &format!("config-source-{action}"),
+    )?;
+    Ok(VtyInventoryCommand::ConfigSourceChange {
+        action: action.to_string(),
+        behavior: behavior
+            .with_context(|| format!("config-source-{action} requires --behavior"))?,
+        preset_id,
+        selector,
         clients,
         tags,
+        preview_hash,
         confirmed,
     })
 }
@@ -3243,29 +3319,17 @@ fn fleet_alert_notifications_path(
     path
 }
 
-fn source_templates_path(domain: Option<&str>) -> String {
-    match domain {
-        Some(domain) => format!(
-            "/api/v1/source-templates?domain={}",
-            percent_encode_query_value(domain)
+fn config_presets_path(behavior: Option<&str>) -> String {
+    match behavior {
+        Some(behavior) => format!(
+            "/api/v1/configuration-presets?behavior={}",
+            percent_encode_query_value(behavior)
         ),
-        None => "/api/v1/source-templates".to_string(),
+        None => "/api/v1/configuration-presets".to_string(),
     }
 }
 
-fn source_template_assignments_path(client_id: Option<&str>, domain: Option<&str>) -> String {
-    source_template_filtered_path("/api/v1/source-template-assignments", client_id, domain)
-}
-
-fn source_status_path(client_id: Option<&str>, domain: Option<&str>) -> String {
-    source_template_filtered_path("/api/v1/source-status", client_id, domain)
-}
-
-fn source_template_filtered_path(
-    base: &str,
-    client_id: Option<&str>,
-    domain: Option<&str>,
-) -> String {
+fn config_sources_path(client_id: Option<&str>, behavior: Option<&str>) -> String {
     let mut query = Vec::new();
     if let Some(client_id) = client_id {
         query.push(format!(
@@ -3273,19 +3337,19 @@ fn source_template_filtered_path(
             percent_encode_query_value(client_id)
         ));
     }
-    if let Some(domain) = domain {
-        query.push(format!("domain={}", percent_encode_query_value(domain)));
+    if let Some(behavior) = behavior {
+        query.push(format!("behavior={}", percent_encode_query_value(behavior)));
     }
     if query.is_empty() {
-        base.to_string()
+        "/api/v1/configuration-sources".to_string()
     } else {
-        format!("{base}?{}", query.join("&"))
+        format!("/api/v1/configuration-sources?{}", query.join("&"))
     }
 }
 
-fn template_runtime_config_path(client_id: &str) -> String {
+fn config_render_path(client_id: &str) -> String {
     format!(
-        "/api/v1/template-runtime-config?client_id={}",
+        "/api/v1/effective-agent-config?client_id={}",
         percent_encode_query_value(client_id)
     )
 }

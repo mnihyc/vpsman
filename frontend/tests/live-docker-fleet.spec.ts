@@ -89,7 +89,9 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     "Home overview before operator action, focused on quick actions, fleet availability, running work, and failures.",
   );
 
-  await maybeScreenshot(page, testInfo.project.name, "home");
+  if (!extendedReview) {
+    await maybeScreenshot(page, testInfo.project.name, "home");
+  }
   await expectLiveSystemDashboardTelemetry(page, testInfo.project.name);
   if (isMobile) {
     writeScreenshotManifest(testInfo.project.name);
@@ -146,10 +148,6 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   );
   await activate(inlineDetail.getByLabel("Close VPS instance records row details"));
   await expect(inlineDetail).toHaveCount(0);
-  const openDetailButton = firstRow.getByRole("button", {
-    name: /Open df-alpha-US-01 .* detail/,
-  });
-  await expect(openDetailButton).toBeVisible();
   await openFleetDetailRoute(page, grid, "df-alpha-US-01");
   await expect(
     page.getByRole("heading", { level: 1, name: "Instance detail" }),
@@ -169,7 +167,7 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     page,
     testInfo.project.name,
     "fleet-instance-detail-route",
-    "Canonical VPS detail page opened from the explicit row Open action.",
+    "Canonical VPS detail page opened from the selected-row Actions menu.",
   );
   await openLiveConsoleSubpage(page, "Fleet", "Instances");
   await expect(
@@ -250,7 +248,9 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     "fleet-column-controls-result",
     "Fleet table after operator resizes/reorders columns, hides Provider, and expands page size.",
   );
-  await maybeScreenshot(page, testInfo.project.name, "fleet");
+  if (!extendedReview) {
+    await maybeScreenshot(page, testInfo.project.name, "fleet");
+  }
   await expectCleanLayout(page);
 
   await openLiveConsoleSubpage(page, "Fleet", "Bulk groups");
@@ -325,7 +325,9 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     "page-preferences-operator",
     "System / Preferences page with saved display and workflow defaults.",
   );
-  await maybeScreenshot(page, testInfo.project.name, "preferences");
+  if (!extendedReview) {
+    await maybeScreenshot(page, testInfo.project.name, "preferences");
+  }
   writeScreenshotManifest(testInfo.project.name);
 
   await expect(page.locator(".workspaceRouteError")).toHaveCount(0);
@@ -628,15 +630,20 @@ async function openFleetDetailRoute(
         .locator(".gridBody [role=row]", { hasText: displayName })
         .first();
       await expect(row).toBeVisible({ timeout: 3000 });
-      await clickVisibleGridRowButton(
-        grid,
-        displayName,
-        new RegExp(`^Open ${escapeRegExp(displayName)}.*detail`, "i"),
+      await row.getByRole("checkbox").first().check();
+      await forceClick(
+        grid
+          .locator(".gridToolbarActions")
+          .getByRole("button", { name: "Actions", exact: true }),
+      );
+      await forceClick(
+        page.getByRole("menuitem", { name: "Open detail", exact: true }),
       );
       await expect(instanceDetailCrumb).toBeVisible({ timeout: 5000 });
       return;
     } catch (error) {
       lastError = error;
+      await page.keyboard.press("Escape");
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }
@@ -680,10 +687,6 @@ async function clickVisibleGridRowButton(
     },
   );
   expect(result).toBe("clicked");
-}
-
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function exerciseColumnControls(page: Page, grid: Locator) {
@@ -1160,9 +1163,9 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
     },
     {
       view: "Config",
-      subpage: "Template coverage",
-      marker: "Template coverage",
-      screenshot: "page-config-templates",
+      subpage: "Sources",
+      marker: "Configuration sources",
+      screenshot: "page-config-sources",
     },
     {
       view: "Jobs",

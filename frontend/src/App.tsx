@@ -129,9 +129,9 @@ const SchedulesPanel = retryableLazy(() =>
     default: module.SchedulesPanel,
   })),
 );
-const SourceTemplatePanel = retryableLazy(() =>
-  import("./panels/SourceTemplatesPanel").then((module) => ({
-    default: module.SourceTemplatePanel,
+const ConfigurationSourcesPanel = retryableLazy(() =>
+  import("./panels/ConfigurationSourcesPanel").then((module) => ({
+    default: module.ConfigurationSourcesPanel,
   })),
 );
 const AgentUpdateReleasesPanel = retryableLazy(() =>
@@ -264,8 +264,6 @@ function getScopedPageTitle(view: ActiveView, subpage: string): string {
         return "Rollouts";
       case "runbooks":
         return "Runbooks";
-      case "source_templates":
-        return "Source templates";
       case "os_updates":
         return "OS updates";
       case "agent_updates":
@@ -403,8 +401,6 @@ function getScopedPageDescription(view: ActiveView, subpage: string): string {
         return "Reusable reviewed operations, parameters, and execution handoff";
       case "rollouts":
         return "Durable canaries, bounded batches, safety pauses, and per-VPS evidence";
-      case "source_templates":
-        return "Persistent source templates, rendering, tests, and job handoff";
       case "os_updates":
         return "Native package support, reviewed update candidates, and explicit application";
       case "agent_updates":
@@ -683,8 +679,8 @@ export function App() {
   } | null>(null);
   const [accessIdentityWorkflowIntent, setAccessIdentityWorkflowIntent] =
     useState<"register" | null>(null);
-  const [sourceTemplateWorkflowIntent, setSourceTemplateWorkflowIntent] =
-    useState<"runtime_tunnel_adapter" | "routing_cost_adapter" | null>(null);
+  const [networkAdapterWorkflowIntent, setNetworkAdapterWorkflowIntent] =
+    useState<"runtime_tunnel" | "routing_cost" | null>(null);
   const [privilegeGrant, setPrivilegeGrant] = useState<{
     material: PrivilegeMaterial;
     operatorId: string;
@@ -1423,8 +1419,7 @@ export function App() {
         agents={visibleAgents}
         apiError={dashboard.apiError}
         fleetCoreEvidenceAvailable={dashboard.fleetCoreEvidenceAvailable}
-        sourceTemplateAssignments={dashboard.sourceTemplateAssignments}
-        sourceStatus={dashboard.sourceStatus}
+        configurationSources={dashboard.configurationSources}
         fleetAlerts={dashboard.fleetAlerts}
         fleetAlertStates={dashboard.fleetAlertStates}
         fleetAlertPolicies={dashboard.fleetAlertPolicies}
@@ -1447,7 +1442,8 @@ export function App() {
         onOpenJobDispatchPreset={openJobDispatchPreset}
         onOpenJobDetails={openJobDetails}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
-        onRenderTemplateRuntimeConfig={dashboard.renderTemplateRuntimeConfig}
+        onLoadEffectiveAgentConfig={dashboard.loadEffectiveAgentConfig}
+        onLoadConfigurationSources={dashboard.loadConfigurationSources}
         onSelectAgent={setSelectedAgentId}
         onUpdateAgentAlias={dashboard.updateAgentAlias}
         privilegeMaterial={privilegeMaterial}
@@ -1521,6 +1517,7 @@ export function App() {
           dashboard.backupsError,
           dashboard.auditError,
           dashboard.tagsError,
+          dashboard.configurationSourcesError,
           dashboard.runtimeConfigApplyError,
           dashboard.topologyError,
         )}
@@ -1539,6 +1536,7 @@ export function App() {
           dashboard.topologyLoading ||
           dashboard.auditLoading ||
           dashboard.tagsLoading ||
+          dashboard.configurationSourcesLoading ||
           dashboard.runtimeConfigApplyLoading
         }
         networkObservations={dashboard.networkObservations}
@@ -1567,6 +1565,7 @@ export function App() {
         onOpenInstances={() => selectView("Fleet", "instances")}
         onOpenJob={releaseRoutes.openJobEvidence}
         onOpenJobs={() => selectView("Jobs", "history")}
+        onLoadConfigurationSources={dashboard.loadConfigurationSources}
         onOpenNetwork={openNetworkWorkflow}
         onOpenNetworkEvidence={releaseRoutes.openNetworkEvidence}
         onOpenProcesses={releaseRoutes.openProcess}
@@ -1574,8 +1573,7 @@ export function App() {
         policyAlerts={dashboard.policyAlerts}
         runtimeConfigApplyStates={dashboard.runtimeConfigApplyStates}
         runtimeConfigEvidenceState={runtimeConfigEvidenceState}
-        sourceStatus={dashboard.sourceStatus}
-        sourceTemplateAssignments={dashboard.sourceTemplateAssignments}
+        configurationSources={dashboard.configurationSources}
         summary={visibleSummary}
         telemetryNetworkRates={dashboard.telemetryNetworkRates}
         telemetryRollups={dashboard.telemetryRollups}
@@ -1592,9 +1590,15 @@ export function App() {
         agents={dashboard.agents}
         trafficAccounting={dashboard.trafficAccounting}
         vpsRuleValues={dashboard.vpsRuleValues}
-        sourceTemplateAssignments={dashboard.sourceTemplateAssignments}
-        sourceTemplates={dashboard.sourceTemplates}
-        sourceStatus={dashboard.sourceStatus}
+        configurationPresets={dashboard.configurationPresets}
+        configurationSources={dashboard.configurationSources}
+        configurationSourcesEvidenceState={
+          dashboard.configurationSourcesLoading
+            ? "loading"
+            : dashboard.configurationSourcesEvidenceAvailable
+              ? "available"
+              : "unavailable"
+        }
         fleetConfigEvidenceAvailable={
           dashboard.fleetCoreEvidenceAvailable &&
           dashboard.configPolicyEvidenceAvailable
@@ -1603,6 +1607,7 @@ export function App() {
         error={combineErrors(
           dashboard.apiError,
           dashboard.tagsError,
+          dashboard.configurationSourcesError,
           dashboard.runtimeConfigApplyError,
         )}
         runtimeConfigApplyStates={dashboard.runtimeConfigApplyStates}
@@ -1611,21 +1616,21 @@ export function App() {
         fleetAlertPolicies={dashboard.fleetAlertPolicies}
         jobs={dashboard.jobs}
         loading={
-          dashboard.tagsLoading || dashboard.runtimeConfigApplyLoading
+          dashboard.tagsLoading ||
+          dashboard.configurationSourcesLoading ||
+          dashboard.runtimeConfigApplyLoading
         }
         onSubmitRuntimeConfigPatch={dashboard.submitRuntimeConfigPatch}
         onCreateJob={dashboard.createJob}
         onLoadJobOutputs={dashboard.loadJobOutputs}
         onLoadJobTargets={dashboard.loadJobTargets}
+        onLoadConfigurationSources={dashboard.loadConfigurationSources}
         onDeleteRuntimeConfigPatchGenerator={
           dashboard.deleteRuntimeConfigPatchGenerator
         }
         onOpenJobDetails={openJobDetails}
         onOpenJobHistory={openJobHistory}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
-        onOpenSourceTemplates={() =>
-          selectView("Automation", "source_templates")
-        }
         onOpenAlerts={() => selectView("Observability", "alerts")}
         onRefresh={dashboard.loadTagInventory}
         onBulkUnsetVpsRules={dashboard.bulkUnsetVpsRules}
@@ -1717,32 +1722,26 @@ export function App() {
     );
   }
 
-  function renderSourceTemplatesPanel() {
+  function renderConfigurationSourcesPanel() {
     return (
-      <section className="workspace singleColumn">
-        <SourceTemplatePanel
-          activeSubpage="templates"
-          agents={dashboard.agents}
-          assignments={dashboard.sourceTemplateAssignments}
-          sourceStatus={dashboard.sourceStatus}
-          onAssignTemplate={dashboard.assignSourceTemplate}
-          onCloneTemplate={dashboard.cloneSourceTemplate}
-          onCreateTemplate={dashboard.createSourceTemplate}
-          onDiffTemplate={dashboard.diffSourceTemplate}
-          initialCreateDomain={sourceTemplateWorkflowIntent}
-          onInitialCreateDomainConsumed={() =>
-            setSourceTemplateWorkflowIntent(null)
-          }
-          onOpenTunnelPlans={() => selectView("Network", "tunnel_plans")}
-          onRenderTemplateRuntimeConfig={dashboard.renderTemplateRuntimeConfig}
-          onResolveBulk={dashboard.resolveBulkPreview}
-          onTestTemplate={dashboard.testSourceTemplate}
-          onUpdateTemplate={dashboard.updateSourceTemplate}
-          privilegeMaterial={privilegeMaterial}
-          setPrivilegeMaterial={setPrivilegeMaterial}
-          templates={dashboard.sourceTemplates}
-        />
-      </section>
+      <ConfigurationSourcesPanel
+        agents={dashboard.agents}
+        error={dashboard.configurationSourcesError}
+        loading={dashboard.configurationSourcesLoading}
+        onApplyOverride={dashboard.applyConfigurationSourceOverride}
+        onClonePreset={dashboard.cloneConfigurationPreset}
+        onCreatePreset={dashboard.createConfigurationPreset}
+        onDeletePreset={dashboard.deleteConfigurationPreset}
+        onLoadEffectiveConfig={dashboard.loadEffectiveAgentConfig}
+        onPreviewOverride={dashboard.previewConfigurationSourceOverride}
+        onPreviewPreset={dashboard.previewConfigurationPreset}
+        onRefresh={dashboard.loadConfigurationSources}
+        onUpdatePreset={dashboard.updateConfigurationPreset}
+        presets={dashboard.configurationPresets}
+        privilegeMaterial={privilegeMaterial}
+        setPrivilegeMaterial={setPrivilegeMaterial}
+        sources={dashboard.configurationSources}
+      />
     );
   }
 
@@ -2045,11 +2044,21 @@ export function App() {
       <TopologyPanel
         activeSubpage={panelSubpage}
         agents={dashboard.agents}
+        configurationSources={dashboard.configurationSources}
+        configurationSourcesEvidenceState={
+          dashboard.configurationSourcesLoading
+            ? "loading"
+            : dashboard.configurationSourcesEvidenceAvailable
+              ? "available"
+              : "unavailable"
+        }
         error={combineErrors(
           dashboard.topologyError,
           dashboard.tagsError,
+          dashboard.configurationSourcesError,
           dashboard.runtimeConfigApplyError,
         )}
+        initialAdapterKind={networkAdapterWorkflowIntent}
         jobs={dashboard.jobs}
         loading={dashboard.topologyLoading}
         initialPlanWorkflow={networkPlanWorkflowIntent}
@@ -2060,6 +2069,9 @@ export function App() {
         }
         networkObservations={dashboard.networkObservations}
         networkTrends={dashboard.networkTrends}
+        onInitialAdapterKindConsumed={() =>
+          setNetworkAdapterWorkflowIntent(null)
+        }
         onInitialPlanWorkflowConsumed={() => setNetworkPlanWorkflowIntent(null)}
         onInitialTargetIntentConsumed={consumeWorkflowTargetIntent}
         ospfRecommendations={dashboard.ospfRecommendations}
@@ -2072,26 +2084,36 @@ export function App() {
         runtimeConfigApplyStates={dashboard.runtimeConfigApplyStates}
         onAllocateTunnelEndpoints={dashboard.allocateTunnelEndpoints}
         onCreateJob={dashboard.createJob}
+        onCreateNetworkAdapterDefinition={
+          dashboard.createNetworkAdapterDefinition
+        }
         onCreateTunnelPlan={dashboard.createTunnelPlan}
+        onDeleteNetworkAdapterDefinition={
+          dashboard.deleteNetworkAdapterDefinition
+        }
         onDeleteTunnelPlan={dashboard.deleteTunnelPlan}
         onExportTunnelPlan={dashboard.exportTunnelPlan}
         onLoadNetworkObservations={dashboard.loadNetworkObservations}
+        onLoadConfigurationSources={dashboard.loadConfigurationSources}
         onLoadNetworkTrends={dashboard.loadNetworkTrends}
         onLoadOspfRecommendations={dashboard.loadOspfRecommendations}
         onLoadOspfUpdatePlans={dashboard.loadOspfUpdatePlans}
         onLoadRuntimeConfigApplyStates={
           dashboard.loadRuntimeConfigApplyStates
         }
-        onLoadSourceTemplates={dashboard.loadSourceTemplates}
+        onLoadNetworkAdapterDefinitions={
+          dashboard.loadNetworkAdapterDefinitions
+        }
         onLoadTopologyGraph={dashboard.loadTopologyGraph}
         onLoadOutputs={dashboard.loadJobOutputs}
         onLoadTargets={dashboard.loadJobTargets}
         onOpenCreateTunnelPlan={openCreateTunnelPlan}
+        onOpenConfigurationSources={() => selectView("Config", "sources")}
         onOpenJobDetails={openJobDetails}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
-        onOpenSourceTemplates={(domain) => {
-          setSourceTemplateWorkflowIntent(domain);
-          selectView("Automation", "source_templates");
+        onOpenAdapterDefinitions={(kind) => {
+          setNetworkAdapterWorkflowIntent(kind);
+          selectView("Network", "tunnel_plans");
         }}
         onOpenVpsDetail={releaseRoutes.openVpsDetail}
         onBulkMutatePortForwardRules={dashboard.bulkMutatePortForwardRules}
@@ -2111,9 +2133,12 @@ export function App() {
         }
         onUpdateTunnelPlanOspfCost={dashboard.updateTunnelPlanOspfCost}
         onUpdateTunnelPlan={dashboard.updateTunnelPlan}
+        onUpdateNetworkAdapterDefinition={
+          dashboard.updateNetworkAdapterDefinition
+        }
+        networkAdapterDefinitions={dashboard.networkAdapterDefinitions}
         privilegeMaterial={privilegeMaterial}
         setPrivilegeMaterial={setPrivilegeMaterial}
-        sourceTemplates={dashboard.sourceTemplates}
         topologyGraph={dashboard.topologyGraph}
         telemetryTunnels={dashboard.telemetryTunnels}
         tunnelPlanCorruptions={dashboard.tunnelPlanCorruptions}
@@ -2373,8 +2398,6 @@ export function App() {
       if (activeSubpage === "rollouts") return renderRolloutsPanel();
       if (activeSubpage === "schedules") return renderSchedulesPanel();
       if (activeSubpage === "runbooks") return renderRunbooksPanel();
-      if (activeSubpage === "source_templates")
-        return renderSourceTemplatesPanel();
       if (activeSubpage === "os_updates") return renderOsUpdatesPanel();
       if (activeSubpage === "agent_updates") return renderAgentUpdatesPanel();
       return renderRunbooksPanel();
@@ -2386,6 +2409,8 @@ export function App() {
       return renderBackupsPanel(activeSubpage);
     }
     if (activeView === "Config") {
+      if (activeSubpage === "sources")
+        return renderConfigurationSourcesPanel();
       return renderConfigPanel(configSubpage(activeSubpage));
     }
     if (activeView === "Observability") {
@@ -2439,6 +2464,7 @@ export function App() {
               dashboard.auditLoading ||
               dashboard.accessLoading
             }
+            onClearSession={clearOperatorSession}
             onRefresh={() => {
               void dashboard.loadAudits();
               void dashboard.loadJobs();
@@ -2521,7 +2547,6 @@ export function App() {
           pageTitle={pageTitle}
           onApplySavedFleetView={fleetViews.applySavedFleetView}
           onClearFleetView={fleetViews.clearFleetView}
-          onClearSession={clearOperatorSession}
           onDeleteSavedFleetView={fleetViews.deleteSavedFleetView}
           onFleetQueryChange={fleetViews.setFleetQuery}
           onLockPrivilege={lockPrivilege}
@@ -2606,7 +2631,7 @@ function normalizeFleetReleaseSubpage(subpage: string) {
 
 function configReleaseSubpage(subpage: string) {
   if (
-    ["overview", "per_vps", "bulk_patch", "templates", "rules"].includes(
+    ["overview", "sources", "per_vps", "bulk_patch", "rules"].includes(
       subpage,
     )
   ) {
@@ -2669,7 +2694,7 @@ function remoteOperationsReleaseSubpage(subpage: string) {
 
 function automationReleaseSubpage(subpage: string) {
   if (
-    ["rollouts", "schedules", "runbooks", "source_templates", "os_updates", "agent_updates"].includes(subpage)
+    ["rollouts", "schedules", "runbooks", "os_updates", "agent_updates"].includes(subpage)
   ) {
     return subpage;
   }
@@ -2778,7 +2803,7 @@ function configSubpage(subpage: string) {
   if (subpage === "per_vps") return "single";
   if (subpage === "bulk_patch") return "bulk";
   if (subpage.startsWith("rules:")) return subpage;
-  if (subpage === "rules" || subpage === "templates") return subpage;
+  if (subpage === "rules") return subpage;
   return "overview";
 }
 

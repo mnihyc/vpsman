@@ -120,7 +120,7 @@ pub(crate) async fn revoke_current_client_key(
     verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
     let record = state
         .repo
-        .revoke_current_client_key(&client_id, &request, &operator)
+        .revoke_current_client_key(&client_id, request.reason.as_deref(), &operator)
         .await?;
     let gateway_disconnect = gateway_disconnect_outcome(
         state

@@ -348,6 +348,10 @@ pub struct AgentNetworkConfig {
     pub latency_monitoring_interval_secs: u64,
     #[serde(default = "default_network_latency_down_windows")]
     pub latency_down_windows: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ospf_status_command: Option<RuntimeTunnelCommand>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ospf_update_command: Option<RuntimeTunnelCommand>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runtime_status_telemetry_plans: Vec<AgentRuntimeStatusTelemetryPlan>,
     #[serde(default)]
@@ -458,6 +462,8 @@ impl Default for AgentNetworkConfig {
             latency_monitoring_enabled: true,
             latency_monitoring_interval_secs: default_network_latency_monitoring_interval_secs(),
             latency_down_windows: default_network_latency_down_windows(),
+            ospf_status_command: None,
+            ospf_update_command: None,
             runtime_status_telemetry_plans: Vec::new(),
             port_forwarding: crate::AgentPortForwardingConfig::default(),
         }

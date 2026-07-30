@@ -35,6 +35,14 @@ use crate::{
     routes_command_templates::{
         delete_command_template, list_command_templates, upsert_command_template,
     },
+    routes_configuration_presets::{
+        apply_configuration_source_override, clone_configuration_preset,
+        create_configuration_preset, create_network_adapter_definition,
+        delete_configuration_preset, delete_network_adapter_definition, effective_agent_config,
+        list_configuration_presets, list_configuration_sources, list_network_adapter_definitions,
+        preview_configuration_preset, preview_configuration_source_override,
+        update_configuration_preset, update_network_adapter_definition,
+    },
     routes_dashboard::dashboard_overview,
     routes_file_transfers::{
         create_file_transfer_handoff, download_file_transfer_handoff,
@@ -56,15 +64,12 @@ use crate::{
         request_runtime_config_reload, validate_agent_identity, verify_agent_update_artifact,
     },
     routes_inventory::{
-        assign_agent_tag, assign_source_template, bulk_mutate_tags, clone_source_template,
-        create_server_runtime_config_patch_request, create_source_template, create_tag,
-        delete_agent, delete_runtime_config_patch_generator, delete_tag, diff_source_template,
-        fleet_summary, list_agents, list_gateway_sessions, list_runtime_config_apply_states,
-        list_runtime_config_patch_generators, list_source_status, list_source_template_assignments,
-        list_source_templates, list_tags, list_telemetry_network_rates, list_telemetry_rollups,
-        list_telemetry_tunnels, render_runtime_config_patch_generator,
-        render_template_runtime_config, resolve_bulk_targets, test_source_template,
-        update_agent_alias, update_source_template, update_tag_order,
+        assign_agent_tag, bulk_mutate_tags, create_server_runtime_config_patch_request, create_tag,
+        delete_agent, delete_runtime_config_patch_generator, delete_tag, fleet_summary,
+        list_agents, list_gateway_sessions, list_runtime_config_apply_states,
+        list_runtime_config_patch_generators, list_tags, list_telemetry_network_rates,
+        list_telemetry_rollups, list_telemetry_tunnels, render_runtime_config_patch_generator,
+        resolve_bulk_targets, update_agent_alias, update_tag_order,
         upsert_runtime_config_patch_generator,
     },
     routes_job_history::{
@@ -315,33 +320,44 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/api/v1/tags/order", put(update_tag_order))
         .route("/api/v1/tags/{tag}", delete(delete_tag))
         .route(
-            "/api/v1/source-templates",
-            get(list_source_templates).post(create_source_template),
+            "/api/v1/configuration-presets",
+            get(list_configuration_presets).post(create_configuration_preset),
         )
         .route(
-            "/api/v1/source-templates/{template_id}/clone",
-            post(clone_source_template),
+            "/api/v1/configuration-presets/{preset_id}",
+            put(update_configuration_preset).delete(delete_configuration_preset),
         )
         .route(
-            "/api/v1/source-templates/{template_id}/diff",
-            post(diff_source_template),
+            "/api/v1/configuration-presets/{preset_id}/clone",
+            post(clone_configuration_preset),
         )
         .route(
-            "/api/v1/source-templates/{template_id}/test",
-            post(test_source_template),
+            "/api/v1/configuration-presets/{preset_id}/preview",
+            post(preview_configuration_preset),
         )
         .route(
-            "/api/v1/source-templates/{template_id}/update",
-            post(update_source_template),
+            "/api/v1/configuration-sources",
+            get(list_configuration_sources),
         )
         .route(
-            "/api/v1/source-template-assignments",
-            get(list_source_template_assignments).post(assign_source_template),
+            "/api/v1/configuration-source-overrides/preview",
+            post(preview_configuration_source_override),
         )
-        .route("/api/v1/source-status", get(list_source_status))
         .route(
-            "/api/v1/template-runtime-config",
-            get(render_template_runtime_config),
+            "/api/v1/configuration-source-overrides/apply",
+            post(apply_configuration_source_override),
+        )
+        .route(
+            "/api/v1/effective-agent-config",
+            get(effective_agent_config),
+        )
+        .route(
+            "/api/v1/network-adapter-definitions",
+            get(list_network_adapter_definitions).post(create_network_adapter_definition),
+        )
+        .route(
+            "/api/v1/network-adapter-definitions/{definition_id}",
+            put(update_network_adapter_definition).delete(delete_network_adapter_definition),
         )
         .route(
             "/api/v1/runtime-config/patch",

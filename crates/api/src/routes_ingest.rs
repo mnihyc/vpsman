@@ -708,7 +708,7 @@ pub(crate) async fn record_network_routing_terminal_result(
         && result.plan_id == plan_id.to_string()
         && result.endpoint_side == side
         && result.client_id == client_id
-        && result.adapter_template_id == adapter.template_id
+        && result.adapter_definition_id == adapter.definition_id
         && result.adapter_definition_hash == adapter.definition_hash
         && result.after.ready
         && desired_cost.is_none_or(|desired| result.after.current_cost == Some(desired));

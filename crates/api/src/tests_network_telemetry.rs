@@ -242,9 +242,9 @@ async fn telemetry_sequence_is_idempotent_per_gateway_session() {
 async fn seed_declared_plan(repo: &Repository, manager: RuntimeTunnelManager) -> uuid::Uuid {
     let runtime_control = RuntimeTunnelControl {
         manager,
-        left_adapter_template_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+        left_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
             .then(|| "11111111-1111-4111-8111-111111111111".to_string()),
-        right_adapter_template_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+        right_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
             .then(|| "22222222-2222-4222-8222-222222222222".to_string()),
         ..RuntimeTunnelControl::default()
     };
@@ -273,6 +273,7 @@ async fn seed_declared_plan(repo: &Repository, manager: RuntimeTunnelManager) ->
         bandwidth_mbps: 100,
         ospf: None,
     };
+    crate::tests_network::seed_test_plan_adapter_definitions(repo, &input).await;
     let plan = plan_tunnel(&input).unwrap();
     repo.record_tunnel_plan(&input, &plan, true, &test_operator())
         .await

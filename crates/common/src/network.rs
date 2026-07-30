@@ -11,11 +11,11 @@ pub use models::{
     default_runtime_fou_peer_port, default_runtime_fou_port, BandwidthMbps, OspfControlMode,
     OspfCostPolicy, RoutingCostAdapterCommands, RoutingCostAdapterJobResult,
     RoutingCostAdapterOperation, RoutingCostAdapterRequest, RoutingCostAdapterResponse,
-    RuntimeTunnelAdapterCommands, RuntimeTunnelCommand, RuntimeTunnelControl,
-    RuntimeTunnelFouOptions, RuntimeTunnelManager, RuntimeTunnelRoute, RuntimeTunnelTopologyIntent,
-    RuntimeTunnelTrafficLimit, TunnelAddressFamily, TunnelAddressPair, TunnelEndpointConfig,
-    TunnelEndpointSide, TunnelKind, TunnelObservation, TunnelOspfConfig, TunnelPlan,
-    TunnelPlanInput, ROUTING_COST_ADAPTER_CONTRACT_VERSION,
+    RoutingCostCommandSource, RuntimeTunnelAdapterCommands, RuntimeTunnelCommand,
+    RuntimeTunnelControl, RuntimeTunnelFouOptions, RuntimeTunnelManager, RuntimeTunnelRoute,
+    RuntimeTunnelTopologyIntent, RuntimeTunnelTrafficLimit, TunnelAddressFamily, TunnelAddressPair,
+    TunnelEndpointConfig, TunnelEndpointSide, TunnelKind, TunnelObservation, TunnelOspfConfig,
+    TunnelPlan, TunnelPlanInput, ROUTING_COST_ADAPTER_CONTRACT_VERSION,
 };
 pub use planner::{
     allocate_tunnel_endpoints, plan_tunnel, render_tunnel_endpoint_config,

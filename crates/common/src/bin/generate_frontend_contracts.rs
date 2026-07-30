@@ -25,9 +25,9 @@ use vpsman_common::{
     job_target_terminal_statuses, job_terminal_statuses, migration_link_status_class_by_status,
     migration_link_statuses, plan_tunnel, restore_plan_status_class_by_status,
     restore_plan_statuses, schedule_privilege_intent_fields, server_job_status_class_by_status,
-    server_job_statuses, server_job_types, source_readiness_status_class_by_status,
-    source_readiness_statuses, terminal_command_types, terminal_input_privilege_intent_fields,
-    terminal_session_events, terminal_session_state_class_by_state, terminal_session_states,
+    server_job_statuses, server_job_types, terminal_command_types,
+    terminal_input_privilege_intent_fields, terminal_session_events,
+    terminal_session_state_class_by_state, terminal_session_states,
     terminal_session_status_class_by_status, terminal_session_statuses,
     topology_edge_health_status_class_by_status, topology_edge_health_statuses,
     topology_neighbor_state_class_by_state, topology_neighbor_states,
@@ -415,18 +415,6 @@ fn main() -> io::Result<()> {
         "WEBHOOK_RULE_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS",
         webhook_rule_delivery_process_status_class_by_status(),
         "GeneratedWebhookRuleDeliveryProcessStatus",
-    )?;
-    write_domain_array(
-        &mut output,
-        "SOURCE_READINESS_STATUSES",
-        "GeneratedSourceReadinessStatus",
-        source_readiness_statuses(),
-    )?;
-    write_status_class_map(
-        &mut output,
-        "SOURCE_READINESS_STATUS_CLASS_BY_STATUS",
-        source_readiness_status_class_by_status(),
-        "GeneratedSourceReadinessStatus",
     )?;
     write_domain_array(
         &mut output,
@@ -1464,8 +1452,9 @@ fn golden_tunnel_plan() -> io::Result<vpsman_common::TunnelPlan> {
 
 fn golden_routing_adapter() -> RoutingCostAdapterCommands {
     RoutingCostAdapterCommands {
-        template_id: "routing-adapter-a".to_string(),
-        template_name: "Routing adapter A".to_string(),
+        source: vpsman_common::RoutingCostCommandSource::PlanOverride,
+        definition_id: "routing-adapter-a".to_string(),
+        definition_name: "Routing adapter A".to_string(),
         definition_hash: "aa".repeat(32),
         status: RuntimeTunnelCommand {
             argv: vec!["/opt/network-adapters/status".to_string()],

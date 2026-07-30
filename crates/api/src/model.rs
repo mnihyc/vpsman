@@ -8,9 +8,10 @@ use vpsman_common::{
 pub(crate) use crate::auth_model::*;
 pub(crate) use crate::model_agent_updates::*;
 pub(crate) use crate::model_backups::*;
+pub(crate) use crate::model_configuration_presets::*;
 pub(crate) use crate::model_dashboard::*;
+pub(crate) use crate::model_runtime_config::*;
 pub(crate) use crate::model_server_jobs::*;
-pub(crate) use crate::model_source_templates::*;
 pub(crate) use vpsman_common::JobRolloutPolicy;
 
 #[derive(Clone, Debug, Serialize)]
@@ -438,10 +439,16 @@ pub(crate) struct NetworkOspfUpdatePlanView {
     pub(crate) left_client_id: String,
     pub(crate) right_client_id: String,
     pub(crate) control_mode: String,
-    pub(crate) left_adapter_template_id: String,
-    pub(crate) right_adapter_template_id: String,
-    pub(crate) left_adapter_template_name: Option<String>,
-    pub(crate) right_adapter_template_name: Option<String>,
+    pub(crate) left_updater_source: String,
+    pub(crate) right_updater_source: String,
+    #[serde(rename = "left_adapter_template_id")]
+    pub(crate) left_adapter_definition_id: Option<String>,
+    #[serde(rename = "right_adapter_template_id")]
+    pub(crate) right_adapter_definition_id: Option<String>,
+    #[serde(rename = "left_adapter_template_name")]
+    pub(crate) left_adapter_definition_name: Option<String>,
+    #[serde(rename = "right_adapter_template_name")]
+    pub(crate) right_adapter_definition_name: Option<String>,
     pub(crate) left_adapter_definition_hash: Option<String>,
     pub(crate) right_adapter_definition_hash: Option<String>,
     pub(crate) left_current_ospf_cost: Option<i32>,

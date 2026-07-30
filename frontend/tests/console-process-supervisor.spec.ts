@@ -10,6 +10,23 @@ async function activate(locator: Locator) {
   await locator.evaluate((element) => (element as HTMLElement).click());
 }
 
+async function invokeManagedProcessAction(
+  page: Page,
+  action: "Logs" | "Restart" | "Stop",
+) {
+  const grid = page.getByLabel("Process health inventory data grid");
+  await grid
+    .getByLabel(
+      "Select Process health inventory row agent-sfo-01:ospf-worker",
+    )
+    .check();
+  await grid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  await activate(page.getByRole("menuitem", { name: action, exact: true }));
+}
+
 test("keeps host process scope and target routable while refreshing a read-only snapshot", async ({ page }, testInfo) => {
   await page.goto("/");
   await openConsoleSubpage(page, "Remote Operations", "Processes");
@@ -137,18 +154,35 @@ test("runs restart directly and confirms stop from process inventory", async ({ 
   await openManagedProcesses(page);
 
   const inventory = page.locator(".fleetPanel", { hasText: "Process supervisor inventory" });
-  await expect(inventory.getByRole("button", { name: "Open logs for process ospf-worker" })).toBeVisible();
-  await expect(inventory.getByRole("button", { name: "Restart process ospf-worker" })).toBeVisible();
-  await expect(inventory.getByRole("button", { name: "Stop process ospf-worker" })).toBeVisible();
+  const grid = inventory.getByLabel("Process health inventory data grid");
+  await grid
+    .getByLabel(
+      "Select Process health inventory row agent-sfo-01:ospf-worker",
+    )
+    .check();
+  await grid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  await expect(
+    page.getByRole("menuitem", { name: "Logs", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Restart", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Stop", exact: true }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
 
-  await activate(inventory.getByRole("button", { name: "Open logs for process ospf-worker" }));
+  await invokeManagedProcessAction(page, "Logs");
   await expectProcessDispatchPreset(page, "logs");
   await expect(page.locator(".commandComposer").getByLabel("Supervisor log bytes")).toHaveValue("65536");
   await reviewProcessDispatch(page, "Read retained stdout/stderr logs", "Standard");
   await activate(page.getByRole("button", { name: "Close detail panel" }));
 
   const beforeRestart = await processJobRequestCount(page);
-  await activate(inventory.getByRole("button", { name: "Restart process ospf-worker" }));
+  await invokeManagedProcessAction(page, "Restart");
   const restartPrompt = inventory.locator(".confirmationPrompt", {
     hasText: "Confirm process restart",
   });
@@ -162,6 +196,14 @@ test("runs restart directly and confirms stop from process inventory", async ({ 
   await expect.poll(() => processJobRequestCount(page)).toBe(beforeRestart + 1);
   await expect(restartPrompt).toHaveCount(0);
   await expect(inventory.getByText("Restarted ospf-worker on edge-sfo-01 (fo01).")).toBeVisible();
+  await expect
+    .poll(() =>
+      inventory.locator(".processSupervisorActionFeedback").evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        return bounds.top >= 0 && bounds.bottom <= window.innerHeight;
+      }),
+    )
+    .toBe(true);
   const restartRequest = await lastProcessJobRequest(page);
   expect(JSON.stringify(restartRequest)).not.toContain("local-super-password");
   expect(restartRequest).toMatchObject({
@@ -178,7 +220,7 @@ test("runs restart directly and confirms stop from process inventory", async ({ 
   });
 
   const beforeStop = await processJobRequestCount(page);
-  await activate(inventory.getByRole("button", { name: "Stop process ospf-worker" }));
+  await invokeManagedProcessAction(page, "Stop");
   const prompt = inventory.locator(".confirmationPrompt");
   await expect(prompt.getByText("Confirm process stop")).toBeVisible();
   await expect(prompt).toContainText("ospf-worker");

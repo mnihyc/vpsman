@@ -12,7 +12,8 @@ Start from the repository root and inspect before editing:
 git status -sb
 git fetch origin --prune --tags
 git log --oneline --decorate -12
-gh release view --repo mnihyc/vpsman
+vpsman_repository=OWNER/vpsman
+gh release view --repo "$vpsman_repository"
 ```
 
 - Understand every existing worktree change; preserve unrelated user work.
@@ -38,7 +39,8 @@ Every update must keep these boundaries explicit:
   supports transactions.
 - Daily operator paths remain concise. A correctness fix must not add routine
   prompts, concepts, or controls that operators do not need.
-- Keep provider integrations adapter- or template-driven. Do not add
+- Keep provider integrations behind explicit product-owned adapter definitions
+  or configuration presets. Do not add
   third-party services, bots, scanners, dependencies, CI jobs, or release
   artifacts unless the product change specifically requires them and they have
   been reviewed.
@@ -55,13 +57,16 @@ Every update must keep these boundaries explicit:
 
 ### Database migrations
 
-- Files already pinned in `migrations/released-checksums.sha384` are immutable.
-- Compatible schema work after the v0.2.0 baseline starts with the next
-  sequential migration and remains append-only.
-- Never edit `_sqlx_migrations`, replace released checksums, or mark an
-  unapplied migration as applied.
-- Add the compatibility note and run
-  `VPSMAN_REQUIRE_RELEASE_TAGS=1 bash scripts/audit-migrations.sh`.
+- The current migrations are a canonical fresh-database model, not an in-place
+  upgrade path from an earlier schema.
+- Change a canonical migration only when the product decision explicitly
+  accepts a clean break. Update every code, test, and documentation consumer in
+  the same change.
+- Never edit `_sqlx_migrations`, replace checksums in an existing database, or
+  mark an unapplied migration as applied.
+- When a deployed schema becomes a compatibility boundary, document and pin it
+  from that release onward; later compatible changes must be append-only.
+- Add the compatibility note and run `bash scripts/audit-migrations.sh`.
 
 ### Protocol and rolling-component changes
 
@@ -69,6 +74,53 @@ Every update must keep these boundaries explicit:
 - Preserve explicit schema/version rejection; do not parse an unknown shape as
   an older one.
 - Regenerate and verify frontend protocol contracts when shared types change.
+
+### Configuration preset changes
+
+- Keep configuration presets limited to supported agent behaviors. Workflow
+  status, backup storage, update artifacts, and tunnel adapters are separate
+  product objects, not synthetic presets.
+- System presets are immutable. A VPS with no explicit override inherits the
+  system default; do not materialize a fake assignment row or timestamp.
+- Selector/tag targeting is resolved for each preview/apply operation and is
+  not a live assignment rule. Sign the exact backend-preview target IDs, and
+  reject apply when the preview hash no longer matches. Headless confirmation
+  must consume the hash shown in the separately human-reviewed preview; an
+  internal replacement preview must never become implicit authorization.
+- Preserve desired selection, effective composed config, runtime apply state,
+  and readiness evidence as separate facts.
+- Runtime-tunnel adapter definitions and optional per-plan OSPF command
+  overrides belong to Tunnel plans. A referenced definition is replaced
+  through a reviewed plan change, not mutated behind the plan.
+- `ospf_update_command` presets provide the reusable per-VPS OSPF updater.
+  Resolve each endpoint from its explicit plan override first, otherwise from
+  that endpoint VPS's effective preset. An explicit missing or invalid override
+  is an error; never fall back around it. If neither source is configured, keep
+  the endpoint visibly unconfigured and reject dispatch.
+
+### Console interaction changes
+
+- Use the shared searchable VPS combobox for one-VPS fields. A listed choice
+  commits immediately; arbitrary text must not become a hidden selection.
+- Keep multi-VPS work in its normal workflow. Direct VPS choices and a selector
+  expression form one deduplicated union, with an immediate local count and
+  list. The backend Review step is authoritative and freezes the exact IDs for
+  confirmation; never present a local match as reviewed.
+- Anchor suggestions to their input. Place them directly below when the
+  rendered results fit, otherwise directly above, and keep them inside the
+  viewport.
+- Put create and refresh controls in the table header. Put selected-row
+  operations in the header **Actions** menu; expose the same row operations by
+  right-click on desktop. On mobile, keep selection and the header **Actions**
+  menu available instead of repeating a large action set on every card. Use
+  row or card expansion for inspection. Do not add a fixed rightmost Action
+  column.
+- Keep shared table pagination choices consistent through 1,000 rows per page;
+  individual tables may retain a smaller task-appropriate initial page size.
+- Keep action feedback inside the workflow that produced it. Long status or
+  error content must wrap or scroll within the visible page.
+- Extend the existing console components and styles before introducing a new
+  interaction pattern.
 
 ### Deployment and reverse-proxy changes
 
@@ -136,6 +188,9 @@ focused checks rather than repeatedly rebuilding the same source.
 
 - Bump the Rust workspace version, every local package entry in `Cargo.lock`,
   and frontend package/lock versions together.
+- Compare the candidate with the last release and advance each changed
+  component's tracked build counter exactly once. The isolated aggregate
+  release check intentionally does not advance release identity.
 - Confirm the candidate tag is newer than every published stable release.
 - The annotated tag and binaries must point to the exact reviewed commit.
 - `version.json` is the authoritative release asset manifest.

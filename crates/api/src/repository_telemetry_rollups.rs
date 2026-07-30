@@ -936,7 +936,7 @@ impl Repository {
         .await
     }
 
-    pub(crate) async fn list_declared_telemetry_tunnels_for_source_status_clients(
+    pub(crate) async fn list_declared_telemetry_tunnels_for_clients(
         &self,
         client_ids: &[String],
     ) -> Result<Vec<TelemetryTunnelView>> {

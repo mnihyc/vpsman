@@ -543,7 +543,7 @@ assert_ospf_update_plans() {
   local update_plans_json
   update_plans_json="$(VPSMAN_API_TOKEN="$access_token" \
     target/debug/vpsctl --api-url "$api_url" network-ospf-update-plans --limit 50)"
-  jq -e --arg client "$client_id" --arg peer "$peer_client_id" --arg adapter "$routing_adapter_template_id" '
+  jq -e --arg client "$client_id" --arg peer "$peer_client_id" --arg adapter "$routing_adapter_definition_id" '
     any(.[]; .plan_name == "postgres-live-status"
       and .interface_name == "pgstat0"
       and .left_client_id == $client

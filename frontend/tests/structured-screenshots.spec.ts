@@ -11,7 +11,8 @@ import { viewLabel } from "../src/constants";
 import type { ActiveView } from "../src/types";
 
 const SCREENSHOT_DIR = join(
-  process.env.VPSMAN_SCREENSHOT_DIR ?? join(process.cwd(), "..", "tmp"),
+  process.env.VPSMAN_SCREENSHOT_DIR ??
+    join(process.cwd(), "..", ".tmp", "audit", "structured-screenshots"),
 );
 
 interface ScreenshotEntry {
@@ -23,16 +24,18 @@ interface ScreenshotEntry {
   prepare?:
     | "alert-policy-editor"
     | "config-bulk-patch-preview"
+    | "configuration-assignment-drawer"
+    | "configuration-assignment-review"
     | "config-per-vps-loaded"
     | "fleet-delete-success"
     | "fleet-metrics-advanced"
     | "fleet-metrics-chart"
     | "network-latency-chart"
     | "network-throughput-chart"
+    | "network-adapter-create"
     | "port-forward-confirmation"
     | "port-forward-create"
     | "port-forward-details"
-    | "source-template-adapter-detail"
     | "tunnel-plan-assessment"
     | "tunnel-plan-create"
     | "tunnel-plan-delete-review"
@@ -94,10 +97,10 @@ const allViews: ScreenshotEntry[] = [
     heading: "Instance detail",
     id: "02b-fleet-instance-config-detail",
     requiredText: [
-      "Desired source",
-      "Render status",
+      "Effective sources",
+      "Source state",
       "Drift state",
-      "Open config",
+      "Open per-VPS config",
       "Compare",
       "Apply",
     ],
@@ -251,25 +254,6 @@ const allViews: ScreenshotEntry[] = [
   },
   {
     view: "Automation",
-    subpage: "Source templates",
-    heading: "Source templates",
-    id: "21-automation-source-templates",
-  },
-  {
-    view: "Automation",
-    subpage: "Source templates",
-    heading: "Source templates",
-    id: "21b-automation-tunnel-adapter-detail",
-    prepare: "source-template-adapter-detail",
-    requiredText: [
-      "shared:tunnel-lifecycle-v1",
-      "Bound from tunnel plans",
-      "never ambient VPS configuration",
-      "Open tunnel plans",
-    ],
-  },
-  {
-    view: "Automation",
     subpage: "Agent updates",
     heading: "Agent updates",
     id: "22-automation-agent-updates",
@@ -300,6 +284,20 @@ const allViews: ScreenshotEntry[] = [
       "Agent iproute2",
       "External observed",
       "Tunnel only",
+    ],
+  },
+  {
+    view: "Network",
+    subpage: "Tunnel plans",
+    heading: "New tunnel runtime adapter",
+    id: "25a-network-adapter-definition-create",
+    prepare: "network-adapter-create",
+    requiredText: [
+      "Adapter definitions",
+      "Status (required)",
+      "Start (provide Start or Restart)",
+      "Cleanup (provide Stop or Cleanup)",
+      "Advanced contract preview",
     ],
   },
   {
@@ -391,8 +389,8 @@ const allViews: ScreenshotEntry[] = [
     id: "25c-network-tunnel-plans-ospf",
     prepare: "tunnel-plan-ospf",
     requiredText: [
-      "Enable OSPF adapter workflow",
-      "Left routing adapter",
+      "Enable OSPF cost control",
+      "Left OSPF command override",
       "Control mode",
       "live preview",
     ],
@@ -452,11 +450,9 @@ const allViews: ScreenshotEntry[] = [
     subpage: "Requests",
     heading: "Backup requests",
     id: "30-backups-requests",
-    requiredText: [
-      "Backup request history",
-      "artifact-backed",
-      "Open artifact",
-    ],
+    desktopRequiredText: ["Actions"],
+    mobileRequiredText: ["Open artifact"],
+    requiredText: ["Backup request history", "artifact-backed"],
   },
   {
     view: "Backups",
@@ -542,18 +538,61 @@ const allViews: ScreenshotEntry[] = [
     heading: "Bulk patch",
     id: "37b-config-bulk-patch-preview",
     prepare: "config-bulk-patch-preview",
-    requiredText: ["1 VPS resolved", "edge-sfo-01", "Apply patch"],
+    requiredText: ["1 VPS verified", "edge-sfo-01", "Apply patch"],
   },
   {
     view: "Config",
-    subpage: "Template coverage",
-    heading: "Template coverage",
-    id: "38-config-templates",
+    subpage: "Sources",
+    heading: "Configuration sources",
+    id: "38-config-sources",
     requiredText: [
-      "Desired source",
-      "Server storage missing",
-      "Fix source",
-      "Runtime selected only",
+      "Effective configuration",
+      "Inherited system default",
+      "Explicit override",
+      "Runtime sync",
+      "Readiness",
+    ],
+  },
+  {
+    view: "Config",
+    subpage: "Sources",
+    heading: "Configuration sources",
+    id: "38a-config-assignment-drawer",
+    prepare: "configuration-assignment-drawer",
+    requiredText: [
+      "Change effective configuration",
+      "Choose behavior and preset",
+      "Targets",
+      "edge-sfo-01",
+      "core-fra-02",
+    ],
+  },
+  {
+    view: "Config",
+    subpage: "Sources",
+    heading: "Configuration sources",
+    id: "38aa-config-assignment-review",
+    prepare: "configuration-assignment-review",
+    requiredText: [
+      "Review effective configuration change",
+      "Interface traffic counters",
+      "Edge vnStat",
+      "edge-sfo-01",
+      "core-fra-02",
+    ],
+  },
+  {
+    view: "Config",
+    subpage: "Sources",
+    tab: "Configuration presets",
+    heading: "Configuration sources",
+    id: "38b-config-presets",
+    requiredText: [
+      "Configuration presets",
+      "System default",
+      "Custom",
+      "effective",
+      "explicit",
     ],
   },
   {
@@ -805,7 +844,7 @@ const allViews: ScreenshotEntry[] = [
       "recommended rather than enforced",
       "Operator accounts",
       "Policy recommends MFA",
-      "Revoke sessions",
+      "Use New or select rows, then Actions",
     ],
   },
   {
@@ -954,19 +993,30 @@ async function navigateAndScreenshot(
       const explicitOpen = row
         .getByRole("button", { name: /Open .*detail/ })
         .first();
-      await expect(explicitOpen).toBeVisible({ timeout: 5_000 });
-      await explicitOpen.click();
+      if ((await explicitOpen.count()) > 0) {
+        await explicitOpen.click();
+      } else {
+        await row.getByRole("checkbox", { name: /Select .* row/ }).check();
+        await grid
+          .locator(".gridToolbarActions")
+          .getByRole("button", { name: "Actions", exact: true })
+          .click();
+        await page
+          .getByRole("menuitem", { name: "Open detail", exact: true })
+          .click();
+      }
     } else {
       const card = grid
         .locator(".gridMobileCard", { hasText: entry.expandVpsRow })
         .first();
       await expect(card).toBeVisible({ timeout: 5_000 });
-      const explicitOpen = card.getByRole("button", { name: /Open VPS/ });
-      if ((await explicitOpen.count()) > 0) {
-        await explicitOpen.click();
-      } else {
-        await card.getByRole("button", { name: "Open", exact: true }).click();
-      }
+      const explicitOpen = card
+        .getByRole("button", {
+          name: /^(Open detail|Open VPS(?: .*)?)$/,
+        })
+        .first();
+      await expect(explicitOpen).toBeVisible({ timeout: 5_000 });
+      await explicitOpen.click();
     }
     await expect(
       page
@@ -1107,6 +1157,7 @@ async function navigateAndScreenshot(
     if (entry.prepare === "port-forward-details") {
       await page
         .getByRole("row", { name: /Public web ingress/ })
+        .getByText("Public web ingress", { exact: true })
         .click();
       await expect(
         page.getByRole("region", { name: "Details for Public web ingress" }),
@@ -1116,7 +1167,11 @@ async function navigateAndScreenshot(
       const editor = page.locator(".portForwardEditor");
       await expect(editor).toBeVisible({ timeout: 5_000 });
       if (entry.prepare === "port-forward-confirmation") {
-        await editor.locator("select").first().selectOption({ index: 1 });
+        await editor.getByLabel("Port-forward rule VPS").fill("edge-sfo");
+        await page
+          .getByRole("listbox", { name: "Port-forward rule VPS options" })
+          .getByRole("option", { name: /edge-sfo-01/ })
+          .click();
         await editor.getByLabel("Name", { exact: true }).fill("Audit web ingress");
         await editor.getByLabel("Incoming ports").fill("8443");
         await editor.getByLabel("Target ports").fill("443");
@@ -1130,23 +1185,15 @@ async function navigateAndScreenshot(
     }
   }
 
-  if (entry.prepare === "source-template-adapter-detail") {
-    const registry = page.getByLabel("Template registry data grid");
-    const adapterRow = registry
-      .locator(".gridRow, .gridMobileCard")
-      .filter({ hasText: "shared:tunnel-lifecycle-v1" })
-      .first();
-    await adapterRow.click();
-    const adapterRecord = adapterRow.locator(
-      "xpath=ancestor::div[contains(concat(' ', normalize-space(@class), ' '), ' gridRecord ')][1]",
-    );
-    const lifecycleAction = adapterRecord
-      .getByRole("button", { name: /^(Test\/update|Edit\/test)$/ })
-      .first();
-    await expect(lifecycleAction).toBeVisible({ timeout: 5_000 });
-    await lifecycleAction.click();
+  if (entry.prepare === "network-adapter-create") {
+    const registry = page.getByLabel("Network adapter definitions");
+    await registry
+      .getByRole("button", { name: "Tunnel runtime adapter" })
+      .click();
     await expect(
-      page.getByLabel("shared:tunnel-lifecycle-v1", { exact: true }),
+      page.getByRole("complementary", {
+        name: "New tunnel runtime adapter",
+      }),
     ).toBeVisible({ timeout: 5_000 });
   }
 
@@ -1170,7 +1217,7 @@ async function navigateAndScreenshot(
       .locator("tbody > tr")
       .filter({ hasText: "sfo-fra-gre" })
       .first();
-    await row.click();
+    await row.getByText("sfo-fra-gre", { exact: true }).click();
     await expect(page.locator(".tunnelConnectionAssessment")).toBeVisible({
       timeout: 5_000,
     });
@@ -1179,7 +1226,7 @@ async function navigateAndScreenshot(
   if (entry.prepare === "tunnel-plan-ospf") {
     await closeTunnelPlanWorkflow(page);
     await page.getByRole("button", { name: "Create plan" }).click();
-    await page.getByText("Enable OSPF adapter workflow").click();
+    await page.getByText("Enable OSPF cost control").click();
     await expect(
       page.getByLabel("OSPF control mode"),
     ).toBeVisible();
@@ -1187,9 +1234,14 @@ async function navigateAndScreenshot(
 
   if (entry.prepare === "tunnel-plan-disable-review") {
     await closeTunnelPlanWorkflow(page);
+    await page.getByLabel("Select sfo-fra-gre").check();
     await page
-      .getByRole("button", { name: "Disable sfo-fra-gre" })
+      .getByRole("button", {
+        name: "Actions for 1 selected tunnel plan",
+        exact: true,
+      })
       .click();
+    await page.getByRole("menuitem", { name: "Disable", exact: true }).click();
     await expect(
       page.getByLabel("Confirm tunnel plan disable"),
     ).toBeVisible({ timeout: 5_000 });
@@ -1197,9 +1249,14 @@ async function navigateAndScreenshot(
 
   if (entry.prepare === "tunnel-plan-delete-review") {
     await closeTunnelPlanWorkflow(page);
+    await page.getByLabel("Select sfo-fra-gre").check();
     await page
-      .getByRole("button", { name: "Delete sfo-fra-gre" })
+      .getByRole("button", {
+        name: "Actions for 1 selected tunnel plan",
+        exact: true,
+      })
       .click();
+    await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
     await expect(
       page.getByLabel("Confirm tunnel plan deletion"),
     ).toBeVisible({ timeout: 5_000 });
@@ -1231,7 +1288,9 @@ async function navigateAndScreenshot(
     });
     await targetPicker.fill("fra");
     await expect(
-      page.getByRole("option", { name: /core-fra-02.*agent-fra-02/ }),
+      page
+        .getByRole("listbox", { name: "VPS config target options" })
+        .getByRole("option", { name: /core-fra-02.*agent-fra-02/ }),
     ).toBeVisible({ timeout: 5_000 });
     await page.keyboard.press("Enter");
     await page.getByRole("button", { name: "Read current config" }).click();
@@ -1252,17 +1311,84 @@ async function navigateAndScreenshot(
     });
     await selector.fill("id:agent-sfo-01");
     await expect(
-      page.getByRole("option", { name: /edge-sfo-01.*agent-sfo-01/ }),
+      page
+        .getByRole("listbox", {
+          name: "Bulk patch target expression suggestions",
+        })
+        .getByRole("option", { name: /edge-sfo-01.*agent-sfo-01/ }),
     ).toBeVisible({ timeout: 5_000 });
     await page.keyboard.press("Enter");
     await page.getByRole("button", { name: "Preview changes" }).click();
-    await expect(page.getByText("1 VPS resolved")).toBeVisible({
+    await expect(page.getByText("1 VPS verified")).toBeVisible({
       timeout: 5_000,
     });
     await expect(page.getByLabel("Bulk patch change summary")).toContainText(
       "edge-sfo-01",
       { timeout: 5_000 },
     );
+  }
+
+  if (
+    entry.prepare === "configuration-assignment-drawer" ||
+    entry.prepare === "configuration-assignment-review"
+  ) {
+    const existingDrawer = page.getByRole("complementary", {
+      name: "Change effective configuration",
+    });
+    if (await existingDrawer.isVisible().catch(() => false)) {
+      await existingDrawer
+        .getByRole("button", {
+          name: "Close Change effective configuration",
+        })
+        .click();
+      await expect(existingDrawer).toHaveCount(0);
+    }
+    await unlockPrivilegeFromTop(page);
+    const panel = page.locator(".configurationSourcesPanel");
+    await panel
+      .getByRole("button", { name: "Change configuration" })
+      .click();
+    const drawer = page.getByRole("complementary", {
+      name: "Change effective configuration",
+    });
+    await drawer
+      .getByLabel("Configuration behavior")
+      .selectOption("tunnel_traffic");
+    await drawer
+      .getByLabel("Configuration preset")
+      .selectOption("11111111-1111-4111-8111-111111111111");
+    const directTarget = drawer.getByRole("combobox", {
+      name: "Add configuration target VPS",
+    });
+    await directTarget.fill("edge-sfo");
+    await page
+      .getByRole("listbox", {
+        name: "Add configuration target VPS options",
+      })
+      .getByRole("option", { name: /edge-sfo-01.*agent-sfo-01/ })
+      .click();
+    const selectorDetails = drawer.locator("details", {
+      hasText: "Add targets by selector",
+    });
+    if ((await selectorDetails.getAttribute("open")) === null) {
+      await selectorDetails.locator("summary").click();
+    }
+    await expect(selectorDetails).toHaveAttribute("open", "");
+    await drawer
+      .getByLabel("Configuration target selector")
+      .fill("country:DE");
+    await expect(drawer.getByLabel("Configuration target preview")).toContainText(
+      "edge-sfo-01",
+    );
+    await expect(drawer.getByLabel("Configuration target preview")).toContainText(
+      "core-fra-02",
+    );
+    if (entry.prepare === "configuration-assignment-review") {
+      await drawer.getByRole("button", { name: "Review change" }).click();
+      await expect(
+        page.getByLabel("Review effective configuration change"),
+      ).toBeVisible({ timeout: 5_000 });
+    }
   }
 
   if (entry.prepare === "vps-rules-preview") {

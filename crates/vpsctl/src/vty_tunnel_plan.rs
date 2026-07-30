@@ -55,11 +55,11 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
     let mut ospf_preference_bias = 1.0_f64;
     let mut ospf_min_cost = 5_u16;
     let mut ospf_max_cost = 65_535_u16;
-    let mut left_routing_adapter_template_id = None::<String>;
-    let mut right_routing_adapter_template_id = None::<String>;
+    let mut left_routing_adapter_definition_id = None::<String>;
+    let mut right_routing_adapter_definition_id = None::<String>;
     let mut runtime_manager = RuntimeTunnelManager::AgentIproute2Managed;
-    let mut left_runtime_adapter_template_id = None::<String>;
-    let mut right_runtime_adapter_template_id = None::<String>;
+    let mut left_runtime_adapter_definition_id = None::<String>;
+    let mut right_runtime_adapter_definition_id = None::<String>;
     let mut traffic_ingress_kbps = None::<u32>;
     let mut traffic_egress_kbps = None::<u32>;
     let mut traffic_burst_kb = None::<u32>;
@@ -485,26 +485,26 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
                     parse_u16(flag_value(value, "--ospf-max-cost="), "--ospf-max-cost")?;
                 index += 1;
             }
-            "--left-routing-adapter-template-id" => {
-                left_routing_adapter_template_id = Some(
-                    next_value(tokens, index, "--left-routing-adapter-template-id")?.to_string(),
+            "--left-routing-adapter-definition-id" => {
+                left_routing_adapter_definition_id = Some(
+                    next_value(tokens, index, "--left-routing-adapter-definition-id")?.to_string(),
                 );
                 index += 2;
             }
-            value if value.starts_with("--left-routing-adapter-template-id=") => {
-                left_routing_adapter_template_id =
-                    Some(flag_value(value, "--left-routing-adapter-template-id=").to_string());
+            value if value.starts_with("--left-routing-adapter-definition-id=") => {
+                left_routing_adapter_definition_id =
+                    Some(flag_value(value, "--left-routing-adapter-definition-id=").to_string());
                 index += 1;
             }
-            "--right-routing-adapter-template-id" => {
-                right_routing_adapter_template_id = Some(
-                    next_value(tokens, index, "--right-routing-adapter-template-id")?.to_string(),
+            "--right-routing-adapter-definition-id" => {
+                right_routing_adapter_definition_id = Some(
+                    next_value(tokens, index, "--right-routing-adapter-definition-id")?.to_string(),
                 );
                 index += 2;
             }
-            value if value.starts_with("--right-routing-adapter-template-id=") => {
-                right_routing_adapter_template_id =
-                    Some(flag_value(value, "--right-routing-adapter-template-id=").to_string());
+            value if value.starts_with("--right-routing-adapter-definition-id=") => {
+                right_routing_adapter_definition_id =
+                    Some(flag_value(value, "--right-routing-adapter-definition-id=").to_string());
                 index += 1;
             }
             "--runtime-manager" => {
@@ -516,26 +516,26 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
                 runtime_manager = parse_runtime_manager(flag_value(value, "--runtime-manager="))?;
                 index += 1;
             }
-            "--left-runtime-adapter-template-id" => {
-                left_runtime_adapter_template_id = Some(
-                    next_value(tokens, index, "--left-runtime-adapter-template-id")?.to_string(),
+            "--left-runtime-adapter-definition-id" => {
+                left_runtime_adapter_definition_id = Some(
+                    next_value(tokens, index, "--left-runtime-adapter-definition-id")?.to_string(),
                 );
                 index += 2;
             }
-            value if value.starts_with("--left-runtime-adapter-template-id=") => {
-                left_runtime_adapter_template_id =
-                    Some(flag_value(value, "--left-runtime-adapter-template-id=").to_string());
+            value if value.starts_with("--left-runtime-adapter-definition-id=") => {
+                left_runtime_adapter_definition_id =
+                    Some(flag_value(value, "--left-runtime-adapter-definition-id=").to_string());
                 index += 1;
             }
-            "--right-runtime-adapter-template-id" => {
-                right_runtime_adapter_template_id = Some(
-                    next_value(tokens, index, "--right-runtime-adapter-template-id")?.to_string(),
+            "--right-runtime-adapter-definition-id" => {
+                right_runtime_adapter_definition_id = Some(
+                    next_value(tokens, index, "--right-runtime-adapter-definition-id")?.to_string(),
                 );
                 index += 2;
             }
-            value if value.starts_with("--right-runtime-adapter-template-id=") => {
-                right_runtime_adapter_template_id =
-                    Some(flag_value(value, "--right-runtime-adapter-template-id=").to_string());
+            value if value.starts_with("--right-runtime-adapter-definition-id=") => {
+                right_runtime_adapter_definition_id =
+                    Some(flag_value(value, "--right-runtime-adapter-definition-id=").to_string());
                 index += 1;
             }
             "--traffic-ingress-kbps" => {
@@ -686,20 +686,14 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
             },
             min_cost_delta: ospf_min_cost_delta,
             healthy_windows: ospf_healthy_windows,
-            left_adapter_template_id: required(
-                left_routing_adapter_template_id,
-                "--left-routing-adapter-template-id",
-            )?,
-            right_adapter_template_id: required(
-                right_routing_adapter_template_id,
-                "--right-routing-adapter-template-id",
-            )?,
+            left_adapter_definition_id: left_routing_adapter_definition_id,
+            right_adapter_definition_id: right_routing_adapter_definition_id,
         })
     } else {
         anyhow::ensure!(
             ospf_latency_ms.is_none()
-                && left_routing_adapter_template_id.is_none()
-                && right_routing_adapter_template_id.is_none(),
+                && left_routing_adapter_definition_id.is_none()
+                && right_routing_adapter_definition_id.is_none(),
             "OSPF options require --ospf"
         );
         None
@@ -710,8 +704,8 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
         kind: required(kind, "--kind")?,
         runtime_control: build_runtime_control(RuntimeControlArgs {
             manager: runtime_manager,
-            left_adapter_template_id: left_runtime_adapter_template_id.as_deref(),
-            right_adapter_template_id: right_runtime_adapter_template_id.as_deref(),
+            left_adapter_definition_id: left_runtime_adapter_definition_id.as_deref(),
+            right_adapter_definition_id: right_runtime_adapter_definition_id.as_deref(),
             traffic_ingress_kbps,
             traffic_egress_kbps,
             traffic_burst_kb,
@@ -1088,8 +1082,8 @@ mod tests {
             "--right-tunnel-ipv4-cidr=10.255.10.1/31",
             "--bandwidth-mbps=100",
             "--runtime-manager=adapter",
-            "--left-runtime-adapter-template-id=11111111-1111-4111-8111-111111111111",
-            "--right-runtime-adapter-template-id=22222222-2222-4222-8222-222222222222",
+            "--left-runtime-adapter-definition-id=11111111-1111-4111-8111-111111111111",
+            "--right-runtime-adapter-definition-id=22222222-2222-4222-8222-222222222222",
             "--traffic-egress-kbps=100000",
             "--traffic-burst-kb=4096",
         ])
@@ -1104,7 +1098,7 @@ mod tests {
             request
                 .input
                 .runtime_control
-                .left_adapter_template_id
+                .left_adapter_definition_id
                 .as_deref(),
             Some("11111111-1111-4111-8111-111111111111")
         );
@@ -1112,7 +1106,7 @@ mod tests {
             request
                 .input
                 .runtime_control
-                .right_adapter_template_id
+                .right_adapter_definition_id
                 .as_deref(),
             Some("22222222-2222-4222-8222-222222222222")
         );
@@ -1149,8 +1143,8 @@ mod tests {
             "--ospf-preference-bias=0.8",
             "--ospf-min-cost=8",
             "--ospf-max-cost=64000",
-            "--left-routing-adapter-template-id=33333333-3333-4333-8333-333333333333",
-            "--right-routing-adapter-template-id=44444444-4444-4444-8444-444444444444",
+            "--left-routing-adapter-definition-id=33333333-3333-4333-8333-333333333333",
+            "--right-routing-adapter-definition-id=44444444-4444-4444-8444-444444444444",
         ])
         .unwrap();
 

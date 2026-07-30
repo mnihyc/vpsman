@@ -51,7 +51,7 @@ impl Repository {
             .await?;
         let trends = summarize_network_observation_trends(&observations);
         let mut telemetry = self
-            .list_declared_telemetry_tunnels_for_source_status_clients(&endpoint_client_ids)
+            .list_declared_telemetry_tunnels_for_clients(&endpoint_client_ids)
             .await?;
         telemetry.retain(|record| {
             record

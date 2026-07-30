@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -27,6 +27,7 @@ import type {
   AuditLogRecord,
   BackupArtifactRecord,
   BackupRequestRecord,
+  ConfigurationSourceView,
   FleetAlertRecord,
   FleetAlertPolicyRecord,
   FleetSummary,
@@ -35,8 +36,6 @@ import type {
   NetworkObservationTrendRecord,
   PolicyAlertRecord,
   RuntimeConfigApplyStateRecord,
-  SourceStatusRecord,
-  SourceTemplateAssignmentRecord,
   TelemetryNetworkRateRecord,
   TelemetryRollupRecord,
   TelemetryTunnelRecord,
@@ -97,6 +96,7 @@ type VpsDetailPanelProps = {
   onOpenInstances: () => void;
   onOpenJob: (jobId: string) => void;
   onOpenJobs: () => void;
+  onLoadConfigurationSources: () => Promise<void>;
   onOpenNetwork: (agent: AgentView) => void;
   onOpenNetworkEvidence: (agent: AgentView) => void;
   onOpenProcesses: (agent: AgentView) => void;
@@ -104,8 +104,7 @@ type VpsDetailPanelProps = {
   policyAlerts: PolicyAlertRecord[];
   runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
   runtimeConfigEvidenceState: "available" | "loading" | "unavailable";
-  sourceStatus: SourceStatusRecord[];
-  sourceTemplateAssignments: SourceTemplateAssignmentRecord[];
+  configurationSources: ConfigurationSourceView[];
   summary: FleetSummary;
   telemetryNetworkRates: TelemetryNetworkRateRecord[];
   telemetryRollups: TelemetryRollupRecord[];
@@ -151,6 +150,7 @@ export function VpsDetailPanel({
   onOpenInstances,
   onOpenJob,
   onOpenJobs,
+  onLoadConfigurationSources,
   onOpenNetwork,
   onOpenNetworkEvidence,
   onOpenProcesses,
@@ -158,14 +158,34 @@ export function VpsDetailPanel({
   policyAlerts,
   runtimeConfigApplyStates,
   runtimeConfigEvidenceState,
-  sourceStatus,
-  sourceTemplateAssignments,
+  configurationSources,
   telemetryNetworkRates,
   telemetryRollups,
   telemetryTunnels,
   vpsRuleValues,
 }: VpsDetailPanelProps) {
   const [activeTab, setActiveTab] = useState<VpsDetailTab>("Summary");
+  const [sourceLoadError, setSourceLoadError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!agent) {
+      setSourceLoadError(null);
+      return;
+    }
+    let active = true;
+    setSourceLoadError(null);
+    void onLoadConfigurationSources().catch((error) => {
+      if (active) {
+        setSourceLoadError(
+          error instanceof Error
+            ? `Configuration sources: ${error.message}`
+            : "Configuration sources are unavailable",
+        );
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [agent, onLoadConfigurationSources]);
   const related = useMemo(
     () =>
       agent
@@ -185,8 +205,7 @@ export function VpsDetailPanel({
               runtimeConfigEvidenceState === "available"
                 ? runtimeConfigApplyStates
                 : [],
-            sourceStatus,
-            sourceTemplateAssignments,
+            configurationSources,
             telemetryNetworkRates,
             telemetryRollups,
             telemetryTunnels,
@@ -207,8 +226,7 @@ export function VpsDetailPanel({
       policyAlerts,
       runtimeConfigApplyStates,
       runtimeConfigEvidenceState,
-      sourceStatus,
-      sourceTemplateAssignments,
+      configurationSources,
       telemetryNetworkRates,
       telemetryRollups,
       telemetryTunnels,
@@ -229,7 +247,7 @@ export function VpsDetailPanel({
           </div>
           <ActionFeedback
             className="localActionFeedback"
-            message={apiError}
+            message={apiError ?? sourceLoadError}
             tone="danger"
           />
           <div className="emptyState">
@@ -305,7 +323,7 @@ export function VpsDetailPanel({
 
         <ActionFeedback
           className="localActionFeedback vpsDetailActionFeedback"
-          message={apiError}
+          message={apiError ?? sourceLoadError}
           tone="danger"
         />
 
@@ -714,7 +732,12 @@ function ConfigTab({
     related,
     runtimeConfigEvidenceState,
   );
-  const sourceIssueRows = sourceRowsNeedingAttention(related.sourceStatus);
+  const sourceIssueRows = sourceRowsNeedingAttention(
+    related.configurationSources,
+  );
+  const sourceReadyRows = related.configurationSources.filter(
+    sourceRowIsReady,
+  );
   const applyState = related.runtimeApplyState;
 
   return (
@@ -731,7 +754,7 @@ function ConfigTab({
       <div className="vpsConfigActions" aria-label="VPS config actions">
         <button className="primaryAction compactAction" onClick={onOpenConfig} type="button">
           <FileCog size={14} />
-          <span>Open config</span>
+          <span>Open per-VPS config</span>
         </button>
         <button
           className="secondaryAction compactAction"
@@ -754,24 +777,38 @@ function ConfigTab({
       </div>
       <div className="vpsDetailGrid">
         <DetailBlock title="Source readiness" icon={<Boxes size={18} />}>
-          {related.sourceAssignments.length === 0 && related.sourceStatus.length === 0 ? (
-            <DetailState loading={loading} title="No source-template evidence" detail="No assignment or readiness records are loaded for this VPS." />
+          {related.configurationSources.length === 0 ? (
+            <DetailState loading={loading} title="No configuration source evidence" detail="No effective preset, sync, or readiness records are loaded for this VPS." />
           ) : (
             <>
               {sourceIssueRows.length > 0 ? (
-                sourceIssueRows.slice(0, 3).map((record) => (
-                  <span className="vpsDetailRecord static warning" key={`issue:${record.domain}:${record.module}:${record.template_id}`}>
-                    <strong>{record.module || readableDetailToken(record.domain)}</strong>
-                    <span>{sourceReadinessStatusLabel(record.status)} · {sourceReadinessReasonLabel(record)}</span>
+                sourceIssueRows.map((record) => (
+                  <span className="vpsDetailRecord static warning" key={`issue:${record.behavior}:${record.effective_preset_id}`}>
+                    <strong>{readableDetailToken(record.behavior)}</strong>
+                    <span>{sourceReadinessStatusLabel(record.readiness.state)} · {sourceReadinessReasonLabel(record)}</span>
                   </span>
                 ))
               ) : (
-                <DetailState loading={loading} title="Sources ready" detail="Loaded source assignments have no readiness blockers." />
+                <DetailState
+                  loading={loading}
+                  title={
+                    sourceReadyRows.length ===
+                    related.configurationSources.length
+                      ? "Sources verified ready"
+                      : "No source blockers"
+                  }
+                  detail={
+                    sourceReadyRows.length ===
+                    related.configurationSources.length
+                      ? "All loaded effective sources are synced and verified ready."
+                      : `${sourceReadyRows.length} of ${related.configurationSources.length} loaded sources are verified ready; offline or unverified sources remain neutral.`
+                  }
+                />
               )}
-              {related.sourceStatus.slice(0, 4).map((record) => (
-                <span className="vpsDetailRecord static" key={`status:${record.domain}:${record.module}:${record.template_id}`}>
-                  <strong>{record.domain} · {record.module}</strong>
-                  <span>{sourceReadinessStatusLabel(record.status)} · {sourceReadinessReasonLabel(record)}</span>
+              {related.configurationSources.map((record) => (
+                <span className="vpsDetailRecord static" key={`status:${record.behavior}:${record.effective_preset_id}`}>
+                  <strong>{readableDetailToken(record.behavior)}</strong>
+                  <span>{record.effective_preset_name} · {record.selection_origin === "explicit_override" ? "explicit override" : "inherited system default"}</span>
                 </span>
               ))}
             </>
@@ -782,8 +819,8 @@ function ConfigTab({
             label="Runtime tunnels"
             value={agent.capabilities.can_manage_runtime_tunnels ? "Supported" : "Not reported"}
           />
-          <VpsFact label="Source assignments" value={String(related.sourceAssignments.length)} />
-          <VpsFact label="Readiness records" value={String(related.sourceStatus.length)} />
+          <VpsFact label="Effective sources" value={String(related.configurationSources.length)} />
+          <VpsFact label="Explicit overrides" value={String(related.configurationSources.filter((source) => source.selection_origin === "explicit_override").length)} />
           <VpsFact label="VPS rules" value={String(related.vpsRules.length)} />
           <VpsFact
             label="Last apply"
@@ -822,14 +859,14 @@ function ConfigTab({
           <details className="vpsDetailDisclosure">
             <summary>Raw source state details</summary>
             <div>
-              {related.sourceStatus.length === 0 ? (
-                <span>No raw source readiness records loaded.</span>
+              {related.configurationSources.length === 0 ? (
+                <span>No raw configuration source records loaded.</span>
               ) : (
-                related.sourceStatus.map((record) => (
-                  <span key={`raw:${record.domain}:${record.module}:${record.template_id}`}>
-                    <strong>{record.domain}</strong>
-                    <code>{record.status}</code>
-                    <small>{record.status_reason}</small>
+                related.configurationSources.map((record) => (
+                  <span key={`raw:${record.behavior}:${record.effective_preset_id}`}>
+                    <strong>{record.behavior}</strong>
+                    <code>{record.runtime_sync.state}</code>
+                    <small>{record.runtime_sync.reason} · {record.readiness.reason}</small>
                   </span>
                 ))
               )}
@@ -1251,8 +1288,7 @@ function buildVpsDetailContext({
   networkTrends,
   policyAlerts,
   runtimeConfigApplyStates,
-  sourceStatus,
-  sourceTemplateAssignments,
+  configurationSources,
   telemetryNetworkRates,
   telemetryRollups,
   telemetryTunnels,
@@ -1270,8 +1306,7 @@ function buildVpsDetailContext({
   networkTrends: NetworkObservationTrendRecord[];
   policyAlerts: PolicyAlertRecord[];
   runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
-  sourceStatus: SourceStatusRecord[];
-  sourceTemplateAssignments: SourceTemplateAssignmentRecord[];
+  configurationSources: ConfigurationSourceView[];
   telemetryNetworkRates: TelemetryNetworkRateRecord[];
   telemetryRollups: TelemetryRollupRecord[];
   telemetryTunnels: TelemetryTunnelRecord[];
@@ -1317,8 +1352,9 @@ function buildVpsDetailContext({
   const tunnels = telemetryTunnels
     .filter((tunnel) => tunnel.client_id === clientId || tunnel.peer_client_id === clientId)
     .sort(newestFirst((tunnel) => tunnel.observed_at));
-  const sourceAssignments = sourceTemplateAssignments.filter((assignment) => assignment.client_id === clientId);
-  const sourceStatusRows = sourceStatus.filter((row) => row.client_id === clientId);
+  const relatedConfigurationSources = configurationSources.filter(
+    (source) => source.client_id === clientId,
+  );
   const vpsRules = vpsRuleValues.filter((rule) => rule.client_id === clientId);
   const relatedArtifacts = backupArtifacts
     .filter((artifact) => artifact.client_id === clientId)
@@ -1398,8 +1434,7 @@ function buildVpsDetailContext({
     relatedJobs,
     rollup,
     runtimeApplyState,
-    sourceAssignments,
-    sourceStatus: sourceStatusRows,
+    configurationSources: relatedConfigurationSources,
     tunnels,
     vpsRules,
   };
@@ -1427,7 +1462,15 @@ function buildConfigPosture(
   related: VpsDetailContext,
   runtimeConfigEvidenceState: "available" | "loading" | "unavailable",
 ): ConfigPostureItem[] {
-  const sourceIssues = sourceRowsNeedingAttention(related.sourceStatus);
+  const sourceIssues = sourceRowsNeedingAttention(
+    related.configurationSources,
+  );
+  const sourceReadyCount = related.configurationSources.filter(
+    sourceRowIsReady,
+  ).length;
+  const allSourcesReady =
+    related.configurationSources.length > 0 &&
+    sourceReadyCount === related.configurationSources.length;
   const ruleErrors = related.vpsRules.flatMap((rule) => rule.validation_errors);
   const applyState = related.runtimeApplyState;
   const applyEvidenceDetail =
@@ -1444,35 +1487,49 @@ function buildConfigPosture(
         )
       : null) ||
     ruleErrors[0] ||
-    sourceIssues[0]?.status_reason ||
+    (sourceIssues[0]
+      ? sourceReadinessReasonLabel(sourceIssues[0])
+      : null) ||
     null;
   return [
     {
       detail:
-        related.sourceAssignments.length > 0
-          ? sourceDomainSummary(related.sourceAssignments.map((assignment) => assignment.domain))
-          : related.sourceStatus.length > 0
-            ? sourceDomainSummary(related.sourceStatus.map((status) => status.domain))
-            : "No assignment evidence loaded",
-      label: "Desired source",
-      tone: related.sourceAssignments.length > 0 || related.sourceStatus.length > 0 ? "info" : "neutral",
+        related.configurationSources.length > 0
+          ? sourceDomainSummary(
+              related.configurationSources.map((source) => source.behavior),
+            )
+          : "No effective source evidence loaded",
+      label: "Effective sources",
+      tone:
+        related.configurationSources.length > 0 ? "info" : "neutral",
       value:
-        related.sourceAssignments.length > 0
-          ? `${related.sourceAssignments.length} selected`
-          : related.sourceStatus.length > 0
-            ? `${related.sourceStatus.length} reported`
-            : "Not selected",
+        related.configurationSources.length > 0
+          ? `${related.configurationSources.length} behaviors`
+          : "Unknown",
     },
     {
       detail:
         sourceIssues[0] !== undefined
           ? sourceReadinessReasonLabel(sourceIssues[0])
-          : related.sourceStatus.length > 0
-            ? "Loaded source readiness has no blockers"
-            : "No readiness records loaded",
-      label: "Render status",
-      tone: sourceIssues.length > 0 ? "warning" : related.sourceStatus.length > 0 ? "ok" : "neutral",
-      value: sourceIssues.length > 0 ? "Needs configuration" : related.sourceStatus.length > 0 ? "Ready" : "Unknown",
+          : allSourcesReady
+            ? "All loaded effective sources are synced and verified ready"
+            : related.configurationSources.length > 0
+              ? `${sourceReadyCount} of ${related.configurationSources.length} loaded sources are verified ready; offline or unverified sources remain neutral`
+              : "No readiness records loaded",
+      label: "Source state",
+      tone:
+        sourceIssues.length > 0
+          ? "warning"
+          : allSourcesReady
+            ? "ok"
+            : "neutral",
+      value: sourceIssues.length > 0
+        ? "Needs attention"
+        : allSourcesReady
+          ? "Ready"
+          : related.configurationSources.length > 0
+            ? "Not verified"
+            : "Unknown",
     },
     {
       detail: applyEvidenceKnown
@@ -1537,38 +1594,48 @@ function buildConfigPosture(
   ];
 }
 
-function sourceRowsNeedingAttention(rows: SourceStatusRecord[]): SourceStatusRecord[] {
-  return rows.filter((row) => !sourceReadinessIsOk(row.status));
+function sourceRowsNeedingAttention(
+  rows: ConfigurationSourceView[],
+): ConfigurationSourceView[] {
+  return rows.filter(
+    (row) =>
+      ["failed", "stale"].includes(row.runtime_sync.state) ||
+      ["degraded", "failed", "invalid"].includes(row.readiness.state),
+  );
 }
 
-function sourceReadinessIsOk(status: string): boolean {
-  return ["ok", "ready", "ready_on_demand", "selected", "selected_workflow", "metadata_only"].includes(status);
+function sourceRowIsReady(row: ConfigurationSourceView): boolean {
+  return (
+    row.runtime_sync.state === "applied" &&
+    row.readiness.state === "ready"
+  );
 }
 
 function sourceReadinessStatusLabel(status: string): string {
   const labels: Record<string, string> = {
-    agent_offline: "Agent offline",
     degraded: "Degraded",
-    metadata_only: "Metadata only",
-    ok: "Ready",
+    failed: "Failed",
+    invalid: "Invalid",
     ready: "Ready",
-    ready_on_demand: "Ready on demand",
-    selected: "Selected",
-    selected_no_artifacts: "Selected; no artifacts",
-    selected_no_limits: "Selected; no limits",
-    selected_no_samples: "Selected; no samples",
-    selected_no_store: "Selected; storage unavailable",
-    selected_workflow: "Selected workflow",
-    unknown_domain: "Unknown domain",
+    unavailable: "VPS offline",
+    unverified: "Not verified",
   };
   return labels[status] ?? readableDetailToken(status);
 }
 
-function sourceReadinessReasonLabel(record: SourceStatusRecord): string {
-  if (record.status === "selected_no_store") {
-    return "Backup object-store source selected; server storage is not configured.";
+function sourceReadinessReasonLabel(
+  record: ConfigurationSourceView,
+): string {
+  if (["failed", "stale"].includes(record.runtime_sync.state)) {
+    return sentenceCase(
+      record.runtime_sync.reason ||
+        `Runtime sync ${record.runtime_sync.state}`,
+    );
   }
-  return sentenceCase(record.status_reason || sourceReadinessStatusLabel(record.status));
+  return sentenceCase(
+    record.readiness.reason ||
+      sourceReadinessStatusLabel(record.readiness.state),
+  );
 }
 
 function sourceDomainSummary(domains: string[]): string {

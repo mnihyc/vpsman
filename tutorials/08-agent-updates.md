@@ -36,8 +36,9 @@ The direct `agent_update` command is the permanent recovery path. It always
 uses the v1 command contract containing the complete HTTPS artifact URL and
 SHA-256 digest. Future incompatible update behavior must use a new command
 variant; required fields must never be added to the existing update variants.
-The published `version.json` schema 2 fields needed by existing agents are also
-additive-only. This keeps these two orders valid:
+Published `version.json` schema 3 retains the schema-2 fields needed by
+existing agents, and those fields are additive-only. This keeps these two
+orders valid:
 
 - Control plane first: old agents continue telemetry and supported jobs; newer
   command versions are visibly rejected until those agents are updated.
@@ -55,7 +56,7 @@ identity or gateway trust settings.
 
 Operators can enable or disable autonomous updates from the dashboard under
 Config > Bulk patch with the built-in updater patch generators.
-These templates are ordinary operator-managed records once cloned: they can be
+These generators are ordinary operator-managed records once cloned: they can be
 edited, reused for bulk patch review, or deleted if they are operator-managed.
 The CLI can apply the same setting with an incremental config patch:
 

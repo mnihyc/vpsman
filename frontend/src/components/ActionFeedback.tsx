@@ -13,17 +13,20 @@ const toneClass: Record<ActionFeedbackTone, string> = {
   warning: "actionFeedbackWarning",
 };
 
-export function ActionFeedback({
-  className,
-  id,
-  message,
-  tone = "info",
-}: {
+export const ActionFeedback = forwardRef<HTMLDivElement, {
   className?: string;
   id?: string;
   message: string | null | undefined;
   tone?: ActionFeedbackTone;
-}) {
+}>(function ActionFeedback(
+  {
+    className,
+    id,
+    message,
+    tone = "info",
+  },
+  ref,
+) {
   if (!message) {
     return null;
   }
@@ -34,9 +37,11 @@ export function ActionFeedback({
       aria-live={ariaLive}
       className={`authNotice actionFeedback ${toneClass[tone]}${className ? ` ${className}` : ""}`}
       id={id}
+      ref={ref}
       role={role}
     >
       <span>{message}</span>
     </div>
   );
-}
+});
+import { forwardRef } from "react";

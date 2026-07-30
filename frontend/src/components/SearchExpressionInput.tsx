@@ -33,6 +33,7 @@ type SearchExpressionInputProps = {
   agents?: AgentView[];
   ariaLabel: string;
   className?: string;
+  disabled?: boolean;
   inputId?: string;
   inputRef?: Ref<HTMLElement>;
   onChange: (value: string) => void;
@@ -50,6 +51,7 @@ export function SearchExpressionInput({
   agents,
   ariaLabel,
   className = "",
+  disabled = false,
   inputId,
   inputRef,
   onChange,
@@ -91,6 +93,7 @@ export function SearchExpressionInput({
   const showVisibleMeta = Boolean(showMatchCount && agents);
   const showMeta = showVisibleMeta || Boolean(verificationMessage);
   const autocompleteVisible =
+    !disabled &&
     focused &&
     autocompleteOpen &&
     visibleSuggestions.length > 0 &&
@@ -138,22 +141,47 @@ export function SearchExpressionInput({
       const gap = 4;
       const viewportWidth = window.innerWidth;
       const viewportHeight = window.innerHeight;
-      const below = viewportHeight - rect.bottom - margin;
-      const above = rect.top - margin;
-      const openAbove = below < 178 && above > below;
-      const available = Math.max(openAbove ? above : below, 120);
-      const maxHeight = Math.min(240, available);
-      const width = Math.max(rect.width, 180);
+      if (
+        rect.bottom <= margin ||
+        rect.top >= viewportHeight - margin ||
+        rect.right <= margin ||
+        rect.left >= viewportWidth - margin
+      ) {
+        setAutocompleteOpen(false);
+        return;
+      }
+      const below = Math.max(0, viewportHeight - rect.bottom - gap - margin);
+      const above = Math.max(0, rect.top - gap - margin);
+      const requiredHeight = Math.min(
+        240,
+        Math.max(40, visibleSuggestions.length * 42 + 8),
+      );
+      const openAbove = below < requiredHeight && above > below;
+      const available = openAbove ? above : below;
+      const maxHeight = Math.min(
+        240,
+        available,
+        Math.max(0, viewportHeight - margin * 2),
+      );
+      const width = Math.min(
+        Math.max(rect.width, 180),
+        Math.max(0, viewportWidth - margin * 2),
+      );
       const left = Math.min(
         Math.max(rect.left, margin),
         Math.max(margin, viewportWidth - width - margin),
       );
       setAutocompleteStyle({
+        ...(openAbove
+          ? { bottom: Math.max(viewportHeight - rect.top + gap, margin) }
+          : {
+              top: Math.min(
+                Math.max(rect.bottom + gap, margin),
+                Math.max(margin, viewportHeight - maxHeight - margin),
+              ),
+            }),
         left,
         maxHeight,
-        top: openAbove
-          ? Math.max(margin, rect.top - maxHeight - gap)
-          : Math.min(viewportHeight - margin, rect.bottom + gap),
         width,
       });
     };
@@ -164,7 +192,12 @@ export function SearchExpressionInput({
       window.removeEventListener("resize", updateAutocompletePosition);
       window.removeEventListener("scroll", updateAutocompletePosition, true);
     };
-  }, [autocompleteVisible, completion.filtered.length, completion.fragment]);
+  }, [
+    autocompleteVisible,
+    completion.filtered.length,
+    completion.fragment,
+    visibleSuggestions.length,
+  ]);
 
   useEffect(() => {
     setCaretIndex((current) => Math.min(current, value.length));
@@ -339,11 +372,15 @@ export function SearchExpressionInput({
 
   return (
     <div
+      aria-disabled={disabled}
       className={`searchExpressionInput ${className} ${verification} ${focused ? "editing" : "previewing"} ${
         hasTokens ? "hasTokens" : "empty"
-      }`.trim()}
+      } ${disabled ? "disabled" : ""}`.trim()}
       ref={containerRef}
       onMouseDown={(event) => {
+        if (disabled) {
+          return;
+        }
         if (event.target === event.currentTarget) {
           event.preventDefault();
           editorRef.current?.focus();
@@ -357,6 +394,9 @@ export function SearchExpressionInput({
             className="searchExpressionPreview"
             ref={previewRef}
             onMouseDown={(event) => {
+              if (disabled) {
+                return;
+              }
               if ((event.target as Element).closest("button")) {
                 return;
               }
@@ -367,6 +407,7 @@ export function SearchExpressionInput({
             {displayTokens.map((token, index) => (
               <TokenFragment
                 agents={agents}
+                disabled={disabled}
                 expression={value}
                 key={`${token.start}-${token.end}-${token.raw}`}
                 onChange={onChange}
@@ -393,6 +434,7 @@ export function SearchExpressionInput({
           autoComplete="off"
           autoCorrect="off"
           className="searchExpressionEditor"
+          disabled={disabled}
           id={inputId}
           onBlur={() =>
             window.setTimeout(() => {
@@ -427,6 +469,7 @@ export function SearchExpressionInput({
       {autocompleteVisible && autocompleteStyle
         ? createPortal(
           <div
+            aria-label={`${ariaLabel} suggestions`}
             className="searchExpressionAutocomplete"
             id={autocompleteId}
             ref={menuRef}
@@ -475,12 +518,14 @@ export function SearchExpressionInput({
 
 function TokenFragment({
   agents,
+  disabled,
   expression,
   onChange,
   token,
   trailingSpace,
 }: {
   agents?: AgentView[];
+  disabled: boolean;
   expression: string;
   onChange: (value: string) => void;
   token: DisplayToken;
@@ -488,7 +533,13 @@ function TokenFragment({
 }) {
   return (
     <>
-      <SearchExpressionTokenView agents={agents} expression={expression} onChange={onChange} token={token} />
+      <SearchExpressionTokenView
+        agents={agents}
+        disabled={disabled}
+        expression={expression}
+        onChange={onChange}
+        token={token}
+      />
       {trailingSpace ? " " : null}
     </>
   );
@@ -496,11 +547,13 @@ function TokenFragment({
 
 function SearchExpressionTokenView({
   agents,
+  disabled,
   expression,
   onChange,
   token,
 }: {
   agents?: AgentView[];
+  disabled: boolean;
   expression: string;
   onChange: (value: string) => void;
   token: DisplayToken;
@@ -514,6 +567,7 @@ function SearchExpressionTokenView({
       <button
         aria-label={`Remove ${token.raw}`}
         contentEditable={false}
+        disabled={disabled}
         onClick={(event) => {
           event.preventDefault();
           event.stopPropagation();

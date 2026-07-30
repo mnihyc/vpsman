@@ -80,7 +80,7 @@ test("captures network telemetry placements", async ({ page }, testInfo) => {
     graphPanel.getByText("Why OSPF cost changed", { exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("table", { name: "OSPF adapter update plans" }),
+    page.getByLabel("OSPF updater plans data grid"),
   ).toHaveCount(0);
   await capture(page, page.locator("main.content"), outputDir, manifest, "topology-graph");
 

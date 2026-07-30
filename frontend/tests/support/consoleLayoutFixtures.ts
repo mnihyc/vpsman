@@ -1,8 +1,9 @@
 import type { Page } from "@playwright/test";
 import {
-  sourceTemplateAssignments,
-  sourceTemplates,
-} from "./sourceTemplateFixtures";
+  configurationPresets,
+  configurationSources,
+  networkAdapterDefinitions,
+} from "./configurationSourceFixtures";
 import {
   fileTransferSourceArtifacts,
   fileTransfers,
@@ -13,11 +14,14 @@ import { JOB_COMMAND_TYPE_BY_OPERATION_TYPE } from "../../src/generated/protocol
 import type {
   AuditLogRecord,
   BackupPolicyRecord,
+  ConfigurationBehavior,
+  ConfigurationPresetRecord,
   FleetAlertNotificationChannelRecord,
   HostPackageUpdatePlanRecord,
   HostServiceInventoryRecord,
   HostStorageInventoryRecord,
   JobRolloutRecord,
+  NetworkAdapterDefinitionRecord,
   OperatorAuthEventRecord,
   ScheduleRecord,
 } from "../../src/types";
@@ -1043,7 +1047,10 @@ const portForwardRules = [
     id: "4f000000-0000-4000-8000-000000000001",
     mappings: [
       { incoming: { end: 80, start: 80 }, target: { end: 8080, start: 8080 } },
-      { incoming: { end: 443, start: 443 }, target: { end: 8443, start: 8443 } },
+      {
+        incoming: { end: 443, start: 443 },
+        target: { end: 8443, start: 8443 },
+      },
     ],
     masquerade: true,
     name: "Public web ingress",
@@ -1192,12 +1199,11 @@ const fleetAlerts = [
     title: "Agent is not online",
   },
   {
-    category: "source_readiness",
+    category: "backup",
     client_id: "agent-sfo-01",
-    detail:
-      "Backup object store: backup object-store template is selected, but no server object store is configured",
-    evidence: { domain: "backup_object_store" },
-    id: "fleet-alert-source-agent-sfo-01-backup",
+    detail: "backup request fixture-backup-01 is execution_failed",
+    evidence: { include_config: true, paths: ["/etc"] },
+    id: "fleet-alert-backup-agent-sfo-01",
     observed_at: "2026-06-02T10:00:00Z",
     operator_state: "acknowledged",
     severity: "warning",
@@ -1206,10 +1212,10 @@ const fleetAlerts = [
     state_actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
     state_reason: "fixture acknowledgement",
     state_updated_at: "2026-06-02T10:00:10Z",
-    status: "selected_no_store",
-    target_id: "agent-sfo-01:backup_object_store",
-    target_kind: "source_template",
-    title: "Selected source template needs attention",
+    status: "execution_failed",
+    target_id: "fixture-backup-01",
+    target_kind: "backup_request",
+    title: "Backup request failed",
   },
   {
     category: "traffic",
@@ -1242,7 +1248,7 @@ const fleetAlerts = [
 const fleetAlertStates = [
   {
     action: "acknowledge",
-    alert_id: "fleet-alert-source-agent-sfo-01-backup",
+    alert_id: "fleet-alert-backup-agent-sfo-01",
     created_at: "2026-06-02T10:00:10Z",
     created_by: "99999999-aaaa-4bbb-8ccc-000000000001",
     expires_at: null,
@@ -1884,7 +1890,8 @@ function hostProcessInventory(clientId: string) {
         uid: 0,
       },
       {
-        command: "/usr/bin/node /srv/dashboard/server.js --listen 127.0.0.1:3000",
+        command:
+          "/usr/bin/node /srv/dashboard/server.js --listen 127.0.0.1:3000",
         name: "node",
         pid: 4_242,
         ppid: 1,
@@ -2191,94 +2198,6 @@ export function hostPackageUpdatePlans(): HostPackageUpdatePlanRecord[] {
     },
   ];
 }
-
-const sourceStatus = [
-  {
-    assigned_at: "2026-06-02T10:00:00Z",
-    client_id: "agent-sfo-01",
-    client_status: "online",
-    display_name: "edge-sfo-01",
-    domain: "runtime_traffic_accounting_source",
-    evidence: {
-      interface: "eth0",
-      sample_count: 3,
-      source: "vnstat",
-      traffic_status: "ok",
-    },
-    module: "Traffic",
-    template_id: "11111111-1111-4111-8111-111111111111",
-    template_name: "shared:vnstat-json",
-    template_scope: "shared",
-    source_kind: "vnstat",
-    status: "ok",
-    status_reason:
-      "latest traffic samples are available from the source template",
-  },
-  {
-    assigned_at: "2026-06-02T10:00:00Z",
-    client_id: "agent-fra-02",
-    client_status: "online",
-    display_name: "core-fra-02",
-    domain: "runtime_traffic_accounting_source",
-    evidence: {
-      interface: "tun0",
-      sample_count: 1,
-      source: "telemetry_reported_tunnel",
-      traffic_status: "ok",
-    },
-    module: "Traffic",
-    template_id: "00000000-0000-4000-8000-000000000002",
-    template_name: "builtin:interface_counters",
-    template_scope: "built_in",
-    source_kind: "interface_counters",
-    status: "ok",
-    status_reason:
-      "latest interface counters are available from the source template",
-  },
-  {
-    assigned_at: "2026-06-02T10:00:00Z",
-    client_id: "agent-sfo-01",
-    client_status: "online",
-    display_name: "edge-sfo-01",
-    domain: "backup_object_store",
-    evidence: {
-      artifact_count: 2,
-      continuous_status: false,
-      server_object_store_configured: false,
-      server_object_store_kind: null,
-      workflow: "backup_artifacts",
-    },
-    module: "Backup object store",
-    template_id: "00000000-0000-4000-8000-000000000009",
-    template_name: "builtin:local_filesystem",
-    template_scope: "built_in",
-    source_kind: "local_filesystem",
-    status: "selected_no_store",
-    status_reason:
-      "backup object-store template is selected, but no server object store is configured",
-  },
-  {
-    assigned_at: "2026-06-02T10:00:00Z",
-    client_id: "agent-sfo-01",
-    client_status: "online",
-    display_name: "edge-sfo-01",
-    domain: "update_artifact_source",
-    evidence: {
-      continuous_status: false,
-      external_release_count: 1,
-      release_count: 1,
-      workflow: "agent_update_releases",
-    },
-    module: "Update artifact source",
-    template_id: "00000000-0000-4000-8000-00000000000a",
-    template_name: "builtin:external_https_sha256",
-    template_scope: "built_in",
-    source_kind: "external_https",
-    status: "ready",
-    status_reason:
-      "external HTTPS update release metadata exists; agents download update artifacts outside the API",
-  },
-];
 
 const runtimeConfigApplyStates = [
   {
@@ -3301,7 +3220,7 @@ const ospfRecommendations = [
 export const ospfUpdatePlans = [
   {
     approval_scope: ["client:agent-sfo-01", "client:agent-fra-02"],
-    change_summary: "Apply cost 22 through the two declared routing adapters",
+    change_summary: "Apply OSPF cost 22 through the two resolved endpoint updaters",
     confidence: "measured",
     control_mode: "reviewed",
     evidence: {
@@ -3320,8 +3239,9 @@ export const ospfUpdatePlans = [
     },
     interface_name: "tunab",
     left_client_id: "agent-sfo-01",
-    left_adapter_template_id: "44444444-4444-4444-8444-444444444444",
-    left_adapter_template_name: "sfo:routing-cost-v1",
+    left_updater_source: "configuration_preset",
+    left_adapter_template_id: "66666666-6666-4666-8666-666666666666",
+    left_adapter_template_name: "FRR OSPF updater",
     left_adapter_definition_hash: "c".repeat(64),
     left_current_ospf_cost: 14,
     left_ospf_status: "verified",
@@ -3335,8 +3255,9 @@ export const ospfUpdatePlans = [
     recommended_ospf_cost: 22,
     requires_approval: true,
     right_client_id: "agent-fra-02",
+    right_updater_source: "plan_override",
     right_adapter_template_id: "55555555-5555-4555-8555-555555555555",
-    right_adapter_template_name: "fra:routing-cost-v1",
+    right_adapter_template_name: "FRA routing cost",
     right_adapter_definition_hash: "d".repeat(64),
     right_current_ospf_cost: 14,
     right_ospf_status: "verified",
@@ -3359,12 +3280,17 @@ export async function installConsoleApiMock(
     auditLogsOverride?: AuditLogRecord[];
     backupPoliciesOverride?: BackupPolicyRecord[];
     backupArtifactsOverride?: typeof backupArtifacts;
+    bulkTagMutationDelayMs?: number;
+    bulkResolveDelayMs?: number;
     bulkResolveFailure?: boolean;
+    configurationSourceApplyFailure?: boolean;
+    configurationSourceSyncFailure?: boolean;
     dashboardLatestSampleAtOverride?: string;
     dashboardCountsTruncated?: boolean;
     dashboardSummaryOverride?: Partial<typeof dashboardOverview.summary>;
     fileTransferSourceArtifactsOverride?: typeof fileTransferSourceArtifacts;
     fileTransfersOverride?: typeof fileTransfers;
+    fleetAlertStateFailure?: boolean;
     fleetAlertNotificationChannelsOverride?: FleetAlertNotificationChannelRecord[];
     recordPagesSaturated?: boolean;
     runtimeConfigApplyFailure?: boolean;
@@ -3379,6 +3305,7 @@ export async function installConsoleApiMock(
     telemetryFailurePath?: "network-rates" | "rollups" | "tunnels";
     telemetryNetworkRateScales?: number[];
     terminalSessionsOverride?: typeof terminalSessions;
+    vpsRulesApplyDelayMs?: number;
   } = {},
 ) {
   await page.addInitScript(
@@ -3394,15 +3321,19 @@ export async function installConsoleApiMock(
       artifactsFixture,
       backupPoliciesFixture,
       backupsFixture,
+      bulkTagMutationDelayMsFixture,
+      bulkResolveDelayMsFixture,
       bulkResolveFailureFixture,
+      configurationSourceApplyFailureFixture,
+      configurationSourceSyncFailureFixture,
       dashboardOverviewFixture,
       dashboardLatestSampleAtOverrideFixture,
       dashboardCountsTruncatedFixture,
       dashboardSummaryOverrideFixture,
       systemDashboardFixture,
-      sourceTemplateAssignmentsFixture,
-      sourceTemplatesFixture,
-      sourceStatusFixture,
+      configurationPresetsFixture,
+      configurationSourcesFixture,
+      networkAdapterDefinitionsFixture,
       runtimeConfigApplyStatesFixture,
       runtimeConfigApplyFailureFixture,
       runtimeConfigPatchGeneratorsFixture,
@@ -3413,6 +3344,7 @@ export async function installConsoleApiMock(
       fleetAlertNotificationChannelsFixture,
       fleetAlertNotificationsFixture,
       fleetAlertPoliciesFixture,
+      fleetAlertStateFailureFixture,
       fleetAlertStatesFixture,
       fleetAlertsFixture,
       policyAlertsFixture,
@@ -3449,6 +3381,7 @@ export async function installConsoleApiMock(
       topologyGraphFixture,
       trafficAccountingFixture,
       tunnelPlansFixture,
+      vpsRulesApplyDelayMsFixture,
       vpsRuleValuesFixture,
       webhookDeliveriesFixture,
       webhookRulesFixture,
@@ -3479,10 +3412,7 @@ export async function installConsoleApiMock(
         const leftClientId = String(plan.left_client_id ?? "");
         const rightClientId = String(plan.right_client_id ?? "");
         plan.left_runtime_config = runtimeTunnelConfig(leftClientId, enabled);
-        plan.right_runtime_config = runtimeTunnelConfig(
-          rightClientId,
-          enabled,
-        );
+        plan.right_runtime_config = runtimeTunnelConfig(rightClientId, enabled);
         return runtimeTunnelDispatch(leftClientId, rightClientId);
       };
       const targetCountsFromStatuses = (statuses: string[]) => {
@@ -3511,6 +3441,27 @@ export async function installConsoleApiMock(
         targetCountsFromStatuses(Array.from({ length: total }, () => "queued"));
       const currentOperatorPreferences = { ...operatorPreferencesFixture };
       let currentSuiteConfigToml = suiteConfigTomlFixture;
+      let mutableConfigurationPresets = configurationPresetsFixture.map(
+        (record) => ({
+          ...record,
+          definition: structuredClone(record.definition),
+        }),
+      );
+      let mutableConfigurationSources = configurationSourcesFixture.map(
+        (record) => ({
+          ...record,
+          readiness: {
+            ...record.readiness,
+            evidence: structuredClone(record.readiness.evidence),
+          },
+          runtime_sync: { ...record.runtime_sync },
+        }),
+      );
+      let mutableNetworkAdapterDefinitions =
+        networkAdapterDefinitionsFixture.map((record) => ({
+          ...record,
+          definition: structuredClone(record.definition),
+        }));
       const deletedAgentIds = new Set<string>();
       const deletedTunnelPlanIds = new Set<string>();
       let mutablePortForwardRules = portForwardRulesFixture.map((rule) => ({
@@ -3544,9 +3495,8 @@ export async function installConsoleApiMock(
           JSON.stringify(hostStorageInventoryFixture),
         );
       const rolloutStorageKey = "__vpsmanTestJobRollouts";
-      const persistedJobRollouts = window.sessionStorage.getItem(
-        rolloutStorageKey,
-      );
+      const persistedJobRollouts =
+        window.sessionStorage.getItem(rolloutStorageKey);
       let mutableJobRollouts = persistedJobRollouts
         ? (JSON.parse(persistedJobRollouts) as typeof jobRolloutsFixture)
         : jobRolloutsFixture.map((rollout) => ({
@@ -3619,9 +3569,10 @@ export async function installConsoleApiMock(
         tagDeletes: [] as unknown[],
         bulkResolve: [] as unknown[],
         runtimeConfigPatches: [] as unknown[],
-        sourceConfigPatchs: [] as unknown[],
-        sourceTemplateAssignments: [] as unknown[],
-        sourceTemplates: [] as unknown[],
+        configurationPresetMutations: [] as unknown[],
+        configurationSourceOverrides: [] as unknown[],
+        effectiveConfigurationReads: [] as unknown[],
+        networkAdapterMutations: [] as unknown[],
         runtimeConfigPatchGenerators: [] as unknown[],
         agentIdentities: [] as unknown[],
         clientKeyRevocations: [] as unknown[],
@@ -4504,8 +4455,7 @@ export async function installConsoleApiMock(
                   ...series,
                   critical_threshold:
                     requestedResourceMetric === "memory_used" ? 0.8 : 0.1,
-                  current:
-                    points.at(-1)?.value ?? transform(series.current),
+                  current: points.at(-1)?.value ?? transform(series.current),
                   peak: transform(series.peak),
                   points,
                   threshold_direction:
@@ -4523,8 +4473,7 @@ export async function installConsoleApiMock(
               (cluster) => ({
                 ...cluster,
                 counts_truncated:
-                  dashboardCountsTruncatedFixture ||
-                  cluster.counts_truncated,
+                  dashboardCountsTruncatedFixture || cluster.counts_truncated,
               }),
             ),
             operations: {
@@ -4679,6 +4628,15 @@ export async function installConsoleApiMock(
         if (pathname === "/api/v1/fleet-alert-states" && method === "POST") {
           const body = await readJsonBody(input, init);
           requests.fleetAlertStates.push(body);
+          if (fleetAlertStateFailureFixture) {
+            return jsonResponse(
+              {
+                error: "fleet_alert_state_update_failed",
+                message: "Simulated fleet alert triage failure.",
+              },
+              500,
+            );
+          }
           const request = body as {
             action?: string;
             alert_id?: string;
@@ -4711,6 +4669,11 @@ export async function installConsoleApiMock(
           method === "POST"
         ) {
           const body = await readJsonBody(input, init);
+          if (vpsRulesApplyDelayMsFixture > 0) {
+            await new Promise((resolve) =>
+              window.setTimeout(resolve, vpsRulesApplyDelayMsFixture),
+            );
+          }
           return jsonResponse(
             buildVpsRulesPreview(body as Record<string, unknown>),
           );
@@ -5226,52 +5189,54 @@ export async function installConsoleApiMock(
           return jsonResponse(session);
         }
         if (pathname === "/api/v1/operator-auth-events" && method === "GET")
-          return jsonResponse(operatorAuthEventsFixture ?? [
-            {
-              id: "77777777-aaaa-4bbb-8ccc-000000000001",
-              operator_id: "99999999-aaaa-4bbb-8ccc-000000000001",
-              username: "console-admin",
-              result: "success",
-              reason: null,
-              remote_ip: "127.0.0.1",
-              user_agent: "Playwright",
-              session_id: "88888888-aaaa-4bbb-8ccc-000000000001",
-              created_at: "2026-01-01T00:00:00Z",
-            },
-            {
-              id: "77777777-aaaa-4bbb-8ccc-000000000002",
-              operator_id: "99999999-aaaa-4bbb-8ccc-000000000001",
-              username: "console-admin",
-              result: "success",
-              reason: null,
-              remote_ip: "203.0.113.44",
-              user_agent: "Mozilla/5.0 Chrome/124.0",
-              session_id: "88888888-aaaa-4bbb-8ccc-000000000002",
-              created_at: "2026-01-01T01:00:00Z",
-            },
-            {
-              id: "77777777-aaaa-4bbb-8ccc-000000000003",
-              operator_id: null,
-              username: "unknown-user",
-              result: "failure",
-              reason: "invalid_credentials",
-              remote_ip: "127.0.0.1",
-              user_agent: "Playwright",
-              session_id: null,
-              created_at: "2026-01-01T00:01:00Z",
-            },
-            {
-              id: "77777777-aaaa-4bbb-8ccc-000000000004",
-              operator_id: null,
-              username: "unknown-user",
-              result: "failure",
-              reason: "invalid_credentials",
-              remote_ip: "127.0.0.1",
-              user_agent: "Playwright",
-              session_id: null,
-              created_at: "2026-01-01T00:02:00Z",
-            },
-          ]);
+          return jsonResponse(
+            operatorAuthEventsFixture ?? [
+              {
+                id: "77777777-aaaa-4bbb-8ccc-000000000001",
+                operator_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+                username: "console-admin",
+                result: "success",
+                reason: null,
+                remote_ip: "127.0.0.1",
+                user_agent: "Playwright",
+                session_id: "88888888-aaaa-4bbb-8ccc-000000000001",
+                created_at: "2026-01-01T00:00:00Z",
+              },
+              {
+                id: "77777777-aaaa-4bbb-8ccc-000000000002",
+                operator_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+                username: "console-admin",
+                result: "success",
+                reason: null,
+                remote_ip: "203.0.113.44",
+                user_agent: "Mozilla/5.0 Chrome/124.0",
+                session_id: "88888888-aaaa-4bbb-8ccc-000000000002",
+                created_at: "2026-01-01T01:00:00Z",
+              },
+              {
+                id: "77777777-aaaa-4bbb-8ccc-000000000003",
+                operator_id: null,
+                username: "unknown-user",
+                result: "failure",
+                reason: "invalid_credentials",
+                remote_ip: "127.0.0.1",
+                user_agent: "Playwright",
+                session_id: null,
+                created_at: "2026-01-01T00:01:00Z",
+              },
+              {
+                id: "77777777-aaaa-4bbb-8ccc-000000000004",
+                operator_id: null,
+                username: "unknown-user",
+                result: "failure",
+                reason: "invalid_credentials",
+                remote_ip: "127.0.0.1",
+                user_agent: "Playwright",
+                session_id: null,
+                created_at: "2026-01-01T00:02:00Z",
+              },
+            ],
+          );
         if (pathname === "/api/v1/client-key-revocations" && method === "GET")
           return jsonResponse(clientKeyRevocationsFixture);
         if (pathname === "/api/v1/key-lifecycle/report" && method === "GET")
@@ -5582,133 +5547,205 @@ export async function installConsoleApiMock(
               latency_missed_windows: 1,
             },
           ]);
-        if (pathname === "/api/v1/source-templates" && method === "GET") {
-          return jsonResponse(sourceTemplatesFixture);
+        if (pathname === "/api/v1/configuration-presets" && method === "GET") {
+          const behavior = new URL(url, window.location.href).searchParams.get(
+            "behavior",
+          );
+          return jsonResponse(
+            behavior
+              ? mutableConfigurationPresets.filter(
+                  (record) => record.behavior === behavior,
+                )
+              : mutableConfigurationPresets,
+          );
         }
-        if (pathname === "/api/v1/source-templates" && method === "POST") {
-          const body = await readJsonBody(input, init);
-          requests.sourceTemplates.push(body);
-          return jsonResponse({
-            ...(body as Record<string, unknown>),
-            assigned_client_count: 0,
-            built_in: false,
-            created_at: "2026-06-02T10:03:00Z",
-            id: "33333333-3333-4333-8333-333333333333",
-            is_default: false,
-            updated_at: "2026-06-02T10:03:00Z",
+        if (pathname === "/api/v1/configuration-presets" && method === "POST") {
+          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
+          requests.configurationPresetMutations.push({
+            action: "create",
+            body,
           });
-        }
-        if (
-          pathname.startsWith("/api/v1/source-templates/") &&
-          pathname.endsWith("/clone") &&
-          method === "POST"
-        ) {
-          const body = await readJsonBody(input, init);
-          requests.sourceTemplates.push(body);
-          return jsonResponse({
-            ...(body as Record<string, unknown>),
-            assigned_client_count: 0,
-            built_in: false,
+          const created: ConfigurationPresetRecord = {
+            behavior: String(
+              body.behavior ?? "host_metrics",
+            ) as ConfigurationBehavior,
             created_at: "2026-06-02T10:08:00Z",
-            definition: { source: "interface_counters" },
-            domain: "runtime_traffic_accounting_source",
+            definition: structuredClone(
+              body.definition ?? {},
+            ) as ConfigurationPresetRecord["definition"],
+            description:
+              typeof body.description === "string" ? body.description : null,
+            effective_vps_count: 0,
             id: "34343434-3434-4434-8434-343434343434",
             is_default: false,
+            kind: "custom",
+            name: String(body.name ?? "Custom preset"),
+            override_vps_count: 0,
             updated_at: "2026-06-02T10:08:00Z",
-          });
+          };
+          mutableConfigurationPresets.push(created);
+          return jsonResponse(created);
         }
-        if (
-          pathname.startsWith("/api/v1/source-templates/") &&
-          pathname.endsWith("/update") &&
-          method === "POST"
-        ) {
-          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
-          const template =
-            sourceTemplatesFixture.find((record: { id: string }) =>
-              pathname.includes(record.id),
-            ) ?? sourceTemplatesFixture[0];
-          const affectedClientIds = sourceTemplateAssignmentsFixture
-            .filter((assignment) => assignment.template_id === template.id)
-            .map((assignment) => assignment.client_id);
-          const confirmed = body.confirmed === true;
-          const currentDefinition = template.definition;
-          const currentDescription = template.description;
-          const definition = body.definition ?? template.definition;
-          const description =
-            typeof body.description === "string" ? body.description : null;
-          if (confirmed) {
-            template.definition = definition;
-            template.description = description;
-            template.updated_at = "2026-06-02T10:08:00Z";
+        const configurationPresetCloneMatch = pathname.match(
+          /^\/api\/v1\/configuration-presets\/([^/]+)\/clone$/,
+        );
+        if (configurationPresetCloneMatch && method === "POST") {
+          const presetId = decodeURIComponent(configurationPresetCloneMatch[1]);
+          const source = mutableConfigurationPresets.find(
+            (record) => record.id === presetId,
+          );
+          if (!source) {
+            return jsonResponse(
+              { error: "configuration_preset_not_found" },
+              404,
+            );
           }
+          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
+          requests.configurationPresetMutations.push({
+            action: "clone",
+            body,
+            preset_id: presetId,
+          });
+          const cloned: ConfigurationPresetRecord = {
+            ...source,
+            created_at: "2026-06-02T10:08:00Z",
+            definition: structuredClone(source.definition),
+            description:
+              typeof body.description === "string" ? body.description : null,
+            effective_vps_count: 0,
+            id: "35353535-3535-4535-8535-353535353535",
+            is_default: false,
+            kind: "custom",
+            name: String(body.name ?? `${source.name} copy`),
+            override_vps_count: 0,
+            updated_at: "2026-06-02T10:08:00Z",
+          };
+          mutableConfigurationPresets.push(cloned);
+          return jsonResponse(cloned);
+        }
+        const configurationPresetPreviewMatch = pathname.match(
+          /^\/api\/v1\/configuration-presets\/([^/]+)\/preview$/,
+        );
+        if (configurationPresetPreviewMatch && method === "POST") {
+          const presetId = decodeURIComponent(
+            configurationPresetPreviewMatch[1],
+          );
+          const preset = mutableConfigurationPresets.find(
+            (record) => record.id === presetId,
+          );
+          if (!preset) {
+            return jsonResponse(
+              { error: "configuration_preset_not_found" },
+              404,
+            );
+          }
+          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
+          const affectedClientIds = mutableConfigurationSources
+            .filter((source) => source.effective_preset_id === preset.id)
+            .map((source) => source.client_id)
+            .filter(
+              (clientId, index, values) => values.indexOf(clientId) === index,
+            )
+            .sort();
           return jsonResponse({
             affected_client_count: affectedClientIds.length,
             affected_client_ids: affectedClientIds,
-            confirmation_required: !confirmed,
-            diff: {
-              affected_client_count: affectedClientIds.length,
-              candidate_definition: definition,
-              candidate_description: description,
-              changed_keys: ["source"],
-              current_definition: currentDefinition,
-              current_description: currentDescription,
-              definition_changed:
-                JSON.stringify(currentDefinition) !== JSON.stringify(definition),
-              description_changed: currentDescription !== description,
-              domain: template.domain,
-              template_id: template.id,
-              template_name: template.name,
-            },
-            preview_hash: String(body.preview_hash ?? "8".repeat(64)),
-            sync: confirmed
-              ? affectedClientIds.map((clientId, index) => ({
-                  client_id: clientId,
-                  error: null,
-                  job_id: `4f300000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
-                  status: "queued",
-                }))
-              : [],
-            template,
+            behavior: preset.behavior,
+            candidate_definition: body.definition ?? preset.definition,
+            candidate_description:
+              typeof body.description === "string" ? body.description : null,
+            changed_keys: ["source"],
+            current_definition: preset.definition,
+            current_description: preset.description,
+            name: preset.name,
+            preset_id: preset.id,
+            preview_hash: "8".repeat(64),
+            sections: { fixture: true },
+            toml: "[fixture]\npreview = true\n",
           });
         }
-        if (
-          pathname.startsWith("/api/v1/source-templates/") &&
-          pathname.endsWith("/diff") &&
-          method === "POST"
-        ) {
+        const configurationPresetMatch = pathname.match(
+          /^\/api\/v1\/configuration-presets\/([^/]+)$/,
+        );
+        if (configurationPresetMatch && method === "PUT") {
+          const presetId = decodeURIComponent(configurationPresetMatch[1]);
+          const preset = mutableConfigurationPresets.find(
+            (record) => record.id === presetId,
+          );
+          if (!preset) {
+            return jsonResponse(
+              { error: "configuration_preset_not_found" },
+              404,
+            );
+          }
           const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
-          const template =
-            sourceTemplatesFixture.find((record: { id: string }) =>
-              pathname.includes(record.id),
-            ) ?? sourceTemplatesFixture[0];
-          const candidateDefinition = body.definition ?? template.definition;
-          const candidateDescription =
+          requests.configurationPresetMutations.push({
+            action: "update",
+            body,
+            preset_id: presetId,
+          });
+          const affectedClientIds = mutableConfigurationSources
+            .filter((source) => source.effective_preset_id === preset.id)
+            .map((source) => source.client_id)
+            .filter(
+              (clientId, index, values) => values.indexOf(clientId) === index,
+            )
+            .sort();
+          const preview = {
+            affected_client_count: affectedClientIds.length,
+            affected_client_ids: affectedClientIds,
+            behavior: preset.behavior,
+            candidate_definition: body.definition ?? preset.definition,
+            candidate_description:
+              typeof body.description === "string" ? body.description : null,
+            changed_keys: ["source"],
+            current_definition: preset.definition,
+            current_description: preset.description,
+            name: preset.name,
+            preset_id: preset.id,
+            preview_hash: String(body.preview_hash ?? "8".repeat(64)),
+            sections: { fixture: true },
+            toml: "[fixture]\npreview = true\n",
+          };
+          preset.definition = structuredClone(
+            body.definition ?? preset.definition,
+          ) as ConfigurationPresetRecord["definition"];
+          preset.description =
             typeof body.description === "string" ? body.description : null;
-          const definitionChanged =
-            JSON.stringify(template.definition) !==
-            JSON.stringify(candidateDefinition);
+          preset.updated_at = "2026-06-02T10:09:00Z";
           return jsonResponse({
-            affected_client_count: template.assigned_client_count,
-            candidate_definition: candidateDefinition,
-            candidate_description: candidateDescription,
-            changed_keys: definitionChanged ? ["source"] : [],
-            current_definition: template.definition,
-            current_description: template.description,
-            definition_changed: definitionChanged,
-            description_changed: template.description !== candidateDescription,
-            domain: template.domain,
-            template_id: template.id,
-            template_name: template.name,
+            preset,
+            preview,
+            sync: affectedClientIds.map((clientId, index) => ({
+              client_id: clientId,
+              error: null,
+              job_id: `4f300000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+              status: "queued",
+            })),
           });
         }
-        if (
-          pathname === "/api/v1/source-template-assignments" &&
-          method === "GET"
-        ) {
-          return jsonResponse(sourceTemplateAssignmentsFixture);
+        if (configurationPresetMatch && method === "DELETE") {
+          const presetId = decodeURIComponent(configurationPresetMatch[1]);
+          requests.configurationPresetMutations.push({
+            action: "delete",
+            preset_id: presetId,
+          });
+          mutableConfigurationPresets = mutableConfigurationPresets.filter(
+            (record) => record.id !== presetId,
+          );
+          return new Response(null, { status: 204 });
         }
-        if (pathname === "/api/v1/source-status" && method === "GET") {
-          return jsonResponse(sourceStatusFixture);
+        if (pathname === "/api/v1/configuration-sources" && method === "GET") {
+          const search = new URL(url, window.location.href).searchParams;
+          const clientId = search.get("client_id");
+          const behavior = search.get("behavior");
+          return jsonResponse(
+            mutableConfigurationSources.filter(
+              (record) =>
+                (!clientId || record.client_id === clientId) &&
+                (!behavior || record.behavior === behavior),
+            ),
+          );
         }
         if (
           pathname === "/api/v1/runtime-config/apply-state" &&
@@ -5798,83 +5835,228 @@ export async function installConsoleApiMock(
           return new Response(null, { status: 204 });
         }
         if (
-          pathname === "/api/v1/source-template-assignments" &&
+          [
+            "/api/v1/configuration-source-overrides/preview",
+            "/api/v1/configuration-source-overrides/apply",
+          ].includes(pathname) &&
           method === "POST"
         ) {
-          const body = await readJsonBody(input, init);
-          requests.sourceTemplateAssignments.push(body);
-          const request = body as {
-            template_id?: string;
-            selector_expression?: string;
-            target_client_ids?: string[];
-            confirmed?: boolean;
-            preview_hash?: string | null;
+          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
+          const directIds = Array.isArray(body.target_client_ids)
+            ? body.target_client_ids.map(String)
+            : [];
+          const selectorExpression =
+            typeof body.selector_expression === "string"
+              ? body.selector_expression
+              : "";
+          const selectorIds = selectorExpression
+            ? visibleAgents()
+                .filter((agent) =>
+                  expressionMatchesAgent(agent, selectorExpression),
+                )
+                .map((agent) => agent.id)
+            : [];
+          const targetClientIds = [...new Set([...directIds, ...selectorIds])]
+            .filter((clientId) =>
+              visibleAgents().some((agent) => agent.id === clientId),
+            )
+            .sort();
+          const behavior = String(body.behavior ?? "host_metrics");
+          const action = body.action === "reset" ? "reset" : "set";
+          const selectedPreset =
+            action === "set"
+              ? (mutableConfigurationPresets.find(
+                  (record) => record.id === body.preset_id,
+                ) ?? null)
+              : (mutableConfigurationPresets.find(
+                  (record) => record.behavior === behavior && record.is_default,
+                ) ?? null);
+          if (!selectedPreset) {
+            return jsonResponse(
+              { error: "configuration_preset_not_found" },
+              404,
+            );
+          }
+          const targets = targetClientIds.map((clientId) => {
+            const before = mutableConfigurationSources.find(
+              (record) =>
+                record.client_id === clientId && record.behavior === behavior,
+            );
+            return {
+              after_origin:
+                action === "set" ? "explicit_override" : "system_default",
+              after_preset_id: selectedPreset.id,
+              after_preset_name: selectedPreset.name,
+              before_origin: before?.selection_origin ?? "system_default",
+              before_preset_id:
+                before?.effective_preset_id ?? selectedPreset.id,
+              before_preset_name:
+                before?.effective_preset_name ?? selectedPreset.name,
+              client_id: clientId,
+            };
+          });
+          requests.configurationSourceOverrides.push({ body, pathname });
+          const preview = {
+            action,
+            behavior,
+            preset: action === "set" ? selectedPreset : null,
+            preview_hash: String(
+              body.preview_hash ?? "8".repeat(64),
+            ),
+            selector_expression:
+              typeof body.selector_expression === "string"
+                ? body.selector_expression.trim()
+                : "",
+            target_count: targets.length,
+            targets,
           };
-          const template =
-            sourceTemplatesFixture.find(
-              (record: { id: string }) => record.id === request.template_id,
-            ) ?? sourceTemplatesFixture[0];
-          const targetCount = Array.isArray(request.target_client_ids)
-            ? request.target_client_ids.length
-            : request.selector_expression
-              ? visibleAgents().filter((agent) =>
-                  expressionMatchesAgent(
-                    agent,
-                    request.selector_expression ?? "",
-                  ),
-                ).length
-              : 0;
-          const targetClientIds = Array.isArray(request.target_client_ids)
-            ? request.target_client_ids
-            : request.selector_expression
-              ? visibleAgents()
-                  .filter((agent) =>
-                    expressionMatchesAgent(
-                      agent,
-                      request.selector_expression ?? "",
-                    ),
-                  )
-                  .map((agent) => agent.id)
-              : [];
+          if (pathname.endsWith("/preview")) {
+            return jsonResponse(preview);
+          }
+          if (configurationSourceApplyFailureFixture) {
+            return jsonResponse(
+              { error: "configuration_preview_hash_mismatch" },
+              409,
+            );
+          }
+          const targetIds = new Set(targetClientIds);
+          mutableConfigurationSources = mutableConfigurationSources.map(
+            (record) =>
+              record.behavior === behavior && targetIds.has(record.client_id)
+                ? {
+                    ...record,
+                    effective_preset_id: selectedPreset.id,
+                    effective_preset_kind: selectedPreset.kind,
+                    effective_preset_name: selectedPreset.name,
+                    override_updated_at:
+                      action === "set" ? "2026-06-02T10:10:00Z" : null,
+                    runtime_sync: {
+                      reason: "The effective configuration is queued.",
+                      state: "queued",
+                    },
+                    selection_origin:
+                      action === "set" ? "explicit_override" : "system_default",
+                  }
+                : record,
+          );
           return jsonResponse({
-            assignments: sourceTemplateAssignmentsFixture,
-            confirmation_required: !request.confirmed,
-            preview_hash: request.preview_hash ?? "8".repeat(64),
-            sync: request.confirmed
-              ? targetClientIds.map((clientId, index) => ({
-                  client_id: clientId,
-                  error: null,
-                  job_id: `4f400000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
-                  status: "queued",
-                }))
-              : [],
-            template,
-            target_count: targetCount,
+            ...preview,
+            sync: targetClientIds.map((clientId, index) => ({
+              client_id: clientId,
+              error:
+                configurationSourceSyncFailureFixture && index === 0
+                  ? "Runtime apply queue unavailable"
+                  : null,
+              job_id:
+                configurationSourceSyncFailureFixture && index === 0
+                  ? null
+                  : `4f400000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+              status:
+                configurationSourceSyncFailureFixture && index === 0
+                  ? "queue_failed"
+                  : "queued",
+            })),
           });
         }
-        if (
-          pathname === "/api/v1/template-runtime-config" &&
-          method === "GET"
-        ) {
+        if (pathname === "/api/v1/effective-agent-config" && method === "GET") {
           const clientId =
             new URL(url, window.location.href).searchParams.get("client_id") ??
             "agent-sfo-01";
-          requests.sourceConfigPatchs.push({ client_id: clientId });
+          requests.effectiveConfigurationReads.push({ client_id: clientId });
+          const sources = mutableConfigurationSources.filter(
+            (source) => source.client_id === clientId,
+          );
           return jsonResponse({
-            assignments: sourceTemplateAssignmentsFixture.filter(
-              (assignment) => assignment.client_id === clientId,
-            ),
             client_id: clientId,
             generated_at: "2026-06-02T10:07:00Z",
-            render_notes: [],
             sections: {
-              source_templates: {
-                client_id: clientId,
-              },
+              execution: { process_inventory_source: "linux_procfs" },
+              telemetry: { source: "linux_procfs" },
             },
-            toml: `[source_templates]\nclient_id = "${clientId}"\n`,
-            unsupported_domains: [],
+            sources,
+            toml: `[telemetry]\nsource = "linux_procfs"\n\n[execution]\nprocess_inventory_source = "linux_procfs"\n`,
           });
+        }
+        if (
+          pathname === "/api/v1/network-adapter-definitions" &&
+          method === "GET"
+        ) {
+          const kind = new URL(url, window.location.href).searchParams.get(
+            "adapter_kind",
+          );
+          return jsonResponse(
+            kind
+              ? mutableNetworkAdapterDefinitions.filter(
+                  (record) => record.adapter_kind === kind,
+                )
+              : mutableNetworkAdapterDefinitions,
+          );
+        }
+        if (
+          pathname === "/api/v1/network-adapter-definitions" &&
+          method === "POST"
+        ) {
+          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
+          requests.networkAdapterMutations.push({ action: "create", body });
+          const created: NetworkAdapterDefinitionRecord = {
+            adapter_kind: String(
+              body.adapter_kind ?? "runtime_tunnel",
+            ) as NetworkAdapterDefinitionRecord["adapter_kind"],
+            created_at: "2026-06-02T10:08:00Z",
+            definition: structuredClone(
+              body.definition ?? {},
+            ) as NetworkAdapterDefinitionRecord["definition"],
+            description:
+              typeof body.description === "string" ? body.description : null,
+            id: "36363636-3636-4636-8636-363636363636",
+            name: String(body.name ?? "Custom adapter"),
+            updated_at: "2026-06-02T10:08:00Z",
+          };
+          mutableNetworkAdapterDefinitions.push(created);
+          return jsonResponse(created);
+        }
+        const networkAdapterMatch = pathname.match(
+          /^\/api\/v1\/network-adapter-definitions\/([^/]+)$/,
+        );
+        if (networkAdapterMatch && method === "PUT") {
+          const definitionId = decodeURIComponent(networkAdapterMatch[1]);
+          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
+          const definition = mutableNetworkAdapterDefinitions.find(
+            (record) => record.id === definitionId,
+          );
+          if (!definition) {
+            return jsonResponse({ error: "network_adapter_not_found" }, 404);
+          }
+          requests.networkAdapterMutations.push({
+            action: "update",
+            body,
+            definition_id: definitionId,
+          });
+          Object.assign(definition, {
+            adapter_kind: String(
+              body.adapter_kind ?? definition.adapter_kind,
+            ) as NetworkAdapterDefinitionRecord["adapter_kind"],
+            definition: structuredClone(
+              body.definition ?? definition.definition,
+            ),
+            description:
+              typeof body.description === "string" ? body.description : null,
+            name: String(body.name ?? definition.name),
+            updated_at: "2026-06-02T10:09:00Z",
+          });
+          return jsonResponse(definition);
+        }
+        if (networkAdapterMatch && method === "DELETE") {
+          const definitionId = decodeURIComponent(networkAdapterMatch[1]);
+          requests.networkAdapterMutations.push({
+            action: "delete",
+            definition_id: definitionId,
+          });
+          mutableNetworkAdapterDefinitions =
+            mutableNetworkAdapterDefinitions.filter(
+              (record) => record.id !== definitionId,
+            );
+          return new Response(null, { status: 204 });
         }
         if (pathname === "/api/v1/job-approvals" && method === "GET") {
           return jsonResponse(currentJobApprovals);
@@ -5910,7 +6092,7 @@ export async function installConsoleApiMock(
           }
           rollout.status = action === "pause" ? "paused" : "running";
           rollout.pause_reason =
-            action === "pause" ? body?.reason ?? "operator_requested" : null;
+            action === "pause" ? (body?.reason ?? "operator_requested") : null;
           rollout.next_batch_at = "2026-06-02T10:02:00Z";
           rollout.updated_at = "2026-06-02T10:02:00Z";
           persistJobRollouts();
@@ -6217,12 +6399,10 @@ export async function installConsoleApiMock(
           /^\/api\/v1\/host-processes\/([^/]+)$/,
         );
         if (hostProcessMatch && method === "GET") {
-          return jsonResponse(
-            {
-              ...hostProcessInventoryFixture,
-              client_id: decodeURIComponent(hostProcessMatch[1]),
-            },
-          );
+          return jsonResponse({
+            ...hostProcessInventoryFixture,
+            client_id: decodeURIComponent(hostProcessMatch[1]),
+          });
         }
         const hostServiceMatch = pathname.match(
           /^\/api\/v1\/host-services\/([^/]+)$/,
@@ -6243,7 +6423,9 @@ export async function installConsoleApiMock(
           });
         }
         if (pathname === "/api/v1/os-updates" && method === "GET") {
-          const visibleClientIds = new Set(visibleAgents().map((agent) => agent.id));
+          const visibleClientIds = new Set(
+            visibleAgents().map((agent) => agent.id),
+          );
           return jsonResponse(
             mutableHostPackageUpdatePlans.filter((plan) =>
               visibleClientIds.has(plan.client_id),
@@ -6515,7 +6697,9 @@ export async function installConsoleApiMock(
         if (outputStreamMatch && method === "GET") {
           const jobId = outputStreamMatch[1];
           const clientId = decodeURIComponent(outputStreamMatch[2]);
-          const stream = new URL(url, window.location.href).searchParams.get("stream") ?? "combined";
+          const stream =
+            new URL(url, window.location.href).searchParams.get("stream") ??
+            "combined";
           const items =
             createdJobOutputs.get(jobId) ??
             (jobOutputsFixture as Record<string, FixtureJobOutput[]>)[jobId] ??
@@ -6623,6 +6807,11 @@ export async function installConsoleApiMock(
           });
         }
         if (pathname === "/api/v1/tags/bulk" && method === "POST") {
+          if (bulkTagMutationDelayMsFixture > 0) {
+            await new Promise((resolve) =>
+              window.setTimeout(resolve, bulkTagMutationDelayMsFixture),
+            );
+          }
           const body = await readJsonBody(input, init);
           requests.bulkTagMutations.push(body);
           const request = body as {
@@ -7045,22 +7234,25 @@ export async function installConsoleApiMock(
               rule,
               sync: {
                 error: null,
-                job_id: enabled
-                  ? "4f100000-0000-4000-8000-000000000001"
-                  : null,
+                job_id: enabled ? "4f100000-0000-4000-8000-000000000001" : null,
                 status: enabled ? "queued" : "saved_disabled",
               },
             },
             201,
           );
         }
-        if (pathname === "/api/v1/port-forward-rules/bulk" && method === "POST") {
+        if (
+          pathname === "/api/v1/port-forward-rules/bulk" &&
+          method === "POST"
+        ) {
           const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
           requests.portForwardRules.push({ action: "bulk", body });
           const action = String(body.action ?? "reapply");
           const selected = new Set(
             Array.isArray(body.items)
-              ? body.items.map((item) => String(asFixtureRecord(item)?.id ?? ""))
+              ? body.items.map((item) =>
+                  String(asFixtureRecord(item)?.id ?? ""),
+                )
               : [],
           );
           const affectedClients = new Set<string>();
@@ -7103,7 +7295,9 @@ export async function installConsoleApiMock(
             return [next];
           });
           return jsonResponse({
-            rules: mutablePortForwardRules.filter((rule) => selected.has(rule.id)),
+            rules: mutablePortForwardRules.filter((rule) =>
+              selected.has(rule.id),
+            ),
             sync: [
               ...[...affectedClients].map((clientId, index) => ({
                 client_id: clientId,
@@ -7133,12 +7327,22 @@ export async function installConsoleApiMock(
           const ruleId = decodeURIComponent(portForwardRuleMatch[1]);
           const operation = portForwardRuleMatch[2] ?? "update";
           const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
-          requests.portForwardRules.push({ action: operation, body, rule_id: ruleId });
-          const index = mutablePortForwardRules.findIndex((rule) => rule.id === ruleId);
-          if (index < 0) return jsonResponse({ code: "port_forward_rule_not_found" }, 404);
+          requests.portForwardRules.push({
+            action: operation,
+            body,
+            rule_id: ruleId,
+          });
+          const index = mutablePortForwardRules.findIndex(
+            (rule) => rule.id === ruleId,
+          );
+          if (index < 0)
+            return jsonResponse({ code: "port_forward_rule_not_found" }, 404);
           const current = mutablePortForwardRules[index];
           if (Number(body.expected_revision) !== current.revision) {
-            return jsonResponse({ code: "port_forward_rule_snapshot_stale" }, 409);
+            return jsonResponse(
+              { code: "port_forward_rule_snapshot_stale" },
+              409,
+            );
           }
           const retireImmediately =
             operation === "delete" &&
@@ -7161,7 +7365,8 @@ export async function installConsoleApiMock(
                   ? "enabled"
                   : "disabled",
             enabled,
-            revision: operation === "reapply" ? current.revision : current.revision + 1,
+            revision:
+              operation === "reapply" ? current.revision : current.revision + 1,
             runtime_status:
               operation === "delete"
                 ? "removal_pending"
@@ -7199,7 +7404,7 @@ export async function installConsoleApiMock(
                   ? "forgotten_without_host_cleanup"
                   : retireImmediately
                     ? "retired_disabled_draft"
-                  : "queued",
+                    : "queued",
             },
           });
         }
@@ -7699,6 +7904,11 @@ export async function installConsoleApiMock(
         if (pathname === "/api/v1/bulk/resolve" && method === "POST") {
           const body = await readJsonBody(input, init);
           requests.bulkResolve.push(body);
+          if (bulkResolveDelayMsFixture > 0) {
+            await new Promise((resolve) =>
+              window.setTimeout(resolve, bulkResolveDelayMsFixture),
+            );
+          }
           if (bulkResolveFailureFixture) {
             return jsonResponse(
               {
@@ -7748,15 +7958,17 @@ export async function installConsoleApiMock(
           const targets = resolveBulkTargets(body);
           const commandType =
             (body as { command?: string } | null)?.command ?? "job";
-          const rolloutPolicy = (body as {
-            rollout?: {
-              batch_delay_secs: number;
-              batch_size: number;
-              canary_client_ids: string[];
-              max_failures: number;
-              pause_after_canary: boolean;
-            } | null;
-          } | null)?.rollout;
+          const rolloutPolicy = (
+            body as {
+              rollout?: {
+                batch_delay_secs: number;
+                batch_size: number;
+                canary_client_ids: string[];
+                max_failures: number;
+                pause_after_canary: boolean;
+              } | null;
+            } | null
+          )?.rollout;
           const targetRecords = targets.map((agent) => ({
             client_id: agent.id,
             completed_at: "2026-05-31T10:09:00Z",
@@ -7782,15 +7994,16 @@ export async function installConsoleApiMock(
           }));
           const jobId = "11111111-2222-4333-8444-555555555555";
           if (commandType === "storage_inventory") {
-            const operation = (body as {
-              operation?: { include_pseudo_mounts?: boolean };
-            }).operation;
+            const operation = (
+              body as {
+                operation?: { include_pseudo_mounts?: boolean };
+              }
+            ).operation;
             hostStorageInventoryFixture.include_pseudo_mounts = Boolean(
               operation?.include_pseudo_mounts,
             );
             hostStorageInventoryFixture.source_job_id = jobId;
-            hostStorageInventoryFixture.observed_at =
-              "2026-06-02T10:06:00Z";
+            hostStorageInventoryFixture.observed_at = "2026-06-02T10:06:00Z";
             hostStorageInventoryFixture.last_attempt = {
               completed_at: "2026-06-02T10:06:00Z",
               job_id: jobId,
@@ -7803,14 +8016,10 @@ export async function installConsoleApiMock(
             const canaryIds = new Set(rolloutPolicy.canary_client_ids);
             for (const target of targetRecords) {
               const isCanary = canaryIds.has(target.client_id);
-              target.completed_at = isCanary
-                ? "2026-05-31T10:09:00Z"
-                : null;
+              target.completed_at = isCanary ? "2026-05-31T10:09:00Z" : null;
               target.exit_code = isCanary ? 0 : null;
               target.message = isCanary ? "completed" : null;
-              target.started_at = isCanary
-                ? "2026-05-31T10:08:55Z"
-                : null;
+              target.started_at = isCanary ? "2026-05-31T10:08:55Z" : null;
               target.status = isCanary ? "completed" : "queued";
             }
             const batchByClient = new Map<string, number>();
@@ -7894,9 +8103,11 @@ export async function installConsoleApiMock(
           }
           createdJobTargets.set(jobId, targetRecords);
           if (commandType === "package_update_plan") {
-            const operation = (body as {
-              operation?: { refresh_metadata?: boolean };
-            }).operation;
+            const operation = (
+              body as {
+                operation?: { refresh_metadata?: boolean };
+              }
+            ).operation;
             for (const target of targetRecords) {
               if (target.status !== "completed") continue;
               const plan = mutableHostPackageUpdatePlans.find(
@@ -7918,9 +8129,11 @@ export async function installConsoleApiMock(
             }
           }
           if (commandType === "package_update_apply") {
-            const operation = (body as {
-              operation?: { plan_hash?: string; provider?: string };
-            }).operation;
+            const operation = (
+              body as {
+                operation?: { plan_hash?: string; provider?: string };
+              }
+            ).operation;
             const outputs: FixtureJobOutput[] = [];
             for (const [index, target] of targetRecords.entries()) {
               if (target.status !== "completed") continue;
@@ -7982,9 +8195,11 @@ export async function installConsoleApiMock(
             );
           }
           if (commandType === "service_logs") {
-            const operation = (body as {
-              operation?: { provider?: string; service?: string };
-            }).operation;
+            const operation = (
+              body as {
+                operation?: { provider?: string; service?: string };
+              }
+            ).operation;
             createdJobOutputs.set(
               jobId,
               targetRecords.flatMap((target, index) => [
@@ -8075,6 +8290,8 @@ export async function installConsoleApiMock(
       agentUpdateReleasesFixture: agentUpdateReleases,
       auditLogsFixture: options.auditLogsOverride ?? auditLogs,
       backupPoliciesFixture: options.backupPoliciesOverride ?? [],
+      bulkTagMutationDelayMsFixture: options.bulkTagMutationDelayMs ?? 0,
+      bulkResolveDelayMsFixture: options.bulkResolveDelayMs ?? 0,
       artifactsFixture:
         options.backupArtifactsOverride ??
         (options.recordPagesSaturated
@@ -8105,6 +8322,10 @@ export async function installConsoleApiMock(
           ]
         : backupRequests,
       bulkResolveFailureFixture: options.bulkResolveFailure ?? false,
+      configurationSourceApplyFailureFixture:
+        options.configurationSourceApplyFailure ?? false,
+      configurationSourceSyncFailureFixture:
+        options.configurationSourceSyncFailure ?? false,
       dashboardOverviewFixture: dashboardOverview,
       dashboardLatestSampleAtOverrideFixture:
         options.dashboardLatestSampleAtOverride ?? null,
@@ -8112,9 +8333,9 @@ export async function installConsoleApiMock(
         options.dashboardCountsTruncated ?? false,
       dashboardSummaryOverrideFixture: options.dashboardSummaryOverride ?? null,
       systemDashboardFixture: systemDashboard,
-      sourceTemplateAssignmentsFixture: sourceTemplateAssignments,
-      sourceTemplatesFixture: sourceTemplates,
-      sourceStatusFixture: sourceStatus,
+      configurationPresetsFixture: configurationPresets,
+      configurationSourcesFixture: configurationSources,
+      networkAdapterDefinitionsFixture: networkAdapterDefinitions,
       runtimeConfigApplyStatesFixture: runtimeConfigApplyStates,
       runtimeConfigApplyFailureFixture:
         options.runtimeConfigApplyFailure ?? false,
@@ -8133,6 +8354,7 @@ export async function installConsoleApiMock(
           }))
         : fleetAlertNotifications,
       fleetAlertPoliciesFixture: fleetAlertPolicies,
+      fleetAlertStateFailureFixture: options.fleetAlertStateFailure ?? false,
       fleetAlertStatesFixture: fleetAlertStates,
       fleetAlertsFixture: options.alertStateCoverage
         ? [
@@ -8167,15 +8389,15 @@ export async function installConsoleApiMock(
           ]
         : options.recordPagesSaturated
           ? [
-            ...fleetAlerts,
-            ...Array.from(
-              { length: 200 - fleetAlerts.length },
-              (_, index) => ({
-                ...fleetAlerts[0],
-                id: `fleet-alert-filler-${String(index).padStart(3, "0")}`,
-                target_id: `agent-fra-02:filler-${index}`,
-              }),
-            ),
+              ...fleetAlerts,
+              ...Array.from(
+                { length: 200 - fleetAlerts.length },
+                (_, index) => ({
+                  ...fleetAlerts[0],
+                  id: `fleet-alert-filler-${String(index).padStart(3, "0")}`,
+                  target_id: `agent-fra-02:filler-${index}`,
+                }),
+              ),
             ]
           : fleetAlerts,
       policyAlertsFixture: options.alertEvidenceSaturated
@@ -8241,6 +8463,7 @@ export async function installConsoleApiMock(
       topologyGraphFixture: topologyGraph,
       trafficAccountingFixture: trafficAccounting,
       tunnelPlansFixture: tunnelPlans,
+      vpsRulesApplyDelayMsFixture: options.vpsRulesApplyDelayMs ?? 0,
       vpsRuleValuesFixture: vpsRuleValues,
       webhookDeliveriesFixture: webhookDeliveries,
       webhookRulesFixture: webhookRules,

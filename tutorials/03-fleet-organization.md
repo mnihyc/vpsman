@@ -33,6 +33,11 @@ cargo run -p vpsctl -- bulk-resolve --tags id:edge-01
 cargo run -p vpsctl -- bulk-resolve --clients edge-01 --tags lab
 ```
 
+These commands are the headless path. In the console, each operation keeps the
+same target control in its normal workflow, previews matches automatically, and
+uses **Review** to freeze the server-resolved list; there is no separate bulk
+page.
+
 Use `id:<client_id>` or explicit client ids for destructive one-off work, and
 tags for operational groups, provider labels, countries, regions, or optional
 `pool:<name>` labels.

@@ -165,16 +165,41 @@ impl Repository {
     }
 
     pub(crate) async fn list_agents(&self) -> Result<Vec<AgentView>> {
+        self.list_agents_by_ids(None).await
+    }
+
+    pub(crate) async fn list_agents_for_client_ids(
+        &self,
+        client_ids: &[String],
+    ) -> Result<Vec<AgentView>> {
+        if client_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.list_agents_by_ids(Some(client_ids)).await
+    }
+
+    async fn list_agents_by_ids(&self, client_ids: Option<&[String]>) -> Result<Vec<AgentView>> {
         match self {
             Self::Memory(memory) => {
                 let hidden = memory.hidden_clients.read().await;
                 let tag_order = memory_tag_order_map(&memory.tags.read().await);
+                let selected = client_ids.map(|client_ids| {
+                    client_ids
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<HashSet<_>>()
+                });
                 Ok(memory
                     .agents
                     .read()
                     .await
                     .iter()
-                    .filter(|agent| !hidden.contains(&agent.id))
+                    .filter(|agent| {
+                        !hidden.contains(&agent.id)
+                            && selected
+                                .as_ref()
+                                .is_none_or(|selected| selected.contains(agent.id.as_str()))
+                    })
                     .map(|agent| agent_with_ordered_tags(agent, &tag_order))
                     .collect())
             }
@@ -202,10 +227,12 @@ impl Repository {
                     LEFT JOIN client_tags ct ON ct.client_id = c.id
                     LEFT JOIN tags t ON t.id = ct.tag_id
                     WHERE c.hidden_at IS NULL
+                      AND ($1::text[] IS NULL OR c.id = ANY($1))
                     GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.arch, c.internal_build_number, c.process_incarnation_id, c.stale_since, c.stale_reason, c.capabilities
                     ORDER BY c.display_name, c.id
                     "#,
                 )
+                .bind(client_ids.map(<[String]>::to_vec))
                 .fetch_all(pool)
                 .await?;
 
@@ -863,12 +890,10 @@ impl Repository {
     pub(crate) async fn delete_agent(
         &self,
         client_id: &str,
-        request: &DeleteAgentRequest,
+        reason: Option<&str>,
         operator: &AuthContext,
     ) -> Result<DeleteAgentResult> {
-        let reason = request
-            .reason
-            .as_deref()
+        let reason = reason
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
@@ -897,6 +922,12 @@ impl Repository {
                 agents.retain(|agent| agent.id != client_id);
                 drop(agents);
                 anyhow::ensure!(found || already_hidden, "agent_not_found");
+                let removed_configuration_preset_override_count = {
+                    let mut overrides = memory.configuration_preset_overrides.write().await;
+                    let previous_count = overrides.len();
+                    overrides.retain(|override_record| override_record.client_id != client_id);
+                    previous_count.saturating_sub(overrides.len())
+                };
                 let archived_port_forward_rule_count = {
                     let deleted_reason = reason
                         .as_deref()
@@ -1007,6 +1038,7 @@ impl Repository {
                         "already_hidden": already_hidden,
                         "frontend_visible": false,
                         "access_deactivated": true,
+                        "removed_configuration_preset_override_count": removed_configuration_preset_override_count,
                         "soft_deleted_tunnel_plan_count": soft_deleted_tunnel_plan_count,
                         "archived_port_forward_rule_count": archived_port_forward_rule_count,
                         "agent_lost_job_ids": agent_lost_job_ids,
@@ -1085,6 +1117,13 @@ impl Repository {
                     anyhow::bail!("agent_not_found");
                 };
                 let deleted_at: String = row.try_get("deleted_at")?;
+                let removed_configuration_preset_override_count = sqlx::query(
+                    "DELETE FROM client_configuration_preset_overrides WHERE client_id = $1",
+                )
+                .bind(client_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
                 let archived_port_forward_rule_count =
                     archive_postgres_port_forwarding_for_agent_delete(
                         &mut tx,
@@ -1172,6 +1211,7 @@ impl Repository {
                     "reason": reason,
                     "frontend_visible": false,
                     "access_deactivated": true,
+                    "removed_configuration_preset_override_count": removed_configuration_preset_override_count,
                     "soft_deleted_tunnel_plan_count": soft_deleted_tunnel_plan_count,
                     "archived_port_forward_rule_count": archived_port_forward_rule_count,
                     "agent_lost_job_ids": agent_lost_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),

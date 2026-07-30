@@ -8,8 +8,7 @@ use uuid::Uuid;
 use crate::{
     model::{
         AgentIdentityView, AgentView, AuditLogView, AuthContext, ClientKeyRevocationView,
-        CreateClientKeyRevocationRequest, KeyLifecycleClientView, KeyLifecycleReportView,
-        UpsertAgentIdentityRequest,
+        KeyLifecycleClientView, KeyLifecycleReportView, UpsertAgentIdentityRequest,
     },
     repository::Repository,
     repository_jobs::{
@@ -579,10 +578,10 @@ impl Repository {
     pub(crate) async fn revoke_current_client_key(
         &self,
         client_id: &str,
-        request: &CreateClientKeyRevocationRequest,
+        reason: Option<&str>,
         operator: &AuthContext,
     ) -> Result<ClientKeyRevocationView> {
-        let reason = normalized_reason(request.reason.as_deref());
+        let reason = normalized_reason(reason);
         match self {
             Self::Memory(memory) => {
                 let _key_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
@@ -612,23 +611,45 @@ impl Repository {
                     .find(|record| record.public_key_sha256_hex == public_key_sha256_hex)
                     .cloned()
                 {
-                    if let Some(old_process_incarnation_id) = old_process_incarnation_id {
-                        self.mark_active_targets_agent_lost_for_client(
+                    let agent_lost_job_ids =
+                        if let Some(old_process_incarnation_id) = old_process_incarnation_id {
+                            self.mark_active_targets_agent_lost_for_client(
+                                client_id,
+                                old_process_incarnation_id,
+                                None,
+                                "client_key_revoked",
+                                "client key was revoked before final command output",
+                            )
+                            .await?
+                        } else {
+                            Vec::new()
+                        };
+                    let skipped_job_ids = self
+                        .skip_unstarted_queued_targets_for_client(
                             client_id,
-                            old_process_incarnation_id,
-                            None,
                             "client_key_revoked",
-                            "client key was revoked before final command output",
+                            "client_key_revoked: target skipped before dispatch",
                         )
                         .await?;
-                    }
-                    mark_memory_agent_revoked(memory, client_id).await;
-                    self.skip_unstarted_queued_targets_for_client(
-                        client_id,
-                        "client_key_revoked",
-                        "client_key_revoked: target skipped before dispatch",
-                    )
-                    .await?;
+                    let removed_configuration_preset_override_count =
+                        mark_memory_agent_revoked(memory, client_id).await;
+                    memory.audits.write().await.push(AuditLogView {
+                        id: Uuid::new_v4(),
+                        actor_id: Some(operator.operator.id),
+                        action: "client_key.revoked".to_string(),
+                        target: format!("client:{client_id}"),
+                        command_hash: None,
+                        metadata: json!({
+                            "client_id": client_id,
+                            "public_key_sha256_hex": existing.public_key_sha256_hex,
+                            "reason": existing.reason,
+                            "recovered_existing_revocation": true,
+                            "removed_configuration_preset_override_count": removed_configuration_preset_override_count,
+                            "agent_lost_job_ids": agent_lost_job_ids,
+                            "skipped_unstarted_job_ids": skipped_job_ids,
+                        }),
+                        created_at: unix_now().to_string(),
+                    });
                     return Ok(existing);
                 }
 
@@ -658,7 +679,6 @@ impl Repository {
                     } else {
                         Vec::new()
                     };
-                mark_memory_agent_revoked(memory, client_id).await;
                 let skipped_job_ids = self
                     .skip_unstarted_queued_targets_for_client(
                         client_id,
@@ -666,6 +686,8 @@ impl Repository {
                         "client_key_revoked: target skipped before dispatch",
                     )
                     .await?;
+                let removed_configuration_preset_override_count =
+                    mark_memory_agent_revoked(memory, client_id).await;
                 memory.audits.write().await.push(AuditLogView {
                     id: Uuid::new_v4(),
                     actor_id: Some(operator.operator.id),
@@ -676,6 +698,7 @@ impl Repository {
                         "client_id": client_id,
                         "public_key_sha256_hex": record.public_key_sha256_hex,
                         "reason": record.reason,
+                        "removed_configuration_preset_override_count": removed_configuration_preset_override_count,
                         "agent_lost_job_ids": agent_lost_job_ids,
                         "skipped_unstarted_job_ids": skipped_job_ids,
                     }),
@@ -711,7 +734,7 @@ impl Repository {
                 if let Some(existing) =
                     fetch_postgres_key_revocation(&mut tx, &public_key_sha256_hex).await?
                 {
-                    let mut job_ids =
+                    let agent_lost_job_ids =
                         if let Some(old_process_incarnation_id) = old_process_incarnation_id {
                             mark_active_targets_agent_lost_for_client_in_tx(
                                 &mut tx,
@@ -725,7 +748,7 @@ impl Repository {
                         } else {
                             Vec::new()
                         };
-                    mark_postgres_agent_revoked(
+                    let removed_configuration_preset_override_count = mark_postgres_agent_revoked(
                         &mut tx,
                         client_id,
                         operator.operator.id,
@@ -740,6 +763,29 @@ impl Repository {
                         "client_key_revoked: target skipped before dispatch",
                     )
                     .await?;
+                    sqlx::query(
+                        r#"
+                        INSERT INTO audit_logs (
+                            id, actor_id, action, target, command_hash, metadata
+                        )
+                        VALUES ($1, $2, 'client_key.revoked', $3, NULL, $4)
+                        "#,
+                    )
+                    .bind(Uuid::new_v4())
+                    .bind(operator.operator.id)
+                    .bind(format!("client:{client_id}"))
+                    .bind(json!({
+                        "client_id": client_id,
+                        "public_key_sha256_hex": existing.public_key_sha256_hex,
+                        "reason": existing.reason,
+                        "recovered_existing_revocation": true,
+                        "removed_configuration_preset_override_count": removed_configuration_preset_override_count,
+                        "agent_lost_job_ids": agent_lost_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
+                        "skipped_unstarted_job_ids": skipped_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
+                    }))
+                    .execute(&mut *tx)
+                    .await?;
+                    let mut job_ids = agent_lost_job_ids;
                     job_ids.extend(skipped_job_ids);
                     tx.commit().await?;
                     job_ids.sort();
@@ -780,7 +826,7 @@ impl Repository {
                     } else {
                         Vec::new()
                     };
-                mark_postgres_agent_revoked(
+                let removed_configuration_preset_override_count = mark_postgres_agent_revoked(
                     &mut tx,
                     client_id,
                     operator.operator.id,
@@ -810,6 +856,7 @@ impl Repository {
                     "client_id": client_id,
                     "public_key_sha256_hex": public_key_sha256_hex,
                     "reason": reason,
+                    "removed_configuration_preset_override_count": removed_configuration_preset_override_count,
                     "agent_lost_job_ids": agent_lost_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
                     "skipped_unstarted_job_ids": skipped_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
                 }))
@@ -1143,7 +1190,10 @@ impl Repository {
     }
 }
 
-async fn mark_memory_agent_revoked(memory: &crate::repository::MemoryState, client_id: &str) {
+async fn mark_memory_agent_revoked(
+    memory: &crate::repository::MemoryState,
+    client_id: &str,
+) -> usize {
     let now = unix_now().to_string();
     memory
         .hidden_clients
@@ -1170,6 +1220,10 @@ async fn mark_memory_agent_revoked(memory: &crate::repository::MemoryState, clie
             session.end_reason = Some("client_key_revoked".to_string());
         }
     }
+    let mut overrides = memory.configuration_preset_overrides.write().await;
+    let previous_count = overrides.len();
+    overrides.retain(|override_record| override_record.client_id != client_id);
+    previous_count.saturating_sub(overrides.len())
 }
 
 async fn mark_postgres_agent_revoked(
@@ -1178,7 +1232,7 @@ async fn mark_postgres_agent_revoked(
     operator_id: Uuid,
     request_reason: Option<&str>,
     prior_status: &str,
-) -> Result<()> {
+) -> Result<u64> {
     let hidden_reason = request_reason.unwrap_or("client_key_revoked");
     sqlx::query(
         r#"
@@ -1200,6 +1254,12 @@ async fn mark_postgres_agent_revoked(
     .bind(hidden_reason)
     .execute(&mut **tx)
     .await?;
+    let removed_configuration_preset_override_count =
+        sqlx::query("DELETE FROM client_configuration_preset_overrides WHERE client_id = $1")
+            .bind(client_id)
+            .execute(&mut **tx)
+            .await?
+            .rows_affected();
     sqlx::query(
         r#"
         UPDATE gateway_sessions
@@ -1234,7 +1294,7 @@ async fn mark_postgres_agent_revoked(
         .execute(&mut **tx)
         .await?;
     }
-    Ok(())
+    Ok(removed_configuration_preset_override_count)
 }
 
 async fn fetch_postgres_agent_identity(

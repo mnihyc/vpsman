@@ -20,6 +20,7 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { createPortal } from "react-dom";
 import {
   ConsoleDataGrid,
+  type ConsoleDataGridAction,
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
 import {
@@ -227,6 +228,88 @@ export function TerminalSessionsPanel({
       ? null
       : "Load Replay first; transcript export uses the retained replay loaded in this browser."
     : "Select a terminal session before copying or downloading transcript text.";
+  const terminalRowActions: ConsoleDataGridAction<TerminalSessionRecord>[] = [
+    {
+      description: ([session]) =>
+        session
+          ? "Follow persisted output as new terminal chunks arrive."
+          : "Follow terminal output.",
+      disabled: ([session]) =>
+        !session ||
+        !isTerminalActive(session) ||
+        session.output_next_seq === null,
+      hidden: ([session]) =>
+        Boolean(
+          session &&
+            followingLive &&
+            followKey === `${session.client_id}:${session.session_id}`,
+        ),
+      icon: <Radio size={13} />,
+      label: "Follow",
+      onSelect: ([session]) => session && toggleFollow(session),
+    },
+    {
+      description: () => "Stop following live terminal output.",
+      hidden: ([session]) =>
+        !session ||
+        !followingLive ||
+        followKey !== `${session.client_id}:${session.session_id}`,
+      icon: <Radio size={13} />,
+      label: "Stop follow",
+      onSelect: ([session]) => session && toggleFollow(session),
+    },
+    {
+      description: () => "Load durable replay from retained terminal output.",
+      disabled: ([session]) =>
+        !session ||
+        session.output_next_seq === null ||
+        replayPendingKey === `${session.client_id}:${session.session_id}`,
+      icon: <History size={13} />,
+      label: "Replay",
+      onSelect: ([session]) => {
+        if (session) {
+          void loadDurableReplay(session);
+        }
+      },
+    },
+    {
+      description: () => "Attach to this active terminal session.",
+      disabled: ([session]) => !session || !isTerminalActive(session),
+      icon: <LogIn size={13} />,
+      label: "Attach",
+      onSelect: ([session]) => session && onPrepareAction(session, "open"),
+    },
+    {
+      description: () => "Poll retained terminal output.",
+      disabled: ([session]) => !session || !isTerminalActive(session),
+      icon: <RefreshCw size={13} />,
+      label: "Poll",
+      onSelect: ([session]) => session && onPrepareAction(session, "poll"),
+    },
+    {
+      description: () =>
+        "Focus the inline input composer for this terminal session.",
+      disabled: ([session]) => !session || !isTerminalActive(session),
+      icon: <Keyboard size={13} />,
+      label: "Input",
+      onSelect: ([session]) => session && focusTerminalInput(session),
+    },
+    {
+      description: () => "Resize this active terminal session.",
+      disabled: ([session]) => !session || !isTerminalActive(session),
+      icon: <Maximize2 size={13} />,
+      label: "Resize",
+      onSelect: ([session]) => session && onPrepareAction(session, "resize"),
+    },
+    {
+      description: () => "Close this terminal session after review.",
+      disabled: ([session]) => !session || !isTerminalActive(session),
+      icon: <XCircle size={13} />,
+      label: "Close",
+      onSelect: ([session]) => session && requestTerminalClose(session),
+      tone: "danger",
+    },
+  ];
   const terminalColumns: ConsoleDataGridColumn<TerminalSessionRecord>[] = [
     {
       cell: (session) => {
@@ -302,125 +385,6 @@ export function TerminalSessionsPanel({
       id: "output",
       searchValue: (session) => `${formatOutputRange(session)} ${formatOutputRetention(session)}`,
       sortValue: (session) => session.output_next_seq ?? 0,
-    },
-    {
-      cell: (session) => {
-        const active = !session.session_exited && session.state !== "closed";
-        const key = `${session.client_id}:${session.session_id}`;
-        const following = followingLive && followKey === key;
-        const followTitle = !active
-          ? "This session is closed. Load Replay to inspect its retained output."
-          : session.output_next_seq === null
-            ? "Live follow starts after the session reports an output sequence."
-            : "Follow persisted output as new terminal chunks arrive";
-        return (
-          <span className="terminalRowActions" aria-label={`Terminal session ${shortId(session.session_id)} controls`}>
-            <button
-              aria-label={`${following ? "Stop following" : "Follow"} terminal session ${shortId(session.session_id)}`}
-              className={`terminalActionButton ${following ? "activeAction" : ""}`}
-              disabled={!active || session.output_next_seq === null}
-              onClick={(event) => {
-                event.stopPropagation();
-                toggleFollow(session);
-              }}
-              title={followTitle}
-              type="button"
-            >
-              <Radio size={13} />
-              <span>{following ? "Stop follow" : "Follow"}</span>
-            </button>
-            <button
-              aria-label={`Durable replay terminal session ${shortId(session.session_id)}`}
-              className="terminalActionButton"
-              disabled={session.output_next_seq === null || replayPendingKey === key}
-              onClick={(event) => {
-                event.stopPropagation();
-                void loadDurableReplay(session);
-              }}
-              title="Load durable replay from retained terminal output"
-              type="button"
-            >
-              <History size={13} />
-              <span>Replay</span>
-            </button>
-            <button
-              aria-label={`Attach terminal session ${shortId(session.session_id)}`}
-              className="terminalActionButton"
-              disabled={!active}
-              onClick={(event) => {
-                event.stopPropagation();
-                onPrepareAction(session, "open");
-              }}
-              title="Attach to this active terminal session"
-              type="button"
-            >
-              <LogIn size={13} />
-              <span>Attach</span>
-            </button>
-            <button
-              aria-label={`Poll terminal session ${shortId(session.session_id)}`}
-              className="terminalActionButton"
-              disabled={!active}
-              onClick={(event) => {
-                event.stopPropagation();
-                onPrepareAction(session, "poll");
-              }}
-              title="Poll retained terminal output"
-              type="button"
-            >
-              <RefreshCw size={13} />
-              <span>Poll</span>
-            </button>
-            <button
-              aria-label={`Input terminal session ${shortId(session.session_id)}`}
-              className="terminalActionButton"
-              disabled={!active}
-              onClick={(event) => {
-                event.stopPropagation();
-                focusTerminalInput(session);
-              }}
-              title="Focus the inline input composer for this exact terminal session"
-              type="button"
-            >
-              <Keyboard size={13} />
-              <span>Input</span>
-            </button>
-            <button
-              aria-label={`Resize terminal session ${shortId(session.session_id)}`}
-              className="terminalActionButton"
-              disabled={!active}
-              onClick={(event) => {
-                event.stopPropagation();
-                onPrepareAction(session, "resize");
-              }}
-              title="Resize this terminal session"
-              type="button"
-            >
-              <Maximize2 size={13} />
-              <span>Resize</span>
-            </button>
-            <button
-              aria-label={`Close terminal session ${shortId(session.session_id)}`}
-              className="terminalActionButton dangerAction"
-              disabled={!active}
-              onClick={(event) => {
-                event.stopPropagation();
-                requestTerminalClose(session);
-              }}
-              title="Close this terminal session after review"
-              type="button"
-            >
-              <XCircle size={13} />
-              <span>Close</span>
-            </button>
-          </span>
-        );
-      },
-      enableHiding: false,
-      header: "Session controls",
-      id: "actions",
-      minSize: 420,
-      size: 460,
     },
     {
       cell: (session) => formatTime(session.observed_at),
@@ -710,13 +674,15 @@ export function TerminalSessionsPanel({
 
   function focusTerminalInput(session: TerminalSessionRecord) {
     selectTerminalSession(`${session.client_id}:${session.session_id}`);
-    window.requestAnimationFrame(() => {
-      const input = terminalFocusOpen
-        ? focusedTerminalInputRef.current
-        : terminalInputRef.current;
-      input?.focus({ preventScroll: false });
-      input?.scrollIntoView({ block: "nearest" });
-    });
+    window.setTimeout(() => {
+      window.requestAnimationFrame(() => {
+        const input = terminalFocusOpen
+          ? focusedTerminalInputRef.current
+          : terminalInputRef.current;
+        input?.focus({ preventScroll: false });
+        input?.scrollIntoView({ block: "nearest" });
+      });
+    }, 0);
   }
 
   async function sendTerminalInput(event: FormEvent<HTMLFormElement>) {
@@ -1356,10 +1322,10 @@ export function TerminalSessionsPanel({
             <strong>{session.last_event}</strong>
           </div>
         )}
+        rowActions={terminalRowActions}
         rows={sessions}
         rowsTruncated={sessionsTruncated}
         searchPlaceholder="Search terminal sessions"
-        selectable={false}
         storageKey="vpsman.jobs.terminalSessions"
         title="Session inventory and controls"
       />

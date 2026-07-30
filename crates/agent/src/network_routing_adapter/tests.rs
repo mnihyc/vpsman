@@ -70,8 +70,9 @@ fn write_script(path: &std::path::Path, contents: &str) {
 
 fn adapter(status: &std::path::Path, update: &std::path::Path) -> RoutingCostAdapterCommands {
     RoutingCostAdapterCommands {
-        template_id: "routing-adapter-a".to_string(),
-        template_name: "Test routing adapter".to_string(),
+        source: vpsman_common::RoutingCostCommandSource::PlanOverride,
+        definition_id: "routing-adapter-a".to_string(),
+        definition_name: "Test routing adapter".to_string(),
         definition_hash: "a".repeat(64),
         status: RuntimeTunnelCommand {
             argv: vec![status.to_string_lossy().to_string()],

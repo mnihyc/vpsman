@@ -59,13 +59,19 @@ routing_adapter_definition="$(jq -nc \
   status_command: {argv:[$python, $script], max_timeout_secs:5, max_output_bytes:4096},
   update_command: {argv:[$python, $script], max_timeout_secs:5, max_output_bytes:4096}
 }')"
-routing_adapter_json="$(VPSMAN_API_TOKEN="$access_token" \
-  target/debug/vpsctl --api-url "$api_url" source-template-create \
-    --domain routing_cost_adapter \
-    --name smoke:routing-cost-adapter \
-    --description "postgres live routing adapter contract" \
-    --definition-json "$routing_adapter_definition")"
-routing_adapter_template_id="$(jq -r '.id' <<<"$routing_adapter_json")"
+routing_adapter_json="$(curl -fsS \
+  -H "Authorization: Bearer $access_token" \
+  -H "Content-Type: application/json" \
+  -d "$(jq -nc \
+    --argjson definition "$routing_adapter_definition" \
+    '{
+      adapter_kind:"routing_cost",
+      name:"smoke:routing-cost-adapter",
+      description:"postgres live routing adapter contract",
+      definition:$definition
+    }')" \
+  "$api_url/api/v1/network-adapter-definitions")"
+routing_adapter_definition_id="$(jq -r '.id' <<<"$routing_adapter_json")"
 
 target/debug/vpsctl --api-url "$api_url" tunnel-plan \
   --name postgres-live-status \
@@ -82,8 +88,8 @@ target/debug/vpsctl --api-url "$api_url" tunnel-plan \
   --bandwidth-mbps 100 \
   --ospf \
   --ospf-latency-ms 5 \
-  --left-routing-adapter-template-id "$routing_adapter_template_id" \
-  --right-routing-adapter-template-id "$routing_adapter_template_id" >/dev/null
+  --left-routing-adapter-definition-id "$routing_adapter_definition_id" \
+  --right-routing-adapter-definition-id "$routing_adapter_definition_id" >/dev/null
 network_plan_json="$(VPSMAN_API_TOKEN="$access_token" \
 target/debug/vpsctl --api-url "$api_url" tunnel-plan \
   --name postgres-live-status \
@@ -100,8 +106,8 @@ target/debug/vpsctl --api-url "$api_url" tunnel-plan \
   --bandwidth-mbps 100 \
   --ospf \
   --ospf-latency-ms 5 \
-  --left-routing-adapter-template-id "$routing_adapter_template_id" \
-  --right-routing-adapter-template-id "$routing_adapter_template_id" \
+  --left-routing-adapter-definition-id "$routing_adapter_definition_id" \
+  --right-routing-adapter-definition-id "$routing_adapter_definition_id" \
   --save \
   --enabled \
   --confirmed)"

@@ -298,22 +298,6 @@ pub const WEBHOOK_RULE_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS: [(&str, &str); 2
     ("failed", WORKFLOW_STATUS_CLASS_WARNING),
 ];
 
-pub const SOURCE_READINESS_STATUS_CLASS_BY_STATUS: [(&str, &str); 13] = [
-    ("agent_offline", WORKFLOW_STATUS_CLASS_WARNING),
-    ("selected", WORKFLOW_STATUS_CLASS_NEUTRAL),
-    ("selected_workflow", WORKFLOW_STATUS_CLASS_NEUTRAL),
-    ("unknown_domain", WORKFLOW_STATUS_CLASS_WARNING),
-    ("ready_on_demand", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
-    ("ready", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
-    ("metadata_only", WORKFLOW_STATUS_CLASS_NEUTRAL),
-    ("selected_no_store", WORKFLOW_STATUS_CLASS_WARNING),
-    ("selected_no_artifacts", WORKFLOW_STATUS_CLASS_WARNING),
-    ("selected_no_limits", WORKFLOW_STATUS_CLASS_WARNING),
-    ("selected_no_samples", WORKFLOW_STATUS_CLASS_NEUTRAL),
-    ("ok", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
-    ("degraded", WORKFLOW_STATUS_CLASS_WARNING),
-];
-
 pub const TOPOLOGY_NODE_STATUS_CLASS_BY_STATUS: [(&str, &str); 5] = [
     ("online", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
     ("offline", WORKFLOW_STATUS_CLASS_WARNING),
@@ -709,10 +693,6 @@ pub fn webhook_rule_delivery_history_status_class_by_status(
 pub fn webhook_rule_delivery_process_status_class_by_status(
 ) -> &'static [(&'static str, &'static str)] {
     &WEBHOOK_RULE_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS
-}
-
-pub fn source_readiness_status_class_by_status() -> &'static [(&'static str, &'static str)] {
-    &SOURCE_READINESS_STATUS_CLASS_BY_STATUS
 }
 
 pub fn topology_node_status_class_by_status() -> &'static [(&'static str, &'static str)] {
@@ -2185,22 +2165,6 @@ pub const WEBHOOK_RULE_DELIVERY_PROCESS_STATUSES: &[&str] = &[
     WEBHOOK_RULE_DELIVERY_STATUS_FAILED,
 ];
 
-pub const SOURCE_READINESS_STATUSES: &[&str] = &[
-    "agent_offline",
-    "selected",
-    "selected_workflow",
-    "unknown_domain",
-    "ready_on_demand",
-    "ready",
-    "metadata_only",
-    "selected_no_store",
-    "selected_no_artifacts",
-    "selected_no_limits",
-    "selected_no_samples",
-    "ok",
-    "degraded",
-];
-
 pub const TOPOLOGY_NODE_STATUSES: &[&str] = &["online", "offline", "never", "stale", "unknown"];
 pub const TOPOLOGY_EDGE_HEALTH_STATUSES: &[&str] = &["disabled", "unknown", "healthy", "degraded"];
 pub const TOPOLOGY_NEIGHBOR_STATES: &[&str] = &[
@@ -2302,10 +2266,6 @@ pub fn webhook_rule_delivery_process_statuses() -> &'static [&'static str] {
     WEBHOOK_RULE_DELIVERY_PROCESS_STATUSES
 }
 
-pub fn source_readiness_statuses() -> &'static [&'static str] {
-    SOURCE_READINESS_STATUSES
-}
-
 pub fn topology_node_statuses() -> &'static [&'static str] {
     TOPOLOGY_NODE_STATUSES
 }
@@ -2389,10 +2349,6 @@ pub fn file_transfer_session_status(event_type: &str, download_complete: bool) -
         "file_transfer_start" | "file_transfer_download_start" => "started",
         _ => "unknown",
     }
-}
-
-pub fn is_source_readiness_status(status: &str) -> bool {
-    contains_static(SOURCE_READINESS_STATUSES, status)
 }
 
 pub fn is_topology_node_status(status: &str) -> bool {
@@ -3987,10 +3943,6 @@ mod tests {
         assert_status_class_map_total(
             webhook_rule_delivery_process_statuses(),
             super::webhook_rule_delivery_process_status_class_by_status(),
-        );
-        assert_status_class_map_total(
-            super::source_readiness_statuses(),
-            super::source_readiness_status_class_by_status(),
         );
         assert_status_class_map_total(
             topology_node_statuses(),

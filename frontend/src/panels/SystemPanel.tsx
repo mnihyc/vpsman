@@ -1151,51 +1151,6 @@ export function SystemUsersPanel({
           accessSummaries[row.id]?.lastLogin?.created_at ?? "",
         minSize: 120,
       },
-      {
-        id: "actions",
-        header: "Actions",
-        stickyEnd: true,
-        cell: (row) => (
-          <div className="operatorInlineActions">
-            <button
-              className="secondaryAction compactAction"
-              onClick={(event) => {
-                event.stopPropagation();
-                setSelectedOperatorId(row.id);
-              }}
-              title={`Manage ${row.username}.`}
-              type="button"
-            >
-              <Pencil size={14} />
-              <span>Manage</span>
-            </button>
-            <button
-              className="secondaryAction compactAction"
-              disabled={
-                reviewPending ||
-                actionPending ||
-                !canManageUsers ||
-                (accessSummaries[row.id]?.revokableSessions.length ?? 0) === 0
-              }
-              onClick={(event) => {
-                event.stopPropagation();
-                void submitOperatorSessionRevoke(row, accessSummaries[row.id]);
-              }}
-              title={
-                (accessSummaries[row.id]?.revokableSessions.length ?? 0) > 0
-                  ? `Revoke ${accessSummaries[row.id]?.revokableSessions.length ?? 0} non-current active sessions for ${row.username}.`
-                  : `No non-current active sessions are available to revoke for ${row.username}.`
-              }
-              type="button"
-            >
-              <UserX size={14} />
-              <span>Revoke sessions</span>
-            </button>
-          </div>
-        ),
-        enableHiding: false,
-        minSize: 210,
-      },
     ],
     [
       accessSummaries,
@@ -1778,7 +1733,7 @@ export function SystemUsersPanel({
               ? `Editing ${selectedOperator.username}`
               : editorMode === "create"
                 ? "Creating new operator"
-                : "Use New or row actions"}
+                : "Use New or select rows, then Actions"}
           </span>
         </div>
         {editorMode === "closed" ? (
@@ -1791,7 +1746,7 @@ export function SystemUsersPanel({
         <ConsoleDataGrid
           actions={[
             {
-              label: "Edit selected",
+              label: "Edit",
               description: (rows) =>
                 rows.length === 1
                   ? `Load ${rows[0].username} into the editor.`
@@ -1801,7 +1756,27 @@ export function SystemUsersPanel({
               onSelect: (rows) => setSelectedOperatorId(rows[0].id),
             },
             {
-              label: "Enable selected",
+              label: "Revoke sessions",
+              description: (rows) =>
+                rows.length === 1
+                  ? `Revoke non-current active sessions for ${rows[0].username}.`
+                  : "Select exactly one operator whose sessions should be revoked.",
+              disabled: (rows) =>
+                rows.length !== 1 ||
+                reviewPending ||
+                actionPending ||
+                !canManageUsers ||
+                (accessSummaries[rows[0].id]?.revokableSessions.length ?? 0) ===
+                  0,
+              icon: <UserX size={14} />,
+              onSelect: (rows) =>
+                void submitOperatorSessionRevoke(
+                  rows[0],
+                  accessSummaries[rows[0].id],
+                ),
+            },
+            {
+              label: "Enable",
               description: (rows) =>
                 rows.length === 1
                   ? `Allow ${rows[0].username} to log in again.`
@@ -1816,7 +1791,7 @@ export function SystemUsersPanel({
               onSelect: (rows) => void submitBulkStatus(rows, "active"),
             },
             {
-              label: "Disable selected",
+              label: "Disable",
               description: (rows) =>
                 rows.length === 1
                   ? `Block ${rows[0].username} login and revoke existing sessions.`
@@ -1832,7 +1807,7 @@ export function SystemUsersPanel({
               tone: "danger",
             },
             {
-              label: "Delete selected",
+              label: "Delete",
               description: (rows) =>
                 rows.length === 1
                   ? `Delete ${rows[0].username} for login purposes and revoke existing sessions.`
@@ -1848,7 +1823,7 @@ export function SystemUsersPanel({
               tone: "danger",
             },
             {
-              label: "Clear TOTP selected",
+              label: "Clear TOTP",
               description: (rows) =>
                 rows.length === 1
                   ? `Remove stored TOTP secret material for ${rows[0].username} and revoke existing sessions.`
@@ -1871,7 +1846,6 @@ export function SystemUsersPanel({
           expandOnRowClick
           getRowId={(row) => row.id}
           itemLabel="operators"
-          mobileLayout="table"
           onOpenRow={(row) => setSelectedOperatorId(row.id)}
           openRowLabel="Open operator"
           openRowTitle={(row) => `Show operator details for ${row.username}.`}
@@ -2437,39 +2411,6 @@ function SystemSessionsPanel({
         searchValue: (row) =>
           `${sessionEnrichment[row.id]?.riskLabel ?? ""} ${sessionEnrichment[row.id]?.riskDetail ?? ""}`,
       },
-      {
-        id: "revoke",
-        header: "Revoke",
-        cell: (row) => (
-          <button
-            aria-label={`Revoke session for ${row.operator_username}`}
-            className="secondaryAction compactAction sessionInlineRevoke"
-            disabled={
-              reviewPending ||
-              pending ||
-              row.current ||
-              !isOperatorSessionUsable(row)
-            }
-            onClick={(event) => {
-              event.stopPropagation();
-              void requestSessionRevoke([row]);
-            }}
-            title={
-              row.current
-                ? "Current session cannot be revoked from this table."
-                : row.revoked
-                  ? "Session is already revoked."
-                  : !isOperatorSessionUsable(row)
-                    ? "Expired bearer sessions are retained as evidence and excluded from active revoke controls."
-                    : `Revoke ${row.operator_username}'s active bearer session.`
-            }
-            type="button"
-          >
-            <UserX size={15} />
-            <span>Revoke</span>
-          </button>
-        ),
-      },
     ],
     [pending, privilegeMaterial, reviewPending, sessionEnrichment],
   );
@@ -2743,7 +2684,7 @@ function SystemSessionsPanel({
               }
             />
             <SystemPostureTile
-              detail="The table exposes row-level revoke actions and still supports bulk revoke from selected rows."
+              detail="Select one or more active bearer sessions, then use Actions to review revocation."
               icon={<UserX size={18} />}
               label="Revocation"
               tone={
@@ -2776,7 +2717,7 @@ function SystemSessionsPanel({
           <ConsoleDataGrid
             actions={[
               {
-                label: "Revoke selected",
+                label: "Revoke",
                 description: (rows) =>
                   rows.length === 1
                     ? `Revoke the bearer session for ${rows[0].operator_username}.`
@@ -2806,21 +2747,6 @@ function SystemSessionsPanel({
             renderSelectionPanel={(rows) => (
               <SessionSelectionPanel rows={rows} />
             )}
-            rowActions={[
-              {
-                label: "Revoke session",
-                description: (rows) =>
-                  `Revoke the bearer session for ${rows[0].operator_username}.`,
-                tone: "danger",
-                icon: <UserX size={14} />,
-                disabled: (rows) =>
-                  reviewPending ||
-                  pending ||
-                  rows.length === 0 ||
-                  rows.some((row) => row.current || row.revoked),
-                onSelect: (rows) => void requestSessionRevoke(rows),
-              },
-            ]}
             rows={sessions}
             rowsTruncated={sessionsTruncated}
             searchPlaceholder="Search user, role, IP, browser, device, state, or risk"
@@ -5774,8 +5700,8 @@ function SystemConfigPanel({
             <div>
               <strong>Runtime config scope</strong>
               <p>
-                Per-VPS runtime reads, overrides, patches, templates, and rules
-                stay in Config workflows.
+                Per-VPS runtime reads, overrides, patches, configuration
+                presets, and rules stay in Config workflows.
               </p>
             </div>
             <div className="systemConfigOwnershipActions">

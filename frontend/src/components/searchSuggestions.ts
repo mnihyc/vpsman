@@ -33,13 +33,21 @@ export function buildParseableSearchValueSuggestions<T>(
   limit = MAX_SEARCH_VALUE_SUGGESTIONS,
 ): string[] {
   const candidates = buildSearchValueSuggestions(items, valuesForItem, limit * 3);
+  const indexedItems = items.map((item) => ({
+    fields: fieldsForItem(item),
+    item,
+  }));
   const matching: string[] = [];
   const nonMatching: string[] = [];
   for (const candidate of candidates) {
     if (!isParseableSearchSuggestion(candidate)) {
       continue;
     }
-    const result = filterBySearchExpression(items, candidate, fieldsForItem);
+    const result = filterBySearchExpression(
+      indexedItems,
+      candidate,
+      (entry) => entry.fields,
+    );
     if (result.error) {
       continue;
     }

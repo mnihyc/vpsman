@@ -265,6 +265,7 @@ export function useDashboardData(activeView: ActiveView) {
       topologyReloadTimer.current = null;
       void Promise.all([
         topology.loadTunnelPlans(),
+        topology.loadNetworkAdapterDefinitions(),
         topology.loadTopologyGraph(),
         topology.loadNetworkObservations(),
         topology.loadNetworkTrends(),
@@ -275,6 +276,7 @@ export function useDashboardData(activeView: ActiveView) {
     }, 500);
   }, [
     topology.loadNetworkObservations,
+    topology.loadNetworkAdapterDefinitions,
     topology.loadNetworkTrends,
     topology.loadOspfRecommendations,
     topology.loadOspfUpdatePlans,
@@ -420,6 +422,7 @@ export function useDashboardData(activeView: ActiveView) {
       void inventory.loadRuntimeConfigApplyStates();
       void portForwarding.loadPortForwardRules();
       void topology.loadTunnelPlans();
+      void topology.loadNetworkAdapterDefinitions();
       void topology.loadNetworkObservations();
       void topology.loadNetworkTrends();
       void topology.loadOspfRecommendations();
@@ -466,6 +469,7 @@ export function useDashboardData(activeView: ActiveView) {
     system.loadSuiteConfig,
     system.loadSystemDashboard,
     topology.loadNetworkObservations,
+    topology.loadNetworkAdapterDefinitions,
     topology.loadNetworkTrends,
     topology.loadOspfRecommendations,
     topology.loadOspfUpdatePlans,
@@ -646,7 +650,7 @@ export function useDashboardData(activeView: ActiveView) {
         () => {
           if (authGenerationRef.current === logoutGeneration) {
             setLogoutWarning(
-              "Signed out locally, but the server could not revoke this session. It may remain active until it expires; sign in again to review Access > Sessions when the API is available.",
+              "Signed out locally, but the server could not revoke this session. It may remain active until it expires; sign in again to review Audit > Sessions when the API is available.",
             );
           }
         },
@@ -663,7 +667,8 @@ export function useDashboardData(activeView: ActiveView) {
     agents: fleet.agents,
     apiError: fleet.apiError,
     apiToken,
-    assignSourceTemplate: inventory.assignSourceTemplate,
+    applyConfigurationSourceOverride:
+      inventory.applyConfigurationSourceOverride,
     assignTag: inventory.assignTag,
     bulkMutateTags: inventory.bulkMutateTags,
     auditError: audit.auditError,
@@ -690,7 +695,13 @@ export function useDashboardData(activeView: ActiveView) {
     clearSession,
     clientKeyRevocations: access.clientKeyRevocations,
     clearOperatorTotp: access.clearOperatorTotp,
-    cloneSourceTemplate: inventory.cloneSourceTemplate,
+    cloneConfigurationPreset: inventory.cloneConfigurationPreset,
+    configurationPresets: inventory.configurationPresets,
+    configurationSourcesEvidenceAvailable:
+      inventory.configurationSourcesEvidenceAvailable,
+    configurationSourcesError: inventory.configurationSourcesError,
+    configurationSourcesLoading: inventory.configurationSourcesLoading,
+    configurationSources: inventory.configurationSources,
     confirmTotp: access.confirmTotp,
     createOperator: access.createOperator,
     updateAgentAlias: fleet.updateAgentAlias,
@@ -714,7 +725,7 @@ export function useDashboardData(activeView: ActiveView) {
     retryAuthRefresh: refreshStoredAuth,
     createArtifactCleanupJob: jobs.createArtifactCleanupJob,
     createAgentUpdateRelease: jobs.createAgentUpdateRelease,
-    createSourceTemplate: inventory.createSourceTemplate,
+    createConfigurationPreset: inventory.createConfigurationPreset,
     createSchedule: schedules.createSchedule,
     updateSchedule: schedules.updateSchedule,
     updateScheduleTargets: schedules.updateScheduleTargets,
@@ -727,12 +738,16 @@ export function useDashboardData(activeView: ActiveView) {
     updateTagOrder: inventory.updateTagOrder,
     allocateTunnelEndpoints: topology.allocateTunnelEndpoints,
     createTunnelPlan: topology.createTunnelPlan,
+    createNetworkAdapterDefinition:
+      topology.createNetworkAdapterDefinition,
     createPortForwardRule: portForwarding.createPortForwardRule,
     updatePortForwardRule: portForwarding.updatePortForwardRule,
     mutatePortForwardRule: portForwarding.mutatePortForwardRule,
     bulkMutatePortForwardRules: portForwarding.bulkMutatePortForwardRules,
     resolvePortForwardHostname: portForwarding.resolvePortForwardHostname,
     deleteTunnelPlan: topology.deleteTunnelPlan,
+    deleteNetworkAdapterDefinition:
+      topology.deleteNetworkAdapterDefinition,
     exportTunnelPlan: topology.exportTunnelPlan,
     refreshTunnelPlanOspfStatus: topology.refreshTunnelPlanOspfStatus,
     disableTotp: access.disableTotp,
@@ -829,10 +844,13 @@ export function useDashboardData(activeView: ActiveView) {
     cancelJob: jobs.cancelJob,
     previewArtifactCleanup: jobs.previewArtifactCleanup,
     loadTagInventory: inventory.loadTagInventory,
-    loadSourceTemplates: inventory.loadSourceTemplates,
+    deleteConfigurationPreset: inventory.deleteConfigurationPreset,
+    loadConfigurationSources: inventory.loadConfigurationSources,
     loadRuntimeConfigApplyStates: inventory.loadRuntimeConfigApplyStates,
     loadSchedules: schedules.loadSchedules,
     loadNetworkObservations: topology.loadNetworkObservations,
+    loadNetworkAdapterDefinitions:
+      topology.loadNetworkAdapterDefinitions,
     loadNetworkTrends: topology.loadNetworkTrends,
     loadOspfRecommendations: topology.loadOspfRecommendations,
     loadOspfUpdatePlans: topology.loadOspfUpdatePlans,
@@ -841,9 +859,12 @@ export function useDashboardData(activeView: ActiveView) {
     loadPortForwardRules: portForwarding.loadPortForwardRules,
     setTunnelPlanEnabled: topology.setTunnelPlanEnabled,
     updateTunnelConnectionAssessment: topology.updateTunnelConnectionAssessment,
+    updateNetworkAdapterDefinition:
+      topology.updateNetworkAdapterDefinition,
     updateTunnelPlanOspfCost: topology.updateTunnelPlanOspfCost,
     updateTunnelPlan: topology.updateTunnelPlan,
     networkObservations: topology.networkObservations,
+    networkAdapterDefinitions: topology.networkAdapterDefinitions,
     networkTrends: topology.networkTrends,
     ospfRecommendations: topology.ospfRecommendations,
     ospfUpdatePlans: topology.ospfUpdatePlans,
@@ -855,9 +876,6 @@ export function useDashboardData(activeView: ActiveView) {
     operatorSessionsTruncated: access.operatorSessionsTruncated,
     preferencesError: access.preferencesError,
     preferencesSaving: access.preferencesSaving,
-    sourceTemplateAssignments: inventory.sourceTemplateAssignments,
-    sourceTemplates: inventory.sourceTemplates,
-    sourceStatus: inventory.sourceStatus,
     deleteRuntimeConfigPatchGenerator: inventory.deleteRuntimeConfigPatchGenerator,
     deleteTag: inventory.deleteTag,
     dashboardOverview: dashboardOverview.dashboardOverview,
@@ -868,9 +886,11 @@ export function useDashboardData(activeView: ActiveView) {
     loadDashboardOverview: dashboardOverview.loadDashboardOverview,
     setDashboardOverviewWindow: dashboardOverview.setDashboardOverviewWindow,
     updateDashboardPreferences: dashboardOverview.updateDashboardPreferences,
-    diffSourceTemplate: inventory.diffSourceTemplate,
+    loadEffectiveAgentConfig: inventory.loadEffectiveAgentConfig,
     submitRuntimeConfigPatch: inventory.submitRuntimeConfigPatch,
-    renderTemplateRuntimeConfig: inventory.renderTemplateRuntimeConfig,
+    previewConfigurationPreset: inventory.previewConfigurationPreset,
+    previewConfigurationSourceOverride:
+      inventory.previewConfigurationSourceOverride,
     renderRuntimeConfigPatchGenerator: inventory.renderRuntimeConfigPatchGenerator,
     resolveBulkPreview: inventory.resolveBulkPreview,
     resolveJobTargets: inventory.resolveJobTargets,
@@ -879,7 +899,6 @@ export function useDashboardData(activeView: ActiveView) {
     resetOperatorPassword: access.resetOperatorPassword,
     pruneHistoryRetention: audit.pruneHistoryRetention,
     setupTotp: access.setupTotp,
-    testSourceTemplate: inventory.testSourceTemplate,
     schedules: schedules.schedules,
     schedulesTruncated: schedules.schedulesTruncated,
     schedulesError: schedules.schedulesError,
@@ -924,7 +943,7 @@ export function useDashboardData(activeView: ActiveView) {
     portForwardRules: portForwarding.portForwardRules,
     portForwardError: portForwarding.portForwardError,
     portForwardLoading: portForwarding.portForwardLoading,
-    updateSourceTemplate: inventory.updateSourceTemplate,
+    updateConfigurationPreset: inventory.updateConfigurationPreset,
     updateOperator: access.updateOperator,
     upsertRuntimeConfigPatchGenerator: inventory.upsertRuntimeConfigPatchGenerator,
     upsertCommandTemplate: jobs.upsertCommandTemplate,

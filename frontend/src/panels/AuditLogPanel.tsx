@@ -1226,7 +1226,8 @@ function auditWorkflowFamilies(audit: AuditLogRecord): string[] {
   }
   if (
     haystack.includes("config") ||
-    haystack.includes("source_template") ||
+    haystack.includes("configuration_preset") ||
+    haystack.includes("configuration_source") ||
     haystack.includes("suite_config")
   ) {
     workflows.add("config read/write");

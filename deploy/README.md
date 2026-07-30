@@ -112,11 +112,18 @@ files private.
 `runtime/cli/current`, creates missing compose secrets when
 `VPSMAN_SUPER_PASSWORD` is set, snapshots PostgreSQL, then starts compose. The
 snapshot makes API migrations reversible if activation fails, including for a
-restored database.
+restored database. A successful first-start prints the generated
+`VPSMAN_SUPER_SALT_HEX`; save it for browser and CLI privilege unlock. The
+persistent copy remains in `./config/secrets/operator-privilege.env`.
 
 After first start, open the browser console. An empty control plane shows
 **Create first operator** and signs in the initial admin after creation. Once an
 operator exists, the same unauthenticated page shows **Sign in**.
+
+The current canonical database is intentionally fresh-only and does not support
+an in-place update from an earlier schema model; review
+[migration compatibility](../docs/migration-compatibility.md) before updating
+an older deployment.
 
 `update.sh latest` updates the same three release payloads for an existing
 deployment. It validates authoritative `version.json` metadata, asset layouts,

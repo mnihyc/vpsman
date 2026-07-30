@@ -33,7 +33,6 @@ test("reviews and applies native OS package candidates without hiding distro lim
     page,
     grid,
     "agent-sfo-01",
-    "edge-sfo-01",
     "Review plan",
     testInfo.project.name,
   );
@@ -135,7 +134,6 @@ test("reviews and applies native OS package candidates without hiding distro lim
     page,
     grid,
     "agent-fra-02",
-    "core-fra-02",
     "Review plan",
     testInfo.project.name,
   );
@@ -204,7 +202,6 @@ test("keeps a stale apply rejection beside the reviewed VPS plan", async ({
     page,
     grid,
     "agent-sfo-01",
-    "edge-sfo-01",
     "Review plan",
     testInfo.project.name,
   );
@@ -266,7 +263,6 @@ async function invokeOsUpdateAction(
   page: Page,
   grid: ReturnType<Page["locator"]>,
   clientId: string,
-  label: string,
   action: string,
   projectName: string,
 ) {
@@ -277,7 +273,19 @@ async function invokeOsUpdateAction(
     await activate(card.getByRole("button", { name: action, exact: true }));
     return;
   }
-  await grid.getByRole("button", { name: `Actions for ${label}` }).click();
+  const selectedRows = grid.locator(
+    'input[aria-label^="Select Fleet package posture row "]:checked',
+  );
+  while ((await selectedRows.count()) > 0) {
+    await selectedRows.first().uncheck();
+  }
+  await grid
+    .getByLabel(`Select Fleet package posture row ${clientId}`)
+    .check();
+  await grid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
   await activate(page.getByRole("menuitem", { name: action, exact: true }));
 }
 

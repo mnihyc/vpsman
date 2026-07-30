@@ -17,7 +17,10 @@ use vpsman_common::{
 use crate::{
     error::ApiError,
     internal_operator::system_operator,
-    model::{AuthContext, CreateJobRequest, CreateJobResponse, RuntimeConfigDispatchView},
+    model::{
+        AgentView, AuthContext, CreateJobRequest, CreateJobResponse, RuntimeConfigDispatchView,
+        TunnelPlanView,
+    },
     routes_jobs::create_job_from_internal_operator_mutation,
     state::AppState,
 };
@@ -221,11 +224,43 @@ pub(crate) async fn compose_runtime_config(
     client_id: &str,
     version: u64,
 ) -> Result<AgentRuntimeConfig, ApiError> {
-    let agents = state.repo.list_agents().await?;
+    let agents = state
+        .repo
+        .list_agents_for_client_ids(&[client_id.to_string()])
+        .await?;
     let agent = agents
-        .iter()
-        .find(|candidate| candidate.id == client_id)
-        .with_context(|| format!("runtime_config_client_not_found:{client_id}"))?;
+        .first()
+        .ok_or_else(|| ApiError::not_found("runtime_config_client_not_found"))?;
+    compose_runtime_config_for_agent(state, agent, version).await
+}
+
+pub(crate) async fn compose_runtime_config_for_agent(
+    state: &AppState,
+    agent: &AgentView,
+    version: u64,
+) -> Result<AgentRuntimeConfig, ApiError> {
+    let preset_toml = state
+        .repo
+        .render_configuration_preset_patch_toml(&agent.id)
+        .await?;
+    let tunnel_plans = state.repo.list_tunnel_plans().await?;
+    compose_runtime_config_for_agent_with_read_model(
+        state,
+        agent,
+        version,
+        &preset_toml,
+        &tunnel_plans,
+    )
+    .await
+}
+
+pub(crate) async fn compose_runtime_config_for_agent_with_read_model(
+    state: &AppState,
+    agent: &AgentView,
+    version: u64,
+    preset_toml: &str,
+    tunnel_plans: &[TunnelPlanView],
+) -> Result<AgentRuntimeConfig, ApiError> {
     let mut effective = AgentConfig {
         client_id: agent.id.clone(),
         display_name: agent.display_name.clone(),
@@ -233,23 +268,22 @@ pub(crate) async fn compose_runtime_config(
         ..AgentConfig::default()
     };
 
-    let rendered = state.repo.render_template_runtime_config(client_id).await?;
-    if !rendered.toml.trim().is_empty() {
-        merge_runtime_config_toml(&mut effective, &rendered.toml)
-            .context("runtime_config_template_merge_failed")?;
+    if !preset_toml.trim().is_empty() {
+        merge_configuration_preset_toml(&mut effective, preset_toml)
+            .context("runtime_config_preset_merge_failed")?;
     }
     for override_record in state
         .repo
-        .list_runtime_config_overrides(Some(client_id))
+        .list_runtime_config_overrides(Some(&agent.id))
         .await?
     {
         merge_runtime_config_toml(&mut effective, &override_record.toml)
             .context("runtime_config_override_merge_failed")?;
     }
-    apply_enabled_tunnel_plans(state, client_id, &mut effective).await?;
+    apply_enabled_tunnel_plans(state, &agent.id, tunnel_plans, &mut effective).await?;
     effective.network.port_forwarding = state
         .repo
-        .port_forwarding_config_for_client(client_id)
+        .port_forwarding_config_for_client(&agent.id)
         .await?;
     validate_agent_config_shape(&effective)
         .map_err(|error| anyhow::anyhow!("composed_runtime_config_invalid:{error}"))?;
@@ -318,12 +352,12 @@ async fn push_runtime_config_job(
 async fn apply_enabled_tunnel_plans(
     state: &AppState,
     client_id: &str,
+    plans: &[TunnelPlanView],
     effective: &mut AgentConfig,
 ) -> Result<(), ApiError> {
-    let plans = state.repo.list_tunnel_plans().await?;
     let mut has_mutating_plan = false;
     for plan in plans
-        .into_iter()
+        .iter()
         .filter(|plan| plan.enabled)
         .filter(|plan| plan.left_client_id == client_id || plan.right_client_id == client_id)
     {
@@ -336,23 +370,23 @@ async fn apply_enabled_tunnel_plans(
         };
         let runtime_adapter =
             if plan.plan.runtime_control.manager == RuntimeTunnelManager::ExternalManagedAdapter {
-                let template_id = match endpoint_side {
+                let definition_id = match endpoint_side {
                     TunnelEndpointSide::Left => plan
                         .plan
                         .runtime_control
-                        .left_adapter_template_id
+                        .left_adapter_definition_id
                         .as_deref(),
                     TunnelEndpointSide::Right => plan
                         .plan
                         .runtime_control
-                        .right_adapter_template_id
+                        .right_adapter_definition_id
                         .as_deref(),
                 }
-                .ok_or_else(|| ApiError::conflict("runtime_tunnel_adapter_template_required"))?;
+                .ok_or_else(|| ApiError::conflict("runtime_tunnel_adapter_definition_required"))?;
                 Some(
                     state
                         .repo
-                        .resolve_runtime_tunnel_adapter(template_id, client_id)
+                        .resolve_runtime_tunnel_adapter(definition_id)
                         .await
                         .map_err(ApiError::from)?,
                 )
@@ -365,9 +399,13 @@ async fn apply_enabled_tunnel_plans(
             .push(AgentRuntimeStatusTelemetryPlan {
                 plan_id: Some(plan.id.to_string()),
                 endpoint_side,
-                plan: plan.plan,
+                plan: plan.plan.clone(),
                 runtime_adapter,
-                traffic_source: AgentRuntimeTrafficSource::InterfaceCounters,
+                traffic_source: if effective.network.runtime_vnstat_argv.is_empty() {
+                    AgentRuntimeTrafficSource::InterfaceCounters
+                } else {
+                    AgentRuntimeTrafficSource::Vnstat
+                },
                 traffic_command: None,
                 latency_monitoring_enabled: effective.network.latency_monitoring_enabled,
             });
@@ -382,8 +420,20 @@ async fn apply_enabled_tunnel_plans(
 
 fn merge_runtime_config_toml(config: &mut AgentConfig, toml_document: &str) -> Result<()> {
     let patch: toml::Value =
-        toml::from_str(toml_document).context("failed to parse runtime config template TOML")?;
+        toml::from_str(toml_document).context("failed to parse runtime config patch TOML")?;
     reject_server_managed_runtime_config_keys(&patch)?;
+    reject_configuration_preset_owned_runtime_config_keys(&patch)?;
+    merge_runtime_config_value(config, patch)
+}
+
+fn merge_configuration_preset_toml(config: &mut AgentConfig, toml_document: &str) -> Result<()> {
+    let patch: toml::Value =
+        toml::from_str(toml_document).context("failed to parse configuration preset TOML")?;
+    reject_server_managed_runtime_config_keys(&patch)?;
+    merge_runtime_config_value(config, patch)
+}
+
+fn merge_runtime_config_value(config: &mut AgentConfig, patch: toml::Value) -> Result<()> {
     let mut merged =
         toml::Value::try_from(&*config).context("failed to serialize base runtime config")?;
     merge_toml_value(&mut merged, patch)?;
@@ -402,6 +452,7 @@ pub(crate) fn validate_runtime_config_patch_toml(toml_document: &str) -> Result<
         anyhow::bail!("runtime_config_patch_toml_invalid");
     }
     reject_server_managed_runtime_config_keys(&patch)?;
+    reject_configuration_preset_owned_runtime_config_keys(&patch)?;
     let mut merged = toml::Value::try_from(AgentConfig::default())
         .context("failed to serialize base runtime config")?;
     merge_toml_value(&mut merged, patch)?;
@@ -443,6 +494,54 @@ fn reject_server_managed_runtime_config_keys(patch: &toml::Value) -> Result<()> 
         .is_some_and(|network| network.contains_key("port_forwarding"))
     {
         anyhow::bail!("runtime_config_patch_managed_port_forwarding_forbidden");
+    }
+    Ok(())
+}
+
+fn reject_configuration_preset_owned_runtime_config_keys(patch: &toml::Value) -> Result<()> {
+    let Some(table) = patch.as_table() else {
+        anyhow::bail!("runtime_config_patch_toml_invalid");
+    };
+    const TELEMETRY_KEYS: &[&str] = &[
+        "source",
+        "proc_root",
+        "sys_class_net_dir",
+        "hostname_file",
+        "os_release_file",
+        "custom_metrics_command",
+    ];
+    const EXECUTION_KEYS: &[&str] = &[
+        "shell_script_argv",
+        "working_directory",
+        "environment_policy",
+        "environment_keep",
+        "environment_set",
+        "pty_policy",
+        "process_cleanup",
+        "user_sessions_source",
+        "user_sessions_command",
+        "process_inventory_source",
+        "process_proc_root",
+        "process_inventory_command",
+    ];
+    const NETWORK_KEYS: &[&str] = &[
+        "probe_ping_argv",
+        "runtime_vnstat_argv",
+        "ospf_status_command",
+        "ospf_update_command",
+    ];
+    for (section, keys) in [
+        ("telemetry", TELEMETRY_KEYS),
+        ("execution", EXECUTION_KEYS),
+        ("network", NETWORK_KEYS),
+    ] {
+        if table
+            .get(section)
+            .and_then(toml::Value::as_table)
+            .is_some_and(|values| keys.iter().any(|key| values.contains_key(*key)))
+        {
+            anyhow::bail!("runtime_config_patch_configuration_preset_field_forbidden");
+        }
     }
     Ok(())
 }

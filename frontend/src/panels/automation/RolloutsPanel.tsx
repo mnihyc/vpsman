@@ -18,7 +18,6 @@ import {
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
 import { ConsoleDetailPanel } from "../../components/ConsoleDetailPanel";
-import { ConsoleActionMenu } from "../../components/ConsoleLayout";
 import { jobTargetStatusBadgeClass } from "../../jobStatusPresentation";
 import { formatLowerBoundCount } from "../../constants";
 import { usePanelDisplaySettings } from "../../panelDisplay";
@@ -431,31 +430,8 @@ export function RolloutsPanel({
         size: 132,
         sortValue: (rollout) => rollout.updated_at,
       },
-      {
-        align: "end",
-        cell: (rollout) => (
-          <span onClick={(event) => event.stopPropagation()}>
-            <ConsoleActionMenu
-              actions={actions.map((action) => ({
-                disabled: action.disabled?.([rollout]),
-                label: action.label,
-                onSelect: () => action.onSelect([rollout]),
-                title: action.description?.([rollout]),
-                tone: action.tone,
-              }))}
-              label={`Actions for rollout ${shortId(rollout.job_id)}`}
-            />
-          </span>
-        ),
-        enableHiding: false,
-        header: "Actions",
-        id: "actions",
-        minSize: 56,
-        size: 64,
-        stickyEnd: true,
-      },
     ],
-    [actions, jobById],
+    [jobById],
   );
 
   const activeCount = rollouts.filter(
@@ -548,7 +524,6 @@ export function RolloutsPanel({
           expandOnRowClick
           getRowId={(rollout) => rollout.job_id}
           itemLabel="rollouts"
-          mobileRowActionLimit={3}
           renderExpandedRow={(rollout) => {
             const progress = rolloutProgress(rollout);
             return (
@@ -582,7 +557,6 @@ export function RolloutsPanel({
           rows={rollouts}
           rowsTruncated={rolloutsTruncated}
           searchPlaceholder="Search job, operation, state, or pause reason"
-          selectable={false}
           singleExpandedRow
           storageKey="vpsman.automation.rollouts"
           title="Rollout history"
@@ -781,6 +755,11 @@ function RolloutDetail({
       onClose={onClose}
       title={`Rollout ${shortId(rollout.job_id)}`}
     >
+      <ActionFeedback
+        className="localActionFeedback rolloutActionFeedback"
+        message={feedback?.message}
+        tone={feedback?.tone}
+      />
       <div
         aria-label="Selected rollout summary"
         className="processSupervisorSummaryStrip"
@@ -833,11 +812,6 @@ function RolloutDetail({
         selectable={false}
         storageKey="vpsman.automation.rolloutTargets"
         title="Batch and target evidence"
-      />
-      <ActionFeedback
-        className="localActionFeedback rolloutActionFeedback"
-        message={feedback?.message}
-        tone={feedback?.tone}
       />
     </ConsoleDetailPanel>
   );

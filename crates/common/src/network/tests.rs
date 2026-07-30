@@ -16,9 +16,9 @@ fn ipv4_pair(left: &str, right: &str) -> TunnelAddressPair {
 fn plan_input(kind: TunnelKind, manager: RuntimeTunnelManager) -> TunnelPlanInput {
     let runtime_control = RuntimeTunnelControl {
         manager,
-        left_adapter_template_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+        left_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
             .then(|| LEFT_RUNTIME_ADAPTER.to_string()),
-        right_adapter_template_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+        right_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
             .then(|| RIGHT_RUNTIME_ADAPTER.to_string()),
         ..RuntimeTunnelControl::default()
     };
@@ -54,8 +54,8 @@ fn ospf_config() -> TunnelOspfConfig {
         policy: OspfCostPolicy::default(),
         min_cost_delta: 5,
         healthy_windows: 2,
-        left_adapter_template_id: LEFT_ROUTING_ADAPTER.to_string(),
-        right_adapter_template_id: RIGHT_ROUTING_ADAPTER.to_string(),
+        left_adapter_definition_id: Some(LEFT_ROUTING_ADAPTER.to_string()),
+        right_adapter_definition_id: Some(RIGHT_ROUTING_ADAPTER.to_string()),
     }
 }
 
@@ -289,7 +289,7 @@ fn agent_iproute2_only_accepts_supported_kernel_tunnel_kinds() {
 }
 
 #[test]
-fn external_managed_plans_require_both_endpoint_template_ids() {
+fn external_managed_plans_require_both_endpoint_definition_ids() {
     let valid = plan_input(
         TunnelKind::Wireguard,
         RuntimeTunnelManager::ExternalManagedAdapter,
@@ -297,7 +297,7 @@ fn external_managed_plans_require_both_endpoint_template_ids() {
     assert!(plan_tunnel(&valid).is_ok());
 
     let mut missing = valid.clone();
-    missing.runtime_control.right_adapter_template_id = None;
+    missing.runtime_control.right_adapter_definition_id = None;
     assert_eq!(
         plan_tunnel(&missing),
         Err(NetworkPlanError::RuntimeTunnelAdapterCommandRequired)
@@ -414,6 +414,92 @@ fn plan_rejects_out_of_range_bandwidth_and_invalid_ospf_binding() {
 
     let mut ospf = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentIproute2Managed);
     ospf.ospf = Some(ospf_config());
-    ospf.ospf.as_mut().unwrap().left_adapter_template_id = String::new();
+    ospf.ospf.as_mut().unwrap().left_adapter_definition_id = Some(String::new());
     assert_eq!(plan_tunnel(&ospf), Err(NetworkPlanError::InvalidOspfConfig));
+}
+
+#[test]
+fn published_network_v1_wire_names_remain_stable() {
+    let ospf = ospf_config();
+    let encoded_ospf = serde_json::to_value(&ospf).unwrap();
+    assert_eq!(
+        encoded_ospf["left_adapter_template_id"],
+        LEFT_ROUTING_ADAPTER
+    );
+    assert_eq!(
+        encoded_ospf["right_adapter_template_id"],
+        RIGHT_ROUTING_ADAPTER
+    );
+    assert!(encoded_ospf.get("left_adapter_definition_id").is_none());
+    assert!(encoded_ospf.get("right_adapter_definition_id").is_none());
+
+    let command = RuntimeTunnelCommand {
+        argv: vec!["/opt/vpsman/routing-cost".to_string()],
+        ..RuntimeTunnelCommand::default()
+    };
+    let adapter = RoutingCostAdapterCommands {
+        source: RoutingCostCommandSource::ConfigurationPreset,
+        definition_id: LEFT_ROUTING_ADAPTER.to_string(),
+        definition_name: "FRR updater".to_string(),
+        definition_hash: "a".repeat(64),
+        status: command.clone(),
+        update: command,
+    };
+    let encoded_adapter = serde_json::to_value(&adapter).unwrap();
+    assert_eq!(encoded_adapter["template_id"], LEFT_ROUTING_ADAPTER);
+    assert_eq!(encoded_adapter["template_name"], "FRR updater");
+    assert_eq!(encoded_adapter["source"], "configuration_preset");
+    assert!(encoded_adapter.get("definition_id").is_none());
+    assert!(encoded_adapter.get("definition_name").is_none());
+
+    let result = RoutingCostAdapterJobResult {
+        contract_version: ROUTING_COST_ADAPTER_CONTRACT_VERSION,
+        operation: RoutingCostAdapterOperation::Status,
+        plan_id: "00000000-0000-4000-8000-000000000099".to_string(),
+        endpoint_side: TunnelEndpointSide::Left,
+        client_id: "edge-a".to_string(),
+        adapter_definition_id: LEFT_ROUTING_ADAPTER.to_string(),
+        adapter_definition_hash: "a".repeat(64),
+        before: None,
+        update: None,
+        after: RoutingCostAdapterResponse {
+            contract_version: ROUTING_COST_ADAPTER_CONTRACT_VERSION,
+            interface_name: "tunab".to_string(),
+            ready: true,
+            current_cost: Some(20),
+            applied_cost: None,
+            adapter_version: None,
+            message: None,
+        },
+    };
+    let encoded_result = serde_json::to_value(result).unwrap();
+    assert_eq!(encoded_result["adapter_template_id"], LEFT_ROUTING_ADAPTER);
+    assert!(encoded_result.get("adapter_definition_id").is_none());
+}
+
+#[test]
+fn internal_definition_aliases_are_accepted_without_changing_canonical_output() {
+    let decoded: TunnelOspfConfig = serde_json::from_value(serde_json::json!({
+        "mode": "reviewed",
+        "planned_latency_ms": 20.0,
+        "planned_packet_loss_ratio": 0.01,
+        "preference": 1.0,
+        "policy": OspfCostPolicy::default(),
+        "min_cost_delta": 5,
+        "healthy_windows": 2,
+        "left_adapter_definition_id": LEFT_ROUTING_ADAPTER,
+        "right_adapter_definition_id": RIGHT_ROUTING_ADAPTER
+    }))
+    .unwrap();
+    assert_eq!(
+        decoded.left_adapter_definition_id.as_deref(),
+        Some(LEFT_ROUTING_ADAPTER)
+    );
+    assert_eq!(
+        decoded.right_adapter_definition_id.as_deref(),
+        Some(RIGHT_ROUTING_ADAPTER)
+    );
+    let encoded = serde_json::to_value(decoded).unwrap();
+    assert!(encoded.get("left_adapter_definition_id").is_none());
+    assert_eq!(encoded["left_adapter_template_id"], LEFT_ROUTING_ADAPTER);
 }

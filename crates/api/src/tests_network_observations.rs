@@ -277,6 +277,7 @@ async fn topology_graph_combines_plans_endpoint_state_and_observation_trends() {
         bandwidth_mbps: 100,
         ospf: Some(test_ospf(1.0)),
     };
+    crate::tests_network::seed_test_plan_adapter_definitions(&repo, &input).await;
     repo.record_tunnel_plan(&input, &plan, true, &operator)
         .await
         .unwrap();
@@ -386,6 +387,7 @@ async fn topology_graph_keeps_quiet_plan_evidence_beyond_noisy_global_caps() {
     }
     let operator = topology_test_operator();
     let noisy_input = test_plan_input("right-b");
+    crate::tests_network::seed_test_plan_adapter_definitions(&repo, &noisy_input).await;
     let noisy_plan = repo
         .record_tunnel_plan(
             &noisy_input,
@@ -399,6 +401,12 @@ async fn topology_graph_keeps_quiet_plan_evidence_beyond_noisy_global_caps() {
     quiet_input.name = "quiet-edge".to_string();
     quiet_input.interface_name = "tunquiet".to_string();
     quiet_input.left_client_id = "quiet-left".to_string();
+    quiet_input.address_pool_cidr = "10.255.0.4/30".to_string();
+    quiet_input.ipv4_tunnel = Some(vpsman_common::TunnelAddressPair {
+        left: "10.255.0.4".to_string(),
+        right: "10.255.0.5".to_string(),
+        prefix_len: 31,
+    });
     let quiet_plan = repo
         .record_tunnel_plan(
             &quiet_input,
@@ -572,8 +580,10 @@ async fn topology_graph_ignores_observations_from_reused_plan_name_with_differen
         session_id: Uuid::nil(),
     };
     let original = test_plan();
+    let original_input = test_plan_input("right-b");
+    crate::tests_network::seed_test_plan_adapter_definitions(&repo, &original_input).await;
     let saved = repo
-        .record_tunnel_plan(&test_plan_input("right-b"), &original, true, &operator)
+        .record_tunnel_plan(&original_input, &original, true, &operator)
         .await
         .unwrap();
 
@@ -607,11 +617,12 @@ async fn topology_graph_ignores_observations_from_reused_plan_name_with_differen
     assert!(old_observation.plan_id.is_some());
     assert!(old_observation.topology_identity_hash.is_some());
 
-    let replacement = plan_tunnel(&test_plan_input("right-c")).unwrap();
+    let replacement_input = test_plan_input("right-c");
+    let replacement = plan_tunnel(&replacement_input).unwrap();
     repo.update_tunnel_plan(
         saved.id,
         saved.revision,
-        &test_plan_input("right-c"),
+        &replacement_input,
         &replacement,
         true,
         &operator,
@@ -710,6 +721,7 @@ async fn topology_graph_marks_offline_runtime_endpoint_without_agent_observation
         bandwidth_mbps: 100,
         ospf: Some(test_ospf(1.0)),
     };
+    crate::tests_network::seed_test_plan_adapter_definitions(&repo, &input).await;
     repo.record_tunnel_plan(&input, &plan, true, &operator)
         .await
         .unwrap();
@@ -749,6 +761,7 @@ async fn topology_graph_uses_exact_plan_bound_endpoint_telemetry() {
     let operator = topology_test_operator();
     let plan = test_plan();
     let input = test_plan_input("right-b");
+    crate::tests_network::seed_test_plan_adapter_definitions(&repo, &input).await;
     let saved = repo
         .record_tunnel_plan(&input, &plan, true, &operator)
         .await
@@ -797,6 +810,7 @@ async fn failed_latency_probe_does_not_reclassify_converged_runtime_as_failed() 
     let operator = topology_test_operator();
     let plan = test_plan();
     let input = test_plan_input("right-b");
+    crate::tests_network::seed_test_plan_adapter_definitions(&repo, &input).await;
     let saved = repo
         .record_tunnel_plan(&input, &plan, true, &operator)
         .await
@@ -878,38 +892,35 @@ async fn topology_graph_exposes_explicit_runtime_status_coverage() {
         session_id: Uuid::nil(),
     };
     let plan = test_plan();
-    repo.record_tunnel_plan(
-        &TunnelPlanInput {
-            name: plan.name.clone(),
-            interface_name: plan.interface_name.clone(),
-            kind: plan.kind,
-            runtime_control: Default::default(),
-            runtime_topology: Default::default(),
-            left_client_id: plan.left_client_id.clone(),
-            right_client_id: plan.right_client_id.clone(),
-            left_remote_underlay: plan.left_remote_underlay.clone(),
-            right_remote_underlay: plan.right_remote_underlay.clone(),
-            left_local_underlay: None,
-            right_local_underlay: None,
-            address_pool_cidr: "10.255.0.0/30".to_string(),
-            reserved_addresses: Vec::new(),
-            ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
-                left: "10.255.0.0".to_string(),
-                right: "10.255.0.1".to_string(),
-                prefix_len: 31,
-            }),
-            ipv6_address_pool_cidr: None,
-            ipv6_tunnel: None,
-            latency_primary_family: Default::default(),
-            bandwidth_mbps: 100,
-            ospf: Some(test_ospf(1.0)),
-        },
-        &plan,
-        true,
-        &operator,
-    )
-    .await
-    .unwrap();
+    let input = TunnelPlanInput {
+        name: plan.name.clone(),
+        interface_name: plan.interface_name.clone(),
+        kind: plan.kind,
+        runtime_control: Default::default(),
+        runtime_topology: Default::default(),
+        left_client_id: plan.left_client_id.clone(),
+        right_client_id: plan.right_client_id.clone(),
+        left_remote_underlay: plan.left_remote_underlay.clone(),
+        right_remote_underlay: plan.right_remote_underlay.clone(),
+        left_local_underlay: None,
+        right_local_underlay: None,
+        address_pool_cidr: "10.255.0.0/30".to_string(),
+        reserved_addresses: Vec::new(),
+        ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
+            left: "10.255.0.0".to_string(),
+            right: "10.255.0.1".to_string(),
+            prefix_len: 31,
+        }),
+        ipv6_address_pool_cidr: None,
+        ipv6_tunnel: None,
+        latency_primary_family: Default::default(),
+        bandwidth_mbps: 100,
+        ospf: Some(test_ospf(1.0)),
+    };
+    crate::tests_network::seed_test_plan_adapter_definitions(&repo, &input).await;
+    repo.record_tunnel_plan(&input, &plan, true, &operator)
+        .await
+        .unwrap();
 
     let job_id = Uuid::new_v4();
     repo.record_network_observations(
@@ -988,38 +999,35 @@ async fn recommends_ospf_cost_from_probe_and_speed_trends() {
         session_id: Uuid::nil(),
     };
     let plan = test_plan();
-    repo.record_tunnel_plan(
-        &TunnelPlanInput {
-            name: plan.name.clone(),
-            interface_name: plan.interface_name.clone(),
-            kind: plan.kind,
-            runtime_control: Default::default(),
-            runtime_topology: Default::default(),
-            left_client_id: plan.left_client_id.clone(),
-            right_client_id: plan.right_client_id.clone(),
-            left_remote_underlay: plan.left_remote_underlay.clone(),
-            right_remote_underlay: plan.right_remote_underlay.clone(),
-            left_local_underlay: None,
-            right_local_underlay: None,
-            address_pool_cidr: "10.255.0.0/30".to_string(),
-            reserved_addresses: Vec::new(),
-            ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
-                left: "10.255.0.0".to_string(),
-                right: "10.255.0.1".to_string(),
-                prefix_len: 31,
-            }),
-            ipv6_address_pool_cidr: None,
-            ipv6_tunnel: None,
-            latency_primary_family: Default::default(),
-            bandwidth_mbps: 100,
-            ospf: Some(test_ospf(0.5)),
-        },
-        &plan,
-        true,
-        &operator,
-    )
-    .await
-    .unwrap();
+    let input = TunnelPlanInput {
+        name: plan.name.clone(),
+        interface_name: plan.interface_name.clone(),
+        kind: plan.kind,
+        runtime_control: Default::default(),
+        runtime_topology: Default::default(),
+        left_client_id: plan.left_client_id.clone(),
+        right_client_id: plan.right_client_id.clone(),
+        left_remote_underlay: plan.left_remote_underlay.clone(),
+        right_remote_underlay: plan.right_remote_underlay.clone(),
+        left_local_underlay: None,
+        right_local_underlay: None,
+        address_pool_cidr: "10.255.0.0/30".to_string(),
+        reserved_addresses: Vec::new(),
+        ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
+            left: "10.255.0.0".to_string(),
+            right: "10.255.0.1".to_string(),
+            prefix_len: 31,
+        }),
+        ipv6_address_pool_cidr: None,
+        ipv6_tunnel: None,
+        latency_primary_family: Default::default(),
+        bandwidth_mbps: 100,
+        ospf: Some(test_ospf(0.5)),
+    };
+    crate::tests_network::seed_test_plan_adapter_definitions(&repo, &input).await;
+    repo.record_tunnel_plan(&input, &plan, true, &operator)
+        .await
+        .unwrap();
     let job_id = Uuid::new_v4();
     repo.record_network_observations(
         job_id,
@@ -1128,8 +1136,8 @@ fn test_ospf(preference: f64) -> vpsman_common::TunnelOspfConfig {
         policy: OspfCostPolicy::default(),
         min_cost_delta: 5,
         healthy_windows: 2,
-        left_adapter_template_id: "33333333-3333-4333-8333-333333333333".to_string(),
-        right_adapter_template_id: "44444444-4444-4444-8444-444444444444".to_string(),
+        left_adapter_definition_id: Some("33333333-3333-4333-8333-333333333333".to_string()),
+        right_adapter_definition_id: Some("44444444-4444-4444-8444-444444444444".to_string()),
     }
 }
 

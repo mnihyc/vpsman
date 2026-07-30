@@ -441,42 +441,23 @@ jq -e '
   any(.[]; .id == "cli-agent-b" and .status == "online" and .capabilities.privilege_mode == "unprivileged" and .capabilities.can_apply_process_limits == false)
 ' \
   <<<"$agents_json" >/dev/null
-source_status_json="$(vpsctl_auth source-status --domain telemetry_metrics_source)"
+configuration_sources_json="$(vpsctl_auth config-sources)"
 jq -e '
   map(select(.client_id == "cli-agent-a" or .client_id == "cli-agent-b")) as $live |
-  ($live | length) == 2 and
-  all($live[]; .domain == "telemetry_metrics_source" and .template_name == "builtin:linux_procfs" and .status == "selected")
+  ($live | length) == 14 and
+  ([ $live[].behavior ] | unique | sort) ==
+    ["command_execution", "host_metrics", "latency_probe", "ospf_update_command", "process_inventory", "tunnel_traffic", "user_sessions"] and
+  all($live[];
+    .effective_preset_kind == "system" and
+    .selection_origin == "system_default" and
+    .override_updated_at == null and
+    .runtime_sync.state == "unknown" and
+    (if .behavior == "ospf_update_command"
+     then .readiness.state == "unconfigured" and .readiness.evidence.command_configured == false
+     else .readiness.state == "unverified"
+     end))
 ' \
-  <<<"$source_status_json" >/dev/null
-backup_source_status_json="$(vpsctl_auth source-status --domain backup_object_store)"
-jq -e '
-  map(select(.client_id == "cli-agent-a" or .client_id == "cli-agent-b")) as $live |
-  ($live | length) == 2 and
-  all($live[]; .domain == "backup_object_store" and .template_name == "builtin:local_filesystem" and .status == "ready") and
-  all($live[]; .evidence.server_object_store_configured == true and .evidence.server_object_store_kind == "filesystem" and (.evidence.artifact_count | type == "number"))
-' <<<"$backup_source_status_json" >/dev/null
-update_source_status_json="$(vpsctl_auth source-status --domain update_artifact_source)"
-jq -e '
-  map(select(.client_id == "cli-agent-a" or .client_id == "cli-agent-b")) as $live |
-  ($live | length) == 2 and
-  all($live[]; .domain == "update_artifact_source" and .template_name == "builtin:external_https_sha256" and .status == "selected_no_artifacts") and
-  all($live[]; .evidence.external_release_count == .evidence.release_count)
-' <<<"$update_source_status_json" >/dev/null
-workflow_source_status_json="$(vpsctl_auth source-status)"
-jq -e '
-  ([.[].domain] | unique) as $domains |
-  ($domains | index("process_inventory_source")) and
-  ($domains | index("user_session_inventory_source")) and
-  ($domains | index("latency_probe_source")) and
-  ($domains | index("speed_test_provider")) and
-  ($domains | index("command_execution_policy")) and
-  any(.[]; .client_id == "cli-agent-a" and .domain == "process_inventory_source" and .status == "ready_on_demand" and .evidence.workflow == "process_inventory" and .evidence.supervisor_workflow == "process_supervisor" and .evidence.process_limits_status == "available") and
-  any(.[]; .client_id == "cli-agent-b" and .domain == "process_inventory_source" and .status == "ready_on_demand" and .evidence.process_limits_status == "degraded_unprivileged" and .evidence.privilege_mode == "unprivileged") and
-  any(.[]; .client_id == "cli-agent-a" and .domain == "user_session_inventory_source" and .status == "ready_on_demand" and .evidence.workflow == "user_session_inventory") and
-  any(.[]; .client_id == "cli-agent-a" and .domain == "latency_probe_source" and .status == "ready_on_demand" and .evidence.workflow == "network_probe") and
-  any(.[]; .client_id == "cli-agent-a" and .domain == "speed_test_provider" and .status == "ready_on_demand" and .evidence.requires_two_endpoints == true) and
-  any(.[]; .client_id == "cli-agent-a" and .domain == "command_execution_policy" and .status == "ready_on_demand" and .evidence.environment_policy == "inherit" and .evidence.pty_policy == "native_pty" and .evidence.process_cleanup == "process_group")
-' <<<"$workflow_source_status_json" >/dev/null
+  <<<"$configuration_sources_json" >/dev/null
 plan_json="$(vpsctl_auth tunnel-plan \
   --name cli-gre-a-b \
   --interface-name grecli \
@@ -556,16 +537,16 @@ curl -fsS \
   "$api_url/internal/v1/gateway/command-output" >/dev/null
 fleet_alerts_json="$(vpsctl_auth fleet-alerts --limit 20)"
 jq -e '
-  any(.[]; .category == "source_readiness" and .severity == "warning" and .status == "degraded" and .client_id == "cli-agent-a") and
-  any(.[]; .category == "source_readiness" and .severity == "warning" and .status == "degraded" and .client_id == "cli-agent-b")
+  any(.[]; .category == "network" and .severity == "warning" and .status == "tunnel_traffic_degraded" and .client_id == "cli-agent-a") and
+  any(.[]; .category == "network" and .severity == "warning" and .status == "tunnel_traffic_degraded" and .client_id == "cli-agent-b")
 ' <<<"$fleet_alerts_json" >/dev/null
 fleet_alerts_filtered_json="$(vpsctl_auth fleet-alerts --client-id cli-agent-a --severity warning --limit 10)"
 jq -e '
   length >= 1 and all(.[]; .client_id == "cli-agent-a" and .severity == "warning")
 ' <<<"$fleet_alerts_filtered_json" >/dev/null
-alert_state_target_id="$(jq -r 'map(select(.category == "source_readiness" and .client_id == "cli-agent-a"))[0].id' <<<"$fleet_alerts_json")"
+alert_state_target_id="$(jq -r 'map(select(.category == "network" and .status == "tunnel_traffic_degraded" and .client_id == "cli-agent-a"))[0].id' <<<"$fleet_alerts_json")"
 if [[ -z "$alert_state_target_id" || "$alert_state_target_id" == "null" ]]; then
-  fail "failed to select source_readiness alert for state update"
+  fail "failed to select network alert for state update"
 fi
 alert_state_json="$(vpsctl_auth fleet-alert-state-update \
   --alert-id "$alert_state_target_id" \
@@ -662,71 +643,71 @@ if [[ "$scoped_alert_policy_write_status" != "403" ]]; then
 fi
 jq -e '.error == "operator_scope_insufficient"' <<<"$scoped_alert_policy_write_body" >/dev/null
 alert_notification_channel_json="$(vpsctl_auth fleet-alert-notification-channel-upsert \
-  --name source-readiness-webhook \
+  --name network-webhook \
   --scope-kind global \
   --min-severity warning \
-  --categories source_readiness \
+  --categories network \
   --operator-states open \
   --delivery-kind webhook \
-  --target http://127.0.0.1:9/vpsman/source-readiness \
+  --target http://127.0.0.1:9/vpsman/network \
   --cooldown-secs 600 \
   --notes live-smoke \
   --confirmed)"
 alert_notification_channel_id="$(jq -r '.id' <<<"$alert_notification_channel_json")"
 jq -e '
-  .name == "source-readiness-webhook" and
+  .name == "network-webhook" and
   .scope_kind == "global" and
   .min_severity == "warning" and
-  .categories == ["source_readiness"] and
+  .categories == ["network"] and
   .operator_states == ["open"] and
   .delivery_kind == "webhook" and
   .enabled == true
 ' <<<"$alert_notification_channel_json" >/dev/null
 alert_notification_channels_json="$(vpsctl_auth fleet-alert-notification-channels --delivery-kind webhook --limit 20)"
-jq -e 'any(.[]; .name == "source-readiness-webhook")' <<<"$alert_notification_channels_json" >/dev/null
+jq -e 'any(.[]; .name == "network-webhook")' <<<"$alert_notification_channels_json" >/dev/null
 alert_notification_backup_channel_json="$(vpsctl_auth fleet-alert-notification-channel-upsert \
-  --name source-readiness-backup-webhook \
+  --name network-backup-webhook \
   --scope-kind global \
   --min-severity warning \
-  --categories source_readiness \
+  --categories network \
   --operator-states open \
   --delivery-kind webhook \
-  --target http://127.0.0.1:9/vpsman/source-readiness-backup \
+  --target http://127.0.0.1:9/vpsman/network-backup \
   --cooldown-secs 600 \
   --notes live-smoke-backup \
   --confirmed)"
 alert_notification_backup_channel_id="$(jq -r '.id' <<<"$alert_notification_backup_channel_json")"
 jq -e '
-  .name == "source-readiness-backup-webhook" and
+  .name == "network-backup-webhook" and
   .delivery_kind == "webhook" and
   .enabled == true
 ' <<<"$alert_notification_backup_channel_json" >/dev/null
 alert_notification_dry_run_json="$(vpsctl_auth fleet-alert-notification-dispatch \
-  --category source_readiness \
+  --category network \
   --include-muted \
   --dry-run \
   --limit 20)"
 jq -e '
   length >= 1 and
   all(.[]; .status == "matched_dry_run") and
-  any(.[]; .channel_name == "source-readiness-webhook" and .alert_category == "source_readiness")
+  any(.[]; .channel_name == "network-webhook" and .alert_category == "network")
 ' <<<"$alert_notification_dry_run_json" >/dev/null
 alert_notification_dispatch_preview_hash="$(jq -r '.[0].review_preview_hash // empty' <<<"$alert_notification_dry_run_json")"
 if [[ ! "$alert_notification_dispatch_preview_hash" =~ ^[0-9a-f]{64}$ ]]; then
   fail "fleet-alert-notification-dispatch dry run did not return a valid preview hash"
 fi
 alert_notification_dispatch_json="$(vpsctl_auth fleet-alert-notification-dispatch \
-  --category source_readiness \
+  --category network \
   --include-muted \
   --preview-hash "$alert_notification_dispatch_preview_hash" \
   --confirmed \
   --limit 20)"
 jq -e '
   length >= 1 and
-  any(.[]; .channel_name == "source-readiness-webhook" and .status == "queued" and .delivery_kind == "webhook")
+  any(.[]; .channel_name == "network-webhook" and .status == "queued" and .delivery_kind == "webhook")
 ' <<<"$alert_notification_dispatch_json" >/dev/null
 jq -e '
-  any(.[]; .channel_name == "source-readiness-backup-webhook" and .status == "queued" and .delivery_kind == "webhook")
+  any(.[]; .channel_name == "network-backup-webhook" and .status == "queued" and .delivery_kind == "webhook")
 ' <<<"$alert_notification_dispatch_json" >/dev/null
 alert_notifications_json="$(vpsctl_auth fleet-alert-notifications --status queued --limit 20)"
 jq -e '
@@ -761,7 +742,7 @@ jq -e '
   any(.[]; .channel_id == "'"$alert_notification_backup_channel_id"'" and .status == "failed" and .attempt_count == 1)
 ' <<<"$alert_notification_failed_json" >/dev/null
 alert_notification_duplicate_json="$(vpsctl_auth fleet-alert-notification-dispatch \
-  --category source_readiness \
+  --category network \
   --include-muted \
   --preview-hash "$alert_notification_dispatch_preview_hash" \
   --confirmed \
@@ -796,11 +777,11 @@ if [[ "$scoped_alert_notification_write_status" != "403" ]]; then
   fail "fleet:read scoped fleet-alert-notification write returned HTTP $scoped_alert_notification_write_status: $scoped_alert_notification_write_body"
 fi
 jq -e '.error == "operator_scope_insufficient"' <<<"$scoped_alert_notification_write_body" >/dev/null
-traffic_templates_json="$(vpsctl_auth source-templates --domain runtime_traffic_accounting_source)"
+traffic_presets_json="$(vpsctl_auth config-presets --behavior tunnel_traffic)"
 jq -e '
-  any(.[]; .name == "builtin:interface_counters" and .built_in == true and .is_default == true) and
-  any(.[]; .name == "builtin:vnstat_json" and .built_in == true and .is_default == false)
-' <<<"$traffic_templates_json" >/dev/null
+  any(.[]; .name == "Interface traffic counters" and .kind == "system" and .is_default == true) and
+  any(.[]; .name == "vnStat traffic counters" and .kind == "system" and .is_default == false)
+' <<<"$traffic_presets_json" >/dev/null
 
 tag_json="$(vpsctl_auth tag-create --name cli-live-tag --confirmed)"
 jq -e '.name == "cli-live-tag"' <<<"$tag_json" >/dev/null
@@ -982,11 +963,8 @@ jq -n \
       "fleet_alert_notifications",
       "direct_agent_identity",
       "agents_summary",
-      "source_status",
-      "source_template_object_store_readiness",
-      "source_template_workflow_readiness",
-      "source_template_process_limit_readiness",
-      "curated_source_templates",
+      "configuration_source_system_inheritance",
+      "system_configuration_presets",
       "tag_bulk",
       "tunnel_plan_save_enable_update_disable_delete",
       "schedule_create_list",

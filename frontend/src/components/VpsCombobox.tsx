@@ -102,14 +102,26 @@ export function VpsCombobox({
       const gap = 4;
       const viewportWidth = window.innerWidth;
       const viewportHeight = window.innerHeight;
+      if (
+        rect.bottom <= margin ||
+        rect.top >= viewportHeight - margin ||
+        rect.right <= margin ||
+        rect.left >= viewportWidth - margin
+      ) {
+        setOpen(false);
+        return;
+      }
       const below = Math.max(0, viewportHeight - rect.bottom - gap - margin);
       const above = Math.max(0, rect.top - gap - margin);
-      const minimumHeight = Math.min(120, Math.max(0, viewportHeight - margin * 2));
-      const openAbove = below < minimumHeight && above > below;
+      const requiredHeight = Math.min(
+        240,
+        Math.max(40, filtered.length * 50 + 8),
+      );
+      const openAbove = below < requiredHeight && above > below;
       const available = openAbove ? above : below;
       const maxHeight = Math.min(
         240,
-        Math.max(available, minimumHeight),
+        available,
         Math.max(0, viewportHeight - margin * 2),
       );
       const width = Math.min(rect.width, Math.max(0, viewportWidth - margin * 2));
@@ -117,17 +129,17 @@ export function VpsCombobox({
         Math.max(rect.left, margin),
         Math.max(margin, viewportWidth - width - margin),
       );
-      const desiredTop = openAbove
-        ? rect.top - gap - maxHeight
-        : rect.bottom + gap;
-      const top = Math.min(
-        Math.max(desiredTop, margin),
-        Math.max(margin, viewportHeight - maxHeight - margin),
-      );
       setMenuStyle({
+        ...(openAbove
+          ? { bottom: Math.max(viewportHeight - rect.top + gap, margin) }
+          : {
+              top: Math.min(
+                Math.max(rect.bottom + gap, margin),
+                Math.max(margin, viewportHeight - maxHeight - margin),
+              ),
+            }),
         left,
         maxHeight,
-        top,
         width,
       });
     };
@@ -138,7 +150,27 @@ export function VpsCombobox({
       window.removeEventListener("resize", updateMenuPosition);
       window.removeEventListener("scroll", updateMenuPosition, true);
     };
-  }, [disabled, open, filtered.length]);
+  }, [disabled, filtered.length, open]);
+
+  useLayoutEffect(() => {
+    const menu = menuRef.current;
+    if (!open || !menu || activeIndex < 0) {
+      return;
+    }
+    const activeOption = menu.querySelector<HTMLElement>(
+      '[role="option"][aria-selected="true"]',
+    );
+    if (!activeOption) {
+      return;
+    }
+    const optionTop = activeOption.offsetTop;
+    const optionBottom = optionTop + activeOption.offsetHeight;
+    if (optionTop < menu.scrollTop) {
+      menu.scrollTop = optionTop;
+    } else if (optionBottom > menu.scrollTop + menu.clientHeight) {
+      menu.scrollTop = optionBottom - menu.clientHeight;
+    }
+  }, [activeIndex, menuStyle, open]);
 
   function selectOption(option: SearchableVpsOption) {
     skipBlurCommitRef.current = true;
@@ -154,7 +186,9 @@ export function VpsCombobox({
     setOpen(false);
     setFocused(false);
     if (!trimmed) {
-      onChange("");
+      if (value) {
+        onChange("");
+      }
       setQuery("");
       return;
     }
@@ -218,7 +252,12 @@ export function VpsCombobox({
         aria-expanded={open}
         aria-label={ariaLabel}
         autoComplete="off"
+        className="vpsComboboxEditor"
         disabled={disabled}
+        onClick={() => {
+          setFocused(true);
+          setOpen(true);
+        }}
         onBlur={() =>
           window.setTimeout(() => {
             if (skipBlurCommitRef.current) {
@@ -249,13 +288,14 @@ export function VpsCombobox({
       {open && !disabled && menuStyle
         ? createPortal(
           <div
+            aria-label={`${ariaLabel} options`}
             className="vpsComboboxMenu"
             ref={menuRef}
             role="listbox"
             style={menuStyle}
           >
           {filtered.length > 0 ? (
-            filtered.slice(0, 10).map((option, index) => (
+            filtered.map((option, index) => (
               <button
                 aria-selected={index === activeIndex}
                 className={index === activeIndex ? "active" : undefined}

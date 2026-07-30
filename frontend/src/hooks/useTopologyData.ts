@@ -1,10 +1,11 @@
 import { useCallback, useRef, useState } from "react";
-import { apiGet, apiPost, apiPut, isApiUnauthorized } from "../api";
+import { apiDelete, apiGet, apiPost, apiPut, isApiUnauthorized } from "../api";
 import { TOPOLOGY_EVIDENCE_LIMIT } from "../constants";
 import type {
   AllocateTunnelEndpointsRequest,
   AllocateTunnelEndpointsResponse,
   CreateTunnelPlanRequest,
+  NetworkAdapterDefinitionRecord,
   NetworkObservationRecord,
   NetworkObservationTrendRecord,
   NetworkOspfRecommendationRecord,
@@ -17,13 +18,16 @@ import type {
   TunnelPlanRecord,
   TunnelPlanMutationResponse,
   TunnelPlanRevisionTarget,
+  UpsertNetworkAdapterDefinitionRequest,
   UpdateTunnelConnectionAssessmentRequest,
   UpdateTunnelPlanOspfCostRequest,
   UpdateTunnelPlanRequest,
 } from "../types";
+import { retainMutationSuccessAfterRefresh } from "../utils";
 
 const TOPOLOGY_SOURCE_ORDER = [
   "tunnelPlans",
+  "networkAdapterDefinitions",
   "networkObservations",
   "networkTrends",
   "ospfRecommendations",
@@ -35,6 +39,7 @@ type TopologySource = (typeof TOPOLOGY_SOURCE_ORDER)[number];
 
 const TOPOLOGY_SOURCE_LABELS: Record<TopologySource, string> = {
   tunnelPlans: "Tunnel plans",
+  networkAdapterDefinitions: "Network adapter definitions",
   networkObservations: "Network observations",
   networkTrends: "Network trends",
   ospfRecommendations: "OSPF recommendations",
@@ -51,6 +56,9 @@ export function useTopologyData(
   const apiTokenRef = useRef(apiToken);
   apiTokenRef.current = apiToken;
   const [tunnelPlans, setTunnelPlans] = useState<TunnelPlanRecord[]>([]);
+  const [networkAdapterDefinitions, setNetworkAdapterDefinitions] = useState<
+    NetworkAdapterDefinitionRecord[]
+  >([]);
   const [tunnelPlanCorruptions, setTunnelPlanCorruptions] =
     useState<TunnelPlanCorruptRecord[]>([]);
   const [networkObservations, setNetworkObservations] = useState<NetworkObservationRecord[]>([]);
@@ -64,6 +72,7 @@ export function useTopologyData(
   const topologyPendingLoads = useRef(new Set<string>());
   const topologyLoadGenerations = useRef<Record<TopologySource, number>>({
     tunnelPlans: 0,
+    networkAdapterDefinitions: 0,
     networkObservations: 0,
     networkTrends: 0,
     ospfRecommendations: 0,
@@ -174,6 +183,22 @@ export function useTopologyData(
     [apiToken, loadTopologySource],
   );
 
+  const loadNetworkAdapterDefinitions = useCallback(
+    () =>
+      loadTopologySource(
+        "networkAdapterDefinitions",
+        () =>
+          apiGet<NetworkAdapterDefinitionRecord[]>(
+            "/api/v1/network-adapter-definitions",
+            apiToken,
+          ),
+        setNetworkAdapterDefinitions,
+        () => setNetworkAdapterDefinitions([]),
+        "Network adapter definitions unavailable",
+      ),
+    [apiToken, loadTopologySource],
+  );
+
   const loadNetworkTrends = useCallback(
     () =>
       loadTopologySource(
@@ -245,6 +270,67 @@ export function useTopologyData(
       return response;
     },
     [apiToken, loadOspfUpdatePlans, loadTopologyGraph, loadTunnelPlans, onAuditChanged, onRuntimeConfigChanged],
+  );
+
+  const createNetworkAdapterDefinition = useCallback(
+    async (request: UpsertNetworkAdapterDefinitionRequest) => {
+      const response = await apiPost<NetworkAdapterDefinitionRecord>(
+        "/api/v1/network-adapter-definitions",
+        apiToken,
+        request,
+      );
+      await retainMutationSuccessAfterRefresh(() =>
+        Promise.all([
+          loadNetworkAdapterDefinitions(),
+          onAuditChanged(),
+        ]).then(() => undefined),
+      );
+      return response;
+    },
+    [apiToken, loadNetworkAdapterDefinitions, onAuditChanged],
+  );
+
+  const updateNetworkAdapterDefinition = useCallback(
+    async (
+      adapterId: string,
+      request: UpsertNetworkAdapterDefinitionRequest,
+    ) => {
+      const response = await apiPut<NetworkAdapterDefinitionRecord>(
+        `/api/v1/network-adapter-definitions/${encodeURIComponent(adapterId)}`,
+        apiToken,
+        request,
+      );
+      await retainMutationSuccessAfterRefresh(() =>
+        Promise.all([
+          loadNetworkAdapterDefinitions(),
+          loadTunnelPlans(),
+          onAuditChanged(),
+        ]).then(() => undefined),
+      );
+      return response;
+    },
+    [
+      apiToken,
+      loadNetworkAdapterDefinitions,
+      loadTunnelPlans,
+      onAuditChanged,
+    ],
+  );
+
+  const deleteNetworkAdapterDefinition = useCallback(
+    async (adapterId: string) => {
+      await apiDelete(
+        `/api/v1/network-adapter-definitions/${encodeURIComponent(adapterId)}`,
+        apiToken,
+      );
+      await retainMutationSuccessAfterRefresh(() =>
+        Promise.all([
+          loadNetworkAdapterDefinitions(),
+          onAuditChanged(),
+        ]).then(() => undefined),
+      );
+    },
+    [apiToken, loadNetworkAdapterDefinitions, onAuditChanged],
   );
 
   const updateTunnelPlan = useCallback(
@@ -391,6 +477,7 @@ export function useTopologyData(
     topologyPendingLoads.current.clear();
     topologyErrors.current = {};
     setTunnelPlans([]);
+    setNetworkAdapterDefinitions([]);
     setTunnelPlanCorruptions([]);
     setNetworkObservations([]);
     setNetworkTrends([]);
@@ -405,21 +492,26 @@ export function useTopologyData(
     allocateTunnelEndpoints,
     clearTopology,
     createTunnelPlan,
+    createNetworkAdapterDefinition,
+    deleteNetworkAdapterDefinition,
     deleteTunnelPlan,
     exportTunnelPlan,
     loadNetworkObservations,
+    loadNetworkAdapterDefinitions,
     loadNetworkTrends,
     loadOspfRecommendations,
     loadOspfUpdatePlans,
     loadTopologyGraph,
     loadTunnelPlans,
     networkObservations,
+    networkAdapterDefinitions,
     networkTrends,
     ospfRecommendations,
     ospfUpdatePlans,
     refreshTunnelPlanOspfStatus,
     setTunnelPlanEnabled,
     updateTunnelConnectionAssessment,
+    updateNetworkAdapterDefinition,
     updateTunnelPlanOspfCost,
     updateTunnelPlan,
     topologyError,

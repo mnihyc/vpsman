@@ -8,6 +8,7 @@ import {
   Server,
   VolumeX,
 } from "lucide-react";
+import { ActionFeedback } from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { FLEET_DETAIL_LIMIT, formatBoundedCount } from "../constants";
 import {
@@ -114,6 +115,7 @@ function FleetAlertList({
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [pending, setPending] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [reviewSnapshot, setReviewSnapshot] = useState<{
     action: FleetAlertStateRequest["action"];
     requests: FleetAlertStateRequest[];
@@ -225,67 +227,8 @@ function FleetAlertList({
           </time>
         ),
       },
-      {
-        id: "action",
-        header: "Action",
-        size: 180,
-        minSize: 160,
-        enableHiding: false,
-        stickyEnd: true,
-        cell: (alert) => {
-          const operatorState = alertOperatorState(alert);
-          const agent = alert.client_id ? agentById.get(alert.client_id) : null;
-          return (
-            <span className="fleetAlertInlineActions">
-              {operatorState === "open" ? (
-                <button
-                  className="secondaryAction compactAction"
-                  disabled={pending != null}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    reviewAlertUpdate([alert], "acknowledge");
-                  }}
-                  type="button"
-                >
-                  <Check size={13} />
-                  <span>Acknowledge</span>
-                </button>
-              ) : (
-                <button
-                  className="secondaryAction compactAction"
-                  disabled={pending != null}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    reviewAlertUpdate([alert], "clear");
-                  }}
-                  type="button"
-                >
-                  <CircleCheck size={13} />
-                  <span>Clear</span>
-                </button>
-              )}
-              <button
-                aria-label={`Open VPS detail for ${agent ? formatVpsName(agent, vpsNameDisplayMode) : "unavailable VPS"}`}
-                className="secondaryAction compactAction"
-                disabled={!agent}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  if (agent) {
-                    onOpenVpsDetail(agent);
-                  }
-                }}
-                title={agent ? `Open VPS detail for ${formatVpsName(agent, vpsNameDisplayMode)}.` : "VPS detail is unavailable for this alert."}
-                type="button"
-              >
-                <Server size={13} />
-                <span>VPS detail</span>
-              </button>
-            </span>
-          );
-        },
-      },
     ],
-    [agentById, nameById, onOpenVpsDetail, pending, vpsNameDisplayMode],
+    [nameById],
   );
 
   useEffect(() => {
@@ -312,6 +255,7 @@ function FleetAlertList({
     if (rows.length === 0 || pending) {
       return;
     }
+    setActionError(null);
     setReviewSnapshot({
       action,
       rows,
@@ -338,11 +282,24 @@ function FleetAlertList({
       return;
     }
     setPending(`${snapshot.action}:${snapshot.rows.map((alert) => alert.id).join(",")}`);
+    let updatedCount = 0;
     try {
       for (const request of snapshot.requests) {
         await onUpdate(request);
+        updatedCount += 1;
       }
+      setActionError(null);
       setReviewSnapshot(null);
+    } catch (error) {
+      const detail =
+        error instanceof Error
+          ? error.message
+          : "The alert update failed without diagnostic detail.";
+      setActionError(
+        updatedCount > 0
+          ? `${updatedCount} of ${snapshot.requests.length} alerts updated before the failure: ${detail}`
+          : `No alerts were updated: ${detail}`,
+      );
     } finally {
       setPending(null);
     }
@@ -366,6 +323,11 @@ function FleetAlertList({
             : `${alertsCapped ? "Loaded page: " : ""}${criticalCount} critical / ${warningCount} warning / ${infoCount} info / ${formatBoundedCount(stateCount, stateCount >= FLEET_DETAIL_LIMIT)} triaged`}
         </small>
       </div>
+      <ActionFeedback
+        className="localActionFeedback"
+        message={reviewSnapshot ? null : actionError}
+        tone="danger"
+      />
       <ConsoleDataGrid
         actions={[
           {
@@ -429,65 +391,6 @@ function FleetAlertList({
               <span>Escalation</span>
               <strong>{alert.escalation_level ?? 0}</strong>
             </div>
-            <div className="configOverrideActions">
-              {alertOperatorState(alert) === "open" ? (
-                <>
-                  <button
-                    className="secondaryAction compactAction"
-                    disabled={pending != null}
-                    onClick={() => reviewAlertUpdate([alert], "acknowledge")}
-                    type="button"
-                  >
-                    <Check size={14} />
-                    <span>Acknowledge</span>
-                  </button>
-                  <button
-                    className="secondaryAction compactAction"
-                    disabled={pending != null}
-                    onClick={() => reviewAlertUpdate([alert], "mute")}
-                    type="button"
-                  >
-                    <VolumeX size={14} />
-                    <span>Silence 4h</span>
-                  </button>
-                </>
-              ) : (
-                <button
-                  className="secondaryAction compactAction"
-                  disabled={pending != null}
-                  onClick={() => reviewAlertUpdate([alert], "clear")}
-                  type="button"
-                >
-                  <CircleCheck size={14} />
-                  <span>Clear triage</span>
-                </button>
-              )}
-              <button
-                aria-label="Open VPS detail"
-                className="secondaryAction compactAction"
-                disabled={!alert.client_id || !agentById.has(alert.client_id)}
-                onClick={() => {
-                  const agent = alert.client_id ? agentById.get(alert.client_id) : null;
-                  if (agent) {
-                    onOpenVpsDetail(agent);
-                  }
-                }}
-                title="Open VPS detail"
-                type="button"
-              >
-                <Server size={14} />
-                <span>VPS detail</span>
-              </button>
-              <button
-                className="secondaryAction compactAction"
-                onClick={onOpenAlertPolicies}
-                title="Open alert policy configuration for this fleet alert."
-                type="button"
-              >
-                <Bell size={14} />
-                <span>Open alert policies</span>
-              </button>
-            </div>
             {policyNameFromAlert(alert) && (
               <span className="fleetAlertPolicyHint">
                 Policy: <strong>{policyNameFromAlert(alert)}</strong>
@@ -498,7 +401,7 @@ function FleetAlertList({
         )}
         rowActions={[
           {
-            label: "Acknowledge",
+            label: "Acknowledge open",
             description: (rows) =>
               actionTargetDescription(
                 "Acknowledge",
@@ -531,7 +434,7 @@ function FleetAlertList({
             },
           },
           {
-            label: "Clear",
+            label: "Clear triaged",
             description: (rows) =>
               actionTargetDescription(
                 "Clear",
@@ -546,7 +449,7 @@ function FleetAlertList({
             onSelect: (rows) => reviewAlertUpdate(rows, "clear"),
           },
           {
-            label: "Mute",
+            label: "Mute open 4h",
             description: (rows) =>
               actionTargetDescription(
                 "Mute",
@@ -562,7 +465,7 @@ function FleetAlertList({
             separatorBefore: true,
           },
           {
-            label: "Escalate",
+            label: "Escalate open",
             description: (rows) =>
               actionTargetDescription(
                 "Escalate",
@@ -621,7 +524,11 @@ function FleetAlertList({
             ),
           },
         ]}
-        onCancel={() => setReviewSnapshot(null)}
+        error={actionError ?? undefined}
+        onCancel={() => {
+          setActionError(null);
+          setReviewSnapshot(null);
+        }}
         onConfirm={() => void updateReviewedAlerts()}
         open={reviewSnapshot !== null}
         pending={pending !== null}
@@ -692,8 +599,6 @@ function alertStatusLabel(status: string): string {
       return "Tunnel adapter degraded";
     case "stale":
       return "Agent stale";
-    case "selected_no_store":
-      return "Source not configured";
     case "policy_reached":
       return "Policy threshold reached";
     default:
@@ -707,8 +612,6 @@ function alertCategoryLabel(alert: FleetAlertRecord): string {
       return "Network";
     case "agent_status":
       return "Agent status";
-    case "source_readiness":
-      return "Source readiness";
     case "traffic":
       return "Traffic policy";
     default:
@@ -723,8 +626,10 @@ function alertTargetScopeLabel(alert: FleetAlertRecord): string {
       return "VPS";
     case "tunnel":
       return "Tunnel";
-    case "source_template":
-      return "Source template";
+    case "configuration_preset":
+      return "Configuration preset";
+    case "configuration_source":
+      return "Configuration source";
     case "policy_alert":
       return "Policy alert";
     default:

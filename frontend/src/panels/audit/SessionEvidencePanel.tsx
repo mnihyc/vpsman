@@ -1,4 +1,4 @@
-import { History, KeyRound, Link2, TerminalSquare } from "lucide-react";
+import { History, KeyRound, Link2, LogOut, TerminalSquare } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
   ConsoleDataGrid,
@@ -56,6 +56,7 @@ export function SessionEvidencePanel({
   jobs,
   jobsTruncated,
   loading,
+  onClearSession,
   onRefresh,
   operator,
   operatorAuthEvents,
@@ -71,6 +72,7 @@ export function SessionEvidencePanel({
   jobs: JobHistoryRecord[];
   jobsTruncated: boolean;
   loading: boolean;
+  onClearSession: () => void;
   onRefresh: () => void;
   operator: OperatorView | null;
   operatorAuthEvents: OperatorAuthEventRecord[];
@@ -345,17 +347,27 @@ export function SessionEvidencePanel({
           <h2>Session evidence</h2>
           <small>
             {canInspectOperatorAuthority
-              ? "Read-only terminal, transcript, operator-session, and authentication evidence for security review."
-              : "Read-only terminal, transcript, and audit evidence. Operator authority correlation is admin-only."}
+              ? "Read-only terminal, transcript, operator-session, and authentication evidence. Sign out ends only this browser session."
+              : "Read-only terminal, transcript, and audit evidence. Sign out ends only this browser session; operator authority correlation is admin-only."}
           </small>
         </span>
-        <button
-          className="secondaryAction compactAction"
-          onClick={onRefresh}
-          type="button"
-        >
-          Refresh
-        </button>
+        <div className="sectionActions">
+          <button
+            className="secondaryAction compactAction"
+            onClick={onRefresh}
+            type="button"
+          >
+            Refresh
+          </button>
+          <button
+            className="secondaryAction compactAction"
+            onClick={onClearSession}
+            type="button"
+          >
+            <LogOut size={16} />
+            Sign out
+          </button>
+        </div>
       </div>
 
       <div className="metricGrid" aria-label="Session evidence summary">

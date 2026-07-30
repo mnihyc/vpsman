@@ -235,8 +235,26 @@ export function ConfirmationPrompt({
       focusPrompt();
       focusTimeout = window.setTimeout(() => {
         // Menus restore focus to their trigger after closing. Reassert both
-        // prompt visibility and focus after that handoff completes.
-        focusPrompt();
+        // prompt visibility and focus after that handoff completes, unless
+        // the operator has already moved to another control.
+        const activeElement = document.activeElement;
+        const openingFocusTarget = previousFocusRef.current[0];
+        const openingFocus = openingFocusTarget
+          ? resolveConfirmationFocusTarget(openingFocusTarget)
+          : null;
+        const restoredMenuTrigger =
+          activeElement instanceof HTMLElement &&
+          activeElement.getAttribute("aria-haspopup") === "menu";
+        if (
+          activeElement === document.body ||
+          activeElement === document.documentElement ||
+          activeElement === element ||
+          activeElement === openingFocus ||
+          restoredMenuTrigger ||
+          (activeElement instanceof Node && element.contains(activeElement))
+        ) {
+          focusPrompt();
+        }
       }, 150);
     });
     return () => {

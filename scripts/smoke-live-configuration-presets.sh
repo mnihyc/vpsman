@@ -7,7 +7,7 @@ source "$ROOT_DIR/scripts/lib-smoke.sh"
 smoke_enter_root
 smoke_require_tools awk base64 cp curl docker grep jq python3 timeout
 smoke_build_binaries
-smoke_init_tmpdir "vpsman-live-source-template-runtime-config"
+smoke_init_tmpdir "vpsman-live-configuration-presets"
 
 pg_port="$(smoke_free_port)"
 api_port="$(smoke_free_port)"
@@ -17,17 +17,19 @@ gateway_control_port="$(smoke_free_port)"
 api_url="http://127.0.0.1:$api_port"
 gateway_addr="127.0.0.1:$gateway_port"
 gateway_control_url="http://127.0.0.1:$gateway_control_port"
-container_name="vpsman-live-source-template-patch-$(date +%s%N)"
+container_name="vpsman-live-configuration-presets-$(date +%s%N)"
 internal_token="smoke-internal-$(date +%s%N)"
 postgres_url="postgres://vpsman:vpsman@127.0.0.1:$pg_port/vpsman"
-operator_password="source-template-runtime-config-smoke-password"
-client_id="source-template-runtime-config-smoke-$(date +%s)"
+operator_password="configuration-presets-smoke-password"
+client_id="configuration-presets-smoke-$(date +%s)"
 super_password="smoke-super-password"
 super_salt_hex="102132435465768798a9bacbdcedfe0f102132435465768798a9bacbdcedfe0f"
 privilege_verifier_key_hex="$(smoke_privilege_verifier_key_hex "$super_password" "$super_salt_hex")"
 patch_proc_root="$SMOKE_TMPDIR/proc-root"
 execution_cwd="$SMOKE_TMPDIR/execution-cwd"
 execution_env_value="smoke-exec-policy-$(date +%s%N)"
+ospf_status_marker="ospf-status-smoke-$(date +%s%N)"
+ospf_update_marker="ospf-update-smoke-$(date +%s%N)"
 execution_timeout_job_id=""
 execution_policy_job_id=""
 terminal_reject_job_id=""
@@ -42,11 +44,11 @@ gateway_log="$SMOKE_TMPDIR/gateway.log"
 agent_log="$SMOKE_TMPDIR/agent.log"
 agent_config="$SMOKE_TMPDIR/agent.toml"
 
-cleanup_live_source_template_patch_smoke() {
+cleanup_live_configuration_presets_smoke() {
   smoke_cleanup
   docker rm -f "$container_name" >/dev/null 2>&1 || true
 }
-trap cleanup_live_source_template_patch_smoke EXIT
+trap cleanup_live_configuration_presets_smoke EXIT
 
 docker run --rm -d \
   --name "$container_name" \
@@ -117,7 +119,7 @@ start_api() {
     fi
     sleep 0.5
   done
-  smoke_dump_logs "live source template config patch API failed to start" "$SMOKE_TMPDIR"/api-"$label"-*.log
+  smoke_dump_logs "live configuration preset API failed to start" "$SMOKE_TMPDIR"/api-"$label"-*.log
   exit 1
 }
 
@@ -149,7 +151,7 @@ wait_agent_online() {
   local deadline=$((SECONDS + 35))
   until [[ "$status" == "online" ]]; do
     if (( SECONDS >= deadline )); then
-      smoke_dump_logs "agent did not become online for live template runtime config smoke" \
+      smoke_dump_logs "agent did not become online for live configuration preset smoke" \
         "$SMOKE_TMPDIR"/api-*.log "$gateway_log" "$agent_log"
       exit 1
     fi
@@ -206,7 +208,7 @@ PY
   printf '%s\n' "$read_job_id"
 }
 
-assert_template_runtime_config_visible() {
+assert_configuration_preset_runtime_visible() {
   local deadline outputs_json
   deadline=$((SECONDS + 45))
   while (( SECONDS < deadline )); do
@@ -215,7 +217,9 @@ assert_template_runtime_config_visible() {
     if jq -e \
       --arg proc_root "$patch_proc_root" \
       --arg cwd "$execution_cwd" \
-      --arg env "$execution_env_value" '
+      --arg env "$execution_env_value" \
+      --arg ospf_status "$ospf_status_marker" \
+      --arg ospf_update "$ospf_update_marker" '
         .items[] | select(.stream == "status" and .done == true and .exit_code == 0)
         | (.data_base64 | @base64d | fromjson)
         | .type == "config_read"
@@ -225,13 +229,15 @@ assert_template_runtime_config_visible() {
           and (.toml | contains($env))
           and (.toml | contains("pty_policy = \"disabled\""))
           and (.toml | contains("process_cleanup = \"direct_child\""))
+          and (.toml | contains($ospf_status))
+          and (.toml | contains($ospf_update))
       ' <<<"$outputs_json" >/dev/null; then
       return
     fi
     sleep 1
   done
-  echo "template-assigned runtime config did not become visible through config_read" >&2
-  dump_job_diagnostics "last config_read did not include template runtime config" "$job_id"
+  echo "preset-selected runtime config did not become visible through config_read" >&2
+  dump_job_diagnostics "last config_read did not include selected configuration presets" "$job_id"
   exit 1
 }
 
@@ -338,11 +344,11 @@ start_api "first"
 
 auth_json="$(curl -fsS \
   -H "Content-Type: application/json" \
-  -d "{\"username\":\"source-template-runtime-config-smoke\",\"password\":\"$operator_password\"}" \
+  -d "{\"username\":\"configuration-presets-smoke\",\"password\":\"$operator_password\"}" \
   "$api_url/api/v1/auth/bootstrap")"
 access_token="$(jq -r '.access_token' <<<"$auth_json")"
 export VPSMAN_API_TOKEN="$access_token"
-jq -e '.operator.username == "source-template-runtime-config-smoke" and .token_type == "Bearer"' \
+jq -e '.operator.username == "configuration-presets-smoke" and .token_type == "Bearer"' \
   <<<"$auth_json" >/dev/null
 
 VPSMAN_GATEWAY_BIND="$gateway_addr" \
@@ -351,18 +357,18 @@ VPSMAN_GATEWAY_PRIVATE_KEY_HEX="$gateway_private_hex" \
 VPSMAN_API_URL="$api_url" \
 VPSMAN_INTERNAL_TOKEN="$internal_token" \
 VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX="$privilege_verifier_key_hex" \
-VPSMAN_GATEWAY_ID="source-template-runtime-config-smoke-gateway" \
+VPSMAN_GATEWAY_ID="configuration-presets-smoke-gateway" \
 VPSMAN_GATEWAY_SPOOL_DIR="$SMOKE_TMPDIR/gateway-spool" \
 RUST_LOG="vpsman_gateway=warn" \
   target/debug/vpsman-gateway >"$gateway_log" 2>&1 &
 smoke_track_pid "$!"
 if ! SMOKE_WAIT_TCP_SECS=90 smoke_wait_tcp 127.0.0.1 "$gateway_port"; then
-  smoke_dump_logs "gateway listener did not open for live template runtime config smoke" \
+  smoke_dump_logs "gateway listener did not open for live configuration preset smoke" \
     "$SMOKE_TMPDIR"/api-*.log "$gateway_log"
   exit 1
 fi
 if ! SMOKE_WAIT_TCP_SECS=90 smoke_wait_tcp 127.0.0.1 "$gateway_control_port"; then
-  smoke_dump_logs "gateway control listener did not open for live template runtime config smoke" \
+  smoke_dump_logs "gateway control listener did not open for live configuration preset smoke" \
     "$SMOKE_TMPDIR"/api-*.log "$gateway_log"
   exit 1
 fi
@@ -373,7 +379,7 @@ smoke_create_direct_agent_config \
   "$agent_config" \
   "$client_id" \
   "$client_id" \
-  "source-template-runtime-config-smoke" \
+  "configuration-presets-smoke" \
   "$gateway_public_hex" \
   "primary=$gateway_addr=10"
 
@@ -385,13 +391,22 @@ smoke_start_local_agent \
 wait_agent_online
 
 mkdir -p "$patch_proc_root" "$execution_cwd"
-preset_json="$(VPSMAN_API_TOKEN="$access_token" \
-  target/debug/vpsctl --api-url "$api_url" source-template-create \
-    --domain telemetry_metrics_source \
+host_metrics_definition="$(jq -nc \
+  --arg proc_root "$patch_proc_root" \
+  '{
+    source:"linux_procfs",
+    proc_root:$proc_root,
+    sys_class_net_dir:"/sys/class/net",
+    hostname_file:"/etc/hostname",
+    os_release_file:"/etc/os-release"
+  }')"
+host_metrics_preset_json="$(VPSMAN_API_TOKEN="$access_token" \
+  target/debug/vpsctl --api-url "$api_url" config-preset-create \
+    --behavior host_metrics \
     --name smoke:custom-proc-root \
     --description "smoke custom proc root" \
-    --definition-json "{\"source\":\"linux_procfs\",\"proc_root\":\"$patch_proc_root\"}")"
-template_id="$(jq -r '.id' <<<"$preset_json")"
+    --definition-json "$host_metrics_definition")"
+host_metrics_preset_id="$(jq -r '.id' <<<"$host_metrics_preset_json")"
 execution_definition="$(jq -nc \
   --arg cwd "$execution_cwd" \
   --arg env "$execution_env_value" \
@@ -405,32 +420,90 @@ execution_definition="$(jq -nc \
     process_cleanup: "direct_child"
   }')"
 execution_preset_json="$(VPSMAN_API_TOKEN="$access_token" \
-  target/debug/vpsctl --api-url "$api_url" source-template-create \
-    --domain command_execution_policy \
+  target/debug/vpsctl --api-url "$api_url" config-preset-create \
+    --behavior command_execution \
     --name smoke:locked-execution-policy \
     --description "smoke non-default command execution policy" \
     --definition-json "$execution_definition")"
-execution_template_id="$(jq -r '.id' <<<"$execution_preset_json")"
+execution_preset_id="$(jq -r '.id' <<<"$execution_preset_json")"
+ospf_definition="$(jq -nc \
+  --arg status_marker "$ospf_status_marker" \
+  --arg update_marker "$ospf_update_marker" \
+  '{
+    contract_version: 1,
+    status_command: {
+      argv: ["/bin/echo", $status_marker],
+      max_timeout_secs: 5,
+      max_output_bytes: 4096
+    },
+    update_command: {
+      argv: ["/bin/echo", $update_marker],
+      max_timeout_secs: 5,
+      max_output_bytes: 4096
+    }
+  }')"
+ospf_preset_json="$(VPSMAN_API_TOKEN="$access_token" \
+  target/debug/vpsctl --api-url "$api_url" config-preset-create \
+    --behavior ospf_update_command \
+    --name smoke:ospf-updater \
+    --description "smoke bounded OSPF updater commands" \
+    --definition-json "$ospf_definition")"
+ospf_preset_id="$(jq -r '.id' <<<"$ospf_preset_json")"
 
+host_metrics_assignment_preview="$(VPSMAN_API_TOKEN="$access_token" \
+  target/debug/vpsctl --api-url "$api_url" config-source-set \
+    --behavior host_metrics \
+    --preset-id "$host_metrics_preset_id" \
+    --clients "$client_id")"
+host_metrics_assignment_hash="$(jq -er '
+  .preview_hash | select(type == "string" and length > 0)
+' <<<"$host_metrics_assignment_preview")"
 VPSMAN_API_TOKEN="$access_token" \
 VPSMAN_SUPER_PASSWORD="$super_password" \
 VPSMAN_SUPER_SALT_HEX="$super_salt_hex" \
-  target/debug/vpsctl --api-url "$api_url" source-template-assign \
-    --domain telemetry_metrics_source \
-    --template-id "$template_id" \
+  target/debug/vpsctl --api-url "$api_url" config-source-set \
+    --behavior host_metrics \
+    --preset-id "$host_metrics_preset_id" \
     --clients "$client_id" \
+    --preview-hash "$host_metrics_assignment_hash" \
     --confirmed >/dev/null
+execution_assignment_preview="$(VPSMAN_API_TOKEN="$access_token" \
+  target/debug/vpsctl --api-url "$api_url" config-source-set \
+    --behavior command_execution \
+    --preset-id "$execution_preset_id" \
+    --clients "$client_id")"
+execution_assignment_hash="$(jq -er '
+  .preview_hash | select(type == "string" and length > 0)
+' <<<"$execution_assignment_preview")"
 VPSMAN_API_TOKEN="$access_token" \
 VPSMAN_SUPER_PASSWORD="$super_password" \
 VPSMAN_SUPER_SALT_HEX="$super_salt_hex" \
-  target/debug/vpsctl --api-url "$api_url" source-template-assign \
-    --domain command_execution_policy \
-    --template-id "$execution_template_id" \
+  target/debug/vpsctl --api-url "$api_url" config-source-set \
+    --behavior command_execution \
+    --preset-id "$execution_preset_id" \
     --clients "$client_id" \
+    --preview-hash "$execution_assignment_hash" \
+    --confirmed >/dev/null
+ospf_assignment_preview="$(VPSMAN_API_TOKEN="$access_token" \
+  target/debug/vpsctl --api-url "$api_url" config-source-set \
+    --behavior ospf_update_command \
+    --preset-id "$ospf_preset_id" \
+    --clients "$client_id")"
+ospf_assignment_hash="$(jq -er '
+  .preview_hash | select(type == "string" and length > 0)
+' <<<"$ospf_assignment_preview")"
+VPSMAN_API_TOKEN="$access_token" \
+VPSMAN_SUPER_PASSWORD="$super_password" \
+VPSMAN_SUPER_SALT_HEX="$super_salt_hex" \
+  target/debug/vpsctl --api-url "$api_url" config-source-set \
+    --behavior ospf_update_command \
+    --preset-id "$ospf_preset_id" \
+    --clients "$client_id" \
+    --preview-hash "$ospf_assignment_hash" \
     --confirmed >/dev/null
 
 rendered_patch="$(VPSMAN_API_TOKEN="$access_token" \
-  target/debug/vpsctl --api-url "$api_url" template-runtime-config \
+  target/debug/vpsctl --api-url "$api_url" config-render \
     --client-id "$client_id" \
     --format toml)"
 grep -q '\[telemetry\]' <<<"$rendered_patch"
@@ -441,50 +514,122 @@ grep -q 'environment_policy = "clean"' <<<"$rendered_patch"
 grep -q "$execution_env_value" <<<"$rendered_patch"
 grep -q 'pty_policy = "disabled"' <<<"$rendered_patch"
 grep -q 'process_cleanup = "direct_child"' <<<"$rendered_patch"
+grep -q "$ospf_status_marker" <<<"$rendered_patch"
+grep -q "$ospf_update_marker" <<<"$rendered_patch"
 
 if grep -q "$patch_proc_root" "$agent_config"; then
-  echo "source template assignment mutated immutable bootstrap config file" >&2
+  echo "configuration preset override mutated immutable bootstrap config file" >&2
   exit 1
 fi
-assert_template_runtime_config_visible
+assert_configuration_preset_runtime_visible
 assert_execution_policy_applied
 
 stop_api
 start_api "restart"
-api_get "/api/v1/auth/me" | jq -e '.username == "source-template-runtime-config-smoke"' >/dev/null
-api_get "/api/v1/source-templates" | jq -e --arg template_id "$template_id" '
-  any(.[]; .id == $template_id and .domain == "telemetry_metrics_source" and .name == "smoke:custom-proc-root")
+api_get "/api/v1/auth/me" | jq -e '.username == "configuration-presets-smoke"' >/dev/null
+api_get "/api/v1/configuration-presets?behavior=host_metrics" | jq -e --arg preset_id "$host_metrics_preset_id" '
+  any(.[]; .id == $preset_id and .behavior == "host_metrics" and .kind == "custom" and .name == "smoke:custom-proc-root")
 ' >/dev/null
-api_get "/api/v1/source-templates" | jq -e --arg template_id "$execution_template_id" '
-  any(.[]; .id == $template_id and .domain == "command_execution_policy" and .name == "smoke:locked-execution-policy")
+api_get "/api/v1/configuration-presets?behavior=command_execution" | jq -e --arg preset_id "$execution_preset_id" '
+  any(.[]; .id == $preset_id and .behavior == "command_execution" and .kind == "custom" and .name == "smoke:locked-execution-policy")
 ' >/dev/null
-api_get "/api/v1/source-template-assignments?client_id=$client_id" | jq -e --arg template_id "$template_id" '
-  any(.[]; .template_id == $template_id and .domain == "telemetry_metrics_source")
+api_get "/api/v1/configuration-presets?behavior=ospf_update_command" | jq -e --arg preset_id "$ospf_preset_id" '
+  any(.[]; .id == $preset_id and .behavior == "ospf_update_command" and .kind == "custom" and .name == "smoke:ospf-updater")
 ' >/dev/null
-api_get "/api/v1/source-template-assignments?client_id=$client_id" | jq -e --arg template_id "$execution_template_id" '
-  any(.[]; .template_id == $template_id and .domain == "command_execution_policy")
+api_get "/api/v1/configuration-sources?client_id=$client_id" | jq -e --arg preset_id "$host_metrics_preset_id" '
+  any(.[]; .effective_preset_id == $preset_id and .behavior == "host_metrics" and .selection_origin == "explicit_override")
 ' >/dev/null
-assert_template_runtime_config_visible
+api_get "/api/v1/configuration-sources?client_id=$client_id" | jq -e --arg preset_id "$execution_preset_id" '
+  any(.[]; .effective_preset_id == $preset_id and .behavior == "command_execution" and .selection_origin == "explicit_override")
+' >/dev/null
+api_get "/api/v1/configuration-sources?client_id=$client_id" | jq -e --arg preset_id "$ospf_preset_id" '
+  any(.[]; .effective_preset_id == $preset_id and .behavior == "ospf_update_command" and .selection_origin == "explicit_override" and .readiness.state != "unconfigured")
+' >/dev/null
+assert_configuration_preset_runtime_visible
+
+for behavior in host_metrics command_execution ospf_update_command; do
+  reset_preview="$(VPSMAN_API_TOKEN="$access_token" \
+    target/debug/vpsctl --api-url "$api_url" config-source-reset \
+      --behavior "$behavior" \
+      --clients "$client_id")"
+  reset_preview_hash="$(jq -er '
+    .preview_hash | select(type == "string" and length > 0)
+  ' <<<"$reset_preview")"
+  VPSMAN_API_TOKEN="$access_token" \
+  VPSMAN_SUPER_PASSWORD="$super_password" \
+  VPSMAN_SUPER_SALT_HEX="$super_salt_hex" \
+    target/debug/vpsctl --api-url "$api_url" config-source-reset \
+      --behavior "$behavior" \
+      --clients "$client_id" \
+      --preview-hash "$reset_preview_hash" \
+      --confirmed >/dev/null
+done
+api_get "/api/v1/configuration-sources?client_id=$client_id" | jq -e '
+  [.[] | select(.behavior == "host_metrics" or .behavior == "command_execution" or .behavior == "ospf_update_command")] as $reset |
+  ($reset | length) == 3 and
+  all($reset[];
+    .effective_preset_kind == "system" and
+    .selection_origin == "system_default" and
+    .override_updated_at == null) and
+  any($reset[]; .behavior == "ospf_update_command" and .readiness.state == "unconfigured")
+' >/dev/null
+default_rendered_config="$(VPSMAN_API_TOKEN="$access_token" \
+  target/debug/vpsctl --api-url "$api_url" config-render \
+    --client-id "$client_id" \
+    --format toml)"
+if grep -Fq "$patch_proc_root" <<<"$default_rendered_config"; then
+  echo "reset retained the custom host metrics override" >&2
+  exit 1
+fi
+grep -Fq 'proc_root = "/proc"' <<<"$default_rendered_config"
+grep -Fq 'environment_policy = "inherit"' <<<"$default_rendered_config"
+grep -Fq 'pty_policy = "native_pty"' <<<"$default_rendered_config"
+if grep -Fq "$ospf_status_marker" <<<"$default_rendered_config" \
+  || grep -Fq "$ospf_update_marker" <<<"$default_rendered_config"; then
+  echo "reset retained the custom OSPF updater override" >&2
+  exit 1
+fi
+
+for preset_id in "$host_metrics_preset_id" "$execution_preset_id" "$ospf_preset_id"; do
+  VPSMAN_API_TOKEN="$access_token" \
+    target/debug/vpsctl --api-url "$api_url" config-preset-delete \
+      --preset-id "$preset_id" \
+      --confirmed
+done
+api_get "/api/v1/configuration-presets" | jq -e \
+  --arg host_metrics_preset_id "$host_metrics_preset_id" \
+  --arg execution_preset_id "$execution_preset_id" \
+  --arg ospf_preset_id "$ospf_preset_id" '
+    all(.[];
+      .id != $host_metrics_preset_id and
+      .id != $execution_preset_id and
+      .id != $ospf_preset_id)
+  ' >/dev/null
 
 jq -n \
   --arg client_id "$client_id" \
   --arg job_id "$job_id" \
-  --arg template_id "$template_id" \
-  --arg execution_template_id "$execution_template_id" \
+  --arg host_metrics_preset_id "$host_metrics_preset_id" \
+  --arg execution_preset_id "$execution_preset_id" \
+  --arg ospf_preset_id "$ospf_preset_id" \
   --arg execution_policy_job_id "$execution_policy_job_id" \
   --arg execution_timeout_job_id "$execution_timeout_job_id" \
   --arg terminal_reject_job_id "$terminal_reject_job_id" \
   --arg proc_root "$patch_proc_root" \
   --arg execution_cwd "$execution_cwd" \
   '{
-    live_source_template_runtime_config_smoke: "ok",
+    live_configuration_presets_smoke: "ok",
     postgres_backed: true,
     auth_session: "persisted",
     api_restart: "verified",
+    reset_to_system_default: "verified",
+    unused_custom_preset_delete: "verified",
     command_execution_policy_fields: "verified",
+    ospf_update_command_lifecycle: "verified",
     client_id: $client_id,
-    template_id: $template_id,
-    execution_template_id: $execution_template_id,
+    host_metrics_preset_id: $host_metrics_preset_id,
+    execution_preset_id: $execution_preset_id,
+    ospf_preset_id: $ospf_preset_id,
     config_read_job_id: $job_id,
     execution_policy_job_id: $execution_policy_job_id,
     execution_timeout_job_id: $execution_timeout_job_id,

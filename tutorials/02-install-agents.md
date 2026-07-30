@@ -106,8 +106,8 @@ For emergency access lockout, revoke the current client key:
 cargo run -p vpsctl -- client-key-revoke --client-id 1 --confirmed
 ```
 
-For inventory retirement, use Fleet > Instances, select exactly one VPS, then
-run the `Review VPS deletion` row action. Deletion requires local privilege
+For inventory retirement, use **Fleet > Instances**, select exactly one VPS,
+then choose **Actions > Review VPS deletion**. Deletion requires local privilege
 unlock and confirmation, hides the VPS from normal fleet views, disconnects any
 active gateway session, retires tunnel declarations using that endpoint,
 immediately queues runtime-config cleanup for surviving peers, and marks pending

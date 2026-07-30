@@ -76,8 +76,10 @@ pub(crate) struct MemoryState {
         Arc<RwLock<Vec<crate::model_webhook_rules::WebhookRuleDeliveryView>>>,
     pub(crate) history_retention_policies:
         Arc<RwLock<Vec<crate::model_history::HistoryRetentionPolicyView>>>,
-    pub(crate) source_templates: Arc<RwLock<Vec<SourceTemplateView>>>,
-    pub(crate) source_template_assignments: Arc<RwLock<Vec<SourceTemplateAssignmentView>>>,
+    pub(crate) configuration_presets: Arc<RwLock<Vec<ConfigurationPresetView>>>,
+    pub(crate) configuration_preset_overrides: Arc<RwLock<Vec<ConfigurationPresetOverrideRecord>>>,
+    pub(crate) configuration_presets_seeded: Arc<RwLock<bool>>,
+    pub(crate) network_adapter_definitions: Arc<RwLock<Vec<NetworkAdapterDefinitionView>>>,
     pub(crate) runtime_config_overrides: Arc<RwLock<Vec<RuntimeConfigOverrideView>>>,
     pub(crate) runtime_config_apply_states: Arc<RwLock<Vec<RuntimeConfigApplyStateRecord>>>,
     pub(crate) runtime_config_patch_generators: Arc<RwLock<Vec<RuntimeConfigPatchGeneratorView>>>,
@@ -165,7 +167,12 @@ impl Repository {
             .run(&pool)
             .await
             .context("failed to run PostgreSQL migrations")?;
+        let repository = Self::Postgres(pool);
+        repository
+            .initialize_system_configuration_presets()
+            .await
+            .context("failed to initialize system configuration presets")?;
         info!("api using PostgreSQL repository");
-        Ok(Self::Postgres(pool))
+        Ok(repository)
     }
 }

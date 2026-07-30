@@ -80,8 +80,9 @@ Target statuses are:
   move reports canceled; once a chunk write or final move has succeeded, the
   completed transfer status wins. Resumable download chunks do not mutate host
   state and can cancel before stdout/status is emitted.
-- Runtime config sync uses per-client pending/apply state. Operator mutations
-  and template changes stage pending config and queue normal
+- Runtime config sync uses per-client pending/apply state. Operator mutations,
+  configuration-preset changes, and per-VPS override changes stage pending
+  config and queue normal
   `runtime_config_sync` jobs. A target that completes promotes only that
   client's matching pending config to applied; skipped, failed, canceled, or
   timed-out targets mark pending state failed and leave the previous applied
@@ -134,7 +135,7 @@ Target statuses are:
 
 ## Desired-State Reconciliation
 
-Runtime config, managed tunnels, port forwarding, and source-template/config
+Runtime config, managed tunnels, port forwarding, and configuration-preset
 changes use one operator model:
 
 1. **Desired saved** means the control plane durably accepted the requested
@@ -219,6 +220,6 @@ The same ownership rule applies to command and adjacent workflow models:
 
 - Command safety, confirmation requirements, canonical command type labels, and command-template display groups are defined in `vpsman_common` and generated into frontend contracts.
 - Command templates store backend-derived `command_type`; user-facing grouping is `display_group`. API-owned built-in command templates provide immutable default job parameters, while user-defined command templates remain operator editable.
-- Terminal session state/status/event, file-transfer direction/status/event/command type, backup/restore/migration/tunnel/update-release statuses, source readiness, and topology evidence statuses are closed generated vocabularies.
+- Terminal session state/status/event, file-transfer direction/status/event/command type, backup/restore/migration/tunnel/update-release statuses, and topology evidence statuses are closed generated vocabularies.
 - Generated frontend contracts also include status-class maps for closed workflow domains. Frontend code may use generic `statusClass` only for free-form display values outside these canonical models.
 - API, CLI, agent, worker, database constraints, frontend types, mocks, and tests must update through `vpsman_common` first. Adding a new workflow state without regenerating contracts and updating constraints is a contract drift bug.

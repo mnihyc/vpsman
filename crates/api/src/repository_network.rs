@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use std::{
+    collections::{HashMap, HashSet},
+    net::IpAddr,
+};
 
 use anyhow::Result;
 use sqlx::{types::Json as SqlJson, Row};
@@ -40,78 +43,6 @@ pub(crate) struct TunnelPlanIdentity {
 }
 
 impl Repository {
-    pub(crate) async fn mark_routing_adapter_template_stale(
-        &self,
-        template_id: Uuid,
-    ) -> Result<()> {
-        let template_id = template_id.to_string();
-        match self {
-            Self::Memory(memory) => {
-                let mut plans = memory.tunnel_plans.write().await;
-                for plan in plans
-                    .iter_mut()
-                    .filter(|plan| plan.deleted_at.is_none() && plan.enabled)
-                {
-                    let Some(ospf) = &plan.plan.ospf else {
-                        continue;
-                    };
-                    let left_matches = ospf.left_adapter_template_id == template_id;
-                    let right_matches = ospf.right_adapter_template_id == template_id;
-                    if !left_matches && !right_matches {
-                        continue;
-                    }
-                    if left_matches {
-                        plan.left_ospf_status = "stale".to_string();
-                        plan.left_ospf_job_id = None;
-                    }
-                    if right_matches {
-                        plan.right_ospf_status = "stale".to_string();
-                        plan.right_ospf_job_id = None;
-                    }
-                    plan.desired_ospf_cost = None;
-                    plan.ospf_status = aggregate_ospf_status(plan).to_string();
-                    plan.updated_at = unix_now().to_string();
-                }
-            }
-            Self::Postgres(pool) => {
-                sqlx::query(
-                    r#"
-                    UPDATE tunnel_plans
-                    SET left_ospf_status = CASE
-                            WHEN plan->'ospf'->>'left_adapter_template_id' = $1 THEN 'stale'
-                            ELSE left_ospf_status
-                        END,
-                        right_ospf_status = CASE
-                            WHEN plan->'ospf'->>'right_adapter_template_id' = $1 THEN 'stale'
-                            ELSE right_ospf_status
-                        END,
-                        left_ospf_job_id = CASE
-                            WHEN plan->'ospf'->>'left_adapter_template_id' = $1 THEN NULL
-                            ELSE left_ospf_job_id
-                        END,
-                        right_ospf_job_id = CASE
-                            WHEN plan->'ospf'->>'right_adapter_template_id' = $1 THEN NULL
-                            ELSE right_ospf_job_id
-                        END,
-                        desired_ospf_cost = NULL,
-                        ospf_status = 'stale',
-                        updated_at = now()
-                    WHERE deleted_at IS NULL
-                      AND enabled = TRUE
-                      AND (
-                        plan->'ospf'->>'left_adapter_template_id' = $1
-                        OR plan->'ospf'->>'right_adapter_template_id' = $1
-                      )
-                    "#,
-                )
-                .bind(template_id)
-                .execute(pool)
-                .await?;
-            }
-        }
-        Ok(())
-    }
-
     pub(crate) async fn list_tunnel_plans(&self) -> Result<Vec<TunnelPlanView>> {
         let reads = self
             .list_tunnel_plan_reads(TUNNEL_PLAN_MANAGEMENT_READ_LIMIT)
@@ -555,6 +486,23 @@ impl Repository {
         })
     }
 
+    pub(crate) async fn validate_tunnel_plan_resource_conflicts(
+        &self,
+        plan: &TunnelPlan,
+        excluded_plan_id: Option<Uuid>,
+    ) -> Result<()> {
+        match self {
+            Self::Memory(memory) => {
+                let plans = memory.tunnel_plans.read().await;
+                validate_memory_tunnel_plan_resource_conflicts(plan, &plans, excluded_plan_id)
+            }
+            Self::Postgres(pool) => {
+                let rows = fetch_postgres_tunnel_plan_resource_rows(pool, excluded_plan_id).await?;
+                validate_postgres_tunnel_plan_resource_rows(plan, rows)
+            }
+        }
+    }
+
     pub(crate) async fn record_tunnel_plan(
         &self,
         input: &TunnelPlanInput,
@@ -608,11 +556,19 @@ impl Repository {
                 {
                     anyhow::bail!("tunnel_plan_name_conflict");
                 }
+                validate_memory_tunnel_plan_resource_conflicts(plan, &plans, None)?;
+                {
+                    let definitions = memory.network_adapter_definitions.read().await;
+                    validate_memory_tunnel_plan_adapter_references(&definitions, plan)?;
+                }
                 plans.push(view.clone());
                 view.clone()
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                lock_postgres_tunnel_plan_write(&mut tx).await?;
+                validate_postgres_tunnel_plan_resource_conflicts(&mut tx, plan, None).await?;
+                validate_postgres_tunnel_plan_adapter_references(&mut tx, plan).await?;
                 lock_visible_postgres_tunnel_endpoints(
                     &mut tx,
                     &view.left_client_id,
@@ -698,16 +654,23 @@ impl Repository {
         let updated = match self {
             Self::Memory(memory) => {
                 let mut plans = memory.tunnel_plans.write().await;
-                let existing = plans
-                    .iter_mut()
-                    .find(|existing| existing.id == plan_id && existing.deleted_at.is_none())
+                let existing_index = plans
+                    .iter()
+                    .position(|existing| existing.id == plan_id && existing.deleted_at.is_none())
                     .ok_or_else(|| anyhow::anyhow!("tunnel_plan_not_found"))?;
+                let existing = &plans[existing_index];
                 if existing.revision != expected_revision {
                     anyhow::bail!("tunnel_plan_snapshot_stale");
                 }
                 if existing.name != plan.name {
                     anyhow::bail!("tunnel_plan_name_is_immutable");
                 }
+                validate_memory_tunnel_plan_resource_conflicts(plan, &plans, Some(plan_id))?;
+                {
+                    let definitions = memory.network_adapter_definitions.read().await;
+                    validate_memory_tunnel_plan_adapter_references(&definitions, plan)?;
+                }
+                let existing = &mut plans[existing_index];
                 let updated = TunnelPlanView {
                     id: existing.id,
                     name: existing.name.clone(),
@@ -750,6 +713,10 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                lock_postgres_tunnel_plan_write(&mut tx).await?;
+                validate_postgres_tunnel_plan_resource_conflicts(&mut tx, plan, Some(plan_id))
+                    .await?;
+                validate_postgres_tunnel_plan_adapter_references(&mut tx, plan).await?;
                 lock_visible_postgres_tunnel_endpoints(
                     &mut tx,
                     &plan.left_client_id,
@@ -1563,6 +1530,218 @@ fn runtime_config_contains_tunnel(
         .runtime_status_telemetry_plans
         .iter()
         .any(|plan| plan.plan_id.as_deref() == Some(plan_id.as_str()))
+}
+
+const TUNNEL_PLAN_RESOURCE_ROWS_QUERY: &str = r#"
+    SELECT id, left_client_id, right_client_id, plan
+    FROM tunnel_plans
+    WHERE deleted_at IS NULL
+      AND ($1::uuid IS NULL OR id <> $1)
+    ORDER BY id
+"#;
+
+fn tunnel_plan_addresses(plan: &TunnelPlan) -> Result<HashSet<IpAddr>> {
+    [plan.ipv4_tunnel.as_ref(), plan.ipv6_tunnel.as_ref()]
+        .into_iter()
+        .flatten()
+        .flat_map(|pair| [&pair.left, &pair.right])
+        .map(|address| {
+            address
+                .parse()
+                .map_err(|_| anyhow::anyhow!("tunnel_plan_address_invalid"))
+        })
+        .collect()
+}
+
+fn validate_tunnel_plan_resource_pair(
+    requested: &TunnelPlan,
+    requested_addresses: &HashSet<IpAddr>,
+    existing: &TunnelPlan,
+    existing_left_client_id: &str,
+    existing_right_client_id: &str,
+) -> Result<()> {
+    let shares_endpoint = [
+        requested.left_client_id.as_str(),
+        requested.right_client_id.as_str(),
+    ]
+    .into_iter()
+    .any(|client_id| client_id == existing_left_client_id || client_id == existing_right_client_id);
+    anyhow::ensure!(
+        !shares_endpoint || requested.interface_name != existing.interface_name,
+        "tunnel_plan_interface_conflict"
+    );
+    anyhow::ensure!(
+        requested_addresses.is_disjoint(&tunnel_plan_addresses(existing)?),
+        "tunnel_plan_address_conflict"
+    );
+    Ok(())
+}
+
+fn validate_memory_tunnel_plan_resource_conflicts(
+    requested: &TunnelPlan,
+    existing_plans: &[TunnelPlanView],
+    excluded_plan_id: Option<Uuid>,
+) -> Result<()> {
+    let requested_addresses = tunnel_plan_addresses(requested)?;
+    for existing in existing_plans
+        .iter()
+        .filter(|existing| existing.deleted_at.is_none())
+        .filter(|existing| Some(existing.id) != excluded_plan_id)
+    {
+        validate_tunnel_plan_resource_pair(
+            requested,
+            &requested_addresses,
+            &existing.plan,
+            &existing.left_client_id,
+            &existing.right_client_id,
+        )?;
+    }
+    Ok(())
+}
+
+async fn fetch_postgres_tunnel_plan_resource_rows(
+    pool: &sqlx::PgPool,
+    excluded_plan_id: Option<Uuid>,
+) -> Result<Vec<sqlx::postgres::PgRow>> {
+    Ok(sqlx::query(TUNNEL_PLAN_RESOURCE_ROWS_QUERY)
+        .bind(excluded_plan_id)
+        .fetch_all(pool)
+        .await?)
+}
+
+fn validate_postgres_tunnel_plan_resource_rows(
+    requested: &TunnelPlan,
+    rows: Vec<sqlx::postgres::PgRow>,
+) -> Result<()> {
+    let requested_addresses = tunnel_plan_addresses(requested)?;
+    for row in rows {
+        let existing: SqlJson<serde_json::Value> = row.try_get("plan")?;
+        let existing = serde_json::from_value::<TunnelPlan>(existing.0)
+            .map_err(|error| anyhow::anyhow!("invalid persisted tunnel plan: {error}"))?;
+        validate_tunnel_plan_resource_pair(
+            requested,
+            &requested_addresses,
+            &existing,
+            &row.try_get::<String, _>("left_client_id")?,
+            &row.try_get::<String, _>("right_client_id")?,
+        )?;
+    }
+    Ok(())
+}
+
+async fn validate_postgres_tunnel_plan_resource_conflicts(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    requested: &TunnelPlan,
+    excluded_plan_id: Option<Uuid>,
+) -> Result<()> {
+    let rows = sqlx::query(TUNNEL_PLAN_RESOURCE_ROWS_QUERY)
+        .bind(excluded_plan_id)
+        .fetch_all(&mut **tx)
+        .await?;
+    validate_postgres_tunnel_plan_resource_rows(requested, rows)
+}
+
+async fn lock_postgres_tunnel_plan_write(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<()> {
+    // Serialize only plan create/update conflict scans. Other tunnel status writes keep
+    // normal row-level concurrency.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind("vpsman.tunnel_plan_resource_conflicts")
+        .execute(&mut **tx)
+        .await?;
+    // Adapter definition mutation takes SHARE before checking references. ROW EXCLUSIVE
+    // preserves that table -> definition lock order while remaining writer-compatible.
+    sqlx::query("LOCK TABLE tunnel_plans IN ROW EXCLUSIVE MODE")
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct TunnelPlanAdapterReference {
+    id: Uuid,
+    adapter_kind: &'static str,
+}
+
+fn tunnel_plan_adapter_references(plan: &TunnelPlan) -> Result<Vec<TunnelPlanAdapterReference>> {
+    let mut references = Vec::with_capacity(4);
+    let mut add_reference = |raw_id: &str, adapter_kind: &'static str| -> Result<()> {
+        let id = Uuid::parse_str(raw_id)
+            .map_err(|_| anyhow::anyhow!("tunnel_plan_adapter_definition_id_invalid"))?;
+        if !references
+            .iter()
+            .any(|reference: &TunnelPlanAdapterReference| {
+                reference.id == id && reference.adapter_kind == adapter_kind
+            })
+        {
+            references.push(TunnelPlanAdapterReference { id, adapter_kind });
+        }
+        Ok(())
+    };
+
+    if plan.runtime_control.manager == RuntimeTunnelManager::ExternalManagedAdapter {
+        let left_id = plan
+            .runtime_control
+            .left_adapter_definition_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("tunnel_plan_adapter_definition_id_invalid"))?;
+        let right_id = plan
+            .runtime_control
+            .right_adapter_definition_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("tunnel_plan_adapter_definition_id_invalid"))?;
+        add_reference(left_id, "runtime_tunnel")?;
+        add_reference(right_id, "runtime_tunnel")?;
+    }
+    if let Some(ospf) = &plan.ospf {
+        if let Some(id) = ospf.left_adapter_definition_id.as_deref() {
+            add_reference(id, "routing_cost")?;
+        }
+        if let Some(id) = ospf.right_adapter_definition_id.as_deref() {
+            add_reference(id, "routing_cost")?;
+        }
+    }
+    Ok(references)
+}
+
+fn validate_memory_tunnel_plan_adapter_references(
+    definitions: &[NetworkAdapterDefinitionView],
+    plan: &TunnelPlan,
+) -> Result<()> {
+    for reference in tunnel_plan_adapter_references(plan)? {
+        anyhow::ensure!(
+            definitions.iter().any(|definition| {
+                definition.id == reference.id && definition.adapter_kind == reference.adapter_kind
+            }),
+            "tunnel_plan_adapter_definition_unavailable"
+        );
+    }
+    Ok(())
+}
+
+async fn validate_postgres_tunnel_plan_adapter_references(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    plan: &TunnelPlan,
+) -> Result<()> {
+    for reference in tunnel_plan_adapter_references(plan)? {
+        let adapter_kind = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT adapter_kind
+            FROM network_adapter_definitions
+            WHERE id = $1
+            FOR SHARE
+            "#,
+        )
+        .bind(reference.id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        anyhow::ensure!(
+            adapter_kind.as_deref() == Some(reference.adapter_kind),
+            "tunnel_plan_adapter_definition_unavailable"
+        );
+    }
+    Ok(())
 }
 
 async fn lock_visible_postgres_tunnel_endpoints(

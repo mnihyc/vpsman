@@ -5,45 +5,32 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
-use serde::Serialize;
 
 use crate::{
     error::ApiError,
     job_request::{fixed_target_selection, normalized_target_client_ids},
     lifecycle_outcome::{gateway_disconnect_outcome, terminal_reconciliation_outcome},
     model::{
-        AgentView, AssignSourceTemplateRequest, AssignTagRequest, BulkResolveRequest,
-        BulkResolveResponse, BulkTagMutationRequest, CloneSourceTemplateRequest,
-        CreateSourceTemplateRequest, CreateTagRequest, DeleteAgentRequest, DeleteAgentResponse,
+        AgentView, AssignTagRequest, BulkResolveRequest, BulkResolveResponse,
+        BulkTagMutationRequest, CreateTagRequest, DeleteAgentRequest, DeleteAgentResponse,
         DeleteRuntimeConfigPatchGeneratorRequest, DeleteTagRequest, FleetSummary,
         GatewaySessionView, HistoryQuery, RenderRuntimeConfigPatchGeneratorRequest,
         RuntimeConfigApplyStateView, RuntimeConfigPatchGeneratorRenderView,
         RuntimeConfigPatchGeneratorView, RuntimeConfigPatchRequest, RuntimeConfigPatchResponse,
-        SourceStatusQuery, SourceStatusView, SourceTemplateAssignmentQuery,
-        SourceTemplateAssignmentView, SourceTemplateDiffRequest, SourceTemplateDiffView,
-        SourceTemplateQuery, SourceTemplateTestView, SourceTemplateView, TagMutationResponse,
-        TagView, TelemetryNetworkRateQuery, TelemetryNetworkRateView, TelemetryRollupQuery,
-        TelemetryRollupView, TelemetryTunnelQuery, TelemetryTunnelView, TemplateRuntimeConfigQuery,
-        TemplateRuntimeConfigView, TestSourceTemplateRequest, UpdateAgentAliasRequest,
-        UpdateSourceTemplateRequest, UpdateSourceTemplateResponse, UpdateTagOrderRequest,
-        UpsertRuntimeConfigPatchGeneratorRequest, WsEvent,
+        TagMutationResponse, TagView, TelemetryNetworkRateQuery, TelemetryNetworkRateView,
+        TelemetryRollupQuery, TelemetryRollupView, TelemetryTunnelQuery, TelemetryTunnelView,
+        UpdateAgentAliasRequest, UpdateTagOrderRequest, UpsertRuntimeConfigPatchGeneratorRequest,
+        WsEvent,
     },
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
-    repository_template_runtime_config::render_template_runtime_candidate,
     runtime_config::{dispatch_runtime_config_for_clients, validate_runtime_config_patch_toml},
     security::{SCOPE_CONFIG_READ, SCOPE_FLEET_READ},
     selector_expression::parse_selector_expression,
-    source_template_builtins::SOURCE_TEMPLATE_DOMAINS,
     state::AppState,
     util::limit_or_default,
 };
 use vpsman_common::{payload_hash, MAX_RUNTIME_CONFIG_FIELD_BYTES};
 
-const MAX_TEMPLATE_NAME_BYTES: usize = 128;
-const MAX_TEMPLATE_DESCRIPTION_BYTES: usize = 1024;
-const MAX_TEMPLATE_DEFINITION_BYTES: usize = 16 * 1024;
-const MAX_TEMPLATE_ARGV_ITEMS: usize = 32;
-const MAX_TEMPLATE_ARG_BYTES: usize = 512;
 const MAX_PATCH_GENERATOR_BODY_BYTES: usize = 16 * 1024;
 const TELEMETRY_NETWORK_RATE_LIMIT_MAX: i64 = 5_000;
 
@@ -106,7 +93,7 @@ pub(crate) async fn delete_agent(
     verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
     let deleted = state
         .repo
-        .delete_agent(&client_id, &request, &operator)
+        .delete_agent(&client_id, request.reason.as_deref(), &operator)
         .await
         .map_err(agent_mutation_error)?;
     let tunnel_peer_client_ids =
@@ -271,23 +258,6 @@ pub(crate) async fn update_tag_order(
     ))
 }
 
-pub(crate) async fn list_source_templates(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(query): Query<SourceTemplateQuery>,
-) -> Result<Json<Vec<SourceTemplateView>>, ApiError> {
-    let _operator = state
-        .require_operator_scope(&headers, SCOPE_CONFIG_READ)
-        .await?;
-    validate_optional_domain(query.domain.as_deref())?;
-    Ok(Json(
-        state
-            .repo
-            .list_source_templates(query.domain.as_deref())
-            .await?,
-    ))
-}
-
 pub(crate) async fn list_runtime_config_patch_generators(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -365,248 +335,6 @@ pub(crate) async fn delete_runtime_config_patch_generator(
         .await
         .map_err(runtime_config_patch_generator_error)?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-pub(crate) async fn create_source_template(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(request): Json<CreateSourceTemplateRequest>,
-) -> Result<Json<SourceTemplateView>, ApiError> {
-    let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "config:write")
-        .await?;
-    validate_create_source_template(&request)?;
-    Ok(Json(
-        state
-            .repo
-            .create_source_template(&request, &operator)
-            .await
-            .map_err(source_template_lifecycle_error)?,
-    ))
-}
-
-pub(crate) async fn clone_source_template(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(template_id): Path<uuid::Uuid>,
-    Json(request): Json<CloneSourceTemplateRequest>,
-) -> Result<Json<SourceTemplateView>, ApiError> {
-    let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "config:write")
-        .await?;
-    validate_clone_source_template(&request)?;
-    Ok(Json(
-        state
-            .repo
-            .clone_source_template(template_id, &request, &operator)
-            .await
-            .map_err(source_template_lifecycle_error)?,
-    ))
-}
-
-pub(crate) async fn diff_source_template(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(template_id): Path<uuid::Uuid>,
-    Json(request): Json<SourceTemplateDiffRequest>,
-) -> Result<Json<SourceTemplateDiffView>, ApiError> {
-    let _operator = state
-        .require_operator_scope(&headers, SCOPE_CONFIG_READ)
-        .await?;
-    let domain = source_template_domain(&state, template_id).await?;
-    validate_source_template_candidate(&domain, &request.description, &request.definition)?;
-    Ok(Json(
-        state
-            .repo
-            .diff_source_template(template_id, &request)
-            .await
-            .map_err(source_template_lifecycle_error)?,
-    ))
-}
-
-pub(crate) async fn test_source_template(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(template_id): Path<uuid::Uuid>,
-    Json(request): Json<TestSourceTemplateRequest>,
-) -> Result<Json<SourceTemplateTestView>, ApiError> {
-    let _operator = state
-        .require_operator_scope(&headers, SCOPE_CONFIG_READ)
-        .await?;
-    let domain = source_template_domain(&state, template_id).await?;
-    validate_template_definition(&domain, &request.definition)?;
-    Ok(Json(
-        state
-            .repo
-            .test_source_template(template_id, &request)
-            .await
-            .map_err(source_template_lifecycle_error)?,
-    ))
-}
-
-pub(crate) async fn update_source_template(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(template_id): Path<uuid::Uuid>,
-    Json(request): Json<UpdateSourceTemplateRequest>,
-) -> Result<Json<UpdateSourceTemplateResponse>, ApiError> {
-    let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "config:write")
-        .await?;
-    let domain = source_template_domain(&state, template_id).await?;
-    validate_source_template_candidate(&domain, &request.description, &request.definition)?;
-    if request.confirmed {
-        let mut preview_request = request.clone();
-        preview_request.confirmed = false;
-        preview_request.preview_hash = None;
-        preview_request.privilege_assertion = None;
-        let mut preview = state
-            .repo
-            .update_source_template(template_id, &preview_request, &operator)
-            .await
-            .map_err(source_template_lifecycle_error)?;
-        let affected = source_template_assigned_client_ids(
-            &state,
-            preview.template.id,
-            &preview.template.domain,
-        )
-        .await?;
-        let preview_hash = source_template_update_preview_hash(&preview.diff, &affected)?;
-        preview.affected_client_ids = affected.clone();
-        preview.affected_client_count = affected.len() as i64;
-        if !preview.confirmation_required {
-            return Ok(Json(preview));
-        }
-        require_matching_preview_hash(
-            request.preview_hash.as_deref(),
-            &preview_hash,
-            "source_template_update_preview_hash_required",
-            "source_template_update_preview_hash_mismatch",
-        )?;
-        if !affected.is_empty() {
-            let target = source_template_privilege_target(template_id);
-            let intent = DbPrivilegeIntent::new(
-                "source_template.update",
-                &target,
-                None,
-                &affected,
-                true,
-                Some(&preview_hash),
-            );
-            verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
-        }
-        let mut response = state
-            .repo
-            .update_source_template(template_id, &request, &operator)
-            .await
-            .map_err(source_template_lifecycle_error)?;
-        if response.template.domain == "routing_cost_adapter" {
-            state
-                .repo
-                .mark_routing_adapter_template_stale(response.template.id)
-                .await?;
-        }
-        response.affected_client_ids = affected.clone();
-        response.affected_client_count = affected.len() as i64;
-        response.preview_hash = Some(preview_hash);
-        let sync_clients = if response.template.domain == "runtime_tunnel_adapter" {
-            source_template_active_runtime_client_ids(&state, response.template.id).await?
-        } else if response.template.domain == "routing_cost_adapter" {
-            Vec::new()
-        } else {
-            affected.clone()
-        };
-        if !sync_clients.is_empty() {
-            response.sync = dispatch_runtime_config_for_clients(
-                &state,
-                &operator,
-                sync_clients,
-                "source_template_updated",
-            )
-            .await;
-        }
-        return Ok(Json(response));
-    }
-    let mut response = state
-        .repo
-        .update_source_template(template_id, &request, &operator)
-        .await
-        .map_err(source_template_lifecycle_error)?;
-    let affected = source_template_assigned_client_ids(
-        &state,
-        response.template.id,
-        &response.template.domain,
-    )
-    .await?;
-    response.affected_client_ids = affected.clone();
-    response.affected_client_count = affected.len() as i64;
-    if response.confirmation_required {
-        response.preview_hash = Some(source_template_update_preview_hash(
-            &response.diff,
-            &affected,
-        )?);
-    }
-    Ok(Json(response))
-}
-
-pub(crate) async fn list_source_template_assignments(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(query): Query<SourceTemplateAssignmentQuery>,
-) -> Result<Json<Vec<SourceTemplateAssignmentView>>, ApiError> {
-    let _operator = state
-        .require_operator_scope(&headers, SCOPE_CONFIG_READ)
-        .await?;
-    validate_optional_domain(query.domain.as_deref())?;
-    if query
-        .client_id
-        .as_ref()
-        .is_some_and(|client_id| client_id.is_empty() || client_id.len() > 128)
-    {
-        return Err(ApiError::bad_request("invalid_client_id"));
-    }
-    Ok(Json(
-        state
-            .repo
-            .list_source_template_assignments(query.client_id.as_deref(), query.domain.as_deref())
-            .await?,
-    ))
-}
-
-pub(crate) async fn list_source_status(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(query): Query<SourceStatusQuery>,
-) -> Result<Json<Vec<SourceStatusView>>, ApiError> {
-    let _operator = state
-        .require_operator_scope(&headers, SCOPE_FLEET_READ)
-        .await?;
-    validate_optional_domain(query.domain.as_deref())?;
-    if let Some(client_id) = query.client_id.as_deref() {
-        validate_client_id(client_id)?;
-    }
-    Ok(Json(
-        state
-            .list_source_status(query.client_id.as_deref(), query.domain.as_deref())
-            .await?,
-    ))
-}
-
-pub(crate) async fn render_template_runtime_config(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(query): Query<TemplateRuntimeConfigQuery>,
-) -> Result<Json<TemplateRuntimeConfigView>, ApiError> {
-    let _operator = state
-        .require_operator_scope(&headers, SCOPE_CONFIG_READ)
-        .await?;
-    validate_client_id(&query.client_id)?;
-    Ok(Json(
-        state
-            .repo
-            .render_template_runtime_config(&query.client_id)
-            .await?,
-    ))
 }
 
 pub(crate) async fn list_runtime_config_apply_states(
@@ -699,81 +427,6 @@ pub(crate) async fn create_server_runtime_config_patch_request(
         sync_job_ids: sync.iter().filter_map(|outcome| outcome.job_id).collect(),
         sync,
     }))
-}
-
-pub(crate) async fn assign_source_template(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(mut request): Json<AssignSourceTemplateRequest>,
-) -> Result<Json<crate::model::AssignSourceTemplateResponse>, ApiError> {
-    let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "config:write")
-        .await?;
-    validate_assign_source_template(&request)?;
-    request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
-    verified_fixed_target_ids(
-        &state,
-        &request.target_client_ids,
-        "source_template_assignment_targets_not_found",
-    )
-    .await?;
-    let mut confirmed_preview_hash = None;
-    if request.confirmed {
-        let mut preview_request = request.clone();
-        preview_request.confirmed = false;
-        preview_request.preview_hash = None;
-        preview_request.privilege_assertion = None;
-        let preview = state
-            .repo
-            .assign_source_template(&preview_request, &operator)
-            .await?;
-        let preview_hash = source_template_assignment_preview_hash(&request, &preview)?;
-        require_matching_preview_hash(
-            request.preview_hash.as_deref(),
-            &preview_hash,
-            "source_template_assignment_preview_hash_required",
-            "source_template_assignment_preview_hash_mismatch",
-        )?;
-        let target = source_template_privilege_target(request.template_id);
-        let selector_expression = request.selector_expression.trim().to_string();
-        let selector_for_intent =
-            (!selector_expression.is_empty()).then_some(selector_expression.as_str());
-        let intent = DbPrivilegeIntent::new(
-            "source_template.assign",
-            &target,
-            selector_for_intent,
-            &request.target_client_ids,
-            true,
-            Some(&preview_hash),
-        );
-        verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
-        confirmed_preview_hash = Some(preview_hash);
-    }
-    let mut response = state
-        .repo
-        .assign_source_template(&request, &operator)
-        .await?;
-    response.preview_hash = match confirmed_preview_hash {
-        Some(preview_hash) => Some(preview_hash),
-        None => Some(source_template_assignment_preview_hash(
-            &request, &response,
-        )?),
-    };
-    if !response.confirmation_required && response.target_count > 0 {
-        let affected = response
-            .assignments
-            .iter()
-            .map(|assignment| assignment.client_id.clone())
-            .collect::<Vec<_>>();
-        response.sync = dispatch_runtime_config_for_clients(
-            &state,
-            &operator,
-            affected,
-            "source_template_assigned",
-        )
-        .await;
-    }
-    Ok(Json(response))
 }
 
 fn validate_client_id(client_id: &str) -> Result<(), ApiError> {
@@ -899,186 +552,6 @@ fn require_matching_preview_hash(
     Ok(())
 }
 
-async fn source_template_assigned_client_ids(
-    state: &AppState,
-    template_id: uuid::Uuid,
-    domain: &str,
-) -> Result<Vec<String>, ApiError> {
-    let template_id_text = template_id.to_string();
-    let mut client_ids = if crate::source_template_builtins::is_plan_bound_adapter_domain(domain) {
-        Vec::new()
-    } else {
-        state
-            .repo
-            .list_source_template_assignments(None, Some(domain))
-            .await?
-            .into_iter()
-            .filter(|assignment| assignment.template_id == template_id)
-            .map(|assignment| assignment.client_id)
-            .collect::<Vec<_>>()
-    };
-    for plan in state.repo.list_tunnel_plans().await? {
-        match domain {
-            "runtime_tunnel_adapter" => {
-                if plan
-                    .plan
-                    .runtime_control
-                    .left_adapter_template_id
-                    .as_deref()
-                    == Some(template_id_text.as_str())
-                {
-                    client_ids.push(plan.left_client_id.clone());
-                }
-                if plan
-                    .plan
-                    .runtime_control
-                    .right_adapter_template_id
-                    .as_deref()
-                    == Some(template_id_text.as_str())
-                {
-                    client_ids.push(plan.right_client_id.clone());
-                }
-            }
-            "routing_cost_adapter" => {
-                if let Some(ospf) = &plan.plan.ospf {
-                    if ospf.left_adapter_template_id == template_id_text {
-                        client_ids.push(plan.left_client_id.clone());
-                    }
-                    if ospf.right_adapter_template_id == template_id_text {
-                        client_ids.push(plan.right_client_id.clone());
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    client_ids.sort();
-    client_ids.dedup();
-    Ok(client_ids)
-}
-
-async fn source_template_active_runtime_client_ids(
-    state: &AppState,
-    template_id: uuid::Uuid,
-) -> Result<Vec<String>, ApiError> {
-    let template_id = template_id.to_string();
-    let mut client_ids = Vec::new();
-    for plan in state
-        .repo
-        .list_tunnel_plans()
-        .await?
-        .into_iter()
-        .filter(|plan| plan.enabled)
-    {
-        if plan
-            .plan
-            .runtime_control
-            .left_adapter_template_id
-            .as_deref()
-            == Some(template_id.as_str())
-        {
-            client_ids.push(plan.left_client_id);
-        }
-        if plan
-            .plan
-            .runtime_control
-            .right_adapter_template_id
-            .as_deref()
-            == Some(template_id.as_str())
-        {
-            client_ids.push(plan.right_client_id);
-        }
-    }
-    client_ids.sort();
-    client_ids.dedup();
-    Ok(client_ids)
-}
-
-fn source_template_privilege_target(template_id: uuid::Uuid) -> String {
-    format!("source_template:{template_id}")
-}
-
-#[derive(Serialize)]
-struct SourceTemplateUpdatePreviewPayload<'a> {
-    version: u8,
-    action: &'static str,
-    diff: &'a SourceTemplateDiffView,
-    affected_client_ids: Vec<&'a str>,
-}
-
-#[derive(Serialize)]
-struct SourceTemplateAssignmentPreviewPayload<'a> {
-    version: u8,
-    action: &'static str,
-    domain: &'a str,
-    template_id: String,
-    selector_expression: &'a str,
-    target_client_ids: Vec<&'a str>,
-    assignments: &'a [SourceTemplateAssignmentView],
-}
-
-fn source_template_update_preview_hash(
-    diff: &SourceTemplateDiffView,
-    affected_client_ids: &[String],
-) -> Result<String, ApiError> {
-    let payload = SourceTemplateUpdatePreviewPayload {
-        version: 1,
-        action: "source_template.update",
-        diff,
-        affected_client_ids: sorted_str_refs(affected_client_ids),
-    };
-    preview_payload_hash(&payload)
-}
-
-fn source_template_assignment_preview_hash(
-    request: &AssignSourceTemplateRequest,
-    response: &crate::model::AssignSourceTemplateResponse,
-) -> Result<String, ApiError> {
-    let payload = SourceTemplateAssignmentPreviewPayload {
-        version: 1,
-        action: "source_template.assign",
-        domain: request.domain.trim(),
-        template_id: request.template_id.to_string(),
-        selector_expression: request.selector_expression.trim(),
-        target_client_ids: sorted_str_refs(&request.target_client_ids),
-        assignments: &response.assignments,
-    };
-    preview_payload_hash(&payload)
-}
-
-fn preview_payload_hash<T: Serialize>(payload: &T) -> Result<String, ApiError> {
-    let bytes =
-        serde_json::to_vec(payload).map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
-    Ok(payload_hash(&bytes))
-}
-
-fn sorted_str_refs(values: &[String]) -> Vec<&str> {
-    let mut values = values.iter().map(String::as_str).collect::<Vec<_>>();
-    values.sort_unstable();
-    values
-}
-
-async fn source_template_domain(
-    state: &AppState,
-    template_id: uuid::Uuid,
-) -> Result<String, ApiError> {
-    state
-        .repo
-        .list_source_templates(None)
-        .await?
-        .into_iter()
-        .find(|template| template.id == template_id)
-        .map(|template| template.domain)
-        .ok_or_else(|| ApiError::not_found("source_template_not_found"))
-}
-
-fn validate_create_source_template(request: &CreateSourceTemplateRequest) -> Result<(), ApiError> {
-    validate_domain(&request.domain)?;
-    validate_template_name(&request.name)?;
-    validate_source_template_scope(&request.scope, request.owner_client_id.as_deref())?;
-    validate_source_template_candidate(&request.domain, &request.description, &request.definition)
-}
-
 fn validate_runtime_config_patch_generator(
     request: &UpsertRuntimeConfigPatchGeneratorRequest,
 ) -> Result<(), ApiError> {
@@ -1130,107 +603,6 @@ fn validate_short_required_value(value: &str, error: &'static str) -> Result<(),
     Ok(())
 }
 
-fn validate_clone_source_template(request: &CloneSourceTemplateRequest) -> Result<(), ApiError> {
-    validate_template_name(&request.name)?;
-    validate_source_template_scope(&request.scope, request.owner_client_id.as_deref())?;
-    if request
-        .description
-        .as_ref()
-        .is_some_and(|description| description.len() > MAX_TEMPLATE_DESCRIPTION_BYTES)
-    {
-        return Err(ApiError::bad_request(
-            "source_template_description_too_large",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_source_template_candidate(
-    domain: &str,
-    description: &Option<String>,
-    definition: &serde_json::Value,
-) -> Result<(), ApiError> {
-    if description
-        .as_ref()
-        .is_some_and(|description| description.len() > MAX_TEMPLATE_DESCRIPTION_BYTES)
-    {
-        return Err(ApiError::bad_request(
-            "source_template_description_too_large",
-        ));
-    }
-    validate_template_definition(domain, definition)?;
-    let candidate = SourceTemplateView {
-        id: uuid::Uuid::nil(),
-        domain: domain.to_string(),
-        name: "candidate".to_string(),
-        scope: "shared".to_string(),
-        built_in: false,
-        is_default: false,
-        owner_client_id: None,
-        description: description.clone(),
-        definition: definition.clone(),
-        assigned_client_count: 0,
-        created_at: String::new(),
-        updated_at: String::new(),
-    };
-    render_template_runtime_candidate(&candidate).map_err(|error| {
-        ApiError::bad_request_with_message(
-            "source_template_definition_invalid_for_domain",
-            format!("Template definition is invalid for {domain}: {error}"),
-        )
-    })?;
-    Ok(())
-}
-
-fn validate_source_template_scope(
-    scope: &str,
-    owner_client_id: Option<&str>,
-) -> Result<(), ApiError> {
-    match scope {
-        "shared" => {
-            if owner_client_id.is_some() {
-                return Err(ApiError::bad_request(
-                    "shared_template_must_not_have_owner_client",
-                ));
-            }
-        }
-        "vps_local" => {
-            let Some(owner) = owner_client_id else {
-                return Err(ApiError::bad_request(
-                    "vps_local_template_requires_owner_client",
-                ));
-            };
-            if owner.is_empty() || owner.len() > 128 {
-                return Err(ApiError::bad_request("invalid_owner_client_id"));
-            }
-        }
-        "built_in" => {
-            return Err(ApiError::bad_request(
-                "built_in_templates_are_managed_by_server",
-            ));
-        }
-        _ => return Err(ApiError::bad_request("invalid_source_template_scope")),
-    }
-    Ok(())
-}
-
-fn validate_assign_source_template(request: &AssignSourceTemplateRequest) -> Result<(), ApiError> {
-    validate_domain(&request.domain)?;
-    if crate::source_template_builtins::is_plan_bound_adapter_domain(&request.domain) {
-        return Err(ApiError::bad_request(
-            "source_template_adapter_requires_tunnel_plan_binding",
-        ));
-    }
-    if request.selector_expression.trim().is_empty() {
-        return Err(ApiError::bad_request(
-            "source_template_assignment_targets_required",
-        ));
-    }
-    parse_selector_expression(&request.selector_expression)
-        .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
-    Ok(())
-}
-
 fn validate_server_runtime_config_patch_request(
     request: &RuntimeConfigPatchRequest,
 ) -> Result<(), ApiError> {
@@ -1269,8 +641,12 @@ fn runtime_config_patch_validation_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
     if message.contains("runtime_config_patch_bootstrap_field_forbidden") {
         ApiError::bad_request("runtime_config_patch_bootstrap_field_forbidden")
+    } else if message.contains("runtime_config_patch_configuration_preset_field_forbidden") {
+        ApiError::bad_request("runtime_config_patch_configuration_preset_field_forbidden")
     } else if message.contains("runtime_config_patch_managed_tunnel_plans_forbidden") {
         ApiError::bad_request("runtime_config_patch_managed_tunnel_plans_forbidden")
+    } else if message.contains("runtime_config_patch_managed_port_forwarding_forbidden") {
+        ApiError::bad_request("runtime_config_patch_managed_port_forwarding_forbidden")
     } else if message.contains("runtime_config_patch_toml_invalid")
         || message.contains("failed to parse runtime config patch TOML")
     {
@@ -1302,232 +678,6 @@ async fn verified_fixed_target_ids(
         return Err(ApiError::conflict(error_code));
     }
     Ok(target_client_ids)
-}
-
-fn validate_optional_domain(domain: Option<&str>) -> Result<(), ApiError> {
-    if let Some(domain) = domain {
-        validate_domain(domain)?;
-    }
-    Ok(())
-}
-
-fn validate_domain(domain: &str) -> Result<(), ApiError> {
-    if SOURCE_TEMPLATE_DOMAINS
-        .iter()
-        .any(|candidate| candidate == &domain)
-    {
-        Ok(())
-    } else {
-        Err(ApiError::bad_request("invalid_source_template_domain"))
-    }
-}
-
-fn validate_template_name(name: &str) -> Result<(), ApiError> {
-    if name.trim().is_empty() || name.trim() != name || name.len() > MAX_TEMPLATE_NAME_BYTES {
-        return Err(ApiError::bad_request("invalid_source_template_name"));
-    }
-    if !name.bytes().all(|byte| {
-        byte.is_ascii_alphanumeric()
-            || matches!(byte, b':' | b'-' | b'_' | b'.' | b' ' | b'(' | b')')
-    }) {
-        return Err(ApiError::bad_request("invalid_source_template_name"));
-    }
-    Ok(())
-}
-
-fn validate_template_definition(
-    domain: &str,
-    definition: &serde_json::Value,
-) -> Result<(), ApiError> {
-    if !definition.is_object() {
-        return Err(ApiError::bad_request(
-            "source_template_definition_must_be_object",
-        ));
-    }
-    let size = serde_json::to_vec(definition)
-        .map_err(|_| ApiError::bad_request("invalid_source_template_definition"))?
-        .len();
-    if size > MAX_TEMPLATE_DEFINITION_BYTES {
-        return Err(ApiError::bad_request(
-            "source_template_definition_too_large",
-        ));
-    }
-    validate_argv_fields(definition)?;
-    if domain == "runtime_tunnel_adapter" {
-        validate_runtime_tunnel_adapter_definition(definition)?;
-    }
-    if domain == "routing_cost_adapter" {
-        validate_routing_cost_adapter_definition(definition)?;
-    }
-    Ok(())
-}
-
-fn validate_runtime_tunnel_adapter_definition(
-    definition: &serde_json::Value,
-) -> Result<(), ApiError> {
-    let object = definition
-        .as_object()
-        .ok_or_else(|| ApiError::bad_request("source_template_definition_must_be_object"))?;
-    const ALLOWED_FIELDS: &[&str] = &[
-        "manager",
-        "contract_version",
-        "startup_command",
-        "restart_command",
-        "stop_command",
-        "cleanup_command",
-        "status_command",
-        "traffic_limit_command",
-    ];
-    if object
-        .keys()
-        .any(|key| !ALLOWED_FIELDS.contains(&key.as_str()))
-    {
-        return Err(ApiError::bad_request(
-            "runtime_tunnel_adapter_definition_field_invalid",
-        ));
-    }
-    if object.get("manager").and_then(serde_json::Value::as_str) != Some("external_managed_adapter")
-        || object
-            .get("contract_version")
-            .and_then(serde_json::Value::as_u64)
-            != Some(1)
-    {
-        return Err(ApiError::bad_request(
-            "runtime_tunnel_adapter_contract_invalid",
-        ));
-    }
-    if !object.contains_key("status_command")
-        || (!object.contains_key("startup_command") && !object.contains_key("restart_command"))
-        || (!object.contains_key("stop_command") && !object.contains_key("cleanup_command"))
-    {
-        return Err(ApiError::bad_request(
-            "runtime_tunnel_adapter_lifecycle_commands_required",
-        ));
-    }
-    for field in [
-        "startup_command",
-        "restart_command",
-        "stop_command",
-        "cleanup_command",
-        "status_command",
-        "traffic_limit_command",
-    ] {
-        let Some(value) = object.get(field) else {
-            continue;
-        };
-        let command: vpsman_common::RuntimeTunnelCommand = serde_json::from_value(value.clone())
-            .map_err(|_| ApiError::bad_request("runtime_tunnel_adapter_command_invalid"))?;
-        if !(1..=120).contains(&command.max_timeout_secs)
-            || !(1024..=64 * 1024).contains(&command.max_output_bytes)
-        {
-            return Err(ApiError::bad_request(
-                "runtime_tunnel_adapter_command_bounds_invalid",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_routing_cost_adapter_definition(
-    definition: &serde_json::Value,
-) -> Result<(), ApiError> {
-    let object = definition
-        .as_object()
-        .ok_or_else(|| ApiError::bad_request("source_template_definition_must_be_object"))?;
-    if object.keys().any(|key| {
-        !matches!(
-            key.as_str(),
-            "contract_version" | "status_command" | "update_command"
-        )
-    }) {
-        return Err(ApiError::bad_request(
-            "routing_cost_adapter_definition_field_invalid",
-        ));
-    }
-    if object
-        .get("contract_version")
-        .and_then(serde_json::Value::as_u64)
-        != Some(u64::from(
-            vpsman_common::ROUTING_COST_ADAPTER_CONTRACT_VERSION,
-        ))
-    {
-        return Err(ApiError::bad_request(
-            "routing_cost_adapter_contract_version_invalid",
-        ));
-    }
-    for field in ["status_command", "update_command"] {
-        let command = object
-            .get(field)
-            .ok_or_else(|| ApiError::bad_request("routing_cost_adapter_command_required"))?;
-        let command: vpsman_common::RuntimeTunnelCommand = serde_json::from_value(command.clone())
-            .map_err(|_| ApiError::bad_request("routing_cost_adapter_command_invalid"))?;
-        if !(1..=120).contains(&command.max_timeout_secs)
-            || !(1024..=64 * 1024).contains(&command.max_output_bytes)
-        {
-            return Err(ApiError::bad_request(
-                "routing_cost_adapter_command_bounds_invalid",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_argv_fields(value: &serde_json::Value) -> Result<(), ApiError> {
-    match value {
-        serde_json::Value::Object(map) => {
-            if let Some(argv) = map.get("argv") {
-                validate_argv_array(argv)?;
-            }
-            for child in map.values() {
-                validate_argv_fields(child)?;
-            }
-        }
-        serde_json::Value::Array(items) => {
-            for child in items {
-                validate_argv_fields(child)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn validate_argv_array(value: &serde_json::Value) -> Result<(), ApiError> {
-    let Some(items) = value.as_array() else {
-        return Err(ApiError::bad_request("source_template_argv_must_be_array"));
-    };
-    if items.is_empty() || items.len() > MAX_TEMPLATE_ARGV_ITEMS {
-        return Err(ApiError::bad_request("source_template_argv_invalid"));
-    }
-    for item in items {
-        let Some(arg) = item.as_str() else {
-            return Err(ApiError::bad_request("source_template_argv_invalid"));
-        };
-        if arg.is_empty() || arg.len() > MAX_TEMPLATE_ARG_BYTES {
-            return Err(ApiError::bad_request("source_template_argv_invalid"));
-        }
-    }
-    let executable = items[0].as_str().unwrap_or_default();
-    if !executable.starts_with('/') {
-        return Err(ApiError::bad_request(
-            "source_template_argv_executable_must_be_absolute",
-        ));
-    }
-    Ok(())
-}
-
-fn source_template_lifecycle_error(error: anyhow::Error) -> ApiError {
-    let message = error.to_string();
-    if message.contains("source_template_not_found") {
-        ApiError::not_found("source_template_not_found")
-    } else if message.contains("source_template_builtin_immutable")
-        || message.contains("source_template_clone_target_exists")
-        || message.contains("source_template_duplicate")
-    {
-        ApiError::conflict("source_template_lifecycle_conflict")
-    } else {
-        ApiError::from(error)
-    }
 }
 
 pub(crate) async fn assign_agent_tag(
@@ -1762,11 +912,23 @@ fn validate_telemetry_tunnel_query(query: &TelemetryTunnelQuery) -> Result<(), A
 #[cfg(test)]
 mod tests {
     use super::{
-        peer_client_ids_for_deleted_agent, telemetry_network_rate_limit_or_default,
-        validate_assign_source_template, validate_legacy_tag_name_for_cleanup,
-        validate_persisted_tag_name, validate_source_template_candidate, validate_template_name,
+        peer_client_ids_for_deleted_agent, runtime_config_patch_validation_error,
+        telemetry_network_rate_limit_or_default, validate_legacy_tag_name_for_cleanup,
+        validate_persisted_tag_name,
     };
-    use crate::model::AssignSourceTemplateRequest;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn runtime_config_patch_reports_server_managed_port_forwarding() {
+        let error = runtime_config_patch_validation_error(anyhow::anyhow!(
+            "runtime_config_patch_managed_port_forwarding_forbidden"
+        ));
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.code,
+            "runtime_config_patch_managed_port_forwarding_forbidden"
+        );
+    }
 
     #[test]
     fn persisted_tags_reject_inner_selector_prefixes() {
@@ -1789,54 +951,6 @@ mod tests {
         assert_eq!(telemetry_network_rate_limit_or_default(None), 100);
         assert_eq!(telemetry_network_rate_limit_or_default(Some(5_000)), 5_000);
         assert_eq!(telemetry_network_rate_limit_or_default(Some(50_000)), 5_000);
-    }
-
-    #[test]
-    fn adapter_templates_require_explicit_tunnel_plan_bindings() {
-        for domain in ["runtime_tunnel_adapter", "routing_cost_adapter"] {
-            let error = validate_assign_source_template(&AssignSourceTemplateRequest {
-                domain: domain.to_string(),
-                template_id: uuid::Uuid::new_v4(),
-                selector_expression: "id:edge-a".to_string(),
-                target_client_ids: vec!["edge-a".to_string()],
-                confirmed: false,
-                preview_hash: None,
-                privilege_assertion: None,
-            })
-            .unwrap_err();
-            assert_eq!(
-                error.code,
-                "source_template_adapter_requires_tunnel_plan_binding"
-            );
-        }
-    }
-
-    #[test]
-    fn source_template_candidates_reject_domain_values_the_renderer_cannot_use() {
-        let error = validate_source_template_candidate(
-            "runtime_traffic_accounting_source",
-            &None,
-            &serde_json::json!({"source": "custom"}),
-        )
-        .unwrap_err();
-        assert_eq!(error.code, "source_template_definition_invalid_for_domain");
-        assert!(error.public_message.as_deref().is_some_and(
-            |message| message.contains("unsupported_runtime_traffic_accounting_source:custom")
-        ));
-
-        validate_source_template_candidate(
-            "runtime_traffic_accounting_source",
-            &None,
-            &serde_json::json!({"source": "interface_counters"}),
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn source_template_names_accept_the_ui_clone_suffix() {
-        validate_template_name("shared:traffic-source (cloned)").unwrap();
-        assert!(validate_template_name(" shared:traffic-source (cloned)").is_err());
-        assert!(validate_template_name("shared:traffic/source").is_err());
     }
 
     #[test]

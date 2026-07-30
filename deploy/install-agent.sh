@@ -520,7 +520,7 @@ read_release_manifest_selection() {
 
   awk -v selected_asset="$selected_asset" '
     function json_string_value(line, key, prefix) {
-      prefix = "^[[:space:]]*\\\"" key "\\\"[[:space:]]*:[[:space:]]*\\\""
+      prefix = "^[[:space:]]*\"" key "\"[[:space:]]*:[[:space:]]*\""
       if (line !~ prefix || line !~ /"[[:space:]]*,?[[:space:]]*$/) {
         return ""
       }
@@ -595,6 +595,7 @@ download_release_asset() {
 download_default_agent_binary() {
   local output="$1"
   local asset asset_url base_url download_dir manifest_selection resolved_tag
+  local LC_ALL=C
   asset="$(agent_release_asset)"
   base_url="$(release_base_url)"
   create_registered_temp download_dir disposable -d

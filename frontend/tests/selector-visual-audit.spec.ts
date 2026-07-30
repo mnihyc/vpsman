@@ -5,11 +5,12 @@ import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
 import {
   activate,
   openConsoleSubpage,
+  unlockPrivilegeFromTop,
   waitForConsoleShell,
 } from "./support/consoleNavigation";
 
 test.skip(!process.env.VPSMAN_VISUAL_AUDIT, "manual selector visual audit screenshots only");
-test.setTimeout(120_000);
+test.setTimeout(180_000);
 
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
@@ -34,6 +35,84 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
   await openVpsMenu(page.locator(".configApplyGrid"), "VPS config target", "fra", /core-fra-02.*agent-fra-02/);
   await capture(page, outputDir, manifest, "config-single-target");
 
+  await unlockPrivilegeFromTop(page);
+  await openConsoleSubpage(page, "Config", "Sources");
+  const sourcesPanel = page.locator(".configurationSourcesPanel");
+  await activate(
+    sourcesPanel.getByRole("button", { name: "Change configuration" }),
+  );
+  const assignmentDrawer = page.getByRole("complementary", {
+    name: "Change effective configuration",
+  });
+  await expect(
+    assignmentDrawer.getByRole("button", { name: "Review reset to system default" }),
+  ).toBeDisabled();
+  await assignmentDrawer.scrollIntoViewIfNeeded();
+  await capture(
+    page,
+    outputDir,
+    manifest,
+    "configuration-source-assignment-empty",
+    { fullPage: false, scrollToTop: false },
+  );
+  await openVpsMenu(
+    assignmentDrawer,
+    "Add configuration target VPS",
+    "edge",
+    /edge-sfo-01.*agent-sfo-01/,
+  );
+  await capture(
+    page,
+    outputDir,
+    manifest,
+    "configuration-source-assignment-direct-menu",
+    { fullPage: false, scrollToTop: false },
+  );
+  await page
+    .getByRole("listbox", { name: "Add configuration target VPS options" })
+    .getByRole("option", { name: /edge-sfo-01.*agent-sfo-01/ })
+    .click();
+  await assignmentDrawer
+    .getByText("Add targets by selector", { exact: true })
+    .click();
+  const assignmentSelector = assignmentDrawer.getByLabel(
+    "Configuration target selector",
+  );
+  await assignmentSelector.fill("country:DE");
+  await expect(
+    assignmentDrawer.getByLabel("Configuration target preview"),
+  ).toContainText("edge-sfo-01");
+  await expect(
+    assignmentDrawer.getByLabel("Configuration target preview"),
+  ).toContainText("core-fra-02");
+  await assignmentSelector.press("Escape");
+  await assignmentDrawer
+    .getByLabel("Configuration target preview")
+    .scrollIntoViewIfNeeded();
+  await capture(
+    page,
+    outputDir,
+    manifest,
+    "configuration-source-assignment-union-preview",
+    { fullPage: false, scrollToTop: false },
+  );
+
+  await openConsoleSubpage(page, "Fleet", "Bulk groups");
+  await page
+    .getByLabel("Bulk group selector expression")
+    .fill("status:online");
+  await expect(
+    page.getByLabel("Bulk group local VPS preview"),
+  ).toContainText("edge-sfo-01");
+  await capture(page, outputDir, manifest, "fleet-bulk-group-target-preview");
+
+  await openConsoleSubpage(page, "Remote Operations", "Bulk files");
+  await page.getByLabel("Bulk file target selector").fill("status:online");
+  await expect(
+    page.getByLabel("Bulk file local VPS preview"),
+  ).toContainText("edge-sfo-01");
+  await capture(page, outputDir, manifest, "bulk-file-target-preview");
+
   await openConsoleSubpage(page, "Remote Operations", "Files");
   await openVpsMenu(page.locator(".fileBrowserPanel"), "File browser target VPS", "sfo", /edge-sfo-01.*agent-sfo-01/);
   await capture(page, outputDir, manifest, "file-browser-target");
@@ -44,8 +123,34 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
     has: page.getByRole("heading", { name: "Create tunnel plan" }),
   });
   await openVpsMenu(tunnelComposer, "Left tunnel VPS", "sfo", /edge-sfo-01.*agent-sfo-01/);
+  await tunnelComposer
+    .getByRole("combobox", { name: "Left tunnel VPS" })
+    .press("Enter");
   await openVpsMenu(tunnelComposer, "Right tunnel VPS", "fra", /core-fra-02.*agent-fra-02/);
   await capture(page, outputDir, manifest, "topology-tunnel-targets");
+
+  await openConsoleSubpage(page, "Automation", "Schedules");
+  await activate(page.getByRole("button", { name: "Expand Create schedule" }));
+  await page.getByLabel("Schedule target expression").fill("country:US");
+  await expect(
+    page.getByLabel("Schedule local VPS preview"),
+  ).toContainText("edge-sfo-01");
+  await capture(page, outputDir, manifest, "schedule-target-preview");
+
+  await openConsoleSubpage(page, "Backups", "Policies");
+  await activate(
+    page.getByRole("button", { name: "Create policy", exact: true }).first(),
+  );
+  const backupPolicyDrawer = page.getByRole("complementary", {
+    name: "Create policy",
+  });
+  await backupPolicyDrawer
+    .getByLabel("Backup policy target expression")
+    .fill("country:US");
+  await expect(
+    backupPolicyDrawer.getByLabel("Backup policy local VPS preview"),
+  ).toContainText("edge-sfo-01");
+  await capture(page, outputDir, manifest, "backup-policy-target-preview");
 
   await openConsoleSubpage(page, "Backups", "Restore");
   await activate(page.getByRole("button", { name: "Choose restore artifact" }));
@@ -74,8 +179,11 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
   const policyExpression = policyEditor.getByRole("combobox", {
     name: "Policy VPS selector expression",
   });
-  await policyExpression.fill("tag:edge && status:online");
-  await expect(policyExpression).toHaveValue("tag:edge && status:online");
+  await policyExpression.fill("country:US && status:online");
+  await expect(policyExpression).toHaveValue("country:US && status:online");
+  await expect(
+    policyEditor.getByLabel("Alert policy local VPS preview"),
+  ).toContainText("edge-sfo-01");
   await capture(
     page,
     outputDir,
@@ -129,6 +237,7 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
   const dispatchComposer = page.locator(".commandComposer");
   await openExpressionMenu(dispatchComposer, "Bulk target selector expression", "name:s", /edge-sfo-01.*Name.*agent-sfo-01/);
   await capture(page, outputDir, manifest, "dispatch-expression-name-search");
+  await openExpressionMenu(dispatchComposer, "Bulk target selector expression", "name:s", /edge-sfo-01.*Name.*agent-sfo-01/);
   await page.keyboard.press("Enter");
   await expect(dispatchComposer.getByRole("combobox", { name: "Bulk target selector expression" })).toHaveValue("name:edge-sfo-01");
   await capture(page, outputDir, manifest, "dispatch-expression-name-selected");
@@ -177,6 +286,10 @@ async function openVpsMenu(
   await expect(
     root.page().locator(".vpsComboboxMenu").getByRole("option", { name: expectedOption }),
   ).toBeVisible();
+  await expectMenuAdjacentToControl(
+    combobox.locator("xpath=.."),
+    root.page().locator(".vpsComboboxMenu"),
+  );
 }
 
 async function openExpressionMenu(
@@ -194,6 +307,27 @@ async function openExpressionMenu(
   await expect(
     root.page().locator(".searchExpressionAutocomplete").getByRole("option", { name: expectedOption }),
   ).toBeVisible();
+  await expectMenuAdjacentToControl(
+    searchbox.locator(
+      "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' searchExpressionInput ')][1]",
+    ),
+    root.page().locator(".searchExpressionAutocomplete"),
+  );
+}
+
+async function expectMenuAdjacentToControl(control: Locator, menu: Locator) {
+  const [controlBox, menuBox] = await Promise.all([
+    control.boundingBox(),
+    menu.boundingBox(),
+  ]);
+  expect(controlBox).not.toBeNull();
+  expect(menuBox).not.toBeNull();
+  const verticalGap =
+    menuBox!.y >= controlBox!.y + controlBox!.height
+      ? menuBox!.y - (controlBox!.y + controlBox!.height)
+      : controlBox!.y - (menuBox!.y + menuBox!.height);
+  expect(verticalGap).toBeGreaterThanOrEqual(0);
+  expect(verticalGap).toBeLessThanOrEqual(6);
 }
 
 async function capture(
@@ -203,7 +337,12 @@ async function capture(
   name: string,
   options: { fullPage?: boolean; scrollToTop?: boolean } = {},
 ) {
-  if (options.scrollToTop ?? true) {
+  const hasOpenMenu = await page
+    .locator(".vpsComboboxMenu, .searchExpressionAutocomplete")
+    .first()
+    .isVisible()
+    .catch(() => false);
+  if (options.scrollToTop ?? !hasOpenMenu) {
     await page.evaluate(() => window.scrollTo(0, 0));
   }
   await page.waitForTimeout(150);
@@ -266,6 +405,6 @@ async function capture(
     `${name} uncontained horizontal overflow candidates: ${JSON.stringify(layout.overflowCandidates)}`,
   ).toHaveLength(0);
   const screenshot = join(outputDir, `${name}-${page.viewportSize()?.width ?? "viewport"}.png`);
-  await page.screenshot({ fullPage: options.fullPage ?? true, path: screenshot });
+  await page.screenshot({ fullPage: options.fullPage ?? !hasOpenMenu, path: screenshot });
   manifest.push({ name, screenshot, ...layout });
 }

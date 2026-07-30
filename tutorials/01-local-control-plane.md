@@ -23,7 +23,9 @@ export VPSMAN_SUPER_PASSWORD='<local_super_password>'
 `update.sh first-start` reads the release's `version.json`, downloads its
 server, frontend, and host CLI assets, validates their layouts, installs them
 under `runtime/`, generates missing compose secrets from
-`VPSMAN_SUPER_PASSWORD`, and starts compose.
+`VPSMAN_SUPER_PASSWORD`, and starts compose. On success it prints the generated
+`VPSMAN_SUPER_SALT_HEX`; save that value for browser and CLI privilege unlock.
+The persistent copy is `./config/secrets/operator-privilege.env`.
 
 After the stack starts, open `http://127.0.0.1:5173`. The console discovers
 whether any operator exists: an empty control plane shows **Create first
@@ -58,7 +60,8 @@ root instead:
 `cargo run -p vpsctl -- compose-secrets --secrets-dir deploy/config/secrets`.
 It writes the mounted internal token, gateway private key, privilege verifier
 key, a gateway public-key file for agent installs, and
-`operator-privilege.env` with the generated `VPSMAN_SUPER_SALT_HEX`.
+`operator-privilege.env` with the generated `VPSMAN_SUPER_SALT_HEX`. Source that
+file before using the host CLI for privileged work.
 
 The default compose shape uses:
 
@@ -84,6 +87,11 @@ use `latest` only for disposable local evaluation. The updater refreshes the
 server, frontend, and host CLI release payloads and recreates the compose
 services. Runtime state stays under the deployment directory, not
 Docker-managed named volumes.
+
+The current canonical database is intentionally fresh-only and does not support
+an in-place update from an earlier schema model; review
+[migration compatibility](../docs/migration-compatibility.md) before updating
+an older deployment.
 
 ## Start Processes Manually
 

@@ -20,7 +20,7 @@ commands=(
   health bootstrap login refresh me operators operator-create operator-update operator-disable operator-enable operator-delete operator-password-reset operator-totp-clear operator-sessions operator-session-revoke operator-auth-events totp-setup totp-confirm totp-disable
   agent-identity-upsert client-key-revocations client-key-revoke key-lifecycle-report compose-secrets
   summary agents fleet-alerts fleet-alert-export fleet-alert-states fleet-alert-state-update vps-rules alert-policies alert-policy fleet-alert-notification-channels fleet-alert-notification-channel-upsert fleet-alert-notifications fleet-alert-notification-dispatch fleet-alert-notification-process gateway-sessions telemetry-rollups telemetry-network-rates telemetry-tunnels tags tag-create agent-tag
-  source-templates source-template-create source-template-clone source-template-diff source-template-test source-template-update source-status source-template-assignments template-runtime-config source-template-assign
+  config-presets config-preset-create config-preset-clone config-preset-preview config-preset-update config-preset-delete config-sources config-source-set config-source-reset config-render
   jobs job-rollouts job-rollout job-rollout-pause job-rollout-resume job-cancel schedules schedule-create schedule-update schedule-enable schedule-disable schedule-defer schedule-apply-now schedule-delete job-create job-shell
   terminal-open terminal-input terminal-poll terminal-resize terminal-close terminal-sessions terminal-replay terminal-follow
   file-pull file-push file-transfer-upload file-transfer-download file-transfers file-transfer-handoff file-transfer-sources file-transfer-source-upload file-transfer-source-download user-sessions config-patch agent-update agent-update-check agent-update-activate agent-update-rollback agent-update-release-record agent-update-release-latest agent-update-releases
@@ -43,7 +43,7 @@ while IFS= read -r line; do
   if [[ "$in_commands" -eq 1 && "$line" == "Options:" ]]; then
     break
   fi
-  if [[ "$in_commands" -eq 1 && "$line" =~ ^[[:space:]]{2}([a-z0-9][a-z0-9-]*)[[:space:]] ]]; then
+  if [[ "$in_commands" -eq 1 && "$line" =~ ^[[:space:]]{2}([a-z0-9][a-z0-9-]*)[[:space:]]*$ ]]; then
     command="${BASH_REMATCH[1]}"
     [[ "$command" == "help" ]] || parsed_commands+=("$command")
   fi
@@ -70,7 +70,7 @@ workflow_for_command() {
     fleet-alerts|fleet-alert-export|fleet-alert-states|fleet-alert-state-update|vps-rules|alert-policies|alert-policy|fleet-alert-notification-channels|fleet-alert-notification-channel-upsert|fleet-alert-notifications|fleet-alert-notification-dispatch|fleet-alert-notification-process)
       printf 'fleet_alerting_and_notifications\n'
       ;;
-    source-templates|source-template-create|source-template-clone|source-template-diff|source-template-test|source-template-update|source-status|source-template-assignments|template-runtime-config|source-template-assign)
+    config-presets|config-preset-create|config-preset-clone|config-preset-preview|config-preset-update|config-preset-delete|config-sources|config-source-set|config-source-reset|config-render)
       printf 'configuration_sources\n'
       ;;
     jobs|job-rollouts|job-rollout|job-rollout-pause|job-rollout-resume|job-cancel|job-create|job-shell|job-targets|job-target-status-download|job-outputs|job-follow|job-output-download|server-jobs|server-job-cancel|artifact-cleanup-preview|artifact-cleanup-create)
@@ -112,7 +112,7 @@ workflow_for_command() {
   esac
 }
 
-for expected in "operators" "operator-create" "operator-update" "operator-disable" "operator-enable" "operator-delete" "operator-password-reset" "operator-totp-clear" "operator-sessions" "operator-session-revoke" "operator-auth-events" "totp-setup" "totp-confirm" "totp-disable" "agent-identity-upsert" "client-key-revocations" "client-key-revoke" "key-lifecycle-report" "fleet-alerts" "fleet-alert-export" "fleet-alert-states" "fleet-alert-state-update" "vps-rules" "alert-policies" "alert-policy" "fleet-alert-notification-channels" "fleet-alert-notification-channel-upsert" "fleet-alert-notifications" "fleet-alert-notification-dispatch" "fleet-alert-notification-process" "gateway-sessions" "telemetry-rollups" "telemetry-network-rates" "telemetry-tunnels" "source-templates" "source-template-create" "source-template-clone" "source-template-diff" "source-template-test" "source-template-update" "source-status" "source-template-assignments" "template-runtime-config" "source-template-assign" "job-rollouts" "job-rollout" "job-rollout-pause" "job-rollout-resume" "job-cancel" "job-shell" "job-follow" "job-target-status-download" "job-output-download" "server-jobs" "server-job-cancel" "artifact-cleanup-preview" "artifact-cleanup-create" "history-retention" "history-retention-upsert" "history-retention-prune" "history-export" "terminal-sessions" "terminal-replay" "terminal-follow" "file-transfers" "file-transfer-handoff" "file-transfer-sources" "file-transfer-source-upload" "file-transfer-source-download" "backup-policies" "backup-policy-upsert" "backup-policy-prune" "backup-artifact-upload-chunked" "backup-artifact-handoff" "port-forwards" "port-forward-create" "port-forward-update" "port-forward-enable" "port-forward-disable" "port-forward-delete" "port-forward-forget" "port-forward-reapply" "port-forward-resolve" "port-forward-bulk" "tunnel-allocate" "tunnel-plan-export" "tunnel-plan-enable" "tunnel-plan-disable" "tunnel-plan-delete" "tunnel-ospf-status-refresh" "tunnel-speed-test" "tunnel-ospf-cost-update" "restore-run" "restore-rollback" "migration-links" "migration-link" "migration-run" "network-observations" "network-trends" "network-ospf-recommendations" "network-ospf-update-plans" "topology-graph" "config-patch" "agent-update" "agent-update-check" "agent-update-activate" "agent-update-rollback" "agent-update-release-record" "agent-update-release-latest" "agent-update-releases" "host-process-refresh" "host-processes" "host-service-refresh" "host-services" "host-service-logs" "host-service-action" "host-storage-refresh" "host-storage" "os-update-check" "os-update-refresh" "os-update-plans" "os-update-plan" "os-update-apply" "process-supervisor-inventory"; do
+for expected in "operators" "operator-create" "operator-update" "operator-disable" "operator-enable" "operator-delete" "operator-password-reset" "operator-totp-clear" "operator-sessions" "operator-session-revoke" "operator-auth-events" "totp-setup" "totp-confirm" "totp-disable" "agent-identity-upsert" "client-key-revocations" "client-key-revoke" "key-lifecycle-report" "fleet-alerts" "fleet-alert-export" "fleet-alert-states" "fleet-alert-state-update" "vps-rules" "alert-policies" "alert-policy" "fleet-alert-notification-channels" "fleet-alert-notification-channel-upsert" "fleet-alert-notifications" "fleet-alert-notification-dispatch" "fleet-alert-notification-process" "gateway-sessions" "telemetry-rollups" "telemetry-network-rates" "telemetry-tunnels" "config-presets" "config-preset-create" "config-preset-clone" "config-preset-preview" "config-preset-update" "config-preset-delete" "config-sources" "config-source-set" "config-source-reset" "config-render" "job-rollouts" "job-rollout" "job-rollout-pause" "job-rollout-resume" "job-cancel" "job-shell" "job-follow" "job-target-status-download" "job-output-download" "server-jobs" "server-job-cancel" "artifact-cleanup-preview" "artifact-cleanup-create" "history-retention" "history-retention-upsert" "history-retention-prune" "history-export" "terminal-sessions" "terminal-replay" "terminal-follow" "file-transfers" "file-transfer-handoff" "file-transfer-sources" "file-transfer-source-upload" "file-transfer-source-download" "backup-policies" "backup-policy-upsert" "backup-policy-prune" "backup-artifact-upload-chunked" "backup-artifact-handoff" "port-forwards" "port-forward-create" "port-forward-update" "port-forward-enable" "port-forward-disable" "port-forward-delete" "port-forward-forget" "port-forward-reapply" "port-forward-resolve" "port-forward-bulk" "tunnel-allocate" "tunnel-plan-export" "tunnel-plan-enable" "tunnel-plan-disable" "tunnel-plan-delete" "tunnel-ospf-status-refresh" "tunnel-speed-test" "tunnel-ospf-cost-update" "restore-run" "restore-rollback" "migration-links" "migration-link" "migration-run" "network-observations" "network-trends" "network-ospf-recommendations" "network-ospf-update-plans" "topology-graph" "config-patch" "agent-update" "agent-update-check" "agent-update-activate" "agent-update-rollback" "agent-update-release-record" "agent-update-release-latest" "agent-update-releases" "host-process-refresh" "host-processes" "host-service-refresh" "host-services" "host-service-logs" "host-service-action" "host-storage-refresh" "host-storage" "os-update-check" "os-update-refresh" "os-update-plans" "os-update-plan" "os-update-apply" "process-supervisor-inventory"; do
   if [[ "$root_help" != *"$expected"* ]]; then
     smoke_fail "root help is missing expected command: $expected"
   fi
@@ -125,6 +125,19 @@ backup_policy_upsert_help="$("$bin" backup-policy-upsert --help)"
 tunnel_plan_help="$("$bin" tunnel-plan --help)"
 [[ "$tunnel_plan_help" == *"--update-plan-id"* ]] || smoke_fail "tunnel-plan help missing --update-plan-id"
 [[ "$tunnel_plan_help" == *"--expected-revision"* ]] || smoke_fail "tunnel-plan help missing --expected-revision"
+[[ "$tunnel_plan_help" == *"--left-runtime-adapter-definition-id"* ]] || smoke_fail "tunnel-plan help missing runtime adapter definition"
+[[ "$tunnel_plan_help" == *"--left-routing-adapter-definition-id"* ]] || smoke_fail "tunnel-plan help missing routing adapter definition"
+config_source_set_help="$("$bin" config-source-set --help)"
+[[ "$config_source_set_help" == *"--preset-id"* ]] || smoke_fail "config-source-set help missing --preset-id"
+[[ "$config_source_set_help" == *"--selector"* ]] || smoke_fail "config-source-set help missing --selector"
+[[ "$config_source_set_help" == *"--preview-hash"* ]] || smoke_fail "config-source-set help missing reviewed preview hash"
+config_source_reset_help="$("$bin" config-source-reset --help)"
+[[ "$config_source_reset_help" != *"--preset-id"* ]] || smoke_fail "config-source-reset must not accept --preset-id"
+[[ "$config_source_reset_help" == *"--preview-hash"* ]] || smoke_fail "config-source-reset help missing reviewed preview hash"
+config_preset_update_help="$("$bin" config-preset-update --help)"
+[[ "$config_preset_update_help" == *"--preview-hash"* ]] || smoke_fail "config-preset-update help missing reviewed preview hash"
+config_render_help="$("$bin" config-render --help)"
+[[ "$config_render_help" == *"--format"* ]] || smoke_fail "config-render help missing --format"
 
 declare -A workflow_counts=()
 for command in "${commands[@]}"; do

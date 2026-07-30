@@ -7,14 +7,16 @@ each plan:
 
 1. **Agent iproute2** creates and removes GRE, IPIP, SIT, or FOU links.
 2. **External observed** inspects one exact declared interface without mutating it.
-3. **External adapter** runs operator-owned lifecycle commands from source
-   templates for implementations such as WireGuard, OpenVPN, TUN/TAP, or a
-   custom tunnel program.
+3. **External adapter** runs an operator-owned adapter definition for
+   implementations such as WireGuard, OpenVPN, TUN/TAP, or a custom tunnel
+   program.
 
-OSPF cost control is separate and off by default. Enabling it binds one
-operator-owned routing-cost adapter to each endpoint. The adapter can integrate
-with any routing stack; vpsman never installs, edits, or removes the adapter or
-the routing stack it controls.
+OSPF cost control is separate and off by default. Each endpoint normally uses
+that VPS's effective `ospf_update_command` Configuration preset. A tunnel
+plan may optionally select a routing-cost adapter definition as an endpoint
+override. The plan override takes precedence; an invalid override is reported
+and never bypassed with a preset fallback. vpsman never installs, edits, or
+removes the command or routing stack it controls.
 
 ## Console Workflow
 
@@ -24,21 +26,21 @@ edit opens below it. Each plan shows:
 - the exact endpoint VPSs and interface;
 - runtime ownership and enabled state;
 - current left/right runtime evidence derived from that declaration only;
-- optional OSPF mode and adapter status;
+- optional OSPF mode and updater status;
 - edit, export, enable, disable, and retire actions.
 
 Choose **Create plan**, select the runtime owner, enter endpoints and addresses,
 and optionally enable OSPF. The cost preview updates beside latency, loss,
-bandwidth, and preference. Use the row edit action to replace an existing
-declaration; plan identity is fixed during edit so a rename cannot accidentally
-create another plan. The editor submits the displayed declaration revision; if
-another operator changes the plan first, the update is rejected and the editor
-must be reopened against current state.
+bandwidth, and preference. To replace an existing declaration, select the plan
+and choose **Actions > Edit**; plan identity is fixed during edit so a rename
+cannot accidentally create another plan. The editor submits the displayed
+declaration revision; if another operator changes the plan first, the update is
+rejected and the editor must be reopened against current state.
 
-Source templates live under **Automation > Source templates**. Runtime and
-routing adapters are never built in. Create a shared template when the same
-executable contract exists on several VPSs, or a VPS-local template when one
-endpoint differs.
+Runtime adapters and optional per-plan OSPF overrides live under **Network >
+Tunnel plans > Adapter definitions**. Reusable VPS-level OSPF commands live
+under **Config > Sources** as `ospf_update_command` presets. No OSPF
+implementation is built in.
 
 **Network > Graph** contains only endpoints referenced by saved plans. Fleet
 VPSs with no declared tunnel remain in Fleet rather than appearing as inferred
@@ -218,17 +220,33 @@ Use an external adapter when vpsman should start, stop, clean up, or check an
 operator-owned tunnel implementation. The executable must already exist on the
 endpoint. vpsman invokes direct argv without a shell.
 
-Create a shared runtime adapter template:
+In **Adapter definitions**, choose **Tunnel runtime adapter** and enter each
+command as one argument per line. The form produces the following contract,
+which is also visible under **Advanced contract preview**:
 
-```sh
-cargo run -p vpsctl -- source-template-create \
-  --domain runtime_tunnel_adapter \
-  --name shared:tunnel-lifecycle-v1 \
-  --scope shared \
-  --definition-json '{"manager":"external_managed_adapter","contract_version":1,"startup_command":{"argv":["/opt/operator/tunnel-adapter","start","--interface","{interface}","--kind","{kind}","--local-underlay","{local_underlay}","--remote-underlay","{remote_underlay}","--local-address","{local_address}","--remote-address","{remote_address}","--prefix-len","{prefix_len}"],"max_timeout_secs":20,"max_output_bytes":16384},"cleanup_command":{"argv":["/opt/operator/tunnel-adapter","cleanup","--interface","{interface}"],"max_timeout_secs":20,"max_output_bytes":16384},"status_command":{"argv":["/opt/operator/tunnel-adapter","status","--interface","{interface}"],"max_timeout_secs":10,"max_output_bytes":16384}}'
+```json
+{
+  "manager": "external_managed_adapter",
+  "contract_version": 1,
+  "startup_command": {
+    "argv": ["/opt/operator/tunnel-adapter", "start", "--interface", "{interface}", "--kind", "{kind}", "--local-underlay", "{local_underlay}", "--remote-underlay", "{remote_underlay}", "--local-address", "{local_address}", "--remote-address", "{remote_address}", "--prefix-len", "{prefix_len}"],
+    "max_timeout_secs": 20,
+    "max_output_bytes": 16384
+  },
+  "cleanup_command": {
+    "argv": ["/opt/operator/tunnel-adapter", "cleanup", "--interface", "{interface}"],
+    "max_timeout_secs": 20,
+    "max_output_bytes": 16384
+  },
+  "status_command": {
+    "argv": ["/opt/operator/tunnel-adapter", "status", "--interface", "{interface}"],
+    "max_timeout_secs": 10,
+    "max_output_bytes": 16384
+  }
+}
 ```
 
-Runtime templates require `status_command`, one of `startup_command` or
+Runtime definitions require `status_command`, one of `startup_command` or
 `restart_command`, and one of `stop_command` or `cleanup_command`. Optional
 commands are `traffic_limit_command`, `stop_command`, `cleanup_command`, and
 `restart_command`.
@@ -257,7 +275,7 @@ tunnel. A random script can implement the contract if it accepts the declared
 argv, is idempotent, stays within the configured timeout/output bounds, and
 returns truthful exit status.
 
-Bind the template explicitly to both endpoints:
+Bind the definition explicitly to both endpoints:
 
 ```sh
 cargo run -p vpsctl -- tunnel-plan \
@@ -265,8 +283,8 @@ cargo run -p vpsctl -- tunnel-plan \
   --interface-name wg42 \
   --kind wireguard \
   --runtime-manager external_managed_adapter \
-  --left-runtime-adapter-template-id <runtime_template_uuid> \
-  --right-runtime-adapter-template-id <runtime_template_uuid> \
+  --left-runtime-adapter-definition-id <runtime_definition_uuid> \
+  --right-runtime-adapter-definition-id <runtime_definition_uuid> \
   --left-client-id edge-a \
   --right-client-id edge-b \
   --left-remote-underlay 203.0.113.20 \
@@ -281,23 +299,37 @@ cargo run -p vpsctl -- tunnel-plan \
   --confirmed
 ```
 
-Template updates use a frozen affected-endpoint preview. Updating a bound
-runtime template pushes new snapshots to affected agents. Disabling a plan runs
-only its declared stop/cleanup command and then stops telemetry. vpsman never
-deletes the adapter executable. The adapter owns any routes or daemon state its
-commands need; agent iproute2 route/cleanup fields are rejected for this mode.
+An adapter definition is desired-state input, not proof that its executable is
+installed or converged. A definition referenced by a tunnel plan cannot be
+edited or deleted: create a replacement, review the plan change, and then
+verify runtime evidence. Disabling a plan runs only its declared stop/cleanup
+command and then stops telemetry. vpsman never deletes the adapter executable.
+The adapter owns any routes or daemon state its commands need; agent iproute2
+route/cleanup fields are rejected for this mode.
 
 ## Optional OSPF Cost Control
 
-Routing cost is a second adapter contract, independent of tunnel ownership.
-Create one shared or VPS-local template per executable contract:
+Routing cost uses a second command contract, independent of tunnel ownership.
+For the normal reusable path, open **Config > Sources**, create an **OSPF
+updater command** preset, and assign it to the applicable VPSs. When one tunnel
+plan needs different commands, create a **Routing cost adapter** under
+**Adapter definitions** and select it as that endpoint's optional override.
+Both forms use the same contract:
 
-```sh
-cargo run -p vpsctl -- source-template-create \
-  --domain routing_cost_adapter \
-  --name shared:routing-cost-v1 \
-  --scope shared \
-  --definition-json '{"contract_version":1,"status_command":{"argv":["/opt/operator/routing-cost-adapter","status"],"max_timeout_secs":10,"max_output_bytes":16384},"update_command":{"argv":["/opt/operator/routing-cost-adapter","apply"],"max_timeout_secs":10,"max_output_bytes":16384}}'
+```json
+{
+  "contract_version": 1,
+  "status_command": {
+    "argv": ["/opt/operator/routing-cost-adapter", "status"],
+    "max_timeout_secs": 10,
+    "max_output_bytes": 16384
+  },
+  "update_command": {
+    "argv": ["/opt/operator/routing-cost-adapter", "apply"],
+    "max_timeout_secs": 10,
+    "max_output_bytes": 16384
+  }
+}
 ```
 
 Both commands receive one JSON object on stdin. A status request resembles:
@@ -339,10 +371,11 @@ The executable writes exactly one contract response to stdout:
 For an apply request, `expected_current_cost` and `desired_cost` are populated.
 The update response must set `applied_cost` to the desired value. The agent then
 runs status again and accepts the job only when `current_cost` equals that
-value. A changed current cost, interface, template hash, recommendation, or
+value. A changed current cost, interface, adapter-definition hash, recommendation, or
 endpoint snapshot rejects stale confirmation.
 
-Enable reviewed OSPF on a plan:
+Enable reviewed OSPF on a plan after each endpoint resolves a configured updater
+from its effective `ospf_update_command` preset or explicit per-plan override:
 
 First read the plan UUID and current declaration revision with `tunnel-plans`.
 The console row editor carries these fields automatically. CLI/VTY updates name
@@ -365,8 +398,6 @@ cargo run -p vpsctl -- tunnel-plan \
   --ospf \
   --ospf-mode reviewed \
   --ospf-latency-ms 20 \
-  --left-routing-adapter-template-id <left_template_uuid> \
-  --right-routing-adapter-template-id <right_template_uuid> \
   --save \
   --update-plan-id <plan_uuid> \
   --expected-revision <revision> \
@@ -374,7 +405,18 @@ cargo run -p vpsctl -- tunnel-plan \
   --confirmed
 ```
 
-Check both endpoint adapters, then fetch the current frozen recommendation:
+To override only one endpoint for this plan, add its optional flag:
+
+```text
+--left-routing-adapter-definition-id <left_definition_uuid>
+```
+
+The other endpoint still uses its effective VPS Configuration preset. An
+explicit override always wins; if it is missing or invalid, vpsman rejects the
+operation instead of falling back.
+
+Check both resolved endpoint updaters, then fetch the current frozen
+recommendation:
 
 ```sh
 cargo run -p vpsctl -- tunnel-ospf-status-refresh --plan-id <plan_uuid>
@@ -384,8 +426,8 @@ cargo run -p vpsctl -- network-ospf-update-plans --limit 50
 Apply only fields from that current update-plan record:
 
 ```sh
+source ./path/to/secrets/operator-privilege.env
 export VPSMAN_SUPER_PASSWORD='<local-super-password>'
-export VPSMAN_SUPER_SALT_HEX='<super-salt-hex>'
 
 cargo run -p vpsctl -- tunnel-ospf-cost-update \
   --plan-id <plan_uuid> \
@@ -405,7 +447,7 @@ after five minutes, refreshes verified costs every ten minutes, and applies only
 after the configured minimum delta and consecutive healthy-probe count pass in
 the recent ten-minute evidence window. A degraded sample resets that streak; it
 does not block the plan forever. The agent still executes only explicit server-issued status/apply
-jobs with bound template snapshots. Those internal routing jobs cannot be
+jobs with bound adapter-definition snapshots. Those internal routing jobs cannot be
 submitted as ordinary public operator mutations; operator-reviewed jobs retain
 the approving operator's authority.
 
@@ -488,14 +530,16 @@ enable/disable changes, or retirement clear it back to automatic measurement.
 - Use external observed mode when vpsman must never mutate the tunnel.
 - Use external adapter mode only for an executable the operator installed and
   owns.
-- Keep OSPF off for tunnel-only use; enabling it always requires two explicit
-  routing adapter bindings.
+- Keep OSPF off for tunnel-only use. When it is enabled, each endpoint needs an
+  effective OSPF updater command from its configuration preset unless the plan
+  explicitly binds an override; the per-plan override wins.
 - Inspect endpoint status, probe, and throughput evidence before reviewed cost
   changes.
 - Reviewed mode may explicitly apply the operator-declared baseline when no
   recent probe exists, or a recommendation containing degraded recent samples;
   both cases use a warning confirmation. Automatic mode never does either.
-- Treat adapter definition updates as code changes. Review affected endpoints
-  and recheck routing status after an update.
+- Treat adapter replacements as code changes. A referenced definition is
+  immutable: create its replacement, review each explicit plan binding, and
+  recheck endpoint and routing status after the plan change.
 - Do not expect vpsman to discover, import, install, or clean up anything that
   was not named by the saved declaration and its bound adapter commands.

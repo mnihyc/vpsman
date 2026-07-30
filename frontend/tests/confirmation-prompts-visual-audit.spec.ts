@@ -68,7 +68,13 @@ async function captureTopologyLifecyclePrompt(
   manifest: Array<Record<string, unknown>>,
 ) {
   await openConsoleSubpage(page, "Network", "Tunnel plans");
-  await activate(page.getByRole("button", { name: "Disable sfo-fra-gre" }));
+  await page.getByLabel("Select sfo-fra-gre").check();
+  await page
+    .getByRole("button", {
+      name: "Actions for 1 selected tunnel plan",
+    })
+    .click();
+  await activate(page.getByRole("menuitem", { name: "Disable", exact: true }));
   await expect(page.getByLabel("Confirm tunnel plan disable")).toBeVisible();
   await capture(page, outputDir, manifest, "topology-lifecycle-confirm");
   await activate(page.getByRole("button", { name: "Close confirmation" }));

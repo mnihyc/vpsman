@@ -93,8 +93,8 @@ bandwidth as evidence, not as automatic discovery of link capacity.
 ## Fleet Alert Read-Model Bounds
 
 Fleet alerts are a bounded operational read model, not an unbounded history
-export. The API combines current agent, resource, and source-readiness
-snapshots with at most 200 matching candidates from each durable event source.
+export. The API combines current agent and resource snapshots with at most 200
+matching candidates from each durable event source.
 Client, category, severity, and dashboard-time filters are applied by the
 source before that horizon. The combined result is then merged with operator
 state, ordered, and limited to the requested page.

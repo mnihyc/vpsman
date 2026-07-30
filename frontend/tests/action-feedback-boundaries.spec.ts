@@ -87,10 +87,13 @@ test("keeps action feedback in dedicated local containers", () => {
     "panels/jobs/ProcessSupervisorInventoryPanel.tsx",
   );
   expect(processSupervisorPanel).not.toContain("processActionNotice");
-  expect(processSupervisorPanel).toContain('className="localActionFeedback"');
+  expect(processSupervisorPanel).toContain("processSupervisorActionFeedback");
   expect(processSupervisorPanel).toContain(
     "message={!stopProcess && !restartProcess ? actionError ?? actionStatus : null}",
   );
+
+  const hostServicesPanel = source("panels/jobs/HostServicesPanel.tsx");
+  expect(hostServicesPanel).toContain("hostServiceActionFeedback");
 
   const fleetGroupsPanel = source("panels/FleetGroupsPanel.tsx");
   expect(fleetGroupsPanel).not.toMatch(
@@ -126,14 +129,16 @@ test("keeps action feedback in dedicated local containers", () => {
   expect(fileTransferSessionsPanel).toContain("sourceArtifactActionFeedback");
   expect(fileTransferSessionsPanel).toContain("transferHandoffActionFeedback");
 
-  const sourceTemplatesPanel = source("panels/SourceTemplatesPanel.tsx");
-  expect(sourceTemplatesPanel).not.toContain(
-    '{actionError ?? "No template records match the current search."}',
+  const configurationSourcesPanel = source(
+    "panels/ConfigurationSourcesPanel.tsx",
   );
-  expect(sourceTemplatesPanel).not.toMatch(
-    /targetSelectorHeader[\s\S]{0,160}assignmentSelectorParse\.error\s*\?\?/,
+  expect(configurationSourcesPanel).not.toContain(
+    '{actionError ?? "No effective configuration"}',
   );
-  expect(sourceTemplatesPanel).toContain("sourceTemplateListActionFeedback");
+  expect(configurationSourcesPanel).toContain("localActionFeedback");
+  expect(configurationSourcesPanel).toContain(
+    "The selected targets did not match any VPS",
+  );
 
   const auditLogPanel = source("panels/AuditLogPanel.tsx");
   expect(auditLogPanel).not.toMatch(

@@ -114,16 +114,24 @@ pub(crate) struct TunnelPlanCommand {
     pub(crate) ospf_min_cost: u16,
     #[arg(long, default_value_t = 65_535, requires = "ospf")]
     pub(crate) ospf_max_cost: u16,
-    #[arg(long, requires = "ospf")]
-    pub(crate) left_routing_adapter_template_id: Option<String>,
-    #[arg(long, requires = "ospf")]
-    pub(crate) right_routing_adapter_template_id: Option<String>,
+    #[arg(
+        long,
+        requires = "ospf",
+        help = "Optional left-endpoint command override; otherwise use that VPS's effective ospf_update_command preset. Invalid overrides and unconfigured effective presets fail"
+    )]
+    pub(crate) left_routing_adapter_definition_id: Option<String>,
+    #[arg(
+        long,
+        requires = "ospf",
+        help = "Optional right-endpoint command override; otherwise use that VPS's effective ospf_update_command preset. Invalid overrides and unconfigured effective presets fail"
+    )]
+    pub(crate) right_routing_adapter_definition_id: Option<String>,
     #[arg(long, value_enum, default_value = "agent_iproute2_managed")]
     pub(crate) runtime_manager: RuntimeManagerArg,
     #[arg(long)]
-    pub(crate) left_runtime_adapter_template_id: Option<String>,
+    pub(crate) left_runtime_adapter_definition_id: Option<String>,
     #[arg(long)]
-    pub(crate) right_runtime_adapter_template_id: Option<String>,
+    pub(crate) right_runtime_adapter_definition_id: Option<String>,
     #[arg(long)]
     pub(crate) traffic_ingress_kbps: Option<u32>,
     #[arg(long)]
@@ -916,12 +924,8 @@ pub(crate) fn tunnel_plan(
             },
             min_cost_delta: request.ospf_min_cost_delta,
             healthy_windows: request.ospf_healthy_windows,
-            left_adapter_template_id: request
-                .left_routing_adapter_template_id
-                .context("tunnel-plan --ospf requires --left-routing-adapter-template-id")?,
-            right_adapter_template_id: request
-                .right_routing_adapter_template_id
-                .context("tunnel-plan --ospf requires --right-routing-adapter-template-id")?,
+            left_adapter_definition_id: request.left_routing_adapter_definition_id,
+            right_adapter_definition_id: request.right_routing_adapter_definition_id,
         })
     } else {
         None
@@ -932,8 +936,8 @@ pub(crate) fn tunnel_plan(
         kind: request.kind.into(),
         runtime_control: build_runtime_control(RuntimeControlArgs {
             manager: request.runtime_manager.into(),
-            left_adapter_template_id: request.left_runtime_adapter_template_id.as_deref(),
-            right_adapter_template_id: request.right_runtime_adapter_template_id.as_deref(),
+            left_adapter_definition_id: request.left_runtime_adapter_definition_id.as_deref(),
+            right_adapter_definition_id: request.right_runtime_adapter_definition_id.as_deref(),
             traffic_ingress_kbps: request.traffic_ingress_kbps,
             traffic_egress_kbps: request.traffic_egress_kbps,
             traffic_burst_kb: request.traffic_burst_kb,

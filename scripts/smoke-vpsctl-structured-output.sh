@@ -63,8 +63,8 @@ ospf_plan_json="$("$bin" --output pretty-json tunnel-plan \
   --ospf-latency-ms 25 \
   --ospf-packet-loss-ratio 0.01 \
   --ospf-preference 1.2 \
-  --left-routing-adapter-template-id 00000000-0000-0000-0000-000000000101 \
-  --right-routing-adapter-template-id 00000000-0000-0000-0000-000000000102)"
+  --left-routing-adapter-definition-id 00000000-0000-0000-0000-000000000101 \
+  --right-routing-adapter-definition-id 00000000-0000-0000-0000-000000000102)"
 jq -e '
   .name == "edge-structured-ospf"
   and .ospf.mode == "reviewed"
