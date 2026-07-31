@@ -69,8 +69,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             }
             _ = auth_revalidate.tick() => {
-                if !session.revalidate(&state).await {
+                let Some(heartbeat) =
+                    authenticated_heartbeat_message(&state, &session.access_token).await
+                else {
                     let _ = sender.send(Message::Close(None)).await;
+                    break;
+                };
+                if sender.send(heartbeat).await.is_err() {
                     break;
                 }
             }
@@ -131,6 +136,15 @@ pub(crate) async fn authenticate_socket_token(state: &AppState, access_token: &s
     authenticate_socket_context(state, access_token)
         .await
         .is_some()
+}
+
+pub(crate) async fn authenticated_heartbeat_message(
+    state: &AppState,
+    access_token: &str,
+) -> Option<Message> {
+    authenticate_socket_token(state, access_token)
+        .await
+        .then(|| Message::Ping(Default::default()))
 }
 
 pub(crate) async fn authenticate_socket_context(

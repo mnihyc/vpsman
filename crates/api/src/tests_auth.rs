@@ -1193,12 +1193,19 @@ async fn fleet_read_only_cannot_read_sensitive_payload_surfaces() {
 }
 
 #[tokio::test]
-async fn fleet_websocket_auth_rejects_revoked_sessions() {
+async fn fleet_websocket_heartbeat_revalidates_and_rejects_revoked_sessions() {
     let state = memory_test_state();
     let (fleet_token, _) = issue_test_operator_headers(&state, "viewer", &[SCOPE_FLEET_READ]).await;
     let context = routes_ws::authenticate_socket_context(&state, &fleet_token)
         .await
         .expect("initial websocket auth");
+    let heartbeat = routes_ws::authenticated_heartbeat_message(&state, &fleet_token)
+        .await
+        .expect("authenticated websocket heartbeat");
+    assert!(matches!(
+        heartbeat,
+        axum::extract::ws::Message::Ping(payload) if payload.is_empty()
+    ));
 
     state
         .repo
@@ -1206,7 +1213,11 @@ async fn fleet_websocket_auth_rejects_revoked_sessions() {
         .await
         .unwrap();
 
-    assert!(!routes_ws::authenticate_socket_token(&state, &fleet_token).await);
+    assert!(
+        routes_ws::authenticated_heartbeat_message(&state, &fleet_token)
+            .await
+            .is_none()
+    );
     assert!(routes_ws::authenticate_socket_context(&state, &fleet_token)
         .await
         .is_none());
