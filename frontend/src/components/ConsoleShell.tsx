@@ -34,6 +34,7 @@ import {
 import type { ActiveView, AgentView, FleetSummary } from "../types";
 import type { SavedFleetView } from "../hooks/useFleetViews";
 import { usePanelDisplaySettings } from "../panelDisplay";
+import { prefersReducedMotion } from "../motion";
 
 const SIDEBAR_SUBPANEL_STORAGE_KEY = "vpsman.sidebarSubpanels";
 
@@ -93,6 +94,7 @@ type ConsoleShellProps = {
   pageTitle: string;
   privilegeUnlocked: boolean;
   savedFleetViews: SavedFleetView[];
+  sidebarFocusRequest: number;
   summary: FleetSummary;
   summaryScopeLabel: string;
   wsState: string;
@@ -130,6 +132,7 @@ export function ConsoleShell({
   pageTitle,
   privilegeUnlocked,
   savedFleetViews,
+  sidebarFocusRequest,
   summary,
   summaryScopeLabel,
   wsState,
@@ -151,6 +154,10 @@ export function ConsoleShell({
   const commandInputRef = useRef<HTMLInputElement | null>(null);
   const commandReturnFocusRef = useRef<HTMLElement | null>(null);
   const contentRef = useRef<HTMLElement | null>(null);
+  const sidebarRef = useRef<HTMLElement | null>(null);
+  const activePrimaryButtonRef = useRef<HTMLButtonElement | null>(null);
+  const activeSubpageButtonRef = useRef<HTMLButtonElement | null>(null);
+  const handledSidebarFocusRequestRef = useRef(sidebarFocusRequest);
   const topbarRef = useRef<HTMLElement | null>(null);
   const hasFleetScope = fleetQuery.trim().length > 0 || activeSavedFleetViewId !== null;
   const activeSavedFleetView = savedFleetViews.find((view) => view.id === activeSavedFleetViewId) ?? null;
@@ -450,7 +457,11 @@ export function ConsoleShell({
       writeSidebarSubpanelPreferences(preferences.sidebar_subpanel_default, next);
       return next;
     });
-  }, [activeView, preferences.sidebar_subpanel_default]);
+  }, [
+    activeView,
+    preferences.sidebar_subpanel_default,
+    sidebarFocusRequest,
+  ]);
 
   useEffect(() => {
     const content = contentRef.current;
@@ -599,6 +610,58 @@ export function ConsoleShell({
     window.scrollTo({ left: 0, top: 0, behavior: "auto" });
   }, [activeSubpage, activeView]);
 
+  useLayoutEffect(() => {
+    if (
+      sidebarFocusRequest === 0 ||
+      handledSidebarFocusRequestRef.current === sidebarFocusRequest
+    ) {
+      return;
+    }
+    const sidebar = sidebarRef.current;
+    if (!sidebar) {
+      return;
+    }
+    if (sidebar.offsetParent === null) {
+      handledSidebarFocusRequestRef.current = sidebarFocusRequest;
+      return;
+    }
+    const activeSubpageButton = activeSubpageButtonRef.current;
+    const visibleSubpageButton =
+      activeSubpageButton && activeSubpageButton.offsetParent !== null
+        ? activeSubpageButton
+        : null;
+    const usePrimaryButton =
+      (viewSubpages[activeView] ?? []).length <= 1 ||
+      sidebar.clientWidth <= 100;
+    const activeButton =
+      visibleSubpageButton ??
+      (usePrimaryButton ? activePrimaryButtonRef.current : null);
+    if (!activeButton || activeButton.offsetParent === null) {
+      return;
+    }
+    handledSidebarFocusRequestRef.current = sidebarFocusRequest;
+    const frame = window.requestAnimationFrame(() => {
+      const sidebarBounds = sidebar.getBoundingClientRect();
+      const buttonBounds = activeButton.getBoundingClientRect();
+      const nextScrollTop =
+        sidebar.scrollTop +
+        buttonBounds.top +
+        buttonBounds.height / 2 -
+        (sidebarBounds.top + sidebarBounds.height / 2);
+      activeButton.focus({ preventScroll: true });
+      sidebar.scrollTo({
+        behavior: prefersReducedMotion() ? "auto" : "smooth",
+        top: Math.max(0, nextScrollTop),
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    activeSubpageBase,
+    activeView,
+    manualSubpanelState,
+    sidebarFocusRequest,
+  ]);
+
   return (
     <div className="shell">
       <a
@@ -608,7 +671,7 @@ export function ConsoleShell({
       >
         Skip to page content
       </a>
-      <aside className="sidebar">
+      <aside className="sidebar" ref={sidebarRef}>
         <div className="brand">
           <img
             alt=""
@@ -635,6 +698,11 @@ export function ConsoleShell({
                         aria-current={activeView === item.view ? "page" : undefined}
                         className={activeView === item.view ? "navItem active" : "navItem"}
                         onClick={() => selectPrimaryNavItem(item.view, hasSubpages, expanded)}
+                        ref={
+                          activeView === item.view
+                            ? activePrimaryButtonRef
+                            : undefined
+                        }
                         type="button"
                       >
                         <Icon size={18} />
@@ -669,6 +737,7 @@ export function ConsoleShell({
                               onClick={() =>
                                 onSelectView(item.view, subpage.id)
                               }
+                              ref={active ? activeSubpageButtonRef : undefined}
                               title={subpage.description}
                               type="button"
                             >

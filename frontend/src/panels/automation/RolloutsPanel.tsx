@@ -41,6 +41,7 @@ import {
   formatFullTime,
   shortId,
 } from "../../utils";
+import { pushHistoryEntry } from "../../historyEntryState";
 
 type FeedbackState = {
   jobId?: string;
@@ -917,5 +918,5 @@ function setRolloutJobRoute(jobId: string | null) {
   if (current === jobId) return;
   if (jobId) url.searchParams.set("rollout_job", jobId);
   else url.searchParams.delete("rollout_job");
-  window.history.pushState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  pushHistoryEntry(`${url.pathname}${url.search}${url.hash}`);
 }

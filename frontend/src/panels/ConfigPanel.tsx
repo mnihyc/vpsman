@@ -282,7 +282,7 @@ export function ConfigPanel({
   const [pending, setPending] = useState(false);
   const subpage = normalizeConfigSubpage(activeSubpage);
   const rulesSelectorPrefill = activeSubpage.startsWith("rules:id:")
-    ? `id:${decodeURIComponent(activeSubpage.slice("rules:id:".length))}`
+    ? `id:${activeSubpage.slice("rules:id:".length)}`
     : null;
   const configPageFeedbackMessage =
     error ?? (loading ? "Refreshing runtime config state" : null);

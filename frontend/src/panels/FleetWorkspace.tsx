@@ -2815,7 +2815,7 @@ function TrafficRulesDetail({
             onClick={() =>
               onNavigatePanel?.(
                 "Config",
-                `rules:id:${encodeURIComponent(agent.id)}`,
+                `rules:id:${agent.id}`,
               )
             }
           >
@@ -4307,6 +4307,7 @@ export function FleetAlertPolicyManager({
   agents,
   editorMode = "inline",
   onEditorOpenChange,
+  onPolicyFocusChange,
   policies,
   rowsTruncated = policies.length >= FLEET_DETAIL_LIMIT,
   policyAlerts,
@@ -4319,6 +4320,7 @@ export function FleetAlertPolicyManager({
   agents: AgentView[];
   editorMode?: "inline" | "focused";
   onEditorOpenChange?: (open: boolean) => void;
+  onPolicyFocusChange?: (policyId: string | null) => void;
   policies: FleetAlertPolicyRecord[];
   rowsTruncated?: boolean;
   policyAlerts: PolicyAlertRecord[];
@@ -4537,10 +4539,15 @@ export function FleetAlertPolicyManager({
 
   useEffect(() => {
     if (!policyFocusId) {
+      if (onPolicyFocusChange) {
+        setDetailPolicyId(null);
+      }
       return;
     }
     const focused = policies.find((policy) => policy.id === policyFocusId);
     if (!focused) {
+      updateEditorOpen(false);
+      setDetailPolicyId(null);
       setPolicyStatus("Policy not found: " + shortId(policyFocusId), "danger");
       return;
     }
@@ -4603,11 +4610,17 @@ export function FleetAlertPolicyManager({
   function createPolicy() {
     resetForm();
     setDetailPolicyId(null);
+    if (policyFocusId) {
+      onPolicyFocusChange?.(null);
+    }
     updateEditorOpen(true);
   }
 
   function editPolicy(policy: FleetAlertPolicyRecord) {
     setDetailPolicyId(null);
+    if (policyFocusId) {
+      onPolicyFocusChange?.(null);
+    }
     setEditingId(policy.id);
     setName(policy.name);
     setSelectorExpression(policy.selector_expression);
@@ -4627,7 +4640,13 @@ export function FleetAlertPolicyManager({
   function openPolicyDetails(policy: FleetAlertPolicyRecord) {
     updateEditorOpen(false);
     setDetailPolicyId(policy.id);
+    onPolicyFocusChange?.(policy.id);
     setPolicyStatus("viewing " + policy.name, "info");
+  }
+
+  function closePolicyDetails() {
+    setDetailPolicyId(null);
+    onPolicyFocusChange?.(null);
   }
 
   function updateRuleDraft(localId: string, patch: Partial<PolicyRuleDraft>) {
@@ -4760,6 +4779,7 @@ export function FleetAlertPolicyManager({
       }
       if (rows.some((policy) => policy.id === detailPolicyId)) {
         setDetailPolicyId(null);
+        onPolicyFocusChange?.(null);
       }
       setDeleteRows(null);
       setPolicyStatus(
@@ -4954,7 +4974,7 @@ export function FleetAlertPolicyManager({
               </button>
             }
             description="Policy group metadata, rule rows, and recent issued alerts."
-            onClose={() => setDetailPolicyId(null)}
+            onClose={closePolicyDetails}
             title="Alert policy details"
           >
             <PolicyDetailGrid policy={detailPolicy} />

@@ -25,6 +25,7 @@ import {
   type JobDispatchPreset,
 } from "../jobDispatchPreset";
 import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
+import { useHistoryEntryState } from "../historyEntryState";
 import {
   buildPrivilegeAssertion,
   canonicalTerminalInputPrivilegeIntent,
@@ -276,6 +277,25 @@ async function loadUploadSourceArtifactFile(
   });
 }
 
+function useDispatchHistoryState<T>(
+  slot: string,
+  initial: T | (() => T),
+  enabled: boolean,
+) {
+  return useHistoryEntryState(`jobs.dispatch.${slot}`, initial, enabled);
+}
+
+type VisibleTransferProgress =
+  | Omit<ResumableUploadProgress, "resumeToken">
+  | Omit<ResumableDownloadProgress, "resumeToken">;
+
+function visibleTransferProgress(
+  progress: ResumableUploadProgress | ResumableDownloadProgress,
+): VisibleTransferProgress {
+  const { resumeToken: _resumeToken, ...visible } = progress;
+  return visible;
+}
+
 export function JobDispatchPanel({
   agents,
   fileTransferSources,
@@ -347,16 +367,42 @@ export function JobDispatchPanel({
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
 }) {
   const appliedDispatchPresetRequestId = useRef<string | null>(null);
-  const [mode, setModeState] = useState<DispatchMode>(fixedMode ?? "shell");
-  const [commandText, setCommandText] = useState("");
-  const [shellPty, setShellPty] = useState(false);
-  const [shellScript, setShellScript] = useState("");
-  const [terminalAction, setTerminalAction] = useState<TerminalAction>("open");
-  const [terminalSessionId, setTerminalSessionId] = useState<string>(() => crypto.randomUUID());
+  // Only the main composer restores operator-safe drafts/results. File
+  // objects, resume tokens, terminal input, privilege material, reviews, and
+  // errors use ordinary component state and never enter history memory.
+  const preserveHistoryState = surface === "jobs" && fixedMode === undefined;
+  const [mode, setModeState] = useDispatchHistoryState<DispatchMode>(
+    "mode",
+    fixedMode ?? "shell",
+    preserveHistoryState,
+  );
+  const [commandText, setCommandText] = useDispatchHistoryState(
+    "commandText",
+    "",
+    preserveHistoryState,
+  );
+  const [shellPty, setShellPty] = useDispatchHistoryState(
+    "shellPty",
+    false,
+    preserveHistoryState,
+  );
+  const [shellScript, setShellScript] = useDispatchHistoryState(
+    "shellScript",
+    "",
+    preserveHistoryState,
+  );
+  // Terminal workflows use their dedicated surface, so these values never
+  // belong to the Jobs composer history snapshot.
+  const [terminalAction, setTerminalAction] =
+    useState<TerminalAction>("open");
+  const [terminalSessionId, setTerminalSessionId] = useState<string>(
+    () => crypto.randomUUID(),
+  );
   const [terminalArgv, setTerminalArgv] = useState(DEFAULT_TERMINAL_ARGV);
   const [terminalCwd, setTerminalCwd] = useState("");
   const [terminalUser, setTerminalUser] = useState("");
-  const [terminalUserPolicy, setTerminalUserPolicy] = useState<"fail" | "fallback">("fail");
+  const [terminalUserPolicy, setTerminalUserPolicy] =
+    useState<"fail" | "fallback">("fail");
   const [terminalCols, setTerminalCols] = useState(120);
   const [terminalRows, setTerminalRows] = useState(40);
   const [terminalReplayFromSeq, setTerminalReplayFromSeq] = useState("");
@@ -364,28 +410,101 @@ export function JobDispatchPanel({
   const [terminalFlowWindowBytes, setTerminalFlowWindowBytes] = useState(65536);
   const [terminalInputText, setTerminalInputText] = useState("");
   const [terminalCloseReason, setTerminalCloseReason] = useState("");
-  const [filePath, setFilePath] = useState("");
-  const [fileFollowSymlinks, setFileFollowSymlinks] = useState(false);
-  const [filePushPath, setFilePushPath] = useState("");
-  const [filePushMode, setFilePushMode] = useState("0644");
-  const [filePushSource, setFilePushSource] = useState<File | null>(null);
-  const [fileTransferUploadSourceKind, setFileTransferUploadSourceKind] = useState<"local-file" | "source-artifact">(
-    "local-file",
+  const [filePath, setFilePath] = useDispatchHistoryState(
+    "filePath",
+    "",
+    preserveHistoryState,
   );
-  const [fileTransferSourceArtifactId, setFileTransferSourceArtifactId] = useState("");
+  const [fileFollowSymlinks, setFileFollowSymlinks] =
+    useDispatchHistoryState(
+      "fileFollowSymlinks",
+      false,
+      preserveHistoryState,
+    );
+  const [filePushPath, setFilePushPath] = useDispatchHistoryState(
+    "filePushPath",
+    "",
+    preserveHistoryState,
+  );
+  const [filePushMode, setFilePushMode] = useDispatchHistoryState(
+    "filePushMode",
+    "0644",
+    preserveHistoryState,
+  );
+  const [filePushSource, setFilePushSource] = useState<File | null>(null);
+  const [fileTransferUploadSourceKind, setFileTransferUploadSourceKind] =
+    useDispatchHistoryState<"local-file" | "source-artifact">(
+      "fileTransferUploadSourceKind",
+      "local-file",
+      preserveHistoryState,
+    );
+  const [fileTransferSourceArtifactId, setFileTransferSourceArtifactId] =
+    useDispatchHistoryState(
+      "fileTransferSourceArtifactId",
+      "",
+      preserveHistoryState,
+    );
   const [fileTransferSessionId, setFileTransferSessionId] = useState("");
   const [fileTransferResumeToken, setFileTransferResumeToken] = useState("");
-  const [fileTransferDownloadName, setFileTransferDownloadName] = useState("");
-  const [fileTransferDownloadSink, setFileTransferDownloadSink] = useState<BrowserDownloadSinkMode>("browser-download");
-  const [fileTransferChunkSize, setFileTransferChunkSize] = useState(65536);
-  const [fileTransferRateLimit, setFileTransferRateLimit] = useState(0);
-  const [fileTransferExistingPolicy, setFileTransferExistingPolicy] = useState<FileExistingPolicy>("skip");
+  const [fileTransferDownloadName, setFileTransferDownloadName] =
+    useDispatchHistoryState(
+      "fileTransferDownloadName",
+      "",
+      preserveHistoryState,
+    );
+  const [fileTransferDownloadSink, setFileTransferDownloadSink] =
+    useDispatchHistoryState<BrowserDownloadSinkMode>(
+      "fileTransferDownloadSink",
+      "browser-download",
+      preserveHistoryState,
+    );
+  const [fileTransferChunkSize, setFileTransferChunkSize] =
+    useDispatchHistoryState(
+      "fileTransferChunkSize",
+      65536,
+      preserveHistoryState,
+    );
+  const [fileTransferRateLimit, setFileTransferRateLimit] =
+    useDispatchHistoryState(
+      "fileTransferRateLimit",
+      0,
+      preserveHistoryState,
+    );
+  const [fileTransferExistingPolicy, setFileTransferExistingPolicy] =
+    useDispatchHistoryState<FileExistingPolicy>(
+      "fileTransferExistingPolicy",
+      "skip",
+      preserveHistoryState,
+    );
   const [fileTransferMultiTargetPolicy, setFileTransferMultiTargetPolicy] =
-    useState<BrowserTransferMultiTargetPolicy>("same-offset");
-  const [selectedTemplateId, setSelectedTemplateId] = useState("");
-  const [templateName, setTemplateName] = useState("");
-  const [templateScopeKind, setTemplateScopeKind] = useState<"global" | "provider" | "tag" | "client">("global");
-  const [templateScopeValue, setTemplateScopeValue] = useState("");
+    useDispatchHistoryState<BrowserTransferMultiTargetPolicy>(
+      "fileTransferMultiTargetPolicy",
+      "same-offset",
+      preserveHistoryState,
+    );
+  const [selectedTemplateId, setSelectedTemplateId] =
+    useDispatchHistoryState(
+      "selectedTemplateId",
+      "",
+      preserveHistoryState,
+    );
+  const [templateName, setTemplateName] = useDispatchHistoryState(
+    "templateName",
+    "",
+    preserveHistoryState,
+  );
+  const [templateScopeKind, setTemplateScopeKind] =
+    useDispatchHistoryState<"global" | "provider" | "tag" | "client">(
+      "templateScopeKind",
+      "global",
+      preserveHistoryState,
+    );
+  const [templateScopeValue, setTemplateScopeValue] =
+    useDispatchHistoryState(
+      "templateScopeValue",
+      "",
+      preserveHistoryState,
+    );
   const [templatePending, setTemplatePending] = useState(false);
   const [templateConfirmation, setTemplateConfirmation] = useState<"save" | "save-copy" | "delete" | null>(null);
   const [templateSaveSnapshot, setTemplateSaveSnapshot] = useState<{
@@ -394,42 +513,191 @@ export function JobDispatchPanel({
   } | null>(null);
   const [deleteTemplateSnapshot, setDeleteTemplateSnapshot] =
     useState<CommandTemplateRecord | null>(null);
-  const [updateArtifactUrl, setUpdateArtifactUrl] = useState("");
-  const [updateSha256Hex, setUpdateSha256Hex] = useState("");
-  const [updateCheckVersionUrl, setUpdateCheckVersionUrl] = useState(DEFAULT_UPDATE_VERSION_URL);
-  const [updateActivationSha256Hex, setUpdateActivationSha256Hex] = useState("");
-  const [updateRestartAgent, setUpdateRestartAgent] = useState(false);
-  const [updateRollbackSha256Hex, setUpdateRollbackSha256Hex] = useState("");
-  const [backupPathsText, setBackupPathsText] = useState(DEFAULT_JOB_BACKUP_PATHS);
-  const [backupIncludeConfig, setBackupIncludeConfig] = useState(true);
-  const [backupFollowSymlinks, setBackupFollowSymlinks] = useState(false);
-  const [backupSkipMissingPaths, setBackupSkipMissingPaths] = useState(false);
-  const [processLimit, setProcessLimit] = useState(50);
-  const [supervisorAction, setSupervisorAction] = useState<SupervisorAction>("status");
-  const [supervisorName, setSupervisorName] = useState("");
-  const [supervisorArgv, setSupervisorArgv] = useState("");
-  const [supervisorCwd, setSupervisorCwd] = useState("");
-  const [supervisorEnv, setSupervisorEnv] = useState("");
-  const [supervisorLogBytes, setSupervisorLogBytes] = useState(65536);
-  const [selectorExpression, setSelectorExpression] = useState(() =>
-    visibleDispatchSelector(readLocalString(JOB_SELECTOR_STORAGE_KEY)),
+  const [updateArtifactUrl, setUpdateArtifactUrl] =
+    useDispatchHistoryState(
+      "updateArtifactUrl",
+      "",
+      preserveHistoryState,
+    );
+  const [updateSha256Hex, setUpdateSha256Hex] = useDispatchHistoryState(
+    "updateSha256Hex",
+    "",
+    preserveHistoryState,
   );
-  const [maxTimeoutSecs, setMaxTimeoutSecs] = useState("");
-  const [forceUnprivileged, setForceUnprivileged] = useState(false);
-  const [rolloutEnabled, setRolloutEnabled] = useState(false);
-  const [rolloutCanaryClientId, setRolloutCanaryClientId] = useState("");
-  const [rolloutBatchSize, setRolloutBatchSize] = useState("5");
-  const [rolloutMaxFailures, setRolloutMaxFailures] = useState("0");
-  const [rolloutPauseAfterCanary, setRolloutPauseAfterCanary] = useState(true);
-  const [rolloutBatchDelaySecs, setRolloutBatchDelaySecs] = useState("0");
+  const [updateCheckVersionUrl, setUpdateCheckVersionUrl] =
+    useDispatchHistoryState(
+      "updateCheckVersionUrl",
+      DEFAULT_UPDATE_VERSION_URL,
+      preserveHistoryState,
+    );
+  const [updateActivationSha256Hex, setUpdateActivationSha256Hex] =
+    useDispatchHistoryState(
+      "updateActivationSha256Hex",
+      "",
+      preserveHistoryState,
+    );
+  const [updateRestartAgent, setUpdateRestartAgent] =
+    useDispatchHistoryState(
+      "updateRestartAgent",
+      false,
+      preserveHistoryState,
+    );
+  const [updateRollbackSha256Hex, setUpdateRollbackSha256Hex] =
+    useDispatchHistoryState(
+      "updateRollbackSha256Hex",
+      "",
+      preserveHistoryState,
+    );
+  const [backupPathsText, setBackupPathsText] = useDispatchHistoryState(
+    "backupPathsText",
+    DEFAULT_JOB_BACKUP_PATHS,
+    preserveHistoryState,
+  );
+  const [backupIncludeConfig, setBackupIncludeConfig] =
+    useDispatchHistoryState(
+      "backupIncludeConfig",
+      true,
+      preserveHistoryState,
+    );
+  const [backupFollowSymlinks, setBackupFollowSymlinks] =
+    useDispatchHistoryState(
+      "backupFollowSymlinks",
+      false,
+      preserveHistoryState,
+    );
+  const [backupSkipMissingPaths, setBackupSkipMissingPaths] =
+    useDispatchHistoryState(
+      "backupSkipMissingPaths",
+      false,
+      preserveHistoryState,
+    );
+  const [processLimit, setProcessLimit] = useDispatchHistoryState(
+    "processLimit",
+    50,
+    preserveHistoryState,
+  );
+  const [supervisorAction, setSupervisorAction] =
+    useDispatchHistoryState<SupervisorAction>(
+      "supervisorAction",
+      "status",
+      preserveHistoryState,
+    );
+  const [supervisorName, setSupervisorName] = useDispatchHistoryState(
+    "supervisorName",
+    "",
+    preserveHistoryState,
+  );
+  const [supervisorArgv, setSupervisorArgv] = useDispatchHistoryState(
+    "supervisorArgv",
+    "",
+    preserveHistoryState,
+  );
+  const [supervisorCwd, setSupervisorCwd] = useDispatchHistoryState(
+    "supervisorCwd",
+    "",
+    preserveHistoryState,
+  );
+  const [supervisorEnv, setSupervisorEnv] = useDispatchHistoryState(
+    "supervisorEnv",
+    "",
+    preserveHistoryState,
+  );
+  const [supervisorLogBytes, setSupervisorLogBytes] =
+    useDispatchHistoryState(
+      "supervisorLogBytes",
+      65536,
+      preserveHistoryState,
+    );
+  const [selectorExpression, setSelectorExpression] =
+    useDispatchHistoryState(
+      "selectorExpression",
+      () =>
+        visibleDispatchSelector(
+          readLocalString(JOB_SELECTOR_STORAGE_KEY),
+        ),
+      preserveHistoryState,
+    );
+  const [maxTimeoutSecs, setMaxTimeoutSecs] = useDispatchHistoryState(
+    "maxTimeoutSecs",
+    "",
+    preserveHistoryState,
+  );
+  const [forceUnprivileged, setForceUnprivileged] =
+    useDispatchHistoryState(
+      "forceUnprivileged",
+      false,
+      preserveHistoryState,
+    );
+  const [rolloutEnabled, setRolloutEnabled] = useDispatchHistoryState(
+    "rolloutEnabled",
+    false,
+    preserveHistoryState,
+  );
+  const [rolloutCanaryClientId, setRolloutCanaryClientId] =
+    useDispatchHistoryState(
+      "rolloutCanaryClientId",
+      "",
+      preserveHistoryState,
+    );
+  const [rolloutBatchSize, setRolloutBatchSize] =
+    useDispatchHistoryState(
+      "rolloutBatchSize",
+      "5",
+      preserveHistoryState,
+    );
+  const [rolloutMaxFailures, setRolloutMaxFailures] =
+    useDispatchHistoryState(
+      "rolloutMaxFailures",
+      "0",
+      preserveHistoryState,
+    );
+  const [rolloutPauseAfterCanary, setRolloutPauseAfterCanary] =
+    useDispatchHistoryState(
+      "rolloutPauseAfterCanary",
+      true,
+      preserveHistoryState,
+    );
+  const [rolloutBatchDelaySecs, setRolloutBatchDelaySecs] =
+    useDispatchHistoryState(
+      "rolloutBatchDelaySecs",
+      "0",
+      preserveHistoryState,
+    );
+  // The target preview is refreshed from the restored selector; caching it
+  // would briefly expose stale target resolution after Back.
   const [preview, setPreview] = useState<BulkResolveResponse | null>(null);
-  const [lastJob, setLastJob] = useState<CreateJobResponse | null>(null);
-  const [dispatchProgress, setDispatchProgress] = useState<BulkJobProgress | null>(null);
-  const [lastDispatchProgress, setLastDispatchProgress] = useState<BulkJobProgress | null>(null);
-  const [lastDispatchContext, setLastDispatchContext] = useState<string | null>(null);
-  const [lastPayloadHash, setLastPayloadHash] = useState<string | null>(null);
-  const [lastRolloutJobId, setLastRolloutJobId] = useState<string | null>(null);
-  const [transferProgress, setTransferProgress] = useState<ResumableUploadProgress | ResumableDownloadProgress | null>(null);
+  const [dispatchProgress, setDispatchProgress] =
+    useState<BulkJobProgress | null>(null);
+  const [lastDispatchProgress, setLastDispatchProgress] =
+    useDispatchHistoryState<BulkJobProgress | null>(
+      "lastDispatchProgress",
+      null,
+      preserveHistoryState,
+    );
+  const [lastDispatchContext, setLastDispatchContext] =
+    useDispatchHistoryState<string | null>(
+      "lastDispatchContext",
+      null,
+      preserveHistoryState,
+    );
+  const [lastPayloadHash, setLastPayloadHash] =
+    useDispatchHistoryState<string | null>(
+      "lastPayloadHash",
+      null,
+      preserveHistoryState,
+    );
+  const [lastRolloutJobId, setLastRolloutJobId] =
+    useDispatchHistoryState<string | null>(
+      "lastRolloutJobId",
+      null,
+      preserveHistoryState,
+    );
+  const [transferProgress, setTransferProgress] =
+    useDispatchHistoryState<VisibleTransferProgress | null>(
+      "transferProgress",
+      null,
+      preserveHistoryState,
+    );
   const [actionError, setActionError] = useState<string | null>(null);
   const [dispatchPromptOpen, setDispatchPromptOpen] = useState(false);
   const [lockPromptOpen, setLockPromptOpen] = useState(false);
@@ -919,7 +1187,6 @@ export function JobDispatchPanel({
     setDispatchProgress(null);
     setLastDispatchProgress(null);
     setLastDispatchContext(null);
-    setLastJob(null);
     setLastRolloutJobId(null);
     setTransferProgress(null);
   }
@@ -1449,12 +1716,11 @@ export function JobDispatchPanel({
           maxTimeoutSecs: confirmed.maxTimeoutSecs,
           maxTimeoutOverrideSecs: confirmed.maxTimeoutOverrideSecs,
           onProgress: (progress) => {
-            setTransferProgress(progress);
+            setTransferProgress(visibleTransferProgress(progress));
             setFileTransferSessionId(progress.sessionId);
             setFileTransferResumeToken(progress.resumeToken);
           },
         });
-        setLastJob(commitJob);
         setLastPayloadHash(null);
         await trackDispatchProgress(commitJob, confirmed.targets, confirmed.maxTimeoutSecs);
         return;
@@ -1480,12 +1746,11 @@ export function JobDispatchPanel({
           maxTimeoutSecs: confirmed.maxTimeoutSecs,
           maxTimeoutOverrideSecs: confirmed.maxTimeoutOverrideSecs,
           onProgress: (progress) => {
-            setTransferProgress(progress);
+            setTransferProgress(visibleTransferProgress(progress));
             setFileTransferSessionId(progress.sessionId);
             setFileTransferResumeToken(progress.resumeToken);
           },
         });
-        setLastJob(startJob);
         setLastPayloadHash(null);
         await trackDispatchProgress(startJob, confirmed.targets, confirmed.maxTimeoutSecs);
         return;
@@ -1498,7 +1763,6 @@ export function JobDispatchPanel({
           confirmed: true,
           privilege_assertion: confirmed.privilegeAssertion,
         });
-        setLastJob(response.job);
         setLastPayloadHash(confirmed.payloadHashHex);
         await trackDispatchProgress(response.job, confirmed.targets, confirmed.maxTimeoutSecs);
         return;
@@ -1506,7 +1770,6 @@ export function JobDispatchPanel({
       const nextJob = await onCreateJob(
         jobRequestFromConfirmation(confirmed, confirmed.destructive),
       );
-      setLastJob(nextJob);
       setLastPayloadHash(confirmed.payloadHashHex);
       if (confirmed.rollout) {
         setLastRolloutJobId(nextJob.job_id);

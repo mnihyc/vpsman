@@ -33,6 +33,7 @@ import type {
 } from "../../types";
 import { INTERFACE_RATE_DEFINITION } from "../../telemetryMetrics";
 import { formatCompactTime } from "../../utils";
+import { replaceHistoryEntry } from "../../historyEntryState";
 
 type ObservabilityDashboardsPanelProps = {
   error: string | null;
@@ -144,11 +145,7 @@ function writeDashboardPresetToLocation(presetId: DashboardPresetId) {
   }
   const url = new URL(window.location.href);
   url.searchParams.set("dashboard", presetId);
-  window.history.replaceState(
-    null,
-    "",
-    `${url.pathname}${url.search}${url.hash}`,
-  );
+  replaceHistoryEntry(`${url.pathname}${url.search}${url.hash}`);
 }
 
 export function ObservabilityDashboardsPanel({

@@ -25,6 +25,10 @@ import type {
   JobTargetRecord,
 } from "../../types";
 import { formatCompactTime, formatFullTime } from "../../utils";
+import {
+  pushHistoryEntry,
+  replaceHistoryEntry,
+} from "../../historyEntryState";
 
 const STORAGE_INVENTORY_LIMIT = 2048;
 
@@ -845,9 +849,9 @@ function setStorageRoute(
     return;
   }
   if (historyMode === "replace") {
-    window.history.replaceState(null, "", next);
+    replaceHistoryEntry(next);
   } else {
-    window.history.pushState(null, "", next);
+    pushHistoryEntry(next);
   }
 }
 

@@ -82,6 +82,18 @@ const JobDispatchPanel = retryableLazy(() =>
 type JobOutputComparisonGroup = JobOutputComparisonRecord["groups"][number];
 type JobOutputComparisonRow = JobOutputComparisonRecord["rows"][number];
 type ApprovalDecision = "approve" | "reject";
+const JOB_DETAIL_SUBPAGE_PREFIX = "history:job:";
+
+function jobDetailSubpage(jobId: string): string {
+  return `${JOB_DETAIL_SUBPAGE_PREFIX}${jobId}`;
+}
+
+function jobDetailId(subpage: string): string | null {
+  if (!subpage.startsWith(JOB_DETAIL_SUBPAGE_PREFIX)) {
+    return null;
+  }
+  return subpage.slice(JOB_DETAIL_SUBPAGE_PREFIX.length).trim() || null;
+}
 
 function displayToken(value: string): string {
   return value.replace(/_/g, " ");
@@ -273,10 +285,8 @@ export function JobsPanel({
   onRejectJobApproval,
   onResolveTargets,
   onSelectSubpage,
-  onSelectedJobDetailsOpened,
   onDeleteCommandTemplate,
   onUpsertCommandTemplate,
-  pendingSelectedJobId,
   privilegeMaterial,
   setPrivilegeMaterial,
 }: {
@@ -345,7 +355,6 @@ export function JobsPanel({
   onResolveTargets: (
     selection: JobTargetSelection,
   ) => Promise<BulkResolveResponse>;
-  onSelectedJobDetailsOpened?: (jobId: string) => void;
   onSelectSubpage?: (subpage: string) => void;
   onDeleteCommandTemplate: (
     templateId: string,
@@ -354,12 +363,13 @@ export function JobsPanel({
   onUpsertCommandTemplate: (
     request: UpsertCommandTemplateRequest,
   ) => Promise<CommandTemplateRecord>;
-  pendingSelectedJobId?: string | null;
   privilegeMaterial: PrivilegeMaterial | null;
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
 }) {
   const { preferences, vpsNameDisplayMode } = usePanelDisplaySettings();
   const targetDetailRef = useRef<HTMLDivElement | null>(null);
+  const targetLoadGenerationRef = useRef(0);
+  const comparisonLoadGenerationRef = useRef(0);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [targets, setTargets] = useState<JobTargetRecord[]>([]);
   const [outputs, setOutputs] = useState<JobOutputRecord[]>([]);
@@ -394,6 +404,7 @@ export function JobsPanel({
   ].includes(activeSubpage)
     ? activeSubpage
     : "history";
+  const routeSelectedJobId = jobDetailId(activeSubpage);
   const jobHistoryFeedbackMessage =
     error ?? (loading ? "Refreshing command records" : null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
@@ -511,13 +522,19 @@ export function JobsPanel({
 
   const openTargets = useCallback(
     async (jobId: string) => {
+      const generation = ++targetLoadGenerationRef.current;
+      const comparisonGeneration = ++comparisonLoadGenerationRef.current;
       setSelectedJobId(jobId);
+      setTargets([]);
+      setOutputs([]);
+      setOutputComparison(null);
       setTargetsLoading(true);
       setOutputsLoading(true);
       setComparisonLoading(true);
       setTargetError(null);
       setOutputError(null);
       setComparisonError(null);
+      setDownloadError(null);
       setSelectedComparisonGroupId(null);
       const [targetResult, outputResult, comparisonResult] =
         await Promise.allSettled([
@@ -525,6 +542,9 @@ export function JobsPanel({
           onLoadOutputs(jobId),
           onLoadOutputComparison(jobId, comparisonMode),
         ]);
+      if (generation !== targetLoadGenerationRef.current) {
+        return;
+      }
       if (targetResult.status === "fulfilled") {
         setTargets(targetResult.value);
       } else {
@@ -541,25 +561,29 @@ export function JobsPanel({
           errorMessage(outputResult.reason, "Job output unavailable"),
         );
       }
-      if (comparisonResult.status === "fulfilled") {
-        setOutputComparison(comparisonResult.value);
-      } else {
-        setOutputComparison(null);
-        setComparisonError(
-          errorMessage(
-            comparisonResult.reason,
-            "Execution summary unavailable",
-          ),
-        );
+      if (comparisonGeneration === comparisonLoadGenerationRef.current) {
+        if (comparisonResult.status === "fulfilled") {
+          setOutputComparison(comparisonResult.value);
+        } else {
+          setOutputComparison(null);
+          setComparisonError(
+            errorMessage(
+              comparisonResult.reason,
+              "Execution summary unavailable",
+            ),
+          );
+        }
+        setComparisonLoading(false);
       }
       setTargetsLoading(false);
       setOutputsLoading(false);
-      setComparisonLoading(false);
     },
     [comparisonMode, onLoadOutputComparison, onLoadOutputs, onLoadTargets],
   );
 
-  function closeTargetDetails() {
+  const clearTargetDetails = useCallback(() => {
+    targetLoadGenerationRef.current += 1;
+    comparisonLoadGenerationRef.current += 1;
     setSelectedJobId(null);
     setTargets([]);
     setOutputs([]);
@@ -571,12 +595,23 @@ export function JobsPanel({
     setTargetsLoading(false);
     setOutputsLoading(false);
     setComparisonLoading(false);
-  }
+  }, []);
 
-  function openSubmittedJobDetails(jobId: string) {
+  const closeTargetDetails = useCallback(() => {
+    clearTargetDetails();
     onSelectSubpage?.("history");
-    void openTargets(jobId);
-  }
+  }, [clearTargetDetails, onSelectSubpage]);
+
+  const openSubmittedJobDetails = useCallback(
+    (jobId: string) => {
+      if (onSelectSubpage) {
+        onSelectSubpage(jobDetailSubpage(jobId));
+        return;
+      }
+      void openTargets(jobId);
+    },
+    [onSelectSubpage, openTargets],
+  );
 
   function openApprovalReview(approval: JobApprovalRecord) {
     setApprovalReview(approval);
@@ -636,18 +671,20 @@ export function JobsPanel({
   }
 
   useEffect(() => {
-    if (!pendingSelectedJobId) {
+    if (routeSelectedJobId) {
+      if (routeSelectedJobId !== selectedJobId) {
+        void openTargets(routeSelectedJobId);
+      }
       return;
     }
-    onSelectSubpage?.("history");
-    void openTargets(pendingSelectedJobId).finally(() =>
-      onSelectedJobDetailsOpened?.(pendingSelectedJobId),
-    );
+    if (selectedJobId) {
+      clearTargetDetails();
+    }
   }, [
-    onSelectSubpage,
-    onSelectedJobDetailsOpened,
+    clearTargetDetails,
     openTargets,
-    pendingSelectedJobId,
+    routeSelectedJobId,
+    selectedJobId,
   ]);
 
   useEffect(() => {
@@ -695,7 +732,7 @@ export function JobsPanel({
             className="linkButton"
             onClick={(event) => {
               event.stopPropagation();
-              void openTargets(job.id);
+              openSubmittedJobDetails(job.id);
             }}
             type="button"
           >
@@ -766,7 +803,7 @@ export function JobsPanel({
         ),
       },
     ],
-    [],
+    [openSubmittedJobDetails],
   );
 
   const scheduledRunColumns = useMemo<
@@ -831,7 +868,7 @@ export function JobsPanel({
             className="linkButton"
             onClick={(event) => {
               event.stopPropagation();
-              void openTargets(job.id);
+              openSubmittedJobDetails(job.id);
             }}
             type="button"
           >
@@ -883,7 +920,7 @@ export function JobsPanel({
         cell: (job) => formatJobDuration(job),
       },
     ],
-    [scheduleById],
+    [openSubmittedJobDetails, scheduleById],
   );
 
   const approvalColumns = useMemo<ConsoleDataGridColumn<JobApprovalRecord>[]>(
@@ -1195,11 +1232,19 @@ export function JobsPanel({
     jobId: string,
     mode: JobOutputCompareMode = comparisonMode,
   ) {
+    const generation = ++comparisonLoadGenerationRef.current;
     setComparisonLoading(true);
     setComparisonError(null);
     try {
-      setOutputComparison(await onLoadOutputComparison(jobId, mode));
+      const comparison = await onLoadOutputComparison(jobId, mode);
+      if (generation !== comparisonLoadGenerationRef.current) {
+        return;
+      }
+      setOutputComparison(comparison);
     } catch (loadError) {
+      if (generation !== comparisonLoadGenerationRef.current) {
+        return;
+      }
       setOutputComparison(null);
       setComparisonError(
         loadError instanceof Error
@@ -1207,7 +1252,9 @@ export function JobsPanel({
           : "Output comparison unavailable",
       );
     } finally {
-      setComparisonLoading(false);
+      if (generation === comparisonLoadGenerationRef.current) {
+        setComparisonLoading(false);
+      }
     }
   }
 
@@ -1428,7 +1475,8 @@ export function JobsPanel({
                   {
                     label: "Open target detail",
                     disabled: (rows) => rows.length !== 1,
-                    onSelect: (rows) => void openTargets(rows[0].id),
+                    onSelect: (rows) =>
+                      openSubmittedJobDetails(rows[0].id),
                   },
                   {
                     label: "Copy job IDs",
@@ -1447,7 +1495,7 @@ export function JobsPanel({
                 }
                 getRowId={(job) => job.id}
                 itemLabel="jobs"
-                onOpenRow={(job) => void openTargets(job.id)}
+                onOpenRow={(job) => openSubmittedJobDetails(job.id)}
                 openRowLabel="Open targets"
                 openRowTitle={(job) => `Load target results for job ${job.id}.`}
                 showMobileOpenRowAction={false}
@@ -2270,7 +2318,7 @@ export function JobsPanel({
                   expandOnRowClick={false}
                   getRowId={(job) => job.id}
                   itemLabel="runs"
-                  onOpenRow={(job) => void openTargets(job.id)}
+                  onOpenRow={(job) => openSubmittedJobDetails(job.id)}
                   openRowLabel="Open targets"
                   openRowTitle={(job) =>
                     `Load target results for scheduled run ${job.id}.`

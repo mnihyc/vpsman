@@ -1355,6 +1355,9 @@ test("exposes traffic columns and the VPS Traffic & Rules drilldown", async ({
   await expect(
     page.getByRole("heading", { name: "Alert policies" }),
   ).toBeVisible();
+  await expect(page).toHaveURL(
+    /#\/observability\/alert-policy\/fbfbfbfb-1111-4111-8111-111111111111$/,
+  );
   await expect(
     page.locator(".consoleDetailPanelHeader strong", {
       hasText: "Alert policy details",
@@ -1363,6 +1366,63 @@ test("exposes traffic columns and the VPS Traffic & Rules drilldown", async ({
   await expect(page.locator(".consoleDetailPanel").last()).toContainText(
     "edge-resource-policy",
   );
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await waitForConsoleShell(page);
+  await expect(page).toHaveURL(
+    /#\/observability\/alert-policy\/fbfbfbfb-1111-4111-8111-111111111111$/,
+  );
+  await expect(
+    page.locator(".consoleDetailPanelHeader strong", {
+      hasText: "Alert policy details",
+    }),
+  ).toBeVisible();
+});
+
+test("rehydrates the exact VPS on the canonical Config Rules route", async ({
+  page,
+}) => {
+  await page.goto("/#/config/rules/agent-sfo-01");
+  await waitForConsoleShell(page);
+
+  await expect(page).toHaveURL(/#\/config\/rules\/agent-sfo-01$/);
+  await expect(
+    page.getByRole("heading", { name: "VPS Rules" }),
+  ).toBeVisible();
+  await expect(
+    page.getByLabel("VPS rules selector expression"),
+  ).toHaveValue("id:agent-sfo-01");
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await waitForConsoleShell(page);
+  await expect(page).toHaveURL(/#\/config\/rules\/agent-sfo-01$/);
+  await expect(
+    page.getByLabel("VPS rules selector expression"),
+  ).toHaveValue("id:agent-sfo-01");
+});
+
+test("clears stale alert-policy detail when a routed policy does not exist", async ({
+  page,
+}) => {
+  await page.goto(
+    "/#/observability/alert-policy/fbfbfbfb-1111-4111-8111-111111111111",
+  );
+  await waitForConsoleShell(page);
+  await expect(
+    page.locator(".consoleDetailPanelHeader strong", {
+      hasText: "Alert policy details",
+    }),
+  ).toBeVisible();
+
+  await page.evaluate(() => {
+    window.location.hash = "#/observability/alert-policy/missing";
+  });
+  await expect(page).toHaveURL(/#\/observability\/alert-policy\/missing$/);
+  await expect(page.getByText("Policy not found: missing")).toBeVisible();
+  await expect(
+    page.locator(".consoleDetailPanelHeader strong", {
+      hasText: "Alert policy details",
+    }),
+  ).toHaveCount(0);
 });
 
 test("supports Config VPS Rules dry-run, confirm, and explicit unset", {
@@ -1635,12 +1695,21 @@ test("keeps fleet alert policy actions selection-scoped", async ({
       hasText: "Alert policy details",
     }),
   ).toBeVisible();
+  await expect(page).toHaveURL(
+    /#\/observability\/alert-policy\/fbfbfbfb-1111-4111-8111-111111111111$/,
+  );
   const belowDetail = page.locator(".consoleDetailPanel");
   await expect(belowDetail).toContainText("edge-resource-policy");
   await expect(belowDetail).toContainText("traffic.cycle.total");
   await expect(belowDetail).toContainText("traffic.quota.total * 0.8");
   await expect(belowDetail).toContainText("Traffic quota threshold reached");
   await page.getByLabel("Close detail panel").click();
+  await expect(page.getByText("Alert policy details")).toHaveCount(0);
+  await expect(page).toHaveURL(/#\/observability\/alerts$/);
+
+  await page.goBack();
+  await expect(page.getByText("Alert policy details")).toBeVisible();
+  await page.goForward();
   await expect(page.getByText("Alert policy details")).toHaveCount(0);
 
   if (!testInfo.project.name.includes("mobile")) {
@@ -1770,12 +1839,200 @@ test("exposes console route state through URL, browser history, and reload", asy
   ).toBeVisible();
   await expect(page).toHaveURL(/#\/network\/tunnel-plans$/);
 
+  await page.goForward();
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Command dispatch" }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(/#\/jobs\/dispatch$/);
+
+  await page.goBack();
   await page.reload({ waitUntil: "domcontentloaded" });
   await waitForConsoleShell(page);
   await expect(
     page.getByRole("heading", { level: 1, name: "Tunnel plans" }),
   ).toBeVisible();
   await expect(page).toHaveURL(/#\/network\/tunnel-plans$/);
+});
+
+test("isolates untouched dispatch defaults between browser history entries", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem(
+      "vpsman.jobDispatch.selectorExpression",
+      "id:agent-sfo-01",
+    );
+  });
+  await page.goto("/#/jobs/dispatch");
+  await waitForConsoleShell(page);
+  const selector = page.getByLabel("Bulk target selector expression");
+  await expect(selector).toHaveValue("id:agent-sfo-01");
+
+  await openConsoleSubpage(page, "Jobs", "History");
+  await openConsoleSubpage(page, "Jobs", "Dispatch");
+  await selector.fill("id:agent-fra-02");
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.localStorage.getItem(
+          "vpsman.jobDispatch.selectorExpression",
+        ),
+      ),
+    )
+    .toBe("id:agent-fra-02");
+
+  await page.goBack();
+  await page.goBack();
+  await expect(selector).toHaveValue("id:agent-sfo-01");
+
+  await page.goForward();
+  await page.goForward();
+  await expect(selector).toHaveValue("id:agent-fra-02");
+});
+
+test("keeps an exact job detail identity through browser history and reload", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the desktop job grid is the canonical job-detail entry point",
+  );
+  const jobId = "77777777-aaaa-4bbb-8ccc-dddddddddddd";
+
+  await page.goto("/#/jobs/history");
+  await waitForConsoleShell(page);
+  const grid = page.getByLabel("Job records data grid");
+  const row = grid
+    .locator(".gridBody [role=row]", { hasText: "network speed test" })
+    .first();
+  await row.getByRole("checkbox").check();
+  await runGridAction(page, "Job records", "Open target detail");
+
+  await expect(page).toHaveURL(
+    new RegExp(`#\\/jobs\\/history\\/${jobId}$`),
+  );
+  await expect(
+    page.getByRole("heading", { name: "Target results" }),
+  ).toBeVisible();
+
+  await page.goBack();
+  await expect(page).toHaveURL(/#\/jobs\/history$/);
+  await expect(
+    page.getByRole("heading", { name: "Target results" }),
+  ).toHaveCount(0);
+
+  await page.goForward();
+  await expect(page).toHaveURL(
+    new RegExp(`#\\/jobs\\/history\\/${jobId}$`),
+  );
+  await expect(
+    page.getByRole("heading", { name: "Target results" }),
+  ).toBeVisible();
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await waitForConsoleShell(page);
+  await expect(page).toHaveURL(
+    new RegExp(`#\\/jobs\\/history\\/${jobId}$`),
+  );
+  await expect(
+    page.getByRole("heading", { name: "Target results" }),
+  ).toBeVisible();
+});
+
+test("centers and focuses the active left subpanel after navigation", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the compact mobile page selector replaces the desktop left subpanel",
+  );
+  await page.setViewportSize({ height: 520, width: 1440 });
+  await page.goto("/#/automation/agent-updates");
+  await waitForConsoleShell(page);
+
+  const initialSubpanel = page
+    .getByLabel("Automation sections")
+    .getByRole("button", { name: "Agent updates", exact: true });
+  await expect(initialSubpanel).not.toBeFocused();
+  const sidebar = page.locator(".sidebar");
+  await sidebar.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await activate(
+    page
+      .getByLabel("Agent update rollout posture")
+      .getByRole("button", { name: "Update jobs" }),
+  );
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Job history" }),
+  ).toBeVisible();
+
+  const activeSubpanel = page
+    .getByLabel("Jobs sections")
+    .getByRole("button", { name: "History", exact: true });
+  await expect(activeSubpanel).toBeFocused();
+  await expect
+    .poll(async () => {
+      const [sidebarBounds, subpanelBounds] = await Promise.all([
+        sidebar.boundingBox(),
+        activeSubpanel.boundingBox(),
+      ]);
+      if (!sidebarBounds || !subpanelBounds) {
+        return Number.POSITIVE_INFINITY;
+      }
+      const sidebarCenter = sidebarBounds.y + sidebarBounds.height / 2;
+      const subpanelCenter = subpanelBounds.y + subpanelBounds.height / 2;
+      return Math.abs(sidebarCenter - subpanelCenter);
+    })
+    .toBeLessThan(48);
+
+  const jobsNavGroup = page.locator(".navGroup").filter({
+    has: page.getByRole("button", { name: "Jobs", exact: true }),
+  });
+  await jobsNavGroup
+    .getByRole("button", { name: "Collapse subpages" })
+    .click();
+  await expect(page.getByLabel("Jobs sections")).toHaveCount(0);
+  await page.evaluate(() => {
+    window.location.hash = "#/jobs/dispatch";
+  });
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Command dispatch" }),
+  ).toBeVisible();
+  await expect(
+    page
+      .getByLabel("Jobs sections")
+      .getByRole("button", { name: "Dispatch", exact: true }),
+  ).toBeFocused();
+
+  await page.locator(".content").focus();
+  await page.goBack();
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Job history" }),
+  ).toBeVisible();
+  await expect(activeSubpanel).toBeFocused();
+
+  await page.locator(".content").focus();
+  await page.goBack();
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Agent updates" }),
+  ).toBeVisible();
+  await expect(initialSubpanel).toHaveAttribute("aria-current", "page");
+  await expect(initialSubpanel).toBeFocused();
+  await expect
+    .poll(async () => {
+      const [sidebarBounds, subpanelBounds] = await Promise.all([
+        sidebar.boundingBox(),
+        initialSubpanel.boundingBox(),
+      ]);
+      if (!sidebarBounds || !subpanelBounds) {
+        return Number.POSITIVE_INFINITY;
+      }
+      const sidebarCenter = sidebarBounds.y + sidebarBounds.height / 2;
+      const subpanelCenter = subpanelBounds.y + subpanelBounds.height / 2;
+      return Math.abs(sidebarCenter - subpanelCenter);
+    })
+    .toBeLessThan(48);
 });
 
 test("reconnects the live console stream after an interrupted socket", async ({
@@ -5716,6 +5973,7 @@ test("shows grouped execution summaries for job output details", async ({
 test("generates local privilege assertions before dispatching a privileged job", async ({
   page,
 }, testInfo) => {
+  test.slow();
   test.skip(
     testInfo.project.name.includes("mobile"),
     "privileged dispatch flow is covered in the desktop console layout",
@@ -5803,6 +6061,12 @@ test("generates local privilege assertions before dispatching a privileged job",
   const resultPanel = page.getByLabel("Execution result");
   await expect(resultPanel).toBeVisible();
   await expect(resultPanel.getByText(/completed on 1 VPS/)).toBeVisible();
+  const dispatchHistoryState = await page.evaluate(() =>
+    JSON.stringify(window.history.state),
+  );
+  expect(dispatchHistoryState).toContain("__vpsman_history");
+  expect(dispatchHistoryState).not.toContain("/usr/bin/uptime");
+  expect(dispatchHistoryState).not.toContain("local-super-password");
   await activate(page.getByRole("button", { name: "Open job details" }));
   await expect(
     page.getByRole("heading", { level: 1, name: "Job history" }),
@@ -5810,6 +6074,9 @@ test("generates local privilege assertions before dispatching a privileged job",
   await expect(
     page.getByRole("heading", { name: "Target results" }),
   ).toBeVisible();
+  await expect(page).toHaveURL(
+    /#\/jobs\/history\/11111111-2222-4333-8444-555555555555$/,
+  );
   const targetDetails = page.getByRole("region", {
     name: "Job target details",
   });
@@ -5868,6 +6135,41 @@ test("generates local privilege assertions before dispatching a privileged job",
     (request as { privilege_assertion?: { assertion_hex?: string } })
       .privilege_assertion?.assertion_hex,
   ).toMatch(/^[0-9a-f]+$/);
+
+  await page.goBack();
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Command dispatch" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Command argv")).toHaveValue(
+    "/usr/bin/uptime",
+  );
+  await expect(page.getByLabel("Execution result")).toContainText(
+    /completed on 1 VPS/,
+  );
+  await expect(page.locator(".confirmationPrompt")).toHaveCount(0);
+  const serializedHistoryState = await page.evaluate(() =>
+    JSON.stringify(window.history.state),
+  );
+  expect(serializedHistoryState).toContain("__vpsman_history");
+  expect(serializedHistoryState).not.toContain("/usr/bin/uptime");
+  expect(serializedHistoryState).not.toContain("local-super-password");
+
+  await page.goForward();
+  await expect(page).toHaveURL(
+    /#\/jobs\/history\/11111111-2222-4333-8444-555555555555$/,
+  );
+  await expect(
+    page.getByRole("heading", { name: "Target results" }),
+  ).toBeVisible();
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await waitForConsoleShell(page);
+  await page.goBack();
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Command dispatch" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Command argv")).toHaveValue("");
+  await expect(page.getByLabel("Execution result")).toHaveCount(0);
 });
 
 test("keeps long search expressions horizontally editable and inspectable", async ({

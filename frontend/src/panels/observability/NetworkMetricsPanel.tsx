@@ -15,6 +15,7 @@ import {
 } from "../../telemetryMetrics";
 import { latencyStatusLabel, telemetryReasonLabel } from "../../topologyRuntime";
 import { formatCompactTime, timestampMillis } from "../../utils";
+import { pushHistoryEntry } from "../../historyEntryState";
 
 type NetworkMetricsPanelProps = {
   networkObservations: NetworkObservationRecord[];
@@ -398,7 +399,7 @@ function writeNetworkMetricRoute(metric: NetworkChartMetric) {
     `${window.location.pathname}${window.location.search}${window.location.hash}` !==
     next
   ) {
-    window.history.pushState(null, "", next);
+    pushHistoryEntry(next);
   }
 }
 

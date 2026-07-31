@@ -31,6 +31,7 @@ import {
   createSubmissionGuard,
   finishSubmission,
 } from "../../submissionGuard";
+import { pushHistoryEntry } from "../../historyEntryState";
 import type {
   AgentView,
   CreateJobRequest,
@@ -813,7 +814,7 @@ function setServiceClientRoute(clientId: string | null) {
   } else {
     url.searchParams.delete("service_client");
   }
-  window.history.pushState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  pushHistoryEntry(`${url.pathname}${url.search}${url.hash}`);
 }
 
 function providerLabel(provider: HostServiceProvider | null): string {

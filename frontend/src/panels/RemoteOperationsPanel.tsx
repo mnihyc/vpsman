@@ -51,6 +51,10 @@ import type {
 import { clientDisplayNameFromMap, clientDisplayNameMap } from "../utils";
 import { JobDispatchPanel, type TerminalComposerAction } from "./JobDispatchPanel";
 import { retryableLazy } from "../lazyImport";
+import {
+  pushHistoryEntry,
+  replaceHistoryEntry,
+} from "../historyEntryState";
 
 export type DirectTerminalOpenRequest = {
   maxTimeoutSecs: number;
@@ -868,9 +872,9 @@ function setProcessWorkspaceRoute(
     return;
   }
   if (historyMode === "replace") {
-    window.history.replaceState(null, "", next);
+    replaceHistoryEntry(next);
   } else {
-    window.history.pushState(null, "", next);
+    pushHistoryEntry(next);
   }
 }
 

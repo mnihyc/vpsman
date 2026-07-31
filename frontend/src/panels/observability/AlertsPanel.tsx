@@ -43,6 +43,7 @@ type AlertsPanelProps = {
   ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
   onDryRunFleetAlertPolicy: (request: PolicyDryRunRequest) => Promise<PolicyDryRunResponse>;
   onOpenFleetAlerts: () => void;
+  onPolicyFocusChange: (policyId: string | null) => void;
   onProcessFleetAlertNotifications: (
     request: FleetAlertNotificationProcessRequest,
   ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
@@ -66,6 +67,7 @@ export function AlertsPanel({
   onDispatchFleetAlertNotifications,
   onDryRunFleetAlertPolicy,
   onOpenFleetAlerts,
+  onPolicyFocusChange,
   onProcessFleetAlertNotifications,
   onUpsertFleetAlertNotificationChannel,
   onUpsertFleetAlertPolicy,
@@ -189,6 +191,7 @@ export function AlertsPanel({
               onDelete={onDeleteFleetAlertPolicy}
               onDryRun={onDryRunFleetAlertPolicy}
               onEditorOpenChange={setPolicyEditorOpen}
+              onPolicyFocusChange={onPolicyFocusChange}
               onUpsert={onUpsertFleetAlertPolicy}
               editorMode="focused"
               policies={fleetAlertPolicies}

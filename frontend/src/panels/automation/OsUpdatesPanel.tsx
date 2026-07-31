@@ -40,6 +40,7 @@ import type {
   JobTargetRecord,
 } from "../../types";
 import { formatCompactTime, formatFullTime, shortHash } from "../../utils";
+import { pushHistoryEntry } from "../../historyEntryState";
 
 type OsUpdateRow = {
   agent: AgentView;
@@ -1265,5 +1266,5 @@ function setOsUpdateClientRoute(clientId: string | null) {
   } else {
     url.searchParams.delete("os_update_client");
   }
-  window.history.pushState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  pushHistoryEntry(`${url.pathname}${url.search}${url.hash}`);
 }

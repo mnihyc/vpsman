@@ -55,6 +55,10 @@ import type {
   JobDispatchPreset,
   JobDispatchPresetInput,
 } from "./jobDispatchPreset";
+import {
+  pushHistoryEntry,
+  replaceHistoryEntry,
+} from "./historyEntryState";
 import { retryableLazy } from "./lazyImport";
 
 type ReleaseRouteTarget = AgentView | string;
@@ -726,16 +730,31 @@ function writeConsoleRoute(
   const search = searchParams.toString();
   const url = `${window.location.pathname}${search ? `?${search}` : ""}${hash}`;
   if (mode === "replace") {
-    window.history.replaceState(null, "", url);
+    replaceHistoryEntry(url);
     return;
   }
-  window.history.pushState(null, "", url);
+  pushHistoryEntry(url);
 }
 
 function subpageRouteSegment(view: ActiveView, subpage: string): string {
   if (view === "Fleet" && subpage.startsWith("instance_detail:")) {
     const clientId = subpage.slice("instance_detail:".length).trim();
     return `instance-detail/${encodeURIComponent(clientId)}`;
+  }
+  if (view === "Jobs" && subpage.startsWith("history:job:")) {
+    const jobId = subpage.slice("history:job:".length).trim();
+    return `history/${encodeURIComponent(jobId)}`;
+  }
+  if (view === "Config" && subpage.startsWith("rules:id:")) {
+    const clientId = subpage.slice("rules:id:".length).trim();
+    return `rules/${encodeURIComponent(clientId)}`;
+  }
+  if (
+    view === "Observability" &&
+    subpage.startsWith("alerts:policy:")
+  ) {
+    const policyId = subpage.slice("alerts:policy:".length).trim();
+    return `alert-policy/${encodeURIComponent(policyId)}`;
   }
   const subpages = viewSubpages[view] ?? [];
   const known = subpages.find((entry) => entry.id === subpage);
@@ -753,6 +772,19 @@ function routeSegmentSubpage(
   const decoded = decodeRouteSegment(segment);
   if (view === "Fleet" && decoded === "instance-detail" && resourceSegment) {
     return `instance_detail:${decodeRouteSegment(resourceSegment)}`;
+  }
+  if (view === "Jobs" && decoded === "history" && resourceSegment) {
+    return `history:job:${decodeRouteSegment(resourceSegment)}`;
+  }
+  if (view === "Config" && decoded === "rules" && resourceSegment) {
+    return `rules:id:${decodeRouteSegment(resourceSegment)}`;
+  }
+  if (
+    view === "Observability" &&
+    decoded === "alert-policy" &&
+    resourceSegment
+  ) {
+    return `alerts:policy:${decodeRouteSegment(resourceSegment)}`;
   }
   const subpages = viewSubpages[view] ?? [];
   const known = subpages.find(
@@ -805,12 +837,15 @@ export function App() {
         }
       : {}),
   }));
+  const [sidebarFocusRequest, setSidebarFocusRequest] = useState(0);
+  const sidebarFocusRouteRef = useRef(
+    `${initialRouteRef.current?.view ?? "Home"}:${
+      initialRouteRef.current?.subpage.split(":")[0] ?? "overview"
+    }`,
+  );
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [workflowTargetIntent, setWorkflowTargetIntent] =
     useState<WorkflowTargetIntent | null>(null);
-  const [pendingJobDetailId, setPendingJobDetailId] = useState<string | null>(
-    null,
-  );
   const [jobDispatchPreset, setJobDispatchPreset] =
     useState<JobDispatchPreset | null>(null);
   const [networkPlanWorkflowIntent, setNetworkPlanWorkflowIntent] = useState<
@@ -1252,6 +1287,7 @@ export function App() {
           ...current,
           Home: "overview",
         }));
+        requestSidebarFocus("Home", "overview");
         writeConsoleRoute("Home", "overview", "replace");
         return;
       }
@@ -1260,6 +1296,7 @@ export function App() {
         ...current,
         [route.view]: route.subpage,
       }));
+      requestSidebarFocus(route.view, route.subpage);
       if (
         window.location.hash !== consoleRouteHash(route.view, route.subpage)
       ) {
@@ -1295,7 +1332,17 @@ export function App() {
       ...current,
       [view]: nextSubpage,
     }));
+    requestSidebarFocus(view, nextSubpage);
     writeConsoleRoute(view, nextSubpage);
+  }
+
+  function requestSidebarFocus(view: ActiveView, subpage: string) {
+    const routeKey = `${view}:${subpage.split(":")[0]}`;
+    if (sidebarFocusRouteRef.current === routeKey) {
+      return;
+    }
+    sidebarFocusRouteRef.current = routeKey;
+    setSidebarFocusRequest((current) => current + 1);
   }
 
   function selectSubpage(subpage: string) {
@@ -1305,6 +1352,7 @@ export function App() {
       ...current,
       [activeView]: nextSubpage,
     }));
+    requestSidebarFocus(activeView, nextSubpage);
     writeConsoleRoute(activeView, nextSubpage);
   }
 
@@ -1312,11 +1360,7 @@ export function App() {
     selectView("Automation", "rollouts");
     const url = new URL(window.location.href);
     url.searchParams.set("rollout_job", jobId);
-    window.history.replaceState(
-      null,
-      "",
-      `${url.pathname}${url.search}${url.hash}`,
-    );
+    replaceHistoryEntry(`${url.pathname}${url.search}${url.hash}`);
   }
 
   function selectReleaseDestination(
@@ -1380,8 +1424,7 @@ export function App() {
   }
 
   function openJobEvidence(jobId: string) {
-    setPendingJobDetailId(jobId);
-    selectView("Jobs", "history");
+    selectView("Jobs", `history:job:${jobId}`);
   }
 
   function openJobDetails(jobId: string) {
@@ -1389,7 +1432,6 @@ export function App() {
   }
 
   function openJobHistory() {
-    setPendingJobDetailId(null);
     selectView("Jobs", "history");
   }
 
@@ -2020,6 +2062,12 @@ export function App() {
         }
         onDryRunFleetAlertPolicy={dashboard.dryRunFleetAlertPolicy}
         onOpenFleetAlerts={() => selectView("Fleet", "alerts")}
+        onPolicyFocusChange={(policyId) =>
+          selectView(
+            "Observability",
+            policyId ? `alerts:policy:${policyId}` : "alerts",
+          )
+        }
         onProcessFleetAlertNotifications={
           dashboard.processFleetAlertNotifications
         }
@@ -2246,14 +2294,12 @@ export function App() {
         onOpenRemoteOperations={(subpage) =>
           selectView("Remote Operations", subpage)
         }
-        onSelectedJobDetailsOpened={() => setPendingJobDetailId(null)}
         onRefresh={dashboard.loadJobs}
         onResolveTargets={dashboard.resolveJobTargets}
         onRejectJobApproval={dashboard.rejectJobApproval}
         onSelectSubpage={(subpage) => selectReleaseDestination("Jobs", subpage)}
         onDeleteCommandTemplate={dashboard.deleteCommandTemplate}
         onUpsertCommandTemplate={dashboard.upsertCommandTemplate}
-        pendingSelectedJobId={pendingJobDetailId}
         privilegeMaterial={privilegeMaterial}
         setPrivilegeMaterial={setPrivilegeMaterial}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
@@ -2738,7 +2784,7 @@ export function App() {
           />
         );
       }
-      return renderJobPanel(jobSubpage(activeSubpage));
+      return renderJobPanel(activeSubpage);
     }
     if (activeView === "Automation") {
       if (activeSubpage === "rollouts") return renderRolloutsPanel();
@@ -2911,6 +2957,7 @@ export function App() {
           operatorPreferencesReady={dashboard.operator !== null}
           privilegeUnlocked={privilegeMaterial !== null}
           savedFleetViews={fleetViews.savedViews}
+          sidebarFocusRequest={sidebarFocusRequest}
           summary={shellSummary}
           summaryScopeLabel={summaryScopeLabel}
           wsState={dashboard.wsState}
@@ -2989,6 +3036,9 @@ function normalizeFleetReleaseSubpage(subpage: string) {
 }
 
 function configReleaseSubpage(subpage: string) {
+  if (subpage.startsWith("rules:id:")) {
+    return subpage;
+  }
   if (
     ["overview", "sources", "per_vps", "bulk_patch", "rules"].includes(
       subpage,
@@ -3003,6 +3053,9 @@ function jobReleaseDestination(subpage: string): {
   view: ActiveView;
   subpage: string;
 } {
+  if (subpage.startsWith("history:job:")) {
+    return { view: "Jobs", subpage };
+  }
   if (
     [
       "history",
@@ -3175,12 +3228,6 @@ function remoteOperationsSubpage(subpage: string) {
   )
     return subpage;
   return "terminal";
-}
-
-function jobSubpage(subpage: string) {
-  if (["approvals", "dispatch", "scheduled_runs"].includes(subpage))
-    return subpage;
-  return "history";
 }
 
 function networkSubpage(subpage: string) {
