@@ -55,7 +55,11 @@ export function BackupPolicyPruneForm({
           <select aria-label="Backup policy prune scope" onChange={(event) => onScheduleIdChange(event.target.value)} value={scheduleId}>
             <option value="">All policies</option>
             {policies.map((policy) => (
-              <option key={policy.schedule_id} value={policy.schedule_id}>
+              <option
+                key={policy.schedule_id}
+                title={policy.schedule_id}
+                value={policy.schedule_id}
+              >
                 {policy.name} ({shortId(policy.schedule_id)})
               </option>
             ))}
@@ -77,7 +81,7 @@ export function BackupPolicyPruneForm({
               : "Submits a fresh dry-run preview first, freezes its preview hash, then opens an apply confirmation."}
           </span>
           {result && totals && (
-            <small>
+            <small title={result.preview_hash}>
               Last preview {shortHash(result.preview_hash)} reviewed {totals.matched} matched row{totals.matched === 1 ? "" : "s"}
               {result.dry_run ? "" : `; ${totals.pruned} pruned`}.
             </small>

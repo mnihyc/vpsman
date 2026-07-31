@@ -1,5 +1,14 @@
-import { History, KeyRound, Link2, LogOut, TerminalSquare } from "lucide-react";
+import {
+  History,
+  KeyRound,
+  Link2,
+  LogOut,
+  TerminalSquare,
+  UserX,
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { ActionFeedback } from "../../components/ActionFeedback";
+import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
@@ -17,6 +26,17 @@ import type {
   OperatorSessionRecord,
 } from "../../types";
 import type { TerminalSessionRecord } from "../../typesTerminal";
+import {
+  buildPrivilegeAssertion,
+  canonicalDbPrivilegeIntent,
+  operatorDbPayloadHashHex,
+  type PrivilegeAssertion,
+  type PrivilegeMaterial,
+} from "../../privilege";
+import {
+  useReviewGenerationGuard,
+  waitForReviewRender,
+} from "../../hooks/useReviewGenerationGuard";
 import {
   formatCompactTime,
   formatFullTime,
@@ -57,12 +77,15 @@ export function SessionEvidencePanel({
   jobsTruncated,
   loading,
   onClearSession,
+  onOpenPrivilegeUnlock,
   onRefresh,
+  onRevokeOperatorSession,
   operator,
   operatorAuthEvents,
   operatorAuthEventsTruncated,
   operatorSessions,
   operatorSessionsTruncated,
+  privilegeMaterial,
   terminalSessions,
   terminalSessionsTruncated,
 }: {
@@ -73,12 +96,19 @@ export function SessionEvidencePanel({
   jobsTruncated: boolean;
   loading: boolean;
   onClearSession: () => void;
+  onOpenPrivilegeUnlock: () => void;
   onRefresh: () => void;
+  onRevokeOperatorSession: (
+    sessionId: string,
+    adminRiskAcknowledged: boolean,
+    privilegeAssertion: PrivilegeAssertion,
+  ) => Promise<void>;
   operator: OperatorView | null;
   operatorAuthEvents: OperatorAuthEventRecord[];
   operatorAuthEventsTruncated: boolean;
   operatorSessions: OperatorSessionRecord[];
   operatorSessionsTruncated: boolean;
+  privilegeMaterial: PrivilegeMaterial | null;
   terminalSessions: TerminalSessionRecord[];
   terminalSessionsTruncated: boolean;
 }) {
@@ -192,8 +222,12 @@ export function SessionEvidencePanel({
         sortValue: (row) => terminalActorLabel(row, authEventBySessionId),
         cell: (row) => (
           <span className="historyPrimary">
-            <strong>{terminalActorLabel(row, authEventBySessionId)}</strong>
-            <small>{terminalActorDetail(row, authEventBySessionId)}</small>
+            <strong title={row.job?.actor_id ?? undefined}>
+              {terminalActorLabel(row, authEventBySessionId)}
+            </strong>
+            <small title={terminalActorEvidenceTitle(row)}>
+              {terminalActorDetail(row, authEventBySessionId)}
+            </small>
           </span>
         ),
       },
@@ -347,7 +381,7 @@ export function SessionEvidencePanel({
           <h2>Session evidence</h2>
           <small>
             {canInspectOperatorAuthority
-              ? "Read-only terminal, transcript, operator-session, and authentication evidence. Sign out ends only this browser session."
+              ? "Terminal and transcript evidence with a complete, revocable bearer-session inventory. Sign out ends only this browser session."
               : "Read-only terminal, transcript, and audit evidence. Sign out ends only this browser session; operator authority correlation is admin-only."}
           </small>
         </span>
@@ -535,8 +569,11 @@ export function SessionEvidencePanel({
       <OperatorSessionEvidence
         authEventBySessionId={authEventBySessionId}
         canInspectOperatorAuthority={canInspectOperatorAuthority}
+        onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+        onRevokeOperatorSession={onRevokeOperatorSession}
         operatorSessions={operatorSessions}
         operatorSessionsTruncated={operatorSessionsTruncated}
+        privilegeMaterial={privilegeMaterial}
         stateById={operatorStateById}
       />
     </section>
@@ -578,7 +615,7 @@ function SelectedSessionEvidence({
       <div className="consoleDetailPanelHeader">
         <span>
           <strong>Selected terminal proof</strong>
-          <small>
+          <small title={record.session.session_id}>
             {agentNameById.get(record.session.client_id) ??
               record.session.client_id}{" "}
             · {shortId(record.session.session_id)}
@@ -589,7 +626,9 @@ function SelectedSessionEvidence({
       <div className="consoleInlineDetailGrid">
         <span>
           <strong>Actor</strong>
-          <span>{terminalActorLabel(record, authEventBySessionId)}</span>
+          <span title={record.job?.actor_id ?? undefined}>
+            {terminalActorLabel(record, authEventBySessionId)}
+          </span>
         </span>
         <span>
           <strong>Target</strong>
@@ -660,10 +699,10 @@ function SelectedSessionEvidence({
                 key={audit.id}
               >
                 <strong>{audit.action}</strong>
-                <span title={audit.target}>
+                <span title={terminalAuditTargetTitle(audit)}>
                   {terminalAuditTargetLabel(audit)}
                 </span>
-                <small>
+                <small title={audit.command_hash ?? undefined}>
                   {audit.command_hash
                     ? shortHash(audit.command_hash)
                     : "no hash"}
@@ -715,7 +754,7 @@ function SelectedSessionEvidence({
         >
           <div className="dashboardWidgetHeader">
             <strong>Operator auth evidence</strong>
-            <small>
+            <small title={operatorSessionId ?? undefined}>
               {operatorSessionId
                 ? shortId(operatorSessionId)
                 : auditCorrelationTruncated
@@ -790,16 +829,254 @@ function SelectedSessionEvidence({
 function OperatorSessionEvidence({
   authEventBySessionId,
   canInspectOperatorAuthority,
+  onOpenPrivilegeUnlock,
+  onRevokeOperatorSession,
   operatorSessions,
   operatorSessionsTruncated,
+  privilegeMaterial,
   stateById,
 }: {
   authEventBySessionId: Map<string, OperatorAuthEventRecord>;
   canInspectOperatorAuthority: boolean;
+  onOpenPrivilegeUnlock: () => void;
+  onRevokeOperatorSession: (
+    sessionId: string,
+    adminRiskAcknowledged: boolean,
+    privilegeAssertion: PrivilegeAssertion,
+  ) => Promise<void>;
   operatorSessions: OperatorSessionRecord[];
   operatorSessionsTruncated: boolean;
+  privilegeMaterial: PrivilegeMaterial | null;
   stateById: Map<string, OperatorSessionEvidenceState>;
 }) {
+  const [pendingRevoke, setPendingRevoke] = useState<{
+    adminRisk: boolean;
+    privileges: Record<
+      string,
+      { payloadHashHex: string; privilegeAssertion: PrivilegeAssertion }
+    >;
+    sessions: OperatorSessionRecord[];
+  } | null>(null);
+  const [reviewPending, setReviewPending] = useState(false);
+  const [revokePending, setRevokePending] = useState(false);
+  const [feedback, setFeedback] = useState<{
+    message: string;
+    tone: "danger" | "progress" | "success";
+  } | null>(null);
+  const {
+    captureReviewGeneration,
+    invalidateReviewGeneration,
+    isReviewGenerationCurrent,
+  } = useReviewGenerationGuard();
+  const columns = useMemo<ConsoleDataGridColumn<OperatorSessionRecord>[]>(
+    () => [
+      {
+        id: "operator",
+        header: "Operator",
+        cell: (session) => (
+          <span className="historyPrimary">
+            <strong>{session.operator_username}</strong>
+            <small title={session.id}>{shortId(session.id)}</small>
+          </span>
+        ),
+        searchValue: (session) =>
+          `${session.operator_username} ${session.id}`,
+        sortValue: (session) => session.operator_username,
+      },
+      {
+        id: "role",
+        header: "Role",
+        cell: (session) => (
+          <span
+            className={`status ${session.operator_role === "admin" ? "warn" : "neutral"}`}
+          >
+            {session.operator_role}
+          </span>
+        ),
+        searchValue: (session) => session.operator_role,
+      },
+      {
+        id: "state",
+        header: "State",
+        cell: (session) => {
+          const state =
+            stateById.get(session.id) ??
+            operatorSessionEvidenceState(session);
+          return (
+            <span className={`status ${state.tone}`} title={state.detail}>
+              {state.label}
+            </span>
+          );
+        },
+        searchValue: (session) => {
+          const state =
+            stateById.get(session.id) ??
+            operatorSessionEvidenceState(session);
+          return `${state.label} ${state.detail}`;
+        },
+      },
+      {
+        id: "created",
+        header: "Created",
+        cell: (session) => (
+          <time
+            dateTime={session.created_at}
+            title={formatFullTime(session.created_at)}
+          >
+            {formatCompactTime(session.created_at)}
+          </time>
+        ),
+        sortValue: (session) => session.created_at,
+      },
+      {
+        id: "access_expiry",
+        header: "Access expires",
+        cell: (session) => (
+          <time
+            dateTime={session.expires_at}
+            title={formatFullTime(session.expires_at)}
+          >
+            {formatCompactTime(session.expires_at)}
+          </time>
+        ),
+        sortValue: (session) => session.expires_at,
+      },
+      {
+        id: "refresh_expiry",
+        header: "Refresh expires",
+        cell: (session) => (
+          <time
+            dateTime={session.refresh_expires_at}
+            title={formatFullTime(session.refresh_expires_at)}
+          >
+            {formatCompactTime(session.refresh_expires_at)}
+          </time>
+        ),
+        sortValue: (session) => session.refresh_expires_at,
+      },
+      {
+        id: "source",
+        header: "Authentication",
+        cell: (session) =>
+          formatAuthEvidenceSource(authEventBySessionId.get(session.id)),
+        searchValue: (session) =>
+          formatAuthEvidenceSource(authEventBySessionId.get(session.id)),
+      },
+    ],
+    [authEventBySessionId, stateById],
+  );
+
+  useEffect(() => {
+    invalidateReviewGeneration();
+    setPendingRevoke(null);
+  }, [invalidateReviewGeneration, operatorSessions]);
+
+  async function requestRevoke(rows: OperatorSessionRecord[]) {
+    const sessions = rows.filter(
+      (session) => !session.current && isOperatorSessionRevokable(session),
+    );
+    if (sessions.length === 0) {
+      setFeedback({
+        message:
+          "Select at least one active, non-current bearer session to revoke.",
+        tone: "danger",
+      });
+      return;
+    }
+    if (!privilegeMaterial) {
+      setFeedback({
+        message: "Unlock privilege to review session revocation.",
+        tone: "danger",
+      });
+      onOpenPrivilegeUnlock();
+      return;
+    }
+    const reviewGeneration = captureReviewGeneration();
+    const adminRisk = sessions.some(
+      (session) => session.operator_role === "admin",
+    );
+    setReviewPending(true);
+    setFeedback({
+      message: "Preparing session revoke review",
+      tone: "progress",
+    });
+    try {
+      await waitForReviewRender();
+      const privileges = Object.fromEntries(
+        await Promise.all(
+          sessions.map(async (session) => {
+            const payloadHashHex = await operatorDbPayloadHashHex({
+              action: "operator_session.revoke",
+              target: session.id,
+              adminRiskAcknowledged: adminRisk,
+            });
+            const privilegeAssertion = await buildPrivilegeAssertion({
+              intent: canonicalDbPrivilegeIntent({
+                action: "operator_session.revoke",
+                confirmed: true,
+                payloadHash: payloadHashHex,
+                resolvedTargets: [session.id],
+                target: session.id,
+              }),
+              privilegeMaterial,
+            });
+            return [session.id, { payloadHashHex, privilegeAssertion }];
+          }),
+        ),
+      );
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
+      setPendingRevoke({ adminRisk, privileges, sessions });
+      setFeedback(null);
+    } catch (error) {
+      if (isReviewGenerationCurrent(reviewGeneration)) {
+        setFeedback({
+          message:
+            error instanceof Error
+              ? error.message
+              : "Session revoke review failed",
+          tone: "danger",
+        });
+      }
+    } finally {
+      if (isReviewGenerationCurrent(reviewGeneration)) {
+        setReviewPending(false);
+      }
+    }
+  }
+
+  async function confirmRevoke() {
+    if (!pendingRevoke) {
+      return;
+    }
+    setRevokePending(true);
+    setFeedback({ message: "Revoking sessions", tone: "progress" });
+    try {
+      for (const session of pendingRevoke.sessions) {
+        await onRevokeOperatorSession(
+          session.id,
+          pendingRevoke.adminRisk,
+          pendingRevoke.privileges[session.id].privilegeAssertion,
+        );
+      }
+      const count = pendingRevoke.sessions.length;
+      setPendingRevoke(null);
+      setFeedback({
+        message: `Revoked ${count} bearer session${count === 1 ? "" : "s"}.`,
+        tone: "success",
+      });
+    } catch (error) {
+      setFeedback({
+        message:
+          error instanceof Error ? error.message : "Session revoke failed",
+        tone: "danger",
+      });
+    } finally {
+      setRevokePending(false);
+    }
+  }
+
   return (
     <section
       className="dashboardWidgetTable operatorSessionEvidenceTable"
@@ -812,7 +1089,7 @@ function OperatorSessionEvidence({
             ? `${formatLowerBoundCount(
                 operatorSessions.length,
                 operatorSessionsTruncated,
-              )}${operatorSessionsTruncated ? " loaded" : ""} bearer session${operatorSessions.length === 1 ? "" : "s"} · created and refresh expiry shown`
+              )}${operatorSessionsTruncated ? " loaded" : ""} bearer session${operatorSessions.length === 1 ? "" : "s"} · select active non-current sessions to revoke`
             : "Admin only"}
         </small>
       </div>
@@ -821,38 +1098,140 @@ function OperatorSessionEvidence({
           Bearer-session inventory and operator authentication records are
           visible to admins only. No empty-state conclusion is inferred.
         </div>
-      ) : operatorSessions.length > 0 ? (
-        operatorSessions.slice(0, 6).map((session) => {
-          const authEvent = authEventBySessionId.get(session.id);
-          const state =
-            stateById.get(session.id) ?? operatorSessionEvidenceState(session);
-          return (
-            <div
-              className="dashboardWidgetRow operatorSessionEvidenceRow"
-              key={session.id}
-            >
-              <strong>{session.operator_username}</strong>
-              <span>{session.operator_role}</span>
-              <small className={`status ${state.tone}`} title={state.detail}>
-                {state.label}
-              </small>
-              <small title={formatFullTime(session.created_at)}>
-                Created {formatCompactTime(session.created_at)}
-              </small>
-              <small title={formatFullTime(session.refresh_expires_at)}>
-                Refresh expiry {formatCompactTime(session.refresh_expires_at)}
-              </small>
-              <small>{formatAuthEvidenceSource(authEvent)}</small>
-            </div>
-          );
-        })
       ) : (
-        <div className="dashboardWidgetEmpty">
-          No bearer session evidence returned by the operator-session API.
-        </div>
+        <>
+          <ActionFeedback
+            className="localActionFeedback"
+            message={feedback?.message ?? null}
+            tone={feedback?.tone}
+          />
+          <ConsoleDataGrid
+            actions={[
+              {
+                label: "Revoke",
+                description: (rows) =>
+                  rows.length === 1
+                    ? `Revoke the bearer session for ${rows[0].operator_username}.`
+                    : `Revoke ${rows.length} selected bearer sessions.`,
+                disabled: (rows) =>
+                  reviewPending ||
+                  revokePending ||
+                  rows.length === 0 ||
+                  rows.some(
+                    (session) =>
+                      session.current ||
+                      !isOperatorSessionRevokable(session),
+                  ),
+                icon: <UserX size={14} />,
+                onSelect: (rows) => void requestRevoke(rows),
+                tone: "danger",
+              },
+            ]}
+            columns={columns}
+            defaultPageSize={12}
+            empty="No bearer session evidence returned by the operator-session API."
+            expandOnRowClick
+            getRowId={(session) => session.id}
+            itemLabel="sessions"
+            renderExpandedRow={(session) => (
+              <div className="consoleInlineDetailGrid">
+                <span>
+                  <strong>Session ID</strong>
+                  <span className="monoValue">{session.id}</span>
+                </span>
+                <span>
+                  <strong>Operator ID</strong>
+                  <span className="monoValue">{session.operator_id}</span>
+                </span>
+                <span>
+                  <strong>Authentication source</strong>
+                  <span>
+                    {formatAuthEvidenceSource(
+                      authEventBySessionId.get(session.id),
+                    )}
+                  </span>
+                </span>
+                <span>
+                  <strong>Remote IP</strong>
+                  <span>
+                    {formatAuthRemoteIp(
+                      authEventBySessionId.get(session.id) ?? null,
+                    )}
+                  </span>
+                </span>
+                <span>
+                  <strong>User agent</strong>
+                  <span>
+                    {formatAuthUserAgent(
+                      authEventBySessionId.get(session.id) ?? null,
+                    )}
+                  </span>
+                </span>
+                <span>
+                  <strong>Current browser</strong>
+                  <span>{session.current ? "Yes" : "No"}</span>
+                </span>
+              </div>
+            )}
+            rows={operatorSessions}
+            rowsTruncated={operatorSessionsTruncated}
+            searchPlaceholder="Search operator, role, state, session, or authentication evidence"
+            singleExpandedRow
+            storageKey="vpsman.audit.operatorSessions"
+            title="Operator bearer sessions"
+          />
+          <ConfirmationPrompt
+            confirmLabel={
+              (pendingRevoke?.sessions.length ?? 0) === 1
+                ? "Revoke session"
+                : "Revoke sessions"
+            }
+            detail={
+              pendingRevoke?.adminRisk
+                ? "This revokes one or more admin bearer sessions. The current browser session cannot be selected here."
+                : "This revokes the selected non-current bearer sessions."
+            }
+            items={[
+              {
+                label: "Sessions",
+                value: pendingRevoke?.sessions.length ?? 0,
+              },
+              {
+                label: "Operators",
+                value:
+                  pendingRevoke?.sessions
+                    .map((session) => session.operator_username)
+                    .join(", ") ?? "-",
+              },
+              {
+                label: "Admin sessions",
+                value:
+                  pendingRevoke?.sessions.filter(
+                    (session) => session.operator_role === "admin",
+                  ).length ?? 0,
+              },
+            ]}
+            onCancel={() => setPendingRevoke(null)}
+            onConfirm={() => void confirmRevoke()}
+            open={pendingRevoke !== null}
+            pending={revokePending}
+            title={
+              pendingRevoke?.adminRisk
+                ? "Confirm admin session revoke"
+                : "Confirm session revoke"
+            }
+            tone="danger"
+          />
+        </>
       )}
     </section>
   );
+}
+
+function isOperatorSessionRevokable(
+  session: OperatorSessionRecord,
+): boolean {
+  return !session.revoked && !isPast(session.refresh_expires_at);
 }
 
 function terminalEvidenceState(
@@ -1035,6 +1414,16 @@ function terminalActorDetail(
   return "operator source not reported";
 }
 
+function terminalActorEvidenceTitle(
+  record: TerminalEvidenceRecord,
+): string | undefined {
+  const operatorSessionId = terminalOperatorSessionId(record.audits);
+  if (operatorSessionId) {
+    return operatorSessionId;
+  }
+  return record.job?.actor_id ?? undefined;
+}
+
 function terminalOperatorSessionId(audits: AuditLogRecord[]): string | null {
   for (const audit of audits) {
     const value = metadataText(audit.metadata, [
@@ -1062,6 +1451,14 @@ function terminalAuditTargetLabel(audit: AuditLogRecord): string {
       .join(" · ");
   }
   return audit.target.replace(/^terminal:/, "");
+}
+
+function terminalAuditTargetTitle(audit: AuditLogRecord): string {
+  const clientId = metadataText(audit.metadata, ["client_id"]);
+  const terminalSessionId = metadataText(audit.metadata, [
+    "terminal_session_id",
+  ]);
+  return [clientId, terminalSessionId].filter(Boolean).join(" · ") || audit.target;
 }
 
 function terminalStartedAt(record: TerminalEvidenceRecord): string | null {

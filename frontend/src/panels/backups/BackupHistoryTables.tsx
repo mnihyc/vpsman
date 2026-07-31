@@ -560,7 +560,9 @@ function BackupRequestsTable({
       sortValue: (backup) => backup.payload_hash,
       searchValue: (backup) => backup.payload_hash,
       cell: (backup) => (
-        <span className="monoValue">{shortHash(backup.payload_hash)}</span>
+        <span className="monoValue" title={backup.payload_hash}>
+          {shortHash(backup.payload_hash)}
+        </span>
       ),
     },
   ];
@@ -598,17 +600,17 @@ function BackupRequestsTable({
             <div className="gridDetailLine">
               <strong>{clientLabel(backup.client_id)}</strong>
               <span title={backup.id}>request {shortId(backup.id)}</span>
-              <span>
+              <span title={backup.actor_id ?? undefined}>
                 {backup.actor_id
                   ? `actor ${shortId(backup.actor_id)}`
                   : "requester not reported"}
               </span>
-              <span>
+              <span title={backup.source_job_id ?? undefined}>
                 {backup.source_job_id
                   ? `job ${shortId(backup.source_job_id)}`
                   : "source job not reported"}
               </span>
-              <span>
+              <span title={backup.source_schedule_id ?? undefined}>
                 {backup.source_schedule_id
                   ? `schedule ${shortId(backup.source_schedule_id)}`
                   : "manual or source not reported"}
@@ -619,7 +621,9 @@ function BackupRequestsTable({
                   ? `${formatBytes(artifact.size_bytes)} package`
                   : "artifact size not reported"}
               </span>
-              <span>{shortHash(backup.payload_hash)}</span>
+              <span title={backup.payload_hash}>
+                {shortHash(backup.payload_hash)}
+              </span>
               <span>{formatTime(backup.created_at)}</span>
               {backup.note && <span>{backup.note}</span>}
             </div>
@@ -950,7 +954,7 @@ function RestoreSourcesTable({
                   ? shortId(backup.artifact_id)
                   : "No artifact"}
             </strong>
-            <small>
+            <small title={backup.id}>
               {clientLabel(backup.client_id)} · request {shortId(backup.id)}
             </small>
           </span>
@@ -1028,7 +1032,7 @@ function RestoreSourcesTable({
           <strong>
             {restoreSourceScopeLabel(backup.include_config, backup.paths)}
           </strong>
-          <small>
+          <small title={backup.paths.join(", ") || undefined}>
             {backup.paths.length > 0
               ? backup.paths.slice(0, 2).join(", ")
               : backup.include_config
@@ -1192,8 +1196,10 @@ function MigrationLinksTable({
       searchValue: (link) => `${link.id} ${link.restore_plan_id}`,
       cell: (link) => (
         <span className="historyPrimary">
-          <strong>{shortId(link.id)}</strong>
-          <small>draft {shortId(link.restore_plan_id)}</small>
+          <strong title={link.id}>{shortId(link.id)}</strong>
+          <small title={link.restore_plan_id}>
+            draft {shortId(link.restore_plan_id)}
+          </small>
         </span>
       ),
     },

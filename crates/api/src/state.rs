@@ -369,46 +369,41 @@ impl AppState {
     pub(crate) fn fleet_alert_policy(&self) -> FleetAlertPolicy {
         let mut policy = self.fleet_alert_policy.clone();
         if let Some(suite) = self.current_suite_config() {
-            if env_absent("VPSMAN_ALERT_MEMORY_AVAILABLE_WARNING_RATIO") {
-                if let Some(value) = suite.api.alert_memory_available_warning_ratio {
-                    policy.memory_available_warning_ratio = value;
+            if env_absent("VPSMAN_ALERT_MEMORY_AVAILABLE_WARNING_RATIO")
+                && env_absent("VPSMAN_ALERT_MEMORY_AVAILABLE_CRITICAL_RATIO")
+            {
+                if let (Some(warning), Some(critical)) = (
+                    suite.api.alert_memory_available_warning_ratio,
+                    suite.api.alert_memory_available_critical_ratio,
+                ) {
+                    policy.memory_available_warning_ratio = warning;
+                    policy.memory_available_critical_ratio = critical;
                 }
             }
-            if env_absent("VPSMAN_ALERT_MEMORY_AVAILABLE_CRITICAL_RATIO") {
-                if let Some(value) = suite.api.alert_memory_available_critical_ratio {
-                    policy.memory_available_critical_ratio = value;
+            if env_absent("VPSMAN_ALERT_DISK_AVAILABLE_WARNING_RATIO")
+                && env_absent("VPSMAN_ALERT_DISK_AVAILABLE_CRITICAL_RATIO")
+            {
+                if let (Some(warning), Some(critical)) = (
+                    suite.api.alert_disk_available_warning_ratio,
+                    suite.api.alert_disk_available_critical_ratio,
+                ) {
+                    policy.disk_available_warning_ratio = warning;
+                    policy.disk_available_critical_ratio = critical;
                 }
             }
-            if env_absent("VPSMAN_ALERT_DISK_AVAILABLE_WARNING_RATIO") {
-                if let Some(value) = suite.api.alert_disk_available_warning_ratio {
-                    policy.disk_available_warning_ratio = value;
-                }
-            }
-            if env_absent("VPSMAN_ALERT_DISK_AVAILABLE_CRITICAL_RATIO") {
-                if let Some(value) = suite.api.alert_disk_available_critical_ratio {
-                    policy.disk_available_critical_ratio = value;
-                }
-            }
-            if env_absent("VPSMAN_ALERT_CPU_LOAD_WARNING") {
-                if let Some(value) = suite.api.alert_cpu_load_warning {
-                    policy.cpu_load_warning = value;
-                }
-            }
-            if env_absent("VPSMAN_ALERT_CPU_LOAD_CRITICAL") {
-                if let Some(value) = suite.api.alert_cpu_load_critical {
-                    policy.cpu_load_critical = value;
+            if env_absent("VPSMAN_ALERT_CPU_LOAD_WARNING")
+                && env_absent("VPSMAN_ALERT_CPU_LOAD_CRITICAL")
+            {
+                if let (Some(warning), Some(critical)) = (
+                    suite.api.alert_cpu_load_warning,
+                    suite.api.alert_cpu_load_critical,
+                ) {
+                    policy.cpu_load_warning = warning;
+                    policy.cpu_load_critical = critical;
                 }
             }
         }
-        FleetAlertPolicy::new(
-            policy.memory_available_warning_ratio,
-            policy.memory_available_critical_ratio,
-            policy.disk_available_warning_ratio,
-            policy.disk_available_critical_ratio,
-            policy.cpu_load_warning,
-            policy.cpu_load_critical,
-        )
-        .unwrap_or_else(|_| self.fleet_alert_policy.clone())
+        policy
     }
 }
 

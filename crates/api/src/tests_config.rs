@@ -1233,6 +1233,13 @@ fn app_state_reloads_suite_config_hot_fields_from_file() {
         state.refresh_gateway_dispatch_timeouts();
         assert_eq!(state.gateway.test_timeouts().read.as_secs(), 29);
 
+        std::fs::write(&path, "version = 1\n").unwrap();
+        let policy = state.fleet_alert_policy();
+        assert_eq!(policy.memory_available_warning_ratio, 0.20);
+        assert_eq!(policy.memory_available_critical_ratio, 0.10);
+        assert_eq!(policy.cpu_load_warning, 2.0);
+        assert_eq!(policy.cpu_load_critical, 4.0);
+
         let _ = std::fs::remove_file(path);
     });
 }

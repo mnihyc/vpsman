@@ -2153,12 +2153,14 @@ export function JobDispatchPanel({
         )}
       </form>
 
-      <PrivilegeVaultBox
-        lastPayloadHash={lastPayloadHash}
-        onOpenUnlock={onOpenPrivilegeUnlock}
-        onPrivilegeMaterialChange={setPrivilegeMaterial}
-        privilegeMaterial={privilegeMaterial}
-      />
+      {!privilegeMaterial && (
+        <PrivilegeVaultBox
+          lastPayloadHash={lastPayloadHash}
+          onOpenUnlock={onOpenPrivilegeUnlock}
+          onPrivilegeMaterialChange={setPrivilegeMaterial}
+          privilegeMaterial={privilegeMaterial}
+        />
+      )}
       <PrivilegeLockPrompt
         onCancel={() => setLockPromptOpen(false)}
         onConfirm={() => void lockPrivilege()}

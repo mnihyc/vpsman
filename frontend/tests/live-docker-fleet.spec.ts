@@ -80,7 +80,8 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   await expect(
     page.getByRole("heading", { name: "Needs attention" }),
   ).toBeVisible();
-  await expect(page.getByLabel("Home telemetry widgets")).toHaveCount(0);
+  await expect(page.getByLabel("Home fleet scan")).toBeVisible();
+  await expect(page.getByLabel("Home telemetry widgets")).toBeVisible();
   await expectCleanLayout(page);
   await maybeExtendedScreenshot(
     page,
@@ -204,26 +205,39 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   await expect(
     page.getByRole("menuitem", { name: "Copy client IDs" }),
   ).toBeVisible();
+  const actionMenu = page.locator(".consoleMenu:visible").last();
+  const actionMenuBox = await actionMenu.boundingBox();
+  const viewport = page.viewportSize();
+  expect(actionMenuBox).not.toBeNull();
+  expect(viewport).not.toBeNull();
+  expect((actionMenuBox?.y ?? 0) + (actionMenuBox?.height ?? 0)).toBeLessThanOrEqual(
+    (viewport?.height ?? 0) - 12,
+  );
+  const deletionAction = page.getByRole("menuitem", {
+    name: "Review VPS deletion",
+  });
+  await deletionAction.scrollIntoViewIfNeeded();
+  await expect(deletionAction).toBeVisible();
   await maybeExtendedScreenshot(
     page,
     testInfo.project.name,
     "fleet-action-menu-open",
-    "Bulk action menu opened after selecting the provider-filtered VPS rows.",
+    "Scrollable bulk action menu showing the bounded destructive action after selecting provider-filtered VPS rows.",
   );
   await page.keyboard.press("Escape");
   await gridSearch.fill("df-alpha-US-01");
   await expect(grid.getByText(`1 of ${expectedTotal} instances`)).toBeVisible();
   await expect(firstRow).toBeVisible();
-  await firstRow.dispatchEvent("contextmenu", {
-    bubbles: true,
-    button: 2,
-    buttons: 2,
-    cancelable: true,
-  });
+  await firstRow.click({ button: "right" });
   await expect(page.getByText("Row actions")).toBeVisible();
   await expect(
     page.getByRole("menuitem", { name: "Open detail" }),
   ).toBeVisible();
+  const rowBox = await firstRow.boundingBox();
+  const contextMenuBox = await page.locator(".consoleMenu:visible").boundingBox();
+  expect(rowBox).not.toBeNull();
+  expect(contextMenuBox).not.toBeNull();
+  expect(contextMenuBox?.x ?? 0).toBeGreaterThanOrEqual(rowBox?.x ?? 0);
   await maybeExtendedScreenshot(
     page,
     testInfo.project.name,
@@ -819,11 +833,12 @@ async function exerciseExpressionWebhooks(page: Page, projectName: string) {
     })
     .getByRole("button", { name: "Create rule" })
     .click();
-  await expect(
-    webhooks.locator(".fleetPolicyActionFeedback.actionFeedbackSuccess", {
-      hasText: "saved docker-fleet-q2-capacity",
-    }),
-  ).toBeVisible({ timeout: 30_000 });
+  const savedFeedback = webhooks.locator(
+    ".webhookEditorActionFeedback.actionFeedbackSuccess",
+    { hasText: "saved docker-fleet-q2-capacity" },
+  );
+  await expect(savedFeedback).toBeVisible({ timeout: 30_000 });
+  await savedFeedback.scrollIntoViewIfNeeded();
   await expect(webhooks).toContainText("docker-fleet-q2-capacity", {
     timeout: 30_000,
   });
@@ -831,7 +846,7 @@ async function exerciseExpressionWebhooks(page: Page, projectName: string) {
     page,
     projectName,
     "webhook-rule-saved",
-    "Webhook rule creation result showing saved status and the new rule in context.",
+    "Webhook editor footer showing saved status and the transition from Create rule to Update rule.",
   );
 
   await detail.getByRole("button", { name: "Test" }).click();
@@ -847,6 +862,8 @@ async function exerciseExpressionWebhooks(page: Page, projectName: string) {
   await expect(samplePreview).toContainText("df-alpha-US-01", {
     timeout: 30_000,
   });
+  await expect(samplePreview).toContainText("dry run");
+  await expect(samplePreview).not.toContainText("matched_dry_run");
   await maybeExtendedScreenshot(
     page,
     projectName,
@@ -913,11 +930,12 @@ async function exerciseAlertPolicyReview(page: Page, projectName: string) {
     .first();
   await expect(row).toBeVisible();
   await row.getByLabel("Expand Policy groups row").click();
-  await expect(
-    grid.locator(".gridExpandedRow", {
-      hasText: "docker-edge-resource-alerts",
-    }),
-  ).toBeVisible();
+  const expandedPolicy = grid.locator(".gridExpandedRow", {
+    hasText: "docker-edge-resource-alerts",
+  });
+  await expect(expandedPolicy).toBeVisible();
+  await expect(expandedPolicy).toHaveCSS("opacity", "1");
+  await expandedPolicy.scrollIntoViewIfNeeded();
   await maybeExtendedScreenshot(
     page,
     projectName,
@@ -929,6 +947,10 @@ async function exerciseAlertPolicyReview(page: Page, projectName: string) {
   await forceClick(grid.getByRole("button", { name: "Actions", exact: true }));
   await forceClick(page.getByRole("menuitem", { name: "Details" }));
   await expect(page.getByText("Alert policy details")).toBeVisible();
+  const policyDetail = alerts.locator(".consoleDetailPanel", {
+    hasText: "Alert policy details",
+  });
+  await policyDetail.scrollIntoViewIfNeeded();
   await maybeExtendedScreenshot(
     page,
     projectName,
@@ -977,11 +999,12 @@ async function exerciseAlertNotificationChannels(
     .first();
   await expect(row).toBeVisible();
   await row.getByLabel("Expand Alert notification channels row").click();
-  await expect(
-    grid.locator(".gridExpandedRow", {
-      hasText: "docker-resource-webhook",
-    }),
-  ).toBeVisible();
+  const expandedChannel = grid.locator(".gridExpandedRow", {
+    hasText: "docker-resource-webhook",
+  });
+  await expect(expandedChannel).toBeVisible();
+  await expect(expandedChannel).toHaveCSS("opacity", "1");
+  await expandedChannel.scrollIntoViewIfNeeded();
   await maybeExtendedScreenshot(
     page,
     projectName,
@@ -995,6 +1018,10 @@ async function exerciseAlertNotificationChannels(
   await forceClick(grid.getByRole("button", { name: "Actions", exact: true }));
   await forceClick(page.getByRole("menuitem", { name: "Details" }));
   await expect(page.getByText("Notification channel details")).toBeVisible();
+  const channelDetail = notifications.locator(".consoleDetailPanel", {
+    hasText: "Notification channel details",
+  });
+  await channelDetail.scrollIntoViewIfNeeded();
   await maybeExtendedScreenshot(
     page,
     projectName,
@@ -1043,7 +1070,7 @@ async function exerciseServerJobsCleanup(page: Page, projectName: string) {
     .fill(cleanupExpression);
   await cleanupPanel.getByRole("button", { name: "Preview" }).click();
   await expect(cleanupPanel.getByLabel("Cleanup preview result")).toContainText(
-    /^[\s\S]*[1-9][0-9]* artifacts/,
+    /^[\s\S]*[1-9][0-9]* artifacts?/,
     { timeout: 30_000 },
   );
   await expect(
@@ -1409,6 +1436,13 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
       await expect(graphPanel.locator(".topologyFreshnessBadge")).toContainText(
         /just now|ago/,
       );
+      const layerSummary = graphPanel
+        .locator(".topologyGraphLegend > div")
+        .filter({ hasText: "Layers" });
+      await expect(layerSummary).toContainText(
+        "0 healthy, 1 unknown, 0 attention",
+      );
+      await expect(layerSummary).not.toHaveClass(/\bready\b/);
       await expect(graphPanel.getByText("OSPF cost", { exact: true })).toHaveCount(0);
       await expect(graphPanel.getByText("Why OSPF cost changed")).toHaveCount(0);
     }

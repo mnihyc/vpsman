@@ -223,6 +223,7 @@ valid_ipv4_literal() {
     return 1
   octets=("${BASH_REMATCH[@]:1}")
   for octet in "${octets[@]}"; do
+    [[ "${#octet}" -eq 1 || "$octet" != 0* ]] || return 1
     ((10#$octet <= 255)) || return 1
   done
 }

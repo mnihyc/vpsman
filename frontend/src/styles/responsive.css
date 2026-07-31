@@ -208,7 +208,15 @@
     align-items: flex-start;
     gap: 8px;
     min-height: 0;
-    padding: 12px 0;
+    margin-bottom: 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    padding: 10px;
+  }
+
+  .topologyEvidence .historyRow.topologyEvidenceGrid:last-child {
+    margin-bottom: 0;
   }
 
   .topologyEvidence .historyRow.topologyEvidenceGrid > span {
@@ -1086,6 +1094,20 @@
 
   .systemCapacityConfigLinks > div {
     justify-content: flex-start;
+  }
+
+  .systemCapacityConfigLinks button {
+    justify-content: flex-start;
+    width: 100%;
+    white-space: normal;
+  }
+
+  .systemCapacityConfigLinks button small {
+    max-width: 100%;
+    overflow: visible;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+    white-space: normal;
   }
 
   .dashboardChartHeader {

@@ -147,7 +147,7 @@ export function BackupPolicyForm({
           />
         </label>
         <div className="dispatchControls">
-          <label>
+          <label title="Five-field cron expression evaluated in UTC. For example, 0 3 * * * runs daily at 03:00 UTC.">
             <span>UTC cron</span>
             <input
               aria-label="Backup policy UTC cron expression"
@@ -156,7 +156,7 @@ export function BackupPolicyForm({
               value={cronExpr}
             />
           </label>
-          <label>
+          <label title="Age boundary for pruning. A backup is eligible only when it is older than this limit and outside the newest backups protected by Keep last.">
             <span>Retain days</span>
             <input
               aria-label="Backup policy retention days"
@@ -169,7 +169,7 @@ export function BackupPolicyForm({
               value={retentionDays}
             />
           </label>
-          <label>
+          <label title="Minimum newest backups retained per VPS regardless of age. Pruning requires a backup to be both older than Retain days and outside this protected set.">
             <span>Keep last</span>
             <input
               aria-label="Backup policy keep last"
@@ -181,7 +181,7 @@ export function BackupPolicyForm({
             />
           </label>
         </div>
-        <label>
+        <label title="Optional operator-defined key-generation label recorded with policy and backup evidence. It does not rotate encryption keys by itself.">
           <span>Rotation generation</span>
           <input
             aria-label="Backup policy rotation generation"

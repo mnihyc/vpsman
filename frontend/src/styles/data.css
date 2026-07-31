@@ -3227,6 +3227,20 @@
   min-width: 0;
 }
 
+@media (max-width: 640px) {
+  .privilegeGateBox[aria-label="Schedule lifecycle privilege gate"] {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .privilegeGateBox[aria-label="Schedule lifecycle privilege gate"] button {
+    grid-column: 1 / -1;
+    justify-content: center;
+    width: 100%;
+  }
+}
+
 .structuredDefinitionForm {
   display: grid;
   align-content: start;
@@ -3560,6 +3574,13 @@
 
 .auditSessionEvidencePanel .consoleDataGrid {
   border-top: 1px solid var(--border-subtle);
+}
+
+.auditSessionEvidencePanel > .metricGrid {
+  grid-template-columns: repeat(
+    auto-fit,
+    minmax(min(100%, 140px), 1fr)
+  );
 }
 
 .sessionEvidenceDetailPanel,
@@ -3951,7 +3972,11 @@
 }
 
 .targetDetail {
-  border-top: 1px solid var(--border);
+  margin: 0 18px 18px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
   scroll-margin-top: 12px;
 }
 
@@ -4158,10 +4183,6 @@
   background: var(--warning-soft);
 }
 
-.bulkTagApplyGrid {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
-}
-
 .bulkTagMutationForm {
   align-items: stretch;
   border: 1px solid var(--border);
@@ -4337,7 +4358,7 @@
 }
 
 .bulkTagApplyGrid {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .bulkTagPreviewPanel {
@@ -4724,6 +4745,48 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .vpsRulesWorkspace .consoleDetailPanelHeader {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .vpsRulesWorkspace .consoleOperationsActions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    justify-content: stretch;
+    width: 100%;
+  }
+
+  .vpsRulesWorkspace .consoleOperationsActions > .compactAction,
+  .vpsRulesAlertImpact .compactAction,
+  .vpsRulesPreviewFinalAction > .compactAction {
+    width: 100%;
+  }
+
+  .vpsRulesModeSwitch {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .vpsRulesModeSwitch button {
+    min-width: 0;
+  }
+
+  .vpsRulesPreviewFinalAction {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .vpsRulesPreviewFinalAction strong,
+  .vpsRulesPreviewFinalAction small {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+  }
 }
 
 .trafficAccountingSummary {

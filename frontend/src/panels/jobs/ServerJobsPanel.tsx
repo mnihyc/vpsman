@@ -97,7 +97,7 @@ export function ServerJobsPanel({
   const expressionValid = expression.trim().length > 0 && !expression.startsWith("__invalid__");
   const jobsTruncated = jobs.length >= FLEET_DETAIL_LIMIT;
   const summary = preview
-    ? `${preview.matched_count} artifacts previewed, ${formatBytes(preview.matched_bytes)}`
+    ? `${artifactCountLabel(preview.matched_count)} previewed, ${formatBytes(preview.matched_bytes)}`
     : `${formatLowerBoundCount(jobs.length, jobsTruncated)} maintenance jobs${jobsTruncated ? " loaded" : ""}`;
   const cleanupPageFeedbackMessage = error ?? loadError;
   const cleanupActionFeedbackMessage = previewStatus;
@@ -451,7 +451,7 @@ export function ServerJobsPanel({
               <span>Matched</span>
               <strong>
                 {preview
-                  ? `${preview.matched_count} artifacts / ${formatBytes(preview.matched_bytes)}`
+                  ? `${artifactCountLabel(preview.matched_count)} / ${formatBytes(preview.matched_bytes)}`
                   : "Preview required"}
               </strong>
             </div>
@@ -520,7 +520,7 @@ export function ServerJobsPanel({
               <span>Deletion impact</span>
               <strong>
                 {preview
-                  ? `${preview.matched_count} artifacts / ${formatBytes(preview.matched_bytes)}`
+                  ? `${artifactCountLabel(preview.matched_count)} / ${formatBytes(preview.matched_bytes)}`
                   : "Unknown until preview"}
               </strong>
               <p>
@@ -754,6 +754,10 @@ function buildCleanupExpression(
 
 function escapeExpressionLiteral(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function artifactCountLabel(count: number): string {
+  return `${count} ${count === 1 ? "artifact" : "artifacts"}`;
 }
 
 function cleanupPreviewEvidence(preview: ArtifactCleanupPreviewRecord | null): {

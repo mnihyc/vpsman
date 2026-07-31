@@ -88,6 +88,8 @@ agent capability checks share the same maximum.
 Tunnel endpoint allocation pools are under `[network]`. They are empty by
 default; set IPv4 and/or IPv6 pool CIDRs before using Generate endpoints or
 `tunnel-allocate` without explicit pool arguments.
+Admins can edit the same global pools in **System > Suite Config > Network**;
+Advanced TOML is not required.
 
 The gateway `[gateway].api_url` is intentionally plain `http://` for the
 private compose network or another trusted private network. Expose TLS at the

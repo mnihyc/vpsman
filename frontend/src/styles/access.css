@@ -283,8 +283,13 @@
   line-height: 1.35;
 }
 
+.identityRegistrationComplete {
+  margin-top: 10px;
+}
+
 .installCommandBlock {
   display: grid;
+  align-self: start;
   gap: 10px;
   min-width: 0;
   border: 1px solid var(--border);
@@ -299,6 +304,14 @@
   justify-content: space-between;
   gap: 12px;
   min-width: 0;
+}
+
+.installCommandHeader .sectionActions {
+  flex: 0 0 auto;
+}
+
+.installCommandHeader .sectionActions button {
+  white-space: nowrap;
 }
 
 .installCommandHeader > div:first-child {
@@ -331,14 +344,56 @@
 
 .installCommandControls {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
   gap: 8px;
   align-items: end;
 }
 
+.installCommandControls label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.installCommandControls label > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.installCommandControls input,
+.installCommandControls select,
+.installCommandControls textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.installCommandControls input,
+.installCommandControls select {
+  min-height: 36px;
+  padding: 0 9px;
+}
+
 .installCommandControls textarea {
   min-height: 64px;
+  overflow: auto;
+  padding: 8px 9px;
   resize: vertical;
+}
+
+.installCommandControls textarea[name="gateway_endpoints"] {
+  white-space: pre;
+}
+
+.installCommandBlock > .localActionFeedback {
+  margin: 0;
+  max-width: 100%;
 }
 
 .installCommandBlock pre {
@@ -1128,6 +1183,85 @@
   font-size: 13px;
 }
 
+.totpEnrollmentPanel {
+  display: grid;
+  grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: center;
+  min-width: 0;
+  grid-column: 1 / -1;
+  border: 1px solid var(--primary-border);
+  border-radius: 8px;
+  background: var(--primary-soft);
+  padding: 14px;
+}
+
+.totpQrFrame {
+  display: grid;
+  place-items: center;
+  min-height: 220px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: #42526b;
+  padding: 8px;
+  text-align: center;
+}
+
+.totpQrFrame img {
+  display: block;
+  width: 100%;
+  max-width: 220px;
+  height: auto;
+}
+
+.totpEnrollmentInstructions {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.totpEnrollmentInstructions > strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.totpEnrollmentInstructions > span,
+.totpCopyStatus {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.totpManualKey {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.totpManualKey > span {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 4px;
+  min-width: 0;
+}
+
+.totpManualKey small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.totpManualKey code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
 .totpSecretPanel span,
 .totpSecretPanel small,
 .totpDisablePanel span {
@@ -1264,6 +1398,15 @@
 
   .totpStepList {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .totpEnrollmentPanel {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .totpQrFrame {
+    justify-self: center;
+    width: min(100%, 236px);
   }
 
   .accessPostureCard > button {

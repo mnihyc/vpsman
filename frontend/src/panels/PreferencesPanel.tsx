@@ -336,7 +336,7 @@ export function PreferencesPanel({
             </PreferenceGroup>
 
             <PreferenceGroup
-              description="Country columns show a compact flag glyph plus code when enabled; turn this off for code-only compact rows such as US, DE, or JP."
+              description="Country columns show a compact flag icon plus code when enabled; turn this off for code-only compact rows such as US, DE, or JP."
               icon={<Flag size={18} />}
               onReset={() =>
                 resetDraftPatch({
@@ -797,16 +797,16 @@ export function PreferencesPanel({
 
           {activeScope === "system" && (
             <PreferenceSection
-              description="Shared defaults are managed in operational workflows. Preferences links here, but does not edit them as personal display settings."
+              description="Operational defaults are managed in their owning workflows. Preferences links to them but does not edit them as personal display settings."
               title="System-linked defaults"
             >
               <SystemLinkedPreferenceRow
                 icon={<Wifi size={18} />}
                 title="Gateway install material"
                 scope="System / Access"
-                detail="Gateway bind, API forwarding, gateway identity, and gateway key file live in Suite Config. Agent install commands are reviewed from Access / VPS identities after gateway material is configured."
-                primaryAction="Open Suite Config"
-                onPrimary={() => onSelectView("System", "suite_config")}
+                detail="Gateway runtime binds and its private-key file live in Suite Config. Reusable agent-installer endpoints, server public key, and install mode are edited under Access / Gateway sessions."
+                primaryAction="Open gateway settings"
+                onPrimary={() => onSelectView("Access", "gateway_sessions")}
                 secondaryAction="Open VPS identities"
                 onSecondary={() => onSelectView("Access", "vps_identities")}
               />
@@ -814,7 +814,7 @@ export function PreferencesPanel({
                 icon={<Route size={18} />}
                 title="Tunnel allocation pools"
                 scope="System / Suite Config"
-                detail="IPv4 and IPv6 tunnel allocation pools are shared topology defaults. Edit `network.tunnel_ipv4_allocation_pool_cidr` and `network.tunnel_ipv6_allocation_pool_cidr` in Suite Config."
+                detail="Open System / Suite Config, choose Network, and edit the shared IPv4 and IPv6 tunnel allocation pools. Advanced TOML is not required."
                 primaryAction="Open Suite Config"
                 onPrimary={() => onSelectView("System", "suite_config")}
               />

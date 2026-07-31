@@ -538,6 +538,58 @@ test("privilege unlock reaches refreshable session actions while Audit evidence 
   await expect(page.getByText("2 expired bearer sessions")).toHaveCount(0);
 });
 
+test("keeps unlocked vault management out of operational workflows", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "dense restore and migration drawers are covered in the desktop console",
+  );
+  await installConsoleApiMock(page);
+  await page.goto("/");
+  await waitForConsoleShell(page);
+  await unlockPrivilegeFromTop(page);
+
+  const expectVaultManagementAbsent = async () => {
+    await expect(
+      page.getByText("Request-bound privilege assertions", { exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Clear local vault", exact: true }),
+    ).toHaveCount(0);
+  };
+
+  await openConsoleSubpage(page, "Jobs", "Dispatch");
+  await expectVaultManagementAbsent();
+
+  await openConsoleSubpage(page, "Network", "Tests");
+  await expectVaultManagementAbsent();
+
+  await openConsoleSubpage(page, "Backups", "Restore");
+  await activate(
+    page.getByRole("button", { name: "Choose restore artifact", exact: true }),
+  );
+  await expect(
+    page.getByRole("complementary", { name: "Choose restore artifact" }),
+  ).toBeVisible();
+  await expectVaultManagementAbsent();
+  await activate(
+    page.getByRole("button", { name: "Close Choose restore artifact" }),
+  );
+
+  await openConsoleSubpage(page, "Backups", "Migration");
+  await activate(
+    page.getByRole("button", {
+      name: "Create migration mapping",
+      exact: true,
+    }),
+  );
+  await expect(
+    page.getByRole("complementary", { name: "Create migration mapping" }),
+  ).toBeVisible();
+  await expectVaultManagementAbsent();
+});
+
 test("keeps cross-route job evidence below the mobile toolbar", async ({
   page,
 }, testInfo) => {

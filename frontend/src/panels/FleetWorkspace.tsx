@@ -20,6 +20,7 @@ import {
   DatabaseBackup,
   Eye,
   FileCog,
+  Flag,
   FolderOpen,
   Gauge,
   LockKeyhole,
@@ -2722,9 +2723,12 @@ function TrafficRulesDetail({
         size: 165,
         minSize: 130,
         searchValue: (row) => policyById.get(row.policy_group_id)?.name ?? "",
-        cell: (row) =>
-          policyById.get(row.policy_group_id)?.name ??
-          shortId(row.policy_group_id),
+        cell: (row) => (
+          <span title={row.policy_group_id}>
+            {policyById.get(row.policy_group_id)?.name ??
+              shortId(row.policy_group_id)}
+          </span>
+        ),
       },
       {
         id: "rule",
@@ -2735,11 +2739,14 @@ function TrafficRulesDetail({
           policyById
             .get(row.policy_group_id)
             ?.rules.find((rule) => rule.id === row.policy_rule_id)?.name ?? "",
-        cell: (row) =>
-          policyById
-            .get(row.policy_group_id)
-            ?.rules.find((rule) => rule.id === row.policy_rule_id)?.name ??
-          shortId(row.policy_rule_id),
+        cell: (row) => (
+          <span title={row.policy_rule_id}>
+            {policyById
+              .get(row.policy_group_id)
+              ?.rules.find((rule) => rule.id === row.policy_rule_id)?.name ??
+              shortId(row.policy_rule_id)}
+          </span>
+        ),
       },
       {
         id: "actual",
@@ -3503,14 +3510,7 @@ function CountryBadge({
   return (
     <span className="countryBadge" title={normalized}>
       {showFlag && hasCountryCode && (
-        <span
-          aria-hidden="true"
-          className="countryFlag"
-        >
-          {Array.from(normalized, (character) =>
-            String.fromCodePoint(127397 + character.charCodeAt(0)),
-          ).join("")}
-        </span>
+        <Flag aria-hidden="true" className="countryFlag" size={14} />
       )}
       <span>{normalized}</span>
     </span>
@@ -4426,7 +4426,9 @@ export function FleetAlertPolicyManager({
         cell: (policy) => (
           <span className="historyPrimary">
             <strong>{policy.name}</strong>
-            <small className="monoValue">{shortId(policy.id)}</small>
+            <small className="monoValue" title={policy.id}>
+              {shortId(policy.id)}
+            </small>
           </span>
         ),
       },
@@ -4490,7 +4492,7 @@ export function FleetAlertPolicyManager({
       },
       {
         id: "last_evaluated",
-        header: "Last Evaluated",
+        header: "Last run",
         size: 145,
         minSize: 115,
         sortValue: (policy) => policy.last_evaluated_at ?? "",
@@ -6715,6 +6717,7 @@ export function FleetAlertNotificationManager({
             value: queueSnapshot
               ? `${queueSnapshot.previewHash.slice(0, 12)}...`
               : "review required",
+            title: queueSnapshot?.previewHash ?? "review required",
           },
         ]}
         onCancel={() => {
@@ -6851,7 +6854,9 @@ export function NotificationDeliveryHistoryGrid({
         cell: (delivery) => (
           <span className="historyPrimary">
             <strong>{delivery.alert_severity}</strong>
-            <small>{shortId(delivery.alert_id)}</small>
+            <small title={delivery.alert_id}>
+              {shortId(delivery.alert_id)}
+            </small>
           </span>
         ),
       },
@@ -7750,7 +7755,7 @@ export function WebhookRuleManager({
   return (
     <div className="consoleCrudPanel">
       <div className="consoleResourceLayout fullWidth">
-        {statusScope === "resource" ? (
+        {statusScope === "resource" && !editorOpen ? (
           <ActionFeedback
             className="localActionFeedback fleetPolicyActionFeedback"
             message={status}
@@ -7786,6 +7791,13 @@ export function WebhookRuleManager({
           <ConsoleDetailPanel
             actions={
               <>
+                {statusScope === "resource" ? (
+                  <ActionFeedback
+                    className="localActionFeedback fleetPolicyActionFeedback webhookEditorActionFeedback"
+                    message={status}
+                    tone={statusTone}
+                  />
+                ) : null}
                 <button
                   className="secondaryAction"
                   type="button"
@@ -7840,6 +7852,13 @@ export function WebhookRuleManager({
           <ConsoleDetailPanel
             actions={
               <>
+                {statusScope === "resource" ? (
+                  <ActionFeedback
+                    className="localActionFeedback fleetPolicyActionFeedback webhookEditorActionFeedback"
+                    message={status}
+                    tone={statusTone}
+                  />
+                ) : null}
                 <button
                   className="secondaryAction"
                   disabled={
@@ -8219,6 +8238,7 @@ export function WebhookRuleManager({
             value: queueSnapshot
               ? `${queueSnapshot.previewHash.slice(0, 12)}...`
               : "review required",
+            title: queueSnapshot?.previewHash ?? "review required",
           },
         ]}
         onCancel={clearWebhookQueueReview}
@@ -8406,7 +8426,11 @@ function WebhookRuleSamplePreview({
         </div>
         <div>
           <span>Delivery status</span>
-          <strong>{preview.delivery?.status ?? "dry run only"}</strong>
+          <strong>
+            {preview.delivery
+              ? deliveryStatusLabel(preview.delivery.status)
+              : "dry run only"}
+          </strong>
         </div>
       </div>
       <pre>{samplePayload}</pre>
@@ -8632,7 +8656,7 @@ export function WebhookDeliveryMaintenancePanel({
         confirmed,
         preview_hash: confirmed ? rotationPreview?.preview_hash : null,
       });
-      setRotationPreview(response);
+      setRotationPreview(confirmed ? null : response);
       setConfirmDelete(false);
       setRotationStatusMessage(
         `${response.matched_count} matched / ${response.deleted_count} deleted`,
@@ -8758,6 +8782,7 @@ export function WebhookDeliveryMaintenancePanel({
             value: rotationPreview
               ? `${rotationPreview.preview_hash.slice(0, 12)}...`
               : "review required",
+            title: rotationPreview?.preview_hash ?? "review required",
           },
         ]}
         error={rotationError}
@@ -9348,7 +9373,7 @@ function NetworkInterfacesPanel({
       <Network size={18} />
       <div>
         <strong>Host interfaces</strong>
-        <span>
+        <span title={payloadHash ?? undefined}>
           {networkInterfaceSummary}
           {observed ? `; seen ${observed}` : ""}
           {payloadHash ? `; payload ${payloadHash.slice(0, 12)}` : ""}
@@ -9382,6 +9407,7 @@ function NetworkInterfacesPanel({
             <button
               className="secondaryAction compactAction"
               onClick={() => onOpenJobDetails(jobId)}
+              title={jobId}
               type="button"
             >
               Job {shortId(jobId)}
@@ -9660,6 +9686,17 @@ function TunnelList({
                   detail={formatTunnelPlanDetail(tunnel)}
                   main={formatTunnelPlanMain(tunnel)}
                   tone={adapterTone(tunnel)}
+                  title={[
+                    tunnel.endpoint_side
+                      ? `${tunnel.endpoint_side} endpoint`
+                      : "endpoint",
+                    tunnel.peer_client_id
+                      ? `peer ${tunnel.peer_client_id}`
+                      : "peer unavailable",
+                    tunnel.plan_id
+                      ? `plan ${tunnel.plan_id}`
+                      : "plan unavailable",
+                  ].join("; ")}
                 />
               </div>
             ))}

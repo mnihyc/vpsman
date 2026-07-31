@@ -6,6 +6,7 @@ import {
   Clock3,
   DatabaseBackup,
   FolderOpen,
+  History,
   Network,
   Play,
   ShieldAlert,
@@ -27,6 +28,7 @@ import type {
   BackupArtifactRecord,
   BackupRequestRecord,
   DashboardDrilldownRecord,
+  DashboardOverviewRecord,
   DashboardPreferences,
   DashboardWindow,
   FleetAlertRecord,
@@ -39,6 +41,8 @@ import type {
   TelemetryTunnelRecord,
 } from "../types";
 import { displayNameOrUnnamed, formatCompactTime, formatFullTime, shortId } from "../utils";
+import { FleetMonitorPanel } from "./FleetMonitorPanel";
+import { HomeTelemetryPanel } from "./HomeTelemetryPanel";
 
 type HomePanelProps = {
   agents: AgentView[];
@@ -47,15 +51,16 @@ type HomePanelProps = {
   backupArtifacts: BackupArtifactRecord[];
   backups: BackupRequestRecord[];
   backupsEvidenceAvailable: boolean;
-  dashboardError: string | null;
-  dashboardLoading: boolean;
+  dashboardOverview: DashboardOverviewRecord | null;
   dashboardPreferences: DashboardPreferences;
   dashboardWindow: DashboardWindow;
   fileTransfers: FileTransferSessionRecord[];
+  fleetError: string | null;
   fleetAlertsEvidenceAvailable: boolean;
   fleetAlerts: FleetAlertRecord[];
   fleetCoreEvidenceAvailable: boolean;
   homeEvidenceComplete: boolean;
+  homeError: string | null;
   jobs: JobHistoryRecord[];
   jobsEvidenceAvailable: boolean;
   recordBounds: {
@@ -69,6 +74,8 @@ type HomePanelProps = {
   summary: FleetSummary;
   systemDashboard: SystemDashboardRecord | null;
   telemetryNetworkRates: TelemetryNetworkRateRecord[];
+  telemetryError: string | null;
+  telemetryLoading: boolean;
   telemetryRollups: TelemetryRollupRecord[];
   telemetryTunnels: TelemetryTunnelRecord[];
   onDashboardNavigate: (drilldown: DashboardDrilldownRecord) => void;
@@ -99,6 +106,7 @@ type HomeActionItem = {
   detail: string;
   id: string;
   label: string;
+  labelTitle?: string;
   meta: string;
   metaTitle?: string;
   onOpen: () => void;
@@ -123,13 +131,16 @@ export function HomePanel({
   backupArtifacts,
   backups,
   backupsEvidenceAvailable,
-  dashboardError,
-  dashboardLoading,
+  dashboardOverview,
+  dashboardPreferences,
+  dashboardWindow,
   fileTransfers,
+  fleetError,
   fleetAlertsEvidenceAvailable,
   fleetAlerts,
   fleetCoreEvidenceAvailable,
   homeEvidenceComplete,
+  homeError,
   jobs,
   jobsEvidenceAvailable,
   recordBounds,
@@ -137,6 +148,15 @@ export function HomePanel({
   scopeFiltered,
   summary,
   systemDashboard,
+  telemetryNetworkRates,
+  telemetryError,
+  telemetryLoading,
+  telemetryRollups,
+  telemetryTunnels,
+  onDashboardNavigate,
+  onDashboardPreferencesChange,
+  onDashboardRefresh,
+  onDashboardWindowChange,
   onOpenAudit,
   onOpenBackup,
   onOpenBackups,
@@ -147,6 +167,7 @@ export function HomePanel({
   onOpenJobs,
   onOpenNetwork,
   onOpenNetworkEvidence,
+  onOpenProcesses,
   onOpenSchedule,
   onOpenSystemCapacity,
   onOpenTerminal,
@@ -311,11 +332,8 @@ export function HomePanel({
     <div className="homeWorkspace">
       <ActionFeedback
         className="localActionFeedback"
-        message={
-          dashboardError ??
-          (dashboardLoading ? "Refreshing dashboard evidence" : null)
-        }
-        tone={dashboardError ? "danger" : "progress"}
+        message={homeError}
+        tone="danger"
       />
       <section className="homeReleaseLayer" aria-labelledby="home-release-title">
         <div className="homeCommandBand">
@@ -556,7 +574,7 @@ export function HomePanel({
           <HomePostureMetric
             detail={
               backupsEvidenceAvailable
-                ? `${formatLowerBoundCount(failedBackups, backupsTruncated)} failed${backupsTruncated ? " in loaded history" : ""}, ${formatLowerBoundCount(backupArtifacts.length, recordBounds.backupArtifacts)} artifacts${recordBounds.backupArtifacts ? " in the loaded page" : ""}`
+                ? `${formatLowerBoundCount(failedBackups, backupsTruncated)} failed${backupsTruncated ? " in loaded history" : ""}, ${formatLowerBoundCount(backupArtifacts.length, recordBounds.backupArtifacts)} artifact${backupArtifacts.length === 1 ? "" : "s"}${recordBounds.backupArtifacts ? " in the loaded page" : ""}`
                 : "Backup request or artifact evidence is unavailable"
             }
             label="Backups"
@@ -599,6 +617,53 @@ export function HomePanel({
             }
           />
         </div>
+
+        <FleetMonitorPanel
+          agents={agents}
+          apiError={fleetError}
+          ariaLabel="Home fleet scan"
+          backups={backups}
+          description="VPS health cards for scanning resources, network, alerts, and current work before opening the exact operator workflow."
+          embedded
+          failedJobCount={failedJobs}
+          fileTransfers={fileTransfers}
+          fleetAlerts={fleetAlerts}
+          jobs={jobs}
+          maxCards={8}
+          recordBounds={{
+            backups: recordBounds.backups,
+            fileTransfers: recordBounds.fileTransfers,
+            fleetAlerts: recordBounds.fleetAlerts,
+          }}
+          runningJobCount={runningJobs}
+          telemetryNetworkRates={telemetryNetworkRates}
+          telemetryRollups={telemetryRollups}
+          telemetryTunnels={telemetryTunnels}
+          title="Fleet scan"
+          toolbarAction={
+            <button
+              className="secondaryAction compactAction"
+              onClick={() =>
+                onDashboardNavigate({
+                  label: "Open fleet monitor",
+                  query: null,
+                  subpage: "monitor",
+                  view: "Fleet",
+                })
+              }
+              type="button"
+            >
+              <History size={15} />
+              <span>View all VPS</span>
+            </button>
+          }
+          onOpenBackup={onOpenBackup}
+          onOpenFiles={onOpenFiles}
+          onOpenNetwork={onOpenNetwork}
+          onOpenProcesses={onOpenProcesses}
+          onOpenTerminal={onOpenTerminal}
+          onOpenVpsDetail={onOpenVpsDetail}
+        />
 
         <div className="homeWorkGrid">
           <HomeActionPanel
@@ -691,7 +756,7 @@ export function HomePanel({
                       {item.tone === "critical" ? <AlertTriangle size={16} /> : <Activity size={16} />}
                     </span>
                     <span className="homeActionText">
-                      <strong>{item.label}</strong>
+                      <strong title={item.labelTitle}>{item.label}</strong>
                       <small>{item.detail}</small>
                     </span>
                     <span className="homeActionMeta" title={item.metaTitle}>
@@ -751,6 +816,20 @@ export function HomePanel({
         </div>
       </section>
 
+      <section className="homeDashboardLayer" aria-label="Home telemetry widgets">
+        <HomeTelemetryPanel
+          agents={agents}
+          error={telemetryError}
+          loading={telemetryLoading}
+          onNavigate={onDashboardNavigate}
+          onPreferencesChange={onDashboardPreferencesChange}
+          onRefresh={onDashboardRefresh}
+          onWindowChange={onDashboardWindowChange}
+          overview={dashboardOverview}
+          preferences={dashboardPreferences}
+          window={dashboardWindow}
+        />
+      </section>
     </div>
   );
 }
@@ -822,7 +901,7 @@ function HomeActionPanel({
                 {item.tone === "critical" ? <AlertTriangle size={16} /> : <Activity size={16} />}
               </span>
               <span className="homeActionText">
-                <strong>{item.label}</strong>
+                <strong title={item.labelTitle}>{item.label}</strong>
                 <small>{item.detail}</small>
               </span>
               <span className="homeActionMeta" title={item.metaTitle}>
@@ -915,6 +994,7 @@ function buildAttentionItems({
       detail: `${job.command_type} / ${job.target_count} target${job.target_count === 1 ? "" : "s"}`,
       id: `job:${job.id}`,
       label: `${scopeFiltered ? "Fleet job" : "Job"} ${shortId(job.id)} failed`,
+      labelTitle: `${scopeFiltered ? "Fleet job" : "Job"} ${job.id} failed`,
       meta: formatCompactTime(job.completed_at ?? job.created_at),
       metaTitle: formatFullTime(job.completed_at ?? job.created_at),
       onOpen: () => onOpenJobDetails(job.id),
@@ -926,6 +1006,7 @@ function buildAttentionItems({
       detail: `${transfer.direction} ${transfer.path}`,
       id: `transfer:${transfer.client_id}:${transfer.session_id}`,
       label: `Transfer ${shortId(transfer.session_id)} needs retry`,
+      labelTitle: `Transfer ${transfer.session_id} needs retry`,
       meta: formatCompactTime(transfer.observed_at),
       metaTitle: formatFullTime(transfer.observed_at),
       onOpen: onOpenTransfers,
@@ -939,6 +1020,7 @@ function buildAttentionItems({
         detail: `${displayNameOrUnnamed(agent?.display_name ?? backup.client_id)} / ${backup.paths.join(", ")}`,
         id: `backup:${backup.id}`,
         label: `Backup ${shortId(backup.id)} failed`,
+        labelTitle: `Backup ${backup.id} failed`,
         meta: formatCompactTime(backup.created_at),
         metaTitle: formatFullTime(backup.created_at),
         onOpen: () => (agent ? onOpenBackup(agent) : undefined),
@@ -1033,6 +1115,7 @@ function buildRunningWorkItems({
       detail: `${readableJobCommand(job.command_type)} / ${job.target_count} target${job.target_count === 1 ? "" : "s"}`,
       id: `running-job:${job.id}`,
       label: `${scopeFiltered ? "Fleet job" : "Job"} ${shortId(job.id)} ${readableJobStatus(job.status)}`,
+      labelTitle: `${scopeFiltered ? "Fleet job" : "Job"} ${job.id} ${readableJobStatus(job.status)}`,
       meta: formatCompactTime(job.created_at),
       metaTitle: formatFullTime(job.created_at),
       onOpen: () => onOpenJobDetails(job.id),
@@ -1044,6 +1127,7 @@ function buildRunningWorkItems({
       detail: `${readableTransferDirection(transfer.direction)} ${transfer.path}`,
       id: `running-transfer:${transfer.client_id}:${transfer.session_id}`,
       label: `Transfer ${shortId(transfer.session_id)} ${readableTransferStatus(transfer.status)}`,
+      labelTitle: `Transfer ${transfer.session_id} ${readableTransferStatus(transfer.status)}`,
       meta: formatCompactTime(transfer.observed_at),
       metaTitle: formatFullTime(transfer.observed_at),
       onOpen: onOpenTransfers,
@@ -1055,6 +1139,7 @@ function buildRunningWorkItems({
       detail: `${backup.client_id} / ${backup.paths.join(", ")}`,
       id: `running-backup:${backup.id}`,
       label: `Backup ${shortId(backup.id)} ${readableBackupStatus(backup.status)}`,
+      labelTitle: `Backup ${backup.id} ${readableBackupStatus(backup.status)}`,
       meta: formatCompactTime(backup.created_at),
       metaTitle: formatFullTime(backup.created_at),
       onOpen: onOpenBackups,
@@ -1108,6 +1193,7 @@ function buildRecentFailureItems({
       detail: `${readableJobCommand(job.command_type)} / ${job.target_count} target${job.target_count === 1 ? "" : "s"}`,
       id: `failed-job:${job.id}`,
       label: `${scopeFiltered ? "Fleet job" : "Job"} ${shortId(job.id)} ${readableJobStatus(job.status)}`,
+      labelTitle: `${scopeFiltered ? "Fleet job" : "Job"} ${job.id} ${readableJobStatus(job.status)}`,
       meta: formatCompactTime(job.completed_at ?? job.created_at),
       metaTitle: formatFullTime(job.completed_at ?? job.created_at),
       onOpen: () => onOpenJobDetails(job.id),
@@ -1119,6 +1205,7 @@ function buildRecentFailureItems({
       detail: `${readableTransferDirection(transfer.direction)} ${transfer.path}`,
       id: `failed-transfer:${transfer.client_id}:${transfer.session_id}`,
       label: `Transfer ${shortId(transfer.session_id)} ${readableTransferStatus(transfer.status)}`,
+      labelTitle: `Transfer ${transfer.session_id} ${readableTransferStatus(transfer.status)}`,
       meta: formatCompactTime(transfer.observed_at),
       metaTitle: formatFullTime(transfer.observed_at),
       onOpen: onOpenTransfers,
@@ -1130,6 +1217,7 @@ function buildRecentFailureItems({
       detail: `${backup.client_id} / ${backup.paths.join(", ")}`,
       id: `failed-backup:${backup.id}`,
       label: `Backup ${shortId(backup.id)} ${readableBackupStatus(backup.status)}`,
+      labelTitle: `Backup ${backup.id} ${readableBackupStatus(backup.status)}`,
       meta: formatCompactTime(backup.created_at),
       metaTitle: formatFullTime(backup.created_at),
       onOpen: onOpenBackups,

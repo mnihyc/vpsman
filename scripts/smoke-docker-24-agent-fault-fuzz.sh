@@ -781,6 +781,6 @@ jq -n \
       "no_duplicate_agent_identity_after_recovery",
       "gateway_session_churn_records_active_and_ended_sessions",
       "post_fault_full_fleet_dispatch_outputs",
-      "post_fault_desktop_mobile_live_ui_all_subpanels"
+      "post_fault_desktop_all_subpanels_and_mobile_home"
     ]
   }'

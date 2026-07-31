@@ -32,6 +32,7 @@ import {
 } from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { AdminRoleBoundary } from "../components/RoleBoundary";
+import { TotpEnrollmentQr } from "../components/TotpEnrollmentQr";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
@@ -198,7 +199,6 @@ type AccessPanelProps = {
   onDisableTotp: (password: string, code: string) => Promise<void>;
   onInitialIdentityWorkflowConsumed: () => void;
   onOpenPrivilegeUnlock: () => void;
-  onOpenSystemConfig: () => void;
   onOpenSystemSessions: () => void;
   onOpenTerminalSessions: () => void;
   onRefresh: () => Promise<void>;
@@ -307,7 +307,7 @@ function accessPanelHeader(subpage: AccessSubpage): {
       return {
         title: "Gateway session inventory",
         description:
-          "Live gateway connectivity evidence and shared gateway configuration",
+          "Live gateway connectivity evidence and reusable installer defaults",
       };
     case "Privilege vault":
       return {
@@ -339,7 +339,6 @@ export function AccessPanel({
   onDisableTotp,
   onInitialIdentityWorkflowConsumed,
   onOpenPrivilegeUnlock,
-  onOpenSystemConfig,
   onOpenSystemSessions,
   onOpenTerminalSessions,
   onRefresh,
@@ -1214,12 +1213,12 @@ export function AccessPanel({
       : null,
     gatewayInstallDefaultsNeedReview
       ? {
-          action: "Open Suite Config",
+          action: "Configure defaults",
           detail:
-            "Gateway endpoints and server public key are system settings. Review Suite Config before generating agent install commands.",
+            "Gateway endpoints and the server public key are this operator's reusable agent-installer defaults.",
           icon: <Wifi size={16} />,
           label: "Gateway install defaults",
-          onClick: onOpenSystemConfig,
+          onClick: () => openAccessSubpage("Gateway sessions"),
           tone: "attention",
           value: "Review",
         }
@@ -1325,12 +1324,12 @@ export function AccessPanel({
       action: "Open sessions",
       detail:
         activeGatewaySessions > 0
-          ? `${formatLowerBoundCount(gatewaySessions.length, gatewaySessionsTruncated)} recent${gatewaySessionsTruncated ? " loaded" : ""} gateway sessions; install defaults are owned by Suite Config.`
+          ? `${formatLowerBoundCount(gatewaySessions.length, gatewaySessionsTruncated)} recent${gatewaySessionsTruncated ? " loaded" : ""} gateway sessions; installer defaults are managed on the same page.`
           : gatewaySessionsTruncated
             ? "No active gateway session appears in the loaded history; more records may exist."
           : canManageOperators
-            ? "No active gateway sessions. Configure gateway endpoint and server key in Suite Config."
-            : "No active gateway sessions are visible. An admin manages shared gateway endpoint and server-key defaults in Suite Config.",
+            ? "No active gateway sessions. Configure reusable installer endpoints and the server public key on the Gateway sessions page."
+            : "No active gateway sessions are visible. An admin manages installer defaults on the Gateway sessions page.",
       icon: <Wifi size={16} />,
       label: "Gateway sessions",
       onClick: () => openAccessSubpage("Gateway sessions"),
@@ -1634,8 +1633,8 @@ export function AccessPanel({
                     </li>
                     <li className={totpSetup ? "ready" : ""}>
                       <span>2</span>
-                      <strong title="Scan the QR code or enter the secret">
-                        Secret
+                      <strong title="Scan the QR code or enter the setup key">
+                        QR / key
                       </strong>
                     </li>
                     <li className={totpCode ? "ready" : ""}>
@@ -1668,15 +1667,14 @@ export function AccessPanel({
                       Set up TOTP
                     </button>
                     {totpSetup ? (
-                      <div className="totpSecretPanel">
-                        <strong>Authenticator secret</strong>
-                        <span>{totpSetup.secret_base32}</span>
-                        <small>{totpSetup.otpauth_uri}</small>
-                      </div>
+                      <TotpEnrollmentQr setup={totpSetup} />
                     ) : (
                       <div className="totpSecretPanel muted">
-                        <strong>Authenticator secret</strong>
-                        <span>Set up TOTP after entering the password.</span>
+                        <strong>Authenticator QR code</strong>
+                        <span>
+                          Enter your current password, then choose Set up TOTP
+                          to generate a scannable account.
+                        </span>
                       </div>
                     )}
                     <label>
@@ -1844,12 +1842,15 @@ export function AccessPanel({
         )}
 
         {activeSubpage === "Gateway sessions" && (
-          <div className="workspaceSection">
-            {gatewaySessions.length === 0 ? (
-              <GatewaySessionEmptyState
-                canConfigure={canManageOperators}
-                onOpenGatewaySettings={onOpenSystemConfig}
+          <div className="workspaceSection accessTableStack">
+            {canManageOperators ? (
+              <InstallCommand
+                onUpdateOperatorPreferences={onUpdateOperatorPreferences}
+                operatorPreferences={operator?.preferences ?? null}
               />
+            ) : null}
+            {gatewaySessions.length === 0 ? (
+              <GatewaySessionEmptyState canConfigure={canManageOperators} />
             ) : (
               <section className="controlPanel">
                 <div className="sectionHeader compact">
@@ -2165,7 +2166,9 @@ export function AccessPanel({
                   ? "key is rotated"
                   : "is registered"}
               </strong>
-              <span>
+              <span
+                title={`${createdIdentity.client_id} / ${createdIdentity.current_public_key_sha256_hex}`}
+              >
                 {createdIdentity.client_id} /{" "}
                 {shortHash(createdIdentity.current_public_key_sha256_hex)}
               </span>
@@ -2388,10 +2391,8 @@ function AccessOverviewRow({ item }: { item: AccessOverviewItem }) {
 
 function GatewaySessionEmptyState({
   canConfigure,
-  onOpenGatewaySettings,
 }: {
   canConfigure: boolean;
-  onOpenGatewaySettings: () => void;
 }) {
   return (
     <section
@@ -2410,21 +2411,10 @@ function GatewaySessionEmptyState({
         </p>
         <span>
           {canConfigure
-            ? "Gateway defaults are managed from shared system configuration."
-            : "An admin manages gateway defaults in shared system configuration."}
+            ? "Installer defaults can be edited above; a session appears here after an agent connects."
+            : "An admin manages installer defaults on this page."}
         </span>
       </div>
-      {canConfigure && (
-        <div className="gatewaySessionEmptyActions">
-          <button
-            className="primaryAction compact"
-            onClick={onOpenGatewaySettings}
-            type="button"
-          >
-            Gateway settings
-          </button>
-        </div>
-      )}
     </section>
   );
 }
@@ -2859,7 +2849,9 @@ function isValidIpv4Literal(value: string): boolean {
     octets.length === 4 &&
     octets.every(
       (octet) =>
-        /^[0-9]{1,3}$/.test(octet) && Number(octet) <= 255,
+        /^[0-9]{1,3}$/.test(octet) &&
+        (octet.length === 1 || !octet.startsWith("0")) &&
+        Number(octet) <= 255,
     )
   );
 }
@@ -2944,12 +2936,12 @@ function InstallCommand({
   operatorPreferences,
   privateKeyHex,
 }: {
-  clientId: string;
+  clientId?: string;
   onUpdateOperatorPreferences: (
     preferences: OperatorPreferences,
   ) => Promise<void>;
   operatorPreferences: OperatorPreferences | null;
-  privateKeyHex: string;
+  privateKeyHex?: string;
 }) {
   const installControlId = useId().replace(/:/g, "");
   const gatewayKeyInputId = `${installControlId}-gateway-key`;
@@ -2973,37 +2965,46 @@ function InstallCommand({
     operatorPreferences?.gateway_server_public_key_hex ?? "";
   const savedGatewayEndpoints = operatorPreferences?.gateway_endpoints ?? "";
   const savedInstallMode = operatorPreferences?.agent_install_mode ?? "root";
-  const normalizedGatewayServerPublicKeyHex =
-    gatewayServerPublicKeyHex.trim();
-  const normalizedGatewayEndpoints = gatewayEndpoints.trim();
+  const normalizedGatewayServerPublicKeyHex = gatewayServerPublicKeyHex.trim();
+  const normalizedGatewayEndpoints =
+    normalizeGatewayEndpointList(gatewayEndpoints);
+  const hasInstallIdentity = Boolean(clientId && privateKeyHex);
   const gatewayKeyValid = isFixedHex32(normalizedGatewayServerPublicKeyHex);
   const gatewayEndpointsError = gatewayEndpointsValidationError(
     normalizedGatewayEndpoints,
   );
   const gatewayEndpointsValid = gatewayEndpointsError === null;
-  const canBuildCommand = gatewayKeyValid && gatewayEndpointsValid;
+  const gatewayDefaultsEmpty =
+    !normalizedGatewayServerPublicKeyHex && !normalizedGatewayEndpoints;
+  const gatewayDefaultsValid =
+    gatewayDefaultsEmpty || (gatewayKeyValid && gatewayEndpointsValid);
+  const showGatewayValidation =
+    hasInstallIdentity ||
+    Boolean(normalizedGatewayServerPublicKeyHex || normalizedGatewayEndpoints);
+  const gatewayKeyInvalid = showGatewayValidation && !gatewayKeyValid;
+  const gatewayEndpointsInvalid =
+    showGatewayValidation && !gatewayEndpointsValid;
+  const canBuildCommand =
+    hasInstallIdentity && gatewayKeyValid && gatewayEndpointsValid;
   const gatewayValidationDescription = [
-    !gatewayKeyValid ? gatewayKeyErrorId : null,
-    !gatewayEndpointsValid ? gatewayEndpointsErrorId : null,
+    gatewayKeyInvalid ? gatewayKeyErrorId : null,
+    gatewayEndpointsInvalid ? gatewayEndpointsErrorId : null,
   ]
     .filter(Boolean)
     .join(" ") || undefined;
-  const installValidationDescription = [
-    !gatewayKeyValid ? gatewayKeyErrorId : null,
-    !gatewayEndpointsValid ? gatewayEndpointsErrorId : null,
-  ]
-    .filter(Boolean)
-    .join(" ") || undefined;
+  const installValidationDescription = hasInstallIdentity
+    ? gatewayValidationDescription
+    : undefined;
   const gatewayDefaultsDirty =
     normalizedGatewayServerPublicKeyHex !==
       savedGatewayServerPublicKeyHex.trim() ||
-    normalizedGatewayEndpoints !== savedGatewayEndpoints.trim() ||
+    normalizedGatewayEndpoints !==
+      normalizeGatewayEndpointList(savedGatewayEndpoints) ||
     installMode !== savedInstallMode;
   const canSaveGatewayDefaults =
     operatorPreferences !== null &&
     gatewayDefaultsDirty &&
-    gatewayKeyValid &&
-    gatewayEndpointsValid &&
+    gatewayDefaultsValid &&
     !savePending;
   const saveGatewayDefaultsLabel = savePending
     ? "Saving"
@@ -3017,11 +3018,11 @@ function InstallCommand({
     : "The gateway key, endpoints, and install mode already match the saved defaults.";
   const installCommand = canBuildCommand
     ? buildAgentInstallCommand({
-        clientId,
+        clientId: clientId!,
         gatewayEndpoints: normalizedGatewayEndpoints,
         gatewayServerPublicKeyHex: normalizedGatewayServerPublicKeyHex,
         installMode,
-        privateKeyHex,
+        privateKeyHex: privateKeyHex!,
       })
     : [
         "Enter the gateway server public key and endpoints to generate",
@@ -3038,7 +3039,6 @@ function InstallCommand({
     );
     setGatewayEndpoints(operatorPreferences?.gateway_endpoints ?? "");
     setInstallMode(operatorPreferences?.agent_install_mode ?? "root");
-    setInstallFeedback(null);
   }, [
     operatorPreferences?.gateway_endpoints,
     operatorPreferences?.gateway_server_public_key_hex,
@@ -3077,7 +3077,8 @@ function InstallCommand({
         ...operatorPreferences,
         agent_install_mode: installMode,
         gateway_endpoints: normalizedGatewayEndpoints,
-        gateway_server_public_key_hex: normalizedGatewayServerPublicKeyHex,
+        gateway_server_public_key_hex:
+          normalizedGatewayServerPublicKeyHex || null,
       });
       setInstallFeedback({
         message: "Gateway install defaults saved for this operator.",
@@ -3099,19 +3100,24 @@ function InstallCommand({
   return (
     <div
       aria-describedby={installValidationDescription}
-      aria-label="Agent install command"
+      aria-label={
+        hasInstallIdentity
+          ? "Agent install command"
+          : "Gateway installer defaults"
+      }
       className="installCommandBlock"
     >
       <div className="installCommandHeader">
         <div>
-          <strong>Agent install command</strong>
+          <strong>
+            {hasInstallIdentity
+              ? "Agent install command"
+              : "Gateway installer defaults"}
+          </strong>
           <span>
-            Uses the stable repository installer, which resolves the selected
-            agent release through version.json. The private key is shown once
-            and is not saved by the console; the copied line contains it, so
-            use a trusted shell with history disabled and clear the clipboard
-            afterward. Gateway values can be saved as this operator&apos;s
-            reusable installer defaults.
+            {hasInstallIdentity
+              ? "Uses the stable repository installer, which resolves the selected agent release through version.json. The private key is shown once and is not saved by the console; the copied line contains it, so use a trusted shell with history disabled and clear the clipboard afterward."
+              : "Saved per operator and reused when this console generates agent install commands. These values do not change the gateway listener or private key."}
           </span>
         </div>
         <div className="sectionActions">
@@ -3126,28 +3132,30 @@ function InstallCommand({
             <Save size={15} />
             {saveGatewayDefaultsLabel}
           </button>
-          <button
-            aria-describedby={installValidationDescription}
-            className="secondaryAction compact"
-            disabled={!canBuildCommand}
-            onClick={() => void handleCopy()}
-            title="Copy the complete one-line install command."
-            type="button"
-          >
-            <Copy size={15} />
-            Copy command
-          </button>
+          {hasInstallIdentity ? (
+            <button
+              aria-describedby={installValidationDescription}
+              className="secondaryAction compact"
+              disabled={!canBuildCommand}
+              onClick={() => void handleCopy()}
+              title="Copy the complete one-line install command."
+              type="button"
+            >
+              <Copy size={15} />
+              Copy command
+            </button>
+          ) : null}
         </div>
       </div>
       <div className="installCommandControls">
         <label htmlFor={gatewayKeyInputId}>
           <span>Gateway public key</span>
           <input
-            aria-describedby={!gatewayKeyValid ? gatewayKeyErrorId : undefined}
-            aria-errormessage={!gatewayKeyValid ? gatewayKeyErrorId : undefined}
-            aria-invalid={!gatewayKeyValid}
+            aria-describedby={gatewayKeyInvalid ? gatewayKeyErrorId : undefined}
+            aria-errormessage={gatewayKeyInvalid ? gatewayKeyErrorId : undefined}
+            aria-invalid={gatewayKeyInvalid}
             aria-label="Gateway server public key hex"
-            aria-required="true"
+            aria-required={hasInstallIdentity}
             className="monospace"
             id={gatewayKeyInputId}
             name="gateway_server_public_key_hex"
@@ -3164,14 +3172,14 @@ function InstallCommand({
           <span>Gateway endpoints</span>
           <textarea
             aria-describedby={
-              !gatewayEndpointsValid ? gatewayEndpointsErrorId : undefined
+              gatewayEndpointsInvalid ? gatewayEndpointsErrorId : undefined
             }
             aria-errormessage={
-              !gatewayEndpointsValid ? gatewayEndpointsErrorId : undefined
+              gatewayEndpointsInvalid ? gatewayEndpointsErrorId : undefined
             }
-            aria-invalid={!gatewayEndpointsValid}
+            aria-invalid={gatewayEndpointsInvalid}
             aria-label="Gateway endpoints"
-            aria-required="true"
+            aria-required={hasInstallIdentity}
             id={gatewayEndpointsInputId}
             name="gateway_endpoints"
             onChange={(event) => {
@@ -3204,7 +3212,7 @@ function InstallCommand({
         </label>
       </div>
       <div aria-live="polite" className="installCommandValidation">
-        {!gatewayKeyValid ? (
+        {gatewayKeyInvalid ? (
           <small
             className="installCommandHint warn"
             id={gatewayKeyErrorId}
@@ -3214,7 +3222,7 @@ function InstallCommand({
               : "Gateway public key must be exactly 64 hex characters."}
           </small>
         ) : null}
-        {!gatewayEndpointsValid ? (
+        {gatewayEndpointsInvalid ? (
           <small
             className="installCommandHint warn"
             id={gatewayEndpointsErrorId}
@@ -3230,10 +3238,12 @@ function InstallCommand({
         }
         tone={savePending ? "progress" : installFeedback?.tone}
       />
-      <pre>
-        <code>{installCommand}</code>
-      </pre>
-      {installMode === "staged" ? (
+      {hasInstallIdentity ? (
+        <pre>
+          <code>{installCommand}</code>
+        </pre>
+      ) : null}
+      {hasInstallIdentity && installMode === "staged" ? (
         <div className="installCommandFollowup" role="note">
           <strong>Then run in foreground</strong>
           <code title={foregroundStartCommand}>{foregroundStartCommand}</code>
@@ -3241,6 +3251,14 @@ function InstallCommand({
       ) : null}
     </div>
   );
+}
+
+function normalizeGatewayEndpointList(value: string): string {
+  return value
+    .split(/[\n,]/)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .join("\n");
 }
 
 function buildAgentInstallCommand({

@@ -264,6 +264,7 @@ docker run --rm -d \
   --cpus 1.0 \
   --pids-limit 64 \
   -e RUST_LOG=vpsman_agent=info \
+  -e VPSMAN_AGENT_STATE_DIR=/tmp/vpsman-agent-state \
   -v "$SMOKE_ROOT_DIR:$SMOKE_ROOT_DIR" \
   -w "$SMOKE_ROOT_DIR" \
   alpine:3.20 \

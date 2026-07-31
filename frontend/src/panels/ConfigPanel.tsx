@@ -26,7 +26,6 @@ import {
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
 import { ExecutionResultPanel } from "../components/ExecutionResultPanel";
-import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import { scrollIntoViewWithMotion } from "../motion";
 import {
@@ -221,7 +220,6 @@ export function ConfigPanel({
   onSelectSubpage,
   onUpsertRuntimeConfigPatchGenerator,
   privilegeMaterial,
-  setPrivilegeMaterial,
 }: {
   activeSubpage: string;
   agents: AgentView[];
@@ -279,7 +277,6 @@ export function ConfigPanel({
     request: UpsertRuntimeConfigPatchGeneratorRequest,
   ) => Promise<RuntimeConfigPatchGeneratorRecord>;
   privilegeMaterial: PrivilegeMaterial | null;
-  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
 }) {
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
@@ -380,7 +377,6 @@ export function ConfigPanel({
             runAction={(action) =>
               runPanelAction(setPending, setActionError, action)
             }
-            setPrivilegeMaterial={setPrivilegeMaterial}
           />
         )}
         {subpage === "single" && (
@@ -399,7 +395,6 @@ export function ConfigPanel({
             runAction={(action) =>
               runPanelAction(setPending, setActionError, action)
             }
-            setPrivilegeMaterial={setPrivilegeMaterial}
           />
         )}
         {subpage === "rules" && (
@@ -583,6 +578,7 @@ function ConfigOverview({
       status: runtimeConfigApplyStatusLabel(state),
       target: agentNameById.get(state.client_id) ?? state.client_id,
       time: configApplyStateTime(state) ?? "",
+      title: runtimeConfigApplyStateSummary(state, false),
       tone: runtimeConfigApplyTone(state),
     })),
     ...configJobs.map((job) => ({
@@ -592,6 +588,7 @@ function ConfigOverview({
       status: job.status,
       target: "runtime config",
       time: job.created_at,
+      title: `Job ${job.id} created ${formatTime(job.created_at)}`,
       tone: configJobStatusTone(job.status),
     })),
   ]
@@ -964,7 +961,7 @@ function ConfigOverview({
                   {change.status}
                 </ConsoleStatusBadge>
               </span>
-              <span title={change.detail}>{change.detail}</span>
+              <span title={change.title}>{change.detail}</span>
               <span title={updated}>{updated}</span>
             </div>
             );
@@ -1021,7 +1018,7 @@ function ConfigCurrentStateRowsList({
             <ConsoleStatusBadge tone={row.tone}>
               {row.statusLabel}
             </ConsoleStatusBadge>
-            <small>{row.statusDetail}</small>
+            <small title={row.statusTitle}>{row.statusDetail}</small>
           </span>
           <span>
             <strong>{row.ruleLabel}</strong>
@@ -1070,6 +1067,7 @@ type ConfigCurrentStateRow = {
   statusDetail: string;
   statusKind: ConfigApplyStatusKind;
   statusLabel: string;
+  statusTitle?: string;
   targetDetail: string;
   targetLabel: string;
   targetTitle: string;
@@ -1160,6 +1158,11 @@ function buildConfigCurrentStateRow({
     statusDetail: status.detail,
     statusKind: status.kind,
     statusLabel: status.label,
+    statusTitle:
+      state?.applied_content_hash ??
+      state?.pending_job_id ??
+      state?.applied_job_id ??
+      undefined,
     targetDetail,
     targetLabel,
     targetTitle: resourceAvailable ? clientId : `Missing resource ${clientId}`,
@@ -1466,7 +1469,6 @@ function BulkConfigApply({
   pending,
   privilegeMaterial,
   runAction,
-  setPrivilegeMaterial,
 }: {
   agents: AgentView[];
   runtimeConfigPatchGenerators: RuntimeConfigPatchGeneratorRecord[];
@@ -1494,7 +1496,6 @@ function BulkConfigApply({
   pending: boolean;
   privilegeMaterial: PrivilegeMaterial | null;
   runAction: (action: () => Promise<void>) => Promise<void>;
-  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
 }) {
   const [selectorExpression, setSelectorExpression] = useState(() =>
     readLocalString(CONFIG_BULK_SELECTOR_STORAGE_KEY),
@@ -1570,7 +1571,6 @@ function BulkConfigApply({
     preview.target_count > 0 &&
     previewToml &&
     selectorExpression.trim() &&
-    privilegeMaterial &&
     !selectorParse.error &&
     (patchMode === "temporary" || rendered),
   );
@@ -2062,7 +2062,7 @@ function BulkConfigApply({
         </div>
         <div className="segmentedControl" aria-label="Patch source">
           <button
-            className={patchMode === "generator" ? "activeAction" : ""}
+            className={patchMode === "generator" ? "active" : ""}
             onClick={() => {
               setPatchMode("generator");
               clearBulkConfigReview();
@@ -2072,7 +2072,7 @@ function BulkConfigApply({
             Saved generator
           </button>
           <button
-            className={patchMode === "temporary" ? "activeAction" : ""}
+            className={patchMode === "temporary" ? "active" : ""}
             onClick={() => {
               setPatchMode("temporary");
               setRendered(null);
@@ -2248,32 +2248,32 @@ function BulkConfigApply({
             />
           </label>
         </details>
-        <PrivilegeVaultBox
-          labelPrefix="Runtime config"
-          lastPayloadHash={null}
-          onOpenUnlock={onOpenPrivilegeUnlock}
-          onPrivilegeMaterialChange={async (material) => {
-            await setPrivilegeMaterial(material);
-            clearBulkConfigReview();
-          }}
-          privilegeMaterial={privilegeMaterial}
-          unlockRedirectLabel="Unlock privilege for runtime config"
-        />
         <div className="singleConfigStickyActions bulkPatchApplyActions">
           <span>
             {ready
-              ? `Ready to apply ${bulkVpsCountLabel(preview?.target_count ?? 0)}`
-              : "Preview changes and unlock before applying a bulk runtime config patch."}
+              ? privilegeMaterial
+                ? `Ready to apply ${bulkVpsCountLabel(preview?.target_count ?? 0)}`
+                : `Preview ready for ${bulkVpsCountLabel(preview?.target_count ?? 0)}; applying will open privilege unlock.`
+              : "Preview changes before applying a bulk runtime config patch."}
           </span>
           <button
             className="primaryAction"
             disabled={pending || !ready}
-            onClick={() => void reviewApply()}
+            onClick={() => {
+              if (!privilegeMaterial) {
+                setReviewStatus("Unlock privilege to apply this reviewed patch");
+                onOpenPrivilegeUnlock();
+                return;
+              }
+              void reviewApply();
+            }}
             title={
               pending
                 ? "Wait for the current config operation to finish before opening apply confirmation."
                 : !ready
-                  ? "Preview changes and unlock privilege material before applying."
+                  ? "Preview changes before applying."
+                  : !privilegeMaterial
+                    ? "Open the shared privilege unlock, then apply this unchanged preview."
                   : "Open the final runtime config apply confirmation."
             }
             type="button"
@@ -2533,6 +2533,7 @@ function BulkConfigApply({
             value: applySnapshot?.payloadHashHex
               ? shortId(applySnapshot.payloadHashHex)
               : "-",
+            title: applySnapshot?.payloadHashHex ?? "-",
           },
         ]}
         onCancel={() => {
@@ -2662,7 +2663,6 @@ function SingleVpsConfig({
   pending,
   privilegeMaterial,
   runAction,
-  setPrivilegeMaterial,
 }: {
   agents: AgentView[];
   runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
@@ -2678,7 +2678,6 @@ function SingleVpsConfig({
   pending: boolean;
   privilegeMaterial: PrivilegeMaterial | null;
   runAction: (action: () => Promise<void>) => Promise<void>;
-  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [clientId, setClientId] = useState(() => readSingleConfigClientId());
@@ -2724,9 +2723,7 @@ function SingleVpsConfig({
     () => countConfigPatchLines(overrideToml),
     [overrideToml],
   );
-  const overrideReady = Boolean(
-    singleTarget && privilegeMaterial && baseHash && overrideToml.trim(),
-  );
+  const overrideReady = Boolean(singleTarget && baseHash && overrideToml.trim());
   const reviewFeedbackTone = reviewStatus?.startsWith("Patch preview ready")
     ? "success"
     : reviewStatus?.startsWith("Desired")
@@ -3031,7 +3028,13 @@ function SingleVpsConfig({
                 ? "Select a listed VPS"
                 : "no target selected"}
           </span>
-          <span>
+          <span
+            title={
+              runtimeConfigEvidenceState === "available"
+                ? runtimeConfigApplyStateSummary(runtimeApplyState, false)
+                : undefined
+            }
+          >
             {runtimeConfigEvidenceState === "loading"
               ? "Checking apply-state evidence"
               : runtimeConfigEvidenceState === "unavailable"
@@ -3059,6 +3062,7 @@ function SingleVpsConfig({
           <button
             className="secondaryAction"
             onClick={() => onOpenJobDetails(lastJobId)}
+            title={lastJobId}
             type="button"
           >
             Open job {shortId(lastJobId)}
@@ -3114,14 +3118,6 @@ function SingleVpsConfig({
             payloadLabel="Patch hash before apply"
             sectionsLabel="Validated TOML sections"
           />
-          <PrivilegeVaultBox
-            labelPrefix="Runtime config apply"
-            lastPayloadHash={null}
-            onOpenUnlock={onOpenPrivilegeUnlock}
-            onPrivilegeMaterialChange={setPrivilegeMaterial}
-            privilegeMaterial={privilegeMaterial}
-            unlockRedirectLabel="Unlock privilege for runtime config apply"
-          />
         </section>
       )}
 
@@ -3153,14 +3149,6 @@ function SingleVpsConfig({
             baseLabel="Read current config"
             payloadLabel="Patch hash before apply"
             sectionsLabel="Validated TOML sections"
-          />
-          <PrivilegeVaultBox
-            labelPrefix="Runtime config apply"
-            lastPayloadHash={null}
-            onOpenUnlock={onOpenPrivilegeUnlock}
-            onPrivilegeMaterialChange={setPrivilegeMaterial}
-            privilegeMaterial={privilegeMaterial}
-            unlockRedirectLabel="Unlock privilege for runtime config apply"
           />
         </section>
       )}
@@ -3197,7 +3185,7 @@ function SingleVpsConfig({
               label="Redacted runtime TOML"
               strong
             />
-            <span>
+            <span title={baseHash}>
               base {shortId(baseHash)} / redacted runtime config for{" "}
               {formatVpsName(singleTarget, vpsNameDisplayMode)}
             </span>
@@ -3229,12 +3217,14 @@ function SingleVpsConfig({
             </span>
             <SingleConfigGuardAnchors
               baseLabel={shortId(baseHash)}
+              baseTitle={baseHash}
               exactTargetLabel={formatVpsName(singleTarget, vpsNameDisplayMode)}
               payloadLabel={
                 overrideValidation?.payloadHashHex
                   ? shortId(overrideValidation.payloadHashHex)
                   : "Not ready"
               }
+              payloadTitle={overrideValidation?.payloadHashHex}
               sectionsLabel={
                 overrideValidation?.sections.join(", ") || "Type patch"
               }
@@ -3253,17 +3243,6 @@ function SingleVpsConfig({
               className="localActionFeedback configReviewFeedback"
               message={reviewStatus}
               tone={reviewFeedbackTone}
-            />
-            <PrivilegeVaultBox
-              labelPrefix="Runtime config apply"
-              lastPayloadHash={overrideValidation?.payloadHashHex ?? null}
-              onOpenUnlock={onOpenPrivilegeUnlock}
-              onPrivilegeMaterialChange={async (material) => {
-                clearSingleConfigReview();
-                await setPrivilegeMaterial(material);
-              }}
-              privilegeMaterial={privilegeMaterial}
-              unlockRedirectLabel="Unlock privilege for runtime config apply"
             />
             <div className="configOverrideActions singleConfigStickyActions">
               <span
@@ -3287,7 +3266,16 @@ function SingleVpsConfig({
               <button
                 className="primaryAction"
                 disabled={pending || !overrideReady}
-                onClick={() => void reviewOverrideApply()}
+                onClick={() => {
+                  if (!privilegeMaterial) {
+                    setReviewStatus(
+                      "Unlock privilege to apply this one-VPS patch",
+                    );
+                    onOpenPrivilegeUnlock();
+                    return;
+                  }
+                  void reviewOverrideApply();
+                }}
                 title={
                   pending
                     ? "Wait for the current config operation to finish before applying."
@@ -3331,6 +3319,7 @@ function SingleVpsConfig({
             value: applySnapshot?.baseHash
               ? shortId(applySnapshot.baseHash)
               : "-",
+            title: applySnapshot?.baseHash ?? "-",
           },
           {
             label: "Sections",
@@ -3341,6 +3330,7 @@ function SingleVpsConfig({
             value: applySnapshot?.payloadHashHex
               ? shortId(applySnapshot.payloadHashHex)
               : "-",
+            title: applySnapshot?.payloadHashHex ?? "-",
           },
           {
             label: "Timeout",
@@ -4136,7 +4126,7 @@ function VpsRulesPanel({
               preview_hash: snapshot.preview.preview_hash,
             });
       const nextPreview = buildOperatorVpsRulesPreview(rawPreview);
-      setPreview(nextPreview);
+      setPreview(null);
       setReviewSnapshot(null);
       setRuleStatus(
         `applied ${nextPreview.changed_row_count} VPS rule changes`,
@@ -4622,13 +4612,17 @@ function ConfigHelpLabel({
 
 function SingleConfigGuardAnchors({
   baseLabel,
+  baseTitle,
   exactTargetLabel,
   payloadLabel,
+  payloadTitle,
   sectionsLabel,
 }: {
   baseLabel: string;
+  baseTitle?: string;
   exactTargetLabel?: string;
   payloadLabel: string;
+  payloadTitle?: string;
   sectionsLabel: string;
 }) {
   return (
@@ -4644,7 +4638,7 @@ function SingleConfigGuardAnchors({
       )}
       <span>
         <strong title={CONFIG_HELP.currentBase}>Current base</strong>
-        <small>{baseLabel}</small>
+        <small title={baseTitle}>{baseLabel}</small>
       </span>
       <span>
         <strong title={CONFIG_HELP.sections}>Patch sections</strong>
@@ -4652,7 +4646,7 @@ function SingleConfigGuardAnchors({
       </span>
       <span>
         <strong title={CONFIG_HELP.payload}>Payload</strong>
-        <small>{payloadLabel}</small>
+        <small title={payloadTitle}>{payloadLabel}</small>
       </span>
     </div>
   );
@@ -4970,20 +4964,21 @@ function extractConfigRead(outputs: JobOutputRecord[]): {
 
 function runtimeConfigApplyStateSummary(
   state: RuntimeConfigApplyStateRecord | null,
+  shortenIdentifiers = true,
 ): string {
   if (!state) {
     return "No server-applied runtime sync recorded";
   }
   if (state.pending_status === "failed") {
     const job = state.pending_job_id
-      ? ` job ${shortId(state.pending_job_id)}`
+      ? ` job ${shortenIdentifiers ? shortId(state.pending_job_id) : state.pending_job_id}`
       : "";
     const error = state.pending_error ? `: ${state.pending_error}` : "";
     return `Runtime sync failed${job}${error}`;
   }
   if (state.pending_status === "queued") {
     const job = state.pending_job_id
-      ? ` job ${shortId(state.pending_job_id)}`
+      ? ` job ${shortenIdentifiers ? shortId(state.pending_job_id) : state.pending_job_id}`
       : "";
     if (runtimeConfigQueuedStateIsStale(state)) {
       const queuedAt = configApplyStateTime(state);
@@ -4995,10 +4990,13 @@ function runtimeConfigApplyStateSummary(
   }
   if (state.applied_content_hash) {
     const job = state.applied_job_id
-      ? ` job ${shortId(state.applied_job_id)}`
+      ? ` job ${shortenIdentifiers ? shortId(state.applied_job_id) : state.applied_job_id}`
       : "";
     const when = state.applied_at ? ` ${formatTime(state.applied_at)}` : "";
-    return `Runtime config applied${job}${when}; hash ${shortId(state.applied_content_hash)}`;
+    const hash = shortenIdentifiers
+      ? shortId(state.applied_content_hash)
+      : state.applied_content_hash;
+    return `Runtime config applied${job}${when}; hash ${hash}`;
   }
   return "No server-applied runtime sync recorded";
 }

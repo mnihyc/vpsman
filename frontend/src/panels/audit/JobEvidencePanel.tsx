@@ -184,7 +184,7 @@ export function JobEvidencePanel({
         cell: (row) => (
           <span className="historyPrimary">
             <strong>{commandLabel(row.job.command_type)}</strong>
-            <small>{shortId(row.job.id)}</small>
+            <small title={row.job.id}>{shortId(row.job.id)}</small>
           </span>
         ),
       },
@@ -195,7 +195,11 @@ export function JobEvidencePanel({
         searchValue: (row) => jobActorLabel(row.job, row.auditMatches),
         size: 150,
         sortValue: (row) => jobActorLabel(row.job, row.auditMatches),
-        cell: (row) => jobActorLabel(row.job, row.auditMatches),
+        cell: (row) => (
+          <span title={row.job.actor_id ?? undefined}>
+            {jobActorLabel(row.job, row.auditMatches)}
+          </span>
+        ),
       },
       {
         id: "privilege",
@@ -223,13 +227,16 @@ export function JobEvidencePanel({
       {
         id: "status",
         header: "Result",
-        minSize: 120,
+        minSize: 150,
         searchValue: (row) => row.job.status,
-        size: 130,
+        size: 160,
         sortValue: (row) => row.job.status,
         cell: (row) => (
-          <span className={`status ${jobStatusBadgeClass(row.job.status)}`}>
-            {row.job.status}
+          <span
+            className={`status ${jobStatusBadgeClass(row.job.status)}`}
+            title={row.job.status.replace(/_/g, " ")}
+          >
+            {row.job.status.replace(/_/g, " ")}
           </span>
         ),
       },
@@ -398,7 +405,7 @@ function JobEvidenceDetail({
       <div className="consoleDetailPanelHeader">
         <span>
           <strong>Selected job proof</strong>
-          <small>
+          <small title={record.job.id}>
             {commandLabel(record.job.command_type)} · {shortId(record.job.id)}
           </small>
         </span>
@@ -417,7 +424,9 @@ function JobEvidenceDetail({
       <div className="consoleInlineDetailGrid">
         <span>
           <strong>Actor</strong>
-          <span>{jobActorLabel(record.job, record.auditMatches)}</span>
+          <span title={record.job.actor_id ?? undefined}>
+            {jobActorLabel(record.job, record.auditMatches)}
+          </span>
         </span>
         <span>
           <strong>Privilege</strong>
@@ -480,7 +489,9 @@ function JobEvidenceDetail({
               <div className="dashboardWidgetRow auditEvidenceRow" key={audit.id}>
                 <strong>{audit.action}</strong>
                 <span>{audit.target}</span>
-                <small>{audit.command_hash ? shortHash(audit.command_hash) : "no hash"}</small>
+                <small title={audit.command_hash ?? undefined}>
+                  {audit.command_hash ? shortHash(audit.command_hash) : "no hash"}
+                </small>
                 <small>{formatTime(audit.created_at)}</small>
               </div>
             ))
@@ -540,7 +551,9 @@ function JobEvidenceDetail({
                   {output.artifact_object_key ? (
                     <strong>{output.artifact_object_key}</strong>
                   ) : output.artifact_sha256_hex ? (
-                    <strong>{shortHash(output.artifact_sha256_hex)}</strong>
+                    <strong title={output.artifact_sha256_hex}>
+                      {shortHash(output.artifact_sha256_hex)}
+                    </strong>
                   ) : (
                     <strong>inline output</strong>
                   )}

@@ -201,7 +201,7 @@ export function MigrationLinkForm({
           <div className="migrationPlanSummary" aria-live="polite">
             <div>
               <span>Draft restore</span>
-              <strong>{shortId(selectedPlan.id)}</strong>
+              <strong title={selectedPlan.id}>{shortId(selectedPlan.id)}</strong>
             </div>
             <div>
               <span>Source VPS</span>
@@ -225,7 +225,7 @@ export function MigrationLinkForm({
             </div>
             <div>
               <span>Last mapping</span>
-              <strong>
+              <strong title={existingLink?.id}>
                 {existingLink
                   ? `${shortId(existingLink.id)} · ${migrationLinkStatusLabel(existingLink.status)}`
                   : "none"}

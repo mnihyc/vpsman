@@ -328,6 +328,21 @@ impl SuiteConfig {
             self.api.trusted_proxy_cidrs.as_deref(),
             "api.trusted_proxy_cidrs",
         )?;
+        validate_optional_ratio_thresholds(
+            self.api.alert_memory_available_warning_ratio,
+            self.api.alert_memory_available_critical_ratio,
+            "api.alert_memory_available",
+        )?;
+        validate_optional_ratio_thresholds(
+            self.api.alert_disk_available_warning_ratio,
+            self.api.alert_disk_available_critical_ratio,
+            "api.alert_disk_available",
+        )?;
+        validate_optional_cpu_thresholds(
+            self.api.alert_cpu_load_warning,
+            self.api.alert_cpu_load_critical,
+            "api.alert_cpu_load",
+        )?;
         validate_optional_tunnel_allocation_pool(
             self.network.tunnel_ipv4_allocation_pool_cidr.as_deref(),
             TunnelAllocationPoolFamily::Ipv4,
@@ -533,6 +548,48 @@ fn validate_optional_ip_nets(values: Option<&[String]>, name: &str) -> Result<()
         let value = value.trim();
         if value.is_empty() || value.parse::<ipnet::IpNet>().is_err() {
             return Err(format!("{name}_invalid"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_optional_ratio_thresholds(
+    warning: Option<f64>,
+    critical: Option<f64>,
+    name: &str,
+) -> Result<(), String> {
+    if warning.is_some() != critical.is_some() {
+        return Err(format!("{name}_pair_incomplete"));
+    }
+    for value in [warning, critical].into_iter().flatten() {
+        if !value.is_finite() || value <= 0.0 || value >= 1.0 {
+            return Err(format!("{name}_out_of_range"));
+        }
+    }
+    if let (Some(warning), Some(critical)) = (warning, critical) {
+        if critical > warning {
+            return Err(format!("{name}_critical_above_warning"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_optional_cpu_thresholds(
+    warning: Option<f64>,
+    critical: Option<f64>,
+    name: &str,
+) -> Result<(), String> {
+    if warning.is_some() != critical.is_some() {
+        return Err(format!("{name}_pair_incomplete"));
+    }
+    for value in [warning, critical].into_iter().flatten() {
+        if !value.is_finite() || value <= 0.0 {
+            return Err(format!("{name}_out_of_range"));
+        }
+    }
+    if let (Some(warning), Some(critical)) = (warning, critical) {
+        if critical < warning {
+            return Err(format!("{name}_critical_below_warning"));
         }
     }
     Ok(())
@@ -753,5 +810,85 @@ tunnel_ipv6_allocation_pool_cidr = "fd80::/128"
             too_small,
             "network.tunnel_ipv6_allocation_pool_cidr_too_small"
         );
+    }
+
+    #[test]
+    fn suite_config_validates_alert_threshold_ranges_and_order() {
+        SuiteConfig::parse(
+            r#"
+version = 1
+
+[api]
+alert_memory_available_warning_ratio = 0.2
+alert_memory_available_critical_ratio = 0.1
+alert_disk_available_warning_ratio = 0.25
+alert_disk_available_critical_ratio = 0.05
+alert_cpu_load_warning = 2.0
+alert_cpu_load_critical = 4.0
+"#,
+        )
+        .expect("ordered alert thresholds");
+
+        let memory_error = SuiteConfig::parse(
+            r#"
+version = 1
+
+[api]
+alert_memory_available_warning_ratio = 0.1
+alert_memory_available_critical_ratio = 0.2
+"#,
+        )
+        .unwrap_err();
+        assert_eq!(
+            memory_error,
+            "api.alert_memory_available_critical_above_warning"
+        );
+
+        let cpu_error = SuiteConfig::parse(
+            r#"
+version = 1
+
+[api]
+alert_cpu_load_warning = 4.0
+alert_cpu_load_critical = 2.0
+"#,
+        )
+        .unwrap_err();
+        assert_eq!(cpu_error, "api.alert_cpu_load_critical_below_warning");
+
+        let range_error = SuiteConfig::parse(
+            r#"
+version = 1
+
+[api]
+alert_disk_available_warning_ratio = 1.0
+alert_disk_available_critical_ratio = 0.1
+"#,
+        )
+        .unwrap_err();
+        assert_eq!(range_error, "api.alert_disk_available_out_of_range");
+
+        let zero_error = SuiteConfig::parse(
+            r#"
+version = 1
+
+[api]
+alert_memory_available_warning_ratio = 0.0
+alert_memory_available_critical_ratio = 0.0
+"#,
+        )
+        .unwrap_err();
+        assert_eq!(zero_error, "api.alert_memory_available_out_of_range");
+
+        let incomplete_error = SuiteConfig::parse(
+            r#"
+version = 1
+
+[api]
+alert_cpu_load_warning = 2.0
+"#,
+        )
+        .unwrap_err();
+        assert_eq!(incomplete_error, "api.alert_cpu_load_pair_incomplete");
     }
 }

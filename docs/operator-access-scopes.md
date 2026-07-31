@@ -82,11 +82,18 @@ a custom list.
 
 ## User And Session Management
 
-The dashboard manages accounts, roles, scopes, MFA, and active bearer-session
-revocation under Access > Operators. Audit > Sessions holds operator and
-terminal session evidence, while Access > Gateway sessions shows live and ended
-agent streams. Access > VPS identities owns agent key lifecycle, and Access >
-Privilege vault owns local privilege unlock state.
+The dashboard manages accounts, roles, scopes, MFA, and active bearer sessions
+under Access > Operators. Audit > Sessions provides searchable operator and
+terminal evidence plus reviewed bulk revocation of active non-current bearer
+sessions. Operators enroll TOTP under Access > Privilege vault by scanning the
+QR code (the manual setup key remains available) and confirming the current
+six-digit code.
+
+Access > Gateway sessions shows live and ended agent streams and edits the
+current admin's reusable agent-installer endpoints, server public key, and
+install mode. These defaults do not change gateway runtime binds or its private
+key. Access > VPS identities owns agent key lifecycle, and Access > Privilege
+vault owns local privilege unlock state.
 
 Unlock verifies a non-mutating, request-bound assertion with the gateway before
 the console reports success. The entered super password and privilege salt stay

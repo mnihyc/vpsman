@@ -1299,7 +1299,7 @@ function TunnelPlanRows({
         <tr className="tunnelPlanDetailRow">
           <td colSpan={7}>
             <div className="tunnelPlanDetail">
-              <button aria-label={`Close details for ${plan.name}`} className="iconAction topologyDetailClose" onClick={onToggle} title="Close details" type="button"><X size={15} /></button>
+              <button aria-label={`Close details for ${plan.name}`} className="iconButton topologyDetailClose" onClick={onToggle} title="Close details" type="button"><X size={15} /></button>
               <div className="tunnelPlanFacts">
                 <PlanFact label="Desired state" value={plan.enabled ? "Present on both endpoints" : "Absent from both endpoints"} />
                 <PlanFact
@@ -1313,7 +1313,16 @@ function TunnelPlanRows({
                 <PlanFact label="Right outer path" value={formatEndpointUnderlay(plan.plan.right_local_underlay, plan.plan.right_remote_underlay)} />
                 <PlanFact label="Tunnel addresses" value={formatTunnelAddresses(plan)} />
                 <PlanFact label="Bandwidth" value={`${plan.plan.bandwidth_mbps} Mbps`} />
-                <PlanFact label="Runtime ownership" value={formatRuntimeBinding(plan)} />
+                <PlanFact
+                  label="Runtime ownership"
+                  title={
+                    plan.plan.runtime_control?.manager ===
+                    "external_managed_adapter"
+                      ? `External adapters ${plan.plan.runtime_control.left_adapter_template_id ?? "missing"} / ${plan.plan.runtime_control.right_adapter_template_id ?? "missing"}`
+                      : undefined
+                  }
+                  value={formatRuntimeBinding(plan)}
+                />
                 <PlanFact label="OSPF control" value={formatPlanOspf(plan)} />
               </div>
               <form className="tunnelConnectionAssessment" onClick={(event) => event.stopPropagation()} onSubmit={(event) => void saveConnectionAssessment(event)}>
@@ -1579,7 +1588,7 @@ function TunnelPlanComposer({
           <h2>{existing ? "Update tunnel plan" : "Create tunnel plan"}</h2>
           <span>Declare one exact point-to-point tunnel; OSPF remains optional</span>
         </div>
-        <button aria-label="Close tunnel plan editor" className="iconAction" onClick={onClose} title="Close editor" type="button"><X size={17} /></button>
+        <button aria-label="Close tunnel plan editor" className="iconButton" onClick={onClose} title="Close editor" type="button"><X size={17} /></button>
       </div>
       <form className="tunnelPlanForm" noValidate onSubmit={submit}>
         <fieldset className="topologyFormSection">
@@ -1711,13 +1720,35 @@ function TunnelPlanComposer({
               >
                 <span>
                   <strong>Left endpoint command</strong>
-                  <span title={endpointOspfResolutionLabel(form.leftClientId, leftOspfSource, configurationSourcesEvidenceState, form.leftRoutingDefinitionId, networkAdapterDefinitions)}>
+                  <span
+                    title={
+                      form.leftRoutingDefinitionId ??
+                      endpointOspfResolutionLabel(
+                        form.leftClientId,
+                        leftOspfSource,
+                        configurationSourcesEvidenceState,
+                        form.leftRoutingDefinitionId,
+                        networkAdapterDefinitions,
+                      )
+                    }
+                  >
                     {endpointOspfResolutionLabel(form.leftClientId, leftOspfSource, configurationSourcesEvidenceState, form.leftRoutingDefinitionId, networkAdapterDefinitions)}
                   </span>
                 </span>
                 <span>
                   <strong>Right endpoint command</strong>
-                  <span title={endpointOspfResolutionLabel(form.rightClientId, rightOspfSource, configurationSourcesEvidenceState, form.rightRoutingDefinitionId, networkAdapterDefinitions)}>
+                  <span
+                    title={
+                      form.rightRoutingDefinitionId ??
+                      endpointOspfResolutionLabel(
+                        form.rightClientId,
+                        rightOspfSource,
+                        configurationSourcesEvidenceState,
+                        form.rightRoutingDefinitionId,
+                        networkAdapterDefinitions,
+                      )
+                    }
+                  >
                     {endpointOspfResolutionLabel(form.rightClientId, rightOspfSource, configurationSourcesEvidenceState, form.rightRoutingDefinitionId, networkAdapterDefinitions)}
                   </span>
                 </span>
@@ -1809,7 +1840,7 @@ function AdapterDefinitionField({ clientId, domain, emptyLabel = "Select adapter
           <option value="">{!clientId ? "Select endpoint first" : domain !== "routing_cost" && definitions.length === 0 ? "No compatible adapter definitions" : emptyLabel}</option>
           {definitions.map((definition) => <option key={definition.id} value={definition.id}>{definition.name}</option>)}
         </select>
-        <button aria-label={`Open adapter definitions for ${label}`} className="iconAction" onClick={() => onOpenAdapterDefinitions(domain)} title={`Create or manage ${domain === "routing_cost" ? "routing cost" : "tunnel runtime"} adapters`} type="button"><ExternalLink size={15} /></button>
+        <button aria-label={`Open adapter definitions for ${label}`} className="iconButton" onClick={() => onOpenAdapterDefinitions(domain)} title={`Create or manage ${domain === "routing_cost" ? "routing cost" : "tunnel runtime"} adapters`} type="button"><ExternalLink size={15} /></button>
       </div>
     </div>
   );
@@ -1949,7 +1980,7 @@ function tunnelConnectivityPresentation(
       ? formatCompactTime(plan.connection_assessed_at)
       : "time unavailable";
     const actor = plan.connection_assessed_by
-      ? `operator ${shortId(plan.connection_assessed_by)}`
+      ? `operator ${plan.connection_assessed_by}`
       : "operator";
     return {
       detail: `Operator assessment · ${assessedAt}`,
@@ -2613,6 +2644,7 @@ function createConfirmationItems(
     { label: "Runtime owner", value: runtimeManagerLabel(request.runtime_control?.manager) },
     ...(runtime?.manager === "external_managed_adapter" ? [{
       label: "Runtime adapters",
+      title: `${runtime.left_adapter_template_id ?? "missing"} / ${runtime.right_adapter_template_id ?? "missing"}`,
       value: `${adapterDefinitionName(runtime.left_adapter_template_id)} / ${adapterDefinitionName(runtime.right_adapter_template_id)}`,
     }] : []),
     { label: "Traffic policy", value: trafficSummary },
@@ -2626,6 +2658,7 @@ function createConfirmationItems(
     ...(request.ospf ? [
       {
         label: "OSPF command overrides",
+        title: `${request.ospf.left_adapter_template_id ?? "VPS preset"} / ${request.ospf.right_adapter_template_id ?? "VPS preset"}`,
         value: `${endpointOspfResolutionLabel(
           request.left_client_id,
           endpointOspfConfigurationSource(

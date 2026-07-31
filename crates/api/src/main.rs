@@ -443,34 +443,37 @@ impl Args {
                 self.require_registered_agent_updates = value;
             }
         }
-        if env_absent("VPSMAN_ALERT_MEMORY_AVAILABLE_WARNING_RATIO") {
-            if let Some(value) = config.api.alert_memory_available_warning_ratio {
-                self.alert_memory_available_warning_ratio = value;
+        if env_absent("VPSMAN_ALERT_MEMORY_AVAILABLE_WARNING_RATIO")
+            && env_absent("VPSMAN_ALERT_MEMORY_AVAILABLE_CRITICAL_RATIO")
+        {
+            if let (Some(warning), Some(critical)) = (
+                config.api.alert_memory_available_warning_ratio,
+                config.api.alert_memory_available_critical_ratio,
+            ) {
+                self.alert_memory_available_warning_ratio = warning;
+                self.alert_memory_available_critical_ratio = critical;
             }
         }
-        if env_absent("VPSMAN_ALERT_MEMORY_AVAILABLE_CRITICAL_RATIO") {
-            if let Some(value) = config.api.alert_memory_available_critical_ratio {
-                self.alert_memory_available_critical_ratio = value;
+        if env_absent("VPSMAN_ALERT_DISK_AVAILABLE_WARNING_RATIO")
+            && env_absent("VPSMAN_ALERT_DISK_AVAILABLE_CRITICAL_RATIO")
+        {
+            if let (Some(warning), Some(critical)) = (
+                config.api.alert_disk_available_warning_ratio,
+                config.api.alert_disk_available_critical_ratio,
+            ) {
+                self.alert_disk_available_warning_ratio = warning;
+                self.alert_disk_available_critical_ratio = critical;
             }
         }
-        if env_absent("VPSMAN_ALERT_DISK_AVAILABLE_WARNING_RATIO") {
-            if let Some(value) = config.api.alert_disk_available_warning_ratio {
-                self.alert_disk_available_warning_ratio = value;
-            }
-        }
-        if env_absent("VPSMAN_ALERT_DISK_AVAILABLE_CRITICAL_RATIO") {
-            if let Some(value) = config.api.alert_disk_available_critical_ratio {
-                self.alert_disk_available_critical_ratio = value;
-            }
-        }
-        if env_absent("VPSMAN_ALERT_CPU_LOAD_WARNING") {
-            if let Some(value) = config.api.alert_cpu_load_warning {
-                self.alert_cpu_load_warning = value;
-            }
-        }
-        if env_absent("VPSMAN_ALERT_CPU_LOAD_CRITICAL") {
-            if let Some(value) = config.api.alert_cpu_load_critical {
-                self.alert_cpu_load_critical = value;
+        if env_absent("VPSMAN_ALERT_CPU_LOAD_WARNING")
+            && env_absent("VPSMAN_ALERT_CPU_LOAD_CRITICAL")
+        {
+            if let (Some(warning), Some(critical)) = (
+                config.api.alert_cpu_load_warning,
+                config.api.alert_cpu_load_critical,
+            ) {
+                self.alert_cpu_load_warning = warning;
+                self.alert_cpu_load_critical = critical;
             }
         }
         if env_absent("VPSMAN_API_DB_MAX_CONNECTIONS") {
@@ -576,6 +579,17 @@ async fn main() -> Result<()> {
         .init();
 
     let mut args = Args::parse();
+    // Keep the non-suite startup policy as the hot-reload baseline. Suite
+    // values are applied on every read, so deleting a suite key restores the
+    // CLI/environment/default value instead of retaining a stale suite value.
+    let fleet_alert_policy = FleetAlertPolicy::new(
+        args.alert_memory_available_warning_ratio,
+        args.alert_memory_available_critical_ratio,
+        args.alert_disk_available_warning_ratio,
+        args.alert_disk_available_critical_ratio,
+        args.alert_cpu_load_warning,
+        args.alert_cpu_load_critical,
+    )?;
     let suite_config =
         SuiteConfig::load_optional(&args.suite_config).map_err(anyhow::Error::msg)?;
     remember_suite_config(&args.suite_config, &suite_config);
@@ -611,7 +625,7 @@ async fn main() -> Result<()> {
     );
     let update_release_policy =
         UpdateReleasePolicy::new(args.agent_update_allowed_channels.clone())?;
-    let fleet_alert_policy = FleetAlertPolicy::new(
+    FleetAlertPolicy::new(
         args.alert_memory_available_warning_ratio,
         args.alert_memory_available_critical_ratio,
         args.alert_disk_available_warning_ratio,

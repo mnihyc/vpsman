@@ -1689,7 +1689,7 @@ function PresetDefinitionEditor({
           />
         </label>
         <div className="formRow">
-          <label>
+          <label title="Controls which environment variables the command inherits: all current values, a minimal PATH, or a clean environment.">
             <span>Environment</span>
             <select
               aria-label="Command environment policy"
@@ -1703,7 +1703,7 @@ function PresetDefinitionEditor({
               <option value="clean">Clean</option>
             </select>
           </label>
-          <label>
+          <label title="Controls whether the command receives a native pseudo-terminal or runs without a terminal.">
             <span>Terminal</span>
             <select
               aria-label="Command terminal policy"
@@ -1714,7 +1714,7 @@ function PresetDefinitionEditor({
               <option value="disabled">Disabled</option>
             </select>
           </label>
-          <label>
+          <label title="Controls whether timeout and cancellation cleanup targets the full spawned process group or only the direct child.">
             <span>Process cleanup</span>
             <select
               aria-label="Command process cleanup"
@@ -1928,7 +1928,7 @@ function BoundedCommandEditor({
         value={textDrafts[`${commandKey}.argv`] ?? ""}
       />
       <div className="formRow">
-        <label>
+        <label title="Hard wall-clock limit for each source command invocation. A timed-out invocation is reported as a failure.">
           <span>Timeout seconds</span>
           <input
             aria-label={`${label} timeout seconds`}
@@ -1944,7 +1944,7 @@ function BoundedCommandEditor({
             value={asNumber(command.max_timeout_secs, 5)}
           />
         </label>
-        <label>
+        <label title="Maximum command output retained as source evidence. It does not limit what the process can write elsewhere.">
           <span>Maximum output bytes</span>
           <input
             aria-label={`${label} maximum output bytes`}

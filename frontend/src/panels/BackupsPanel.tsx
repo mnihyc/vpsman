@@ -193,6 +193,7 @@ type ConfirmationItem = { label: string; title?: string; value: ReactNode };
 type BackupPostureItem = {
   detail: string;
   label: string;
+  title?: string;
   tone?: "attention" | "ready";
   value: string;
 };
@@ -1945,6 +1946,7 @@ export function BackupsPanel({
               (policyPruneScheduleId
                 ? shortId(policyPruneScheduleId)
                 : "all policies"),
+            title: policyPruneScheduleId || "all policies",
           },
           {
             label: "Mode",
@@ -1963,6 +1965,7 @@ export function BackupsPanel({
             value: snapshot
               ? `${snapshot.previewHash.slice(0, 12)}...`
               : "preview required",
+            title: snapshot?.previewHash ?? "preview required",
           },
         ];
       }
@@ -2012,6 +2015,7 @@ export function BackupsPanel({
             value:
               snapshot?.requestLabel ??
               (artifactBackupId ? shortId(artifactBackupId) : "none"),
+            title: artifactBackupId || "none",
           },
           {
             label: "Object",
@@ -2036,6 +2040,7 @@ export function BackupsPanel({
             value:
               snapshot?.requestLabel ??
               (artifactBackupId ? shortId(artifactBackupId) : "none"),
+            title: artifactBackupId || "none",
           },
           {
             label: "Source job",
@@ -2056,6 +2061,7 @@ export function BackupsPanel({
             value:
               snapshot?.sourceLabel ??
               (restoreSourceId ? shortId(restoreSourceId) : "none"),
+            title: restoreSourceId || "none",
           },
           {
             label: "Destination VPS",
@@ -2099,6 +2105,7 @@ export function BackupsPanel({
             value:
               snapshot?.sourceLabel ??
               (restoreSourceId ? shortId(restoreSourceId) : "none"),
+            title: restoreSourceId || "none",
           },
           {
             label: "Destination VPS",
@@ -2142,6 +2149,7 @@ export function BackupsPanel({
               (rollbackRestoreJobId.trim()
                 ? shortId(rollbackRestoreJobId.trim())
                 : "none"),
+            title: rollbackRestoreJobId.trim() || "none",
           },
           {
             label: "Target",
@@ -2178,6 +2186,7 @@ export function BackupsPanel({
               (migrationRestorePlanId
                 ? shortId(migrationRestorePlanId)
                 : "none"),
+            title: migrationRestorePlanId || "none",
           },
           {
             label: "Path behavior",
@@ -2216,6 +2225,10 @@ export function BackupsPanel({
               (selectedMigrationRestorePlan
                 ? shortId(selectedMigrationRestorePlan.id)
                 : "none"),
+            title:
+              snapshot?.restorePlan.id ??
+              selectedMigrationRestorePlan?.id ??
+              "none",
           },
           {
             label: "Source -> replacement",
@@ -3053,19 +3066,21 @@ export function BackupsPanel({
                 targetAgent={rollbackTarget}
                 targetClientId={rollbackTargetId}
               />
-              <PrivilegeVaultBox
-                lastPayloadHash={lastPayloadHash}
-                onOpenUnlock={onOpenPrivilegeUnlock}
-                onPrivilegeMaterialChange={async (material) => {
-                  await setPrivilegeMaterial(material);
-                  clearBackupConfirmations([
-                    "restore-plan",
-                    "restore-run",
-                    "restore-rollback",
-                  ]);
-                }}
-                privilegeMaterial={privilegeMaterial}
-              />
+              {!privilegeMaterial && (
+                <PrivilegeVaultBox
+                  lastPayloadHash={lastPayloadHash}
+                  onOpenUnlock={onOpenPrivilegeUnlock}
+                  onPrivilegeMaterialChange={async (material) => {
+                    await setPrivilegeMaterial(material);
+                    clearBackupConfirmations([
+                      "restore-plan",
+                      "restore-run",
+                      "restore-rollback",
+                    ]);
+                  }}
+                  privilegeMaterial={privilegeMaterial}
+                />
+              )}
             </>
           )}
           {backupSubpage === "migration" && (
@@ -3165,15 +3180,20 @@ export function BackupsPanel({
                 selectedPlan={selectedMigrationRestorePlan}
                 targetAgent={selectedMigrationTarget}
               />
-              <PrivilegeVaultBox
-                lastPayloadHash={lastPayloadHash}
-                onOpenUnlock={onOpenPrivilegeUnlock}
-                onPrivilegeMaterialChange={async (material) => {
-                  await setPrivilegeMaterial(material);
-                  clearBackupConfirmations(["migration-link", "migration-run"]);
-                }}
-                privilegeMaterial={privilegeMaterial}
-              />
+              {!privilegeMaterial && (
+                <PrivilegeVaultBox
+                  lastPayloadHash={lastPayloadHash}
+                  onOpenUnlock={onOpenPrivilegeUnlock}
+                  onPrivilegeMaterialChange={async (material) => {
+                    await setPrivilegeMaterial(material);
+                    clearBackupConfirmations([
+                      "migration-link",
+                      "migration-run",
+                    ]);
+                  }}
+                  privilegeMaterial={privilegeMaterial}
+                />
+              )}
             </>
           )}
         </div>
@@ -3214,7 +3234,11 @@ function BackupPostureOverview({ items }: { items: BackupPostureItem[] }) {
       </div>
       <div className="backupPostureGrid">
         {items.map((item) => (
-          <div className={item.tone ?? ""} key={item.label} title={item.detail}>
+          <div
+            className={item.tone ?? ""}
+            key={item.label}
+            title={item.title ?? item.detail}
+          >
             <span>{item.label}</span>
             <strong>{item.value}</strong>
             <p>{item.detail}</p>
@@ -3396,7 +3420,7 @@ function BackupRestoreSummary({
     : "backupRequestSummary backupRestoreSummary";
   return (
     <section aria-label="Backup restore summary" className={summaryClass}>
-      <strong>
+      <strong title={selectedSourceBackup?.id}>
         {selectedSourceLabel} · {selectedArtifactLabel}
       </strong>
       <span>
@@ -3488,7 +3512,13 @@ function BackupMigrationSummary({
         <div>
           <span>Source VPS/artifact</span>
           <strong>{sourceTitle}</strong>
-          <small>{sourceDetail}</small>
+          <small
+            title={
+              sourceArtifact?.id ?? sourceBackup?.artifact_id ?? undefined
+            }
+          >
+            {sourceDetail}
+          </small>
         </div>
         <ArrowRight aria-hidden="true" size={18} />
         <div>
@@ -3516,7 +3546,7 @@ function BackupMigrationSummary({
             {sameVpsRestoreDraftCount === 1 ? "" : "s"} excluded
           </span>
         )}
-        <span>{mappingDetail}</span>
+        <span title={latestMapping?.id}>{mappingDetail}</span>
         <span>
           identity, service checks, and cutover notes stay optional until
           cutover
@@ -3876,6 +3906,7 @@ function BackupOverview({
         <div className="backupEvidenceRows">
           <BackupEvidenceRow
             label="Latest backup"
+            title={latestBackup?.artifact_id ?? undefined}
             value={
               latestBackup
                 ? `${formatTime(latestBackup.created_at)} · ${backupStatusLabel(latestBackup.status)}`
@@ -3889,6 +3920,11 @@ function BackupOverview({
           />
           <BackupEvidenceRow
             label="Latest artifact"
+            title={
+              latestArtifact
+                ? `${latestArtifact.id}; SHA-256 ${latestArtifact.sha256_hex}`
+                : undefined
+            }
             value={
               latestArtifact
                 ? `${shortId(latestArtifact.id)} · ${formatBytes(latestArtifact.size_bytes)}`
@@ -3947,6 +3983,7 @@ function BackupOverview({
           />
           <BackupEvidenceRow
             label="Restore verification"
+            title={latestRestorePlan?.id}
             value={
               latestRestorePlan
                 ? `${shortId(latestRestorePlan.id)} · ${latestRestorePlan.status}`
@@ -3965,6 +4002,7 @@ function BackupOverview({
           />
           <BackupEvidenceRow
             label="Migration readiness"
+            title={latestMigrationLink?.id}
             value={
               latestMigrationLink
                 ? `${shortId(latestMigrationLink.id)} · ${latestMigrationLink.status}`
@@ -4094,6 +4132,7 @@ function BackupArtifactOwnershipGuide({
         />
         <BackupGuideStep
           label="Upload package"
+          title={latestArtifact?.id}
           value={
             latestArtifact
               ? shortId(latestArtifact.id)
@@ -4159,16 +4198,18 @@ function BackupArtifactOwnershipGuide({
 function BackupGuideStep({
   detail,
   label,
+  title,
   tone,
   value,
 }: {
   detail: string;
   label: string;
+  title?: string;
   tone?: "attention" | "ready";
   value: string;
 }) {
   return (
-    <div className={tone ?? ""}>
+    <div className={tone ?? ""} title={title}>
       <span>{label}</span>
       <strong>{value}</strong>
       <p>{detail}</p>
@@ -4179,14 +4220,16 @@ function BackupGuideStep({
 function BackupEvidenceRow({
   detail,
   label,
+  title,
   value,
 }: {
   detail: string;
   label: string;
+  title?: string;
   value: string;
 }) {
   return (
-    <div className="backupEvidenceRow">
+    <div className="backupEvidenceRow" title={title}>
       <div>
         <strong>{label}</strong>
         <span>{detail}</span>
@@ -4345,6 +4388,7 @@ function buildBackupPostureItems({
         ? `${backupStatusLabel(latestBackup.status)} for ${latestBackup.client_id}; artifact ${latestBackup.artifact_id ? shortId(latestBackup.artifact_id) : "not recorded"}.`
         : "No backup request records are available.",
       label: "Last backup",
+      title: latestBackup?.artifact_id ?? undefined,
       tone:
         latestBackup && !backupRequestNeedsAttention(latestBackup.status)
           ? "ready"
@@ -4373,6 +4417,7 @@ function buildBackupPostureItems({
               )
               .join("; ")}${backupsTruncated ? "; more may exist outside loaded history." : ""}`,
       label: "Failed requests",
+      title: failedBackups.map((backup) => backup.id).join(", ") || undefined,
       tone:
         failedBackups.length === 0
           ? backupsTruncated
@@ -4394,6 +4439,9 @@ function buildBackupPostureItems({
           ? "No active artifact appears in loaded history; more records may exist."
           : "No stored artifact metadata is available.",
       label: "Artifact storage",
+      title: latestArtifact
+        ? `${latestArtifact.id}; SHA-256 ${latestArtifact.sha256_hex}`
+        : undefined,
       tone:
         activeArtifacts.length > 0
           ? "ready"

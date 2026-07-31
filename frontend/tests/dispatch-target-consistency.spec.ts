@@ -522,7 +522,7 @@ test("artifact cleanup async preview ignores stale expression edits", async ({
 
   await activate(cleanupPanel.getByRole("button", { name: "Preview" }));
   await expect(cleanupPanel.getByLabel("Cleanup preview result")).toContainText(
-    "1 artifacts / 22 B",
+    "1 artifact / 22 B",
   );
   await expect(cleanupPanel.getByLabel("Cleanup preview result")).toBeFocused();
   await expect(

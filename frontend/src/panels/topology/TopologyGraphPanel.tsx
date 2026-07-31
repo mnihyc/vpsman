@@ -771,7 +771,12 @@ function buildGraphLegendItems(edges: TopologyGraphEdge[]): GraphLegendItem[] {
     {
       detail: `${healthyCount} healthy, ${unknownCount} unknown, ${attentionCount} attention, ${disabledCount} disabled`,
       label: "Layers",
-      tone: attentionCount > 0 ? "attention" : "ready",
+      tone:
+        attentionCount > 0
+          ? "attention"
+          : healthyCount > 0 && unknownCount === 0
+            ? "ready"
+            : undefined,
       value: `${edges.length} visible tunnel${edges.length === 1 ? "" : "s"}`,
     },
     {

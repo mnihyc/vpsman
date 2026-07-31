@@ -224,7 +224,9 @@ export function AuditLogPanel({
         cell: (audit) => (
           <span className="historyPrimary">
             <strong>{auditActor(audit)}</strong>
-            <small>{auditActorDetail(audit)}</small>
+            <small title={audit.actor_id ?? undefined}>
+              {auditActorDetail(audit)}
+            </small>
           </span>
         ),
       },
@@ -254,7 +256,7 @@ export function AuditLogPanel({
         cell: (audit) => (
           <span className="historyPrimary">
             <strong>{auditTargetLabel(audit)}</strong>
-            <small>{auditTargetDetail(audit)}</small>
+            <small title={audit.target}>{auditTargetDetail(audit)}</small>
           </span>
         ),
       },
@@ -280,8 +282,12 @@ export function AuditLogPanel({
         searchValue: (audit) => auditRelatedEvidenceSearch(audit),
         cell: (audit) => (
           <span className="historyPrimary">
-            <strong>{auditRelatedEvidenceLabel(audit)}</strong>
-            <small>{auditRelatedEvidenceDetail(audit)}</small>
+            <strong title={auditRelatedEvidenceFullDetail(audit)}>
+              {auditRelatedEvidenceLabel(audit)}
+            </strong>
+            <small title={auditRelatedEvidenceFullDetail(audit)}>
+              {auditRelatedEvidenceDetail(audit)}
+            </small>
           </span>
         ),
       },
@@ -931,7 +937,7 @@ export function AuditLogPanel({
                   Preview cleanup
                 </button>
                 <button
-                  className="dangerAction"
+                  className="secondaryAction dangerAction"
                   disabled={!pruneSnapshot || pruneSnapshot.reviewedRows === 0}
                   onClick={() => setPruneConfirmationOpen(true)}
                   title={!pruneSnapshot ? "Preview cleanup first" : pruneSnapshot.reviewedRows === 0 ? "No reviewed rows match; deletion is not needed" : `Review deletion of ${pruneSnapshot.reviewedRows} matched rows`}
@@ -1061,6 +1067,7 @@ export function AuditLogPanel({
                 value: pruneSnapshot?.previewHash
                   ? `${pruneSnapshot.previewHash.slice(0, 12)}...`
                   : "not returned",
+                title: pruneSnapshot?.previewHash ?? "not returned",
               },
             ]}
             onCancel={clearPruneConfirmation}
@@ -1162,7 +1169,7 @@ function AuditEventDetailPanel({
         </span>
         <span>
           <strong>Command hash</strong>
-          <span>
+          <span title={audit.command_hash ?? undefined}>
             {audit.command_hash ? shortHash(audit.command_hash) : "none"}
           </span>
         </span>

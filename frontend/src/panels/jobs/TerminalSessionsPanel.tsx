@@ -988,6 +988,11 @@ export function TerminalSessionsPanel({
             <select
               aria-label="Terminal shell profile"
               onChange={(event) => setLaunchProfile(event.target.value as TerminalLaunchProfile)}
+              title={
+                TERMINAL_LAUNCH_PROFILES.find(
+                  (profile) => profile.value === launchProfile,
+                )?.description
+              }
               value={launchProfile}
             >
               {TERMINAL_LAUNCH_PROFILES.map((profile) => (

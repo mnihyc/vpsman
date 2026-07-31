@@ -166,7 +166,7 @@ impl OperatorPreferences {
                 .gateway_server_public_key_hex
                 .map(|value| value.trim().to_ascii_lowercase())
                 .filter(|value| !value.is_empty()),
-            gateway_endpoints: self.gateway_endpoints.trim().to_string(),
+            gateway_endpoints: normalize_gateway_endpoints(&self.gateway_endpoints),
             agent_install_mode: normalize_choice(
                 self.agent_install_mode,
                 "root",
@@ -182,6 +182,15 @@ impl OperatorPreferences {
                 .to_string(),
         }
     }
+}
+
+fn normalize_gateway_endpoints(value: &str) -> String {
+    value
+        .split([',', '\n'])
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub(crate) fn normalize_operator_timezone(value: String) -> Option<String> {

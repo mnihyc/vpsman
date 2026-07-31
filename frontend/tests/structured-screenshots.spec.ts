@@ -867,8 +867,9 @@ const allViews: ScreenshotEntry[] = [
     id: "52-access-gateway-sessions",
     requiredText: [
       "No active gateway sessions",
-      "gateway endpoint and server key",
-      "Gateway settings",
+      "Gateway installer defaults",
+      "Gateway public key",
+      "Gateway endpoints",
     ],
   },
   {
@@ -882,7 +883,7 @@ const allViews: ScreenshotEntry[] = [
       "Unlock scope",
       "Unlocked until",
       "Keep encrypted in this browser",
-      "Authenticator secret",
+      "Authenticator QR code",
       "Complete setup",
     ],
   },
@@ -1560,10 +1561,8 @@ async function scrollSectionBelowToolbar(
 ) {
   await section.evaluate((element) => {
     if (window.innerWidth <= 600) {
-      window.scrollTo({ top: 0, behavior: "auto" });
-      document
-        .querySelector<HTMLElement>(".content")
-        ?.scrollTo({ top: 0, behavior: "auto" });
+      element.scrollIntoView({ block: "start", behavior: "auto" });
+      window.scrollBy({ top: -14, behavior: "auto" });
       return;
     }
     element.scrollIntoView({ block: "start", behavior: "auto" });

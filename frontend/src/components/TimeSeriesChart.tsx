@@ -123,7 +123,10 @@ export function TimeSeriesChart({
             grid: { stroke: consolePalette.neutral.borderSubtle, width: 1 },
             size: narrow ? 84 : 96,
             stroke: consolePalette.neutral.muted,
-            values: (_plot, ticks) => ticks.map((tick) => valueFormatter(tick)),
+            values: (_plot, ticks) =>
+              deduplicateAxisLabels(
+                ticks.map((tick) => valueFormatter(tick)),
+              ),
           },
         ],
         cursor: {
@@ -452,6 +455,17 @@ export function TimeSeriesChart({
       )}
     </figure>
   );
+}
+
+function deduplicateAxisLabels(labels: string[]): string[] {
+  let previous: string | null = null;
+  return labels.map((label) => {
+    if (label === previous) {
+      return "";
+    }
+    previous = label;
+    return label;
+  });
 }
 
 function buildHoverState(

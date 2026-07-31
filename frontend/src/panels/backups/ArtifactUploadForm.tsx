@@ -54,7 +54,7 @@ export function ArtifactUploadForm({
           <select aria-label="Artifact backup request" onChange={(event) => onArtifactBackupIdChange(event.target.value)} value={artifactBackupId}>
             <option value="">Select backup request</option>
             {backups.map((backup) => (
-              <option key={backup.id} value={backup.id}>
+              <option key={backup.id} title={backup.id} value={backup.id}>
                 {shortId(backup.id)} from {clientLabel(backup.client_id)}
               </option>
             ))}

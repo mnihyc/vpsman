@@ -679,7 +679,7 @@ export function JobsPanel({
             <strong title={job.command_type}>
               {displayCommandType(job.command_type)}
             </strong>
-            <small>{shortId(job.id)}</small>
+            <small title={job.id}>{shortId(job.id)}</small>
           </span>
         ),
       },
@@ -742,7 +742,9 @@ export function JobsPanel({
           }`,
         cell: (job) => (
           <span className="historyPrimary">
-            <strong>{jobStartedByLabel(job)}</strong>
+            <strong title={job.actor_id ?? undefined}>
+              {jobStartedByLabel(job)}
+            </strong>
             <small>{job.privileged ? "privileged" : "unprivileged"}</small>
           </span>
         ),
@@ -789,7 +791,9 @@ export function JobsPanel({
             : undefined;
           return (
             <span className="historyPrimary">
-              <strong>{scheduledRunScheduleLabel(job, schedule)}</strong>
+              <strong title={job.source_schedule_id ?? undefined}>
+                {scheduledRunScheduleLabel(job, schedule)}
+              </strong>
               <small title={schedule?.cadence_error ?? undefined}>
                 {schedule
                   ? scheduledRunCadenceLabel(schedule)
@@ -897,7 +901,9 @@ export function JobsPanel({
             <strong title={approval.command_type}>
               {displayCommandType(approval.command_type)}
             </strong>
-            <small>Job {shortId(approval.job_id)}</small>
+            <small title={approval.job_id}>
+              Job {shortId(approval.job_id)}
+            </small>
           </span>
         ),
       },
@@ -999,7 +1005,7 @@ export function JobsPanel({
         cell: (target) => (
           <span className="historyPrimary">
             <strong>{clientLabel(target.client_id)}</strong>
-            <small>{shortId(target.job_id)}</small>
+            <small title={target.job_id}>{shortId(target.job_id)}</small>
           </span>
         ),
         header: "Client",
@@ -1114,7 +1120,7 @@ export function JobsPanel({
       },
       {
         cell: (group) => (
-          <span className="monoValue" title={group.preview}>
+          <span className="monoValue" title={group.output_digest_hex}>
             {shortHash(group.output_digest_hex)}
           </span>
         ),
@@ -1172,7 +1178,7 @@ export function JobsPanel({
       },
       {
         cell: (row) => (
-          <span className="monoValue" title={row.preview}>
+          <span className="monoValue" title={row.output_digest_hex}>
             {shortHash(row.output_digest_hex)}
           </span>
         ),
@@ -1464,7 +1470,9 @@ export function JobsPanel({
                     <span>Duration</span>
                     <strong>{formatJobDuration(job)}</strong>
                     <span>Started by</span>
-                    <strong>{jobStartedByLabel(job)}</strong>
+                    <strong title={job.actor_id ?? undefined}>
+                      {jobStartedByLabel(job)}
+                    </strong>
                     <span>Actor ID</span>
                     <strong>{job.actor_id ?? "Worker automation"}</strong>
                     <span>Privilege</span>
@@ -1497,7 +1505,7 @@ export function JobsPanel({
                 <div className="sectionHeader compact targetDetailHeader">
                   <div>
                     <h2>Target results</h2>
-                    <span>
+                    <span title={selectedJobId}>
                       {targetsLoading
                         ? "Loading target records"
                         : shortId(selectedJobId)}
@@ -2274,7 +2282,7 @@ export function JobsPanel({
                     return (
                       <div className="consoleInlineDetailGrid">
                         <span>Schedule</span>
-                        <strong>
+                        <strong title={job.source_schedule_id ?? undefined}>
                           {scheduledRunScheduleLabel(job, schedule)}
                         </strong>
                         <span>Schedule ID</span>
@@ -2319,7 +2327,7 @@ export function JobsPanel({
                         <span>Payload</span>
                         <strong>{job.payload_hash}</strong>
                         <span>Authority</span>
-                        <strong>
+                        <strong title={job.actor_id ?? undefined}>
                           {job.actor_id
                             ? `Operator ${shortId(job.actor_id)}`
                             : "Worker automation"}{" "}

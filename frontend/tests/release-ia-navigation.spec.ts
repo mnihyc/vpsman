@@ -773,7 +773,7 @@ test(
     await expect(alertMetric).toContainText("in loaded page");
 
     await expect(backupMetric.locator("strong")).toHaveText("≥1");
-    await expect(backupMetric).toContainText("≥1 artifacts in the loaded page");
+    await expect(backupMetric).toContainText("≥1 artifact in the loaded page");
 
     await expect(transferMetric.locator("strong")).toHaveText("≥3");
     await expect(transferMetric).toContainText("in loaded history");
@@ -1774,8 +1774,8 @@ test("home exposes quick actions, availability, running work, failures, attentio
     ).toBeEnabled();
   }
 
-  await expect(page.getByLabel("Home fleet scan")).toHaveCount(0);
-  await expect(page.getByLabel("Home telemetry widgets")).toHaveCount(0);
+  await expect(page.getByLabel("Home fleet scan")).toBeVisible();
+  await expect(page.getByLabel("Home telemetry widgets")).toBeVisible();
   await expect(page.locator("body")).not.toContainText(
     "artifact_metadata_recorded",
   );
@@ -3149,7 +3149,7 @@ test("jobs approvals and scheduled runs stay separate", async ({
   );
   if (testInfo.project.name.includes("mobile")) {
     await expect(
-      schedulesGrid.getByRole("button", { name: "Run now" }).first(),
+      page.getByRole("button", { name: "Unlock privilege" }),
     ).toBeVisible();
   }
   await activate(
@@ -4315,9 +4315,9 @@ test("config bulk patch requires reviewed scope and privilege before apply", asy
   await expect(
     bulk.getByRole("button", { exact: true, name: "Apply patch" }),
   ).toBeDisabled();
-  await expect(bulk.locator(".privilegeManager")).toContainText(
-    /Locked|locked/,
-  );
+  await expect(bulk.locator(".privilegeManager")).toHaveCount(0);
+  await expect(bulk).not.toContainText("Clear local vault");
+  await expect(bulk).not.toContainText("Clear local session");
 
   await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, "Config", "Bulk patch");
@@ -4420,7 +4420,17 @@ test("config per-vps preserves guarded one-vps override workflow", async ({
   );
   await expect(
     panel.getByRole("button", { name: "Apply patch" }),
-  ).toBeDisabled();
+  ).toBeEnabled();
+  await expect(panel.locator(".privilegeManager")).toHaveCount(0);
+  await expect(panel).not.toContainText("Clear local vault");
+  await expect(panel).not.toContainText("Clear local session");
+  await activate(panel.getByRole("button", { name: "Apply patch" }));
+  await expect(
+    page.getByRole("dialog", { name: "Unlock privilege" }),
+  ).toBeVisible();
+  await activate(
+    page.getByRole("button", { name: "Close privilege unlock" }),
+  );
   await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, "Config", "Per-VPS");
   const unlockedPanel = page.locator(".configApplyGrid");
@@ -5396,7 +5406,7 @@ test("audit sessions correlates terminal and auth evidence without emulator cont
     "bearer sessions",
   );
   await expect(panel.getByLabel("Operator session evidence")).toContainText(
-    "created and refresh expiry shown",
+    "select active non-current sessions to revoke",
   );
   await expect(panel.getByLabel("Operator session evidence")).toContainText(
     "Expired",
@@ -5577,8 +5587,11 @@ test("access overview routes to release authority pages", async ({ page }) => {
     "No active gateway sessions. Configure the gateway endpoint and server key.",
   );
   await expect(
-    emptyState.getByRole("button", { name: "Gateway settings" }),
+    page.getByLabel("Gateway installer defaults"),
   ).toBeVisible();
+  await expect(
+    emptyState.getByRole("button", { name: "Gateway settings" }),
+  ).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "Copy transcript" }),
   ).toHaveCount(0);
@@ -5632,18 +5645,6 @@ test("access privilege vault is the locked handoff for privileged workflows", as
       subpage: "Bulk groups",
       view: "Fleet",
       evidence: /Bulk group mutation/i,
-    },
-    {
-      heading: "Per-VPS config",
-      subpage: "Per-VPS",
-      view: "Config",
-      evidence: "runtime config",
-    },
-    {
-      heading: "Bulk patch",
-      subpage: "Bulk patch",
-      view: "Config",
-      evidence: "runtime config",
     },
     {
       heading: "Network tests",
@@ -7106,7 +7107,7 @@ test("system suite config owns control-plane config and excludes per-VPS editors
   const boundary = page.getByLabel("Suite config ownership boundary");
   await expect(boundary).toContainText("System scope");
   await expect(boundary).toContainText(
-    "Suite TOML controls API, gateway, worker, capacity, storage, secrets, and control-plane timeouts.",
+    "Suite TOML controls API, gateway, network, worker, capacity, storage, secrets, and control-plane timeouts.",
   );
   await expect(boundary).toContainText("Runtime config scope");
   await expect(boundary).toContainText(
@@ -7118,6 +7119,7 @@ test("system suite config owns control-plane config and excludes per-VPS editors
   for (const label of [
     "API",
     "Gateway",
+    "Network",
     "Worker",
     "Capacity",
     "Storage",
@@ -7131,6 +7133,27 @@ test("system suite config owns control-plane config and excludes per-VPS editors
   await expect(page.getByLabel("Suite config sticky save bar")).toContainText(
     "No draft changes",
   );
+  await page
+    .getByLabel("Suite config editor mode")
+    .getByRole("button", { name: "Advanced TOML" })
+    .click();
+  const suiteToml = page.getByLabel("Suite config TOML");
+  const originalSuiteToml = await suiteToml.inputValue();
+  await suiteToml.fill(`${originalSuiteToml}\n# operator maintenance note\n`);
+  await expect(page.getByLabel("Suite config sticky save bar")).toContainText(
+    "Advanced TOML text changed",
+  );
+  await expect(
+    page.getByLabel("Suite config validation and save review"),
+  ).toContainText("Formatting or comments only");
+  await suiteToml.fill(originalSuiteToml);
+  await expect(page.getByLabel("Suite config sticky save bar")).toContainText(
+    "No draft changes",
+  );
+  await page
+    .getByLabel("Suite config editor mode")
+    .getByRole("button", { name: "Fields" })
+    .click();
   await expect(
     page.getByLabel("Suite config validation and save review"),
   ).toContainText("Edit");
@@ -7257,7 +7280,7 @@ test("system maintenance owns artifact cleanup and maintenance job records", asy
 
   await cleanupPanel.getByRole("button", { name: "Preview" }).click();
   await expect(cleanupPanel.getByLabel("Cleanup preview result")).toContainText(
-    "1 artifacts",
+    "1 artifact",
   );
   await expect(cleanupPanel.getByLabel("Cleanup preview result")).toContainText(
     "1 representative",
@@ -7373,6 +7396,7 @@ test("system preferences separates personal display from shared defaults", async
   const shared = page.getByLabel("System-linked defaults");
   await expect(shared).toContainText("Gateway install material");
   await expect(shared).toContainText("Tunnel allocation pools");
+  await expect(shared).toContainText("Open gateway settings");
   await expect(shared).toContainText("Open Suite Config");
   await expect(shared).toContainText("Open VPS identities");
   await expect(shared).not.toContainText("Home telemetry curves");

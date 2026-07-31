@@ -10,6 +10,11 @@
   min-width: 0;
 }
 
+.topologyPageStack > .tunnelPlansRegistryPanel {
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+
 .networkOverviewHeader,
 .networkOverviewActions,
 .tunnelPlanRegistry,
@@ -294,11 +299,11 @@
 }
 
 .portForwardTable th:nth-child(2) { width: 18%; }
-.portForwardTable th:nth-child(3) { width: 31%; }
-.portForwardTable th:nth-child(4) { width: 13%; }
-.portForwardTable th:nth-child(5) { width: 11%; }
-.portForwardTable th:nth-child(6) { width: 11%; }
-.portForwardTable th:nth-child(7) { width: 10%; }
+.portForwardTable th:nth-child(3) { width: 27%; }
+.portForwardTable th:nth-child(4) { width: 12%; }
+.portForwardTable th:nth-child(5) { width: 14%; }
+.portForwardTable th:nth-child(6) { width: 14%; }
+.portForwardTable th:nth-child(7) { width: 9%; }
 
 .portForwardMobileStatus {
   display: none;
@@ -1255,8 +1260,10 @@
     flex: 1 1 min(100%, 132px);
     justify-content: center;
     height: auto;
+    max-width: 100%;
+    min-width: max-content;
     min-height: 34px;
-    white-space: normal;
+    white-space: nowrap;
   }
 
   .tunnelPlanComposerHeader {
@@ -1266,7 +1273,7 @@
     flex-wrap: nowrap;
   }
 
-  .tunnelPlanComposerHeader > .iconAction {
+  .tunnelPlanComposerHeader > .iconButton {
     grid-column: 2;
     grid-row: 1;
     align-self: start;
@@ -1719,6 +1726,8 @@
   color: var(--text-secondary);
   font-weight: 700;
   cursor: pointer;
+  padding-inline: 8px;
+  white-space: nowrap;
 }
 
 .segmentedControl button:last-child {
@@ -2812,6 +2821,13 @@
     white-space: nowrap;
   }
 
+  .tunnelPlansRegistryPanel
+    .gridToolbarActions
+    .compactAction.columnChooserButton {
+    flex: 0 0 44px;
+    width: 44px;
+  }
+
   .tunnelPlansRegistryPanel .gridToolbarActions .compactAction svg {
     flex: 0 0 14px;
     width: 14px;
@@ -2913,10 +2929,16 @@
 
   .topologyGraphEdgeRow > [data-label]::before {
     content: attr(data-label);
+    grid-column: 1;
+    grid-row: 1 / span 2;
     color: var(--muted);
     font-size: 11px;
     font-weight: 800;
     text-transform: uppercase;
+  }
+
+  .topologyGraphEdgeRow > [data-label] > * {
+    grid-column: 2;
   }
 
   .topologyGraphEdgeRow .status {

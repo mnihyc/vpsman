@@ -135,7 +135,7 @@ fn validate_ratio_thresholds(name: &str, warning: f64, critical: f64) -> Result<
     if !warning.is_finite() || !critical.is_finite() {
         anyhow::bail!("{name} alert thresholds must be finite numbers");
     }
-    if !(0.0..1.0).contains(&warning) || !(0.0..1.0).contains(&critical) {
+    if warning <= 0.0 || warning >= 1.0 || critical <= 0.0 || critical >= 1.0 {
         anyhow::bail!("{name} alert thresholds must be greater than 0 and below 1");
     }
     if critical > warning {

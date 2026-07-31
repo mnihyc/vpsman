@@ -54,8 +54,8 @@ UIs. `vpsman` targets a different operating model:
 | Backups | Bounded recursive configuration snapshots, chunked artifacts, restore plans, rollback, migration links, and object-store retention. |
 | Runtime config | Immutable system presets, reusable custom presets, explicit per-VPS override/reset, effective-config inspection, and visible runtime sync state. |
 | Network | Explicit NAT-safe tunnel plans, per-VPS owned nftables port forwarding, exact endpoint evidence, topology, bounded network tests, and optional daemon-neutral routing-cost adapters. |
-| Observability | Current fleet monitor cards, scoped retained resource/network charts, explicit freshness and coverage, alert policies, event webhooks, and bounded automatic telemetry retention. |
-| Access and audit | Operator roles/scopes, sessions, TOTP, direct gateway identities, key rotation/revocation, audit logs, and evidence views. |
+| Observability | Clickable Home posture and VPS cards, quick workflow entrances, scoped retained resource/network charts, explicit freshness and coverage, alert policies, event webhooks, and bounded automatic telemetry retention. |
+| Access and audit | Operator roles/scopes, searchable and revocable bearer sessions, QR-assisted TOTP enrollment, direct gateway identities, key rotation/revocation, audit logs, and evidence views. |
 | Releases | Authoritative `version.json` metadata, GitHub release assets, compose updater, agent update jobs, and rollback-friendly deployment layout. |
 
 ## Architecture
@@ -211,13 +211,15 @@ dispatch work. Stop the disposable database afterward with
 The recommended path is the Access > VPS identities workflow in the web
 console:
 
-1. Open **Access > VPS identities**.
-2. Choose **Register VPS**.
-3. Keep the default numerical VPS ID or edit it for an imported legacy ID.
-4. Generate a unique Noise keypair for this VPS.
-5. Review and register the public identity.
-6. Fill gateway install defaults once.
-7. Copy the generated one-line installer to the VPS.
+1. As an admin, save the reusable gateway public key, prioritized endpoints,
+   and install mode under **Access > Gateway sessions**.
+2. Open **Access > VPS identities**.
+3. Choose **Register VPS**.
+4. Keep the default numerical VPS ID or edit it for an imported legacy ID.
+5. Generate a unique Noise keypair for this VPS.
+6. Review and register the public identity.
+7. Review the saved gateway install defaults.
+8. Copy the generated one-line installer to the VPS.
 
 The generated command downloads the stable repository installer. That
 bootstrap reads authoritative `version.json` metadata and installs the

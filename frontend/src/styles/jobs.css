@@ -4180,12 +4180,22 @@
   }
 
   .terminalActiveHeader .compactRowActions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    flex: 0 1 auto;
     justify-content: flex-start;
     min-width: 0;
+    width: 100%;
   }
 
   .terminalActiveHeader .compactRowActions .compactAction {
-    flex: 1 1 150px;
+    width: 100%;
+    min-width: 0;
+    white-space: nowrap;
+  }
+
+  .terminalActiveHeader .compactRowActions .compactAction:nth-child(n + 3) {
+    grid-column: 1 / -1;
   }
 
   .terminalSessionContext {

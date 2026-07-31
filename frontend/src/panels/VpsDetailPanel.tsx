@@ -666,7 +666,9 @@ function SummaryTab({
         )}
         {related.backups[0] ? (
           <span className="vpsDetailRecord static">
-            <strong>Backup {shortId(related.backups[0].id)}</strong>
+            <strong title={related.backups[0].id}>
+              Backup {shortId(related.backups[0].id)}
+            </strong>
             <span>
               {backupStatusLabel(related.backups[0].status)} ·{" "}
               <DetailTime value={related.backups[0].created_at} />
@@ -739,12 +741,33 @@ function ConfigTab({
     sourceRowIsReady,
   );
   const applyState = related.runtimeApplyState;
+  const applyEvidenceTitle = [
+    applyState?.applied_content_hash
+      ? `Applied hash ${applyState.applied_content_hash}`
+      : null,
+    applyState?.applied_job_id
+      ? `Applied job ${applyState.applied_job_id}`
+      : null,
+    applyState?.pending_job_id
+      ? `Pending job ${applyState.pending_job_id}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join("; ");
 
   return (
     <div className="vpsConfigDetailTab">
       <div className="vpsConfigPosture" aria-label="VPS config posture">
         {configPosture.map((item) => (
-          <span className={`vpsConfigPostureItem ${item.tone}`} key={item.label}>
+          <span
+            className={`vpsConfigPostureItem ${item.tone}`}
+            key={item.label}
+            title={
+              applyEvidenceTitle
+                ? `${item.detail}; ${applyEvidenceTitle}`
+                : item.detail
+            }
+          >
             <small>{item.label}</small>
             <strong>{item.value}</strong>
             <em>{item.detail}</em>
@@ -914,7 +937,9 @@ function BackupsTab({
         ) : (
           related.backups.slice(0, 5).map((backup) => (
             <span className="vpsDetailRecord static" key={backup.id}>
-              <strong>{shortId(backup.id)} · {backupStatusLabel(backup.status)}</strong>
+              <strong title={backup.id}>
+                {shortId(backup.id)} · {backupStatusLabel(backup.status)}
+              </strong>
               <span>
                 {backup.paths.join(", ") || "No paths"} ·{" "}
                 <DetailTime value={backup.created_at} />
@@ -946,8 +971,13 @@ function BackupsTab({
         ) : (
           related.backupArtifacts.slice(0, 5).map((artifact) => (
             <span className="vpsDetailRecord static" key={artifact.id}>
-              <strong>{shortId(artifact.id)} · {backupStatusLabel(artifact.status)}</strong>
-              <span>{formatBytes(artifact.size_bytes)} · SHA-256 {artifact.sha256_hex.slice(0, 12)}</span>
+              <strong title={artifact.id}>
+                {shortId(artifact.id)} · {backupStatusLabel(artifact.status)}
+              </strong>
+              <span title={artifact.sha256_hex}>
+                {formatBytes(artifact.size_bytes)} · SHA-256{" "}
+                {artifact.sha256_hex.slice(0, 12)}
+              </span>
             </span>
           ))
         )}
@@ -1066,8 +1096,12 @@ function NetworkTab({
         ) : (
           trafficPolicyAlerts.slice(0, 4).map((alert) => (
             <span className="vpsDetailRecord static warning" key={alert.id}>
-              <strong>{trafficPolicyLabel(alert, related.alertPolicies)}</strong>
-              <span>{trafficPolicyRuleLabel(alert, related.alertPolicies)} · {alert.detail}</span>
+              <strong title={alert.policy_group_id}>
+                {trafficPolicyLabel(alert, related.alertPolicies)}
+              </strong>
+              <span title={alert.policy_rule_id}>
+                {trafficPolicyRuleLabel(alert, related.alertPolicies)} · {alert.detail}
+              </span>
             </span>
           ))
         )}
@@ -1121,6 +1155,7 @@ function ActivityTab({
                 else if (event.kind === "audit") onOpenAudit();
                 else onOpenJobs();
               }}
+              title={event.id}
               type="button"
             >
               <strong>{event.title}</strong>

@@ -459,10 +459,19 @@ test("renders an operational cloud-console fleet workspace", async ({
       .filter({ has: page.getByRole("heading", { name: "Recent issues" }) })
       .getByRole("button", { name: /Tunnel adapter status failed/ }),
   ).toBeVisible();
-  await expect(page.getByLabel("Home telemetry widgets")).toHaveCount(0);
+  await expect(page.getByLabel("Home fleet scan")).toBeVisible();
+  await expect(page.getByLabel("Home telemetry widgets")).toBeVisible();
   if (testInfo.project.name.includes("mobile")) {
     await openFleetFromDashboard(page);
   } else {
+    await activate(
+      page.getByRole("button", {
+        name: "View all VPS",
+      }),
+    );
+    await expect(
+      page.getByRole("heading", { name: "Fleet monitor" }),
+    ).toBeVisible();
     await openConsoleSubpage(page, "Fleet", "Instances");
   }
 
@@ -998,6 +1007,44 @@ test("reviews notification and webhook queue mutations before commit", async ({
       }),
     )
     .toMatchObject({ confirmed: true, dry_run: false });
+
+  await activate(webhooks.getByRole("tab", { name: "Maintenance" }));
+  await activate(webhooks.getByRole("button", { name: "Review rotation" }));
+  const reviewCleanup = webhooks.getByRole("button", {
+    name: "Review cleanup",
+  });
+  await expect(reviewCleanup).toBeEnabled();
+  await activate(reviewCleanup);
+  const cleanupPrompt = page.getByLabel(
+    "Delete webhook delivery history",
+  );
+  await expect(cleanupPrompt).toBeVisible();
+  await expect(cleanupPrompt.getByTitle("9".repeat(64))).toBeVisible();
+  await activate(
+    cleanupPrompt.getByRole("button", {
+      name: "Delete retained history",
+    }),
+  );
+  await expect(cleanupPrompt).toBeHidden();
+  await expect(reviewCleanup).toBeDisabled();
+  await expect(
+    webhooks.getByText("not reviewed", { exact: true }),
+  ).toBeVisible();
+  const rotationRequest = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: {
+          webhookDeliveryRotations: Array<Record<string, unknown>>;
+        };
+      }
+    ).__vpsmanTestRequests;
+    return requests.webhookDeliveryRotations.at(-1);
+  });
+  expect(rotationRequest).toMatchObject({
+    confirmed: true,
+    older_than: "2025-12-31T00:00:00.000Z",
+    preview_hash: "9".repeat(64),
+  });
 });
 
 test("clears browser-local console selections without deleting session or privilege records", async ({
@@ -1406,6 +1453,8 @@ test("supports Config VPS Rules dry-run, confirm, and explicit unset", {
   await expect(
     page.locator(".vpsRulesActionFeedback.actionFeedbackSuccess"),
   ).toContainText("applied 1 VPS rule changes");
+  await expect(previewBlock).toHaveCount(0);
+  await expect(finalAction).toHaveCount(0);
   await expect(
     page.getByLabel("VPS rules selector expression"),
   ).toBeEnabled();
@@ -1915,8 +1964,8 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
   ).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Operational Health" }),
-  ).toHaveCount(0);
-  await expect(page.getByLabel("Home telemetry widgets")).toHaveCount(0);
+  ).toBeVisible();
+  await expect(page.getByLabel("Home telemetry widgets")).toBeVisible();
   await expect(dashboard.getByText("DB pool", { exact: true })).toHaveCount(0);
   await expect(
     dashboard.getByText("Gateway events", { exact: true }),
@@ -1994,6 +2043,7 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
   const configSections = page.getByLabel("Suite config sections");
   await expect(configSections).toContainText("API");
   await expect(configSections).toContainText("Gateway");
+  await expect(configSections).toContainText("Network");
   await expect(configSections).toContainText("Worker");
   await expect(configSections).toContainText("Capacity");
   await expect(configSections).toContainText("Storage");
@@ -2017,6 +2067,40 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
   await expect(page.getByLabel("API suite config fields")).toContainText(
     "Private HTTP API bind address",
   );
+  await configSections.getByRole("button", { name: /Network/ }).click();
+  await expect(
+    page.getByLabel("Tunnel IPv4 allocation pool"),
+  ).toHaveValue("");
+  await page
+    .getByLabel("Tunnel IPv4 allocation pool")
+    .fill("10.250.0.0/16");
+  await expect(
+    page
+      .locator(".systemConfigReview")
+      .getByText("network.tunnel_ipv4_allocation_pool_cidr")
+      .first(),
+  ).toBeVisible();
+  await expect(
+    page.locator(".systemConfigReview").getByText(
+      "api.alert_cpu_load_warning",
+    ),
+  ).toHaveCount(0);
+  await expect(
+    page.locator(".systemConfigReview").getByText(
+      "api.alert_cpu_load_critical",
+    ),
+  ).toHaveCount(0);
+  await page
+    .getByLabel("Tunnel IPv6 allocation pool")
+    .fill("fd42:250::/64");
+  await expect(
+    page
+      .locator(".systemConfigReview")
+      .getByText("network.tunnel_ipv6_allocation_pool_cidr")
+      .first(),
+  ).toBeVisible();
+  await page.getByLabel("Tunnel IPv4 allocation pool").fill("");
+  await page.getByLabel("Tunnel IPv6 allocation pool").fill("");
   await configSections.getByRole("button", { name: /Capacity/ }).click();
   await expect(page.getByLabel("Capacity suite config fields")).toContainText(
     "Current",
@@ -2375,6 +2459,71 @@ test("marks saturated operator auth history without changing normal counts", asy
   const selectedOperatorEvidence = page.getByLabel("Operator access evidence");
   await expect(selectedOperatorEvidence).toContainText("Failed logins");
   await expect(selectedOperatorEvidence).toContainText("≥200 loaded");
+});
+
+test("revokes selected non-current bearer sessions from Audit", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const frozenNow = Date.parse("2026-01-03T00:00:00Z");
+    Date.now = () => frozenNow;
+  });
+  await page.goto("/");
+  await unlockPrivilegeFromTop(page);
+  await openConsoleSubpage(page, "Audit", "Sessions");
+
+  const sessionsGrid = page.getByLabel(
+    "Operator bearer sessions data grid",
+  );
+  const currentSessionId = "88888888-aaaa-4bbb-8ccc-000000000001";
+  const currentSessionRow = sessionsGrid
+    .locator(".gridBody [role=row], .gridMobileCard", {
+      hasText: currentSessionId.slice(0, 8),
+    })
+    .first();
+  await currentSessionRow.click();
+  await expect(sessionsGrid).toContainText("Current browser");
+  await expect(sessionsGrid).toContainText("Yes");
+  await selectGridRow(page, "Operator bearer sessions", currentSessionId);
+  await sessionsGrid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  await expect(
+    page.getByRole("menuitem", { name: "Revoke" }),
+  ).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await unselectGridRow(page, "Operator bearer sessions", currentSessionId);
+
+  const sessionId = "88888888-aaaa-4bbb-8ccc-000000000002";
+  await selectGridRow(page, "Operator bearer sessions", sessionId);
+  await runGridAction(page, "Operator bearer sessions", "Revoke");
+  const confirmation = page.getByLabel("Confirm admin session revoke");
+  await expect(confirmation).toBeVisible();
+  await expect(confirmation).toContainText("console-admin");
+  await activate(
+    confirmation.getByRole("button", { name: "Revoke session" }),
+  );
+
+  await expect(
+    page.getByLabel("Operator bearer sessions data grid"),
+  ).toContainText("Revoked");
+  const revokeRequest = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { operatorActions: unknown[] };
+      }
+    ).__vpsmanTestRequests;
+    return requests.operatorActions.find(
+      (request) =>
+        (request as { action?: string }).action === "session-revoke",
+    );
+  });
+  expect(revokeRequest).toMatchObject({
+    action: "session-revoke",
+    session_id: sessionId,
+  });
+  expectPrivilegeAssertion((revokeRequest as { body?: unknown }).body);
 });
 
 test("keeps legacy invalid schedule cadences visible and blocks only automatic runs", async ({
@@ -3097,6 +3246,15 @@ test("accepts server-valid leap-day, named, and extended cadences without treati
   await page.goto("/");
   await unlockPrivilegeFor(page, "Automation", "Schedules");
   await activate(page.getByRole("button", { name: "Expand Create schedule" }));
+  await expect(page.getByLabel("Catch-up limit help")).toHaveAttribute(
+    "title",
+    /Maximum missed runs dispatched/,
+  );
+  await expect(page.getByLabel("Schedule catch-up limit")).toBeDisabled();
+  await page
+    .getByLabel("Schedule catch-up policy")
+    .selectOption("run_all_limited");
+  await expect(page.getByLabel("Schedule catch-up limit")).toBeEnabled();
   await page
     .getByLabel("Schedule job template")
     .selectOption("46464646-5656-4789-8abc-defdefdefdef");
@@ -4246,6 +4404,14 @@ test("registers VPS identities and revokes current keys from the access panel", 
   );
   await expect(inspector).toContainText("VPS identity registered.");
   await expect(inspector.getByText("edge-tokyo-04")).toBeVisible();
+  const registrationComplete = inspector.locator(
+    ".identityRegistrationComplete",
+  );
+  await expect(registrationComplete).toHaveCSS("margin-top", "10px");
+  await expect(registrationComplete.locator("span")).toHaveAttribute(
+    "title",
+    /^agent-tokyo-04 \/ [0-9a-f]{64}$/,
+  );
   const identityRequest = await page.evaluate(() => {
     const requests = (
       window as unknown as {
@@ -4318,6 +4484,10 @@ test("registers VPS identities and revokes current keys from the access panel", 
   await gatewayEndpoints.fill("bad=bad_host.example:9443=10");
   await expect(gatewayEndpoints).toHaveAttribute("aria-invalid", "true");
   await gatewayEndpoints.fill("bad=999.0.0.1:9443=10");
+  await expect(gatewayEndpoints).toHaveAttribute("aria-invalid", "true");
+  await gatewayEndpoints.fill("bad=001.2.3.4:9443=10");
+  await expect(gatewayEndpoints).toHaveAttribute("aria-invalid", "true");
+  await gatewayEndpoints.fill("bad=[::ffff:001.2.3.4]:9443=10");
   await expect(gatewayEndpoints).toHaveAttribute("aria-invalid", "true");
   await gatewayEndpoints.fill(
     "primary=gw.example.com:9443=10\nbackup=gw-backup.example.com:9443=20",
@@ -4448,15 +4618,19 @@ test("shows access posture, MFA risk, identity lifecycle, and gateway readiness"
   await expect(actions).toContainText("Expired bearer sessions");
   await expect(actions).toContainText("2 expired");
   await expect(actions).toContainText("Gateway install defaults");
-  await expect(actions).toContainText("Suite Config");
+  await expect(actions).toContainText("Configure defaults");
   await expect(actions).not.toContainText("Privilege state");
   const initialSessionScopes = page.getByLabel("Access session scopes");
   await expect(initialSessionScopes).toContainText("Privilege unlock");
   await expect(initialSessionScopes).toContainText("No saved local vault");
-  await activate(actions.getByRole("button", { name: "Open Suite Config" }));
+  await activate(actions.getByRole("button", { name: "Configure defaults" }));
   await expect(
-    page.getByRole("heading", { level: 1, name: "Suite Config" }),
+    page.getByRole("heading", {
+      level: 1,
+      name: "Gateway sessions",
+    }),
   ).toBeVisible();
+  await expect(page.getByLabel("Gateway installer defaults")).toBeVisible();
   await openConsoleSubpage(page, "Access", "Overview");
 
   const responsibilities = page.getByLabel("Access overview responsibilities");
@@ -4508,10 +4682,10 @@ test("shows access posture, MFA risk, identity lifecycle, and gateway readiness"
     "Password",
   );
   await expect(page.getByLabel("TOTP enrollment sequence")).toContainText(
-    "Secret",
+    "QR / key",
   );
   await expect(
-    page.getByTitle("Scan the QR code or enter the secret"),
+    page.getByTitle("Scan the QR code or enter the setup key"),
   ).toBeVisible();
   await expect(page.getByLabel("TOTP enrollment sequence")).toHaveJSProperty(
     "tagName",
@@ -4583,11 +4757,42 @@ test("shows access posture, MFA risk, identity lifecycle, and gateway readiness"
     "No active gateway sessions. Configure the gateway endpoint and server key.",
   );
   await expect(emptyState).toContainText(
-    "Gateway defaults are managed from shared system configuration.",
+    "Installer defaults can be edited above",
   );
+  const gatewayDefaults = page.getByLabel("Gateway installer defaults");
+  await expect(gatewayDefaults).toBeVisible();
   await expect(
-    emptyState.getByRole("button", { name: "Gateway settings" }),
+    gatewayDefaults.getByLabel("Gateway server public key hex"),
   ).toBeVisible();
+  await expect(gatewayDefaults.getByLabel("Gateway endpoints")).toBeVisible();
+  await gatewayDefaults
+    .getByLabel("Gateway endpoints")
+    .fill(
+      "primary=gw.example.com:9443=10,backup=[2001:db8::5]:9443=20",
+    );
+  const saveDefaults = gatewayDefaults.getByRole("button", {
+    name: "Save defaults",
+  });
+  await expect(saveDefaults).toHaveCSS("white-space", "nowrap");
+  await activate(saveDefaults);
+  await expect(gatewayDefaults).toContainText(
+    "Gateway install defaults saved for this operator.",
+  );
+  const savedGatewayDefaults = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: {
+          operatorPreferences: Array<Record<string, unknown>>;
+        };
+      }
+    ).__vpsmanTestRequests;
+    return requests.operatorPreferences.at(-1);
+  });
+  expect(savedGatewayDefaults).toMatchObject({
+    gateway_endpoints:
+      "primary=gw.example.com:9443=10\nbackup=[2001:db8::5]:9443=20",
+    gateway_server_public_key_hex: "1".repeat(64),
+  });
   await expect(
     emptyState.getByRole("button", { name: "Preferences", exact: true }),
   ).toHaveCount(0);
@@ -4595,13 +4800,9 @@ test("shows access posture, MFA risk, identity lifecycle, and gateway readiness"
   await expect(page.getByRole("columnheader", { name: "Gateway" })).toHaveCount(
     0,
   );
-  await activate(emptyState.getByRole("button", { name: "Gateway settings" }));
   await expect(
-    page.getByRole("heading", { level: 1, name: "Suite config" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("heading", { level: 2, name: "Suite config" }),
-  ).toBeVisible();
+    emptyState.getByRole("button", { name: "Gateway settings" }),
+  ).toHaveCount(0);
 });
 
 test("keeps clipboard failures visible beside the copied identity value", async ({
@@ -4683,6 +4884,32 @@ test("keeps access action feedback out of headings and durable labels", async ({
   await expect(totpPanel.locator(".actionFeedbackDanger")).toContainText(
     "Password Too Short (400)",
   );
+});
+
+test("renders a local authenticator QR code with a manual fallback", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await openConsoleSubpage(page, "Access", "Privilege vault");
+
+  const totpPanel = page.locator(".controlPanel").filter({
+    has: page.getByRole("heading", { level: 2, name: "TOTP" }),
+  });
+  await totpPanel
+    .getByLabel("TOTP password")
+    .fill("valid-password-123");
+  await activate(totpPanel.getByRole("button", { name: "Set up TOTP" }));
+
+  const enrollment = totpPanel.getByLabel("Authenticator QR code");
+  await expect(enrollment).toBeVisible();
+  await expect(
+    enrollment.getByRole("img", {
+      name: "QR code for this vpsman authenticator account",
+    }),
+  ).toHaveAttribute("src", /^data:image\/svg\+xml,/);
+  await expect(enrollment).toContainText("JBSWY3DPEHPK3PXP");
+  await expect(enrollment).toContainText("SHA1 · 6 digits · 30-second period");
+  await expect(totpPanel).not.toContainText("otpauth://");
 });
 
 test("rotates an existing agent key through the access panel", async ({

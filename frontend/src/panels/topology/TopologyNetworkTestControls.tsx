@@ -917,15 +917,17 @@ export function TopologyNetworkTestControls({
           </ExecutionResultPanel>
         )}
       </form>
-      <PrivilegeVaultBox
-        lastPayloadHash={lastPayloadHash}
-        onOpenUnlock={onOpenPrivilegeUnlock}
-        onPrivilegeMaterialChange={async (material) => {
-          clearNetworkReview();
-          await setPrivilegeMaterial(material);
-        }}
-        privilegeMaterial={privilegeMaterial}
-      />
+      {!privilegeMaterial && (
+        <PrivilegeVaultBox
+          lastPayloadHash={lastPayloadHash}
+          onOpenUnlock={onOpenPrivilegeUnlock}
+          onPrivilegeMaterialChange={async (material) => {
+            clearNetworkReview();
+            await setPrivilegeMaterial(material);
+          }}
+          privilegeMaterial={privilegeMaterial}
+        />
+      )}
     </section>
   );
 }

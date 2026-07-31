@@ -844,6 +844,8 @@ bind = "127.0.0.1:8080"
 gateway_control_url = "unix:/var/lib/vpsman/gateway-control.sock"
 job_output_artifact_min_bytes = 32768
 require_registered_agent_updates = false
+alert_cpu_load_warning = 2.0
+alert_cpu_load_critical = 4.0
 
 [gateway]
 bind = "0.0.0.0:9443"
@@ -851,6 +853,10 @@ control_bind = "unix:/var/lib/vpsman/gateway-control.sock"
 api_url = "http://api:8080"
 gateway_id = "compose-gateway"
 reconnect_grace_secs = 60
+
+[network]
+tunnel_ipv4_allocation_pool_cidr = ""
+tunnel_ipv6_allocation_pool_cidr = ""
 
 [worker]
 tick_secs = 30
@@ -885,6 +891,8 @@ const suiteConfigRedacted = {
     gateway_control_url: "unix:/var/lib/vpsman/gateway-control.sock",
     job_output_artifact_min_bytes: 32768,
     require_registered_agent_updates: false,
+    alert_cpu_load_warning: 2,
+    alert_cpu_load_critical: 4,
   },
   capacity: {
     api_db_pool: 32,
@@ -898,6 +906,10 @@ const suiteConfigRedacted = {
     control_bind: "unix:/var/lib/vpsman/gateway-control.sock",
     gateway_id: "compose-gateway",
     reconnect_grace_secs: 60,
+  },
+  network: {
+    tunnel_ipv4_allocation_pool_cidr: "",
+    tunnel_ipv6_allocation_pool_cidr: "",
   },
   secrets: {
     gateway_private_key_file: "/run/secrets/vpsman_gateway_private_key_hex",
@@ -4582,8 +4594,23 @@ export async function installConsoleApiMock(
             toml?: string;
           };
           const draftToml = body.toml ?? currentSuiteConfigToml;
+          const changedKeys = [
+            draftToml.includes("api_db_pool = 40")
+              ? "capacity.api_db_pool"
+              : null,
+            draftToml.includes(
+              'tunnel_ipv4_allocation_pool_cidr = "10.250.0.0/16"',
+            )
+              ? "network.tunnel_ipv4_allocation_pool_cidr"
+              : null,
+            draftToml.includes(
+              'tunnel_ipv6_allocation_pool_cidr = "fd42:250::/64"',
+            )
+              ? "network.tunnel_ipv6_allocation_pool_cidr"
+              : null,
+          ].filter((value): value is string => value !== null);
           return jsonResponse({
-            changed_keys: ["capacity.api_db_pool"],
+            changed_keys: changedKeys,
             exists: true,
             old_redacted: suiteConfigRedactedFixture,
             path: "config/vpsman.toml",
@@ -4592,6 +4619,19 @@ export async function installConsoleApiMock(
               capacity: {
                 ...suiteConfigRedactedFixture.capacity,
                 api_db_pool: draftToml.includes("api_db_pool = 40") ? 40 : 32,
+              },
+              network: {
+                ...suiteConfigRedactedFixture.network,
+                tunnel_ipv4_allocation_pool_cidr: draftToml.includes(
+                  'tunnel_ipv4_allocation_pool_cidr = "10.250.0.0/16"',
+                )
+                  ? "10.250.0.0/16"
+                  : "",
+                tunnel_ipv6_allocation_pool_cidr: draftToml.includes(
+                  'tunnel_ipv6_allocation_pool_cidr = "fd42:250::/64"',
+                )
+                  ? "fd42:250::/64"
+                  : "",
               },
             },
             validation: suiteConfigValidationFixture,
@@ -4986,8 +5026,10 @@ export async function installConsoleApiMock(
         ) {
           const body = (await readJsonBody(input, init)) as {
             confirmed?: boolean;
+            older_than?: string | null;
             rule_id?: string | null;
             status?: string | null;
+            preview_hash?: string | null;
           } | null;
           requests.webhookDeliveryRotations.push(body);
           const matchedCount = webhookDeliveriesFixture.filter(
@@ -4996,8 +5038,12 @@ export async function installConsoleApiMock(
               (!body?.status || delivery.status === body.status),
           ).length;
           return jsonResponse({
+            confirmation_required: !body?.confirmed,
             deleted_count: body?.confirmed ? matchedCount : 0,
             matched_count: matchedCount,
+            older_than:
+              body?.older_than ?? "2025-12-31T00:00:00.000Z",
+            preview_hash: body?.preview_hash ?? "9".repeat(64),
             rule_id: body?.rule_id ?? null,
             status: body?.status ?? null,
           });
@@ -5129,8 +5175,11 @@ export async function installConsoleApiMock(
             return jsonResponse({ error: "password_too_short" }, 400);
           }
           return jsonResponse({
+            algorithm: "SHA1",
+            digits: 6,
             otpauth_uri:
               "otpauth://totp/vpsman:console-admin?secret=JBSWY3DPEHPK3PXP&issuer=vpsman",
+            period_secs: 30,
             secret_base32: "JBSWY3DPEHPK3PXP",
           });
         }

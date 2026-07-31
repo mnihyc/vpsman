@@ -137,6 +137,7 @@ export function AgentUpdateReleasesPanel({
         ? `Latest artifact hash ${shortHash(latestArtifactSha256Hex)} is available for scoped dispatch.`
         : "Record HTTPS artifact metadata before Start update can prefill a manual update hash.",
       label: "Registered artifact",
+      title: latestArtifactSha256Hex || undefined,
       value: latestArtifactSha256Hex ? "Hash registered" : "No artifact",
     },
     {
@@ -161,6 +162,7 @@ export function AgentUpdateReleasesPanel({
     {
       detail: rollbackDetail,
       label: "Rollback",
+      title: latestRollbackSha256Hex || undefined,
       value: latestRollbackSha256Hex
         ? "Hash registered"
         : latestRelease
@@ -237,7 +239,7 @@ export function AgentUpdateReleasesPanel({
               ? shortHash(release.artifact_url_sha256_hex)
               : "not stored"}
             {release.rollback_artifact_url_sha256_hex && (
-              <small>
+              <small title={release.rollback_artifact_url_sha256_hex}>
                 {shortHash(release.rollback_artifact_url_sha256_hex)}
               </small>
             )}
@@ -481,7 +483,11 @@ export function AgentUpdateReleasesPanel({
         </div>
         <div className="releasePostureGrid">
           {releasePostureItems.map((item) => (
-            <div className="releasePostureItem" key={item.label}>
+            <div
+              className="releasePostureItem"
+              key={item.label}
+              title={("title" in item ? item.title : undefined) ?? item.detail}
+            >
               <span>{item.label}</span>
               <strong>{item.value}</strong>
               <small>{item.detail}</small>

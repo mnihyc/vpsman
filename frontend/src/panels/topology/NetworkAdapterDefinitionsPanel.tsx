@@ -205,10 +205,15 @@ export function NetworkAdapterDefinitionsPanel({
         </div>
       </div>
       <ActionFeedback
+        className="localActionFeedback"
         message={editor === null && deleteTarget === null ? error : null}
         tone="danger"
       />
-      <ActionFeedback message={feedback} tone="success" />
+      <ActionFeedback
+        className="localActionFeedback"
+        message={feedback}
+        tone="success"
+      />
       <ConsoleDataGrid
         actions={actions}
         columns={columns}
@@ -473,7 +478,7 @@ function AdapterCommandFields({
             </label>
             {strings(command.argv).length > 0 || required ? (
               <div className="formRow">
-                <label>
+                <label title="Hard wall-clock limit for each adapter command invocation. A timed-out invocation is reported as a failure.">
                   <span>Timeout seconds</span>
                   <input
                     aria-label={`${label} timeout seconds`}
@@ -497,7 +502,7 @@ function AdapterCommandFields({
                     value={number(command.max_timeout_secs, 30)}
                   />
                 </label>
-                <label>
+                <label title="Maximum command output retained as adapter evidence. It does not limit what the process can write elsewhere.">
                   <span>Maximum output bytes</span>
                   <input
                     aria-label={`${label} maximum output bytes`}

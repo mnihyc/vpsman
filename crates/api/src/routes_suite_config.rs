@@ -258,11 +258,42 @@ fn collect_changed_paths(prefix: &str, old: &Value, new: &Value, changed: &mut B
                 }
             }
         }
-        _ if old != new => {
+        _ if !json_values_semantically_equal(old, new) => {
             changed.insert(prefix.to_string());
         }
         _ => {}
     }
+}
+
+fn json_values_semantically_equal(left: &Value, right: &Value) -> bool {
+    let (Value::Number(left), Value::Number(right)) = (left, right) else {
+        return left == right;
+    };
+    let left_integer = json_integer(left);
+    let right_integer = json_integer(right);
+    match (left_integer, right_integer) {
+        (Some(left), Some(right)) => left == right,
+        (Some(integer), None) => integer_equals_json_float(integer, right),
+        (None, Some(integer)) => integer_equals_json_float(integer, left),
+        (None, None) => left.as_f64() == right.as_f64(),
+    }
+}
+
+fn json_integer(value: &serde_json::Number) -> Option<i128> {
+    value
+        .as_i64()
+        .map(i128::from)
+        .or_else(|| value.as_u64().map(i128::from))
+}
+
+fn integer_equals_json_float(integer: i128, value: &serde_json::Number) -> bool {
+    const MAX_SAFE_JSON_FLOAT_INTEGER: i128 = 9_007_199_254_740_991;
+    if !(-MAX_SAFE_JSON_FLOAT_INTEGER..=MAX_SAFE_JSON_FLOAT_INTEGER).contains(&integer) {
+        return false;
+    }
+    value
+        .as_f64()
+        .is_some_and(|float| float.is_finite() && float == integer as f64)
 }
 
 fn collect_leaf_paths(prefix: &str, value: &Value, changed: &mut BTreeSet<String>) {
@@ -339,6 +370,46 @@ gateway_control_read_timeout_ms = 2500
         ];
         assert_eq!(changed_json_paths(&base, &with_api), expected);
         assert_eq!(changed_json_paths(&with_api, &base), expected);
+    }
+
+    #[test]
+    fn changed_paths_ignore_equivalent_integer_and_float_toml_numbers() {
+        let old = toml_json(
+            r#"
+version = 1
+
+[api]
+alert_cpu_load_warning = 2.0
+alert_cpu_load_critical = 4.0
+"#,
+        )
+        .unwrap();
+        let reformatted = toml_json(
+            r#"
+version = 1
+
+[api]
+alert_cpu_load_warning = 2
+alert_cpu_load_critical = 4
+"#,
+        )
+        .unwrap();
+        assert!(changed_json_paths(&old, &reformatted).is_empty());
+
+        let changed = toml_json(
+            r#"
+version = 1
+
+[api]
+alert_cpu_load_warning = 3
+alert_cpu_load_critical = 4
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            changed_json_paths(&old, &changed),
+            vec!["api.alert_cpu_load_warning".to_string()]
+        );
     }
 
     #[test]

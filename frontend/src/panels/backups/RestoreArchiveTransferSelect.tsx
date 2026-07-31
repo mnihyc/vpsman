@@ -57,7 +57,11 @@ export function RestoreArchiveTransferSelect({
               : "Select staged archive"}
           </option>
           {options.map((option) => (
-            <option key={option.key} title={option.path} value={option.key}>
+            <option
+              key={option.key}
+              title={`${option.path} · SHA-256 ${option.sha256Hex}`}
+              value={option.key}
+            >
               {shortId(option.sessionId)} / {formatBytes(option.sizeBytes)} /{" "}
               {shortHash(option.sha256Hex)}
             </option>

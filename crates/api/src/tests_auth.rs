@@ -2208,6 +2208,41 @@ async fn operator_preferences_route_rejects_invalid_values() {
         ),
         (
             OperatorPreferences {
+                gateway_endpoints: "primary=999.0.0.1:9443=10".to_string(),
+                ..OperatorPreferences::default()
+            },
+            "invalid_gateway_endpoints",
+        ),
+        (
+            OperatorPreferences {
+                gateway_endpoints: "primary=001.2.3.4:9443=10".to_string(),
+                ..OperatorPreferences::default()
+            },
+            "invalid_gateway_endpoints",
+        ),
+        (
+            OperatorPreferences {
+                gateway_endpoints: "primary=[::ffff:001.2.3.4]:9443=10".to_string(),
+                ..OperatorPreferences::default()
+            },
+            "invalid_gateway_endpoints",
+        ),
+        (
+            OperatorPreferences {
+                gateway_endpoints: "primary=gw.example.com:+9443=10".to_string(),
+                ..OperatorPreferences::default()
+            },
+            "invalid_gateway_endpoints",
+        ),
+        (
+            OperatorPreferences {
+                gateway_endpoints: "primary=gw.example.com:9443=+10".to_string(),
+                ..OperatorPreferences::default()
+            },
+            "invalid_gateway_endpoints",
+        ),
+        (
+            OperatorPreferences {
                 fleet_tag_visibility_overrides: BTreeMap::from([("bad tag".to_string(), true)]),
                 ..OperatorPreferences::default()
             },
@@ -2237,6 +2272,8 @@ async fn operator_preferences_route_persists_valid_payload() {
         axum::extract::State(state),
         headers,
         axum::Json(OperatorPreferences {
+            gateway_endpoints: "primary=gw.example.com:9443=10,backup=[2001:db8::5]:9443=20,edge=[::ffff:192.0.2.4]:443=0".to_string(),
+            gateway_server_public_key_hex: Some("AA".repeat(32)),
             language: "en".to_string(),
             review_prompt_mode: "overlay".to_string(),
             sidebar_subpanel_default: "all".to_string(),
@@ -2255,6 +2292,18 @@ async fn operator_preferences_route_persists_valid_payload() {
     );
     assert_eq!(response.0.preferences.sidebar_subpanel_default, "all");
     assert_eq!(response.0.preferences.review_prompt_mode, "overlay");
+    assert_eq!(
+        response.0.preferences.gateway_endpoints,
+        "primary=gw.example.com:9443=10\nbackup=[2001:db8::5]:9443=20\nedge=[::ffff:192.0.2.4]:443=0"
+    );
+    assert_eq!(
+        response
+            .0
+            .preferences
+            .gateway_server_public_key_hex
+            .as_deref(),
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    );
 }
 
 #[tokio::test]

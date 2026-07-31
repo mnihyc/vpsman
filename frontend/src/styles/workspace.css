@@ -2762,7 +2762,7 @@ button.vpsDetailRecord:hover {
 
 .systemPostureGrid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(220px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
   padding: 16px 16px 0;
 }
@@ -4628,7 +4628,7 @@ button.vpsDetailRecord:hover {
 
 .dashboardClusterCard > span:not(.dashboardMetricIcon) {
   min-width: 0;
-  padding-right: 26px;
+  padding-right: 72px;
 }
 
 .dashboardClusterCard.aggregate {
@@ -4645,10 +4645,12 @@ button.vpsDetailRecord:hover {
   justify-content: center;
   min-width: 26px;
   height: 26px;
+  padding: 0 7px;
   border-radius: 999px;
   background: var(--surface-neutral);
   color: var(--text-secondary);
   font-size: 12px;
+  white-space: nowrap;
 }
 
 .dashboardLists {
@@ -4916,6 +4918,12 @@ button.vpsDetailRecord:hover {
 
 .fleetPolicyActionFeedback.localActionFeedback {
   margin: 10px 0 0;
+  max-width: 100%;
+}
+
+.webhookEditorActionFeedback.localActionFeedback {
+  flex: 1 0 100%;
+  margin: 0;
   max-width: 100%;
 }
 

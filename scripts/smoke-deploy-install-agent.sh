@@ -1703,6 +1703,20 @@ grep -q "endpoint address must be IPv4:port, hostname:port, or \\[IPv6\\]:port" 
 test ! -e "$invalid_fresh_home"
 
 if env \
+  PATH="$fake_bin_dir:$PATH" \
+  VPSMAN_AGENT_HOME="$invalid_fresh_home" \
+  VPSMAN_AGENT_BINARY_PATH="$fake_agent" \
+  "${common_env[@]}" \
+  VPSMAN_GATEWAY_ENDPOINTS='ipv4=001.2.3.4:9443=10' \
+  bash deploy/install-agent.sh >"$SMOKE_TMPDIR/ambiguous-ipv4.log" 2>&1; then
+  echo "expected deploy installer to reject leading-zero IPv4 octets" >&2
+  exit 1
+fi
+grep -q "endpoint address must be IPv4:port, hostname:port, or \\[IPv6\\]:port" \
+  "$SMOKE_TMPDIR/ambiguous-ipv4.log"
+test ! -e "$invalid_fresh_home"
+
+if env \
   PATH="$no_systemctl_bin" \
   VPSMAN_AGENT_HOME="$agent_home" \
   VPSMAN_AGENT_BINARY_PATH="$replacement_agent" \

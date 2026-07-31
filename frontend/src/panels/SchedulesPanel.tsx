@@ -69,6 +69,29 @@ import { LocalTargetPreview } from "./TargetImpactPreview";
 
 const SCHEDULE_SELECTOR_STORAGE_KEY = "vpsman.schedules.selectorExpression";
 
+function ScheduleFieldLabel({
+  help,
+  label,
+}: {
+  help: string;
+  label: string;
+}) {
+  return (
+    <span className="fieldLabelWithHelp">
+      <span>{label}</span>
+      <span
+        aria-label={`${label} help`}
+        className="fieldHelpIcon"
+        role="img"
+        tabIndex={0}
+        title={help}
+      >
+        ?
+      </span>
+    </span>
+  );
+}
+
 export function SchedulesPanel({
   activeSubpage: _activeSubpage,
   agents,
@@ -314,22 +337,22 @@ export function SchedulesPanel({
       {
         id: "name",
         header: "Name",
-        size: 220,
-        minSize: 160,
+        size: 170,
+        minSize: 130,
         sortValue: (schedule) => schedule.name,
         searchValue: (schedule) => `${schedule.name} ${schedule.id}`,
         cell: (schedule) => (
           <span className="historyPrimary">
             <strong>{schedule.name}</strong>
-            <small>{shortId(schedule.id)}</small>
+            <small title={schedule.id}>{shortId(schedule.id)}</small>
           </span>
         ),
       },
       {
         id: "operation",
         header: "Operation",
-        size: 210,
-        minSize: 170,
+        size: 150,
+        minSize: 120,
         sortValue: (schedule) => schedule.command_type,
         searchValue: (schedule) =>
           `${schedule.command_type} ${operationSummary(schedule.operation)} ${schedule.operation_error ?? ""}`,
@@ -351,8 +374,8 @@ export function SchedulesPanel({
       {
         id: "targets",
         header: "Targets",
-        size: 230,
-        minSize: 190,
+        size: 155,
+        minSize: 125,
         sortValue: (schedule) => fixedTargetIds(schedule).length,
         searchValue: (schedule) =>
           `${schedule.selector_expression} ${fixedTargetIds(schedule).join(" ")}`,
@@ -375,8 +398,8 @@ export function SchedulesPanel({
       {
         id: "cron",
         header: "Human cadence",
-        size: 210,
-        minSize: 170,
+        size: 165,
+        minSize: 140,
         sortValue: (schedule) => schedule.cron_expr,
         searchValue: (schedule) =>
           `${schedule.cron_expr} ${describeCronExpression(schedule.cron_expr)} ${schedule.timezone} ${schedule.cadence_error ?? ""}`,
@@ -403,8 +426,8 @@ export function SchedulesPanel({
       {
         id: "nextRun",
         header: "Next run / Overdue",
-        size: 210,
-        minSize: 175,
+        size: 170,
+        minSize: 145,
         sortValue: (schedule) => schedule.next_run_at,
         searchValue: (schedule) =>
           `${schedule.next_run_at} ${schedule.next_runs.join(" ")} ${schedule.last_run_at ?? ""}`,
@@ -435,8 +458,8 @@ export function SchedulesPanel({
       {
         id: "lastResult",
         header: "Last result",
-        size: 160,
-        minSize: 135,
+        size: 130,
+        minSize: 115,
         sortValue: (schedule) => schedule.last_run_at ?? "",
         searchValue: (schedule) =>
           `${schedule.last_run_at ?? ""} ${schedule.last_error ?? ""} ${schedule.failure_count}`,
@@ -456,8 +479,8 @@ export function SchedulesPanel({
       {
         id: "state",
         header: "State",
-        size: 170,
-        minSize: 145,
+        size: 135,
+        minSize: 120,
         sortValue: (schedule) =>
           `${schedule.enabled ? "enabled" : "disabled"} ${schedule.failure_count}`,
         searchValue: (schedule) =>
@@ -1047,6 +1070,7 @@ export function SchedulesPanel({
     const items = [
       {
         label: "Schedule",
+        title: action.schedule.id,
         value: `${action.schedule.name} (${shortId(action.schedule.id)})`,
       },
       {
@@ -1489,7 +1513,10 @@ export function SchedulesPanel({
             </label>
             <div className="dispatchControls">
               <label>
-                <span>UTC cron</span>
+                <ScheduleFieldLabel
+                  help="Five-field cron expression evaluated in UTC. For example, 0 2 * * * runs every day at 02:00 UTC."
+                  label="UTC cron"
+                />
                 <input
                   aria-label="Schedule cron expression"
                   onChange={(event) => setCronExpr(event.target.value)}
@@ -1508,7 +1535,10 @@ export function SchedulesPanel({
             </div>
             <div className="dispatchControls">
               <label>
-                <span>Catch-up</span>
+                <ScheduleFieldLabel
+                  help="Controls missed runs after downtime: skip them, dispatch one missed run, or dispatch a bounded backlog."
+                  label="Catch-up"
+                />
                 <select
                   aria-label="Schedule catch-up policy"
                   onChange={(event) => setCatchUpPolicy(event.target.value)}
@@ -1520,9 +1550,13 @@ export function SchedulesPanel({
                 </select>
               </label>
               <label>
-                <span>Catch-up limit</span>
+                <ScheduleFieldLabel
+                  help="Maximum missed runs dispatched when Catch-up is Run limited backlog. It is ignored by the other policies."
+                  label="Catch-up limit"
+                />
                 <input
                   aria-label="Schedule catch-up limit"
+                  disabled={catchUpPolicy !== "run_all_limited"}
                   min={1}
                   max={25}
                   onChange={(event) =>
@@ -1535,7 +1569,10 @@ export function SchedulesPanel({
             </div>
             <div className="dispatchControls">
               <label>
-                <span>Retry delay (seconds)</span>
+                <ScheduleFieldLabel
+                  help="Delay before the scheduler retries after a failed run."
+                  label="Retry delay (seconds)"
+                />
                 <input
                   aria-label="Schedule retry delay seconds"
                   min={1}
@@ -1548,7 +1585,10 @@ export function SchedulesPanel({
                 />
               </label>
               <label>
-                <span>Max failures</span>
+                <ScheduleFieldLabel
+                  help="Consecutive failed runs allowed before the scheduler disables this schedule."
+                  label="Max failures"
+                />
                 <input
                   aria-label="Schedule max failures"
                   min={1}

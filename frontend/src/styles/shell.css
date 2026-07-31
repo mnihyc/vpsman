@@ -1107,6 +1107,7 @@ nav {
 .iconButton,
 .primaryAction,
 .secondaryAction,
+.compactAction,
 .sessionButton,
 .wideAction {
   display: inline-flex;
@@ -1120,6 +1121,14 @@ nav {
   color: var(--text-secondary);
   cursor: pointer;
   padding: 0 14px;
+}
+
+.primaryAction,
+.secondaryAction,
+.compactAction,
+.sessionButton,
+.wideAction {
+  white-space: nowrap;
 }
 
 .actionDrawer {
@@ -1829,9 +1838,10 @@ h2 {
 }
 
 .consoleMenu {
+  box-sizing: border-box;
   min-width: 190px;
   max-height: min(
-    460px,
+    400px,
     var(
       --radix-dropdown-menu-content-available-height,
       var(--radix-context-menu-content-available-height, calc(100vh - 24px))
@@ -1839,6 +1849,8 @@ h2 {
   );
   overflow-y: auto;
   overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
@@ -2400,19 +2412,26 @@ h2 {
     flex: 1 1 min(100%, 132px);
     justify-content: center;
     height: auto;
+    max-width: 100%;
+    min-width: max-content;
     min-height: 34px;
-    white-space: normal;
+    white-space: nowrap;
   }
 
   .gridMobileActions .compactAction span {
-    min-width: 0;
-    overflow-wrap: anywhere;
+    white-space: nowrap;
   }
 
   .gridMobileActions .secondaryAction.danger {
     border-color: var(--danger-border);
     background: var(--danger-soft);
     color: var(--danger);
+  }
+
+  .gridMobileActions .secondaryAction.danger:disabled {
+    border-color: var(--border-subtle);
+    background: var(--surface-neutral);
+    color: var(--muted);
   }
 
   .gridExpandedRow {

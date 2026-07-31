@@ -574,7 +574,7 @@ function getScopedPageDescription(view: ActiveView, subpage: string): string {
       case "vps_identities":
         return "Agent registration, rotation, revocation, and install evidence";
       case "gateway_sessions":
-        return "Gateway streams, agent connectivity, and routing readiness";
+        return "Gateway installer defaults, agent connectivity, streams, and routing readiness";
       case "privilege_vault":
         return "Local privilege unlock, vault state, and lock action";
       default:
@@ -1684,19 +1684,18 @@ export function App() {
         backupArtifacts={homeScopedRecords.backupArtifacts}
         backups={homeScopedRecords.backups}
         backupsEvidenceAvailable={homeBackupsEvidenceAvailable}
-        dashboardError={combineErrors(
-          dashboard.dashboardOverviewError,
-          dashboard.apiError,
+        homeError={combineErrors(
           dashboard.jobsError,
           dashboard.backupsError,
           dashboard.auditError,
           dashboard.schedulesError,
           dashboard.systemDashboardError,
         )}
-        dashboardLoading={homeEvidenceLoading}
+        dashboardOverview={dashboard.dashboardOverview}
         dashboardPreferences={dashboard.dashboardPreferences}
         dashboardWindow={dashboard.dashboardOverviewWindow}
         fileTransfers={homeScopedRecords.fileTransfers}
+        fleetError={dashboard.apiError}
         fleetAlertsEvidenceAvailable={scopedFleetAlertsEvidenceAvailable}
         fleetAlerts={homeScopedRecords.fleetAlerts}
         fleetCoreEvidenceAvailable={dashboard.fleetCoreEvidenceAvailable}
@@ -1727,6 +1726,8 @@ export function App() {
         summary={visibleSummary}
         systemDashboard={dashboard.systemDashboard}
         telemetryNetworkRates={dashboard.telemetryNetworkRates}
+        telemetryError={dashboard.dashboardOverviewError}
+        telemetryLoading={dashboard.dashboardOverviewLoading}
         telemetryRollups={dashboard.telemetryRollups}
         telemetryTunnels={dashboard.telemetryTunnels}
         onDashboardNavigate={navigateDashboardTarget}
@@ -1992,7 +1993,6 @@ export function App() {
           dashboard.upsertRuntimeConfigPatchGenerator
         }
         privilegeMaterial={privilegeMaterial}
-        setPrivilegeMaterial={setPrivilegeMaterial}
       />
     );
   }
@@ -2386,7 +2386,8 @@ export function App() {
 
   function renderNetworkPanel(panelSubpage: string) {
     return (
-      <TopologyPanel
+      <div className="workspace singleColumn">
+        <TopologyPanel
         activeSubpage={panelSubpage}
         agents={dashboard.agents}
         configurationSources={dashboard.configurationSources}
@@ -2487,8 +2488,9 @@ export function App() {
         topologyGraph={dashboard.topologyGraph}
         telemetryTunnels={dashboard.telemetryTunnels}
         tunnelPlanCorruptions={dashboard.tunnelPlanCorruptions}
-        tunnelPlans={dashboard.tunnelPlans}
-      />
+          tunnelPlans={dashboard.tunnelPlans}
+        />
+      </div>
     );
   }
 
@@ -2581,7 +2583,6 @@ export function App() {
           setAccessIdentityWorkflowIntent(null)
         }
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
-        onOpenSystemConfig={() => selectView("System", "suite_config")}
         onOpenSystemSessions={() => selectView("Audit", "sessions")}
         onOpenTerminalSessions={() =>
           selectView("Remote Operations", "terminal")
@@ -2776,56 +2777,63 @@ export function App() {
       if (activeSubpage === "events") return renderAuditPanel("events");
       if (activeSubpage === "job_evidence") {
         return (
-          <JobEvidencePanel
-            agents={dashboard.agents}
-            audits={dashboard.audits}
-            auditsTruncated={dashboard.auditsTruncated}
-            error={dashboard.jobsError ?? dashboard.auditError}
-            jobs={dashboard.jobs}
-            jobsTruncated={dashboard.jobsTruncated}
-            loading={dashboard.jobsLoading || dashboard.auditLoading}
-            onLoadJobOutputs={dashboard.loadJobOutputs}
-            onLoadJobTargets={dashboard.loadJobTargets}
-            onOpenJobDetails={openJobDetails}
-            onRefresh={() => {
-              void dashboard.loadJobs();
-              void dashboard.loadAudits();
-            }}
-          />
+          <div className="workspace singleColumn">
+            <JobEvidencePanel
+              agents={dashboard.agents}
+              audits={dashboard.audits}
+              auditsTruncated={dashboard.auditsTruncated}
+              error={dashboard.jobsError ?? dashboard.auditError}
+              jobs={dashboard.jobs}
+              jobsTruncated={dashboard.jobsTruncated}
+              loading={dashboard.jobsLoading || dashboard.auditLoading}
+              onLoadJobOutputs={dashboard.loadJobOutputs}
+              onLoadJobTargets={dashboard.loadJobTargets}
+              onOpenJobDetails={openJobDetails}
+              onRefresh={() => {
+                void dashboard.loadJobs();
+                void dashboard.loadAudits();
+              }}
+            />
+          </div>
         );
       }
       if (activeSubpage === "retention_export")
         return renderAuditPanel("retention");
       if (activeSubpage === "sessions") {
         return (
-          <SessionEvidencePanel
-            agents={dashboard.agents}
-            audits={dashboard.audits}
-            auditsTruncated={dashboard.auditsTruncated}
-            jobs={dashboard.jobs}
-            jobsTruncated={dashboard.jobsTruncated}
-            loading={
-              dashboard.jobsLoading ||
-              dashboard.auditLoading ||
-              dashboard.accessLoading
-            }
-            onClearSession={clearOperatorSession}
-            onRefresh={() => {
-              void dashboard.loadAudits();
-              void dashboard.loadJobs();
-              void dashboard.loadTerminalSessions();
-              void dashboard.loadCurrentOperator();
-            }}
-            operator={dashboard.operator}
-            operatorAuthEvents={dashboard.operatorAuthEvents}
-            operatorAuthEventsTruncated={
-              dashboard.operatorAuthEventsTruncated
-            }
-            operatorSessions={dashboard.operatorSessions}
-            operatorSessionsTruncated={dashboard.operatorSessionsTruncated}
-            terminalSessions={dashboard.terminalSessions}
-            terminalSessionsTruncated={dashboard.terminalSessionsTruncated}
-          />
+          <div className="workspace singleColumn">
+            <SessionEvidencePanel
+              agents={dashboard.agents}
+              audits={dashboard.audits}
+              auditsTruncated={dashboard.auditsTruncated}
+              jobs={dashboard.jobs}
+              jobsTruncated={dashboard.jobsTruncated}
+              loading={
+                dashboard.jobsLoading ||
+                dashboard.auditLoading ||
+                dashboard.accessLoading
+              }
+              onClearSession={clearOperatorSession}
+              onOpenPrivilegeUnlock={openPrivilegeUnlock}
+              onRefresh={() => {
+                void dashboard.loadAudits();
+                void dashboard.loadJobs();
+                void dashboard.loadTerminalSessions();
+                void dashboard.loadCurrentOperator();
+              }}
+              onRevokeOperatorSession={dashboard.revokeOperatorSession}
+              operator={dashboard.operator}
+              operatorAuthEvents={dashboard.operatorAuthEvents}
+              operatorAuthEventsTruncated={
+                dashboard.operatorAuthEventsTruncated
+              }
+              operatorSessions={dashboard.operatorSessions}
+              operatorSessionsTruncated={dashboard.operatorSessionsTruncated}
+              privilegeMaterial={privilegeMaterial}
+              terminalSessions={dashboard.terminalSessions}
+              terminalSessionsTruncated={dashboard.terminalSessionsTruncated}
+            />
+          </div>
         );
       }
       return renderAuditPanel("events");

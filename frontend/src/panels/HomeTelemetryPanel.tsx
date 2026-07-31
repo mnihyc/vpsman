@@ -120,9 +120,49 @@ export function HomeTelemetryPanel({
   const customRangeActive = Boolean(preferences.startAt.trim());
   const selectedScopeLabel = dashboardScopeLabel(preferences, overview);
   const selectedGroupLabel = groupLabel(preferences.groupBy);
+  const visibleAgentIds = useMemo(
+    () => new Set(agents.map((agent) => agent.id)),
+    [agents],
+  );
+  const visibleResourceSeries = useMemo(
+    () =>
+      (resourceCurve?.series ?? []).filter((series) =>
+        visibleAgentIds.has(series.client_id),
+      ),
+    [resourceCurve?.series, visibleAgentIds],
+  );
+  const visibleRateClients = useMemo(
+    () =>
+      (network?.top_clients ?? []).filter((client) =>
+        visibleAgentIds.has(client.client_id),
+      ),
+    [network?.top_clients, visibleAgentIds],
+  );
+  const visibleTrafficSeries = useMemo(
+    () =>
+      (network?.traffic_series ?? []).filter((series) =>
+        visibleAgentIds.has(series.client_id),
+      ),
+    [network?.traffic_series, visibleAgentIds],
+  );
+  const visibleRecentAlerts = useMemo(
+    () =>
+      (operations?.recent_alerts ?? []).filter(
+        (alert) =>
+          alert.client_id === null || visibleAgentIds.has(alert.client_id),
+      ),
+    [operations?.recent_alerts, visibleAgentIds],
+  );
+  const visibleDegradedAgents = useMemo(
+    () =>
+      (operations?.degraded_agents ?? []).filter((agent) =>
+        visibleAgentIds.has(agent.client_id),
+      ),
+    [operations?.degraded_agents, visibleAgentIds],
+  );
   const resourceChart = useMemo(
-    () => resourceChartData(resourceCurve?.series ?? []),
-    [resourceCurve?.series],
+    () => resourceChartData(visibleResourceSeries),
+    [visibleResourceSeries],
   );
   const networkSpeedChart = useMemo(
     () => ({
@@ -136,12 +176,18 @@ export function HomeTelemetryPanel({
   );
   const networkPeak = useMemo(() => maxNetworkPoint(network?.points ?? []), [network?.points]);
   const trafficChart = useMemo(
-    () => trafficChartData(network?.traffic_series ?? [], preferences.trafficSort),
-    [network?.traffic_series, preferences.trafficSort],
+    () => trafficChartData(visibleTrafficSeries, preferences.trafficSort),
+    [preferences.trafficSort, visibleTrafficSeries],
   );
   const trafficClients = useMemo(
-    () => sortTrafficClients(network?.traffic_top_clients ?? [], preferences.trafficSort),
-    [network?.traffic_top_clients, preferences.trafficSort],
+    () =>
+      sortTrafficClients(
+        (network?.traffic_top_clients ?? []).filter((client) =>
+          visibleAgentIds.has(client.client_id),
+        ),
+        preferences.trafficSort,
+      ),
+    [network?.traffic_top_clients, preferences.trafficSort, visibleAgentIds],
   );
 
   function openDrawer(next: DrawerState) {
@@ -488,9 +534,9 @@ export function HomeTelemetryPanel({
             <div className="dashboardTopClients">
               <div className="dashboardSideRailHeader">
                 <strong>Top VPS</strong>
-                <span>{resourceCurve?.series.length ?? 0} of {resourceCurve?.sampled_clients ?? 0}</span>
+                <span>{visibleResourceSeries.length} visible</span>
               </div>
-              {(resourceCurve?.series ?? []).map((series) => (
+              {visibleResourceSeries.map((series) => (
                 <button
                   className="dashboardClientRow"
                   key={series.client_id}
@@ -606,9 +652,9 @@ export function HomeTelemetryPanel({
                 <div className="dashboardTopClients">
                   <div className="dashboardSideRailHeader">
                     <strong>Top rate</strong>
-                    <span>{network?.top_clients.length ?? 0} VPS</span>
+                    <span>{visibleRateClients.length} visible</span>
                   </div>
-                  {(network?.top_clients ?? []).map((client) => (
+                  {visibleRateClients.map((client) => (
                     <button className="dashboardClientRow" key={client.client_id} onClick={() => openDrawer({
                       description: `${client.interfaces.length} observed interface${client.interfaces.length === 1 ? "" : "s"}.`,
                       drilldown: client.drilldown,
@@ -710,12 +756,14 @@ export function HomeTelemetryPanel({
           </div>
         </section>
 
-        {operations && (operations.recent_alerts.length > 0 || operations.degraded_agents.length > 0) && (
+        {operations &&
+          (visibleRecentAlerts.length > 0 ||
+            visibleDegradedAgents.length > 0) && (
           <section className="dashboardSection dashboardLists" aria-label="Operational lists">
             <div>
               <h2>Recent Alerts</h2>
               <div className="dashboardList">
-                {operations.recent_alerts.map((alert) => (
+                {visibleRecentAlerts.map((alert) => (
                   <button
                     className="dashboardListRow"
                     key={alert.id}
@@ -745,7 +793,7 @@ export function HomeTelemetryPanel({
             <div>
               <h2>Degraded VPS</h2>
               <div className="dashboardList">
-                {operations.degraded_agents.map((agent) => (
+                {visibleDegradedAgents.map((agent) => (
                   <button
                     className="dashboardListRow"
                     key={agent.client_id}
@@ -858,7 +906,9 @@ function ClusterButton({
         <strong>{cluster.label}</strong>
         <em>{clusterSummary(cluster)}</em>
       </span>
-      <b>{cluster.warnings}</b>
+      <b title={`${cluster.warnings} open alerts`}>
+        {cluster.warnings} alerts
+      </b>
     </button>
   );
 }

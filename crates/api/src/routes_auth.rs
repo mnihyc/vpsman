@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{Ipv6Addr, SocketAddr};
 
 use axum::{
     extract::{ConnectInfo, Path, Query, State},
@@ -370,9 +370,14 @@ fn validate_preference_tag_name(tag: &str) -> bool {
 }
 
 fn validate_gateway_endpoints_format(value: &str) -> bool {
-    value
-        .lines()
-        .all(|line| validate_gateway_endpoint_entry(line.trim()))
+    let entries = value
+        .split([',', '\n'])
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>();
+    !entries.is_empty()
+        && entries.len() <= 16
+        && entries.into_iter().all(validate_gateway_endpoint_entry)
 }
 
 fn validate_gateway_endpoint_entry(entry: &str) -> bool {
@@ -390,17 +395,112 @@ fn validate_gateway_endpoint_entry(entry: &str) -> bool {
         || label.len() > 64
         || !label
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
     {
         return false;
     }
-    if addr.is_empty() || addr.len() > 256 || addr.contains(char::is_control) {
+    if !validate_gateway_tcp_address(addr) {
         return false;
     }
-    if priority.parse::<u16>().is_err() {
+    if priority.is_empty()
+        || priority.len() > 5
+        || !priority.bytes().all(|byte| byte.is_ascii_digit())
+        || priority.parse::<u16>().is_err()
+    {
         return false;
     }
     true
+}
+
+fn validate_gateway_tcp_address(value: &str) -> bool {
+    if value.is_empty() || value.len() > 256 || value.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let (host, port) = if let Some(bracketed) = value.strip_prefix('[') {
+        let Some((host, port)) = bracketed.rsplit_once("]:") else {
+            return false;
+        };
+        if !validate_gateway_ipv6_literal(host) {
+            return false;
+        }
+        (host, port)
+    } else {
+        let Some((host, port)) = value.rsplit_once(':') else {
+            return false;
+        };
+        if host.contains(':') || !validate_gateway_host(host) {
+            return false;
+        }
+        (host, port)
+    };
+    !host.is_empty()
+        && !port.is_empty()
+        && port.len() <= 5
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<u16>().is_ok_and(|port| port > 0)
+}
+
+fn validate_gateway_host(value: &str) -> bool {
+    if value
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || byte == b'.')
+    {
+        return validate_gateway_ipv4_literal(value);
+    }
+    if value.is_empty() || value.len() > 253 {
+        return false;
+    }
+    let value = value.strip_suffix('.').unwrap_or(value);
+    !value.is_empty()
+        && value.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && label
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+        })
+}
+
+fn validate_gateway_ipv4_literal(value: &str) -> bool {
+    let octets = value.split('.').collect::<Vec<_>>();
+    octets.len() == 4
+        && octets.iter().all(|octet| {
+            !octet.is_empty()
+                && octet.len() <= 3
+                && octet.bytes().all(|byte| byte.is_ascii_digit())
+                && (octet.len() == 1 || !octet.starts_with('0'))
+                && octet.parse::<u16>().is_ok_and(|octet| octet <= 255)
+        })
+}
+
+fn validate_gateway_ipv6_literal(value: &str) -> bool {
+    if !value.contains('.') {
+        return value.parse::<Ipv6Addr>().is_ok();
+    }
+    let Some((prefix, ipv4_tail)) = value.rsplit_once(':') else {
+        return false;
+    };
+    if !validate_gateway_ipv4_literal(ipv4_tail) {
+        return false;
+    }
+    let octets = ipv4_tail
+        .split('.')
+        .map(|octet| octet.parse::<u16>().expect("validated IPv4 octet"))
+        .collect::<Vec<_>>();
+    let normalized = format!(
+        "{prefix}:{:x}:{:x}",
+        (octets[0] << 8) | octets[1],
+        (octets[2] << 8) | octets[3],
+    );
+    normalized.parse::<Ipv6Addr>().is_ok()
 }
 
 #[derive(Clone, Copy)]

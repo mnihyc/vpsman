@@ -236,7 +236,7 @@ export function PrivilegeVaultBox({
           <ShieldCheck size={18} />
           <div>
             <strong>{privilegeStatus}</strong>
-            <span>
+            <span title={lastPayloadHash ?? undefined}>
               {lastPayloadHash
                 ? shortHash(lastPayloadHash)
                 : "Access / Privilege Vault required"}

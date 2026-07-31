@@ -375,6 +375,30 @@ const suiteConfigSections: ConfigSectionSpec[] = [
   },
   {
     description:
+      "Shared address pools used when tunnel plans request automatic endpoint allocation.",
+    id: "network",
+    title: "Network",
+    fields: [
+      {
+        defaultValue: "unset",
+        help: "Global IPv4 CIDR used to allocate missing tunnel endpoint addresses. Leave empty to require explicit IPv4 endpoints per plan.",
+        kind: "text",
+        label: "Tunnel IPv4 allocation pool",
+        path: "network.tunnel_ipv4_allocation_pool_cidr",
+        rule: "IPv4 CIDR with at least two addresses, or unset",
+      },
+      {
+        defaultValue: "unset",
+        help: "Global IPv6 CIDR used to allocate missing tunnel endpoint addresses. Leave empty to require explicit IPv6 endpoints per plan.",
+        kind: "text",
+        label: "Tunnel IPv6 allocation pool",
+        path: "network.tunnel_ipv6_allocation_pool_cidr",
+        rule: "IPv6 CIDR with at least two addresses, or unset",
+      },
+    ],
+  },
+  {
+    description:
       "Worker cadence, leases, schedule timeout, and offline reconciliation.",
     id: "worker",
     title: "Worker",
@@ -2697,7 +2721,7 @@ function SystemSessionsPanel({
               value={`${formatLowerBoundCount(
                 revokableSessions,
                 sessionsTruncated,
-              )} revokable${sessionsTruncated ? " loaded" : ""}`}
+              )} revocable${sessionsTruncated ? " loaded" : ""}`}
             />
           </div>
         </section>
@@ -2728,7 +2752,9 @@ function SystemSessionsPanel({
                   reviewPending ||
                   pending ||
                   rows.length === 0 ||
-                  rows.some((row) => row.current || row.revoked),
+                  rows.some(
+                    (row) => row.current || !isOperatorSessionUsable(row),
+                  ),
                 onSelect: (rows) => void requestSessionRevoke(rows),
               },
             ]}
@@ -2876,6 +2902,10 @@ function SystemSessionsPanel({
           },
           {
             label: "Payload",
+            title: pendingRevoke?.sessions[0]
+              ? pendingRevoke.privileges[pendingRevoke.sessions[0].id]
+                  .payloadHashHex
+              : undefined,
             value: pendingRevoke?.sessions[0]
               ? shortId(
                   pendingRevoke.privileges[pendingRevoke.sessions[0].id]
@@ -4035,7 +4065,7 @@ function pendingUserActionDetail(action: PendingUserAction | null): ReactNode {
 
 function pendingUserActionItems(
   action: PendingUserAction | null,
-): Array<{ label: string; value: ReactNode }> {
+): Array<{ label: string; title?: string; value: ReactNode }> {
   if (!action) {
     return [];
   }
@@ -4056,7 +4086,11 @@ function pendingUserActionItems(
           ? action.scopes.join(", ")
           : "role defaults",
       },
-      { label: "Payload", value: shortId(action.privilege.payloadHashHex) },
+      {
+        label: "Payload",
+        title: action.privilege.payloadHashHex,
+        value: shortId(action.privilege.payloadHashHex),
+      },
     ];
   }
   if (action.kind === "update") {
@@ -4076,14 +4110,22 @@ function pendingUserActionItems(
           ? action.scopes.join(", ")
           : "role defaults",
       },
-      { label: "Payload", value: shortId(action.privilege.payloadHashHex) },
+      {
+        label: "Payload",
+        title: action.privilege.payloadHashHex,
+        value: shortId(action.privilege.payloadHashHex),
+      },
     ];
   }
   if (action.kind === "password") {
     return [
       { label: "Username", value: action.operator.username },
       { label: "Role", value: operatorRoleLabel(action.operator.role) },
-      { label: "Payload", value: shortId(action.privilege.payloadHashHex) },
+      {
+        label: "Payload",
+        title: action.privilege.payloadHashHex,
+        value: shortId(action.privilege.payloadHashHex),
+      },
     ];
   }
   if (action.kind === "status" || action.kind === "totp") {
@@ -4096,6 +4138,9 @@ function pendingUserActionItems(
       { label: "Count", value: action.operators.length },
       {
         label: "Payload",
+        title: firstOperator
+          ? action.privileges[firstOperator.id].payloadHashHex
+          : undefined,
         value: firstOperator
           ? shortId(action.privileges[firstOperator.id].payloadHashHex)
           : "-",
@@ -4115,6 +4160,9 @@ function pendingUserActionItems(
       },
       {
         label: "Payload",
+        title: firstSession
+          ? action.privileges[firstSession.id].payloadHashHex
+          : undefined,
         value: firstSession
           ? shortId(action.privileges[firstSession.id].payloadHashHex)
           : "-",
@@ -5286,6 +5334,7 @@ function SystemConfigPanel({
   const [savePending, setSavePending] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [editorMode, setEditorMode] = useState<"form" | "toml">("form");
+  const [advancedTomlEdited, setAdvancedTomlEdited] = useState(false);
   const [configSearch, setConfigSearch] = useState("");
   const validationRequestId = useRef(0);
   const [activeConfigSection, setActiveConfigSection] = useState(
@@ -5318,8 +5367,16 @@ function SystemConfigPanel({
     : filteredConfigSections.filter(
         (section) => section.id === activeConfigSection,
       );
-  const dirty = Boolean(config && draftToml !== config.toml);
+  const draftTextChanged = Boolean(config && draftToml !== config.toml);
   const changedKeys = validation?.changed_keys ?? [];
+  const textOnlyDraftChange =
+    draftTextChanged &&
+    advancedTomlEdited &&
+    Boolean(validation) &&
+    changedKeys.length === 0;
+  const dirty =
+    draftTextChanged &&
+    (!validation || changedKeys.length > 0 || advancedTomlEdited);
   const activeValidation = validation?.validation ?? config?.validation ?? null;
   const hotReloadFields = activeValidation?.hot_reload_fields ?? [];
   const restartRequiredFields = activeValidation?.restart_required_fields ?? [];
@@ -5346,7 +5403,9 @@ function SystemConfigPanel({
     ? "Draft impact"
     : "Configuration inventory";
   const impactSummaryDetail = validation
-    ? `${changedKeys.length} changed · ${changedHotReloadFields.length} hot reload · ${changedRestartRequiredFields.length} restart · ${changedUnknownImpactFields.length} not reported`
+    ? textOnlyDraftChange
+      ? "Exact Advanced TOML text changed · no runtime value changes"
+      : `${changedKeys.length} changed · ${changedHotReloadFields.length} hot reload · ${changedRestartRequiredFields.length} restart · ${changedUnknownImpactFields.length} not reported`
     : `${hotReloadCount} hot-reload fields · ${restartRequiredCount} restart-required fields`;
   const hotReloadSummaryLabel = validation
     ? "Draft hot reload"
@@ -5396,6 +5455,7 @@ function SystemConfigPanel({
     if (config) {
       validationRequestId.current += 1;
       setDraftToml(config.toml);
+      setAdvancedTomlEdited(false);
       setValidation(null);
       setValidationPending(false);
       setSavePending(false);
@@ -5688,8 +5748,8 @@ function SystemConfigPanel({
             <div>
               <strong>System scope</strong>
               <p>
-                Suite TOML controls API, gateway, worker, capacity, storage,
-                secrets, and control-plane timeouts.
+                Suite TOML controls API, gateway, network, worker, capacity,
+                storage, secrets, and control-plane timeouts.
               </p>
             </div>
           </div>
@@ -5743,7 +5803,9 @@ function SystemConfigPanel({
           <div>
             <strong>
               {validation
-                ? changedKeyCountLabel(changedKeys.length)
+                ? textOnlyDraftChange
+                  ? "Advanced TOML text changed"
+                  : changedKeyCountLabel(changedKeys.length)
                 : dirty
                   ? validationPending
                     ? "Auto-validating draft"
@@ -5930,6 +5992,7 @@ function SystemConfigPanel({
                     onChange={(event) => {
                       validationRequestId.current += 1;
                       setDraftToml(event.target.value);
+                      setAdvancedTomlEdited(event.target.value !== config?.toml);
                       setValidation(null);
                       setValidationPending(false);
                       setConfirmOpen(false);
@@ -5964,7 +6027,9 @@ function SystemConfigPanel({
                   }
                 >
                   {validation
-                    ? `${changedKeys.length} changed`
+                    ? textOnlyDraftChange
+                      ? "Text changed"
+                      : `${changedKeys.length} changed`
                     : dirty
                       ? "Draft"
                       : "No draft"}
@@ -6034,7 +6099,11 @@ function SystemConfigPanel({
                       </span>
                     ))}
                     {validation && changedKeys.length === 0 ? (
-                      <span>No changes</span>
+                      <span>
+                        {textOnlyDraftChange
+                          ? "Formatting or comments only"
+                          : "No changes"}
+                      </span>
                     ) : null}
                     {!validation ? (
                       <span>
@@ -6134,6 +6203,9 @@ function SystemConfigPanel({
                 error={configError}
                 items={[
                   { label: "Changed keys", value: String(changedKeys.length) },
+                  ...(textOnlyDraftChange
+                    ? [{ label: "Advanced TOML text", value: "Changed" }]
+                    : []),
                   {
                     label: "Hot reload changed",
                     value: String(changedHotReloadFields.length),

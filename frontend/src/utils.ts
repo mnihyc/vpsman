@@ -88,7 +88,7 @@ export function getPageTitle(view: ActiveView): string {
 export function getPageDescription(view: ActiveView): string {
   switch (view) {
     case "Home":
-      return "Fleet posture, needs-attention work, recent activity, and quick operator actions";
+      return "Clickable VPS health cards, fleet posture, resource and network metrics, current work, and quick operator actions";
     case "Jobs":
       return "Execution history, advanced dispatch, approvals, scheduled runs, and artifacts";
     case "Remote Operations":
@@ -102,7 +102,7 @@ export function getPageDescription(view: ActiveView): string {
     case "Observability":
       return "Read-only fleet, network, process, alert, webhook, and dashboard analysis";
     case "Audit":
-      return "Operator and security events from the control plane";
+      return "Searchable audit, job, terminal, and bearer-session evidence with reviewed session revocation";
     case "Backups":
       return "Backup, restore, and migration workflows";
     case "Access":

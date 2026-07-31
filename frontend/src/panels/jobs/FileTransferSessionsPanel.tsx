@@ -308,7 +308,9 @@ export function FileTransferSessionsPanel({
         cell: (source) => (
           <span className="historyPrimary">
             <strong>{source.name}</strong>
-            <small>SHA-256 {shortHash(source.sha256_hex)}</small>
+            <small title={source.sha256_hex}>
+              SHA-256 {shortHash(source.sha256_hex)}
+            </small>
           </span>
         ),
         header: "Source",
@@ -349,7 +351,9 @@ export function FileTransferSessionsPanel({
       cell: (transfer) => (
         <span className="historyPrimary">
           <strong>{transferDirectionLabel(transfer)}</strong>
-          <small>{shortId(transfer.session_id)}</small>
+          <small title={transfer.session_id}>
+            {shortId(transfer.session_id)}
+          </small>
         </span>
       ),
       header: "Direction",
@@ -374,7 +378,7 @@ export function FileTransferSessionsPanel({
       cell: (transfer) => (
         <span className="historyPrimary">
           <strong title={transfer.path}>{transfer.path}</strong>
-          <small>
+          <small title={transfer.sha256_hex ?? undefined}>
             {transferPathRoleLabel(transfer)} ·{" "}
             {transferIntegrityLabel(transfer)}
           </small>
@@ -1021,6 +1025,9 @@ export function FileTransferSessionsPanel({
           },
           {
             label: "Sessions",
+            title: handoffSnapshot
+              ? handoffFullSessionSummary(handoffSnapshot.transfers)
+              : undefined,
             value: handoffSnapshot
               ? handoffSessionSummary(handoffSnapshot.transfers)
               : "-",
@@ -1560,6 +1567,15 @@ function handoffSessionSummary(transfers: HandoffReviewItem[]): string {
     : shown;
 }
 
+function handoffFullSessionSummary(transfers: HandoffReviewItem[]): string {
+  return transfers
+    .map(
+      (transfer) =>
+        `${transfer.clientLabel}/${transfer.sessionId} ${transfer.path}`,
+    )
+    .join(", ");
+}
+
 function handoffHashSummary(transfers: HandoffReviewItem[]): string {
   const hashes = transfers
     .map((transfer) => transfer.sha256Hex)
@@ -1597,7 +1613,7 @@ function handoffFullEvidenceSummary(transfers: HandoffReviewItem[]): string {
       const reason = transfer.evidenceReason
         ? ` (${transfer.evidenceReason.replace(/_/g, " ")})`
         : "";
-      return `${transfer.clientLabel}/${shortId(transfer.sessionId)}: ${handoffEvidenceStatusLabel(transfer.evidenceStatus)}${reason}`;
+      return `${transfer.clientLabel}/${transfer.sessionId}: ${handoffEvidenceStatusLabel(transfer.evidenceStatus)}${reason}`;
     })
     .join(", ");
 }
