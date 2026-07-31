@@ -880,45 +880,44 @@ assert_user_sessions_output() {
   fi
 }
 
-assert_terminal_job_completed() {
-  local current_job_id="$1"
-  local expected_command="$2"
+assert_terminal_open_job_completed() {
   local job_json targets_json
-  job_json="$(api_get "/api/v1/jobs/$current_job_id")"
-  targets_json="$(api_get "/api/v1/jobs/$current_job_id/targets")"
+  job_json="$(api_get "/api/v1/jobs/$terminal_open_job_id")"
+  targets_json="$(api_get "/api/v1/jobs/$terminal_open_job_id/targets")"
 
-  jq -e --arg command "$expected_command" '
-    .status == "completed" and .command_type == $command and .target_count == 1
+  jq -e '
+    .status == "completed"
+    and .command_type == "terminal_open"
+    and .target_count == 1
+    and (.completed_at | type == "string")
   ' <<<"$job_json" >/dev/null
   jq -e --arg client "$client_id" '
-    length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
+    length == 1
+    and .[0].client_id == $client
+    and .[0].status == "completed"
+    and (.[0].completed_at | type == "string")
   ' <<<"$targets_json" >/dev/null
 }
 
 assert_terminal_session_workflow() {
-  local open_outputs input_outputs attach_outputs resize_outputs poll_outputs close_outputs sessions_json vty_sessions decoded_pty
+  local open_outputs sessions_json vty_sessions decoded_pty terminal_job_count terminal_job_recorded input_bytes input_seq
 
-  assert_terminal_job_completed "$terminal_open_job_id" "terminal_open"
-  assert_terminal_job_completed "$terminal_resize_job_id" "terminal_resize"
-  assert_terminal_job_completed "$terminal_input_job_id" "terminal_input"
-  assert_terminal_job_completed "$terminal_attach_job_id" "terminal_open"
-  assert_terminal_job_completed "$terminal_poll_job_id" "terminal_poll"
-  assert_terminal_job_completed "$terminal_close_job_id" "terminal_close"
-
+  assert_terminal_open_job_completed
   open_outputs="$(api_get "/api/v1/jobs/$terminal_open_job_id/outputs")"
-  input_outputs="$(api_get "/api/v1/jobs/$terminal_input_job_id/outputs")"
-  attach_outputs="$(api_get "/api/v1/jobs/$terminal_attach_job_id/outputs")"
-  resize_outputs="$(api_get "/api/v1/jobs/$terminal_resize_job_id/outputs")"
-  poll_outputs="$(api_get "/api/v1/jobs/$terminal_poll_job_id/outputs")"
-  close_outputs="$(api_get "/api/v1/jobs/$terminal_close_job_id/outputs")"
+  terminal_job_count="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc \
+    "SELECT count(*) FROM jobs WHERE command_type LIKE 'terminal_%'")"
+  terminal_job_recorded="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc \
+    "SELECT id FROM jobs WHERE command_type = 'terminal_open'")"
+  [[ "$terminal_job_count" == "1" ]]
+  [[ "$terminal_job_recorded" == "$terminal_open_job_id" ]]
 
   jq -e --arg sid "$terminal_session_id" '
-    any(.items[]; .stream == "status" and .done == true and .exit_code == 0 and (
+    any(.items[]; .stream == "status" and .done == false and .exit_code == 0 and (
       (.data_base64 | @base64d | fromjson)
       | .type == "terminal_open"
         and .status == "opened"
         and .session_id == $sid
-        and .argv == ["/bin/sh", "-lc", "read line; printf '\''got:%s\\n'\'' \"$line\""]
+        and .argv == ["/bin/sh", "-lc", "while IFS= read -r line; do printf '\''got:%s\\n'\'' \"$line\"; done"]
         and .cols == 96
         and .rows == 28
         and .idle_timeout_secs == 300
@@ -928,94 +927,98 @@ assert_terminal_session_workflow() {
         and .output_replay_truncated == false
     ))
   ' <<<"$open_outputs" >/dev/null
+
   jq -e --arg sid "$terminal_session_id" '
-    any(.items[]; .stream == "status" and .done == true and .exit_code == 0 and (
-      (.data_base64 | @base64d | fromjson)
-      | .type == "terminal_resize"
-        and .status == "resized"
-        and .session_id == $sid
-        and .cols == 100
-        and .rows == 30
-    ))
-  ' <<<"$resize_outputs" >/dev/null
-  jq -e --arg sid "$terminal_session_id" '
-    any(.items[]; .stream == "status" and .done == true and .exit_code == 0 and (
-      (.data_base64 | @base64d | fromjson)
-      | .type == "terminal_input"
-        and .status == "accepted"
-        and .session_id == $sid
-        and .input_seq == 1
-        and .written_bytes > 0
-        and .output_next_seq >= .output_first_seq
-        and .output_retained_bytes > 0
-        and .output_dropped_bytes == 0
-        and .output_replay_truncated == false
-    ))
-  ' <<<"$input_outputs" >/dev/null
-  decoded_pty="$(jq -r '.items[] | select(.stream == "pty") | .data_base64' <<<"$input_outputs" | base64 -d)"
+    .request_id != null
+    and .session_id == $sid
+    and .action == "resize"
+    and .accepted == true
+    and .status == "resized"
+    and .message == "terminal_resized"
+    and .cols == 100
+    and .rows == 30
+    and .input_seq == null
+    and .written_bytes == null
+    and (has("job_id") | not)
+  ' <<<"$terminal_resize_json" >/dev/null
+
+  input_bytes=$(( ${#terminal_payload} + 1 ))
+  input_seq="$(jq -r '.input_seq' <<<"$terminal_input_json")"
+  jq -e --arg sid "$terminal_session_id" --argjson input_bytes "$input_bytes" '
+    .request_id != null
+    and .session_id == $sid
+    and .action == "input"
+    and .accepted == true
+    and .status == "accepted"
+    and .message == "terminal_input_accepted"
+    and .input_seq == 1
+    and .written_bytes == $input_bytes
+    and .cols == null
+    and .rows == null
+    and (has("job_id") | not)
+  ' <<<"$terminal_input_json" >/dev/null
+
+  jq -e --arg client "$client_id" --arg sid "$terminal_session_id" --arg opener "$terminal_open_job_id" '
+    .client_id == $client
+    and .session_id == $sid
+    and .from_seq == 1
+    and .source == "terminal_output_chunks"
+    and .chunk_count >= 1
+    and .byte_count > 0
+    and .truncated == false
+    and .next_seq > 1
+    and all(.chunks[]; .job_id == $opener and (.data_base64 | type == "string"))
+    and (has("job_id") | not)
+  ' <<<"$terminal_poll_json" >/dev/null
+  decoded_pty="$(
+    jq -r '.chunks[].data_base64' <<<"$terminal_poll_json" | while IFS= read -r chunk; do
+      printf '%s' "$chunk" | base64 -d
+    done
+  )"
   [[ "$decoded_pty" == *"got:$terminal_payload"* ]]
-  decoded_pty="$(jq -r '.items[] | select(.stream == "pty") | .data_base64' <<<"$attach_outputs" | base64 -d)"
-  [[ "$decoded_pty" == *"got:$terminal_payload"* ]]
+
   jq -e --arg sid "$terminal_session_id" '
-    any(.items[]; .stream == "status" and .done == true and .exit_code == 0 and (
-      (.data_base64 | @base64d | fromjson)
-      | .type == "terminal_open"
-        and .status == "attached"
-        and .session_id == $sid
-        and .output_first_seq == 1
-        and .output_retained_bytes > 0
-        and .output_dropped_bytes == 0
-        and .output_replay_truncated == false
-    ))
-  ' <<<"$attach_outputs" >/dev/null
-  decoded_pty="$(jq -r '.items[] | select(.stream == "pty") | .data_base64' <<<"$poll_outputs" | base64 -d)"
-  [[ "$decoded_pty" == *"got:$terminal_payload"* ]]
-  jq -e --arg sid "$terminal_session_id" '
-    any(.items[]; .stream == "status" and .done == true and .exit_code == 0 and (
-      (.data_base64 | @base64d | fromjson)
-      | .type == "terminal_poll"
-        and .status == "polled"
-        and .session_id == $sid
-        and .replay_from_seq == 1
-        and .output_first_seq == 1
-        and .output_retained_bytes > 0
-        and .output_dropped_bytes == 0
-        and .output_replay_truncated == false
-    ))
-  ' <<<"$poll_outputs" >/dev/null
-  jq -e --arg sid "$terminal_session_id" '
-    any(.items[]; .stream == "status" and .done == true and .exit_code == 0 and (
-      (.data_base64 | @base64d | fromjson)
-      | .type == "terminal_close"
-        and .status == "closed"
-        and .session_id == $sid
-        and .reason == "live-terminal-smoke"
-    ))
-  ' <<<"$close_outputs" >/dev/null
+    .request_id != null
+    and .session_id == $sid
+    and .action == "close"
+    and .accepted == true
+    and .status == "closed"
+    and .message == "terminal_closed"
+    and .input_seq == null
+    and .written_bytes == null
+    and .cols == null
+    and .rows == null
+    and (has("job_id") | not)
+  ' <<<"$terminal_close_json" >/dev/null
 
   sessions_json="$(VPSMAN_API_TOKEN="$access_token" \
     target/debug/vpsctl --api-url "$api_url" terminal-sessions \
       --client-id "$client_id" \
       --session-id "$terminal_session_id" \
       --limit 5)"
-  jq -e --arg client "$client_id" --arg sid "$terminal_session_id" '
+  jq -e \
+    --arg client "$client_id" \
+    --arg sid "$terminal_session_id" \
+    --arg opener "$terminal_open_job_id" \
+    --argjson input_seq "$input_seq" '
     length == 1
     and .[0].client_id == $client
     and .[0].session_id == $sid
+    and .[0].job_id == $opener
     and .[0].state == "closed"
     and .[0].last_status == "closed"
-    and .[0].argv == ["/bin/sh", "-lc", "read line; printf '\''got:%s\\n'\'' \"$line\""]
+    and .[0].argv == ["/bin/sh", "-lc", "while IFS= read -r line; do printf '\''got:%s\\n'\'' \"$line\"; done"]
     and .[0].cols == 100
     and .[0].rows == 30
     and .[0].idle_timeout_secs == 300
     and .[0].flow_window_bytes == 32768
-    and .[0].last_input_seq == 1
+    and .[0].last_input_seq == $input_seq
+    and .[0].last_input_seq > 0
     and .[0].output_retained_bytes > 0
     and .[0].output_dropped_bytes == 0
     and .[0].output_replay_truncated == false
     and .[0].close_reason == "live-terminal-smoke"
     and .[0].last_event == "terminal_close"
-    and .[0].last_command_type == "terminal_close"
   ' <<<"$sessions_json" >/dev/null
 
   vty_sessions="$(printf 'terminal-sessions --client-id %s --session-id %s\nexit\n' \

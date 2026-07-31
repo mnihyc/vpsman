@@ -25,8 +25,7 @@ use vpsman_common::{
     job_target_terminal_statuses, job_terminal_statuses, migration_link_status_class_by_status,
     migration_link_statuses, plan_tunnel, restore_plan_status_class_by_status,
     restore_plan_statuses, schedule_privilege_intent_fields, server_job_status_class_by_status,
-    server_job_statuses, server_job_types, terminal_command_types,
-    terminal_input_privilege_intent_fields, terminal_session_events,
+    server_job_statuses, server_job_types, terminal_command_types, terminal_session_events,
     terminal_session_state_class_by_state, terminal_session_states,
     terminal_session_status_class_by_status, terminal_session_statuses,
     topology_edge_health_status_class_by_status, topology_edge_health_statuses,
@@ -218,11 +217,6 @@ fn main() -> io::Result<()> {
         &mut output,
         "DB_PRIVILEGE_INTENT_FIELDS",
         db_privilege_intent_fields(),
-    )?;
-    write_string_array(
-        &mut output,
-        "TERMINAL_INPUT_PRIVILEGE_INTENT_FIELDS",
-        terminal_input_privilege_intent_fields(),
     )?;
     write_domain_array(
         &mut output,
@@ -874,36 +868,6 @@ fn contract_golden_vectors() -> io::Result<Vec<ContractGoldenVector>> {
                 replay_from_seq: None,
                 idle_timeout_secs: 3600,
                 flow_window_bytes: 64 * 1024,
-            },
-        ),
-        golden_vector(
-            "terminal_input",
-            JobCommand::TerminalInput {
-                session_id,
-                input_seq: 7,
-                data_base64: "bHMK".to_string(),
-            },
-        ),
-        golden_vector(
-            "terminal_poll",
-            JobCommand::TerminalPoll {
-                session_id,
-                replay_from_seq: Some(4),
-            },
-        ),
-        golden_vector(
-            "terminal_resize",
-            JobCommand::TerminalResize {
-                session_id,
-                cols: 100,
-                rows: 40,
-            },
-        ),
-        golden_vector(
-            "terminal_close",
-            JobCommand::TerminalClose {
-                session_id,
-                reason: Some("done".to_string()),
             },
         ),
         golden_vector("config_read", JobCommand::ConfigRead),

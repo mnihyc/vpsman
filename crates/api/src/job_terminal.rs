@@ -1,7 +1,6 @@
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use vpsman_common::{
     MAX_TERMINAL_COLS, MAX_TERMINAL_FLOW_WINDOW_BYTES, MAX_TERMINAL_IDLE_TIMEOUT_SECS,
-    MAX_TERMINAL_INPUT_BYTES, MAX_TERMINAL_REASON_BYTES, MAX_TERMINAL_ROWS, MIN_TERMINAL_COLS,
+    MAX_TERMINAL_REASON_BYTES, MAX_TERMINAL_ROWS, MIN_TERMINAL_COLS,
     MIN_TERMINAL_FLOW_WINDOW_BYTES, MIN_TERMINAL_IDLE_TIMEOUT_SECS, MIN_TERMINAL_ROWS,
 };
 
@@ -64,31 +63,6 @@ fn validate_terminal_user(user: &str) -> Result<(), ApiError> {
         return Err(ApiError::bad_request("terminal_user_invalid"));
     }
     Ok(())
-}
-
-pub(crate) fn validate_terminal_input(
-    session_id: uuid::Uuid,
-    input_seq: u64,
-    data_base64: &str,
-) -> Result<(), ApiError> {
-    validate_terminal_session_id(session_id)?;
-    if input_seq == 0 {
-        return Err(ApiError::bad_request("terminal_input_seq_out_of_range"));
-    }
-    if data_base64.is_empty() || data_base64.len() > MAX_TERMINAL_INPUT_BYTES.div_ceil(3) * 4 + 16 {
-        return Err(ApiError::bad_request("terminal_input_size_invalid"));
-    }
-    let data = BASE64_STANDARD
-        .decode(data_base64.as_bytes())
-        .map_err(|_| ApiError::bad_request("terminal_input_base64_invalid"))?;
-    if data.is_empty() || data.len() > MAX_TERMINAL_INPUT_BYTES {
-        return Err(ApiError::bad_request("terminal_input_size_invalid"));
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_terminal_poll(session_id: uuid::Uuid) -> Result<(), ApiError> {
-    validate_terminal_session_id(session_id)
 }
 
 pub(crate) fn validate_terminal_resize(

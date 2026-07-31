@@ -116,7 +116,7 @@ use crate::{
     routes_suite_config::{get_suite_config, update_suite_config, validate_suite_config},
     routes_system::system_dashboard,
     routes_terminal_sessions::{
-        list_terminal_sessions, submit_terminal_session_input, terminal_session_replay,
+        control_terminal_session, list_terminal_sessions, terminal_session_replay,
     },
     routes_update_releases::{
         create_agent_update_release, latest_agent_update_release, list_agent_update_releases,
@@ -527,8 +527,8 @@ pub(crate) fn build_router(state: AppState) -> Router {
             get(terminal_session_replay),
         )
         .route(
-            "/api/v1/terminal-sessions/{client_id}/{session_id}/input",
-            post(submit_terminal_session_input),
+            "/api/v1/terminal-sessions/{client_id}/{session_id}/control",
+            post(control_terminal_session),
         )
         .route(
             "/api/v1/network/observations",

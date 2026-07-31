@@ -18,11 +18,36 @@ require_contains() {
   fi
 }
 
+require_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local context="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    fail "$context contains unexpected token: $needle"
+  fi
+}
+
 require_source_token() {
   local token="$1"
   shift
   if ! rg -F -q -- "$token" "$@"; then
     fail "frontend source is missing expected token: $token in $*"
+  fi
+}
+
+require_source_pattern() {
+  local pattern="$1"
+  shift
+  if ! rg -U -q -- "$pattern" "$@"; then
+    fail "source is missing expected pattern: $pattern in $*"
+  fi
+}
+
+require_source_pattern_absent() {
+  local pattern="$1"
+  shift
+  if rg -U -q -- "$pattern" "$@"; then
+    fail "source contains retired pattern: $pattern in $*"
   fi
 }
 
@@ -42,6 +67,11 @@ root_help="$("$bin" --help)"
 vty_help="$(printf 'help\nexit\n' | "$bin" --api-url http://127.0.0.1:1 vty)"
 file_transfer_upload_help="$("$bin" file-transfer-upload --help)"
 backup_policy_upsert_help="$("$bin" backup-policy-upsert --help)"
+terminal_open_help="$("$bin" terminal-open --help)"
+terminal_input_help="$("$bin" terminal-input --help)"
+terminal_poll_help="$("$bin" terminal-poll --help)"
+terminal_resize_help="$("$bin" terminal-resize --help)"
+terminal_close_help="$("$bin" terminal-close --help)"
 
 require_contains "$file_transfer_upload_help" "--source-artifact-id" "vpsctl file-transfer-upload source artifact help"
 require_contains "$vty_help" "--source-artifact-id" "VTY file-transfer-upload source artifact help"
@@ -53,14 +83,42 @@ require_contains "$vty_help" "show capabilities" "VTY capability display help"
 require_contains "$vty_help" "show degraded-policy" "VTY degraded-operation policy help"
 require_source_token "Resumable upload source artifact" frontend/src/panels/jobs/JobOperationControls.tsx
 
+require_contains "$terminal_open_help" "--password-env" "privileged terminal-open help"
+require_not_contains "$terminal_input_help" "--password-env" "authorized terminal-input help"
+require_not_contains "$terminal_poll_help" "--password-env" "read-only terminal-poll help"
+require_not_contains "$terminal_resize_help" "--password-env" "authorized terminal-resize help"
+require_not_contains "$terminal_close_help" "--password-env" "authorized terminal-close help"
+
+terminal_privilege_source="crates/vpsctl/src/vty_privilege.rs"
+require_source_pattern 'const PRIVILEGE_REQUIRED_COMMANDS:[^;]*"terminal-open"' "$terminal_privilege_source"
+require_source_pattern 'const SESSION_AUTHORIZED_COMMANDS:[^;]*"terminal-input"[^;]*"terminal-resize"[^;]*"terminal-close"' "$terminal_privilege_source"
+require_source_pattern 'const READ_ONLY_COMMANDS:[^;]*"terminal-poll"' "$terminal_privilege_source"
+require_source_pattern_absent 'const PRIVILEGE_REQUIRED_COMMANDS:[^;]*"terminal-(input|poll|resize|close)"' "$terminal_privilege_source"
+
+terminal_job_sources=(
+  crates/vpsctl/src/commands_terminal.rs
+  crates/vpsctl/src/vty_terminal.rs
+  frontend/src/panels/jobDispatchModel.ts
+  frontend/src/types.ts
+)
+require_source_token "JobCommand::TerminalOpen" crates/vpsctl/src/commands_terminal.rs
+require_source_token "JobCommand::TerminalOpen" crates/vpsctl/src/vty_terminal.rs
+for retired_job_variant in TerminalInput TerminalPoll TerminalResize TerminalClose; do
+  require_source_pattern_absent "JobCommand::${retired_job_variant}" "${terminal_job_sources[@]}"
+done
+require_source_token "terminal_control_output(" crates/vpsctl/src/commands_terminal.rs
+require_source_token "VtyTerminalRequest::Control" crates/vpsctl/src/vty_terminal.rs
+require_source_token "terminal_replay_output(" crates/vpsctl/src/commands_terminal.rs
+require_source_token "VtyTerminalRequest::Replay" crates/vpsctl/src/vty_terminal.rs
+
 workflows=(
   'job dispatch argv|job-create|job-create|mode: "shell"|frontend/src/panels/jobs/JobOperationControls.tsx'
   'job dispatch shell wrapper|job-shell|job-shell|mode: "shell_script"|frontend/src/panels/jobs/JobOperationControls.tsx'
-  'terminal session controls|terminal-open|terminal-open|mode: "terminal_session"|frontend/src/panels/jobs/JobOperationControls.tsx'
-  'terminal input controls|terminal-input|terminal-input|terminal_input|frontend/src/panels/jobDispatchModel.ts frontend/src/types.ts'
-  'terminal poll controls|terminal-poll|terminal-poll|terminal_poll|frontend/src/panels/jobDispatchModel.ts frontend/src/types.ts frontend/src/panels/jobs/TerminalSessionsPanel.tsx'
-  'terminal resize controls|terminal-resize|terminal-resize|terminal_resize|frontend/src/panels/jobDispatchModel.ts frontend/src/types.ts'
-  'terminal close controls|terminal-close|terminal-close|terminal_close|frontend/src/panels/jobDispatchModel.ts frontend/src/types.ts'
+  'terminal session open job|terminal-open|terminal-open|mode: "terminal_session"|frontend/src/panels/jobs/JobOperationControls.tsx'
+  'terminal authorized input control|terminal-input|terminal-input|queueTerminalInput|frontend/src/panels/jobs/TerminalSessionsPanel.tsx'
+  'terminal replay read|terminal-poll|terminal-poll|loadTerminalReplay|frontend/src/hooks/useJobsData.ts frontend/src/panels/jobs/TerminalSessionsPanel.tsx'
+  'terminal authorized resize control|terminal-resize|terminal-resize|queueTerminalResize|frontend/src/panels/jobs/TerminalSessionsPanel.tsx'
+  'terminal authorized close control|terminal-close|terminal-close|confirmTerminalClose|frontend/src/panels/jobs/TerminalSessionsPanel.tsx'
   'terminal session inventory|terminal-sessions|terminal-sessions|Terminal sessions|frontend/src/panels/jobs/TerminalSessionsPanel.tsx'
   'terminal durable replay|terminal-replay|terminal-replay|Durable replay|frontend/src/panels/jobs/TerminalSessionsPanel.tsx'
   'file pull dispatch|file-pull|file-pull|mode: "file_pull"|frontend/src/panels/jobs/JobOperationControls.tsx'

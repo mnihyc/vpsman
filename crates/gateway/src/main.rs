@@ -27,7 +27,7 @@ use vpsman_common::{
     GatewayAgentUpdateVerificationIngest, GatewayCommandOutputIngest,
     GatewayRuntimeConfigReloadRequest, GatewaySessionLifecycleIngest, GatewayTelemetryIngest,
     GatewayTerminalOutputIngest, JobAck, JobCancelAck, MessageKind, NoiseFrameStream,
-    SequencedCommandOutput, ServerHello, SuiteConfig, TelemetryEnvelope,
+    SequencedCommandOutput, ServerHello, SuiteConfig, TelemetryEnvelope, TerminalControlAck,
 };
 
 use crate::{
@@ -563,11 +563,19 @@ async fn handle_agent(
     let mut outbound_seq = 2_u64;
     let mut pending_commands = HashMap::<uuid::Uuid, PendingCommand>::new();
     let mut pending_cancels = HashMap::new();
+    let mut pending_terminal_controls = HashMap::<
+        uuid::Uuid,
+        (
+            vpsman_common::TerminalControlRequest,
+            tokio::sync::oneshot::Sender<TerminalControlAck>,
+        ),
+    >::new();
     let mut lifecycle_disconnect_reason = None::<String>;
     let lifecycle_close_deadline = time::sleep(Duration::from_secs(0));
     tokio::pin!(lifecycle_close_deadline);
 
     let result: Result<()> = loop {
+        pending_terminal_controls.retain(|_, (_, response)| !response.is_closed());
         tokio::select! {
             biased;
             changed = close_rx.changed(), if client_id.is_some() && lifecycle_disconnect_reason.is_none() => {
@@ -627,6 +635,7 @@ async fn handle_agent(
                         &mut process_incarnation_id,
                         &mut pending_commands,
                         &mut pending_cancels,
+                        &mut pending_terminal_controls,
                         &mut outbound_seq,
                         frame,
                     ).await
@@ -680,6 +689,40 @@ async fn handle_agent(
                         }
                         outbound_seq += 1;
                         pending_cancels.insert(job_id, cancel.response);
+                    }
+                    GatewaySessionMessage::TerminalControl(control) => {
+                        let request_id = control.request.request_id;
+                        if pending_terminal_controls.contains_key(&request_id) {
+                            let _ = control.response.send(TerminalControlAck {
+                                request_id,
+                                session_id: control.request.session_id,
+                                action: control.request.action.kind().to_string(),
+                                accepted: false,
+                                status: "rejected".to_string(),
+                                message: "terminal_control_request_id_pending".to_string(),
+                                input_seq: None,
+                                written_bytes: None,
+                                cols: None,
+                                rows: None,
+                            });
+                            continue;
+                        }
+                        if let Err(error) = write_json_frame(
+                            &mut stream,
+                            MessageKind::TerminalControl,
+                            3,
+                            outbound_seq,
+                            &control.request,
+                        )
+                        .await
+                        {
+                            break Err(error);
+                        }
+                        outbound_seq += 1;
+                        pending_terminal_controls.insert(
+                            request_id,
+                            (control.request, control.response),
+                        );
                     }
                 }
             }
@@ -822,6 +865,13 @@ async fn handle_agent_frame(
         uuid::Uuid,
         tokio::sync::oneshot::Sender<vpsman_common::GatewayCommandCancelResult>,
     >,
+    pending_terminal_controls: &mut HashMap<
+        uuid::Uuid,
+        (
+            vpsman_common::TerminalControlRequest,
+            tokio::sync::oneshot::Sender<TerminalControlAck>,
+        ),
+    >,
     outbound_seq: &mut u64,
     frame: Frame,
 ) -> Result<()> {
@@ -926,6 +976,36 @@ async fn handle_agent_frame(
             if let Some(response) = pending_cancels.remove(&ack.job_id) {
                 let client_id = client_id.clone().unwrap_or_default();
                 let _ = response.send(cancel_ack_result(client_id, ack));
+            }
+        }
+        MessageKind::TerminalControlAck => {
+            let ack: TerminalControlAck = decode_json(&frame.decoded_payload()?)?;
+            if let Some((request, response)) = pending_terminal_controls.remove(&ack.request_id) {
+                let reply = if ack.session_id == request.session_id
+                    && ack.action == request.action.kind()
+                {
+                    ack
+                } else {
+                    TerminalControlAck {
+                        request_id: request.request_id,
+                        session_id: request.session_id,
+                        action: request.action.kind().to_string(),
+                        accepted: false,
+                        status: "rejected".to_string(),
+                        message: "terminal_control_ack_binding_mismatch".to_string(),
+                        input_seq: None,
+                        written_bytes: None,
+                        cols: None,
+                        rows: None,
+                    }
+                };
+                let _ = response.send(reply);
+            } else {
+                warn!(
+                    request_id = %ack.request_id,
+                    session_id = %ack.session_id,
+                    "received terminal control ack without a pending request"
+                );
             }
         }
         MessageKind::CommandResume => {

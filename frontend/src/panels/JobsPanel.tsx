@@ -50,10 +50,6 @@ import type {
   WsJobOutputEvent,
 } from "../types";
 import type { FileTransferSourceArtifactRecord } from "../typesFileTransfer";
-import type {
-  TerminalInputSubmitRequest,
-  TerminalInputSubmitResponse,
-} from "../typesTerminal";
 import {
   jobOutputComparisonStatusBadgeClass,
   jobStatusBadgeClass,
@@ -107,8 +103,6 @@ function displayCommandType(value: string): string {
       return "Scheduled shell command";
     case "shell_pty":
       return "Terminal session";
-    case "terminal_input":
-      return "Terminal input";
     default:
       return displayToken(value);
   }
@@ -275,7 +269,6 @@ export function JobsPanel({
   onLoadOutputs,
   onLoadOutputComparison,
   onLoadTargets,
-  onSubmitTerminalInput,
   onOpenPrivilegeUnlock,
   onOpenRollout,
   onOpenSchedules,
@@ -336,11 +329,6 @@ export function JobsPanel({
     jobId: string,
     mode: JobOutputCompareMode,
   ) => Promise<JobOutputComparisonRecord>;
-  onSubmitTerminalInput: (
-    clientId: string,
-    sessionId: string,
-    request: TerminalInputSubmitRequest,
-  ) => Promise<TerminalInputSubmitResponse>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenPrivilegeUnlock: () => void;
   onOpenRollout?: (jobId: string) => void;
@@ -1397,7 +1385,6 @@ export function JobsPanel({
             onLoadJob={onLoadJob}
             onLoadOutputs={onLoadOutputs}
             onLoadTargets={onLoadTargets}
-            onSubmitTerminalInput={onSubmitTerminalInput}
             onOpenJobDetails={openSubmittedJobDetails}
             onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
             onApprovalRequested={() => onSelectSubpage?.("approvals")}

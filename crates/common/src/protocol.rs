@@ -195,24 +195,23 @@ pub const WORKFLOW_STATUS_CLASSES: [&str; 4] = [
     WORKFLOW_STATUS_CLASS_NEUTRAL,
 ];
 
-pub const TERMINAL_SESSION_STATE_CLASS_BY_STATE: [(&str, &str); 6] = [
+pub const TERMINAL_SESSION_STATE_CLASS_BY_STATE: [(&str, &str); 7] = [
+    ("opening", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
     ("open", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
     ("closed", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
     ("missing", WORKFLOW_STATUS_CLASS_WARNING),
     ("rejected", WORKFLOW_STATUS_CLASS_WARNING),
+    ("failed", WORKFLOW_STATUS_CLASS_WARNING),
     ("exited", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
-    ("unknown", WORKFLOW_STATUS_CLASS_NEUTRAL),
 ];
 
-pub const TERMINAL_SESSION_STATUS_CLASS_BY_STATUS: [(&str, &str); 17] = [
+pub const TERMINAL_SESSION_STATUS_CLASS_BY_STATUS: [(&str, &str); 14] = [
+    ("opening", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
     ("opened", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
     ("attached", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
     ("rejected", WORKFLOW_STATUS_CLASS_WARNING),
+    ("failed", WORKFLOW_STATUS_CLASS_WARNING),
     ("accepted", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
-    ("duplicate_ignored", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
-    ("duplicate_conflict", WORKFLOW_STATUS_CLASS_WARNING),
-    ("out_of_order", WORKFLOW_STATUS_CLASS_WARNING),
-    ("polled", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
     ("resized", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
     ("closed", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
     ("missing", WORKFLOW_STATUS_CLASS_WARNING),
@@ -221,7 +220,6 @@ pub const TERMINAL_SESSION_STATUS_CLASS_BY_STATUS: [(&str, &str); 17] = [
     ("idle_timeout", WORKFLOW_STATUS_CLASS_WARNING),
     ("disconnected_timeout", WORKFLOW_STATUS_CLASS_WARNING),
     ("lifecycle_disconnected", WORKFLOW_STATUS_CLASS_WARNING),
-    ("unknown", WORKFLOW_STATUS_CLASS_NEUTRAL),
 ];
 
 pub const FILE_TRANSFER_SESSION_STATUS_CLASS_BY_STATUS: [(&str, &str); 5] = [
@@ -1115,6 +1113,19 @@ pub struct GatewayCommandCancel {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayTerminalControl {
+    pub client_id: String,
+    pub expected_process_incarnation_id: Uuid,
+    pub request: TerminalControlRequest,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayTerminalControlResult {
+    pub client_id: String,
+    pub ack: TerminalControlAck,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GatewaySessionDisconnect {
     pub client_id: String,
     pub reason: String,
@@ -1174,6 +1185,58 @@ pub struct GatewayCommandCancelResult {
     pub accepted: bool,
     pub applied: bool,
     pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TerminalControlAction {
+    Input {
+        data_base64: String,
+    },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
+    Close {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+}
+
+impl TerminalControlAction {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Input { .. } => "input",
+            Self::Resize { .. } => "resize",
+            Self::Close { .. } => "close",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalControlRequest {
+    pub request_id: Uuid,
+    pub session_id: Uuid,
+    pub action: TerminalControlAction,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalControlAck {
+    pub request_id: Uuid,
+    pub session_id: Uuid,
+    pub action: String,
+    pub accepted: bool,
+    pub status: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub written_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cols: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u16>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -1276,10 +1339,6 @@ pub fn job_command_variant_names() -> &'static [&'static str] {
         "shell",
         "shell_script",
         "terminal_open",
-        "terminal_input",
-        "terminal_poll",
-        "terminal_resize",
-        "terminal_close",
         "config_read",
         "runtime_config_sync",
         "agent_update",
@@ -1337,15 +1396,11 @@ pub const JOB_COMMAND_SAFETY_WRITE: &str = "write";
 pub const JOB_COMMAND_SAFETY_EXEC: &str = "exec";
 pub const JOB_COMMAND_SAFETY_EXCLUSIVE: &str = "exclusive";
 
-pub const JOB_COMMAND_TYPE_LABELS: [&str; 57] = [
+pub const JOB_COMMAND_TYPE_LABELS: [&str; 53] = [
     "shell_argv",
     "shell_pty",
     "shell_script",
     "terminal_open",
-    "terminal_input",
-    "terminal_poll",
-    "terminal_resize",
-    "terminal_close",
     "config_read",
     "runtime_config_sync",
     "agent_update",
@@ -1397,14 +1452,10 @@ pub const JOB_COMMAND_TYPE_LABELS: [&str; 57] = [
     "network_routing_apply",
 ];
 
-pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 56] = [
+pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 52] = [
     ("shell", JOB_COMMAND_SAFETY_EXEC),
     ("shell_script", JOB_COMMAND_SAFETY_EXEC),
     ("terminal_open", JOB_COMMAND_SAFETY_EXEC),
-    ("terminal_input", JOB_COMMAND_SAFETY_EXEC),
-    ("terminal_poll", JOB_COMMAND_SAFETY_EXEC),
-    ("terminal_resize", JOB_COMMAND_SAFETY_EXEC),
-    ("terminal_close", JOB_COMMAND_SAFETY_EXEC),
     ("config_read", JOB_COMMAND_SAFETY_READ),
     ("runtime_config_sync", JOB_COMMAND_SAFETY_EXCLUSIVE),
     ("agent_update", JOB_COMMAND_SAFETY_EXCLUSIVE),
@@ -1456,14 +1507,10 @@ pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 56] = [
     ("network_routing_apply", JOB_COMMAND_SAFETY_EXEC),
 ];
 
-pub const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE: [(&str, bool); 56] = [
+pub const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE: [(&str, bool); 52] = [
     ("shell", true),
     ("shell_script", true),
     ("terminal_open", true),
-    ("terminal_input", true),
-    ("terminal_poll", true),
-    ("terminal_resize", true),
-    ("terminal_close", true),
     ("config_read", false),
     ("runtime_config_sync", true),
     ("agent_update", true),
@@ -1515,14 +1562,10 @@ pub const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE: [(&str, bool); 56
     ("network_routing_apply", true),
 ];
 
-pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 56] = [
+pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 52] = [
     ("shell", "shell_argv"),
     ("shell_script", "shell_script"),
     ("terminal_open", "terminal_open"),
-    ("terminal_input", "terminal_input"),
-    ("terminal_poll", "terminal_poll"),
-    ("terminal_resize", "terminal_resize"),
-    ("terminal_close", "terminal_close"),
     ("config_read", "config_read"),
     ("runtime_config_sync", "runtime_config_sync"),
     ("agent_update", "agent_update"),
@@ -1580,15 +1623,11 @@ pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 56] = [
     ("network_routing_apply", "network_routing_apply"),
 ];
 
-pub const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE: [(&str, &str); 57] = [
+pub const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE: [(&str, &str); 53] = [
     ("shell_argv", "shell"),
     ("shell_pty", "shell"),
     ("shell_script", "shell"),
     ("terminal_open", "terminal"),
-    ("terminal_input", "terminal"),
-    ("terminal_poll", "terminal"),
-    ("terminal_resize", "terminal"),
-    ("terminal_close", "terminal"),
     ("config_read", "config"),
     ("runtime_config_sync", "config"),
     ("agent_update", "agent_update"),
@@ -1755,18 +1794,6 @@ pub fn db_privilege_intent_fields() -> &'static [&'static str] {
     ]
 }
 
-pub fn terminal_input_privilege_intent_fields() -> &'static [&'static str] {
-    &[
-        "version",
-        "action",
-        "client_id",
-        "session_id",
-        "input_payload_hash",
-        "max_timeout_secs",
-        "confirmed",
-    ]
-}
-
 #[derive(Serialize)]
 pub struct JobPrivilegeIntent<'a> {
     version: u8,
@@ -1905,39 +1932,6 @@ impl<'a> DbPrivilegeIntent<'a> {
     }
 }
 
-#[derive(Serialize)]
-pub struct TerminalInputPrivilegeIntent<'a> {
-    version: u8,
-    action: &'static str,
-    client_id: &'a str,
-    session_id: &'a str,
-    input_payload_hash: &'a str,
-    max_timeout_secs: u64,
-    confirmed: bool,
-}
-
-impl<'a> TerminalInputPrivilegeIntent<'a> {
-    pub fn new(input: TerminalInputPrivilegeIntentInput<'a>) -> Self {
-        Self {
-            version: 1,
-            action: "terminal_input.submit",
-            client_id: input.client_id.trim(),
-            session_id: input.session_id.trim(),
-            input_payload_hash: input.input_payload_hash.trim(),
-            max_timeout_secs: input.max_timeout_secs.max(1),
-            confirmed: input.confirmed,
-        }
-    }
-}
-
-pub struct TerminalInputPrivilegeIntentInput<'a> {
-    pub client_id: &'a str,
-    pub session_id: &'a str,
-    pub input_payload_hash: &'a str,
-    pub max_timeout_secs: u64,
-    pub confirmed: bool,
-}
-
 pub struct OperatorDbPayloadInput<'a> {
     pub action: &'a str,
     pub target: &'a str,
@@ -2008,12 +2002,6 @@ pub fn canonical_db_privilege_intent(
     ))
 }
 
-pub fn canonical_terminal_input_privilege_intent(
-    input: TerminalInputPrivilegeIntentInput<'_>,
-) -> serde_json::Result<String> {
-    serde_json::to_string(&TerminalInputPrivilegeIntent::new(input))
-}
-
 pub fn operator_db_payload_hash(input: OperatorDbPayloadInput<'_>) -> serde_json::Result<String> {
     let payload = serde_json::to_string(&OperatorDbPayload::new(input))?;
     Ok(crate::auth::payload_hash(payload.as_bytes()))
@@ -2025,32 +2013,23 @@ fn sorted_str_refs(values: &[String]) -> Vec<&str> {
     values
 }
 
-pub const TERMINAL_COMMAND_TYPES: &[&str] = &[
-    "terminal_open",
-    "terminal_input",
-    "terminal_poll",
-    "terminal_resize",
-    "terminal_close",
-];
+pub const TERMINAL_COMMAND_TYPES: &[&str] = &["terminal_open"];
 
 pub const TERMINAL_SESSION_EVENTS: &[&str] = &[
     "terminal_open",
     "terminal_input",
-    "terminal_poll",
     "terminal_resize",
     "terminal_close",
     "terminal_stream",
 ];
 
 pub const TERMINAL_SESSION_STATUSES: &[&str] = &[
+    "opening",
     "opened",
     "attached",
     "rejected",
+    "failed",
     "accepted",
-    "duplicate_ignored",
-    "duplicate_conflict",
-    "out_of_order",
-    "polled",
     "resized",
     "closed",
     "missing",
@@ -2059,11 +2038,11 @@ pub const TERMINAL_SESSION_STATUSES: &[&str] = &[
     "idle_timeout",
     "disconnected_timeout",
     "lifecycle_disconnected",
-    "unknown",
 ];
 
-pub const TERMINAL_SESSION_STATES: &[&str] =
-    &["open", "closed", "missing", "rejected", "exited", "unknown"];
+pub const TERMINAL_SESSION_STATES: &[&str] = &[
+    "opening", "open", "closed", "missing", "rejected", "failed", "exited",
+];
 
 pub const FILE_TRANSFER_COMMAND_TYPES: &[&str] = &[
     "file_transfer_start",
@@ -2308,16 +2287,14 @@ pub fn terminal_session_state(
     session_exited: bool,
 ) -> &'static str {
     match (event_type, status) {
+        ("terminal_open", "opening") => "opening",
         ("terminal_close", "closed") => "closed",
         ("terminal_close", "missing") | (_, "missing") => "missing",
         ("terminal_open", "rejected") => "rejected",
+        ("terminal_open", "failed") => "failed",
         _ if session_exited => "exited",
         ("terminal_open", "opened" | "attached") => "open",
-        (
-            "terminal_input",
-            "accepted" | "duplicate_ignored" | "duplicate_conflict" | "out_of_order",
-        ) => "open",
-        ("terminal_poll", "polled") => "open",
+        ("terminal_input", "accepted") => "open",
         ("terminal_resize", "resized") => "open",
         ("terminal_stream", "streaming") => "open",
         (
@@ -2626,26 +2603,6 @@ pub enum JobCommand {
         idle_timeout_secs: u32,
         #[serde(default = "default_terminal_flow_window_bytes")]
         flow_window_bytes: u32,
-    },
-    TerminalInput {
-        session_id: Uuid,
-        input_seq: u64,
-        data_base64: String,
-    },
-    TerminalPoll {
-        session_id: Uuid,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        replay_from_seq: Option<u64>,
-    },
-    TerminalResize {
-        session_id: Uuid,
-        cols: u16,
-        rows: u16,
-    },
-    TerminalClose {
-        session_id: Uuid,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reason: Option<String>,
     },
     ConfigRead,
     RuntimeConfigSync {
@@ -2995,11 +2952,7 @@ pub fn job_command_protocol_version(command: &JobCommand) -> u16 {
     match command {
         JobCommand::Shell { .. } => SHELL_COMMAND_PROTOCOL_VERSION,
         JobCommand::ShellScript { .. } => SHELL_SCRIPT_COMMAND_PROTOCOL_VERSION,
-        JobCommand::TerminalOpen { .. }
-        | JobCommand::TerminalInput { .. }
-        | JobCommand::TerminalPoll { .. }
-        | JobCommand::TerminalResize { .. }
-        | JobCommand::TerminalClose { .. } => TERMINAL_COMMAND_PROTOCOL_VERSION,
+        JobCommand::TerminalOpen { .. } => TERMINAL_COMMAND_PROTOCOL_VERSION,
         JobCommand::FilePull { .. }
         | JobCommand::FilePush { .. }
         | JobCommand::FilePushChunked { .. }
@@ -3073,10 +3026,6 @@ pub fn job_command_min_supported_protocol_version(command: &JobCommand) -> u16 {
         JobCommand::Shell { .. }
         | JobCommand::ShellScript { .. }
         | JobCommand::TerminalOpen { .. }
-        | JobCommand::TerminalInput { .. }
-        | JobCommand::TerminalPoll { .. }
-        | JobCommand::TerminalResize { .. }
-        | JobCommand::TerminalClose { .. }
         | JobCommand::ConfigRead
         | JobCommand::RuntimeConfigSync { .. }
         | JobCommand::UpdateAgent { .. }
@@ -3136,10 +3085,6 @@ pub fn job_command_type_label(command: &JobCommand) -> &'static str {
         JobCommand::Shell { .. } => "shell_argv",
         JobCommand::ShellScript { .. } => "shell_script",
         JobCommand::TerminalOpen { .. } => "terminal_open",
-        JobCommand::TerminalInput { .. } => "terminal_input",
-        JobCommand::TerminalPoll { .. } => "terminal_poll",
-        JobCommand::TerminalResize { .. } => "terminal_resize",
-        JobCommand::TerminalClose { .. } => "terminal_close",
         JobCommand::ConfigRead => "config_read",
         JobCommand::RuntimeConfigSync { .. } => "runtime_config_sync",
         JobCommand::UpdateAgent { .. } => "agent_update",
@@ -3262,10 +3207,6 @@ pub fn job_command_safety(command: &JobCommand) -> JobCommandSafety {
         JobCommand::Shell { .. }
         | JobCommand::ShellScript { .. }
         | JobCommand::TerminalOpen { .. }
-        | JobCommand::TerminalInput { .. }
-        | JobCommand::TerminalPoll { .. }
-        | JobCommand::TerminalResize { .. }
-        | JobCommand::TerminalClose { .. }
         | JobCommand::PackageUpdatePlan { .. } => JobCommandSafety::Exec,
         JobCommand::RuntimeConfigSync { .. }
         | JobCommand::UpdateAgent { .. }
@@ -4067,7 +4008,7 @@ mod tests {
     }
 
     #[test]
-    fn privilege_intents_preserve_long_timeout_values() {
+    fn job_privilege_intent_preserves_long_timeout_values() {
         let resolved_targets = vec!["client-b".to_string(), "client-a".to_string()];
         let job_intent = super::canonical_job_privilege_intent(super::JobPrivilegeIntentInput {
             selector_expression: "tag:prod",
@@ -4081,18 +4022,6 @@ mod tests {
         })
         .unwrap();
         assert!(job_intent.contains(r#""max_timeout_secs":7200"#));
-
-        let terminal_intent = super::canonical_terminal_input_privilege_intent(
-            super::TerminalInputPrivilegeIntentInput {
-                client_id: "client-a",
-                session_id: "session-a",
-                input_payload_hash: "cd",
-                max_timeout_secs: 7_200,
-                confirmed: true,
-            },
-        )
-        .unwrap();
-        assert!(terminal_intent.contains(r#""max_timeout_secs":7200"#));
     }
 
     #[test]

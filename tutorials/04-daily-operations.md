@@ -198,7 +198,7 @@ export controls.
 
 ## Terminal Sessions
 
-Open a bounded polled terminal session:
+Open one bounded, audited terminal session:
 
 ```sh
 cargo run -p vpsctl -- terminal-open \
@@ -208,24 +208,38 @@ cargo run -p vpsctl -- terminal-open \
   --confirmed
 ```
 
-Send input and poll output:
+After that open job is authorized, send input or resize/close the same live
+session directly. These controls do not create additional jobs and do not
+require another privilege assertion:
 
 ```sh
 cargo run -p vpsctl -- terminal-input \
   --client-id edge-01 \
   --session-id <session_uuid> \
-  --text $'uptime\n' \
-  --confirmed
+  --text $'uptime\n'
 
 cargo run -p vpsctl -- terminal-poll \
+  --client-id edge-01 \
   --session-id <session_uuid> \
-  --replay-from-seq 1 \
-  --clients edge-01 \
-  --confirmed
+  --replay-from-seq 1
+
+cargo run -p vpsctl -- terminal-resize \
+  --client-id edge-01 \
+  --session-id <session_uuid> \
+  --cols 120 \
+  --rows 40
+
+cargo run -p vpsctl -- terminal-close \
+  --client-id edge-01 \
+  --session-id <session_uuid> \
+  --reason operator_finished
 ```
 
-Terminal input order is reserved by the server for the selected client and
-session; do not provide an input sequence.
+The agent assigns terminal input order for the selected client and session; do
+not provide an input sequence. The `terminal_open` job remains `running` while
+the PTY is live and becomes terminal when the session closes, exits, fails, or
+is found missing. Session list, replay, control, and job-history reads reconcile
+that lifecycle lazily.
 
 List durable sessions and replay persisted output:
 
@@ -238,8 +252,10 @@ cargo run -p vpsctl -- terminal-replay \
   --output-file ./terminal.log
 ```
 
-Remote > Terminal exposes the same attach/replay, durable replay preview, poll,
-input, resize, and close actions from terminal session rows.
+Remote > Terminal exposes the same attach/replay, direct xterm input, automatic
+resize, and reviewed close actions from terminal session rows. The xterm surface
+sends normal terminal bytes, including Enter, Tab, Escape, arrow keys, and
+Ctrl+C; there is no separate plaintext command composer.
 
 ## File Transfers
 

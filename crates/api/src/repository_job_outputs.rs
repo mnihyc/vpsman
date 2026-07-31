@@ -20,7 +20,6 @@ use crate::model::{
 use crate::object_store::BackupObjectStore;
 use crate::repository::{MemoryState, Repository};
 use crate::repository_jobs::enqueue_target_terminal_event_in_tx;
-use crate::repository_terminal_sessions::finalize_active_terminal_input_request_for_terminal_target_in_tx;
 use crate::{output_stream_name, unix_now, TargetDispatchOutcome};
 
 const JOB_OUTPUT_ARTIFACT_PREFIX: &str = "job-outputs";
@@ -717,12 +716,6 @@ impl Repository {
                                 .map(|target| target.status.clone())
                                 .collect::<Vec<_>>()
                         };
-                        self.finalize_active_terminal_input_request_for_target_status(
-                            job_id,
-                            client_id,
-                            &outcome.status,
-                        )
-                        .await?;
                         memory.audits.write().await.push(AuditLogView {
                             id: Uuid::new_v4(),
                             actor_id: None,
@@ -895,10 +888,6 @@ impl Repository {
                         anyhow::bail!("job_target_not_active");
                     }
                     target_terminalized = true;
-                    finalize_active_terminal_input_request_for_terminal_target_in_tx(
-                        &mut tx, job_id, client_id,
-                    )
-                    .await?;
                     sqlx::query(
                         r#"
                             INSERT INTO audit_logs (
@@ -961,8 +950,6 @@ impl Repository {
                 std::slice::from_ref(output),
             )
             .await?;
-            self.record_terminal_input_status_output(job_id, output)
-                .await?;
         }
         self.refresh_file_transfer_sessions_for_client(client_id)
             .await?;
@@ -1334,8 +1321,6 @@ impl Repository {
                     std::slice::from_ref(output),
                 )
                 .await?;
-                self.record_terminal_input_status_output(job_id, output)
-                    .await?;
                 if let Some(artifact) = self
                     .get_job_output_artifact_ref(job_id, client_id, seq)
                     .await?
@@ -1595,8 +1580,6 @@ impl Repository {
                 std::slice::from_ref(output),
             )
             .await?;
-            self.record_terminal_input_status_output(job_id, output)
-                .await?;
         }
         self.register_persisted_job_output_artifacts(client_id, &accepted_persisted)
             .await?;

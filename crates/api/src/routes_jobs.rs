@@ -278,20 +278,6 @@ pub(crate) async fn create_job_from_saved_schedule(
     .await
 }
 
-pub(crate) async fn create_job_from_terminal_input_route(
-    state: &AppState,
-    operator: &AuthContext,
-    request: CreateJobRequest,
-) -> Result<(StatusCode, Json<CreateJobResponse>), ApiError> {
-    create_job_inner(
-        state,
-        operator,
-        request,
-        JobPrivilegeSource::TerminalInputRoute,
-    )
-    .await
-}
-
 pub(crate) async fn create_job_from_internal_operator_mutation(
     state: &AppState,
     operator: &AuthContext,
@@ -310,7 +296,6 @@ enum JobPrivilegeSource {
     RequestAssertion,
     ApprovedRequest(Uuid),
     SavedSchedule(Uuid),
-    TerminalInputRoute,
     InternalOperatorMutation,
 }
 
@@ -342,9 +327,6 @@ async fn prepare_job_approval(
     bind_declared_network_plan(state, &mut job).await?;
     let job_command = job.job_command()?;
     validate_job_command_source(&job_command, &JobPrivilegeSource::RequestAssertion)?;
-    if matches!(job_command, JobCommand::TerminalInput { .. }) {
-        return Err(ApiError::bad_request("terminal_input_route_required"));
-    }
     let command_payload = encode_json(&job_command).map_err(|error| {
         ApiError::from(anyhow!(
             "failed to encode job command for approval authorization: {error}"
@@ -453,11 +435,6 @@ async fn create_job_inner(
     bind_declared_network_plan(state, &mut request).await?;
     let job_command = request.job_command()?;
     validate_job_command_source(&job_command, &privilege_source)?;
-    if matches!(job_command, JobCommand::TerminalInput { .. })
-        && !matches!(privilege_source, JobPrivilegeSource::TerminalInputRoute)
-    {
-        return Err(ApiError::bad_request("terminal_input_route_required"));
-    }
     if !request.confirmed && job_command_requires_dispatch_confirmation(&job_command) {
         return Err(ApiError::conflict(confirmation_error_code(&job_command)));
     }
@@ -518,6 +495,9 @@ async fn create_job_inner(
     if matches!(job_command, JobCommand::ConfigRead) && resolved_targets.len() != 1 {
         return Err(ApiError::conflict("config_read_requires_single_target"));
     }
+    if matches!(job_command, JobCommand::TerminalOpen { .. }) && resolved_targets.len() != 1 {
+        return Err(ApiError::conflict("terminal_open_requires_single_target"));
+    }
     vpsman_server_core::validate_network_command_targets(&job_command, &resolved_targets)
         .map_err(|error| ApiError::bad_request(error.code()))?;
     validate_restore_archive_binding(state, &job_command, &resolved_targets).await?;
@@ -525,7 +505,6 @@ async fn create_job_inner(
         JobPrivilegeSource::RequestAssertion => None,
         JobPrivilegeSource::ApprovedRequest(_) => None,
         JobPrivilegeSource::SavedSchedule(schedule_id) => Some(*schedule_id),
-        JobPrivilegeSource::TerminalInputRoute => None,
         JobPrivilegeSource::InternalOperatorMutation => None,
     };
     let approval_id = match &privilege_source {

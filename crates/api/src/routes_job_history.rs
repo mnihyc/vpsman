@@ -96,7 +96,20 @@ pub(crate) async fn list_jobs(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
-    Ok(Json(state.repo.query_jobs(&query).await?))
+    let jobs = state.repo.query_jobs(&query).await?;
+    let mut reconciled = false;
+    for job in jobs
+        .iter()
+        .filter(|job| job.command_type == "terminal_open")
+    {
+        state.repo.reconcile_terminal_job_by_id(job.id).await?;
+        reconciled = true;
+    }
+    Ok(Json(if reconciled {
+        state.repo.query_jobs(&query).await?
+    } else {
+        jobs
+    }))
 }
 
 pub(crate) async fn get_job(
@@ -107,6 +120,7 @@ pub(crate) async fn get_job(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
+    state.repo.reconcile_terminal_job_by_id(job_id).await?;
     let job = state
         .repo
         .get_job(job_id)

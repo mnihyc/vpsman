@@ -203,11 +203,12 @@ const TERMINAL_COMMAND_USAGE: &str = concat!(
     "usage: terminal-open --argv </abs/bin,arg> <target ...> [--session-id <uuid>] ",
     "[--cols <20-240>] [--rows <5-120>] [--confirmed]\n",
     "usage: terminal-input --client-id <id> --session-id <uuid> ",
-    "(--text <text>|--data-base64 <b64>) --confirmed\n",
-    "usage: terminal-poll --session-id <uuid> [--replay-from-seq <n>] <target ...>\n",
-    "usage: terminal-resize --session-id <uuid> --cols <20-240> ",
-    "--rows <5-120> <target ...>\n",
-    "usage: terminal-close --session-id <uuid> <target ...> [--reason <text>]"
+    "(--text <text>|--data-base64 <b64>)\n",
+    "usage: terminal-poll --client-id <id> --session-id <uuid> ",
+    "[--replay-from-seq <n>]\n",
+    "usage: terminal-resize --client-id <id> --session-id <uuid> ",
+    "--cols <20-240> --rows <5-120>\n",
+    "usage: terminal-close --client-id <id> --session-id <uuid> [--reason <text>]"
 );
 
 const FILE_PUSH_USAGE: &str = concat!(
@@ -460,7 +461,7 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
                 );
             }
             command if is_vty_terminal_command(command) => {
-                if !privilege_context.enabled {
+                if command.starts_with("terminal-open ") && !privilege_context.enabled {
                     println!("{PRIVILEGE_UNLOCK_REQUIRED}");
                     continue;
                 }

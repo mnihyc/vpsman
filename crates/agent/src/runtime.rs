@@ -61,9 +61,9 @@ use crate::{
     supervisor::reconcile_supervised_processes_on_start,
     telemetry::{collect_metrics_for_config, TelemetryRuntimeState},
     terminal::{
-        close_all_terminal_sessions_for_lifecycle, drain_pending_terminal_final_events,
-        execute_terminal_command_with_stream_sink, mark_gateway_connected,
-        mark_gateway_disconnected,
+        close_all_terminal_sessions_for_lifecycle, control_terminal_session,
+        drain_pending_terminal_final_events, execute_terminal_command_with_stream_sink,
+        mark_gateway_connected, mark_gateway_disconnected,
     },
     update::{
         execute_update_agent, execute_update_check, AgentUpdateCheckInput, AgentUpdateInput,
@@ -327,6 +327,20 @@ async fn connect_and_stream(
                             request,
                         )
                         .await?;
+                    }
+                    MessageKind::TerminalControl => {
+                        let request: vpsman_common::TerminalControlRequest =
+                            decode_json(&frame.decoded_payload()?)?;
+                        let ack = control_terminal_session(request).await;
+                        send_json_frame(
+                            &mut stream,
+                            MessageKind::TerminalControlAck,
+                            frame.stream_id,
+                            seq,
+                            &ack,
+                        )
+                        .await?;
+                        seq += 1;
                     }
                     MessageKind::Keepalive => {
                         debug!("gateway keepalive");
@@ -2400,11 +2414,7 @@ async fn execute_authorized_command(
             })
             .await
         }
-        JobCommand::TerminalOpen { .. }
-        | JobCommand::TerminalInput { .. }
-        | JobCommand::TerminalPoll { .. }
-        | JobCommand::TerminalResize { .. }
-        | JobCommand::TerminalClose { .. } => {
+        JobCommand::TerminalOpen { .. } => {
             run_cancelable(
                 "terminal",
                 cancel_token,

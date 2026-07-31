@@ -16,11 +16,14 @@ use vpsman_common::{
     verify_privilege_assertion, GatewayCommandCancel, GatewayCommandCancelResult,
     GatewayCommandDispatch, GatewayCommandDispatchResult, GatewayPrivilegeVerification,
     GatewayPrivilegeVerificationResult, GatewaySessionDisconnect, GatewaySessionDisconnectResult,
-    PrivilegeAssertionError,
+    GatewayTerminalControl, GatewayTerminalControlResult, PrivilegeAssertionError,
 };
 
 use crate::{
-    state::{GatewayCancelCommand, GatewayCommand, GatewaySessionMessage, GatewayState},
+    state::{
+        GatewayCancelCommand, GatewayCommand, GatewaySessionMessage, GatewayState,
+        GatewayTerminalControlCommand,
+    },
     Args,
 };
 
@@ -116,6 +119,7 @@ where
             "/internal/v1/gateway/command"
                 | "/internal/v1/gateway/command/cancel"
                 | "/internal/v1/gateway/session/disconnect"
+                | "/internal/v1/gateway/terminal/control"
                 | "/internal/v1/gateway/metrics"
                 | "/internal/v1/gateway/privilege/verify"
         )
@@ -189,6 +193,23 @@ where
             Ok(result) => write_http_json(&mut stream, "200 OK", &result).await?,
             Err(error) => write_gateway_error(&mut stream, error).await?,
         }
+    } else if request.path == "/internal/v1/gateway/terminal/control" {
+        let control: GatewayTerminalControl = match serde_json::from_slice(&request.body) {
+            Ok(control) => control,
+            Err(error) => {
+                write_http_json(
+                    &mut stream,
+                    "400 Bad Request",
+                    &serde_json::json!({"error": format!("invalid_terminal_control:{error}")}),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        match dispatch_terminal_control(&state, control).await {
+            Ok(result) => write_http_json(&mut stream, "200 OK", &result).await?,
+            Err(error) => write_gateway_error(&mut stream, error).await?,
+        }
     } else if request.path == "/internal/v1/gateway/metrics" {
         write_http_json(&mut stream, "200 OK", &state.forward_metrics.snapshot()).await?;
     } else {
@@ -213,6 +234,48 @@ where
         }
     }
     Ok(())
+}
+
+async fn dispatch_terminal_control(
+    state: &GatewayState,
+    control: GatewayTerminalControl,
+) -> Result<GatewayTerminalControlResult> {
+    let Some(session) = state.sessions.read().await.get(&control.client_id).cloned() else {
+        return Err(anyhow!("agent_not_online:{}", control.client_id));
+    };
+    if session.process_incarnation_id != control.expected_process_incarnation_id {
+        return Err(anyhow!(
+            "agent_incarnation_mismatch:{}:expected={}:actual={}",
+            control.client_id,
+            control.expected_process_incarnation_id,
+            session.process_incarnation_id
+        ));
+    }
+    let (response_tx, response_rx) = oneshot::channel();
+    session
+        .sender
+        .try_send(GatewaySessionMessage::TerminalControl(
+            GatewayTerminalControlCommand {
+                request: control.request,
+                response: response_tx,
+            },
+        ))
+        .map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => {
+                anyhow!("agent_session_command_queue_full:{}", control.client_id)
+            }
+            mpsc::error::TrySendError::Closed(_) => {
+                anyhow!("agent_session_closed:{}", control.client_id)
+            }
+        })?;
+    let ack = time::timeout(Duration::from_secs(state.dispatch_ack_secs()), response_rx)
+        .await
+        .context("gateway terminal control timed out")?
+        .context("gateway terminal control response dropped")?;
+    Ok(GatewayTerminalControlResult {
+        client_id: control.client_id,
+        ack,
+    })
 }
 
 async fn verify_gateway_privilege(

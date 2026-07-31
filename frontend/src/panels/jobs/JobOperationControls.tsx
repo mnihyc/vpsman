@@ -14,7 +14,7 @@ import {
 import type { BrowserDownloadSinkMode, BrowserTransferMultiTargetPolicy } from "../../resumableFileTransfer";
 import type { FileExistingPolicy } from "../../types";
 import type { FileTransferSourceArtifactRecord } from "../../typesFileTransfer";
-import type { DispatchMode, SupervisorAction, TerminalAction } from "../jobDispatchModel";
+import type { DispatchMode, SupervisorAction } from "../jobDispatchModel";
 import { TerminalOperationControls } from "./TerminalOperationControls";
 
 export function OperationModeTabs({
@@ -163,16 +163,13 @@ export function JobOperationEditor({
   backupPathsText,
   commandText,
   shellPty,
-  terminalAction,
   terminalArgv,
-  terminalCloseReason,
   terminalCols,
   terminalCwd,
   terminalUser,
   terminalUserPolicy,
   terminalFlowWindowBytes,
   terminalIdleTimeoutSecs,
-  terminalInputText,
   terminalReplayFromSeq,
   terminalRows,
   terminalSessionId,
@@ -202,16 +199,13 @@ export function JobOperationEditor({
   setCommandText,
   setShellPty,
   setShellScript,
-  setTerminalAction,
   setTerminalArgv,
-  setTerminalCloseReason,
   setTerminalCols,
   setTerminalCwd,
   setTerminalUser,
   setTerminalUserPolicy,
   setTerminalFlowWindowBytes,
   setTerminalIdleTimeoutSecs,
-  setTerminalInputText,
   setTerminalReplayFromSeq,
   setTerminalRows,
   setTerminalSessionId,
@@ -263,16 +257,13 @@ export function JobOperationEditor({
   backupPathsText: string;
   commandText: string;
   shellPty: boolean;
-  terminalAction: TerminalAction;
   terminalArgv: string;
-  terminalCloseReason: string;
   terminalCols: number;
   terminalCwd: string;
   terminalUser: string;
   terminalUserPolicy: "fail" | "fallback";
   terminalFlowWindowBytes: number;
   terminalIdleTimeoutSecs: number;
-  terminalInputText: string;
   terminalReplayFromSeq: string;
   terminalRows: number;
   terminalSessionId: string;
@@ -302,16 +293,13 @@ export function JobOperationEditor({
   setCommandText: (value: string) => void;
   setShellPty: (value: boolean) => void;
   setShellScript: (value: string) => void;
-  setTerminalAction: (value: TerminalAction) => void;
   setTerminalArgv: (value: string) => void;
-  setTerminalCloseReason: (value: string) => void;
   setTerminalCols: (value: number) => void;
   setTerminalCwd: (value: string) => void;
   setTerminalUser: (value: string) => void;
   setTerminalUserPolicy: (value: "fail" | "fallback") => void;
   setTerminalFlowWindowBytes: (value: number) => void;
   setTerminalIdleTimeoutSecs: (value: number) => void;
-  setTerminalInputText: (value: string) => void;
   setTerminalReplayFromSeq: (value: string) => void;
   setTerminalRows: (value: number) => void;
   setTerminalSessionId: (value: string) => void;
@@ -400,29 +388,23 @@ export function JobOperationEditor({
   if (mode === "terminal_session") {
     return (
       <TerminalOperationControls
-        setTerminalAction={setTerminalAction}
         setTerminalArgv={setTerminalArgv}
-        setTerminalCloseReason={setTerminalCloseReason}
         setTerminalCols={setTerminalCols}
         setTerminalCwd={setTerminalCwd}
         setTerminalUser={setTerminalUser}
         setTerminalUserPolicy={setTerminalUserPolicy}
         setTerminalFlowWindowBytes={setTerminalFlowWindowBytes}
         setTerminalIdleTimeoutSecs={setTerminalIdleTimeoutSecs}
-        setTerminalInputText={setTerminalInputText}
         setTerminalReplayFromSeq={setTerminalReplayFromSeq}
         setTerminalRows={setTerminalRows}
         setTerminalSessionId={setTerminalSessionId}
-        terminalAction={terminalAction}
         terminalArgv={terminalArgv}
-        terminalCloseReason={terminalCloseReason}
         terminalCols={terminalCols}
         terminalCwd={terminalCwd}
         terminalUser={terminalUser}
         terminalUserPolicy={terminalUserPolicy}
         terminalFlowWindowBytes={terminalFlowWindowBytes}
         terminalIdleTimeoutSecs={terminalIdleTimeoutSecs}
-        terminalInputText={terminalInputText}
         terminalReplayFromSeq={terminalReplayFromSeq}
         terminalRows={terminalRows}
         terminalSessionId={terminalSessionId}

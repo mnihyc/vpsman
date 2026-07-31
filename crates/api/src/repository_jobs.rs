@@ -38,7 +38,6 @@ use crate::repository_job_outputs::append_lock_keys;
 use crate::repository_runtime_config::{
     queue_runtime_config_apply_memory_state, queue_runtime_config_apply_postgres_in_tx,
 };
-use crate::repository_terminal_sessions::finalize_active_terminal_input_request_for_terminal_target_in_tx;
 use crate::util::{
     compare_timestamps_desc, limit_or_default, offset_or_default, output_stream_name,
     search_pattern, sort_descending, timestamp_in_optional_bounds,
@@ -1035,12 +1034,6 @@ pub(crate) async fn skip_unstarted_queued_targets_for_client_in_tx(
         .execute(&mut **tx)
         .await?;
         if updated.rows_affected() > 0 {
-            finalize_active_terminal_input_request_for_terminal_target_in_tx(
-                tx,
-                job_id,
-                &target_client_id,
-            )
-            .await?;
             let outcome =
                 synthetic_terminal_outcome(TARGET_STATUS_SKIPPED, message, Some(0), false);
             enqueue_target_terminal_event_in_tx(tx, job_id, &target_client_id, &outcome).await?;
@@ -1117,12 +1110,6 @@ pub(crate) async fn mark_active_targets_agent_lost_for_client_in_tx(
         if updated.rows_affected() == 0 {
             bail!("agent_lost_target_cas_lost:{job_id}:{target_client_id}");
         }
-        finalize_active_terminal_input_request_for_terminal_target_in_tx(
-            tx,
-            job_id,
-            &target_client_id,
-        )
-        .await?;
         let outcome = synthetic_terminal_outcome(TARGET_STATUS_AGENT_LOST, message, None, false);
         enqueue_target_terminal_event_in_tx(tx, job_id, &target_client_id, &outcome).await?;
         sqlx::query(
@@ -3413,14 +3400,6 @@ impl Repository {
                             }),
                     );
                 }
-                for target in precompleted_targets {
-                    self.finalize_active_terminal_input_request_for_target_status(
-                        job_id,
-                        &target.client_id,
-                        &target.outcome.status,
-                    )
-                    .await?;
-                }
                 memory.audits.write().await.push(AuditLogView {
                     id: Uuid::new_v4(),
                     actor_id,
@@ -3568,10 +3547,6 @@ impl Repository {
                             )
                             .await?;
                         }
-                        finalize_active_terminal_input_request_for_terminal_target_in_tx(
-                            &mut tx, job_id, client_id,
-                        )
-                        .await?;
                         enqueue_target_terminal_event_in_tx(&mut tx, job_id, client_id, outcome)
                             .await?;
                         insert_target_result_audit_in_tx(&mut tx, job_id, client_id, outcome)
@@ -4402,14 +4377,6 @@ impl Repository {
                     }
                 }
                 if !changed.is_empty() {
-                    for (job_id, target_client_id) in &changed {
-                        self.finalize_active_terminal_input_request_for_target_status(
-                            *job_id,
-                            target_client_id,
-                            TARGET_STATUS_SKIPPED,
-                        )
-                        .await?;
-                    }
                     let mut outputs = memory.job_outputs.write().await;
                     for (job_id, target_client_id) in &changed {
                         let seq = outputs
@@ -4516,14 +4483,6 @@ impl Repository {
                     }
                 }
                 if !changed.is_empty() {
-                    for (job_id, target_client_id) in &changed {
-                        self.finalize_active_terminal_input_request_for_target_status(
-                            *job_id,
-                            target_client_id,
-                            TARGET_STATUS_AGENT_LOST,
-                        )
-                        .await?;
-                    }
                     let mut outputs = memory.job_outputs.write().await;
                     for (job_id, target_client_id) in &changed {
                         let seq = outputs
@@ -4734,12 +4693,6 @@ impl Repository {
                     .started_at
                     .get_or_insert_with(|| completed_at.clone());
                 drop(targets);
-                self.finalize_active_terminal_input_request_for_target_status(
-                    job_id,
-                    client_id,
-                    TARGET_STATUS_AGENT_LOST,
-                )
-                .await?;
                 let seq = memory
                     .job_outputs
                     .read()
@@ -4846,10 +4799,6 @@ impl Repository {
                     tx.rollback().await?;
                     return Ok(None);
                 }
-                finalize_active_terminal_input_request_for_terminal_target_in_tx(
-                    &mut tx, job_id, client_id,
-                )
-                .await?;
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (
@@ -4914,7 +4863,6 @@ impl Repository {
                 let operations = memory.job_operations.read().await.clone();
                 let mut expired = Vec::new();
                 let mut synthetic_outputs = Vec::new();
-                let mut terminalized_inputs = Vec::new();
                 let mut invalid_operation_evidence = Vec::new();
                 let mut targets = memory.job_targets.write().await;
                 for target in targets
@@ -5020,12 +4968,6 @@ impl Repository {
                             message.clone(),
                             decode_error,
                         ));
-                    } else {
-                        terminalized_inputs.push((
-                            target.job_id,
-                            target.client_id.clone(),
-                            status.to_string(),
-                        ));
                     }
                     let output_data = output_value.to_string().into_bytes();
                     target.status = status.to_string();
@@ -5044,12 +4986,6 @@ impl Repository {
                     });
                 }
                 drop(targets);
-                for (job_id, client_id, status) in terminalized_inputs {
-                    self.finalize_active_terminal_input_request_for_target_status(
-                        job_id, &client_id, &status,
-                    )
-                    .await?;
-                }
                 if !synthetic_outputs.is_empty() {
                     let mut outputs = memory.job_outputs.write().await;
                     for (job_id, client_id, data, exit_code) in synthetic_outputs {
@@ -5275,10 +5211,6 @@ impl Repository {
                     if updated.rows_affected() == 0 {
                         anyhow::bail!("deadline_terminal_cas_lost:{job_id}:{client_id}");
                     }
-                    finalize_active_terminal_input_request_for_terminal_target_in_tx(
-                        &mut tx, job_id, &client_id,
-                    )
-                    .await?;
                     sqlx::query(
                         r#"
                         INSERT INTO audit_logs (
@@ -5438,14 +5370,6 @@ impl Repository {
                         target.completed_at = Some(now.clone());
                     }
                 }
-                for client_id in &canceled_targets {
-                    self.finalize_active_terminal_input_request_for_target_status(
-                        job_id,
-                        client_id,
-                        TARGET_STATUS_CANCELED,
-                    )
-                    .await?;
-                }
                 let pending_canceled = canceled_targets.len();
                 if let Some(rollout) = memory
                     .job_rollouts
@@ -5563,10 +5487,6 @@ impl Repository {
                 let pending_canceled = pending_rows.len();
                 for row in &pending_rows {
                     let client_id: String = row.try_get("client_id")?;
-                    finalize_active_terminal_input_request_for_terminal_target_in_tx(
-                        &mut tx, job_id, &client_id,
-                    )
-                    .await?;
                     let outcome =
                         synthetic_terminal_outcome(TARGET_STATUS_CANCELED, message, None, false);
                     enqueue_target_terminal_event_in_tx(&mut tx, job_id, &client_id, &outcome)
@@ -5647,14 +5567,6 @@ impl Repository {
                         target.completed_at = Some(now);
                         terminalized = true;
                     }
-                    if terminalized {
-                        self.finalize_active_terminal_input_request_for_target_status(
-                            job_id,
-                            client_id,
-                            TARGET_STATUS_CANCELED,
-                        )
-                        .await?;
-                    }
                 }
             }
             Self::Postgres(pool) => {
@@ -5690,10 +5602,6 @@ impl Repository {
                 .await?;
                 if applied && updated.rows_affected() > 0 {
                     terminalized = true;
-                    finalize_active_terminal_input_request_for_terminal_target_in_tx(
-                        &mut tx, job_id, client_id,
-                    )
-                    .await?;
                     let outcome =
                         synthetic_terminal_outcome(TARGET_STATUS_CANCELED, message, None, accepted);
                     enqueue_target_terminal_event_in_tx(&mut tx, job_id, client_id, &outcome)
@@ -5783,12 +5691,6 @@ impl Repository {
                     }
                 }
                 if updated {
-                    self.finalize_active_terminal_input_request_for_target_status(
-                        job_id,
-                        client_id,
-                        &outcome.status,
-                    )
-                    .await?;
                     memory.audits.write().await.push(AuditLogView {
                         id: Uuid::new_v4(),
                         actor_id: None,
@@ -5902,10 +5804,6 @@ impl Repository {
                 if updated.rows_affected() == 0 {
                     return Ok(false);
                 } else {
-                    finalize_active_terminal_input_request_for_terminal_target_in_tx(
-                        &mut tx, job_id, client_id,
-                    )
-                    .await?;
                     sqlx::query(
                         r#"
                         INSERT INTO audit_logs (

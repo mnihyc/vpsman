@@ -442,6 +442,7 @@ CREATE INDEX server_job_artifact_cleanup_targets_job_idx
 CREATE TABLE terminal_sessions (
     session_id UUID NOT NULL,
     client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    job_id UUID NOT NULL UNIQUE REFERENCES jobs(id) ON DELETE CASCADE,
     state TEXT NOT NULL,
     last_status TEXT NOT NULL,
     argv JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -457,29 +458,23 @@ CREATE TABLE terminal_sessions (
     output_dropped_bytes BIGINT,
     output_dropped_chunks BIGINT,
     output_replay_truncated BOOLEAN NOT NULL DEFAULT FALSE,
-    last_input_seq BIGINT,
-    session_exited BOOLEAN NOT NULL DEFAULT FALSE,
+    last_input_seq BIGINT NOT NULL DEFAULT 0 CHECK (last_input_seq >= 0),
     close_reason TEXT,
     last_event TEXT NOT NULL,
-    last_job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-    last_command_type TEXT NOT NULL,
-    last_seq INTEGER NOT NULL,
     opened_at TIMESTAMPTZ,
     observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (client_id, session_id),
     CONSTRAINT terminal_sessions_argv_array CHECK (jsonb_typeof(argv) = 'array'),
     CONSTRAINT terminal_sessions_state_check
-        CHECK (state IN ('open', 'closed', 'missing', 'rejected', 'exited', 'unknown')),
+        CHECK (state IN ('opening', 'open', 'closed', 'missing', 'rejected', 'failed', 'exited')),
     CONSTRAINT terminal_sessions_last_status_check
         CHECK (last_status IN (
+            'opening',
             'opened',
             'attached',
             'rejected',
+            'failed',
             'accepted',
-            'duplicate_ignored',
-            'duplicate_conflict',
-            'out_of_order',
-            'polled',
             'resized',
             'closed',
             'missing',
@@ -487,25 +482,15 @@ CREATE TABLE terminal_sessions (
             'exited',
             'idle_timeout',
             'disconnected_timeout',
-            'lifecycle_disconnected',
-            'unknown'
+            'lifecycle_disconnected'
         )),
     CONSTRAINT terminal_sessions_last_event_check
         CHECK (last_event IN (
             'terminal_open',
             'terminal_input',
-            'terminal_poll',
             'terminal_resize',
             'terminal_close',
             'terminal_stream'
-        )),
-    CONSTRAINT terminal_sessions_last_command_type_check
-        CHECK (last_command_type IN (
-            'terminal_open',
-            'terminal_input',
-            'terminal_poll',
-            'terminal_resize',
-            'terminal_close'
         ))
 );
 
@@ -526,47 +511,6 @@ CREATE TABLE terminal_output_chunks (
 
 CREATE INDEX terminal_output_chunks_session_idx
     ON terminal_output_chunks (client_id, session_id, terminal_seq ASC);
-
-CREATE TABLE terminal_input_requests (
-    job_id UUID PRIMARY KEY,
-    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
-    session_id UUID NOT NULL,
-    input_seq BIGINT NOT NULL CHECK (input_seq > 0),
-    payload_sha256_hex TEXT NOT NULL,
-    payload_size_bytes BIGINT NOT NULL CHECK (payload_size_bytes > 0),
-    status TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    completed_at TIMESTAMPTZ,
-    UNIQUE (client_id, session_id, input_seq),
-    CONSTRAINT terminal_input_requests_status_check
-        CHECK (status IN (
-            'reserved',
-            'queued',
-            'dispatching',
-            'running',
-            'accepted',
-            'duplicate_ignored',
-            'duplicate_conflict',
-            'out_of_order',
-            'missing',
-            'completed',
-            'skipped',
-            'rejected',
-            'failed',
-            'agent_lost',
-            'agent_timeout',
-            'control_timeout',
-            'canceled'
-        ))
-);
-
-CREATE INDEX terminal_input_requests_session_idx
-    ON terminal_input_requests (client_id, session_id, input_seq ASC);
-
-CREATE INDEX terminal_input_requests_active_idx
-    ON terminal_input_requests (client_id, session_id, updated_at ASC)
-    WHERE status IN ('reserved', 'queued', 'dispatching', 'running');
 
 CREATE TABLE worker_leases (
     task_name TEXT PRIMARY KEY,
@@ -605,10 +549,6 @@ CREATE TABLE command_templates (
             'shell_pty',
             'shell_script',
             'terminal_open',
-            'terminal_input',
-            'terminal_poll',
-            'terminal_resize',
-            'terminal_close',
             'config_read',
             'runtime_config_sync',
             'agent_update',

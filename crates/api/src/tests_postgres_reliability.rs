@@ -3982,55 +3982,45 @@ async fn postgres_terminal_merge_preserves_terminal_state_nulls_and_true_open_ti
     };
     let client_id = "terminal-merge-client";
     let session_id = Uuid::new_v4();
-    let delayed_job = Uuid::new_v4();
-    let close_job = Uuid::new_v4();
-    let later_poll_job = Uuid::new_v4();
+    let open_job = Uuid::new_v4();
     insert_client(&db.pool, client_id, None).await;
-    for job_id in [delayed_job, close_job, later_poll_job] {
-        insert_job_target(&db.pool, job_id, client_id, "completed", true, None).await;
-    }
+    insert_job_target(&db.pool, open_job, client_id, "running", true, None).await;
 
-    let terminal_view = |state: &str,
-                         last_status: &str,
-                         last_event: &str,
-                         job_id: Uuid,
-                         observed_at: &str,
-                         opened_at: &str| TerminalSessionView {
-        session_id,
-        client_id: client_id.to_string(),
-        state: state.to_string(),
-        last_status: last_status.to_string(),
-        argv: vec!["/bin/sh".to_string()],
-        cwd: None,
-        cols: None,
-        rows: None,
-        idle_timeout_secs: None,
-        flow_window_bytes: None,
-        output_first_seq: None,
-        output_next_seq: None,
-        output_retained_first_seq: None,
-        output_retained_bytes: None,
-        output_dropped_bytes: None,
-        output_dropped_chunks: None,
-        output_replay_truncated: false,
-        last_input_seq: None,
-        session_exited: false,
-        close_reason: (state == "closed").then(|| "operator".to_string()),
-        last_event: last_event.to_string(),
-        last_job_id: job_id,
-        last_command_type: last_event.to_string(),
-        last_seq: 0,
-        opened_at: Some(opened_at.to_string()),
-        observed_at: observed_at.to_string(),
-    };
+    let terminal_view =
+        |state: &str, last_status: &str, last_event: &str, observed_at: &str, opened_at: &str| {
+            TerminalSessionView {
+                session_id,
+                client_id: client_id.to_string(),
+                job_id: open_job,
+                state: state.to_string(),
+                last_status: last_status.to_string(),
+                argv: vec!["/bin/sh".to_string()],
+                cwd: None,
+                cols: None,
+                rows: None,
+                idle_timeout_secs: None,
+                flow_window_bytes: None,
+                output_first_seq: None,
+                output_next_seq: None,
+                output_retained_first_seq: None,
+                output_retained_bytes: None,
+                output_dropped_bytes: None,
+                output_dropped_chunks: None,
+                output_replay_truncated: false,
+                last_input_seq: 0,
+                close_reason: (state == "closed").then(|| "operator".to_string()),
+                last_event: last_event.to_string(),
+                opened_at: Some(opened_at.to_string()),
+                observed_at: observed_at.to_string(),
+            }
+        };
 
     upsert_postgres_terminal_session(
         &db.pool,
         &terminal_view(
             "open",
-            "polled",
-            "terminal_poll",
-            delayed_job,
+            "opened",
+            "terminal_open",
             "1970-01-01T00:03:20Z",
             "1970-01-01T00:03:20Z",
         ),
@@ -4043,7 +4033,6 @@ async fn postgres_terminal_merge_preserves_terminal_state_nulls_and_true_open_ti
             "closed",
             "closed",
             "terminal_close",
-            close_job,
             "1970-01-01T00:01:40Z",
             "1970-01-01T00:00:50Z",
         ),
@@ -4054,26 +4043,51 @@ async fn postgres_terminal_merge_preserves_terminal_state_nulls_and_true_open_ti
         &db.pool,
         &terminal_view(
             "open",
-            "polled",
-            "terminal_poll",
-            later_poll_job,
+            "streaming",
+            "terminal_stream",
             "1970-01-01T00:05:00Z",
             "1970-01-01T00:03:20Z",
         ),
     )
     .await
     .unwrap();
+    upsert_postgres_terminal_session(
+        &db.pool,
+        &terminal_view(
+            "open",
+            "opened",
+            "terminal_open",
+            "1970-01-01T00:00:25Z",
+            "1970-01-01T00:00:25Z",
+        ),
+    )
+    .await
+    .unwrap();
+
+    let conflicting_job = Uuid::new_v4();
+    insert_job_target(&db.pool, conflicting_job, client_id, "running", true, None).await;
+    let mut conflicting = terminal_view(
+        "open",
+        "opened",
+        "terminal_open",
+        "1970-01-01T00:06:40Z",
+        "1970-01-01T00:06:40Z",
+    );
+    conflicting.job_id = conflicting_job;
+    let conflict = upsert_postgres_terminal_session(&db.pool, &conflicting)
+        .await
+        .unwrap_err();
+    assert_eq!(conflict.to_string(), "terminal_session_job_conflict");
 
     let row = sqlx::query(
         r#"
         SELECT
             state,
-            session_exited,
             output_next_seq,
             EXTRACT(EPOCH FROM opened_at)::bigint AS opened_at_unix,
             EXTRACT(EPOCH FROM observed_at)::bigint AS observed_at_unix,
             last_event,
-            last_job_id
+            job_id
         FROM terminal_sessions
         WHERE client_id = $1 AND session_id = $2
         "#,
@@ -4084,7 +4098,6 @@ async fn postgres_terminal_merge_preserves_terminal_state_nulls_and_true_open_ti
     .await
     .unwrap();
     assert_eq!(row.try_get::<String, _>("state").unwrap(), "closed");
-    assert!(!row.try_get::<bool, _>("session_exited").unwrap());
     assert_eq!(
         row.try_get::<Option<i64>, _>("output_next_seq").unwrap(),
         None
@@ -4095,7 +4108,7 @@ async fn postgres_terminal_merge_preserves_terminal_state_nulls_and_true_open_ti
         row.try_get::<String, _>("last_event").unwrap(),
         "terminal_close"
     );
-    assert_eq!(row.try_get::<Uuid, _>("last_job_id").unwrap(), close_job);
+    assert_eq!(row.try_get::<Uuid, _>("job_id").unwrap(), open_job);
 
     db.cleanup().await;
 }

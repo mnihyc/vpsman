@@ -3618,7 +3618,7 @@ export async function installConsoleApiMock(
         schedules: [] as unknown[],
         suiteConfigs: [] as unknown[],
         suiteConfigReads: 0,
-        terminalInputs: [] as unknown[],
+        terminalControls: [] as unknown[],
         tunnelPlanAllocations: [] as unknown[],
         tunnelPlanEnabledMutations: [] as unknown[],
         tunnelPlanConnectionAssessments: [] as unknown[],
@@ -6636,40 +6636,65 @@ export async function installConsoleApiMock(
           return jsonResponse(terminalSessionsFixture);
         }
         if (
-          pathname ===
-            "/api/v1/terminal-sessions/agent-sfo-01/61616161-2222-4333-8444-555555555555/input" &&
+          /^\/api\/v1\/terminal-sessions\/[^/]+\/[^/]+\/control$/.test(pathname) &&
           method === "POST"
         ) {
           const body = await readJsonBody(input, init);
-          requests.terminalInputs.push(body);
-          return jsonResponse(
-            {
-              input_seq: 3,
-              request_status: "queued",
-              job: {
-                job_id:
-                  (body as { job_id?: string } | null)?.job_id ??
-                  "61616161-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-                status: "queued",
-                target_count: 1,
-                target_counts: {
-                  total: 1,
-                  queued: 1,
-                  dispatching: 0,
-                  running: 0,
-                  completed: 0,
-                  skipped: 0,
-                  rejected: 0,
-                  failed: 0,
-                  agent_lost: 0,
-                  agent_timeout: 0,
-                  control_timeout: 0,
-                  canceled: 0,
-                },
-              },
-            },
-            202,
+          requests.terminalControls.push(body);
+          const request = body as {
+            request_id: string;
+            action:
+              | { type: "input"; data_base64: string }
+              | { type: "resize"; cols: number; rows: number }
+              | { type: "close"; reason?: string };
+          };
+          const sessionId = pathname.split("/").at(-2)!;
+          const session = terminalSessionsFixture.find(
+            (candidate: { session_id: string }) =>
+              candidate.session_id === sessionId,
           );
+          if (!session) {
+            return jsonResponse({ error: "terminal_session_not_found" }, 404);
+          }
+          if (request.action.type === "input") {
+            session.last_input_seq += 1;
+            return jsonResponse({
+              request_id: request.request_id,
+              session_id: sessionId,
+              action: "input",
+              accepted: true,
+              status: "accepted",
+              message: "terminal_input_accepted",
+              input_seq: session.last_input_seq,
+              written_bytes: atob(request.action.data_base64).length,
+            });
+          }
+          if (request.action.type === "resize") {
+            session.cols = request.action.cols;
+            session.rows = request.action.rows;
+            return jsonResponse({
+              request_id: request.request_id,
+              session_id: sessionId,
+              action: "resize",
+              accepted: true,
+              status: "resized",
+              message: "terminal_resized",
+              cols: request.action.cols,
+              rows: request.action.rows,
+            });
+          }
+          session.state = "closed";
+          session.last_status = "closed";
+          session.last_event = "terminal_close";
+          session.close_reason = request.action.reason ?? "operator";
+          return jsonResponse({
+            request_id: request.request_id,
+            session_id: sessionId,
+            action: "close",
+            accepted: true,
+            status: "closed",
+            message: "terminal_closed",
+          });
         }
         if (
           pathname ===

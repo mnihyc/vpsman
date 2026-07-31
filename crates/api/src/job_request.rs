@@ -15,10 +15,7 @@ use vpsman_common::{
 
 use crate::{
     job_files::validate_file_command,
-    job_terminal::{
-        validate_terminal_close, validate_terminal_input, validate_terminal_open,
-        validate_terminal_poll, validate_terminal_resize, TerminalOpenValidation,
-    },
+    job_terminal::{validate_terminal_open, TerminalOpenValidation},
     model::{BulkResolveRequest, CreateJobRequest},
     ApiError,
 };
@@ -150,20 +147,6 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
             idle_timeout_secs: *idle_timeout_secs,
             flow_window_bytes: *flow_window_bytes,
         }),
-        JobCommand::TerminalInput {
-            session_id,
-            input_seq,
-            data_base64,
-        } => validate_terminal_input(*session_id, *input_seq, data_base64),
-        JobCommand::TerminalPoll { session_id, .. } => validate_terminal_poll(*session_id),
-        JobCommand::TerminalResize {
-            session_id,
-            cols,
-            rows,
-        } => validate_terminal_resize(*session_id, *cols, *rows),
-        JobCommand::TerminalClose { session_id, reason } => {
-            validate_terminal_close(*session_id, reason.as_deref())
-        }
         JobCommand::FilePull { .. }
         | JobCommand::FilePush { .. }
         | JobCommand::FilePushChunked { .. }

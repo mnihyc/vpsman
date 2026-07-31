@@ -105,7 +105,6 @@ const TRUNCATED_TEXT_SELECTOR = [
   ".targetImpactGroupHeader span",
   ".targetSelectorHeader span",
   ".templateToolbarStatus",
-  ".terminalActionButton span",
   ".terminalActiveHeader > div:first-child > span",
   ".terminalFocusOverlay header span",
   ".terminalSessionContext small",

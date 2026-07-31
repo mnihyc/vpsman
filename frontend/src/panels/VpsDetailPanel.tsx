@@ -1800,8 +1800,6 @@ function displayCommandType(value: string): string {
       return "Scheduled shell command";
     case "shell_pty":
       return "Terminal session";
-    case "terminal_input":
-      return "Terminal input";
     case "file_read":
       return "File read";
     case "file_write":

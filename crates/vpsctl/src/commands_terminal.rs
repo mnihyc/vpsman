@@ -4,17 +4,16 @@ use clap::Args;
 use serde_json::Value;
 use uuid::Uuid;
 use vpsman_common::{
-    default_terminal_flow_window_bytes, default_terminal_idle_timeout_secs, payload_hash,
-    JobCommand, TerminalUserPolicy, DEFAULT_MAX_JOB_TIMEOUT_SECS,
+    default_terminal_flow_window_bytes, default_terminal_idle_timeout_secs, JobCommand,
+    TerminalControlAction, TerminalUserPolicy, DEFAULT_MAX_JOB_TIMEOUT_SECS,
+    MAX_TERMINAL_INPUT_BYTES,
 };
 
 use crate::{
+    commands_terminal_sessions::{terminal_replay_output, TerminalReplayRequest},
     http::http_post_json,
     jobs::{submit_privileged_operation, PrivilegedOperationRequest},
-    privilege::{
-        build_privilege_for_terminal_input, load_super_password, load_super_salt_hex,
-        TerminalInputPrivilegeRequest,
-    },
+    util::percent_encode_path_segment,
 };
 
 #[derive(Debug, Args)]
@@ -65,84 +64,38 @@ pub(crate) struct TerminalInputCommand {
     pub(crate) text: Option<String>,
     #[arg(long)]
     pub(crate) data_base64: Option<String>,
-    #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
-    pub(crate) password_env: String,
-    #[arg(long)]
-    pub(crate) super_salt_hex: Option<String>,
-    #[arg(long, default_value_t = 300)]
-    pub(crate) privilege_ttl_secs: u64,
-    #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-    pub(crate) max_timeout_secs: u64,
-    #[arg(long, default_value_t = false)]
-    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct TerminalPollCommand {
     #[arg(long)]
+    pub(crate) client_id: String,
+    #[arg(long)]
     pub(crate) session_id: Uuid,
     #[arg(long)]
     pub(crate) replay_from_seq: Option<u64>,
-    #[arg(long, value_delimiter = ',')]
-    pub(crate) clients: Vec<String>,
-    #[arg(long, value_delimiter = ',')]
-    pub(crate) tags: Vec<String>,
-    #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
-    pub(crate) password_env: String,
-    #[arg(long)]
-    pub(crate) super_salt_hex: Option<String>,
-    #[arg(long, default_value_t = 300)]
-    pub(crate) privilege_ttl_secs: u64,
-    #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-    pub(crate) max_timeout_secs: u64,
-    #[arg(long, default_value_t = false)]
-    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct TerminalResizeCommand {
+    #[arg(long)]
+    pub(crate) client_id: String,
     #[arg(long)]
     pub(crate) session_id: Uuid,
     #[arg(long)]
     pub(crate) cols: u16,
     #[arg(long)]
     pub(crate) rows: u16,
-    #[arg(long, value_delimiter = ',')]
-    pub(crate) clients: Vec<String>,
-    #[arg(long, value_delimiter = ',')]
-    pub(crate) tags: Vec<String>,
-    #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
-    pub(crate) password_env: String,
-    #[arg(long)]
-    pub(crate) super_salt_hex: Option<String>,
-    #[arg(long, default_value_t = 300)]
-    pub(crate) privilege_ttl_secs: u64,
-    #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-    pub(crate) max_timeout_secs: u64,
-    #[arg(long, default_value_t = false)]
-    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct TerminalCloseCommand {
     #[arg(long)]
+    pub(crate) client_id: String,
+    #[arg(long)]
     pub(crate) session_id: Uuid,
     #[arg(long)]
     pub(crate) reason: Option<String>,
-    #[arg(long, value_delimiter = ',')]
-    pub(crate) clients: Vec<String>,
-    #[arg(long, value_delimiter = ',')]
-    pub(crate) tags: Vec<String>,
-    #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
-    pub(crate) password_env: String,
-    #[arg(long)]
-    pub(crate) super_salt_hex: Option<String>,
-    #[arg(long, default_value_t = 300)]
-    pub(crate) privilege_ttl_secs: u64,
-    #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-    pub(crate) max_timeout_secs: u64,
-    #[arg(long, default_value_t = false)]
-    pub(crate) confirmed: bool,
 }
 
 pub(crate) fn terminal_open(
@@ -185,44 +138,23 @@ pub(crate) fn terminal_input(
     token: Option<&str>,
     command: TerminalInputCommand,
 ) -> Result<()> {
-    validate_terminal_input_client_id(&command.client_id)?;
+    validate_terminal_client_id(&command.client_id)?;
     let data_base64 = terminal_input_data(command.text, command.data_base64)?;
     let data = BASE64
         .decode(data_base64.as_bytes())
         .context("terminal input data is not valid base64")?;
-    let password = load_super_password(&command.password_env)?;
-    let salt_hex = load_super_salt_hex(command.super_salt_hex.as_deref())?;
-    let job_id = Uuid::new_v4();
-    let session_id = command.session_id.to_string();
-    let input_payload_hash = payload_hash(&data);
-    let privilege_assertion = build_privilege_for_terminal_input(
-        TerminalInputPrivilegeRequest {
-            client_id: &command.client_id,
-            session_id: &session_id,
-            input_payload_hash: &input_payload_hash,
-            max_timeout_secs: command.max_timeout_secs,
-            confirmed: command.confirmed,
-        },
-        &password,
-        &salt_hex,
-        command.privilege_ttl_secs,
-    )?;
+    anyhow::ensure!(
+        !data.is_empty() && data.len() <= MAX_TERMINAL_INPUT_BYTES,
+        "terminal input must contain 1 to {MAX_TERMINAL_INPUT_BYTES} bytes"
+    );
     println!(
         "{}",
-        http_post_json(
+        terminal_control_output(
             api_url,
-            &format!(
-                "/api/v1/terminal-sessions/{}/{}/input",
-                command.client_id, command.session_id
-            ),
             token,
-            &serde_json::json!({
-                "job_id": job_id,
-                "data_base64": data_base64,
-                "max_timeout_secs": command.max_timeout_secs,
-                "confirmed": command.confirmed,
-                "privilege_assertion": privilege_assertion,
-            }),
+            &command.client_id,
+            command.session_id,
+            TerminalControlAction::Input { data_base64 },
         )?
     );
     Ok(())
@@ -233,24 +165,21 @@ pub(crate) fn terminal_poll(
     token: Option<&str>,
     command: TerminalPollCommand,
 ) -> Result<()> {
-    let operation = JobCommand::TerminalPoll {
-        session_id: command.session_id,
-        replay_from_seq: command.replay_from_seq,
-    };
+    validate_terminal_client_id(&command.client_id)?;
     println!(
         "{}",
-        submit_terminal_operation(
+        terminal_replay_output(
             api_url,
             token,
-            &operation,
-            "terminal_poll",
-            &command.clients,
-            &command.tags,
-            &command.password_env,
-            command.super_salt_hex.as_deref(),
-            command.privilege_ttl_secs,
-            command.max_timeout_secs,
-            command.confirmed,
+            TerminalReplayRequest {
+                client_id: command.client_id,
+                session_id: command.session_id.to_string(),
+                from_seq: command.replay_from_seq,
+                limit: 100,
+                max_bytes: 4 * 1024 * 1024,
+                output_file: None,
+                metadata_only: false,
+            },
         )?
     );
     Ok(())
@@ -261,25 +190,18 @@ pub(crate) fn terminal_resize(
     token: Option<&str>,
     command: TerminalResizeCommand,
 ) -> Result<()> {
-    let operation = JobCommand::TerminalResize {
-        session_id: command.session_id,
-        cols: command.cols,
-        rows: command.rows,
-    };
+    validate_terminal_client_id(&command.client_id)?;
     println!(
         "{}",
-        submit_terminal_operation(
+        terminal_control_output(
             api_url,
             token,
-            &operation,
-            "terminal_resize",
-            &command.clients,
-            &command.tags,
-            &command.password_env,
-            command.super_salt_hex.as_deref(),
-            command.privilege_ttl_secs,
-            command.max_timeout_secs,
-            command.confirmed,
+            &command.client_id,
+            command.session_id,
+            TerminalControlAction::Resize {
+                cols: command.cols,
+                rows: command.rows,
+            },
         )?
     );
     Ok(())
@@ -290,27 +212,41 @@ pub(crate) fn terminal_close(
     token: Option<&str>,
     command: TerminalCloseCommand,
 ) -> Result<()> {
-    let operation = JobCommand::TerminalClose {
-        session_id: command.session_id,
-        reason: command.reason,
-    };
+    validate_terminal_client_id(&command.client_id)?;
     println!(
         "{}",
-        submit_terminal_operation(
+        terminal_control_output(
             api_url,
             token,
-            &operation,
-            "terminal_close",
-            &command.clients,
-            &command.tags,
-            &command.password_env,
-            command.super_salt_hex.as_deref(),
-            command.privilege_ttl_secs,
-            command.max_timeout_secs,
-            command.confirmed,
+            &command.client_id,
+            command.session_id,
+            TerminalControlAction::Close {
+                reason: command.reason,
+            },
         )?
     );
     Ok(())
+}
+
+pub(crate) fn terminal_control_output(
+    api_url: &str,
+    token: Option<&str>,
+    client_id: &str,
+    session_id: Uuid,
+    action: TerminalControlAction,
+) -> Result<String> {
+    http_post_json(
+        api_url,
+        &format!(
+            "/api/v1/terminal-sessions/{}/{session_id}/control",
+            percent_encode_path_segment(client_id)
+        ),
+        token,
+        &serde_json::json!({
+            "request_id": Uuid::new_v4(),
+            "action": action,
+        }),
+    )
 }
 
 fn submit_terminal_operation(
@@ -351,13 +287,13 @@ fn terminal_input_data(text: Option<String>, data_base64: Option<String>) -> Res
     }
 }
 
-fn validate_terminal_input_client_id(client_id: &str) -> Result<()> {
+pub(crate) fn validate_terminal_client_id(client_id: &str) -> Result<()> {
     anyhow::ensure!(
         !client_id.trim().is_empty()
             && client_id.len() <= 128
             && !client_id.contains('/')
             && !client_id.chars().any(char::is_whitespace),
-        "terminal-input --client-id must be a path-safe client id"
+        "--client-id must be a path-safe client id"
     );
     Ok(())
 }
@@ -374,7 +310,7 @@ fn enrich_terminal_open_response(session_id: Uuid, response: &str) -> Result<Str
 
 #[cfg(test)]
 mod tests {
-    use super::{terminal_input_data, validate_terminal_input_client_id};
+    use super::{terminal_input_data, validate_terminal_client_id};
 
     #[test]
     fn terminal_input_text_is_encoded_and_validated() {
@@ -388,8 +324,8 @@ mod tests {
 
     #[test]
     fn terminal_input_client_id_is_path_safe() {
-        assert!(validate_terminal_input_client_id("edge-a").is_ok());
-        assert!(validate_terminal_input_client_id("edge/a").is_err());
-        assert!(validate_terminal_input_client_id("edge a").is_err());
+        assert!(validate_terminal_client_id("edge-a").is_ok());
+        assert!(validate_terminal_client_id("edge/a").is_err());
+        assert!(validate_terminal_client_id("edge a").is_err());
     }
 }

@@ -10,10 +10,6 @@ export const JOB_OPERATION_TYPES = [
   "shell",
   "shell_script",
   "terminal_open",
-  "terminal_input",
-  "terminal_poll",
-  "terminal_resize",
-  "terminal_close",
   "config_read",
   "runtime_config_sync",
   "agent_update",
@@ -71,10 +67,6 @@ export const JOB_COMMAND_TYPES = [
   "shell_pty",
   "shell_script",
   "terminal_open",
-  "terminal_input",
-  "terminal_poll",
-  "terminal_resize",
-  "terminal_close",
   "config_read",
   "runtime_config_sync",
   "agent_update",
@@ -139,10 +131,6 @@ export const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE = {
   "shell": "exec",
   "shell_script": "exec",
   "terminal_open": "exec",
-  "terminal_input": "exec",
-  "terminal_poll": "exec",
-  "terminal_resize": "exec",
-  "terminal_close": "exec",
   "config_read": "read",
   "runtime_config_sync": "exclusive",
   "agent_update": "exclusive",
@@ -198,10 +186,6 @@ export const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE = {
   "shell": true,
   "shell_script": true,
   "terminal_open": true,
-  "terminal_input": true,
-  "terminal_poll": true,
-  "terminal_resize": true,
-  "terminal_close": true,
   "config_read": false,
   "runtime_config_sync": true,
   "agent_update": true,
@@ -257,10 +241,6 @@ export const JOB_COMMAND_TYPE_BY_OPERATION_TYPE = {
   "shell": "shell_argv",
   "shell_script": "shell_script",
   "terminal_open": "terminal_open",
-  "terminal_input": "terminal_input",
-  "terminal_poll": "terminal_poll",
-  "terminal_resize": "terminal_resize",
-  "terminal_close": "terminal_close",
   "config_read": "config_read",
   "runtime_config_sync": "runtime_config_sync",
   "agent_update": "agent_update",
@@ -317,10 +297,6 @@ export const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE = {
   "shell_pty": "shell",
   "shell_script": "shell",
   "terminal_open": "terminal",
-  "terminal_input": "terminal",
-  "terminal_poll": "terminal",
-  "terminal_resize": "terminal",
-  "terminal_close": "terminal",
   "config_read": "config",
   "runtime_config_sync": "config",
   "agent_update": "agent_update",
@@ -537,29 +513,14 @@ export const DB_PRIVILEGE_INTENT_FIELDS = [
   "payload_hash",
 ] as const;
 
-export const TERMINAL_INPUT_PRIVILEGE_INTENT_FIELDS = [
-  "version",
-  "action",
-  "client_id",
-  "session_id",
-  "input_payload_hash",
-  "max_timeout_secs",
-  "confirmed",
-] as const;
-
 export const TERMINAL_COMMAND_TYPES = [
   "terminal_open",
-  "terminal_input",
-  "terminal_poll",
-  "terminal_resize",
-  "terminal_close",
 ] as const;
 export type GeneratedTerminalCommandType = typeof TERMINAL_COMMAND_TYPES[number];
 
 export const TERMINAL_SESSION_EVENTS = [
   "terminal_open",
   "terminal_input",
-  "terminal_poll",
   "terminal_resize",
   "terminal_close",
   "terminal_stream",
@@ -567,14 +528,12 @@ export const TERMINAL_SESSION_EVENTS = [
 export type GeneratedTerminalSessionEvent = typeof TERMINAL_SESSION_EVENTS[number];
 
 export const TERMINAL_SESSION_STATUSES = [
+  "opening",
   "opened",
   "attached",
   "rejected",
+  "failed",
   "accepted",
-  "duplicate_ignored",
-  "duplicate_conflict",
-  "out_of_order",
-  "polled",
   "resized",
   "closed",
   "missing",
@@ -583,19 +542,16 @@ export const TERMINAL_SESSION_STATUSES = [
   "idle_timeout",
   "disconnected_timeout",
   "lifecycle_disconnected",
-  "unknown",
 ] as const;
 export type GeneratedTerminalSessionStatus = typeof TERMINAL_SESSION_STATUSES[number];
 
 export const TERMINAL_SESSION_STATUS_CLASS_BY_STATUS = {
+  "opening": "in_progress",
   "opened": "in_progress",
   "attached": "in_progress",
   "rejected": "warning",
+  "failed": "warning",
   "accepted": "successful",
-  "duplicate_ignored": "successful",
-  "duplicate_conflict": "warning",
-  "out_of_order": "warning",
-  "polled": "successful",
   "resized": "successful",
   "closed": "successful",
   "missing": "warning",
@@ -604,26 +560,27 @@ export const TERMINAL_SESSION_STATUS_CLASS_BY_STATUS = {
   "idle_timeout": "warning",
   "disconnected_timeout": "warning",
   "lifecycle_disconnected": "warning",
-  "unknown": "neutral",
 } as const satisfies Record<GeneratedTerminalSessionStatus, GeneratedWorkflowStatusClass>;
 
 export const TERMINAL_SESSION_STATES = [
+  "opening",
   "open",
   "closed",
   "missing",
   "rejected",
+  "failed",
   "exited",
-  "unknown",
 ] as const;
 export type GeneratedTerminalSessionState = typeof TERMINAL_SESSION_STATES[number];
 
 export const TERMINAL_SESSION_STATE_CLASS_BY_STATE = {
+  "opening": "in_progress",
   "open": "in_progress",
   "closed": "successful",
   "missing": "warning",
   "rejected": "warning",
+  "failed": "warning",
   "exited": "successful",
-  "unknown": "neutral",
 } as const satisfies Record<GeneratedTerminalSessionState, GeneratedWorkflowStatusClass>;
 
 export const FILE_TRANSFER_COMMAND_TYPES = [
@@ -1152,10 +1109,6 @@ export const PRIVILEGE_OPERATION_GOLDEN_VECTORS = [
   { command_type: "shell_argv", input_json: "{\"type\":\"shell\",\"argv\":[\"/bin/true\"],\"pty\":false}", canonical_json: "{\"type\":\"shell\",\"argv\":[\"/bin/true\"],\"pty\":false}" },
   { command_type: "shell_script", input_json: "{\"type\":\"shell_script\",\"script\":\"printf ok\"}", canonical_json: "{\"type\":\"shell_script\",\"script\":\"printf ok\"}" },
   { command_type: "terminal_open", input_json: "{\"type\":\"terminal_open\",\"session_id\":\"61616161-2222-4333-8444-555555555555\",\"argv\":[\"/bin/sh\",\"-l\"],\"user_policy\":\"fail\",\"cols\":120,\"rows\":30,\"idle_timeout_secs\":3600,\"flow_window_bytes\":65536}", canonical_json: "{\"type\":\"terminal_open\",\"session_id\":\"61616161-2222-4333-8444-555555555555\",\"argv\":[\"/bin/sh\",\"-l\"],\"user_policy\":\"fail\",\"cols\":120,\"rows\":30,\"idle_timeout_secs\":3600,\"flow_window_bytes\":65536}" },
-  { command_type: "terminal_input", input_json: "{\"type\":\"terminal_input\",\"session_id\":\"61616161-2222-4333-8444-555555555555\",\"input_seq\":7,\"data_base64\":\"bHMK\"}", canonical_json: "{\"type\":\"terminal_input\",\"session_id\":\"61616161-2222-4333-8444-555555555555\",\"input_seq\":7,\"data_base64\":\"bHMK\"}" },
-  { command_type: "terminal_poll", input_json: "{\"type\":\"terminal_poll\",\"session_id\":\"61616161-2222-4333-8444-555555555555\",\"replay_from_seq\":4}", canonical_json: "{\"type\":\"terminal_poll\",\"session_id\":\"61616161-2222-4333-8444-555555555555\",\"replay_from_seq\":4}" },
-  { command_type: "terminal_resize", input_json: "{\"type\":\"terminal_resize\",\"session_id\":\"61616161-2222-4333-8444-555555555555\",\"cols\":100,\"rows\":40}", canonical_json: "{\"type\":\"terminal_resize\",\"session_id\":\"61616161-2222-4333-8444-555555555555\",\"cols\":100,\"rows\":40}" },
-  { command_type: "terminal_close", input_json: "{\"type\":\"terminal_close\",\"session_id\":\"61616161-2222-4333-8444-555555555555\",\"reason\":\"done\"}", canonical_json: "{\"type\":\"terminal_close\",\"session_id\":\"61616161-2222-4333-8444-555555555555\",\"reason\":\"done\"}" },
   { command_type: "config_read", input_json: "{\"type\":\"config_read\"}", canonical_json: "{\"type\":\"config_read\"}" },
   { command_type: "agent_update", input_json: "{\"type\":\"agent_update\",\"artifact_url\":\"https://updates.example/vpsman-agent\",\"sha256_hex\":\"6666666666666666666666666666666666666666666666666666666666666666\"}", canonical_json: "{\"type\":\"agent_update\",\"artifact_url\":\"https://updates.example/vpsman-agent\",\"sha256_hex\":\"6666666666666666666666666666666666666666666666666666666666666666\"}" },
   { command_type: "agent_update_activate", input_json: "{\"type\":\"agent_update_activate\",\"staged_sha256_hex\":\"6666666666666666666666666666666666666666666666666666666666666666\"}", canonical_json: "{\"type\":\"agent_update_activate\",\"staged_sha256_hex\":\"6666666666666666666666666666666666666666666666666666666666666666\"}" },

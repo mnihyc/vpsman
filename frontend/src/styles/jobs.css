@@ -3089,45 +3089,6 @@
   border-top: 1px solid var(--border-subtle);
 }
 
-.terminalAdvancedComposer {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  overflow: hidden;
-}
-
-.terminalAdvancedComposer > summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 44px;
-  cursor: pointer;
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 750;
-  list-style: none;
-  padding: 0 16px;
-}
-
-.terminalAdvancedComposer > summary::-webkit-details-marker {
-  display: none;
-}
-
-.terminalAdvancedComposer > summary::after {
-  content: "Show protocol diagnostics";
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.terminalAdvancedComposer[open] > summary {
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.terminalAdvancedComposer[open] > summary::after {
-  content: "Hide protocol diagnostics";
-}
-
 .terminalLaunchPanel {
   display: grid;
   gap: 12px;
@@ -3879,80 +3840,6 @@
   color: var(--primary);
 }
 
-.terminalRowActions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
-.terminalActionButton {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  min-width: 0;
-  min-height: 28px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 650;
-  line-height: 1;
-  padding: 0 7px;
-}
-
-.terminalActionButton svg {
-  flex: 0 0 auto;
-}
-
-.terminalActionButton span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.terminalActionButton:hover:not(:disabled) {
-  border-color: var(--primary-border);
-  background: var(--primary-selected);
-  color: var(--primary-text);
-}
-
-.terminalActionButton:focus-visible {
-  border-color: var(--primary);
-  outline: 0;
-  box-shadow: var(--focus-ring);
-}
-
-.terminalActionButton:disabled {
-  background: var(--surface-neutral);
-  color: var(--placeholder);
-  cursor: not-allowed;
-}
-
-.terminalActionButton.activeAction {
-  border-color: var(--primary);
-  background: var(--primary-soft);
-  color: var(--primary-text);
-}
-
-.terminalActionButton.dangerAction {
-  color: var(--danger);
-}
-
-.terminalActionButton.dangerAction:disabled {
-  color: var(--placeholder);
-}
-
-.terminalActionButton.dangerAction:hover:not(:disabled) {
-  border-color: var(--danger-border);
-  background: var(--danger-soft);
-  color: var(--danger-strong);
-}
-
 .terminalWarning {
   color: var(--warning-text);
 }
@@ -4062,35 +3949,6 @@
   background: var(--text);
 }
 
-.terminalInputComposer {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: end;
-  gap: 10px;
-  border-top: 1px solid var(--border-subtle);
-  background: var(--canvas);
-  padding: 12px 18px;
-}
-
-.terminalInputComposer > .wideField {
-  display: grid;
-  grid-column: 1 / -1;
-  gap: 5px;
-  min-width: 0;
-}
-
-.terminalInputComposer textarea {
-  min-height: 54px;
-  max-height: 180px;
-  resize: vertical;
-  font-family: var(--font-mono);
-}
-
-.terminalAppendNewline {
-  align-self: center;
-  margin: 0;
-}
-
 .terminalInputFeedback {
   grid-column: 1 / -1;
 }
@@ -4143,11 +4001,6 @@
   border-radius: 0;
 }
 
-.terminalFocusOverlay .terminalInputComposer {
-  border-top-color: var(--border);
-  padding: 10px 14px;
-}
-
 @media (max-width: 980px) {
   .terminalLaunchGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4170,11 +4023,6 @@
     flex-direction: column;
   }
 
-  .terminalInputComposer {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .terminalInputComposer > .wideField,
   .terminalInputFeedback {
     grid-column: 1;
   }

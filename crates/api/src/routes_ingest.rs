@@ -915,6 +915,14 @@ pub(crate) async fn ingest_terminal_output(
         terminal_seq: event.output.terminal_seq,
         done: event.output.output.done,
     });
+    if event.output.output.done {
+        if let Some(job) = state.repo.get_job(event.output.job_id).await? {
+            state.publish(WsEvent::JobFinished {
+                job_id: job.id,
+                status: job.status,
+            });
+        }
+    }
     Ok(Json(IngestResponse {
         accepted: true,
         message: "terminal output recorded".to_string(),

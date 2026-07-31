@@ -90,6 +90,13 @@ Target statuses are:
   content hash with freshly composed database desired state. A failed pending
   record remains failure evidence; it does not become desired state or suppress
   a later repair.
+- A `terminal_open` job is the authorization and lifecycle record for exactly
+  one terminal session. It remains `running` while the agent PTY is live.
+  Terminal input, resize, replay, and close do not create child jobs. A close or
+  normal exit completes the opener; rejection, delivery failure, a missing
+  session, or a changed agent process incarnation fails it. Terminal session
+  list, replay, control, and job-history reads reconcile this relationship
+  lazily so a stale opener is not shown as running after the operator uses it.
 - Final output must be durably recorded before a target is marked terminal.
   Job-finished side effects are published only after both output and terminal
   target state are durable. Backup artifact auto-recording from async gateway

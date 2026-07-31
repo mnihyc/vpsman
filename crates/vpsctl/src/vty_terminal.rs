@@ -2,13 +2,13 @@ use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use uuid::Uuid;
 use vpsman_common::{
-    default_terminal_flow_window_bytes, default_terminal_idle_timeout_secs, payload_hash,
-    JobCommand, DEFAULT_MAX_JOB_TIMEOUT_SECS, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
+    default_terminal_flow_window_bytes, default_terminal_idle_timeout_secs, JobCommand,
+    TerminalControlAction, DEFAULT_MAX_JOB_TIMEOUT_SECS, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
 };
 
 use crate::{
-    http::http_post_json,
-    privilege::{build_privilege_for_terminal_input, TerminalInputPrivilegeRequest},
+    commands_terminal::{terminal_control_output, validate_terminal_client_id},
+    commands_terminal_sessions::{terminal_replay_output, TerminalReplayRequest},
     vty_jobs::{vty_submit_operation, VtyJobSelection, VtyPrivilegeContext},
 };
 
@@ -47,9 +47,28 @@ pub(crate) fn submit_vty_terminal_command(
             selection,
             max_timeout_secs,
         ),
-        VtyTerminalRequest::Input(input) => {
-            submit_vty_terminal_input(api_url, token, privilege_context, input)
-        }
+        VtyTerminalRequest::Control {
+            client_id,
+            session_id,
+            action,
+        } => terminal_control_output(api_url, token, &client_id, session_id, action),
+        VtyTerminalRequest::Replay {
+            client_id,
+            session_id,
+            from_seq,
+        } => terminal_replay_output(
+            api_url,
+            token,
+            TerminalReplayRequest {
+                client_id,
+                session_id: session_id.to_string(),
+                from_seq,
+                limit: 100,
+                max_bytes: 4 * 1024 * 1024,
+                output_file: None,
+                metadata_only: false,
+            },
+        ),
     }
 }
 
@@ -61,16 +80,16 @@ enum VtyTerminalRequest {
         selection: VtyJobSelection,
         max_timeout_secs: u64,
     },
-    Input(VtyTerminalInputRoute),
-}
-
-#[derive(Debug)]
-struct VtyTerminalInputRoute {
-    client_id: String,
-    session_id: Uuid,
-    data_base64: String,
-    max_timeout_secs: u64,
-    confirmed: bool,
+    Control {
+        client_id: String,
+        session_id: Uuid,
+        action: TerminalControlAction,
+    },
+    Replay {
+        client_id: String,
+        session_id: Uuid,
+        from_seq: Option<u64>,
+    },
 }
 
 fn parse_vty_terminal(verb: &str, args: &[&str]) -> Result<VtyTerminalRequest> {
@@ -167,8 +186,6 @@ fn parse_terminal_input(args: &[&str]) -> Result<VtyTerminalRequest> {
     let mut client_id = None;
     let mut session_id = None;
     let mut data_base64 = None;
-    let mut max_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
-    let mut confirmed = false;
     let mut index = 0;
     while index < args.len() {
         match args[index] {
@@ -205,35 +222,37 @@ fn parse_terminal_input(args: &[&str]) -> Result<VtyTerminalRequest> {
                         .to_string(),
                 );
             }
-            "--max-timeout" => {
-                index += 1;
-                max_timeout_secs = parse_timeout(args.get(index))?;
-            }
-            "--confirmed" => confirmed = true,
             "--input-seq" => anyhow::bail!("terminal-input no longer accepts --input-seq"),
             value => anyhow::bail!("unknown terminal-input argument {value}"),
         }
         index += 1;
     }
     let client_id = client_id.context("terminal-input requires --client-id")?;
-    validate_terminal_input_client_id(&client_id)?;
-    Ok(VtyTerminalRequest::Input(VtyTerminalInputRoute {
+    validate_terminal_client_id(&client_id)?;
+    Ok(VtyTerminalRequest::Control {
         client_id,
         session_id: session_id.context("terminal-input requires --session-id")?,
-        data_base64: data_base64.context("terminal-input requires --text or --data-base64")?,
-        max_timeout_secs,
-        confirmed,
-    }))
+        action: TerminalControlAction::Input {
+            data_base64: data_base64.context("terminal-input requires --text or --data-base64")?,
+        },
+    })
 }
 
 fn parse_terminal_poll(args: &[&str]) -> Result<VtyTerminalRequest> {
+    let mut client_id = None;
     let mut session_id = None;
     let mut replay_from_seq = None;
-    let mut max_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
-    let mut targets = Vec::new();
     let mut index = 0;
     while index < args.len() {
         match args[index] {
+            "--client-id" => {
+                index += 1;
+                client_id = Some(
+                    args.get(index)
+                        .context("--client-id requires a value")?
+                        .to_string(),
+                );
+            }
             "--session-id" => {
                 index += 1;
                 session_id = Some(parse_uuid(args.get(index), "--session-id")?);
@@ -242,35 +261,35 @@ fn parse_terminal_poll(args: &[&str]) -> Result<VtyTerminalRequest> {
                 index += 1;
                 replay_from_seq = Some(parse_value(args.get(index), "--replay-from-seq")?);
             }
-            "--max-timeout" => {
-                index += 1;
-                max_timeout_secs = parse_timeout(args.get(index))?;
-            }
-            value => targets.push(value),
+            value => anyhow::bail!("unknown terminal-poll argument {value}"),
         }
         index += 1;
     }
-    let selection = VtyJobSelection::parse(&targets)?;
-    Ok(VtyTerminalRequest::Job {
-        command_label: "terminal_poll",
-        operation: Box::new(JobCommand::TerminalPoll {
-            session_id: session_id.context("terminal-poll requires --session-id")?,
-            replay_from_seq,
-        }),
-        selection,
-        max_timeout_secs,
+    let client_id = client_id.context("terminal-poll requires --client-id")?;
+    validate_terminal_client_id(&client_id)?;
+    Ok(VtyTerminalRequest::Replay {
+        client_id,
+        session_id: session_id.context("terminal-poll requires --session-id")?,
+        from_seq: replay_from_seq,
     })
 }
 
 fn parse_terminal_resize(args: &[&str]) -> Result<VtyTerminalRequest> {
+    let mut client_id = None;
     let mut session_id = None;
     let mut cols = None;
     let mut rows = None;
-    let mut max_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
-    let mut targets = Vec::new();
     let mut index = 0;
     while index < args.len() {
         match args[index] {
+            "--client-id" => {
+                index += 1;
+                client_id = Some(
+                    args.get(index)
+                        .context("--client-id requires a value")?
+                        .to_string(),
+                );
+            }
             "--session-id" => {
                 index += 1;
                 session_id = Some(parse_uuid(args.get(index), "--session-id")?);
@@ -283,35 +302,37 @@ fn parse_terminal_resize(args: &[&str]) -> Result<VtyTerminalRequest> {
                 index += 1;
                 rows = Some(parse_value(args.get(index), "--rows")?);
             }
-            "--max-timeout" => {
-                index += 1;
-                max_timeout_secs = parse_timeout(args.get(index))?;
-            }
-            value => targets.push(value),
+            value => anyhow::bail!("unknown terminal-resize argument {value}"),
         }
         index += 1;
     }
-    let selection = VtyJobSelection::parse(&targets)?;
-    Ok(VtyTerminalRequest::Job {
-        command_label: "terminal_resize",
-        operation: Box::new(JobCommand::TerminalResize {
-            session_id: session_id.context("terminal-resize requires --session-id")?,
+    let client_id = client_id.context("terminal-resize requires --client-id")?;
+    validate_terminal_client_id(&client_id)?;
+    Ok(VtyTerminalRequest::Control {
+        client_id,
+        session_id: session_id.context("terminal-resize requires --session-id")?,
+        action: TerminalControlAction::Resize {
             cols: cols.context("terminal-resize requires --cols")?,
             rows: rows.context("terminal-resize requires --rows")?,
-        }),
-        selection,
-        max_timeout_secs,
+        },
     })
 }
 
 fn parse_terminal_close(args: &[&str]) -> Result<VtyTerminalRequest> {
+    let mut client_id = None;
     let mut session_id = None;
     let mut reason = None;
-    let mut max_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
-    let mut targets = Vec::new();
     let mut index = 0;
     while index < args.len() {
         match args[index] {
+            "--client-id" => {
+                index += 1;
+                client_id = Some(
+                    args.get(index)
+                        .context("--client-id requires a value")?
+                        .to_string(),
+                );
+            }
             "--session-id" => {
                 index += 1;
                 session_id = Some(parse_uuid(args.get(index), "--session-id")?);
@@ -324,79 +345,17 @@ fn parse_terminal_close(args: &[&str]) -> Result<VtyTerminalRequest> {
                         .to_string(),
                 );
             }
-            "--max-timeout" => {
-                index += 1;
-                max_timeout_secs = parse_timeout(args.get(index))?;
-            }
-            value => targets.push(value),
+            value => anyhow::bail!("unknown terminal-close argument {value}"),
         }
         index += 1;
     }
-    let selection = VtyJobSelection::parse(&targets)?;
-    Ok(VtyTerminalRequest::Job {
-        command_label: "terminal_close",
-        operation: Box::new(JobCommand::TerminalClose {
-            session_id: session_id.context("terminal-close requires --session-id")?,
-            reason,
-        }),
-        selection,
-        max_timeout_secs,
+    let client_id = client_id.context("terminal-close requires --client-id")?;
+    validate_terminal_client_id(&client_id)?;
+    Ok(VtyTerminalRequest::Control {
+        client_id,
+        session_id: session_id.context("terminal-close requires --session-id")?,
+        action: TerminalControlAction::Close { reason },
     })
-}
-
-fn submit_vty_terminal_input(
-    api_url: &str,
-    token: Option<&str>,
-    privilege_context: &VtyPrivilegeContext,
-    input: VtyTerminalInputRoute,
-) -> Result<String> {
-    anyhow::ensure!(
-        privilege_context.enabled,
-        "terminal-input requires privilege unlock"
-    );
-    let data = BASE64
-        .decode(input.data_base64.as_bytes())
-        .context("terminal input data is not valid base64")?;
-    let session_id = input.session_id.to_string();
-    let input_payload_hash = payload_hash(&data);
-    let privilege_assertion = build_privilege_for_terminal_input(
-        TerminalInputPrivilegeRequest {
-            client_id: &input.client_id,
-            session_id: &session_id,
-            input_payload_hash: &input_payload_hash,
-            max_timeout_secs: input.max_timeout_secs,
-            confirmed: input.confirmed,
-        },
-        &privilege_context.password,
-        &privilege_context.salt_hex,
-        300,
-    )?;
-    http_post_json(
-        api_url,
-        &format!(
-            "/api/v1/terminal-sessions/{}/{}/input",
-            input.client_id, input.session_id
-        ),
-        token,
-        &serde_json::json!({
-            "job_id": Uuid::new_v4(),
-            "data_base64": input.data_base64,
-            "max_timeout_secs": input.max_timeout_secs,
-            "confirmed": input.confirmed,
-            "privilege_assertion": privilege_assertion,
-        }),
-    )
-}
-
-fn validate_terminal_input_client_id(client_id: &str) -> Result<()> {
-    anyhow::ensure!(
-        !client_id.trim().is_empty()
-            && client_id.len() <= 128
-            && !client_id.contains('/')
-            && !client_id.chars().any(char::is_whitespace),
-        "terminal-input --client-id must be a path-safe client id"
-    );
-    Ok(())
 }
 
 fn parse_uuid(value: Option<&&str>, name: &str) -> Result<Uuid> {
@@ -493,19 +452,26 @@ mod tests {
                 "edge-a",
                 "--text",
                 "id",
-                "--confirmed",
             ],
         )
         .unwrap();
         match request {
-            VtyTerminalRequest::Input(input) => {
-                assert_eq!(input.client_id, "edge-a");
+            VtyTerminalRequest::Control {
+                client_id,
+                session_id,
+                action,
+            } => {
+                assert_eq!(client_id, "edge-a");
                 assert_eq!(
-                    input.session_id.to_string(),
+                    session_id.to_string(),
                     "11111111-1111-4111-8111-111111111111"
                 );
-                assert!(input.confirmed);
-                assert_eq!(input.data_base64, "aWQ=");
+                assert_eq!(
+                    action,
+                    vpsman_common::TerminalControlAction::Input {
+                        data_base64: "aWQ=".to_string()
+                    }
+                );
             }
             other => panic!("unexpected request {other:?}"),
         }
@@ -538,23 +504,23 @@ mod tests {
                 "11111111-1111-4111-8111-111111111111",
                 "--replay-from-seq",
                 "4",
-                "id:edge-a",
+                "--client-id",
+                "edge-a",
             ],
         )
         .unwrap();
         match request {
-            VtyTerminalRequest::Job {
-                command_label,
-                operation,
-                ..
+            VtyTerminalRequest::Replay {
+                client_id,
+                session_id,
+                from_seq,
             } => {
-                assert_eq!(command_label, "terminal_poll");
-                match *operation {
-                    JobCommand::TerminalPoll {
-                        replay_from_seq, ..
-                    } => assert_eq!(replay_from_seq, Some(4)),
-                    other => panic!("unexpected operation {other:?}"),
-                }
+                assert_eq!(client_id, "edge-a");
+                assert_eq!(
+                    session_id.to_string(),
+                    "11111111-1111-4111-8111-111111111111"
+                );
+                assert_eq!(from_seq, Some(4));
             }
             other => panic!("unexpected request {other:?}"),
         }
@@ -571,18 +537,24 @@ mod tests {
                 "90",
                 "--rows",
                 "24",
-                "id:edge-a",
+                "--client-id",
+                "edge-a",
             ],
         )
         .unwrap();
         match resize {
-            VtyTerminalRequest::Job { operation, .. } => match *operation {
-                JobCommand::TerminalResize { cols, rows, .. } => {
-                    assert_eq!(cols, 90);
-                    assert_eq!(rows, 24);
+            VtyTerminalRequest::Control {
+                client_id, action, ..
+            } => {
+                assert_eq!(client_id, "edge-a");
+                match action {
+                    vpsman_common::TerminalControlAction::Resize { cols, rows } => {
+                        assert_eq!(cols, 90);
+                        assert_eq!(rows, 24);
+                    }
+                    other => panic!("unexpected operation {other:?}"),
                 }
-                other => panic!("unexpected operation {other:?}"),
-            },
+            }
             other => panic!("unexpected request {other:?}"),
         }
         let close = parse_vty_terminal(
@@ -592,17 +564,23 @@ mod tests {
                 "11111111-1111-4111-8111-111111111111",
                 "--reason",
                 "done",
-                "id:edge-a",
+                "--client-id",
+                "edge-a",
             ],
         )
         .unwrap();
         match close {
-            VtyTerminalRequest::Job { operation, .. } => match *operation {
-                JobCommand::TerminalClose { reason, .. } => {
-                    assert_eq!(reason.as_deref(), Some("done"));
+            VtyTerminalRequest::Control {
+                client_id, action, ..
+            } => {
+                assert_eq!(client_id, "edge-a");
+                match action {
+                    vpsman_common::TerminalControlAction::Close { reason } => {
+                        assert_eq!(reason.as_deref(), Some("done"));
+                    }
+                    other => panic!("unexpected operation {other:?}"),
                 }
-                other => panic!("unexpected operation {other:?}"),
-            },
+            }
             other => panic!("unexpected request {other:?}"),
         }
     }

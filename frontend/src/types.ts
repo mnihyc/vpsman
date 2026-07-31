@@ -2023,15 +2023,6 @@ export type JobOperation =
       idle_timeout_secs: number;
       flow_window_bytes: number;
     }
-  | {
-      type: "terminal_input";
-      session_id: string;
-      input_seq: number;
-      data_base64: string;
-    }
-  | { type: "terminal_poll"; session_id: string; replay_from_seq?: number }
-  | { type: "terminal_resize"; session_id: string; cols: number; rows: number }
-  | { type: "terminal_close"; session_id: string; reason?: string }
   | { type: "file_pull"; path: string; follow_symlinks: boolean }
   | { type: "config_read" }
   | {

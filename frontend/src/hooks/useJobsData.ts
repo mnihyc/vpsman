@@ -38,8 +38,8 @@ import type {
   UploadFileTransferSourceArtifactRequest,
 } from "../typesFileTransfer";
 import type {
-  TerminalInputSubmitRequest,
-  TerminalInputSubmitResponse,
+  TerminalControlAck,
+  TerminalControlSubmitRequest,
   TerminalReplayRecord,
   TerminalSessionRecord,
 } from "../typesTerminal";
@@ -983,11 +983,11 @@ export function useJobsData(
     [apiToken, rethrowDirectRequestError],
   );
 
-  const submitTerminalInput = useCallback(
-    async (clientId: string, sessionId: string, request: TerminalInputSubmitRequest) => {
+  const controlTerminalSession = useCallback(
+    async (clientId: string, sessionId: string, request: TerminalControlSubmitRequest) => {
       try {
-        const response = await apiPost<TerminalInputSubmitResponse>(
-          `/api/v1/terminal-sessions/${encodeURIComponent(clientId)}/${encodeURIComponent(sessionId)}/input`,
+        const response = await apiPost<TerminalControlAck>(
+          `/api/v1/terminal-sessions/${encodeURIComponent(clientId)}/${encodeURIComponent(sessionId)}/control`,
           apiToken,
           request,
         );
@@ -1268,7 +1268,7 @@ export function useJobsData(
     loadAgentUpdateReleases,
     loadServerJobs,
     loadTerminalReplay,
-    submitTerminalInput,
+    controlTerminalSession,
     loadTerminalSessions,
     updateJobRollout,
     deleteCommandTemplate,

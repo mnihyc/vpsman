@@ -10,7 +10,8 @@ use std::{
 use tokio::sync::{mpsc, oneshot, watch, Mutex, RwLock};
 use vpsman_common::{
     CommandOutput, GatewayCommandCancelResult, GatewayCommandDispatchResult, JobAck, JobCancelAck,
-    JobCancelRequest, JobRequest, PrivilegeAssertionReplayCache,
+    JobCancelRequest, JobRequest, PrivilegeAssertionReplayCache, TerminalControlAck,
+    TerminalControlRequest,
 };
 
 use crate::api_client::GatewayForwardMetrics;
@@ -70,6 +71,7 @@ pub(crate) struct GatewaySession {
 pub(crate) enum GatewaySessionMessage {
     Command(Box<GatewayCommand>),
     Cancel(GatewayCancelCommand),
+    TerminalControl(GatewayTerminalControlCommand),
 }
 
 pub(crate) struct GatewayCommand {
@@ -81,6 +83,11 @@ pub(crate) struct GatewayCommand {
 pub(crate) struct GatewayCancelCommand {
     pub(crate) request: JobCancelRequest,
     pub(crate) response: oneshot::Sender<GatewayCommandCancelResult>,
+}
+
+pub(crate) struct GatewayTerminalControlCommand {
+    pub(crate) request: TerminalControlRequest,
+    pub(crate) response: oneshot::Sender<TerminalControlAck>,
 }
 
 pub(crate) struct PendingCommand {

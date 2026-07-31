@@ -156,17 +156,17 @@ cargo run -p vpsctl -- terminal-open --argv /bin/sh --clients "$EDGE_CLIENT_ID" 
 cargo run -p vpsctl -- terminal-input \
   --client-id "$EDGE_CLIENT_ID" \
   --session-id <session_uuid> \
-  --text "uname -a\n" \
-  --confirmed
+  --text "uname -a\n"
 cargo run -p vpsctl -- terminal-poll \
+  --client-id "$EDGE_CLIENT_ID" \
   --session-id <session_uuid> \
-  --replay-from-seq 1 \
-  --clients "$EDGE_CLIENT_ID" \
-  --confirmed
+  --replay-from-seq 1
 ```
 
-Terminal input order is assigned by the server for the selected client and
-session; operators submit only the bytes to write.
+Only `terminal-open` creates a privileged job. That job remains running while
+the PTY is live. Input, resize, replay, and close operate on the already
+authorized session; the agent assigns input order, so operators submit only the
+bytes to write.
 
 ## 6. Inspect Configuration Sources
 

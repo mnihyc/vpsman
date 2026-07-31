@@ -28,12 +28,10 @@ import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useRevie
 import { useHistoryEntryState } from "../historyEntryState";
 import {
   buildPrivilegeAssertion,
-  canonicalTerminalInputPrivilegeIntent,
   canonicalJobPrivilegeIntent,
   operationPayloadHashHex,
   parseCommandArgv,
   rolloutPolicyHashHex,
-  textPayloadHashHex,
   type PrivilegeAssertion,
   type PrivilegeMaterial,
 } from "../privilege";
@@ -80,11 +78,6 @@ import type {
   UpsertCommandTemplateRequest,
 } from "../types";
 import type { FileTransferSourceArtifactRecord } from "../typesFileTransfer";
-import type {
-  TerminalInputSubmitRequest,
-  TerminalInputSubmitResponse,
-  TerminalSessionRecord,
-} from "../typesTerminal";
 import { runPanelAction, shortId } from "../utils";
 import { DispatchOptions, JobTargetSelector } from "./JobDispatchControls";
 import { JobOperationEditor, OperationModeTabs } from "./jobs/JobOperationControls";
@@ -92,16 +85,6 @@ import { agentsMatchingExpression, parseSearchExpression } from "../searchExpres
 import { TargetImpactPreview, targetImpactModeForDispatch } from "./TargetImpactPreview";
 
 const JOB_SELECTOR_STORAGE_KEY = "vpsman.jobDispatch.selectorExpression";
-
-export type TerminalComposerAction = {
-  action: TerminalAction;
-  maxTimeoutSecs?: number;
-  requestId: string;
-  session: TerminalSessionRecord;
-  terminalReplayFromSeq?: string;
-  terminalUser?: string;
-  terminalUserPolicy?: "fail" | "fallback";
-};
 
 function formatArgvForInput(argv: string[]): string {
   return argv.map(shellQuoteArg).join(" ");
@@ -187,15 +170,6 @@ type DispatchConfirmationSnapshot = {
       operation: CreateJobRequest["operation"];
       payloadHashHex: string;
       privilegeAssertion: PrivilegeAssertion;
-    }
-  | {
-      kind: "terminal_input";
-      clientId: string;
-      jobId: string;
-      payloadHashHex: string;
-      privilegeAssertion: PrivilegeAssertion;
-      sessionId: string;
-      text: string;
     }
   | {
       kind: "transfer_upload";
@@ -305,7 +279,6 @@ export function JobDispatchPanel({
   dispatchPreset,
   fixedMode,
   surface = "jobs",
-  terminalComposerAction,
   onDispatchPresetApplied,
   onCreateJob,
   onCreateJobApproval,
@@ -317,7 +290,6 @@ export function JobDispatchPanel({
   onLoadJob,
   onLoadOutputs,
   onLoadTargets,
-  onSubmitTerminalInput,
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
   onApprovalRequested,
@@ -335,7 +307,6 @@ export function JobDispatchPanel({
   dispatchPreset?: JobDispatchPreset | null;
   fixedMode?: DispatchMode;
   surface?: "jobs" | "terminal";
-  terminalComposerAction?: TerminalComposerAction | null;
   onDispatchPresetApplied?: () => void;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onCreateJobApproval?: (
@@ -349,11 +320,6 @@ export function JobDispatchPanel({
   onLoadJob: (jobId: string) => Promise<JobHistoryRecord>;
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
-  onSubmitTerminalInput: (
-    clientId: string,
-    sessionId: string,
-    request: TerminalInputSubmitRequest,
-  ) => Promise<TerminalInputSubmitResponse>;
   onOpenJobDetails?: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
   onApprovalRequested?: (approval: JobApprovalRecord) => void;
@@ -393,8 +359,7 @@ export function JobDispatchPanel({
   );
   // Terminal workflows use their dedicated surface, so these values never
   // belong to the Jobs composer history snapshot.
-  const [terminalAction, setTerminalAction] =
-    useState<TerminalAction>("open");
+  const terminalAction: TerminalAction = "open";
   const [terminalSessionId, setTerminalSessionId] = useState<string>(
     () => crypto.randomUUID(),
   );
@@ -408,8 +373,6 @@ export function JobDispatchPanel({
   const [terminalReplayFromSeq, setTerminalReplayFromSeq] = useState("");
   const [terminalIdleTimeoutSecs, setTerminalIdleTimeoutSecs] = useState(3600);
   const [terminalFlowWindowBytes, setTerminalFlowWindowBytes] = useState(65536);
-  const [terminalInputText, setTerminalInputText] = useState("");
-  const [terminalCloseReason, setTerminalCloseReason] = useState("");
   const [filePath, setFilePath] = useDispatchHistoryState(
     "filePath",
     "",
@@ -850,43 +813,6 @@ export function JobDispatchPanel({
   ]);
 
   useEffect(() => {
-    if (!terminalComposerAction) {
-      return;
-    }
-    const session = terminalComposerAction.session;
-    setMode("terminal_session");
-    setTerminalAction(terminalComposerAction.action);
-    setTerminalSessionId(session.session_id);
-    setTerminalArgv(session.argv.length > 0 ? formatArgvForInput(session.argv) : DEFAULT_TERMINAL_ARGV);
-    setTerminalCwd(session.cwd ?? "");
-    setTerminalUser(terminalComposerAction.terminalUser ?? "");
-    setTerminalUserPolicy(terminalComposerAction.terminalUserPolicy ?? "fail");
-    setTerminalCols(session.cols ?? 120);
-    setTerminalRows(session.rows ?? 40);
-    setTerminalIdleTimeoutSecs(session.idle_timeout_secs ?? 3600);
-    setTerminalFlowWindowBytes(session.flow_window_bytes ?? 65536);
-    setTerminalReplayFromSeq(
-      terminalComposerAction.terminalReplayFromSeq !== undefined
-        ? terminalComposerAction.terminalReplayFromSeq
-        : terminalComposerAction.action === "open" || terminalComposerAction.action === "poll"
-        ? String(session.output_retained_first_seq ?? session.output_first_seq ?? 0)
-        : "",
-    );
-    if (terminalComposerAction.maxTimeoutSecs !== undefined) {
-      setMaxTimeoutSecs(String(clampJobMaxTimeoutSecs(terminalComposerAction.maxTimeoutSecs)));
-    }
-    if (terminalComposerAction.action === "input") {
-      setMaxTimeoutSecs("30");
-    }
-    setTerminalInputText("");
-    setTerminalCloseReason(session.close_reason ?? "operator");
-    setSelectorExpression(`id:${session.client_id}`);
-    setPreview(null);
-    clearDispatchReview();
-    setActionError(null);
-  }, [terminalComposerAction]);
-
-  useEffect(() => {
     writeLocalString(JOB_SELECTOR_STORAGE_KEY, selectorExpression);
   }, [selectorExpression]);
 
@@ -951,12 +877,10 @@ export function JobDispatchPanel({
     supervisorName,
     terminalAction,
     terminalArgv,
-    terminalCloseReason,
     terminalCols,
     terminalCwd,
     terminalFlowWindowBytes,
     terminalIdleTimeoutSecs,
-    terminalInputText,
     terminalReplayFromSeq,
     terminalRows,
     terminalSessionId,
@@ -1040,7 +964,7 @@ export function JobDispatchPanel({
       : mode === "shell_script"
         ? shellScript.trim().length > 0
         : mode === "terminal_session"
-          ? terminalReady(terminalAction, terminalSessionId, terminalArgv, terminalInputText)
+          ? terminalReady(terminalAction, terminalSessionId, terminalArgv)
           : mode === "file_pull"
             ? filePullReady
             : mode === "file_push"
@@ -1070,7 +994,10 @@ export function JobDispatchPanel({
   );
   const impactMode = targetImpactModeForDispatch(mode);
   const supportsForceUnprivileged = impactMode !== "generic";
-  const operationNeedsConfirmation = generatedConfirmationRequiredForMode(mode, supervisorAction, terminalAction);
+  const operationNeedsConfirmation = generatedConfirmationRequiredForMode(
+    mode,
+    supervisorAction,
+  );
   const approvalRequestSupported = Boolean(
     !terminalSurface &&
       onCreateJobApproval &&
@@ -1324,41 +1251,6 @@ export function JobDispatchPanel({
         sessionId: fileTransferSessionId,
       };
     }
-    if (mode === "terminal_session" && terminalAction === "input") {
-      if (targets.length !== 1) {
-        throw new Error("Terminal input requires exactly one resolved VPS");
-      }
-      const sessionId = terminalSessionId.trim();
-      if (!/^[0-9a-fA-F-]{36}$/.test(sessionId)) {
-        throw new Error("Terminal session id must be a UUID");
-      }
-      if (!terminalInputText) {
-        throw new Error("Terminal input is empty");
-      }
-      const clientId = targets[0].id;
-      const payloadHashHex = await textPayloadHashHex(terminalInputText);
-      const privilegeAssertion = await buildPrivilegeAssertion({
-        intent: canonicalTerminalInputPrivilegeIntent({
-          clientId,
-          sessionId,
-          inputPayloadHash: payloadHashHex,
-          maxTimeoutSecs: maxTimeout,
-          confirmed: true,
-        }),
-        privilegeMaterial,
-      });
-      return {
-        ...base,
-        clientId,
-        jobId: crypto.randomUUID(),
-        kind: "terminal_input",
-        operationLabel: "Send terminal input",
-        payloadHashHex,
-        privilegeAssertion,
-        sessionId,
-        text: terminalInputText,
-      };
-    }
     const filePushPayload = mode === "file_push" ? await readFilePushPayload(filePushSource) : null;
     const operation = buildOperation(
       mode,
@@ -1376,8 +1268,6 @@ export function JobDispatchPanel({
       terminalReplayFromSeq,
       terminalIdleTimeoutSecs,
       terminalFlowWindowBytes,
-      terminalInputText,
-      terminalCloseReason,
       filePath,
       fileFollowSymlinks,
       processLimit,
@@ -1518,7 +1408,6 @@ export function JobDispatchPanel({
         return;
       case "terminal_open":
         setMode("terminal_session");
-        setTerminalAction("open");
         setTerminalSessionId(crypto.randomUUID());
         setTerminalArgv(formatArgvForInput(operation.argv));
         setTerminalCwd(operation.cwd ?? "");
@@ -1596,8 +1485,6 @@ export function JobDispatchPanel({
       terminalReplayFromSeq,
       terminalIdleTimeoutSecs,
       terminalFlowWindowBytes,
-      terminalInputText,
-      terminalCloseReason,
       filePath,
       fileFollowSymlinks,
       processLimit,
@@ -1753,18 +1640,6 @@ export function JobDispatchPanel({
         });
         setLastPayloadHash(null);
         await trackDispatchProgress(startJob, confirmed.targets, confirmed.maxTimeoutSecs);
-        return;
-      }
-      if (confirmed.kind === "terminal_input") {
-        const response = await onSubmitTerminalInput(confirmed.clientId, confirmed.sessionId, {
-          job_id: confirmed.jobId,
-          text: confirmed.text,
-          max_timeout_secs: confirmed.maxTimeoutSecs,
-          confirmed: true,
-          privilege_assertion: confirmed.privilegeAssertion,
-        });
-        setLastPayloadHash(confirmed.payloadHashHex);
-        await trackDispatchProgress(response.job, confirmed.targets, confirmed.maxTimeoutSecs);
         return;
       }
       const nextJob = await onCreateJob(
@@ -2095,16 +1970,13 @@ export function JobDispatchPanel({
           shellPty={shellPty}
           fileFollowSymlinks={fileFollowSymlinks}
           filePath={filePath}
-          terminalAction={terminalAction}
           terminalArgv={terminalArgv}
-          terminalCloseReason={terminalCloseReason}
           terminalCols={terminalCols}
           terminalCwd={terminalCwd}
           terminalUser={terminalUser}
           terminalUserPolicy={terminalUserPolicy}
           terminalFlowWindowBytes={terminalFlowWindowBytes}
           terminalIdleTimeoutSecs={terminalIdleTimeoutSecs}
-          terminalInputText={terminalInputText}
           terminalReplayFromSeq={terminalReplayFromSeq}
           terminalRows={terminalRows}
           terminalSessionId={terminalSessionId}
@@ -2128,16 +2000,13 @@ export function JobDispatchPanel({
           setCommandText={setCommandText}
           setShellPty={setShellPty}
           setShellScript={setShellScript}
-          setTerminalAction={setTerminalAction}
           setTerminalArgv={setTerminalArgv}
-          setTerminalCloseReason={setTerminalCloseReason}
           setTerminalCols={setTerminalCols}
           setTerminalCwd={setTerminalCwd}
           setTerminalUser={setTerminalUser}
           setTerminalUserPolicy={setTerminalUserPolicy}
           setTerminalFlowWindowBytes={setTerminalFlowWindowBytes}
           setTerminalIdleTimeoutSecs={setTerminalIdleTimeoutSecs}
-          setTerminalInputText={setTerminalInputText}
           setTerminalReplayFromSeq={setTerminalReplayFromSeq}
           setTerminalRows={setTerminalRows}
           setTerminalSessionId={setTerminalSessionId}
@@ -2729,11 +2598,7 @@ function jobOperationLabel(
     agent_update_check: "Check agent update",
     agent_update_rollback: "Rollback agent update",
     backup: "Run backup",
-    terminal_close: "Close terminal session",
-    terminal_input: "Send terminal input",
-    terminal_open: "Open or attach terminal session",
-    terminal_poll: "Poll terminal output",
-    terminal_resize: "Resize terminal session",
+    terminal_open: "Open terminal session",
   };
   return labels[operation.type] ?? fallback;
 }
@@ -2741,18 +2606,10 @@ function jobOperationLabel(
 function generatedConfirmationRequiredForMode(
   mode: DispatchMode,
   supervisorAction: SupervisorAction,
-  terminalAction: TerminalAction,
 ): boolean {
-  const terminalOperationType = {
-    close: "terminal_close",
-    input: "terminal_input",
-    open: "terminal_open",
-    poll: "terminal_poll",
-    resize: "terminal_resize",
-  } satisfies Record<TerminalAction, keyof typeof JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE>;
   const operationType =
     mode === "terminal_session"
-      ? terminalOperationType[terminalAction]
+      ? "terminal_open"
       : mode === "file_transfer_upload"
         ? "file_transfer_start"
         : mode === "file_transfer_download"

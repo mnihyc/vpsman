@@ -27,7 +27,7 @@ export type DispatchMode =
   | "process_supervisor";
 
 export type SupervisorAction = "start" | "stop" | "restart" | "status" | "logs";
-export type TerminalAction = "open" | "input" | "poll" | "resize" | "close";
+export type TerminalAction = "open";
 const MAX_SHELL_SCRIPT_BYTES = 16 * 1024;
 
 export function clampInteger(value: number, min: number, max: number): number {
@@ -53,8 +53,6 @@ export function buildOperation(
   terminalReplayFromSeq: string,
   terminalIdleTimeoutSecs: number,
   terminalFlowWindowBytes: number,
-  terminalInputText: string,
-  terminalCloseReason: string,
   filePath: string,
   fileFollowSymlinks: boolean,
   processLimit: number,
@@ -104,8 +102,6 @@ export function buildOperation(
       terminalReplayFromSeq,
       terminalIdleTimeoutSecs,
       terminalFlowWindowBytes,
-      terminalInputText,
-      terminalCloseReason,
     );
   }
   if (mode === "file_pull") {
@@ -255,32 +251,26 @@ export function operationCommandLabel(mode: DispatchMode, commandText: string): 
     process_list: "List processes",
     process_supervisor: "Managed process",
     shell_script: "Run shell script",
-    terminal_session: "Terminal session action",
+    terminal_session: "Open terminal session",
     user_sessions: "List user sessions",
   };
   return mode === "shell" ? commandText.trim() : labels[mode];
 }
 
-export function terminalReady(action: TerminalAction, sessionId: string, argv: string, inputText: string): boolean {
+export function terminalReady(_action: TerminalAction, sessionId: string, argv: string): boolean {
   if (!sessionId.trim()) {
     return false;
   }
-  if (action === "open") {
-    try {
-      const parsed = parseCommandArgv(argv);
-      return parsed.length > 0 && parsed[0].startsWith("/");
-    } catch {
-      return false;
-    }
+  try {
+    const parsed = parseCommandArgv(argv);
+    return parsed.length > 0 && parsed[0].startsWith("/");
+  } catch {
+    return false;
   }
-  if (action === "input") {
-    return inputText.length > 0;
-  }
-  return true;
 }
 
 function buildTerminalOperation(
-  action: TerminalAction,
+  _action: TerminalAction,
   sessionIdInput: string,
   argvInput: string,
   cwdInput: string,
@@ -291,61 +281,39 @@ function buildTerminalOperation(
   replayFromSeqInput: string,
   idleTimeoutSecsInput: number,
   flowWindowBytesInput: number,
-  inputText: string,
-  closeReasonInput: string,
 ): JobOperation {
   const sessionId = sessionIdInput.trim();
   if (!/^[0-9a-fA-F-]{36}$/.test(sessionId)) {
     throw new Error("Terminal session id must be a UUID");
   }
-  if (action === "open") {
-    const argv = parseCommandArgv(argvInput);
-    if (argv.length === 0 || !argv[0].startsWith("/")) {
-      throw new Error("Terminal executable must be an absolute path");
-    }
-    const cwd = cwdInput.trim();
-    const user = userInput.trim();
-    const replayFromSeq = replayFromSeqInput.trim();
-    return {
-      type: "terminal_open",
-      session_id: sessionId,
-      argv,
-      cwd: cwd ? cwd : null,
-      user: user ? user : null,
-      user_policy: userPolicy,
-      cols: clampInteger(colsInput, 20, 240),
-      rows: clampInteger(rowsInput, 5, 120),
-      ...(replayFromSeq ? { replay_from_seq: clampInteger(Number(replayFromSeq), 0, Number.MAX_SAFE_INTEGER) } : {}),
-      idle_timeout_secs: clampInteger(idleTimeoutSecsInput, 10, 86400),
-      flow_window_bytes: clampInteger(flowWindowBytesInput, 4096, 1024 * 1024),
-    };
+  const argv = parseCommandArgv(argvInput);
+  if (argv.length === 0 || !argv[0].startsWith("/")) {
+    throw new Error("Terminal executable must be an absolute path");
   }
-  if (action === "input") {
-    if (!inputText) {
-      throw new Error("Terminal input is empty");
-    }
-    throw new Error("Terminal input must be submitted from the live terminal input action");
-  }
-  if (action === "poll") {
-    const replayFromSeq = replayFromSeqInput.trim();
-    return {
-      type: "terminal_poll",
-      session_id: sessionId,
-      ...(replayFromSeq ? { replay_from_seq: clampInteger(Number(replayFromSeq), 0, Number.MAX_SAFE_INTEGER) } : {}),
-    };
-  }
-  if (action === "resize") {
-    return {
-      type: "terminal_resize",
-      session_id: sessionId,
-      cols: clampInteger(colsInput, 20, 240),
-      rows: clampInteger(rowsInput, 5, 120),
-    };
-  }
-  const reason = closeReasonInput.trim();
-  return reason
-    ? { type: "terminal_close", session_id: sessionId, reason }
-    : { type: "terminal_close", session_id: sessionId };
+  const cwd = cwdInput.trim();
+  const user = userInput.trim();
+  const replayFromSeq = replayFromSeqInput.trim();
+  return {
+    type: "terminal_open",
+    session_id: sessionId,
+    argv,
+    cwd: cwd ? cwd : null,
+    user: user ? user : null,
+    user_policy: userPolicy,
+    cols: clampInteger(colsInput, 20, 240),
+    rows: clampInteger(rowsInput, 5, 120),
+    ...(replayFromSeq
+      ? {
+          replay_from_seq: clampInteger(
+            Number(replayFromSeq),
+            0,
+            Number.MAX_SAFE_INTEGER,
+          ),
+        }
+      : {}),
+    idle_timeout_secs: clampInteger(idleTimeoutSecsInput, 10, 86400),
+    flow_window_bytes: clampInteger(flowWindowBytesInput, 4096, 1024 * 1024),
+  };
 }
 
 export function supervisorReady(action: SupervisorAction, name: string, argv: string): boolean {

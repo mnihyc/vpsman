@@ -815,7 +815,7 @@ export function useDashboardData(activeView: ActiveView) {
     loadServerJobs: jobs.loadServerJobs,
     loadTerminalSessions: jobs.loadTerminalSessions,
     loadTerminalReplay: jobs.loadTerminalReplay,
-    submitTerminalInput: jobs.submitTerminalInput,
+    controlTerminalSession: jobs.controlTerminalSession,
     loadAgentUpdateReleases: jobs.loadAgentUpdateReleases,
     loadJobTargets: jobs.loadJobTargets,
     loadHostProcessInventory: jobs.loadHostProcessInventory,

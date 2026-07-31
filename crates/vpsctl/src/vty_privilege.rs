@@ -23,6 +23,7 @@ const READ_ONLY_COMMANDS: &[&str] = &[
     "terminal-sessions",
     "terminal-replay",
     "terminal-follow",
+    "terminal-poll",
     "file-transfers",
     "file-transfer-sources",
     "process-supervisor-inventory",
@@ -50,9 +51,6 @@ const PRIVILEGE_REQUIRED_COMMANDS: &[&str] = &[
     "job-create",
     "job-shell",
     "terminal-open",
-    "terminal-input",
-    "terminal-resize",
-    "terminal-close",
     "file-pull",
     "file-push",
     "file-transfer-upload",
@@ -75,6 +73,9 @@ const PRIVILEGE_REQUIRED_COMMANDS: &[&str] = &[
     "tunnel-probe",
     "tunnel-speed-test",
 ];
+
+const SESSION_AUTHORIZED_COMMANDS: &[&str] =
+    &["terminal-input", "terminal-resize", "terminal-close"];
 
 const FORCE_UNPRIVILEGED_COMMANDS: &[&str] = &[
     "process-start",
@@ -122,6 +123,7 @@ pub(crate) fn render_vty_capabilities() -> String {
     pretty_json(serde_json::json!({
         "read_only_without_enable": READ_ONLY_COMMANDS,
         "privilege_required_after_enable": PRIVILEGE_REQUIRED_COMMANDS,
+        "authorized_by_open_terminal_session": SESSION_AUTHORIZED_COMMANDS,
         "force_unprivileged_supported": FORCE_UNPRIVILEGED_COMMANDS,
         "root_sensitive_capabilities": ROOT_SENSITIVE_CAPABILITIES,
         "privilege_model": {

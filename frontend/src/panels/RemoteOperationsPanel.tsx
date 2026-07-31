@@ -7,10 +7,7 @@ import {
 } from "../generated/protocolContracts";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import {
-  buildPrivilegeAssertion,
   buildPrivilegeForJobOperation,
-  canonicalTerminalInputPrivilegeIntent,
-  textPayloadHashHex,
   type PrivilegeMaterial,
 } from "../privilege";
 import type {
@@ -43,13 +40,13 @@ import type {
   UploadFileTransferSourceArtifactRequest,
 } from "../typesFileTransfer";
 import type {
-  TerminalInputSubmitRequest,
-  TerminalInputSubmitResponse,
+  TerminalControlAck,
+  TerminalControlSubmitRequest,
   TerminalReplayRecord,
   TerminalSessionRecord,
 } from "../typesTerminal";
 import { clientDisplayNameFromMap, clientDisplayNameMap } from "../utils";
-import { JobDispatchPanel, type TerminalComposerAction } from "./JobDispatchPanel";
+import { JobDispatchPanel } from "./JobDispatchPanel";
 import { retryableLazy } from "../lazyImport";
 import {
   pushHistoryEntry,
@@ -150,13 +147,12 @@ export function RemoteOperationsPanel({
   onResolveTargets,
   onSaveFileTransferHandoff,
   onSelectSubpage,
-  onSubmitTerminalInput,
+  onControlTerminalSession,
   onTransferTargetConsumed,
   onUploadFileTransferSource,
   onDeleteCommandTemplate,
   onUpsertCommandTemplate,
   privilegeMaterial,
-  privilegeUnlockOpen,
   processSupervisorInventory,
   processSupervisorInventoryTruncated,
   setPrivilegeMaterial,
@@ -237,11 +233,11 @@ export function RemoteOperationsPanel({
     },
   ) => Promise<void>;
   onSelectSubpage?: (subpage: string) => void;
-  onSubmitTerminalInput: (
+  onControlTerminalSession: (
     clientId: string,
     sessionId: string,
-    request: TerminalInputSubmitRequest,
-  ) => Promise<TerminalInputSubmitResponse>;
+    request: TerminalControlSubmitRequest,
+  ) => Promise<TerminalControlAck>;
   onTransferTargetConsumed?: () => void;
   onUploadFileTransferSource: (
     request: UploadFileTransferSourceArtifactRequest,
@@ -254,7 +250,6 @@ export function RemoteOperationsPanel({
     request: UpsertCommandTemplateRequest,
   ) => Promise<CommandTemplateRecord>;
   privilegeMaterial: PrivilegeMaterial | null;
-  privilegeUnlockOpen: boolean;
   processSupervisorInventory: ProcessSupervisorInventoryRecord[];
   processSupervisorInventoryTruncated: boolean;
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
@@ -267,14 +262,10 @@ export function RemoteOperationsPanel({
   } | null;
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
-  const [terminalComposerAction, setTerminalComposerAction] =
-    useState<TerminalComposerAction | null>(null);
   const [processComposerPreset, setProcessComposerPreset] =
     useState<JobDispatchPreset | null>(null);
   const [transferComposerPreset, setTransferComposerPreset] =
     useState<JobDispatchPreset | null>(null);
-  const [terminalAdvancedOpen, setTerminalAdvancedOpen] = useState(false);
-  const terminalComposerRef = useRef<HTMLDivElement | null>(null);
   const [multiFileInitialPath, setMultiFileInitialPath] = useState("");
   const [transferFocusPath, setTransferFocusPath] = useState<string | null>(
     null,
@@ -328,23 +319,6 @@ export function RemoteOperationsPanel({
     setProcessRoute({ clientId, mode });
   }
 
-  function prepareTerminalSessionAction(
-    session: TerminalSessionRecord,
-    action: TerminalComposerAction["action"],
-    options: Omit<
-      TerminalComposerAction,
-      "action" | "requestId" | "session"
-    > = {},
-  ) {
-    setTerminalAdvancedOpen(true);
-    setTerminalComposerAction({
-      action,
-      ...options,
-      requestId: crypto.randomUUID(),
-      session,
-    });
-  }
-
   function openProcessComposer(preset: JobDispatchPresetInput) {
     setProcessComposerPreset({ ...preset, requestId: crypto.randomUUID() });
   }
@@ -352,18 +326,6 @@ export function RemoteOperationsPanel({
   function openTransferComposer(preset: JobDispatchPresetInput) {
     setTransferComposerPreset({ ...preset, requestId: crypto.randomUUID() });
   }
-
-  useEffect(() => {
-    if (remoteSubpage !== "terminal" || !terminalComposerAction) {
-      return;
-    }
-    window.requestAnimationFrame(() => {
-      terminalComposerRef.current?.scrollIntoView({
-        block: "start",
-        behavior: "smooth",
-      });
-    });
-  }, [remoteSubpage, terminalComposerAction?.requestId]);
 
   async function openTerminalSessionDirectly(
     request: DirectTerminalOpenRequest,
@@ -417,83 +379,6 @@ export function RemoteOperationsPanel({
       privilege_assertion: privilegeAssertion,
     });
     onRefresh();
-  }
-
-  async function closeTerminalSessionDirectly(
-    session: TerminalSessionRecord,
-  ): Promise<void> {
-    if (!privilegeMaterial) {
-      onOpenPrivilegeUnlock();
-      throw new Error("Unlock local privilege before closing a terminal.");
-    }
-    const maxTimeoutSecs = 30;
-    const operation: JobOperation = {
-      type: "terminal_close",
-      session_id: session.session_id,
-      reason: "operator_closed",
-    };
-    const selectorExpression = `id:${session.client_id}`;
-    const commandType = JOB_COMMAND_TYPE_BY_OPERATION_TYPE[operation.type];
-    const { privilegeAssertion } = await buildPrivilegeForJobOperation({
-      clientIds: [session.client_id],
-      commandType,
-      operation,
-      privilegeMaterial,
-      selectorExpression,
-      maxTimeoutSecs,
-    });
-    await onCreateJob({
-      job_id: crypto.randomUUID(),
-      selector_expression: selectorExpression,
-      target_client_ids: [session.client_id],
-      destructive: true,
-      confirmed: true,
-      command: commandType,
-      argv: [],
-      operation,
-      max_timeout_secs: maxTimeoutSecs,
-      privileged: true,
-      privilege_assertion: privilegeAssertion,
-    });
-    onRefresh();
-  }
-
-  async function submitTerminalInputDirectly(
-    session: TerminalSessionRecord,
-    text: string,
-  ): Promise<TerminalInputSubmitResponse> {
-    if (!privilegeMaterial) {
-      onOpenPrivilegeUnlock();
-      throw new Error("Unlock local privilege before sending terminal input.");
-    }
-    if (!text) {
-      throw new Error("Terminal input is empty.");
-    }
-    const maxTimeoutSecs = 30;
-    const payloadHashHex = await textPayloadHashHex(text);
-    const privilegeAssertion = await buildPrivilegeAssertion({
-      intent: canonicalTerminalInputPrivilegeIntent({
-        clientId: session.client_id,
-        sessionId: session.session_id,
-        inputPayloadHash: payloadHashHex,
-        maxTimeoutSecs,
-        confirmed: true,
-      }),
-      privilegeMaterial,
-    });
-    const response = await onSubmitTerminalInput(
-      session.client_id,
-      session.session_id,
-      {
-        job_id: crypto.randomUUID(),
-        text,
-        max_timeout_secs: maxTimeoutSecs,
-        confirmed: true,
-        privilege_assertion: privilegeAssertion,
-      },
-    );
-    onRefresh();
-    return response;
   }
 
   return (
@@ -650,7 +535,6 @@ export function RemoteOperationsPanel({
                     onOpenJobsDispatch={onOpenJobsDispatch}
                     onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
                     onResolveTargets={onResolveTargets}
-                    onSubmitTerminalInput={onSubmitTerminalInput}
                     onUpsertCommandTemplate={onUpsertCommandTemplate}
                     privilegeMaterial={privilegeMaterial}
                     setPrivilegeMaterial={setPrivilegeMaterial}
@@ -730,7 +614,6 @@ export function RemoteOperationsPanel({
                     onOpenJobsDispatch={onOpenJobsDispatch}
                     onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
                     onResolveTargets={onResolveTargets}
-                    onSubmitTerminalInput={onSubmitTerminalInput}
                     onUpsertCommandTemplate={onUpsertCommandTemplate}
                     privilegeMaterial={privilegeMaterial}
                     setPrivilegeMaterial={setPrivilegeMaterial}
@@ -759,56 +642,15 @@ export function RemoteOperationsPanel({
               sessionsTruncated={terminalSessionsTruncated}
               lastTerminalOutputEvent={lastTerminalOutputEvent}
               loading={loading}
-              onCloseTerminal={closeTerminalSessionDirectly}
               onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
               onInitialTargetConsumed={onInitialTargetIntentConsumed}
               onOpenTerminal={openTerminalSessionDirectly}
-              onPrepareAction={prepareTerminalSessionAction}
-              onSendInput={submitTerminalInputDirectly}
+              onControl={onControlTerminalSession}
               onReplay={onLoadTerminalReplay}
               onRefresh={onRefresh}
               onOpenSessionEvidence={onOpenSessionEvidence}
               privilegeMaterial={privilegeMaterial}
-              privilegeUnlockOpen={privilegeUnlockOpen}
             />
-            <details
-              className="terminalAdvancedComposer"
-              onToggle={(event) =>
-                setTerminalAdvancedOpen(event.currentTarget.open)
-              }
-              open={terminalAdvancedOpen}
-            >
-              <summary>Advanced session controls</summary>
-              <div className="terminalComposerAnchor" ref={terminalComposerRef}>
-                <JobDispatchPanel
-                  agents={agents}
-                  fileTransferSources={fileTransferSources}
-                  fileTransferSourcesTruncated={fileTransferSourcesTruncated}
-                  commandTemplates={commandTemplates}
-                  commandTemplatesTruncated={commandTemplatesTruncated}
-                  dispatchPreset={dispatchPreset}
-                  fixedMode="terminal_session"
-                  surface="terminal"
-                  terminalComposerAction={terminalComposerAction}
-                  onDispatchPresetApplied={onDispatchPresetApplied}
-                  onCreateJob={onCreateJob}
-                  onDownloadFileTransferSource={onDownloadFileTransferSource}
-                  onDownloadOutputChunk={onDownloadOutputChunk}
-                  onLoadJob={onLoadJob}
-                  onLoadOutputs={onLoadOutputs}
-                  onLoadTargets={onLoadTargets}
-                  onSubmitTerminalInput={onSubmitTerminalInput}
-                  onOpenJobDetails={onOpenJobDetails}
-                  onOpenJobsDispatch={onOpenJobsDispatch}
-                  onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
-                  onResolveTargets={onResolveTargets}
-                  onDeleteCommandTemplate={onDeleteCommandTemplate}
-                  onUpsertCommandTemplate={onUpsertCommandTemplate}
-                  privilegeMaterial={privilegeMaterial}
-                  setPrivilegeMaterial={setPrivilegeMaterial}
-                />
-              </div>
-            </details>
           </div>
         )}
       </Suspense>

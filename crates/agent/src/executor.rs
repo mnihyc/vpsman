@@ -134,11 +134,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
             )
             .await
         }
-        JobCommand::TerminalOpen { .. }
-        | JobCommand::TerminalInput { .. }
-        | JobCommand::TerminalPoll { .. }
-        | JobCommand::TerminalResize { .. }
-        | JobCommand::TerminalClose { .. } => {
+        JobCommand::TerminalOpen { .. } => {
             execute_terminal_command(config, job_id, command, max_timeout_secs).await
         }
         JobCommand::FilePull {

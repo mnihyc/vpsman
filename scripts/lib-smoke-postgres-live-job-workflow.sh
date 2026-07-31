@@ -244,7 +244,7 @@ assert_file_pull_output
 terminal_open_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
 VPSMAN_API_TOKEN="$access_token" \
   target/debug/vpsctl --api-url "$api_url" terminal-open \
-    --argv "/bin/sh,-lc,read line; printf 'got:%s\\n' \"\$line\"" \
+    --argv "/bin/sh,-lc,while IFS= read -r line; do printf 'got:%s\\n' \"\$line\"; done" \
     --cols 96 \
     --rows 28 \
     --idle-timeout-secs 300 \
@@ -259,83 +259,101 @@ jq -e '
   (.terminal_session_id | length == 36)
   and .job.target_count == 1
 ' <<<"$terminal_open_json" >/dev/null
-smoke_wait_api_job_status "$api_url" "$terminal_open_job_id" completed 45 >/dev/null
+smoke_wait_api_job_status "$api_url" "$terminal_open_job_id" running 45 >/dev/null
+terminal_session_deadline=$((SECONDS + 45))
+until terminal_sessions_json="$(VPSMAN_API_TOKEN="$access_token" \
+  target/debug/vpsctl --api-url "$api_url" terminal-sessions \
+    --client-id "$client_id" \
+    --session-id "$terminal_session_id" \
+    --limit 1)" \
+  && jq -e --arg sid "$terminal_session_id" '
+    length == 1
+    and .[0].session_id == $sid
+    and .[0].state == "open"
+    and .[0].last_status == "opened"
+  ' <<<"$terminal_sessions_json" >/dev/null; do
+  if (( SECONDS >= terminal_session_deadline )); then
+    echo "timed out waiting for terminal session materialization" >&2
+    exit 1
+  fi
+  sleep 0.25
+done
 
-terminal_resize_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
-VPSMAN_API_TOKEN="$access_token" \
+terminal_resize_json="$(VPSMAN_API_TOKEN="$access_token" \
   target/debug/vpsctl --api-url "$api_url" terminal-resize \
+    --client-id "$client_id" \
     --session-id "$terminal_session_id" \
     --cols 100 \
-    --rows 30 \
-    --clients "$client_id" \
-    --super-salt-hex "$super_salt_hex" \
-    --max-timeout-secs 10 \
-    --confirmed)"
-terminal_resize_job_id="$(jq -r '.job_id' <<<"$terminal_resize_json")"
-smoke_assert_job_create_queued "$terminal_resize_json" 1
-smoke_wait_api_job_status "$api_url" "$terminal_resize_job_id" completed 45 >/dev/null
+    --rows 30)"
+jq -e --arg sid "$terminal_session_id" '
+  .session_id == $sid
+  and .action == "resize"
+  and .accepted == true
+  and .status == "resized"
+  and .cols == 100
+  and .rows == 30
+' <<<"$terminal_resize_json" >/dev/null
 
-terminal_input_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
-VPSMAN_API_TOKEN="$access_token" \
+terminal_input_json="$(VPSMAN_API_TOKEN="$access_token" \
   target/debug/vpsctl --api-url "$api_url" terminal-input \
     --client-id "$client_id" \
     --session-id "$terminal_session_id" \
-    --data-base64 "$terminal_input_base64" \
-    --super-salt-hex "$super_salt_hex" \
-    --max-timeout-secs 10 \
-    --confirmed)"
-terminal_input_job_json="$(jq -c '.job' <<<"$terminal_input_json")"
-terminal_input_job_id="$(jq -r '.job_id' <<<"$terminal_input_job_json")"
-jq -e '.input_seq >= 1 and (.request_status | type == "string")' <<<"$terminal_input_json" >/dev/null
-smoke_assert_job_create_queued "$terminal_input_job_json" 1
-smoke_wait_api_job_status "$api_url" "$terminal_input_job_id" completed 45 >/dev/null
+    --data-base64 "$terminal_input_base64")"
+jq -e --arg sid "$terminal_session_id" '
+  .session_id == $sid
+  and .action == "input"
+  and .accepted == true
+  and .status == "accepted"
+  and .input_seq >= 1
+  and .written_bytes > 0
+' <<<"$terminal_input_json" >/dev/null
 
-terminal_attach_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
-VPSMAN_API_TOKEN="$access_token" \
-  target/debug/vpsctl --api-url "$api_url" terminal-open \
-    --session-id "$terminal_session_id" \
-    --argv "/bin/sh,-lc,read line; printf 'got:%s\\n' \"\$line\"" \
-    --replay-from-seq 1 \
-    --cols 96 \
-    --rows 28 \
-    --idle-timeout-secs 300 \
-    --flow-window-bytes 32768 \
-    --clients "$client_id" \
-    --super-salt-hex "$super_salt_hex" \
-    --max-timeout-secs 10 \
-    --confirmed)"
-terminal_attach_job_id="$(jq -r '.job.job_id' <<<"$terminal_attach_json")"
-jq -e '
-  .terminal_session_id == "'"$terminal_session_id"'"
-  and .job.target_count == 1
-' <<<"$terminal_attach_json" >/dev/null
-smoke_wait_api_job_status "$api_url" "$terminal_attach_job_id" completed 45 >/dev/null
+terminal_poll_json=""
+terminal_poll_text=""
+terminal_poll_deadline=$((SECONDS + 45))
+while (( SECONDS < terminal_poll_deadline )); do
+  terminal_poll_json="$(VPSMAN_API_TOKEN="$access_token" \
+    target/debug/vpsctl --api-url "$api_url" terminal-poll \
+      --client-id "$client_id" \
+      --session-id "$terminal_session_id" \
+      --replay-from-seq 1)"
+  terminal_poll_text="$(
+    jq -r '.chunks[]?.data_base64 // empty' <<<"$terminal_poll_json" \
+      | while IFS= read -r chunk; do
+          printf '%s' "$chunk" | base64 -d
+        done
+  )"
+  if [[ "$terminal_poll_text" == *"got:$terminal_payload"* ]]; then
+    break
+  fi
+  sleep 0.25
+done
+if [[ "$terminal_poll_text" != *"got:$terminal_payload"* ]]; then
+  echo "timed out waiting for direct terminal replay output" >&2
+  exit 1
+fi
+jq -e --arg client "$client_id" --arg sid "$terminal_session_id" '
+  .session_id == $sid
+  and .client_id == $client
+  and .from_seq == 1
+  and .chunk_count > 0
+  and .byte_count > 0
+  and .next_seq > 1
+  and .truncated == false
+' <<<"$terminal_poll_json" >/dev/null
 
-terminal_poll_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
-VPSMAN_API_TOKEN="$access_token" \
-  target/debug/vpsctl --api-url "$api_url" terminal-poll \
-    --session-id "$terminal_session_id" \
-    --replay-from-seq 1 \
-    --clients "$client_id" \
-    --super-salt-hex "$super_salt_hex" \
-    --max-timeout-secs 10 \
-    --confirmed)"
-terminal_poll_job_id="$(jq -r '.job_id' <<<"$terminal_poll_json")"
-smoke_assert_job_create_queued "$terminal_poll_json" 1
-smoke_wait_api_job_status "$api_url" "$terminal_poll_job_id" completed 45 >/dev/null
-
-terminal_close_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
-VPSMAN_API_TOKEN="$access_token" \
+terminal_close_json="$(VPSMAN_API_TOKEN="$access_token" \
   target/debug/vpsctl --api-url "$api_url" terminal-close \
+    --client-id "$client_id" \
     --session-id "$terminal_session_id" \
-    --reason live-terminal-smoke \
-    --clients "$client_id" \
-    --super-salt-hex "$super_salt_hex" \
-    --max-timeout-secs 10 \
-    --confirmed)"
-terminal_close_job_id="$(jq -r '.job_id' <<<"$terminal_close_json")"
-smoke_assert_job_create_queued "$terminal_close_json" 1
-smoke_wait_api_job_status "$api_url" "$terminal_close_job_id" completed 45 >/dev/null
+    --reason live-terminal-smoke)"
+jq -e --arg sid "$terminal_session_id" '
+  .session_id == $sid
+  and .action == "close"
+  and .accepted == true
+  and .status == "closed"
+' <<<"$terminal_close_json" >/dev/null
+smoke_wait_api_job_status "$api_url" "$terminal_open_job_id" completed 45 >/dev/null
 assert_terminal_session_workflow
 run_scheduled_resume_gateway_restart_check
 
@@ -586,11 +604,10 @@ jq -n \
   --arg file_pull_job_id "$file_pull_job_id" \
   --arg terminal_session_id "$terminal_session_id" \
   --arg terminal_open_job_id "$terminal_open_job_id" \
-  --arg terminal_resize_job_id "$terminal_resize_job_id" \
-  --arg terminal_input_job_id "$terminal_input_job_id" \
-  --arg terminal_attach_job_id "$terminal_attach_job_id" \
-  --arg terminal_poll_job_id "$terminal_poll_job_id" \
-  --arg terminal_close_job_id "$terminal_close_job_id" \
+  --argjson terminal_resize_ack "$terminal_resize_json" \
+  --argjson terminal_input_ack "$terminal_input_json" \
+  --argjson terminal_poll_replay "$(jq '{chunk_count, byte_count, next_seq, truncated, source}' <<<"$terminal_poll_json")" \
+  --argjson terminal_close_ack "$terminal_close_json" \
   --arg resumable_upload_session_id "$resumable_upload_session_id" \
   --arg resumable_download_session_id "$resumable_download_session_id" \
   --arg user_sessions_job_id "$user_sessions_job_id" \
@@ -620,11 +637,10 @@ jq -n \
     file_pull_job_id: $file_pull_job_id,
     terminal_session_id: $terminal_session_id,
     terminal_open_job_id: $terminal_open_job_id,
-    terminal_resize_job_id: $terminal_resize_job_id,
-    terminal_input_job_id: $terminal_input_job_id,
-    terminal_attach_job_id: $terminal_attach_job_id,
-    terminal_poll_job_id: $terminal_poll_job_id,
-    terminal_close_job_id: $terminal_close_job_id,
+    terminal_resize_ack: $terminal_resize_ack,
+    terminal_input_ack: $terminal_input_ack,
+    terminal_poll_replay: $terminal_poll_replay,
+    terminal_close_ack: $terminal_close_ack,
     resumable_upload_session_id: $resumable_upload_session_id,
     resumable_download_session_id: $resumable_download_session_id,
     user_sessions_job_id: $user_sessions_job_id,

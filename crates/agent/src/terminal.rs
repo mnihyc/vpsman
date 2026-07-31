@@ -17,9 +17,10 @@ use tokio::{
 };
 use tracing::warn;
 use vpsman_common::{
-    payload_hash, AgentConfig, AgentExecutionEnvironmentPolicy, AgentExecutionPtyPolicy,
-    CommandOutput, JobCommand, OutputStream, TerminalStreamOutput, TerminalUserPolicy,
-    MAX_TERMINAL_INPUT_BYTES, MAX_TERMINAL_REASON_BYTES,
+    AgentConfig, AgentExecutionEnvironmentPolicy, AgentExecutionPtyPolicy, CommandOutput,
+    JobCommand, OutputStream, TerminalControlAck, TerminalControlAction, TerminalControlRequest,
+    TerminalStreamOutput, TerminalUserPolicy, MAX_TERMINAL_COLS, MAX_TERMINAL_INPUT_BYTES,
+    MAX_TERMINAL_REASON_BYTES, MAX_TERMINAL_ROWS, MIN_TERMINAL_COLS, MIN_TERMINAL_ROWS,
 };
 
 use crate::{
@@ -39,6 +40,7 @@ const TERMINAL_DISCONNECTED_GRACE_SECS: u64 = 3600;
 const TERMINAL_PENDING_FINAL_EVENTS_MAX: usize = 256;
 
 static TERMINAL_REGISTRY: OnceLock<TerminalRegistry> = OnceLock::new();
+static TERMINAL_OPEN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static TERMINAL_PENDING_FINAL_EVENTS: OnceLock<Mutex<VecDeque<TerminalStreamOutput>>> =
     OnceLock::new();
 
@@ -77,7 +79,8 @@ pub(crate) async fn mark_gateway_disconnected() {
 pub(crate) async fn close_all_terminal_sessions_for_lifecycle(reason: &str) {
     let entries = registry().remove_all().await;
     for entry in entries {
-        close_removed_terminal_entry(entry, "lifecycle_disconnected", reason).await;
+        close_removed_terminal_entry(entry, "terminal_stream", "lifecycle_disconnected", reason)
+            .await;
     }
 }
 
@@ -121,23 +124,6 @@ async fn execute_terminal_command_inner(
             })
             .await
         }
-        JobCommand::TerminalInput {
-            session_id,
-            input_seq,
-            data_base64,
-        } => input_terminal_session(job_id, *session_id, *input_seq, data_base64).await,
-        JobCommand::TerminalPoll {
-            session_id,
-            replay_from_seq,
-        } => poll_terminal_session(job_id, *session_id, *replay_from_seq).await,
-        JobCommand::TerminalResize {
-            session_id,
-            cols,
-            rows,
-        } => resize_terminal_session(job_id, *session_id, *cols, *rows).await,
-        JobCommand::TerminalClose { session_id, reason } => {
-            close_terminal_session(job_id, *session_id, reason.as_deref()).await
-        }
         _ => anyhow::bail!("not a terminal command"),
     }
 }
@@ -177,8 +163,21 @@ async fn open_terminal_session(input: TerminalOpenInput<'_>) -> Result<Vec<Comma
         .or(input.config.execution.working_directory.as_deref());
     validate_terminal_cwd(effective_cwd)?;
     let user_resolution = resolve_terminal_user(input.user, input.user_policy)?;
+    let _open_guard = terminal_open_lock().lock().await;
     let registry = registry();
     if let Some(handle) = registry.get_handle(input.session_id).await {
+        if handle.open_job_id != input.job_id {
+            return Ok(vec![status_output(
+                input.job_id,
+                serde_json::json!({
+                    "type": "terminal_open",
+                    "status": "rejected",
+                    "reason": "terminal_session_id_in_use",
+                    "session_id": input.session_id,
+                }),
+                Some(125),
+            )]);
+        }
         handle.update_stream_sender(input.stream_tx).await;
         handle.last_activity.store(unix_now(), Ordering::Relaxed);
         let (outputs, range) = collect_session_output(
@@ -285,7 +284,6 @@ async fn open_terminal_session(input: TerminalOpenInput<'_>) -> Result<Vec<Comma
                 handle: handle.clone(),
                 last_delivered_seq: input.replay_from_seq.unwrap_or_default(),
                 last_input_seq: 0,
-                accepted_inputs: HashMap::new(),
                 disconnected_since: None,
                 idle_timeout_secs: input.idle_timeout_secs,
                 cols: input.cols,
@@ -407,161 +405,123 @@ fn apply_kept_environment(config: &AgentConfig, command: &mut tokio::process::Co
     }
 }
 
-async fn input_terminal_session(
-    job_id: uuid::Uuid,
-    session_id: uuid::Uuid,
-    input_seq: u64,
-    data_base64: &str,
-) -> Result<Vec<CommandOutput>> {
-    let data = base64::engine::general_purpose::STANDARD
-        .decode(data_base64)
-        .context("terminal input data is not valid base64")?;
-    if data.is_empty() || data.len() > MAX_TERMINAL_INPUT_BYTES {
-        anyhow::bail!("terminal input size is out of range");
+pub(crate) async fn control_terminal_session(
+    request: TerminalControlRequest,
+) -> TerminalControlAck {
+    let action = request.action.kind().to_string();
+    let rejected = |status: &str, message: &str| TerminalControlAck {
+        request_id: request.request_id,
+        session_id: request.session_id,
+        action: action.clone(),
+        accepted: false,
+        status: status.to_string(),
+        message: message.to_string(),
+        input_seq: None,
+        written_bytes: None,
+        cols: None,
+        rows: None,
+    };
+    if request.request_id.is_nil() || request.session_id.is_nil() {
+        return rejected("rejected", "terminal_control_id_invalid");
     }
-    let data_sha256_hex = payload_hash(&data);
-    let Some(handle) = registry()
-        .accept_input(session_id, input_seq, &data_sha256_hex)
-        .await
-    else {
-        return Ok(vec![missing_session_status(
-            job_id,
-            session_id,
-            "terminal_input",
-        )]);
-    };
-    if handle.decision == TerminalInputDecision::Accepted {
-        let mut writer = handle.session.writer.lock().await;
-        writer.write_all(&data).await?;
-        writer.flush().await?;
-        handle
-            .session
-            .last_activity
-            .store(unix_now(), Ordering::Relaxed);
-        time::sleep(Duration::from_millis(TERMINAL_OUTPUT_SETTLE_MS)).await;
+    match request.action {
+        TerminalControlAction::Input { data_base64 } => {
+            let data = match base64::engine::general_purpose::STANDARD.decode(data_base64) {
+                Ok(data) if !data.is_empty() && data.len() <= MAX_TERMINAL_INPUT_BYTES => data,
+                _ => {
+                    return rejected("rejected", "terminal_input_size_or_encoding_invalid");
+                }
+            };
+            let Some((handle, input_seq)) = registry().next_input(request.session_id).await else {
+                return rejected("missing", "terminal_session_not_open");
+            };
+            if handle.session_exited().await {
+                return rejected("exited", "terminal_session_exited");
+            }
+            let write_result = async {
+                let mut writer = handle.writer.lock().await;
+                writer.write_all(&data).await?;
+                writer.flush().await
+            }
+            .await;
+            if write_result.is_err() {
+                return rejected("failed", "terminal_input_write_failed");
+            }
+            handle.last_activity.store(unix_now(), Ordering::Relaxed);
+            TerminalControlAck {
+                request_id: request.request_id,
+                session_id: request.session_id,
+                action,
+                accepted: true,
+                status: "accepted".to_string(),
+                message: "terminal_input_accepted".to_string(),
+                input_seq: Some(input_seq),
+                written_bytes: Some(data.len() as u64),
+                cols: None,
+                rows: None,
+            }
+        }
+        TerminalControlAction::Resize { cols, rows } => {
+            if !(MIN_TERMINAL_COLS..=MAX_TERMINAL_COLS).contains(&cols)
+                || !(MIN_TERMINAL_ROWS..=MAX_TERMINAL_ROWS).contains(&rows)
+            {
+                return rejected("rejected", "terminal_dimensions_out_of_range");
+            }
+            let Some(handle) = registry().resize(request.session_id, cols, rows).await else {
+                return rejected("missing", "terminal_session_not_open");
+            };
+            if handle.session_exited().await {
+                return rejected("exited", "terminal_session_exited");
+            }
+            let writer = handle.writer.lock().await;
+            if child_process::set_pty_window_size(&*writer, cols, rows).is_err() {
+                return rejected("failed", "terminal_resize_failed");
+            }
+            handle.last_activity.store(unix_now(), Ordering::Relaxed);
+            TerminalControlAck {
+                request_id: request.request_id,
+                session_id: request.session_id,
+                action,
+                accepted: true,
+                status: "resized".to_string(),
+                message: "terminal_resized".to_string(),
+                input_seq: None,
+                written_bytes: None,
+                cols: Some(cols),
+                rows: Some(rows),
+            }
+        }
+        TerminalControlAction::Close { reason } => {
+            if validate_terminal_reason(reason.as_deref()).is_err() {
+                return rejected("rejected", "terminal_close_reason_invalid");
+            }
+            let Some(entry) = registry().remove(request.session_id).await else {
+                return rejected("missing", "terminal_session_not_open");
+            };
+            if entry.handle.session_exited().await {
+                return rejected("exited", "terminal_session_exited");
+            }
+            close_removed_terminal_entry(
+                entry,
+                "terminal_close",
+                "closed",
+                reason.as_deref().unwrap_or("operator"),
+            )
+            .await;
+            TerminalControlAck {
+                request_id: request.request_id,
+                session_id: request.session_id,
+                action,
+                accepted: true,
+                status: "closed".to_string(),
+                message: "terminal_closed".to_string(),
+                input_seq: None,
+                written_bytes: None,
+                cols: None,
+                rows: None,
+            }
+        }
     }
-    let (outputs, range) = collect_session_output(job_id, session_id, None).await;
-    let status = handle.decision.status();
-    Ok(with_status(
-        outputs,
-        job_id,
-        status_with_output_range(
-            serde_json::json!({
-            "type": "terminal_input",
-            "status": status,
-            "session_id": session_id,
-            "input_seq": input_seq,
-            "written_bytes": if handle.decision == TerminalInputDecision::Accepted { data.len() } else { 0 },
-            "session_exited": handle.session.session_exited().await,
-            }),
-            &range,
-        ),
-        Some(handle.decision.exit_code()),
-    ))
-}
-
-async fn poll_terminal_session(
-    job_id: uuid::Uuid,
-    session_id: uuid::Uuid,
-    replay_from_seq: Option<u64>,
-) -> Result<Vec<CommandOutput>> {
-    let Some(handle) = registry().get_handle(session_id).await else {
-        return Ok(vec![missing_session_status(
-            job_id,
-            session_id,
-            "terminal_poll",
-        )]);
-    };
-    let (outputs, range) = collect_session_output(job_id, session_id, replay_from_seq).await;
-    Ok(with_status(
-        outputs,
-        job_id,
-        status_with_output_range(
-            serde_json::json!({
-                "type": "terminal_poll",
-                "status": "polled",
-                "session_id": session_id,
-                "replay_from_seq": replay_from_seq,
-                "session_exited": handle.session_exited().await,
-            }),
-            &range,
-        ),
-        Some(0),
-    ))
-}
-
-async fn resize_terminal_session(
-    job_id: uuid::Uuid,
-    session_id: uuid::Uuid,
-    cols: u16,
-    rows: u16,
-) -> Result<Vec<CommandOutput>> {
-    let Some(handle) = registry().resize(session_id, cols, rows).await else {
-        return Ok(vec![missing_session_status(
-            job_id,
-            session_id,
-            "terminal_resize",
-        )]);
-    };
-    let writer = handle.writer.lock().await;
-    child_process::set_pty_window_size(&*writer, cols, rows)
-        .context("failed to resize terminal PTY")?;
-    handle.last_activity.store(unix_now(), Ordering::Relaxed);
-    Ok(vec![status_output(
-        job_id,
-        serde_json::json!({
-            "type": "terminal_resize",
-            "status": "resized",
-            "session_id": session_id,
-            "cols": cols,
-            "rows": rows,
-            "session_exited": handle.session_exited().await,
-        }),
-        Some(0),
-    )])
-}
-
-async fn close_terminal_session(
-    job_id: uuid::Uuid,
-    session_id: uuid::Uuid,
-    reason: Option<&str>,
-) -> Result<Vec<CommandOutput>> {
-    validate_terminal_reason(reason)?;
-    let Some(entry) = registry().remove(session_id).await else {
-        return Ok(vec![status_output(
-            job_id,
-            serde_json::json!({
-                "type": "terminal_close",
-                "status": "missing",
-                "session_id": session_id,
-            }),
-            Some(0),
-        )]);
-    };
-    let cleanup = terminate_terminal_process_group(entry.handle.process_group_id).await?;
-    time::sleep(Duration::from_millis(TERMINAL_OUTPUT_SETTLE_MS)).await;
-    entry
-        .handle
-        .emit_stream_status("terminal_stream", "closed", true, Some(0))
-        .await;
-    let (chunks, range) =
-        collect_output_from_handle(job_id, &entry.handle, Some(entry.last_delivered_seq)).await;
-    Ok(with_status(
-        chunks,
-        job_id,
-        status_with_output_range(
-            serde_json::json!({
-            "type": "terminal_close",
-            "status": "closed",
-            "session_id": session_id,
-            "reason": reason,
-            "session_exited": entry.handle.session_exited().await,
-            "cleanup": cleanup,
-            }),
-            &range,
-        ),
-        Some(0),
-    ))
 }
 
 #[derive(Clone)]
@@ -735,42 +695,12 @@ impl TerminalRegistry {
         self.sessions.lock().await.remove(&session_id)
     }
 
-    async fn accept_input(
-        &self,
-        session_id: uuid::Uuid,
-        input_seq: u64,
-        data_sha256_hex: &str,
-    ) -> Option<TerminalInputHandle> {
+    async fn next_input(&self, session_id: uuid::Uuid) -> Option<(TerminalSessionHandle, u64)> {
         let mut sessions = self.sessions.lock().await;
         let entry = sessions.get_mut(&session_id)?;
         entry.disconnected_since = None;
-        let decision = if input_seq == entry.last_input_seq.saturating_add(1) {
-            entry.last_input_seq = input_seq;
-            entry
-                .accepted_inputs
-                .insert(input_seq, data_sha256_hex.to_string());
-            TerminalInputDecision::Accepted
-        } else if input_seq <= entry.last_input_seq {
-            match entry.accepted_inputs.get(&input_seq) {
-                Some(stored_hash) if stored_hash == data_sha256_hex => {
-                    TerminalInputDecision::DuplicateIgnored
-                }
-                _ => TerminalInputDecision::DuplicateConflict,
-            }
-        } else {
-            TerminalInputDecision::OutOfOrder
-        };
-        while entry.accepted_inputs.len() > 128 {
-            if let Some(oldest) = entry.accepted_inputs.keys().next().copied() {
-                entry.accepted_inputs.remove(&oldest);
-            } else {
-                break;
-            }
-        }
-        Some(TerminalInputHandle {
-            session: entry.handle.clone(),
-            decision,
-        })
+        entry.last_input_seq = entry.last_input_seq.saturating_add(1);
+        Some((entry.handle.clone(), entry.last_input_seq))
     }
 
     async fn resize(
@@ -849,43 +779,10 @@ struct TerminalRegistryEntry {
     handle: TerminalSessionHandle,
     last_delivered_seq: u64,
     last_input_seq: u64,
-    accepted_inputs: HashMap<u64, String>,
     disconnected_since: Option<u64>,
     idle_timeout_secs: u32,
     cols: u16,
     rows: u16,
-}
-
-struct TerminalInputHandle {
-    session: TerminalSessionHandle,
-    decision: TerminalInputDecision,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TerminalInputDecision {
-    Accepted,
-    DuplicateIgnored,
-    DuplicateConflict,
-    OutOfOrder,
-}
-
-impl TerminalInputDecision {
-    fn status(self) -> &'static str {
-        match self {
-            Self::Accepted => "accepted",
-            Self::DuplicateIgnored => "duplicate_ignored",
-            Self::DuplicateConflict => "duplicate_conflict",
-            Self::OutOfOrder => "out_of_order",
-        }
-    }
-
-    fn exit_code(self) -> i32 {
-        match self {
-            Self::Accepted | Self::DuplicateIgnored => 0,
-            Self::DuplicateConflict => 125,
-            Self::OutOfOrder => 126,
-        }
-    }
 }
 
 struct TerminalOutputBuffer {
@@ -1133,6 +1030,7 @@ fn spawn_idle_reaper(
             for entry in registry().disconnected_expired_sessions().await {
                 close_removed_terminal_entry(
                     entry,
+                    "terminal_stream",
                     "disconnected_timeout",
                     "gateway_disconnected_timeout",
                 )
@@ -1153,6 +1051,7 @@ fn spawn_idle_reaper(
 
 async fn close_removed_terminal_entry(
     entry: TerminalRegistryEntry,
+    event_type: &'static str,
     status: &'static str,
     reason: &str,
 ) {
@@ -1166,7 +1065,7 @@ async fn close_removed_terminal_entry(
     time::sleep(Duration::from_millis(TERMINAL_OUTPUT_SETTLE_MS)).await;
     entry
         .handle
-        .emit_stream_status_with_reason("terminal_stream", status, true, Some(0), Some(reason))
+        .emit_stream_status_with_reason(event_type, status, true, Some(0), Some(reason))
         .await;
 }
 
@@ -1176,7 +1075,13 @@ fn with_status(
     status: serde_json::Value,
     exit_code: Option<i32>,
 ) -> Vec<CommandOutput> {
-    outputs.push(status_output(job_id, status, exit_code));
+    outputs.push(CommandOutput {
+        job_id,
+        stream: OutputStream::Status,
+        data: serde_json::to_vec(&status).unwrap_or_default(),
+        exit_code,
+        done: false,
+    });
     outputs
 }
 
@@ -1231,22 +1136,6 @@ fn status_output(
     }
 }
 
-fn missing_session_status(
-    job_id: uuid::Uuid,
-    session_id: uuid::Uuid,
-    command_type: &'static str,
-) -> CommandOutput {
-    status_output(
-        job_id,
-        serde_json::json!({
-            "type": command_type,
-            "status": "missing",
-            "session_id": session_id,
-        }),
-        Some(125),
-    )
-}
-
 fn validate_terminal_argv(argv: &[String]) -> Result<()> {
     if argv.is_empty() {
         anyhow::bail!("terminal argv is empty");
@@ -1296,6 +1185,10 @@ fn registry() -> &'static TerminalRegistry {
     TERMINAL_REGISTRY.get_or_init(|| TerminalRegistry {
         sessions: Mutex::new(HashMap::new()),
     })
+}
+
+fn terminal_open_lock() -> &'static Mutex<()> {
+    TERMINAL_OPEN_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn pending_final_events() -> &'static Mutex<VecDeque<TerminalStreamOutput>> {
@@ -1447,7 +1340,6 @@ mod tests {
             },
             last_delivered_seq: 1,
             last_input_seq: 0,
-            accepted_inputs: HashMap::new(),
             disconnected_since: None,
             idle_timeout_secs,
             cols: 120,

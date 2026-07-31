@@ -548,10 +548,6 @@ function capabilityForOperation(operation: JobOperation): RunbookCapability {
         supervisorAction: "logs",
       };
     case "terminal_open":
-    case "terminal_input":
-    case "terminal_poll":
-    case "terminal_resize":
-    case "terminal_close":
       return {
         dispatchable: false,
         reason: "Terminal lifecycle belongs in Remote.",

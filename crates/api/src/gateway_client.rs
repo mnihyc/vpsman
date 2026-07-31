@@ -6,6 +6,8 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+#[cfg(test)]
+use base64::Engine as _;
 use serde::de::DeserializeOwned;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -16,7 +18,8 @@ use vpsman_common::{
     GatewayCommandCancel, GatewayCommandCancelResult, GatewayCommandDispatch,
     GatewayCommandDispatchResult, GatewayForwardMetricsSnapshot, GatewayPrivilegeVerification,
     GatewayPrivilegeVerificationResult, GatewaySessionDisconnect, GatewaySessionDisconnectResult,
-    JobCancelRequest, JobRequest, PrivilegeAssertion,
+    GatewayTerminalControl, GatewayTerminalControlResult, JobCancelRequest, JobRequest,
+    PrivilegeAssertion, TerminalControlRequest,
 };
 
 const CONTROL_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -189,6 +192,67 @@ impl GatewayDispatchClient {
             "/internal/v1/gateway/command/cancel",
             &GatewayCommandCancel {
                 client_id: client_id.to_string(),
+                request,
+            },
+            self.internal_token.as_deref(),
+            self.timeouts(),
+        )
+        .await
+    }
+
+    pub(crate) async fn terminal_control(
+        &self,
+        client_id: &str,
+        expected_process_incarnation_id: uuid::Uuid,
+        request: TerminalControlRequest,
+    ) -> Result<GatewayTerminalControlResult> {
+        #[cfg(test)]
+        if self.test_privilege_auto_approve {
+            let action = request.action.kind().to_string();
+            let (status, input_seq, written_bytes, cols, rows) = match &request.action {
+                vpsman_common::TerminalControlAction::Input { data_base64 } => (
+                    "accepted",
+                    Some(1),
+                    base64::engine::general_purpose::STANDARD
+                        .decode(data_base64)
+                        .ok()
+                        .map(|data| data.len() as u64),
+                    None,
+                    None,
+                ),
+                vpsman_common::TerminalControlAction::Resize { cols, rows } => {
+                    ("resized", None, None, Some(*cols), Some(*rows))
+                }
+                vpsman_common::TerminalControlAction::Close { .. } => {
+                    ("closed", None, None, None, None)
+                }
+            };
+            return Ok(GatewayTerminalControlResult {
+                client_id: client_id.to_string(),
+                ack: vpsman_common::TerminalControlAck {
+                    request_id: request.request_id,
+                    session_id: request.session_id,
+                    action,
+                    accepted: true,
+                    status: status.to_string(),
+                    message: "test terminal control accepted".to_string(),
+                    input_seq,
+                    written_bytes,
+                    cols,
+                    rows,
+                },
+            });
+        }
+        let control_url = self
+            .control_url
+            .as_deref()
+            .context("gateway control URL is not configured")?;
+        post_gateway_control(
+            control_url,
+            "/internal/v1/gateway/terminal/control",
+            &GatewayTerminalControl {
+                client_id: client_id.to_string(),
+                expected_process_incarnation_id,
                 request,
             },
             self.internal_token.as_deref(),

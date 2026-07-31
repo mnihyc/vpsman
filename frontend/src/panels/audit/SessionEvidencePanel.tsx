@@ -143,7 +143,7 @@ export function SessionEvidencePanel({
   const evidenceRows = useMemo<TerminalEvidenceRecord[]>(
     () =>
       terminalSessions.map((session) => {
-        const job = jobsById.get(session.last_job_id) ?? null;
+        const job = jobsById.get(session.job_id) ?? null;
         return {
           audits: audits
             .filter((audit) => auditMatchesTerminalSession(audit, session, job))
@@ -668,12 +668,12 @@ function SelectedSessionEvidence({
           <span>{transcriptLabel(record.session)}</span>
         </span>
         <span>
-          <strong>Last job</strong>
-          <span>{record.session.last_job_id}</span>
+          <strong>Authorization job</strong>
+          <span>{record.session.job_id}</span>
         </span>
         <span>
-          <strong>Last command</strong>
-          <span>{record.session.last_command_type}</span>
+          <strong>Authorization command</strong>
+          <span>terminal_open</span>
         </span>
       </div>
 
@@ -1361,7 +1361,7 @@ function auditMatchesTerminalSession(
     `${audit.target} ${JSON.stringify(audit.metadata)}`.toLowerCase();
   if (
     text.includes(session.session_id.toLowerCase()) ||
-    text.includes(session.last_job_id.toLowerCase())
+    text.includes(session.job_id.toLowerCase())
   ) {
     return true;
   }
@@ -1637,7 +1637,7 @@ function terminalKey(session: TerminalSessionRecord): string {
 }
 
 function isTerminalOpen(session: TerminalSessionRecord): boolean {
-  return !session.session_exited && session.state !== "closed";
+  return session.state === "opening" || session.state === "open";
 }
 
 function sessionLifecycleLabel(session: TerminalSessionRecord): string {

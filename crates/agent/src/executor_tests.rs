@@ -10,13 +10,15 @@ mod tests {
     use crate::file_push::{
         execute_file_transfer_abort, execute_file_transfer_chunk, execute_file_transfer_start,
     };
+    use crate::terminal::{control_terminal_session, execute_terminal_command_with_stream_sink};
     use std::{io::Cursor, os::unix::fs::PermissionsExt, time::Duration};
     use tokio::sync::mpsc;
     use vpsman_common::{
         payload_hash, AgentConfig, AgentExecutionConfig, AgentExecutionEnvironmentPolicy,
         AgentExecutionProcessCleanupPolicy, AgentExecutionPtyPolicy, AgentProcessInventorySource,
         AgentUserSessionsSource, FileActionPolicy, FileExistingPolicy, FileOwnershipPolicy,
-        FilePushChunk, JobCommand, OutputStream, RuntimeTunnelCommand,
+        FilePushChunk, JobCommand, OutputStream, RuntimeTunnelCommand, TerminalControlAck,
+        TerminalControlAction, TerminalControlRequest, TerminalStreamOutput,
     };
 
     #[tokio::test]
@@ -163,17 +165,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_session_accepts_input_resize_and_close() {
+    async fn terminal_session_accepts_exact_input_resize_and_close() {
         let session_id = uuid::Uuid::new_v4();
         let open_job_id = uuid::Uuid::new_v4();
-        let outputs = execute_job_command(
+        let (stream_tx, mut stream_rx) = mpsc::channel(16);
+        let outputs = execute_terminal_command_with_stream_sink(
+            &AgentConfig::default(),
             open_job_id,
             &JobCommand::TerminalOpen {
                 session_id,
                 argv: vec![
                     "/bin/sh".to_string(),
                     "-lc".to_string(),
-                    "read line; printf 'got:%s\\n' \"$line\"".to_string(),
+                    "printf 'ready\\n'; stty raw -echo; dd bs=1 count=4 2>/dev/null | od -An -t x1; sleep 30".to_string(),
                 ],
                 cwd: None,
                 user: None,
@@ -185,72 +189,79 @@ mod tests {
                 flow_window_bytes: 65_536,
             },
             5,
+            Some(stream_tx),
         )
         .await
         .unwrap();
 
         let status = outputs
             .iter()
-            .find(|output| output.done && output.stream == OutputStream::Status)
+            .find(|output| output.stream == OutputStream::Status)
             .expect("terminal open status");
         assert_eq!(status.job_id, open_job_id);
         assert_eq!(status.exit_code, Some(0));
+        assert!(!status.done);
         let payload: serde_json::Value = serde_json::from_slice(&status.data).unwrap();
         assert_eq!(payload["type"], "terminal_open");
         assert_eq!(payload["status"], "opened");
 
-        let resize_outputs = execute_job_command(
-            uuid::Uuid::new_v4(),
-            &JobCommand::TerminalResize {
-                session_id,
+        let resize = issue_terminal_control(
+            session_id,
+            TerminalControlAction::Resize {
                 cols: 100,
                 rows: 30,
             },
-            5,
         )
-        .await
-        .unwrap();
-        let resize_status = status_payload(&resize_outputs);
-        assert_eq!(resize_status["type"], "terminal_resize");
-        assert_eq!(resize_status["status"], "resized");
+        .await;
+        assert!(resize.accepted);
+        assert_eq!(resize.action, "resize");
+        assert_eq!(resize.status, "resized");
+        assert_eq!(resize.cols, Some(100));
+        assert_eq!(resize.rows, Some(30));
 
-        let input_outputs = execute_job_command(
-            uuid::Uuid::new_v4(),
-            &JobCommand::TerminalInput {
-                session_id,
-                input_seq: 1,
-                data_base64: vpsman_common::encode_inline_file_payload(b"hello\n").unwrap(),
+        let exact_input = [b'A', 0x03, 0x7f, b'\r'];
+        let input = issue_terminal_control(
+            session_id,
+            TerminalControlAction::Input {
+                data_base64: vpsman_common::encode_inline_file_payload(&exact_input).unwrap(),
             },
-            5,
         )
-        .await
-        .unwrap();
-        let pty_text = pty_text(&input_outputs);
-        assert!(pty_text.contains("got:hello"), "{pty_text:?}");
-        let input_status = status_payload(&input_outputs);
-        assert_eq!(input_status["type"], "terminal_input");
-        assert_eq!(input_status["status"], "accepted");
-        assert_eq!(input_status["written_bytes"], 6);
+        .await;
+        assert!(input.accepted);
+        assert_eq!(input.action, "input");
+        assert_eq!(input.status, "accepted");
+        assert_eq!(input.input_seq, Some(1));
+        assert_eq!(input.written_bytes, Some(exact_input.len() as u64));
+        let streamed =
+            terminal_stream_text_until(&mut stream_rx, open_job_id, session_id, "41 03 7f 0d")
+                .await;
+        assert!(streamed.contains("41 03 7f 0d"), "{streamed:?}");
 
-        let close_outputs = execute_job_command(
-            uuid::Uuid::new_v4(),
-            &JobCommand::TerminalClose {
-                session_id,
+        let close = issue_terminal_control(
+            session_id,
+            TerminalControlAction::Close {
                 reason: Some("test complete".to_string()),
             },
-            5,
         )
-        .await
-        .unwrap();
-        let close_status = status_payload(&close_outputs);
-        assert_eq!(close_status["type"], "terminal_close");
-        assert_eq!(close_status["status"], "closed");
-        assert_eq!(close_status["cleanup"]["target_kind"], "process_group");
-        assert_eq!(close_status["cleanup"]["final_running"], false);
+        .await;
+        assert!(close.accepted);
+        assert_eq!(close.action, "close");
+        assert_eq!(close.status, "closed");
+
+        let after_close = issue_terminal_control(
+            session_id,
+            TerminalControlAction::Input {
+                data_base64: vpsman_common::encode_inline_file_payload(b"ignored").unwrap(),
+            },
+        )
+        .await;
+        assert!(!after_close.accepted);
+        assert_eq!(after_close.status, "missing");
+        assert_eq!(after_close.message, "terminal_session_not_open");
     }
 
     #[tokio::test]
-    async fn terminal_input_enforces_exact_sequence_and_payload_replay() {
+    async fn terminal_input_sequence_is_assigned_by_registry() {
         let session_id = uuid::Uuid::new_v4();
         let outputs = execute_job_command(
             uuid::Uuid::new_v4(),
@@ -259,7 +270,7 @@ mod tests {
                 argv: vec![
                     "/bin/sh".to_string(),
                     "-lc".to_string(),
-                    "while IFS= read -r line; do printf 'got:%s\\n' \"$line\"; done".to_string(),
+                    "cat >/dev/null".to_string(),
                 ],
                 cwd: None,
                 user: None,
@@ -274,159 +285,85 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(status_payload(&outputs)["status"], "opened");
+        assert_eq!(terminal_open_status_payload(&outputs)["status"], "opened");
 
-        let future = execute_job_command(
-            uuid::Uuid::new_v4(),
-            &JobCommand::TerminalInput {
-                session_id,
-                input_seq: 2,
-                data_base64: vpsman_common::encode_inline_file_payload(b"future\n").unwrap(),
+        let first = issue_terminal_control(
+            session_id,
+            TerminalControlAction::Input {
+                data_base64: vpsman_common::encode_inline_file_payload(b"first\n").unwrap(),
             },
-            5,
         )
-        .await
-        .unwrap();
-        let future_status = status_payload(&future);
-        assert_eq!(future_status["status"], "out_of_order");
-        assert_eq!(future_status["written_bytes"], 0);
-        assert!(!pty_text(&future).contains("got:future"));
+        .await;
+        let second = issue_terminal_control(
+            session_id,
+            TerminalControlAction::Input {
+                data_base64: vpsman_common::encode_inline_file_payload(b"second\n").unwrap(),
+            },
+        )
+        .await;
 
-        let accepted = execute_job_command(
-            uuid::Uuid::new_v4(),
-            &JobCommand::TerminalInput {
-                session_id,
-                input_seq: 1,
-                data_base64: vpsman_common::encode_inline_file_payload(b"hello\n").unwrap(),
-            },
-            5,
-        )
-        .await
-        .unwrap();
-        let accepted_status = status_payload(&accepted);
-        assert_eq!(accepted_status["status"], "accepted");
-        assert_eq!(accepted_status["written_bytes"], 6);
-        assert!(pty_text(&accepted).contains("got:hello"));
+        assert!(first.accepted);
+        assert!(second.accepted);
+        assert_eq!(first.input_seq, Some(1));
+        assert_eq!(second.input_seq, Some(2));
+        assert_eq!(first.written_bytes, Some(6));
+        assert_eq!(second.written_bytes, Some(7));
 
-        let duplicate = execute_job_command(
-            uuid::Uuid::new_v4(),
-            &JobCommand::TerminalInput {
-                session_id,
-                input_seq: 1,
-                data_base64: vpsman_common::encode_inline_file_payload(b"hello\n").unwrap(),
-            },
-            5,
-        )
-        .await
-        .unwrap();
-        let duplicate_status = status_payload(&duplicate);
-        assert_eq!(duplicate_status["status"], "duplicate_ignored");
-        assert_eq!(duplicate_status["written_bytes"], 0);
-
-        let conflict = execute_job_command(
-            uuid::Uuid::new_v4(),
-            &JobCommand::TerminalInput {
-                session_id,
-                input_seq: 1,
-                data_base64: vpsman_common::encode_inline_file_payload(b"different\n").unwrap(),
-            },
-            5,
-        )
-        .await
-        .unwrap();
-        let conflict_status = status_payload(&conflict);
-        assert_eq!(conflict_status["status"], "duplicate_conflict");
-        assert_eq!(conflict_status["written_bytes"], 0);
-        assert!(!pty_text(&conflict).contains("got:different"));
-
-        let _ = execute_job_command(
-            uuid::Uuid::new_v4(),
-            &JobCommand::TerminalClose {
-                session_id,
-                reason: Some("test cleanup".to_string()),
-            },
-            5,
-        )
-        .await
-        .unwrap();
+        let close = close_test_terminal(session_id).await;
+        assert!(close.accepted);
     }
 
     #[tokio::test]
-    async fn terminal_session_attach_replays_from_requested_cursor() {
+    async fn terminal_session_id_cannot_be_rebound_to_another_job() {
         let session_id = uuid::Uuid::new_v4();
-        let argv = vec![
-            "/bin/sh".to_string(),
-            "-lc".to_string(),
-            "printf 'first-line\\nsecond-line\\n'; sleep 10".to_string(),
-        ];
-        let open_outputs = execute_job_command(
-            uuid::Uuid::new_v4(),
-            &JobCommand::TerminalOpen {
-                session_id,
-                argv: argv.clone(),
-                cwd: None,
-                user: None,
-                user_policy: vpsman_common::TerminalUserPolicy::Fail,
-                cols: 120,
-                rows: 40,
-                replay_from_seq: None,
-                idle_timeout_secs: 30,
-                flow_window_bytes: 65_536,
-            },
-            5,
-        )
-        .await
-        .unwrap();
-        assert!(pty_text(&open_outputs).contains("first-line"));
-        let open_status = status_payload(&open_outputs);
-        assert_eq!(open_status["status"], "opened");
-        assert_eq!(open_status["output_replay_truncated"], false);
-        assert!(open_status["output_retained_bytes"].as_u64().unwrap() > 0);
+        let command = JobCommand::TerminalOpen {
+            session_id,
+            argv: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "cat >/dev/null".to_string(),
+            ],
+            cwd: None,
+            user: None,
+            user_policy: vpsman_common::TerminalUserPolicy::Fail,
+            cols: 120,
+            rows: 40,
+            replay_from_seq: None,
+            idle_timeout_secs: 30,
+            flow_window_bytes: 65_536,
+        };
+        let first_job_id = uuid::Uuid::new_v4();
+        let first = execute_job_command(first_job_id, &command, 5)
+            .await
+            .unwrap();
+        assert_eq!(terminal_open_status_payload(&first)["status"], "opened");
 
-        let attach_outputs = execute_job_command(
-            uuid::Uuid::new_v4(),
-            &JobCommand::TerminalOpen {
-                session_id,
-                argv,
-                cwd: None,
-                user: None,
-                user_policy: vpsman_common::TerminalUserPolicy::Fail,
-                cols: 120,
-                rows: 40,
-                replay_from_seq: Some(1),
-                idle_timeout_secs: 30,
-                flow_window_bytes: 65_536,
-            },
-            5,
-        )
-        .await
-        .unwrap();
-        let attach_text = pty_text(&attach_outputs);
-        assert!(attach_text.contains("first-line"), "{attach_text:?}");
-        assert!(attach_text.contains("second-line"), "{attach_text:?}");
-        let attach_status = status_payload(&attach_outputs);
-        assert_eq!(attach_status["type"], "terminal_open");
-        assert_eq!(attach_status["status"], "attached");
-        assert_eq!(attach_status["output_first_seq"], 1);
-        assert_eq!(attach_status["output_replay_truncated"], false);
+        let second_job_id = uuid::Uuid::new_v4();
+        let second = execute_job_command(second_job_id, &command, 5)
+            .await
+            .unwrap();
+        let status = second
+            .iter()
+            .find(|output| output.stream == OutputStream::Status)
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&status.data).unwrap();
+        assert_eq!(payload["status"], "rejected");
+        assert_eq!(payload["reason"], "terminal_session_id_in_use");
+        assert_eq!(status.job_id, second_job_id);
+        assert!(status.done);
 
-        let _ = execute_job_command(
-            uuid::Uuid::new_v4(),
-            &JobCommand::TerminalClose {
-                session_id,
-                reason: Some("test cleanup".to_string()),
-            },
-            5,
-        )
-        .await
-        .unwrap();
+        let close = close_test_terminal(session_id).await;
+        assert!(close.accepted);
     }
 
     #[tokio::test]
-    async fn terminal_poll_collects_idle_output_without_input() {
+    async fn terminal_stream_reports_idle_output_without_input() {
         let session_id = uuid::Uuid::new_v4();
-        let open_outputs = execute_job_command(
-            uuid::Uuid::new_v4(),
+        let open_job_id = uuid::Uuid::new_v4();
+        let (stream_tx, mut stream_rx) = mpsc::channel(16);
+        let open_outputs = execute_terminal_command_with_stream_sink(
+            &AgentConfig::default(),
+            open_job_id,
             &JobCommand::TerminalOpen {
                 session_id,
                 argv: vec![
@@ -444,40 +381,26 @@ mod tests {
                 flow_window_bytes: 65_536,
             },
             5,
+            Some(stream_tx),
         )
         .await
         .unwrap();
-        assert_eq!(status_payload(&open_outputs)["status"], "opened");
+        assert_eq!(
+            terminal_open_status_payload(&open_outputs)["status"],
+            "opened"
+        );
 
-        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
-        let poll_outputs = execute_job_command(
-            uuid::Uuid::new_v4(),
-            &JobCommand::TerminalPoll {
-                session_id,
-                replay_from_seq: Some(1),
-            },
-            5,
+        let streamed = terminal_stream_text_until(
+            &mut stream_rx,
+            open_job_id,
+            session_id,
+            "idle-terminal-output",
         )
-        .await
-        .unwrap();
-        let poll_text = pty_text(&poll_outputs);
-        assert!(poll_text.contains("idle-terminal-output"), "{poll_text:?}");
-        let poll_status = status_payload(&poll_outputs);
-        assert_eq!(poll_status["type"], "terminal_poll");
-        assert_eq!(poll_status["status"], "polled");
-        assert_eq!(poll_status["replay_from_seq"], 1);
-        assert_eq!(poll_status["output_replay_truncated"], false);
+        .await;
+        assert!(streamed.contains("idle-terminal-output"), "{streamed:?}");
 
-        let _ = execute_job_command(
-            uuid::Uuid::new_v4(),
-            &JobCommand::TerminalClose {
-                session_id,
-                reason: Some("test cleanup".to_string()),
-            },
-            5,
-        )
-        .await
-        .unwrap();
+        let close = close_test_terminal(session_id).await;
+        assert!(close.accepted);
     }
 
     #[tokio::test]
@@ -505,23 +428,15 @@ mod tests {
         )
         .await
         .unwrap();
-        let status = status_payload(&outputs);
+        let status = terminal_open_status_payload(&outputs);
         assert_eq!(status["type"], "terminal_open");
         assert_eq!(status["status"], "opened");
         assert!(status["output_retained_bytes"].as_u64().unwrap() <= 4096);
         assert!(status["output_dropped_bytes"].as_u64().unwrap() > 0);
         assert_eq!(status["output_replay_truncated"], true);
 
-        let _ = execute_job_command(
-            uuid::Uuid::new_v4(),
-            &JobCommand::TerminalClose {
-                session_id,
-                reason: Some("test cleanup".to_string()),
-            },
-            5,
-        )
-        .await
-        .unwrap();
+        let close = close_test_terminal(session_id).await;
+        assert!(close.accepted);
     }
 
     #[tokio::test]
@@ -549,68 +464,104 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(status_payload(&outputs)["status"], "opened");
+        assert_eq!(terminal_open_status_payload(&outputs)["status"], "opened");
 
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-        let input_outputs = execute_job_command(
-            uuid::Uuid::new_v4(),
-            &JobCommand::TerminalInput {
-                session_id,
-                input_seq: 1,
+        let input = issue_terminal_control(
+            session_id,
+            TerminalControlAction::Input {
                 data_base64: vpsman_common::encode_inline_file_payload(b"hello\n").unwrap(),
             },
-            5,
         )
-        .await
-        .unwrap();
-        let status = status_payload(&input_outputs);
-        assert_eq!(status["type"], "terminal_input");
-        assert_eq!(status["status"], "missing");
+        .await;
+        assert!(!input.accepted);
+        assert_eq!(input.action, "input");
+        assert_eq!(input.status, "missing");
+        assert_eq!(input.message, "terminal_session_not_open");
     }
 
     #[tokio::test]
-    async fn terminal_input_missing_session_reports_typed_status() {
+    async fn terminal_controls_report_missing_session() {
         let session_id = uuid::Uuid::new_v4();
-        let outputs = execute_job_command(
-            uuid::Uuid::new_v4(),
-            &JobCommand::TerminalInput {
-                session_id,
-                input_seq: 1,
+        let input = issue_terminal_control(
+            session_id,
+            TerminalControlAction::Input {
                 data_base64: vpsman_common::encode_inline_file_payload(b"hello\n").unwrap(),
             },
-            5,
         )
-        .await
-        .unwrap();
+        .await;
+        let resize = issue_terminal_control(
+            session_id,
+            TerminalControlAction::Resize {
+                cols: 100,
+                rows: 30,
+            },
+        )
+        .await;
+        let close = close_test_terminal(session_id).await;
 
-        let status = outputs
-            .iter()
-            .find(|output| output.done && output.stream == OutputStream::Status)
-            .expect("terminal missing status");
-        assert_eq!(status.exit_code, Some(125));
-        let payload: serde_json::Value = serde_json::from_slice(&status.data).unwrap();
-        assert_eq!(payload["type"], "terminal_input");
-        assert_eq!(payload["status"], "missing");
+        for ack in [input, resize, close] {
+            assert!(!ack.accepted);
+            assert_eq!(ack.status, "missing");
+            assert_eq!(ack.message, "terminal_session_not_open");
+        }
     }
 
     #[tokio::test]
-    async fn terminal_poll_missing_session_reports_typed_status() {
+    async fn terminal_controls_report_actual_exited_session_state() {
         let session_id = uuid::Uuid::new_v4();
         let outputs = execute_job_command(
             uuid::Uuid::new_v4(),
-            &JobCommand::TerminalPoll {
+            &JobCommand::TerminalOpen {
                 session_id,
-                replay_from_seq: Some(1),
+                argv: vec!["/bin/true".to_string()],
+                cwd: None,
+                user: None,
+                user_policy: vpsman_common::TerminalUserPolicy::Fail,
+                cols: 120,
+                rows: 40,
+                replay_from_seq: None,
+                idle_timeout_secs: 30,
+                flow_window_bytes: 65_536,
             },
             5,
         )
         .await
         .unwrap();
 
-        let status = status_payload(&outputs);
-        assert_eq!(status["type"], "terminal_poll");
-        assert_eq!(status["status"], "missing");
-        assert_eq!(status["session_id"], session_id.to_string());
+        assert_eq!(terminal_open_status_payload(&outputs)["status"], "opened");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let input = issue_terminal_control(
+            session_id,
+            TerminalControlAction::Input {
+                data_base64: vpsman_common::encode_inline_file_payload(b"ignored").unwrap(),
+            },
+        )
+        .await;
+        assert!(!input.accepted);
+        assert_eq!(input.action, "input");
+        assert_eq!(input.status, "exited");
+        assert_eq!(input.message, "terminal_session_exited");
+
+        let resize = issue_terminal_control(
+            session_id,
+            TerminalControlAction::Resize {
+                cols: 100,
+                rows: 30,
+            },
+        )
+        .await;
+        assert!(!resize.accepted);
+        assert_eq!(resize.action, "resize");
+        assert_eq!(resize.status, "exited");
+        assert_eq!(resize.message, "terminal_session_exited");
+
+        let close = close_test_terminal(session_id).await;
+        assert!(!close.accepted);
+        assert_eq!(close.action, "close");
+        assert_eq!(close.status, "exited");
+        assert_eq!(close.message, "terminal_session_exited");
     }
 
     #[tokio::test]
@@ -1985,6 +1936,70 @@ mod tests {
         assert_eq!(status["next_offset"], offset);
     }
 
+    async fn issue_terminal_control(
+        session_id: uuid::Uuid,
+        action: TerminalControlAction,
+    ) -> TerminalControlAck {
+        let request_id = uuid::Uuid::new_v4();
+        let action_kind = action.kind();
+        let ack = control_terminal_session(TerminalControlRequest {
+            request_id,
+            session_id,
+            action,
+        })
+        .await;
+        assert_eq!(ack.request_id, request_id);
+        assert_eq!(ack.session_id, session_id);
+        assert_eq!(ack.action, action_kind);
+        ack
+    }
+
+    async fn close_test_terminal(session_id: uuid::Uuid) -> TerminalControlAck {
+        issue_terminal_control(
+            session_id,
+            TerminalControlAction::Close {
+                reason: Some("test cleanup".to_string()),
+            },
+        )
+        .await
+    }
+
+    async fn terminal_stream_text_until(
+        receiver: &mut mpsc::Receiver<TerminalStreamOutput>,
+        open_job_id: uuid::Uuid,
+        session_id: uuid::Uuid,
+        expected: &str,
+    ) -> String {
+        let bytes = tokio::time::timeout(Duration::from_secs(3), async {
+            let mut bytes = Vec::new();
+            loop {
+                let event = receiver.recv().await.expect("terminal stream closed");
+                assert_eq!(event.job_id, open_job_id);
+                assert_eq!(event.output.job_id, open_job_id);
+                assert_eq!(event.session_id, session_id);
+                if event.output.stream != OutputStream::Pty {
+                    continue;
+                }
+                bytes.extend_from_slice(&event.output.data);
+                if String::from_utf8_lossy(&bytes).contains(expected) {
+                    break bytes;
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for terminal stream output");
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn terminal_open_status_payload(outputs: &[vpsman_common::CommandOutput]) -> serde_json::Value {
+        let status = outputs
+            .iter()
+            .find(|output| output.stream == OutputStream::Status)
+            .expect("terminal open status output");
+        assert!(!status.done);
+        serde_json::from_slice(&status.data).unwrap()
+    }
+
     fn status_payload(outputs: &[vpsman_common::CommandOutput]) -> serde_json::Value {
         let status = outputs
             .iter()
@@ -2021,14 +2036,6 @@ mod tests {
             .filter(|output| output.stream == OutputStream::Pty)
             .flat_map(|output| output.data.clone())
             .collect()
-    }
-
-    fn pty_text(outputs: &[vpsman_common::CommandOutput]) -> String {
-        outputs
-            .iter()
-            .filter(|output| output.stream == OutputStream::Pty)
-            .map(|output| String::from_utf8_lossy(&output.data))
-            .collect::<String>()
     }
 
     #[tokio::test]

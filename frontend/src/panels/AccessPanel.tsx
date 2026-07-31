@@ -2667,7 +2667,7 @@ function isOperatorSessionActive(session: OperatorSessionRecord): boolean {
 }
 
 function isTerminalOpen(session: TerminalSessionRecord): boolean {
-  return !session.session_exited && session.state !== "closed";
+  return session.state === "opening" || session.state === "open";
 }
 
 function isOperatorSessionExpired(session: OperatorSessionRecord): boolean {

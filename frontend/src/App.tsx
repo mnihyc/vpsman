@@ -1622,7 +1622,7 @@ export function App() {
       group: "Terminal" as const,
       label: `Terminal ${shortCommandId(session.session_id)}`,
       detail: `${agentNameById.get(session.client_id) ?? session.client_id} · ${session.state} · ${session.argv.join(" ")}`,
-      keywords: `${session.client_id} ${session.session_id} ${session.state} ${session.last_status} ${session.last_command_type} ${session.argv.join(" ")}`,
+      keywords: `${session.client_id} ${session.session_id} ${session.state} ${session.last_status} terminal_open ${session.argv.join(" ")}`,
       onSelect: () => releaseRoutes.openTerminal(session.client_id),
     }));
     const transferItems = dashboard.fileTransfers.map((transfer) => ({
@@ -2287,7 +2287,6 @@ export function App() {
         onLoadOutputs={dashboard.loadJobOutputs}
         onLoadOutputComparison={dashboard.loadJobOutputComparison}
         onLoadTargets={dashboard.loadJobTargets}
-        onSubmitTerminalInput={dashboard.submitTerminalInput}
         onOpenSchedules={() => selectView("Automation", "schedules")}
         onOpenRollout={openRolloutDetails}
         onOpenVpsDetail={releaseRoutes.openVpsDetail}
@@ -2356,13 +2355,12 @@ export function App() {
         onSelectSubpage={(subpage) =>
           selectReleaseDestination("Remote Operations", subpage)
         }
-        onSubmitTerminalInput={dashboard.submitTerminalInput}
+        onControlTerminalSession={dashboard.controlTerminalSession}
         onTransferTargetConsumed={() => setTransferTargetIntent(null)}
         onUploadFileTransferSource={dashboard.uploadFileTransferSource}
         onDeleteCommandTemplate={dashboard.deleteCommandTemplate}
         onUpsertCommandTemplate={dashboard.upsertCommandTemplate}
         privilegeMaterial={privilegeMaterial}
-        privilegeUnlockOpen={privilegeUnlockOpen}
         processSupervisorInventory={dashboard.processSupervisorInventory}
         processSupervisorInventoryTruncated={
           dashboard.processSupervisorInventoryTruncated
