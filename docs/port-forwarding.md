@@ -197,7 +197,7 @@ Create and apply a reviewed rule:
 
 ```sh
 vpsctl port-forward-create \
-  --client-id 12 \
+  --client-id v-12 \
   --name public-web \
   --protocol both \
   --incoming 80,443 \

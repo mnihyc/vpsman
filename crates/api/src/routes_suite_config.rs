@@ -128,6 +128,7 @@ pub(crate) async fn update_suite_config(
             old_redacted.clone(),
             new_redacted.clone(),
             request_id,
+            &toml_payload_hash,
         )
         .await?;
     if let Err(write_error) = write_suite_config_atomically(&state, &request.toml) {
@@ -140,6 +141,7 @@ pub(crate) async fn update_suite_config(
                 old_redacted.clone(),
                 new_redacted.clone(),
                 request_id,
+                &toml_payload_hash,
                 write_error.code,
             )
             .await
@@ -161,6 +163,7 @@ pub(crate) async fn update_suite_config(
             old_redacted,
             new_redacted,
             request_id,
+            &toml_payload_hash,
         )
         .await
     {

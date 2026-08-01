@@ -794,6 +794,7 @@ export function useDashboardData(activeView: ActiveView) {
     lastJobOutputEvent,
     lastTerminalOutputEvent,
     loadAudits: audit.loadAudits,
+    loadAuditEvent: audit.loadAuditEvent,
     loadHistoryExport: audit.loadHistoryExport,
     loadBackups: backups.loadBackups,
     loadCurrentOperator: access.loadCurrentOperator,

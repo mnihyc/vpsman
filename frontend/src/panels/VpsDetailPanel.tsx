@@ -15,6 +15,7 @@ import {
   TerminalSquare,
 } from "lucide-react";
 import { agentDisplayState } from "../agentDisplayState";
+import { auditClientIds, presentAudit } from "../auditPresentation";
 import { ActionFeedback } from "../components/ActionFeedback";
 import { handleTabListKeyDown, tabId } from "../components/AccessibleTabs";
 import {
@@ -85,7 +86,7 @@ type VpsDetailPanelProps = {
   loading: boolean;
   networkObservations: NetworkObservationRecord[];
   networkTrends: NetworkObservationTrendRecord[];
-  onOpenAudit: () => void;
+  onOpenAudit: (auditId?: string) => void;
   onOpenAlertPolicies: (policyId?: string) => void;
   onOpenBackup: (agent: AgentView) => void;
   onOpenConfig: (agent: AgentView) => void;
@@ -1122,7 +1123,7 @@ function ActivityTab({
   loading: boolean;
   related: VpsDetailContext;
   recordBounds: VpsDetailRecordBounds;
-  onOpenAudit: () => void;
+  onOpenAudit: (auditId?: string) => void;
   onOpenFleetAlerts: () => void;
   onOpenJob: (jobId: string) => void;
   onOpenJobs: () => void;
@@ -1152,7 +1153,7 @@ function ActivityTab({
               onClick={() => {
                 if (event.kind === "job" && event.jobId) onOpenJob(event.jobId);
                 else if (event.kind === "alert") onOpenFleetAlerts();
-                else if (event.kind === "audit") onOpenAudit();
+                else if (event.kind === "audit") onOpenAudit(event.id);
                 else onOpenJobs();
               }}
               title={event.id}
@@ -1361,8 +1362,15 @@ function buildVpsDetailContext({
     .filter((alert) => alert.client_id === clientId)
     .sort(newestFirst((alert) => alert.observed_at));
   const relatedAudits = audits
-    .filter((audit) => audit.target.includes(clientId) || JSON.stringify(audit.metadata).includes(clientId))
+    .filter((audit) => auditClientIds(audit).includes(clientId))
     .sort(newestFirst((audit) => audit.created_at));
+  const relatedAuditJobIds = new Set(
+    relatedAudits.flatMap((audit) =>
+      presentAudit(audit).evidenceReferences
+        .filter((reference) => reference.kind === "Job")
+        .map((reference) => reference.value),
+    ),
+  );
   const relatedNetworkObservations = networkObservations
     .filter((observation) => observation.client_id === clientId || observation.peer_client_id === clientId)
     .sort(newestFirst((observation) => observation.observed_at));
@@ -1374,7 +1382,7 @@ function buildVpsDetailContext({
       relatedBackups.some((backup) => backup.source_job_id === job.id) ||
       relatedTransfers.some((transfer) => transfer.last_job_id === job.id) ||
       relatedNetworkObservations.some((observation) => observation.job_id === job.id) ||
-      relatedAudits.some((audit) => audit.command_hash === job.payload_hash),
+      relatedAuditJobIds.has(job.id),
     )
     .sort(newestFirst((job) => job.created_at));
   const rollup =
@@ -1446,10 +1454,10 @@ function buildVpsDetailContext({
       when: job.created_at,
     })),
     ...relatedAudits.map((audit) => ({
-      detail: `${readableDetailToken(audit.action)} · ${audit.target} · ${formatCompactTime(audit.created_at)}`,
+      detail: `${presentAudit(audit).actionLabel} · ${presentAudit(audit).actorLabel} · ${presentAudit(audit).outcomeLabel} · ${formatCompactTime(audit.created_at)}`,
       id: audit.id,
       kind: "audit" as const,
-      title: `Audit ${shortId(audit.id)}`,
+      title: presentAudit(audit).targetLabel,
       when: audit.created_at,
     })),
   ].sort((left, right) => Date.parse(right.when) - Date.parse(left.when));

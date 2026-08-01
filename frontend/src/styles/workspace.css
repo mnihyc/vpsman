@@ -1721,12 +1721,12 @@
 
 .vpsMonitorGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 350px), 1fr));
   gap: 12px;
 }
 
 .vpsMonitorGrid.compact {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr));
   gap: 8px;
 }
 
@@ -1739,6 +1739,34 @@
 .vpsMonitorCard.compact {
   gap: 8px;
   padding: 10px;
+}
+
+.vpsMonitorCard.compact .vpsMonitorCardMain {
+  grid-template-areas:
+    "name status"
+    "context context";
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 8px;
+}
+
+.vpsMonitorCard.compact .vpsMonitorCardMain .vpsMonitorStatus {
+  grid-area: status;
+  justify-self: end;
+}
+
+.vpsMonitorCard.compact .vpsMonitorCardMain strong {
+  grid-area: name;
+  align-self: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vpsMonitorCard.compact .vpsMonitorCardMain small {
+  grid-area: context;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .vpsMonitorCard.online {
@@ -1893,6 +1921,11 @@
 .vpsMonitorEvidence span {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.vpsMonitorEvidence.compactSummary {
+  gap: 3px;
+  font-size: 11px;
 }
 
 .vpsMonitorEvidence .telemetryEvidence.partial,

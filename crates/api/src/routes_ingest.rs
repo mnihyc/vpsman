@@ -752,7 +752,7 @@ async fn try_auto_record_backup_artifact_for_job_target(
     };
     let operator = AuthContext {
         operator: operator.view(),
-        session_id: uuid::Uuid::nil(),
+        session_id: None,
     };
     try_auto_record_backup_artifact(
         state,

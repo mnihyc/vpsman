@@ -1033,14 +1033,16 @@ impl Repository {
                     "#,
                 )
                 .bind(Uuid::new_v4())
-                .bind(operator.operator.id)
+                .bind(persisted_actor_id(operator))
                 .bind(format!("tunnel_plan:{plan_id}"))
-                .bind(serde_json::json!({
-                    "assessment": assessment,
-                    "note": note,
-                    "operator_username": &operator.operator.username,
-                    "session_id": operator.session_id,
-                }))
+                .bind(network_audit_metadata(
+                    serde_json::json!({
+                        "assessment": assessment,
+                        "note": note,
+                    }),
+                    operator,
+                    "succeeded",
+                ))
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
@@ -1931,48 +1933,54 @@ fn aggregate_ospf_status_fields(
 }
 
 fn tunnel_plan_metadata(view: &TunnelPlanView, operator: &AuthContext) -> serde_json::Value {
-    serde_json::json!({
-        "name": &view.name,
-        "kind": tunnel_kind_name(view.kind),
-        "enabled": view.enabled,
-        "left_client_id": &view.left_client_id,
-        "right_client_id": &view.right_client_id,
-        "runtime_manager": runtime_manager_name(view.plan.runtime_control.manager),
-        "runtime_topology_version": &view.plan.runtime_topology.version,
-        "ospf_enabled": view.plan.ospf.is_some(),
-        "recommended_ospf_cost": view.recommended_ospf_cost,
-        "operator_username": &operator.operator.username,
-        "session_id": operator.session_id,
-    })
+    network_audit_metadata(
+        serde_json::json!({
+            "name": &view.name,
+            "kind": tunnel_kind_name(view.kind),
+            "enabled": view.enabled,
+            "left_client_id": &view.left_client_id,
+            "right_client_id": &view.right_client_id,
+            "runtime_manager": runtime_manager_name(view.plan.runtime_control.manager),
+            "runtime_topology_version": &view.plan.runtime_topology.version,
+            "ospf_enabled": view.plan.ospf.is_some(),
+            "recommended_ospf_cost": view.recommended_ospf_cost,
+        }),
+        operator,
+        "succeeded",
+    )
 }
 
 fn tunnel_plan_enabled_metadata(
     view: &TunnelPlanView,
     operator: &AuthContext,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "name": &view.name,
-        "enabled": view.enabled,
-        "left_client_id": &view.left_client_id,
-        "right_client_id": &view.right_client_id,
-        "ospf_status": &view.ospf_status,
-        "operator_username": &operator.operator.username,
-        "session_id": operator.session_id,
-    })
+    network_audit_metadata(
+        serde_json::json!({
+            "name": &view.name,
+            "enabled": view.enabled,
+            "left_client_id": &view.left_client_id,
+            "right_client_id": &view.right_client_id,
+            "ospf_status": &view.ospf_status,
+        }),
+        operator,
+        "succeeded",
+    )
 }
 
 fn tunnel_connection_assessment_metadata(
     view: &TunnelPlanView,
     operator: &AuthContext,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "name": &view.name,
-        "revision": view.revision,
-        "assessment": &view.connection_assessment,
-        "note": &view.connection_assessment_note,
-        "operator_username": &operator.operator.username,
-        "session_id": operator.session_id,
-    })
+    network_audit_metadata(
+        serde_json::json!({
+            "name": &view.name,
+            "revision": view.revision,
+            "assessment": &view.connection_assessment,
+            "note": &view.connection_assessment_note,
+        }),
+        operator,
+        "succeeded",
+    )
 }
 
 fn tunnel_plan_delete_metadata(
@@ -1980,17 +1988,19 @@ fn tunnel_plan_delete_metadata(
     was_enabled: bool,
     operator: &AuthContext,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "name": &view.name,
-        "revision": view.revision,
-        "was_enabled": was_enabled,
-        "left_client_id": &view.left_client_id,
-        "right_client_id": &view.right_client_id,
-        "interface_name": &view.plan.interface_name,
-        "deleted_reason": &view.deleted_reason,
-        "operator_username": &operator.operator.username,
-        "session_id": operator.session_id,
-    })
+    network_audit_metadata(
+        serde_json::json!({
+            "name": &view.name,
+            "revision": view.revision,
+            "was_enabled": was_enabled,
+            "left_client_id": &view.left_client_id,
+            "right_client_id": &view.right_client_id,
+            "interface_name": &view.plan.interface_name,
+            "deleted_reason": &view.deleted_reason,
+        }),
+        operator,
+        "succeeded",
+    )
 }
 
 fn ospf_jobs_audit(
@@ -2016,17 +2026,63 @@ fn ospf_jobs_metadata(
     right_job_id: Uuid,
     operator: &AuthContext,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "plan_id": view.id,
-        "plan_name": &view.name,
-        "desired_ospf_cost": view.desired_ospf_cost,
-        "left_current_ospf_cost": view.left_current_ospf_cost,
-        "right_current_ospf_cost": view.right_current_ospf_cost,
-        "left_job_id": left_job_id,
-        "right_job_id": right_job_id,
-        "operator_username": &operator.operator.username,
-        "session_id": operator.session_id,
-    })
+    network_audit_metadata(
+        serde_json::json!({
+            "plan_id": view.id,
+            "plan_name": &view.name,
+            "desired_ospf_cost": view.desired_ospf_cost,
+            "left_current_ospf_cost": view.left_current_ospf_cost,
+            "right_current_ospf_cost": view.right_current_ospf_cost,
+            "left_job_id": left_job_id,
+            "right_job_id": right_job_id,
+        }),
+        operator,
+        "requested",
+    )
+}
+
+fn network_audit_metadata(
+    mut metadata: serde_json::Value,
+    operator: &AuthContext,
+    result: &str,
+) -> serde_json::Value {
+    let fields = metadata
+        .as_object_mut()
+        .expect("network audit metadata must be an object");
+    fields.insert("result".to_string(), serde_json::json!(result));
+    if let Some(operator_id) = persisted_actor_id(operator) {
+        fields.insert(
+            "origin_kind".to_string(),
+            serde_json::json!("operator_request"),
+        );
+        fields.insert(
+            "component".to_string(),
+            serde_json::json!("network-controller"),
+        );
+        fields.insert("operator_id".to_string(), serde_json::json!(operator_id));
+        fields.insert(
+            "operator_username".to_string(),
+            serde_json::json!(&operator.operator.username),
+        );
+        fields.insert(
+            "operator_role".to_string(),
+            serde_json::json!(&operator.operator.role),
+        );
+        fields.insert(
+            "operator_session_id".to_string(),
+            serde_json::json!(operator.audit_session_id()),
+        );
+    } else {
+        fields.insert(
+            "origin_kind".to_string(),
+            serde_json::json!("control_plane"),
+        );
+        fields.insert(
+            "component".to_string(),
+            serde_json::json!(&operator.operator.username),
+        );
+    }
+    metadata
 }
 
 async fn insert_tunnel_audit(
@@ -2043,7 +2099,7 @@ async fn insert_tunnel_audit(
         "#,
     )
     .bind(Uuid::new_v4())
-    .bind(operator.operator.id)
+    .bind(persisted_actor_id(operator))
     .bind(action)
     .bind(format!("tunnel_plan:{}", view.id))
     .bind(metadata)

@@ -3072,7 +3072,7 @@ fn test_operator() -> AuthContext {
             disabled_at: None,
             deleted_at: None,
         },
-        session_id: Uuid::new_v4(),
+        session_id: Some(Uuid::new_v4()),
     }
 }
 

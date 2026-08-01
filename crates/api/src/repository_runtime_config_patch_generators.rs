@@ -398,9 +398,13 @@ fn runtime_config_patch_generator_audit_metadata(
         "raw_generator_body": generator.raw_generator_body,
         "docs_metadata": generator.docs_metadata,
         "built_in": generator.built_in,
+        "result": "succeeded",
+        "operator_id": operator.operator.id,
         "operator_username": &operator.operator.username,
         "operator_role": &operator.operator.role,
-        "session_id": operator.session_id,
+        "operator_session_id": operator.audit_session_id(),
+        "origin_kind": "operator_request",
+        "component": "runtime-config-generator-controller",
     })
 }
 

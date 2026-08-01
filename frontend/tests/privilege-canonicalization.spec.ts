@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { PRIVILEGE_OPERATION_GOLDEN_VECTORS } from "../src/generated/protocolContracts";
 import {
+  agentIdentityPayloadHashHex,
   buildPrivilegeForJobOperation,
   canonicalJobPrivilegeIntent,
   canonicalDbPrivilegeIntent,
@@ -192,6 +193,20 @@ test("DB privilege intent binds suite config payload hash", async () => {
     }),
   ).toBe(
     `{"version":1,"action":"suite_config.update","target":"suite_config","selector_expression":null,"resolved_targets":[],"confirmed":true,"payload_hash":"${payloadHash}"}`,
+  );
+});
+
+test("agent identity payload hashing matches the Rust canonical shape", async () => {
+  const payloadHash = await agentIdentityPayloadHashHex({
+    clientId: " v-16 ",
+    displayName: " Edge 16 ",
+    publicKeyHex: "11".repeat(32),
+    replaceExistingKey: false,
+    tags: [" edge ", "bgp", "edge"],
+  });
+
+  expect(payloadHash).toBe(
+    "fe02d0d023921dead3370b45a0c9e256464173ce30d4c6ee9d7ccc173f9a078c",
   );
 });
 

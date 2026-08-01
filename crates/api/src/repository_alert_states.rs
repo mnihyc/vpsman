@@ -360,8 +360,12 @@ fn alert_state_metadata(state: &FleetAlertStateView, operator: &AuthContext) -> 
         "muted_until_unix": state.muted_until_unix,
         "escalation_level": state.escalation_level,
         "reason": state.reason,
+        "result": "succeeded",
         "operator_id": operator.operator.id,
         "operator_username": operator.operator.username,
-        "session_id": operator.session_id,
+        "operator_role": operator.operator.role,
+        "operator_session_id": operator.audit_session_id(),
+        "origin_kind": "operator_request",
+        "component": "alert-state-controller",
     })
 }

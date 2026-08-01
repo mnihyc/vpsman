@@ -28,6 +28,7 @@ interface ScreenshotEntry {
     | "configuration-assignment-review"
     | "config-per-vps-loaded"
     | "fleet-delete-success"
+    | "fleet-monitor-compact"
     | "fleet-metrics-advanced"
     | "fleet-metrics-chart"
     | "network-latency-chart"
@@ -114,6 +115,14 @@ const allViews: ScreenshotEntry[] = [
   },
   {
     view: "Fleet",
+    subpage: "Monitor",
+    heading: "Fleet monitor",
+    id: "03b-fleet-monitor-compact",
+    prepare: "fleet-monitor-compact",
+    requiredText: ["VPS cards"],
+  },
+  {
+    view: "Fleet",
     subpage: "Groups",
     heading: "Fleet groups",
     id: "04-fleet-groups",
@@ -165,7 +174,7 @@ const allViews: ScreenshotEntry[] = [
       "Privilege locked",
       "Unlock privilege",
       "Focus terminal",
-      "Advanced session controls",
+      "Session inventory and controls",
     ],
   },
   {
@@ -774,8 +783,8 @@ const allViews: ScreenshotEntry[] = [
     id: "45-audit-events",
     requiredText: [
       "Visible events",
-      "Coverage warning",
-      "Related job/session",
+      "Known actors",
+      "Evidence",
       "Latest visible",
     ],
   },
@@ -977,6 +986,17 @@ async function navigateAndScreenshot(
   await expectNoLegacyTopLevelSidebarEntries(page);
   await openConsoleSubpage(page, entry.view, entry.subpage ?? "Overview");
   await expectNoLegacyTopLevelSidebarEntries(page);
+
+  if (entry.prepare === "fleet-monitor-compact") {
+    await page
+      .getByLabel("VPS cards density")
+      .getByRole("button", { name: "Compact" })
+      .click();
+    await expect(page.getByLabel("VPS monitor cards")).toHaveAttribute(
+      "data-density",
+      "compact",
+    );
+  }
 
   if (entry.tab) {
     const tab = page.getByRole("tab", { name: entry.tab, exact: true });
@@ -1423,7 +1443,9 @@ async function navigateAndScreenshot(
 
   await page.waitForTimeout(200);
   const preserveWorkflowFocus = Boolean(
-    (entry.prepare && entry.prepare !== "fleet-metrics-advanced") ||
+    (entry.prepare &&
+      entry.prepare !== "fleet-metrics-advanced" &&
+      entry.prepare !== "fleet-monitor-compact") ||
       entry.expandVpsRow ||
       entry.tab,
   );

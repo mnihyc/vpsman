@@ -162,6 +162,28 @@ struct PgReliabilityTestDb {
 }
 
 #[tokio::test]
+async fn postgres_audit_schema_rejects_non_object_metadata() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+
+    let error = sqlx::query(
+        r#"
+        INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
+        VALUES ($1, NULL, 'test.invalid_metadata', 'test:audit', NULL, $2)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(serde_json::json!(["result", "origin_kind", "component"]))
+    .execute(&db.pool)
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("audit_logs_canonical_metadata"));
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_rollout_reconciler_isolates_missing_current_batch_assignment() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -5195,7 +5217,7 @@ async fn postgres_network_operator(repo: &Repository) -> AuthContext {
         .unwrap();
     AuthContext {
         operator: auth.operator,
-        session_id: Uuid::nil(),
+        session_id: None,
     }
 }
 
@@ -6524,7 +6546,7 @@ async fn postgres_queued_cancel_terminal_event_records_target_and_job_side_effec
 
     let plan = db
         .repo
-        .request_job_cancel(job_id, operator.operator.id, Some("test cancel"))
+        .request_job_cancel(job_id, &operator, Some("test cancel"))
         .await
         .unwrap();
     assert_eq!(plan.pending_canceled, 1);

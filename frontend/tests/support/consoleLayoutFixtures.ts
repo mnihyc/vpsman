@@ -1741,10 +1741,12 @@ const auditLogs = [
     id: "audit-job-dispatch-scheduled-0001",
     metadata: {
       command_type: "scheduled_shell_argv",
+      component: "system scheduler",
       job_id: "77777777-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-      operator_username: "system scheduler",
+      origin_kind: "control_plane",
       privileged: false,
-      resolved_targets: ["agent-sfo-01", "agent-fra-02"],
+      result: "requested",
+      target_client_ids: ["agent-sfo-01", "agent-fra-02"],
       source_schedule_id: "51515151-6161-4717-8abc-defdefdefdef",
       target_count: 2,
     },
@@ -1758,12 +1760,15 @@ const auditLogs = [
     id: "audit-job-dispatch-network-0001",
     metadata: {
       command_type: "network_speed_test",
+      component: "job-submission-controller",
       job_id: "77777777-aaaa-4bbb-8ccc-dddddddddddd",
       operator_role: "admin",
       operator_username: "console-admin",
+      origin_kind: "operator_request",
       privileged: true,
-      resolved_targets: ["agent-sfo-01", "agent-fra-02"],
-      session_id: "88888888-aaaa-4bbb-8ccc-000000000001",
+      result: "requested",
+      target_client_ids: ["agent-sfo-01", "agent-fra-02"],
+      operator_session_id: "88888888-aaaa-4bbb-8ccc-000000000001",
       target_count: 2,
     },
     target: "api:/api/v1/jobs",
@@ -1776,11 +1781,14 @@ const auditLogs = [
     id: "audit-job-dispatch-repeated-payload-0001",
     metadata: {
       command_type: "network_speed_test",
+      component: "job-submission-controller",
       job_id: "11111111-2222-4333-8444-555555555555",
       operator_role: "admin",
       operator_username: "console-admin",
+      origin_kind: "operator_request",
       privileged: true,
-      resolved_targets: ["agent-sfo-01"],
+      result: "requested",
+      target_client_ids: ["agent-sfo-01"],
       target_count: 1,
     },
     target: "api:/api/v1/jobs",
@@ -1788,13 +1796,18 @@ const auditLogs = [
   {
     action: "terminal.open",
     actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
-    command_hash: null,
+    command_hash: "b".repeat(64),
     created_at: "2026-05-31T10:11:50Z",
     id: "audit-terminal-open-0001",
     metadata: {
+      accepted: true,
       client_id: "agent-sfo-01",
       operator_session_id: "88888888-aaaa-4bbb-8ccc-000000000001",
       operator_username: "console-admin",
+      origin_kind: "operator_request",
+      component: "terminal-controller",
+      result: "accepted",
+      status: "accepted",
       terminal_session_id: "61616161-2222-4333-8444-555555555555",
     },
     target: "terminal:agent-sfo-01/61616161-2222-4333-8444-555555555555",
@@ -1802,15 +1815,20 @@ const auditLogs = [
   {
     action: "terminal.input",
     actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
-    command_hash: null,
+    command_hash: "c".repeat(64),
     created_at: "2026-05-31T10:12:00Z",
     id: "audit-terminal-input-0001",
     metadata: {
+      accepted: true,
       client_id: "agent-sfo-01",
       input_seq: 2,
       job_id: "61616161-aaaa-4bbb-8ccc-dddddddddddd",
       operator_session_id: "88888888-aaaa-4bbb-8ccc-000000000001",
       operator_username: "console-admin",
+      origin_kind: "operator_request",
+      component: "terminal-controller",
+      result: "accepted",
+      status: "accepted",
       terminal_session_id: "61616161-2222-4333-8444-555555555555",
     },
     target: "terminal:agent-sfo-01/61616161-2222-4333-8444-555555555555",
@@ -1818,31 +1836,40 @@ const auditLogs = [
   {
     action: "terminal.close",
     actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
-    command_hash: null,
+    command_hash: "d".repeat(64),
     created_at: "2026-05-31T10:12:30Z",
     id: "audit-terminal-close-0001",
     metadata: {
+      accepted: true,
       client_id: "agent-fra-02",
       close_reason: "operator",
       job_id: "71717171-aaaa-4bbb-8ccc-dddddddddddd",
       operator_session_id: "88888888-aaaa-4bbb-8ccc-000000000002",
       operator_username: "console-admin",
+      origin_kind: "operator_request",
+      component: "terminal-controller",
+      result: "accepted",
+      status: "closed",
       terminal_session_id: "71717171-2222-4333-8444-555555555555",
     },
     target: "terminal:agent-fra-02/71717171-2222-4333-8444-555555555555",
   },
   {
-    action: "privilege_unlock",
+    action: "privilege.unlock",
     actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
     command_hash: null,
     created_at: "2026-06-02T10:12:00Z",
     id: "audit-privilege-unlock-0001",
     metadata: {
-      ip: "127.0.0.1",
-      result: "success",
-      session_id: "88888888-aaaa-4bbb-8ccc-000000000001",
-      username: "console-admin",
-      privilege_scope: "browser_memory",
+      component: "privilege-verifier",
+      operator_role: "admin",
+      origin_kind: "authentication",
+      remote_ip: "127.0.0.1",
+      result: "succeeded",
+      operator_session_id: "88888888-aaaa-4bbb-8ccc-000000000001",
+      operator_username: "console-admin",
+      privilege_scope: "privilege.unlock",
+      user_agent: "Playwright (test automation)",
     },
     target: "access/privilege-vault",
   },
@@ -2683,7 +2710,7 @@ const networkJobs = [
     target_count: 1,
   },
   {
-    actor_id: null,
+    actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
     command_type: "network_speed_test",
     completed_at: "2026-05-31T10:09:00Z",
     created_at: "2026-05-31T10:08:55Z",
@@ -3289,6 +3316,7 @@ export async function installConsoleApiMock(
     agentDeleteFailedClientIds?: string[];
     agentDeleteRequestFailure?: boolean;
     agentDeleteSyncJobIds?: string[];
+    auditDetailOverride?: AuditLogRecord;
     auditLogsOverride?: AuditLogRecord[];
     backupPoliciesOverride?: BackupPolicyRecord[];
     backupArtifactsOverride?: typeof backupArtifacts;
@@ -3331,6 +3359,7 @@ export async function installConsoleApiMock(
       agentDeleteSyncJobIdsFixture,
       agentsFixture,
       agentUpdateReleasesFixture,
+      auditDetailFixture,
       auditLogsFixture,
       artifactsFixture,
       backupPoliciesFixture,
@@ -7920,6 +7949,29 @@ export async function installConsoleApiMock(
         if (pathname === "/api/v1/audit") {
           return jsonResponse(auditLogsFixture);
         }
+        if (pathname.startsWith("/api/v1/audit/")) {
+          const auditId = decodeURIComponent(
+            pathname.slice("/api/v1/audit/".length),
+          );
+          const audit =
+            (auditDetailFixture?.id === auditId
+              ? auditDetailFixture
+              : null) ??
+            auditLogsFixture.find(
+              (record: { id: string }) => record.id === auditId,
+            );
+          return audit
+            ? jsonResponse(audit)
+            : jsonResponse(
+                {
+                  error: "audit_event_not_found",
+                  message: "Audit event not found",
+                  recovery: "Return to the audit event list.",
+                  status: 404,
+                },
+                404,
+              );
+        }
         if (
           pathname === "/api/v1/history/retention-policies" &&
           method === "GET"
@@ -8398,6 +8450,7 @@ export async function installConsoleApiMock(
       ],
       agentsFixture: agents,
       agentUpdateReleasesFixture: agentUpdateReleases,
+      auditDetailFixture: options.auditDetailOverride ?? null,
       auditLogsFixture: options.auditLogsOverride ?? auditLogs,
       backupPoliciesFixture: options.backupPoliciesOverride ?? [],
       bulkTagMutationDelayMsFixture: options.bulkTagMutationDelayMs ?? 0,

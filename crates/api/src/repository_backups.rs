@@ -1021,9 +1021,13 @@ fn backup_request_metadata(
         "source_job_id": view.source_job_id,
         "source_schedule_id": view.source_schedule_id,
         "confirmed": confirmed,
+        "operator_id": operator.operator.id,
         "operator_username": &operator.operator.username,
         "operator_role": &operator.operator.role,
-        "session_id": operator.session_id,
+        "operator_session_id": operator.audit_session_id(),
+        "result": "requested",
+        "origin_kind": "operator_request",
+        "component": "backup-controller",
         "metadata_only": true,
     })
 }
@@ -1055,9 +1059,13 @@ fn backup_request_source_metadata(
         "missing_path_policy": view.missing_path_policy.as_str(),
         "source_job_id": view.source_job_id,
         "source_schedule_id": view.source_schedule_id,
+        "result": "succeeded",
+        "operator_id": operator.operator.id,
         "operator_username": &operator.operator.username,
         "operator_role": &operator.operator.role,
-        "session_id": operator.session_id,
+        "operator_session_id": operator.audit_session_id(),
+        "origin_kind": "operator_request",
+        "component": "backup-controller",
         "metadata_only": true,
     })
 }
@@ -1101,9 +1109,13 @@ fn backup_request_execution_metadata(
         "artifact_id": view.artifact_id,
         "source_job_id": view.source_job_id,
         "source_schedule_id": view.source_schedule_id,
+        "operator_id": operator.map(|operator| operator.operator.id),
         "operator_username": operator.map(|operator| operator.operator.username.as_str()),
         "operator_role": operator.map(|operator| operator.operator.role.as_str()),
-        "session_id": operator.map(|operator| operator.session_id),
+        "operator_session_id": operator.and_then(AuthContext::audit_session_id),
+        "result": &view.status,
+        "origin_kind": if operator.is_some() { "operator_request" } else { "control_plane" },
+        "component": "backup-controller",
         "metadata_only": true,
     })
 }
@@ -1123,9 +1135,13 @@ fn backup_rejection_metadata(
         "confirmed": request.confirmed,
         "payload_hash": payload_hash,
         "reason": reason,
+        "result": "rejected",
+        "operator_id": operator.operator.id,
         "operator_username": &operator.operator.username,
         "operator_role": &operator.operator.role,
-        "session_id": operator.session_id,
+        "operator_session_id": operator.audit_session_id(),
+        "origin_kind": "operator_request",
+        "component": "backup-controller",
         "metadata_only": true,
     })
 }

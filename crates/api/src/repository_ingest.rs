@@ -57,7 +57,7 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
 ) -> Result<Vec<Uuid>> {
     let rows = sqlx::query(
         r#"
-        SELECT target.job_id, target.client_id, job.operation
+        SELECT target.job_id, target.client_id, job.operation, job.payload_hash
         FROM job_targets target
         JOIN jobs job ON job.id = target.job_id
         WHERE target.client_id = $1
@@ -76,6 +76,7 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
     for row in rows {
         let job_id: Uuid = row.try_get("job_id")?;
         let target_client_id: String = row.try_get("client_id")?;
+        let job_payload_hash: String = row.try_get("payload_hash")?;
         let operation = row
             .try_get::<sqlx::types::Json<JobCommand>, _>("operation")
             .map(|operation| operation.0);
@@ -148,15 +149,17 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
                         INSERT INTO audit_logs (
                             id, actor_id, action, target, command_hash, metadata
                         )
-                        VALUES ($1, NULL, $2, $3, NULL, $4)
+                        VALUES ($1, NULL, $2, $3, $4, $5)
                         "#,
                     )
                     .bind(Uuid::new_v4())
                     .bind("job.target_result")
                     .bind(format!("client:{target_client_id}"))
+                    .bind(&job_payload_hash)
                     .bind(serde_json::json!({
                         "job_id": job_id,
                         "status": TARGET_STATUS_FAILED,
+                        "result": TARGET_STATUS_FAILED,
                         "exit_code": 1,
                         "accepted": false,
                         "message": message,
@@ -164,6 +167,9 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
                         "reason": "agent_update_activation_heartbeat_hash_mismatch",
                         "previous_process_incarnation_id": previous_process_incarnation_id,
                         "current_process_incarnation_id": current_process_incarnation_id,
+                        "gateway_id": gateway_id,
+                        "origin_kind": "gateway_ingest",
+                        "component": "agent-update-activation-reconciler",
                     }))
                     .execute(&mut **tx)
                     .await?;
@@ -172,19 +178,24 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
                         INSERT INTO audit_logs (
                             id, actor_id, action, target, command_hash, metadata
                         )
-                        VALUES ($1, NULL, $2, $3, NULL, $4)
+                        VALUES ($1, NULL, $2, $3, $4, $5)
                         "#,
                     )
                     .bind(Uuid::new_v4())
                     .bind("agent_update.activation_failed")
                     .bind(format!("client:{target_client_id}"))
+                    .bind(&job_payload_hash)
                     .bind(serde_json::json!({
                         "activation_job_id": job_id,
                         "client_id": &target_client_id,
                         "artifact_sha256_hex": &expected_sha256_hex,
                         "observed_artifact_sha256_hex": &observed_sha256_hex,
                         "status": "activation_failed",
+                        "result": "failed",
                         "reason": "heartbeat_hash_mismatch",
+                        "gateway_id": gateway_id,
+                        "origin_kind": "gateway_ingest",
+                        "component": "agent-update-activation-reconciler",
                     }))
                     .execute(&mut **tx)
                     .await?;
@@ -250,15 +261,17 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
                     INSERT INTO audit_logs (
                         id, actor_id, action, target, command_hash, metadata
                     )
-                    VALUES ($1, NULL, $2, $3, NULL, $4)
+                    VALUES ($1, NULL, $2, $3, $4, $5)
                     "#,
                 )
                 .bind(Uuid::new_v4())
                 .bind("job.target_result")
                 .bind(format!("client:{target_client_id}"))
+                .bind(&job_payload_hash)
                 .bind(serde_json::json!({
                     "job_id": job_id,
                     "status": TARGET_STATUS_COMPLETED,
+                    "result": TARGET_STATUS_COMPLETED,
                     "exit_code": 0,
                     "accepted": true,
                     "message": message,
@@ -266,6 +279,9 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
                     "reason": "agent_update_restart_heartbeat_verified",
                     "previous_process_incarnation_id": previous_process_incarnation_id,
                     "current_process_incarnation_id": current_process_incarnation_id,
+                    "gateway_id": gateway_id,
+                    "origin_kind": "gateway_ingest",
+                    "component": "agent-update-activation-reconciler",
                 }))
                 .execute(&mut **tx)
                 .await?;
@@ -274,18 +290,23 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
                     INSERT INTO audit_logs (
                         id, actor_id, action, target, command_hash, metadata
                     )
-                    VALUES ($1, NULL, $2, $3, NULL, $4)
+                    VALUES ($1, NULL, $2, $3, $4, $5)
                     "#,
                 )
                 .bind(Uuid::new_v4())
                 .bind("agent_update.activation_completed")
                 .bind(format!("client:{target_client_id}"))
+                .bind(&job_payload_hash)
                 .bind(serde_json::json!({
                     "activation_job_id": job_id,
                     "client_id": &target_client_id,
                     "artifact_sha256_hex": &expected_sha256_hex,
                     "status": "activation_completed",
+                    "result": "succeeded",
                     "heartbeat": "verified_after_restart",
+                    "gateway_id": gateway_id,
+                    "origin_kind": "gateway_ingest",
+                    "component": "agent-update-activation-reconciler",
                 }))
                 .execute(&mut **tx)
                 .await?;
@@ -351,21 +372,25 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
             INSERT INTO audit_logs (
                 id, actor_id, action, target, command_hash, metadata
             )
-            VALUES ($1, NULL, $2, $3, NULL, $4)
+            VALUES ($1, NULL, $2, $3, $4, $5)
             "#,
         )
         .bind(Uuid::new_v4())
         .bind("job.target_result")
         .bind(format!("client:{target_client_id}"))
+        .bind(&job_payload_hash)
         .bind(serde_json::json!({
             "job_id": job_id,
             "status": TARGET_STATUS_AGENT_LOST,
+            "result": TARGET_STATUS_AGENT_LOST,
             "message": message,
             "reason": reason,
             "operation_decode_failed": operation_decode_failed,
             "gateway_id": gateway_id,
             "previous_process_incarnation_id": previous_process_incarnation_id,
             "current_process_incarnation_id": current_process_incarnation_id,
+            "origin_kind": "gateway_ingest",
+            "component": "agent-incarnation-reconciler",
         }))
         .execute(&mut **tx)
         .await?;
@@ -525,6 +550,9 @@ impl Repository {
                                 "stale_reason": stale_reason,
                                 "previous_internal_build_number": prior_build,
                                 "internal_build_number": event.hello.internal_build_number,
+                                "result": "online",
+                                "origin_kind": "gateway_ingest",
+                                "component": "agent-ingest",
                             });
                             memory
                                 .audits
@@ -552,6 +580,9 @@ impl Repository {
                                 "from_status": "never",
                                 "to_status": "online",
                                 "reason": "agent_first_connection",
+                                "result": "online",
+                                "origin_kind": "gateway_ingest",
+                                "component": "agent-ingest",
                             });
                             memory
                                 .audits
@@ -779,6 +810,8 @@ impl Repository {
                             "new_internal_build_number": event.hello.internal_build_number,
                             "gateway_id": &event.gateway_id,
                         }),
+                        "gateway_ingest",
+                        "agent-ingest",
                     )
                     .await?;
                 }
@@ -792,6 +825,8 @@ impl Repository {
                         serde_json::json!({
                             "gateway_id": &event.gateway_id,
                         }),
+                        "gateway_ingest",
+                        "agent-ingest",
                     )
                     .await?;
                 }
@@ -1081,6 +1116,9 @@ impl Repository {
                                         "to_status": "stale",
                                         "reason": reason,
                                         "details": webhook_metadata.get("details").cloned().unwrap_or(serde_json::Value::Null),
+                                        "result": "stale",
+                                        "origin_kind": "control_plane",
+                                        "component": "agent-status-tracker",
                                     }),
                                     created_at: crate::unix_now().to_string(),
                                 });
@@ -1146,6 +1184,8 @@ impl Repository {
                         "stale",
                         reason,
                         metadata,
+                        "control_plane",
+                        "agent-status-tracker",
                     )
                     .await?;
                 }
@@ -1973,8 +2013,16 @@ pub(crate) async fn record_client_status_transition_in_tx(
     from_status: Option<&str>,
     to_status: &str,
     reason: &str,
-    metadata: serde_json::Value,
+    mut metadata: serde_json::Value,
+    origin_kind: &str,
+    component: &str,
 ) -> Result<()> {
+    let object = metadata
+        .as_object_mut()
+        .context("client status transition metadata must be an object")?;
+    object.insert("result".to_string(), serde_json::json!(to_status));
+    object.insert("origin_kind".to_string(), serde_json::json!(origin_kind));
+    object.insert("component".to_string(), serde_json::json!(component));
     let webhook_metadata = metadata.clone();
     sqlx::query(
         r#"

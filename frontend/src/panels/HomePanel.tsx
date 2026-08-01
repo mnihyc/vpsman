@@ -14,6 +14,7 @@ import {
   UserPlus,
 } from "lucide-react";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
+import { presentAudit } from "../auditPresentation";
 import { ActionFeedback } from "../components/ActionFeedback";
 import { VpsCombobox } from "../components/VpsCombobox";
 import { agentDisplayState } from "../agentDisplayState";
@@ -82,7 +83,7 @@ type HomePanelProps = {
   onDashboardPreferencesChange: (patch: Partial<DashboardPreferences>) => void;
   onDashboardRefresh: () => void;
   onDashboardWindowChange: (window: DashboardWindow) => void;
-  onOpenAudit: () => void;
+  onOpenAudit: (auditId?: string) => void;
   onOpenBackup: (agent: AgentView) => void;
   onOpenBackups: () => void;
   onOpenDispatch: (agent: AgentView) => void;
@@ -1260,7 +1261,7 @@ function buildActivityItems({
   backups: BackupRequestRecord[];
   fileTransfers: FileTransferSessionRecord[];
   jobs: JobHistoryRecord[];
-  onOpenAudit: () => void;
+  onOpenAudit: (auditId?: string) => void;
   onOpenBackups: () => void;
   onOpenJobDetails: (jobId: string) => void;
   onOpenSchedule: () => void;
@@ -1294,9 +1295,9 @@ function buildActivityItems({
   }));
   const auditItems = auditLogs.map((audit) => ({
     id: `audit:${audit.id}`,
-    label: readableAuditAction(audit.action),
-    meta: audit.target,
-    onOpen: onOpenAudit,
+    label: presentAudit(audit).actionLabel,
+    meta: `${presentAudit(audit).actorLabel} · ${presentAudit(audit).targetLabel} · ${presentAudit(audit).outcomeLabel}`,
+    onOpen: () => onOpenAudit(audit.id),
     time: audit.created_at,
     type: scopeFiltered ? "Fleet audit" : "Audit",
   }));
@@ -1429,12 +1430,5 @@ function readableAlertCategory(category: string) {
   return category
     .replace(/_/g, " ")
     .replace(/\bospf\b/gi, "OSPF")
-    .replace(/\b[a-z]/g, (letter) => letter.toUpperCase());
-}
-
-function readableAuditAction(action: string) {
-  return action
-    .replace(/[._]/g, " ")
-    .replace(/\bapi\b/gi, "API")
     .replace(/\b[a-z]/g, (letter) => letter.toUpperCase());
 }

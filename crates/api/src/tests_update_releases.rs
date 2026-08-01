@@ -638,7 +638,7 @@ fn test_operator() -> AuthContext {
             disabled_at: None,
             deleted_at: None,
         },
-        session_id: Uuid::nil(),
+        session_id: None,
     }
 }
 

@@ -176,6 +176,18 @@ async fn migration_run_reuses_matching_existing_link_and_records_restore_job() {
             .count(),
         1
     );
+    let dispatch_audit = repo
+        .list_audit_logs(20)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|audit| audit.action == "job.dispatch_requested")
+        .expect("migration job dispatch audit");
+    assert_eq!(
+        dispatch_audit.metadata["target_client_ids"],
+        serde_json::json!(["rebuilt-client"])
+    );
+    assert!(dispatch_audit.metadata.get("resolved_targets").is_none());
 }
 
 #[tokio::test]
@@ -597,6 +609,6 @@ fn migration_test_operator() -> AuthContext {
             disabled_at: None,
             deleted_at: None,
         },
-        session_id: Uuid::nil(),
+        session_id: None,
     }
 }

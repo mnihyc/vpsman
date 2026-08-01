@@ -13,6 +13,7 @@ use crate::{
         KeyLifecycleReportView, UpsertAgentIdentityRequest, WsEvent,
     },
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
+    repository_key_lifecycle::agent_identity_payload_hash,
     state::AppState,
     util::limit_or_default,
 };
@@ -38,7 +39,10 @@ pub(crate) async fn upsert_agent_identity(
     } else {
         "agent_identity.import"
     };
-    let intent = DbPrivilegeIntent::new(action, client_id, None, &targets, true, None);
+    let payload_hash = agent_identity_payload_hash(&request)
+        .map_err(|_| ApiError::bad_request("agent_identity_payload_invalid"))?;
+    let intent =
+        DbPrivilegeIntent::new(action, client_id, None, &targets, true, Some(&payload_hash));
     verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
     state
         .repo

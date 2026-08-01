@@ -455,9 +455,13 @@ fn restore_plan_metadata(
         "payload_hash": &view.payload_hash,
         "command_scope": &view.command_scope,
         "confirmed": confirmed,
+        "operator_id": operator.operator.id,
         "operator_username": &operator.operator.username,
         "operator_role": &operator.operator.role,
-        "session_id": operator.session_id,
+        "operator_session_id": operator.audit_session_id(),
+        "result": "succeeded",
+        "origin_kind": "operator_request",
+        "component": "restore-controller",
         "metadata_only": true,
     })
 }
@@ -477,9 +481,13 @@ fn restore_rejection_metadata(
         "confirmed": request.confirmed,
         "payload_hash": payload_hash,
         "reason": reason,
+        "result": "rejected",
+        "operator_id": operator.operator.id,
         "operator_username": &operator.operator.username,
         "operator_role": &operator.operator.role,
-        "session_id": operator.session_id,
+        "operator_session_id": operator.audit_session_id(),
+        "origin_kind": "operator_request",
+        "component": "restore-controller",
         "metadata_only": true,
     })
 }

@@ -1,12 +1,22 @@
 import {
+  ArrowLeft,
   ClipboardList,
   Download,
+  ExternalLink,
   Filter,
   RotateCcw,
   Scissors,
   ShieldCheck,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  auditActionLabel as sharedAuditActionLabel,
+  auditEvidenceSearchText,
+  auditMissingFieldLabel,
+  auditSessionSearchText,
+  presentAudit,
+  type AuditEvidenceReference,
+} from "../auditPresentation";
 import {
   ActionFeedback,
   type ActionFeedbackTone,
@@ -30,10 +40,9 @@ import {
   formatCompactTime,
   formatFullTime,
   formatTime,
-  metadataOperator,
   shortHash,
-  shortId,
 } from "../utils";
+import { useHistoryEntryState } from "../historyEntryState";
 
 type AuditFilterState = {
   action: string;
@@ -59,25 +68,6 @@ const EMPTY_AUDIT_FILTERS: AuditFilterState = {
   to: "",
 };
 
-const EXPECTED_AUDIT_WORKFLOWS = [
-  "login",
-  "privilege unlock",
-  "config read/write",
-  "command dispatch",
-  "file edit",
-  "terminal input",
-  "key import/revoke",
-  "backup/restore",
-  "topology update",
-  "system config change",
-];
-
-type AuditWorkflowCoverage = {
-  covered: string[];
-  missing: string[];
-  relatedCount: number;
-};
-
 export function AuditLogPanel({
   activeSubpage,
   audits,
@@ -88,6 +78,10 @@ export function AuditLogPanel({
   historyRetentionPolicies,
   loading,
   onExportHistory,
+  onCloseAuditEvent,
+  onLoadAuditEvent,
+  onOpenAuditEvent,
+  onOpenEvidence,
   onPruneHistoryRetention,
   onRefresh,
   onUpsertHistoryRetentionPolicy,
@@ -101,6 +95,10 @@ export function AuditLogPanel({
   historyRetentionPolicies: HistoryRetentionPolicyRecord[];
   loading: boolean;
   onExportHistory: (domains?: string) => Promise<HistoryExportRecord>;
+  onCloseAuditEvent: () => void;
+  onLoadAuditEvent: (auditId: string) => Promise<AuditLogRecord | null>;
+  onOpenAuditEvent: (auditId: string) => void;
+  onOpenEvidence: (reference: AuditEvidenceReference) => void;
   onPruneHistoryRetention: (
     request: HistoryRetentionPruneRequest,
   ) => Promise<HistoryRetentionPruneResponse>;
@@ -110,6 +108,19 @@ export function AuditLogPanel({
   ) => Promise<void>;
 }) {
   const auditSubpage = activeSubpage === "retention" ? "retention" : "events";
+  const selectedAuditId = activeSubpage.startsWith("events:id:")
+    ? activeSubpage.slice("events:id:".length).trim()
+    : null;
+  const selectedAuditFromList = selectedAuditId
+    ? audits.find((audit) => audit.id === selectedAuditId) ?? null
+    : null;
+  const [routedAudit, setRoutedAudit] = useState<AuditLogRecord | null>(null);
+  const [routedAuditError, setRoutedAuditError] = useState<string | null>(null);
+  const [routedAuditLoading, setRoutedAuditLoading] = useState(false);
+  const routedAuditLoadGeneration = useRef(0);
+  const selectedAudit =
+    selectedAuditFromList ??
+    (routedAudit?.id === selectedAuditId ? routedAudit : null);
   const [selectedDomain, setSelectedDomain] = useState("audit_logs");
   const selectedPolicy = useMemo(
     () =>
@@ -136,7 +147,10 @@ export function AuditLogPanel({
   const [retentionStatusTone, setRetentionStatusTone] =
     useState<ActionFeedbackTone>("info");
   const [auditFilters, setAuditFilters] =
-    useState<AuditFilterState>(EMPTY_AUDIT_FILTERS);
+    useHistoryEntryState<AuditFilterState>(
+      "audit.events.filters",
+      EMPTY_AUDIT_FILTERS,
+    );
 
   useEffect(() => {
     if (!selectedPolicy) {
@@ -148,6 +162,44 @@ export function AuditLogPanel({
     setMetadataOnly(selectedPolicy.metadata_only);
     setExportEnabled(selectedPolicy.export_enabled);
   }, [selectedPolicy]);
+
+  useEffect(() => {
+    const generation = routedAuditLoadGeneration.current + 1;
+    routedAuditLoadGeneration.current = generation;
+    if (!selectedAuditId || selectedAuditFromList) {
+      setRoutedAudit(null);
+      setRoutedAuditError(null);
+      setRoutedAuditLoading(false);
+      return;
+    }
+    let active = true;
+    setRoutedAudit(null);
+    setRoutedAuditError(null);
+    setRoutedAuditLoading(true);
+    void onLoadAuditEvent(selectedAuditId)
+      .then((record) => {
+        if (active && routedAuditLoadGeneration.current === generation) {
+          setRoutedAudit(record);
+        }
+      })
+      .catch((loadError: unknown) => {
+        if (active && routedAuditLoadGeneration.current === generation) {
+          setRoutedAuditError(
+            loadError instanceof Error
+              ? loadError.message
+              : "Audit event lookup failed",
+          );
+        }
+      })
+      .finally(() => {
+        if (active && routedAuditLoadGeneration.current === generation) {
+          setRoutedAuditLoading(false);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [onLoadAuditEvent, selectedAuditFromList, selectedAuditId]);
 
   const enabledPolicyCount = useMemo(
     () => historyRetentionPolicies.filter((policy) => policy.enabled).length,
@@ -174,15 +226,18 @@ export function AuditLogPanel({
             .map((audit) => auditActor(audit))
             .filter((value): value is string => Boolean(value)),
         ),
-      ).slice(0, 3),
+      ),
     [audits],
   );
   const latestVisibleAudit = useMemo(
     () => latestAuditRecord(filteredAudits),
     [filteredAudits],
   );
-  const auditWorkflowCoverage = useMemo(
-    () => summarizeAuditWorkflowCoverage(audits),
+  const relatedAuditCount = useMemo(
+    () =>
+      audits.filter(
+        (audit) => presentAudit(audit).evidenceReferences.length > 0,
+      ).length,
     [audits],
   );
   const activeFilterCount = useMemo(
@@ -220,7 +275,7 @@ export function AuditLogPanel({
         minSize: 150,
         sortValue: (audit) => auditActor(audit),
         searchValue: (audit) =>
-          `${auditActor(audit)} ${audit.actor_id ?? ""} ${auditMetadataValue(audit, ["operator_role", "role"]) ?? ""}`,
+          `${auditActor(audit)} ${audit.actor_id ?? ""} ${presentAudit(audit).actorDetail}`,
         cell: (audit) => (
           <span className="historyPrimary">
             <strong>{auditActor(audit)}</strong>
@@ -233,6 +288,7 @@ export function AuditLogPanel({
       {
         id: "action",
         header: "Action",
+        mobilePrimary: true,
         size: 190,
         minSize: 150,
         sortValue: (audit) => auditActionLabel(audit.action),
@@ -262,7 +318,8 @@ export function AuditLogPanel({
       },
       {
         id: "result",
-        header: "Result",
+        header: "Outcome",
+        mobileState: true,
         size: 140,
         minSize: 110,
         sortValue: (audit) => auditResultLabel(audit),
@@ -275,7 +332,7 @@ export function AuditLogPanel({
       },
       {
         id: "related",
-        header: "Related job/session",
+        header: "Evidence",
         size: 210,
         minSize: 150,
         sortValue: (audit) => auditRelatedEvidenceLabel(audit),
@@ -454,10 +511,82 @@ export function AuditLogPanel({
   const auditFeedbackMessage =
     error ?? (loading ? "Refreshing audit records" : null);
 
+  const retryRoutedAudit = async () => {
+    if (!selectedAuditId) return;
+    const generation = routedAuditLoadGeneration.current + 1;
+    routedAuditLoadGeneration.current = generation;
+    setRoutedAuditLoading(true);
+    setRoutedAuditError(null);
+    try {
+      const record = await onLoadAuditEvent(selectedAuditId);
+      if (routedAuditLoadGeneration.current === generation) {
+        setRoutedAudit(record);
+      }
+    } catch (loadError) {
+      if (routedAuditLoadGeneration.current === generation) {
+        setRoutedAuditError(
+          loadError instanceof Error
+            ? loadError.message
+            : "Audit event lookup failed",
+        );
+      }
+    } finally {
+      if (routedAuditLoadGeneration.current === generation) {
+        setRoutedAuditLoading(false);
+      }
+    }
+  };
+
   return (
     <section className="workspace singleColumn">
+      {auditSubpage === "events" && selectedAuditId && (
+        <div className="fleetPanel auditEventRoutePanel">
+          <div className="sectionHeader">
+            <div>
+              <h2>Audit event</h2>
+              <span title={selectedAuditId}>Event ID {selectedAuditId}</span>
+            </div>
+            <button
+              className="secondaryAction compactAction"
+              onClick={onCloseAuditEvent}
+              type="button"
+            >
+              <ArrowLeft size={15} />
+              Audit events
+            </button>
+          </div>
+          {selectedAudit ? (
+            <AuditEventDetailPanel
+              audit={selectedAudit}
+              onOpenEvidence={onOpenEvidence}
+            />
+          ) : routedAuditLoading || loading ? (
+            <div className="emptyState" aria-live="polite">
+              <ClipboardList size={22} />
+              <strong>Loading audit event</strong>
+              <span>Looking up the exact event ID.</span>
+            </div>
+          ) : (
+            <div className="emptyState">
+              <ClipboardList size={22} />
+              <strong>Audit event is unavailable</strong>
+              <span>
+                {routedAuditError ??
+                  "The exact event ID was not returned. It may have been pruned."}
+              </span>
+              <button
+                className="secondaryAction compactAction"
+                onClick={() => void retryRoutedAudit()}
+                type="button"
+              >
+                Refresh event
+              </button>
+            </div>
+          )}
+        </div>
+      )}
       {auditSubpage === "events" && (
-        <div className="fleetPanel">
+        <div className="fleetPanel" hidden={Boolean(selectedAuditId)}>
           <div className="sectionHeader">
             <div>
               <h2>Audit log</h2>
@@ -505,7 +634,7 @@ export function AuditLogPanel({
             </div>
             <div className="auditEventMetric">
               <span>Related evidence</span>
-              <strong>{auditWorkflowCoverage.relatedCount} linked</strong>
+              <strong>{relatedAuditCount} linked</strong>
               <p>Job, terminal, session, or schedule references in metadata.</p>
             </div>
             <div className="auditEventMetric">
@@ -513,31 +642,16 @@ export function AuditLogPanel({
               <strong>{auditActors.length || "None"}</strong>
               <p>
                 {auditActors.length > 0
-                  ? auditActors.join(", ")
+                  ? auditActors.slice(0, 3).join(", ")
                   : "No actor values available."}
               </p>
-            </div>
-            <div
-              className={`auditCoverageNotice ${auditWorkflowCoverage.missing.length > 0 ? "attention" : "ready"}`}
-              aria-label="Audit coverage warning"
-            >
-              <strong>
-                {auditWorkflowCoverage.missing.length > 0
-                  ? "Coverage warning"
-                  : "Coverage sample present"}
-              </strong>
-              <span>
-                {auditWorkflowCoverage.missing.length > 0
-                  ? `${auditWorkflowCoverage.covered.length}/${EXPECTED_AUDIT_WORKFLOWS.length} expected workflow families are visible. Missing: ${auditWorkflowCoverage.missing.join(", ")}.`
-                  : `All ${EXPECTED_AUDIT_WORKFLOWS.length} expected workflow families are represented in the returned rows.`}
-              </span>
             </div>
           </div>
           <div className="auditFilterBar" aria-label="Audit event filters">
             <div className="auditFilterIntro">
               <Filter size={16} />
               <span>
-                Filter audit evidence by actor, action, resource, result, time,
+                Filter audit evidence by actor, action, resource, outcome, time,
                 source IP, session, and privilege scope.
               </span>
             </div>
@@ -575,7 +689,7 @@ export function AuditLogPanel({
               />
             </label>
             <label>
-              <span>Result</span>
+              <span>Outcome</span>
               <input
                 aria-label="Audit result filter"
                 placeholder="allowed, failed"
@@ -693,10 +807,22 @@ export function AuditLogPanel({
             itemLabel="records"
             expandOnRowClick
             renderExpandedRow={(audit) => (
-              <AuditEventDetailPanel audit={audit} />
+              <AuditEventDetailPanel
+                audit={audit}
+                onOpenDedicated={() => onOpenAuditEvent(audit.id)}
+                onOpenEvidence={onOpenEvidence}
+              />
             )}
+            rowActions={[
+              {
+                expandRow: true,
+                label: "Details",
+                onSelect: () => undefined,
+              },
+            ]}
             rows={filteredAudits}
             rowsTruncated={auditsTruncated}
+            singleExpandedRow
             storageKey="vpsman.grid.audit.events"
             title="Audit records"
           />
@@ -1113,9 +1239,14 @@ export function AuditLogPanel({
 
 function AuditEventDetailPanel({
   audit,
+  onOpenDedicated,
+  onOpenEvidence,
 }: {
   audit: AuditLogRecord;
+  onOpenDedicated?: () => void;
+  onOpenEvidence: (reference: AuditEvidenceReference) => void;
 }) {
+  const presentation = presentAudit(audit);
   return (
     <div
       className="auditEventDetailPanel"
@@ -1129,6 +1260,16 @@ function AuditEventDetailPanel({
             {formatFullTime(audit.created_at)}
           </small>
         </span>
+        {onOpenDedicated && (
+          <button
+            className="secondaryAction compactAction"
+            onClick={onOpenDedicated}
+            type="button"
+          >
+            Open event
+            <ExternalLink size={14} />
+          </button>
+        )}
       </div>
       <div className="consoleInlineDetailGrid">
         <span>
@@ -1136,58 +1277,128 @@ function AuditEventDetailPanel({
           <span>{formatFullTime(audit.created_at)}</span>
         </span>
         <span>
-          <strong>Actor</strong>
-          <span>{auditActor(audit)}</span>
+          <strong>Event</strong>
+          <span>{presentation.actionLabel}</span>
         </span>
         <span>
-          <strong>Action</strong>
-          <span>{auditActionLabel(audit.action)}</span>
+          <strong>Actor</strong>
+          <span>
+            {presentation.actorLabel} · {presentation.actorDetail}
+          </span>
+        </span>
+        <span>
+          <strong>Origin</strong>
+          <span>{presentation.originLabel}</span>
         </span>
         <span>
           <strong>Target</strong>
-          <span>{auditTargetLabel(audit)}</span>
+          <span>
+            {presentation.targetLabel} · {presentation.targetDetail}
+          </span>
         </span>
         <span>
-          <strong>Result</strong>
-          <span>{auditResultLabel(audit)}</span>
+          <strong>Outcome</strong>
+          <span>{presentation.outcomeLabel}</span>
         </span>
         <span>
-          <strong>Related evidence</strong>
+          <strong>Evidence</strong>
           <span>{auditRelatedEvidenceFullDetail(audit)}</span>
         </span>
         <span>
           <strong>Source IP</strong>
-          <span>{auditFilterText(audit, "ip") || "not recorded"}</span>
-        </span>
-        <span>
-          <strong>Session</strong>
-          <span>{auditFilterText(audit, "session") || "not recorded"}</span>
-        </span>
-        <span>
-          <strong>Privilege</strong>
-          <span>{auditFilterText(audit, "privilege") || "not recorded"}</span>
-        </span>
-        <span>
-          <strong>Command hash</strong>
-          <span title={audit.command_hash ?? undefined}>
-            {audit.command_hash ? shortHash(audit.command_hash) : "none"}
+          <span>
+            {presentation.sourceIp ?? auditMissingFieldLabel("request")}
           </span>
         </span>
         <span>
-          <strong>Event ID</strong>
-          <span>{audit.id}</span>
+          <strong>Operator session</strong>
+          <span>
+            {presentation.operatorSessionId ??
+              auditMissingFieldLabel("operator")}
+          </span>
         </span>
         <span>
-          <strong>Raw action</strong>
-          <span>{audit.action}</span>
+          <strong>Terminal session</strong>
+          <span>
+            {presentation.terminalSessionId ??
+              auditMissingFieldLabel("terminal")}
+          </span>
         </span>
         <span>
-          <strong>Raw target</strong>
-          <span>{audit.target}</span>
+          <strong>Gateway session</strong>
+          <span>
+            {presentation.gatewaySessionId ??
+              auditMissingFieldLabel("gateway")}
+          </span>
+        </span>
+        <span>
+          <strong>Privilege scope</strong>
+          <span>
+            {presentation.privilege ??
+              auditMissingFieldLabel("privilege")}
+          </span>
+        </span>
+        <span>
+          <strong>User agent</strong>
+          <span>
+            {presentation.userAgent ?? auditMissingFieldLabel("request")}
+          </span>
         </span>
       </div>
-      <pre className="auditEventMetadata">{jsonText(audit.metadata)}</pre>
+      {presentation.evidenceReferences.some((reference) =>
+        auditEvidenceHasDestination(reference),
+      ) && (
+        <div className="consoleInlineDetailActions" aria-label="Related audit evidence links">
+          {presentation.evidenceReferences
+            .filter(auditEvidenceHasDestination)
+            .map((reference) => (
+              <button
+                className="secondaryAction compactAction"
+                key={`${reference.kind}:${reference.value}`}
+                onClick={() => onOpenEvidence(reference)}
+                title={reference.detail}
+                type="button"
+              >
+                Open {reference.kind.toLowerCase()}
+                <ExternalLink size={14} />
+              </button>
+            ))}
+        </div>
+      )}
+      <details className="auditEventAdvanced">
+        <summary>Advanced event data</summary>
+        <div className="consoleInlineDetailGrid">
+          <span>
+            <strong>Command hash</strong>
+            <span title={audit.command_hash ?? undefined}>
+              {audit.command_hash
+                ? shortHash(audit.command_hash)
+                : "Not supplied for this event"}
+            </span>
+          </span>
+          <span>
+            <strong>Event ID</strong>
+            <span>{audit.id}</span>
+          </span>
+          <span>
+            <strong>Raw action</strong>
+            <span>{audit.action}</span>
+          </span>
+          <span>
+            <strong>Raw target</strong>
+            <span>{audit.target}</span>
+          </span>
+        </div>
+        <pre className="auditEventMetadata">{jsonText(audit.metadata)}</pre>
+      </details>
     </div>
+  );
+}
+
+function auditEvidenceHasDestination(reference: AuditEvidenceReference): boolean {
+  return (
+    reference.kind === "Job" &&
+    /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(reference.value)
   );
 }
 
@@ -1198,326 +1409,54 @@ async function copyText(value: string) {
   await navigator.clipboard?.writeText(value);
 }
 
-function summarizeAuditWorkflowCoverage(
-  audits: AuditLogRecord[],
-): AuditWorkflowCoverage {
-  const covered = new Set<string>();
-  for (const audit of audits) {
-    for (const workflow of auditWorkflowFamilies(audit)) {
-      covered.add(workflow);
-    }
-  }
-  return {
-    covered: EXPECTED_AUDIT_WORKFLOWS.filter((workflow) =>
-      covered.has(workflow),
-    ),
-    missing: EXPECTED_AUDIT_WORKFLOWS.filter(
-      (workflow) => !covered.has(workflow),
-    ),
-    relatedCount: audits.filter(
-      (audit) => auditRelatedEvidenceLabel(audit) !== "No linked evidence",
-    ).length,
-  };
-}
-
-function auditWorkflowFamilies(audit: AuditLogRecord): string[] {
-  const haystack = `${audit.action} ${audit.target} ${jsonText(
-    audit.metadata,
-  )}`.toLowerCase();
-  const workflows = new Set<string>();
-  if (haystack.includes("login") || haystack.includes("operator_auth")) {
-    workflows.add("login");
-  }
-  if (haystack.includes("privilege_unlock") || haystack.includes("privilege")) {
-    workflows.add("privilege unlock");
-  }
-  if (
-    haystack.includes("config") ||
-    haystack.includes("configuration_preset") ||
-    haystack.includes("configuration_source") ||
-    haystack.includes("suite_config")
-  ) {
-    workflows.add("config read/write");
-  }
-  if (
-    haystack.includes("job.") ||
-    haystack.includes("dispatch") ||
-    haystack.includes("command")
-  ) {
-    workflows.add("command dispatch");
-  }
-  if (haystack.includes("file")) {
-    workflows.add("file edit");
-  }
-  if (haystack.includes("terminal")) {
-    workflows.add("terminal input");
-  }
-  if (haystack.includes("key") || haystack.includes("totp")) {
-    workflows.add("key import/revoke");
-  }
-  if (
-    haystack.includes("backup") ||
-    haystack.includes("restore") ||
-    haystack.includes("migration")
-  ) {
-    workflows.add("backup/restore");
-  }
-  if (
-    haystack.includes("network") ||
-    haystack.includes("ospf") ||
-    haystack.includes("topology") ||
-    haystack.includes("tunnel")
-  ) {
-    workflows.add("topology update");
-  }
-  if (
-    haystack.includes("system") ||
-    haystack.includes("runtime_config") ||
-    haystack.includes("suite_config")
-  ) {
-    workflows.add("system config change");
-  }
-  return Array.from(workflows);
-}
-
 function auditActionLabel(action: string): string {
-  const known: Record<string, string> = {
-    "job.dispatch_requested": "Job dispatch requested",
-    "operator.login": "Operator login",
-    privilege_unlock: "Privilege unlock",
-    "terminal.close": "Terminal closed",
-    "terminal.input": "Terminal input",
-    "terminal.open": "Terminal opened",
-  };
-  return known[action] ?? titleCase(action.replace(/[._:/-]+/g, " "));
+  return sharedAuditActionLabel(action);
 }
 
 function auditActionDetail(audit: AuditLogRecord): string {
-  const commandType = auditMetadataValue(audit, ["command_type"]);
-  const targetCount = auditMetadataValue(audit, ["target_count"]);
-  const privileged = auditMetadataValue(audit, ["privileged"]);
-  const details = [
-    commandType ? titleCase(commandType.replace(/_/g, " ")) : null,
-    targetCount
-      ? `${targetCount} target${targetCount === "1" ? "" : "s"}`
-      : null,
-    privileged === "true" ? "privileged" : null,
-  ].filter((value): value is string => Boolean(value));
-  if (details.length > 0) {
-    return details.join(" · ");
-  }
-  if (audit.action.startsWith("terminal.")) {
-    return "Terminal session event";
-  }
-  if (audit.action.includes("privilege")) {
-    return "Privilege access event";
-  }
-  if (audit.action.includes("dispatch")) {
-    return "Dispatch event";
-  }
-  return "Audit event";
+  return presentAudit(audit).actionDetail;
 }
 
 function auditTargetLabel(audit: AuditLogRecord): string {
-  if (audit.target === "access/privilege-vault") {
-    return "Privilege vault";
-  }
-  if (audit.target === "auth:login") {
-    return "Authentication";
-  }
-  if (audit.target.startsWith("api:/api/v1/jobs")) {
-    return "Jobs API";
-  }
-  if (audit.target.startsWith("terminal:")) {
-    const clientId = auditMetadataValue(audit, ["client_id"]);
-    return clientId ? `Terminal: ${clientId}` : "Terminal session";
-  }
-  if (audit.target.startsWith("client:")) {
-    return `VPS: ${audit.target.slice("client:".length)}`;
-  }
-  return titleCase(audit.target.replace(/[._:/-]+/g, " "));
+  return presentAudit(audit).targetLabel;
 }
 
 function auditTargetDetail(audit: AuditLogRecord): string {
-  const clientId = auditMetadataValue(audit, ["client_id"]);
-  const targetCount = auditMetadataValue(audit, ["target_count"]);
-  if (targetCount) {
-    return `${targetCount} resolved target${targetCount === "1" ? "" : "s"}`;
-  }
-  if (clientId) {
-    return clientId;
-  }
-  if (audit.target === "access/privilege-vault") {
-    return "access control";
-  }
-  if (audit.target === "auth:login") {
-    return "operator access";
-  }
-  return shortId(audit.target);
+  return presentAudit(audit).targetDetail;
 }
 
 function auditActorDetail(audit: AuditLogRecord): string {
-  const role = auditMetadataValue(audit, ["operator_role", "role"]);
-  const ip = auditMetadataValue(audit, [
-    "client_ip",
-    "ip",
-    "remote_addr",
-    "remote_ip",
-    "request_ip",
-    "source_ip",
-  ]);
-  if (role && ip) {
-    return `${role} · ${ip}`;
-  }
-  if (role) {
-    return role;
-  }
-  if (ip) {
-    return ip;
-  }
-  return audit.actor_id ? shortId(audit.actor_id) : "system event";
+  return presentAudit(audit).actorDetail;
 }
 
 function auditResultLabel(audit: AuditLogRecord): string {
-  const raw =
-    auditMetadataValue(audit, [
-      "decision",
-      "error",
-      "outcome",
-      "result",
-      "status",
-    ]) ?? defaultAuditResult(audit.action);
-  return titleCase(raw.replace(/_/g, " "));
-}
-
-function defaultAuditResult(action: string): string {
-  if (action.endsWith("_requested") || action.includes(".dispatch")) {
-    return "requested";
-  }
-  if (action.startsWith("terminal.")) {
-    return "recorded";
-  }
-  return "recorded";
+  return presentAudit(audit).outcomeLabel;
 }
 
 function auditResultTone(
   audit: AuditLogRecord,
 ): "critical" | "warning" | "ok" | "info" | "neutral" {
-  const value = auditResultLabel(audit).toLowerCase();
-  if (
-    value.includes("fail") ||
-    value.includes("error") ||
-    value.includes("denied") ||
-    value.includes("reject")
-  ) {
-    return "critical";
-  }
-  if (value.includes("warning") || value.includes("stale")) {
-    return "warning";
-  }
-  if (
-    value.includes("success") ||
-    value.includes("accepted") ||
-    value.includes("complete") ||
-    value.includes("applied")
-  ) {
-    return "ok";
-  }
-  if (value.includes("requested") || value.includes("recorded")) {
-    return "info";
-  }
-  return "neutral";
+  return presentAudit(audit).outcomeTone;
 }
 
 function auditRelatedEvidenceLabel(audit: AuditLogRecord): string {
-  const references = auditRelatedEvidenceReferences(audit);
-  if (references.length === 0) {
-    return "No linked evidence";
-  }
-  return references
-    .slice(0, 2)
-    .map((reference) => reference.label)
-    .join(" · ");
+  return presentAudit(audit).evidenceLabel;
 }
 
 function auditRelatedEvidenceDetail(audit: AuditLogRecord): string {
-  const references = auditRelatedEvidenceReferences(audit);
-  if (references.length === 0) {
-    return "No job, terminal, session, or schedule reference";
-  }
-  if (references.length === 1) {
-    return references[0].label;
-  }
-  return `${references.length} links: ${references
-    .map((reference) => reference.kind)
-    .join(", ")}`;
+  return presentAudit(audit).evidenceDetail;
 }
 
 function auditRelatedEvidenceFullDetail(audit: AuditLogRecord): string {
-  const references = auditRelatedEvidenceReferences(audit);
+  const references = presentAudit(audit).evidenceReferences;
   if (references.length === 0) {
-    return "No job, terminal, session, or schedule reference";
+    return "This audit row is the complete event record; no related record ID was supplied.";
   }
   return references.map((reference) => reference.detail).join(" · ");
 }
 
 function auditRelatedEvidenceSearch(audit: AuditLogRecord): string {
-  return auditRelatedEvidenceReferences(audit)
-    .flatMap((reference) => [
-      reference.label,
-      reference.detail,
-      reference.value,
-    ])
-    .join(" ");
-}
-
-function auditRelatedEvidenceReferences(audit: AuditLogRecord): Array<{
-  detail: string;
-  kind: string;
-  label: string;
-  value: string;
-}> {
-  const refs: Array<{
-    detail: string;
-    kind: string;
-    label: string;
-    value: string;
-  }> = [];
-  const pushRef = (kind: string, value: string | null) => {
-    if (!value || refs.some((reference) => reference.value === value)) {
-      return;
-    }
-    refs.push({
-      detail: `${kind} ${value}`,
-      kind,
-      label: `${kind} ${shortId(value)}`,
-      value,
-    });
-  };
-  pushRef("Job", auditMetadataValue(audit, ["activation_job_id", "job_id"]));
-  pushRef("Terminal", auditMetadataValue(audit, ["terminal_session_id"]));
-  pushRef(
-    "Session",
-    auditMetadataValue(audit, [
-      "gateway_session_id",
-      "operator_session_id",
-      "session",
-      "session_id",
-    ]),
-  );
-  pushRef("Schedule", auditMetadataValue(audit, ["source_schedule_id"]));
-  return refs;
-}
-
-function auditMetadataValue(
-  audit: AuditLogRecord,
-  keys: string[],
-): string | null {
-  const values = collectMetadataValues(
-    audit.metadata,
-    new Set(keys.map((key) => key.toLowerCase())),
-  );
-  return values.find((value) => value && value !== "null") ?? null;
+  return auditEvidenceSearchText(audit);
 }
 
 function titleCase(value: string): string {
@@ -1533,7 +1472,7 @@ function auditMatchesFilters(
   filters: AuditFilterState,
 ): boolean {
   const checks: Array<[string, string]> = [
-    [filters.actor, auditActor(audit)],
+    [filters.actor, auditActorFilterText(audit)],
     [filters.action, auditFilterText(audit, "action")],
     [filters.resource, auditFilterText(audit, "resource")],
     [filters.result, auditFilterText(audit, "result")],
@@ -1572,138 +1511,35 @@ function latestAuditRecord(audits: AuditLogRecord[]): AuditLogRecord | null {
 }
 
 function auditActor(audit: AuditLogRecord): string {
-  return (
-    metadataOperator(audit.metadata) ??
-    metadataFieldText(audit.metadata, [
-      "actor",
-      "actor_id",
-      "operator",
-      "operator_username",
-      "user",
-      "user_id",
-      "username",
-    ]) ??
-    audit.actor_id ??
-    "Control plane"
-  );
+  return presentAudit(audit).actorLabel;
+}
+
+function auditActorFilterText(audit: AuditLogRecord): string {
+  const presentation = presentAudit(audit);
+  return [audit.actor_id, presentation.actorLabel, presentation.actorDetail]
+    .filter((value): value is string => Boolean(value))
+    .join(" ");
 }
 
 function auditFilterText(
   audit: AuditLogRecord,
   field: "action" | "ip" | "privilege" | "resource" | "result" | "session",
 ): string {
-  const metadata = audit.metadata;
-  const metadataJson = jsonText(metadata);
+  const presentation = presentAudit(audit);
   switch (field) {
     case "action":
-      return [
-        audit.action,
-        metadataFieldText(metadata, [
-          "action",
-          "command",
-          "command_type",
-          "event",
-          "event_kind",
-          "operation",
-          "type",
-        ]),
-        metadataJson,
-      ].join(" ");
+      return [audit.action, presentation.actionLabel, presentation.actionDetail].join(" ");
     case "resource":
-      return [
-        audit.target,
-        metadataFieldText(metadata, [
-          "client_id",
-          "domain",
-          "object_id",
-          "resource",
-          "resource_id",
-          "target",
-          "target_id",
-          "vps_id",
-        ]),
-        metadataJson,
-      ].join(" ");
+      return [audit.target, presentation.targetLabel, presentation.targetDetail].join(" ");
     case "result":
-      return [
-        metadataFieldText(metadata, [
-          "decision",
-          "error",
-          "exit_code",
-          "outcome",
-          "result",
-          "status",
-        ]),
-        metadataJson,
-      ].join(" ");
+      return presentation.outcomeLabel;
     case "ip":
-      return (
-        metadataFieldText(metadata, [
-          "client_ip",
-          "ip",
-          "remote_addr",
-          "remote_ip",
-          "request_ip",
-          "source_ip",
-        ]) ?? ""
-      );
+      return presentation.sourceIp ?? "";
     case "session":
-      return (
-        metadataFieldText(metadata, [
-          "gateway_session_id",
-          "session",
-          "session_id",
-          "terminal_session_id",
-        ]) ?? ""
-      );
+      return auditSessionSearchText(audit);
     case "privilege":
-      return (
-        metadataFieldText(metadata, [
-          "capability",
-          "permission",
-          "permission_scope",
-          "privilege_scope",
-          "required_scope",
-          "role",
-          "scope",
-        ]) ?? ""
-      );
+      return presentation.privilege ?? "";
   }
-}
-
-function metadataFieldText(metadata: JsonValue, keys: string[]): string | null {
-  const values = collectMetadataValues(metadata, new Set(keys));
-  return values.length > 0 ? values.join(" ") : null;
-}
-
-function collectMetadataValues(
-  value: JsonValue,
-  keys: Set<string>,
-  values: string[] = [],
-): string[] {
-  if (Array.isArray(value)) {
-    value.forEach((entry) => collectMetadataValues(entry, keys, values));
-    return values;
-  }
-  if (value && typeof value === "object") {
-    Object.entries(value).forEach(([key, entry]) => {
-      if (keys.has(key.toLowerCase())) {
-        values.push(jsonScalarText(entry));
-      }
-      collectMetadataValues(entry, keys, values);
-    });
-  }
-  return values;
-}
-
-function jsonScalarText(value: JsonValue): string {
-  if (value === null) {
-    return "null";
-  }
-  if (typeof value === "object") {
-    return jsonText(value);
-  }
-  return String(value);
 }
 
 function jsonText(value: JsonValue): string {

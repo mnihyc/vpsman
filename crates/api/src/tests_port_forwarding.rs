@@ -421,7 +421,7 @@ fn port_forward_operator() -> AuthContext {
             disabled_at: None,
             deleted_at: None,
         },
-        session_id: uuid::Uuid::new_v4(),
+        session_id: Some(uuid::Uuid::new_v4()),
     }
 }
 

@@ -96,7 +96,7 @@ tunnel plans require the read scopes listed in
 Register a direct gateway agent identity:
 
 ```sh
-export EDGE_CLIENT_ID=1
+export EDGE_CLIENT_ID=v-1
 cargo run -p vpsctl -- noise-keygen
 cargo run -p vpsctl -- agent-identity-upsert \
   --client-id "$EDGE_CLIENT_ID" \

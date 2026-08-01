@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { ActionFeedback } from "../../components/ActionFeedback";
+import { presentAudit } from "../../auditPresentation";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import {
   ConsoleDataGrid,
@@ -41,7 +42,6 @@ import {
   formatCompactTime,
   formatFullTime,
   formatTime,
-  metadataOperator,
   shortHash,
   shortId,
 } from "../../utils";
@@ -146,7 +146,7 @@ export function SessionEvidencePanel({
         const job = jobsById.get(session.job_id) ?? null;
         return {
           audits: audits
-            .filter((audit) => auditMatchesTerminalSession(audit, session, job))
+            .filter((audit) => auditMatchesTerminalSession(audit, session))
             .sort((left, right) =>
               right.created_at.localeCompare(left.created_at),
             ),
@@ -698,7 +698,7 @@ function SelectedSessionEvidence({
                 className="dashboardWidgetRow auditEvidenceRow"
                 key={audit.id}
               >
-                <strong>{audit.action}</strong>
+                <strong>{presentAudit(audit).actionLabel}</strong>
                 <span title={terminalAuditTargetTitle(audit)}>
                   {terminalAuditTargetLabel(audit)}
                 </span>
@@ -1355,37 +1355,35 @@ function parseTimeMs(value: string): number | null {
 function auditMatchesTerminalSession(
   audit: AuditLogRecord,
   session: TerminalSessionRecord,
-  job: JobHistoryRecord | null,
 ): boolean {
-  const text =
-    `${audit.target} ${JSON.stringify(audit.metadata)}`.toLowerCase();
+  const presentation = presentAudit(audit);
+  if (presentation.terminalSessionId === session.session_id) {
+    return true;
+  }
   if (
-    text.includes(session.session_id.toLowerCase()) ||
-    text.includes(session.job_id.toLowerCase())
+    presentation.evidenceReferences.some(
+      (reference) =>
+        reference.kind === "Job" && reference.value === session.job_id,
+    )
   ) {
     return true;
   }
-  return Boolean(job?.payload_hash && audit.command_hash === job.payload_hash);
+  return false;
 }
 
 function terminalActorLabel(
   record: TerminalEvidenceRecord,
   authEventBySessionId: Map<string, OperatorAuthEventRecord>,
 ): string {
-  const auditActor = record.audits
-    .map(
+  if (record.job?.actor_id) {
+    const dispatchActor = record.audits.find(
       (audit) =>
-        metadataOperator(audit.metadata) ??
-        metadataText(audit.metadata, [
-          "operator_username",
-          "username",
-          "operator_id",
-          "actor_id",
-        ]),
-    )
-    .find(Boolean);
-  if (auditActor) {
-    return auditActor;
+        audit.actor_id === record.job?.actor_id &&
+        audit.action === "job.dispatch_requested",
+    );
+    return dispatchActor
+      ? presentAudit(dispatchActor).actorLabel
+      : `Operator ${shortId(record.job.actor_id)}`;
   }
   const operatorSessionId = terminalOperatorSessionId(record.audits);
   const authEvent = operatorSessionId
@@ -1426,10 +1424,7 @@ function terminalActorEvidenceTitle(
 
 function terminalOperatorSessionId(audits: AuditLogRecord[]): string | null {
   for (const audit of audits) {
-    const value = metadataText(audit.metadata, [
-      "operator_session_id",
-      "session_id",
-    ]);
+    const value = presentAudit(audit).operatorSessionId;
     if (value) {
       return value;
     }
@@ -1438,27 +1433,12 @@ function terminalOperatorSessionId(audits: AuditLogRecord[]): string | null {
 }
 
 function terminalAuditTargetLabel(audit: AuditLogRecord): string {
-  const clientId = metadataText(audit.metadata, ["client_id"]);
-  const terminalSessionId = metadataText(audit.metadata, [
-    "terminal_session_id",
-  ]);
-  if (clientId || terminalSessionId) {
-    return [
-      clientId ?? "terminal",
-      terminalSessionId ? shortId(terminalSessionId) : null,
-    ]
-      .filter(Boolean)
-      .join(" · ");
-  }
-  return audit.target.replace(/^terminal:/, "");
+  return presentAudit(audit).targetLabel;
 }
 
 function terminalAuditTargetTitle(audit: AuditLogRecord): string {
-  const clientId = metadataText(audit.metadata, ["client_id"]);
-  const terminalSessionId = metadataText(audit.metadata, [
-    "terminal_session_id",
-  ]);
-  return [clientId, terminalSessionId].filter(Boolean).join(" · ") || audit.target;
+  const presentation = presentAudit(audit);
+  return `${presentation.targetLabel} · ${presentation.targetDetail}`;
 }
 
 function terminalStartedAt(record: TerminalEvidenceRecord): string | null {

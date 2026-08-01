@@ -1439,8 +1439,11 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
       const layerSummary = graphPanel
         .locator(".topologyGraphLegend > div")
         .filter({ hasText: "Layers" });
+      // Runtime evidence arrives asynchronously after the plan sync. Before the
+      // first observation the tunnel is unknown; once both agents report that
+      // the declared interface is absent, it correctly needs attention.
       await expect(layerSummary).toContainText(
-        "0 healthy, 1 unknown, 0 attention",
+        /0 healthy, (?:1 unknown, 0 attention|0 unknown, 1 attention)/,
       );
       await expect(layerSummary).not.toHaveClass(/\bready\b/);
       await expect(graphPanel.getByText("OSPF cost", { exact: true })).toHaveCount(0);

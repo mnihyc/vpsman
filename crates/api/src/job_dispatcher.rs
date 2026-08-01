@@ -653,7 +653,7 @@ async fn auth_context_for_claim(
     }
     Ok(Some(AuthContext {
         operator: operator.view(),
-        session_id: Uuid::nil(),
+        session_id: None,
     }))
 }
 

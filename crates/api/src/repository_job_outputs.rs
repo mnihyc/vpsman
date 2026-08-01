@@ -716,19 +716,30 @@ impl Repository {
                                 .map(|target| target.status.clone())
                                 .collect::<Vec<_>>()
                         };
+                        let command_hash = memory
+                            .jobs
+                            .read()
+                            .await
+                            .iter()
+                            .find(|job| job.id == job_id)
+                            .map(|job| job.payload_hash.clone());
                         memory.audits.write().await.push(AuditLogView {
                             id: Uuid::new_v4(),
                             actor_id: None,
                             action: "job.target_result".to_string(),
                             target: format!("client:{client_id}"),
-                            command_hash: None,
+                            command_hash,
                             metadata: serde_json::json!({
                                 "job_id": job_id,
                                 "status": outcome.status,
+                                "result": outcome.status,
                                 "exit_code": outcome.exit_code,
                                 "accepted": outcome.accepted,
                                 "message": outcome.message,
                                 "received_at": outcome.received_at,
+                                "output_seq": seq,
+                                "origin_kind": "gateway_ingest",
+                                "component": "gateway-command-output-ingest",
                             }),
                             created_at: completed_at.clone(),
                         });
@@ -893,19 +904,28 @@ impl Repository {
                             INSERT INTO audit_logs (
                                 id, actor_id, action, target, command_hash, metadata
                             )
-                            VALUES ($1, NULL, $2, $3, NULL, $4)
+                            VALUES (
+                                $1, NULL, $2, $3,
+                                (SELECT payload_hash FROM jobs WHERE id = $4),
+                                $5
+                            )
                             "#,
                     )
                     .bind(Uuid::new_v4())
                     .bind("job.target_result")
                     .bind(format!("client:{client_id}"))
+                    .bind(job_id)
                     .bind(serde_json::json!({
                         "job_id": job_id,
                         "status": outcome.status,
+                        "result": outcome.status,
                         "exit_code": outcome.exit_code,
                         "accepted": outcome.accepted,
                         "message": outcome.message,
                         "received_at": outcome.received_at,
+                        "output_seq": seq,
+                        "origin_kind": "gateway_ingest",
+                        "component": "gateway-command-output-ingest",
                     }))
                     .execute(&mut *tx)
                     .await?;
@@ -1178,6 +1198,9 @@ impl Repository {
                     "client_id": client_id,
                     "seq": seq,
                     "reason": "output sequence already persisted with different content",
+                    "result": "ignored",
+                    "origin_kind": "gateway_ingest",
+                    "component": "gateway-command-output-ingest",
                 }))
                 .execute(pool)
                 .await?;
@@ -1964,6 +1987,9 @@ fn job_output_conflict_audit(job_id: Uuid, client_id: &str, seq: i32) -> AuditLo
             "client_id": client_id,
             "seq": seq,
             "reason": "output sequence already persisted with different content",
+            "result": "ignored",
+            "origin_kind": "gateway_ingest",
+            "component": "gateway-command-output-ingest",
         }),
         created_at: unix_now().to_string(),
     }
@@ -1988,6 +2014,9 @@ async fn insert_job_output_conflict_audit(
         "client_id": output.client_id,
         "seq": output.seq,
         "reason": "output sequence already persisted with different content",
+        "result": "ignored",
+        "origin_kind": "gateway_ingest",
+        "component": "gateway-command-output-ingest",
     }))
     .execute(&mut **tx)
     .await?;

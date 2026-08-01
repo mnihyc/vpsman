@@ -42,6 +42,8 @@ const releaseAccessibilityRoutes: Array<{ view: ActiveView; subpage: string }> =
 const customMockTests = new Set([
   "audit latest visible event uses newest timestamp instead of row order",
   "audit identifies control-plane events without inventing an unknown actor",
+  "audit event route loads one exact ID outside the list page",
+  "failed audit event lookup stays scoped to its detail page",
   "observability dashboards use safe labels when summary counts are missing",
   "home shows a useful empty state when no VPS agents are loaded",
   "fleet monitor cards remain readable for 0 generated VPS fixtures",
@@ -1292,7 +1294,7 @@ test("terminal open and resume stay in Remote Operations without Jobs", async ({
   ).toBeVisible();
   await expect(page.locator(".terminalCommandComposer")).toBeHidden();
   await expect(
-    page.getByText("Advanced session controls", { exact: true }),
+    page.getByText("Session inventory and controls", { exact: true }),
   ).toBeVisible();
   await expect(launcher.getByLabel("New terminal columns")).toBeHidden();
   await launcher.getByText("Advanced terminal options").click();
@@ -1343,25 +1345,17 @@ test("terminal open and resume stay in Remote Operations without Jobs", async ({
     .locator(".gridBody [role=row]", { hasText: "61616161" })
     .first();
   await invokeGridRowAction(page, terminalGrid, activeTerminalRow, "Attach");
-  const composer = page.locator(".terminalCommandComposer");
+  const focusedTerminal = page.getByLabel("Focused terminal workspace");
+  await expect(focusedTerminal).toBeVisible();
+  await expect(focusedTerminal).toContainText("61616161");
   await expect(
-    composer.getByRole("heading", { name: "Terminal review composer" }),
+    focusedTerminal.getByLabel("Focused terminal emulator"),
   ).toBeVisible();
-  await expect(composer.getByLabel("Dispatch mode boundary")).toContainText(
-    "Terminal session mode",
-  );
-  await expect(composer.getByRole("button", { name: "Argv" })).toHaveCount(0);
-  await expect(composer.getByLabel("Terminal action")).toHaveValue("open");
-  await expect(composer.getByLabel("Terminal argv")).toHaveValue("/bin/sh -l");
-  await expect(composer.getByLabel("Terminal session id")).toHaveValue(
-    "61616161-2222-4333-8444-555555555555",
-  );
-  await expect(
-    composer.getByLabel("Terminal replay from sequence"),
-  ).toHaveValue("1");
-  await expect(
-    composer.getByLabel("Bulk target selector expression"),
-  ).toHaveValue("id:agent-sfo-01");
+  await expect(page.locator(".terminalCommandComposer")).toBeHidden();
+  await focusedTerminal
+    .getByRole("button", { name: "Exit focused terminal view" })
+    .click();
+  await expect(focusedTerminal).toBeHidden();
 
   const terminalPanel = page.locator(".terminalSessionsPanel");
   await expect(terminalPanel).toContainText("Following");
@@ -1984,6 +1978,14 @@ test("fleet monitor renders VPS card workflow actions", async ({
   const monitor = page.getByLabel("VPS monitor cards");
   await expect(monitor).toBeVisible();
   await expect(page.getByLabel("VPS cards controls")).toBeVisible();
+  const comfortableFirstRow = await monitorFirstRowCount(monitor);
+  const comfortableCardWidth = await monitor
+    .locator(".vpsMonitorCard")
+    .first()
+    .evaluate((card) => card.getBoundingClientRect().width);
+  await expect(
+    monitor.locator(".vpsMonitorCard").first().locator(".comfortableSummary span"),
+  ).toHaveCount(5);
   await page.getByLabel("VPS cards sort").selectOption("traffic");
   await expect(monitor).toHaveAttribute("data-sort", "traffic");
   await page
@@ -1991,13 +1993,40 @@ test("fleet monitor renders VPS card workflow actions", async ({
     .getByRole("button", { name: "Compact" })
     .click();
   await expect(monitor).toHaveAttribute("data-density", "compact");
+  const compactFirstRow = await monitorFirstRowCount(monitor);
+  const compactCardWidth = await monitor
+    .locator(".vpsMonitorCard")
+    .first()
+    .evaluate((card) => card.getBoundingClientRect().width);
+  expect(comfortableFirstRow).toBeGreaterThanOrEqual(2);
+  expect(compactFirstRow).toBeGreaterThanOrEqual(comfortableFirstRow);
+  expect(compactCardWidth).toBeLessThan(comfortableCardWidth);
+  await expect(
+    monitor
+      .locator(".vpsMonitorCard")
+      .first()
+      .locator(".compactSummary > span"),
+  ).toHaveCount(2);
+  await expect(
+    monitor.locator(".vpsMonitorCard").first().locator(".comfortableSummary"),
+  ).toHaveCount(0);
+
+  await monitor.locator(".vpsMonitorCardMain").first().click();
+  await expect(page).toHaveURL(/#\/fleet\/instance-detail\//);
+  await page.goBack();
+  await expect(monitor).toHaveAttribute("data-density", "compact");
+  await expect(monitor).toHaveAttribute("data-sort", "traffic");
 
   const edgeCard = monitor
     .locator(".vpsMonitorCard", { hasText: "edge-sfo-01" })
     .first();
-  await expect(edgeCard.getByText("Contact unknown").first()).toBeVisible();
+  await expect(edgeCard.getByText("No contact").first()).toBeVisible();
   await expect(edgeCard.getByLabel("Tags for edge-sfo-01")).toContainText(
     "provider:alpha",
+  );
+  await expect(edgeCard.getByText("+1", { exact: true })).toHaveAttribute(
+    "title",
+    "role:edge",
   );
   await expect(edgeCard).toContainText("1m load");
   await expect(edgeCard).toContainText("Telemetry stale");
@@ -2151,6 +2180,58 @@ for (const fixtureCount of [0, 3, 20, 50, 100]) {
     await expectMonitorCardsToFit(page, `${fixtureCount} generated VPS`);
   });
 }
+
+test("fleet monitor density remains responsive on a narrow viewport", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the desktop project performs the explicit viewport transition",
+  );
+  await installConsoleApiMock(page, {
+    agentListOverride: makeMonitorAgentFixtures(20),
+  });
+  await page.setViewportSize({ height: 844, width: 390 });
+  await gotoConsoleHome(page);
+  await openConsoleSubpage(page, "Fleet", "Monitor");
+
+  const monitor = page.getByLabel("VPS monitor cards");
+  expect(await monitorFirstRowCount(monitor)).toBe(1);
+  await page
+    .getByLabel("VPS cards density")
+    .getByRole("button", { name: "Compact" })
+    .click();
+  expect(await monitorFirstRowCount(monitor)).toBe(1);
+  await expectMonitorCardsToFit(page, "narrow compact VPS");
+});
+
+test("fleet monitor densities remain distinct at a common laptop width", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the desktop project performs the explicit viewport transition",
+  );
+  await installConsoleApiMock(page, {
+    agentListOverride: makeMonitorAgentFixtures(20),
+  });
+  await page.setViewportSize({ height: 900, width: 1024 });
+  await gotoConsoleHome(page);
+  await openConsoleSubpage(page, "Fleet", "Monitor");
+
+  const monitor = page.getByLabel("VPS monitor cards");
+  const comfortableFirstRow = await monitorFirstRowCount(monitor);
+  expect(comfortableFirstRow).toBeGreaterThanOrEqual(2);
+  await expectMonitorCardsToFit(page, "laptop comfortable VPS");
+
+  await page
+    .getByLabel("VPS cards density")
+    .getByRole("button", { name: "Compact" })
+    .click();
+  const compactFirstRow = await monitorFirstRowCount(monitor);
+  expect(compactFirstRow).toBeGreaterThan(comfortableFirstRow);
+  await expectMonitorCardsToFit(page, "laptop compact VPS");
+});
 
 test("steady-state fleet polling refreshes latest telemetry without reloading operational tables", async ({
   page,
@@ -2999,7 +3080,7 @@ test("command palette indexes release pages and fixture entities", async ({
   await expectCommandPaletteGroup(page, "Terminal", "61616161");
   await expectCommandPaletteGroup(page, "Transfer", "routing.log");
   await expectCommandPaletteGroup(page, "Backup", "fixture backup");
-  await expectCommandPaletteGroup(page, "Audit", "privilege_unlock");
+  await expectCommandPaletteGroup(page, "Audit", "privilege.unlock");
   await expectCommandPaletteGroup(page, "Schedule", "edge-health-hourly");
 });
 
@@ -3030,7 +3111,7 @@ test("command palette entity selections use release route helpers", async ({
     page.getByRole("heading", { name: "Terminal sessions" }),
   ).toBeVisible();
 
-  await selectCommandPaletteResult(page, "Audit", "privilege_unlock");
+  await selectCommandPaletteResult(page, "Audit", "privilege.unlock");
   await expect(
     page.getByRole("heading", { name: "Audit events" }),
   ).toBeVisible();
@@ -5077,32 +5158,34 @@ test("audit events stays read-only with filters and event detail", async ({
     await expect(filters.getByLabel(label)).toBeVisible();
   }
 
-  await filters.getByLabel("Audit action filter").fill("privilege_unlock");
+  await filters.getByLabel("Audit action filter").fill("privilege.unlock");
   const grid = page.getByLabel("Audit records data grid");
   await expect(page.getByLabel("Audit event summary")).toContainText(
     "Latest visible",
   );
-  await expect(page.getByLabel("Audit coverage warning")).toContainText(
-    "Coverage warning",
+  await expect(page.getByLabel("Audit event summary")).toContainText(
+    "Known actors",
   );
   for (const header of [
     "Time",
     "Actor",
     "Action",
     "Target",
-    "Result",
-    "Related job/session",
+    "Outcome",
+    "Evidence",
   ]) {
     await expect(grid).toContainText(header);
   }
   await expect(grid).toContainText("Privilege vault");
   if (testInfo.project.name.includes("mobile")) {
+    const mobileCard = grid.getByLabel(
+      "Audit records mobile card audit-privilege-unlock-0001",
+    );
+    await expect(mobileCard.locator(".gridMobileState")).toContainText(
+      "Succeeded",
+    );
     await activate(
-      grid
-        .getByRole("button", {
-          name: /Show details for Audit records row/,
-        })
-        .first(),
+      mobileCard.getByRole("button", { name: "Details" }),
     );
   } else {
     await expect(grid).toContainText("Privilege unlock");
@@ -5113,12 +5196,39 @@ test("audit events stays read-only with filters and event detail", async ({
   await expect(detail).toBeVisible();
   await expect(detail).toContainText("console-admin");
   await expect(detail).toContainText("127.0.0.1");
-  await expect(detail).toContainText("browser_memory");
-  await expect(detail).toContainText("Success");
+  await expect(detail).toContainText("privilege.unlock");
+  await expect(detail).toContainText("Succeeded");
   await expect(detail).toContainText("Exact time");
   await expect(detail).toContainText(/GMT|UTC/);
   await expect(detail).toContainText("Raw action");
-  await expect(detail).toContainText("privilege_unlock");
+  await expect(detail).toContainText("privilege.unlock");
+  await detail.getByRole("button", { name: "Open event" }).click();
+  await expect(page).toHaveURL(/#\/audit\/events\/audit-privilege-unlock-0001$/);
+  await expect(page.getByRole("heading", { level: 2, name: "Audit event" })).toBeVisible();
+  await expect(
+    page.locator('[aria-label="Audit event detail"]:visible'),
+  ).toContainText(
+    "audit-privilege-unlock-0001",
+  );
+  await page.goBack();
+  await expect(page).toHaveURL(/#\/audit\/events$/);
+  await expect(detail).toBeVisible();
+  await expect(filters.getByLabel("Audit action filter")).toHaveValue(
+    "privilege.unlock",
+  );
+  await detail.getByRole("button", { name: "Open event" }).click();
+  await page.getByRole("button", { name: "Audit events" }).click();
+  await expect(page).toHaveURL(/#\/audit\/events$/);
+  await expect(filters.getByLabel("Audit action filter")).toHaveValue("");
+  await page.goBack();
+  await expect(page).toHaveURL(
+    /#\/audit\/events\/audit-privilege-unlock-0001$/,
+  );
+  await page.goBack();
+  await expect(page).toHaveURL(/#\/audit\/events$/);
+  await expect(filters.getByLabel("Audit action filter")).toHaveValue(
+    "privilege.unlock",
+  );
 
   const eventsPanel = page.locator(".fleetPanel").filter({
     has: page.getByRole("heading", { level: 2, name: "Audit log" }),
@@ -5141,6 +5251,70 @@ test("audit events stays read-only with filters and event detail", async ({
   }
 });
 
+test("audit event route loads one exact ID outside the list page", async ({
+  page,
+}) => {
+  const auditId = "abababab-abab-4bab-8bab-abababababab";
+  await installConsoleApiMock(page, {
+    auditDetailOverride: {
+      action: "job.target_result",
+      actor_id: null,
+      command_hash: null,
+      created_at: "2026-07-31T08:00:00Z",
+      id: auditId,
+      metadata: {
+        client_id: "agent-sfo-01",
+        component: "job-dispatcher",
+        job_id: "8b021452-b292-4eae-8735-8474b3c7faab",
+        origin_kind: "control_plane",
+        result: "skipped",
+      },
+      target: "client:agent-sfo-01",
+    },
+    auditLogsOverride: [],
+  });
+  await page.goto(`/#/audit/events/${auditId}`);
+  await waitForConsoleShell(page);
+
+  const detail = page.getByLabel("Audit event detail");
+  await expect(detail).toContainText(auditId);
+  await expect(detail).toContainText("Job target result");
+  const requests = await page.evaluate(() => {
+    const trackedWindow = window as typeof window & {
+      __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+    };
+    return trackedWindow.__vpsmanFetchRequests ?? [];
+  });
+  expect(
+    requests.some(
+      (request) =>
+        request.method === "GET" &&
+        new URL(request.url, "http://localhost").pathname ===
+          `/api/v1/audit/${auditId}`,
+    ),
+  ).toBe(true);
+});
+
+test("failed audit event lookup stays scoped to its detail page", async ({
+  page,
+}) => {
+  const missingAuditId = "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd";
+  await installConsoleApiMock(page, { auditLogsOverride: [] });
+  await page.goto(`/#/audit/events/${missingAuditId}`);
+  await waitForConsoleShell(page);
+
+  const detailPanel = page.locator(".auditEventRoutePanel");
+  await expect(detailPanel).toContainText("Audit event is unavailable");
+  await expect(detailPanel).toContainText("Audit event not found");
+  await detailPanel.getByRole("button", { name: "Audit events" }).click();
+
+  const listPanel = page.locator(".fleetPanel").filter({
+    has: page.getByRole("heading", { level: 2, name: "Audit log" }),
+  });
+  await expect(listPanel).toBeVisible();
+  await expect(listPanel).not.toContainText("Audit event not found");
+});
+
 test("audit latest visible event uses newest timestamp instead of row order", async ({
   page,
 }) => {
@@ -5149,13 +5323,15 @@ test("audit latest visible event uses newest timestamp instead of row order", as
   await installConsoleApiMock(page, {
     auditLogsOverride: [
       {
-        action: "operator.login",
+        action: "operator_auth.login_success",
         actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
         command_hash: null,
         created_at: olderCreatedAt,
         id: "audit-unsorted-older-0001",
         metadata: {
+          component: "operator-auth",
           operator_username: "console-admin",
+          origin_kind: "authentication",
           result: "success",
         },
         target: "auth:login",
@@ -5168,7 +5344,9 @@ test("audit latest visible event uses newest timestamp instead of row order", as
         id: "audit-unsorted-newer-0001",
         metadata: {
           command_type: "shell_argv",
+          component: "job-submission-controller",
           operator_username: "console-admin",
+          origin_kind: "operator_request",
           result: "accepted",
           target_count: 1,
         },
@@ -5222,7 +5400,9 @@ test("audit identifies control-plane events without inventing an unknown actor",
         created_at: "2026-06-02T11:30:00Z",
         id: "audit-control-plane-0001",
         metadata: {
+          component: "job-dispatcher",
           job_id: "job-control-plane-0001",
+          origin_kind: "control_plane",
           result: "succeeded",
         },
         target: "job:job-control-plane-0001",
@@ -5234,13 +5414,12 @@ test("audit identifies control-plane events without inventing an unknown actor",
 
   const grid = page.getByLabel("Audit records data grid");
   await expect(grid).toContainText("Control plane");
-  await expect(grid).toContainText("system event");
+  await expect(grid).toContainText("Job dispatcher");
   await expect(grid).not.toContainText("Unknown actor");
   if (testInfo.project.name.includes("mobile")) {
     await grid
-      .getByRole("button", {
-        name: "Show details for Audit records row audit-control-plane-0001",
-      })
+      .getByLabel("Audit records mobile card audit-control-plane-0001")
+      .getByRole("button", { name: "Details" })
       .click();
   } else {
     await grid.getByText("Job target result").click();
@@ -5249,6 +5428,201 @@ test("audit identifies control-plane events without inventing an unknown actor",
   const detail = page.getByLabel("Audit event detail");
   await expect(detail).toContainText("Control plane");
   await expect(detail).not.toContainText("unknown");
+});
+
+test("audit does not coerce malformed metadata into provenance or evidence", async ({
+  page,
+}, testInfo) => {
+  await installConsoleApiMock(page, {
+    auditLogsOverride: [
+      {
+        action: "job.dispatch_requested",
+        actor_id: "173d16db-ca37-4385-9190-5b0bed72bd4e",
+        command_hash: null,
+        created_at: "2026-07-31T08:00:00Z",
+        id: "audit-malformed-scalars-0001",
+        metadata: {
+          client_id: 789,
+          component: 41,
+          job_id: 456,
+          operator_session_id: 123,
+          operator_username: false,
+          origin_kind: true,
+          result: 7,
+          target_count: 2,
+        },
+        target: "api:/api/v1/jobs",
+      },
+      {
+        action: "job.target_result",
+        actor_id: null,
+        command_hash: null,
+        created_at: "2026-07-31T07:59:00Z",
+        id: "audit-literal-null-0001",
+        metadata: {
+          component: "null",
+          origin_kind: "null",
+          result: "null",
+        },
+        target: "job:unlinked",
+      },
+    ],
+  });
+  await gotoConsoleHome(page);
+  await openConsoleSubpage(page, "Audit", "Events");
+
+  const grid = page.getByLabel("Audit records data grid");
+  await expect(grid).toContainText("Outcome not recorded");
+  await expect(grid).toContainText("2 targets");
+  await expect(grid).toContainText("Null");
+
+  if (testInfo.project.name.includes("mobile")) {
+    await grid
+      .getByLabel("Audit records mobile card audit-malformed-scalars-0001")
+      .getByRole("button", { name: "Details" })
+      .click();
+  } else {
+    await grid.getByText("Job dispatch requested").click();
+  }
+
+  const detail = page.getByLabel("Audit event detail");
+  await expect(detail).toContainText("Outcome not recorded");
+  await expect(detail).toContainText("Origin not recorded");
+  await expect(detail).toContainText("Operator session not recorded");
+  await expect(detail.getByRole("button", { name: "Open job" })).toHaveCount(0);
+});
+
+test("audit presents operator and control-plane provenance with one explicit model", async ({
+  page,
+}, testInfo) => {
+  const operatorId = "173d16db-ca37-4385-9190-5b0bed72bd4e";
+  const operatorSessionId = "eaa8fae8-6ad6-4284-bb23-f341e6173153";
+  const jobId = "8b021452-b292-4eae-8735-8474b3c7faab";
+  await installConsoleApiMock(page, {
+    auditLogsOverride: [
+      {
+        action: "fleet.vps_rules_updated",
+        actor_id: operatorId,
+        command_hash: "a".repeat(64),
+        created_at: "2026-07-31T07:45:46Z",
+        id: "audit-vps-rules-provenance",
+        metadata: {
+          changed_row_count: 2,
+          matched_vps_count: 3,
+          component: "vps-rules-controller",
+          operator_role: "admin",
+          operator_session_id: operatorSessionId,
+          operator_username: "console-admin",
+          origin_kind: "operator_request",
+          preview_hash: "a".repeat(64),
+          result: "succeeded",
+        },
+        target: "vps_rules",
+      },
+      {
+        action: "operator_auth.login_success",
+        actor_id: operatorId,
+        command_hash: null,
+        created_at: "2026-07-31T08:51:32Z",
+        id: "audit-login-provenance",
+        metadata: {
+          remote_ip: "2001:db8::40",
+          result: "success",
+          component: "operator-auth",
+          operator_session_id: operatorSessionId,
+          operator_username: "console-admin",
+          origin_kind: "authentication",
+          attempted_username: "console-admin",
+          user_agent: "operator-browser",
+        },
+        target: `operator:${operatorId}`,
+      },
+      {
+        action: "job.target_result",
+        actor_id: null,
+        command_hash: "b".repeat(64),
+        created_at: "2026-07-31T07:36:01Z",
+        id: "audit-target-result-provenance",
+        metadata: {
+          accepted: false,
+          component: "job-dispatcher",
+          job_id: jobId,
+          message: "target has never connected",
+          origin_kind: "control_plane",
+          result: "skipped",
+          status: "skipped",
+        },
+        target: "client:1",
+      },
+      {
+        action: "schedule.due_materialized",
+        actor_id: operatorId,
+        command_hash: "c".repeat(64),
+        created_at: "2026-07-31T07:35:00Z",
+        id: "audit-schedule-worker-provenance",
+        metadata: {
+          component: "schedule-dispatch-worker",
+          job_id: jobId,
+          operator_id: operatorId,
+          operator_role: "admin",
+          operator_username: "console-admin",
+          origin_kind: "worker",
+          result: "requested",
+          schedule_id: "51515151-6161-4717-8abc-defdefdefdef",
+          schedule_name: "Nightly review",
+        },
+        target: "schedule:51515151-6161-4717-8abc-defdefdefdef",
+      },
+    ],
+  });
+  await gotoConsoleHome(page);
+  await openConsoleSubpage(page, "Audit", "Events");
+
+  const grid = page.getByLabel("Audit records data grid");
+  await expect(grid).toContainText("Fleet VPS rules updated");
+  await expect(grid).toContainText("console-admin");
+  await expect(grid).toContainText("Operator session eaa8fae8");
+  await expect(grid).toContainText("Operator login succeeded");
+  await expect(grid).toContainText("Job 8b021452");
+  await expect(grid).toContainText("Skipped");
+  await expect(grid).not.toContainText(operatorId);
+  await expect(grid).not.toContainText("Recorded");
+  await expect(grid).not.toContainText("No linked evidence");
+
+  if (testInfo.project.name.includes("mobile")) {
+    await grid
+      .getByLabel(
+        "Audit records mobile card audit-target-result-provenance",
+      )
+      .getByRole("button", { name: "Details" })
+      .click();
+  } else {
+    await grid.getByText("Job target result").click();
+  }
+  let detail = page.getByLabel("Audit event detail");
+  await expect(detail).toContainText("Control plane · Job dispatcher");
+  await expect(detail).toContainText("Operator session not recorded");
+  await expect(detail.getByRole("button", { name: "Open job" })).toBeVisible();
+
+  if (testInfo.project.name.includes("mobile")) {
+    await grid
+      .getByLabel(
+        "Audit records mobile card audit-schedule-worker-provenance",
+      )
+      .getByRole("button", { name: "Details" })
+      .click();
+  } else {
+    await grid.getByText("Schedule due materialized").click();
+  }
+  detail = page.getByLabel("Audit event detail");
+  await expect(detail).toContainText("console-admin · Admin");
+  await expect(detail).toContainText("Worker · Schedule dispatch worker");
+  await expect(detail).toContainText("Not recorded for this event");
+  await expect(detail).toContainText("Schedule 51515151");
+  await expect(detail.getByRole("button", { name: "Open job" })).toBeVisible();
+  await expect(
+    detail.getByRole("button", { name: "Open schedule" }),
+  ).toHaveCount(0);
 });
 
 test("audit job evidence proves who ran what without leaving Audit", async ({
@@ -5303,7 +5677,7 @@ test("audit job evidence proves who ran what without leaving Audit", async ({
   await expect(detail).toContainText("no approval record exposed");
   await expect(
     detail.getByLabel("Audit context for selected job"),
-  ).toContainText("job.dispatch_requested");
+  ).toContainText("Job dispatch requested");
   await expect(detail.getByLabel("Job targets for selected job")).toContainText(
     "edge-sfo-01",
   );
@@ -5385,8 +5759,8 @@ test("audit sessions correlates terminal and auth evidence without emulator cont
   await expect(detail).toContainText("Started");
   await expect(detail).toContainText("Last activity");
   await expect(detail).toContainText("Expiry");
-  await expect(detail).toContainText("terminal.open");
-  await expect(detail).toContainText("terminal.input");
+  await expect(detail).toContainText("Terminal opened");
+  await expect(detail).toContainText("Terminal input");
   await expect(
     detail.getByLabel("Transcript references for selected session"),
   ).toContainText("Advanced replay path");
@@ -7508,6 +7882,16 @@ function makeMonitorAgentFixtures(count: number) {
   });
 }
 
+async function monitorFirstRowCount(monitor: Locator): Promise<number> {
+  return monitor.locator(".vpsMonitorCard").evaluateAll((cards) => {
+    if (cards.length === 0) return 0;
+    const firstTop = cards[0].getBoundingClientRect().top;
+    return cards.filter(
+      (card) => Math.abs(card.getBoundingClientRect().top - firstTop) <= 1,
+    ).length;
+  });
+}
+
 async function expectMonitorCardsToFit(page: Page, label: string) {
   const overflow = await page.locator(".vpsMonitorCard").evaluateAll((cards) =>
     cards.flatMap((card, cardIndex) => {
@@ -7527,7 +7911,11 @@ async function expectMonitorCardsToFit(page: Page, label: string) {
             element.textContent?.trim().replace(/\s+/g, " ").slice(0, 80) ?? "";
           const elementOverflow =
             element.scrollWidth > element.clientWidth + 1 &&
-            style.overflowX !== "visible";
+            style.overflowX !== "visible" &&
+            !(
+              style.textOverflow === "ellipsis" &&
+              Boolean(element.getAttribute("title"))
+            );
           const escapesCard =
             rect.right > cardRect.right + 1 || rect.left < cardRect.left - 1;
           return elementOverflow || escapesCard

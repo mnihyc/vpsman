@@ -193,8 +193,18 @@ CREATE TABLE audit_logs (
     action TEXT NOT NULL,
     target TEXT NOT NULL,
     command_hash TEXT,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    metadata JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT audit_logs_canonical_metadata CHECK (
+        jsonb_typeof(metadata) = 'object'
+        AND metadata ?& ARRAY['result', 'origin_kind', 'component']
+        AND jsonb_typeof(metadata -> 'result') = 'string'
+        AND jsonb_typeof(metadata -> 'origin_kind') = 'string'
+        AND jsonb_typeof(metadata -> 'component') = 'string'
+        AND btrim(metadata ->> 'result') <> ''
+        AND btrim(metadata ->> 'origin_kind') <> ''
+        AND btrim(metadata ->> 'component') <> ''
+    )
 );
 
 CREATE INDEX audit_logs_created_idx

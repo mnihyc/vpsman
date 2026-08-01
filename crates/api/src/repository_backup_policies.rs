@@ -423,9 +423,20 @@ impl Repository {
         metadata_only: Option<bool>,
         policies: &[BackupPolicyPrunePolicyView],
     ) -> Result<()> {
+        let result = if dry_run {
+            "previewed"
+        } else if policies
+            .iter()
+            .any(|policy| !policy.object_delete_errors.is_empty())
+        {
+            "partial"
+        } else {
+            "succeeded"
+        };
         let metadata = serde_json::json!({
             "dry_run": dry_run,
             "metadata_only_requested": metadata_only,
+            "result": result,
             "policies": policies.iter().map(|policy| serde_json::json!({
                 "schedule_id": policy.schedule_id,
                 "name": &policy.name,
@@ -437,9 +448,12 @@ impl Repository {
                 "object_delete_errors": &policy.object_delete_errors,
                 "status": &policy.status,
             })).collect::<Vec<_>>(),
+            "operator_id": operator.operator.id,
             "operator_username": &operator.operator.username,
             "operator_role": &operator.operator.role,
-            "session_id": operator.session_id,
+            "operator_session_id": operator.audit_session_id(),
+            "origin_kind": "operator_request",
+            "component": "backup-retention-controller",
         });
         match self {
             Self::Memory(memory) => {
@@ -627,8 +641,13 @@ fn backup_policy_audit_metadata(
         "retention_days": metadata.retention_days,
         "keep_last": metadata.keep_last,
         "rotation_generation": &metadata.rotation_generation,
+        "result": "succeeded",
+        "operator_id": operator.operator.id,
         "operator_username": &operator.operator.username,
-        "session_id": operator.session_id,
+        "operator_role": &operator.operator.role,
+        "operator_session_id": operator.audit_session_id(),
+        "origin_kind": "operator_request",
+        "component": "backup-policy-controller",
     })
 }
 

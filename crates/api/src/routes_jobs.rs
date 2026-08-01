@@ -66,7 +66,7 @@ pub(crate) async fn cancel_job(
     let reason = bounded_cancel_reason(request.reason.as_deref());
     let plan = state
         .repo
-        .request_job_cancel(job_id, operator.operator.id, reason.as_deref())
+        .request_job_cancel(job_id, &operator, reason.as_deref())
         .await?;
     if plan.pending_canceled > 0 {
         if let Err(error) =

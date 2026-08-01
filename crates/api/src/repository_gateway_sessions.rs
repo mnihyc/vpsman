@@ -4,7 +4,7 @@ use sqlx::Row;
 use vpsman_common::GatewaySessionLifecycleIngest;
 
 use crate::{
-    model::GatewaySessionView,
+    model::{AuditLogView, GatewaySessionView},
     repository::{MemoryState, Repository},
     unix_now,
 };
@@ -130,12 +130,22 @@ impl Repository {
                 )
                 .await
                 {
+                    let metadata = gateway_status_metadata(event, "online");
+                    memory.audits.write().await.push(AuditLogView {
+                        id: uuid::Uuid::new_v4(),
+                        actor_id: None,
+                        action: "agent.status_online".to_string(),
+                        target: format!("client:{}", event.client_id),
+                        command_hash: None,
+                        metadata: metadata.clone(),
+                        created_at: unix_now().to_string(),
+                    });
                     self.record_client_status_webhook_event(
                         &event.client_id,
                         Some(&from_status),
                         "online",
                         "gateway_session_started",
-                        gateway_status_metadata(event),
+                        metadata,
                     )
                     .await?;
                 }
@@ -223,7 +233,9 @@ impl Repository {
                         Some(&prior_status),
                         "online",
                         "gateway_session_started",
-                        gateway_status_metadata(event),
+                        gateway_status_metadata(event, "online"),
+                        "gateway_ingest",
+                        "gateway-session-lifecycle",
                     )
                     .await?;
                 }
@@ -252,12 +264,22 @@ impl Repository {
                     )
                     .await
                     {
+                        let metadata = gateway_status_metadata(event, "disconnected");
+                        memory.audits.write().await.push(AuditLogView {
+                            id: uuid::Uuid::new_v4(),
+                            actor_id: None,
+                            action: "agent.status_disconnected".to_string(),
+                            target: format!("client:{}", event.client_id),
+                            command_hash: None,
+                            metadata: metadata.clone(),
+                            created_at: unix_now().to_string(),
+                        });
                         self.record_client_status_webhook_event(
                             &event.client_id,
                             Some(&from_status),
                             "disconnected",
                             "gateway_session_ended",
-                            gateway_status_metadata(event),
+                            metadata,
                         )
                         .await?;
                     }
@@ -335,7 +357,9 @@ impl Repository {
                                 Some(prior_status),
                                 "disconnected",
                                 "gateway_session_ended",
-                                gateway_status_metadata(event),
+                                gateway_status_metadata(event, "disconnected"),
+                                "gateway_ingest",
+                                "gateway-session-lifecycle",
                             )
                             .await?;
                         }
@@ -521,12 +545,18 @@ async fn set_memory_agent_status(
     changed_from
 }
 
-fn gateway_status_metadata(event: &GatewaySessionLifecycleIngest) -> serde_json::Value {
+fn gateway_status_metadata(
+    event: &GatewaySessionLifecycleIngest,
+    result: &str,
+) -> serde_json::Value {
     serde_json::json!({
         "gateway_id": &event.gateway_id,
-        "session_id": event.session_id,
+        "gateway_session_id": event.session_id,
         "remote_ip": &event.remote_ip,
         "reason": &event.reason,
+        "result": result,
+        "origin_kind": "gateway_ingest",
+        "component": "gateway-session-lifecycle",
     })
 }
 

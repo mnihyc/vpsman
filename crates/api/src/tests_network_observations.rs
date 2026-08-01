@@ -249,7 +249,7 @@ async fn topology_graph_combines_plans_endpoint_state_and_observation_trends() {
             disabled_at: None,
             deleted_at: None,
         },
-        session_id: Uuid::nil(),
+        session_id: None,
     };
     let plan = test_plan();
     let input = TunnelPlanInput {
@@ -577,7 +577,7 @@ async fn topology_graph_ignores_observations_from_reused_plan_name_with_differen
             disabled_at: None,
             deleted_at: None,
         },
-        session_id: Uuid::nil(),
+        session_id: None,
     };
     let original = test_plan();
     let original_input = test_plan_input("right-b");
@@ -693,7 +693,7 @@ async fn topology_graph_marks_offline_runtime_endpoint_without_agent_observation
             disabled_at: None,
             deleted_at: None,
         },
-        session_id: Uuid::nil(),
+        session_id: None,
     };
     let plan = test_plan();
     let input = TunnelPlanInput {
@@ -889,7 +889,7 @@ async fn topology_graph_exposes_explicit_runtime_status_coverage() {
             disabled_at: None,
             deleted_at: None,
         },
-        session_id: Uuid::nil(),
+        session_id: None,
     };
     let plan = test_plan();
     let input = TunnelPlanInput {
@@ -996,7 +996,7 @@ async fn recommends_ospf_cost_from_probe_and_speed_trends() {
             disabled_at: None,
             deleted_at: None,
         },
-        session_id: Uuid::nil(),
+        session_id: None,
     };
     let plan = test_plan();
     let input = TunnelPlanInput {
@@ -1174,7 +1174,7 @@ fn topology_test_operator() -> AuthContext {
             disabled_at: None,
             deleted_at: None,
         },
-        session_id: Uuid::nil(),
+        session_id: None,
     }
 }
 

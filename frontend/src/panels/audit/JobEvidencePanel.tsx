@@ -5,6 +5,7 @@ import {
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
 import { ActionFeedback } from "../../components/ActionFeedback";
+import { presentAudit } from "../../auditPresentation";
 import { formatLowerBoundCount } from "../../constants";
 import {
   jobStatusBadgeClass,
@@ -21,7 +22,6 @@ import type {
 import {
   decodeOutputPreview,
   formatTime,
-  metadataOperator,
   shortHash,
   shortId,
 } from "../../utils";
@@ -487,8 +487,8 @@ function JobEvidenceDetail({
           {record.auditMatches.length > 0 ? (
             record.auditMatches.slice(0, 6).map((audit) => (
               <div className="dashboardWidgetRow auditEvidenceRow" key={audit.id}>
-                <strong>{audit.action}</strong>
-                <span>{audit.target}</span>
+                <strong>{presentAudit(audit).actionLabel}</strong>
+                <span>{presentAudit(audit).targetLabel}</span>
                 <small title={audit.command_hash ?? undefined}>
                   {audit.command_hash ? shortHash(audit.command_hash) : "no hash"}
                 </small>
@@ -580,26 +580,12 @@ function JobEvidenceDetail({
 }
 
 function auditMatchesJob(audit: AuditLogRecord, job: JobHistoryRecord): boolean {
-  const jobId = job.id.toLowerCase();
-  if (audit.target.toLowerCase() === `job:${jobId}`) {
+  if (audit.target === `job:${job.id}`) {
     return true;
   }
-  return jsonValueContainsExactText(audit.metadata, jobId);
-}
-
-function jsonValueContainsExactText(value: JsonValue, expected: string): boolean {
-  if (typeof value === "string") {
-    return value.toLowerCase() === expected;
-  }
-  if (Array.isArray(value)) {
-    return value.some((entry) => jsonValueContainsExactText(entry, expected));
-  }
-  if (value && typeof value === "object") {
-    return Object.values(value).some((entry) =>
-      jsonValueContainsExactText(entry, expected),
-    );
-  }
-  return false;
+  return presentAudit(audit).evidenceReferences.some(
+    (reference) => reference.kind === "Job" && reference.value === job.id,
+  );
 }
 
 function auditEvidenceState(
@@ -646,24 +632,12 @@ function outputEvidenceState(
     };
   }
   if (evidence.error) {
-    const lower = evidence.error.toLowerCase();
-    const retentionExpired =
-      lower.includes("retention") ||
-      lower.includes("expired") ||
-      lower.includes("gone");
-    return retentionExpired
-      ? {
-          detail: "Retention expired. The job remains in the ledger, but retained output is no longer available.",
-          label: "Retention expired",
-          searchText: "retention expired output unavailable",
-          tone: "warn",
-        }
-      : {
-          detail: `Output unavailable. ${evidence.error}`,
-          label: "Output unavailable",
-          searchText: "output unavailable load error",
-          tone: "warn",
-        };
+    return {
+      detail: `Output unavailable. ${evidence.error}`,
+      label: "Output unavailable",
+      searchText: "output unavailable load error",
+      tone: "warn",
+    };
   }
   if (evidence.outputs.length === 0) {
     return {
@@ -701,14 +675,16 @@ function outputEvidenceState(
 }
 
 function jobActorLabel(job: JobHistoryRecord, audits: AuditLogRecord[]): string {
-  const auditActor = audits
-    .map((audit) => metadataOperator(audit.metadata) ?? metadataText(audit.metadata, ["operator_username", "username", "operator_id", "actor_id"]))
-    .find(Boolean);
-  if (auditActor) {
-    return auditActor;
-  }
   if (job.actor_id) {
-    return shortId(job.actor_id);
+    const dispatchAudit = audits.find(
+      (audit) =>
+        audit.action === "job.dispatch_requested" &&
+        audit.actor_id === job.actor_id,
+    );
+    if (dispatchAudit) {
+      return presentAudit(dispatchAudit).actorLabel;
+    }
+    return `Operator ${shortId(job.actor_id)}`;
   }
   if (job.command_type.startsWith("scheduled_")) {
     return "system scheduler";
@@ -722,7 +698,7 @@ function approvalStateLabel(
   auditsTruncated = false,
 ): string {
   const approvalAudit = audits.find((audit) =>
-    `${audit.action} ${JSON.stringify(audit.metadata)}`.toLowerCase().includes("approval"),
+    audit.action.startsWith("job.approval_"),
   );
   if (approvalAudit) {
     return `${approvalAudit.action} · ${formatTime(approvalAudit.created_at)}`;

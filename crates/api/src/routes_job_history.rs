@@ -1357,6 +1357,22 @@ pub(crate) async fn list_audit_logs(
     Ok(Json(state.repo.query_audit_logs(&query).await?))
 }
 
+pub(crate) async fn get_audit_log(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(audit_id): Path<Uuid>,
+) -> Result<Json<AuditLogView>, ApiError> {
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_AUDIT_READ)
+        .await?;
+    let audit = state
+        .repo
+        .get_audit_log(audit_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("audit_event_not_found"))?;
+    Ok(Json(audit))
+}
+
 pub(crate) async fn list_network_observations(
     State(state): State<AppState>,
     headers: HeaderMap,

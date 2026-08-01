@@ -17,6 +17,7 @@ impl Repository {
         old_config: serde_json::Value,
         new_config: serde_json::Value,
         request_id: Uuid,
+        payload_hash: &str,
     ) -> Result<()> {
         self.record_suite_config_audit_event(
             operator,
@@ -26,6 +27,7 @@ impl Repository {
             old_config,
             new_config,
             request_id,
+            payload_hash,
             None,
         )
         .await
@@ -39,6 +41,7 @@ impl Repository {
         old_config: serde_json::Value,
         new_config: serde_json::Value,
         request_id: Uuid,
+        payload_hash: &str,
     ) -> Result<()> {
         self.record_suite_config_audit_event(
             operator,
@@ -48,6 +51,7 @@ impl Repository {
             old_config,
             new_config,
             request_id,
+            payload_hash,
             None,
         )
         .await
@@ -61,6 +65,7 @@ impl Repository {
         old_config: serde_json::Value,
         new_config: serde_json::Value,
         request_id: Uuid,
+        payload_hash: &str,
         write_error: &str,
     ) -> Result<()> {
         self.record_suite_config_audit_event(
@@ -71,6 +76,7 @@ impl Repository {
             old_config,
             new_config,
             request_id,
+            payload_hash,
             Some(write_error),
         )
         .await
@@ -85,14 +91,28 @@ impl Repository {
         old_config: serde_json::Value,
         new_config: serde_json::Value,
         request_id: Uuid,
+        payload_hash: &str,
         write_error: Option<&str>,
     ) -> Result<()> {
+        let result = match action {
+            "suite_config.update_requested" => "requested",
+            "suite_config.updated" => "succeeded",
+            "suite_config.update_failed" => "failed",
+            _ => anyhow::bail!("unsupported_suite_config_audit_action"),
+        };
         let mut metadata = json!({
             "path": path,
             "changed_keys": changed_keys,
             "old": old_config,
             "new": new_config,
             "request_id": request_id,
+            "result": result,
+            "operator_id": operator.operator.id,
+            "operator_username": operator.operator.username,
+            "operator_role": operator.operator.role,
+            "operator_session_id": operator.audit_session_id(),
+            "origin_kind": "operator_request",
+            "component": "suite-config-controller",
             "rollback_available": false,
         });
         if let Some(write_error) = write_error {
@@ -105,7 +125,7 @@ impl Repository {
                     actor_id: Some(operator.operator.id),
                     action: action.to_string(),
                     target: "suite_config".to_string(),
-                    command_hash: None,
+                    command_hash: Some(payload_hash.to_string()),
                     metadata,
                     created_at: unix_now().to_string(),
                 });
@@ -116,12 +136,13 @@ impl Repository {
                     INSERT INTO audit_logs (
                         id, actor_id, action, target, command_hash, metadata
                     )
-                    VALUES ($1, $2, $3, 'suite_config', NULL, $4)
+                    VALUES ($1, $2, $3, 'suite_config', $4, $5)
                     "#,
                 )
                 .bind(Uuid::new_v4())
                 .bind(operator.operator.id)
                 .bind(action)
+                .bind(payload_hash)
                 .bind(metadata)
                 .execute(pool)
                 .await?;
@@ -156,7 +177,7 @@ mod tests {
                 disabled_at: None,
                 deleted_at: None,
             },
-            session_id: Uuid::new_v4(),
+            session_id: Some(Uuid::new_v4()),
         }
     }
 
@@ -174,6 +195,7 @@ mod tests {
             json!({"old": true}),
             json!({"new": true}),
             request_id,
+            "suite-config-payload-hash",
         )
         .await
         .unwrap();
@@ -184,6 +206,7 @@ mod tests {
             json!({"old": true}),
             json!({"new": true}),
             request_id,
+            "suite-config-payload-hash",
             "suite_config_write_failed",
         )
         .await
@@ -198,6 +221,14 @@ mod tests {
         assert_eq!(audits[1].action, "suite_config.update_failed");
         assert_eq!(audits[0].metadata["request_id"], json!(request_id));
         assert_eq!(audits[1].metadata["request_id"], json!(request_id));
+        assert_eq!(
+            audits[0].command_hash.as_deref(),
+            Some("suite-config-payload-hash")
+        );
+        assert_eq!(
+            audits[1].metadata["operator_session_id"],
+            json!(operator.audit_session_id())
+        );
         assert_eq!(
             audits[1].metadata["write_error"],
             json!("suite_config_write_failed")

@@ -46,6 +46,13 @@ pub(crate) fn agent_identity_upsert(
     let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
     let salt_hex = load_super_salt_hex(None)?;
     let targets = vec![options.client_id.clone()];
+    let payload_hash = agent_identity_request_payload_hash(
+        &options.client_id,
+        &options.client_public_key_hex,
+        options.display_name.as_deref(),
+        &options.tags,
+        options.replace_existing_key,
+    )?;
     let privilege_assertion = build_privilege_for_db(
         DbPrivilegeRequest {
             action: if options.replace_existing_key {
@@ -57,7 +64,7 @@ pub(crate) fn agent_identity_upsert(
             selector_expression: None,
             resolved_targets: &targets,
             confirmed: options.confirmed,
-            payload_hash: None,
+            payload_hash: Some(&payload_hash),
         },
         &password,
         &salt_hex,
@@ -77,6 +84,27 @@ pub(crate) fn agent_identity_upsert(
         http_post_json(api_url, "/api/v1/agent-identities", token, &body,)?
     );
     Ok(())
+}
+
+pub(crate) fn agent_identity_request_payload_hash(
+    client_id: &str,
+    client_public_key_hex: &str,
+    display_name: Option<&str>,
+    tags: &[String],
+    replace_existing_key: bool,
+) -> Result<String> {
+    let public_key =
+        hex::decode(client_public_key_hex.trim()).context("agent public key must be valid hex")?;
+    anyhow::ensure!(public_key.len() == 32, "agent public key must be 32 bytes");
+    Ok(vpsman_common::agent_identity_payload_hash(
+        vpsman_common::AgentIdentityPayloadInput {
+            client_id,
+            public_key: &public_key,
+            display_name,
+            tags,
+            replace_existing_key,
+        },
+    ))
 }
 
 pub(crate) fn client_key_revocations(api_url: &str, token: Option<&str>, limit: u16) -> Result<()> {
@@ -136,6 +164,33 @@ pub(crate) fn key_lifecycle_report(api_url: &str, token: Option<&str>) -> Result
         http_get(api_url, "/api/v1/key-lifecycle/report", token)?
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod identity_hash_tests {
+    use super::agent_identity_request_payload_hash;
+
+    #[test]
+    fn agent_identity_request_hash_matches_the_shared_canonical_shape() {
+        let tags = vec![" edge ".to_string(), "bgp".to_string(), "edge".to_string()];
+        assert_eq!(
+            agent_identity_request_payload_hash(
+                " v-16 ",
+                &"11".repeat(32),
+                Some(" Edge 16 "),
+                &tags,
+                false,
+            )
+            .unwrap(),
+            "fe02d0d023921dead3370b45a0c9e256464173ce30d4c6ee9d7ccc173f9a078c"
+        );
+    }
+
+    #[test]
+    fn agent_identity_request_hash_rejects_invalid_public_keys() {
+        assert!(agent_identity_request_payload_hash("v-1", "xyz", None, &[], false).is_err());
+        assert!(agent_identity_request_payload_hash("v-1", "11", None, &[], false).is_err());
+    }
 }
 
 pub(crate) struct ComposeSecretsOptions {

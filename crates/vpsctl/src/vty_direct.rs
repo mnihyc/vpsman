@@ -219,6 +219,13 @@ fn submit_agent_identity_upsert(
         })
         .unwrap_or_default();
     let targets = vec![client_id.clone()];
+    let payload_hash = crate::commands_keys::agent_identity_request_payload_hash(
+        &client_id,
+        &client_public_key_hex,
+        display_name.as_deref(),
+        &tags,
+        replace_existing_key,
+    )?;
     let privilege_assertion = build_privilege_for_db(
         DbPrivilegeRequest {
             action: if replace_existing_key {
@@ -230,7 +237,7 @@ fn submit_agent_identity_upsert(
             selector_expression: None,
             resolved_targets: &targets,
             confirmed,
-            payload_hash: None,
+            payload_hash: Some(&payload_hash),
         },
         &privilege_context.password,
         &privilege_context.salt_hex,

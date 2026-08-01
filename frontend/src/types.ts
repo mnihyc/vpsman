@@ -1105,6 +1105,7 @@ export type AuthResponse = {
   token_type: "Bearer";
   access_token: string;
   refresh_token: string;
+  session_id: string;
   expires_in_secs: number;
   refresh_expires_in_secs: number;
   operator: OperatorView;

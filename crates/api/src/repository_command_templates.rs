@@ -836,8 +836,13 @@ fn command_template_audit_metadata(
         "scope_value": template.scope_value,
         "command_type": template.command_type,
         "display_group": template.display_group,
+        "result": "succeeded",
         "operator_id": operator.operator.id,
         "operator_username": operator.operator.username,
+        "operator_role": operator.operator.role,
+        "operator_session_id": operator.audit_session_id(),
+        "origin_kind": "operator_request",
+        "component": "command-template-controller",
     })
 }
 
@@ -977,7 +982,7 @@ mod tests {
                 disabled_at: None,
                 deleted_at: None,
             },
-            session_id: Uuid::new_v4(),
+            session_id: Some(Uuid::new_v4()),
         }
     }
 

@@ -21,7 +21,7 @@ pub(crate) fn system_operator(username: &str) -> AuthContext {
             disabled_at: None,
             deleted_at: None,
         },
-        session_id: Uuid::nil(),
+        session_id: None,
     }
 }
 
@@ -40,5 +40,15 @@ pub(crate) fn server_issued_job_actor(command: &JobCommand) -> Option<&'static s
             Some("network-routing-controller")
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::system_operator;
+
+    #[test]
+    fn system_authority_has_no_operator_session_evidence() {
+        assert_eq!(system_operator("test-controller").audit_session_id(), None);
     }
 }

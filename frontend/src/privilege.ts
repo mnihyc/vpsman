@@ -307,6 +307,32 @@ export async function operatorDbPayloadHashHex(input: OperatorDbPayloadInput): P
   return sha256Hex(encoder.encode(JSON.stringify(payload)));
 }
 
+export async function agentIdentityPayloadHashHex(input: {
+  clientId: string;
+  displayName: string | null;
+  publicKeyHex: string;
+  replaceExistingKey: boolean;
+  tags: string[];
+}): Promise<string> {
+  const publicKey = hexToBytes(input.publicKeyHex);
+  if (publicKey.length !== 32) {
+    throw new Error("Agent public key must be 32 bytes");
+  }
+  const publicKeySha256Hex = await sha256Hex(publicKey);
+  const tags = Array.from(
+    new Set(input.tags.map((tag) => tag.trim()).filter(Boolean)),
+  ).sort();
+  const payload = [
+    ["version", 1],
+    ["client_id", input.clientId.trim()],
+    ["public_key_sha256_hex", publicKeySha256Hex],
+    ["display_name", input.displayName?.trim() || null],
+    ["tags", tags],
+    ["replace_existing_key", input.replaceExistingKey],
+  ];
+  return sha256Hex(encoder.encode(JSON.stringify(payload)));
+}
+
 export async function buildPrivilegeAssertion({
   intent,
   privilegeMaterial,

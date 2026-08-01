@@ -1043,6 +1043,13 @@ impl Repository {
                         "archived_port_forward_rule_count": archived_port_forward_rule_count,
                         "agent_lost_job_ids": agent_lost_job_ids,
                         "skipped_unstarted_job_ids": skipped_job_ids,
+                        "result": "succeeded",
+                        "operator_id": operator.operator.id,
+                        "operator_username": &operator.operator.username,
+                        "operator_role": &operator.operator.role,
+                        "operator_session_id": operator.audit_session_id(),
+                        "origin_kind": "operator_request",
+                        "component": "inventory-controller",
                     }),
                     created_at: deleted_at.clone(),
                 });
@@ -1215,7 +1222,14 @@ impl Repository {
                     "soft_deleted_tunnel_plan_count": soft_deleted_tunnel_plan_count,
                     "archived_port_forward_rule_count": archived_port_forward_rule_count,
                     "agent_lost_job_ids": agent_lost_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
-                    "skipped_unstarted_job_ids": skipped_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>()
+                    "skipped_unstarted_job_ids": skipped_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
+                    "result": "succeeded",
+                    "operator_id": operator.operator.id,
+                    "operator_username": &operator.operator.username,
+                    "operator_role": &operator.operator.role,
+                    "operator_session_id": operator.audit_session_id(),
+                    "origin_kind": "operator_request",
+                    "component": "inventory-controller"
                 })))
                 .execute(&mut *tx)
                 .await?;
@@ -1267,6 +1281,13 @@ impl Repository {
                         "client_id": client_id,
                         "old_display_name": old_display_name,
                         "new_display_name": display_name,
+                        "result": "succeeded",
+                        "operator_id": operator.operator.id,
+                        "operator_username": &operator.operator.username,
+                        "operator_role": &operator.operator.role,
+                        "operator_session_id": operator.audit_session_id(),
+                        "origin_kind": "operator_request",
+                        "component": "inventory-controller",
                     }),
                     created_at: unix_now().to_string(),
                 });
@@ -1318,6 +1339,13 @@ impl Repository {
                     "client_id": client_id,
                     "old_display_name": old_display_name,
                     "new_display_name": new_display_name,
+                    "result": "succeeded",
+                    "operator_id": operator.operator.id,
+                    "operator_username": &operator.operator.username,
+                    "operator_role": &operator.operator.role,
+                    "operator_session_id": operator.audit_session_id(),
+                    "origin_kind": "operator_request",
+                    "component": "inventory-controller"
                 })))
                 .execute(&mut *tx)
                 .await?;

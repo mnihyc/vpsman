@@ -653,7 +653,7 @@ async fn rejected_job_records_frozen_target_results() {
             disabled_at: None,
             deleted_at: None,
         },
-        session_id: Uuid::nil(),
+        session_id: None,
     };
     let request = CreateJobRequest {
         job_id: None,
@@ -691,6 +691,18 @@ async fn rejected_job_records_frozen_target_results() {
     assert_eq!(targets[0].client_id, "client-a");
     assert_eq!(targets[0].status, "rejected_authorization_required");
     assert!(targets[0].completed_at.is_some());
+    let audit = repo
+        .list_audit_logs(10)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|audit| audit.metadata["job_id"] == job_id.to_string())
+        .expect("rejected job audit");
+    assert_eq!(
+        audit.metadata["target_client_ids"],
+        serde_json::json!(["client-a"])
+    );
+    assert!(audit.metadata.get("resolved_targets").is_none());
 }
 
 #[tokio::test]
@@ -733,7 +745,7 @@ async fn rejected_job_freezes_tag_targets() {
             disabled_at: None,
             deleted_at: None,
         },
-        session_id: Uuid::nil(),
+        session_id: None,
     };
     let request = CreateJobRequest {
         job_id: None,
@@ -1094,7 +1106,7 @@ async fn dispatching_job_records_and_updates_target_results() {
             disabled_at: None,
             deleted_at: None,
         },
-        session_id: Uuid::nil(),
+        session_id: None,
     };
     let request = CreateJobRequest {
         job_id: None,
@@ -1194,6 +1206,20 @@ async fn dispatching_job_records_and_updates_target_results() {
     assert_eq!(outputs[1].stream, "status");
     assert_eq!(outputs[1].exit_code, Some(0));
     assert!(outputs[1].done);
+    let target_audit = repo
+        .list_audit_logs(20)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|audit| {
+            audit.action == "job.target_result" && audit.metadata["job_id"] == job_id.to_string()
+        })
+        .expect("target-result audit");
+    assert_eq!(
+        target_audit.command_hash.as_deref(),
+        Some(command_hash.as_str())
+    );
+    assert_eq!(target_audit.metadata["component"], "job-dispatcher");
 }
 
 #[tokio::test]
@@ -1268,6 +1294,18 @@ async fn memory_final_output_insert_terminalizes_target_atomically() {
     assert_eq!(outputs[0].stream, "status");
     assert_eq!(outputs[0].exit_code, Some(0));
     assert!(outputs[0].done);
+    let audit = repo
+        .list_audit_logs(20)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|audit| {
+            audit.action == "job.target_result" && audit.metadata["job_id"] == job_id.to_string()
+        })
+        .expect("final-output target audit");
+    assert_eq!(audit.command_hash.as_deref(), Some(command_hash.as_str()));
+    assert_eq!(audit.metadata["component"], "gateway-command-output-ingest");
+    assert!(audit.metadata.get("payload_hash_verified").is_none());
 }
 
 #[tokio::test]
@@ -1648,10 +1686,19 @@ async fn memory_dispatch_claim_quarantines_missing_operation_and_keeps_healthy_p
     assert_eq!(payload["code"], "invalid_job_operation");
     assert_eq!(payload["phase"], "dispatch_claim");
     drop(outputs);
-    assert!(memory.audits.read().await.iter().any(|audit| {
-        audit.metadata["job_id"] == poison_job_id.to_string()
-            && audit.metadata["reason"] == "invalid_job_operation"
-    }));
+    let audits = memory.audits.read().await;
+    let poison_audit = audits
+        .iter()
+        .find(|audit| {
+            audit.metadata["job_id"] == poison_job_id.to_string()
+                && audit.metadata["reason"] == "invalid_job_operation"
+        })
+        .expect("invalid-operation target audit");
+    assert_eq!(
+        poison_audit.command_hash.as_deref(),
+        Some(command_hash.as_str())
+    );
+    assert_eq!(poison_audit.metadata["component"], "job-dispatcher");
 }
 
 #[tokio::test]
@@ -1717,6 +1764,22 @@ async fn memory_deadline_expiry_marks_missing_operation_without_blocking_healthy
     .unwrap();
     assert_eq!(payload["code"], "invalid_job_operation");
     assert_eq!(payload["phase"], "control_deadline_expiry");
+    drop(outputs);
+    let audits = memory.audits.read().await;
+    let deadline_audits = audits
+        .iter()
+        .filter(|audit| {
+            audit.action == "job.target_result"
+                && [poison_job_id, healthy_job_id]
+                    .iter()
+                    .any(|job_id| audit.metadata["job_id"] == job_id.to_string())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(deadline_audits.len(), 2);
+    assert!(deadline_audits.iter().all(|audit| {
+        audit.command_hash.as_deref() == Some(command_hash.as_str())
+            && audit.metadata["component"] == "job-deadline-reconciler"
+    }));
 }
 
 #[tokio::test]
@@ -2434,7 +2497,7 @@ pub(crate) fn test_operator() -> AuthContext {
             disabled_at: None,
             deleted_at: None,
         },
-        session_id: Uuid::nil(),
+        session_id: None,
     }
 }
 

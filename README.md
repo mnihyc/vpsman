@@ -215,7 +215,7 @@ console:
    and install mode under **Access > Gateway sessions**.
 2. Open **Access > VPS identities**.
 3. Choose **Register VPS**.
-4. Keep the default numerical VPS ID or edit it for an imported legacy ID.
+4. Keep the next numbered VPS ID (`v-1`, `v-2`, …) or edit it for an imported legacy ID.
 5. Generate a unique Noise keypair for this VPS.
 6. Review and register the public identity.
 7. Review the saved gateway install defaults.
@@ -238,7 +238,7 @@ export VPSMAN_SUPER_PASSWORD='<local_super_password>'
 source .tmp/quickstart-secrets/operator-privilege.env
 
 vpsctl agent-identity-upsert \
-  --client-id 1 \
+  --client-id v-1 \
   --client-public-key-hex <agent_noise_public_key_hex> \
   --display-name edge-nrt-04 \
   --tags country:JP,role:edge \
@@ -249,7 +249,7 @@ curl -fLO https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-ag
 env \
   VPSMAN_AGENT_RELEASE=vX.Y.Z \
   VPSMAN_INSTALL_MODE=root \
-  VPSMAN_AGENT_CLIENT_ID=1 \
+  VPSMAN_AGENT_CLIENT_ID=v-1 \
   VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=<agent_noise_private_key_hex> \
   VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=<gateway_noise_public_key_hex> \
   VPSMAN_GATEWAY_ENDPOINTS='primary=gw.example.com:9443=10,backup=gw-backup.example.com:9443=20' \

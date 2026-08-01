@@ -635,6 +635,9 @@ async fn insert_legacy_manual_event_skip_audit(
     .bind("webhook_events")
     .bind(json!({
         "worker": "webhook_rule_worker",
+        "origin_kind": "worker",
+        "component": "webhook-rule-worker",
+        "result": "skipped",
         "skipped_count": events.len(),
         "reason": "legacy broad manual dispatch did not persist its reviewed candidate set; skipped fail-closed",
         "events": events.iter().map(|event| json!({
@@ -1430,6 +1433,9 @@ async fn insert_default_partition_prune_audit(
     .bind("webhook_events_default")
     .bind(json!({
         "worker": "webhook_rule_worker",
+        "origin_kind": "worker",
+        "component": "webhook-rule-worker",
+        "result": "succeeded",
         "retention_days": config.retention_days,
         "pruned_count": pruned_count,
     }))
@@ -1491,6 +1497,11 @@ async fn insert_process_audit(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     outcomes: &[DeliveryOutcome],
 ) -> Result<()> {
+    let delivered_count = outcomes
+        .iter()
+        .filter(|outcome| outcome.status == WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED)
+        .count();
+    let failed_count = outcomes.len().saturating_sub(delivered_count);
     sqlx::query(
         r#"
         INSERT INTO audit_logs (
@@ -1504,9 +1515,12 @@ async fn insert_process_audit(
     .bind("webhook_rules")
     .bind(json!({
         "worker": "webhook_rule_worker",
+        "origin_kind": "worker",
+        "component": "webhook-rule-worker",
         "delivery_count": outcomes.len(),
-        "delivered_count": outcomes.iter().filter(|outcome| outcome.status == WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED).count(),
-        "failed_count": outcomes.iter().filter(|outcome| outcome.status != WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED).count(),
+        "delivered_count": delivered_count,
+        "failed_count": failed_count,
+        "result": if failed_count == 0 { "succeeded" } else { "partial" },
         "deliveries": outcomes.iter().take(MAX_AUDIT_DELIVERY_ROWS).map(|outcome| json!({
             "id": outcome.id,
             "rule_id": outcome.rule_id,
@@ -1565,6 +1579,9 @@ async fn insert_permanent_failure_alert(
         "rule_name": &delivery.rule_name,
         "event_kind": &delivery.event_kind,
         "event_id": &delivery.event_id,
+        "origin_kind": "worker",
+        "component": "webhook-rule-worker",
+        "result": "failed",
         "error": error,
     }))
     .execute(&mut **tx)
@@ -1623,6 +1640,9 @@ async fn insert_prune_audit(
     .bind("webhook_rules")
     .bind(json!({
         "worker": "webhook_rule_worker",
+        "origin_kind": "worker",
+        "component": "webhook-rule-worker",
+        "result": "succeeded",
         "retention_days": config.retention_days,
         "pruned_count": pruned.len(),
         "resolved_alert_count": resolved_alerts,

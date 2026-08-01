@@ -25,22 +25,29 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
   const currentApiToken = useRef(apiToken);
   currentApiToken.current = apiToken;
 
+  const handleAuditUnauthorized = useCallback(() => {
+    if (currentApiToken.current !== apiToken) {
+      return;
+    }
+    onUnauthorized();
+    setAudits([]);
+    setAuditsTruncated(false);
+    setHistoryRetentionPolicies([]);
+    setAuditError("Operator login required");
+  }, [apiToken, onUnauthorized]);
+
   const handleAuditError = useCallback(
     (error: unknown, fallback: string) => {
       if (currentApiToken.current !== apiToken) {
         return;
       }
       if (isApiUnauthorized(error)) {
-        onUnauthorized();
-        setAudits([]);
-        setAuditsTruncated(false);
-        setHistoryRetentionPolicies([]);
-        setAuditError("Operator login required");
+        handleAuditUnauthorized();
         return;
       }
       setAuditError(error instanceof Error ? error.message : fallback);
     },
-    [apiToken, onUnauthorized],
+    [apiToken, handleAuditUnauthorized],
   );
 
   const loadAudits = useCallback(async () => {
@@ -98,6 +105,31 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
       }
     }
   }, [apiToken, onUnauthorized]);
+
+  const loadAuditEvent = useCallback(
+    async (auditId: string): Promise<AuditLogRecord | null> => {
+      const normalizedId = auditId.trim();
+      if (!normalizedId || currentApiToken.current !== apiToken) {
+        return null;
+      }
+      try {
+        const record = await apiGet<AuditLogRecord>(
+          `/api/v1/audit/${encodeURIComponent(normalizedId)}`,
+          apiToken,
+        );
+        if (currentApiToken.current !== apiToken) {
+          return null;
+        }
+        return record;
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          handleAuditUnauthorized();
+        }
+        throw error;
+      }
+    },
+    [apiToken, handleAuditUnauthorized],
+  );
 
   const upsertHistoryRetentionPolicy = useCallback(
     async (request: HistoryRetentionPolicyRequest) => {
@@ -217,6 +249,7 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
     historyPruneResult,
     historyRetentionPolicies,
     loadAudits,
+    loadAuditEvent,
     loadHistoryExport,
     pruneHistoryRetention,
     upsertHistoryRetentionPolicy,

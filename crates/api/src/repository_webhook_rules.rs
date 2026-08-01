@@ -1007,10 +1007,23 @@ impl Repository {
         if deliveries.is_empty() {
             return Ok(());
         }
+        let delivered_count = deliveries
+            .iter()
+            .filter(|delivery| delivery.status == WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED)
+            .count();
+        let non_delivered_count = deliveries.len().saturating_sub(delivered_count);
         let metadata = json!({
             "delivery_count": deliveries.len(),
-            "delivered_count": deliveries.iter().filter(|delivery| delivery.status == WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED).count(),
-            "failed_count": deliveries.iter().filter(|delivery| delivery.status == WEBHOOK_RULE_DELIVERY_STATUS_FAILED).count(),
+            "delivered_count": delivered_count,
+            "failed_count": deliveries.iter().filter(|delivery| matches!(delivery.status.as_str(), WEBHOOK_RULE_DELIVERY_STATUS_FAILED | WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED)).count(),
+            "non_delivered_count": non_delivered_count,
+            "result": if non_delivered_count == 0 { "succeeded" } else { "partial" },
+            "operator_id": operator.operator.id,
+            "operator_username": &operator.operator.username,
+            "operator_role": &operator.operator.role,
+            "operator_session_id": operator.audit_session_id(),
+            "origin_kind": "operator_request",
+            "component": "webhook-delivery-controller",
             "deliveries": deliveries.iter().take(100).map(|delivery| json!({
                 "id": delivery.id,
                 "rule_id": delivery.rule_id,
@@ -1328,6 +1341,9 @@ async fn insert_webhook_dispatch_audit(
     .bind("webhook_rules")
     .bind(json!({
         "delivery_count": deliveries.len(),
+        "result": "queued",
+        "origin_kind": "control_plane",
+        "component": "webhook-rule-dispatcher",
         "deliveries": deliveries.iter().take(100).map(|delivery| json!({
             "id": delivery.id,
             "rule_id": delivery.rule_id,
@@ -1375,10 +1391,13 @@ fn webhook_rule_metadata(rule: &WebhookRuleView, operator: &AuthContext) -> serd
         "expression": &rule.expression,
         "target": &rule.target,
         "cooldown_secs": rule.cooldown_secs,
-        "operator": {
-            "id": operator.operator.id,
-            "username": &operator.operator.username,
-        },
+        "result": "succeeded",
+        "operator_id": operator.operator.id,
+        "operator_username": &operator.operator.username,
+        "operator_role": &operator.operator.role,
+        "operator_session_id": operator.audit_session_id(),
+        "origin_kind": "operator_request",
+        "component": "webhook-rule-controller",
     })
 }
 
@@ -1800,7 +1819,7 @@ mod tests {
                 disabled_at: None,
                 deleted_at: None,
             },
-            session_id: Uuid::nil(),
+            session_id: None,
         }
     }
 

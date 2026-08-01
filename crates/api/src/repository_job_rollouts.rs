@@ -684,8 +684,13 @@ async fn push_memory_rollout_audit(
         metadata: json!({
             "job_id": job_id,
             "reason": reason,
+            "result": "succeeded",
+            "operator_id": operator.operator.id,
             "operator_username": operator.operator.username,
-            "session_id": operator.session_id,
+            "operator_role": operator.operator.role,
+            "operator_session_id": operator.audit_session_id(),
+            "origin_kind": "operator_request",
+            "component": "job-rollout-controller",
         }),
         created_at: now.to_string(),
     });
@@ -711,8 +716,13 @@ async fn insert_postgres_rollout_audit(
     .bind(json!({
         "job_id": job_id,
         "reason": reason,
+        "result": "succeeded",
+        "operator_id": operator.operator.id,
         "operator_username": operator.operator.username,
-        "session_id": operator.session_id,
+        "operator_role": operator.operator.role,
+        "operator_session_id": operator.audit_session_id(),
+        "origin_kind": "operator_request",
+        "component": "job-rollout-controller",
     }))
     .execute(&mut **tx)
     .await?;
@@ -969,7 +979,7 @@ mod tests {
         );
 
         let cancel = repo
-            .request_job_cancel(job_id, operator.operator.id, Some("stop rollout"))
+            .request_job_cancel(job_id, &operator, Some("stop rollout"))
             .await
             .unwrap();
         assert_eq!(cancel.pending_canceled, 2);

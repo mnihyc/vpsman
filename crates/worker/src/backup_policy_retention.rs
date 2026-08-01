@@ -427,17 +427,20 @@ async fn insert_retention_actor_revoked_audit(
         INSERT INTO audit_logs (
             id, actor_id, action, target, command_hash, metadata
         )
-        VALUES ($1, $2, $3, $4, NULL, $5)
+        VALUES ($1, NULL, $2, $3, NULL, $4)
         "#,
     )
     .bind(Uuid::new_v4())
-    .bind(policy.actor_id)
     .bind("backup_policy.retention_actor_authority_revoked")
     .bind(format!("schedule:{}", policy.schedule_id))
     .bind(SqlJson(json!({
         "worker": "backup_policy_retention_worker",
+        "origin_kind": "worker",
+        "component": "backup-policy-retention-worker",
+        "result": "rejected",
         "schedule_id": policy.schedule_id,
         "name": &policy.name,
+        "referenced_operator_id": policy.actor_id,
         "reason": "actor_authority_revoked",
     })))
     .execute(pool)
@@ -451,6 +454,16 @@ async fn insert_prune_audit(
     run: &BackupPolicyRetentionPruneRun,
     outcomes: &[BackupPolicyRetentionPruneOutcome],
 ) -> Result<()> {
+    let result = if config.dry_run {
+        "previewed"
+    } else if outcomes
+        .iter()
+        .any(|outcome| !outcome.object_delete_errors.is_empty())
+    {
+        "partial"
+    } else {
+        "succeeded"
+    };
     sqlx::query(
         r#"
         INSERT INTO audit_logs (
@@ -464,6 +477,9 @@ async fn insert_prune_audit(
     .bind("backup_policy_retention")
     .bind(SqlJson(json!({
         "worker": "backup_policy_retention_worker",
+        "origin_kind": "worker",
+        "component": "backup-policy-retention-worker",
+        "result": result,
         "dry_run": config.dry_run,
         "metadata_only": config.dry_run || !config.delete_objects,
         "object_delete_requested": config.delete_objects,

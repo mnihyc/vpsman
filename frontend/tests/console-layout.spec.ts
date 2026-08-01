@@ -3587,7 +3587,11 @@ test("discloses the exact audit fetch cap", async ({ page }) => {
       command_hash: null,
       created_at: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
       id: `audit-cap-${String(index).padStart(4, "0")}`,
-      metadata: {},
+      metadata: {
+        component: "fixture-generator",
+        origin_kind: "control_plane",
+        result: "generated",
+      },
       target: `fixture:${index}`,
     })),
   });
@@ -4999,9 +5003,9 @@ test("shows access posture, MFA risk, identity lifecycle, and gateway readiness"
   await expect(inspector).toContainText("Private key material is shown once");
   await expect(inspector).toContainText("VPS client ID");
   await expect(inspector.getByLabel("Agent identity client ID")).toHaveValue(
-    "1",
+    "v-1",
   );
-  await expect(inspector).toContainText("next numerical VPS ID");
+  await expect(inspector).toContainText("next numbered VPS ID");
   await expect(inspector).toContainText("Noise public key");
   await inspector
     .getByRole("button", { name: "Close VPS identity workflow" })
@@ -6402,9 +6406,7 @@ test("shows audit filters and retention compliance posture", async ({
   await expect(auditSummary).toContainText("Visible events");
   await expect(auditSummary).toContainText("Latest visible");
   await expect(auditSummary).toContainText("Related evidence");
-  await expect(page.getByLabel("Audit coverage warning")).toContainText(
-    "Coverage warning",
-  );
+  await expect(auditSummary).toContainText("Known actors");
 
   const filters = page.getByLabel("Audit event filters");
   await expect(filters.getByLabel("Audit actor filter")).toBeVisible();

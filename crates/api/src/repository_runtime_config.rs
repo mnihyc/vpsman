@@ -5,7 +5,7 @@ use vpsman_common::AgentRuntimeConfig;
 
 use crate::{
     model::{
-        AuthContext, RuntimeConfigApplyStateRecord, RuntimeConfigApplyStateView,
+        AuditLogView, AuthContext, RuntimeConfigApplyStateRecord, RuntimeConfigApplyStateView,
         RuntimeConfigOverrideView,
     },
     repository::{MemoryState, Repository},
@@ -594,11 +594,27 @@ impl Repository {
                         });
                     }
                 }
-                Ok(overrides
+                let selected = overrides
                     .iter()
                     .filter(|override_record| client_ids.contains(&override_record.client_id))
                     .cloned()
-                    .collect())
+                    .collect::<Vec<_>>();
+                drop(overrides);
+                let mut audits = memory.audits.write().await;
+                for client_id in client_ids {
+                    audits.push(AuditLogView {
+                        id: Uuid::new_v4(),
+                        actor_id: Some(operator.operator.id),
+                        action: "runtime_config.client_patch_upserted".to_string(),
+                        target: format!("client:{client_id}"),
+                        command_hash: None,
+                        metadata: runtime_config_override_audit_metadata(
+                            client_id, reason, operator,
+                        ),
+                        created_at: now.clone(),
+                    });
+                }
+                Ok(selected)
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
@@ -632,10 +648,9 @@ impl Repository {
                     .bind(Uuid::new_v4())
                     .bind(operator.operator.id)
                     .bind(format!("client:{client_id}"))
-                    .bind(serde_json::json!({
-                        "client_id": client_id,
-                        "reason": reason,
-                    }))
+                    .bind(runtime_config_override_audit_metadata(
+                        client_id, reason, operator,
+                    ))
                     .execute(&mut *tx)
                     .await?;
                 }
@@ -651,4 +666,22 @@ impl Repository {
             }
         }
     }
+}
+
+fn runtime_config_override_audit_metadata(
+    client_id: &str,
+    reason: &str,
+    operator: &AuthContext,
+) -> serde_json::Value {
+    serde_json::json!({
+        "client_id": client_id,
+        "reason": reason,
+        "result": "succeeded",
+        "operator_id": operator.operator.id,
+        "operator_username": &operator.operator.username,
+        "operator_role": &operator.operator.role,
+        "operator_session_id": operator.audit_session_id(),
+        "origin_kind": "operator_request",
+        "component": "runtime-config-controller",
+    })
 }

@@ -98,11 +98,20 @@ pub(crate) async fn refresh_operator_session(
 
 pub(crate) async fn logout_operator_session(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let access_token =
         bearer_token(&headers).ok_or_else(|| ApiError::unauthorized("missing_bearer_token"))?;
-    if !state.repo.logout_operator_session(access_token).await? {
+    let remote_ip = state.operator_client_ip(peer, &headers);
+    let user_agent = headers
+        .get(USER_AGENT)
+        .and_then(|value| value.to_str().ok());
+    if !state
+        .repo
+        .logout_operator_session(access_token, &remote_ip, user_agent)
+        .await?
+    {
         return Err(ApiError::unauthorized("invalid_operator_session"));
     }
     Ok(StatusCode::NO_CONTENT)
@@ -793,10 +802,13 @@ pub(crate) async fn list_operator_sessions(
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<Vec<OperatorSessionView>>, ApiError> {
     let operator = state.require_operator_role(&headers, "admin").await?;
+    let current_session_id = operator
+        .audit_session_id()
+        .ok_or_else(|| ApiError::unauthorized("invalid_operator_session"))?;
     Ok(Json(
         state
             .repo
-            .list_operator_sessions(query.limit.unwrap_or(50), operator.session_id)
+            .list_operator_sessions(query.limit.unwrap_or(50), current_session_id)
             .await?,
     ))
 }
@@ -808,10 +820,13 @@ pub(crate) async fn revoke_operator_session(
     Json(request): Json<OperatorSessionRevokeRequest>,
 ) -> Result<Json<OperatorSessionView>, ApiError> {
     let operator = state.require_operator_role(&headers, "admin").await?;
+    let current_session_id = operator
+        .audit_session_id()
+        .ok_or_else(|| ApiError::unauthorized("invalid_operator_session"))?;
     require_confirmed(request.confirmed)?;
     let target_session = state
         .repo
-        .operator_session_by_id(session_id, operator.session_id)
+        .operator_session_by_id(session_id, current_session_id)
         .await?
         .ok_or_else(|| ApiError::not_found("operator_session_not_found"))?;
     require_admin_risk_if_needed(

@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useEffect,
   useRef,
   useState,
   type Dispatch,
@@ -87,27 +88,45 @@ export function useHistoryEntryState<T>(
   initial: T | (() => T),
   enabled = true,
 ): [T, Dispatch<SetStateAction<T>>] {
-  const entryIdRef = useRef<string | null>(null);
-  if (enabled && !entryIdRef.current) {
-    entryIdRef.current = ensureHistoryEntryId();
-  }
+  const currentEntryId = enabled ? ensureHistoryEntryId() : null;
+  const activeEntryRef = useRef({ entryId: currentEntryId, slot });
+  const initialRef = useRef(initial);
+  initialRef.current = initial;
   const [value, setValue] = useState<T>(() => {
-    const entryId = entryIdRef.current;
-    if (entryId) {
-      const stored = entryState.get(entryId);
+    if (currentEntryId) {
+      const stored = entryState.get(currentEntryId);
       if (stored?.has(slot)) {
         return stored.get(slot) as T;
       }
       const resolved = initialValue(initial);
       const snapshot = stored ?? new Map<string, unknown>();
       snapshot.set(slot, resolved);
-      entryState.set(entryId, snapshot);
+      entryState.set(currentEntryId, snapshot);
       return resolved;
     }
     return initialValue(initial);
   });
   const valueRef = useRef(value);
   valueRef.current = value;
+
+  useEffect(() => {
+    const active = activeEntryRef.current;
+    if (active.entryId === currentEntryId && active.slot === slot) {
+      return;
+    }
+    activeEntryRef.current = { entryId: currentEntryId, slot };
+    const stored = currentEntryId ? entryState.get(currentEntryId) : null;
+    const resolved = stored?.has(slot)
+      ? (stored.get(slot) as T)
+      : initialValue(initialRef.current);
+    if (currentEntryId && !stored?.has(slot)) {
+      const snapshot = stored ?? new Map<string, unknown>();
+      snapshot.set(slot, resolved);
+      entryState.set(currentEntryId, snapshot);
+    }
+    valueRef.current = resolved;
+    setValue(resolved);
+  }, [currentEntryId, slot]);
 
   const setHistoryValue = useCallback<Dispatch<SetStateAction<T>>>(
     (next) => {
@@ -116,10 +135,10 @@ export function useHistoryEntryState<T>(
           ? (next as (current: T) => T)(valueRef.current)
           : next;
       valueRef.current = resolved;
-      const entryId = entryIdRef.current;
+      const entryId = activeEntryRef.current.entryId;
       if (entryId) {
         const stored = entryState.get(entryId) ?? new Map<string, unknown>();
-        stored.set(slot, resolved);
+        stored.set(activeEntryRef.current.slot, resolved);
         entryState.set(entryId, stored);
       }
       setValue(resolved);

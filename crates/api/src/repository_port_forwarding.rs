@@ -651,15 +651,16 @@ impl Repository {
         .bind(Uuid::new_v4())
         .bind(persisted_actor_id(operator))
         .bind(format!("port_forward_rule:{id}"))
-        .bind(serde_json::json!({
-            "rule_id": id,
-            "client_id": &corrupt.client_id,
-            "name": &corrupt.name,
-            "revision": corrupt.revision,
-            "configuration_error": configuration_error,
-            "operator_username": &operator.operator.username,
-            "session_id": operator.session_id,
-        }))
+        .bind(port_forward_operator_metadata(
+            serde_json::json!({
+                "rule_id": id,
+                "client_id": &corrupt.client_id,
+                "name": &corrupt.name,
+                "revision": corrupt.revision,
+                "configuration_error": configuration_error,
+            }),
+            operator,
+        ))
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -1736,23 +1737,67 @@ fn port_forward_audit_metadata(
     record: &PortForwardRuleRecord,
     operator: &AuthContext,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "rule_id": record.id,
-        "client_id": &record.client_id,
-        "name": &record.name,
-        "protocol": protocol_name(record.protocol),
-        "target_ip": record.target_ip,
-        "mappings": &record.mappings,
-        "masquerade": record.masquerade,
-        "enabled": record.enabled,
-        "revision": record.revision,
-        "deleted_at": &record.deleted_at,
-        "deleted_reason": &record.deleted_reason,
-        "forgotten_at": &record.forgotten_at,
-        "forget_reason": &record.forget_reason,
-        "operator_username": &operator.operator.username,
-        "session_id": operator.session_id,
-    })
+    port_forward_operator_metadata(
+        serde_json::json!({
+            "rule_id": record.id,
+            "client_id": &record.client_id,
+            "name": &record.name,
+            "protocol": protocol_name(record.protocol),
+            "target_ip": record.target_ip,
+            "mappings": &record.mappings,
+            "masquerade": record.masquerade,
+            "enabled": record.enabled,
+            "revision": record.revision,
+            "deleted_at": &record.deleted_at,
+            "deleted_reason": &record.deleted_reason,
+            "forgotten_at": &record.forgotten_at,
+            "forget_reason": &record.forget_reason,
+        }),
+        operator,
+    )
+}
+
+fn port_forward_operator_metadata(
+    mut metadata: serde_json::Value,
+    operator: &AuthContext,
+) -> serde_json::Value {
+    let fields = metadata
+        .as_object_mut()
+        .expect("port-forward audit metadata must be an object");
+    fields.insert("result".to_string(), serde_json::json!("succeeded"));
+    if let Some(operator_id) = persisted_actor_id(operator) {
+        fields.insert(
+            "origin_kind".to_string(),
+            serde_json::json!("operator_request"),
+        );
+        fields.insert(
+            "component".to_string(),
+            serde_json::json!("port-forward-controller"),
+        );
+        fields.insert("operator_id".to_string(), serde_json::json!(operator_id));
+        fields.insert(
+            "operator_username".to_string(),
+            serde_json::json!(&operator.operator.username),
+        );
+        fields.insert(
+            "operator_role".to_string(),
+            serde_json::json!(&operator.operator.role),
+        );
+        fields.insert(
+            "operator_session_id".to_string(),
+            serde_json::json!(operator.audit_session_id()),
+        );
+    } else {
+        fields.insert(
+            "origin_kind".to_string(),
+            serde_json::json!("control_plane"),
+        );
+        fields.insert(
+            "component".to_string(),
+            serde_json::json!(&operator.operator.username),
+        );
+    }
+    metadata
 }
 
 async fn insert_port_forward_audit(

@@ -500,64 +500,6 @@ export function statusClass(status: string): string {
   return "neutral";
 }
 
-export function metadataOperator(metadata: JsonValue): string | null {
-  if (!isJsonObject(metadata)) {
-    return null;
-  }
-  return (
-    metadataIdentityLabel(metadata.operator_username) ??
-    metadataIdentityLabel(metadata.operator) ??
-    metadataIdentityLabel(metadata.actor) ??
-    metadataIdentityLabel(metadata.username)
-  );
-}
-
-function metadataIdentityLabel(value: JsonValue | undefined): string | null {
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!trimmed) {
-      return null;
-    }
-    if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-      try {
-        return metadataIdentityLabel(JSON.parse(trimmed) as JsonValue) ?? trimmed;
-      } catch {
-        return trimmed;
-      }
-    }
-    return trimmed;
-  }
-  if (value === undefined || !isJsonObject(value)) {
-    return null;
-  }
-  for (const key of [
-    "operator_username",
-    "username",
-    "name",
-    "operator_id",
-    "actor_id",
-    "user_id",
-    "id",
-  ]) {
-    const candidate = value[key];
-    if (typeof candidate === "string" && candidate.trim()) {
-      return candidate.trim();
-    }
-  }
-  return null;
-}
-
-export function metadataPreview(metadata: JsonValue): string {
-  if (isJsonObject(metadata)) {
-    const session = metadata.session_id;
-    if (typeof session === "string") {
-      return `session ${shortId(session)}`;
-    }
-  }
-  const rendered = JSON.stringify(metadata);
-  return rendered.length > 96 ? `${rendered.slice(0, 93)}...` : rendered;
-}
-
 export function isJsonObject(
   value: JsonValue,
 ): value is { [key: string]: JsonValue } {

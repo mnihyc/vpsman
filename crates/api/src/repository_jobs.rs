@@ -543,7 +543,7 @@ async fn insert_target_result_audit_in_tx(
         INSERT INTO audit_logs (
             id, actor_id, action, target, command_hash, metadata
         )
-        VALUES ($1, NULL, $2, $3, NULL, $4)
+        VALUES ($1, NULL, $2, $3, (SELECT payload_hash FROM jobs WHERE id = $5), $4)
         "#,
     )
     .bind(Uuid::new_v4())
@@ -552,11 +552,15 @@ async fn insert_target_result_audit_in_tx(
     .bind(json!({
         "job_id": job_id,
         "status": outcome.status,
+        "result": outcome.status,
         "exit_code": outcome.exit_code,
         "accepted": outcome.accepted,
         "message": outcome.message,
         "received_at": outcome.received_at,
+        "origin_kind": "control_plane",
+        "component": "job-dispatch-validation",
     }))
+    .bind(job_id)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -811,6 +815,11 @@ async fn terminalize_invalid_job_operation_target_in_tx(
     request_cancel: bool,
     control_deadline_extra_secs: Option<i32>,
 ) -> Result<bool> {
+    let component = if phase == "control_deadline_expiry" {
+        "job-deadline-reconciler"
+    } else {
+        "job-dispatcher"
+    };
     let updated = sqlx::query(
         r#"
         UPDATE job_targets target
@@ -866,7 +875,14 @@ async fn terminalize_invalid_job_operation_target_in_tx(
         INSERT INTO audit_logs (
             id, actor_id, action, target, command_hash, metadata
         )
-        VALUES ($1, NULL, 'job.target_result', $2, NULL, $3)
+        VALUES (
+            $1,
+            NULL,
+            'job.target_result',
+            $2,
+            (SELECT payload_hash FROM jobs WHERE id = $4),
+            $3
+        )
         "#,
     )
     .bind(Uuid::new_v4())
@@ -874,12 +890,16 @@ async fn terminalize_invalid_job_operation_target_in_tx(
     .bind(json!({
         "job_id": target.job_id,
         "status": status,
+        "result": status,
         "message": target.message,
         "reason": INVALID_JOB_OPERATION_CODE,
         "phase": phase,
         "decode_error": target.decode_error,
         "process_incarnation_id": target.process_incarnation_id,
+        "origin_kind": "control_plane",
+        "component": component,
     }))
+    .bind(target.job_id)
     .execute(&mut **tx)
     .await?;
     finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(tx, target.job_id).await?;
@@ -1037,6 +1057,37 @@ pub(crate) async fn skip_unstarted_queued_targets_for_client_in_tx(
             let outcome =
                 synthetic_terminal_outcome(TARGET_STATUS_SKIPPED, message, Some(0), false);
             enqueue_target_terminal_event_in_tx(tx, job_id, &target_client_id, &outcome).await?;
+            sqlx::query(
+                r#"
+                INSERT INTO audit_logs (
+                    id, actor_id, action, target, command_hash, metadata
+                )
+                VALUES (
+                    $1,
+                    NULL,
+                    'job.target_result',
+                    $2,
+                    (SELECT payload_hash FROM jobs WHERE id = $4),
+                    $3
+                )
+                "#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(format!("client:{target_client_id}"))
+            .bind(json!({
+                "job_id": job_id,
+                "status": TARGET_STATUS_SKIPPED,
+                "result": TARGET_STATUS_SKIPPED,
+                "exit_code": 0,
+                "accepted": false,
+                "message": message,
+                "reason": reason_code,
+                "origin_kind": "control_plane",
+                "component": "client-lifecycle",
+            }))
+            .bind(job_id)
+            .execute(&mut **tx)
+            .await?;
             job_ids.push(job_id);
         }
     }
@@ -1117,7 +1168,14 @@ pub(crate) async fn mark_active_targets_agent_lost_for_client_in_tx(
             INSERT INTO audit_logs (
                 id, actor_id, action, target, command_hash, metadata
             )
-            VALUES ($1, NULL, 'job.target_result', $2, NULL, $3)
+            VALUES (
+                $1,
+                NULL,
+                'job.target_result',
+                $2,
+                (SELECT payload_hash FROM jobs WHERE id = $4),
+                $3
+            )
             "#,
         )
         .bind(Uuid::new_v4())
@@ -1125,11 +1183,15 @@ pub(crate) async fn mark_active_targets_agent_lost_for_client_in_tx(
         .bind(json!({
             "job_id": job_id,
             "status": TARGET_STATUS_AGENT_LOST,
+            "result": TARGET_STATUS_AGENT_LOST,
             "message": message,
             "reason": code,
             "expected_process_incarnation_id": expected_process_incarnation_id,
             "current_process_incarnation_id": current_process_incarnation_id,
+            "origin_kind": "control_plane",
+            "component": "client-lifecycle",
         }))
+        .bind(job_id)
         .execute(&mut **tx)
         .await?;
         job_ids.push(job_id);
@@ -1398,6 +1460,8 @@ fn audit_log_order_by(sort: Option<&str>, descending: bool) -> &'static str {
 
 struct WebhookJobSummary {
     actor_id: Option<Uuid>,
+    actor_username: Option<String>,
+    actor_role: Option<String>,
     command_type: String,
     privileged: bool,
     status: String,
@@ -1527,6 +1591,19 @@ fn job_approval_from_row(row: PgRow) -> Result<JobApprovalView> {
     })
 }
 
+fn audit_log_from_row(row: PgRow) -> Result<AuditLogView> {
+    let metadata: sqlx::types::Json<serde_json::Value> = row.try_get("metadata")?;
+    Ok(AuditLogView {
+        id: row.try_get("id")?,
+        actor_id: row.try_get("actor_id")?,
+        action: row.try_get("action")?,
+        target: row.try_get("target")?,
+        command_hash: row.try_get("command_hash")?,
+        metadata: metadata.0,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
 fn job_approval_audit(
     approval: &JobApprovalView,
     action: &'static str,
@@ -1561,7 +1638,10 @@ fn job_approval_audit(
             "operator_id": operator.operator.id,
             "operator_username": operator.operator.username,
             "operator_role": operator.operator.role,
-            "session_id": operator.session_id,
+            "operator_session_id": operator.audit_session_id(),
+            "result": approval.status,
+            "origin_kind": if job_actor_id(operator).is_some() { "operator_request" } else { "control_plane" },
+            "component": "job-approval-controller",
         }),
         created_at: unix_now().to_string(),
     }
@@ -2827,21 +2907,39 @@ impl Repository {
                 .bind(limit)
                 .fetch_all(pool)
                 .await?;
-                rows.into_iter()
-                    .map(|row| {
-                        let metadata: sqlx::types::Json<serde_json::Value> =
-                            row.try_get("metadata")?;
-                        Ok(AuditLogView {
-                            id: row.try_get("id")?,
-                            actor_id: row.try_get("actor_id")?,
-                            action: row.try_get("action")?,
-                            target: row.try_get("target")?,
-                            command_hash: row.try_get("command_hash")?,
-                            metadata: metadata.0,
-                            created_at: row.try_get("created_at")?,
-                        })
-                    })
-                    .collect()
+                rows.into_iter().map(audit_log_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn get_audit_log(&self, audit_id: Uuid) -> Result<Option<AuditLogView>> {
+        match self {
+            Self::Memory(memory) => Ok(memory
+                .audits
+                .read()
+                .await
+                .iter()
+                .find(|audit| audit.id == audit_id)
+                .cloned()),
+            Self::Postgres(pool) => {
+                let row = sqlx::query(
+                    r#"
+                    SELECT
+                        id,
+                        actor_id,
+                        action,
+                        target,
+                        command_hash,
+                        metadata,
+                        created_at::text AS created_at
+                    FROM audit_logs
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(audit_id)
+                .fetch_optional(pool)
+                .await?;
+                row.map(audit_log_from_row).transpose()
             }
         }
     }
@@ -2914,21 +3012,7 @@ impl Repository {
                 .bind(search_pattern(&query.q))
                 .fetch_all(pool)
                 .await?;
-                rows.into_iter()
-                    .map(|row| {
-                        let metadata: sqlx::types::Json<serde_json::Value> =
-                            row.try_get("metadata")?;
-                        Ok(AuditLogView {
-                            id: row.try_get("id")?,
-                            actor_id: row.try_get("actor_id")?,
-                            action: row.try_get("action")?,
-                            target: row.try_get("target")?,
-                            command_hash: row.try_get("command_hash")?,
-                            metadata: metadata.0,
-                            created_at: row.try_get("created_at")?,
-                        })
-                    })
-                    .collect()
+                rows.into_iter().map(audit_log_from_row).collect()
             }
         }
     }
@@ -2946,7 +3030,7 @@ impl Repository {
         let metadata = json!({
             "job_id": job_id,
             "selector_expression": request.selector_expression,
-            "resolved_targets": &resolved_targets,
+            "target_client_ids": &resolved_targets,
             "destructive": request.destructive,
             "confirmed": request.confirmed,
             "privileged": request.privileged,
@@ -2954,8 +3038,12 @@ impl Repository {
             "operator_id": operator.operator.id,
             "operator_username": operator.operator.username,
             "operator_role": operator.operator.role,
-            "session_id": operator.session_id,
+            "operator_session_id": operator.audit_session_id(),
+            "status": status,
             "reason": reason,
+            "result": status,
+            "origin_kind": if job_actor_id(operator).is_some() { "operator_request" } else { "control_plane" },
+            "component": "job-submission-controller",
         });
         let operation = request.job_command().ok();
         let actor_id = job_actor_id(operator);
@@ -3228,10 +3316,13 @@ impl Repository {
         approval_id: Option<Uuid>,
     ) -> Result<Uuid> {
         let command_type = request.command_type_label().to_string();
-        let metadata = json!({
+        let actor_id = job_actor_id(operator);
+        let mut metadata = json!({
             "job_id": job_id,
+            "command_type": &command_type,
             "selector_expression": request.selector_expression,
-            "resolved_targets": resolved_targets,
+            "target_client_ids": resolved_targets,
+            "target_count": resolved_targets.len(),
             "destructive": request.destructive,
             "confirmed": request.confirmed,
             "privileged": request.privileged,
@@ -3239,15 +3330,23 @@ impl Repository {
             "rollout": request.rollout,
             "source_schedule_id": source_schedule_id,
             "approval_id": approval_id,
-            "operator_id": operator.operator.id,
-            "operator_username": operator.operator.username,
-            "operator_role": operator.operator.role,
-            "session_id": operator.session_id,
+            "request_fingerprint": request_fingerprint,
+            "result": "requested",
         });
+        if actor_id.is_some() {
+            metadata["origin_kind"] = json!("operator_request");
+            metadata["component"] = json!("job-submission-controller");
+            metadata["operator_id"] = json!(operator.operator.id);
+            metadata["operator_username"] = json!(&operator.operator.username);
+            metadata["operator_role"] = json!(&operator.operator.role);
+            metadata["operator_session_id"] = json!(operator.audit_session_id());
+        } else {
+            metadata["origin_kind"] = json!("control_plane");
+            metadata["component"] = json!(&operator.operator.username);
+        }
         let operation = request
             .job_command()
             .map_err(|error| anyhow::anyhow!(error.code))?;
-        let actor_id = job_actor_id(operator);
         let precompleted_by_client =
             precompleted_targets_by_client(resolved_targets, precompleted_targets)?;
         let capability_degraded_by_client = precompleted_targets
@@ -3417,14 +3516,17 @@ impl Repository {
                             actor_id: None,
                             action: "job.target_result".to_string(),
                             target: format!("client:{}", target.client_id),
-                            command_hash: None,
+                            command_hash: Some(command_hash.to_string()),
                             metadata: json!({
                                 "job_id": job_id,
                                 "status": target.outcome.status,
+                                "result": target.outcome.status,
                                 "exit_code": target.outcome.exit_code,
                                 "accepted": target.outcome.accepted,
                                 "message": target.outcome.message,
                                 "received_at": target.outcome.received_at,
+                                "origin_kind": "control_plane",
+                                "component": "job-dispatch-validation",
                             }),
                             created_at: created_at.clone(),
                         });
@@ -3896,14 +3998,20 @@ impl Repository {
                                 actor_id: None,
                                 action: "job.target_result".to_string(),
                                 target: format!("client:{}", target.client_id),
-                                command_hash: None,
+                                command_hash: jobs
+                                    .iter()
+                                    .find(|job| job.id == target.job_id)
+                                    .map(|job| job.payload_hash.clone()),
                                 metadata: json!({
                                     "job_id": target.job_id,
                                     "status": TARGET_STATUS_FAILED,
+                                    "result": TARGET_STATUS_FAILED,
                                     "message": target.message,
                                     "reason": INVALID_JOB_OPERATION_CODE,
                                     "phase": "dispatch_claim",
                                     "decode_error": target.decode_error,
+                                    "origin_kind": "control_plane",
+                                    "component": "job-dispatcher",
                                 }),
                                 created_at: now.clone(),
                             });
@@ -4411,6 +4519,34 @@ impl Repository {
                         });
                     }
                 }
+                if !changed.is_empty() {
+                    let jobs = memory.jobs.read().await;
+                    let mut audits = memory.audits.write().await;
+                    for (job_id, target_client_id) in &changed {
+                        audits.push(AuditLogView {
+                            id: Uuid::new_v4(),
+                            actor_id: None,
+                            action: "job.target_result".to_string(),
+                            target: format!("client:{target_client_id}"),
+                            command_hash: jobs
+                                .iter()
+                                .find(|job| job.id == *job_id)
+                                .map(|job| job.payload_hash.clone()),
+                            metadata: json!({
+                                "job_id": job_id,
+                                "status": TARGET_STATUS_SKIPPED,
+                                "result": TARGET_STATUS_SKIPPED,
+                                "exit_code": 0,
+                                "accepted": false,
+                                "message": message,
+                                "reason": reason_code,
+                                "origin_kind": "control_plane",
+                                "component": "client-lifecycle",
+                            }),
+                            created_at: now.clone(),
+                        });
+                    }
+                }
                 changed
                     .into_iter()
                     .map(|(job_id, _)| job_id)
@@ -4515,6 +4651,34 @@ impl Repository {
                             exit_code: None,
                             done: true,
                             received_at: Some(now.clone()),
+                            created_at: now.clone(),
+                        });
+                    }
+                }
+                if !changed.is_empty() {
+                    let jobs = memory.jobs.read().await;
+                    let mut audits = memory.audits.write().await;
+                    for (job_id, target_client_id) in &changed {
+                        audits.push(AuditLogView {
+                            id: Uuid::new_v4(),
+                            actor_id: None,
+                            action: "job.target_result".to_string(),
+                            target: format!("client:{target_client_id}"),
+                            command_hash: jobs
+                                .iter()
+                                .find(|job| job.id == *job_id)
+                                .map(|job| job.payload_hash.clone()),
+                            metadata: json!({
+                                "job_id": job_id,
+                                "status": TARGET_STATUS_AGENT_LOST,
+                                "result": TARGET_STATUS_AGENT_LOST,
+                                "message": message,
+                                "reason": code,
+                                "expected_process_incarnation_id": expected_process_incarnation_id,
+                                "current_process_incarnation_id": current_process_incarnation_id,
+                                "origin_kind": "control_plane",
+                                "component": "client-lifecycle",
+                            }),
                             created_at: now.clone(),
                         });
                     }
@@ -4718,18 +4882,29 @@ impl Repository {
                     received_at: Some(completed_at.clone()),
                     created_at: completed_at.clone(),
                 });
+                let command_hash = memory
+                    .jobs
+                    .read()
+                    .await
+                    .iter()
+                    .find(|job| job.id == job_id)
+                    .map(|job| job.payload_hash.clone());
                 memory.audits.write().await.push(AuditLogView {
                     id: Uuid::new_v4(),
                     actor_id: None,
                     action: "job.target_result".to_string(),
                     target: format!("client:{client_id}"),
-                    command_hash: None,
+                    command_hash,
                     metadata: json!({
                         "job_id": job_id,
                         "status": TARGET_STATUS_AGENT_LOST,
+                        "result": TARGET_STATUS_AGENT_LOST,
                         "message": message,
                         "expected_process_incarnation_id": expected_process_incarnation_id,
                         "current_process_incarnation_id": observed_process_incarnation_id,
+                        "reason": "agent_process_restarted",
+                        "origin_kind": "control_plane",
+                        "component": "job-dispatcher",
                     }),
                     created_at: completed_at,
                 });
@@ -4804,7 +4979,14 @@ impl Repository {
                     INSERT INTO audit_logs (
                         id, actor_id, action, target, command_hash, metadata
                     )
-                    VALUES ($1, NULL, $2, $3, NULL, $4)
+                    VALUES (
+                        $1,
+                        NULL,
+                        $2,
+                        $3,
+                        (SELECT payload_hash FROM jobs WHERE id = $5),
+                        $4
+                    )
                     "#,
                 )
                 .bind(Uuid::new_v4())
@@ -4813,11 +4995,16 @@ impl Repository {
                 .bind(json!({
                     "job_id": job_id,
                     "status": TARGET_STATUS_AGENT_LOST,
+                    "result": TARGET_STATUS_AGENT_LOST,
                     "message": message,
                     "expected_process_incarnation_id": expected_process_incarnation_id,
                     "target_process_incarnation_id": current_process_incarnation_id,
                     "current_process_incarnation_id": evidence_process_incarnation_id,
+                    "reason": "agent_process_restarted",
+                    "origin_kind": "control_plane",
+                    "component": "job-dispatcher",
                 }))
+                .bind(job_id)
                 .execute(&mut *tx)
                 .await?;
                 enqueue_target_terminal_event_in_tx(&mut tx, job_id, client_id, &outcome).await?;
@@ -4861,9 +5048,10 @@ impl Repository {
                 let completed_at = now.to_string();
                 let timeouts = memory.job_timeouts.read().await.clone();
                 let operations = memory.job_operations.read().await.clone();
+                let jobs = memory.jobs.read().await.clone();
                 let mut expired = Vec::new();
                 let mut synthetic_outputs = Vec::new();
-                let mut invalid_operation_evidence = Vec::new();
+                let mut deadline_audit_evidence = Vec::new();
                 let mut targets = memory.job_targets.write().await;
                 for target in targets
                     .iter_mut()
@@ -4961,14 +5149,21 @@ impl Repository {
                                 )
                             }
                         };
-                    if let Some(decode_error) = invalid_decode_error {
-                        invalid_operation_evidence.push((
-                            target.job_id,
-                            target.client_id.clone(),
-                            message.clone(),
-                            decode_error,
-                        ));
-                    }
+                    let reason = if invalid_decode_error.is_some() {
+                        INVALID_JOB_OPERATION_CODE
+                    } else if status == TARGET_STATUS_AGENT_LOST {
+                        "agent_update_restart_missing_heartbeat"
+                    } else {
+                        "control_deadline_elapsed"
+                    };
+                    deadline_audit_evidence.push((
+                        target.job_id,
+                        target.client_id.clone(),
+                        status.to_string(),
+                        message.clone(),
+                        reason,
+                        invalid_decode_error,
+                    ));
                     let output_data = output_value.to_string().into_bytes();
                     target.status = status.to_string();
                     target.message = Some(message.clone());
@@ -5015,34 +5210,44 @@ impl Repository {
                         });
                     }
                 }
-                if !invalid_operation_evidence.is_empty() {
+                if !deadline_audit_evidence.is_empty() {
                     let mut audits = memory.audits.write().await;
-                    for (job_id, client_id, message, decode_error) in &invalid_operation_evidence {
+                    for (job_id, client_id, status, message, reason, decode_error) in
+                        &deadline_audit_evidence
+                    {
                         audits.push(AuditLogView {
                             id: Uuid::new_v4(),
                             actor_id: None,
                             action: "job.target_result".to_string(),
                             target: format!("client:{client_id}"),
-                            command_hash: None,
+                            command_hash: jobs
+                                .iter()
+                                .find(|job| job.id == *job_id)
+                                .map(|job| job.payload_hash.clone()),
                             metadata: json!({
                                 "job_id": job_id,
-                                "status": TARGET_STATUS_CONTROL_TIMEOUT,
+                                "status": status,
+                                "result": status,
                                 "message": message,
-                                "reason": INVALID_JOB_OPERATION_CODE,
+                                "reason": reason,
                                 "phase": "control_deadline_expiry",
                                 "decode_error": decode_error,
+                                "origin_kind": "control_plane",
+                                "component": "job-deadline-reconciler",
                             }),
                             created_at: completed_at.clone(),
                         });
                     }
                     drop(audits);
-                    for (job_id, client_id, _, decode_error) in invalid_operation_evidence {
-                        warn!(
-                            %job_id,
-                            client_id,
-                            error = %decode_error,
-                            "terminalized expired target with invalid stored job operation"
-                        );
+                    for (job_id, client_id, _, _, _, decode_error) in deadline_audit_evidence {
+                        if let Some(decode_error) = decode_error {
+                            warn!(
+                                %job_id,
+                                client_id,
+                                error = %decode_error,
+                                "terminalized expired target with invalid stored job operation"
+                            );
+                        }
                     }
                 }
                 Ok(expired)
@@ -5216,7 +5421,14 @@ impl Repository {
                         INSERT INTO audit_logs (
                             id, actor_id, action, target, command_hash, metadata
                         )
-                        VALUES ($1, NULL, $2, $3, NULL, $4)
+                        VALUES (
+                            $1,
+                            NULL,
+                            $2,
+                            $3,
+                            (SELECT payload_hash FROM jobs WHERE id = $5),
+                            $4
+                        )
                         "#,
                     )
                     .bind(Uuid::new_v4())
@@ -5225,6 +5437,7 @@ impl Repository {
                     .bind(json!({
                         "job_id": job_id,
                         "status": status,
+                        "result": status,
                         "message": message,
                         "reason": if missing_update_heartbeat {
                             "agent_update_restart_missing_heartbeat"
@@ -5232,7 +5445,10 @@ impl Repository {
                             "control_deadline_elapsed"
                         },
                         "process_incarnation_id": process_incarnation_id,
+                        "origin_kind": "control_plane",
+                        "component": "job-deadline-reconciler",
                     }))
+                    .bind(job_id)
                     .execute(&mut *tx)
                     .await?;
                     let outcome = synthetic_terminal_outcome(status, &message, None, false);
@@ -5295,9 +5511,10 @@ impl Repository {
     pub(crate) async fn request_job_cancel(
         &self,
         job_id: Uuid,
-        actor_id: Uuid,
+        operator: &AuthContext,
         reason: Option<&str>,
     ) -> Result<JobCancelPlan> {
+        let actor_id = operator.operator.id;
         let message = reason
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -5394,6 +5611,13 @@ impl Repository {
                         "reason": message,
                         "pending_canceled": pending_canceled,
                         "cancel_targets": cancel_targets,
+                        "result": "requested",
+                        "operator_id": operator.operator.id,
+                        "operator_username": &operator.operator.username,
+                        "operator_role": &operator.operator.role,
+                        "operator_session_id": operator.audit_session_id(),
+                        "origin_kind": "operator_request",
+                        "component": "job-cancel-controller",
                     }),
                     created_at: now,
                 });
@@ -5529,6 +5753,13 @@ impl Repository {
                     "reason": message,
                     "pending_canceled": pending_canceled,
                     "cancel_targets": &cancel_targets,
+                    "result": "requested",
+                    "operator_id": operator.operator.id,
+                    "operator_username": &operator.operator.username,
+                    "operator_role": &operator.operator.role,
+                    "operator_session_id": operator.audit_session_id(),
+                    "origin_kind": "operator_request",
+                    "component": "job-cancel-controller",
                 }))
                 .execute(&mut *tx)
                 .await?;
@@ -5691,19 +5922,29 @@ impl Repository {
                     }
                 }
                 if updated {
+                    let command_hash = memory
+                        .jobs
+                        .read()
+                        .await
+                        .iter()
+                        .find(|job| job.id == job_id)
+                        .map(|job| job.payload_hash.clone());
                     memory.audits.write().await.push(AuditLogView {
                         id: Uuid::new_v4(),
                         actor_id: None,
                         action: "job.target_result".to_string(),
                         target: format!("client:{client_id}"),
-                        command_hash: None,
+                        command_hash,
                         metadata: json!({
                             "job_id": job_id,
                             "status": outcome.status,
+                            "result": outcome.status,
                             "exit_code": outcome.exit_code,
                             "accepted": outcome.accepted,
                             "message": outcome.message,
                             "received_at": outcome.received_at,
+                            "origin_kind": "control_plane",
+                            "component": "job-dispatcher",
                         }),
                         created_at: completed_at,
                     });
@@ -5809,19 +6050,27 @@ impl Repository {
                         INSERT INTO audit_logs (
                             id, actor_id, action, target, command_hash, metadata
                         )
-                        VALUES ($1, NULL, $2, $3, NULL, $4)
+                        VALUES (
+                            $1, NULL, $2, $3,
+                            (SELECT payload_hash FROM jobs WHERE id = $4),
+                            $5
+                        )
                         "#,
                     )
                     .bind(Uuid::new_v4())
                     .bind("job.target_result")
                     .bind(format!("client:{client_id}"))
+                    .bind(job_id)
                     .bind(json!({
                         "job_id": job_id,
                         "status": outcome.status,
+                        "result": outcome.status,
                         "exit_code": outcome.exit_code,
                         "accepted": outcome.accepted,
                         "message": outcome.message,
                         "received_at": outcome.received_at,
+                        "origin_kind": "control_plane",
+                        "component": "job-dispatcher",
                     }))
                     .execute(&mut *tx)
                     .await?;
@@ -6554,6 +6803,12 @@ impl Repository {
                             "error": error,
                             "job_id": schedule_outcome.job_id,
                             "job_status": &schedule_outcome.status,
+                            "result": "failed",
+                            "operator_id": summary.actor_id,
+                            "operator_username": &summary.actor_username,
+                            "operator_role": &summary.actor_role,
+                            "origin_kind": "control_plane",
+                            "component": "schedule-job-observer",
                         }),
                         created_at: unix_now().to_string(),
                     });
@@ -6590,6 +6845,12 @@ impl Repository {
                     "error": error,
                     "job_id": schedule_outcome.job_id,
                     "job_status": &schedule_outcome.status,
+                    "result": "failed",
+                    "operator_id": summary.actor_id,
+                    "operator_username": &summary.actor_username,
+                    "operator_role": &summary.actor_role,
+                    "origin_kind": "control_plane",
+                    "component": "schedule-job-observer",
                 }))
                 .bind(schedule_outcome.job_id.to_string())
                 .execute(pool)
@@ -6782,6 +7043,16 @@ impl Repository {
                 else {
                     return Ok(None);
                 };
+                let actor = match job.actor_id {
+                    Some(actor_id) => memory
+                        .operators
+                        .read()
+                        .await
+                        .iter()
+                        .find(|operator| operator.id == actor_id)
+                        .map(|operator| (operator.username.clone(), operator.role.clone())),
+                    None => None,
+                };
                 let target_records = memory
                     .job_targets
                     .read()
@@ -6806,6 +7077,8 @@ impl Repository {
                     .copied();
                 Ok(Some(WebhookJobSummary {
                     actor_id: job.actor_id,
+                    actor_username: actor.as_ref().map(|actor| actor.0.clone()),
+                    actor_role: actor.map(|actor| actor.1),
                     command_type: job.command_type,
                     privileged: job.privileged,
                     status: job.status,
@@ -6821,6 +7094,8 @@ impl Repository {
                     r#"
                     SELECT
                         job.actor_id,
+                        operator.username AS actor_username,
+                        operator.role AS actor_role,
                         job.command_type,
                         job.privileged,
                         job.status,
@@ -6844,6 +7119,7 @@ impl Repository {
                             ARRAY[]::TEXT[]
                         ) AS target_statuses
                     FROM jobs job
+                    LEFT JOIN operators operator ON operator.id = job.actor_id
                     WHERE job.id = $1
                     "#,
                 )
@@ -6855,6 +7131,8 @@ impl Repository {
                 };
                 Ok(Some(WebhookJobSummary {
                     actor_id: row.try_get("actor_id")?,
+                    actor_username: row.try_get("actor_username")?,
+                    actor_role: row.try_get("actor_role")?,
                     command_type: row.try_get("command_type")?,
                     privileged: row.try_get("privileged")?,
                     status: row.try_get("status")?,

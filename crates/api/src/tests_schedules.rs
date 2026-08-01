@@ -30,7 +30,7 @@ fn schedule_test_operator() -> AuthContext {
             disabled_at: None,
             deleted_at: None,
         },
-        session_id: Uuid::nil(),
+        session_id: None,
     }
 }
 
@@ -728,6 +728,11 @@ async fn schedule_apply_now_allows_disabled_schedule_without_advancing_next_run(
             .and_then(serde_json::Value::as_str),
         Some(schedule_id.as_str())
     );
+    assert_eq!(
+        dispatch_audit.metadata["target_client_ids"],
+        serde_json::json!(["client-a"])
+    );
+    assert!(dispatch_audit.metadata.get("resolved_targets").is_none());
 }
 
 #[tokio::test]

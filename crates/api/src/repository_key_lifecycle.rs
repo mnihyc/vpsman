@@ -161,6 +161,14 @@ impl Repository {
             .await?;
         }
         let tags = normalize_tags(&request.tags);
+        let identity_payload_hash =
+            vpsman_common::agent_identity_payload_hash(vpsman_common::AgentIdentityPayloadInput {
+                client_id: &client_id,
+                public_key: &public_key,
+                display_name: request.display_name.as_deref(),
+                tags: &tags,
+                replace_existing_key: request.replace_existing_key,
+            });
 
         if self
             .is_public_key_revoked(&public_key)
@@ -345,13 +353,21 @@ impl Repository {
                     actor_id: Some(operator.operator.id),
                     action: "agent_identity.upserted".to_string(),
                     target: format!("client:{client_id}"),
-                    command_hash: None,
+                    command_hash: Some(identity_payload_hash.clone()),
                     metadata: json!({
                         "client_id": client_id,
+                        "requested_display_name": request.display_name.as_deref().map(str::trim),
                         "public_key_sha256_hex": public_key_sha256_hex,
                         "replace_existing_key": request.replace_existing_key,
                         "tags": tags,
                         "agent_lost_job_ids": agent_lost_job_ids,
+                        "result": "succeeded",
+                        "operator_id": operator.operator.id,
+                        "operator_username": &operator.operator.username,
+                        "operator_role": &operator.operator.role,
+                        "operator_session_id": operator.audit_session_id(),
+                        "origin_kind": "operator_request",
+                        "component": "agent-identity-controller",
                     }),
                     created_at: unix_now().to_string(),
                 });
@@ -521,18 +537,27 @@ impl Repository {
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
-                    VALUES ($1, $2, 'agent_identity.upserted', $3, NULL, $4)
+                    VALUES ($1, $2, 'agent_identity.upserted', $3, $4, $5)
                     "#,
                 )
                 .bind(Uuid::new_v4())
                 .bind(operator.operator.id)
                 .bind(format!("client:{}", client_id))
+                .bind(&identity_payload_hash)
                 .bind(json!({
                     "client_id": &client_id,
+                    "requested_display_name": request.display_name.as_deref().map(str::trim),
                     "public_key_sha256_hex": public_key_sha256_hex,
                     "replace_existing_key": request.replace_existing_key,
                     "tags": tags,
                     "agent_lost_job_ids": agent_lost_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
+                    "result": "succeeded",
+                    "operator_id": operator.operator.id,
+                    "operator_username": &operator.operator.username,
+                    "operator_role": &operator.operator.role,
+                    "operator_session_id": operator.audit_session_id(),
+                    "origin_kind": "operator_request",
+                    "component": "agent-identity-controller",
                 }))
                 .execute(&mut *tx)
                 .await?;
@@ -554,23 +579,30 @@ impl Repository {
                     .read()
                     .await
                     .iter()
-                    .filter_map(|agent| agent.id.parse::<u64>().ok())
+                    .filter_map(|agent| {
+                        agent
+                            .id
+                            .strip_prefix("v-")
+                            .unwrap_or(&agent.id)
+                            .parse::<u64>()
+                            .ok()
+                    })
                     .max()
                     .unwrap_or(0);
-                Ok((max_numeric + 1).to_string())
+                Ok(format!("v-{}", max_numeric + 1))
             }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
-                    SELECT COALESCE(MAX(id::bigint), 0) AS max_id
+                    SELECT COALESCE(MAX(regexp_replace(id, '^v-', '')::bigint), 0) AS max_id
                     FROM clients
-                    WHERE id ~ '^\d+$'
+                    WHERE id ~ '^(v-)?\d+$'
                     "#,
                 )
                 .fetch_one(pool)
                 .await?;
                 let max_id: i64 = row.try_get("max_id")?;
-                Ok((max_id + 1).to_string())
+                Ok(format!("v-{}", max_id + 1))
             }
         }
     }
@@ -647,6 +679,13 @@ impl Repository {
                             "removed_configuration_preset_override_count": removed_configuration_preset_override_count,
                             "agent_lost_job_ids": agent_lost_job_ids,
                             "skipped_unstarted_job_ids": skipped_job_ids,
+                            "result": "succeeded",
+                            "operator_id": operator.operator.id,
+                            "operator_username": &operator.operator.username,
+                            "operator_role": &operator.operator.role,
+                            "operator_session_id": operator.audit_session_id(),
+                            "origin_kind": "operator_request",
+                            "component": "client-key-controller",
                         }),
                         created_at: unix_now().to_string(),
                     });
@@ -701,6 +740,13 @@ impl Repository {
                         "removed_configuration_preset_override_count": removed_configuration_preset_override_count,
                         "agent_lost_job_ids": agent_lost_job_ids,
                         "skipped_unstarted_job_ids": skipped_job_ids,
+                        "result": "succeeded",
+                        "operator_id": operator.operator.id,
+                        "operator_username": &operator.operator.username,
+                        "operator_role": &operator.operator.role,
+                        "operator_session_id": operator.audit_session_id(),
+                        "origin_kind": "operator_request",
+                        "component": "client-key-controller",
                     }),
                     created_at: unix_now().to_string(),
                 });
@@ -782,6 +828,13 @@ impl Repository {
                         "removed_configuration_preset_override_count": removed_configuration_preset_override_count,
                         "agent_lost_job_ids": agent_lost_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
                         "skipped_unstarted_job_ids": skipped_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
+                        "result": "succeeded",
+                        "operator_id": operator.operator.id,
+                        "operator_username": &operator.operator.username,
+                        "operator_role": &operator.operator.role,
+                        "operator_session_id": operator.audit_session_id(),
+                        "origin_kind": "operator_request",
+                        "component": "client-key-controller",
                     }))
                     .execute(&mut *tx)
                     .await?;
@@ -859,6 +912,13 @@ impl Repository {
                     "removed_configuration_preset_override_count": removed_configuration_preset_override_count,
                     "agent_lost_job_ids": agent_lost_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
                     "skipped_unstarted_job_ids": skipped_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
+                    "result": "succeeded",
+                    "operator_id": operator.operator.id,
+                    "operator_username": &operator.operator.username,
+                    "operator_role": &operator.operator.role,
+                    "operator_session_id": operator.audit_session_id(),
+                    "origin_kind": "operator_request",
+                    "component": "client-key-controller",
                 }))
                 .execute(&mut *tx)
                 .await?;
@@ -1427,6 +1487,25 @@ fn normalize_tags(tags: &[String]) -> Vec<String> {
         normalized.push(trimmed.to_string());
     }
     normalized
+}
+
+pub(crate) fn agent_identity_payload_hash(request: &UpsertAgentIdentityRequest) -> Result<String> {
+    let client_id = request
+        .client_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("client_id_required")?;
+    let public_key = decode_public_key_hex(&request.client_public_key_hex)?;
+    Ok(vpsman_common::agent_identity_payload_hash(
+        vpsman_common::AgentIdentityPayloadInput {
+            client_id,
+            public_key: &public_key,
+            display_name: request.display_name.as_deref(),
+            tags: &request.tags,
+            replace_existing_key: request.replace_existing_key,
+        },
+    ))
 }
 
 pub(crate) fn public_key_sha256_hex(public_key: &[u8]) -> String {

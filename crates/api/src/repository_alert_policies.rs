@@ -1471,17 +1471,25 @@ impl Repository {
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
-                    VALUES ($1, $2, $3, $4, NULL, $5)
+                    VALUES ($1, $2, $3, $4, $5, $6)
                     "#,
                 )
                 .bind(Uuid::new_v4())
                 .bind(operator.operator.id)
                 .bind("fleet.vps_rules_updated")
                 .bind("vps_rules")
+                .bind(&preview.preview_hash)
                 .bind(json!({
-                    "preview_hash": preview.preview_hash,
+                    "preview_hash": &preview.preview_hash,
                     "matched_vps_count": preview.matched_vps_count,
                     "changed_row_count": preview.changed_row_count,
+                    "result": "succeeded",
+                    "operator_id": operator.operator.id,
+                    "operator_username": &operator.operator.username,
+                    "operator_role": &operator.operator.role,
+                    "operator_session_id": operator.audit_session_id(),
+                    "origin_kind": "operator_request",
+                    "component": "vps-rules-controller",
                 }))
                 .execute(&mut *tx)
                 .await?;
@@ -4444,7 +4452,13 @@ fn policy_group_audit(
 
 fn policy_group_metadata(policy: &PolicyGroupRecord, operator: &AuthContext) -> Value {
     json!({
-        "operator": operator.operator.username,
+        "operator_id": operator.operator.id,
+        "operator_username": &operator.operator.username,
+        "operator_role": &operator.operator.role,
+        "operator_session_id": operator.audit_session_id(),
+        "result": "succeeded",
+        "origin_kind": "operator_request",
+        "component": "alert-policy-controller",
         "policy": policy,
     })
 }
@@ -4460,12 +4474,18 @@ fn vps_rules_audit(
         actor_id: Some(operator.operator.id),
         action: action.to_string(),
         target: "vps_rules".to_string(),
-        command_hash: None,
+        command_hash: Some(preview.preview_hash.clone()),
         metadata: json!({
-            "operator": operator.operator.username,
-            "preview_hash": preview.preview_hash,
+            "preview_hash": &preview.preview_hash,
             "matched_vps_count": preview.matched_vps_count,
             "changed_row_count": preview.changed_row_count,
+            "result": "succeeded",
+            "operator_id": operator.operator.id,
+            "operator_username": &operator.operator.username,
+            "operator_role": &operator.operator.role,
+            "operator_session_id": operator.audit_session_id(),
+            "origin_kind": "operator_request",
+            "component": "vps-rules-controller",
         }),
         created_at,
     }

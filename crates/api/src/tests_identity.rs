@@ -1,4 +1,5 @@
 use super::*;
+use crate::repository_key_lifecycle::agent_identity_payload_hash;
 use base64::Engine as _;
 use std::{sync::Arc, time::Duration};
 use tokio::{
@@ -12,6 +13,47 @@ use vpsman_common::{
     RuntimeTunnelManager,
 };
 use vpsman_server_core::TARGET_STATUS_AGENT_LOST;
+
+#[test]
+fn identity_payload_hash_is_normalized_and_binds_every_material_field() {
+    let base = UpsertAgentIdentityRequest {
+        client_id: Some(" edge-a ".to_string()),
+        client_public_key_hex: "11".repeat(32),
+        display_name: Some(" Edge A ".to_string()),
+        tags: vec!["region:sg".to_string(), " role:web ".to_string()],
+        replace_existing_key: false,
+        confirmed: true,
+        privilege_assertion: None,
+    };
+    let hash = agent_identity_payload_hash(&base).unwrap();
+    assert_eq!(
+        hash,
+        "f00a5fe086d6dc7f7ec8081a7f2d7d6cc440805fcd4fdf6b32aa96fa61ce95c6"
+    );
+    let mut normalized = UpsertAgentIdentityRequest {
+        client_id: Some("edge-a".to_string()),
+        client_public_key_hex: "11".repeat(32),
+        display_name: Some("Edge A".to_string()),
+        tags: vec![
+            "role:web".to_string(),
+            "region:sg".to_string(),
+            "role:web".to_string(),
+        ],
+        replace_existing_key: false,
+        confirmed: true,
+        privilege_assertion: None,
+    };
+    assert_eq!(hash, agent_identity_payload_hash(&normalized).unwrap());
+
+    normalized.client_public_key_hex = "22".repeat(32);
+    assert_ne!(hash, agent_identity_payload_hash(&normalized).unwrap());
+    normalized.client_public_key_hex = "11".repeat(32);
+    normalized.tags.push("tier:prod".to_string());
+    assert_ne!(hash, agent_identity_payload_hash(&normalized).unwrap());
+    normalized.tags.pop();
+    normalized.replace_existing_key = true;
+    assert_ne!(hash, agent_identity_payload_hash(&normalized).unwrap());
+}
 
 #[tokio::test]
 async fn direct_agent_identity_imports_key_and_tags_without_panel_token() {
@@ -45,6 +87,61 @@ async fn direct_agent_identity_imports_key_and_tags_without_panel_token() {
     let report = repo.key_lifecycle_report().await.unwrap();
     assert_eq!(report.direct_identity_client_count, 1);
     assert_eq!(report.current_key_revoked_count, 0);
+}
+
+#[tokio::test]
+async fn default_agent_identity_ids_keep_the_numeric_sequence_with_v_prefix() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = identity_operator();
+
+    repo.upsert_agent_identity(
+        &UpsertAgentIdentityRequest {
+            client_id: Some("15".to_string()),
+            client_public_key_hex: "31".repeat(32),
+            display_name: Some("Existing VPS".to_string()),
+            tags: Vec::new(),
+            replace_existing_key: false,
+            confirmed: true,
+            privilege_assertion: None,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+
+    let first = repo
+        .upsert_agent_identity(
+            &UpsertAgentIdentityRequest {
+                client_id: None,
+                client_public_key_hex: "32".repeat(32),
+                display_name: None,
+                tags: Vec::new(),
+                replace_existing_key: false,
+                confirmed: true,
+                privilege_assertion: None,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    let second = repo
+        .upsert_agent_identity(
+            &UpsertAgentIdentityRequest {
+                client_id: None,
+                client_public_key_hex: "33".repeat(32),
+                display_name: None,
+                tags: Vec::new(),
+                replace_existing_key: false,
+                confirmed: true,
+                privilege_assertion: None,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(first.client_id, "v-16");
+    assert_eq!(second.client_id, "v-17");
 }
 
 #[tokio::test]
@@ -842,14 +939,15 @@ async fn rejected_identity_rotation_does_not_request_gateway_disconnect() {
 }
 
 #[tokio::test]
-async fn privilege_unlock_verification_is_authenticated_and_non_mutating() {
+async fn privilege_unlock_verification_records_canonical_audit_evidence() {
     let state = identity_route_test_state(
         crate::gateway_client::GatewayDispatchClient::test_privilege_auto_approve(),
     );
     let headers = crate::test_auth_headers(&state).await;
 
     let axum::Json(response) = crate::privilege::verify_privilege_unlock(
-        axum::extract::State(state),
+        axum::extract::State(state.clone()),
+        axum::extract::ConnectInfo("127.0.0.1:41000".parse().unwrap()),
         headers,
         axum::Json(crate::privilege::PrivilegeUnlockVerificationRequest {
             privilege_assertion: Some(dummy_privilege_assertion()),
@@ -859,6 +957,15 @@ async fn privilege_unlock_verification_is_authenticated_and_non_mutating() {
     .unwrap();
 
     assert!(response.verified);
+    let audits = state.repo.list_audit_logs(10).await.unwrap();
+    let audit = audits
+        .iter()
+        .find(|audit| audit.action == "privilege.unlock")
+        .expect("privilege verification audit");
+    assert_eq!(audit.target, "access/privilege-vault");
+    assert_eq!(audit.metadata["result"], "succeeded");
+    assert_eq!(audit.metadata["remote_ip"], "127.0.0.1");
+    assert!(audit.metadata["operator_session_id"].is_string());
 }
 
 #[tokio::test]
@@ -870,7 +977,8 @@ async fn privilege_unlock_reports_gateway_unavailability_without_denial() {
     let headers = crate::test_auth_headers(&state).await;
 
     let error = crate::privilege::verify_privilege_unlock(
-        axum::extract::State(state),
+        axum::extract::State(state.clone()),
+        axum::extract::ConnectInfo("127.0.0.1:41001".parse().unwrap()),
         headers,
         axum::Json(crate::privilege::PrivilegeUnlockVerificationRequest {
             privilege_assertion: Some(dummy_privilege_assertion()),
@@ -881,6 +989,16 @@ async fn privilege_unlock_reports_gateway_unavailability_without_denial() {
 
     assert_eq!(error.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(error.code, "privilege_verification_unavailable");
+    let audits = state.repo.list_audit_logs(10).await.unwrap();
+    let audit = audits
+        .iter()
+        .find(|audit| audit.action == "privilege.unlock")
+        .expect("failed privilege verification audit");
+    assert_eq!(audit.metadata["result"], "unavailable");
+    assert_eq!(
+        audit.metadata["reason"],
+        "privilege_verification_unavailable"
+    );
 }
 
 fn identity_operator() -> AuthContext {
@@ -898,7 +1016,7 @@ fn identity_operator() -> AuthContext {
             disabled_at: None,
             deleted_at: None,
         },
-        session_id: Uuid::nil(),
+        session_id: None,
     }
 }
 

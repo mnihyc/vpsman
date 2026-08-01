@@ -315,8 +315,12 @@ async fn record_totp_audit(
         metadata: serde_json::json!({
             "operator_id": actor.operator.id,
             "operator_username": actor.operator.username,
-            "session_id": actor.session_id,
-            "status": status,
+            "operator_role": actor.operator.role,
+            "operator_session_id": actor.audit_session_id(),
+            "totp_status": status,
+            "result": "succeeded",
+            "origin_kind": "operator_request",
+            "component": "operator-totp",
         }),
         created_at: unix_now().to_string(),
     });
@@ -341,8 +345,12 @@ async fn insert_totp_audit(
     .bind(serde_json::json!({
         "operator_id": actor.operator.id,
         "operator_username": actor.operator.username,
-        "session_id": actor.session_id,
-        "status": status,
+        "operator_role": actor.operator.role,
+        "operator_session_id": actor.audit_session_id(),
+        "totp_status": status,
+        "result": "succeeded",
+        "origin_kind": "operator_request",
+        "component": "operator-totp",
     }))
     .execute(&mut **tx)
     .await?;

@@ -954,6 +954,9 @@ async fn detect_offline_agents(pool: &PgPool, offline_timeout_secs: i64) -> Resu
             "to_status": "offline",
             "reason": "agent_offline_timeout",
             "offline_timeout_secs": offline_timeout_secs,
+            "result": "transitioned",
+            "origin_kind": "worker",
+            "component": "agent-offline-reconciler",
         });
         sqlx::query(
             r#"
@@ -1882,6 +1885,8 @@ async fn process_due_schedule(
         SELECT
             id,
             actor_id,
+            (SELECT username FROM operators WHERE id = schedules.actor_id) AS actor_username,
+            (SELECT role FROM operators WHERE id = schedules.actor_id) AS actor_role,
             name,
             operation,
             selector_expression,
@@ -1912,6 +1917,8 @@ async fn process_due_schedule(
         };
         let id: Uuid = row.try_get("id")?;
         let actor_id: Option<Uuid> = row.try_get("actor_id")?;
+        let actor_username: Option<String> = row.try_get("actor_username")?;
+        let actor_role: Option<String> = row.try_get("actor_role")?;
         let name: String = row.try_get("name")?;
         let raw_operation = row.try_get::<SqlJson<Value>, _>("operation")?.0;
         let operation_revision = payload_hash(raw_operation.to_string().as_bytes());
@@ -1922,6 +1929,8 @@ async fn process_due_schedule(
                     &mut tx,
                     id,
                     actor_id,
+                    actor_username.as_deref(),
+                    actor_role.as_deref(),
                     &name,
                     &operation_revision,
                 )
@@ -1933,6 +1942,8 @@ async fn process_due_schedule(
         let schedule = DueSchedule {
             id,
             actor_id,
+            actor_username,
+            actor_role,
             name,
             operation,
             selector_expression: row.try_get("selector_expression")?,
@@ -1987,6 +1998,8 @@ async fn process_due_schedule(
 struct DueSchedule {
     id: Uuid,
     actor_id: Option<Uuid>,
+    actor_username: Option<String>,
+    actor_role: Option<String>,
     name: String,
     operation: JobCommand,
     selector_expression: String,
@@ -2275,6 +2288,12 @@ async fn materialize_due_schedule(
     .bind(serde_json::json!({
         "schedule_id": schedule.id,
         "schedule_name": schedule.name,
+        "result": if targets.is_empty() { "skipped" } else { "requested" },
+        "origin_kind": "worker",
+        "component": "schedule-dispatch-worker",
+        "operator_id": schedule.actor_id,
+        "operator_username": &schedule.actor_username,
+        "operator_role": &schedule.actor_role,
         "operation_type": operation_type,
         "job_id": job_id,
         "fixed_targets": &targets,
@@ -2690,9 +2709,12 @@ async fn record_schedule_capability_skip_outputs(
         .bind(serde_json::json!({
             "job_id": job_id,
             "status": TARGET_STATUS_SKIPPED,
+            "result": TARGET_STATUS_SKIPPED,
             "exit_code": 0,
             "accepted": false,
             "message": skip.failure.message,
+            "origin_kind": "worker",
+            "component": "schedule-dispatch-worker",
         }))
         .execute(&mut **tx)
         .await?;
@@ -2764,9 +2786,12 @@ async fn record_schedule_target_skip_outputs(
         .bind(serde_json::json!({
             "job_id": job_id,
             "status": TARGET_STATUS_SKIPPED,
+            "result": TARGET_STATUS_SKIPPED,
             "exit_code": 0,
             "accepted": skip.accepted,
             "message": skip.message,
+            "origin_kind": "worker",
+            "component": "schedule-dispatch-worker",
         }))
         .execute(&mut **tx)
         .await?;
@@ -2956,6 +2981,17 @@ async fn record_schedule_failure(pool: &PgPool, schedule_id: Uuid, error: &str) 
         return Ok(());
     };
     let actor_id: Option<Uuid> = row.try_get("actor_id")?;
+    let (actor_username, actor_role) = if let Some(actor_id) = actor_id {
+        sqlx::query_as::<_, (String, String)>("SELECT username, role FROM operators WHERE id = $1")
+            .bind(actor_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .map_or((None, None), |(username, role)| {
+                (Some(username), Some(role))
+            })
+    } else {
+        (None, None)
+    };
     let failure_count: i32 = row.try_get("failure_count")?;
     let max_failures: i32 = row.try_get("max_failures")?;
     let enabled: bool = row.try_get("enabled")?;
@@ -2975,8 +3011,14 @@ async fn record_schedule_failure(pool: &PgPool, schedule_id: Uuid, error: &str) 
     .bind("schedule.due_failed")
     .bind(format!("schedule:{schedule_id}"))
     .bind(serde_json::json!({
+        "origin_kind": "worker",
+        "component": "schedule-dispatch-worker",
+        "result": "failed",
         "schedule_id": schedule_id,
         "schedule_name": &schedule_name,
+        "operator_id": actor_id,
+        "operator_username": &actor_username,
+        "operator_role": &actor_role,
         "failure_count": failure_count,
         "max_failures": max_failures,
         "retry_delay_secs": retry_delay_secs,
@@ -3043,17 +3085,22 @@ async fn disable_schedule_for_revoked_actor(
         INSERT INTO audit_logs (
             id, actor_id, action, target, command_hash, metadata
         )
-        VALUES ($1, $2, $3, $4, NULL, $5)
+        VALUES ($1, NULL, $2, $3, NULL, $4)
         "#,
     )
     .bind(Uuid::new_v4())
-    .bind(schedule.actor_id)
     .bind("schedule.disabled_actor_authority_revoked")
     .bind(format!("schedule:{}", schedule.id))
     .bind(serde_json::json!({
         "worker": "schedule_dispatch_worker",
+        "origin_kind": "worker",
+        "component": "schedule-dispatch-worker",
+        "result": "rejected",
         "schedule_id": schedule.id,
         "schedule_name": &schedule.name,
+        "referenced_operator_id": schedule.actor_id,
+        "referenced_operator_username": &schedule.actor_username,
+        "referenced_operator_role": &schedule.actor_role,
         "reason": "actor_authority_revoked",
     }))
     .execute(&mut **tx)
@@ -3065,6 +3112,8 @@ async fn disable_schedule_for_invalid_operation(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     schedule_id: Uuid,
     actor_id: Option<Uuid>,
+    actor_username: Option<&str>,
+    actor_role: Option<&str>,
     schedule_name: &str,
     operation_revision: &str,
 ) -> Result<()> {
@@ -3096,8 +3145,14 @@ async fn disable_schedule_for_invalid_operation(
     .bind(operation_revision)
     .bind(serde_json::json!({
         "worker": "schedule_dispatch_worker",
+        "origin_kind": "worker",
+        "component": "schedule-dispatch-worker",
+        "result": "failed",
         "schedule_id": schedule_id,
         "schedule_name": schedule_name,
+        "operator_id": actor_id,
+        "operator_username": actor_username,
+        "operator_role": actor_role,
         "disabled": true,
         "permanent": true,
         "error": SCHEDULE_OPERATION_INVALID,
@@ -3151,8 +3206,14 @@ async fn disable_schedule_for_invalid_cadence(
     .bind(format!("schedule:{}", schedule.id))
     .bind(serde_json::json!({
         "worker": "schedule_dispatch_worker",
+        "origin_kind": "worker",
+        "component": "schedule-dispatch-worker",
+        "result": "failed",
         "schedule_id": schedule.id,
         "schedule_name": &schedule.name,
+        "operator_id": schedule.actor_id,
+        "operator_username": &schedule.actor_username,
+        "operator_role": &schedule.actor_role,
         "disabled": true,
         "permanent": true,
         "error": cadence_error,
@@ -3306,6 +3367,8 @@ mod schedule_tests {
         DueSchedule {
             id: Uuid::nil(),
             actor_id: None,
+            actor_username: None,
+            actor_role: None,
             name: "test".to_string(),
             operation: JobCommand::Shell {
                 argv: vec!["/bin/true".to_string()],
@@ -3559,8 +3622,8 @@ mod schedule_tests {
                 .unwrap();
         assert_eq!(invalid_jobs, 0);
         assert_eq!(valid_jobs, 1);
-        let invalid_audits: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM audit_logs WHERE action = 'schedule.due_failed' AND target = $1",
+        let invalid_audit: SqlJson<Value> = sqlx::query_scalar(
+            "SELECT metadata FROM audit_logs WHERE action = 'schedule.due_failed' AND target = $1",
         )
         .bind(format!("schedule:{invalid_id}"))
         .fetch_one(&db.pool)
@@ -3573,7 +3636,12 @@ mod schedule_tests {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-        assert_eq!(invalid_audits, 1);
+        assert_eq!(invalid_audit.0["origin_kind"], "worker");
+        assert_eq!(invalid_audit.0["component"], "schedule-dispatch-worker");
+        assert_eq!(invalid_audit.0["result"], "failed");
+        assert!(invalid_audit.0["operator_id"].is_string());
+        assert!(invalid_audit.0["operator_username"].is_string());
+        assert_eq!(invalid_audit.0["operator_role"], "operator");
         assert_eq!(invalid_events, 1);
 
         assert_eq!(

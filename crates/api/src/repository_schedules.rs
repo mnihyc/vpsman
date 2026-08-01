@@ -400,26 +400,7 @@ impl Repository {
                     action: "schedule.created".to_string(),
                     target: format!("schedule:{}", schedule.id),
                     command_hash: None,
-                    metadata: serde_json::json!({
-                        "name": &schedule.name,
-                        "operation_type": &schedule.command_type,
-                        "operation_error": &schedule.operation_error,
-                        "operation_payload_hash": &schedule.operation_payload_hash,
-                        "selector_expression": &schedule.selector_expression,
-                        "target_client_ids": &schedule.target_client_ids,
-                        "target_count": schedule.target_client_ids.len(),
-                        "cron_expr": &schedule.cron_expr,
-                        "timezone": &schedule.timezone,
-                        "next_runs": &schedule.next_runs,
-                        "catch_up_policy": &schedule.catch_up_policy,
-                        "catch_up_limit": schedule.catch_up_limit,
-                        "retry_delay_secs": schedule.retry_delay_secs,
-                        "max_failures": schedule.max_failures,
-                        "enabled": schedule.enabled,
-                        "deferred_until": schedule.deferred_until,
-                        "operator_username": &operator.operator.username,
-                        "session_id": operator.session_id,
-                    }),
+                    metadata: schedule_audit_metadata(&schedule, operator, serde_json::Value::Null),
                     created_at: now.to_string(),
                 });
                 Ok(schedule)
@@ -1210,8 +1191,13 @@ fn schedule_audit_metadata(
         "enabled": schedule.enabled,
         "deferred_until": schedule.deferred_until,
         "deleted_at": schedule.deleted_at,
+        "result": "succeeded",
+        "operator_id": operator.operator.id,
         "operator_username": &operator.operator.username,
-        "session_id": operator.session_id,
+        "operator_role": &operator.operator.role,
+        "operator_session_id": operator.audit_session_id(),
+        "origin_kind": "operator_request",
+        "component": "schedule-controller",
     });
     if !extra.is_null() {
         metadata["extra"] = extra;

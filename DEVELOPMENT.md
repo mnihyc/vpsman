@@ -37,6 +37,12 @@ Every update must keep these boundaries explicit:
   visible. Do not invent success or add a silent fallback.
 - Durable mutation and its audit evidence stay atomic where the storage model
   supports transactions.
+- Audit producers record explicit outcomes, origins, and canonical operator,
+  session, job, and VPS identifiers at write time. Presentation code must not
+  infer those facts from unrelated metadata, and evidence links require an
+  exact ID-backed destination. Fresh schemas reject audit metadata unless
+  `result`, `origin_kind`, and `component` are explicit non-empty strings;
+  update every memory and PostgreSQL producer together.
 - Daily operator paths remain concise. A correctness fix must not add routine
   prompts, concepts, or controls that operators do not need.
 - Keep provider integrations behind explicit product-owned adapter definitions
@@ -67,6 +73,23 @@ Every update must keep these boundaries explicit:
 - When a deployed schema becomes a compatibility boundary, document and pin it
   from that release onward; later compatible changes must be append-only.
 - Add the compatibility note and run `bash scripts/audit-migrations.sh`.
+
+### Adding an audit event
+
+- Write the canonical non-empty `result`, `origin_kind`, and `component` fields
+  at the producer. Do not derive an outcome or origin in repository reads or UI
+  presentation. `origin_kind` is one of `operator_request`, `authentication`,
+  `control_plane`, `gateway_ingest`, or `worker`; `component` is the stable name
+  of the writer.
+- Attribute operator work with `operator_id`, `operator_username`,
+  `operator_role`, and `operator_session_id`. Link affected resources with their
+  exact canonical keys, including `job_id`, `client_id`, `target_client_ids`,
+  `terminal_session_id`, `gateway_session_id`, or `schedule_id` when that
+  resource exists.
+- Keep the memory and PostgreSQL writers equivalent, and add tests for both the
+  required metadata and each exact-ID correlation or evidence destination.
+- Reject missing or malformed canonical fields. Do not add aliases, legacy-key
+  reads, substring matching, or presentation-time identity guesses.
 
 ### Protocol and rolling-component changes
 

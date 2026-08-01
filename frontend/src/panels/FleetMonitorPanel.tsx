@@ -8,7 +8,7 @@ import {
   Server,
   TerminalSquare,
 } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
 import { agentDisplayState, type AgentDisplayState } from "../agentDisplayState";
 import { ActionFeedback } from "../components/ActionFeedback";
 import {
@@ -26,6 +26,7 @@ import type {
   TelemetryTunnelRecord,
 } from "../types";
 import { INTERFACE_RATE_DEFINITION } from "../telemetryMetrics";
+import { useHistoryEntryState } from "../historyEntryState";
 import { displayNameOrUnnamed, formatTime, timestampMillis } from "../utils";
 
 type FleetMonitorPanelProps = {
@@ -77,7 +78,7 @@ export function FleetMonitorPanel({
   agents,
   apiError = null,
   ariaLabel = "VPS monitor cards",
-  description = "Compact VPS health cards for scanning state, resources, network, and alerts before opening terminal or file workflows.",
+  description = "VPS health cards for scanning state, resources, network, and alerts before opening terminal or file workflows.",
   embedded = false,
   backups = [],
   failedJobCount,
@@ -99,8 +100,15 @@ export function FleetMonitorPanel({
   onOpenTerminal,
   onOpenVpsDetail,
 }: FleetMonitorPanelProps) {
-  const [density, setDensity] = useState<FleetMonitorDensity>("comfortable");
-  const [sortMode, setSortMode] = useState<FleetMonitorSort>("warning");
+  const historySlot = embedded ? "home.fleet-monitor" : "fleet.monitor";
+  const [density, setDensity] = useHistoryEntryState<FleetMonitorDensity>(
+    `${historySlot}.density`,
+    "comfortable",
+  );
+  const [sortMode, setSortMode] = useHistoryEntryState<FleetMonitorSort>(
+    `${historySlot}.sort`,
+    "warning",
+  );
   const rollups = latestRollupsByClient(telemetryRollups);
   const rates = latestRatesByClient(telemetryNetworkRates);
   const tunnels = latestTunnelsByClient(telemetryTunnels);
@@ -256,6 +264,7 @@ export function VpsMonitorCard({
   const provider = tagValue(agent.tags, "provider") ?? "provider unset";
   const region = tagValue(agent.tags, "country") ?? tagValue(agent.tags, "region") ?? "region unset";
   const visibleTags = agent.tags.slice(0, density === "compact" ? 2 : 4);
+  const hiddenTags = agent.tags.slice(visibleTags.length);
   const hiddenTagCount = Math.max(0, agent.tags.length - visibleTags.length);
   const currentRates = coherentNetworkRates(rates);
   const networkBps =
@@ -293,11 +302,15 @@ export function VpsMonitorCard({
       className={`vpsMonitorCard ${statusTone} ${density}`}
     >
       <button className="vpsMonitorCardMain" onClick={() => onOpenVpsDetail(agent)} type="button">
-        <span className="vpsMonitorStatus">
+        <span className="vpsMonitorStatus" title={displayState.detail}>
           <span aria-hidden="true" />
-          {displayState.label}
+          {density === "compact" && displayState.label === "Contact unknown"
+            ? "No contact"
+            : displayState.label}
         </span>
-        <strong>{displayNameOrUnnamed(agent.display_name)}</strong>
+        <strong title={displayNameOrUnnamed(agent.display_name)}>
+          {displayNameOrUnnamed(agent.display_name)}
+        </strong>
         <small title={`${provider} / ${region}`}>{provider} / {region}</small>
       </button>
       <div className="vpsMonitorTags" aria-label={`Tags for ${displayNameOrUnnamed(agent.display_name)}`}>
@@ -306,7 +319,9 @@ export function VpsMonitorCard({
         ) : (
           visibleTags.map((tag) => <span key={tag} title={tag}>{tag}</span>)
         )}
-        {hiddenTagCount > 0 && <span>+{hiddenTagCount}</span>}
+        {hiddenTagCount > 0 && (
+          <span title={hiddenTags.join(", ")}>+{hiddenTagCount}</span>
+        )}
       </div>
       <div className="vpsMonitorMetrics">
         <MonitorMetric
@@ -326,19 +341,37 @@ export function VpsMonitorCard({
           value={networkBps === null ? "n/a" : formatRate(networkBps)}
         />
       </div>
-      <div className="vpsMonitorEvidence">
-        <span title={tunnelTelemetryState.title}>
-          {latency === null
-            ? "Latency n/a"
-            : `${latency.toFixed(1)} ms avg${tunnelTelemetryState.kind === "stale" ? " · last-known" : ""}`}
-        </span>
-        <span>{formatMonitorContactEvidence(agent, displayState, lastContact)}</span>
-        <span className={`telemetryEvidence ${telemetryState.kind}`} title={telemetryState.title}>
-          {telemetryState.label}
-        </span>
-        <span>{signals.fleetJobText}</span>
-        <span>{agent.stale_reason ?? signals.statusText}</span>
-      </div>
+      {density === "compact" ? (
+        <div className="vpsMonitorEvidence compactSummary">
+          <span title={tunnelTelemetryState.title}>
+            {latency === null
+              ? "Latency n/a"
+              : `${latency.toFixed(1)} ms avg${tunnelTelemetryState.kind === "stale" ? " · last-known" : ""}`}
+            {" · "}
+            {formatMonitorContactEvidence(agent, displayState, lastContact)}
+          </span>
+          <span title={telemetryState.title}>
+            <span className={`telemetryEvidence ${telemetryState.kind}`}>
+              {telemetryState.label}
+            </span>{" "}
+            · {signals.fleetJobText}
+          </span>
+        </div>
+      ) : (
+        <div className="vpsMonitorEvidence comfortableSummary">
+          <span title={tunnelTelemetryState.title}>
+            {latency === null
+              ? "Latency n/a"
+              : `${latency.toFixed(1)} ms avg${tunnelTelemetryState.kind === "stale" ? " · last-known" : ""}`}
+          </span>
+          <span>{formatMonitorContactEvidence(agent, displayState, lastContact)}</span>
+          <span className={`telemetryEvidence ${telemetryState.kind}`} title={telemetryState.title}>
+            {telemetryState.label}
+          </span>
+          <span>{signals.fleetJobText}</span>
+          <span>{agent.stale_reason ?? signals.statusText}</span>
+        </div>
+      )}
       <div className="vpsMonitorSignals" aria-label={`Operational signals for ${displayNameOrUnnamed(agent.display_name)}`}>
         <MonitorSignal tone={signals.alertTone} label="Alerts" value={signals.alertText} />
         <MonitorSignal tone={signals.backupTone} label="Backup" value={signals.backupText} />

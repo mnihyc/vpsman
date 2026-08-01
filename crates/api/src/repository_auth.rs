@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -197,6 +197,7 @@ impl Repository {
                 &ip_key,
                 user_agent,
                 None,
+                false,
             )
             .await?;
             self.record_operator_auth_failure(
@@ -222,6 +223,7 @@ impl Repository {
                 &ip_key,
                 user_agent,
                 None,
+                false,
             )
             .await?;
             self.record_operator_auth_failure(&username_key, &ip_key, reason, throttle)
@@ -237,6 +239,7 @@ impl Repository {
                 &ip_key,
                 user_agent,
                 None,
+                false,
             )
             .await?;
             self.record_operator_auth_failure(
@@ -258,6 +261,7 @@ impl Repository {
                     &ip_key,
                     user_agent,
                     None,
+                    false,
                 )
                 .await?;
                 self.record_operator_auth_failure(
@@ -278,6 +282,7 @@ impl Repository {
                     &ip_key,
                     user_agent,
                     None,
+                    false,
                 )
                 .await?;
                 self.record_operator_auth_failure(
@@ -300,6 +305,7 @@ impl Repository {
                         &ip_key,
                         user_agent,
                         None,
+                        false,
                     )
                     .await?;
                     self.record_operator_auth_failure(
@@ -321,6 +327,7 @@ impl Repository {
                     &ip_key,
                     user_agent,
                     None,
+                    false,
                 )
                 .await?;
                 self.record_operator_auth_failure(
@@ -337,10 +344,6 @@ impl Repository {
             .operator_auth_previous_failures(&username_key, throttle)
             .await?;
         self.clear_operator_auth_success(&username_key).await?;
-        if previous_failures {
-            self.record_operator_auth_success_after_failures(&operator, &username_key, &ip_key)
-                .await?;
-        }
         let response = self.issue_session(operator.view()).await?;
         self.record_operator_auth_event(
             Some(&operator),
@@ -349,7 +352,8 @@ impl Repository {
             None,
             &ip_key,
             user_agent,
-            None,
+            Some(response.session_id),
+            previous_failures,
         )
         .await?;
         Ok(OperatorLoginAttempt::Authenticated(Box::new(response)))
@@ -468,7 +472,8 @@ impl Repository {
                 }
                 drop(buckets);
                 for lockout in lockouts {
-                    record_memory_auth_lockout_audit(memory, &lockout, reason.as_str()).await;
+                    record_memory_auth_lockout_audit(memory, &lockout, reason.as_str(), ip_key)
+                        .await;
                 }
                 Ok(())
             }
@@ -502,7 +507,8 @@ impl Repository {
                     lockouts.push(lockout);
                 }
                 for lockout in &lockouts {
-                    insert_postgres_auth_lockout_audit(&mut tx, lockout, reason.as_str()).await?;
+                    insert_postgres_auth_lockout_audit(&mut tx, lockout, reason.as_str(), ip_key)
+                        .await?;
                 }
                 tx.commit().await?;
                 Ok(())
@@ -572,53 +578,6 @@ impl Repository {
         }
     }
 
-    async fn record_operator_auth_success_after_failures(
-        &self,
-        operator: &OperatorRecord,
-        username_key: &str,
-        ip_key: &str,
-    ) -> Result<()> {
-        let metadata = serde_json::json!({
-            "operator_id": operator.id,
-            "username": operator.username,
-            "username_key": username_key,
-            "ip": ip_key,
-            "cleared_scope_kinds": ["username_ip"],
-        });
-        match self {
-            Self::Memory(memory) => {
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: Some(operator.id),
-                    action: "operator_auth.login_after_failures".to_string(),
-                    target: format!("operator:{}", operator.id),
-                    command_hash: None,
-                    metadata,
-                    created_at: unix_now().to_string(),
-                });
-                Ok(())
-            }
-            Self::Postgres(pool) => {
-                sqlx::query(
-                    r#"
-                    INSERT INTO audit_logs (
-                        id, actor_id, action, target, command_hash, metadata
-                    )
-                    VALUES ($1, $2, $3, $4, NULL, $5)
-                    "#,
-                )
-                .bind(Uuid::new_v4())
-                .bind(operator.id)
-                .bind("operator_auth.login_after_failures")
-                .bind(format!("operator:{}", operator.id))
-                .bind(metadata)
-                .execute(pool)
-                .await?;
-                Ok(())
-            }
-        }
-    }
-
     async fn record_operator_auth_event(
         &self,
         operator: Option<&OperatorRecord>,
@@ -628,6 +587,7 @@ impl Repository {
         remote_ip: &str,
         user_agent: Option<&str>,
         session_id: Option<Uuid>,
+        cleared_previous_failures: bool,
     ) -> Result<()> {
         let action = match result {
             "success" => "operator_auth.login_success",
@@ -642,12 +602,16 @@ impl Repository {
         };
         let metadata = serde_json::json!({
             "operator_id": operator.map(|operator| operator.id),
-            "username": normalized_username,
+            "operator_username": operator.map(|operator| &operator.username),
+            "attempted_username": normalized_username,
             "result": result,
             "reason": reason,
             "remote_ip": remote_ip,
             "user_agent": user_agent.unwrap_or(""),
-            "session_id": session_id,
+            "operator_session_id": session_id,
+            "cleared_previous_failures": cleared_previous_failures,
+            "origin_kind": "authentication",
+            "component": "operator-auth",
         });
         match self {
             Self::Memory(memory) => {
@@ -802,7 +766,7 @@ impl Repository {
                     .filter(|operator| operator.status == "active")
                     .map(|operator| AuthContext {
                         operator: operator.view(),
-                        session_id,
+                        session_id: Some(session_id),
                     }))
             }
             Self::Postgres(pool) => {
@@ -834,7 +798,7 @@ impl Repository {
                 .await?;
                 row.map(|row| {
                     Ok(AuthContext {
-                        session_id: row.try_get("session_id")?,
+                        session_id: Some(row.try_get("session_id")?),
                         operator: OperatorView {
                             id: row.try_get("operator_id")?,
                             username: row.try_get("username")?,
@@ -1074,14 +1038,18 @@ impl Repository {
             deleted_at: None,
         };
         let metadata = serde_json::json!({
-            "operator_id": operator.id,
-            "username": operator.username,
-            "role": operator.role,
-            "scopes": operator.scopes,
+            "target_operator_id": operator.id,
+            "target_operator_username": operator.username,
+            "target_operator_role": operator.role,
+            "target_operator_scopes": operator.scopes,
             "session_refresh_ttl_secs": operator.session_refresh_ttl_secs,
-            "created_by_operator_id": actor.operator.id,
-            "created_by_operator_username": actor.operator.username,
-            "session_id": actor.session_id,
+            "operator_id": actor.operator.id,
+            "operator_username": actor.operator.username,
+            "operator_role": actor.operator.role,
+            "operator_session_id": actor.audit_session_id(),
+            "result": "succeeded",
+            "origin_kind": "operator_request",
+            "component": "operator-admin-controller",
         });
         match self {
             Self::Memory(memory) => {
@@ -1160,13 +1128,17 @@ impl Repository {
             normalize_session_refresh_ttl(request.session_refresh_ttl_secs)
                 .map_err(|error| anyhow::anyhow!(error.code))?;
         let metadata = serde_json::json!({
-            "operator_id": operator_id,
-            "role": role,
-            "scopes": scopes,
+            "target_operator_id": operator_id,
+            "target_operator_role": role,
+            "target_operator_scopes": scopes,
             "session_refresh_ttl_secs": session_refresh_ttl_secs,
-            "updated_by_operator_id": actor.operator.id,
-            "updated_by_operator_username": actor.operator.username,
-            "session_id": actor.session_id,
+            "operator_id": actor.operator.id,
+            "operator_username": actor.operator.username,
+            "operator_role": actor.operator.role,
+            "operator_session_id": actor.audit_session_id(),
+            "result": "succeeded",
+            "origin_kind": "operator_request",
+            "component": "operator-admin-controller",
         });
         match self {
             Self::Memory(memory) => {
@@ -1274,11 +1246,15 @@ impl Repository {
             _ => unreachable!(),
         };
         let metadata = serde_json::json!({
-            "operator_id": operator_id,
-            "status": status,
-            "updated_by_operator_id": actor.operator.id,
-            "updated_by_operator_username": actor.operator.username,
-            "session_id": actor.session_id,
+            "target_operator_id": operator_id,
+            "target_operator_status": status,
+            "operator_id": actor.operator.id,
+            "operator_username": actor.operator.username,
+            "operator_role": actor.operator.role,
+            "operator_session_id": actor.audit_session_id(),
+            "result": "succeeded",
+            "origin_kind": "operator_request",
+            "component": "operator-admin-controller",
         });
         match self {
             Self::Memory(memory) => {
@@ -1412,12 +1388,16 @@ impl Repository {
     ) -> Result<Option<OperatorView>> {
         let password_hash = hash_operator_password(password)?;
         let metadata = serde_json::json!({
-            "operator_id": operator_id,
-            "reset_by_operator_id": actor.operator.id,
-            "reset_by_operator_username": actor.operator.username,
-            "session_id": actor.session_id,
+            "target_operator_id": operator_id,
+            "operator_id": actor.operator.id,
+            "operator_username": actor.operator.username,
+            "operator_role": actor.operator.role,
+            "operator_session_id": actor.audit_session_id(),
             "sessions_revoked": true,
             "totp_cleared": true,
+            "result": "succeeded",
+            "origin_kind": "operator_request",
+            "component": "operator-admin-controller",
         });
         match self {
             Self::Memory(memory) => {
@@ -1499,11 +1479,15 @@ impl Repository {
         actor: &AuthContext,
     ) -> Result<Option<OperatorView>> {
         let metadata = serde_json::json!({
-            "operator_id": operator_id,
-            "cleared_by_operator_id": actor.operator.id,
-            "cleared_by_operator_username": actor.operator.username,
-            "session_id": actor.session_id,
+            "target_operator_id": operator_id,
+            "operator_id": actor.operator.id,
+            "operator_username": actor.operator.username,
+            "operator_role": actor.operator.role,
+            "operator_session_id": actor.audit_session_id(),
             "sessions_revoked": true,
+            "result": "succeeded",
+            "origin_kind": "operator_request",
+            "component": "operator-admin-controller",
         });
         match self {
             Self::Memory(memory) => {
@@ -1585,8 +1569,12 @@ impl Repository {
         let metadata = serde_json::json!({
             "operator_id": actor.operator.id,
             "operator_username": actor.operator.username,
-            "session_id": actor.session_id,
+            "operator_role": actor.operator.role,
+            "operator_session_id": actor.audit_session_id(),
             "preferences": preferences,
+            "result": "succeeded",
+            "origin_kind": "operator_request",
+            "component": "operator-preferences-controller",
         });
         match self {
             Self::Memory(memory) => {
@@ -1661,31 +1649,25 @@ impl Repository {
         let limit = i64::from(query.limit.unwrap_or(100)).clamp(1, 200);
         match self {
             Self::Memory(memory) => {
-                let mut rows = memory
-                    .audits
-                    .read()
-                    .await
+                let audits = memory.audits.read().await;
+                let mut rows = audits
                     .iter()
                     .filter(|audit| is_operator_auth_event_action(&audit.action))
-                    .filter_map(|audit| operator_auth_event_from_audit(audit).ok())
-                    .filter(|event| {
-                        query
-                            .operator_id
-                            .is_none_or(|operator_id| event.operator_id == Some(operator_id))
-                    })
-                    .filter(|event| {
-                        query
+                    .map(operator_auth_event_from_audit)
+                    .collect::<Result<Vec<_>>>()?;
+                rows.retain(|event| {
+                    query
+                        .operator_id
+                        .is_none_or(|operator_id| event.operator_id == Some(operator_id))
+                        && query
                             .username
                             .as_ref()
                             .is_none_or(|username| event.username == username.trim())
-                    })
-                    .filter(|event| {
-                        query
+                        && query
                             .result
                             .as_ref()
                             .is_none_or(|result| event.result == result.trim())
-                    })
-                    .collect::<Vec<_>>();
+                });
                 rows.sort_by(|left, right| right.created_at.cmp(&left.created_at));
                 rows.truncate(limit as usize);
                 Ok(rows)
@@ -1702,7 +1684,13 @@ impl Repository {
                         'operator_auth.login_throttled'
                     )
                       AND ($2::text IS NULL OR metadata->>'operator_id' = $2)
-                      AND ($3::text IS NULL OR metadata->>'username' = $3)
+                      AND (
+                          $3::text IS NULL
+                          OR COALESCE(
+                              metadata->>'operator_username',
+                              metadata->>'attempted_username'
+                          ) = $3
+                      )
                       AND ($4::text IS NULL OR metadata->>'result' = $4)
                     ORDER BY created_at DESC
                     LIMIT $1
@@ -1891,6 +1879,9 @@ impl Repository {
         session_id: Uuid,
         actor: &AuthContext,
     ) -> Result<Option<OperatorSessionView>> {
+        let current_session_id = actor
+            .audit_session_id()
+            .context("operator session revoke requires an authenticated session")?;
         match self {
             Self::Memory(memory) => {
                 let mut sessions = memory.sessions.write().await;
@@ -1903,7 +1894,7 @@ impl Repository {
                 session.revoked = true;
                 drop(sessions);
                 record_session_revoke_audit(memory, session_id, actor).await;
-                self.operator_session_by_id(session_id, actor.session_id)
+                self.operator_session_by_id(session_id, current_session_id)
                     .await
             }
             Self::Postgres(pool) => {
@@ -1935,15 +1926,19 @@ impl Repository {
                 .bind("operator_session.revoked")
                 .bind(format!("operator-session:{session_id}"))
                 .bind(serde_json::json!({
-                    "session_id": session_id,
-                    "revoked_by_operator_id": actor.operator.id,
-                    "revoked_by_operator_username": actor.operator.username,
-                    "revoked_by_session_id": actor.session_id,
+                    "revoked_operator_session_id": session_id,
+                    "operator_id": actor.operator.id,
+                    "operator_username": actor.operator.username,
+                    "operator_role": actor.operator.role,
+                    "operator_session_id": actor.audit_session_id(),
+                    "result": "succeeded",
+                    "origin_kind": "operator_request",
+                    "component": "operator-session-controller",
                 }))
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
-                self.operator_session_by_id(session_id, actor.session_id)
+                self.operator_session_by_id(session_id, current_session_id)
                     .await
             }
         }
@@ -1954,7 +1949,12 @@ impl Repository {
     /// This lookup intentionally ignores normal access expiry and prior revocation:
     /// an expired token must still be able to revoke its paired refresh token, and
     /// a retry after a lost response must remain successful without a second audit.
-    pub(crate) async fn logout_operator_session(&self, access_token: &str) -> Result<bool> {
+    pub(crate) async fn logout_operator_session(
+        &self,
+        access_token: &str,
+        remote_ip: &str,
+        user_agent: Option<&str>,
+    ) -> Result<bool> {
         let access_hash = token_hash(access_token);
         match self {
             Self::Memory(memory) => {
@@ -1984,6 +1984,8 @@ impl Repository {
                         session_id,
                         operator_id,
                         &operator_username,
+                        remote_ip,
+                        user_agent,
                     )
                     .await;
                 }
@@ -2026,11 +2028,16 @@ impl Repository {
                         .bind("operator_session.logged_out")
                         .bind(format!("operator-session:{session_id}"))
                         .bind(serde_json::json!({
-                            "session_id": session_id,
                             "operator_id": operator_id,
                             "operator_username": operator_username,
+                            "operator_session_id": session_id,
+                            "remote_ip": remote_ip,
+                            "user_agent": user_agent.unwrap_or(""),
                             "revocation_scope": "current_session",
                             "revoked_access_and_refresh": true,
+                            "result": "succeeded",
+                            "origin_kind": "operator_request",
+                            "component": "operator-session-controller",
                         }))
                         .execute(&mut *tx)
                         .await?;
@@ -2123,21 +2130,16 @@ fn operator_auth_event_from_audit(audit: &AuditLogView) -> Result<OperatorAuthEv
     }
     Ok(OperatorAuthEventView {
         id: audit.id,
-        operator_id: json_uuid(&audit.metadata, "operator_id"),
-        username: json_string(&audit.metadata, "username").unwrap_or_default(),
-        result: json_string(&audit.metadata, "result").unwrap_or_else(|| {
-            if audit.action == "operator_auth.login_success" {
-                "success".to_string()
-            } else if audit.action == "operator_auth.login_throttled" {
-                "throttled".to_string()
-            } else {
-                "failure".to_string()
-            }
-        }),
+        operator_id: json_uuid(&audit.metadata, "operator_id")?,
+        username: json_string(&audit.metadata, "operator_username")
+            .or_else(|| json_string(&audit.metadata, "attempted_username"))
+            .context("operator auth audit missing canonical username")?,
+        result: json_string(&audit.metadata, "result")
+            .context("operator auth audit missing canonical result")?,
         reason: json_string(&audit.metadata, "reason"),
         remote_ip: json_string(&audit.metadata, "remote_ip"),
         user_agent: json_string(&audit.metadata, "user_agent"),
-        session_id: json_uuid(&audit.metadata, "session_id"),
+        session_id: json_uuid(&audit.metadata, "operator_session_id")?,
         created_at: audit.created_at.clone(),
     })
 }
@@ -2146,13 +2148,16 @@ fn operator_auth_event_from_row(row: &sqlx::postgres::PgRow) -> Result<OperatorA
     let metadata: serde_json::Value = row.try_get("metadata")?;
     Ok(OperatorAuthEventView {
         id: row.try_get("id")?,
-        operator_id: json_uuid(&metadata, "operator_id"),
-        username: json_string(&metadata, "username").unwrap_or_default(),
-        result: json_string(&metadata, "result").unwrap_or_else(|| "failure".to_string()),
+        operator_id: json_uuid(&metadata, "operator_id")?,
+        username: json_string(&metadata, "operator_username")
+            .or_else(|| json_string(&metadata, "attempted_username"))
+            .context("operator auth audit missing canonical username")?,
+        result: json_string(&metadata, "result")
+            .context("operator auth audit missing canonical result")?,
         reason: json_string(&metadata, "reason"),
         remote_ip: json_string(&metadata, "remote_ip"),
         user_agent: json_string(&metadata, "user_agent"),
-        session_id: json_uuid(&metadata, "session_id"),
+        session_id: json_uuid(&metadata, "operator_session_id")?,
         created_at: row.try_get("created_at")?,
     })
 }
@@ -2161,12 +2166,21 @@ fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
     value
         .get(key)
         .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
+        .map(str::trim)
         .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
-fn json_uuid(value: &serde_json::Value, key: &str) -> Option<Uuid> {
-    json_string(value, key).and_then(|value| Uuid::parse_str(&value).ok())
+fn json_uuid(value: &serde_json::Value, key: &str) -> Result<Option<Uuid>> {
+    match value.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(raw)) => {
+            let parsed = Uuid::parse_str(raw.trim())
+                .with_context(|| format!("operator auth audit has invalid {key}"))?;
+            Ok(Some(parsed))
+        }
+        Some(_) => anyhow::bail!("operator auth audit {key} must be a UUID string"),
+    }
 }
 
 struct PreparedOperatorSession {
@@ -2210,6 +2224,7 @@ impl PreparedOperatorSession {
             token_type: "Bearer",
             access_token: self.access_token,
             refresh_token: self.refresh_token,
+            session_id: self.session_id,
             expires_in_secs: ACCESS_TOKEN_TTL_SECS,
             refresh_expires_in_secs: operator.session_refresh_ttl_secs,
             operator,
@@ -2470,14 +2485,15 @@ async fn record_memory_auth_lockout_audit(
     memory: &crate::repository::MemoryState,
     lockout: &AuthThrottleLockout,
     reason: &str,
+    remote_ip: &str,
 ) {
     memory.audits.write().await.push(AuditLogView {
         id: Uuid::new_v4(),
         actor_id: None,
         action: "operator_auth.lockout_created".to_string(),
-        target: format!("operator-auth:{}:{}", lockout.scope_kind, lockout.scope_key),
+        target: "auth:login".to_string(),
         command_hash: None,
-        metadata: auth_lockout_metadata(lockout, reason),
+        metadata: auth_lockout_metadata(lockout, reason, remote_ip),
         created_at: unix_now().to_string(),
     });
 }
@@ -2486,6 +2502,7 @@ async fn insert_postgres_auth_lockout_audit(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     lockout: &AuthThrottleLockout,
     reason: &str,
+    remote_ip: &str,
 ) -> Result<()> {
     sqlx::query(
         r#"
@@ -2497,18 +2514,23 @@ async fn insert_postgres_auth_lockout_audit(
     )
     .bind(Uuid::new_v4())
     .bind("operator_auth.lockout_created")
-    .bind(format!(
-        "operator-auth:{}:{}",
-        lockout.scope_kind, lockout.scope_key
-    ))
-    .bind(auth_lockout_metadata(lockout, reason))
+    .bind("auth:login")
+    .bind(auth_lockout_metadata(lockout, reason, remote_ip))
     .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
-fn auth_lockout_metadata(lockout: &AuthThrottleLockout, reason: &str) -> serde_json::Value {
+fn auth_lockout_metadata(
+    lockout: &AuthThrottleLockout,
+    reason: &str,
+    remote_ip: &str,
+) -> serde_json::Value {
     serde_json::json!({
+        "origin_kind": "authentication",
+        "component": "operator-auth-throttle",
+        "result": "locked",
+        "remote_ip": remote_ip,
         "scope_kind": lockout.scope_kind,
         "scope_key": lockout.scope_key,
         "failed_attempts": lockout.failed_attempts,
@@ -2600,10 +2622,14 @@ async fn record_session_revoke_audit(
         target: format!("operator-session:{session_id}"),
         command_hash: None,
         metadata: serde_json::json!({
-            "session_id": session_id,
-            "revoked_by_operator_id": actor.operator.id,
-            "revoked_by_operator_username": actor.operator.username,
-            "revoked_by_session_id": actor.session_id,
+            "revoked_operator_session_id": session_id,
+            "operator_id": actor.operator.id,
+            "operator_username": actor.operator.username,
+            "operator_role": actor.operator.role,
+            "operator_session_id": actor.audit_session_id(),
+            "result": "succeeded",
+            "origin_kind": "operator_request",
+            "component": "operator-session-controller",
         }),
         created_at: unix_now().to_string(),
     });
@@ -2614,6 +2640,8 @@ async fn record_session_logout_audit(
     session_id: Uuid,
     operator_id: Uuid,
     operator_username: &str,
+    remote_ip: &str,
+    user_agent: Option<&str>,
 ) {
     memory.audits.write().await.push(AuditLogView {
         id: Uuid::new_v4(),
@@ -2622,11 +2650,16 @@ async fn record_session_logout_audit(
         target: format!("operator-session:{session_id}"),
         command_hash: None,
         metadata: serde_json::json!({
-            "session_id": session_id,
             "operator_id": operator_id,
             "operator_username": operator_username,
+            "operator_session_id": session_id,
+            "remote_ip": remote_ip,
+            "user_agent": user_agent.unwrap_or(""),
             "revocation_scope": "current_session",
             "revoked_access_and_refresh": true,
+            "result": "succeeded",
+            "origin_kind": "operator_request",
+            "component": "operator-session-controller",
         }),
         created_at: unix_now().to_string(),
     });

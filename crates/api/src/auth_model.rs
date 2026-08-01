@@ -314,7 +314,13 @@ pub(crate) struct OperatorSessionView {
 #[derive(Clone, Debug)]
 pub(crate) struct AuthContext {
     pub(crate) operator: OperatorView,
-    pub(crate) session_id: Uuid,
+    pub(crate) session_id: Option<Uuid>,
+}
+
+impl AuthContext {
+    pub(crate) fn audit_session_id(&self) -> Option<Uuid> {
+        self.session_id
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -422,6 +428,7 @@ pub(crate) struct AuthResponse {
     pub(crate) token_type: &'static str,
     pub(crate) access_token: String,
     pub(crate) refresh_token: String,
+    pub(crate) session_id: Uuid,
     pub(crate) expires_in_secs: u64,
     pub(crate) refresh_expires_in_secs: u64,
     pub(crate) operator: OperatorView,

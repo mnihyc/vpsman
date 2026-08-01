@@ -1445,10 +1445,13 @@ fn notification_channel_metadata(
         "cooldown_secs": channel.cooldown_secs,
         "enabled": channel.enabled,
         "configuration_error": &channel.configuration_error,
-        "operator": {
-            "id": operator.operator.id,
-            "username": &operator.operator.username,
-        },
+        "result": "succeeded",
+        "operator_id": operator.operator.id,
+        "operator_username": &operator.operator.username,
+        "operator_role": &operator.operator.role,
+        "operator_session_id": operator.audit_session_id(),
+        "origin_kind": "operator_request",
+        "component": "alert-notification-controller",
     })
 }
 
@@ -1474,6 +1477,7 @@ fn notification_dispatch_metadata(
 ) -> serde_json::Value {
     json!({
         "delivery_count": deliveries.len(),
+        "result": "queued",
         "deliveries": deliveries.iter().map(|delivery| json!({
             "id": delivery.id,
             "channel_id": delivery.channel_id,
@@ -1481,10 +1485,12 @@ fn notification_dispatch_metadata(
             "status": &delivery.status,
             "delivery_kind": &delivery.delivery_kind,
         })).collect::<Vec<_>>(),
-        "operator": {
-            "id": operator.operator.id,
-            "username": &operator.operator.username,
-        },
+        "operator_id": operator.operator.id,
+        "operator_username": &operator.operator.username,
+        "operator_role": &operator.operator.role,
+        "operator_session_id": operator.audit_session_id(),
+        "origin_kind": "operator_request",
+        "component": "alert-notification-controller",
     })
 }
 
@@ -1508,8 +1514,16 @@ fn notification_process_metadata(
     deliveries: &[FleetAlertNotificationDeliveryView],
     operator: &AuthContext,
 ) -> serde_json::Value {
+    let delivered_count = deliveries
+        .iter()
+        .filter(|delivery| delivery.status == FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED)
+        .count();
+    let non_delivered_count = deliveries.len().saturating_sub(delivered_count);
     json!({
         "delivery_count": deliveries.len(),
+        "delivered_count": delivered_count,
+        "non_delivered_count": non_delivered_count,
+        "result": if non_delivered_count == 0 { "succeeded" } else { "partial" },
         "deliveries": deliveries.iter().map(|delivery| json!({
             "id": delivery.id,
             "channel_id": delivery.channel_id,
@@ -1519,9 +1533,11 @@ fn notification_process_metadata(
             "attempt_count": delivery.attempt_count,
             "error": &delivery.error,
         })).collect::<Vec<_>>(),
-        "operator": {
-            "id": operator.operator.id,
-            "username": &operator.operator.username,
-        },
+        "operator_id": operator.operator.id,
+        "operator_username": &operator.operator.username,
+        "operator_role": &operator.operator.role,
+        "operator_session_id": operator.audit_session_id(),
+        "origin_kind": "operator_request",
+        "component": "alert-notification-controller",
     })
 }

@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::json;
 use uuid::Uuid;
 use vpsman_common::AgentUpdateHeartbeat;
@@ -22,6 +22,7 @@ impl Repository {
             "agent_update.rollback_completed",
             client_id,
             metadata,
+            "succeeded",
             None,
         )
         .await
@@ -49,6 +50,7 @@ impl Repository {
             "agent_update.rollback_failed",
             client_id,
             metadata,
+            "failed",
             None,
         )
         .await
@@ -70,6 +72,7 @@ impl Repository {
             "agent_update.activation_completed",
             client_id,
             metadata,
+            "succeeded",
             None,
         )
         .await
@@ -98,6 +101,7 @@ impl Repository {
             "agent_update.activation_failed",
             client_id,
             metadata,
+            "failed",
             None,
         )
         .await
@@ -121,6 +125,7 @@ impl Repository {
             "agent_update.heartbeat_observed",
             client_id,
             metadata,
+            "succeeded",
             Some(heartbeat.observed_unix.to_string()),
         )
         .await
@@ -130,9 +135,16 @@ impl Repository {
         &self,
         action: &str,
         client_id: &str,
-        metadata: serde_json::Value,
+        mut metadata: serde_json::Value,
+        result: &str,
         created_at_override: Option<String>,
     ) -> Result<()> {
+        let fields = metadata
+            .as_object_mut()
+            .context("agent update audit metadata must be an object")?;
+        fields.insert("result".to_string(), json!(result));
+        fields.insert("origin_kind".to_string(), json!("gateway_ingest"));
+        fields.insert("component".to_string(), json!("agent-update-lifecycle"));
         match self {
             Self::Memory(memory) => {
                 memory.audits.write().await.push(AuditLogView {

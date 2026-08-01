@@ -417,6 +417,21 @@ async fn insert_process_audit(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     outcomes: &[DeliveryOutcome],
 ) -> Result<()> {
+    let delivered_count = outcomes
+        .iter()
+        .filter(|outcome| outcome.status == FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED)
+        .count();
+    let failed_count = outcomes
+        .iter()
+        .filter(|outcome| {
+            matches!(
+                outcome.status.as_str(),
+                FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED
+                    | FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_PERMANENTLY_FAILED
+            )
+        })
+        .count();
+    let non_delivered_count = outcomes.len().saturating_sub(delivered_count);
     sqlx::query(
         r#"
         INSERT INTO audit_logs (
@@ -430,9 +445,13 @@ async fn insert_process_audit(
     .bind("fleet_alert_notifications")
     .bind(json!({
         "worker": "alert_notification_worker",
+        "origin_kind": "worker",
+        "component": "alert-notification-worker",
         "delivery_count": outcomes.len(),
-        "delivered_count": outcomes.iter().filter(|outcome| outcome.status == FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED).count(),
-        "failed_count": outcomes.iter().filter(|outcome| outcome.status == FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED).count(),
+        "delivered_count": delivered_count,
+        "failed_count": failed_count,
+        "non_delivered_count": non_delivered_count,
+        "result": if non_delivered_count == 0 { "succeeded" } else { "partial" },
         "deliveries": outcomes.iter().take(MAX_AUDIT_DELIVERY_ROWS).map(|outcome| json!({
             "id": outcome.id,
             "channel_id": outcome.channel_id,
@@ -466,6 +485,9 @@ async fn insert_prune_audit(
     .bind("fleet_alert_notifications")
     .bind(json!({
         "worker": "alert_notification_worker",
+        "origin_kind": "worker",
+        "component": "alert-notification-worker",
+        "result": "succeeded",
         "retention_days": config.retention_days,
         "pruned_count": pruned.len(),
         "deliveries": pruned.iter().take(MAX_AUDIT_DELIVERY_ROWS).map(|delivery| json!({

@@ -159,6 +159,117 @@ async fn refresh_operator_session_rotates_refresh_token_once() {
 }
 
 #[tokio::test]
+async fn successful_login_audit_links_the_issued_session_and_request_origin() {
+    let repo = Repository::Memory(MemoryState::default());
+    let password = "admin-password-123";
+    repo.bootstrap_operator(&BootstrapOperatorRequest {
+        username: "admin".to_string(),
+        password: password.to_string(),
+    })
+    .await
+    .unwrap();
+    let attempt = repo
+        .login_operator_with_throttle(
+            &LoginRequest {
+                username: "admin".to_string(),
+                password: password.to_string(),
+                totp_code: None,
+            },
+            "203.0.113.40",
+            Some("audit-test-agent"),
+            &crate::state::OperatorAuthThrottleConfig::default(),
+        )
+        .await
+        .unwrap();
+    let repository_auth::OperatorLoginAttempt::Authenticated(response) = attempt else {
+        panic!("expected authenticated login")
+    };
+    let audit = repo
+        .list_audit_logs(20)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|audit| audit.action == "operator_auth.login_success")
+        .expect("login audit");
+
+    assert_eq!(
+        audit.metadata["operator_session_id"],
+        response.session_id.to_string()
+    );
+    assert_eq!(audit.metadata["remote_ip"], "203.0.113.40");
+    assert_eq!(audit.metadata["user_agent"], "audit-test-agent");
+}
+
+#[tokio::test]
+async fn operator_auth_event_listing_rejects_noncanonical_audit_rows() {
+    let memory = MemoryState::default();
+    memory.audits.write().await.push(AuditLogView {
+        id: Uuid::new_v4(),
+        actor_id: None,
+        action: "operator_auth.login_failure".to_string(),
+        target: "operator-login:test-operator".to_string(),
+        command_hash: None,
+        metadata: serde_json::json!({
+            "attempted_username": "test-operator",
+            "component": "operator-auth",
+            "origin_kind": "authentication",
+            "result": "   "
+        }),
+        created_at: unix_now().to_string(),
+    });
+    let repo = Repository::Memory(memory);
+
+    let error = repo
+        .list_operator_auth_events(&OperatorAuthEventQuery {
+            limit: None,
+            operator_id: None,
+            username: None,
+            result: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("operator auth audit missing canonical result"));
+}
+
+#[tokio::test]
+async fn operator_auth_event_listing_rejects_malformed_canonical_ids() {
+    for malformed_session_id in [serde_json::json!(17), serde_json::json!("not-a-uuid")] {
+        let memory = MemoryState::default();
+        memory.audits.write().await.push(AuditLogView {
+            id: Uuid::new_v4(),
+            actor_id: None,
+            action: "operator_auth.login_failure".to_string(),
+            target: "auth:login".to_string(),
+            command_hash: None,
+            metadata: serde_json::json!({
+                "attempted_username": "test-operator",
+                "component": "operator-auth",
+                "operator_session_id": malformed_session_id,
+                "origin_kind": "authentication",
+                "result": "failure"
+            }),
+            created_at: unix_now().to_string(),
+        });
+        let repo = Repository::Memory(memory);
+
+        let error = repo
+            .list_operator_auth_events(&OperatorAuthEventQuery {
+                limit: None,
+                operator_id: None,
+                username: None,
+                result: None,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("operator_session_id"));
+    }
+}
+
+#[tokio::test]
 async fn logout_route_revokes_current_session_idempotently_and_audits_once() {
     let state = memory_test_state();
     let auth = state
@@ -171,10 +282,14 @@ async fn logout_route_revokes_current_session_idempotently_and_audits_once() {
         .unwrap();
     let app = crate::routes::build_router(state.clone());
     let logout_request = || {
+        let peer = "203.0.113.41:44321"
+            .parse::<std::net::SocketAddr>()
+            .unwrap();
         Request::builder()
             .method("POST")
             .uri("/api/v1/auth/logout")
             .header(AUTHORIZATION, format!("Bearer {}", auth.access_token))
+            .extension(axum::extract::ConnectInfo(peer))
             .body(Body::empty())
             .unwrap()
     };
@@ -213,6 +328,12 @@ async fn logout_route_revokes_current_session_idempotently_and_audits_once() {
         logout_audits[0].metadata["revoked_access_and_refresh"],
         true
     );
+    assert_eq!(
+        logout_audits[0].metadata["operator_session_id"],
+        auth.session_id.to_string()
+    );
+    assert_eq!(logout_audits[0].metadata["result"], "succeeded");
+    assert_eq!(logout_audits[0].metadata["remote_ip"], "203.0.113.41");
     let audit_json = serde_json::to_string(&logout_audits[0]).unwrap();
     assert!(!audit_json.contains(&auth.access_token));
     assert!(!audit_json.contains(&auth.refresh_token));
@@ -221,6 +342,9 @@ async fn logout_route_revokes_current_session_idempotently_and_audits_once() {
 #[tokio::test]
 async fn logout_route_rejects_missing_or_unknown_session_credentials() {
     let app = crate::routes::build_router(memory_test_state());
+    let peer = "203.0.113.42:44321"
+        .parse::<std::net::SocketAddr>()
+        .unwrap();
 
     let missing = app
         .clone()
@@ -228,6 +352,7 @@ async fn logout_route_rejects_missing_or_unknown_session_credentials() {
             Request::builder()
                 .method("POST")
                 .uri("/api/v1/auth/logout")
+                .extension(axum::extract::ConnectInfo(peer))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -241,6 +366,7 @@ async fn logout_route_rejects_missing_or_unknown_session_credentials() {
                 .method("POST")
                 .uri("/api/v1/auth/logout")
                 .header(AUTHORIZATION, format!("Bearer {}", "f".repeat(64)))
+                .extension(axum::extract::ConnectInfo(peer))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -420,8 +546,19 @@ async fn operator_login_throttle_isolates_username_lockouts_by_client_ip() {
         audit_count_before
     );
 
-    let audit_json = serde_json::to_string(&repo.list_audit_logs(10).await.unwrap()).unwrap();
-    assert!(audit_json.contains("operator_auth.login_after_failures"));
+    let audits = repo.list_audit_logs(10).await.unwrap();
+    let lockout = audits
+        .iter()
+        .find(|audit| audit.action == "operator_auth.lockout_created")
+        .expect("lockout audit");
+    assert_eq!(lockout.target, "auth:login");
+    assert_eq!(lockout.metadata["result"], "locked");
+    assert_eq!(lockout.metadata["origin_kind"], "authentication");
+    assert_eq!(lockout.metadata["component"], "operator-auth-throttle");
+    assert_eq!(lockout.metadata["remote_ip"], "203.0.113.10");
+    let audit_json = serde_json::to_string(&audits).unwrap();
+    assert!(audit_json.contains("\"cleared_previous_failures\":true"));
+    assert!(!audit_json.contains("operator_auth.login_after_failures"));
     assert!(audit_json.contains("operator_auth.lockout_created"));
     assert!(audit_json.contains("\"scope_kind\":\"username_ip\""));
     assert!(!audit_json.contains("\"scope_kind\":\"ip\""));
@@ -599,7 +736,7 @@ async fn missing_totp_counts_toward_login_throttle() {
         .unwrap();
     let actor = AuthContext {
         operator: auth.operator,
-        session_id: Uuid::new_v4(),
+        session_id: Some(Uuid::new_v4()),
     };
     let TotpSetupOutcome::Created(setup) =
         repo.setup_operator_totp(&actor, password).await.unwrap()
@@ -852,6 +989,14 @@ async fn fleet_read_only_cannot_read_sensitive_payload_surfaces() {
             axum::extract::State(state.clone()),
             viewer_headers.clone(),
             axum::extract::Query(ListQuery::default()),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_job_history::get_audit_log(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Path(Uuid::new_v4()),
         )
         .await,
     );
@@ -1209,7 +1354,12 @@ async fn fleet_websocket_heartbeat_revalidates_and_rejects_revoked_sessions() {
 
     state
         .repo
-        .revoke_operator_session(context.session_id, &context)
+        .revoke_operator_session(
+            context
+                .audit_session_id()
+                .expect("authenticated websocket context has a session"),
+            &context,
+        )
         .await
         .unwrap();
 
@@ -1257,21 +1407,27 @@ async fn revoke_operator_session_returns_the_exact_session_beyond_the_list_cap()
     for (index, session) in memory.sessions.write().await.iter_mut().enumerate() {
         session.created_unix = index as u64;
     }
+    let actor_session_id = actor
+        .audit_session_id()
+        .expect("authenticated actor has a session");
+    let target_session_id = target
+        .audit_session_id()
+        .expect("authenticated target has a session");
     assert!(!state
         .repo
-        .list_operator_sessions(200, actor.session_id)
+        .list_operator_sessions(200, actor_session_id)
         .await
         .unwrap()
         .iter()
-        .any(|session| session.id == target.session_id));
+        .any(|session| session.id == target_session_id));
 
     let revoked = state
         .repo
-        .revoke_operator_session(target.session_id, &actor)
+        .revoke_operator_session(target_session_id, &actor)
         .await
         .unwrap()
         .expect("exact session lookup should return the revoked session");
-    assert_eq!(revoked.id, target.session_id);
+    assert_eq!(revoked.id, target_session_id);
     assert!(revoked.revoked);
 }
 
@@ -1350,8 +1506,16 @@ async fn matching_sensitive_read_scopes_cross_authorization_boundary() {
     assert_not_scope_forbidden(
         routes_job_history::list_audit_logs(
             axum::extract::State(state.clone()),
-            audit_headers,
+            audit_headers.clone(),
             axum::extract::Query(ListQuery::default()),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_job_history::get_audit_log(
+            axum::extract::State(state.clone()),
+            audit_headers,
+            axum::extract::Path(Uuid::new_v4()),
         )
         .await,
     );
@@ -1651,7 +1815,7 @@ async fn admin_can_create_sanitized_operator_record() {
             disabled_at: None,
             deleted_at: None,
         },
-        session_id: Uuid::new_v4(),
+        session_id: Some(Uuid::new_v4()),
     };
     repo.create_operator(
         &CreateOperatorRequest {
@@ -1942,7 +2106,11 @@ async fn operator_management_routes_require_confirmation_and_privilege() {
     let error = routes_auth::revoke_operator_session(
         axum::extract::State(state),
         headers,
-        axum::extract::Path(session.session_id),
+        axum::extract::Path(
+            session
+                .audit_session_id()
+                .expect("authenticated session has an ID"),
+        ),
         axum::Json(OperatorSessionRevokeRequest {
             confirmed: true,
             admin_risk_acknowledged: false,
@@ -1998,7 +2166,7 @@ async fn disabled_and_deleted_operators_cannot_login_and_deleted_usernames_remai
         .unwrap();
     let admin = AuthContext {
         operator: admin_auth.operator.clone(),
-        session_id: Uuid::new_v4(),
+        session_id: Some(Uuid::new_v4()),
     };
     let created = repo
         .create_operator(
@@ -2085,7 +2253,7 @@ async fn operator_preferences_update_persists_to_authenticated_views() {
         .unwrap();
     let actor = AuthContext {
         operator: auth.operator,
-        session_id: Uuid::new_v4(),
+        session_id: Some(Uuid::new_v4()),
     };
 
     let preferences = OperatorPreferences {
@@ -2439,7 +2607,7 @@ async fn operator_totp_lifecycle_encrypts_secret_and_gates_login() {
         .unwrap();
     let actor = AuthContext {
         operator: auth.operator.clone(),
-        session_id: Uuid::new_v4(),
+        session_id: Some(Uuid::new_v4()),
     };
     let setup = repo.setup_operator_totp(&actor, password).await.unwrap();
     let TotpSetupOutcome::Created(setup) = setup else {
@@ -2507,7 +2675,7 @@ async fn operator_totp_lifecycle_encrypts_secret_and_gates_login() {
         .disable_operator_totp(
             &AuthContext {
                 operator: logged_in.operator,
-                session_id: Uuid::new_v4(),
+                session_id: Some(Uuid::new_v4()),
             },
             password,
             &code,
@@ -2546,7 +2714,7 @@ async fn operator_password_reset_clears_totp_secret_material() {
         .unwrap();
     let actor = AuthContext {
         operator: auth.operator.clone(),
-        session_id: Uuid::new_v4(),
+        session_id: Some(Uuid::new_v4()),
     };
 
     let TotpSetupOutcome::Created(_) = repo.setup_operator_totp(&actor, password).await.unwrap()

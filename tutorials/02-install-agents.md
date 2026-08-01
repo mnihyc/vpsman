@@ -24,7 +24,7 @@ VPS identities in the panel:
 
 ```sh
 cargo run -p vpsctl -- agent-identity-upsert \
-  --client-id 1 \
+  --client-id v-1 \
   --client-public-key-hex <agent_noise_public_key_hex> \
   --display-name edge-nrt-04 \
   --tags country:JP,provider:acmecloud,role:edge \
@@ -58,7 +58,7 @@ Root service:
 env \
   VPSMAN_AGENT_RELEASE="$release_tag" \
   VPSMAN_INSTALL_MODE=root \
-  VPSMAN_AGENT_CLIENT_ID=1 \
+  VPSMAN_AGENT_CLIENT_ID=v-1 \
   VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=<agent_noise_private_key_hex> \
   VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=<gateway_noise_public_key_hex> \
   VPSMAN_GATEWAY_ENDPOINTS='primary=gw.example.com:9443=10,backup=gw-backup.example.com:9443=20' \
@@ -71,7 +71,7 @@ Unprivileged service:
 env \
   VPSMAN_AGENT_RELEASE="$release_tag" \
   VPSMAN_INSTALL_MODE=user \
-  VPSMAN_AGENT_CLIENT_ID=1 \
+  VPSMAN_AGENT_CLIENT_ID=v-1 \
   VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=<agent_noise_private_key_hex> \
   VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=<gateway_noise_public_key_hex> \
   VPSMAN_GATEWAY_ENDPOINTS='primary=gw.example.com:9443=10' \
@@ -103,7 +103,7 @@ telemetry.
 For emergency access lockout, revoke the current client key:
 
 ```sh
-cargo run -p vpsctl -- client-key-revoke --client-id 1 --confirmed
+cargo run -p vpsctl -- client-key-revoke --client-id v-1 --confirmed
 ```
 
 For inventory retirement, use **Fleet > Instances**, select exactly one VPS,
@@ -123,7 +123,7 @@ and run:
 
 ```sh
 cargo run -p vpsctl -- agent-identity-upsert \
-  --client-id 1 \
+  --client-id v-1 \
   --client-public-key-hex <new_agent_noise_public_key_hex> \
   --replace-existing-key \
   --confirmed

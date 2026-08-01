@@ -70,6 +70,7 @@ import type {
 } from "../typesAccess";
 import type { TerminalSessionRecord } from "../typesTerminal";
 import {
+  agentIdentityPayloadHashHex,
   buildPrivilegeAssertion,
   canonicalDbPrivilegeIntent,
   type PrivilegeAssertion,
@@ -1001,12 +1002,14 @@ export function AccessPanel({
     setIdentityReviewPending(true);
     try {
       await waitForReviewRender();
+      const payloadHash = await agentIdentityPayloadHashHex(snapshotInput);
       const privilegeAssertion = await buildPrivilegeAssertion({
         intent: canonicalDbPrivilegeIntent({
           action: isRotate ? "agent_identity.rotate" : "agent_identity.import",
           confirmed: true,
           resolvedTargets: [clientId],
           target: clientId,
+          payloadHash,
         }),
         privilegeMaterial: privilegeMaterial!,
       });
@@ -2030,7 +2033,7 @@ export function AccessPanel({
                   {identityClientIdError ??
                     (identityMode === "rotate"
                       ? "Use the existing VPS ID. Only the current public key is replaced."
-                      : `Defaults to the next numerical VPS ID (${nextIdentityClientId}). Editable for imported or legacy string IDs.`)}
+                      : `Defaults to the next numbered VPS ID (${nextIdentityClientId}). Editable for imported or legacy string IDs.`)}
                 </small>
               </label>
               <label className="wideField">
@@ -2722,15 +2725,15 @@ function nextNumericalClientId(clients: KeyLifecycleClientView[]): string {
   let max = 0n;
   for (const client of clients) {
     const clientId = client.client_id.trim();
-    if (!/^\d+$/.test(clientId)) {
+    if (!/^(?:v-)?\d+$/.test(clientId)) {
       continue;
     }
-    const value = BigInt(clientId);
+    const value = BigInt(clientId.replace(/^v-/, ""));
     if (value > max) {
       max = value;
     }
   }
-  return (max + 1n).toString();
+  return `v-${max + 1n}`;
 }
 
 function isFixedHex32(value: string): boolean {

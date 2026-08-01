@@ -109,12 +109,23 @@ async fn history_retention_policy_updates_and_prunes_memory_audit() {
 #[tokio::test]
 async fn audit_list_query_sorts_searches_and_offsets_memory_rows() {
     let repo = Repository::Memory(MemoryState::default());
+    let exact_id;
     if let Repository::Memory(memory) = &repo {
         let mut audits = memory.audits.write().await;
         audits.push(audit_with_created_at("target:zeta", "1".to_string()));
         audits.push(audit_with_created_at("target:alpha", "2".to_string()));
-        audits.push(audit_with_created_at("target:beta", "3".to_string()));
+        let exact = audit_with_created_at("target:beta", "3".to_string());
+        exact_id = exact.id;
+        audits.push(exact);
+    } else {
+        unreachable!();
     }
+
+    assert_eq!(
+        repo.get_audit_log(exact_id).await.unwrap().unwrap().target,
+        "target:beta"
+    );
+    assert!(repo.get_audit_log(Uuid::new_v4()).await.unwrap().is_none());
 
     let by_target = repo
         .query_audit_logs(&ListQuery {
@@ -436,7 +447,11 @@ fn audit_with_created_at(target: &str, created_at: String) -> AuditLogView {
         action: "test.audit".to_string(),
         target: target.to_string(),
         command_hash: None,
-        metadata: json!({}),
+        metadata: json!({
+            "result": "recorded",
+            "origin_kind": "test",
+            "component": "history-test-fixture",
+        }),
         created_at,
     }
 }
@@ -591,6 +606,6 @@ fn test_operator() -> AuthContext {
             disabled_at: None,
             deleted_at: None,
         },
-        session_id: Uuid::new_v4(),
+        session_id: Some(Uuid::new_v4()),
     }
 }

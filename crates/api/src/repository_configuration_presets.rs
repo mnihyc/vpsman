@@ -1872,6 +1872,7 @@ impl Repository {
         operator: &AuthContext,
     ) -> Result<()> {
         let command_hash = payload_hash(metadata.to_string().as_bytes());
+        let metadata = configuration_audit_metadata(metadata, operator);
         match self {
             Self::Memory(memory) => {
                 memory
@@ -2477,6 +2478,38 @@ fn network_adapter_audit_metadata(definition: &NetworkAdapterDefinitionView) -> 
     })
 }
 
+fn configuration_audit_metadata(mut metadata: Value, operator: &AuthContext) -> Value {
+    let fields = metadata
+        .as_object_mut()
+        .expect("configuration audit metadata must be an object");
+    fields.insert("result".to_string(), serde_json::json!("succeeded"));
+    fields.insert(
+        "operator_id".to_string(),
+        serde_json::json!(operator.operator.id),
+    );
+    fields.insert(
+        "operator_username".to_string(),
+        serde_json::json!(&operator.operator.username),
+    );
+    fields.insert(
+        "operator_role".to_string(),
+        serde_json::json!(&operator.operator.role),
+    );
+    fields.insert(
+        "operator_session_id".to_string(),
+        serde_json::json!(operator.audit_session_id()),
+    );
+    fields.insert(
+        "origin_kind".to_string(),
+        serde_json::json!("operator_request"),
+    );
+    fields.insert(
+        "component".to_string(),
+        serde_json::json!("configuration-controller"),
+    );
+    metadata
+}
+
 fn tunnel_plan_references_adapter(plan: &crate::model::TunnelPlanView, id: Uuid) -> bool {
     if plan.deleted_at.is_some() {
         return false;
@@ -2618,6 +2651,7 @@ async fn insert_configuration_audit_in_tx(
     operator: &AuthContext,
 ) -> Result<()> {
     let command_hash = payload_hash(metadata.to_string().as_bytes());
+    let metadata = configuration_audit_metadata(metadata, operator);
     sqlx::query(
         r#"
         INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)

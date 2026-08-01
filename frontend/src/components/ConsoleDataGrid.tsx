@@ -67,6 +67,8 @@ export type ConsoleDataGridColumn<T> = {
   header: string;
   id: string;
   minSize?: number;
+  mobilePrimary?: boolean;
+  mobileState?: boolean;
   searchValue?: (row: T) => string | number | boolean | null | undefined;
   size?: number;
   sortValue?: (row: T) => string | number | boolean | null | undefined;
@@ -503,11 +505,19 @@ export function ConsoleDataGrid<T>({
   function renderMobileCard(row: Row<T>) {
     const rowId = getRowId(row.original);
     const dataCells = rowDataCells(row);
-    const primaryCell = dataCells[0] ?? null;
+    const primaryCell =
+      dataCells.find(
+        (cell) => dataColumnsById.get(cell.column.id)?.mobilePrimary,
+      ) ??
+      dataCells[0] ??
+      null;
     const stateCell =
+      dataCells.find(
+        (cell) => dataColumnsById.get(cell.column.id)?.mobileState,
+      ) ??
       dataCells.find((cell, index) => {
         if (index === 0) return false;
-        return /status|state|result|health|verification|audit|output/i.test(
+        return /status|state|result|outcome|health|verification|audit|output/i.test(
           cellHeaderLabel(cell),
         );
       }) ??

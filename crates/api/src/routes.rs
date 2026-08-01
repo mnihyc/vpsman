@@ -76,8 +76,8 @@ use crate::{
     routes_job_history::{
         compare_job_outputs, download_file_download_bundle, download_file_download_for_client,
         download_job_output_archive, download_job_output_chunk, download_job_output_stream,
-        download_job_target_statuses, get_job, list_audit_logs, list_job_outputs, list_job_targets,
-        list_jobs, list_network_observation_trends, list_network_observations,
+        download_job_target_statuses, get_audit_log, get_job, list_audit_logs, list_job_outputs,
+        list_job_targets, list_jobs, list_network_observation_trends, list_network_observations,
         list_process_supervisor_inventory,
     },
     routes_job_rollouts::{
@@ -704,6 +704,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/migration-runs", post(create_migration_run))
         .route("/api/v1/audit", get(list_audit_logs))
+        .route("/api/v1/audit/{audit_id}", get(get_audit_log))
         .route(
             "/internal/v1/gateway/agent-identity",
             post(validate_agent_identity),

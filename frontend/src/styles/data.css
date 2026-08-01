@@ -227,6 +227,10 @@
   min-width: 0;
 }
 
+.auditEventRoutePanel > .auditEventDetailPanel {
+  margin: 16px;
+}
+
 .fleetAlertPolicyHint {
   color: var(--text-secondary);
   font-size: 12px;
@@ -3421,6 +3425,13 @@
   white-space: nowrap;
 }
 
+.auditEventDetailPanel .consoleInlineDetailGrid span span {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+}
+
 .scheduleExpandedDetail span span {
   overflow: visible;
   overflow-wrap: anywhere;
@@ -3486,6 +3497,33 @@
   padding: 10px;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.auditEventAdvanced {
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.auditEventAdvanced > summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 10px 12px;
+}
+
+.auditEventAdvanced[open] > summary {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.auditEventAdvanced > .consoleInlineDetailGrid {
+  padding: 10px 12px 0;
+}
+
+.auditEventAdvanced > .auditEventMetadata {
+  margin: 10px 12px 12px;
 }
 
 .auditJobEvidencePanel .consoleDataGrid {

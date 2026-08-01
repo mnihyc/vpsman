@@ -60,6 +60,10 @@ import {
   replaceHistoryEntry,
 } from "./historyEntryState";
 import { retryableLazy } from "./lazyImport";
+import {
+  presentAudit,
+  type AuditEvidenceReference,
+} from "./auditPresentation";
 
 type ReleaseRouteTarget = AgentView | string;
 
@@ -745,6 +749,10 @@ function subpageRouteSegment(view: ActiveView, subpage: string): string {
     const jobId = subpage.slice("history:job:".length).trim();
     return `history/${encodeURIComponent(jobId)}`;
   }
+  if (view === "Audit" && subpage.startsWith("events:id:")) {
+    const auditId = subpage.slice("events:id:".length).trim();
+    return `events/${encodeURIComponent(auditId)}`;
+  }
   if (view === "Config" && subpage.startsWith("rules:id:")) {
     const clientId = subpage.slice("rules:id:".length).trim();
     return `rules/${encodeURIComponent(clientId)}`;
@@ -775,6 +783,9 @@ function routeSegmentSubpage(
   }
   if (view === "Jobs" && decoded === "history" && resourceSegment) {
     return `history:job:${decodeRouteSegment(resourceSegment)}`;
+  }
+  if (view === "Audit" && decoded === "events" && resourceSegment) {
+    return `events:id:${decodeRouteSegment(resourceSegment)}`;
   }
   if (view === "Config" && decoded === "rules" && resourceSegment) {
     return `rules:id:${decodeRouteSegment(resourceSegment)}`;
@@ -1431,6 +1442,12 @@ export function App() {
     openJobEvidence(jobId);
   }
 
+  function openAuditEvidenceReference(reference: AuditEvidenceReference) {
+    if (reference.kind === "Job") {
+      openJobDetails(reference.value);
+    }
+  }
+
   function openJobHistory() {
     selectView("Jobs", "history");
   }
@@ -1555,8 +1572,8 @@ export function App() {
     );
   }
 
-  function openAuditEvidence(_auditId?: string) {
-    selectView("Audit", "events");
+  function openAuditEvidence(auditId?: string) {
+    selectView("Audit", auditId ? `events:id:${auditId}` : "events");
   }
 
   function openHomeDispatch(agent: AgentView) {
@@ -1658,14 +1675,17 @@ export function App() {
         selectView("Backups", "artifacts");
       },
     }));
-    const auditItems = dashboard.audits.map((audit) => ({
-      id: `audit:${audit.id}`,
-      group: "Audit" as const,
-      label: `Audit event ${shortCommandId(audit.id)}`,
-      detail: `${audit.action} · ${audit.target}`,
-      keywords: `${audit.id} ${audit.action} ${audit.target} ${audit.actor_id ?? ""} ${audit.command_hash ?? ""}`,
-      onSelect: () => releaseRoutes.openAuditEvidence(audit.id),
-    }));
+    const auditItems = dashboard.audits.map((audit) => {
+      const presentation = presentAudit(audit);
+      return {
+        id: `audit:${audit.id}`,
+        group: "Audit" as const,
+        label: presentation.actionLabel,
+        detail: `${presentation.actorLabel} · ${presentation.targetLabel} · ${presentation.outcomeLabel}`,
+        keywords: `${audit.id} ${audit.action} ${audit.target} ${presentation.actorLabel} ${presentation.outcomeLabel} ${audit.actor_id ?? ""} ${audit.command_hash ?? ""}`,
+        onSelect: () => releaseRoutes.openAuditEvidence(audit.id),
+      };
+    });
     const scheduleItems = dashboard.schedules.map((schedule) => ({
       id: `schedule:${schedule.id}`,
       group: "Schedule" as const,
@@ -1929,7 +1949,7 @@ export function App() {
         }
         networkObservations={dashboard.networkObservations}
         networkTrends={dashboard.networkTrends}
-        onOpenAudit={() => selectView("Audit", "events")}
+        onOpenAudit={releaseRoutes.openAuditEvidence}
         onOpenAlertPolicies={(policyId) =>
           selectView(
             "Observability",
@@ -2550,6 +2570,12 @@ export function App() {
         historyRetentionPolicies={dashboard.historyRetentionPolicies}
         loading={dashboard.auditLoading}
         onExportHistory={dashboard.loadHistoryExport}
+        onCloseAuditEvent={() => selectView("Audit", "events")}
+        onLoadAuditEvent={dashboard.loadAuditEvent}
+        onOpenAuditEvent={(auditId) =>
+          selectView("Audit", `events:id:${auditId}`)
+        }
+        onOpenEvidence={openAuditEvidenceReference}
         onPruneHistoryRetention={dashboard.pruneHistoryRetention}
         onRefresh={dashboard.loadAudits}
         onUpsertHistoryRetentionPolicy={dashboard.upsertHistoryRetentionPolicy}
@@ -2818,7 +2844,11 @@ export function App() {
       return renderFleetMetricsPanel();
     }
     if (activeView === "Audit") {
-      if (activeSubpage === "events") return renderAuditPanel("events");
+      if (
+        activeSubpage === "events" ||
+        activeSubpage.startsWith("events:id:")
+      )
+        return renderAuditPanel(activeSubpage);
       if (activeSubpage === "job_evidence") {
         return (
           <div className="workspace singleColumn">

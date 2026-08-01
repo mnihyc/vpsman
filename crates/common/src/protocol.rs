@@ -1943,6 +1943,14 @@ pub struct OperatorDbPayloadInput<'a> {
     pub admin_risk_acknowledged: bool,
 }
 
+pub struct AgentIdentityPayloadInput<'a> {
+    pub client_id: &'a str,
+    pub public_key: &'a [u8],
+    pub display_name: Option<&'a str>,
+    pub tags: &'a [String],
+    pub replace_existing_key: bool,
+}
+
 #[derive(Serialize)]
 struct OperatorDbPayload<'a> {
     version: u8,
@@ -2005,6 +2013,40 @@ pub fn canonical_db_privilege_intent(
 pub fn operator_db_payload_hash(input: OperatorDbPayloadInput<'_>) -> serde_json::Result<String> {
     let payload = serde_json::to_string(&OperatorDbPayload::new(input))?;
     Ok(crate::auth::payload_hash(payload.as_bytes()))
+}
+
+pub fn agent_identity_payload_hash(input: AgentIdentityPayloadInput<'_>) -> String {
+    let mut tags = input
+        .tags
+        .iter()
+        .map(|tag| tag.trim())
+        .filter(|tag| !tag.is_empty())
+        .collect::<Vec<_>>();
+    tags.sort_unstable();
+    tags.dedup();
+    let payload = serde_json::json!([
+        ["version", serde_json::json!(1)],
+        ["client_id", serde_json::json!(input.client_id.trim())],
+        [
+            "public_key_sha256_hex",
+            serde_json::json!(crate::auth::payload_hash(input.public_key))
+        ],
+        [
+            "display_name",
+            serde_json::json!(input
+                .display_name
+                .map(str::trim)
+                .filter(|value| !value.is_empty()))
+        ],
+        ["tags", serde_json::json!(tags)],
+        [
+            "replace_existing_key",
+            serde_json::json!(input.replace_existing_key)
+        ],
+    ]);
+    crate::auth::payload_hash(
+        &serde_json::to_vec(&payload).expect("agent identity payload serializes"),
+    )
 }
 
 fn sorted_str_refs(values: &[String]) -> Vec<&str> {
@@ -4061,5 +4103,28 @@ mod tests {
         .unwrap();
 
         assert_eq!(payload_hash.len(), 64);
+    }
+
+    #[test]
+    fn agent_identity_payload_hash_normalizes_operator_input() {
+        let tags = vec![" edge ".to_string(), "bgp".to_string(), "edge".to_string()];
+        let hash = super::agent_identity_payload_hash(super::AgentIdentityPayloadInput {
+            client_id: " v-16 ",
+            public_key: &[0x11; 32],
+            display_name: Some(" Edge 16 "),
+            tags: &tags,
+            replace_existing_key: false,
+        });
+        let normalized_tags = vec!["bgp".to_string(), "edge".to_string()];
+        assert_eq!(
+            hash,
+            super::agent_identity_payload_hash(super::AgentIdentityPayloadInput {
+                client_id: "v-16",
+                public_key: &[0x11; 32],
+                display_name: Some("Edge 16"),
+                tags: &normalized_tags,
+                replace_existing_key: false,
+            })
+        );
     }
 }

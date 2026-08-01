@@ -140,9 +140,13 @@ impl Repository {
                         "enabled": policy.enabled,
                         "metadata_only": policy.metadata_only,
                         "export_enabled": policy.export_enabled,
+                        "result": "succeeded",
+                        "operator_id": operator.operator.id,
                         "operator_username": &operator.operator.username,
                         "operator_role": &operator.operator.role,
-                        "session_id": operator.session_id,
+                        "operator_session_id": operator.audit_session_id(),
+                        "origin_kind": "operator_request",
+                        "component": "history-retention-controller",
                     }),
                     policy.updated_at.clone(),
                 ));
@@ -206,9 +210,13 @@ impl Repository {
                     "enabled": policy.enabled,
                     "metadata_only": policy.metadata_only,
                     "export_enabled": policy.export_enabled,
+                    "result": "succeeded",
+                    "operator_id": operator.operator.id,
                     "operator_username": &operator.operator.username,
                     "operator_role": &operator.operator.role,
-                    "session_id": operator.session_id,
+                    "operator_session_id": operator.audit_session_id(),
+                    "origin_kind": "operator_request",
+                    "component": "history-retention-controller",
                 }))
                 .execute(&mut *tx)
                 .await?;
@@ -619,13 +627,26 @@ impl Repository {
         domains: &[serde_json::Value],
     ) -> Result<()> {
         let now = unix_now().to_string();
+        let result = if dry_run {
+            "previewed"
+        } else if domains.iter().any(|domain| {
+            domain.get("status").and_then(serde_json::Value::as_str) == Some("partial_error")
+        }) {
+            "partial"
+        } else {
+            "succeeded"
+        };
         let metadata = json!({
             "dry_run": dry_run,
             "metadata_only_requested": metadata_only,
             "domains": domains,
+            "result": result,
+            "operator_id": operator.operator.id,
             "operator_username": &operator.operator.username,
             "operator_role": &operator.operator.role,
-            "session_id": operator.session_id,
+            "operator_session_id": operator.audit_session_id(),
+            "origin_kind": "operator_request",
+            "component": "history-retention-controller",
         });
         match self {
             Self::Memory(memory) => {
