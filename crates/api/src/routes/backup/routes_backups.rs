@@ -1,0 +1,1586 @@
+use std::{
+    fs::File,
+    io::{BufReader, Cursor, Read},
+    path::Path as FsPath,
+};
+
+use anyhow::anyhow;
+use axum::{
+    body::Body,
+    extract::{Path, Query, State},
+    http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, Response, StatusCode},
+    Json,
+};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use serde::Deserialize;
+use vpsman_common::{
+    encode_json, payload_hash, JobCommand, PrivilegeAssertion, DEFAULT_MAX_JOB_TIMEOUT_SECS,
+};
+
+use crate::{
+    backup_auto_artifacts::backup_artifact_object_key,
+    backup_handoff::{backup_artifact_streaming_max_bytes, stage_retained_backup_artifact_stdout},
+    backup_upload_sessions::backup_upload_sessions,
+    error::ApiError,
+    job_request::{
+        fixed_target_selection, job_command_type_label, normalized_target_client_ids,
+        normalized_target_client_ids_allow_empty, validate_file_path,
+    },
+    model::{
+        BackupArtifactHandoffRequest, BackupArtifactHandoffView, BackupArtifactUploadChunkRequest,
+        BackupArtifactUploadCommitRequest, BackupArtifactUploadSessionCreateRequest,
+        BackupArtifactUploadSessionView, BackupArtifactView, BackupPolicyPruneRequest,
+        BackupPolicyPruneResponse, BackupPolicyView, BackupRequestStatus, BackupRequestView,
+        BulkResolveRequest, CreateBackupPolicyRequest, CreateBackupRequest, CreateScheduleRequest,
+        ListQuery, RecordBackupArtifactMetadataRequest, UpdateBackupPolicyRequest,
+        UpdateScheduleRequest, UploadBackupArtifactRequest, WsEvent,
+    },
+    privilege::{
+        verify_privilege_intent, JobPrivilegeIntent, JobPrivilegeIntentInput,
+        SchedulePrivilegeIntent, SchedulePrivilegeIntentInput,
+    },
+    repository_backup_artifacts::backup_server_artifact,
+    repository_backup_policies::BackupPolicyPruneCandidate,
+    repository_schedules::ScheduleSnapshotExpectation,
+    routes_file_transfers::{map_verified_object_error, streaming_artifact_file_body},
+    routes_schedules::{
+        map_schedule_snapshot_error, require_selector_target_snapshot, validate_schedule_request,
+        validate_update_schedule_request,
+    },
+    security::{operator_has_scope, SCOPE_BACKUPS_READ},
+    selector_expression::id_selector_expression,
+    state::AppState,
+    unix_now,
+};
+
+const MAX_BACKUP_PATHS: usize = 64;
+const MAX_BACKUP_NOTE_BYTES: usize = 1024;
+const MAX_BACKUP_ARTIFACT_OBJECT_KEY_BYTES: usize = 1024;
+const MAX_BACKUP_ARTIFACT_SIZE_BYTES: i64 = 1_099_511_627_776;
+const BACKUP_ARCHIVE_FORMAT: &str = "vpsman.backup_tar.v1";
+const BACKUP_ARCHIVE_MANIFEST_PATH: &str = "vpsman-backup/manifest.json";
+const MAX_BACKUP_ARCHIVE_MANIFEST_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_BACKUP_ARTIFACT_UPLOAD_BODY_BYTES: usize = 24 * 1024 * 1024;
+pub(crate) const MAX_BACKUP_ARTIFACT_UPLOAD_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+enum BackupPolicyTargetResolutionMode {
+    PreserveFrozenTargets,
+    RequireLiveTargets,
+}
+const RETENTION_DAY_SECS: u64 = 86_400;
+
+pub(crate) async fn list_backup_requests(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Vec<BackupRequestView>>, ApiError> {
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_BACKUPS_READ)
+        .await?;
+    Ok(Json(state.repo.query_backup_requests(&query).await?))
+}
+
+pub(crate) async fn list_backup_artifacts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Vec<BackupArtifactView>>, ApiError> {
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_BACKUPS_READ)
+        .await?;
+    Ok(Json(state.repo.query_backup_artifacts(&query).await?))
+}
+
+pub(crate) async fn list_backup_policies(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Vec<BackupPolicyView>>, ApiError> {
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_BACKUPS_READ)
+        .await?;
+    Ok(Json(state.repo.list_backup_policies(&query).await?))
+}
+
+pub(crate) async fn create_backup_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(mut request): Json<CreateBackupPolicyRequest>,
+) -> Result<(StatusCode, Json<BackupPolicyView>), ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "backups:write")
+        .await?;
+    if !operator_has_scope(&operator.operator.scopes, "schedules:write") {
+        return Err(ApiError::forbidden("operator_scope_insufficient"));
+    }
+    validate_create_backup_policy_request(&request)?;
+    request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
+    require_selector_target_snapshot(
+        &state,
+        &request.selector_expression,
+        &request.target_client_ids,
+        "backup_policy_target_snapshot_stale",
+    )
+    .await?;
+    verify_backup_policy_privilege(
+        &state,
+        &request,
+        request.privilege_assertion.clone(),
+        "backup_policy.create",
+        None,
+        BackupPolicyTargetResolutionMode::RequireLiveTargets,
+    )
+    .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(state.repo.create_backup_policy(request, &operator).await?),
+    ))
+}
+
+pub(crate) async fn update_backup_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(schedule_id): Path<uuid::Uuid>,
+    Json(mut request): Json<UpdateBackupPolicyRequest>,
+) -> Result<Json<BackupPolicyView>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "backups:write")
+        .await?;
+    if !operator_has_scope(&operator.operator.scopes, "schedules:write") {
+        return Err(ApiError::forbidden("operator_scope_insufficient"));
+    }
+    request.target_client_ids =
+        normalized_target_client_ids_allow_empty(&request.target_client_ids)?;
+    request.expected_target_client_ids =
+        normalized_target_client_ids_allow_empty(&request.expected_target_client_ids)?;
+    let expectation = ScheduleSnapshotExpectation {
+        selector_expression: request.expected_selector_expression.clone(),
+        target_client_ids: request.expected_target_client_ids.clone(),
+    };
+    let mut request = CreateBackupPolicyRequest::from(request);
+    validate_update_backup_policy_request(&request)?;
+    let current = state
+        .repo
+        .backup_policy_by_schedule_id(schedule_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("backup_policy_not_found"))?;
+    require_backup_policy_snapshot(&current, &expectation)?;
+    let selector_unchanged =
+        request.selector_expression.trim() == expectation.selector_expression.trim();
+    if selector_unchanged {
+        if !same_target_client_ids(&request.target_client_ids, &expectation.target_client_ids) {
+            return Err(ApiError::conflict("backup_policy_target_snapshot_stale"));
+        }
+        request.target_client_ids = current.target_client_ids.clone();
+    } else {
+        require_selector_target_snapshot(
+            &state,
+            &request.selector_expression,
+            &request.target_client_ids,
+            "backup_policy_target_snapshot_stale",
+        )
+        .await?;
+    }
+    verify_backup_policy_privilege(
+        &state,
+        &request,
+        request.privilege_assertion.clone(),
+        "backup_policy.update",
+        Some(schedule_id),
+        if selector_unchanged {
+            BackupPolicyTargetResolutionMode::PreserveFrozenTargets
+        } else {
+            BackupPolicyTargetResolutionMode::RequireLiveTargets
+        },
+    )
+    .await?;
+    let updated = state
+        .repo
+        .update_backup_policy(schedule_id, request, &expectation, &operator)
+        .await
+        .map_err(map_schedule_snapshot_error)?
+        .ok_or_else(|| ApiError::not_found("backup_policy_not_found"))?;
+    Ok(Json(updated))
+}
+
+fn require_backup_policy_snapshot(
+    current: &BackupPolicyView,
+    expectation: &ScheduleSnapshotExpectation,
+) -> Result<(), ApiError> {
+    let mut stored_targets = current.target_client_ids.clone();
+    stored_targets.sort();
+    stored_targets.dedup();
+    let mut expected_targets = expectation.target_client_ids.clone();
+    expected_targets.sort();
+    expected_targets.dedup();
+    if current.selector_expression.trim() != expectation.selector_expression.trim()
+        || stored_targets != expected_targets
+    {
+        return Err(ApiError::conflict("schedule_snapshot_stale"));
+    }
+    Ok(())
+}
+
+async fn verify_backup_policy_privilege(
+    state: &AppState,
+    request: &CreateBackupPolicyRequest,
+    assertion: Option<PrivilegeAssertion>,
+    action: &'static str,
+    schedule_id: Option<uuid::Uuid>,
+    target_resolution_mode: BackupPolicyTargetResolutionMode,
+) -> Result<(), ApiError> {
+    let resolved_targets = match target_resolution_mode {
+        BackupPolicyTargetResolutionMode::PreserveFrozenTargets => {
+            normalized_target_client_ids_allow_empty(&request.target_client_ids)?
+        }
+        BackupPolicyTargetResolutionMode::RequireLiveTargets => {
+            resolved_backup_policy_targets(state, &request.target_client_ids).await?
+        }
+    };
+    let operation = backup_policy_command(request);
+    let operation_payload = encode_json(&operation).map_err(|error| {
+        ApiError::from(anyhow!("failed to encode backup policy command: {error}"))
+    })?;
+    let operation_payload_hash = payload_hash(&operation_payload);
+    let command_type = job_command_type_label(&operation);
+    let schedule_id = schedule_id.map(|id| id.to_string());
+    let privilege_intent = SchedulePrivilegeIntent::new(SchedulePrivilegeIntentInput {
+        action,
+        schedule_id: schedule_id.as_deref(),
+        name: &request.name,
+        command_type,
+        operation_payload_hash: &operation_payload_hash,
+        selector_expression: &request.selector_expression,
+        resolved_targets: &resolved_targets,
+        cron_expr: &request.cron_expr,
+        timezone: &request.timezone,
+        enabled: request.enabled,
+        catch_up_policy: &request.catch_up_policy,
+        catch_up_limit: request.catch_up_limit,
+        retry_delay_secs: request.retry_delay_secs,
+        max_failures: request.max_failures,
+        deferred_until: None,
+        deleted: false,
+    });
+    verify_privilege_intent(state, &privilege_intent, assertion).await
+}
+
+async fn resolved_backup_policy_targets(
+    state: &AppState,
+    target_client_ids: &[String],
+) -> Result<Vec<String>, ApiError> {
+    let target_client_ids = normalized_target_client_ids_allow_empty(target_client_ids)?;
+    if target_client_ids.is_empty() {
+        return Ok(target_client_ids);
+    }
+    let resolved = state
+        .repo
+        .resolve_bulk_targets(&fixed_target_selection(&target_client_ids)?)
+        .await?
+        .targets
+        .into_iter()
+        .map(|agent| agent.id)
+        .collect::<Vec<_>>();
+    let missing = target_client_ids
+        .iter()
+        .filter(|client_id| !resolved.iter().any(|resolved_id| resolved_id == *client_id))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(ApiError::conflict("backup_policy_fixed_targets_not_found"));
+    }
+    Ok(target_client_ids)
+}
+
+fn same_target_client_ids(left: &[String], right: &[String]) -> bool {
+    let mut left = left.to_vec();
+    left.sort();
+    left.dedup();
+    let mut right = right.to_vec();
+    right.sort();
+    right.dedup();
+    left == right
+}
+
+pub(crate) async fn prune_backup_policies(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<BackupPolicyPruneRequest>,
+) -> Result<Json<BackupPolicyPruneResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "backups:write")
+        .await?;
+    if !request.dry_run && !request.confirmed {
+        return Err(ApiError::bad_request(
+            "backup_policy_prune_confirmation_required",
+        ));
+    }
+    if !request.dry_run
+        && request
+            .preview_hash
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+    {
+        return Err(ApiError::bad_request(
+            "backup_policy_prune_preview_hash_required",
+        ));
+    }
+    let metadata_only = request.metadata_only.unwrap_or(false);
+    if !request.dry_run && !metadata_only && state.backup_object_store.is_none() {
+        return Err(ApiError::bad_request(
+            "backup_policy_prune_object_store_required",
+        ));
+    }
+    let plan = backup_policy_prune_plan(&state, &request).await?;
+    let preview_outputs = backup_policy_prune_preview_outputs(&state, &plan, metadata_only);
+    let preview_hash = backup_policy_prune_preview_hash(
+        request.schedule_id,
+        request.metadata_only,
+        &plan,
+        &preview_outputs,
+    )?;
+    if request.dry_run {
+        return Ok(Json(BackupPolicyPruneResponse {
+            dry_run: true,
+            metadata_only_requested: request.metadata_only,
+            preview_hash,
+            policies: preview_outputs,
+        }));
+    }
+    if request
+        .preview_hash
+        .as_deref()
+        .is_some_and(|submitted| submitted.trim() != preview_hash)
+    {
+        return Err(ApiError::conflict(
+            "backup_policy_prune_preview_hash_mismatch",
+        ));
+    }
+    let outputs = execute_backup_policy_prune_plan(&state, plan, metadata_only).await?;
+    state
+        .repo
+        .record_backup_policy_prune_audit(
+            &operator,
+            request.dry_run,
+            request.metadata_only,
+            &outputs,
+        )
+        .await?;
+    Ok(Json(BackupPolicyPruneResponse {
+        dry_run: false,
+        metadata_only_requested: request.metadata_only,
+        preview_hash,
+        policies: outputs,
+    }))
+}
+
+struct BackupPolicyPrunePlan {
+    policy: BackupPolicyView,
+    cutoff_unix: u64,
+    candidates: Vec<BackupPolicyPruneCandidate>,
+}
+
+async fn backup_policy_prune_plan(
+    state: &AppState,
+    request: &BackupPolicyPruneRequest,
+) -> Result<Vec<BackupPolicyPrunePlan>, ApiError> {
+    let policies = if let Some(schedule_id) = request.schedule_id {
+        vec![state
+            .repo
+            .backup_policy_by_schedule_id(schedule_id)
+            .await?
+            .ok_or_else(|| ApiError::bad_request("backup_policy_not_found"))?]
+    } else {
+        let policies = state
+            .repo
+            .list_backup_policies(&ListQuery {
+                limit: Some(1000),
+                ..ListQuery::default()
+            })
+            .await?;
+        let overflow = state
+            .repo
+            .list_backup_policies(&ListQuery {
+                limit: Some(1),
+                offset: Some(1000),
+                ..ListQuery::default()
+            })
+            .await?;
+        if !overflow.is_empty() {
+            return Err(ApiError::bad_request(
+                "backup_policy_prune_schedule_id_required_at_scale",
+            ));
+        }
+        policies
+    };
+    if policies.is_empty() {
+        return Err(ApiError::bad_request("backup_policy_not_found"));
+    }
+    let mut plan = Vec::new();
+    for policy in policies {
+        let cutoff_unix = retention_cutoff_unix(policy.retention_days);
+        let candidates = state
+            .repo
+            .list_backup_policy_prune_candidates(&policy, cutoff_unix)
+            .await?;
+        plan.push(BackupPolicyPrunePlan {
+            policy,
+            cutoff_unix,
+            candidates,
+        });
+    }
+    Ok(plan)
+}
+
+fn backup_policy_prune_preview_outputs(
+    state: &AppState,
+    plan: &[BackupPolicyPrunePlan],
+    metadata_only: bool,
+) -> Vec<crate::model::BackupPolicyPrunePolicyView> {
+    plan.iter()
+        .map(|policy_plan| {
+            let object_keys = policy_plan
+                .candidates
+                .iter()
+                .map(|candidate| candidate.object_key.clone())
+                .collect::<Vec<_>>();
+            state.repo.backup_policy_prune_view(
+                &policy_plan.policy,
+                policy_plan.cutoff_unix,
+                policy_plan.candidates.len() as i64,
+                0,
+                object_keys,
+                false,
+                Vec::new(),
+                metadata_only,
+                "dry_run",
+            )
+        })
+        .collect()
+}
+
+async fn execute_backup_policy_prune_plan(
+    state: &AppState,
+    plan: Vec<BackupPolicyPrunePlan>,
+    metadata_only: bool,
+) -> Result<Vec<crate::model::BackupPolicyPrunePolicyView>, ApiError> {
+    if !metadata_only && state.backup_object_store.is_none() {
+        return Err(ApiError::bad_request(
+            "backup_policy_prune_object_store_required",
+        ));
+    }
+    let mut outputs = Vec::new();
+    for policy_plan in plan {
+        let matched_rows = policy_plan.candidates.len() as i64;
+        let mut pruned_rows = 0_i64;
+        let mut object_keys = if metadata_only {
+            policy_plan
+                .candidates
+                .iter()
+                .map(|candidate| candidate.object_key.clone())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let mut object_delete_attempted = false;
+        let mut object_delete_errors = Vec::new();
+        if metadata_only {
+            pruned_rows = state
+                .repo
+                .prune_backup_policy_candidates_metadata(&policy_plan.candidates)
+                .await?;
+        } else if !policy_plan.candidates.is_empty() {
+            object_delete_attempted = true;
+            if let Some(store) = state.backup_object_store.as_ref() {
+                for candidate in &policy_plan.candidates {
+                    if !state
+                        .repo
+                        .begin_backup_policy_candidate_object_delete(candidate)
+                        .await?
+                    {
+                        continue;
+                    }
+                    object_keys.push(candidate.object_key.clone());
+                    match store.delete_confirmed(&candidate.object_key).await {
+                        Ok(()) => {
+                            let rows = state
+                                .repo
+                                .finalize_backup_policy_candidate_object_delete(candidate)
+                                .await?;
+                            pruned_rows += rows;
+                        }
+                        Err(error) => {
+                            let error_text = error.to_string();
+                            state
+                                .repo
+                                .mark_backup_policy_candidate_delete_failed(candidate, &error_text)
+                                .await?;
+                            object_delete_errors
+                                .push(format!("{}: {error_text}", candidate.object_key));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let status = if !object_delete_errors.is_empty() {
+            "partial_error"
+        } else if pruned_rows == 0 {
+            "no_matches"
+        } else {
+            "pruned"
+        };
+        let output = state.repo.backup_policy_prune_view(
+            &policy_plan.policy,
+            policy_plan.cutoff_unix,
+            matched_rows,
+            pruned_rows,
+            object_keys,
+            object_delete_attempted,
+            object_delete_errors,
+            metadata_only,
+            status,
+        );
+        outputs.push(output);
+    }
+    Ok(outputs)
+}
+
+fn backup_policy_prune_preview_hash(
+    schedule_id: Option<uuid::Uuid>,
+    metadata_only: Option<bool>,
+    plan: &[BackupPolicyPrunePlan],
+    outputs: &[crate::model::BackupPolicyPrunePolicyView],
+) -> Result<String, ApiError> {
+    if plan.len() != outputs.len() {
+        return Err(ApiError::from(anyhow!(
+            "backup_policy_prune_preview_hash_failed: plan_output_length_mismatch"
+        )));
+    }
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "version": 1,
+        "schedule_id": schedule_id,
+        "metadata_only_requested": metadata_only,
+        "policies": plan.iter().zip(outputs.iter()).map(|(policy_plan, policy)| {
+            serde_json::json!({
+                "schedule_id": policy.schedule_id,
+                "retention_days": policy.retention_days,
+                "keep_last": policy.keep_last,
+                "cutoff_day": retention_cutoff_day(policy.cutoff_unix),
+                "matched_rows": policy.matched_rows,
+                "object_keys": &policy.object_keys,
+                "candidate_keys": backup_policy_prune_candidate_hash_keys(&policy_plan.candidates),
+                "metadata_only": policy.metadata_only,
+                "status": &policy.status,
+            })
+        }).collect::<Vec<_>>(),
+    }))
+    .map_err(|error| ApiError::from(anyhow!("backup_policy_prune_preview_hash_failed: {error}")))?;
+    Ok(payload_hash(&payload))
+}
+
+fn backup_policy_prune_candidate_hash_keys(
+    candidates: &[BackupPolicyPruneCandidate],
+) -> Vec<serde_json::Value> {
+    candidates
+        .iter()
+        .map(BackupPolicyPruneCandidate::preview_hash_key)
+        .collect()
+}
+
+fn retention_cutoff_unix(retention_days: i32) -> u64 {
+    let today_start = unix_now() / RETENTION_DAY_SECS * RETENTION_DAY_SECS;
+    today_start.saturating_sub(retention_days.max(1) as u64 * RETENTION_DAY_SECS)
+}
+
+fn retention_cutoff_day(cutoff_unix: u64) -> u64 {
+    cutoff_unix / RETENTION_DAY_SECS
+}
+
+#[cfg(test)]
+#[path = "tests_routes_backups.rs"]
+mod tests;
+
+pub(crate) async fn create_backup_request(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateBackupRequest>,
+) -> Result<(StatusCode, Json<BackupRequestView>), ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "backups:write")
+        .await?;
+    validate_create_backup_request(&request)?;
+    ensure_single_backup_client(&state, &request).await?;
+
+    let command = backup_command(&request);
+    let payload = encode_json(&command)
+        .map_err(|error| ApiError::from(anyhow!("failed to encode backup command: {error}")))?;
+    let command_hash = payload_hash(&payload);
+    let resolved_targets = vec![request.client_id.clone()];
+    let selector_expression = id_selector_expression(&request.client_id);
+    let privilege_intent = JobPrivilegeIntent::new(JobPrivilegeIntentInput {
+        selector_expression: &selector_expression,
+        command_type: "backup",
+        operation_payload_hash: &command_hash,
+        rollout_policy_hash: None,
+        resolved_targets: &resolved_targets,
+        max_timeout_secs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
+        force_unprivileged: false,
+        privileged: true,
+    });
+    if let Err(error) = verify_privilege_intent(
+        &state,
+        &privilege_intent,
+        request.privilege_assertion.clone(),
+    )
+    .await
+    {
+        state
+            .repo
+            .record_rejected_backup_request(
+                &request,
+                &command_hash,
+                &operator,
+                "backup_privilege_verification_failed",
+            )
+            .await?;
+        return Err(error);
+    }
+    let command_scope = format!("client:{}", request.client_id);
+
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            state
+                .repo
+                .record_backup_request(
+                    &request,
+                    &command_hash,
+                    &command_scope,
+                    &operator,
+                    BackupRequestStatus::RequestedMetadataOnly,
+                )
+                .await?,
+        ),
+    ))
+}
+
+pub(crate) async fn record_backup_artifact_metadata(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(backup_request_id): Path<uuid::Uuid>,
+    Json(request): Json<RecordBackupArtifactMetadataRequest>,
+) -> Result<(StatusCode, Json<BackupArtifactView>), ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "backups:write")
+        .await?;
+    validate_backup_artifact_metadata_request(&request)?;
+    let backup_request = state
+        .repo
+        .find_backup_request(backup_request_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("backup_request_not_found"))?;
+    if backup_request.artifact_id.is_some() {
+        return Err(ApiError::conflict("backup_artifact_already_recorded"));
+    }
+    let store = state
+        .backup_object_store
+        .as_ref()
+        .ok_or_else(|| ApiError::conflict("backup_object_store_not_configured"))?;
+    let artifact_id = uuid::Uuid::new_v4();
+    reserve_backup_artifact_object(&state, &backup_request, artifact_id, &request).await?;
+    if let Err(error) = verify_staged_backup_artifact_object(&state, store, &request).await {
+        release_server_artifact_reservation(&state, &request.object_key).await;
+        return Err(error);
+    }
+
+    let artifact = match state
+        .repo
+        .record_backup_artifact_metadata(&backup_request, artifact_id, &request, &operator)
+        .await
+    {
+        Ok(artifact) => artifact,
+        Err(error) => {
+            release_server_artifact_reservation(&state, &request.object_key).await;
+            if error
+                .to_string()
+                .contains("backup_artifact_already_recorded")
+            {
+                return Err(ApiError::conflict("backup_artifact_already_recorded"));
+            }
+            return Err(ApiError::from(error));
+        }
+    };
+    state.publish(WsEvent::BackupArtifactRecorded {
+        backup_request_id,
+        client_id: backup_request.client_id,
+        artifact_id: artifact.id,
+    });
+    Ok((StatusCode::CREATED, Json(artifact)))
+}
+
+pub(crate) async fn upload_backup_artifact(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(backup_request_id): Path<uuid::Uuid>,
+    Json(request): Json<UploadBackupArtifactRequest>,
+) -> Result<(StatusCode, Json<BackupArtifactView>), ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "backups:write")
+        .await?;
+    validate_backup_artifact_upload_request(&request)?;
+    let store = state
+        .backup_object_store
+        .as_ref()
+        .ok_or_else(|| ApiError::conflict("backup_object_store_not_configured"))?;
+    let backup_request = state
+        .repo
+        .find_backup_request(backup_request_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("backup_request_not_found"))?;
+    if backup_request.artifact_id.is_some() {
+        return Err(ApiError::conflict("backup_artifact_already_recorded"));
+    }
+
+    let artifact_bytes = BASE64
+        .decode(request.artifact_base64.trim())
+        .map_err(|_| ApiError::bad_request("backup_artifact_base64_invalid"))?;
+    validate_plain_backup_artifact(&artifact_bytes, &backup_request.client_id)?;
+    let sha256_hex = payload_hash(&artifact_bytes);
+    let size_bytes = i64::try_from(artifact_bytes.len())
+        .map_err(|_| ApiError::bad_request("backup_artifact_size_invalid"))?;
+    let artifact_id = uuid::Uuid::new_v4();
+    let metadata_request = RecordBackupArtifactMetadataRequest {
+        object_key: request.object_key.clone(),
+        sha256_hex,
+        size_bytes,
+        confirmed: request.confirmed,
+    };
+    reserve_backup_artifact_object(&state, &backup_request, artifact_id, &metadata_request).await?;
+
+    if let Err(error) = store.put_new(&request.object_key, &artifact_bytes).await {
+        release_server_artifact_reservation(&state, &request.object_key).await;
+        return Err({
+            let error_text = error.to_string();
+            if error_text.contains("object already exists") || error_text.contains("File exists") {
+                ApiError::conflict("backup_artifact_object_exists")
+            } else {
+                ApiError::from(error)
+            }
+        });
+    }
+    match state
+        .repo
+        .record_backup_artifact_metadata(&backup_request, artifact_id, &metadata_request, &operator)
+        .await
+    {
+        Ok(artifact) => {
+            state.publish(WsEvent::BackupArtifactRecorded {
+                backup_request_id,
+                client_id: backup_request.client_id,
+                artifact_id: artifact.id,
+            });
+            Ok((StatusCode::CREATED, Json(artifact)))
+        }
+        Err(error) => {
+            cleanup_created_reserved_artifact_after_error(
+                &state,
+                store,
+                &request.object_key,
+                &error.to_string(),
+                true,
+            )
+            .await;
+            if error
+                .to_string()
+                .contains("backup_artifact_already_recorded")
+            {
+                Err(ApiError::conflict("backup_artifact_already_recorded"))
+            } else {
+                Err(ApiError::from(error))
+            }
+        }
+    }
+}
+
+pub(crate) async fn create_backup_artifact_upload_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(backup_request_id): Path<uuid::Uuid>,
+    Json(request): Json<BackupArtifactUploadSessionCreateRequest>,
+) -> Result<(StatusCode, Json<BackupArtifactUploadSessionView>), ApiError> {
+    let _operator = state
+        .require_operator_role_and_scope(&headers, "operator", "backups:write")
+        .await?;
+    let _store = state
+        .backup_object_store
+        .as_ref()
+        .ok_or_else(|| ApiError::conflict("backup_object_store_not_configured"))?;
+    let backup_request = state
+        .repo
+        .find_backup_request(backup_request_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("backup_request_not_found"))?;
+    if backup_request.artifact_id.is_some() {
+        return Err(ApiError::conflict("backup_artifact_already_recorded"));
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            backup_upload_sessions()
+                .create(backup_request_id, backup_request.client_id, request)
+                .await?,
+        ),
+    ))
+}
+
+pub(crate) async fn upload_backup_artifact_session_chunk(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((backup_request_id, upload_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+    Json(request): Json<BackupArtifactUploadChunkRequest>,
+) -> Result<Json<BackupArtifactUploadSessionView>, ApiError> {
+    let _operator = state
+        .require_operator_role_and_scope(&headers, "operator", "backups:write")
+        .await?;
+    Ok(Json(
+        backup_upload_sessions()
+            .write_chunk(backup_request_id, upload_id, request)
+            .await?,
+    ))
+}
+
+pub(crate) async fn commit_backup_artifact_upload_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((backup_request_id, upload_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+    Json(request): Json<BackupArtifactUploadCommitRequest>,
+) -> Result<(StatusCode, Json<BackupArtifactView>), ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "backups:write")
+        .await?;
+    if !request.confirmed {
+        return Err(ApiError::conflict(
+            "backup_artifact_upload_commit_confirmation_required",
+        ));
+    }
+    let store = state
+        .backup_object_store
+        .as_ref()
+        .ok_or_else(|| ApiError::conflict("backup_object_store_not_configured"))?;
+    let backup_request = state
+        .repo
+        .find_backup_request(backup_request_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("backup_request_not_found"))?;
+    if backup_request.artifact_id.is_some() {
+        return Err(ApiError::conflict("backup_artifact_already_recorded"));
+    }
+
+    let prepared = backup_upload_sessions()
+        .prepare_commit(
+            backup_request_id,
+            upload_id,
+            &backup_request.client_id,
+            request,
+        )
+        .await?;
+    let artifact_id = uuid::Uuid::new_v4();
+    let metadata_request = RecordBackupArtifactMetadataRequest {
+        object_key: prepared.object_key.clone(),
+        sha256_hex: prepared.sha256_hex.clone(),
+        size_bytes: prepared.size_bytes,
+        confirmed: true,
+    };
+    reserve_backup_artifact_object(&state, &backup_request, artifact_id, &metadata_request).await?;
+    let created_object = match store
+        .put_file_idempotent(
+            &prepared.object_key,
+            &prepared.staging_path,
+            &prepared.sha256_hex,
+            prepared
+                .size_bytes
+                .try_into()
+                .map_err(|_| ApiError::bad_request("backup_artifact_size_invalid"))?,
+        )
+        .await
+    {
+        Ok(created_object) => created_object,
+        Err(error) => {
+            release_server_artifact_reservation(&state, &prepared.object_key).await;
+            let error_text = error.to_string();
+            return Err(
+                if error_text.contains("object already exists")
+                    || error_text.contains("File exists")
+                {
+                    ApiError::conflict("backup_artifact_object_exists")
+                } else {
+                    ApiError::from(error)
+                },
+            );
+        }
+    };
+    match state
+        .repo
+        .record_backup_artifact_metadata(&backup_request, artifact_id, &metadata_request, &operator)
+        .await
+    {
+        Ok(artifact) => {
+            backup_upload_sessions().finish(prepared.upload_id).await;
+            state.publish(WsEvent::BackupArtifactRecorded {
+                backup_request_id,
+                client_id: backup_request.client_id,
+                artifact_id: artifact.id,
+            });
+            Ok((StatusCode::CREATED, Json(artifact)))
+        }
+        Err(error) => {
+            cleanup_created_reserved_artifact_after_error(
+                &state,
+                store,
+                &metadata_request.object_key,
+                &error.to_string(),
+                created_object,
+            )
+            .await;
+            if error
+                .to_string()
+                .contains("backup_artifact_already_recorded")
+            {
+                Err(ApiError::conflict("backup_artifact_already_recorded"))
+            } else {
+                Err(ApiError::from(error))
+            }
+        }
+    }
+}
+
+pub(crate) async fn abort_backup_artifact_upload_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((backup_request_id, upload_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+    Json(request): Json<BackupArtifactUploadCommitRequest>,
+) -> Result<Json<BackupArtifactUploadSessionView>, ApiError> {
+    let _operator = state
+        .require_operator_role_and_scope(&headers, "operator", "backups:write")
+        .await?;
+    Ok(Json(
+        backup_upload_sessions()
+            .abort(backup_request_id, upload_id, request.confirmed)
+            .await?,
+    ))
+}
+
+pub(crate) async fn create_backup_artifact_handoff(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(backup_request_id): Path<uuid::Uuid>,
+    Json(request): Json<BackupArtifactHandoffRequest>,
+) -> Result<(StatusCode, Json<BackupArtifactHandoffView>), ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "backups:write")
+        .await?;
+    if !request.confirmed {
+        return Err(ApiError::conflict(
+            "backup_artifact_handoff_confirmation_required",
+        ));
+    }
+    let store = state
+        .backup_object_store
+        .as_ref()
+        .ok_or_else(|| ApiError::conflict("backup_object_store_not_configured"))?;
+    let backup_request = state
+        .repo
+        .find_backup_request(backup_request_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("backup_request_not_found"))?;
+    if backup_request.artifact_id.is_some() {
+        return Err(ApiError::conflict("backup_artifact_already_recorded"));
+    }
+    let candidate = state
+        .repo
+        .find_backup_artifact_output_candidate(&backup_request, request.job_id)
+        .await?
+        .ok_or_else(|| ApiError::conflict("backup_artifact_handoff_source_missing"))?;
+    let prepared = stage_retained_backup_artifact_stdout(&state, &candidate.outputs).await?;
+    if let Err(error) = validate_plain_backup_artifact_file_with_limit(
+        &prepared.staging_path,
+        &backup_request.client_id,
+        backup_artifact_streaming_max_bytes(),
+    ) {
+        let _ = tokio::fs::remove_file(&prepared.staging_path).await;
+        return Err(error);
+    }
+    let object_key = backup_artifact_object_key(&backup_request.client_id, backup_request.id);
+    let artifact_id = uuid::Uuid::new_v4();
+    let metadata_request = RecordBackupArtifactMetadataRequest {
+        object_key: object_key.clone(),
+        sha256_hex: prepared.sha256_hex.clone(),
+        size_bytes: prepared.size_bytes,
+        confirmed: true,
+    };
+    reserve_backup_artifact_object(&state, &backup_request, artifact_id, &metadata_request).await?;
+    let created_object = match store
+        .put_file_idempotent(
+            &object_key,
+            &prepared.staging_path,
+            &prepared.sha256_hex,
+            prepared
+                .size_bytes
+                .try_into()
+                .map_err(|_| ApiError::bad_request("backup_artifact_size_invalid"))?,
+        )
+        .await
+    {
+        Ok(created_object) => created_object,
+        Err(error) => {
+            release_server_artifact_reservation(&state, &object_key).await;
+            let _ = tokio::fs::remove_file(&prepared.staging_path).await;
+            return Err(ApiError::from(error));
+        }
+    };
+    let result = match state
+        .repo
+        .record_backup_artifact_metadata(&backup_request, artifact_id, &metadata_request, &operator)
+        .await
+    {
+        Ok(artifact) => {
+            state.publish(WsEvent::BackupArtifactRecorded {
+                backup_request_id,
+                client_id: backup_request.client_id,
+                artifact_id: artifact.id,
+            });
+            Ok((
+                StatusCode::CREATED,
+                Json(BackupArtifactHandoffView {
+                    artifact,
+                    source_job_id: candidate.job_id,
+                    source_chunk_count: prepared.source_chunk_count,
+                    source: "retained_job_outputs_streamed".to_string(),
+                }),
+            ))
+        }
+        Err(error) => {
+            cleanup_created_reserved_artifact_after_error(
+                &state,
+                store,
+                &metadata_request.object_key,
+                &error.to_string(),
+                created_object,
+            )
+            .await;
+            if error
+                .to_string()
+                .contains("backup_artifact_already_recorded")
+            {
+                Err(ApiError::conflict("backup_artifact_already_recorded"))
+            } else {
+                Err(ApiError::from(error))
+            }
+        }
+    };
+    let _ = tokio::fs::remove_file(&prepared.staging_path).await;
+    result
+}
+
+pub(crate) async fn download_backup_artifact(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(backup_request_id): Path<uuid::Uuid>,
+) -> Result<Response<Body>, ApiError> {
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_BACKUPS_READ)
+        .await?;
+    let store = state
+        .backup_object_store
+        .as_ref()
+        .ok_or_else(|| ApiError::conflict("backup_object_store_not_configured"))?;
+    let backup_request = state
+        .repo
+        .find_backup_request(backup_request_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("backup_request_not_found"))?;
+    let artifact_id = backup_request
+        .artifact_id
+        .ok_or_else(|| ApiError::conflict("backup_artifact_not_recorded"))?;
+    let artifact = state
+        .repo
+        .find_backup_artifact(artifact_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("backup_artifact_not_found"))?;
+    if !artifact.content_available {
+        return Err(ApiError::conflict("backup_artifact_not_available"));
+    }
+    if artifact.client_id != backup_request.client_id {
+        return Err(ApiError::conflict("backup_artifact_client_mismatch"));
+    }
+    let expected_size = u64::try_from(artifact.size_bytes)
+        .map_err(|_| ApiError::conflict("backup_artifact_object_size_mismatch"))?;
+    let object_file = store
+        .verified_object_file(
+            &artifact.object_key,
+            &artifact.sha256_hex,
+            expected_size,
+            state.artifact_max_bytes(),
+        )
+        .await
+        .map_err(|error| {
+            map_verified_object_error(
+                error,
+                "backup_artifact_object_not_found",
+                "backup_artifact_object_hash_mismatch",
+            )
+        })?;
+    let body = streaming_artifact_file_body(
+        object_file.path,
+        "backup_artifact_object_not_found",
+        object_file.cleanup_after_stream,
+    )
+    .await?;
+
+    let mut response = Response::new(body);
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    response.headers_mut().insert(
+        "x-vpsman-backup-artifact-id",
+        HeaderValue::from_str(&artifact.id.to_string())
+            .map_err(|error| ApiError::from(anyhow!("invalid artifact id header: {error}")))?,
+    );
+    response.headers_mut().insert(
+        "x-vpsman-backup-artifact-sha256",
+        HeaderValue::from_str(&artifact.sha256_hex)
+            .map_err(|error| ApiError::from(anyhow!("invalid artifact sha header: {error}")))?,
+    );
+    response.headers_mut().insert(
+        "content-length",
+        HeaderValue::from_str(&expected_size.to_string())
+            .map_err(|error| ApiError::from(anyhow!("invalid artifact size header: {error}")))?,
+    );
+    Ok(response)
+}
+
+pub(crate) fn validate_create_backup_request(
+    request: &CreateBackupRequest,
+) -> Result<(), ApiError> {
+    if request.client_id.trim().is_empty() {
+        return Err(ApiError::bad_request("backup_client_required"));
+    }
+    if !request.include_config && request.paths.is_empty() {
+        return Err(ApiError::bad_request("backup_scope_required"));
+    }
+    if request.paths.len() > MAX_BACKUP_PATHS {
+        return Err(ApiError::bad_request("backup_path_limit_exceeded"));
+    }
+    for path in &request.paths {
+        validate_file_path(path)?;
+    }
+    if request
+        .note
+        .as_ref()
+        .is_some_and(|note| note.len() > MAX_BACKUP_NOTE_BYTES)
+    {
+        return Err(ApiError::bad_request("backup_note_too_long"));
+    }
+    if !request.confirmed {
+        return Err(ApiError::conflict("backup_confirmation_required"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_create_backup_policy_request(
+    request: &CreateBackupPolicyRequest,
+) -> Result<(), ApiError> {
+    validate_backup_policy_request(request, false)
+}
+
+fn validate_backup_policy_request(
+    request: &CreateBackupPolicyRequest,
+    allow_empty_targets: bool,
+) -> Result<(), ApiError> {
+    if !request.confirmed {
+        return Err(ApiError::conflict("backup_policy_confirmation_required"));
+    }
+    let schedule_request = CreateScheduleRequest {
+        name: request.name.clone(),
+        operation: JobCommand::Backup {
+            paths: request.paths.clone(),
+            include_config: request.include_config,
+            follow_symlinks: request.follow_symlinks,
+            missing_path_policy: request.missing_path_policy,
+        },
+        selector_expression: request.selector_expression.clone(),
+        target_client_ids: request.target_client_ids.clone(),
+        cron_expr: request.cron_expr.clone(),
+        timezone: request.timezone.clone(),
+        enabled: request.enabled,
+        catch_up_policy: request.catch_up_policy.clone(),
+        catch_up_limit: request.catch_up_limit,
+        retry_delay_secs: request.retry_delay_secs,
+        max_failures: request.max_failures,
+        privilege_assertion: None,
+        confirmed: true,
+    };
+    if allow_empty_targets {
+        let update_request = UpdateScheduleRequest {
+            name: schedule_request.name,
+            operation: schedule_request.operation,
+            selector_expression: schedule_request.selector_expression.clone(),
+            target_client_ids: schedule_request.target_client_ids.clone(),
+            expected_selector_expression: schedule_request.selector_expression,
+            expected_target_client_ids: schedule_request.target_client_ids,
+            cron_expr: schedule_request.cron_expr,
+            timezone: schedule_request.timezone,
+            enabled: schedule_request.enabled,
+            catch_up_policy: schedule_request.catch_up_policy,
+            catch_up_limit: schedule_request.catch_up_limit,
+            retry_delay_secs: schedule_request.retry_delay_secs,
+            max_failures: schedule_request.max_failures,
+            privilege_assertion: None,
+            confirmed: true,
+        };
+        validate_update_schedule_request(&update_request)?;
+    } else {
+        validate_schedule_request(&schedule_request)?;
+    }
+    let retention_days = request.retention_days.unwrap_or(30);
+    if !(1..=3650).contains(&retention_days) {
+        return Err(ApiError::bad_request(
+            "backup_policy_retention_days_out_of_range",
+        ));
+    }
+    let keep_last = request.keep_last.unwrap_or(7);
+    if !(1..=1000).contains(&keep_last) {
+        return Err(ApiError::bad_request(
+            "backup_policy_keep_last_out_of_range",
+        ));
+    }
+    if let Some(rotation_generation) = &request.rotation_generation {
+        validate_backup_policy_generation(rotation_generation)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_update_backup_policy_request(
+    request: &CreateBackupPolicyRequest,
+) -> Result<(), ApiError> {
+    if request.retention_days.is_none() {
+        return Err(ApiError::bad_request(
+            "backup_policy_retention_days_required",
+        ));
+    }
+    if request.keep_last.is_none() {
+        return Err(ApiError::bad_request("backup_policy_keep_last_required"));
+    }
+    validate_backup_policy_request(request, true)
+}
+
+pub(crate) fn validate_backup_artifact_metadata_request(
+    request: &RecordBackupArtifactMetadataRequest,
+) -> Result<(), ApiError> {
+    validate_backup_artifact_object_key(&request.object_key)?;
+    if !is_sha256_hex(&request.sha256_hex) {
+        return Err(ApiError::bad_request("backup_artifact_invalid_sha256"));
+    }
+    if !(1..=MAX_BACKUP_ARTIFACT_SIZE_BYTES).contains(&request.size_bytes) {
+        return Err(ApiError::bad_request("backup_artifact_size_invalid"));
+    }
+    if !request.confirmed {
+        return Err(ApiError::conflict("backup_artifact_confirmation_required"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_backup_artifact_upload_request(
+    request: &UploadBackupArtifactRequest,
+) -> Result<(), ApiError> {
+    validate_backup_artifact_object_key(&request.object_key)?;
+    if request.artifact_base64.trim().is_empty() {
+        return Err(ApiError::bad_request("backup_artifact_body_required"));
+    }
+    let max_base64_len = MAX_BACKUP_ARTIFACT_UPLOAD_BYTES.div_ceil(3) * 4 + 256;
+    if request.artifact_base64.len() > max_base64_len {
+        return Err(ApiError::bad_request("backup_artifact_upload_too_large"));
+    }
+    if !request.confirmed {
+        return Err(ApiError::conflict(
+            "backup_artifact_upload_confirmation_required",
+        ));
+    }
+    Ok(())
+}
+
+async fn verify_staged_backup_artifact_object(
+    state: &AppState,
+    store: &crate::object_store::BackupObjectStore,
+    request: &RecordBackupArtifactMetadataRequest,
+) -> Result<(), ApiError> {
+    let expected_size = u64::try_from(request.size_bytes)
+        .map_err(|_| ApiError::bad_request("backup_artifact_size_invalid"))?;
+    let object_file = store
+        .verified_object_file(
+            &request.object_key,
+            &request.sha256_hex,
+            expected_size,
+            state.artifact_max_bytes(),
+        )
+        .await
+        .map_err(|error| {
+            map_verified_object_error(
+                error,
+                "backup_artifact_object_not_found",
+                "backup_artifact_object_integrity_mismatch",
+            )
+        })?;
+    if object_file.cleanup_after_stream {
+        let _ = tokio::fs::remove_file(&object_file.path).await;
+    }
+    Ok(())
+}
+
+async fn reserve_backup_artifact_object(
+    state: &AppState,
+    backup_request: &BackupRequestView,
+    artifact_id: uuid::Uuid,
+    request: &RecordBackupArtifactMetadataRequest,
+) -> Result<(), ApiError> {
+    let artifact = BackupArtifactView {
+        id: artifact_id,
+        client_id: backup_request.client_id.clone(),
+        object_key: request.object_key.clone(),
+        sha256_hex: request.sha256_hex.clone(),
+        size_bytes: request.size_bytes,
+        status: "creating".to_string(),
+        content_available: false,
+        created_at: unix_now().to_string(),
+    };
+    state
+        .repo
+        .reserve_server_artifact(backup_server_artifact(backup_request, &artifact))
+        .await
+        .map_err(map_backup_artifact_reservation_error)
+}
+
+fn map_backup_artifact_reservation_error(error: anyhow::Error) -> ApiError {
+    if error
+        .to_string()
+        .contains("server_artifact_object_key_conflict")
+    {
+        ApiError::conflict("backup_artifact_object_exists")
+    } else {
+        ApiError::from(error)
+    }
+}
+
+async fn release_server_artifact_reservation(state: &AppState, object_key: &str) {
+    let _ = state
+        .repo
+        .discard_server_artifact_reservation(object_key)
+        .await;
+}
+
+async fn cleanup_created_reserved_artifact_after_error(
+    state: &AppState,
+    store: &crate::object_store::BackupObjectStore,
+    object_key: &str,
+    error: &str,
+    created_object: bool,
+) {
+    if created_object {
+        match store.delete_confirmed(object_key).await {
+            Ok(()) => {
+                let _ = state
+                    .repo
+                    .discard_server_artifact_reservation(object_key)
+                    .await;
+            }
+            Err(delete_error) => {
+                let _ = state
+                    .repo
+                    .mark_server_artifact_delete_failed(
+                        object_key,
+                        &format!("{error}; cleanup_delete_failed: {delete_error}"),
+                    )
+                    .await;
+            }
+        }
+    } else {
+        let _ = state
+            .repo
+            .discard_server_artifact_reservation(object_key)
+            .await;
+    }
+}
+
+async fn ensure_single_backup_client(
+    state: &AppState,
+    request: &CreateBackupRequest,
+) -> Result<(), ApiError> {
+    let resolved = state
+        .repo
+        .resolve_bulk_targets(&BulkResolveRequest {
+            selector_expression: id_selector_expression(&request.client_id),
+        })
+        .await?;
+    if resolved.target_count == 1 && resolved.targets[0].id == request.client_id {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request("backup_client_not_found"))
+    }
+}
+
+fn backup_command(request: &CreateBackupRequest) -> JobCommand {
+    JobCommand::Backup {
+        paths: request.paths.clone(),
+        include_config: request.include_config,
+        follow_symlinks: request.follow_symlinks,
+        missing_path_policy: request.missing_path_policy,
+    }
+}
+
+fn backup_policy_command(request: &CreateBackupPolicyRequest) -> JobCommand {
+    JobCommand::Backup {
+        paths: request.paths.clone(),
+        include_config: request.include_config,
+        follow_symlinks: request.follow_symlinks,
+        missing_path_policy: request.missing_path_policy,
+    }
+}
+
+fn validate_backup_policy_generation(value: &str) -> Result<(), ApiError> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 120 {
+        return Err(ApiError::bad_request(
+            "backup_policy_rotation_generation_invalid",
+        ));
+    }
+    if value.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'/')
+    }) {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request(
+            "backup_policy_rotation_generation_invalid",
+        ))
+    }
+}
+
+pub(crate) fn validate_backup_artifact_object_key(object_key: &str) -> Result<(), ApiError> {
+    if object_key.trim().is_empty() {
+        return Err(ApiError::bad_request("backup_artifact_object_key_required"));
+    }
+    if object_key.len() > MAX_BACKUP_ARTIFACT_OBJECT_KEY_BYTES || object_key.as_bytes().contains(&0)
+    {
+        return Err(ApiError::bad_request("backup_artifact_object_key_invalid"));
+    }
+    if object_key.starts_with('/')
+        || object_key.contains('\\')
+        || object_key
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return Err(ApiError::bad_request("backup_artifact_object_key_invalid"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_plain_backup_artifact(
+    bytes: &[u8],
+    expected_client_id: &str,
+) -> Result<(), ApiError> {
+    validate_plain_backup_artifact_with_limit(
+        bytes,
+        expected_client_id,
+        MAX_BACKUP_ARTIFACT_UPLOAD_BYTES,
+    )
+}
+
+pub(crate) fn validate_plain_backup_artifact_with_limit(
+    bytes: &[u8],
+    expected_client_id: &str,
+    max_size_bytes: usize,
+) -> Result<(), ApiError> {
+    if bytes.is_empty() || bytes.len() > max_size_bytes {
+        return Err(ApiError::bad_request("backup_artifact_size_invalid"));
+    }
+    validate_plain_backup_artifact_reader(Cursor::new(bytes), expected_client_id)
+}
+
+pub(crate) fn validate_plain_backup_artifact_file_with_limit(
+    path: &FsPath,
+    expected_client_id: &str,
+    max_size_bytes: usize,
+) -> Result<(), ApiError> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|_| ApiError::bad_request("backup_artifact_size_invalid"))?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > max_size_bytes as u64 {
+        return Err(ApiError::bad_request("backup_artifact_size_invalid"));
+    }
+    let file =
+        File::open(path).map_err(|_| ApiError::bad_request("backup_artifact_tar_invalid"))?;
+    validate_plain_backup_artifact_reader(BufReader::new(file), expected_client_id)
+}
+
+fn validate_plain_backup_artifact_reader<R: Read>(
+    reader: R,
+    expected_client_id: &str,
+) -> Result<(), ApiError> {
+    let mut archive = tar::Archive::new(reader);
+    let entries = archive
+        .entries()
+        .map_err(|_| ApiError::bad_request("backup_artifact_tar_invalid"))?;
+    let mut manifest = None;
+    for entry in entries {
+        let mut entry = entry.map_err(|_| ApiError::bad_request("backup_artifact_tar_invalid"))?;
+        let is_manifest = entry
+            .path()
+            .map_err(|_| ApiError::bad_request("backup_artifact_tar_invalid"))?
+            .as_ref()
+            == FsPath::new(BACKUP_ARCHIVE_MANIFEST_PATH);
+        if !is_manifest {
+            continue;
+        }
+        if manifest.is_some() {
+            return Err(ApiError::bad_request("backup_artifact_manifest_duplicate"));
+        }
+        let mut manifest_bytes = Vec::new();
+        let mut limited = (&mut entry).take((MAX_BACKUP_ARCHIVE_MANIFEST_BYTES + 1) as u64);
+        limited
+            .read_to_end(&mut manifest_bytes)
+            .map_err(|_| ApiError::bad_request("backup_artifact_manifest_invalid"))?;
+        if manifest_bytes.len() > MAX_BACKUP_ARCHIVE_MANIFEST_BYTES {
+            return Err(ApiError::bad_request("backup_artifact_manifest_too_large"));
+        }
+        let parsed = serde_json::from_slice::<BackupArchiveManifest>(&manifest_bytes)
+            .map_err(|_| ApiError::bad_request("backup_artifact_manifest_invalid"))?;
+        manifest = Some(parsed);
+    }
+    let manifest =
+        manifest.ok_or_else(|| ApiError::bad_request("backup_artifact_manifest_required"))?;
+    if manifest.format != BACKUP_ARCHIVE_FORMAT {
+        return Err(ApiError::bad_request("backup_artifact_format_invalid"));
+    }
+    if manifest.client_id != expected_client_id {
+        return Err(ApiError::bad_request("backup_artifact_client_mismatch"));
+    }
+    if manifest.files.is_empty() {
+        return Err(ApiError::bad_request("backup_artifact_manifest_invalid"));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct BackupArchiveManifest {
+    format: String,
+    client_id: String,
+    #[serde(default)]
+    files: Vec<serde_json::Value>,
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.as_bytes().iter().all(u8::is_ascii_hexdigit)
+}

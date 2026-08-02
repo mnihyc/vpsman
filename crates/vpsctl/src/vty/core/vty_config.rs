@@ -1,0 +1,575 @@
+use anyhow::{Context, Result};
+use serde::Deserialize;
+use uuid::Uuid;
+use vpsman_common::{JobCommand, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS};
+
+use crate::{
+    commands_config::validate_update_input, commands_schedules::selector_expression_from_targets,
+    http::http_post_json, privilege::build_privilege_for_job_command, vty_jobs::VtyJobSelection,
+};
+
+#[derive(Debug)]
+pub(crate) struct VtyAgentUpdateRequest {
+    artifact_url: String,
+    sha256_hex: String,
+    selection: VtyJobSelection,
+    max_timeout_secs: u64,
+    privilege_ttl_secs: u64,
+    force_unprivileged: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct VtyAgentUpdateCheckRequest {
+    version_url: Option<String>,
+    activate: bool,
+    restart_agent: bool,
+    selection: VtyJobSelection,
+    max_timeout_secs: u64,
+    privilege_ttl_secs: u64,
+    force_unprivileged: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct VtyAgentUpdateActivateRequest {
+    staged_sha256_hex: String,
+    restart_agent: bool,
+    selection: VtyJobSelection,
+    max_timeout_secs: u64,
+    privilege_ttl_secs: u64,
+    force_unprivileged: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct VtyAgentUpdateRollbackRequest {
+    rollback_sha256_hex: Option<String>,
+    selection: VtyJobSelection,
+    max_timeout_secs: u64,
+    privilege_ttl_secs: u64,
+    force_unprivileged: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct VtyBulkResolveResponse {
+    targets: Vec<VtyTarget>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VtyTarget {
+    id: String,
+}
+
+pub(crate) fn parse_vty_agent_update(tokens: &[&str]) -> Result<VtyAgentUpdateRequest> {
+    let mut artifact_url = None;
+    let mut sha256_hex = None;
+    let mut max_timeout_secs = 300_u64;
+    let mut privilege_ttl_secs = 300_u64;
+    let mut force_unprivileged = false;
+    let mut target_tokens = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        match tokens[index] {
+            "--artifact-url" => {
+                artifact_url = Some(
+                    tokens
+                        .get(index + 1)
+                        .context("--artifact-url requires a URL")?
+                        .to_string(),
+                );
+                index += 2;
+            }
+            "--sha256-hex" => {
+                sha256_hex = Some(
+                    tokens
+                        .get(index + 1)
+                        .context("--sha256-hex requires a value")?
+                        .to_string(),
+                );
+                index += 2;
+            }
+            "--max-timeout" => {
+                max_timeout_secs = tokens
+                    .get(index + 1)
+                    .context("--max-timeout requires a value")?
+                    .parse()
+                    .context("--max-timeout must be an integer")?;
+                index += 2;
+            }
+            "--privilege-ttl" => {
+                privilege_ttl_secs = tokens
+                    .get(index + 1)
+                    .context("--privilege-ttl requires a value")?
+                    .parse()
+                    .context("--privilege-ttl must be an integer")?;
+                index += 2;
+            }
+            "--force-unprivileged" => {
+                force_unprivileged = true;
+                index += 1;
+            }
+            value if value.starts_with("--") && value != "--confirmed" => {
+                anyhow::bail!("unknown agent-update flag {value}");
+            }
+            value => {
+                target_tokens.push(value);
+                index += 1;
+            }
+        }
+    }
+    anyhow::ensure!(
+        (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&max_timeout_secs),
+        "agent-update --max-timeout must be between 1 and {MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}"
+    );
+    anyhow::ensure!(
+        (15..=300).contains(&privilege_ttl_secs),
+        "agent-update --privilege-ttl must be between 15 and 300"
+    );
+    let artifact_url = artifact_url.context("agent-update requires --artifact-url <https-url>")?;
+    let sha256_hex = sha256_hex.context("agent-update requires --sha256-hex <sha256>")?;
+    validate_update_input(&artifact_url, &sha256_hex)?;
+    let selection = VtyJobSelection::parse(&target_tokens)?;
+    anyhow::ensure!(
+        selection.confirmed,
+        "agent-update requires --confirmed because it stages a replacement binary"
+    );
+    Ok(VtyAgentUpdateRequest {
+        artifact_url,
+        sha256_hex: sha256_hex.to_ascii_lowercase(),
+        selection,
+        max_timeout_secs,
+        privilege_ttl_secs,
+        force_unprivileged,
+    })
+}
+
+pub(crate) fn parse_vty_agent_update_check(tokens: &[&str]) -> Result<VtyAgentUpdateCheckRequest> {
+    let mut version_url = None;
+    let mut activate = false;
+    let mut restart_agent = false;
+    let mut max_timeout_secs = 300_u64;
+    let mut privilege_ttl_secs = 300_u64;
+    let mut force_unprivileged = false;
+    let mut target_tokens = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        match tokens[index] {
+            "--version-url" => {
+                version_url = Some(
+                    tokens
+                        .get(index + 1)
+                        .context("--version-url requires a URL")?
+                        .to_string(),
+                );
+                index += 2;
+            }
+            "--activate" => {
+                activate = true;
+                index += 1;
+            }
+            "--restart-agent" => {
+                restart_agent = true;
+                index += 1;
+            }
+            "--max-timeout" => {
+                max_timeout_secs = tokens
+                    .get(index + 1)
+                    .context("--max-timeout requires a value")?
+                    .parse()
+                    .context("--max-timeout must be an integer")?;
+                index += 2;
+            }
+            "--privilege-ttl" => {
+                privilege_ttl_secs = tokens
+                    .get(index + 1)
+                    .context("--privilege-ttl requires a value")?
+                    .parse()
+                    .context("--privilege-ttl must be an integer")?;
+                index += 2;
+            }
+            "--force-unprivileged" => {
+                force_unprivileged = true;
+                index += 1;
+            }
+            value if value.starts_with("--") && value != "--confirmed" => {
+                anyhow::bail!("unknown agent-update-check flag {value}");
+            }
+            value => {
+                target_tokens.push(value);
+                index += 1;
+            }
+        }
+    }
+    validate_config_dispatch_bounds(max_timeout_secs, privilege_ttl_secs, "agent-update-check")?;
+    if let Some(version_url) = version_url.as_deref() {
+        validate_update_check_version_url(version_url)?;
+    }
+    let selection = VtyJobSelection::parse(&target_tokens)?;
+    anyhow::ensure!(
+        selection.confirmed,
+        "agent-update-check requires --confirmed because it may stage and activate a replacement binary"
+    );
+    anyhow::ensure!(
+        !restart_agent || activate,
+        "--restart-agent requires --activate"
+    );
+    Ok(VtyAgentUpdateCheckRequest {
+        version_url,
+        activate,
+        restart_agent,
+        selection,
+        max_timeout_secs,
+        privilege_ttl_secs,
+        force_unprivileged,
+    })
+}
+
+pub(crate) fn parse_vty_agent_update_activate(
+    tokens: &[&str],
+) -> Result<VtyAgentUpdateActivateRequest> {
+    let mut staged_sha256_hex = None;
+    let mut max_timeout_secs = 60_u64;
+    let mut privilege_ttl_secs = 300_u64;
+    let mut restart_agent = false;
+    let mut force_unprivileged = false;
+    let mut target_tokens = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        match tokens[index] {
+            "--staged-sha256-hex" => {
+                staged_sha256_hex = Some(
+                    tokens
+                        .get(index + 1)
+                        .context("--staged-sha256-hex requires a value")?
+                        .to_string(),
+                );
+                index += 2;
+            }
+            "--max-timeout" => {
+                max_timeout_secs = tokens
+                    .get(index + 1)
+                    .context("--max-timeout requires a value")?
+                    .parse()
+                    .context("--max-timeout must be an integer")?;
+                index += 2;
+            }
+            "--privilege-ttl" => {
+                privilege_ttl_secs = tokens
+                    .get(index + 1)
+                    .context("--privilege-ttl requires a value")?
+                    .parse()
+                    .context("--privilege-ttl must be an integer")?;
+                index += 2;
+            }
+            "--restart-agent" => {
+                restart_agent = true;
+                index += 1;
+            }
+            "--force-unprivileged" => {
+                force_unprivileged = true;
+                index += 1;
+            }
+            value if value.starts_with("--") && value != "--confirmed" => {
+                anyhow::bail!("unknown agent-update-activate flag {value}");
+            }
+            value => {
+                target_tokens.push(value);
+                index += 1;
+            }
+        }
+    }
+    validate_config_dispatch_bounds(
+        max_timeout_secs,
+        privilege_ttl_secs,
+        "agent-update-activate",
+    )?;
+    let staged_sha256_hex =
+        staged_sha256_hex.context("agent-update-activate requires --staged-sha256-hex <sha256>")?;
+    let staged_sha256_hex = validate_sha256(&staged_sha256_hex, "--staged-sha256-hex")?;
+    let selection = VtyJobSelection::parse(&target_tokens)?;
+    anyhow::ensure!(
+        selection.confirmed,
+        "agent-update-activate requires --confirmed because it replaces the active agent binary"
+    );
+    Ok(VtyAgentUpdateActivateRequest {
+        staged_sha256_hex,
+        restart_agent,
+        selection,
+        max_timeout_secs,
+        privilege_ttl_secs,
+        force_unprivileged,
+    })
+}
+
+pub(crate) fn parse_vty_agent_update_rollback(
+    tokens: &[&str],
+) -> Result<VtyAgentUpdateRollbackRequest> {
+    let mut rollback_sha256_hex = None;
+    let mut max_timeout_secs = 60_u64;
+    let mut privilege_ttl_secs = 300_u64;
+    let mut force_unprivileged = false;
+    let mut target_tokens = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        match tokens[index] {
+            "--rollback-sha256-hex" => {
+                rollback_sha256_hex = Some(
+                    tokens
+                        .get(index + 1)
+                        .context("--rollback-sha256-hex requires a value")?
+                        .to_string(),
+                );
+                index += 2;
+            }
+            "--max-timeout" => {
+                max_timeout_secs = tokens
+                    .get(index + 1)
+                    .context("--max-timeout requires a value")?
+                    .parse()
+                    .context("--max-timeout must be an integer")?;
+                index += 2;
+            }
+            "--privilege-ttl" => {
+                privilege_ttl_secs = tokens
+                    .get(index + 1)
+                    .context("--privilege-ttl requires a value")?
+                    .parse()
+                    .context("--privilege-ttl must be an integer")?;
+                index += 2;
+            }
+            "--force-unprivileged" => {
+                force_unprivileged = true;
+                index += 1;
+            }
+            value if value.starts_with("--") && value != "--confirmed" => {
+                anyhow::bail!("unknown agent-update-rollback flag {value}");
+            }
+            value => {
+                target_tokens.push(value);
+                index += 1;
+            }
+        }
+    }
+    validate_config_dispatch_bounds(
+        max_timeout_secs,
+        privilege_ttl_secs,
+        "agent-update-rollback",
+    )?;
+    let rollback_sha256_hex = rollback_sha256_hex
+        .as_deref()
+        .map(|value| validate_sha256(value, "--rollback-sha256-hex"))
+        .transpose()?;
+    let selection = VtyJobSelection::parse(&target_tokens)?;
+    anyhow::ensure!(
+        selection.confirmed,
+        "agent-update-rollback requires --confirmed because it replaces the active agent binary"
+    );
+    Ok(VtyAgentUpdateRollbackRequest {
+        rollback_sha256_hex,
+        selection,
+        max_timeout_secs,
+        privilege_ttl_secs,
+        force_unprivileged,
+    })
+}
+
+pub(crate) fn submit_vty_agent_update(
+    api_url: &str,
+    token: Option<&str>,
+    password: &str,
+    salt_hex: &str,
+    request: VtyAgentUpdateRequest,
+) -> Result<String> {
+    let operation = JobCommand::UpdateAgent {
+        artifact_url: request.artifact_url,
+        sha256_hex: request.sha256_hex,
+    };
+    submit_vty_config_operation(
+        api_url,
+        token,
+        password,
+        salt_hex,
+        "agent_update",
+        operation,
+        request.selection,
+        request.max_timeout_secs,
+        request.privilege_ttl_secs,
+        request.force_unprivileged,
+    )
+}
+
+pub(crate) fn submit_vty_agent_update_check(
+    api_url: &str,
+    token: Option<&str>,
+    password: &str,
+    salt_hex: &str,
+    request: VtyAgentUpdateCheckRequest,
+) -> Result<String> {
+    submit_vty_config_operation(
+        api_url,
+        token,
+        password,
+        salt_hex,
+        "agent_update_check",
+        JobCommand::AgentUpdateCheck {
+            version_url: request.version_url,
+            activate: request.activate,
+            restart_agent: request.restart_agent,
+        },
+        request.selection,
+        request.max_timeout_secs,
+        request.privilege_ttl_secs,
+        request.force_unprivileged,
+    )
+}
+
+pub(crate) fn submit_vty_agent_update_activate(
+    api_url: &str,
+    token: Option<&str>,
+    password: &str,
+    salt_hex: &str,
+    request: VtyAgentUpdateActivateRequest,
+) -> Result<String> {
+    submit_vty_config_operation(
+        api_url,
+        token,
+        password,
+        salt_hex,
+        "agent_update_activate",
+        JobCommand::AgentUpdateActivate {
+            staged_sha256_hex: request.staged_sha256_hex,
+            restart_agent: request.restart_agent,
+        },
+        request.selection,
+        request.max_timeout_secs,
+        request.privilege_ttl_secs,
+        request.force_unprivileged,
+    )
+}
+
+pub(crate) fn submit_vty_agent_update_rollback(
+    api_url: &str,
+    token: Option<&str>,
+    password: &str,
+    salt_hex: &str,
+    request: VtyAgentUpdateRollbackRequest,
+) -> Result<String> {
+    submit_vty_config_operation(
+        api_url,
+        token,
+        password,
+        salt_hex,
+        "agent_update_rollback",
+        JobCommand::AgentUpdateRollback {
+            rollback_sha256_hex: request.rollback_sha256_hex,
+        },
+        request.selection,
+        request.max_timeout_secs,
+        request.privilege_ttl_secs,
+        request.force_unprivileged,
+    )
+}
+
+fn validate_config_dispatch_bounds(
+    max_timeout_secs: u64,
+    privilege_ttl_secs: u64,
+    command: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&max_timeout_secs),
+        "{command} --max-timeout must be between 1 and {MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}"
+    );
+    anyhow::ensure!(
+        (15..=300).contains(&privilege_ttl_secs),
+        "{command} --privilege-ttl must be between 15 and 300"
+    );
+    Ok(())
+}
+
+fn validate_update_check_version_url(version_url: &str) -> Result<()> {
+    anyhow::ensure!(
+        version_url.starts_with("https://")
+            || version_url.starts_with("http://localhost")
+            || version_url.starts_with("http://127.0.0.1")
+            || version_url.starts_with("file://"),
+        "agent-update-check --version-url must use https://, localhost http://, or file://"
+    );
+    Ok(())
+}
+
+fn validate_sha256(value: &str, label: &str) -> Result<String> {
+    let value = value.trim().to_ascii_lowercase();
+    anyhow::ensure!(
+        value.len() == 64 && value.as_bytes().iter().all(u8::is_ascii_hexdigit),
+        "{label} must be 64 hex characters"
+    );
+    Ok(value)
+}
+
+fn submit_vty_config_operation(
+    api_url: &str,
+    token: Option<&str>,
+    password: &str,
+    salt_hex: &str,
+    command_label: &str,
+    operation: JobCommand,
+    selection: VtyJobSelection,
+    max_timeout_secs: u64,
+    privilege_ttl_secs: u64,
+    force_unprivileged: bool,
+) -> Result<String> {
+    let resolved = http_post_json(
+        api_url,
+        "/api/v1/bulk/resolve",
+        token,
+        &serde_json::json!({
+            "selector_expression": selector_expression_from_targets(&selection.clients, &selection.tags),
+        }),
+    )?;
+    let resolved: VtyBulkResolveResponse =
+        serde_json::from_str(&resolved).context("failed to parse bulk target response")?;
+    let client_ids = resolved
+        .targets
+        .into_iter()
+        .map(|target| target.id)
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        !client_ids.is_empty(),
+        "{command_label} resolved no targets; provide at least one matching target"
+    );
+    let selector_expression = selector_expression_from_targets(&selection.clients, &selection.tags);
+    let privilege = build_privilege_for_job_command(
+        &client_ids,
+        &operation,
+        command_label,
+        &selector_expression,
+        password,
+        salt_hex,
+        privilege_ttl_secs,
+        max_timeout_secs,
+        force_unprivileged,
+        true,
+    )?;
+
+    http_post_json(
+        api_url,
+        "/api/v1/jobs",
+        token,
+        &serde_json::json!({
+            "job_id": Uuid::new_v4(),
+            "command": command_label,
+            "argv": [],
+            "operation": operation,
+            "selector_expression": selector_expression,
+            "target_client_ids": client_ids,
+            "privileged": true,
+            "destructive": false,
+            "confirmed": selection.confirmed,
+            "force_unprivileged": force_unprivileged,
+            "max_timeout_secs": max_timeout_secs,
+            "privilege_assertion": privilege.privilege_assertion,
+        }),
+    )
+}
+
+#[cfg(test)]
+#[path = "tests_vty_config.rs"]
+mod tests;

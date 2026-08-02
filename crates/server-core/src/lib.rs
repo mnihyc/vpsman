@@ -4,6 +4,7 @@ use vpsman_common::{
     MAX_DIRECT_FILE_DOWNLOAD_BYTES,
 };
 
+#[path = "runtime/webhook_target.rs"]
 mod webhook_target;
 
 pub use webhook_target::{
@@ -332,42 +333,8 @@ pub fn target_lacks_restore_capability(
 }
 
 #[cfg(test)]
-mod auth_tests {
-    use super::{default_operator_scopes, operator_is_active_authorized};
-
-    #[test]
-    fn active_operator_authority_requires_status_role_and_all_scopes() {
-        let scopes = default_operator_scopes("operator");
-        assert!(operator_is_active_authorized(
-            "active",
-            "operator",
-            &scopes,
-            "operator",
-            &["jobs:write", "schedules:write"],
-        ));
-        assert!(!operator_is_active_authorized(
-            "disabled",
-            "operator",
-            &scopes,
-            "operator",
-            &["jobs:write"],
-        ));
-        assert!(!operator_is_active_authorized(
-            "active",
-            "viewer",
-            &default_operator_scopes("viewer"),
-            "operator",
-            &["jobs:write"],
-        ));
-        assert!(!operator_is_active_authorized(
-            "active",
-            "operator",
-            &["jobs:write".to_string()],
-            "operator",
-            &["jobs:write", "schedules:write"],
-        ));
-    }
-}
+#[path = "runtime/tests_lib_auth.rs"]
+mod auth_tests;
 
 pub fn target_lacks_privileged_host_mutation_capability(
     capabilities: &AgentCapabilitySnapshot,
@@ -443,90 +410,5 @@ pub fn is_backup_operation(command: &JobCommand) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use vpsman_common::{
-        AgentCapabilitySnapshot, AgentPrivilegeMode, JobCommand, ProcessResourceLimits,
-        ProcessRunPolicy,
-    };
-
-    use super::*;
-
-    #[test]
-    fn config_read_is_not_host_mutation_gated() {
-        let capabilities = AgentCapabilitySnapshot {
-            privilege_mode: AgentPrivilegeMode::Unprivileged,
-            ..AgentCapabilitySnapshot::default()
-        };
-
-        assert_eq!(
-            target_capability_failure(&JobCommand::ConfigRead, &capabilities),
-            None
-        );
-    }
-
-    #[test]
-    fn process_limits_require_capability() {
-        let capabilities = AgentCapabilitySnapshot {
-            privilege_mode: AgentPrivilegeMode::Root,
-            can_attempt_privileged_ops: true,
-            can_apply_process_limits: false,
-            ..AgentCapabilitySnapshot::default()
-        };
-        let command = JobCommand::ProcessStart {
-            name: "svc".to_string(),
-            argv: vec!["/bin/true".to_string()],
-            cwd: None,
-            env: BTreeMap::new(),
-            policy: ProcessRunPolicy::default(),
-            limits: ProcessResourceLimits {
-                memory_max_bytes: Some(1024),
-                ..ProcessResourceLimits::default()
-            },
-        };
-
-        assert_eq!(
-            target_capability_failure(&command, &capabilities).map(|failure| failure.reason),
-            Some("target_agent_lacks_process_limit_capability")
-        );
-    }
-
-    #[test]
-    fn shared_labels_cover_file_and_schedule_cases() {
-        let command = JobCommand::FileDownload {
-            path: "/tmp/a".to_string(),
-            max_bytes: 1,
-            follow_symlinks: false,
-        };
-        assert_eq!(job_command_type_label(&command), "file_download");
-        assert_eq!(
-            scheduled_command_type_label(&command, "file_download"),
-            "file_download"
-        );
-
-        let command = JobCommand::Backup {
-            paths: vec!["/etc".to_string()],
-            include_config: true,
-            follow_symlinks: false,
-            missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
-        };
-        assert_eq!(scheduled_command_type_label(&command, "unknown"), "backup");
-    }
-
-    #[test]
-    fn aggregate_status_preserves_existing_ordering() {
-        assert_eq!(
-            aggregate_job_status_from_statuses(&["completed".to_string()], 1),
-            "completed"
-        );
-        assert_eq!(
-            aggregate_job_status_from_statuses(&["completed".to_string(), "failed".to_string()], 2,),
-            "partial_success"
-        );
-        assert_eq!(
-            aggregate_job_status_from_statuses(&["skipped".to_string(), "skipped".to_string()], 2,),
-            "skipped"
-        );
-    }
-}
+#[path = "runtime/tests_lib.rs"]
+mod tests;

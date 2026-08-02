@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib-smoke.sh"
 
 smoke_enter_root
-smoke_require_tools bash cargo rg
+smoke_require_tools bash cargo find rg
 
 fail() {
   echo "security sweep failed: $*" >&2
@@ -38,10 +38,17 @@ require_no_match \
   'VPSMAN_SUPER_PASSWORD|super_password|superPassword|super-password' \
   crates/api/src crates/gateway/src migrations
 
+mapfile -d '' repository_sources < <(
+  find crates/api/src/repository -type f -name 'repository*.rs' -print0
+)
+if (( ${#repository_sources[@]} == 0 )); then
+  fail "no production repository sources found"
+fi
+
 require_no_match \
   "server audit/repository code must not persist privilege material fields" \
   'privilege_assertion|superPassword|super_password' \
-  crates/api/src/repository*.rs migrations
+  "${repository_sources[@]}" migrations
 
 obsolete_dispatch_auth_pattern='Command''Envelope|sign_command_''envelope|verify_command_''envelope|Privilege''ReplayCache|VPSMAN_SERVER_''SIGNING'
 require_no_match \
@@ -52,12 +59,12 @@ require_no_match \
 require_match \
   "object key traversal tests are present" \
   'object_key_rejects_path_traversal' \
-  crates/api/src/tests_object_store.rs
+  crates/api/src/backup/tests_object_store.rs
 
 require_match \
   "operator password hash verification test is present" \
   'operator_password_hash_verifies_without_plaintext_storage' \
-  crates/api/src/tests_auth.rs
+  crates/api/src/auth/tests_auth.rs
 
 cargo test -p vpsman-common auth
 cargo test -p vpsman-api tests_auth

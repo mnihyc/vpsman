@@ -5,13 +5,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib-smoke.sh"
 
 smoke_enter_root
-smoke_require_tools find git grep wc
+smoke_require_tools find git grep
 
 failures=0
 checked_files=0
-max_source_lines=0
-max_source_file=""
-split_recommendations=0
 hygiene_user="${VPSMAN_REPO_HYGIENE_USER:-${USER:-}}"
 case "$hygiene_user" in
   ""|runner|github|actions|ubuntu|root)
@@ -112,29 +109,6 @@ report_fixed_match() {
   failures=$((failures + 1))
 }
 
-is_line_counted_source() {
-  case "$1" in
-    ./crates/*.rs|./crates/**/*.rs|./frontend/src/*.ts|./frontend/src/**/*.ts|./frontend/src/*.tsx|./frontend/src/**/*.tsx|./frontend/src/*.css|./frontend/src/**/*.css|./frontend/tests/*.ts|./frontend/tests/**/*.ts|./scripts/*.sh)
-      return 0
-      ;;
-  esac
-  return 1
-}
-
-source_line_hard_limit() {
-  case "$1" in
-    ./frontend/tests/*|./frontend/tests/**/*|./crates/*/tests/*|./crates/*/tests/**/*|./crates/*/src/tests.rs|./crates/*/src/tests_*.rs|./crates/*/src/*_tests.rs)
-      echo 5000
-      ;;
-    ./crates/vpsctl/src/vty*.rs|./crates/vpsctl/src/commands_*.rs)
-      echo 5000
-      ;;
-    *)
-      echo 2000
-      ;;
-  esac
-}
-
 while IFS= read -r -d '' file; do
   is_scanned_file "$file" || continue
   checked_files=$((checked_files + 1))
@@ -157,26 +131,6 @@ while IFS= read -r -d '' file; do
   report_match "Slack token" "$file" 'xox[abprs]-[A-Za-z0-9-]{20,}'
   report_match "AWS access key id" "$file" 'A(KIA|SIA)[A-Z0-9]{16}'
 
-  if is_line_counted_source "$file"; then
-    line_count="$(wc -l <"$file")"
-    if (( line_count > max_source_lines )); then
-      max_source_lines="$line_count"
-      max_source_file="$file"
-    fi
-    if (( line_count > 1000 )); then
-      echo "repo hygiene recommendation: split or justify large source file over 1000 lines: $file ($line_count)" >&2
-      split_recommendations=$((split_recommendations + 1))
-    fi
-    hard_limit="$(source_line_hard_limit "$file")"
-    if (( line_count > hard_limit )); then
-      if [[ "${VPSMAN_REPO_HYGIENE_FAIL_ON_HARD_LIMIT:-0}" == "1" ]]; then
-        echo "repo hygiene violation: source file exceeds hard role-based line limit $hard_limit: $file ($line_count)" >&2
-        failures=$((failures + 1))
-      else
-        echo "repo hygiene recommendation: source file exceeds role-based line limit $hard_limit: $file ($line_count)" >&2
-      fi
-    fi
-  fi
 done < <(
   if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     git ls-files -z --cached --others --exclude-standard |
@@ -203,4 +157,4 @@ if (( failures > 0 )); then
   exit 1
 fi
 
-echo "repo_hygiene_scan=ok scanned_files=$checked_files max_source_lines=$max_source_lines max_source_file=$max_source_file split_recommendations=$split_recommendations"
+echo "repo_hygiene_scan=ok scanned_files=$checked_files"

@@ -251,6 +251,12 @@ client -> external TLS provider -> bundled Nginx -> private API
 
 - Use the repository-pinned, profile-managed Rust and Node toolchains described
   in `docs/build.md`.
+- Keep Rust `main.rs` and `lib.rs` as composition roots. Place implementation
+  modules in balanced domain directories, preserve useful filename prefixes,
+  and avoid both singleton domain directories and flat source dumps. Keep unit
+  tests in sibling `tests_<source>.rs` files; do not embed test bodies in
+  production source files. Use explicit module paths when needed to preserve
+  the established logical `crate::...` API during physical moves.
 - Build each required binary once. Multi-VPS simulations must reuse those
   binaries; never compile separately for every simulated VPS.
 - Do not run redundant full builds, Clippy, and workspace tests concurrently.

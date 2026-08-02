@@ -1,122 +1,237 @@
 use std::{net::SocketAddr, path::PathBuf};
 
+#[path = "auth/auth_model.rs"]
 mod auth_model;
+#[path = "auth/auth_totp.rs"]
 mod auth_totp;
+#[path = "backup/backup_auto_artifacts.rs"]
 mod backup_auto_artifacts;
+#[path = "backup/backup_handoff.rs"]
 mod backup_handoff;
+#[path = "backup/backup_upload_sessions.rs"]
 mod backup_upload_sessions;
+#[path = "runtime/build_info.rs"]
 mod build_info;
+#[path = "auth/client_ip.rs"]
 mod client_ip;
+#[path = "runtime/error.rs"]
 mod error;
+#[path = "monitoring/fleet_alert_notifications.rs"]
 mod fleet_alert_notifications;
+#[path = "monitoring/fleet_alerts.rs"]
 mod fleet_alerts;
+#[path = "runtime/gateway_client.rs"]
 mod gateway_client;
+#[path = "auth/internal_operator.rs"]
 mod internal_operator;
+#[path = "jobs/job_dispatcher.rs"]
 mod job_dispatcher;
+#[path = "jobs/job_files.rs"]
 mod job_files;
+#[path = "jobs/job_request.rs"]
 mod job_request;
+#[path = "jobs/job_terminal.rs"]
 mod job_terminal;
+#[path = "jobs/lifecycle_outcome.rs"]
 mod lifecycle_outcome;
+#[path = "model/model.rs"]
 mod model;
+#[path = "model/model_agent_updates.rs"]
 mod model_agent_updates;
+#[path = "model/model_alert_notifications.rs"]
 mod model_alert_notifications;
+#[path = "model/model_alert_policies.rs"]
 mod model_alert_policies;
+#[path = "model/model_alert_states.rs"]
 mod model_alert_states;
+#[path = "model/model_backups.rs"]
 mod model_backups;
+#[path = "model/model_command_templates.rs"]
 mod model_command_templates;
+#[path = "model/model_configuration_presets.rs"]
 mod model_configuration_presets;
+#[path = "model/model_dashboard.rs"]
 mod model_dashboard;
+#[path = "model/model_file_transfer.rs"]
 mod model_file_transfer;
+#[path = "model/model_history.rs"]
 mod model_history;
+#[path = "model/model_host_management.rs"]
 mod model_host_management;
+#[path = "model/model_monitoring.rs"]
 mod model_monitoring;
+#[path = "model/model_port_forwarding.rs"]
 mod model_port_forwarding;
+#[path = "model/model_runtime_config.rs"]
 mod model_runtime_config;
+#[path = "model/model_server_jobs.rs"]
 mod model_server_jobs;
+#[path = "model/model_terminal.rs"]
 mod model_terminal;
+#[path = "model/model_topology.rs"]
 mod model_topology;
+#[path = "model/model_webhook_rules.rs"]
 mod model_webhook_rules;
+#[path = "monitoring/network_ospf_controller.rs"]
 mod network_ospf_controller;
 pub(crate) mod object_store {
     pub(crate) use vpsman_object_store::*;
 }
+#[path = "auth/privilege.rs"]
 mod privilege;
+#[path = "repository/core/repository.rs"]
 mod repository;
+#[path = "repository/system/repository_agent_update_lifecycle.rs"]
 mod repository_agent_update_lifecycle;
+#[path = "repository/system/repository_agent_update_releases.rs"]
 mod repository_agent_update_releases;
+#[path = "repository/fleet/repository_alert_notifications.rs"]
 mod repository_alert_notifications;
+#[path = "repository/fleet/repository_alert_policies.rs"]
 mod repository_alert_policies;
+#[path = "repository/fleet/repository_alert_states.rs"]
 mod repository_alert_states;
+#[path = "repository/access/repository_auth.rs"]
 mod repository_auth;
+#[path = "repository/backup/repository_backup_artifacts.rs"]
 mod repository_backup_artifacts;
+#[path = "repository/backup/repository_backup_policies.rs"]
 mod repository_backup_policies;
+#[path = "repository/backup/repository_backups.rs"]
 mod repository_backups;
+#[path = "repository/config/repository_command_templates.rs"]
 mod repository_command_templates;
+#[path = "repository/config/repository_configuration_presets.rs"]
 mod repository_configuration_presets;
+#[path = "repository/jobs/repository_file_transfer_sources.rs"]
 mod repository_file_transfer_sources;
+#[path = "repository/jobs/repository_file_transfers.rs"]
 mod repository_file_transfers;
+#[path = "repository/access/repository_gateway_sessions.rs"]
 mod repository_gateway_sessions;
+#[path = "repository/system/repository_history.rs"]
 mod repository_history;
+#[path = "repository/system/repository_host_management.rs"]
 mod repository_host_management;
+#[path = "repository/fleet/repository_ingest.rs"]
 mod repository_ingest;
+#[path = "repository/fleet/repository_inventory.rs"]
 mod repository_inventory;
+#[path = "repository/jobs/repository_job_outputs.rs"]
 mod repository_job_outputs;
+#[path = "repository/jobs/repository_job_rollouts.rs"]
 mod repository_job_rollouts;
+#[path = "repository/jobs/repository_jobs.rs"]
 mod repository_jobs;
+#[path = "repository/access/repository_key_lifecycle.rs"]
 mod repository_key_lifecycle;
+#[path = "repository/core/repository_migrations.rs"]
 mod repository_migrations;
+#[path = "repository/fleet/repository_monitoring.rs"]
 mod repository_monitoring;
+#[path = "repository/network/repository_network.rs"]
 mod repository_network;
+#[path = "repository/network/repository_network_adapters.rs"]
 mod repository_network_adapters;
+#[path = "repository/network/repository_network_observations.rs"]
 mod repository_network_observations;
+#[path = "repository/network/repository_network_recommendations.rs"]
 mod repository_network_recommendations;
+#[path = "repository/access/repository_operator_totp.rs"]
 mod repository_operator_totp;
+#[path = "repository/network/repository_port_forwarding.rs"]
 mod repository_port_forwarding;
+#[path = "repository/backup/repository_restores.rs"]
 mod repository_restores;
+#[path = "repository/config/repository_runtime_config.rs"]
 mod repository_runtime_config;
+#[path = "repository/config/repository_runtime_config_patch_generators.rs"]
 mod repository_runtime_config_patch_generators;
+#[path = "repository/jobs/repository_schedules.rs"]
 mod repository_schedules;
+#[path = "repository/jobs/repository_server_jobs.rs"]
 mod repository_server_jobs;
+#[path = "repository/config/repository_suite_config.rs"]
 mod repository_suite_config;
+#[path = "repository/system/repository_system_dashboard.rs"]
 mod repository_system_dashboard;
+#[path = "repository/fleet/repository_telemetry_rollups.rs"]
 mod repository_telemetry_rollups;
+#[path = "repository/jobs/repository_terminal_sessions.rs"]
 mod repository_terminal_sessions;
+#[path = "repository/network/repository_topology_graph.rs"]
 mod repository_topology_graph;
+#[path = "repository/config/repository_webhook_rules.rs"]
 mod repository_webhook_rules;
+#[path = "routes/core/routes.rs"]
 mod routes;
+#[path = "routes/fleet/routes_alerts.rs"]
 mod routes_alerts;
+#[path = "routes/access/routes_auth.rs"]
 mod routes_auth;
+#[path = "routes/backup/routes_backups.rs"]
 mod routes_backups;
+#[path = "routes/config/routes_command_templates.rs"]
 mod routes_command_templates;
+#[path = "routes/config/routes_configuration_presets.rs"]
 mod routes_configuration_presets;
+#[path = "routes/fleet/routes_dashboard.rs"]
 mod routes_dashboard;
+#[path = "routes/jobs/routes_file_transfers.rs"]
 mod routes_file_transfers;
+#[path = "routes/fleet/routes_history.rs"]
 mod routes_history;
+#[path = "routes/operations/routes_host_management.rs"]
 mod routes_host_management;
+#[path = "routes/fleet/routes_ingest.rs"]
 mod routes_ingest;
+#[path = "routes/fleet/routes_inventory.rs"]
 mod routes_inventory;
+#[path = "routes/jobs/routes_job_history.rs"]
 mod routes_job_history;
+#[path = "routes/jobs/routes_job_rollouts.rs"]
 mod routes_job_rollouts;
+#[path = "routes/jobs/routes_jobs.rs"]
 mod routes_jobs;
+#[path = "routes/access/routes_key_lifecycle.rs"]
 mod routes_key_lifecycle;
+#[path = "routes/operations/routes_migrations.rs"]
 mod routes_migrations;
+#[path = "routes/fleet/routes_monitoring.rs"]
 mod routes_monitoring;
+#[path = "routes/network/routes_network.rs"]
 mod routes_network;
+#[path = "routes/network/routes_port_forwarding.rs"]
 mod routes_port_forwarding;
+#[path = "routes/backup/routes_restores.rs"]
 mod routes_restores;
+#[path = "routes/jobs/routes_schedules.rs"]
 mod routes_schedules;
+#[path = "routes/jobs/routes_server_jobs.rs"]
 mod routes_server_jobs;
+#[path = "routes/config/routes_suite_config.rs"]
 mod routes_suite_config;
+#[path = "routes/fleet/routes_system.rs"]
 mod routes_system;
+#[path = "routes/jobs/routes_terminal_sessions.rs"]
 mod routes_terminal_sessions;
+#[path = "routes/operations/routes_update_releases.rs"]
 mod routes_update_releases;
+#[path = "routes/config/routes_webhook_rules.rs"]
 mod routes_webhook_rules;
+#[path = "routes/core/routes_ws.rs"]
 mod routes_ws;
+#[path = "runtime/runtime_config.rs"]
 mod runtime_config;
+#[path = "auth/security.rs"]
 mod security;
+#[path = "monitoring/selector_expression.rs"]
 mod selector_expression;
+#[path = "runtime/state.rs"]
 mod state;
+#[path = "runtime/util.rs"]
 mod util;
+#[path = "monitoring/webhook_rules.rs"]
 mod webhook_rules;
 
 use anyhow::{Context, Result};
@@ -861,52 +976,77 @@ where
 }
 
 #[cfg(test)]
+#[path = "runtime/tests_main.rs"]
 mod tests;
 #[cfg(test)]
+#[path = "monitoring/tests_alerts.rs"]
 mod tests_alerts;
 #[cfg(test)]
+#[path = "auth/tests_auth.rs"]
 mod tests_auth;
 #[cfg(test)]
+#[path = "backup/tests_backups.rs"]
 mod tests_backups;
 #[cfg(test)]
+#[path = "runtime/tests_config.rs"]
 mod tests_config;
 #[cfg(test)]
+#[path = "monitoring/tests_dashboard.rs"]
 mod tests_dashboard;
 #[cfg(test)]
+#[path = "jobs/tests_files.rs"]
 mod tests_files;
 #[cfg(test)]
+#[path = "monitoring/tests_history.rs"]
 mod tests_history;
 #[cfg(test)]
+#[path = "auth/tests_identity.rs"]
 mod tests_identity;
 #[cfg(test)]
+#[path = "jobs/tests_job_approvals.rs"]
 mod tests_job_approvals;
 #[cfg(test)]
+#[path = "repository/core/tests_migrations.rs"]
 mod tests_migrations;
 #[cfg(test)]
+#[path = "monitoring/tests_monitoring.rs"]
 mod tests_monitoring;
 #[cfg(test)]
+#[path = "monitoring/tests_network.rs"]
 mod tests_network;
 #[cfg(test)]
+#[path = "monitoring/tests_network_observations.rs"]
 mod tests_network_observations;
 #[cfg(test)]
+#[path = "monitoring/tests_network_ospf_updates.rs"]
 mod tests_network_ospf_updates;
 #[cfg(test)]
+#[path = "monitoring/tests_network_telemetry.rs"]
 mod tests_network_telemetry;
 #[cfg(test)]
+#[path = "backup/tests_object_store.rs"]
 mod tests_object_store;
 #[cfg(test)]
+#[path = "monitoring/tests_port_forwarding.rs"]
 mod tests_port_forwarding;
 #[cfg(test)]
+#[path = "repository/core/tests_postgres_reliability.rs"]
 mod tests_postgres_reliability;
 #[cfg(test)]
+#[path = "jobs/tests_process.rs"]
 mod tests_process;
 #[cfg(test)]
+#[path = "backup/tests_restores.rs"]
 mod tests_restores;
 #[cfg(test)]
+#[path = "jobs/tests_rollouts.rs"]
 mod tests_rollouts;
 #[cfg(test)]
+#[path = "jobs/tests_schedules.rs"]
 mod tests_schedules;
 #[cfg(test)]
+#[path = "jobs/tests_terminal.rs"]
 mod tests_terminal;
 #[cfg(test)]
+#[path = "jobs/tests_update_releases.rs"]
 mod tests_update_releases;

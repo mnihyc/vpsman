@@ -89,27 +89,27 @@ require_not_contains "$terminal_poll_help" "--password-env" "read-only terminal-
 require_not_contains "$terminal_resize_help" "--password-env" "authorized terminal-resize help"
 require_not_contains "$terminal_close_help" "--password-env" "authorized terminal-close help"
 
-terminal_privilege_source="crates/vpsctl/src/vty_privilege.rs"
+terminal_privilege_source="crates/vpsctl/src/vty/access/vty_privilege.rs"
 require_source_pattern 'const PRIVILEGE_REQUIRED_COMMANDS:[^;]*"terminal-open"' "$terminal_privilege_source"
 require_source_pattern 'const SESSION_AUTHORIZED_COMMANDS:[^;]*"terminal-input"[^;]*"terminal-resize"[^;]*"terminal-close"' "$terminal_privilege_source"
 require_source_pattern 'const READ_ONLY_COMMANDS:[^;]*"terminal-poll"' "$terminal_privilege_source"
 require_source_pattern_absent 'const PRIVILEGE_REQUIRED_COMMANDS:[^;]*"terminal-(input|poll|resize|close)"' "$terminal_privilege_source"
 
 terminal_job_sources=(
-  crates/vpsctl/src/commands_terminal.rs
-  crates/vpsctl/src/vty_terminal.rs
+  crates/vpsctl/src/commands/terminal/commands_terminal.rs
+  crates/vpsctl/src/vty/terminal/vty_terminal.rs
   frontend/src/panels/jobDispatchModel.ts
   frontend/src/types.ts
 )
-require_source_token "JobCommand::TerminalOpen" crates/vpsctl/src/commands_terminal.rs
-require_source_token "JobCommand::TerminalOpen" crates/vpsctl/src/vty_terminal.rs
+require_source_token "JobCommand::TerminalOpen" crates/vpsctl/src/commands/terminal/commands_terminal.rs
+require_source_token "JobCommand::TerminalOpen" crates/vpsctl/src/vty/terminal/vty_terminal.rs
 for retired_job_variant in TerminalInput TerminalPoll TerminalResize TerminalClose; do
   require_source_pattern_absent "JobCommand::${retired_job_variant}" "${terminal_job_sources[@]}"
 done
-require_source_token "terminal_control_output(" crates/vpsctl/src/commands_terminal.rs
-require_source_token "VtyTerminalRequest::Control" crates/vpsctl/src/vty_terminal.rs
-require_source_token "terminal_replay_output(" crates/vpsctl/src/commands_terminal.rs
-require_source_token "VtyTerminalRequest::Replay" crates/vpsctl/src/vty_terminal.rs
+require_source_token "terminal_control_output(" crates/vpsctl/src/commands/terminal/commands_terminal.rs
+require_source_token "VtyTerminalRequest::Control" crates/vpsctl/src/vty/terminal/vty_terminal.rs
+require_source_token "terminal_replay_output(" crates/vpsctl/src/commands/terminal/commands_terminal.rs
+require_source_token "VtyTerminalRequest::Replay" crates/vpsctl/src/vty/terminal/vty_terminal.rs
 
 workflows=(
   'job dispatch argv|job-create|job-create|mode: "shell"|frontend/src/panels/jobs/JobOperationControls.tsx'

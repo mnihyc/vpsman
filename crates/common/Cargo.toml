@@ -27,5 +27,9 @@ tokio.workspace = true
 toml.workspace = true
 uuid.workspace = true
 
+[[bin]]
+name = "generate_frontend_contracts"
+path = "src/protocol/generate_frontend_contracts.rs"
+
 [build-dependencies]
 vpsman-build-support = { path = "../../build/build-support" }

@@ -38,14 +38,22 @@ const TELEMETRY_HISTORY_RETENTION_INTERVAL_SECS: u64 = 60;
 const SCHEDULE_CRON_INVALID: &str = "schedule_cron_invalid";
 const SCHEDULE_CRON_NO_FUTURE_OCCURRENCE: &str = "schedule_cron_no_future_occurrence";
 const SCHEDULE_OPERATION_INVALID: &str = "schedule_operation_invalid";
+#[path = "runtime/actor_authority.rs"]
 mod actor_authority;
+#[path = "delivery/alert_notifications.rs"]
 mod alert_notifications;
+#[path = "retention/backup_policy_retention.rs"]
 mod backup_policy_retention;
+#[path = "runtime/build_info.rs"]
 mod build_info;
+#[path = "retention/history_retention.rs"]
 mod history_retention;
 #[cfg(test)]
+#[path = "runtime/test_support.rs"]
 mod test_support;
+#[path = "delivery/webhook_rules.rs"]
 mod webhook_rules;
+#[path = "runtime/worker_leases.rs"]
 mod worker_leases;
 
 use actor_authority::{actor_authorized, actor_authorized_in_tx};
@@ -3340,4 +3348,5 @@ fn truncate_schedule_error(error: &str) -> String {
 }
 
 #[cfg(test)]
+#[path = "runtime/tests_schedule.rs"]
 mod schedule_tests;

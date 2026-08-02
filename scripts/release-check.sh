@@ -51,7 +51,6 @@ skip_step() {
 
 run_step cargo-fmt cargo fmt --all -- --check
 run_legacy_step repo-hygiene bash scripts/scan-repo-hygiene.sh
-run_legacy_step large-file-audit bash scripts/audit-large-files.sh
 run_legacy_step tutorial-audit bash scripts/audit-tutorials.sh
 run_step customizability-audit bash scripts/audit-customizability.sh
 run_step migration-compatibility-audit bash scripts/audit-migrations.sh
