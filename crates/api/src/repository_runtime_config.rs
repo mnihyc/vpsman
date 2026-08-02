@@ -9,6 +9,9 @@ use crate::{
         RuntimeConfigOverrideView,
     },
     repository::{MemoryState, Repository},
+    repository_key_lifecycle::{
+        require_visible_memory_clients, require_visible_postgres_clients_in_tx,
+    },
     unix_now,
 };
 
@@ -123,15 +126,17 @@ impl Repository {
     ) -> Result<Vec<RuntimeConfigApplyStateRecord>> {
         match self {
             Self::Memory(memory) => {
+                let hidden = memory.hidden_clients.read().await;
                 let mut states = memory
                     .runtime_config_apply_states
                     .read()
                     .await
                     .iter()
                     .filter(|state| {
-                        client_id
-                            .map(|client_id| state.client_id == client_id)
-                            .unwrap_or(true)
+                        !hidden.contains(&state.client_id)
+                            && client_id
+                                .map(|client_id| state.client_id == client_id)
+                                .unwrap_or(true)
                     })
                     .cloned()
                     .collect::<Vec<_>>();
@@ -142,7 +147,7 @@ impl Repository {
                 let rows = sqlx::query(
                     r#"
                     SELECT
-                        client_id,
+                        state.client_id,
                         applied_version,
                         applied_content_hash,
                         applied_config,
@@ -157,9 +162,10 @@ impl Repository {
                         pending_error,
                         pending_updated_at::text AS pending_updated_at,
                         updated_at::text AS updated_at
-                    FROM client_runtime_config_apply_state
-                    WHERE ($1::text IS NULL OR client_id = $1)
-                    ORDER BY client_id
+                    FROM client_runtime_config_apply_state state
+                    JOIN visible_clients client ON client.id = state.client_id
+                    WHERE ($1::text IS NULL OR state.client_id = $1)
+                    ORDER BY state.client_id
                     "#,
                 )
                 .bind(client_id)
@@ -214,25 +220,31 @@ impl Repository {
         client_id: &str,
     ) -> Result<Option<(u64, String, AgentRuntimeConfig)>> {
         match self {
-            Self::Memory(memory) => Ok(memory
-                .runtime_config_apply_states
-                .read()
-                .await
-                .iter()
-                .find(|state| state.client_id == client_id)
-                .and_then(|state| {
-                    Some((
-                        state.applied_version?,
-                        state.applied_content_hash.clone()?,
-                        state.applied_config.clone()?,
-                    ))
-                })),
+            Self::Memory(memory) => {
+                if memory.hidden_clients.read().await.contains(client_id) {
+                    return Ok(None);
+                }
+                Ok(memory
+                    .runtime_config_apply_states
+                    .read()
+                    .await
+                    .iter()
+                    .find(|state| state.client_id == client_id)
+                    .and_then(|state| {
+                        Some((
+                            state.applied_version?,
+                            state.applied_content_hash.clone()?,
+                            state.applied_config.clone()?,
+                        ))
+                    }))
+            }
             Self::Postgres(pool) => {
                 let Some(row) = sqlx::query(
                     r#"
                     SELECT applied_version, applied_content_hash, applied_config
-                    FROM client_runtime_config_apply_state
-                    WHERE client_id = $1
+                    FROM client_runtime_config_apply_state state
+                    JOIN visible_clients client ON client.id = state.client_id
+                    WHERE state.client_id = $1
                       AND applied_version IS NOT NULL
                       AND applied_content_hash IS NOT NULL
                       AND applied_config IS NOT NULL
@@ -530,7 +542,9 @@ impl Repository {
     ) -> Result<Vec<RuntimeConfigOverrideView>> {
         match self {
             Self::Memory(memory) => {
+                let hidden = memory.hidden_clients.read().await;
                 let mut overrides = memory.runtime_config_overrides.read().await.clone();
+                overrides.retain(|override_record| !hidden.contains(&override_record.client_id));
                 if let Some(client_id) = client_id {
                     overrides.retain(|override_record| override_record.client_id == client_id);
                 }
@@ -540,10 +554,16 @@ impl Repository {
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
-                    SELECT client_id, toml, reason, updated_at::text AS updated_at, updated_by
-                    FROM client_runtime_config_overrides
-                    WHERE ($1::text IS NULL OR client_id = $1)
-                    ORDER BY client_id
+                    SELECT
+                        override_record.client_id,
+                        override_record.toml,
+                        override_record.reason,
+                        override_record.updated_at::text AS updated_at,
+                        override_record.updated_by
+                    FROM client_runtime_config_overrides override_record
+                    JOIN visible_clients client ON client.id = override_record.client_id
+                    WHERE ($1::text IS NULL OR override_record.client_id = $1)
+                    ORDER BY override_record.client_id
                     "#,
                 )
                 .bind(client_id)
@@ -573,6 +593,13 @@ impl Repository {
     ) -> Result<Vec<RuntimeConfigOverrideView>> {
         match self {
             Self::Memory(memory) => {
+                let _lifecycle_guard = memory.agent_key_lifecycle.lock().await;
+                require_visible_memory_clients(
+                    memory,
+                    client_ids,
+                    "runtime_config_target_no_longer_available",
+                )
+                .await?;
                 let now = unix_now().to_string();
                 let mut overrides = memory.runtime_config_overrides.write().await;
                 for client_id in client_ids {
@@ -618,6 +645,12 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                require_visible_postgres_clients_in_tx(
+                    &mut tx,
+                    client_ids,
+                    "runtime_config_target_no_longer_available",
+                )
+                .await?;
                 for client_id in client_ids {
                     sqlx::query(
                         r#"

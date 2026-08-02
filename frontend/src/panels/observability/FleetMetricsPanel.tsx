@@ -7,6 +7,9 @@ import { formatLowerBoundCount } from "../../constants";
 import {
   dashboardScopeLabel,
   dashboardScopeValueOptions,
+  dashboardWindowAccessibleLabel,
+  dashboardWindowLabel,
+  dashboardWindowOptions,
   dateTimeLocalToIso,
   isoToDateTimeLocal,
 } from "../../dashboardQuery";
@@ -37,7 +40,6 @@ type FleetMetricsPanelProps = {
   window: DashboardWindow;
 };
 
-const fallbackDashboardWindows: DashboardWindow[] = ["15m", "1h", "6h", "24h", "7d", "14d", "30d", "all"];
 const resourceMetricOptions: Array<{ label: string; value: DashboardResourceMetric }> = [
   { label: "CPU", value: "cpu_load" },
   { label: "Memory", value: "memory_used" },
@@ -87,7 +89,7 @@ export function FleetMetricsPanel({
   const latestSampleAt = resourceCurve?.latest_sample_at ?? null;
   const sampledClients = resourceCurve?.sampled_clients ?? overview?.resources.sampled_clients ?? 0;
   const customRangeActive = Boolean(preferences.startAt.trim() || preferences.endAt.trim());
-  const selectedRangeName = customRangeActive ? "Custom" : windowLabel(window);
+  const selectedRangeName = customRangeActive ? "Custom" : dashboardWindowLabel(window);
   const resourceEvidence = buildResourceEvidence(
     overview,
     selectedRangeName,
@@ -99,7 +101,7 @@ export function FleetMetricsPanel({
     overview,
     latestSampleAt,
   );
-  const windowOptions = overview?.available_filters.windows.map((option) => option.value) ?? fallbackDashboardWindows;
+  const windowOptions = overview?.available_filters.windows.map((option) => option.value) ?? dashboardWindowOptions;
   const groupOptions = overview?.available_filters.group_by_options ?? [];
   const excludedClients = resourceCurve?.excluded_clients ?? 0;
   const matchedClients = overview?.scope.matched_clients ?? 0;
@@ -156,13 +158,15 @@ export function FleetMetricsPanel({
           <div className="timeRangeTabs" aria-label="Fleet metrics time range">
             {windowOptions.map((option) => (
               <button
+                aria-label={dashboardWindowAccessibleLabel(option)}
                 aria-pressed={!customRangeActive && window === option}
                 className={!customRangeActive && window === option ? "active" : ""}
                 key={option}
                 onClick={() => onWindowChange(option)}
+                title={dashboardWindowAccessibleLabel(option)}
                 type="button"
               >
-                {windowLabel(option)}
+                {dashboardWindowLabel(option)}
               </button>
             ))}
           </div>
@@ -427,7 +431,7 @@ export function FleetMetricsPanel({
           <MetricTile
             label="Grouping"
             value={selectedGroupLabel}
-            detail={`${overview?.label_clusters.length ?? 0} groups; ${excludedClients} excluded; ${vpsCountLabel((overview?.summary.offline ?? 0) + (overview?.summary.stale ?? 0))} unavailable`}
+            detail={`${overview?.label_clusters.length ?? 0} groups; ${excludedClients} excluded; ${vpsCountLabel((overview?.summary.offline ?? 0) + (overview?.summary.stale ?? 0) + (overview?.summary.revoked ?? 0))} unavailable`}
           />
         </div>
 
@@ -479,7 +483,7 @@ function GroupTile({ cluster }: { cluster: DashboardLabelClusterRecord }) {
       <small>
         {cluster.kind === "date"
           ? `${cluster.total} network samples, ${formatLowerBoundCount(cluster.warnings, cluster.counts_truncated)} alerts${boundedSuffix}, ${formatLowerBoundCount(cluster.running_jobs, cluster.counts_truncated)} running jobs${boundedSuffix}`
-          : `${cluster.online}/${cluster.total} currently reachable, ${formatLowerBoundCount(cluster.warnings, cluster.counts_truncated)} alerts${boundedSuffix}, ${formatLowerBoundCount(cluster.running_jobs, cluster.counts_truncated)} active job assignments${boundedSuffix}`}
+          : `${cluster.online}/${cluster.total} online, ${cluster.offline} offline, ${cluster.stale} stale, ${cluster.revoked} access revoked, ${formatLowerBoundCount(cluster.warnings, cluster.counts_truncated)} alerts${boundedSuffix}, ${formatLowerBoundCount(cluster.running_jobs, cluster.counts_truncated)} active job assignments${boundedSuffix}`}
         , {formatBitsPerSecond(cluster.rx_bps + cluster.tx_bps)} aggregate interval-average rate
       </small>
     </div>
@@ -498,7 +502,9 @@ function WarningDefinitionStrip({ overview }: { overview: DashboardOverviewRecor
   const groupedAlertsTruncated =
     overview?.label_clusters.some((cluster) => cluster.counts_truncated) ?? false;
   const unavailableVps =
-    (overview?.summary.offline ?? 0) + (overview?.summary.stale ?? 0);
+    (overview?.summary.offline ?? 0) +
+    (overview?.summary.stale ?? 0) +
+    (overview?.summary.revoked ?? 0);
   const definitions = [
     {
       detail: `${criticalAlerts} critical, ${warningAlerts} warning, ${infoAlerts} info${alertsTruncated ? " in loaded page" : ""}`,
@@ -516,7 +522,7 @@ function WarningDefinitionStrip({ overview }: { overview: DashboardOverviewRecor
       value: formatLowerBoundCount(groupedAlerts, groupedAlertsTruncated),
     },
     {
-      detail: "offline and stale VPSs in the retained overview scope",
+      detail: "offline, stale, and access-revoked VPSs in the retained overview scope",
       label: "Unavailable VPS",
       value: String(unavailableVps),
     },
@@ -753,8 +759,4 @@ function formatBitsPerSecond(value: number): string {
     return `${(value / 1_000).toFixed(1)} Kbps`;
   }
   return `${Math.round(value)} bps`;
-}
-
-function windowLabel(window: DashboardWindow): string {
-  return window === "all" ? "All" : window;
 }

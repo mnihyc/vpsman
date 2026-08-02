@@ -50,6 +50,7 @@ import {
 import { useDashboardData } from "./hooks/useDashboardData";
 import { useFleetViews } from "./hooks/useFleetViews";
 import { useValueTooltips } from "./useValueTooltips";
+import { parsePublicShareRouteHash } from "./publicShareRoute";
 import { agentDisplayState } from "./agentDisplayState";
 import type {
   JobDispatchPreset,
@@ -316,6 +317,16 @@ const NetworkMetricsPanel = retryableLazy(() =>
     default: module.NetworkMetricsPanel,
   })),
 );
+const PingTargetsPanel = retryableLazy(() =>
+  import("./panels/observability/PingTargetsPanel").then((module) => ({
+    default: module.PingTargetsPanel,
+  })),
+);
+const SharedViewsPanel = retryableLazy(() =>
+  import("./panels/observability/SharedViewsPanel").then((module) => ({
+    default: module.SharedViewsPanel,
+  })),
+);
 const AlertsPanel = retryableLazy(() =>
   import("./panels/observability/AlertsPanel").then((module) => ({
     default: module.AlertsPanel,
@@ -498,6 +509,10 @@ function getScopedPageTitle(view: ActiveView, subpage: string): string {
     switch (subpage) {
       case "network_metrics":
         return "Network metrics";
+      case "ping_targets":
+        return "Ping targets";
+      case "shared_views":
+        return "Shared views";
       case "alerts":
         return "Alerts";
       case "webhooks":
@@ -612,6 +627,10 @@ function getScopedPageDescription(view: ActiveView, subpage: string): string {
     switch (subpage) {
       case "network_metrics":
         return "Latency, loss, throughput, tunnels, endpoints, and alerts";
+      case "ping_targets":
+        return "Reusable Ping definitions, frozen assignments, primary probes, and runtime evidence";
+      case "shared_views":
+        return "Persistent public monitoring views, expiry, access evidence, extension, and revocation";
       case "alerts":
         return "Alert policies, active context, channels, and delivery evidence";
       case "webhooks":
@@ -871,6 +890,7 @@ export function App() {
     useState<"register" | null>(null);
   const [networkAdapterWorkflowIntent, setNetworkAdapterWorkflowIntent] =
     useState<"runtime_tunnel" | "routing_cost" | null>(null);
+  const [sharedViewSeed, setSharedViewSeed] = useState<string | null>(null);
   const [privilegeGrant, setPrivilegeGrant] = useState<PrivilegeGrant | null>(
     null,
   );
@@ -1134,6 +1154,37 @@ export function App() {
       ? dashboard.agents.find((agent) => agent.id === clientId) ?? null
       : null;
   }, [activeSubpage, activeView, dashboard.agents]);
+  useEffect(() => {
+    if (!dashboard.fleetCoreEvidenceAvailable) {
+      return;
+    }
+    const visibleClientIds = new Set(dashboard.agents.map((agent) => agent.id));
+    setSelectedAgentId((current) =>
+      current && !visibleClientIds.has(current) ? null : current,
+    );
+    setWorkflowTargetIntent((current) =>
+      current && !visibleClientIds.has(current.clientId) ? null : current,
+    );
+    setTransferTargetIntent((current) =>
+      current && !visibleClientIds.has(current.clientId) ? null : current,
+    );
+    const detailClientId =
+      activeView === "Fleet" ? fleetDetailClientId(activeSubpage) : null;
+    if (!detailClientId || visibleClientIds.has(detailClientId)) {
+      return;
+    }
+    setActiveSubpages((current) => ({
+      ...current,
+      Fleet: "instances",
+    }));
+    requestSidebarFocus("Fleet", "instances");
+    writeConsoleRoute("Fleet", "instances", "replace");
+  }, [
+    activeSubpage,
+    activeView,
+    dashboard.agents,
+    dashboard.fleetCoreEvidenceAvailable,
+  ]);
   const visibleSummary = useMemo(
     () =>
       displaySummaryForAgents(visibleAgents, dashboard.summary.running_jobs),
@@ -1267,9 +1318,9 @@ export function App() {
     activeView === "Fleet" && !dashboard.fleetCoreEvidenceAvailable
       ? "Fleet inventory evidence unavailable; retry before assuming the fleet is empty"
       : activeView === "Fleet" && hasFleetScope
-      ? `${visibleSummary.online} visible live / ${visibleSummary.never + visibleSummary.unknown} no contact / ${visibleSummary.total} visible / ${dashboard.summary.total} total`
+      ? `${visibleSummary.online} visible live / ${visibleSummary.offline} offline / ${visibleSummary.stale} stale / ${visibleSummary.revoked} access revoked / ${visibleSummary.never + visibleSummary.unknown} no contact / ${visibleSummary.total} visible / ${dashboard.summary.total} total`
       : activeView === "Fleet"
-        ? `${visibleSummary.online} live / ${visibleSummary.never + visibleSummary.unknown} no contact / ${visibleSummary.total} total`
+        ? `${visibleSummary.online} live / ${visibleSummary.offline} offline / ${visibleSummary.stale} stale / ${visibleSummary.revoked} access revoked / ${visibleSummary.never + visibleSummary.unknown} no contact / ${visibleSummary.total} total`
         : getScopedPageDescription(activeView, activeSubpage);
 
   useEffect(() => {
@@ -1291,6 +1342,9 @@ export function App() {
       );
     }
     const applyLocationRoute = () => {
+      if (parsePublicShareRouteHash(window.location.hash)) {
+        return;
+      }
       const route = readConsoleRouteFromLocation();
       if (!route) {
         setActiveView("Home");
@@ -1615,17 +1669,20 @@ export function App() {
         onSelect: () => selectView(view, subpage.id),
       })),
     );
-    const vpsItems = dashboard.agents.map((agent) => ({
-      id: `vps:${agent.id}`,
-      group: "VPS" as const,
-      label: agent.display_name || agent.id,
-      detail: `${agent.status} · ${agent.id}${agent.tags.length ? ` · ${agent.tags.join(", ")}` : ""}`,
-      keywords: `server agent instance ${agent.id} ${agent.tags.join(" ")} ${agent.last_ip ?? ""} ${agent.registration_ip ?? ""}`,
-      onSelect: () => {
-        fleetViews.setFleetQuery(`id:${agent.id}`);
-        releaseRoutes.openVpsDetail(agent);
-      },
-    }));
+    const vpsItems = dashboard.agents.map((agent) => {
+      const displayState = agentDisplayState(agent);
+      return {
+        id: `vps:${agent.id}`,
+        group: "VPS" as const,
+        label: agent.display_name || agent.id,
+        detail: `${displayState.label} · ${displayState.detail} · ${agent.id}${agent.tags.length ? ` · ${agent.tags.join(", ")}` : ""}`,
+        keywords: `server agent instance ${agent.id} ${agent.status} ${displayState.label} ${agent.tags.join(" ")} ${agent.last_ip ?? ""} ${agent.registration_ip ?? ""}`,
+        onSelect: () => {
+          fleetViews.setFleetQuery(`id:${agent.id}`);
+          releaseRoutes.openVpsDetail(agent);
+        },
+      };
+    });
     const jobItems = dashboard.jobs.map((job) => ({
       id: `job:${job.id}`,
       group: "Job" as const,
@@ -1742,6 +1799,7 @@ export function App() {
       <HomePanel
         agents={visibleAgents}
         allAgents={dashboard.agents}
+        apiToken={dashboard.apiToken}
         auditLogs={dashboard.audits}
         backupArtifacts={homeScopedRecords.backupArtifacts}
         backups={homeScopedRecords.backups}
@@ -1791,7 +1849,6 @@ export function App() {
         telemetryError={dashboard.dashboardOverviewError}
         telemetryLoading={dashboard.dashboardOverviewLoading}
         telemetryRollups={dashboard.telemetryRollups}
-        telemetryTunnels={dashboard.telemetryTunnels}
         onDashboardNavigate={navigateDashboardTarget}
         onDashboardPreferencesChange={dashboard.updateDashboardPreferences}
         onDashboardRefresh={() => void dashboard.loadDashboardOverview()}
@@ -1806,7 +1863,6 @@ export function App() {
         onOpenJobs={() => selectView("Jobs", "history")}
         onOpenNetwork={openNetworkWorkflow}
         onOpenNetworkEvidence={releaseRoutes.openNetworkEvidence}
-        onOpenProcesses={releaseRoutes.openProcess}
         onOpenSchedule={() => selectView("Automation", "schedules")}
         onOpenSystemCapacity={() => selectView("System", "capacity")}
         onOpenTerminal={releaseRoutes.openTerminal}
@@ -1919,6 +1975,7 @@ export function App() {
       <VpsDetailPanel
         agent={selectedAgentForDetail}
         agents={dashboard.agents}
+        apiToken={dashboard.apiToken}
         apiError={combineErrors(
           dashboard.apiError,
           dashboard.jobsError,
@@ -2276,6 +2333,28 @@ export function App() {
     );
   }
 
+  function renderPingTargetsPanel() {
+    return (
+      <PingTargetsPanel
+        agents={dashboard.agents}
+        apiToken={dashboard.apiToken}
+        onResolveTargets={dashboard.resolveJobTargets}
+      />
+    );
+  }
+
+  function renderSharedViewsPanel() {
+    return (
+      <SharedViewsPanel
+        agents={dashboard.agents}
+        apiToken={dashboard.apiToken}
+        initialSelectorExpression={sharedViewSeed ?? "*"}
+        onInitialSelectorConsumed={() => setSharedViewSeed(null)}
+        onResolveTargets={dashboard.resolveBulkPreview}
+      />
+    );
+  }
+
   function renderJobPanel(panelSubpage: string) {
     return (
       <JobsPanel
@@ -2334,6 +2413,7 @@ export function App() {
         commandTemplates={dashboard.commandTemplates}
         commandTemplatesTruncated={dashboard.commandTemplatesTruncated}
         dispatchPreset={jobDispatchPreset}
+        fleetEvidenceAvailable={dashboard.fleetCoreEvidenceAvailable}
         fileTransfers={dashboard.fileTransfers}
         fileTransfersTruncated={dashboard.fileTransfersTruncated}
         fileTransferSources={dashboard.fileTransferSources}
@@ -2454,6 +2534,7 @@ export function App() {
         <TopologyPanel
         activeSubpage={panelSubpage}
         agents={dashboard.agents}
+        apiToken={dashboard.apiToken}
         configurationSources={dashboard.configurationSources}
         configurationSourcesEvidenceState={
           dashboard.configurationSourcesLoading
@@ -2732,6 +2813,7 @@ export function App() {
         return (
           <FleetMonitorPanel
             agents={visibleAgents}
+            apiToken={dashboard.apiToken}
             apiError={dashboard.apiError}
             backups={dashboard.backups}
             failedJobCount={
@@ -2749,14 +2831,12 @@ export function App() {
             )}
             telemetryNetworkRates={dashboard.telemetryNetworkRates}
             telemetryRollups={dashboard.telemetryRollups}
-            telemetryTunnels={dashboard.telemetryTunnels}
             title="VPS cards"
-            onOpenBackup={openBackupWorkflow}
-            onOpenFiles={releaseRoutes.openFiles}
-            onOpenNetwork={openNetworkWorkflow}
-            onOpenProcesses={releaseRoutes.openProcess}
-            onOpenTerminal={releaseRoutes.openTerminal}
             onOpenVpsDetail={releaseRoutes.openVpsDetail}
+            onOpenSharedViews={(selectorExpression) => {
+              setSharedViewSeed(selectorExpression);
+              selectView("Observability", "shared_views");
+            }}
           />
         );
       }
@@ -2833,6 +2913,8 @@ export function App() {
       if (activeSubpage === "fleet_metrics") return renderFleetMetricsPanel();
       if (activeSubpage === "network_metrics")
         return renderNetworkMetricsPanel();
+      if (activeSubpage === "ping_targets") return renderPingTargetsPanel();
+      if (activeSubpage === "shared_views") return renderSharedViewsPanel();
       if (
         activeSubpage === "alerts" ||
         activeSubpage.startsWith("alerts:policy:")
@@ -3149,6 +3231,8 @@ function observabilityReleaseSubpage(subpage: string) {
     [
       "fleet_metrics",
       "network_metrics",
+      "ping_targets",
+      "shared_views",
       "alerts",
       "webhooks",
       "dashboards",
@@ -3207,11 +3291,15 @@ function displaySummaryForAgents(
     (state) => state.label === "Never connected",
   ).length;
   const stale = states.filter((state) => state.label === "Stale").length;
-  const unknown = agents.length - online - offline - never - stale;
+  const revoked = states.filter(
+    (state) => state.label === "Access revoked",
+  ).length;
+  const unknown = agents.length - online - offline - never - revoked - stale;
   return {
     never,
     offline,
     online,
+    revoked,
     running_jobs: runningJobs,
     stale,
     total: agents.length,

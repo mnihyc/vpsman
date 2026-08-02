@@ -735,6 +735,7 @@ export function HostServicesPanel({
           rowActions={rowActions}
           rows={services}
           searchPlaceholder="Search service, description, or state"
+          showMobileRowActions={false}
           singleExpandedRow
           storageKey="vpsman.remote.hostServices"
           title="Host service inventory"

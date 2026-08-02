@@ -106,7 +106,7 @@ export function TopologyNetworkTestControls({
   const [probeIntervalMs, setProbeIntervalMs] = useState(500);
   const [speedDurationSecs, setSpeedDurationSecs] = useState(3);
   const [speedMaxBytesMiB, setSpeedMaxBytesMiB] = useState(16);
-  const [speedRateLimitKbps, setSpeedRateLimitKbps] = useState(100_000);
+  const [speedRateLimitMbps, setSpeedRateLimitMbps] = useState(100);
   const [speedPort, setSpeedPort] = useState(5201);
   const [speedConnectTimeoutMs, setSpeedConnectTimeoutMs] = useState(5000);
   const [lastPayloadHash, setLastPayloadHash] = useState<string | null>(null);
@@ -176,7 +176,7 @@ export function TopologyNetworkTestControls({
   const speedSafetySummary = formatSpeedSafety(
     speedDurationSecs,
     speedMaxBytesMiB,
-    speedRateLimitKbps,
+    Math.round(speedRateLimitMbps * 1_000),
     speedPort,
     speedConnectTimeoutMs,
   );
@@ -278,7 +278,7 @@ export function TopologyNetworkTestControls({
     const boundedSpeedMaxBytes =
       clampInteger(speedMaxBytesMiB, 1, 256) * 1024 * 1024;
     const boundedSpeedRateLimitKbps = clampInteger(
-      speedRateLimitKbps,
+      Math.round(speedRateLimitMbps * 1_000),
       64,
       1_000_000,
     );
@@ -806,18 +806,19 @@ export function TopologyNetworkTestControls({
                   value={speedMaxBytesMiB}
                 />
               </label>
-              <label title="Required bandwidth safety cap.">
-                <span>Rate limit Kbps</span>
+              <label title="Required bandwidth safety cap. The job contract remains exact Kbps internally.">
+                <span>Rate limit Mbps</span>
                 <input
-                  aria-label="Network speed test rate limit Kbps"
-                  max={1_000_000}
-                  min={64}
+                  aria-label="Network speed test rate limit Mbps"
+                  max={1_000}
+                  min={0.064}
                   onChange={(event) => {
                     clearNetworkReview();
-                    setSpeedRateLimitKbps(Number(event.target.value));
+                    setSpeedRateLimitMbps(Number(event.target.value));
                   }}
+                  step="0.001"
                   type="number"
-                  value={speedRateLimitKbps}
+                  value={speedRateLimitMbps}
                 />
               </label>
               <label title="TCP port opened for the temporary speed-test server.">

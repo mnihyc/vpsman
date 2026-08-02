@@ -2914,8 +2914,8 @@ fn parse_telemetry_rollups_args(
     }
     if let Some(bucket_secs) = bucket_secs {
         anyhow::ensure!(
-            bucket_secs == 60,
-            "telemetry-rollups --bucket-secs must be 60"
+            bucket_secs >= 60 && bucket_secs % 60 == 0,
+            "telemetry-rollups --bucket-secs must be at least 60 and divisible by 60"
         );
     }
     Ok((limit, client_id, bucket_secs, latest))
@@ -3015,8 +3015,8 @@ fn parse_telemetry_network_rates_args(parts: &[&str]) -> Result<TelemetryNetwork
     }
     if let Some(bucket_secs) = bucket_secs {
         anyhow::ensure!(
-            bucket_secs == 60,
-            "telemetry-network-rates --bucket-secs must be 60"
+            bucket_secs >= 60 && bucket_secs % 60 == 0,
+            "telemetry-network-rates --bucket-secs must be at least 60 and divisible by 60"
         );
     }
     Ok(TelemetryNetworkRateArgs {

@@ -21,6 +21,10 @@ import {
 } from "../../components/TimeSeriesChart";
 import { consolePalette, dashboardChartColors } from "../../colorPalette";
 import { formatBoundedCount, formatLowerBoundCount } from "../../constants";
+import {
+  dashboardWindowDurationSeconds,
+  dashboardWindowLongLabel,
+} from "../../dashboardQuery";
 import type {
   DashboardLabelClusterRecord,
   DashboardNetworkRecord,
@@ -34,6 +38,7 @@ import type {
 import { INTERFACE_RATE_DEFINITION } from "../../telemetryMetrics";
 import { formatCompactTime } from "../../utils";
 import { replaceHistoryEntry } from "../../historyEntryState";
+import { agentStatusPresentation } from "../../agentDisplayState";
 
 type ObservabilityDashboardsPanelProps = {
   error: string | null;
@@ -171,7 +176,7 @@ export function ObservabilityDashboardsPanel({
   const dashboardScope = overview?.scope.label ?? scopeLabel(preferences);
   const dashboardRange = overview
     ? `${formatCompactTime(overview.time_range.start_at)} - ${formatCompactTime(overview.time_range.end_at)}`
-    : `${windowLabel(window)} window`;
+    : `${dashboardWindowLongLabel(window)} window`;
   const freshness = dashboardFreshnessSummary(overview, window);
   const sourceSummary = dashboardSourceSummary(overview);
   const exportPayload = useMemo(
@@ -308,7 +313,7 @@ export function ObservabilityDashboardsPanel({
             value={selectedPreset.label}
           />
           <MetricTile
-            detail={`${windowLabel(window)}; ${dashboardRange}`}
+            detail={`${dashboardWindowLongLabel(window)}; ${dashboardRange}`}
             label="Telemetry query"
             value={dashboardScope}
           />
@@ -638,8 +643,8 @@ function FleetOperationsDashboard({
         />
         {degradedAgents.slice(0, 8).map((agent) => (
           <div className="dashboardWidgetRow" key={agent.client_id}>
-            <ConsoleStatusBadge tone="warning">
-              {dashboardAgentStatusLabel(agent.status)}
+            <ConsoleStatusBadge tone={agentStatusPresentation(agent.status).tone}>
+              {agentStatusPresentation(agent.status).label}
             </ConsoleStatusBadge>
             <strong>{agent.label || agent.client_id || "Unnamed VPS"}</strong>
             <span>
@@ -923,7 +928,9 @@ function GroupDashboard({
               <>
                 {countPhrase(cluster.total, "VPS")} ·{" "}
                 {countPhrase(cluster.online, "online")} ·{" "}
-                {countPhrase(cluster.stale, "stale")}
+                {countPhrase(cluster.stale, "stale")} ·{" "}
+                {countPhrase(cluster.offline, "offline")} ·{" "}
+                {countPhrase(cluster.revoked, "access revoked")}
                 {cluster.counts_truncated
                   ? " · alert/job counts use loaded operations page"
                   : ""}
@@ -980,7 +987,7 @@ function dashboardFreshnessSummary(
 ): DashboardCoverageSummary {
   if (!overview) {
     return {
-      detail: `Selected: ${windowLabel(selectedWindow)}`,
+      detail: `Selected: ${dashboardWindowLongLabel(selectedWindow)}`,
       isSparse: false,
       networkPointCount: 0,
       resourcePointCount: 0,
@@ -997,7 +1004,7 @@ function dashboardFreshnessSummary(
     overview.time_range.start_at,
     overview.time_range.end_at,
   );
-  const selectedSeconds = windowDurationSeconds(selectedWindow);
+  const selectedSeconds = dashboardWindowDurationSeconds(selectedWindow);
   const pointCount = resourcePointCount + networkPointCount;
   const bucketTimes = uniqueSortedTimes([
     ...resourceCurveBucketTimes(overview.resource_curve.series),
@@ -1015,7 +1022,7 @@ function dashboardFreshnessSummary(
     selectedSeconds,
   });
   return {
-    detail: `${isSparse ? "Sparse" : "Available"} ${windowLabel(selectedWindow)}: ${formatDuration(sampledSeconds)} sampled · ${countPhrase(pointCount, "sample")} (${countPhrase(resourcePointCount, "resource sample")} · ${countPhrase(networkPointCount, "network sample")}) · API range ${formatDuration(apiRangeSeconds)}`,
+    detail: `${isSparse ? "Sparse" : "Available"} ${dashboardWindowLongLabel(selectedWindow)}: ${formatDuration(sampledSeconds)} sampled · ${countPhrase(pointCount, "sample")} (${countPhrase(resourcePointCount, "resource sample")} · ${countPhrase(networkPointCount, "network sample")}) · API range ${formatDuration(apiRangeSeconds)}`,
     isSparse,
     networkPointCount,
     resourcePointCount,
@@ -1079,7 +1086,7 @@ function dashboardSourceCounts(overview: DashboardOverviewRecord | null): {
           : "Running job counts unavailable";
   return {
     alertDetail: `${countPhrase(overview.operations.active_alerts, "active alert", overview.operations.alerts_truncated)} · ${countPhrase(overview.operations.critical_alerts, "critical")} · ${countPhrase(overview.operations.warning_alerts, "warning")} from ${overview.operations.alerts_truncated ? "loaded operations page" : "operations"}`,
-    fleetDetail: `${fleetHealthValue(overview.summary)} online · ${countPhrase(overview.summary.stale, "stale")} · ${countPhrase(summaryOfflineCount(overview.summary), "offline")} from summary`,
+    fleetDetail: `${fleetHealthValue(overview.summary)} online · ${countPhrase(overview.summary.stale, "stale")} · ${countPhrase(overview.summary.revoked, "access revoked")} · ${countPhrase(summaryOfflineCount(overview.summary), "offline")} from summary`,
     jobDetail,
     runningJobs,
     runningJobsTruncated,
@@ -1108,7 +1115,7 @@ function widgetCoverageNote({
     uniqueTimes[0],
     uniqueTimes[uniqueTimes.length - 1],
   );
-  const selectedSeconds = windowDurationSeconds(selectedWindow);
+  const selectedSeconds = dashboardWindowDurationSeconds(selectedWindow);
   const sparse = isSparseCoverage({
     bucketCount: uniqueTimes.length,
     pointCount,
@@ -1117,13 +1124,13 @@ function widgetCoverageNote({
   });
   if (pointCount === 0) {
     return {
-      detail: `${label}: no samples for ${windowLabel(selectedWindow)}`,
+      detail: `${label}: no samples for ${dashboardWindowLongLabel(selectedWindow)}`,
       tone: "warning",
     };
   }
   if (sparse) {
     return {
-      detail: `Sparse ${windowLabel(selectedWindow)}: ${uniqueTimes.length} buckets over ${formatDuration(rangeSeconds)}. Drill down before judging trend.`,
+      detail: `Sparse ${dashboardWindowLongLabel(selectedWindow)}: ${uniqueTimes.length} buckets over ${formatDuration(rangeSeconds)}. Drill down before judging trend.`,
       tone: "warning",
     };
   }
@@ -1195,17 +1202,6 @@ function isSparseCoverage({
   return rangeSeconds > 0 && rangeSeconds < selectedSeconds * 0.25;
 }
 
-function windowDurationSeconds(window: DashboardWindow): number | null {
-  if (window === "15m") return 15 * 60;
-  if (window === "1h") return 60 * 60;
-  if (window === "6h") return 6 * 60 * 60;
-  if (window === "24h") return 24 * 60 * 60;
-  if (window === "7d") return 7 * 24 * 60 * 60;
-  if (window === "14d") return 14 * 24 * 60 * 60;
-  if (window === "30d") return 30 * 24 * 60 * 60;
-  return null;
-}
-
 function formatDuration(seconds: number): string {
   if (seconds <= 0) {
     return "no continuous range";
@@ -1234,7 +1230,7 @@ function fleetHealthValue(summary: DashboardSummaryRecord): string {
 }
 
 function fleetHealthDetail(summary: DashboardSummaryRecord): string {
-  return `${countPhrase(summary.stale, "stale")} · ${countPhrase(summaryOfflineCount(summary), "offline")}`;
+  return `${countPhrase(summary.stale, "stale")} · ${countPhrase(summary.revoked, "access revoked")} · ${countPhrase(summaryOfflineCount(summary), "offline")}`;
 }
 
 function summaryOfflineCount(summary: DashboardSummaryRecord): number | null {
@@ -1245,29 +1241,16 @@ function summaryOfflineCount(summary: DashboardSummaryRecord): number | null {
   const total = finiteCount(summary.total);
   const online = finiteCount(summary.online);
   const stale = finiteCount(summary.stale);
-  if (total === null || online === null || stale === null) {
+  const revoked = finiteCount(summary.revoked);
+  if (
+    total === null ||
+    online === null ||
+    stale === null ||
+    revoked === null
+  ) {
     return null;
   }
-  return Math.max(0, total - online - stale);
-}
-
-function dashboardAgentStatusLabel(status: string | null | undefined): string {
-  if (!status) {
-    return "State unavailable";
-  }
-  if (status === "offline" || status === "disconnected") {
-    return "Offline";
-  }
-  if (status === "never") {
-    return "Never connected";
-  }
-  if (status === "stale") {
-    return "Stale";
-  }
-  if (status === "online") {
-    return "Reported active";
-  }
-  return status.replace(/_/g, " ");
+  return Math.max(0, total - online - stale - revoked);
 }
 
 function countValue(
@@ -1490,15 +1473,4 @@ function formatBytes(value: number | null | undefined): string {
 function scopeLabel(preferences: DashboardPreferences): string {
   if (preferences.scopeKind === "all") return "All VPS";
   return `${preferences.scopeKind}:${preferences.scopeValue || "unselected"}`;
-}
-
-function windowLabel(window: DashboardWindow): string {
-  if (window === "15m") return "15 min";
-  if (window === "1h") return "1 hour";
-  if (window === "6h") return "6 hours";
-  if (window === "24h") return "24 hours";
-  if (window === "7d") return "7 days";
-  if (window === "14d") return "14 days";
-  if (window === "30d") return "30 days";
-  return "All time";
 }

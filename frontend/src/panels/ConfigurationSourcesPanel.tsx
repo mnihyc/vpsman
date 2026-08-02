@@ -290,6 +290,13 @@ export function ConfigurationSourcesPanel({
     setFeedback(null);
   }
 
+  function selectView(nextView: "effective" | "presets") {
+    if (nextView === view) return;
+    resetMessages();
+    clearEffectiveConfigInspection();
+    setView(nextView);
+  }
+
   function clearEffectiveConfigInspection() {
     inspectionGeneration.current += 1;
     setRenderedConfig(null);
@@ -968,7 +975,7 @@ export function ConfigurationSourcesPanel({
             aria-selected={view === "effective"}
             className={view === "effective" ? "active" : ""}
             id={tabId("configuration-sources", "effective")}
-            onClick={() => setView("effective")}
+            onClick={() => selectView("effective")}
             role="tab"
             tabIndex={view === "effective" ? 0 : -1}
             type="button"
@@ -980,7 +987,7 @@ export function ConfigurationSourcesPanel({
             aria-selected={view === "presets"}
             className={view === "presets" ? "active" : ""}
             id={tabId("configuration-sources", "presets")}
-            onClick={() => setView("presets")}
+            onClick={() => selectView("presets")}
             role="tab"
             tabIndex={view === "presets" ? 0 : -1}
             type="button"

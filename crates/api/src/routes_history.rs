@@ -469,13 +469,30 @@ pub(crate) async fn export_history(
                     json!(state.repo.list_audit_logs(limit).await?),
                 );
             }
+            HistoryDomain::TelemetrySamples => {
+                data.insert(
+                    domain.as_str().to_string(),
+                    json!(
+                        state
+                            .repo
+                            .list_telemetry_samples(
+                                limit,
+                                query.client_id.as_deref(),
+                                None,
+                                None,
+                                false,
+                            )
+                            .await?
+                    ),
+                );
+            }
             HistoryDomain::TelemetryRollups => {
                 data.insert(
                     domain.as_str().to_string(),
                     json!(
                         state
                             .repo
-                            .list_telemetry_rollups(limit, query.client_id.as_deref(), None)
+                            .list_telemetry_rollups(limit, query.client_id.as_deref(), None, false,)
                             .await?
                     ),
                 );
@@ -491,7 +508,19 @@ pub(crate) async fn export_history(
                                 query.client_id.as_deref(),
                                 None,
                                 None,
+                                false,
                             )
+                            .await?
+                    ),
+                );
+            }
+            HistoryDomain::TelemetryPingRollups => {
+                data.insert(
+                    domain.as_str().to_string(),
+                    json!(
+                        state
+                            .repo
+                            .list_ping_rollups_for_export(query.client_id.as_deref(), limit,)
                             .await?
                     ),
                 );
@@ -538,7 +567,7 @@ pub(crate) async fn export_history(
             HistoryDomain::NetworkObservations => {
                 data.insert(
                     domain.as_str().to_string(),
-                    json!(state.repo.list_network_observations(limit).await?),
+                    json!(state.repo.list_network_observations(limit, false).await?),
                 );
             }
             HistoryDomain::TopologyHistory => {
@@ -546,7 +575,7 @@ pub(crate) async fn export_history(
                     domain.as_str().to_string(),
                     json!({
                         "graph": state.repo.topology_graph(limit).await?,
-                        "trends": state.repo.list_network_observation_trends(limit).await?,
+                        "trends": state.repo.list_network_observation_trends(limit, false).await?,
                     }),
                 );
             }
@@ -632,6 +661,7 @@ fn history_retention_authority_scope(domain: HistoryDomain) -> &'static str {
     match domain {
         HistoryDomain::AuditLogs => SCOPE_AUDIT_READ,
         HistoryDomain::SystemMetricRollups
+        | HistoryDomain::TelemetrySamples
         | HistoryDomain::TelemetryRollups
         | HistoryDomain::TelemetryNetworkRates
         | HistoryDomain::TrafficCounterSamples
@@ -639,7 +669,9 @@ fn history_retention_authority_scope(domain: HistoryDomain) -> &'static str {
         | HistoryDomain::GatewaySessions => "inventory:write",
         HistoryDomain::JobOutputs => "jobs:write",
         HistoryDomain::BackupArtifacts => "backups:write",
-        HistoryDomain::NetworkObservations | HistoryDomain::TopologyHistory => "network:write",
+        HistoryDomain::NetworkObservations
+        | HistoryDomain::TopologyHistory
+        | HistoryDomain::TelemetryPingRollups => "network:write",
     }
 }
 
@@ -648,8 +680,11 @@ fn history_export_scope(domain: HistoryDomain) -> &'static str {
         HistoryDomain::JobOutputs => SCOPE_JOBS_READ,
         HistoryDomain::BackupArtifacts => SCOPE_BACKUPS_READ,
         HistoryDomain::AuditLogs => SCOPE_AUDIT_READ,
-        HistoryDomain::NetworkObservations | HistoryDomain::TopologyHistory => SCOPE_NETWORK_READ,
+        HistoryDomain::NetworkObservations
+        | HistoryDomain::TopologyHistory
+        | HistoryDomain::TelemetryPingRollups => SCOPE_NETWORK_READ,
         HistoryDomain::SystemMetricRollups
+        | HistoryDomain::TelemetrySamples
         | HistoryDomain::TelemetryRollups
         | HistoryDomain::TelemetryNetworkRates
         | HistoryDomain::TrafficCounterSamples

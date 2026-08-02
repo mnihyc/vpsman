@@ -1,8 +1,9 @@
 use super::models::{
     AgentAuthConfig, AgentBackupConfig, AgentConfig, AgentExecutionConfig, AgentNetworkConfig,
-    AgentNoiseConfig, AgentProcessInventorySource, AgentRuntimeStatusTelemetryPlan,
-    AgentRuntimeTrafficSource, AgentTelemetryConfig, AgentTelemetrySource, AgentUpdateConfig,
-    AgentUserSessionsSource, ServerEndpoint,
+    AgentNoiseConfig, AgentPingProbeKind, AgentPingTarget, AgentProcessInventorySource,
+    AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource, AgentTelemetryConfig,
+    AgentTelemetrySource, AgentUpdateConfig, AgentUserSessionsSource, ServerEndpoint,
+    MAX_AGENT_PING_TARGETS,
 };
 use crate::{
     validate_runtime_topology_intent, validate_runtime_tunnel_control,
@@ -33,6 +34,9 @@ pub fn validate_agent_bootstrap_config_shape(config: &AgentConfig) -> Result<(),
     validate_agent_config_shape(config)?;
     if config.network.port_forwarding != crate::AgentPortForwardingConfig::default() {
         return Err("network_port_forwarding_server_managed".to_string());
+    }
+    if !config.network.ping_targets.is_empty() {
+        return Err("network_ping_targets_server_managed".to_string());
     }
     Ok(())
 }
@@ -333,8 +337,52 @@ fn validate_network_config(config: &AgentNetworkConfig) -> Result<(), String> {
         validate_runtime_command_budget(command, "network_ospf_update_command")?;
     }
     validate_runtime_status_telemetry_plans(&config.runtime_status_telemetry_plans)?;
+    validate_ping_targets(&config.ping_targets)?;
     crate::validate_port_forwarding_config(&config.port_forwarding)
         .map_err(|error| format!("network_port_forwarding_invalid:{error}"))?;
+    Ok(())
+}
+
+fn validate_ping_targets(targets: &[AgentPingTarget]) -> Result<(), String> {
+    if targets.len() > MAX_AGENT_PING_TARGETS {
+        return Err("network_ping_targets_too_many".to_string());
+    }
+    let mut ids = std::collections::HashSet::new();
+    for target in targets {
+        if uuid::Uuid::parse_str(target.id.trim()).is_err() {
+            return Err("network_ping_target_id_invalid".to_string());
+        }
+        if !ids.insert(target.id.trim()) {
+            return Err("network_ping_target_id_duplicate".to_string());
+        }
+        if target.generation == 0 {
+            return Err("network_ping_target_generation_invalid".to_string());
+        }
+        if target.name.trim().is_empty()
+            || target.name.len() > 128
+            || target.name.chars().any(char::is_control)
+        {
+            return Err("network_ping_target_name_invalid".to_string());
+        }
+        if target.host.trim().is_empty()
+            || target.host.len() > 253
+            || target
+                .host
+                .chars()
+                .any(|character| character.is_control() || character.is_whitespace())
+        {
+            return Err("network_ping_target_host_invalid".to_string());
+        }
+        match (target.kind, target.port) {
+            (AgentPingProbeKind::Icmp, None) | (AgentPingProbeKind::Tcp, Some(_)) => {}
+            (AgentPingProbeKind::Icmp, Some(_)) => {
+                return Err("network_ping_target_icmp_port_forbidden".to_string())
+            }
+            (AgentPingProbeKind::Tcp, None) => {
+                return Err("network_ping_target_tcp_port_required".to_string())
+            }
+        }
+    }
     Ok(())
 }
 

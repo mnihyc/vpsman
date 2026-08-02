@@ -1525,6 +1525,7 @@ export function JobsPanel({
                 )}
                 rows={jobs}
                 rowsTruncated={jobHistoryTruncated}
+                showMobileRowActions={false}
                 storageKey="vpsman.grid.jobs.history"
                 title="Job records"
               />
@@ -1637,6 +1638,7 @@ export function JobsPanel({
                   ]}
                   rows={targets}
                   searchPlaceholder="Search targets"
+                  showMobileRowActions={false}
                   storageKey="vpsman.jobs.history.targets"
                   title="Target result records"
                 />
@@ -1832,6 +1834,7 @@ export function JobsPanel({
                         rows={outputComparison.groups}
                         searchPlaceholder="Search grouped outcomes"
                         selectable={false}
+                        showMobileOpenRowAction
                         storageKey="vpsman.jobs.history.comparisonGroups"
                         title="Grouped outcomes"
                       />
@@ -2257,6 +2260,7 @@ export function JobsPanel({
                 rows={jobApprovals}
                 rowsTruncated={approvalsTruncated}
                 searchPlaceholder="Search approvals"
+                showMobileRowActions={false}
                 singleExpandedRow
                 storageKey="vpsman.jobs.approvals"
                 title="Job approval queue"

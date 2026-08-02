@@ -255,13 +255,29 @@ impl Repository {
                             object_keys: Vec::new(),
                         })
                     }
-                    HistoryDomain::TelemetryRollups => {
+                    HistoryDomain::TelemetrySamples => {
                         let matched_rows = prune_memory_vec(
+                            &memory.telemetry_samples,
+                            cutoff_unix,
+                            limit,
+                            dry_run,
+                            |row| &row.observed_at,
+                        )
+                        .await?;
+                        Ok(HistoryRetentionPruneOutcome {
+                            matched_rows,
+                            pruned_rows: if dry_run { 0 } else { matched_rows },
+                            object_keys: Vec::new(),
+                        })
+                    }
+                    HistoryDomain::TelemetryRollups => {
+                        let matched_rows = prune_memory_bucket_vec(
                             &memory.telemetry_rollups,
                             cutoff_unix,
                             limit,
                             dry_run,
                             |row| &row.bucket_start,
+                            |row| row.bucket_secs,
                         )
                         .await?;
                         Ok(HistoryRetentionPruneOutcome {
@@ -271,12 +287,29 @@ impl Repository {
                         })
                     }
                     HistoryDomain::TelemetryNetworkRates => {
-                        let matched_rows = prune_memory_vec(
+                        let matched_rows = prune_memory_bucket_vec(
                             &memory.telemetry_network_rates,
                             cutoff_unix,
                             limit,
                             dry_run,
                             |row| &row.bucket_start,
+                            |row| row.bucket_secs,
+                        )
+                        .await?;
+                        Ok(HistoryRetentionPruneOutcome {
+                            matched_rows,
+                            pruned_rows: if dry_run { 0 } else { matched_rows },
+                            object_keys: Vec::new(),
+                        })
+                    }
+                    HistoryDomain::TelemetryPingRollups => {
+                        let matched_rows = prune_memory_bucket_vec(
+                            &memory.telemetry_ping_rollups,
+                            cutoff_unix,
+                            limit,
+                            dry_run,
+                            |row| &row.bucket_start,
+                            |row| row.bucket_secs,
                         )
                         .await?;
                         Ok(HistoryRetentionPruneOutcome {
@@ -717,7 +750,8 @@ impl Repository {
                         EXTRACT(EPOCH FROM observed_at)::bigint AS observed_unix,
                         rx_bytes,
                         tx_bytes,
-                        counter_epoch,
+                        rx_counter_epoch,
+                        tx_counter_epoch,
                         sample_source
                     FROM traffic_counter_samples
                     WHERE ($1::text IS NULL OR client_id = $1)
@@ -739,7 +773,8 @@ impl Repository {
                             observed_unix: row.try_get("observed_unix")?,
                             rx_bytes: row.try_get("rx_bytes")?,
                             tx_bytes: row.try_get("tx_bytes")?,
-                            counter_epoch: row.try_get("counter_epoch")?,
+                            rx_counter_epoch: row.try_get("rx_counter_epoch")?,
+                            tx_counter_epoch: row.try_get("tx_counter_epoch")?,
                             sample_source: row.try_get("sample_source")?,
                         })
                     })
@@ -1044,6 +1079,36 @@ async fn prune_memory_vec<T>(
         .iter()
         .enumerate()
         .filter(|(_, row)| timestamp_before(timestamp(row), cutoff_unix))
+        .map(|(index, _)| index)
+        .take(limit)
+        .collect::<Vec<_>>();
+    let matched_rows = matched_indices.len();
+    if !dry_run {
+        matched_indices.sort_unstable_by(|left, right| right.cmp(left));
+        for index in matched_indices {
+            rows.remove(index);
+        }
+    }
+    Ok(matched_rows as i64)
+}
+
+async fn prune_memory_bucket_vec<T>(
+    rows: &tokio::sync::RwLock<Vec<T>>,
+    cutoff_unix: u64,
+    limit: usize,
+    dry_run: bool,
+    timestamp: impl Fn(&T) -> &str,
+    bucket_secs: impl Fn(&T) -> i32,
+) -> Result<i64> {
+    let mut rows = rows.write().await;
+    let mut matched_indices = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| {
+            timestamp(row).parse::<u64>().is_ok_and(|bucket_start| {
+                bucket_start.saturating_add(bucket_secs(row).max(1) as u64) <= cutoff_unix
+            })
+        })
         .map(|(index, _)| index)
         .take(limit)
         .collect::<Vec<_>>();
@@ -1368,6 +1433,12 @@ async fn prune_postgres_history_domain(
             )
             .await
         }
+        (HistoryDomain::TelemetrySamples, true) => {
+            prune_telemetry_samples(pool, cutoff_unix, limit, true).await
+        }
+        (HistoryDomain::TelemetrySamples, false) => {
+            prune_telemetry_samples(pool, cutoff_unix, limit, false).await
+        }
         (HistoryDomain::TelemetryRollups, true) => {
             prune_telemetry_rollups(pool, cutoff_unix, limit, true).await
         }
@@ -1379,6 +1450,12 @@ async fn prune_postgres_history_domain(
         }
         (HistoryDomain::TelemetryNetworkRates, false) => {
             prune_telemetry_network_rates(pool, cutoff_unix, limit, false).await
+        }
+        (HistoryDomain::TelemetryPingRollups, true) => {
+            prune_telemetry_ping_rollups(pool, cutoff_unix, limit, true).await
+        }
+        (HistoryDomain::TelemetryPingRollups, false) => {
+            prune_telemetry_ping_rollups(pool, cutoff_unix, limit, false).await
         }
         (HistoryDomain::TrafficCounterSamples, true) => {
             prune_traffic_counter_samples(pool, cutoff_unix, limit, true).await
@@ -1553,6 +1630,48 @@ async fn delete_by_id(
     })
 }
 
+async fn prune_telemetry_samples(
+    pool: &sqlx::PgPool,
+    cutoff_unix: u64,
+    limit: i32,
+    dry_run: bool,
+) -> Result<HistoryRetentionPruneOutcome> {
+    let query = if dry_run {
+        r#"
+        SELECT id
+        FROM telemetry_samples
+        WHERE observed_at < to_timestamp($1)
+        ORDER BY observed_at ASC, id ASC
+        LIMIT $2
+        "#
+    } else {
+        r#"
+        WITH doomed AS (
+            SELECT ctid
+            FROM telemetry_samples
+            WHERE observed_at < to_timestamp($1)
+            ORDER BY observed_at ASC, id ASC
+            LIMIT $2
+            FOR UPDATE SKIP LOCKED
+        )
+        DELETE FROM telemetry_samples sample
+        USING doomed
+        WHERE sample.ctid = doomed.ctid
+        RETURNING sample.id
+        "#
+    };
+    let rows = sqlx::query(query)
+        .bind(cutoff_unix as i64)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+    Ok(HistoryRetentionPruneOutcome {
+        matched_rows: rows.len() as i64,
+        pruned_rows: if dry_run { 0 } else { rows.len() as i64 },
+        object_keys: Vec::new(),
+    })
+}
+
 async fn prune_telemetry_rollups(
     pool: &sqlx::PgPool,
     cutoff_unix: u64,
@@ -1563,7 +1682,7 @@ async fn prune_telemetry_rollups(
         r#"
         SELECT client_id, bucket_secs, bucket_start
         FROM telemetry_rollups
-        WHERE bucket_start < to_timestamp($1)
+        WHERE bucket_start + make_interval(secs => GREATEST(bucket_secs, 1)) <= to_timestamp($1)
         ORDER BY bucket_start ASC, client_id ASC
         LIMIT $2
         "#
@@ -1572,7 +1691,7 @@ async fn prune_telemetry_rollups(
         WITH doomed AS (
             SELECT client_id, bucket_secs, bucket_start
             FROM telemetry_rollups
-            WHERE bucket_start < to_timestamp($1)
+            WHERE bucket_start + make_interval(secs => GREATEST(bucket_secs, 1)) <= to_timestamp($1)
             ORDER BY bucket_start ASC, client_id ASC
             LIMIT $2
         )
@@ -1649,7 +1768,7 @@ async fn prune_telemetry_network_rates(
         r#"
         SELECT client_id, interface, bucket_secs, bucket_start
         FROM telemetry_network_rates
-        WHERE bucket_start < to_timestamp($1)
+        WHERE bucket_start + make_interval(secs => GREATEST(bucket_secs, 1)) <= to_timestamp($1)
         ORDER BY bucket_start ASC, client_id ASC, interface ASC
         LIMIT $2
         "#
@@ -1658,7 +1777,7 @@ async fn prune_telemetry_network_rates(
         WITH doomed AS (
             SELECT client_id, interface, bucket_secs, bucket_start
             FROM telemetry_network_rates
-            WHERE bucket_start < to_timestamp($1)
+            WHERE bucket_start + make_interval(secs => GREATEST(bucket_secs, 1)) <= to_timestamp($1)
             ORDER BY bucket_start ASC, client_id ASC, interface ASC
             LIMIT $2
         )
@@ -1669,6 +1788,51 @@ async fn prune_telemetry_network_rates(
           AND rate.bucket_secs = doomed.bucket_secs
           AND rate.bucket_start = doomed.bucket_start
         RETURNING rate.client_id
+        "#
+    };
+    let rows = sqlx::query(query)
+        .bind(cutoff_unix as i64)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+    Ok(HistoryRetentionPruneOutcome {
+        matched_rows: rows.len() as i64,
+        pruned_rows: if dry_run { 0 } else { rows.len() as i64 },
+        object_keys: Vec::new(),
+    })
+}
+
+async fn prune_telemetry_ping_rollups(
+    pool: &sqlx::PgPool,
+    cutoff_unix: u64,
+    limit: i32,
+    dry_run: bool,
+) -> Result<HistoryRetentionPruneOutcome> {
+    let query = if dry_run {
+        r#"
+        SELECT client_id, target_id, generation, bucket_secs, bucket_start
+        FROM telemetry_ping_rollups
+        WHERE bucket_start + make_interval(secs => GREATEST(bucket_secs, 1)) <= to_timestamp($1)
+        ORDER BY bucket_start ASC, client_id ASC, target_id ASC, generation ASC
+        LIMIT $2
+        "#
+    } else {
+        r#"
+        WITH doomed AS (
+            SELECT client_id, target_id, generation, bucket_secs, bucket_start
+            FROM telemetry_ping_rollups
+            WHERE bucket_start + make_interval(secs => GREATEST(bucket_secs, 1)) <= to_timestamp($1)
+            ORDER BY bucket_start ASC, client_id ASC, target_id ASC, generation ASC
+            LIMIT $2
+        )
+        DELETE FROM telemetry_ping_rollups rollup
+        USING doomed
+        WHERE rollup.client_id = doomed.client_id
+          AND rollup.target_id = doomed.target_id
+          AND rollup.generation = doomed.generation
+          AND rollup.bucket_secs = doomed.bucket_secs
+          AND rollup.bucket_start = doomed.bucket_start
+        RETURNING rollup.client_id
         "#
     };
     let rows = sqlx::query(query)

@@ -3,6 +3,7 @@ use std::{
     ffi::CString,
     path::Path,
     process::{ExitStatus, Stdio},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -10,15 +11,18 @@ use anyhow::{ensure, Context, Result};
 use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
+    net::TcpStream,
     process::Command,
+    sync::Semaphore,
     task::JoinHandle,
     time::{self, Duration, Instant},
 };
 use vpsman_common::{
-    render_tunnel_endpoint_config, AgentConfig, AgentMetrics, AgentRuntimeStatusTelemetryPlan,
-    CpuStat, DiskStat, LoadAverage, MemoryStat, NetworkStat, RuntimeTunnelAdapterHealthStat,
-    RuntimeTunnelManager, RuntimeTunnelStat, TunnelAddressFamily, TunnelEndpointSide, TunnelKind,
-    MAX_TELEMETRY_DISKS, MAX_TELEMETRY_NETWORKS, MAX_TELEMETRY_TUNNELS,
+    render_tunnel_endpoint_config, AgentConfig, AgentMetrics, AgentPingProbeKind, AgentPingTarget,
+    AgentRuntimeStatusTelemetryPlan, ConnectionStat, CpuStat, DiskStat, LoadAverage, MemoryStat,
+    NetworkStat, PingTargetResult, RuntimeTunnelAdapterHealthStat, RuntimeTunnelManager,
+    RuntimeTunnelStat, TunnelAddressFamily, TunnelEndpointSide, TunnelKind, MAX_TELEMETRY_DISKS,
+    MAX_TELEMETRY_NETWORKS, MAX_TELEMETRY_PING_RESULTS, MAX_TELEMETRY_TUNNELS,
 };
 
 use crate::child_process::{run_child_with_bounded_output, ChildCleanupPolicy, ChildRunResult};
@@ -31,12 +35,18 @@ use crate::telemetry_custom::{
 use crate::telemetry_traffic::traffic_accumulation_for_plan;
 
 const MAX_LATENCY_PROBE_OUTPUT_BYTES: usize = 16 * 1024;
+pub(crate) const GENERAL_PING_INTERVAL_SECS: u64 = 60;
+const GENERAL_PING_MAX_ATTEMPT_TIMEOUT_SECS: u64 = 8;
 
 #[derive(Default)]
 pub(crate) struct TelemetryRuntimeState {
+    cpu_time_counters: Option<CpuTimeCounters>,
+    connection_collection_failed: bool,
     last_adapter_check_unix: HashMap<String, u64>,
     cached_adapter_tunnels: HashMap<String, RuntimeTunnelStat>,
     latency_monitors: HashMap<String, LatencyMonitorState>,
+    last_ping_check_unix: HashMap<String, u64>,
+    cached_ping_results: HashMap<String, PingTargetResult>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -45,9 +55,60 @@ struct LatencyMonitorState {
     missed_windows: u8,
 }
 
-fn collect_linux_metrics(config: &AgentConfig) -> Result<AgentMetrics> {
+const PROC_STAT_CPU_COUNTER_COUNT: usize = 8;
+const PROC_STAT_IDLE_INDEX: usize = 3;
+const PROC_STAT_IOWAIT_INDEX: usize = 4;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CpuTimeCounters {
+    // user, nice, system, idle, iowait, irq, softirq, steal. Linux reports
+    // guest counters inside user/nice already, so including them would count
+    // the same CPU time twice.
+    values: [u64; PROC_STAT_CPU_COUNTER_COUNT],
+}
+
+impl CpuTimeCounters {
+    fn utilization_ratio_since(self, previous: Self) -> Option<f64> {
+        let mut total_delta = 0_u64;
+        let mut idle_delta = 0_u64;
+        for (index, (current, previous)) in self.values.into_iter().zip(previous.values).enumerate()
+        {
+            let delta = current.checked_sub(previous)?;
+            total_delta = total_delta.checked_add(delta)?;
+            if matches!(index, PROC_STAT_IDLE_INDEX | PROC_STAT_IOWAIT_INDEX) {
+                idle_delta = idle_delta.checked_add(delta)?;
+            }
+        }
+        if total_delta == 0 {
+            return None;
+        }
+        let busy_delta = total_delta.checked_sub(idle_delta)?;
+        Some(((busy_delta as f64) / (total_delta as f64)).clamp(0.0, 1.0))
+    }
+}
+
+fn collect_linux_metrics(
+    config: &AgentConfig,
+    runtime_state: &mut TelemetryRuntimeState,
+) -> Result<AgentMetrics> {
     let proc_root = Path::new(&config.telemetry.proc_root);
     let networks = network_stats(proc_root)?;
+    let connections = match connection_stats(proc_root) {
+        Ok(connections) => {
+            if runtime_state.connection_collection_failed {
+                tracing::info!("Linux socket telemetry collection recovered");
+            }
+            runtime_state.connection_collection_failed = false;
+            Some(connections)
+        }
+        Err(error) => {
+            if !runtime_state.connection_collection_failed {
+                tracing::warn!(%error, "Linux socket telemetry is unavailable");
+            }
+            runtime_state.connection_collection_failed = true;
+            None
+        }
+    };
     let cores = std::thread::available_parallelism()
         .context("failed to determine available CPU cores")?
         .get();
@@ -59,13 +120,49 @@ fn collect_linux_metrics(config: &AgentConfig) -> Result<AgentMetrics> {
             load: load_average(proc_root)?,
             cores: u16::try_from(cores)
                 .context("available CPU core count exceeds protocol range")?,
+            utilization_ratio: cpu_utilization_ratio(proc_root, runtime_state),
         },
         memory: memory_stat(proc_root)?,
         disks: disk_stats(proc_root)?,
         networks,
+        connections,
         tunnels: Vec::new(),
+        ping_results: Vec::new(),
         port_forwarding: None,
     })
+}
+
+fn connection_stats(proc_root: &Path) -> Result<ConnectionStat> {
+    Ok(ConnectionStat {
+        tcp: socket_protocol_count(proc_root, "tcp")?,
+        udp: socket_protocol_count(proc_root, "udp")?,
+    })
+}
+
+fn socket_protocol_count(proc_root: &Path, protocol: &str) -> Result<u64> {
+    let mut found = false;
+    let mut total = 0_u64;
+    for table in [protocol.to_string(), format!("{protocol}6")] {
+        let path = proc_root.join("net").join(&table);
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to read {}", path.display()))
+            }
+        };
+        found = true;
+        let mut lines = content.lines().filter(|line| !line.trim().is_empty());
+        lines
+            .next()
+            .with_context(|| format!("{} has no socket-table header", path.display()))?;
+        let count = u64::try_from(lines.count()).context("socket table row count overflow")?;
+        total = total
+            .checked_add(count)
+            .context("combined socket table row count overflow")?;
+    }
+    ensure!(found, "Linux {protocol} socket tables are missing");
+    Ok(total)
 }
 
 pub(crate) async fn collect_metrics_for_config(
@@ -73,9 +170,10 @@ pub(crate) async fn collect_metrics_for_config(
     runtime_state: &mut TelemetryRuntimeState,
 ) -> Result<AgentMetrics> {
     let mut metrics = if custom_metrics_replaces_linux(config) {
+        runtime_state.cpu_time_counters = None;
         empty_custom_metrics_snapshot(unix_now())
     } else {
-        collect_linux_metrics(config)?
+        collect_linux_metrics(config, runtime_state)?
     };
     apply_custom_metrics_if_configured(config, &mut metrics).await?;
     let reserved_runtime_tunnels = config
@@ -87,11 +185,253 @@ pub(crate) async fn collect_metrics_for_config(
         .tunnels
         .truncate(MAX_TELEMETRY_TUNNELS - reserved_runtime_tunnels);
     collect_runtime_status_telemetry(config, &mut metrics, runtime_state).await;
+    collect_ping_target_telemetry(config, &mut metrics, runtime_state).await;
     metrics.port_forwarding = Some(inspect_port_forwarding(&config.network.port_forwarding).await);
     metrics.disks.truncate(MAX_TELEMETRY_DISKS);
     metrics.networks.truncate(MAX_TELEMETRY_NETWORKS);
     metrics.tunnels.truncate(MAX_TELEMETRY_TUNNELS);
+    metrics
+        .ping_results
+        .truncate(vpsman_common::MAX_TELEMETRY_PING_RESULTS);
     Ok(metrics)
+}
+
+#[derive(Clone)]
+struct PingProbeSettings {
+    ping_argv: Vec<String>,
+    timeout_secs: u64,
+}
+
+async fn collect_ping_target_telemetry(
+    config: &AgentConfig,
+    metrics: &mut AgentMetrics,
+    runtime_state: &mut TelemetryRuntimeState,
+) {
+    let desired = config
+        .network
+        .ping_targets
+        .iter()
+        .map(ping_target_key)
+        .collect::<HashSet<_>>();
+    runtime_state
+        .last_ping_check_unix
+        .retain(|key, _| desired.contains(key));
+    runtime_state
+        .cached_ping_results
+        .retain(|key, _| desired.contains(key));
+
+    let now = metrics.observed_unix;
+    let interval = GENERAL_PING_INTERVAL_SECS;
+    let due = config
+        .network
+        .ping_targets
+        .iter()
+        .filter(|target| {
+            let key = ping_target_key(target);
+            runtime_state
+                .last_ping_check_unix
+                .get(&key)
+                .is_none_or(|last| now.saturating_sub(*last) >= interval)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if !due.is_empty() {
+        let settings = PingProbeSettings {
+            ping_argv: config.network.probe_ping_argv.clone(),
+            // Sixteen targets run in at most two batches of eight. Keeping
+            // each three-attempt probe bounded below the 60-second cadence
+            // prevents a failed fleet from indefinitely delaying the next run.
+            timeout_secs: config
+                .network
+                .status_probe_timeout_secs
+                .clamp(1, GENERAL_PING_MAX_ATTEMPT_TIMEOUT_SECS),
+        };
+        let semaphore = Arc::new(Semaphore::new(8));
+        let mut tasks = tokio::task::JoinSet::new();
+        for target in due {
+            let settings = settings.clone();
+            let semaphore = semaphore.clone();
+            tasks.spawn(async move {
+                let key = ping_target_key(&target);
+                let _permit = semaphore.acquire_owned().await.ok();
+                let result = run_general_ping_probe(&settings, &target, now).await;
+                (key, result)
+            });
+        }
+        while let Some(joined) = tasks.join_next().await {
+            if let Ok((key, result)) = joined {
+                runtime_state.last_ping_check_unix.insert(key.clone(), now);
+                runtime_state.cached_ping_results.insert(key, result);
+            }
+        }
+    }
+
+    metrics.ping_results = config
+        .network
+        .ping_targets
+        .iter()
+        .filter_map(|target| {
+            runtime_state
+                .cached_ping_results
+                .get(&ping_target_key(target))
+        })
+        .take(MAX_TELEMETRY_PING_RESULTS)
+        .cloned()
+        .collect();
+}
+
+fn ping_target_key(target: &AgentPingTarget) -> String {
+    format!("{}:{}", target.id, target.generation)
+}
+
+async fn run_general_ping_probe(
+    settings: &PingProbeSettings,
+    target: &AgentPingTarget,
+    now: u64,
+) -> PingTargetResult {
+    match target.kind {
+        AgentPingProbeKind::Icmp => run_general_icmp_probe(settings, target, now).await,
+        AgentPingProbeKind::Tcp => run_general_tcp_probe(settings, target, now).await,
+    }
+}
+
+async fn run_general_icmp_probe(
+    settings: &PingProbeSettings,
+    target: &AgentPingTarget,
+    now: u64,
+) -> PingTargetResult {
+    let mut argv = if settings.ping_argv.is_empty() {
+        ["/bin/ping", "/usr/bin/ping"]
+            .into_iter()
+            .find(|path| Path::new(path).exists())
+            .map(|path| vec![path.to_string()])
+            .unwrap_or_default()
+    } else {
+        settings.ping_argv.clone()
+    };
+    if argv.is_empty() {
+        return failed_ping_result(target, now, "ping_binary_not_found", "error");
+    }
+    argv.extend([
+        "-n".to_string(),
+        "-c".to_string(),
+        "3".to_string(),
+        "-i".to_string(),
+        "0.500".to_string(),
+        "-W".to_string(),
+        settings.timeout_secs.to_string(),
+        target.host.clone(),
+    ]);
+    let mut command = Command::new(&argv[0]);
+    command.args(&argv[1..]).stdin(Stdio::null());
+    let timeout_secs = settings.timeout_secs.saturating_mul(3).saturating_add(2);
+    match run_child_with_bounded_output(
+        command,
+        timeout_secs,
+        MAX_LATENCY_PROBE_OUTPUT_BYTES,
+        ChildCleanupPolicy::ProcessGroup,
+    )
+    .await
+    {
+        Ok(ChildRunResult::Completed(output)) => {
+            let parsed = parse_latency_ping_output(&String::from_utf8_lossy(&output.stdout));
+            let loss_ratio = parsed.packet_loss_ratio.unwrap_or(1.0).clamp(0.0, 1.0);
+            let output_limited = output.stdout_truncated || output.stderr_truncated;
+            let (status, reason) = if output_limited {
+                ("error", Some("ping_output_limit".to_string()))
+            } else if parsed.latency_avg_ms.is_some() && loss_ratio == 0.0 {
+                ("ok", None)
+            } else if parsed.latency_avg_ms.is_some() {
+                ("degraded", Some("packet_loss".to_string()))
+            } else {
+                ("down", Some(format!("ping_exit:{:?}", output.exit_code)))
+            };
+            let latency_avg_ms = if matches!(status, "ok" | "degraded") {
+                parsed.latency_avg_ms
+            } else {
+                None
+            };
+            let loss_ratio = if status == "error" { 1.0 } else { loss_ratio };
+            PingTargetResult {
+                target_id: target.id.clone(),
+                generation: target.generation,
+                checked_unix: now,
+                status: status.to_string(),
+                latency_avg_ms,
+                loss_ratio,
+                reason,
+            }
+        }
+        Ok(ChildRunResult::TimedOut(_)) => failed_ping_result(target, now, "ping_timeout", "down"),
+        Ok(ChildRunResult::Canceled { .. }) => {
+            failed_ping_result(target, now, "ping_canceled", "error")
+        }
+        Err(_) => failed_ping_result(target, now, "ping_spawn_failed", "error"),
+    }
+}
+
+async fn run_general_tcp_probe(
+    settings: &PingProbeSettings,
+    target: &AgentPingTarget,
+    now: u64,
+) -> PingTargetResult {
+    let Some(port) = target.port else {
+        return failed_ping_result(target, now, "tcp_port_missing", "error");
+    };
+    let timeout = Duration::from_secs(settings.timeout_secs);
+    let mut success_count = 0_u8;
+    let mut latency_total_ms = 0.0;
+    let mut last_reason = "tcp_connect_failed".to_string();
+    for _ in 0..3 {
+        let started = Instant::now();
+        match time::timeout(timeout, TcpStream::connect((target.host.as_str(), port))).await {
+            Ok(Ok(stream)) => {
+                success_count = success_count.saturating_add(1);
+                latency_total_ms += started.elapsed().as_secs_f64() * 1000.0;
+                drop(stream);
+            }
+            Ok(Err(error)) => {
+                last_reason = format!("tcp_connect_failed:{}", error.kind());
+            }
+            Err(_) => last_reason = "tcp_connect_timeout".to_string(),
+        }
+        time::sleep(Duration::from_millis(100)).await;
+    }
+    let loss_ratio = f64::from(3_u8.saturating_sub(success_count)) / 3.0;
+    PingTargetResult {
+        target_id: target.id.clone(),
+        generation: target.generation,
+        checked_unix: now,
+        status: if success_count == 3 {
+            "ok"
+        } else if success_count > 0 {
+            "degraded"
+        } else {
+            "down"
+        }
+        .to_string(),
+        latency_avg_ms: (success_count > 0).then_some(latency_total_ms / f64::from(success_count)),
+        loss_ratio,
+        reason: (success_count < 3).then_some(last_reason),
+    }
+}
+
+fn failed_ping_result(
+    target: &AgentPingTarget,
+    now: u64,
+    reason: &str,
+    status: &str,
+) -> PingTargetResult {
+    PingTargetResult {
+        target_id: target.id.clone(),
+        generation: target.generation,
+        checked_unix: now,
+        status: status.to_string(),
+        latency_avg_ms: None,
+        loss_ratio: 1.0,
+        reason: Some(reason.to_string()),
+    }
 }
 
 pub(crate) fn unix_now() -> u64 {
@@ -188,6 +528,55 @@ fn load_average(proc_root: &Path) -> Result<LoadAverage> {
         five: parse_field(fields.next(), "five-minute value")?,
         fifteen: parse_field(fields.next(), "fifteen-minute value")?,
     })
+}
+
+fn cpu_utilization_ratio(
+    proc_root: &Path,
+    runtime_state: &mut TelemetryRuntimeState,
+) -> Option<f64> {
+    let contents = match read_proc_file(proc_root, "stat") {
+        Ok(contents) => contents,
+        Err(_) => {
+            runtime_state.cpu_time_counters = None;
+            return None;
+        }
+    };
+    update_cpu_utilization_ratio(&mut runtime_state.cpu_time_counters, &contents)
+}
+
+fn update_cpu_utilization_ratio(
+    previous: &mut Option<CpuTimeCounters>,
+    proc_stat: &str,
+) -> Option<f64> {
+    let current = match parse_cpu_time_counters(proc_stat) {
+        Ok(current) => current,
+        Err(_) => {
+            *previous = None;
+            return None;
+        }
+    };
+    let ratio = previous.and_then(|value| current.utilization_ratio_since(value));
+    *previous = Some(current);
+    ratio
+}
+
+fn parse_cpu_time_counters(proc_stat: &str) -> Result<CpuTimeCounters> {
+    let mut fields = proc_stat
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            (fields.next() == Some("cpu")).then_some(fields)
+        })
+        .context("telemetry CPU source is missing its aggregate row")?;
+    let mut values = [0_u64; PROC_STAT_CPU_COUNTER_COUNT];
+    for (index, value) in values.iter_mut().enumerate() {
+        *value = fields
+            .next()
+            .with_context(|| format!("telemetry CPU source is missing counter {index}"))?
+            .parse::<u64>()
+            .with_context(|| format!("telemetry CPU counter {index} is not numeric"))?;
+    }
+    Ok(CpuTimeCounters { values })
 }
 
 fn memory_stat(proc_root: &Path) -> Result<MemoryStat> {
@@ -1133,6 +1522,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn socket_tables_count_tcp_and_udp_entries_across_ip_families() {
+        let root = std::env::temp_dir().join(format!("vpsman-sockets-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("net")).unwrap();
+        let table =
+            |rows: &[&str]| format!("sl local_address rem_address st\n{}\n", rows.join("\n"));
+        std::fs::write(root.join("net/tcp"), table(&["0: tcp-a", "1: tcp-b"])).unwrap();
+        std::fs::write(root.join("net/tcp6"), table(&["0: tcp6-a"])).unwrap();
+        std::fs::write(root.join("net/udp"), table(&["0: udp-a"])).unwrap();
+        std::fs::write(root.join("net/udp6"), table(&["0: udp6-a", "1: udp6-b"])).unwrap();
+
+        let counts = connection_stats(&root).unwrap();
+        assert_eq!(counts.tcp, 3);
+        assert_eq!(counts.udp, 3);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn missing_ipv6_socket_tables_are_not_invented_or_required() {
+        let root = std::env::temp_dir().join(format!("vpsman-sockets-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("net")).unwrap();
+        std::fs::write(root.join("net/tcp"), "header\n0: tcp\n").unwrap();
+        std::fs::write(root.join("net/udp"), "header\n").unwrap();
+
+        let counts = connection_stats(&root).unwrap();
+        assert_eq!(counts.tcp, 1);
+        assert_eq!(counts.udp, 0);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn ipv6_only_socket_tables_are_counted_without_assuming_ipv4() {
+        let root = std::env::temp_dir().join(format!("vpsman-sockets-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("net")).unwrap();
+        std::fs::write(root.join("net/tcp6"), "header\n0: tcp6\n").unwrap();
+        std::fs::write(root.join("net/udp6"), "header\n0: udp6-a\n1: udp6-b\n").unwrap();
+
+        let counts = connection_stats(&root).unwrap();
+        assert_eq!(counts.tcp, 1);
+        assert_eq!(counts.udp, 2);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn missing_or_headerless_socket_tables_remain_unavailable() {
+        let root = std::env::temp_dir().join(format!("vpsman-sockets-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("net")).unwrap();
+        assert!(connection_stats(&root)
+            .unwrap_err()
+            .to_string()
+            .contains("socket tables are missing"));
+        std::fs::write(root.join("net/tcp"), "\n").unwrap();
+        std::fs::write(root.join("net/udp"), "header\n").unwrap();
+        assert!(connection_stats(&root)
+            .unwrap_err()
+            .to_string()
+            .contains("no socket-table header"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn configured_hostname_read_failure_is_not_replaced_by_a_default() {
         let default_called = std::cell::Cell::new(false);
         let error = resolve_hostname(
@@ -1189,6 +1638,69 @@ mod tests {
         .unwrap();
 
         assert_eq!(hostname, "node-from-os");
+    }
+
+    #[test]
+    fn cpu_utilization_requires_two_valid_samples_and_uses_busy_time() {
+        let mut previous = None;
+        assert_eq!(
+            update_cpu_utilization_ratio(
+                &mut previous,
+                "cpu 100 20 30 400 10 5 5 0 50 10\ncpu0 1 1 1 1 1 1 1 1\n",
+            ),
+            None
+        );
+
+        let ratio = update_cpu_utilization_ratio(
+            &mut previous,
+            // The large guest deltas are deliberately ignored because Linux
+            // already includes guest time in user and nice.
+            "cpu 130 20 40 450 20 5 5 0 500 200\n",
+        )
+        .unwrap();
+        assert!((ratio - 0.4).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn cpu_utilization_reset_and_invalid_input_restart_the_baseline() {
+        let mut previous = None;
+        assert_eq!(
+            update_cpu_utilization_ratio(&mut previous, "cpu 100 20 30 400 10 5 5 0\n",),
+            None
+        );
+        assert_eq!(
+            update_cpu_utilization_ratio(&mut previous, "cpu 10 20 30 400 10 5 5 0\n"),
+            None
+        );
+        let after_reset =
+            update_cpu_utilization_ratio(&mut previous, "cpu 20 20 30 410 10 5 5 0\n").unwrap();
+        assert!((after_reset - 0.5).abs() < f64::EPSILON);
+
+        assert_eq!(
+            update_cpu_utilization_ratio(&mut previous, "cpu invalid\n"),
+            None
+        );
+        assert!(previous.is_none());
+        assert_eq!(
+            update_cpu_utilization_ratio(&mut previous, "cpu 30 20 30 420 10 5 5 0\n",),
+            None
+        );
+    }
+
+    #[test]
+    fn cpu_utilization_zero_delta_is_unknown_and_results_stay_bounded() {
+        let mut previous = None;
+        let baseline = "cpu 0 0 0 0 0 0 0 0\n";
+        assert_eq!(update_cpu_utilization_ratio(&mut previous, baseline), None);
+        assert_eq!(update_cpu_utilization_ratio(&mut previous, baseline), None);
+        assert_eq!(
+            update_cpu_utilization_ratio(&mut previous, "cpu 10 0 0 0 0 0 0 0\n"),
+            Some(1.0)
+        );
+        assert_eq!(
+            update_cpu_utilization_ratio(&mut previous, "cpu 10 0 0 10 0 0 0 0\n"),
+            Some(0.0)
+        );
     }
 
     #[test]

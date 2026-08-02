@@ -1,10 +1,10 @@
 use super::*;
 use sha2::{Digest, Sha256};
 use vpsman_common::{
-    plan_tunnel, AgentMetrics, GatewayTelemetryIngest, PortForwardRuntimeSnapshot,
-    PortForwardRuntimeStatus, RuntimeTunnelAdapterHealthStat, RuntimeTunnelControl,
-    RuntimeTunnelManager, RuntimeTunnelStat, TelemetryEnvelope, TunnelAddressPair, TunnelKind,
-    TunnelPlanInput,
+    plan_tunnel, AgentCapabilitySnapshot, AgentHello, AgentMetrics, AgentPrivilegeMode,
+    GatewayTelemetryIngest, PortForwardRuntimeSnapshot, PortForwardRuntimeStatus,
+    RuntimeTunnelAdapterHealthStat, RuntimeTunnelControl, RuntimeTunnelManager, RuntimeTunnelStat,
+    TelemetryEnvelope, TunnelAddressPair, TunnelKind, TunnelPlanInput,
 };
 
 #[tokio::test]
@@ -164,7 +164,7 @@ async fn telemetry_sequence_is_idempotent_per_gateway_session() {
     let memory = MemoryState::default();
     let webhook_events = memory.webhook_events.clone();
     let port_forward_runtime = memory.port_forward_runtime.clone();
-    let repo = Repository::Memory(memory);
+    let repo = Repository::Memory(memory.clone());
     let process_incarnation_id = uuid::Uuid::new_v4();
     let mut event = GatewayTelemetryIngest {
         gateway_id: "gateway-a".to_string(),
@@ -184,6 +184,7 @@ async fn telemetry_sequence_is_idempotent_per_gateway_session() {
                         fifteen: 0.5,
                     },
                     cores: 2,
+                    utilization_ratio: None,
                 },
                 port_forwarding: Some(PortForwardRuntimeSnapshot {
                     status: PortForwardRuntimeStatus::Absent,
@@ -194,6 +195,14 @@ async fn telemetry_sequence_is_idempotent_per_gateway_session() {
             },
         },
     };
+    seed_memory_telemetry_source(
+        &memory,
+        &event.telemetry.client_id,
+        &event.gateway_id,
+        event.gateway_session_id,
+        event.process_incarnation_id,
+    )
+    .await;
 
     assert!(repo.record_telemetry(&event).await.unwrap());
     port_forward_runtime.write().await.clear();
@@ -207,7 +216,7 @@ async fn telemetry_sequence_is_idempotent_per_gateway_session() {
     assert!(repo.record_telemetry(&event).await.unwrap());
 
     let rollups = repo
-        .list_telemetry_rollups(10, Some("edge-a"), Some(60))
+        .list_telemetry_rollups(10, Some("edge-a"), Some(60), false)
         .await
         .unwrap();
     assert_eq!(rollups.len(), 1);
@@ -216,13 +225,26 @@ async fn telemetry_sequence_is_idempotent_per_gateway_session() {
 
     event.gateway_session_id = uuid::Uuid::new_v4();
     event.telemetry_seq = 1;
+    seed_active_memory_gateway_session(
+        &memory,
+        &event.telemetry.client_id,
+        &event.gateway_id,
+        event.gateway_session_id,
+    )
+    .await;
     assert!(repo.record_telemetry(&event).await.unwrap());
 
     event.process_incarnation_id = uuid::Uuid::new_v4();
     event.telemetry_seq = 1;
+    seed_visible_memory_agent(
+        &memory,
+        &event.telemetry.client_id,
+        event.process_incarnation_id,
+    )
+    .await;
     assert!(repo.record_telemetry(&event).await.unwrap());
     assert_eq!(
-        repo.list_telemetry_rollups(10, Some("edge-a"), Some(60))
+        repo.list_telemetry_rollups(10, Some("edge-a"), Some(60), false)
             .await
             .unwrap()[0]
             .sample_count,
@@ -239,7 +261,213 @@ async fn telemetry_sequence_is_idempotent_per_gateway_session() {
     assert!(event_ids.iter().any(|event_id| event_id.ends_with(":3")));
 }
 
+#[tokio::test]
+async fn memory_telemetry_touch_preserves_agent_identity_and_capabilities() {
+    let memory = MemoryState::default();
+    let process_incarnation_id = uuid::Uuid::new_v4();
+    let gateway_session_id = uuid::Uuid::new_v4();
+    let capabilities = AgentCapabilitySnapshot {
+        privilege_mode: AgentPrivilegeMode::Root,
+        effective_uid: Some(0),
+        can_attempt_privileged_ops: true,
+        can_manage_runtime_tunnels: true,
+        can_apply_process_limits: true,
+        ..AgentCapabilitySnapshot::default()
+    };
+    memory.agents.write().await.push(crate::model::AgentView {
+        id: "edge-a".to_string(),
+        display_name: "Edge A".to_string(),
+        status: "offline".to_string(),
+        tags: vec!["edge".to_string()],
+        registration_ip: Some("198.51.100.1".to_string()),
+        last_ip: Some("198.51.100.1".to_string()),
+        last_seen_at: None,
+        arch: Some("aarch64".to_string()),
+        internal_build_number: 42,
+        process_incarnation_id: Some(process_incarnation_id),
+        stale_since: None,
+        stale_reason: None,
+        capabilities: capabilities.clone(),
+    });
+    seed_active_memory_gateway_session(&memory, "edge-a", "gateway-a", gateway_session_id).await;
+    let repo = Repository::Memory(memory.clone());
+
+    assert!(repo
+        .record_telemetry(&GatewayTelemetryIngest {
+            gateway_id: "gateway-a".to_string(),
+            gateway_session_id,
+            process_incarnation_id,
+            telemetry_seq: 1,
+            remote_ip: Some("2001:db8::20".to_string()),
+            telemetry: TelemetryEnvelope {
+                client_id: "edge-a".to_string(),
+                metrics: AgentMetrics::default(),
+            },
+        })
+        .await
+        .unwrap());
+
+    let agents = memory.agents.read().await;
+    let agent = &agents[0];
+    assert_eq!(agent.status, "online");
+    assert_eq!(agent.registration_ip.as_deref(), Some("198.51.100.1"));
+    assert_eq!(agent.last_ip.as_deref(), Some("2001:db8::20"));
+    assert_eq!(agent.arch.as_deref(), Some("aarch64"));
+    assert_eq!(agent.internal_build_number, 42);
+    assert_eq!(agent.process_incarnation_id, Some(process_incarnation_id));
+    assert_eq!(agent.capabilities, capabilities);
+}
+
+#[tokio::test]
+async fn intra_minute_counter_reset_remains_a_gap_after_recovery_above_the_old_value() {
+    let memory = MemoryState::default();
+    let repo = Repository::Memory(memory.clone());
+    let gateway_session_id = uuid::Uuid::new_v4();
+    let process_incarnation_id = uuid::Uuid::new_v4();
+    let minute = crate::unix_now() / 60 * 60;
+    seed_memory_telemetry_source(
+        &memory,
+        "v-1",
+        "gateway-a",
+        gateway_session_id,
+        process_incarnation_id,
+    )
+    .await;
+    memory.traffic_counter_samples.write().await.push(
+        crate::model_alert_policies::TrafficCounterSampleRecord {
+            client_id: "v-1".to_string(),
+            source_kind: "host".to_string(),
+            interface: "eth0".to_string(),
+            observed_at: (minute - 60).to_string(),
+            observed_unix: (minute - 60) as i64,
+            rx_bytes: 1_000,
+            tx_bytes: 2_000,
+            rx_counter_epoch: 0,
+            tx_counter_epoch: 0,
+            sample_source: "test".to_string(),
+        },
+    );
+    memory
+        .telemetry_network_rates
+        .write()
+        .await
+        .push(crate::model::TelemetryNetworkRateView {
+            client_id: "v-1".to_string(),
+            interface: "eth0".to_string(),
+            bucket_start: (minute - 60).to_string(),
+            bucket_secs: 60,
+            sample_count: 1,
+            rx_bytes_avg: 1_000,
+            tx_bytes_avg: 2_000,
+            rx_bytes_last: 1_000,
+            tx_bytes_last: 2_000,
+            rx_counter_epoch: 0,
+            tx_counter_epoch: 0,
+            rx_bytes_delta: 0,
+            tx_bytes_delta: 0,
+            rx_bps_avg: 0.0,
+            tx_bps_avg: 0.0,
+            updated_at: (minute - 60).to_string(),
+        });
+    for (sequence, rx_bytes, tx_bytes) in [(1, 100, 2_100), (2, 1_200, 2_200)] {
+        assert!(repo
+            .record_telemetry(&GatewayTelemetryIngest {
+                gateway_id: "gateway-a".to_string(),
+                gateway_session_id,
+                process_incarnation_id,
+                telemetry_seq: sequence,
+                remote_ip: None,
+                telemetry: TelemetryEnvelope {
+                    client_id: "v-1".to_string(),
+                    metrics: AgentMetrics {
+                        observed_unix: minute,
+                        hostname: "v-1".to_string(),
+                        networks: vec![vpsman_common::NetworkStat {
+                            interface: "eth0".to_string(),
+                            rx_bytes,
+                            tx_bytes,
+                        }],
+                        ..AgentMetrics::default()
+                    },
+                },
+            })
+            .await
+            .unwrap());
+    }
+
+    let retained_reset = repo
+        .list_dashboard_telemetry_network_rates(
+            10,
+            Some(minute),
+            Some(minute + 59),
+            Some(60),
+            60,
+            &["v-1".to_string()],
+        )
+        .await
+        .unwrap();
+    assert!(retained_reset.is_empty());
+
+    let minute_row = memory
+        .telemetry_network_rates
+        .read()
+        .await
+        .iter()
+        .find(|row| row.bucket_start == minute.to_string())
+        .cloned()
+        .unwrap();
+    assert_eq!(minute_row.rx_bytes_last, 1_200);
+    assert_eq!(minute_row.rx_counter_epoch, 1);
+    assert_eq!(minute_row.tx_counter_epoch, 0);
+    memory
+        .telemetry_network_rates
+        .write()
+        .await
+        .push(crate::model::TelemetryNetworkRateView {
+            client_id: "v-1".to_string(),
+            interface: "eth0".to_string(),
+            bucket_start: (minute + 60).to_string(),
+            bucket_secs: 60,
+            sample_count: 1,
+            rx_bytes_avg: 1_300,
+            tx_bytes_avg: 2_300,
+            rx_bytes_last: 1_300,
+            tx_bytes_last: 2_300,
+            rx_counter_epoch: 1,
+            tx_counter_epoch: 0,
+            rx_bytes_delta: 0,
+            tx_bytes_delta: 0,
+            rx_bps_avg: 0.0,
+            tx_bps_avg: 0.0,
+            updated_at: (minute + 60).to_string(),
+        });
+
+    let retained_recovery = repo
+        .list_dashboard_telemetry_network_rates(
+            10,
+            Some(minute + 60),
+            Some(minute + 119),
+            Some(60),
+            60,
+            &["v-1".to_string()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        retained_recovery.len(),
+        1,
+        "retained: {retained_recovery:?}"
+    );
+    assert_eq!(retained_recovery[0].rx_bytes_delta, 100);
+    assert_eq!(retained_recovery[0].tx_bytes_delta, 100);
+}
+
 async fn seed_declared_plan(repo: &Repository, manager: RuntimeTunnelManager) -> uuid::Uuid {
+    if let Repository::Memory(memory) = repo {
+        for client_id in ["edge-a", "edge-b"] {
+            seed_visible_memory_agent(memory, client_id, uuid::Uuid::new_v4()).await;
+        }
+    }
     let runtime_control = RuntimeTunnelControl {
         manager,
         left_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
@@ -301,10 +529,22 @@ fn test_operator() -> AuthContext {
 }
 
 async fn seed_tunnel_telemetry(repo: &Repository, client_id: &str, tunnel: RuntimeTunnelStat) {
+    let gateway_session_id = uuid::Uuid::new_v4();
+    let process_incarnation_id = uuid::Uuid::new_v4();
+    if let Repository::Memory(memory) = repo {
+        seed_memory_telemetry_source(
+            memory,
+            client_id,
+            "gateway-a",
+            gateway_session_id,
+            process_incarnation_id,
+        )
+        .await;
+    }
     repo.record_telemetry(&GatewayTelemetryIngest {
         gateway_id: "gateway-a".to_string(),
-        gateway_session_id: uuid::Uuid::new_v4(),
-        process_incarnation_id: uuid::Uuid::new_v4(),
+        gateway_session_id,
+        process_incarnation_id,
         telemetry_seq: 2,
         remote_ip: None,
         telemetry: TelemetryEnvelope {
@@ -319,4 +559,61 @@ async fn seed_tunnel_telemetry(repo: &Repository, client_id: &str, tunnel: Runti
     })
     .await
     .unwrap();
+}
+
+async fn seed_memory_telemetry_source(
+    memory: &MemoryState,
+    client_id: &str,
+    gateway_id: &str,
+    gateway_session_id: uuid::Uuid,
+    process_incarnation_id: uuid::Uuid,
+) {
+    seed_visible_memory_agent(memory, client_id, process_incarnation_id).await;
+    seed_active_memory_gateway_session(memory, client_id, gateway_id, gateway_session_id).await;
+}
+
+async fn seed_visible_memory_agent(
+    memory: &MemoryState,
+    client_id: &str,
+    process_incarnation_id: uuid::Uuid,
+) {
+    crate::repository_ingest::upsert_memory_agent(
+        &memory.agents,
+        &AgentHello {
+            client_id: client_id.to_string(),
+            process_incarnation_id,
+            agent_version: "test".to_string(),
+            os_release: "test".to_string(),
+            arch: "x86_64".to_string(),
+            update_heartbeat: None,
+            internal_build_number: 1,
+            capabilities: AgentCapabilitySnapshot::default(),
+        },
+    )
+    .await;
+}
+
+async fn seed_active_memory_gateway_session(
+    memory: &MemoryState,
+    client_id: &str,
+    gateway_id: &str,
+    gateway_session_id: uuid::Uuid,
+) {
+    memory
+        .gateway_sessions
+        .write()
+        .await
+        .push(crate::model::GatewaySessionView {
+            id: gateway_session_id,
+            gateway_id: gateway_id.to_string(),
+            client_id: client_id.to_string(),
+            noise_public_key_hex: None,
+            remote_ip: None,
+            agent_version: "test".to_string(),
+            status: "active".to_string(),
+            started_at: "1800000000".to_string(),
+            last_seen_at: "1800000000".to_string(),
+            ended_at: None,
+            end_reason: None,
+        });
 }

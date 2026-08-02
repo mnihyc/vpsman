@@ -12,6 +12,9 @@ use crate::{
     },
     repository::Repository,
     repository_backups::backup_request_from_row,
+    repository_key_lifecycle::{
+        require_visible_memory_clients, require_visible_postgres_clients_in_tx,
+    },
     unix_now,
     util::{limit_or_default, offset_or_default, search_pattern, sort_descending},
 };
@@ -283,6 +286,13 @@ impl Repository {
         };
         match self {
             Self::Memory(memory) => {
+                let _lifecycle = memory.agent_key_lifecycle.lock().await;
+                require_visible_memory_clients(
+                    memory,
+                    std::slice::from_ref(&view.target_client_id),
+                    "restore_target_unavailable",
+                )
+                .await?;
                 memory.restore_plans.write().await.push(view.clone());
                 memory.audits.write().await.push(restore_plan_audit(
                     &view,
@@ -293,6 +303,12 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                require_visible_postgres_clients_in_tx(
+                    &mut tx,
+                    std::slice::from_ref(&view.target_client_id),
+                    "restore_target_unavailable",
+                )
+                .await?;
                 let row = sqlx::query(
                     r#"
                     INSERT INTO restore_plans (

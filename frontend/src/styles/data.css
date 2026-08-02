@@ -2903,6 +2903,21 @@
   overflow-wrap: anywhere;
 }
 
+.tagScheduleImpactBlock {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.confirmationPromptBody dl > div:has(.tagScheduleImpactBlock) {
+  grid-column: 1 / -1;
+}
+
+.confirmationPromptBody dd:has(.tagScheduleImpactBlock) {
+  overflow: visible;
+  white-space: normal;
+}
+
 .tagScheduleImpactTable {
   display: grid;
   gap: 6px;
@@ -2931,16 +2946,6 @@
 
 .tagScheduleImpactRow > span {
   min-width: 0;
-}
-
-.tagScheduleManualAction {
-  display: grid;
-  gap: 6px;
-  align-items: start;
-}
-
-.tagScheduleManualAction .compactAction {
-  justify-self: start;
 }
 
 .mutedText {
@@ -3358,6 +3363,21 @@
 .deliveryErrorText {
   color: var(--danger);
   overflow-wrap: anywhere;
+}
+
+.fieldError {
+  color: var(--danger-strong);
+  font-size: 12px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.truncateValue {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .historyPrimary .deliveryErrorText {
@@ -4233,6 +4253,11 @@
   margin-bottom: 2px;
 }
 
+.bulkTagMutationForm > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .bulkTagMutationForm label {
   display: grid;
   gap: 6px;
@@ -4739,6 +4764,11 @@
   min-width: 0;
 }
 
+.vpsRulesPreviewBlock {
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+
 .vpsRulesPreviewDetails {
   min-width: 0;
 }
@@ -4835,6 +4865,20 @@
   align-content: start;
 }
 
+.vpsRulesRegistryFilters {
+  grid-template-columns:
+    repeat(2, minmax(min(100%, 180px), 1fr))
+    minmax(min(100%, 190px), 1fr);
+}
+
+.vpsRulesMutationScope {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+
 .vpsRulesSummary {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr));
 }
@@ -4853,6 +4897,16 @@
 .vpsRulesModeSwitch button {
   min-width: 96px;
   padding: 0 12px;
+}
+
+.vpsRulesTargetSection {
+  grid-column: 1 / -1;
+}
+
+.vpsRulesTargetHint {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .vpsRulesModeLegend {

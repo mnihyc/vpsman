@@ -9,8 +9,8 @@ use tokio::{
 };
 use vpsman_common::{
     plan_tunnel, AgentCapabilitySnapshot, AgentHello, AgentPrivilegeMode, GatewayAgentHelloIngest,
-    GatewayPrivilegeVerificationResult, GatewaySessionDisconnectResult, PrivilegeAssertion,
-    RuntimeTunnelManager,
+    GatewayCommandDispatch, GatewayCommandDispatchResult, GatewayPrivilegeVerificationResult,
+    GatewaySessionDisconnectResult, PrivilegeAssertion, RuntimeTunnelManager,
 };
 use vpsman_server_core::TARGET_STATUS_AGENT_LOST;
 
@@ -90,15 +90,84 @@ async fn direct_agent_identity_imports_key_and_tags_without_panel_token() {
 }
 
 #[tokio::test]
-async fn default_agent_identity_ids_keep_the_numeric_sequence_with_v_prefix() {
+async fn memory_gateway_identity_validation_serializes_with_key_lifecycle_mutations() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = identity_operator();
+    let client_id = "edge-validation-race";
+    let old_key_hex = "61".repeat(32);
+    let new_key_hex = "62".repeat(32);
+    repo.upsert_agent_identity(
+        &UpsertAgentIdentityRequest {
+            client_id: Some(client_id.to_string()),
+            client_public_key_hex: old_key_hex.clone(),
+            display_name: Some("Validation race".to_string()),
+            tags: Vec::new(),
+            replace_existing_key: false,
+            confirmed: true,
+            privilege_assertion: None,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    let lifecycle_guard = memory.agent_key_lifecycle.lock().await;
+    let validation_repo = repo.clone();
+    let validation_client_id = client_id.to_string();
+    let validation = tokio::spawn(async move {
+        validation_repo
+            .validate_agent_public_key(&validation_client_id, &old_key_hex)
+            .await
+    });
+    let mut validation = std::pin::pin!(validation);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), validation.as_mut())
+            .await
+            .is_err()
+    );
+
+    memory
+        .client_public_keys
+        .write()
+        .await
+        .insert(client_id.to_string(), hex::decode(&new_key_hex).unwrap());
+    drop(lifecycle_guard);
+
+    assert!(!validation.await.unwrap().unwrap());
+    assert!(repo
+        .validate_agent_public_key(client_id, &new_key_hex)
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn default_agent_identity_ids_keep_the_existing_numeric_sequence_with_v_prefix() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = identity_operator();
 
     repo.upsert_agent_identity(
         &UpsertAgentIdentityRequest {
-            client_id: Some("15".to_string()),
+            client_id: Some("v-15".to_string()),
             client_public_key_hex: "31".repeat(32),
             display_name: Some("Existing VPS".to_string()),
+            tags: Vec::new(),
+            replace_existing_key: false,
+            confirmed: true,
+            privilege_assertion: None,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+
+    repo.upsert_agent_identity(
+        &UpsertAgentIdentityRequest {
+            client_id: Some("222".to_string()),
+            client_public_key_hex: "34".repeat(32),
+            display_name: Some("Explicit numeric ID".to_string()),
             tags: Vec::new(),
             replace_existing_key: false,
             confirmed: true,
@@ -124,6 +193,25 @@ async fn default_agent_identity_ids_keep_the_numeric_sequence_with_v_prefix() {
         )
         .await
         .unwrap();
+    assert_eq!(first.client_id, "v-223");
+
+    let failed = repo
+        .upsert_agent_identity(
+            &UpsertAgentIdentityRequest {
+                client_id: None,
+                client_public_key_hex: "35".repeat(32),
+                display_name: Some("Existing VPS".to_string()),
+                tags: Vec::new(),
+                replace_existing_key: false,
+                confirmed: true,
+                privilege_assertion: None,
+            },
+            &operator,
+        )
+        .await
+        .unwrap_err();
+    assert!(failed.to_string().contains("display_name_already_exists"));
+
     let second = repo
         .upsert_agent_identity(
             &UpsertAgentIdentityRequest {
@@ -140,8 +228,7 @@ async fn default_agent_identity_ids_keep_the_numeric_sequence_with_v_prefix() {
         .await
         .unwrap();
 
-    assert_eq!(first.client_id, "v-16");
-    assert_eq!(second.client_id, "v-17");
+    assert_eq!(second.client_id, "v-224");
 }
 
 #[tokio::test]
@@ -246,7 +333,7 @@ async fn agent_hello_rechecks_the_current_key_after_rotation() {
     let stale_hello = GatewayAgentHelloIngest {
         gateway_id: "gateway-test".to_string(),
         gateway_session_id: Uuid::new_v4(),
-        noise_public_key_hex: Some(old_key_hex),
+        noise_public_key_hex: old_key_hex,
         remote_ip: Some("203.0.113.31".to_string()),
         hello: AgentHello {
             client_id: client_id.to_string(),
@@ -563,6 +650,10 @@ async fn direct_agent_identity_key_change_requires_explicit_replace_and_blocks_r
         .validate_agent_public_key("edge-direct-02", &"33".repeat(32))
         .await
         .unwrap());
+    assert_eq!(
+        repo.agent_by_id("edge-direct-02").await.unwrap().status,
+        "revoked"
+    );
     if let Repository::Memory(memory) = &repo {
         let targets = memory.job_targets.read().await;
         let target = targets
@@ -603,6 +694,28 @@ async fn direct_agent_identity_key_change_requires_explicit_replace_and_blocks_r
         )
         .await
         .is_err());
+    repo.upsert_agent_identity(
+        &UpsertAgentIdentityRequest {
+            client_id: Some("edge-direct-02".to_string()),
+            client_public_key_hex: "34".repeat(32),
+            display_name: None,
+            tags: Vec::new(),
+            replace_existing_key: true,
+            confirmed: true,
+            privilege_assertion: None,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        repo.agent_by_id("edge-direct-02").await.unwrap().status,
+        "offline"
+    );
+    assert!(repo
+        .validate_agent_public_key("edge-direct-02", &"34".repeat(32))
+        .await
+        .unwrap());
 }
 
 #[tokio::test]
@@ -697,8 +810,13 @@ async fn memory_agent_inventory_preserves_unprivileged_capability_snapshot() {
 
 #[tokio::test]
 async fn deleting_tunnel_endpoint_queues_empty_desired_state_for_surviving_peer() {
+    let (gateway_url, observed_paths, gateway_task) = spawn_identity_gateway_recorder().await;
     let state = identity_route_test_state(
-        crate::gateway_client::GatewayDispatchClient::test_privilege_auto_approve(),
+        crate::gateway_client::GatewayDispatchClient::new(
+            Some(gateway_url),
+            Some("gateway-secret-at-least-32-characters".to_string()),
+        )
+        .with_test_privilege_auto_approve(),
     );
     let headers = crate::test_auth_headers(&state).await;
     let operator = identity_operator();
@@ -719,6 +837,47 @@ async fn deleting_tunnel_endpoint_queues_empty_desired_state_for_surviving_peer(
             )
             .await
             .unwrap();
+    }
+    if let Repository::Memory(memory) = &state.repo {
+        let process_incarnation_id = uuid::Uuid::new_v4();
+        upsert_memory_agent(
+            &memory.agents,
+            &AgentHello {
+                client_id: "client-b".to_string(),
+                process_incarnation_id,
+                agent_version: "test".to_string(),
+                os_release: "test".to_string(),
+                arch: "x86_64".to_string(),
+                update_heartbeat: None,
+                internal_build_number: 1,
+                capabilities: AgentCapabilitySnapshot {
+                    privilege_mode: AgentPrivilegeMode::Root,
+                    effective_uid: Some(0),
+                    can_attempt_privileged_ops: true,
+                    can_manage_runtime_tunnels: true,
+                    can_apply_process_limits: true,
+                    ..AgentCapabilitySnapshot::default()
+                },
+            },
+        )
+        .await;
+        memory
+            .gateway_sessions
+            .write()
+            .await
+            .push(GatewaySessionView {
+                id: uuid::Uuid::new_v4(),
+                gateway_id: "gateway-test".to_string(),
+                client_id: "client-b".to_string(),
+                noise_public_key_hex: Some("92".repeat(32)),
+                remote_ip: Some("203.0.113.92".to_string()),
+                agent_version: "test".to_string(),
+                status: "active".to_string(),
+                started_at: "1800000000".to_string(),
+                last_seen_at: "1800000000".to_string(),
+                ended_at: None,
+                end_reason: None,
+            });
     }
 
     let input =
@@ -746,7 +905,11 @@ async fn deleting_tunnel_endpoint_queues_empty_desired_state_for_surviving_peer(
     assert!(response.deleted);
     assert_eq!(response.runtime_sync.len(), 1);
     assert_eq!(response.runtime_sync[0].client_id, "client-b");
-    assert_eq!(response.runtime_sync[0].status, "queued");
+    assert_eq!(
+        response.runtime_sync[0].status, "queued",
+        "runtime sync: {:?}",
+        response.runtime_sync[0]
+    );
     assert!(response.runtime_sync[0].error.is_none());
     assert!(response
         .post_commit
@@ -765,6 +928,11 @@ async fn deleting_tunnel_endpoint_queues_empty_desired_state_for_surviving_peer(
             .runtime_sync
             .first()
             .and_then(|outcome| outcome.job_id)
+    );
+    gateway_task.await.unwrap();
+    assert_eq!(
+        observed_paths.lock().await.as_slice(),
+        ["/internal/v1/gateway/command"]
     );
 }
 
@@ -1042,7 +1210,7 @@ async fn spawn_identity_gateway_recorder(
             let Ok(Ok((mut socket, _))) = accepted else {
                 break;
             };
-            let path = read_identity_gateway_path(&mut socket).await;
+            let (path, body) = read_identity_gateway_request(&mut socket).await;
             observed_paths.lock().await.push(path.clone());
             if path == "/internal/v1/gateway/privilege/verify" {
                 write_identity_gateway_json(
@@ -1065,6 +1233,20 @@ async fn spawn_identity_gateway_recorder(
                     },
                 )
                 .await;
+            } else if path == "/internal/v1/gateway/command" {
+                let dispatch: GatewayCommandDispatch = serde_json::from_slice(&body).unwrap();
+                write_identity_gateway_json(
+                    &mut socket,
+                    &GatewayCommandDispatchResult {
+                        client_id: dispatch.client_id,
+                        job_id: dispatch.request.job_id,
+                        command_version: 1,
+                        accepted: true,
+                        message: "accepted".to_string(),
+                        outputs: Vec::new(),
+                    },
+                )
+                .await;
             } else {
                 socket
                     .write_all(
@@ -1078,7 +1260,7 @@ async fn spawn_identity_gateway_recorder(
     (gateway_url, paths, task)
 }
 
-async fn read_identity_gateway_path(socket: &mut TcpStream) -> String {
+async fn read_identity_gateway_request(socket: &mut TcpStream) -> (String, Vec<u8>) {
     let mut bytes = Vec::new();
     let header_end = loop {
         let mut chunk = [0_u8; 4096];
@@ -1111,7 +1293,10 @@ async fn read_identity_gateway_path(socket: &mut TcpStream) -> String {
         assert_ne!(read, 0, "gateway request ended before body");
         bytes.extend_from_slice(&chunk[..read]);
     }
-    path
+    (
+        path,
+        bytes[body_start..body_start + content_length].to_vec(),
+    )
 }
 
 async fn write_identity_gateway_json<T: serde::Serialize>(socket: &mut TcpStream, value: &T) {

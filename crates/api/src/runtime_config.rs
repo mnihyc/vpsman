@@ -285,6 +285,7 @@ pub(crate) async fn compose_runtime_config_for_agent_with_read_model(
         .repo
         .port_forwarding_config_for_client(&agent.id)
         .await?;
+    effective.network.ping_targets = state.repo.ping_targets_for_client(&agent.id).await?;
     validate_agent_config_shape(&effective)
         .map_err(|error| anyhow::anyhow!("composed_runtime_config_invalid:{error}"))?;
 
@@ -494,6 +495,13 @@ fn reject_server_managed_runtime_config_keys(patch: &toml::Value) -> Result<()> 
         .is_some_and(|network| network.contains_key("port_forwarding"))
     {
         anyhow::bail!("runtime_config_patch_managed_port_forwarding_forbidden");
+    }
+    if table
+        .get("network")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|network| network.contains_key("ping_targets"))
+    {
+        anyhow::bail!("runtime_config_patch_managed_ping_targets_forbidden");
     }
     Ok(())
 }

@@ -14,7 +14,7 @@ export/import into a fresh database.
 | --- | --- |
 | `0001_identity_access.sql` | Operators, sessions, scoped authentication throttling, agents, globally unique active and retired Noise keys, tags, gateway sessions, lifecycle history, and audit logs. |
 | `0002_jobs_schedules_commands.sql` | Schedules, approval-bound jobs, durable per-target dispatch and capability evidence, outputs, terminal sessions, canary/batch rollouts, server cleanup jobs, worker leases, and command templates. |
-| `0003_telemetry_alerts_history.sql` | Telemetry rollups and ingest watermarks, traffic accounting, disabled starter policies, alert state and delivery history, webhook processing, and bounded retention domains. |
+| `0003_telemetry_alerts_history.sql` | Accepted high-resolution telemetry, adaptive minute-derived resource/network/Ping history, ingest watermarks, Ping targets and frozen assignments, monitoring shares/frozen targets/visitor evidence, authoritative traffic accounting, disabled starter policies, alert state and delivery history, webhook processing, and bounded retention domains. |
 | `0004_backups_restores.sql` | Backup artifacts and requests with explicit missing-path policy, restore plans, migration links, and fair backup-policy retention scanning. |
 | `0005_network_tunnels.sql` | Tunnel plans, operator connection assessments, bounded OSPF reconciliation, network evidence indexes, and revision-bound port-forward desired/runtime state. |
 | `0006_agent_updates.sql` | Agent update release and artifact-verification state. |

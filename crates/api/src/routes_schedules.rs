@@ -14,8 +14,8 @@ use crate::{
         validate_job_command,
     },
     model::{
-        CreateJobRequest, CreateScheduleRequest, DeferScheduleRequest, ListQuery,
-        SchedulePrivilegeMutationRequest, ScheduleView, UpdateScheduleRequest,
+        BulkResolveRequest, CreateJobRequest, CreateScheduleRequest, DeferScheduleRequest,
+        ListQuery, SchedulePrivilegeMutationRequest, ScheduleView, UpdateScheduleRequest,
         UpdateScheduleTargetsRequest,
     },
     privilege::{verify_privilege_intent, SchedulePrivilegeIntent, SchedulePrivilegeIntentInput},
@@ -59,6 +59,13 @@ pub(crate) async fn create_schedule(
     validate_schedule_request(&request)?;
     require_schedule_confirmed(request.confirmed)?;
     request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
+    require_selector_target_snapshot(
+        &state,
+        &request.selector_expression,
+        &request.target_client_ids,
+        "schedule_target_snapshot_stale",
+    )
+    .await?;
     verify_schedule_privilege_for_definition(
         &state,
         "schedule.create",
@@ -88,6 +95,13 @@ pub(crate) async fn update_schedule(
     validate_update_schedule_request(&request)?;
     require_schedule_confirmed(request.confirmed)?;
     request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
+    require_selector_target_snapshot(
+        &state,
+        &request.selector_expression,
+        &request.target_client_ids,
+        "schedule_target_snapshot_stale",
+    )
+    .await?;
     verify_schedule_privilege_for_definition(
         &state,
         "schedule.update",
@@ -117,14 +131,26 @@ pub(crate) async fn update_schedule_targets(
         .require_operator_role_and_scope(&headers, "operator", "schedules:write")
         .await?;
     require_schedule_confirmed(request.confirmed)?;
-    let target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
-    let selector_expression = request.selector_expression.trim().to_string();
-    if !selector_expression.is_empty() {
-        parse_selector_expression(&selector_expression)
-            .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
-    }
     let schedule = state.repo.schedule_by_id(schedule_id).await?;
     require_valid_schedule_operation(&schedule)?;
+    let selector_expression = schedule.selector_expression.trim().to_string();
+    if selector_expression.is_empty() {
+        return Err(ApiError::conflict("schedule_selector_missing"));
+    }
+    parse_selector_expression(&selector_expression)
+        .map_err(|_| ApiError::conflict("schedule_selector_invalid"))?;
+    let mut target_client_ids = state
+        .repo
+        .resolve_bulk_targets(&BulkResolveRequest {
+            selector_expression: selector_expression.clone(),
+        })
+        .await?
+        .targets
+        .into_iter()
+        .map(|target| target.id)
+        .collect::<Vec<_>>();
+    target_client_ids.sort();
+    target_client_ids.dedup();
     verify_schedule_privilege_for_stored_view(
         &state,
         "schedule.targets.update",
@@ -140,12 +166,7 @@ pub(crate) async fn update_schedule_targets(
     Ok(Json(
         state
             .repo
-            .update_schedule_targets(
-                schedule_id,
-                selector_expression,
-                target_client_ids,
-                &operator,
-            )
+            .update_schedule_targets(schedule_id, target_client_ids, &operator)
             .await?,
     ))
 }
@@ -536,6 +557,36 @@ async fn resolved_schedule_targets(
         return Err(ApiError::conflict("schedule_fixed_targets_not_found"));
     }
     Ok(target_client_ids)
+}
+
+pub(crate) async fn require_selector_target_snapshot(
+    state: &AppState,
+    selector_expression: &str,
+    target_client_ids: &[String],
+    stale_code: &'static str,
+) -> Result<(), ApiError> {
+    let selector_expression = selector_expression.trim();
+    if selector_expression.is_empty() {
+        return Ok(());
+    }
+    let mut resolved = state
+        .repo
+        .resolve_bulk_targets(&BulkResolveRequest {
+            selector_expression: selector_expression.to_string(),
+        })
+        .await?
+        .targets
+        .into_iter()
+        .map(|target| target.id)
+        .collect::<Vec<_>>();
+    resolved.sort();
+    resolved.dedup();
+    let mut submitted = normalized_target_client_ids(target_client_ids)?;
+    submitted.sort();
+    if resolved != submitted {
+        return Err(ApiError::conflict(stale_code));
+    }
+    Ok(())
 }
 
 struct ScheduleDefinitionRef<'a> {

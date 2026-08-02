@@ -779,8 +779,6 @@ export function SchedulesPanel({
         );
         for (const update of reviewedUpdates) {
           await onUpdateScheduleTargets(update.schedule.id, {
-            selector_expression: update.selectorExpression,
-            target_client_ids: update.targetClientIds,
             confirmed: true,
             privilege_assertion: update.privilegeAssertion,
           });
@@ -915,7 +913,6 @@ export function SchedulesPanel({
           resolvedBySelector.set(selectorExpressionForIntent, targetClientIds);
         }
         if (
-          targetClientIds.length === 0 ||
           sameStringSet(fixedTargetIds(schedule), targetClientIds)
         ) {
           continue;
@@ -928,7 +925,7 @@ export function SchedulesPanel({
       }
       if (updates.length === 0) {
         throw new Error(
-          "Server resolution found no changed non-empty target snapshots",
+          "Server resolution found no changed target snapshots",
         );
       }
       openScheduleAction({
@@ -958,7 +955,7 @@ export function SchedulesPanel({
       onOpenPrivilegeUnlock();
       throw new Error("Privilege unlock is required");
     }
-    if (!targetIds.length) {
+    if (!targetIds.length && action !== "schedule.targets.update") {
       throw new Error("Schedule has no fixed VPS targets");
     }
     const operationHash =
@@ -1893,7 +1890,6 @@ function scheduleTargetsNeedUpdate(
   const currentTargetIds = currentScheduleTargetIds(schedule, agents);
   return Boolean(
     currentTargetIds &&
-      currentTargetIds.length > 0 &&
       !sameStringSet(fixedTargetIds(schedule), currentTargetIds),
   );
 }

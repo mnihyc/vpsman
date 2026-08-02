@@ -188,7 +188,7 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
 
   const loadHistoryExport = useCallback(
     async (
-      domains = "audit_logs,system_metric_rollups,telemetry_rollups,telemetry_network_rates,traffic_counter_samples,job_outputs,backup_artifacts,network_observations,topology_history,client_status_history,gateway_sessions",
+      domains = "audit_logs,system_metric_rollups,telemetry_samples,telemetry_rollups,telemetry_network_rates,telemetry_ping_rollups,traffic_counter_samples,job_outputs,backup_artifacts,network_observations,topology_history,client_status_history,gateway_sessions",
     ) => {
       if (currentApiToken.current !== apiToken) {
         throw new Error("Operator session changed; retry the history export");

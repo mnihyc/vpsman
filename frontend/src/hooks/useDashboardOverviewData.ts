@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { apiGet, isApiUnauthorized } from "../api";
+import { dashboardWindowOptions } from "../dashboardQuery";
 import type {
   DashboardGroupBy,
   DashboardNetworkViewMode,
@@ -26,7 +27,7 @@ const defaultDashboardPreferences: DashboardPreferences = {
   scopeValue: "",
   startAt: "",
   trafficSort: "total",
-  window: "24h",
+  window: "1d",
 };
 
 export function useDashboardOverviewData(
@@ -306,7 +307,7 @@ function normalizeDashboardPreferences(
 function isDashboardWindow(value: unknown): value is DashboardWindow {
   return (
     typeof value === "string" &&
-    ["15m", "1h", "6h", "24h", "7d", "14d", "30d", "all"].includes(value)
+    dashboardWindowOptions.includes(value as DashboardWindow)
   );
 }
 

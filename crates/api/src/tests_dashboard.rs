@@ -17,8 +17,7 @@ async fn dashboard_overview_rejects_invalid_window() {
         State(state),
         headers,
         Query(routes_dashboard::DashboardOverviewQuery {
-            chart_points: None,
-            window: Some("90d".to_string()),
+            window: Some("6h".to_string()),
             ..dashboard_query_default()
         }),
     )
@@ -27,6 +26,101 @@ async fn dashboard_overview_rejects_invalid_window() {
 
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
     assert_eq!(error.code, "invalid_dashboard_window");
+}
+
+#[tokio::test]
+async fn dashboard_overview_exposes_the_complete_monitoring_window_model() {
+    let state = dashboard_test_state(Repository::Memory(MemoryState::default()));
+    let headers = crate::test_auth_headers(&state).await;
+    let expected = [
+        ("15m", Some(15 * 60), "Realtime · last 15 minutes"),
+        ("1h", Some(60 * 60), "1 hour"),
+        ("8h", Some(8 * 60 * 60), "8 hours"),
+        ("1d", Some(24 * 60 * 60), "1 day"),
+        ("7d", Some(7 * 24 * 60 * 60), "7 days"),
+        ("30d", Some(30 * 24 * 60 * 60), "30 days"),
+        ("90d", Some(90 * 24 * 60 * 60), "90 days"),
+        ("180d", Some(180 * 24 * 60 * 60), "180 days"),
+        ("1y", Some(365 * 24 * 60 * 60), "1 year"),
+        ("all", None, "All"),
+    ];
+
+    for &(value, seconds, _) in &expected {
+        let Json(view) = routes_dashboard::dashboard_overview(
+            State(state.clone()),
+            headers.clone(),
+            Query(routes_dashboard::DashboardOverviewQuery {
+                window: Some(value.to_string()),
+                ..dashboard_query_default()
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(view.window, value);
+        assert_eq!(view.time_range.window.as_deref(), Some(value));
+        if let Some(seconds) = seconds {
+            assert_eq!(
+                view.time_range.end_unix - view.time_range.start_unix,
+                seconds
+            );
+        } else {
+            assert_eq!(view.time_range.mode, "all");
+        }
+    }
+
+    let Json(view) = routes_dashboard::dashboard_overview(
+        State(state),
+        headers,
+        Query(dashboard_query_default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(view.window, "1d");
+    assert_eq!(
+        view.available_filters
+            .windows
+            .iter()
+            .map(|window| (window.value.as_str(), window.seconds, window.label.as_str()))
+            .collect::<Vec<_>>(),
+        expected
+            .iter()
+            .map(|(value, seconds, label)| (*value, seconds.unwrap_or(0), *label))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn dashboard_custom_range_matches_the_largest_bounded_window() {
+    let state = dashboard_test_state(Repository::Memory(MemoryState::default()));
+    let headers = crate::test_auth_headers(&state).await;
+    let now = unix_now();
+    let year = 365 * 24 * 60 * 60;
+
+    let result = routes_dashboard::dashboard_overview(
+        State(state.clone()),
+        headers.clone(),
+        Query(routes_dashboard::DashboardOverviewQuery {
+            start_unix: Some(now - year),
+            end_unix: Some(now),
+            ..dashboard_query_default()
+        }),
+    )
+    .await;
+    assert!(result.is_ok());
+
+    let error = routes_dashboard::dashboard_overview(
+        State(state),
+        headers,
+        Query(routes_dashboard::DashboardOverviewQuery {
+            start_unix: Some(now - year - 1),
+            end_unix: Some(now),
+            ..dashboard_query_default()
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "dashboard_time_range_too_large");
 }
 
 #[tokio::test]
@@ -162,7 +256,7 @@ async fn system_dashboard_counts_agent_lost_lifecycle_failures() {
         State(state),
         headers,
         Query(routes_system::SystemDashboardQuery {
-            window: Some("24h".to_string()),
+            window: Some("1d".to_string()),
             chart_points: Some(120),
         }),
     )
@@ -424,7 +518,7 @@ async fn dashboard_overview_supports_scope_and_group_by() {
             group_by: Some("countries".to_string()),
             scope_kind: Some("provider".to_string()),
             scope_value: Some("alpha".to_string()),
-            window: Some("24h".to_string()),
+            window: Some("1d".to_string()),
             ..dashboard_query_default()
         }),
     )
@@ -640,7 +734,7 @@ async fn dashboard_filters_scope_status_and_time_before_bounded_results() {
         Query(routes_dashboard::DashboardOverviewQuery {
             scope_kind: Some("client".to_string()),
             scope_value: Some(selected_client.to_string()),
-            window: Some("24h".to_string()),
+            window: Some("1d".to_string()),
             ..dashboard_query_default()
         }),
     )
@@ -942,6 +1036,8 @@ async fn dashboard_rollups_retain_inclusive_multi_day_endpoints() {
 #[tokio::test]
 async fn latest_telemetry_snapshots_return_one_current_row_per_resource_key() {
     let repo = Repository::Memory(MemoryState::default());
+    crate::tests::seed_never_connected_memory_agent(&repo, "edge-a").await;
+    crate::tests::seed_never_connected_memory_agent(&repo, "edge-b").await;
     if let Repository::Memory(memory) = &repo {
         let mut coarse_rollup = dashboard_test_rollup("edge-a", "250", 2.5, 2.7, 400, 1400);
         coarse_rollup.bucket_secs = 300;
@@ -958,7 +1054,10 @@ async fn latest_telemetry_snapshots_return_one_current_row_per_resource_key() {
         memory.telemetry_network_rates.write().await.extend([
             dashboard_test_rate("edge-a", "eth0", "100", 1_000, 2_000),
             dashboard_test_rate("edge-a", "eth0", "200", 7_000, 8_000),
+            dashboard_test_rate("edge-a", "wg0", "100", 1_000, 2_000),
             dashboard_test_rate("edge-a", "wg0", "180", 3_000, 4_000),
+            dashboard_test_rate("edge-b", "eth0", "100", 1_000, 2_000),
+            dashboard_test_rate("edge-b", "eth0", "190", 5_000, 6_000),
             coarse_previous,
             coarse_current,
         ]);
@@ -1011,6 +1110,13 @@ async fn latest_telemetry_snapshots_return_one_current_row_per_resource_key() {
     assert_eq!(mixed_eth0.bucket_start, "250");
     assert_eq!(mixed_eth0.bucket_secs, 300);
     assert_eq!(mixed_eth0.rx_bytes_delta, 10_000);
+
+    let scoped_rates = repo
+        .list_latest_telemetry_network_rates_for_clients(&["edge-b".to_string()])
+        .await
+        .unwrap();
+    assert_eq!(scoped_rates.len(), 1);
+    assert_eq!(scoped_rates[0].client_id, "edge-b");
 }
 
 fn dashboard_query_default() -> routes_dashboard::DashboardOverviewQuery {
@@ -1058,8 +1164,16 @@ fn dashboard_test_rollup(
         bucket_start: observed_at.to_string(),
         bucket_secs: 60,
         sample_count: 3,
+        cpu_usage_sample_count: 0,
+        cpu_usage_avg: None,
+        cpu_usage_max: None,
+        cpu_cores_max: 0,
         cpu_load_1_avg,
         cpu_load_1_max,
+        cpu_load_5_avg: cpu_load_1_avg,
+        cpu_load_5_max: cpu_load_1_max,
+        cpu_load_15_avg: cpu_load_1_avg,
+        cpu_load_15_max: cpu_load_1_max,
         memory_total_bytes_max: 1000,
         memory_available_bytes_avg: memory_available,
         memory_available_bytes_min: memory_available,
@@ -1068,6 +1182,10 @@ fn dashboard_test_rollup(
         disk_available_bytes_min: disk_available,
         network_rx_bytes_max: 0,
         network_tx_bytes_max: 0,
+        connections_sample_count: 0,
+        tcp_sockets_latest: None,
+        udp_sockets_latest: None,
+        connections_observed_at: None,
         latest_observed_at: observed_at.to_string(),
         updated_at: observed_at.to_string(),
     }
@@ -1088,6 +1206,10 @@ fn dashboard_test_rate(
         sample_count: 3,
         rx_bytes_avg,
         tx_bytes_avg,
+        rx_bytes_last: rx_bytes_avg,
+        tx_bytes_last: tx_bytes_avg,
+        rx_counter_epoch: 0,
+        tx_counter_epoch: 0,
         rx_bytes_delta: 0,
         tx_bytes_delta: 0,
         rx_bps_avg: 0.0,

@@ -17,6 +17,9 @@ import { consolePalette, dashboardChartColors } from "../colorPalette";
 import {
   dashboardScopeLabel,
   dashboardScopeValueOptions,
+  dashboardWindowAccessibleLabel,
+  dashboardWindowLabel,
+  dashboardWindowOptions,
   dateTimeLocalToIso,
   isoToDateTimeLocal,
 } from "../dashboardQuery";
@@ -41,6 +44,10 @@ import {
   resourceMetricDefinition,
 } from "../telemetryMetrics";
 import { formatCompactTime } from "../utils";
+import {
+  ACCESS_REVOKED_RECOVERY_DETAIL,
+  agentStatusPresentation,
+} from "../agentDisplayState";
 
 type HomeTelemetryPanelProps = {
   agents: AgentView[];
@@ -68,7 +75,6 @@ type DrawerState = {
   title: string;
 };
 
-const fallbackDashboardWindows: DashboardWindow[] = ["15m", "1h", "6h", "24h", "7d", "14d", "30d", "all"];
 const resourceMetricOptions: Array<{ value: DashboardResourceMetric; label: string }> = [
   { label: "CPU", value: "cpu_load" },
   { label: "Memory", value: "memory_used" },
@@ -114,7 +120,7 @@ export function HomeTelemetryPanel({
     subpage: "instances",
     view: "Fleet",
   };
-  const windowOptions = overview?.available_filters.windows.map((option) => option.value) ?? fallbackDashboardWindows;
+  const windowOptions = overview?.available_filters.windows.map((option) => option.value) ?? dashboardWindowOptions;
   const groupOptions = overview?.available_filters.group_by_options ?? fallbackGroupOptions();
   const scopeOptions = dashboardScopeValueOptions(preferences.scopeKind, overview);
   const customRangeActive = Boolean(preferences.startAt.trim());
@@ -228,13 +234,15 @@ export function HomeTelemetryPanel({
             <div className="timeRangeTabs" aria-label="Home time range">
               {windowOptions.map((option) => (
                 <button
+                  aria-label={dashboardWindowAccessibleLabel(option)}
                   aria-pressed={!customRangeActive && window === option}
                   className={!customRangeActive && window === option ? "active" : ""}
                   key={option}
                   onClick={() => onWindowChange(option)}
+                  title={dashboardWindowAccessibleLabel(option)}
                   type="button"
                 >
-                  {windowLabel(option)}
+                  {dashboardWindowLabel(option)}
                 </button>
               ))}
             </div>
@@ -368,30 +376,49 @@ export function HomeTelemetryPanel({
               <span>Fleet reachability, active alerts, queued operations, and backup posture.</span>
             </div>
             {summary && (
-              <ConsoleStatusBadge tone={summary.warnings > 0 || summary.stale > 0 ? "warning" : "ok"}>
+              <ConsoleStatusBadge
+                tone={
+                  summary.warnings > 0 ||
+                  summary.offline > 0 ||
+                  summary.revoked > 0 ||
+                  summary.stale > 0
+                    ? "warning"
+                    : "ok"
+                }
+              >
                 {summary.online}/{summary.total} online
               </ConsoleStatusBadge>
             )}
           </div>
           <div className="dashboardCardGrid operationalGrid">
             <HomeMetricCard
-              detail={`${summary?.online ?? 0} online, ${summary?.stale ?? 0} stale`}
+              detail={`${summary?.online ?? 0} online, ${summary?.offline ?? 0} offline, ${summary?.stale ?? 0} stale, ${summary?.revoked ?? 0} access revoked`}
               icon={<Server size={19} />}
               label="Fleet health"
               onClick={() =>
                 openDrawer({
-                  description: "Online, offline, and stale status across VPS clients.",
+                  description:
+                    "Online, offline, stale, and access-revoked status across VPS clients.",
                   drilldown: fallbackDrilldown,
                   metrics: [
                     { label: "Online", tone: "ok", value: String(summary?.online ?? 0) },
                     { label: "Total", value: String(summary?.total ?? 0) },
+                    { label: "Offline", tone: summary?.offline ? "neutral" : "ok", value: String(summary?.offline ?? 0) },
                     { label: "Stale", tone: summary?.stale ? "warning" : "ok", value: String(summary?.stale ?? 0) },
+                    { label: "Access revoked", tone: summary?.revoked ? "warning" : "ok", value: String(summary?.revoked ?? 0) },
                     { label: "Warnings", tone: summary?.warnings ? "warning" : "ok", value: String(summary?.warnings ?? 0) },
                   ],
                   title: "Fleet health",
                 })
               }
-              tone={summary && summary.stale > 0 ? "warning" : "ok"}
+              tone={
+                summary &&
+                (summary.offline > 0 ||
+                  summary.revoked > 0 ||
+                  summary.stale > 0)
+                  ? "warning"
+                  : "ok"
+              }
               value={summary ? `${onlinePercent(summary.online, summary.total)}%` : "No data"}
             />
             <HomeMetricCard
@@ -793,27 +820,42 @@ export function HomeTelemetryPanel({
             <div>
               <h2>Degraded VPS</h2>
               <div className="dashboardList">
-                {visibleDegradedAgents.map((agent) => (
-                  <button
-                    className="dashboardListRow"
-                    key={agent.client_id}
-                    onClick={() =>
-                      openDrawer({
-                        description: agent.tags.join(", ") || agent.client_id,
-                        drilldown: agent.drilldown,
-                        metrics: [
-                          { label: "Status", tone: "warning", value: agent.status },
-                          { label: "Tags", value: agent.tags.join(", ") || "-" },
-                        ],
-                        title: agent.label,
-                      })
-                    }
-                    type="button"
-                  >
-                    <ConsoleStatusBadge tone="warning">{agent.status}</ConsoleStatusBadge>
-                    <span>{agent.label}</span>
-                  </button>
-                ))}
+                {visibleDegradedAgents.map((agent) => {
+                  const status = agentStatusPresentation(agent.status);
+                  return (
+                    <button
+                      className="dashboardListRow"
+                      key={agent.client_id}
+                      onClick={() =>
+                        openDrawer({
+                          description:
+                            agent.status.trim().toLowerCase() === "revoked"
+                              ? ACCESS_REVOKED_RECOVERY_DETAIL
+                              : agent.tags.join(", ") || agent.client_id,
+                          drilldown: agent.drilldown,
+                          metrics: [
+                            {
+                              label: "Status",
+                              tone: status.tone,
+                              value: status.label,
+                            },
+                            {
+                              label: "Tags",
+                              value: agent.tags.join(", ") || "-",
+                            },
+                          ],
+                          title: agent.label,
+                        })
+                      }
+                      type="button"
+                    >
+                      <ConsoleStatusBadge tone={status.tone}>
+                        {status.label}
+                      </ConsoleStatusBadge>
+                      <span>{agent.label}</span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           </section>
@@ -926,6 +968,8 @@ function clusterDrawerMetrics(cluster: DashboardLabelClusterRecord): DrawerMetri
   }
   return [
     { label: "Online", tone: "ok", value: `${cluster.online}/${cluster.total}` },
+    { label: "Offline", tone: cluster.offline ? "neutral" : "ok", value: String(cluster.offline) },
+    { label: "Access revoked", tone: cluster.revoked ? "warning" : "ok", value: String(cluster.revoked) },
     { label: "Stale", tone: cluster.stale ? "warning" : "ok", value: String(cluster.stale) },
     { label: "Warnings", tone: cluster.warnings ? "warning" : "ok", value: String(cluster.warnings) },
     { label: "Running jobs", tone: cluster.running_jobs ? "info" : "neutral", value: String(cluster.running_jobs) },
@@ -937,7 +981,7 @@ function clusterSummary(cluster: DashboardLabelClusterRecord): string {
   if (cluster.kind === "date") {
     return `${cluster.total} samples, ${cluster.warnings} alerts`;
   }
-  return `${cluster.online}/${cluster.total} online`;
+  return `${cluster.online}/${cluster.total} online · ${cluster.offline} offline · ${cluster.stale} stale · ${cluster.revoked} access revoked`;
 }
 
 function maxNetworkPoint(points: Array<{ rx_bps: number; tx_bps: number }>): number {
@@ -1056,10 +1100,6 @@ function trafficPointValue(
 
 function trafficSortLabel(sort: DashboardTrafficSort): string {
   return trafficSortOptions.find((option) => option.value === sort)?.label ?? "Total";
-}
-
-function windowLabel(window: DashboardWindow): string {
-  return window === "all" ? "All" : window;
 }
 
 function formatBytes(value: number): string {

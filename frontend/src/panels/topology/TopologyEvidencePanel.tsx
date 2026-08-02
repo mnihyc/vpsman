@@ -420,71 +420,91 @@ export function TopologyEvidencePanel({
           title="Recommendation evidence"
         >
           {ospfUpdateRows.length > 0 && (
-            <div className="table historyTable trendTable">
-              <div className="historyRow heading topologyEvidenceGrid">
-                <span>OSPF update plan</span>
-                <span>Health</span>
-                <span>Cost</span>
-                <span>Approval</span>
-                <span>Latest</span>
+            <div
+              aria-label="OSPF update plan evidence"
+              className="table historyTable trendTable"
+              role="table"
+            >
+              <div className="historyRow heading topologyEvidenceGrid" role="row">
+                <span role="columnheader">OSPF update plan</span>
+                <span role="columnheader">Health</span>
+                <span role="columnheader">Cost</span>
+                <span role="columnheader">Approval</span>
+                <span role="columnheader">Latest</span>
               </div>
               {ospfUpdateRows.map((row) => (
-                <div className="historyRow topologyEvidenceGrid" key={row.id}>
-                  <span className="historyPrimary">
+                <div className="historyRow topologyEvidenceGrid" key={row.id} role="row">
+                  <span className="historyPrimary" role="cell">
+                    <EvidenceMobileLabel>OSPF update plan</EvidenceMobileLabel>
                     <strong>{row.planName}</strong>
                     <small>{row.interfaceName}</small>
                     <small>{row.confidence}</small>
                   </span>
-                  <span
-                    className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}
-                    title={row.healthDetail}
-                  >
-                    {row.signalLabel}
+                  <span className="topologyEvidenceStatusCell" role="cell">
+                    <EvidenceMobileLabel>Health</EvidenceMobileLabel>
+                    <span
+                      className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}
+                      title={row.healthDetail}
+                    >
+                      {row.signalLabel}
+                    </span>
                   </span>
-                  <span className="topologyMetric">
+                  <span className="topologyMetric" role="cell">
+                    <EvidenceMobileLabel>Cost</EvidenceMobileLabel>
                     <strong>{row.metric}</strong>
                     <small>{row.metricDetail}</small>
                   </span>
-                  <span className="topologyMetric">
+                  <span className="topologyMetric" role="cell">
+                    <EvidenceMobileLabel>Approval</EvidenceMobileLabel>
                     <strong>{row.target}</strong>
                     <small>{row.targetDetail}</small>
                   </span>
-                  <EvidenceTime value={row.latestObservedAt} />
+                  <EvidenceTime label="Latest" value={row.latestObservedAt} />
                 </div>
               ))}
             </div>
           )}
           {ospfRows.length > 0 && (
-            <div className="table historyTable trendTable">
-              <div className="historyRow heading topologyEvidenceGrid">
-                <span>OSPF recommendation</span>
-                <span>Health</span>
-                <span>Cost</span>
-                <span>Evidence</span>
-                <span>Latest</span>
+            <div
+              aria-label="OSPF recommendation evidence"
+              className="table historyTable trendTable"
+              role="table"
+            >
+              <div className="historyRow heading topologyEvidenceGrid" role="row">
+                <span role="columnheader">OSPF recommendation</span>
+                <span role="columnheader">Health</span>
+                <span role="columnheader">Cost</span>
+                <span role="columnheader">Evidence</span>
+                <span role="columnheader">Latest</span>
               </div>
               {ospfRows.map((row) => (
-                <div className="historyRow topologyEvidenceGrid" key={row.id}>
-                  <span className="historyPrimary">
+                <div className="historyRow topologyEvidenceGrid" key={row.id} role="row">
+                  <span className="historyPrimary" role="cell">
+                    <EvidenceMobileLabel>OSPF recommendation</EvidenceMobileLabel>
                     <strong>{row.planName}</strong>
                     <small>{row.interfaceName}</small>
                     <small>{row.confidence}</small>
                   </span>
-                  <span
-                    className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}
-                    title={row.healthDetail}
-                  >
-                    {row.signalLabel}
+                  <span className="topologyEvidenceStatusCell" role="cell">
+                    <EvidenceMobileLabel>Health</EvidenceMobileLabel>
+                    <span
+                      className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}
+                      title={row.healthDetail}
+                    >
+                      {row.signalLabel}
+                    </span>
                   </span>
-                  <span className="topologyMetric">
+                  <span className="topologyMetric" role="cell">
+                    <EvidenceMobileLabel>Cost</EvidenceMobileLabel>
                     <strong>{row.metric}</strong>
                     <small>{row.metricDetail}</small>
                   </span>
-                  <span className="topologyMetric">
+                  <span className="topologyMetric" role="cell">
+                    <EvidenceMobileLabel>Evidence</EvidenceMobileLabel>
                     <strong>{row.target}</strong>
                     <small>{row.targetDetail}</small>
                   </span>
-                  <EvidenceTime value={row.latestObservedAt} />
+                  <EvidenceTime label="Latest" value={row.latestObservedAt} />
                 </div>
               ))}
             </div>
@@ -565,36 +585,44 @@ export function TopologyEvidencePanel({
           )}
           {trendRows.length > 0 && (
             <div
+              aria-label="Network observation trends"
               className="table historyTable trendTable"
               id="topology-evidence-trends"
+              role="table"
             >
-              <div className="historyRow heading topologyEvidenceGrid">
-                <span>Trend</span>
-                <span>Health</span>
-                <span>Metric</span>
-                <span>Endpoint</span>
-                <span>Latest</span>
+              <div className="historyRow heading topologyEvidenceGrid" role="row">
+                <span role="columnheader">Trend</span>
+                <span role="columnheader">Health</span>
+                <span role="columnheader">Metric</span>
+                <span role="columnheader">Endpoint</span>
+                <span role="columnheader">Latest</span>
               </div>
               {trendRows.map((row) => (
-                <div className="historyRow topologyEvidenceGrid" key={row.id}>
-                  <span className="historyPrimary">
+                <div className="historyRow topologyEvidenceGrid" key={row.id} role="row">
+                  <span className="historyPrimary" role="cell">
+                    <EvidenceMobileLabel>Trend</EvidenceMobileLabel>
                     <strong>{humanStatus(row.kind)}</strong>
                     <small>{row.sampleCount} samples</small>
                   </span>
-                  <span
-                    className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}
-                  >
-                    {row.signalLabel}
+                  <span className="topologyEvidenceStatusCell" role="cell">
+                    <EvidenceMobileLabel>Health</EvidenceMobileLabel>
+                    <span
+                      className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}
+                    >
+                      {row.signalLabel}
+                    </span>
                   </span>
-                  <span className="topologyMetric">
+                  <span className="topologyMetric" role="cell">
+                    <EvidenceMobileLabel>Metric</EvidenceMobileLabel>
                     <strong>{row.metric}</strong>
                     <small>{row.metricDetail}</small>
                   </span>
-                  <span className="topologyMetric">
+                  <span className="topologyMetric" role="cell">
+                    <EvidenceMobileLabel>Endpoint</EvidenceMobileLabel>
                     <strong>{row.target}</strong>
                     <small>{row.targetDetail}</small>
                   </span>
-                  <EvidenceTime value={row.latestObservedAt} />
+                  <EvidenceTime label="Latest" value={row.latestObservedAt} />
                 </div>
               ))}
             </div>
@@ -606,34 +634,44 @@ export function TopologyEvidencePanel({
           detail="Persisted status, probe, and speed-test observations remain separate from recommendations and related jobs."
           title="Status and probe results"
         >
-          <div className="table historyTable observationTable">
-            <div className="historyRow heading topologyEvidenceGrid">
-              <span>Observation</span>
-              <span>Signal</span>
-              <span>Metric</span>
-              <span>Target</span>
-              <span>Observed</span>
+          <div
+            aria-label="Status and probe observations"
+            className="table historyTable observationTable"
+            role="table"
+          >
+            <div className="historyRow heading topologyEvidenceGrid" role="row">
+              <span role="columnheader">Observation</span>
+              <span role="columnheader">Signal</span>
+              <span role="columnheader">Metric</span>
+              <span role="columnheader">Target</span>
+              <span role="columnheader">Observed</span>
             </div>
             {observationRows.map((row) => (
-              <div className="historyRow topologyEvidenceGrid" key={row.id}>
-                <span className="historyPrimary">
+              <div className="historyRow topologyEvidenceGrid" key={row.id} role="row">
+                <span className="historyPrimary" role="cell">
+                  <EvidenceMobileLabel>Observation</EvidenceMobileLabel>
                   <strong>{humanStatus(row.kind)}</strong>
                   <small>job {shortId(row.jobId)}</small>
                 </span>
-                <span
-                  className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}
-                >
-                  {row.signalLabel}
+                <span className="topologyEvidenceStatusCell" role="cell">
+                  <EvidenceMobileLabel>Signal</EvidenceMobileLabel>
+                  <span
+                    className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}
+                  >
+                    {row.signalLabel}
+                  </span>
                 </span>
-                <span className="topologyMetric">
+                <span className="topologyMetric" role="cell">
+                  <EvidenceMobileLabel>Metric</EvidenceMobileLabel>
                   <strong>{row.metric}</strong>
                   <small>{row.metricDetail}</small>
                 </span>
-                <span className="topologyMetric">
+                <span className="topologyMetric" role="cell">
+                  <EvidenceMobileLabel>Target</EvidenceMobileLabel>
                   <strong>{row.target}</strong>
                   <small>{row.targetDetail}</small>
                 </span>
-                <EvidenceTime value={row.observedAt} />
+                <EvidenceTime label="Observed" value={row.observedAt} />
               </div>
             ))}
           </div>
@@ -643,19 +681,24 @@ export function TopologyEvidencePanel({
         detail="Command rows explain retained-output state and link to job detail without turning evidence review into a mutation page."
         title="Related command jobs"
       >
-        <div className="table historyTable">
-          <div className="historyRow heading topologyEvidenceGrid">
-            <span>Command</span>
-            <span>Signal</span>
-            <span>Metric</span>
-            <span>Target</span>
-            <span>Created</span>
+        <div
+          aria-label="Related topology command jobs"
+          className="table historyTable"
+          role="table"
+        >
+          <div className="historyRow heading topologyEvidenceGrid" role="row">
+            <span role="columnheader">Command</span>
+            <span role="columnheader">Signal</span>
+            <span role="columnheader">Metric</span>
+            <span role="columnheader">Target</span>
+            <span role="columnheader">Created</span>
           </div>
           {rows.map((row) => {
             const signalLabel = row.signalLabel ?? humanStatus(row.signalStatus);
             return (
-            <div className="historyRow topologyEvidenceGrid" key={row.job.id}>
-              <span className="historyPrimary">
+            <div className="historyRow topologyEvidenceGrid" key={row.job.id} role="row">
+              <span className="historyPrimary" role="cell">
+                <EvidenceMobileLabel>Command</EvidenceMobileLabel>
                 <strong>{humanStatus(row.job.command_type)}</strong>
                 <small>job {shortId(row.job.id)}</small>
                 {onOpenJobDetails ? (
@@ -669,35 +712,40 @@ export function TopologyEvidencePanel({
                   </button>
                 ) : null}
               </span>
-              <span
-                className={`status ${evidenceStatusBadgeClass(row)}`}
-                data-value-tooltip="true"
-                title={signalLabel}
-              >
-                {signalLabel}
+              <span className="topologyEvidenceStatusCell" role="cell">
+                <EvidenceMobileLabel>Signal</EvidenceMobileLabel>
+                <span
+                  className={`status ${evidenceStatusBadgeClass(row)}`}
+                  data-value-tooltip="true"
+                  title={signalLabel}
+                >
+                  {signalLabel}
+                </span>
               </span>
-              <span className="topologyMetric">
+              <span className="topologyMetric" role="cell">
+                <EvidenceMobileLabel>Metric</EvidenceMobileLabel>
                 <strong>{row.metric}</strong>
                 <small>{row.metricDetail}</small>
               </span>
-              <span className="topologyMetric">
+              <span className="topologyMetric" role="cell">
+                <EvidenceMobileLabel>Target</EvidenceMobileLabel>
                 <strong>{row.target}</strong>
                 <small>{row.targetDetail}</small>
               </span>
-              <EvidenceTime value={row.job.created_at} />
+              <EvidenceTime label="Created" value={row.job.created_at} />
             </div>
             );
           })}
-          {rows.length === 0 && (
-            <div className="emptyState">
-              <Activity size={22} />
-              <strong>No topology evidence</strong>
-              <span>
-                Sync, status, probe, and speed-test results will appear here.
-              </span>
-            </div>
-          )}
         </div>
+        {rows.length === 0 && (
+          <div className="emptyState">
+            <Activity size={22} />
+            <strong>No topology evidence</strong>
+            <span>
+              Sync, status, probe, and speed-test results will appear here.
+            </span>
+          </div>
+        )}
       </EvidenceGroup>
     </section>
   );
@@ -725,18 +773,36 @@ function EvidenceGroup({
 
 function EvidenceTime({
   fallback = "pending",
+  label,
   value,
 }: {
   fallback?: string;
+  label: string;
   value: string | null;
 }) {
   if (!value) {
-    return <span>{fallback}</span>;
+    return (
+      <span className="topologyEvidenceTimeCell" role="cell">
+        <EvidenceMobileLabel>{label}</EvidenceMobileLabel>
+        <span>{fallback}</span>
+      </span>
+    );
   }
   return (
-    <time dateTime={value} title={formatFullTime(value)}>
-      {formatCompactTime(value)}
-    </time>
+    <span className="topologyEvidenceTimeCell" role="cell">
+      <EvidenceMobileLabel>{label}</EvidenceMobileLabel>
+      <time dateTime={value} title={formatFullTime(value)}>
+        {formatCompactTime(value)}
+      </time>
+    </span>
+  );
+}
+
+function EvidenceMobileLabel({ children }: { children: ReactNode }) {
+  return (
+    <span aria-hidden="true" className="topologyEvidenceMobileLabel">
+      {children}
+    </span>
   );
 }
 

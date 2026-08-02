@@ -147,6 +147,8 @@ async fn unconfigured_endpoint_ospf_preset_is_an_explicit_error() {
 #[tokio::test]
 async fn saved_plan_is_explicit_and_has_no_ospf_state_when_ospf_is_off() {
     let repo = Repository::Memory(MemoryState::default());
+    seed_online_agent(&repo, "client-a").await;
+    seed_online_agent(&repo, "client-b").await;
     let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
     let plan = plan_tunnel(&input).unwrap();
     let view = repo
@@ -167,6 +169,8 @@ async fn saved_plan_is_explicit_and_has_no_ospf_state_when_ospf_is_off() {
 #[tokio::test]
 async fn memory_management_list_preserves_typed_tunnel_identity() {
     let repo = Repository::Memory(MemoryState::default());
+    seed_online_agent(&repo, "client-a").await;
+    seed_online_agent(&repo, "client-b").await;
     let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
     let plan = plan_tunnel(&input).unwrap();
     let created = repo
@@ -183,6 +187,8 @@ async fn memory_management_list_preserves_typed_tunnel_identity() {
 #[tokio::test]
 async fn connection_assessment_is_audited_revision_bound_and_cleared_by_plan_changes() {
     let repo = Repository::Memory(MemoryState::default());
+    seed_online_agent(&repo, "client-a").await;
+    seed_online_agent(&repo, "client-b").await;
     let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);
     seed_test_plan_adapter_definitions(&repo, &input).await;
     let plan = plan_tunnel(&input).unwrap();
@@ -270,6 +276,8 @@ async fn connection_assessment_is_audited_revision_bound_and_cleared_by_plan_cha
 #[tokio::test]
 async fn enabled_ospf_plan_starts_unverified_and_stages_exact_endpoint_jobs() {
     let repo = Repository::Memory(MemoryState::default());
+    seed_online_agent(&repo, "client-a").await;
+    seed_online_agent(&repo, "client-b").await;
     let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);
     seed_test_plan_adapter_definitions(&repo, &input).await;
     let plan = plan_tunnel(&input).unwrap();
@@ -356,6 +364,7 @@ async fn enabled_ospf_plan_starts_unverified_and_stages_exact_endpoint_jobs() {
 async fn ospf_dispatch_reports_each_endpoint_when_one_target_disappears() {
     let repo = Repository::Memory(MemoryState::default());
     seed_online_agent(&repo, "client-a").await;
+    seed_online_agent(&repo, "client-b").await;
     let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);
     seed_test_plan_adapter_definitions(&repo, &input).await;
     let plan = plan_tunnel(&input).unwrap();
@@ -378,6 +387,14 @@ async fn ospf_dispatch_reports_each_endpoint_when_one_target_disappears() {
         )
         .await
         .unwrap();
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    memory
+        .agents
+        .write()
+        .await
+        .retain(|agent| agent.id != "client-b");
     let state = test_state(repo.clone());
 
     let (jobs, dispatch) = crate::routes_network::dispatch_routing_jobs(
@@ -410,6 +427,8 @@ async fn ospf_dispatch_reports_each_endpoint_when_one_target_disappears() {
 #[tokio::test]
 async fn allocation_skips_addresses_already_owned_by_saved_plans() {
     let repo = Repository::Memory(MemoryState::default());
+    seed_online_agent(&repo, "client-a").await;
+    seed_online_agent(&repo, "client-b").await;
     let mut input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
     input.address_pool_cidr = "10.10.0.0/29".to_string();
     input.ipv4_tunnel = Some(TunnelAddressPair {
@@ -589,6 +608,9 @@ async fn tunnel_plan_create_rejects_duplicates_and_update_rejects_stale_revision
 #[tokio::test]
 async fn tunnel_plan_repository_write_boundary_rechecks_resource_conflicts() {
     let repo = Repository::Memory(MemoryState::default());
+    seed_online_agent(&repo, "client-a").await;
+    seed_online_agent(&repo, "client-b").await;
+    seed_online_agent(&repo, "client-c").await;
     let operator = network_test_operator();
     let first_input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
     let first_plan = plan_tunnel(&first_input).unwrap();
@@ -696,6 +718,8 @@ async fn tunnel_plan_repository_write_boundary_rechecks_resource_conflicts() {
 #[tokio::test]
 async fn tunnel_plan_repository_write_boundary_rejects_invalid_addresses() {
     let repo = Repository::Memory(MemoryState::default());
+    seed_online_agent(&repo, "client-a").await;
+    seed_online_agent(&repo, "client-b").await;
     let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
     let mut plan = plan_tunnel(&input).unwrap();
     plan.ipv4_tunnel.as_mut().unwrap().left = "not-an-ip".to_string();
@@ -1073,6 +1097,8 @@ fn network_status_side_must_match_the_only_dispatch_target() {
 #[tokio::test]
 async fn network_diagnostics_require_an_exact_declared_plan_and_limit_disabled_plans_to_status() {
     let repo = Repository::Memory(MemoryState::default());
+    seed_online_agent(&repo, "client-a").await;
+    seed_online_agent(&repo, "client-b").await;
     let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
     let plan = plan_tunnel(&input).unwrap();
     let saved = repo
@@ -1381,7 +1407,7 @@ async fn assign_test_ospf_preset(
     preset
 }
 
-async fn seed_online_agent(repo: &Repository, client_id: &str) {
+pub(crate) async fn seed_online_agent(repo: &Repository, client_id: &str) {
     let Repository::Memory(memory) = repo else {
         panic!("memory repository required");
     };

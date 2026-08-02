@@ -3,6 +3,10 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
 import {
+  installMonitoringManagementApiMock,
+  screenshotPingTargetId,
+} from "./support/monitoringManagementFixtures";
+import {
   openConsoleSubpage,
   unlockPrivilegeFromTop,
   waitForConsoleShell,
@@ -12,7 +16,7 @@ import type { ActiveView } from "../src/types";
 
 const SCREENSHOT_DIR = join(
   process.env.VPSMAN_SCREENSHOT_DIR ??
-    join(process.cwd(), "..", ".tmp", "audit", "structured-screenshots"),
+    join(process.cwd(), "..", "output", "playwright", "structured-screenshots"),
 );
 
 interface ScreenshotEntry {
@@ -23,6 +27,7 @@ interface ScreenshotEntry {
   detailTab?: string;
   prepare?:
     | "alert-policy-editor"
+    | "bulk-group-schedule-review"
     | "config-bulk-patch-preview"
     | "configuration-assignment-drawer"
     | "configuration-assignment-review"
@@ -31,6 +36,7 @@ interface ScreenshotEntry {
     | "fleet-monitor-compact"
     | "fleet-metrics-advanced"
     | "fleet-metrics-chart"
+    | "ping-target-assignments"
     | "network-latency-chart"
     | "network-throughput-chart"
     | "network-adapter-create"
@@ -43,6 +49,7 @@ interface ScreenshotEntry {
     | "tunnel-plan-disable-review"
     | "tunnel-plan-ospf"
     | "vps-rules-preview"
+    | "shared-view-create"
     | "webhook-rule-editor";
   desktopRequiredText?: string[];
   mobileRequiredText?: string[];
@@ -215,6 +222,30 @@ const allViews: ScreenshotEntry[] = [
   },
   {
     view: "Remote Operations",
+    subpage: "Services",
+    heading: "Services",
+    id: "12a-remote-operations-services",
+    requiredText: [
+      "Host services",
+      "Choose a VPS",
+      "Host service inventory",
+      "Refresh inventory",
+    ],
+  },
+  {
+    view: "Remote Operations",
+    subpage: "Storage",
+    heading: "Storage",
+    id: "12b-remote-operations-storage",
+    requiredText: [
+      "Host storage",
+      "Raw disks",
+      "Inventory view",
+      "Block devices",
+    ],
+  },
+  {
+    view: "Remote Operations",
     subpage: "Bulk files",
     heading: "Bulk files",
     id: "13-remote-operations-bulk-files",
@@ -251,6 +282,13 @@ const allViews: ScreenshotEntry[] = [
   },
   {
     view: "Automation",
+    subpage: "Rollouts",
+    heading: "Rollouts",
+    id: "18a-automation-rollouts",
+    requiredText: ["Staged rollouts", "Durable canaries", "Rollout history"],
+  },
+  {
+    view: "Automation",
     subpage: "Schedules",
     heading: "Schedules",
     id: "19-automation-schedules",
@@ -260,6 +298,18 @@ const allViews: ScreenshotEntry[] = [
     subpage: "Runbooks",
     heading: "Runbooks",
     id: "20-automation-runbooks",
+  },
+  {
+    view: "Automation",
+    subpage: "OS updates",
+    heading: "OS updates",
+    id: "21-automation-os-updates",
+    requiredText: [
+      "OS update posture",
+      "Native package support",
+      "Fleet package posture",
+      "Packages available",
+    ],
   },
   {
     view: "Automation",
@@ -460,7 +510,7 @@ const allViews: ScreenshotEntry[] = [
     heading: "Backup requests",
     id: "30-backups-requests",
     desktopRequiredText: ["Actions"],
-    mobileRequiredText: ["Open artifact"],
+    mobileRequiredText: ["Actions"],
     requiredText: ["Backup request history", "artifact-backed"],
   },
   {
@@ -627,7 +677,7 @@ const allViews: ScreenshotEntry[] = [
     id: "40-observability-fleet-metrics",
     requiredText: [
       "CPU load by VPS",
-      "Selected: 24h",
+      "Selected: 1d",
       "Data available:",
       "Sparse data:",
       "Active alerts",
@@ -708,6 +758,56 @@ const allViews: ScreenshotEntry[] = [
       "average TCP throughput",
       "Average throughput 10.1 Mbps",
       "Data coverage:",
+    ],
+  },
+  {
+    view: "Observability",
+    subpage: "Ping targets",
+    heading: "Ping targets",
+    id: "42-observability-ping-targets",
+    requiredText: [
+      "Create Ping target",
+      "Frankfurt gateway",
+      "Saved selector",
+      "Runtime sync",
+    ],
+  },
+  {
+    view: "Observability",
+    subpage: "Ping targets",
+    heading: "Ping targets",
+    id: "42a-observability-ping-target-assignments",
+    prepare: "ping-target-assignments",
+    desktopRequiredText: ["Assigned VPS"],
+    requiredText: [
+      "Frozen VPS assignments",
+      "Frankfurt gateway assignments",
+      "Card role",
+    ],
+  },
+  {
+    view: "Observability",
+    subpage: "Shared views",
+    heading: "Shared views",
+    id: "42b-observability-shared-views",
+    requiredText: [
+      "Create shared view",
+      "Customer status",
+      "Active · 1",
+      "Active shared views",
+    ],
+  },
+  {
+    view: "Observability",
+    subpage: "Shared views",
+    heading: "Shared views",
+    id: "42c-observability-shared-view-create",
+    prepare: "shared-view-create",
+    requiredText: [
+      "Create shared view",
+      "Frozen VPS scope",
+      "Visible data",
+      "Review creation",
     ],
   },
   {
@@ -891,7 +991,8 @@ const allViews: ScreenshotEntry[] = [
       "Privilege vault",
       "Unlock scope",
       "Unlocked until",
-      "Keep encrypted in this browser",
+      "Persistent browser unlock",
+      "Unlock privilege",
       "Authenticator QR code",
       "Complete setup",
     ],
@@ -953,8 +1054,51 @@ const allViews: ScreenshotEntry[] = [
     heading: "Fleet instances",
     id: "59-fleet-delete-tunnel-cleanup",
     prepare: "fleet-delete-success",
+    requiredText: ["VPS deleted; tunnel cleanup queued for 1 surviving peer."],
+  },
+  {
+    view: "Fleet",
+    subpage: "Bulk groups",
+    heading: "Bulk groups",
+    id: "60-fleet-bulk-group-schedule-review",
+    prepare: "bulk-group-schedule-review",
     requiredText: [
-      "VPS deleted; tunnel cleanup queued for 1 surviving peer.",
+      "Confirm tag mutation",
+      "Affected schedules",
+      "Open schedules",
+      "Impact",
+    ],
+  },
+];
+
+const monitoringDetailViews: ScreenshotEntry[] = [
+  {
+    view: "Fleet",
+    subpage: "Instances",
+    expandVpsRow: "edge-sfo-01",
+    detailTab: "Resources",
+    heading: "Instance detail",
+    id: "08b-fleet-instance-resources-detail",
+    requiredText: [
+      "Monitoring history",
+      "Resource history",
+      "CPU utilization",
+      "Traffic volume",
+    ],
+  },
+  {
+    view: "Fleet",
+    subpage: "Instances",
+    expandVpsRow: "edge-sfo-01",
+    detailTab: "Ping",
+    heading: "Instance detail",
+    id: "08c-fleet-instance-ping-detail",
+    requiredText: [
+      "Monitoring history",
+      "Ping history",
+      "Singapore gateway",
+      "Cloudflare DNS",
+      "Ping latency",
     ],
   },
 ];
@@ -983,6 +1127,7 @@ async function navigateAndScreenshot(
     ? `${viewLabel(entry.view)} / ${entry.subpage}${entry.tab ? ` / ${entry.tab}` : ""}`
     : viewLabel(entry.view);
 
+  await dismissTransientCaptureUi(page);
   await expectNoLegacyTopLevelSidebarEntries(page);
   await openConsoleSubpage(page, entry.view, entry.subpage ?? "Overview");
   await expectNoLegacyTopLevelSidebarEntries(page);
@@ -1036,8 +1181,18 @@ async function navigateAndScreenshot(
           name: /^(Open detail|Open VPS(?: .*)?)$/,
         })
         .first();
-      await expect(explicitOpen).toBeVisible({ timeout: 5_000 });
-      await explicitOpen.click();
+      if (await explicitOpen.isVisible().catch(() => false)) {
+        await explicitOpen.click();
+      } else {
+        await card.getByRole("checkbox", { name: /Select .* row/ }).check();
+        await grid
+          .locator(".gridToolbarActions")
+          .getByRole("button", { name: "Actions", exact: true })
+          .click();
+        await page
+          .getByRole("menuitem", { name: "Open detail", exact: true })
+          .click();
+      }
     }
     await expect(
       page
@@ -1116,9 +1271,7 @@ async function navigateAndScreenshot(
       .locator(".gridToolbarActions")
       .getByRole("button", { name: "Actions", exact: true })
       .click();
-    await page
-      .getByRole("menuitem", { name: "Review VPS deletion" })
-      .click();
+    await page.getByRole("menuitem", { name: "Review VPS deletion" }).click();
     const prompt = page.locator(".fleetInstancesPanel > .confirmationPrompt");
     await expect(prompt).toBeVisible({ timeout: 5_000 });
     await prompt.getByRole("button", { name: "Delete VPS" }).click();
@@ -1128,16 +1281,44 @@ async function navigateAndScreenshot(
       ),
     ).toBeVisible({ timeout: 5_000 });
   }
+  if (entry.prepare === "bulk-group-schedule-review") {
+    await unlockPrivilegeFromTop(page);
+    await openConsoleSubpage(page, "Fleet", "Bulk groups");
+    await page
+      .getByLabel("Bulk group", { exact: true })
+      .fill("maintenance:test");
+    const selector = page.getByRole("combobox", {
+      name: "Bulk group selector expression",
+    });
+    await selector.fill("id:agent-sfo-01");
+    await selector.press("Escape");
+    await page.getByLabel("Include targets needing review").check();
+    await page
+      .locator(".bulkTagApplyGrid")
+      .getByRole("button", { name: /maintenance:test/ })
+      .click();
+    await expect(page.getByLabel("Confirm tag mutation")).toBeVisible({
+      timeout: 5_000,
+    });
+  }
   if (entry.prepare === "fleet-metrics-advanced") {
     const filters = page.locator(".fleetMetricsAdvancedFilters");
     await filters.locator("summary").click();
-    await filters.getByLabel("Fleet metrics scope kind").selectOption("provider");
-    await filters.getByLabel("Fleet metrics scope value").selectOption({ index: 1 });
+    await filters
+      .getByLabel("Fleet metrics scope kind")
+      .selectOption("provider");
+    await filters
+      .getByLabel("Fleet metrics scope value")
+      .selectOption({ index: 1 });
   }
 
   if (entry.prepare === "fleet-metrics-chart") {
     const filters = page.locator(".fleetMetricsAdvancedFilters");
-    if (!(await filters.getByRole("button", { name: "Reset filters" }).isVisible())) {
+    if (
+      !(await filters
+        .getByRole("button", { name: "Reset filters" })
+        .isVisible())
+    ) {
       await filters.locator("summary").click();
     }
     const reset = filters.getByRole("button", { name: "Reset filters" });
@@ -1147,7 +1328,9 @@ async function navigateAndScreenshot(
     if ((await filters.getAttribute("open")) !== null) {
       await filters.locator("summary").click();
     }
-    const chartSection = page.locator(".observabilityMetricsPanel .observabilityChartSection");
+    const chartSection = page.locator(
+      ".observabilityMetricsPanel .observabilityChartSection",
+    );
     await scrollSectionBelowToolbar(chartSection);
     await expect(chartSection.locator(".timeSeriesChartShell")).toBeVisible();
   }
@@ -1169,6 +1352,30 @@ async function navigateAndScreenshot(
     await expect(chartSection.locator(".timeSeriesChartShell")).toBeVisible();
   }
 
+  if (entry.prepare === "ping-target-assignments") {
+    const grid = page.getByLabel("Ping targets data grid");
+    const desktopExpand = grid.getByRole("button", {
+      name: `Expand Ping targets row ${screenshotPingTargetId}`,
+    });
+    if ((await desktopExpand.count()) > 0) {
+      await desktopExpand.click();
+    } else {
+      await grid
+        .getByLabel(`Ping targets mobile card ${screenshotPingTargetId}`)
+        .click();
+    }
+    await expect(
+      grid.getByLabel("Frankfurt gateway assignments data grid"),
+    ).toBeVisible({ timeout: 5_000 });
+  }
+
+  if (entry.prepare === "shared-view-create") {
+    await page.getByRole("button", { name: "Create shared view" }).click();
+    await expect(
+      page.getByRole("complementary", { name: "Create shared view" }),
+    ).toBeVisible({ timeout: 5_000 });
+  }
+
   if (
     entry.prepare === "port-forward-details" ||
     entry.prepare === "port-forward-create" ||
@@ -1176,13 +1383,21 @@ async function navigateAndScreenshot(
   ) {
     await closePortForwardWorkflow(page);
     if (entry.prepare === "port-forward-details") {
-      await page
-        .getByRole("row", { name: /Public web ingress/ })
-        .getByText("Public web ingress", { exact: true })
-        .click();
-      await expect(
-        page.getByRole("region", { name: "Details for Public web ingress" }),
-      ).toBeVisible({ timeout: 5_000 });
+      const grid = page.getByLabel("Port-forward rules data grid");
+      const record =
+        (page.viewportSize()?.width ?? 0) <= 640
+          ? grid.getByLabel(
+              "Port-forward rules mobile card 4f000000-0000-4000-8000-000000000001",
+            )
+          : grid
+              .locator(".gridBody [role=row]", {
+                hasText: "Public web ingress",
+              })
+              .first();
+      await record.click();
+      await expect(grid.locator(".gridExpandedRow")).toBeVisible({
+        timeout: 5_000,
+      });
     } else {
       await page.getByRole("button", { name: "Create rule" }).click();
       const editor = page.locator(".portForwardEditor");
@@ -1193,7 +1408,9 @@ async function navigateAndScreenshot(
           .getByRole("listbox", { name: "Port-forward rule VPS options" })
           .getByRole("option", { name: /edge-sfo-01/ })
           .click();
-        await editor.getByLabel("Name", { exact: true }).fill("Audit web ingress");
+        await editor
+          .getByLabel("Name", { exact: true })
+          .fill("Audit web ingress");
         await editor.getByLabel("Incoming ports").fill("8443");
         await editor.getByLabel("Target ports").fill("443");
         await editor.getByLabel("Target IP or hostname").fill("10.20.0.25");
@@ -1233,12 +1450,16 @@ async function navigateAndScreenshot(
 
   if (entry.prepare === "tunnel-plan-assessment") {
     await closeTunnelPlanWorkflow(page);
-    const row = page
-      .getByRole("table", { name: "Tunnel plans" })
-      .locator("tbody > tr")
-      .filter({ hasText: "sfo-fra-gre" })
-      .first();
-    await row.getByText("sfo-fra-gre", { exact: true }).click();
+    const grid = page.getByLabel("Tunnel plans data grid");
+    const row =
+      (page.viewportSize()?.width ?? 0) <= 640
+        ? grid.getByLabel(
+            "Tunnel plans mobile card dddddddd-eeee-4fff-8000-111111111111",
+          )
+        : grid
+            .locator(".gridBody [role=row]", { hasText: "sfo-fra-gre" })
+            .first();
+    await row.click();
     await expect(page.locator(".tunnelConnectionAssessment")).toBeVisible({
       timeout: 5_000,
     });
@@ -1248,39 +1469,43 @@ async function navigateAndScreenshot(
     await closeTunnelPlanWorkflow(page);
     await page.getByRole("button", { name: "Create plan" }).click();
     await page.getByText("Enable OSPF cost control").click();
-    await expect(
-      page.getByLabel("OSPF control mode"),
-    ).toBeVisible();
+    await expect(page.getByLabel("OSPF control mode")).toBeVisible();
   }
 
   if (entry.prepare === "tunnel-plan-disable-review") {
     await closeTunnelPlanWorkflow(page);
-    await page.getByLabel("Select sfo-fra-gre").check();
-    await page
-      .getByRole("button", {
-        name: "Actions for 1 selected tunnel plan",
-        exact: true,
-      })
+    const grid = page.getByLabel("Tunnel plans data grid");
+    await grid
+      .getByLabel(
+        "Select Tunnel plans row dddddddd-eeee-4fff-8000-111111111111",
+      )
+      .check();
+    await grid
+      .locator(".gridToolbarActions")
+      .getByRole("button", { name: "Actions", exact: true })
       .click();
     await page.getByRole("menuitem", { name: "Disable", exact: true }).click();
-    await expect(
-      page.getByLabel("Confirm tunnel plan disable"),
-    ).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByLabel("Confirm tunnel plan disable")).toBeVisible({
+      timeout: 5_000,
+    });
   }
 
   if (entry.prepare === "tunnel-plan-delete-review") {
     await closeTunnelPlanWorkflow(page);
-    await page.getByLabel("Select sfo-fra-gre").check();
-    await page
-      .getByRole("button", {
-        name: "Actions for 1 selected tunnel plan",
-        exact: true,
-      })
+    const grid = page.getByLabel("Tunnel plans data grid");
+    await grid
+      .getByLabel(
+        "Select Tunnel plans row dddddddd-eeee-4fff-8000-111111111111",
+      )
+      .check();
+    await grid
+      .locator(".gridToolbarActions")
+      .getByRole("button", { name: "Actions", exact: true })
       .click();
     await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
-    await expect(
-      page.getByLabel("Confirm tunnel plan deletion"),
-    ).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByLabel("Confirm tunnel plan deletion")).toBeVisible({
+      timeout: 5_000,
+    });
   }
 
   if (entry.prepare === "webhook-rule-editor") {
@@ -1366,9 +1591,7 @@ async function navigateAndScreenshot(
     }
     await unlockPrivilegeFromTop(page);
     const panel = page.locator(".configurationSourcesPanel");
-    await panel
-      .getByRole("button", { name: "Change configuration" })
-      .click();
+    await panel.getByRole("button", { name: "Change configuration" }).click();
     const drawer = page.getByRole("complementary", {
       name: "Change effective configuration",
     });
@@ -1395,15 +1618,13 @@ async function navigateAndScreenshot(
       await selectorDetails.locator("summary").click();
     }
     await expect(selectorDetails).toHaveAttribute("open", "");
-    await drawer
-      .getByLabel("Configuration target selector")
-      .fill("country:DE");
-    await expect(drawer.getByLabel("Configuration target preview")).toContainText(
-      "edge-sfo-01",
-    );
-    await expect(drawer.getByLabel("Configuration target preview")).toContainText(
-      "core-fra-02",
-    );
+    await drawer.getByLabel("Configuration target selector").fill("country:DE");
+    await expect(
+      drawer.getByLabel("Configuration target preview"),
+    ).toContainText("edge-sfo-01");
+    await expect(
+      drawer.getByLabel("Configuration target preview"),
+    ).toContainText("core-fra-02");
     if (entry.prepare === "configuration-assignment-review") {
       await drawer.getByRole("button", { name: "Review change" }).click();
       await expect(
@@ -1440,14 +1661,25 @@ async function navigateAndScreenshot(
   ]) {
     await expectVisibleText(page, text);
   }
+  if (entry.id === "38b-config-presets") {
+    await expect(
+      page.getByText("Reviewed 2 VPSs; no change has been applied", {
+        exact: true,
+      }),
+    ).toHaveCount(0);
+  }
+  if (entry.id === "08c-fleet-instance-ping-detail") {
+    const targetNames = page.locator(".vpsMonitoringPingTarget strong");
+    await expect(targetNames.first()).toHaveAttribute("title", /\S/);
+  }
 
   await page.waitForTimeout(200);
   const preserveWorkflowFocus = Boolean(
     (entry.prepare &&
       entry.prepare !== "fleet-metrics-advanced" &&
       entry.prepare !== "fleet-monitor-compact") ||
-      entry.expandVpsRow ||
-      entry.tab,
+    entry.expandVpsRow ||
+    entry.tab,
   );
   if (!preserveWorkflowFocus) {
     await page.evaluate(() => {
@@ -1483,7 +1715,15 @@ async function navigateAndScreenshot(
 
   const filename = `${entry.id}-${projectName}.png`;
   const screenshotPath = join(projectDir, filename);
-  await page.screenshot({ fullPage: !preserveWorkflowFocus, path: screenshotPath });
+  await page.screenshot({
+    fullPage: !preserveWorkflowFocus,
+    path: screenshotPath,
+  });
+  const fullScreenshotPath = join(
+    projectDir,
+    `${entry.id}-${projectName}-full.png`,
+  );
+  await captureFullConsolePage(page, fullScreenshotPath);
 
   return {
     id: entry.id,
@@ -1495,7 +1735,92 @@ async function navigateAndScreenshot(
     heading: entry.heading,
     horizontalOverflowPx,
     screenshot: screenshotPath,
+    fullScreenshot: fullScreenshotPath,
   };
+}
+
+async function captureFullConsolePage(
+  page: import("@playwright/test").Page,
+  path: string,
+) {
+  await page.evaluate(() => {
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+    window.scrollTo(0, 0);
+    document.querySelector<HTMLElement>(".content")?.scrollTo(0, 0);
+    document.querySelector<HTMLElement>(".sidebar")?.scrollTo(0, 0);
+
+    const style = document.createElement("style");
+    style.id = "vpsman-full-page-screenshot";
+    style.textContent = `
+      html, body, #root {
+        height: auto !important;
+        min-height: 100% !important;
+        overflow: visible !important;
+      }
+      .shell {
+        height: auto !important;
+        min-height: 100vh !important;
+        overflow: visible !important;
+        align-items: stretch !important;
+      }
+      .sidebar {
+        height: auto !important;
+        min-height: 100vh !important;
+        overflow: visible !important;
+        scrollbar-gutter: auto !important;
+      }
+      .content {
+        height: auto !important;
+        min-height: 100vh !important;
+        overflow: visible !important;
+        scrollbar-gutter: auto !important;
+      }
+      .topbar {
+        position: static !important;
+      }
+      .actionDrawer {
+        position: static !important;
+        grid-template-rows: auto auto auto !important;
+        max-height: none !important;
+        overflow: visible !important;
+      }
+      .actionDrawerBody {
+        overflow: visible !important;
+      }
+    `;
+    document.head.append(style);
+  });
+  try {
+    await page.waitForTimeout(50);
+    await page.screenshot({ fullPage: true, path });
+  } finally {
+    await page.evaluate(() => {
+      document.querySelector("#vpsman-full-page-screenshot")?.remove();
+    });
+  }
+}
+
+async function dismissTransientCaptureUi(
+  page: import("@playwright/test").Page,
+) {
+  for (;;) {
+    const closeConfirmation = page
+      .locator(".confirmationPrompt:visible")
+      .getByRole("button", { name: "Close confirmation" })
+      .first();
+    if (!(await closeConfirmation.isVisible().catch(() => false))) break;
+    await closeConfirmation.click();
+  }
+  for (;;) {
+    const closeDrawer = page
+      .locator(".actionDrawer:visible .actionDrawerHeader")
+      .getByRole("button", { name: /^Close / })
+      .first();
+    if (!(await closeDrawer.isVisible().catch(() => false))) break;
+    await closeDrawer.click();
+  }
 }
 
 async function expectNoLegacyTopLevelSidebarEntries(
@@ -1542,16 +1867,14 @@ async function closeTunnelPlanWorkflow(page: import("@playwright/test").Page) {
     }
   }
   const openDetails = page.getByRole("button", {
-    name: /^Close details for /,
+    name: "Close Tunnel plans row details",
   });
   while ((await openDetails.count()) > 0) {
     const button = openDetails.first();
     if (!(await button.isVisible().catch(() => false))) break;
     await button.click();
   }
-  for (const label of [
-    "Close tunnel plan editor",
-  ]) {
+  for (const label of ["Close tunnel plan editor"]) {
     const button = page.getByRole("button", { name: label });
     if (await button.isVisible().catch(() => false)) {
       await button.click();
@@ -1571,7 +1894,7 @@ async function closePortForwardWorkflow(page: import("@playwright/test").Page) {
     await closeEditor.click();
   }
   const closeDetails = page.getByRole("button", {
-    name: "Close port-forward details",
+    name: "Close Port-forward rules row details",
   });
   if (await closeDetails.isVisible().catch(() => false)) {
     await closeDetails.click();
@@ -1610,14 +1933,37 @@ async function expectSectionBelowToolbar(
         : 0;
     return Math.round(element.getBoundingClientRect().top - visibleTop);
   });
-  expect(gap, "on-demand panel gap below sticky toolbar").toBeGreaterThanOrEqual(8);
-  expect(gap, "on-demand panel gap below sticky toolbar").toBeLessThanOrEqual(24);
+  expect(
+    gap,
+    "on-demand panel gap below sticky toolbar",
+  ).toBeGreaterThanOrEqual(8);
+  expect(gap, "on-demand panel gap below sticky toolbar").toBeLessThanOrEqual(
+    24,
+  );
 }
 
 // Install mock API before each test batch
 test.beforeEach(async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await installConsoleApiMock(page);
+  await installConsoleApiMock(page, {
+    bulkTagScheduleImpacts: [
+      {
+        schedule_id: "60000000-0000-4000-8000-000000000001",
+        name: "Edge maintenance",
+        command_type: "shell",
+        selector_expression: "tag:maintenance:test",
+        before_target_count: 1,
+        after_target_count: 2,
+        added_target_count: 1,
+        removed_target_count: 0,
+        unchanged_target_count: 1,
+        added_targets: [],
+        removed_targets: [],
+        summary: "One VPS now matches",
+      },
+    ],
+  });
+  await installMonitoringManagementApiMock(page);
 });
 
 // Generate one test per batch
@@ -1660,9 +2006,9 @@ batches.forEach((batch, batchIndex) => {
             `${entry.id}-${testInfo.project.name}-error.png`,
           );
           await page.screenshot({ fullPage: true, path: errPath });
-            results.push({
-              id: entry.id,
-              view: viewLabel(entry.view),
+          results.push({
+            id: entry.id,
+            view: viewLabel(entry.view),
             subpage: entry.subpage ?? null,
             heading: entry.heading,
             screenshot: errPath,
@@ -1687,4 +2033,30 @@ batches.forEach((batch, batchIndex) => {
     );
     expect(errors).toEqual([]);
   });
+});
+
+test("populated VPS monitoring detail screenshot coverage", async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(120_000);
+  const projectDir = join(SCREENSHOT_DIR, testInfo.project.name);
+  mkdirSync(projectDir, { recursive: true });
+  await page.goto("/");
+  await waitForConsoleShell(page, 15_000);
+
+  const results: Array<Record<string, unknown>> = [];
+  for (const entry of monitoringDetailViews) {
+    results.push(
+      await navigateAndScreenshot(
+        page,
+        entry,
+        projectDir,
+        testInfo.project.name,
+      ),
+    );
+  }
+  writeFileSync(
+    join(projectDir, "manifest-monitoring-detail.json"),
+    `${JSON.stringify({ generated_by: "structured-screenshots", total: results.length, views: results }, null, 2)}\n`,
+  );
 });

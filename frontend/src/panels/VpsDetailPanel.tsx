@@ -18,6 +18,7 @@ import { agentDisplayState } from "../agentDisplayState";
 import { auditClientIds, presentAudit } from "../auditPresentation";
 import { ActionFeedback } from "../components/ActionFeedback";
 import { handleTabListKeyDown, tabId } from "../components/AccessibleTabs";
+import { useHistoryEntryState } from "../historyEntryState";
 import {
   formatLowerBoundCount,
   isActionableFleetAlertState,
@@ -50,9 +51,12 @@ import {
   shortId,
   timestampMillis,
 } from "../utils";
+import { VpsMonitoringDetailPanel } from "./VpsMonitoringDetailPanel";
 
 type VpsDetailTab =
   | "Summary"
+  | "Resources"
+  | "Ping"
   | "Remote access"
   | "Files"
   | "Processes"
@@ -73,6 +77,7 @@ type VpsDetailRecordBounds = {
 type VpsDetailPanelProps = {
   agent: AgentView | null;
   agents: AgentView[];
+  apiToken: string;
   apiError: string | null;
   audits: AuditLogRecord[];
   backupArtifacts: BackupArtifactRecord[];
@@ -115,6 +120,8 @@ type VpsDetailPanelProps = {
 
 const detailTabs: VpsDetailTab[] = [
   "Summary",
+  "Resources",
+  "Ping",
   "Remote access",
   "Files",
   "Processes",
@@ -127,6 +134,7 @@ const detailTabs: VpsDetailTab[] = [
 export function VpsDetailPanel({
   agent,
   agents,
+  apiToken,
   apiError,
   audits,
   backupArtifacts,
@@ -165,7 +173,10 @@ export function VpsDetailPanel({
   telemetryTunnels,
   vpsRuleValues,
 }: VpsDetailPanelProps) {
-  const [activeTab, setActiveTab] = useState<VpsDetailTab>("Summary");
+  const [activeTab, setActiveTab] = useHistoryEntryState<VpsDetailTab>(
+    `fleet.vps-detail.${agent?.id ?? "unselected"}.tab`,
+    "Summary",
+  );
   const [sourceLoadError, setSourceLoadError] = useState<string | null>(null);
   useEffect(() => {
     if (!agent) {
@@ -474,6 +485,13 @@ export function VpsDetailPanel({
               onOpenFleetAlerts={onOpenFleetAlerts}
               onOpenFleetMetrics={() => onOpenFleetMetrics(agent)}
               onOpenJob={onOpenJob}
+            />
+          )}
+          {(activeTab === "Resources" || activeTab === "Ping") && (
+            <VpsMonitoringDetailPanel
+              apiToken={apiToken}
+              clientId={agent.id}
+              section={activeTab === "Resources" ? "resources" : "ping"}
             />
           )}
           {activeTab === "Remote access" && (

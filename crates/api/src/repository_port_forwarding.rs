@@ -979,8 +979,9 @@ impl Repository {
         );
         match self {
             Self::Memory(memory) => {
+                let _key_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
                 let _lifecycle_guard = memory.port_forward_lifecycle.lock().await;
-                if !memory_port_forward_client_active(memory, client_id).await {
+                if !memory_port_forward_runtime_client_active(memory, client_id).await {
                     return Ok(());
                 }
                 let snapshot = carry_forward_owned_table_evidence(
@@ -1031,8 +1032,10 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                crate::repository_key_lifecycle::lock_postgres_agent_identity_lifecycle(&mut tx)
+                    .await?;
                 lock_postgres_port_forward_client(&mut tx, client_id).await?;
-                if !postgres_port_forward_client_active(&mut tx, client_id).await? {
+                if !postgres_port_forward_runtime_client_active(&mut tx, client_id).await? {
                     return Ok(());
                 }
                 let previous = sqlx::query_scalar::<_, SqlJson<serde_json::Value>>(
@@ -1424,6 +1427,15 @@ async fn memory_port_forward_client_active(memory: &MemoryState, client_id: &str
         .await
         .iter()
         .any(|agent| agent.id == client_id)
+}
+
+async fn memory_port_forward_runtime_client_active(memory: &MemoryState, client_id: &str) -> bool {
+    if memory.hidden_clients.read().await.contains(client_id) {
+        return false;
+    }
+    memory.agents.read().await.iter().any(|agent| {
+        agent.id == client_id && !matches!(agent.status.as_str(), "revoked" | "deleted")
+    })
 }
 
 async fn ensure_memory_port_forward_client_active(
@@ -1973,8 +1985,20 @@ async fn postgres_port_forward_client_active(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     client_id: &str,
 ) -> Result<bool> {
+    Ok(
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM visible_clients WHERE id = $1)")
+            .bind(client_id)
+            .fetch_one(&mut **tx)
+            .await?,
+    )
+}
+
+async fn postgres_port_forward_runtime_client_active(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_id: &str,
+) -> Result<bool> {
     Ok(sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM clients WHERE id = $1 AND hidden_at IS NULL)",
+        "SELECT EXISTS(SELECT 1 FROM visible_clients WHERE id = $1 AND status <> 'revoked')",
     )
     .bind(client_id)
     .fetch_one(&mut **tx)

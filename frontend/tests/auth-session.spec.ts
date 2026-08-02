@@ -403,11 +403,14 @@ async function installAuthSessionApiMock(page: import("@playwright/test").Page) 
     await route.fulfill({
       contentType: "application/json",
       json: {
+        never: 0,
         online: 1,
         offline: 0,
+        revoked: 0,
         stale: 0,
         running_jobs: 0,
         total: 1,
+        unknown: 0,
         warnings: 0,
       },
     });
@@ -430,7 +433,7 @@ async function installAuthSessionApiMock(page: import("@playwright/test").Page) 
             { description: "All labels", label: "Labels", value: "labels" },
           ],
           providers: [],
-          windows: [{ label: "24 hours", seconds: 86400, value: "24h" }],
+          windows: [{ label: "1 day", seconds: 86400, value: "1d" }],
         },
         drilldowns: [
           {
@@ -473,10 +476,13 @@ async function installAuthSessionApiMock(page: import("@playwright/test").Page) 
         summary: {
           online: 1,
           offline: 0,
+          revoked: 0,
           stale: 0,
           running_jobs: 0,
+          running_jobs_truncated: false,
           total: 1,
           warnings: 0,
+          warnings_truncated: false,
         },
         time_range: {
           end_at: "2026-06-05T20:44:58Z",
@@ -484,9 +490,9 @@ async function installAuthSessionApiMock(page: import("@playwright/test").Page) 
           mode: "window",
           start_at: "2026-06-04T20:44:58Z",
           start_unix: 1780605898,
-          window: "24h",
+          window: "1d",
         },
-        window: "24h",
+        window: "1d",
       },
     });
   });

@@ -47,10 +47,11 @@ const customMockTests = new Set([
   "observability dashboards use safe labels when summary counts are missing",
   "home shows a useful empty state when no VPS agents are loaded",
   "fleet monitor cards remain readable for 0 generated VPS fixtures",
-  "fleet monitor cards remain readable for 3 generated VPS fixtures",
+  "fleet monitor cards remain readable for 1 generated VPS fixtures",
+  "fleet monitor cards remain readable for 8 generated VPS fixtures",
   "fleet monitor cards remain readable for 20 generated VPS fixtures",
-  "fleet monitor cards remain readable for 50 generated VPS fixtures",
   "fleet monitor cards remain readable for 100 generated VPS fixtures",
+  "fleet monitor cards remain readable for 1000 generated VPS fixtures",
   "fleet telemetry refresh keeps successful domains current when one domain fails",
   "fleet metrics freshness uses exact sample time instead of the coarse chart bucket",
   "system maintenance presents an empty cleanup preview as a neutral no-op",
@@ -796,10 +797,7 @@ test(
     ).toContainText("≥1 failed");
     await expect(card).toContainText("counts use capped loaded pages");
 
-    await card
-      .getByRole("button", { name: /edge-sfo-01/ })
-      .first()
-      .click();
+    await card.click();
     const alertFact = page
       .getByLabel("VPS resource facts")
       .locator(".vpsResourceFact")
@@ -1039,15 +1037,12 @@ test("remote operations owns terminal, files, transfers, processes, services, st
   ).toBeVisible();
   const processGrid = page.getByLabel("Process health inventory data grid");
   if (testInfo.project.name.includes("mobile")) {
-    const processCards = page.getByLabel("Process supervisor mobile cards");
-    await expect(processCards).toContainText("ospf-worker");
-    await expect(processCards).toContainText("Timestamp inconsistent");
-    await expect(
-      processCards.getByRole("button", {
-        name: "Open logs for process ospf-worker",
-      }),
-    ).toBeVisible();
-    await expect(processCards).not.toContainText("1 processes");
+    const processCard = processGrid.locator(".gridMobileCard", {
+      hasText: "ospf-worker",
+    });
+    await expect(processCard).toContainText("Timestamp inconsistent");
+    await expect(processCard.locator(".gridMobileActions")).toHaveCount(0);
+    await expect(processGrid).not.toContainText("1 processes");
   } else {
     const processRow = processGrid
       .getByRole("row")
@@ -1140,10 +1135,8 @@ test("jobs history links to operational owners without embedding their workflows
     await expect(card).toContainText("completed");
     await expect(card).toContainText("Duration");
     await expect(card).toContainText("Age");
-    await expect(
-      card.getByRole("button", { name: "Open target detail", exact: true }),
-    ).toBeVisible();
-    await card.getByRole("button", { name: "Details" }).click();
+    await expect(card.locator(".gridMobileActions")).toHaveCount(0);
+    await card.click();
   } else {
     for (const header of [
       "Operation",
@@ -1170,11 +1163,15 @@ test("jobs history links to operational owners without embedding their workflows
   );
 
   if (testInfo.project.name.includes("mobile")) {
-    await jobsGrid
+    const scheduledJobCard = jobsGrid
       .locator(".gridMobileCard", { hasText: "Scheduled shell command" })
-      .first()
-      .getByRole("button", { name: "Open target detail", exact: true })
-      .click();
+      .first();
+    await invokeGridRowAction(
+      page,
+      jobsGrid,
+      scheduledJobCard,
+      "Open target detail",
+    );
   } else {
     const scheduledJobRow = jobsGrid
       .locator(".gridBody [role=row]", { hasText: "Scheduled shell command" })
@@ -1225,12 +1222,14 @@ test("job detail opens from release evidence pages", async ({
 
   await openConsoleSubpage(page, "Remote Operations", "Transfers");
   if (testInfo.project.name.includes("mobile")) {
-    await activate(
-      page
-        .getByLabel("Transfer sessions data grid")
+    const transferGrid = page.getByLabel("Transfer sessions data grid");
+    await invokeGridRowAction(
+      page,
+      transferGrid,
+      transferGrid
         .locator(".gridMobileCard", { hasText: "Download from VPS" })
-        .first()
-        .getByRole("button", { name: "Job", exact: true }),
+        .first(),
+      "Job",
     );
   } else {
     const transferGrid = page.getByLabel("Transfer sessions data grid");
@@ -1962,12 +1961,12 @@ test("home overview text fits desktop tablet and mobile widths", async ({
   }
 });
 
-test("fleet monitor renders VPS card workflow actions", async ({
+test("fleet monitor cards are density-distinct and open canonical detail", async ({
   page,
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "desktop card action routing covers the detailed monitor interaction model",
+    "desktop card interaction covers density and detail routing without doubling the mobile suite",
   );
   await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Fleet", "Monitor");
@@ -1977,17 +1976,44 @@ test("fleet monitor renders VPS card workflow actions", async ({
   ).toBeVisible();
   const monitor = page.getByLabel("VPS monitor cards");
   await expect(monitor).toBeVisible();
-  await expect(page.getByLabel("VPS cards controls")).toBeVisible();
+  await expect(monitor).toHaveAttribute("data-density", "comfortable");
+  const edgeCard = monitor
+    .locator(".vpsMonitorCard", { hasText: "edge-sfo-01" })
+    .first();
+  await expect(edgeCard).toHaveAttribute("role", "link");
+  await expect(edgeCard.getByLabel("Tags for edge-sfo-01")).toContainText(
+    "provider:alpha",
+  );
+  await expect(edgeCard.locator(".vpsMonitorCardMain > small")).toBeVisible();
+  const snapshot = page.getByLabel("VPS cards current totals");
+  await expect(snapshot.locator("strong[title], em[title]")).toHaveCount(6);
+  await expect(edgeCard.locator(".vpsMonitorTraffic strong")).toHaveAttribute(
+    "title",
+    /\S/,
+  );
+  await expect(edgeCard.locator(".vpsMonitorTraffic > small")).toHaveAttribute(
+    "title",
+    /\S/,
+  );
+  await expect(edgeCard.locator(".vpsMonitorPing strong")).toHaveAttribute(
+    "title",
+    /\S/,
+  );
+  await expect(
+    edgeCard.locator(".vpsMonitorPing > span small"),
+  ).toHaveAttribute("title", /\S/);
+  await expect(edgeCard).toContainText("1m load");
+  await expect(edgeCard.locator(".comfortableSummary")).toHaveCount(1);
+  await expect(edgeCard.locator("button, a, summary, details")).toHaveCount(0);
   const comfortableFirstRow = await monitorFirstRowCount(monitor);
   const comfortableCardWidth = await monitor
     .locator(".vpsMonitorCard")
     .first()
     .evaluate((card) => card.getBoundingClientRect().width);
-  await expect(
-    monitor.locator(".vpsMonitorCard").first().locator(".comfortableSummary span"),
-  ).toHaveCount(5);
-  await page.getByLabel("VPS cards sort").selectOption("traffic");
-  await expect(monitor).toHaveAttribute("data-sort", "traffic");
+  const comfortableCardHeight = await edgeCard.evaluate(
+    (card) => card.getBoundingClientRect().height,
+  );
+
   await page
     .getByLabel("VPS cards density")
     .getByRole("button", { name: "Compact" })
@@ -1998,161 +2024,48 @@ test("fleet monitor renders VPS card workflow actions", async ({
     .locator(".vpsMonitorCard")
     .first()
     .evaluate((card) => card.getBoundingClientRect().width);
+  const compactCardHeight = await edgeCard.evaluate(
+    (card) => card.getBoundingClientRect().height,
+  );
   expect(comfortableFirstRow).toBeGreaterThanOrEqual(2);
   expect(compactFirstRow).toBeGreaterThanOrEqual(comfortableFirstRow);
   expect(compactCardWidth).toBeLessThan(comfortableCardWidth);
+  expect(compactCardHeight).toBeLessThan(comfortableCardHeight);
+  await expect(edgeCard.getByText("No contact").first()).toBeVisible();
+  await expect(edgeCard.getByLabel("Tags for edge-sfo-01")).toHaveCount(0);
   await expect(
-    monitor
-      .locator(".vpsMonitorCard")
-      .first()
-      .locator(".compactSummary > span"),
-  ).toHaveCount(2);
-  await expect(
-    monitor.locator(".vpsMonitorCard").first().locator(".comfortableSummary"),
-  ).toHaveCount(0);
+    edgeCard.locator(".vpsMonitorCardMain > small"),
+  ).not.toBeVisible();
+  await expect(edgeCard.locator(".comfortableSummary")).toHaveCount(0);
+  await expect(edgeCard.locator("button, a, summary, details")).toHaveCount(0);
 
-  await monitor.locator(".vpsMonitorCardMain").first().click();
+  await page.getByLabel("VPS cards sort").selectOption("traffic");
+  await expect(monitor).toHaveAttribute("data-sort", "traffic");
+  await edgeCard.locator(".vpsMonitorTraffic").click();
   await expect(page).toHaveURL(/#\/fleet\/instance-detail\//);
+  await expect(
+    page.getByLabel("Canonical VPS detail").getByLabel("Selected VPS identity"),
+  ).toContainText("edge-sfo-01");
+
   await page.goBack();
   await expect(monitor).toHaveAttribute("data-density", "compact");
   await expect(monitor).toHaveAttribute("data-sort", "traffic");
-
-  const edgeCard = monitor
-    .locator(".vpsMonitorCard", { hasText: "edge-sfo-01" })
-    .first();
-  await expect(edgeCard.getByText("No contact").first()).toBeVisible();
-  await expect(edgeCard.getByLabel("Tags for edge-sfo-01")).toContainText(
-    "provider:alpha",
-  );
-  await expect(edgeCard.getByText("+1", { exact: true })).toHaveAttribute(
-    "title",
-    "role:edge",
-  );
-  await expect(edgeCard).toContainText("1m load");
-  await expect(edgeCard).toContainText("Telemetry stale");
-  const fraNetworkMetric = monitor
-    .locator(".vpsMonitorCard", { hasText: "core-fra-02" })
-    .locator(".vpsMonitorMetric", { hasText: "Network" });
-  await expect(fraNetworkMetric.locator("strong")).toHaveText("5.9 Mbps");
-  await expect(fraNetworkMetric).toHaveAttribute(
-    "title",
-    /2 concurrently reported interfaces/,
-  );
-  await expect(
-    edgeCard.getByLabel("Operational signals for edge-sfo-01"),
-  ).not.toContainText("Jobs");
-  await expect(edgeCard).toContainText("Fleet-wide jobs: 3 running");
-  await expect(edgeCard).not.toContainText("Fleet jobs:");
-  await expect(
-    edgeCard.getByRole("button", { name: /Terminal/ }),
-  ).toBeVisible();
-  await expect(edgeCard.getByRole("button", { name: /Files/ })).toBeVisible();
-  await expect(edgeCard.getByRole("button", { name: /Processes/ })).toHaveCount(
-    0,
-  );
-  await expect(
-    edgeCard.getByLabel("More actions for edge-sfo-01"),
-  ).toBeVisible();
-  await expect(
-    edgeCard.getByRole("button", { name: /Backup|Network/ }),
-  ).toHaveCount(0);
-
-  for (const action of [
-    {
-      click: async (card: Locator) =>
-        card
-          .getByRole("button", { name: /edge-sfo-01/ })
-          .first()
-          .click(),
-      heading: "Instance detail",
-    },
-    {
-      click: async (card: Locator) =>
-        card.getByRole("button", { name: "Terminal" }).click(),
-      heading: "Terminal",
-    },
-    {
-      click: async (card: Locator) =>
-        card.getByRole("button", { name: "Files" }).click(),
-      heading: "Files",
-    },
-    {
-      click: async (card: Locator) => {
-        await card.getByLabel("More actions for edge-sfo-01").click();
-        await card.getByRole("button", { name: "Processes" }).click();
-      },
-      heading: "Processes",
-    },
-    {
-      click: async (card: Locator) => {
-        await card.getByLabel("More actions for edge-sfo-01").click();
-        await card.getByRole("button", { name: "Backup" }).click();
-      },
-      heading: "Backup requests",
-    },
-    {
-      click: async (card: Locator) => {
-        await card.getByLabel("More actions for edge-sfo-01").click();
-        await card.getByRole("button", { name: "Network" }).click();
-      },
-      heading: "Network graph",
-    },
-  ]) {
-    await gotoConsoleHome(page);
-    await openConsoleSubpage(page, "Fleet", "Monitor");
-    const card = page
-      .getByLabel("VPS monitor cards")
-      .locator(".vpsMonitorCard", { hasText: "edge-sfo-01" })
-      .first();
-    await action.click(card);
-    await expect(
-      page.getByRole("heading", {
-        level: 1,
-        name: action.heading,
-        exact: true,
-      }),
-    ).toBeVisible();
-    if (action.heading === "Instance detail") {
-      await expect(
-        page
-          .getByLabel("Canonical VPS detail")
-          .getByLabel("Selected VPS identity"),
-      ).toContainText("edge-sfo-01");
-    } else if (action.heading === "Terminal") {
-      await expect(page.getByLabel("New terminal target")).toHaveValue(
-        /edge-sfo-01/,
-      );
-    } else if (action.heading === "Files") {
-      await expect(
-        page.getByRole("combobox", { name: "File browser target VPS" }),
-      ).toHaveValue(/edge-sfo-01/);
-    } else if (action.heading === "Processes") {
-      await expect(
-        page
-          .getByRole("group", { name: "Process scope" })
-          .getByRole("button", { name: "Host" }),
-      ).toHaveAttribute("aria-pressed", "true");
-      await expect(
-        page.getByRole("combobox", { name: "Host process VPS" }),
-      ).toHaveValue(/edge-sfo-01/);
-    } else if (action.heading === "Backup requests") {
-      await expect(
-        page
-          .getByRole("complementary", { name: "Run backup" })
-          .getByRole("combobox", { name: "Backup client" }),
-      ).toHaveValue(/edge-sfo-01/);
-    } else if (action.heading === "Network graph") {
-      await expect(page.locator(".topologyNodeInspector")).toContainText(
-        "edge-sfo-01",
-      );
-    }
-  }
+  await edgeCard.focus();
+  await expect(edgeCard).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(/#\/fleet\/instance-detail\//);
+  await page.goBack();
+  await expect(monitor).toHaveAttribute("data-density", "compact");
+  await page.reload();
+  await expect(monitor).toHaveAttribute("data-density", "comfortable");
+  await expect(monitor).toHaveAttribute("data-sort", "warning");
 });
 
-for (const fixtureCount of [0, 3, 20, 50, 100]) {
+for (const fixtureCount of [0, 1, 8, 20, 100, 1_000]) {
   test(`fleet monitor cards remain readable for ${fixtureCount} generated VPS fixtures`, async ({
     page,
   }, testInfo) => {
+    if (fixtureCount >= 1_000) test.setTimeout(60_000);
     test.skip(
       testInfo.project.name.includes("mobile"),
       "desktop fixture-count sweep covers high-card rendering without doubling suite time",
@@ -2171,7 +2084,24 @@ for (const fixtureCount of [0, 3, 20, 50, 100]) {
       return;
     }
     await expect(monitor).toBeVisible();
-    await expect(monitor.locator(".vpsMonitorCard")).toHaveCount(fixtureCount);
+    await expect
+      .poll(
+        async () => {
+          const rendered = await monitor.locator(".vpsMonitorCard").count();
+          if (rendered < fixtureCount) {
+            await page
+              .locator(".fleetMonitorProgress")
+              .scrollIntoViewIfNeeded()
+              .catch(() => undefined);
+          }
+          return rendered;
+        },
+        {
+          message: `progressively render all ${fixtureCount} matched VPS cards`,
+          timeout: fixtureCount >= 1_000 ? 40_000 : 5_000,
+        },
+      )
+      .toBe(fixtureCount);
     await page
       .getByLabel("VPS cards density")
       .getByRole("button", { name: "Compact" })
@@ -2231,6 +2161,22 @@ test("fleet monitor densities remain distinct at a common laptop width", async (
   const compactFirstRow = await monitorFirstRowCount(monitor);
   expect(compactFirstRow).toBeGreaterThan(comfortableFirstRow);
   await expectMonitorCardsToFit(page, "laptop compact VPS");
+
+  const content = page.locator(".content");
+  const lowerCard = monitor.locator(".vpsMonitorCard").nth(16);
+  await lowerCard.scrollIntoViewIfNeeded();
+  await expect
+    .poll(() => content.evaluate((element) => element.scrollTop))
+    .toBeGreaterThan(100);
+  const savedScrollTop = await content.evaluate((element) => element.scrollTop);
+  await page.waitForTimeout(50);
+  await lowerCard.click();
+  await expect(page).toHaveURL(/#\/fleet\/instance-detail\//);
+  await page.goBack();
+  await expect(monitor).toHaveAttribute("data-density", "compact");
+  await expect
+    .poll(() => content.evaluate((element) => element.scrollTop))
+    .toBeGreaterThanOrEqual(savedScrollTop - 2);
 });
 
 test("steady-state fleet polling refreshes latest telemetry without reloading operational tables", async ({
@@ -2298,7 +2244,7 @@ test("fleet telemetry refresh keeps successful domains current when one domain f
   await openConsoleSubpage(page, "Fleet", "Monitor");
   const networkValue = page
     .locator(".vpsMonitorCard", { hasText: "edge-sfo-01" })
-    .locator(".vpsMonitorMetric", { hasText: "Network" })
+    .locator(".vpsMonitorFlowFact", { hasText: "Network RX" })
     .locator("strong");
   await expect(networkValue).toBeVisible();
   await expect(
@@ -2396,9 +2342,7 @@ test("fleet groups expose registry assignments and reviewed bulk mutation eviden
     .filter({ hasText: "edge" })
     .first();
   await operatorGroupRow.click({ button: "right" });
-  await activate(
-    page.getByRole("menuitem", { name: "Delete", exact: true }),
-  );
+  await activate(page.getByRole("menuitem", { name: "Delete", exact: true }));
   const deletePrompt = page.getByLabel("Confirm group delete");
   await expect(deletePrompt).toBeVisible();
   await expect(deletePrompt).toContainText("Group");
@@ -2500,13 +2444,11 @@ test("fleet groups expose registry assignments and reviewed bulk mutation eviden
   await activate(
     page.getByRole("menuitem", { name: "Edit groups", exact: true }),
   );
-  const fraAssignmentDrawer = page.getByLabel(
-    /^Edit groups · core-fra-02/,
-  );
+  const fraAssignmentDrawer = page.getByLabel(/^Edit groups · core-fra-02/);
   await expect(fraAssignmentDrawer).toBeVisible();
-  await expect(
-    fraAssignmentDrawer.locator(".localActionFeedback"),
-  ).toHaveCount(0);
+  await expect(fraAssignmentDrawer.locator(".localActionFeedback")).toHaveCount(
+    0,
+  );
 
   const undoRequests = await page.evaluate(() => {
     const requestLog = (
@@ -2733,6 +2675,57 @@ test("resource-specific VPS detail routes keep navigation context", async ({
   }
 });
 
+test("VPS detail sections stay scoped to their resource history entry", async ({
+  page,
+}) => {
+  await page.goto("/#/fleet/instance-detail/agent-sfo-01");
+  await waitForConsoleShell(page);
+
+  const detail = page.getByLabel("Canonical VPS detail");
+  const detailSection = detail.getByLabel("VPS detail section");
+  const resourcesTab = detail.getByRole("tab", {
+    name: "Resources",
+    exact: true,
+  });
+  await expect(detailSection.or(resourcesTab)).toBeVisible();
+  const usesSectionSelector = await detailSection.isVisible();
+  if (usesSectionSelector) {
+    await detailSection.selectOption("Resources");
+    await expect(detailSection).toHaveValue("Resources");
+  } else {
+    await resourcesTab.click();
+    await expect(resourcesTab).toHaveAttribute("aria-selected", "true");
+  }
+
+  await page.evaluate(() => {
+    window.location.hash = "#/fleet/instance-detail/agent-fra-02";
+  });
+  await expect(page).toHaveURL(/#\/fleet\/instance-detail\/agent-fra-02$/);
+  await expect(detail.getByLabel("Selected VPS identity")).toContainText(
+    "core-fra-02",
+  );
+  if (usesSectionSelector) {
+    await expect(detailSection).toHaveValue("Summary");
+  } else {
+    await expect(
+      detail.getByRole("tab", { name: "Summary", exact: true }),
+    ).toHaveAttribute("aria-selected", "true");
+  }
+
+  await page.goBack();
+  await expect(page).toHaveURL(/#\/fleet\/instance-detail\/agent-sfo-01$/);
+  await expect(detail.getByLabel("Selected VPS identity")).toContainText(
+    "edge-sfo-01",
+  );
+  if (usesSectionSelector) {
+    await expect(detailSection).toHaveValue("Resources");
+  } else {
+    await expect(
+      detail.getByRole("tab", { name: "Resources", exact: true }),
+    ).toHaveAttribute("aria-selected", "true");
+  }
+});
+
 test("VPS detail workflow actions preserve the exact resource target", async ({
   page,
 }, testInfo) => {
@@ -2832,8 +2825,6 @@ test("fleet instance detail is the canonical VPS route from release workflows", 
     .getByLabel("VPS monitor cards")
     .locator(".vpsMonitorCard", { hasText: "edge-sfo-01" })
     .first()
-    .getByRole("button", { name: /edge-sfo-01/ })
-    .first()
     .click();
   await expectCanonicalVpsDetail(page, "edge-sfo-01");
   await expect(page.getByLabel("Canonical VPS detail")).toContainText(
@@ -2856,9 +2847,7 @@ test("fleet instance detail is the canonical VPS route from release workflows", 
     .locator(".gridBody [role=row]", { hasText: "core-fra-02" })
     .first();
   await alertRow.click({ button: "right" });
-  await activate(
-    page.getByRole("menuitem", { name: "Open VPS", exact: true }),
-  );
+  await activate(page.getByRole("menuitem", { name: "Open VPS", exact: true }));
   await expectCanonicalVpsDetail(page, "core-fra-02");
 
   await openConsoleSubpage(page, "Network", "Graph");
@@ -2879,12 +2868,7 @@ test("fleet instance detail is the canonical VPS route from release workflows", 
   await openConsoleSubpage(page, "Jobs", "History");
   const jobsGrid = page.getByLabel("Job records data grid");
   const firstJobRow = jobsGrid.locator(".gridBody [role=row]").first();
-  await invokeGridRowAction(
-    page,
-    jobsGrid,
-    firstJobRow,
-    "Open target detail",
-  );
+  await invokeGridRowAction(page, jobsGrid, firstJobRow, "Open target detail");
   const targetGrid = page.getByLabel("Target result records data grid");
   const targetRow = targetGrid
     .locator(".gridBody [role=row]", { hasText: "edge-sfo-01" })
@@ -3133,10 +3117,11 @@ test("jobs approvals and scheduled runs stay separate", async ({
   await expect(page.getByText("destructive")).toBeVisible();
   const approvalGrid = page.getByLabel("Job approval queue data grid");
   if (testInfo.project.name.includes("mobile")) {
-    await activate(
-      approvalGrid
-        .locator(".gridMobileCard", { hasText: "noc-operator" })
-        .getByRole("button", { name: "Review", exact: true }),
+    await invokeGridRowAction(
+      page,
+      approvalGrid,
+      approvalGrid.locator(".gridMobileCard", { hasText: "noc-operator" }),
+      "Review",
     );
   } else {
     await approvalGrid
@@ -3309,7 +3294,7 @@ test("dispatch can queue a frozen request for approval without running it", asyn
   expect(requests.jobs).toHaveLength(0);
 });
 
-test("generic data grids become actionable mobile cards", async ({
+test("generic data grids keep mobile actions in the shared header", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -3328,12 +3313,18 @@ test("generic data grids become actionable mobile cards", async ({
   const pendingCard = cards.filter({ hasText: "Argv command" }).first();
   await expect(pendingCard).toContainText("pending");
   await expect(pendingCard).toContainText("Scope");
+  await expect(pendingCard.locator(".gridMobileActions")).toHaveCount(0);
+  await pendingCard.click();
+  await expect(grid.locator(".gridExpandedRow")).toBeVisible();
+  await pendingCard.getByRole("checkbox").check();
+  await grid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
   await expect(
-    pendingCard.getByRole("button", { name: "Review", exact: true }),
+    page.getByRole("menuitem", { name: "Review", exact: true }),
   ).toBeVisible();
-  await expect(
-    pendingCard.getByRole("button", { name: "Details" }),
-  ).toBeVisible();
+  await page.keyboard.press("Escape");
 
   const horizontalOverflowPx = await page.evaluate(() =>
     Math.max(
@@ -3385,7 +3376,7 @@ test("advanced release labels provide inline expert help", async ({ page }) => {
   await openConsoleSubpage(page, "Config", "Rules");
   await expect(page.getByLabel("Bulk rule editor help")).toHaveAttribute(
     "title",
-    /accounting and alert policies/,
+    /accounting,? and alert policies/,
   );
   await expect(
     page.locator('h4[title*="Fleet selector used for the dry-run"]'),
@@ -3522,7 +3513,7 @@ test("jobs artifacts is read-only inventory linked to source workflows", async (
   await expect(grid).toContainText("Recorded with SHA-256 evidence");
   await expect(grid.getByLabel("Artifact type filter")).toBeVisible();
   await grid.getByLabel("Artifact type filter").selectOption("Backup artifact");
-  await expect(grid).toContainText("1 of 1 artifacts");
+  await expect(grid).toContainText("1 of 1 artifact");
   await expect(grid).toContainText("Backup artifact");
   await grid.getByLabel("Artifact type filter").selectOption("all");
   await expect(grid).toContainText("Backups / Artifacts");
@@ -3531,8 +3522,14 @@ test("jobs artifacts is read-only inventory linked to source workflows", async (
   await expect(grid).not.toContainText("file_transfer_source");
   await expect(grid).not.toContainText("agent_update");
 
+  const firstArtifactRecord = testInfo.project.name.includes("mobile")
+    ? grid.locator(".gridMobileCard").first()
+    : grid.locator(".gridBody [role=row]").first();
   if (testInfo.project.name.includes("mobile")) {
-    await grid.getByRole("button", { name: "Details" }).first().click();
+    await expect(firstArtifactRecord.locator(".gridMobileActions")).toHaveCount(
+      0,
+    );
+    await firstArtifactRecord.click();
   } else {
     await grid
       .getByRole("button", { name: /Expand Job artifact inventory row/ })
@@ -3542,9 +3539,23 @@ test("jobs artifacts is read-only inventory linked to source workflows", async (
   await expect(grid).toContainText("Object key / URL");
   await expect(grid).toContainText("SHA-256");
   await expect(grid).toContainText("Raw status:");
+  await expect(grid.locator(".gridExpandedContent button")).toHaveCount(0);
+
+  await firstArtifactRecord.getByRole("checkbox").check();
+  await grid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
   await expect(
-    grid.getByRole("button", { name: "Copy" }).first(),
+    page.getByRole("menuitem", { name: "Copy object keys" }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Copy SHA-256" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Copy download paths" }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
 
   await expect(page.getByRole("button", { name: "Queue cleanup" })).toHaveCount(
     0,
@@ -4509,9 +4520,7 @@ test("config per-vps preserves guarded one-vps override workflow", async ({
   await expect(
     page.getByRole("dialog", { name: "Unlock privilege" }),
   ).toBeVisible();
-  await activate(
-    page.getByRole("button", { name: "Close privilege unlock" }),
-  );
+  await activate(page.getByRole("button", { name: "Close privilege unlock" }));
   await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, "Config", "Per-VPS");
   const unlockedPanel = page.locator(".configApplyGrid");
@@ -4611,9 +4620,29 @@ test("observability fleet metrics owns resource charts and read-only analysis co
   ).toBeVisible();
 
   const controls = page.getByLabel("Fleet metrics controls");
-  await expect(controls.getByLabel("Fleet metrics time range")).toContainText(
-    "24h",
+  const rangeControls = controls.getByLabel("Fleet metrics time range");
+  await expect(rangeControls).toContainText("1d");
+  const realtimeRange = rangeControls.getByRole("button", {
+    name: "Realtime · last 15 minutes",
+  });
+  await expect(realtimeRange).toHaveText("15m");
+  await expect(realtimeRange).toHaveAttribute(
+    "title",
+    "Realtime · last 15 minutes",
   );
+  for (const name of [
+    "Last 1 hour",
+    "Last 8 hours",
+    "Last 1 day",
+    "Last 7 days",
+    "Last 30 days",
+    "Last 90 days",
+    "Last 180 days",
+    "Last 1 year",
+    "All retained time",
+  ]) {
+    await expect(rangeControls.getByRole("button", { name })).toBeVisible();
+  }
   await expect(controls.getByRole("button", { name: "CPU" })).toHaveClass(
     /active/,
   );
@@ -4661,9 +4690,7 @@ test("observability fleet metrics owns resource charts and read-only analysis co
     "data-render-mode",
     "points",
   );
-  await expect(
-    page.getByText(/Selected: 24h .* Data available:/),
-  ).toBeVisible();
+  await expect(page.getByText(/Selected: 1d .* Data available:/)).toBeVisible();
   await expect(page.getByText(/Last sample:/)).toBeVisible();
   await expect(
     page.getByText(/Sparse data: .* retained time bucket.* across 3 VPS/),
@@ -4725,7 +4752,10 @@ test("observability fleet metrics owns resource charts and read-only analysis co
     "alerts",
   );
   await expect(page.getByLabel("Fleet metrics group breakdown")).toContainText(
-    "currently reachable",
+    "2/3 online",
+  );
+  await expect(page.getByLabel("Fleet metrics group breakdown")).toContainText(
+    "0 access revoked",
   );
 
   await controls.getByRole("button", { name: "Memory" }).click();
@@ -4802,7 +4832,7 @@ test("fleet metrics exposes persisted scope range and density instead of applyin
         scopeValue: "alpha",
         startAt: "2026-06-05T04:44:00.000Z",
         trafficSort: "total",
-        window: "24h",
+        window: "1d",
       }),
     );
   });
@@ -4988,7 +5018,7 @@ test("observability dashboards manages read-only dashboard presets", async ({
     "Fleet source",
   );
   await expect(panel.getByLabel("Dashboard source coverage")).toContainText(
-    "Sparse 24 hours",
+    "Sparse 1 day",
   );
   await expect(panel).not.toContainText("Saved dashboards");
 
@@ -5040,7 +5070,7 @@ test("observability dashboards manages read-only dashboard presets", async ({
   ).toBeVisible();
   await expect(
     panel.getByLabel("Resource capacity chart widget"),
-  ).toContainText("Sparse 24 hours");
+  ).toContainText("Sparse 1 day");
   await expect(panel.locator(".timeSeriesChartShell")).toBeVisible();
 
   if (testInfo.project.name.includes("mobile")) {
@@ -5054,7 +5084,7 @@ test("observability dashboards manages read-only dashboard presets", async ({
     panel.getByLabel("Network traffic dashboard widgets"),
   ).toContainText("Network rate chart");
   await expect(panel.getByLabel("Network rate chart widget")).toContainText(
-    "Sparse 24 hours",
+    "Sparse 1 day",
   );
   await expect(panel.getByLabel("Top network VPS widget table")).toContainText(
     "edge-sfo-01",
@@ -5184,9 +5214,8 @@ test("audit events stays read-only with filters and event detail", async ({
     await expect(mobileCard.locator(".gridMobileState")).toContainText(
       "Succeeded",
     );
-    await activate(
-      mobileCard.getByRole("button", { name: "Details" }),
-    );
+    await expect(mobileCard.locator(".gridMobileActions")).toHaveCount(0);
+    await activate(mobileCard);
   } else {
     await expect(grid).toContainText("Privilege unlock");
     await grid.getByText("Privilege unlock").click();
@@ -5203,13 +5232,15 @@ test("audit events stays read-only with filters and event detail", async ({
   await expect(detail).toContainText("Raw action");
   await expect(detail).toContainText("privilege.unlock");
   await detail.getByRole("button", { name: "Open event" }).click();
-  await expect(page).toHaveURL(/#\/audit\/events\/audit-privilege-unlock-0001$/);
-  await expect(page.getByRole("heading", { level: 2, name: "Audit event" })).toBeVisible();
+  await expect(page).toHaveURL(
+    /#\/audit\/events\/audit-privilege-unlock-0001$/,
+  );
+  await expect(
+    page.getByRole("heading", { level: 2, name: "Audit event" }),
+  ).toBeVisible();
   await expect(
     page.locator('[aria-label="Audit event detail"]:visible'),
-  ).toContainText(
-    "audit-privilege-unlock-0001",
-  );
+  ).toContainText("audit-privilege-unlock-0001");
   await page.goBack();
   await expect(page).toHaveURL(/#\/audit\/events$/);
   await expect(detail).toBeVisible();
@@ -5419,7 +5450,6 @@ test("audit identifies control-plane events without inventing an unknown actor",
   if (testInfo.project.name.includes("mobile")) {
     await grid
       .getByLabel("Audit records mobile card audit-control-plane-0001")
-      .getByRole("button", { name: "Details" })
       .click();
   } else {
     await grid.getByText("Job target result").click();
@@ -5479,7 +5509,6 @@ test("audit does not coerce malformed metadata into provenance or evidence", asy
   if (testInfo.project.name.includes("mobile")) {
     await grid
       .getByLabel("Audit records mobile card audit-malformed-scalars-0001")
-      .getByRole("button", { name: "Details" })
       .click();
   } else {
     await grid.getByText("Job dispatch requested").click();
@@ -5591,10 +5620,7 @@ test("audit presents operator and control-plane provenance with one explicit mod
 
   if (testInfo.project.name.includes("mobile")) {
     await grid
-      .getByLabel(
-        "Audit records mobile card audit-target-result-provenance",
-      )
-      .getByRole("button", { name: "Details" })
+      .getByLabel("Audit records mobile card audit-target-result-provenance")
       .click();
   } else {
     await grid.getByText("Job target result").click();
@@ -5606,10 +5632,7 @@ test("audit presents operator and control-plane provenance with one explicit mod
 
   if (testInfo.project.name.includes("mobile")) {
     await grid
-      .getByLabel(
-        "Audit records mobile card audit-schedule-worker-provenance",
-      )
-      .getByRole("button", { name: "Details" })
+      .getByLabel("Audit records mobile card audit-schedule-worker-provenance")
       .click();
   } else {
     await grid.getByText("Schedule due materialized").click();
@@ -5960,9 +5983,7 @@ test("access overview routes to release authority pages", async ({ page }) => {
   await expect(emptyState).toContainText(
     "No active gateway sessions. Configure the gateway endpoint and server key.",
   );
-  await expect(
-    page.getByLabel("Gateway installer defaults"),
-  ).toBeVisible();
+  await expect(page.getByLabel("Gateway installer defaults")).toBeVisible();
   await expect(
     emptyState.getByRole("button", { name: "Gateway settings" }),
   ).toHaveCount(0);
@@ -6280,15 +6301,11 @@ test("backups artifacts keep transfer packages separate from job cleanup", async
   await expect(records).toContainText("Artifact inventory records");
   await expect(records).toContainText("Available package");
   await expect(records).toContainText("Linked");
-  const artifactGrid = page.getByLabel(
-    "Artifact inventory records data grid",
-  );
+  const artifactGrid = page.getByLabel("Artifact inventory records data grid");
   const artifactRow = artifactGrid
     .locator(".gridBody [role=row]", { hasText: "Available package" })
     .first();
-  await artifactRow
-    .getByLabel(/Select Artifact inventory records row/)
-    .check();
+  await artifactRow.getByLabel(/Select Artifact inventory records row/).check();
   await artifactGrid.getByRole("button", { name: "Actions" }).click();
   const restoreArtifactAction = page.getByRole("menuitem", {
     name: "Restore",
@@ -6406,9 +6423,7 @@ test("backups requests keep request review separate from policy and restore work
   const readyRequest = requestGrid
     .locator(".gridBody [role=row]", { hasText: "Ready" })
     .first();
-  await readyRequest
-    .getByLabel(/Select Backup request records row/)
-    .check();
+  await readyRequest.getByLabel(/Select Backup request records row/).check();
   await requestGrid.getByRole("button", { name: "Actions" }).click();
   await expect(
     page.getByRole("menuitem", { name: "Open artifact" }),
@@ -6949,15 +6964,11 @@ test("network graph stays focused on visual topology inspection", async ({
   await expect(nodeInspector).toContainText("1 visible tunnel");
   await expect(nodeInspector).not.toContainText("online; 1 visible tunnel");
   await expect(graphPanel.getByLabel("Topology minimap")).toHaveCount(0);
-  await expect(page.getByRole("table", { name: "Tunnel plans" })).toHaveCount(
-    0,
-  );
+  await expect(page.getByLabel("Tunnel plans data grid")).toHaveCount(0);
   await expect(
     page.getByRole("heading", { name: "Create tunnel plan" }),
   ).toHaveCount(0);
-  await expect(
-    page.getByLabel("OSPF updater plans data grid"),
-  ).toHaveCount(0);
+  await expect(page.getByLabel("OSPF updater plans data grid")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Apply" })).toHaveCount(0);
 });
 
@@ -6991,16 +7002,12 @@ test("network tests keeps diagnostics and trends mutation-free", async ({
     page.getByRole("button", { name: "Review speed test" }),
   ).toBeVisible();
 
-  await expect(page.getByRole("table", { name: "Tunnel plans" })).toHaveCount(
-    0,
-  );
+  await expect(page.getByLabel("Tunnel plans data grid")).toHaveCount(0);
   await expect(
     page.getByRole("heading", { name: "Create tunnel plan" }),
   ).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Save plan" })).toHaveCount(0);
-  await expect(
-    page.getByLabel("OSPF updater plans data grid"),
-  ).toHaveCount(0);
+  await expect(page.getByLabel("OSPF updater plans data grid")).toHaveCount(0);
 });
 
 test("network evidence stays read-mostly and links to network action pages", async ({
@@ -7023,7 +7030,7 @@ test("network evidence stays read-mostly and links to network action pages", asy
     "Status and probe results",
     "Related command jobs",
   ]) {
-    await expect(page.getByLabel(label)).toBeVisible();
+    await expect(page.getByLabel(label, { exact: true })).toBeVisible();
   }
   await expect(
     page.getByText(/10\.1 Mbps avg - 10% of expected 100 Mbps/).first(),
@@ -7087,23 +7094,24 @@ test("network evidence stays read-mostly and links to network action pages", asy
     ospfTable.getByTitle("Review required", { exact: true }),
   ).toBeVisible();
   if ((page.viewportSize()?.width ?? 0) <= 720) {
-    const mobileApply = ospfTable.getByRole("button", {
-      name: "Apply cost",
-      exact: true,
-    });
-    await expect(mobileApply).toBeVisible();
+    const ospfPlanCard = ospfTable
+      .locator(".gridMobileCard", { hasText: "sfo-fra-gre" })
+      .first();
+    await expect(
+      ospfPlanCard.getByRole("button", { name: "Apply cost", exact: true }),
+    ).toHaveCount(0);
     for (const header of ["Current cost", "Recommendation", "Evidence"]) {
       await expect(
         ospfTable.getByRole("columnheader", { name: header, exact: true }),
       ).toHaveCount(0);
     }
-    await activate(
-      ospfTable.getByRole("button", {
-        name: /^Show details for OSPF updater plans row /,
-      }),
-    );
+    await activate(ospfPlanCard);
     await expect(ospfTable.getByText("Left endpoint")).toBeVisible();
-    const actionBounds = await mobileApply.boundingBox();
+    await ospfPlanCard.getByRole("checkbox").check();
+    const actionButton = ospfTable
+      .locator(".gridToolbarActions")
+      .getByRole("button", { name: "Actions", exact: true });
+    const actionBounds = await actionButton.boundingBox();
     const gridBounds = await ospfTable.boundingBox();
     expect(actionBounds).not.toBeNull();
     expect(gridBounds).not.toBeNull();
@@ -7111,6 +7119,11 @@ test("network evidence stays read-mostly and links to network action pages", asy
     expect(actionBounds!.x + actionBounds!.width).toBeLessThanOrEqual(
       gridBounds!.x + gridBounds!.width + 1,
     );
+    await actionButton.click();
+    await expect(
+      page.getByRole("menuitem", { name: "Apply cost", exact: true }),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
   } else {
     const ospfPlanRow = ospfTable
       .getByRole("row")
@@ -7154,68 +7167,72 @@ test("network tunnel plans expose only explicit plan-owned runtime and routing c
   await expect(
     page.getByRole("heading", { level: 1, name: "Tunnel plans" }),
   ).toBeVisible();
-  const tunnelPlanTable = page.getByRole("table", { name: "Tunnel plans" });
-  await expect(tunnelPlanTable).toBeVisible();
+  const tunnelPlanGrid = page.getByLabel("Tunnel plans data grid");
+  await expect(tunnelPlanGrid).toBeVisible();
   const isMobileViewport = (page.viewportSize()?.width ?? 0) <= 720;
-  for (const header of [
-    "Plan",
-    "Endpoints",
-    "Runtime owner",
-    "Runtime",
-    "Connectivity",
-    "OSPF",
-  ]) {
-    const columnHeader = tunnelPlanTable.getByRole("columnheader", {
-      name: header,
-      exact: true,
-    });
-    if (isMobileViewport && header !== "Plan") {
-      await expect(columnHeader).toHaveCount(0);
-    } else {
-      await expect(columnHeader).toBeVisible();
+  if (!isMobileViewport) {
+    for (const header of [
+      "Plan",
+      "Endpoints",
+      "Runtime owner",
+      "Runtime",
+      "Connectivity",
+      "OSPF",
+    ]) {
+      await expect(
+        tunnelPlanGrid.getByRole("button", {
+          name: header,
+          exact: true,
+        }),
+      ).toBeVisible();
     }
   }
-  await expect(tunnelPlanTable).toContainText("Agent iproute2");
-  await expect(tunnelPlanTable).toContainText("External observed");
-  await expect(tunnelPlanTable).toContainText("Reviewed");
-  await expect(tunnelPlanTable).toContainText("Tunnel only");
+  await expect(tunnelPlanGrid).toContainText("Agent iproute2");
+  await expect(tunnelPlanGrid).toContainText("External observed");
+  await expect(tunnelPlanGrid).toContainText("Reviewed");
+  await expect(tunnelPlanGrid).toContainText("Tunnel only");
   await expect(page.getByText(/promotion workflow/i)).toHaveCount(0);
   await expect(page.getByText(/generated config/i)).toHaveCount(0);
   await expect(
     page.getByRole("heading", { name: "Create tunnel plan" }),
   ).toHaveCount(0);
 
+  const savedPlan = isMobileViewport
+    ? tunnelPlanGrid.getByLabel(
+        "Tunnel plans mobile card dddddddd-eeee-4fff-8000-111111111111",
+      )
+    : tunnelPlanGrid
+        .locator(".gridBody [role=row]", { hasText: "sfo-fra-gre" })
+        .first();
   if (isMobileViewport) {
-    const planRow = tunnelPlanTable
-      .locator("tbody > tr")
-      .filter({ hasText: "sfo-fra-gre" })
-      .first();
-    const editAction = planRow
-      .locator(".topologyMobileRowActions")
-      .getByRole("button", { name: "Edit", exact: true });
-    const [wrapBox, actionBox] = await Promise.all([
-      page.locator(".tunnelPlanTableWrap").boundingBox(),
-      editAction.boundingBox(),
+    await savedPlan
+      .getByLabel(
+        "Select Tunnel plans row dddddddd-eeee-4fff-8000-111111111111",
+      )
+      .check();
+    const actionButton = tunnelPlanGrid
+      .locator(".gridToolbarActions")
+      .getByRole("button", { name: "Actions", exact: true });
+    const [gridBox, actionBox] = await Promise.all([
+      tunnelPlanGrid.boundingBox(),
+      actionButton.boundingBox(),
     ]);
-    expect(wrapBox).not.toBeNull();
+    expect(gridBox).not.toBeNull();
     expect(actionBox).not.toBeNull();
-    expect(actionBox!.x).toBeGreaterThanOrEqual(wrapBox!.x);
+    expect(actionBox!.x).toBeGreaterThanOrEqual(gridBox!.x);
     expect(actionBox!.x + actionBox!.width).toBeLessThanOrEqual(
-      wrapBox!.x + wrapBox!.width,
+      gridBox!.x + gridBox!.width,
     );
   }
 
-  const savedPlan = tunnelPlanTable.getByRole("row", {
-    name: /sfo-fra-gre/,
-  });
   await activate(savedPlan);
-  await expect(tunnelPlanTable).toContainText("Declared interfaces");
-  await expect(tunnelPlanTable).toContainText("Reviewed · cost 22");
-  await expect(tunnelPlanTable).toContainText(
+  const planDetail = tunnelPlanGrid.locator(".gridExpandedRow");
+  await expect(planDetail).toContainText("Declared interfaces");
+  await expect(planDetail).toContainText("Reviewed · cost 22");
+  await expect(planDetail).toContainText(
     "Partially verified · Peer probe failed; not proof of disconnect",
   );
   if (isMobileViewport) {
-    const planDetail = tunnelPlanTable.locator(".tunnelPlanDetail");
     await expect(planDetail.getByTitle("Agent iproute2")).toBeVisible();
     await expect(
       planDetail.getByTitle("agent-sfo-01 / agent-fra-02"),
@@ -7223,34 +7240,21 @@ test("network tunnel plans expose only explicit plan-owned runtime and routing c
     await expect(planDetail.getByTitle("L Healthy · R Healthy")).toBeVisible();
   }
   await expect(
-    tunnelPlanTable.getByRole("button", {
-      name: "Close details for sfo-fra-gre",
+    planDetail.getByRole("button", {
+      name: "Close Tunnel plans row details",
     }),
   ).toBeVisible();
   await activate(
-    tunnelPlanTable.getByRole("button", {
-      name: "Close details for sfo-fra-gre",
+    planDetail.getByRole("button", {
+      name: "Close Tunnel plans row details",
     }),
   );
 
   if (isMobileViewport) {
-    await activate(
-      tunnelPlanTable
-        .locator("tbody > tr")
-        .filter({ hasText: "sfo-fra-gre" })
-        .first()
-        .locator(".topologyMobileRowActions")
-        .getByRole("button", { name: "Edit", exact: true }),
-    );
+    await invokeGridRowAction(page, tunnelPlanGrid, savedPlan, "Edit");
   } else {
-    const planRow = tunnelPlanTable
-      .locator("tbody > tr")
-      .filter({ hasText: "sfo-fra-gre" })
-      .first();
-    await planRow.click({ button: "right" });
-    await activate(
-      page.getByRole("menuitem", { name: "Edit", exact: true }),
-    );
+    await savedPlan.click({ button: "right" });
+    await activate(page.getByRole("menuitem", { name: "Edit", exact: true }));
   }
   const editor = page.locator(".tunnelPlanComposer");
   await expect(
@@ -7297,7 +7301,7 @@ test("network tunnel plans expose only explicit plan-owned runtime and routing c
   });
 
   await activate(page.getByRole("button", { name: "Create plan" }));
-  await expect(tunnelPlanTable).toBeVisible();
+  await expect(tunnelPlanGrid).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Create tunnel plan" }),
   ).toBeVisible();
@@ -7365,7 +7369,7 @@ test("network tunnel plans expose only explicit plan-owned runtime and routing c
   await expect(
     page.getByRole("heading", { name: "Create tunnel plan" }),
   ).toHaveCount(0);
-  await expect(tunnelPlanTable).toBeVisible();
+  await expect(tunnelPlanGrid).toBeVisible();
 });
 
 test("system overview keeps platform health separate from fleet monitoring", async ({
@@ -7392,7 +7396,6 @@ test("system overview keeps platform health separate from fleet monitoring", asy
   const main = page.getByRole("main");
   await expect(main.locator(".vpsMonitorGrid")).toHaveCount(0);
   await expect(main.locator(".vpsMonitorCard")).toHaveCount(0);
-  await expect(main).not.toContainText("Komari-style");
   await expect(main).not.toContainText("VPS cards");
 
   await openConsoleSubpage(page, "Fleet", "Monitor");

@@ -220,7 +220,7 @@ pub(crate) async fn list_vps_rules(
     Query(query): Query<VpsRuleQuery>,
 ) -> Result<Json<Vec<VpsRuleValueRecord>>, ApiError> {
     let _operator = state
-        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .require_operator_scope(&headers, SCOPE_CONFIG_READ)
         .await?;
     Ok(Json(
         state
@@ -239,7 +239,13 @@ pub(crate) async fn get_effective_vps_rules(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_CONFIG_READ)
         .await?;
-    Ok(Json(state.repo.effective_vps_rules(&client_id).await?))
+    Ok(Json(
+        state
+            .repo
+            .effective_vps_rules(&client_id)
+            .await
+            .map_err(vps_rules_error)?,
+    ))
 }
 
 pub(crate) async fn dry_run_vps_rules(
@@ -765,8 +771,14 @@ fn validate_alert_policy_query(query: &FleetAlertPolicyQuery) -> Result<(), ApiE
 
 fn vps_rules_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
+    if message.contains("vps_rules_target_not_found") {
+        return ApiError::not_found("vps_rules_target_not_found");
+    }
     if message.contains("vps_rules_preview_hash_mismatch") {
         return ApiError::conflict("vps_rules_preview_hash_mismatch");
+    }
+    if message.contains("vps_rules_target_no_longer_available") {
+        return ApiError::conflict("vps_rules_target_no_longer_available");
     }
     for code in [
         "vps_rules_confirmation_required",

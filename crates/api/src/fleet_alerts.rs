@@ -95,7 +95,6 @@ pub(crate) struct AgentAlertScope {
 }
 
 pub(crate) struct FleetAlertSelector<'a> {
-    pub(crate) agents: &'a [AgentView],
     pub(crate) allowed_client_ids: &'a HashSet<String>,
     pub(crate) start_unix: u64,
     pub(crate) end_unix: u64,
@@ -183,19 +182,29 @@ impl AppState {
             && query_allows_any_severity(&query, &["critical", "warning"]))
             || (query_allows_category(&query, "resource")
                 && query_allows_any_severity(&query, &["critical", "warning"]));
+        let visible_agents = self.repo.list_agents().await?;
+        let visible_client_ids = visible_agents
+            .iter()
+            .map(|agent| agent.id.clone())
+            .collect::<HashSet<_>>();
+        let operational_client_ids = selector
+            .map(|selector| {
+                selector
+                    .allowed_client_ids
+                    .intersection(&visible_client_ids)
+                    .cloned()
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_else(|| visible_client_ids.clone());
         let agents = if needs_agents {
-            let agents = if let Some(selector) = selector {
-                selector.agents.to_vec()
-            } else {
-                self.repo.list_agents().await?
-            };
-            agents
+            visible_agents
                 .into_iter()
                 .filter(|agent| {
-                    query
-                        .client_id
-                        .as_deref()
-                        .is_none_or(|client_id| agent.id == client_id)
+                    operational_client_ids.contains(&agent.id)
+                        && query
+                            .client_id
+                            .as_deref()
+                            .is_none_or(|client_id| agent.id == client_id)
                 })
                 .collect::<Vec<_>>()
         } else {
@@ -233,7 +242,7 @@ impl AppState {
                     policy_group_id: None,
                 },
                 FLEET_EVENT_SOURCE_HORIZON_MAX as usize,
-                selector.map(|selector| selector.allowed_client_ids),
+                Some(&operational_client_ids),
                 selector.map(|selector| selector.start_unix),
                 selector.map(|selector| selector.end_unix),
             )
@@ -244,18 +253,12 @@ impl AppState {
         if query_allows_category(&query, "network")
             && query_allows_any_severity(&query, &["critical", "warning"])
         {
-            let scoped_client_ids = selector.map(|selector| {
-                selector
-                    .allowed_client_ids
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-            });
+            let scoped_client_ids = operational_client_ids.iter().cloned().collect::<Vec<_>>();
             let tunnels = self
                 .repo
                 .list_fleet_alert_tunnel_candidates(
                     query.client_id.as_deref(),
-                    scoped_client_ids.as_deref(),
+                    Some(&scoped_client_ids),
                     query.severity.as_deref(),
                     selector.map(|selector| selector.start_unix),
                     selector.map(|selector| selector.end_unix),
@@ -271,7 +274,7 @@ impl AppState {
                 .repo
                 .list_failed_backup_request_candidates(
                     query.client_id.as_deref(),
-                    selector.map(|selector| selector.allowed_client_ids),
+                    Some(&operational_client_ids),
                     selector.map(|selector| selector.start_unix),
                     selector.map(|selector| selector.end_unix),
                     FLEET_EVENT_SOURCE_HORIZON_MAX,
@@ -306,7 +309,7 @@ impl AppState {
                 .repo
                 .list_capability_degraded_job_target_candidates(
                     query.client_id.as_deref(),
-                    selector.map(|selector| selector.allowed_client_ids),
+                    Some(&operational_client_ids),
                     selector.map(|selector| selector.start_unix),
                     selector.map(|selector| selector.end_unix),
                     FLEET_EVENT_SOURCE_HORIZON_MAX,
@@ -375,10 +378,24 @@ fn append_agent_status_alerts(
         if agent.status == "online" {
             continue;
         }
-        let severity = if agent.status == "offline" {
+        let severity = if matches!(agent.status.as_str(), "offline" | "revoked") {
             "critical"
         } else {
             "warning"
+        };
+        let (title, detail) = if agent.status == "revoked" {
+            (
+                "VPS access revoked",
+                format!(
+                    "{} cannot reconnect until an operator assigns a new key",
+                    agent.display_name
+                ),
+            )
+        } else {
+            (
+                "Agent is not online",
+                format!("{} currently reports {}", agent.display_name, agent.status),
+            )
         };
         push_alert(
             alerts,
@@ -388,8 +405,8 @@ fn append_agent_status_alerts(
                 target_kind: "agent",
                 target_id: &agent.id,
                 client_id: Some(&agent.id),
-                title: "Agent is not online",
-                detail: format!("{} currently reports {}", agent.display_name, agent.status),
+                title,
+                detail,
                 status: &agent.status,
                 evidence: json!({
                     "display_name": &agent.display_name,
@@ -906,8 +923,16 @@ mod tests {
                 bucket_start: "100".to_string(),
                 bucket_secs: 60,
                 sample_count: 3,
+                cpu_usage_sample_count: 0,
+                cpu_usage_avg: None,
+                cpu_usage_max: None,
+                cpu_cores_max: 0,
                 cpu_load_1_avg: 1.5,
                 cpu_load_1_max: 2.6,
+                cpu_load_5_avg: 1.5,
+                cpu_load_5_max: 2.6,
+                cpu_load_15_avg: 1.5,
+                cpu_load_15_max: 2.6,
                 memory_total_bytes_max: 1000,
                 memory_available_bytes_avg: 400,
                 memory_available_bytes_min: 300,
@@ -916,6 +941,10 @@ mod tests {
                 disk_available_bytes_min: 200,
                 network_rx_bytes_max: 0,
                 network_tx_bytes_max: 0,
+                connections_sample_count: 0,
+                tcp_sockets_latest: None,
+                udp_sockets_latest: None,
+                connections_observed_at: None,
                 latest_observed_at: "120".to_string(),
                 updated_at: "121".to_string(),
             },

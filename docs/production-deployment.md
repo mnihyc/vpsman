@@ -82,6 +82,15 @@ proxy or private network and set `VPSMAN_FRONTEND_BIND` only to the address that
 proxy needs. Do not expose the API container, `/internal/`, the PostgreSQL
 service, or the gateway-control interface.
 
+The supported public path remains client to external TLS provider to bundled
+Nginx to private API. An operator-created monitoring share uses that same HTTPS
+frontend origin and only the token-authorized, allowlisted public monitoring
+routes; it is not a reason to publish the API container or change proxy trust.
+Treat each complete shared-view URL as a bearer credential, distribute it only
+to its intended readers, and revoke it from Observability > Shared views when it
+should stop working. HTTPS is required for public use, including the secure
+visitor cookie used for access evidence.
+
 Remote agents need a reachable raw TCP endpoint; this is not an HTTP/WebSocket
 route. Set a deliberate publish mapping such as
 `VPSMAN_GATEWAY_PUBLISH=0.0.0.0:9443:9443`, restrict the host firewall to the

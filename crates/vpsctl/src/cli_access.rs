@@ -632,7 +632,7 @@ pub(crate) struct TelemetryRollupsCommand {
     pub(crate) limit: u16,
     #[arg(long)]
     pub(crate) client_id: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "Physical span filter (at least 60, divisible by 60)")]
     pub(crate) bucket_secs: Option<i32>,
     #[arg(long, default_value_t = false)]
     pub(crate) latest: bool,
@@ -646,7 +646,7 @@ pub(crate) struct TelemetryNetworkRatesCommand {
     pub(crate) client_id: Option<String>,
     #[arg(long)]
     pub(crate) interface: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "Physical span filter (at least 60, divisible by 60)")]
     pub(crate) bucket_secs: Option<i32>,
     #[arg(long, default_value_t = false)]
     pub(crate) latest: bool,

@@ -88,7 +88,7 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     {
       id: "monitor",
       label: "Monitor",
-      description: "Komari-style VPS health cards for quick scanning",
+      description: "Visual VPS health cards for quick fleet scanning",
     },
     {
       id: "groups",
@@ -328,6 +328,17 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
       description: "Latency, loss, throughput, tunnel, and endpoint trends",
     },
     {
+      id: "ping_targets",
+      label: "Ping targets",
+      description:
+        "Reusable ICMP and TCP targets, assignments, and primary probes",
+    },
+    {
+      id: "shared_views",
+      label: "Shared views",
+      description: "Create, extend, revoke, and inspect public monitoring views",
+    },
+    {
       id: "alerts",
       label: "Alerts",
       description:
@@ -473,6 +484,7 @@ export const emptySummary: FleetSummary = {
   never: 0,
   offline: 0,
   online: 0,
+  revoked: 0,
   running_jobs: 0,
   stale: 0,
   total: 0,

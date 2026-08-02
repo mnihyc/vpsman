@@ -54,7 +54,7 @@ UIs. `vpsman` targets a different operating model:
 | Backups | Bounded recursive configuration snapshots, chunked artifacts, restore plans, rollback, migration links, and object-store retention. |
 | Runtime config | Immutable system presets, reusable custom presets, explicit per-VPS override/reset, effective-config inspection, and visible runtime sync state. |
 | Network | Explicit NAT-safe tunnel plans, per-VPS owned nftables port forwarding, exact endpoint evidence, topology, bounded network tests, and optional daemon-neutral routing-cost adapters. |
-| Observability | Clickable Home posture and VPS cards, quick workflow entrances, scoped retained resource/network charts, explicit freshness and coverage, alert policies, event webhooks, and bounded automatic telemetry retention. |
+| Observability | Clickable Home posture, an all-VPS visual grid with Comfortable and Compact densities, canonical per-VPS resource/network/Ping history, reusable Ping targets, managed read-only shared views, explicit freshness and coverage, alert policies, event webhooks, and bounded automatic telemetry retention. |
 | Access and audit | Operator roles/scopes, searchable and revocable bearer sessions, QR-assisted TOTP enrollment, direct gateway identities, key rotation/revocation, audit logs, and evidence views. |
 | Releases | Authoritative `version.json` metadata, GitHub release assets, compose updater, agent update jobs, and rollback-friendly deployment layout. |
 
@@ -278,6 +278,33 @@ kept as audit context, but the submitted API payload contains the concrete VPS
 IDs that were reviewed.
 
 Read more in [docs/target-selectors.md](docs/target-selectors.md).
+
+### Monitoring and shared views
+
+**Fleet > Monitor** is the primary fleet overview and defaults to every matching
+VPS. Comfortable cards retain identity context and fuller histories; Compact
+cards use a materially denser metric hierarchy. Both show exact values alongside
+visual CPU, RAM, aggregate disk, load, network, configured traffic, and primary
+Ping evidence. Selecting a card opens the canonical VPS detail with shared
+**15m**, **1h**, **8h**, **1d**, **7d**, **30d**, **90d**, **180d**, **1y**,
+**All**, and **Custom** ranges. 15m is the rolling realtime view.
+
+Accepted high-resolution samples default to 90 days. Authoritative
+minute-derived resource, network, traffic-counter, and Ping history defaults to
+3,650 days; exact-equivalent adjacent resource/network/Ping minutes may be
+stored as a longer lossless span. There is no competing hourly history.
+
+**Observability > Ping targets** manages reusable ICMP/TCP definitions, frozen
+VPS assignments, and an explicit primary target for each card.
+**Observability > Shared views** creates expiring public read-only projections,
+then retains the lifecycle needed to extend active links or revoke them. Each
+share freezes its VPS and visible-data scope at creation. Its secret URL is shown
+once because the control plane stores only a digest. Public projections use
+opaque share-specific VPS keys and never expose IPs, internal configuration,
+actions, jobs, terminals, files, backups, audit data, or operator identity.
+
+See [Telemetry metric definitions](docs/telemetry-metrics.md) for aggregation,
+retention, gaps, and source semantics.
 
 ### Access and privilege
 

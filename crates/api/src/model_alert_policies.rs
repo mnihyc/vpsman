@@ -9,6 +9,9 @@ pub(crate) const VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL: &str = "traffic.quota.total";
 pub(crate) const VPS_RULE_KEY_TRAFFIC_QUOTA_RX: &str = "traffic.quota.rx";
 pub(crate) const VPS_RULE_KEY_TRAFFIC_QUOTA_TX: &str = "traffic.quota.tx";
 pub(crate) const VPS_RULE_KEY_TRAFFIC_SELECTORS: &str = "traffic.selectors";
+pub(crate) const VPS_RULE_KEY_BILLING_PRICE: &str = "billing.price";
+pub(crate) const VPS_RULE_KEY_BILLING_CYCLE: &str = "billing.cycle";
+pub(crate) const VPS_RULE_KEY_NETWORK_PORT_SPEED: &str = "network.port_speed";
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct VpsRuleValueRecord {
@@ -137,7 +140,8 @@ pub(crate) struct TrafficCounterSampleRecord {
     pub(crate) observed_unix: i64,
     pub(crate) rx_bytes: i64,
     pub(crate) tx_bytes: i64,
-    pub(crate) counter_epoch: i64,
+    pub(crate) rx_counter_epoch: i64,
+    pub(crate) tx_counter_epoch: i64,
     pub(crate) sample_source: String,
 }
 

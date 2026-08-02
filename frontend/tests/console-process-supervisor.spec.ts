@@ -54,9 +54,7 @@ test("keeps host process scope and target routable while refreshing a read-only 
   await expect(command.first()).toBeVisible();
   if (testInfo.project.name.includes("mobile")) {
     await activate(
-      inventory.getByRole("button", {
-        name: "Show details for Host process inventory row 4242",
-      }),
+      inventory.getByLabel("Host process inventory mobile card 4242"),
     );
   } else {
     await activate(inventory.getByText("node", { exact: true }).first());
@@ -311,24 +309,29 @@ test("reviews the exact process start command without exposing environment value
   await expect(prompt).not.toContainText("must-not-render");
 });
 
-test("renders process operation cards on mobile with resource usage and actions", async ({ page }, testInfo) => {
-  test.skip(!testInfo.project.name.includes("mobile"), "mobile process card layout");
+test("uses the common process inventory grid on mobile", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.includes("mobile"), "mobile process grid layout");
 
   await page.goto("/");
   await openManagedProcesses(page);
 
-  const cards = page.getByLabel("Process supervisor mobile cards");
-  await expect(cards).toBeVisible();
-  await expect(cards.getByText("ospf-worker")).toBeVisible();
-  await expect(cards.getByText("Timestamp inconsistent")).toBeVisible();
-  await expect(cards.getByText("39")).toBeVisible();
-  await expect(cards.getByText("1.0 MiB")).toBeVisible();
-  await expect(cards.getByText("Unknown")).toBeVisible();
-  await expect(cards.getByText("1 restart")).toBeVisible();
-  await expect(cards.getByRole("button", { name: "Open logs for process ospf-worker" })).toBeVisible();
-  await expect(cards.getByRole("button", { name: "Restart process ospf-worker" })).toBeVisible();
-  await expect(cards.getByRole("button", { name: "Stop process ospf-worker" })).toBeVisible();
-  await expect(page.locator(".processInventoryGridShell")).toBeHidden();
+  const grid = page.getByLabel("Process health inventory data grid");
+  const card = grid.locator(".gridMobileCard", { hasText: "ospf-worker" });
+  await expect(grid).toBeVisible();
+  await expect(card).toBeVisible();
+  await expect(card).toContainText("Timestamp inconsistent");
+  await expect(card).toContainText("39");
+  await expect(card).toContainText("1.0 MiB");
+  await expect(card).toContainText("Unknown");
+  await expect(card).toContainText("1 restart");
+  await expect(card.locator(".gridMobileActions")).toHaveCount(0);
+  await grid
+    .getByLabel("Select Process health inventory row agent-sfo-01:ospf-worker")
+    .check();
+  await grid.getByRole("button", { name: "Actions", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: "Logs", exact: true })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Restart", exact: true })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Stop", exact: true })).toBeVisible();
 });
 
 async function expectProcessDispatchPreset(page: Page, action: string) {

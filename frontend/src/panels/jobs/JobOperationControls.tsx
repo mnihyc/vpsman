@@ -10,6 +10,7 @@ import {
   MAX_BROWSER_RESUMABLE_DOWNLOAD_BYTES,
   MAX_BROWSER_STREAMING_RESUMABLE_DOWNLOAD_BYTES,
   MAX_BROWSER_RESUMABLE_UPLOAD_BYTES,
+  MAX_FILE_TRANSFER_RATE_LIMIT_KBPS,
 } from "../../resumableFileTransfer";
 import type { BrowserDownloadSinkMode, BrowserTransferMultiTargetPolicy } from "../../resumableFileTransfer";
 import type { FileExistingPolicy } from "../../types";
@@ -568,14 +569,20 @@ export function JobOperationEditor({
             value={fileTransferChunkSize}
           />
         </label>
-        <label>
-          <span>Rate kbps</span>
+        <label title="Transfer rate cap in Mbps. Use 0 for no cap.">
+          <span>Rate limit Mbps</span>
           <input
-            aria-label="Resumable upload rate limit"
+            aria-label="Resumable upload rate limit Mbps"
+            max={MAX_FILE_TRANSFER_RATE_LIMIT_KBPS / 1_000}
             min={0}
-            onChange={(event) => setFileTransferRateLimit(Number(event.target.value))}
+            onChange={(event) =>
+              setFileTransferRateLimit(
+                Math.round(Number(event.target.value) * 1_000),
+              )
+            }
+            step={0.001}
             type="number"
-            value={fileTransferRateLimit}
+            value={fileTransferRateLimit / 1_000}
           />
         </label>
         <label>
@@ -675,14 +682,20 @@ export function JobOperationEditor({
             value={fileTransferChunkSize}
           />
         </label>
-        <label>
-          <span>Rate kbps</span>
+        <label title="Transfer rate cap in Mbps. Use 0 for no cap.">
+          <span>Rate limit Mbps</span>
           <input
-            aria-label="Resumable download rate limit"
+            aria-label="Resumable download rate limit Mbps"
+            max={MAX_FILE_TRANSFER_RATE_LIMIT_KBPS / 1_000}
             min={0}
-            onChange={(event) => setFileTransferRateLimit(Number(event.target.value))}
+            onChange={(event) =>
+              setFileTransferRateLimit(
+                Math.round(Number(event.target.value) * 1_000),
+              )
+            }
+            step={0.001}
             type="number"
-            value={fileTransferRateLimit}
+            value={fileTransferRateLimit / 1_000}
           />
         </label>
         <label className="wideField">

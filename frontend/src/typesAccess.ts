@@ -49,6 +49,7 @@ export type KeyLifecycleClientView = {
 };
 
 export type KeyLifecycleReportView = {
+  suggested_client_id: string;
   direct_identity_client_count: number;
   current_key_revoked_count: number;
   revocation_count: number;

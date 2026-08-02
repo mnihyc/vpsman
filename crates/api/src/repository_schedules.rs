@@ -358,6 +358,13 @@ impl Repository {
     ) -> Result<ScheduleView> {
         match self {
             Self::Memory(memory) => {
+                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
+                crate::repository_key_lifecycle::require_visible_memory_clients(
+                    memory,
+                    &request.target_client_ids,
+                    "schedule_fixed_targets_not_found",
+                )
+                .await?;
                 let id = Uuid::new_v4();
                 let now = unix_now();
                 let next_runs = next_cron_runs(&request.cron_expr, 5)?;
@@ -443,6 +450,13 @@ impl Repository {
     ) -> Result<ScheduleView> {
         match self {
             Self::Memory(memory) => {
+                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
+                crate::repository_key_lifecycle::require_visible_memory_clients(
+                    memory,
+                    &request.target_client_ids,
+                    "schedule_fixed_targets_not_found",
+                )
+                .await?;
                 let mut schedules = memory.schedules.write().await;
                 let schedule = schedules
                     .iter_mut()
@@ -467,12 +481,18 @@ impl Repository {
     pub(crate) async fn update_schedule_targets(
         &self,
         schedule_id: Uuid,
-        selector_expression: String,
         target_client_ids: Vec<String>,
         operator: &AuthContext,
     ) -> Result<ScheduleView> {
         match self {
             Self::Memory(memory) => {
+                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
+                crate::repository_key_lifecycle::require_visible_memory_clients(
+                    memory,
+                    &target_client_ids,
+                    "schedule_fixed_targets_not_found",
+                )
+                .await?;
                 let now = unix_now().to_string();
                 let mut schedules = memory.schedules.write().await;
                 let schedule = schedules
@@ -480,7 +500,6 @@ impl Repository {
                     .find(|schedule| schedule.id == schedule_id && schedule.deleted_at.is_none())
                     .ok_or_else(|| anyhow::anyhow!("schedule_not_found:{schedule_id}"))?;
                 ensure_schedule_operation_valid(schedule)?;
-                schedule.selector_expression = selector_expression;
                 schedule.target_client_ids = target_client_ids;
                 schedule.updated_at = now;
                 let schedule = schedule.clone();
@@ -496,6 +515,12 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                crate::repository_key_lifecycle::require_visible_postgres_clients_in_tx(
+                    &mut tx,
+                    &target_client_ids,
+                    "schedule_fixed_targets_not_found",
+                )
+                .await?;
                 let schedule = schedule_by_id_postgres_in_tx(&mut tx, schedule_id).await?;
                 ensure_schedule_operation_valid(&schedule)?;
                 let result = sqlx::query(
@@ -503,15 +528,13 @@ impl Repository {
                     UPDATE schedules
                     SET
                         actor_id = $2,
-                        selector_expression = $3,
-                        target_client_ids = $4,
+                        target_client_ids = $3,
                         updated_at = now()
                     WHERE id = $1 AND deleted_at IS NULL
                     "#,
                 )
                 .bind(schedule_id)
                 .bind(operator.operator.id)
-                .bind(selector_expression.trim())
                 .bind(&target_client_ids)
                 .execute(&mut *tx)
                 .await?;
@@ -872,6 +895,12 @@ pub(crate) async fn create_schedule_record_postgres_in_tx(
     request: &ScheduleCreateInput,
     operator: &AuthContext,
 ) -> Result<ScheduleView> {
+    crate::repository_key_lifecycle::require_visible_postgres_clients_in_tx(
+        tx,
+        &request.target_client_ids,
+        "schedule_fixed_targets_not_found",
+    )
+    .await?;
     let id = Uuid::new_v4();
     let next_runs = next_cron_runs(&request.cron_expr, 5)?;
     let next_run = next_runs
@@ -947,6 +976,12 @@ pub(crate) async fn update_schedule_record_postgres_in_tx(
     request: &ScheduleCreateInput,
     operator: &AuthContext,
 ) -> Result<ScheduleView> {
+    crate::repository_key_lifecycle::require_visible_postgres_clients_in_tx(
+        tx,
+        &request.target_client_ids,
+        "schedule_fixed_targets_not_found",
+    )
+    .await?;
     let next_runs = next_cron_runs(&request.cron_expr, 5)?;
     let next_run = next_runs
         .first()

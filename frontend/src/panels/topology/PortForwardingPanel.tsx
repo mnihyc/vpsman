@@ -1,16 +1,19 @@
 import {
   CheckCircle2,
   CirclePlus,
+  Copy,
   Info,
+  Pencil,
+  Power,
+  PowerOff,
   RefreshCcw,
-  Search,
+  RotateCw,
   ShieldAlert,
   Trash2,
   X,
 } from "lucide-react";
 import {
   type FormEvent,
-  type ReactNode,
   forwardRef,
   useEffect,
   useMemo,
@@ -20,11 +23,10 @@ import {
 import { ActionFeedback, type ActionFeedbackTone } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import {
-  ConsoleActionMenu,
-  ConsoleContextActionMenu,
-  ConsoleInlineActions,
-  type ConsoleMenuAction,
-} from "../../components/ConsoleLayout";
+  ConsoleDataGrid,
+  type ConsoleDataGridAction,
+  type ConsoleDataGridColumn,
+} from "../../components/ConsoleDataGrid";
 import { VpsCombobox } from "../../components/VpsCombobox";
 import { scrollIntoViewWithMotion } from "../../motion";
 import {
@@ -133,14 +135,6 @@ export function PortForwardingPanel({
   onUpdate,
   rules: ruleItems,
 }: PortForwardingPanelProps) {
-  const [query, setQuery] = useState("");
-  const [clientFilter, setClientFilter] = useState("all");
-  const [familyFilter, setFamilyFilter] = useState("all");
-  const [protocolFilter, setProtocolFilter] = useState("all");
-  const [desiredFilter, setDesiredFilter] = useState("all");
-  const [runtimeFilter, setRuntimeFilter] = useState("all");
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [expandedId, setExpandedId] = useState<string | null>(null);
   const [editor, setEditor] = useState<{
     draft: EditorDraft;
     editing: PortForwardRuleRecord | null;
@@ -152,7 +146,6 @@ export function PortForwardingPanel({
   const [corruptDelete, setCorruptDelete] =
     useState<PortForwardRuleCorruptRecord | null>(null);
   const editorRef = useRef<HTMLElement | null>(null);
-  const detailRef = useRef<HTMLElement | null>(null);
   const registryFeedbackRef = useRef<HTMLDivElement | null>(null);
   const writeBoundary = "Operator role and network:write scope required";
   const forgetBoundary = "Admin role and network:write scope required";
@@ -163,53 +156,6 @@ export function PortForwardingPanel({
     () => new Map(agents.map((agent) => [agent.id, agent])),
     [agents],
   );
-  const filtered = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    return rules.filter((rule) => {
-      const family = rule.target_ip.includes(":") ? "ipv6" : "ipv4";
-      const haystack = [
-        rule.name,
-        rule.client_id,
-        agentById.get(rule.client_id)?.display_name ?? "",
-        rule.target_ip,
-        rule.protocol,
-        formatPortMappings(rule.mappings),
-      ]
-        .join(" ")
-        .toLowerCase();
-      return (
-        (!needle || haystack.includes(needle)) &&
-        (clientFilter === "all" || rule.client_id === clientFilter) &&
-        (familyFilter === "all" || family === familyFilter) &&
-        (protocolFilter === "all" || rule.protocol === protocolFilter) &&
-        (desiredFilter === "all" || rule.desired_status === desiredFilter) &&
-        (runtimeFilter === "all" || rule.runtime_status === runtimeFilter)
-      );
-    });
-  }, [
-    agentById,
-    clientFilter,
-    desiredFilter,
-    familyFilter,
-    protocolFilter,
-    query,
-    rules,
-    runtimeFilter,
-  ]);
-  const selectedRules = rules.filter((rule) => selected.has(rule.id));
-  const selectedEnableRules = selectedRules.filter(
-    (rule) =>
-      !rule.enabled &&
-      !rule.deleted_at &&
-      agentById.get(rule.client_id)?.capabilities.port_forwarding?.status === "supported",
-  );
-  const selectedDisableRules = selectedRules.filter((rule) => rule.enabled && !rule.deleted_at);
-  const selectedActiveRules = selectedRules.filter((rule) => !rule.deleted_at);
-  const selectedReapplyRules = selectedActiveRules.filter(
-    (rule) =>
-      agentById.get(rule.client_id)?.capabilities.port_forwarding?.status === "supported",
-  );
-  const expandedRule = rules.find((rule) => rule.id === expandedId) ?? null;
   const enabledCount = rules.filter((rule) => rule.enabled && !rule.deleted_at).length;
   const appliedCount = rules.filter((rule) =>
     ["applied", "applied_warning"].includes(rule.runtime_status),
@@ -266,20 +212,6 @@ export function PortForwardingPanel({
   }, [Boolean(editor), editor?.editing?.id]);
 
   useEffect(() => {
-    if (!expandedRule) return;
-    window.setTimeout(() => {
-      if (detailRef.current) {
-        scrollIntoViewWithMotion(detailRef.current, { block: "nearest" });
-      }
-      detailRef.current?.focus({ preventScroll: true });
-    }, 0);
-  }, [expandedRule?.id]);
-
-  useEffect(() => {
-    setForgetReason("");
-  }, [expandedRule?.id]);
-
-  useEffect(() => {
     if (feedback?.anchor !== "registry") return;
     const frame = window.requestAnimationFrame(() => {
       if (registryFeedbackRef.current) {
@@ -293,7 +225,6 @@ export function PortForwardingPanel({
 
   function openCreate() {
     if (!canWrite) return;
-    setExpandedId(null);
     setFeedback(null);
     setEditor({
       editing: null,
@@ -304,7 +235,6 @@ export function PortForwardingPanel({
   function openEdit(rule: PortForwardRuleRecord) {
     if (!canWrite) return;
     const expressions = mappingsToExpressions(rule.mappings);
-    setExpandedId(null);
     setFeedback(null);
     setEditor({
       editing: rule,
@@ -325,7 +255,6 @@ export function PortForwardingPanel({
   function openClone(rule: PortForwardRuleRecord) {
     if (!canWrite) return;
     const expressions = mappingsToExpressions(rule.mappings);
-    setExpandedId(null);
     setFeedback(null);
     setEditor({
       editing: null,
@@ -375,14 +304,6 @@ export function PortForwardingPanel({
           expected_revision: snapshot.rule.revision,
           reason: snapshot.reason,
         });
-        if (snapshot.operation === "delete" || snapshot.operation === "forget") {
-          setExpandedId((current) => (current === snapshot.rule.id ? null : current));
-          setSelected((current) => {
-            const next = new Set(current);
-            next.delete(snapshot.rule.id);
-            return next;
-          });
-        }
         setFeedback({
           ...syncFeedback(response, singleActionPast(snapshot.operation)),
           anchor: snapshot.operation === "delete" || snapshot.operation === "forget"
@@ -397,7 +318,6 @@ export function PortForwardingPanel({
             expected_revision: rule.revision,
           })),
         );
-        setSelected(new Set());
         setFeedback({
           ...bulkSyncFeedback(response, snapshot.action, snapshot.rules.length),
           anchor: "registry",
@@ -491,77 +411,263 @@ export function PortForwardingPanel({
     }
   }
 
-  function rowActions(rule: PortForwardRuleRecord): ConsoleMenuAction[] {
-    if (rule.deleted_at) return [];
-    const capability = agentById.get(rule.client_id)?.capabilities.port_forwarding;
-    return [
+  const columns = useMemo<ConsoleDataGridColumn<PortForwardRuleRecord>[]>(
+    () => [
       {
-        disabled: !canWrite || pending || Boolean(editor),
-        label: "Edit",
-        onSelect: () => openEdit(rule),
-        title: !canWrite ? writeBoundary : "Edit rule",
+        id: "rule",
+        header: "Rule / VPS",
+        cell: (rule) => (
+          <span className="historyPrimary">
+            <strong title={rule.name}>{rule.name}</strong>
+            <small title={`${agentById.get(rule.client_id)?.display_name || rule.client_id} (${rule.client_id})`}>
+              {agentById.get(rule.client_id)?.display_name || rule.client_id}
+            </small>
+          </span>
+        ),
+        mobilePrimary: true,
+        searchValue: (rule) =>
+          `${rule.name} ${agentById.get(rule.client_id)?.display_name ?? ""} ${rule.client_id}`,
+        sortValue: (rule) => rule.name,
+        minSize: 180,
+        size: 220,
       },
       {
-        disabled: !canWrite || pending || Boolean(editor),
-        label: "Clone",
-        onSelect: () => openClone(rule),
-        title: !canWrite ? writeBoundary : "Clone as a disabled rule",
+        id: "mapping",
+        header: "Mapping",
+        cell: (rule) => (
+          <span className="truncateValue mappingValue" title={portForwardMappingLabel(rule)}>
+            {portForwardMappingLabel(rule)}
+          </span>
+        ),
+        searchValue: (rule) =>
+          `${portForwardMappingLabel(rule)} ${rule.target_ip.includes(":") ? "IPv6" : "IPv4"}`,
+        sortValue: (rule) => portForwardMappingLabel(rule),
+        minSize: 220,
+        size: 300,
       },
       {
-        disabled:
-          !canWrite ||
-          pending ||
-          Boolean(editor) ||
-          (!rule.enabled && capability?.status !== "supported"),
-        label: rule.enabled ? "Disable" : "Enable",
-        onSelect: () =>
-          setConfirmation({
-            kind: "single",
-            operation: rule.enabled ? "disable" : "enable",
-            origin: "registry",
-            rule,
-          }),
-        title: !canWrite
+        id: "return",
+        header: "Return",
+        cell: (rule) => (
+          <span title={rule.masquerade ? "Masquerade only connections DNATed by this rule" : "Preserve the original source address"}>
+            {rule.masquerade ? "Masquerade" : "Preserve source"}
+          </span>
+        ),
+        searchValue: (rule) => rule.masquerade ? "masquerade" : "preserve source",
+        sortValue: (rule) => rule.masquerade ? "masquerade" : "preserve",
+        size: 150,
+      },
+      {
+        id: "desired",
+        header: "Desired",
+        cell: (rule) => <StatusBadge status={rule.desired_status} />,
+        mobileState: true,
+        searchValue: (rule) => rule.desired_status.replace(/_/g, " "),
+        sortValue: (rule) => rule.desired_status,
+        size: 140,
+      },
+      {
+        id: "runtime",
+        header: "Runtime",
+        cell: (rule) => (
+          <StatusBadge status={rule.runtime_status} title={runtimeStatusTitle(rule)} />
+        ),
+        searchValue: (rule) => `${rule.runtime_status.replace(/_/g, " ")} ${runtimeStatusTitle(rule)}`,
+        sortValue: (rule) => rule.runtime_status,
+        minSize: 150,
+        size: 170,
+      },
+      {
+        id: "matches",
+        header: "NAT matches",
+        cell: (rule) => (
+          <span title="First-packet NAT matches since the latest table apply; this is not throughput">
+            {rule.nat_matches.toLocaleString()}
+          </span>
+        ),
+        searchValue: (rule) => rule.nat_matches,
+        sortValue: (rule) => rule.nat_matches,
+        align: "end",
+        size: 120,
+      },
+    ],
+    [agentById],
+  );
+
+  function activeRows(rows: PortForwardRuleRecord[]) {
+    return rows.filter((rule) => !rule.deleted_at);
+  }
+
+  function enableRows(rows: PortForwardRuleRecord[]) {
+    return activeRows(rows).filter(
+      (rule) =>
+        !rule.enabled &&
+        agentById.get(rule.client_id)?.capabilities.port_forwarding?.status === "supported",
+    );
+  }
+
+  function disableRows(rows: PortForwardRuleRecord[]) {
+    return activeRows(rows).filter((rule) => rule.enabled);
+  }
+
+  function reapplyRows(rows: PortForwardRuleRecord[]) {
+    return activeRows(rows).filter(
+      (rule) =>
+        agentById.get(rule.client_id)?.capabilities.port_forwarding?.status === "supported",
+    );
+  }
+
+  function reviewMutation(
+    operation: PortForwardBulkAction,
+    candidates: PortForwardRuleRecord[],
+  ) {
+    const eligible = operation === "enable"
+      ? enableRows(candidates)
+      : operation === "disable"
+        ? disableRows(candidates)
+        : operation === "reapply"
+          ? reapplyRows(candidates)
+          : activeRows(candidates);
+    if (eligible.length === 0) return;
+    if (eligible.length === 1) {
+      setConfirmation({
+        kind: "single",
+        operation,
+        origin: "registry",
+        rule: eligible[0],
+      });
+      return;
+    }
+    setConfirmation({ kind: "bulk", action: operation, rules: eligible });
+  }
+
+  const actions: ConsoleDataGridAction<PortForwardRuleRecord>[] = [
+    {
+      description: (rows) =>
+        !canWrite
           ? writeBoundary
-          : rule.enabled
-            ? "Disable rule"
-            : capabilityActionTitle(agentById.get(rule.client_id), "Enable rule"),
-      },
-      {
-        disabled:
-          !canWrite ||
-          pending ||
-          Boolean(editor) ||
-          capability?.status !== "supported",
-        label: "Reapply",
-        onSelect: () =>
-          setConfirmation({
-            kind: "single",
-            operation: "reapply",
-            origin: "registry",
-            rule,
-          }),
-        title: !canWrite
+          : rows.length !== 1
+            ? "Select one active rule to edit."
+            : rows[0].deleted_at
+              ? "A rule awaiting removal cannot be edited."
+              : editor
+                ? "Close the current editor first."
+                : `Edit ${rows[0].name}.`,
+      disabled: (rows) =>
+        !canWrite || pending || Boolean(editor) || rows.length !== 1 || Boolean(rows[0]?.deleted_at),
+      hidden: (rows) => rows.length === 1 && Boolean(rows[0].deleted_at),
+      icon: <Pencil size={14} />,
+      label: "Edit",
+      onSelect: (rows) => rows[0] && openEdit(rows[0]),
+    },
+    {
+      description: (rows) =>
+        !canWrite
           ? writeBoundary
-          : capabilityActionTitle(
-              agentById.get(rule.client_id),
-              "Reapply this VPS's complete forwarding table",
-            ),
+          : rows.length !== 1
+            ? "Select one active rule to clone."
+            : rows[0].deleted_at
+              ? "A rule awaiting removal cannot be cloned."
+              : editor
+                ? "Close the current editor first."
+                : `Clone ${rows[0].name} as a disabled rule.`,
+      disabled: (rows) =>
+        !canWrite || pending || Boolean(editor) || rows.length !== 1 || Boolean(rows[0]?.deleted_at),
+      hidden: (rows) => rows.length === 1 && Boolean(rows[0].deleted_at),
+      icon: <Copy size={14} />,
+      label: "Clone",
+      onSelect: (rows) => rows[0] && openClone(rows[0]),
+    },
+    {
+      description: (rows) => {
+        const eligible = enableRows(rows);
+        return eligible.length > 0
+          ? `Review enabling ${eligible.length} eligible selected rule${eligible.length === 1 ? "" : "s"}.`
+          : "No selected disabled rule is eligible to enable on its VPS.";
       },
-      {
-        disabled: !canWrite || pending || Boolean(editor),
-        label: "Delete",
-        onSelect: () =>
-          setConfirmation({
-            kind: "single",
-            operation: "delete",
-            origin: "registry",
-            rule,
-          }),
-        title: !canWrite ? writeBoundary : "Delete rule",
-        tone: "danger",
+      disabled: (rows) => !canWrite || pending || Boolean(editor) || enableRows(rows).length === 0,
+      hidden: (rows) => rows.length === 1 && Boolean(rows[0].deleted_at),
+      icon: <Power size={14} />,
+      label: "Enable",
+      onSelect: (rows) => reviewMutation("enable", rows),
+    },
+    {
+      description: (rows) => {
+        const eligible = disableRows(rows);
+        return eligible.length > 0
+          ? `Review disabling ${eligible.length} selected enabled rule${eligible.length === 1 ? "" : "s"}.`
+          : "No selected rule is enabled.";
       },
-    ];
+      disabled: (rows) => !canWrite || pending || Boolean(editor) || disableRows(rows).length === 0,
+      hidden: (rows) => rows.length === 1 && Boolean(rows[0].deleted_at),
+      icon: <PowerOff size={14} />,
+      label: "Disable",
+      onSelect: (rows) => reviewMutation("disable", rows),
+    },
+    {
+      description: (rows) => {
+        const eligible = reapplyRows(rows);
+        return eligible.length > 0
+          ? `Review reapplying the complete forwarding table on ${eligible.length} eligible VPS${eligible.length === 1 ? "" : "s"}.`
+          : "No selected active rule is on a VPS with supported forwarding control.";
+      },
+      disabled: (rows) => !canWrite || pending || Boolean(editor) || reapplyRows(rows).length === 0,
+      hidden: (rows) => rows.length === 1 && Boolean(rows[0].deleted_at),
+      icon: <RotateCw size={14} />,
+      label: "Reapply",
+      onSelect: (rows) => reviewMutation("reapply", rows),
+    },
+    {
+      description: (rows) => {
+        const eligible = activeRows(rows);
+        return eligible.length > 0
+          ? `Review deleting ${eligible.length} selected active rule${eligible.length === 1 ? "" : "s"}.`
+          : "No selected rule is active.";
+      },
+      disabled: (rows) => !canWrite || pending || Boolean(editor) || activeRows(rows).length === 0,
+      hidden: (rows) => rows.length === 1 && Boolean(rows[0].deleted_at),
+      icon: <Trash2 size={14} />,
+      label: "Delete",
+      onSelect: (rows) => reviewMutation("delete", rows),
+      separatorBefore: true,
+      tone: "danger",
+    },
+  ];
+
+  function renderRuleDetails(rule: PortForwardRuleRecord) {
+    return (
+      <div aria-label={`Details for ${rule.name}`} className="portForwardInlineDetail">
+        <dl className="portForwardDetailGrid">
+          <Detail display={shortId(rule.id)} label="Rule ID" title={rule.id} value={rule.id} />
+          <Detail label="Revision" value={String(rule.revision)} />
+          <Detail label="VPS" value={`${agentById.get(rule.client_id)?.display_name || rule.client_id} (${rule.client_id})`} />
+          <Detail label="Protocol" value={rule.protocol.toUpperCase()} />
+          <Detail label="Desired" value={rule.desired_status.replace(/_/g, " ")} />
+          <Detail label="Listener scope" value={`All current local ${rule.target_ip.includes(":") ? "IPv6" : "IPv4"} addresses`} />
+          <Detail label="Target" value={rule.target_ip} />
+          <Detail label="Mappings" value={formatPortMappings(rule.mappings)} />
+          <Detail label="Return path" value={rule.masquerade ? "Targeted masquerade" : "Preserve source"} />
+          <Detail label="Runtime" value={rule.runtime_error ? `${rule.runtime_status}: ${rule.runtime_error}` : rule.runtime_status} />
+          <Detail label="Capability" title={agentById.get(rule.client_id)?.capabilities.port_forwarding?.reason ?? undefined} value={capabilitySummary(agentById.get(rule.client_id)?.capabilities.port_forwarding)} />
+          <Detail label={`${rule.target_ip.includes(":") ? "IPv6" : "IPv4"} forwarding`} tone={rule.forwarding_enabled === false ? "warning" : "normal"} value={forwardingSummary(rule.forwarding_enabled)} />
+          <Detail label="Observed" value={rule.runtime_observed_unix ? formatCompactTime(new Date(rule.runtime_observed_unix * 1000).toISOString()) : "No agent evidence"} />
+          <Detail label="NAT matches" value={rule.nat_matches.toLocaleString()} />
+          <Detail label="Updated" value={formatCompactTime(rule.updated_at)} />
+          <Detail display={shortId(rule.desired_hash)} label="Control desired" title={`Control-plane desired config hash: ${rule.desired_hash ?? "not applicable"}`} value={rule.desired_hash ?? "Not applicable"} />
+          <Detail display={shortId(rule.agent_desired_hash)} label="Agent desired" title={`Latest desired config hash reported by the agent: ${rule.agent_desired_hash ?? "not reported"}`} value={rule.agent_desired_hash ?? "Not reported"} />
+          <Detail display={shortId(rule.observed_hash)} label="Observed table" title={`Latest normalized owned-table hash reported by the agent: ${rule.observed_hash ?? "no owned table hash"}`} value={rule.observed_hash ?? "No owned table hash"} />
+        </dl>
+        <ActionFeedback className="localActionFeedback portForwardDetailFeedback" message={feedback?.anchor === "detail" ? feedback.message : null} tone={feedback?.anchor === "detail" ? feedback.tone : undefined} />
+        {rule.deleted_at && !rule.removal_confirmed_at && (
+          <div className="portForwardRemovalNotice">
+            <ShieldAlert size={17} />
+            <span>Removal pending until the agent confirms the owned table no longer contains this rule.</span>
+            <label className="forgetReasonField"><span className="srOnly">Forget reason</span><input disabled={!canForget || pending} maxLength={512} onChange={(event) => setForgetReason(event.target.value)} placeholder="Decommission reason" title={!canForget ? forgetBoundary : forgetReason} value={forgetReason} /></label>
+            <button className="dangerAction compactAction" disabled={!canForget || pending || !forgetReason.trim()} onClick={() => setConfirmation({ kind: "single", operation: "forget", origin: "detail", reason: forgetReason.trim(), rule })} title={!canForget ? forgetBoundary : "Forget only when this VPS is permanently unreachable or decommissioned"} type="button">Forget</button>
+          </div>
+        )}
+      </div>
+    );
   }
 
   return (
@@ -577,14 +683,6 @@ export function PortForwardingPanel({
                 ? "VPS"
                 : "VPSs"}
             </span>
-          </div>
-          <div className="headerActionStack">
-            <button aria-busy={loading} className="secondaryAction" disabled={loading || pending} onClick={() => void refreshRules()} title="Reload latest stored desired state and agent evidence; this does not request a live agent inspection" type="button">
-              <RefreshCcw size={16} /> {loading ? "Refreshing" : "Refresh"}
-            </button>
-            <button className="primaryAction" disabled={!canWrite || Boolean(editor) || pending} onClick={openCreate} title={!canWrite ? writeBoundary : editor ? "Close the current editor first" : "Create a port-forward rule"} type="button">
-              <CirclePlus size={17} /> Create rule
-            </button>
           </div>
         </div>
         <ActionFeedback className="localActionFeedback portForwardActionFeedback" message={error ?? (loading ? "Reloading stored forwarding state" : feedback?.anchor === "summary" ? feedback.message : null)} tone={error ? "danger" : loading ? "progress" : feedback?.anchor === "summary" ? feedback.tone : undefined} />
@@ -635,204 +733,41 @@ export function PortForwardingPanel({
             </div>
           </div>
         )}
-        <div className="portForwardToolbar">
-          <label className="searchControl compactSearch">
-            <Search size={15} />
-            <input aria-label="Search port-forward rules" onChange={(event) => setQuery(event.target.value)} placeholder="Search rules" value={query} />
-          </label>
-          <VpsCombobox
-            agents={agents}
-            ariaLabel="Filter port-forward rules by VPS"
-            onChange={(clientId) => setClientFilter(clientId || "all")}
-            placeholder="All VPSs"
-            value={clientFilter === "all" ? "" : clientFilter}
-          />
-          <FilterSelect label="Family" onChange={setFamilyFilter} value={familyFilter}>
-            <option value="all">All families</option><option value="ipv4">IPv4</option><option value="ipv6">IPv6</option>
-          </FilterSelect>
-          <FilterSelect label="Protocol" onChange={setProtocolFilter} value={protocolFilter}>
-            <option value="all">All protocols</option><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">Both</option>
-          </FilterSelect>
-          <FilterSelect label="Desired" onChange={setDesiredFilter} value={desiredFilter}>
-            <option value="all">All desired</option><option value="enabled">Enabled</option><option value="disabled">Disabled</option><option value="removal_pending">Removal pending</option>
-          </FilterSelect>
-          <FilterSelect label="Runtime" onChange={setRuntimeFilter} value={runtimeFilter}>
-            <option value="all">All runtime</option><option value="applied">Applied</option><option value="applied_warning">Applied with warning</option><option value="pending">Pending</option><option value="drifted">Drifted</option><option value="failed">Failed</option><option value="unsupported">Unsupported</option><option value="unknown">Unknown</option>
-          </FilterSelect>
-        </div>
-        {selectedRules.length > 0 && (
-          <div className="selectionActionBar portForwardBulkBar" aria-label="Selected port-forward actions">
-            <span>{selectedRules.length} selected</span>
-            <ConsoleActionMenu
-              actions={[
-                {
-                  disabled:
-                    selectedRules.length !== 1 ||
-                    !canWrite ||
-                    pending ||
-                    Boolean(editor),
-                  label: "Edit",
-                  onSelect: () => {
-                    if (selectedRules[0]) openEdit(selectedRules[0]);
-                  },
-                  title: !canWrite ? writeBoundary : undefined,
-                },
-                {
-                  disabled:
-                    selectedRules.length !== 1 ||
-                    !canWrite ||
-                    pending ||
-                    Boolean(editor),
-                  label: "Clone",
-                  onSelect: () => {
-                    if (selectedRules[0]) openClone(selectedRules[0]);
-                  },
-                  title: !canWrite ? writeBoundary : undefined,
-                },
-                {
-                  disabled:
-                    !canWrite ||
-                    pending ||
-                    Boolean(editor) ||
-                    selectedEnableRules.length === 0,
-                  label: `Enable ${selectedEnableRules.length}`,
-                  onSelect: () =>
-                    setConfirmation({
-                      kind: "bulk",
-                      action: "enable",
-                      rules: selectedEnableRules,
-                    }),
-                  title: !canWrite ? writeBoundary : undefined,
-                },
-                {
-                  disabled:
-                    !canWrite ||
-                    pending ||
-                    Boolean(editor) ||
-                    selectedDisableRules.length === 0,
-                  label: `Disable ${selectedDisableRules.length}`,
-                  onSelect: () =>
-                    setConfirmation({
-                      kind: "bulk",
-                      action: "disable",
-                      rules: selectedDisableRules,
-                    }),
-                  title: !canWrite ? writeBoundary : undefined,
-                },
-                {
-                  disabled:
-                    !canWrite ||
-                    pending ||
-                    Boolean(editor) ||
-                    selectedReapplyRules.length === 0,
-                  label: `Reapply ${selectedReapplyRules.length}`,
-                  onSelect: () =>
-                    setConfirmation({
-                      kind: "bulk",
-                      action: "reapply",
-                      rules: selectedReapplyRules,
-                    }),
-                  title: !canWrite ? writeBoundary : undefined,
-                },
-                {
-                  disabled:
-                    !canWrite ||
-                    pending ||
-                    Boolean(editor) ||
-                    selectedActiveRules.length === 0,
-                  label: `Delete ${selectedActiveRules.length}`,
-                  onSelect: () =>
-                    setConfirmation({
-                      kind: "bulk",
-                      action: "delete",
-                      rules: selectedActiveRules,
-                    }),
-                  title: !canWrite ? writeBoundary : undefined,
-                  tone: "danger",
-                },
-              ]}
-              label={`Actions for ${selectedRules.length} selected port-forward rule${selectedRules.length === 1 ? "" : "s"}`}
-            />
-          </div>
-        )}
         <ActionFeedback className="localActionFeedback portForwardRegistryFeedback" message={feedback?.anchor === "registry" ? feedback.message : null} ref={registryFeedbackRef} tone={feedback?.anchor === "registry" ? feedback.tone : undefined} />
-        {filtered.length === 0 ? (
-          <div className="emptyState compactEmptyState">
-            <strong>{rules.length === 0 ? "No port-forward rules" : "No matching rules"}</strong>
-            <span>{rules.length === 0 ? "Create a disabled draft, or enable a rule on a VPS that reports nftables support." : "Adjust the filters."}</span>
-          </div>
-        ) : (
-          <div className="portForwardTableWrap">
-            <table aria-label="Port-forward rules" className="portForwardTable">
-              <thead><tr>
-                <th className="selectionCell"><input aria-label="Select visible port-forward rules" checked={filtered.every((rule) => selected.has(rule.id))} disabled={!canWrite} title={!canWrite ? writeBoundary : "Select all visible rules"} onChange={(event) => {
-                  const next = new Set(selected); for (const rule of filtered) event.target.checked ? next.add(rule.id) : next.delete(rule.id); setSelected(next);
-                }} type="checkbox" /></th>
-                <th>Rule / VPS</th><th>Mapping</th><th>Return</th><th>Desired</th><th>Runtime</th><th>NAT matches</th>
-              </tr></thead>
-              <tbody>{filtered.map((rule) => {
-                const agent = agentById.get(rule.client_id);
-                const targetAddress = rule.target_ip.includes(":") ? `[${rule.target_ip}]` : rule.target_ip;
-                const mapping = `${rule.protocol.toUpperCase()} · ${rule.mappings.map((item) => formatPortRange(item.incoming)).join(",")} -> ${targetAddress}:${rule.mappings.map((item) => formatPortRange(item.target)).join(",")}`;
-                const actions = rowActions(rule);
-                return (
-                  <ConsoleContextActionMenu
-                    actions={actions}
-                    key={rule.id}
-                    label={`Actions for ${rule.name}`}
-                  >
-                    <tr className={expandedId === rule.id ? "expanded" : ""} onClick={() => setExpandedId((current) => current === rule.id ? null : rule.id)} tabIndex={0} onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); setExpandedId((current) => current === rule.id ? null : rule.id); } }}>
-                      <td className="selectionCell" data-label="Select" onClick={(event) => event.stopPropagation()}><input aria-label={`Select ${rule.name}`} checked={selected.has(rule.id)} disabled={!canWrite} title={!canWrite ? writeBoundary : `Select ${rule.name}`} onChange={(event) => { const next = new Set(selected); event.target.checked ? next.add(rule.id) : next.delete(rule.id); setSelected(next); }} type="checkbox" /></td>
-                      <td data-label="Rule / VPS"><strong className="truncateValue" title={rule.name}>{rule.name}</strong><span className="truncateValue" title={`${agent?.display_name || rule.client_id} (${rule.client_id})`}>{agent?.display_name || rule.client_id}</span><div className="portForwardMobileStatus"><StatusBadge status={rule.desired_status} /><StatusBadge status={rule.runtime_status} title={runtimeStatusTitle(rule)} /></div>{actions.length > 0 && <div className="topologyMobileRowActions" onClick={(event) => event.stopPropagation()}><ConsoleInlineActions actions={actions} label={`Actions for ${rule.name}`} /></div>}</td>
-                      <td data-label="Mapping"><span className="truncateValue mappingValue" title={mapping}>{mapping}</span></td>
-                      <td data-label="Return"><span title={rule.masquerade ? "Masquerade only connections DNATed by this rule" : "Preserve the original source address"}>{rule.masquerade ? "Masquerade" : "Preserve source"}</span></td>
-                      <td data-label="Desired"><StatusBadge status={rule.desired_status} /></td>
-                      <td data-label="Runtime"><StatusBadge status={rule.runtime_status} title={runtimeStatusTitle(rule)} /></td>
-                      <td data-label="NAT matches"><span title="First-packet NAT matches since the latest table apply; this is not throughput">{rule.nat_matches.toLocaleString()}</span></td>
-                    </tr>
-                  </ConsoleContextActionMenu>
-                );
-              })}</tbody>
-            </table>
-          </div>
-        )}
-      </section>
-
-      {expandedRule && (
-        <section aria-label={`Details for ${expandedRule.name}`} className="fleetPanel portForwardDetails" ref={detailRef} tabIndex={-1}>
-          <div className="sectionHeader">
-            <div><h2>{expandedRule.name}</h2><span title={expandedRule.id}>{shortId(expandedRule.id)} · revision {expandedRule.revision}</span></div>
-            <button aria-label="Close port-forward details" className="iconButton" onClick={() => setExpandedId(null)} title="Close details" type="button"><X size={17} /></button>
-          </div>
-          <dl className="portForwardDetailGrid">
-            <Detail label="VPS" value={`${agentById.get(expandedRule.client_id)?.display_name || expandedRule.client_id} (${expandedRule.client_id})`} />
-            <Detail label="Protocol" value={expandedRule.protocol.toUpperCase()} />
-            <Detail label="Desired" value={expandedRule.desired_status.replace(/_/g, " ")} />
-            <Detail label="Listener scope" value={`All current local ${expandedRule.target_ip.includes(":") ? "IPv6" : "IPv4"} addresses`} />
-            <Detail label="Target" value={expandedRule.target_ip} />
-            <Detail label="Mappings" value={formatPortMappings(expandedRule.mappings)} />
-            <Detail label="Return path" value={expandedRule.masquerade ? "Targeted masquerade" : "Preserve source"} />
-            <Detail label="Runtime" value={expandedRule.runtime_error ? `${expandedRule.runtime_status}: ${expandedRule.runtime_error}` : expandedRule.runtime_status} />
-            <Detail label="Capability" title={agentById.get(expandedRule.client_id)?.capabilities.port_forwarding?.reason ?? undefined} value={capabilitySummary(agentById.get(expandedRule.client_id)?.capabilities.port_forwarding)} />
-            <Detail label={`${expandedRule.target_ip.includes(":") ? "IPv6" : "IPv4"} forwarding`} tone={expandedRule.forwarding_enabled === false ? "warning" : "normal"} value={forwardingSummary(expandedRule.forwarding_enabled)} />
-            <Detail label="Observed" value={expandedRule.runtime_observed_unix ? formatCompactTime(new Date(expandedRule.runtime_observed_unix * 1000).toISOString()) : "No agent evidence"} />
-            <Detail label="NAT matches" value={expandedRule.nat_matches.toLocaleString()} />
-            <Detail label="Updated" value={formatCompactTime(expandedRule.updated_at)} />
-            <Detail display={shortId(expandedRule.desired_hash)} label="Control desired" title={`Control-plane desired config hash: ${expandedRule.desired_hash ?? "not applicable"}`} value={expandedRule.desired_hash ?? "Not applicable"} />
-            <Detail display={shortId(expandedRule.agent_desired_hash)} label="Agent desired" title={`Latest desired config hash reported by the agent: ${expandedRule.agent_desired_hash ?? "not reported"}`} value={expandedRule.agent_desired_hash ?? "Not reported"} />
-            <Detail display={shortId(expandedRule.observed_hash)} label="Observed table" title={`Latest normalized owned-table hash reported by the agent: ${expandedRule.observed_hash ?? "no owned table hash"}`} value={expandedRule.observed_hash ?? "No owned table hash"} />
-          </dl>
-          <ActionFeedback className="localActionFeedback portForwardDetailFeedback" message={feedback?.anchor === "detail" ? feedback.message : null} tone={feedback?.anchor === "detail" ? feedback.tone : undefined} />
-          {expandedRule.deleted_at && !expandedRule.removal_confirmed_at && (
-            <div className="portForwardRemovalNotice">
-              <ShieldAlert size={17} />
-              <span>Removal pending until the agent confirms the owned table no longer contains this rule.</span>
-              <label className="forgetReasonField"><span className="srOnly">Forget reason</span><input disabled={!canForget || pending} maxLength={512} onChange={(event) => setForgetReason(event.target.value)} placeholder="Decommission reason" title={!canForget ? forgetBoundary : forgetReason} value={forgetReason} /></label>
-              <button className="dangerAction compactAction" disabled={!canForget || pending || !forgetReason.trim()} onClick={() => setConfirmation({ kind: "single", operation: "forget", origin: "detail", reason: forgetReason.trim(), rule: expandedRule })} title={!canForget ? forgetBoundary : "Forget only when this VPS is permanently unreachable or decommissioned"} type="button">Forget</button>
+        <ConsoleDataGrid
+          actions={actions}
+          columns={columns}
+          defaultPageSize={100}
+          empty={
+            <div className="emptyState compactEmptyState">
+              <strong>{loading ? "Loading port-forward rules" : "No port-forward rules"}</strong>
+              <span>{loading ? "Reading desired state and the latest agent evidence." : "Create a disabled draft, or enable a rule on a VPS that reports nftables support."}</span>
             </div>
-          )}
-        </section>
-      )}
+          }
+          getRowId={(rule) => rule.id}
+          itemLabel="port-forward rules"
+          onExpandedRowChange={() => setForgetReason("")}
+          openRowOnClick={false}
+          renderExpandedRow={renderRuleDetails}
+          rows={rules}
+          searchPlaceholder="Search name, VPS, mapping, family, desired, or runtime"
+          selectable={canWrite}
+          showMobileRowActions={false}
+          singleExpandedRow
+          storageKey="vpsman.network.portForwardRules"
+          title="Port-forward rules"
+          toolbarActions={
+            <div className="previewMeta">
+              <button aria-busy={loading} className="secondaryAction compactAction" disabled={loading || pending} onClick={() => void refreshRules()} title="Reload latest stored desired state and agent evidence; this does not request a live agent inspection" type="button">
+                <RefreshCcw size={14} /> {loading ? "Refreshing" : "Refresh"}
+              </button>
+              <button className="primaryAction compactAction" disabled={!canWrite || Boolean(editor) || pending} onClick={openCreate} title={!canWrite ? writeBoundary : editor ? "Close the current editor first" : "Create a port-forward rule"} type="button">
+                <CirclePlus size={15} /> Create rule
+              </button>
+            </div>
+          }
+        />
+      </section>
 
       {editor && (
         <PortForwardEditor
@@ -996,7 +931,7 @@ const PortForwardEditor = forwardRef<HTMLElement, {
               : <><CheckCircle2 size={16} /><span title={formatPortMappings(mappingPreview.mappings)}>{formatPortMappings(mappingPreview.mappings)} · {draft.targetIp || "select target IP"}</span></>}
         </div>
         {selectedAgent && capability?.status !== "supported" && <div className="portForwardCapabilityNotice"><ShieldAlert size={16} /><span title={capability?.reason ?? capability?.status ?? "unknown"}>{capabilityLabel(capability?.status, capability?.reason)}</span></div>}
-        <div className="formActions"><button className="secondaryAction" disabled={pending} onClick={onClose} type="button">Cancel</button><button className="primaryAction" disabled={saveDisabled} title={saveDisabledReason ?? (editing ? "Review rule update" : "Review rule creation")} type="submit">{editing ? "Save changes" : "Create rule"}</button></div>
+        <div className="consoleFormActions fieldFull"><button className="secondaryAction" disabled={pending} onClick={onClose} type="button">Cancel</button><button className="primaryAction" disabled={saveDisabled} title={saveDisabledReason ?? (editing ? "Review rule update" : "Review rule creation")} type="submit">{editing ? "Save changes" : "Create rule"}</button></div>
       </form>
     </section>
   );
@@ -1006,12 +941,21 @@ function Metric({ label, tone = "normal", value }: { label: string; tone?: "norm
   return <span className={tone === "warning" ? "hasAttention" : ""}><small>{label}</small><strong>{value}</strong></span>;
 }
 
-function FilterSelect({ children, label, onChange, value }: { children: ReactNode; label: string; onChange: (value: string) => void; value: string }) {
-  return <label className="compactFilter" title={`Filter by ${label.toLowerCase()}`}><span className="srOnly">{label}</span><select aria-label={`${label} filter`} onChange={(event) => onChange(event.target.value)} value={value}>{children}</select></label>;
-}
-
 function Detail({ display, label, title, tone = "normal", value }: { display?: string; label: string; title?: string; tone?: "normal" | "warning"; value: string }) {
   return <div className={tone === "warning" ? "hasAttention" : ""}><dt>{label}</dt><dd title={title ?? value}>{display ?? value}</dd></div>;
+}
+
+function portForwardMappingLabel(rule: PortForwardRuleRecord) {
+  const targetAddress = rule.target_ip.includes(":")
+    ? `[${rule.target_ip}]`
+    : rule.target_ip;
+  const incoming = rule.mappings
+    .map((item) => formatPortRange(item.incoming))
+    .join(",");
+  const target = rule.mappings
+    .map((item) => formatPortRange(item.target))
+    .join(",");
+  return `${rule.protocol.toUpperCase()} · ${incoming} -> ${targetAddress}:${target}`;
 }
 
 function StatusBadge({ status, title }: { status: string; title?: string }) {

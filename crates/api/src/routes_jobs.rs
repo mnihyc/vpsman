@@ -464,12 +464,28 @@ async fn create_job_inner(
         .collect::<Vec<_>>();
     let allow_unavailable_fixed_targets =
         matches!(&privilege_source, JobPrivilegeSource::SavedSchedule(_));
-    if !allow_unavailable_fixed_targets && !missing_fixed_targets.is_empty() {
-        return Err(ApiError::conflict("fixed_target_not_found"));
+    let unavailable_visible_targets = resolved_targets
+        .iter()
+        .filter(|client_id| {
+            resolved_agents.iter().any(|agent| {
+                agent.id == client_id.as_str()
+                    && matches!(agent.status.as_str(), "revoked" | "deleted")
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !allow_unavailable_fixed_targets {
+        if !missing_fixed_targets.is_empty() {
+            return Err(ApiError::conflict("fixed_target_not_found"));
+        }
+        if !unavailable_visible_targets.is_empty() {
+            return Err(ApiError::conflict("fixed_target_unavailable"));
+        }
     }
     let fixed_target_unavailable_skips = if allow_unavailable_fixed_targets {
         missing_fixed_targets
             .into_iter()
+            .chain(unavailable_visible_targets)
             .map(|client_id| FixedTargetUnavailableSkip { client_id })
             .collect::<Vec<_>>()
     } else {
@@ -679,7 +695,8 @@ async fn create_job_inner(
                 schedule_id,
                 &precompleted_targets,
             )
-            .await?
+            .await
+            .map_err(map_job_recording_error)?
     } else {
         state
             .repo
@@ -693,7 +710,8 @@ async fn create_job_inner(
                 &precompleted_targets,
                 approval_id,
             )
-            .await?
+            .await
+            .map_err(map_job_recording_error)?
     };
     for precompleted in &precompleted_targets {
         state.publish(WsEvent::JobOutputRecorded {
@@ -1034,7 +1052,8 @@ fn never_connected_target_skips(
 }
 
 fn target_has_never_connected(agent: &AgentView) -> bool {
-    agent.process_incarnation_id.is_none() || agent.status == "never"
+    !matches!(agent.status.as_str(), "revoked" | "deleted")
+        && (agent.process_incarnation_id.is_none() || agent.status == "never")
 }
 
 fn network_speed_test_peer_skips(
@@ -1754,6 +1773,17 @@ fn map_job_approval_repo_error(error: anyhow::Error) -> ApiError {
         ApiError::conflict("job_approval_id_reused")
     } else if message.starts_with("job_approval_decision_invalid") {
         ApiError::bad_request("job_approval_decision_invalid")
+    } else {
+        ApiError::from(error)
+    }
+}
+
+fn map_job_recording_error(error: anyhow::Error) -> ApiError {
+    if error
+        .to_string()
+        .starts_with("job_target_no_longer_available")
+    {
+        ApiError::conflict("job_target_no_longer_available")
     } else {
         ApiError::from(error)
     }

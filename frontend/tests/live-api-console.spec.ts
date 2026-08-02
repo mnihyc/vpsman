@@ -52,7 +52,11 @@ test("uses the real API proxy for fleet, topology planning, and audit visibility
   ).toBeVisible();
   await expect(page.getByRole("row", { name: /edge-live-a/ })).toBeVisible();
   await expect(
-    page.locator(".consoleHeader").getByText("2 live / 0 no contact / 2 total"),
+    page
+      .locator(".consoleHeader")
+      .getByText(
+        "2 live / 0 offline / 0 stale / 0 access revoked / 0 no contact / 2 total",
+      ),
   ).toBeVisible();
 
   await openConsoleSubpage(page, "Network", "Tunnel plans");

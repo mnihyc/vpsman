@@ -29,7 +29,14 @@ test("captures network telemetry placements", async ({ page }, testInfo) => {
       "VPS instance records mobile card agent-fra-02",
     );
     await expect(coreCard).toBeVisible();
-    await activate(coreCard.getByRole("button", { name: /Open VPS/ }));
+    await coreCard.getByRole("checkbox").check();
+    await fleetGrid
+      .locator(".gridToolbarActions")
+      .getByRole("button", { name: "Actions", exact: true })
+      .click();
+    await page
+      .getByRole("menuitem", { name: "Open detail", exact: true })
+      .click();
     coreDetail = page.getByLabel("Canonical VPS detail");
     await coreDetail.getByLabel("VPS detail section").selectOption("Network");
   } else {

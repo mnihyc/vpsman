@@ -111,8 +111,8 @@ export function ConsoleDataGrid<T>({
   openRowOnClick = true,
   openRowLabel = "Open",
   openRowTitle,
-  showMobileOpenRowAction = true,
-  showMobileRowActions = true,
+  showMobileOpenRowAction = false,
+  showMobileRowActions = false,
   onSelectionChange,
   renderExpandedRow,
   renderSelectionPanel,
@@ -156,6 +156,7 @@ export function ConsoleDataGrid<T>({
   title: string;
   toolbarActions?: ReactNode;
 }) {
+  const singularItemLabel = singularizeItemLabel(itemLabel);
   const [preferences] = useState(() => readGridPreferences(storageKey));
   const [columnSizing, setColumnSizing] = useState<ColumnSizingState>(
     preferences.columnSizing ?? {},
@@ -781,7 +782,7 @@ export function ConsoleDataGrid<T>({
               ? globalFilter.trim().length > 0
                 ? `${filteredRows.length} matching in ${rows.length} loaded; more may exist`
                 : `${rows.length} loaded; more may exist`
-              : `${filteredRows.length} of ${rows.length} ${itemLabel}`}
+              : `${filteredRows.length} of ${rows.length} ${rows.length === 1 ? singularItemLabel : itemLabel}`}
           </span>
           {selectable && <span>{selectedRows.length} selected</span>}
         </div>
@@ -806,8 +807,8 @@ export function ConsoleDataGrid<T>({
               }
               title={
                 allCurrentPageRowsSelected
-                  ? `Clear the ${selectedPageRowCount} visible selected ${itemLabel}.`
-                  : `Select the ${currentPageRows.length} visible ${itemLabel} on this page.`
+                  ? `Clear the ${selectedPageRowCount} visible selected ${selectedPageRowCount === 1 ? singularItemLabel : itemLabel}.`
+                  : `Select the ${currentPageRows.length} visible ${currentPageRows.length === 1 ? singularItemLabel : itemLabel} on this page.`
               }
               type="button"
             >
@@ -926,56 +927,58 @@ export function ConsoleDataGrid<T>({
               </DropdownMenu.Content>
             </DropdownMenu.Portal>
           </DropdownMenu.Root>
-          <label className="gridPageSize">
-            <span>Rows</span>
-            <select
-              aria-label={`${title} page size`}
-              onChange={(event) => setPageSize(Number(event.target.value))}
-              value={pageSize}
+          <span className="gridPagination">
+            <label className="gridPageSize">
+              <span>Rows</span>
+              <select
+                aria-label={`${title} page size`}
+                onChange={(event) => setPageSize(Number(event.target.value))}
+                value={pageSize}
+              >
+                {[defaultPageSize, 10, 25, 50, 100, 250, 500, 1000]
+                  .filter(
+                    (value, index, values) => values.indexOf(value) === index,
+                  )
+                  .sort((left, right) => left - right)
+                  .map((value) => (
+                    <option key={value} value={value}>
+                      {value}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <button
+              aria-label={`${title} previous page`}
+              className="iconButton"
+              disabled={!table.getCanPreviousPage()}
+              onClick={() => table.previousPage()}
+              title={
+                table.getCanPreviousPage()
+                  ? `Go to the previous ${title} page.`
+                  : `Already on the first ${title} page.`
+              }
+              type="button"
             >
-              {[defaultPageSize, 10, 25, 50, 100, 250, 500, 1000]
-                .filter(
-                  (value, index, values) => values.indexOf(value) === index,
-                )
-                .sort((left, right) => left - right)
-                .map((value) => (
-                  <option key={value} value={value}>
-                    {value}
-                  </option>
-                ))}
-            </select>
-          </label>
-          <button
-            aria-label={`${title} previous page`}
-            className="iconButton"
-            disabled={!table.getCanPreviousPage()}
-            onClick={() => table.previousPage()}
-            title={
-              table.getCanPreviousPage()
-                ? `Go to the previous ${title} page.`
-                : `Already on the first ${title} page.`
-            }
-            type="button"
-          >
-            <ChevronLeft size={16} />
-          </button>
-          <span className="gridPageLabel">
-            {currentPage} / {pageCount}
+              <ChevronLeft size={16} />
+            </button>
+            <span className="gridPageLabel">
+              {currentPage} / {pageCount}
+            </span>
+            <button
+              aria-label={`${title} next page`}
+              className="iconButton"
+              disabled={!table.getCanNextPage()}
+              onClick={() => table.nextPage()}
+              title={
+                table.getCanNextPage()
+                  ? `Go to the next ${title} page.`
+                  : `Already on the last ${title} page.`
+              }
+              type="button"
+            >
+              <ChevronRight size={16} />
+            </button>
           </span>
-          <button
-            aria-label={`${title} next page`}
-            className="iconButton"
-            disabled={!table.getCanNextPage()}
-            onClick={() => table.nextPage()}
-            title={
-              table.getCanNextPage()
-                ? `Go to the next ${title} page.`
-                : `Already on the last ${title} page.`
-            }
-            type="button"
-          >
-            <ChevronRight size={16} />
-          </button>
         </div>
       </div>
       {table.getRowModel().rows.length === 0 ? (
@@ -1149,6 +1152,19 @@ export function ConsoleDataGrid<T>({
       )}
     </div>
   );
+}
+
+function singularizeItemLabel(label: string): string {
+  const separator = label.lastIndexOf(" ");
+  const prefix = separator >= 0 ? label.slice(0, separator + 1) : "";
+  const noun = separator >= 0 ? label.slice(separator + 1) : label;
+  if (noun === "VPSs") return `${prefix}VPS`;
+  if (noun.endsWith("ies")) return `${prefix}${noun.slice(0, -3)}y`;
+  if (noun.endsWith("sses")) return `${prefix}${noun.slice(0, -2)}`;
+  if (noun.endsWith("s") && !noun.endsWith("ss")) {
+    return `${prefix}${noun.slice(0, -1)}`;
+  }
+  return label;
 }
 
 function cellHeaderLabel<T>(cell: Cell<T, unknown>) {

@@ -187,6 +187,8 @@ async fn automatic_update_plan_requires_explicit_packet_loss_evidence() {
 #[tokio::test]
 async fn ospf_evidence_is_bounded_per_plan_instead_of_globally() {
     let (repo, noisy_plan_id) = seeded_plan(OspfControlMode::Reviewed, 2).await;
+    crate::tests_network::seed_online_agent(&repo, "quiet-left").await;
+    crate::tests_network::seed_online_agent(&repo, "quiet-right").await;
     let noisy_plan = repo.get_tunnel_plan(noisy_plan_id).await.unwrap().unwrap();
     let mut quiet_input = noisy_plan.input.clone();
     quiet_input.name = "quiet-edge".to_string();
@@ -297,6 +299,8 @@ async fn seeded_plan(mode: OspfControlMode, healthy_windows: u8) -> (Repository,
         routing_definition(RIGHT_ADAPTER, "right-routing"),
     ]);
     let repo = Repository::Memory(memory);
+    crate::tests_network::seed_online_agent(&repo, "left-a").await;
+    crate::tests_network::seed_online_agent(&repo, "right-b").await;
     let input = TunnelPlanInput {
         name: "edge-a-edge-b".to_string(),
         interface_name: "tunab".to_string(),

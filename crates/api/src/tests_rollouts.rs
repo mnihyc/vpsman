@@ -12,11 +12,16 @@ use crate::{
         get_job_rollout, list_job_rollouts, pause_job_rollout, resume_job_rollout,
         JobRolloutListQuery,
     },
-    tests::{operation_job_request, test_app_state, test_operator},
+    tests::{
+        operation_job_request, seed_never_connected_memory_agent, test_app_state, test_operator,
+    },
 };
 
 async fn recorded_rollout() -> (crate::state::AppState, Uuid) {
     let repo = Repository::Memory(MemoryState::default());
+    for client_id in ["client-a", "client-b", "client-c"] {
+        seed_never_connected_memory_agent(&repo, client_id).await;
+    }
     let operator = test_operator();
     let mut request = operation_job_request(
         JobCommand::AgentUpdateCheck {

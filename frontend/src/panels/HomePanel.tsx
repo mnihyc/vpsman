@@ -39,7 +39,6 @@ import type {
   ScheduleRecord,
   TelemetryNetworkRateRecord,
   TelemetryRollupRecord,
-  TelemetryTunnelRecord,
 } from "../types";
 import { displayNameOrUnnamed, formatCompactTime, formatFullTime, shortId } from "../utils";
 import { FleetMonitorPanel } from "./FleetMonitorPanel";
@@ -48,6 +47,7 @@ import { HomeTelemetryPanel } from "./HomeTelemetryPanel";
 type HomePanelProps = {
   agents: AgentView[];
   allAgents: AgentView[];
+  apiToken: string;
   auditLogs: AuditLogRecord[];
   backupArtifacts: BackupArtifactRecord[];
   backups: BackupRequestRecord[];
@@ -78,7 +78,6 @@ type HomePanelProps = {
   telemetryError: string | null;
   telemetryLoading: boolean;
   telemetryRollups: TelemetryRollupRecord[];
-  telemetryTunnels: TelemetryTunnelRecord[];
   onDashboardNavigate: (drilldown: DashboardDrilldownRecord) => void;
   onDashboardPreferencesChange: (patch: Partial<DashboardPreferences>) => void;
   onDashboardRefresh: () => void;
@@ -93,7 +92,6 @@ type HomePanelProps = {
   onOpenJobs: () => void;
   onOpenNetwork: (agent: AgentView) => void;
   onOpenNetworkEvidence: (agent?: AgentView) => void;
-  onOpenProcesses: (agent: AgentView) => void;
   onOpenSchedule: () => void;
   onOpenSystemCapacity: () => void;
   onOpenTerminal: (agent: AgentView) => void;
@@ -128,6 +126,7 @@ type HomeActivityItem = {
 export function HomePanel({
   agents,
   allAgents,
+  apiToken,
   auditLogs,
   backupArtifacts,
   backups,
@@ -153,7 +152,6 @@ export function HomePanel({
   telemetryError,
   telemetryLoading,
   telemetryRollups,
-  telemetryTunnels,
   onDashboardNavigate,
   onDashboardPreferencesChange,
   onDashboardRefresh,
@@ -168,7 +166,6 @@ export function HomePanel({
   onOpenJobs,
   onOpenNetwork,
   onOpenNetworkEvidence,
-  onOpenProcesses,
   onOpenSchedule,
   onOpenSystemCapacity,
   onOpenTerminal,
@@ -186,6 +183,8 @@ export function HomePanel({
   const visibleContactUnknown = visibleDisplayStates.filter((state) => state.label === "Contact unknown").length;
   const visibleStale = visibleDisplayStates.filter((state) => state.label === "Stale").length;
   const visibleOffline = visibleDisplayStates.filter((state) => state.label === "Offline").length;
+  const visibleNever = visibleDisplayStates.filter((state) => state.label === "Never connected").length;
+  const visibleRevoked = visibleDisplayStates.filter((state) => state.label === "Access revoked").length;
   const visibleReview = visibleDisplayStates.filter(
     (state) => state.tone === "warning" || state.tone === "critical",
   ).length;
@@ -509,7 +508,7 @@ export function HomePanel({
           <HomePostureMetric
             detail={
               fleetCoreEvidenceAvailable
-                ? `${visibleStale} stale, ${visibleContactUnknown} contact unknown, ${visibleOffline} offline`
+                ? `${visibleStale} stale, ${visibleOffline} offline, ${visibleNever} never connected, ${visibleRevoked} access revoked, ${visibleContactUnknown} contact unknown`
                 : "Reachability evidence is unavailable"
             }
             label="Reachability gaps"
@@ -621,10 +620,11 @@ export function HomePanel({
 
         <FleetMonitorPanel
           agents={agents}
+          apiToken={apiToken}
           apiError={fleetError}
           ariaLabel="Home fleet scan"
           backups={backups}
-          description="VPS health cards for scanning resources, network, alerts, and current work before opening the exact operator workflow."
+          description="VPS health cards for scanning resources, network, alerts, and current work. Open a card for canonical VPS detail."
           embedded
           failedJobCount={failedJobs}
           fileTransfers={fileTransfers}
@@ -639,7 +639,6 @@ export function HomePanel({
           runningJobCount={runningJobs}
           telemetryNetworkRates={telemetryNetworkRates}
           telemetryRollups={telemetryRollups}
-          telemetryTunnels={telemetryTunnels}
           title="Fleet scan"
           toolbarAction={
             <button
@@ -658,11 +657,6 @@ export function HomePanel({
               <span>View all VPS</span>
             </button>
           }
-          onOpenBackup={onOpenBackup}
-          onOpenFiles={onOpenFiles}
-          onOpenNetwork={onOpenNetwork}
-          onOpenProcesses={onOpenProcesses}
-          onOpenTerminal={onOpenTerminal}
           onOpenVpsDetail={onOpenVpsDetail}
         />
 

@@ -125,7 +125,7 @@ const CONFIG_HELP = {
   payload:
     "Hash of the exact override payload that the confirmation prompt will bind to the privileged request.",
   vpsRules:
-    "Per-VPS traffic rule values feed accounting and alert policies; dry-run previews changed rows before write.",
+    "Per-VPS traffic and optional billing values feed card display, accounting, and alert policies; dry-run previews changed rows before write.",
   ruleSelector:
     "Fleet selector used for the dry-run and final reviewed VPS rule mutation.",
   ruleSetValues:
@@ -136,6 +136,9 @@ const CONFIG_HELP = {
     "Server-issued hash of the dry-run diff that the apply request must echo to prevent stale writes.",
 } as const;
 const VPS_RULE_KEYS = [
+  "billing.price",
+  "billing.cycle",
+  "network.port_speed",
   "traffic.reset_day",
   "traffic.quota.total",
   "traffic.quota.rx",
@@ -940,38 +943,42 @@ function ConfigOverview({
           <h3>Recent changes</h3>
           <span>{recentChanges.length} historical runtime config records</span>
         </summary>
-        <div className="table hierarchyTable">
-          <div className="historyRow heading configRecentGrid">
-            <span>Target</span>
-            <span>Operation</span>
-            <span>Status</span>
-            <span>Detail</span>
-            <span>Updated</span>
+        <div
+          aria-label="Recent config change records"
+          className="table hierarchyTable"
+          role="table"
+        >
+          <div className="historyRow heading configRecentGrid" role="row">
+            <span role="columnheader">Target</span>
+            <span role="columnheader">Operation</span>
+            <span role="columnheader">Status</span>
+            <span role="columnheader">Detail</span>
+            <span role="columnheader">Updated</span>
           </div>
           {recentChanges.map((change) => {
             const updated = change.time
               ? formatTime(change.time)
               : "No timestamp";
             return (
-            <div className="historyRow configRecentGrid" key={change.id}>
-              <span title={change.target}>{change.target}</span>
-              <span title={change.operation}>{change.operation}</span>
-              <span title={change.status}>
+            <div className="historyRow configRecentGrid" key={change.id} role="row">
+              <span role="cell" title={change.target}>{change.target}</span>
+              <span role="cell" title={change.operation}>{change.operation}</span>
+              <span role="cell" title={change.status}>
                 <ConsoleStatusBadge tone={change.tone}>
                   {change.status}
                 </ConsoleStatusBadge>
               </span>
-              <span title={change.title}>{change.detail}</span>
-              <span title={updated}>{updated}</span>
+              <span role="cell" title={change.title}>{change.detail}</span>
+              <span role="cell" title={updated}>{updated}</span>
             </div>
             );
           })}
-          {recentChanges.length === 0 && (
-            <div className="emptyState compactEmpty">
-              No recent config changes.
-            </div>
-          )}
         </div>
+        {recentChanges.length === 0 && (
+          <div className="emptyState compactEmpty">
+            No recent config changes.
+          </div>
+        )}
       </details>
     </div>
   );
@@ -3374,6 +3381,27 @@ type VpsRuleFieldDefinition = {
 
 const VPS_RULE_FIELD_DEFINITIONS: VpsRuleFieldDefinition[] = [
   {
+    help: "Optional card price, for example 29.90 CNY/m, 48 USD/q, 60 €/hy, or 99 USD/y. Use -1 to explicitly disable billing display as n/a; blank leaves the rule unset.",
+    inputMode: "text",
+    key: "billing.price",
+    label: "Billing price",
+    placeholder: "29.90 CNY/m",
+  },
+  {
+    help: "Optional renewal anchor, independent of traffic reset day. Use a day for /m (for example 15), or day-month for /q, /hy, and /y (for example 15-06).",
+    inputMode: "text",
+    key: "billing.cycle",
+    label: "Billing cycle",
+    placeholder: "15 or 15-06",
+  },
+  {
+    help: "Optional display-only port speed, for example 400Mbps or 1.5 Gbps. It does not configure shaping, quotas, or the agent network.",
+    inputMode: "text",
+    key: "network.port_speed",
+    label: "Port speed",
+    placeholder: "1.5 Gbps",
+  },
+  {
     help: "Day of month in UTC when the traffic accounting cycle resets.",
     inputMode: "numeric",
     key: "traffic.reset_day",
@@ -3381,21 +3409,21 @@ const VPS_RULE_FIELD_DEFINITIONS: VpsRuleFieldDefinition[] = [
     placeholder: "14",
   },
   {
-    help: "Total monthly traffic quota. Operators may type units such as 4TB, 750GB, or raw bytes.",
+    help: "Total monthly traffic quota. Type 4TB, 750GB, raw bytes, or -1 for explicitly unlimited. Blank leaves the rule unset.",
     inputMode: "text",
     key: "traffic.quota.total",
     label: "Total quota",
     placeholder: "4TB",
   },
   {
-    help: "Optional receive-side traffic quota. Leave blank to keep this key out of the set request.",
+    help: "Optional receive-side traffic quota. Use -1 for explicitly unlimited; blank leaves the rule unset.",
     inputMode: "text",
     key: "traffic.quota.rx",
     label: "RX quota",
     placeholder: "Optional",
   },
   {
-    help: "Optional transmit-side traffic quota. Leave blank to keep this key out of the set request.",
+    help: "Optional transmit-side traffic quota. Use -1 for explicitly unlimited; blank leaves the rule unset.",
     inputMode: "text",
     key: "traffic.quota.tx",
     label: "TX quota",
@@ -4153,26 +4181,10 @@ function VpsRulesPanel({
 
   return (
     <div className="consoleCrudPanel vpsRulesWorkspace">
-      <div className="consoleFilterBar">
-        <label>
-          <span>VPS selector expression</span>
-          <SearchExpressionInput
-            agents={agents}
-            ariaLabel="VPS rules selector expression"
-            disabled={applyPending}
-            onChange={setSelectorExpression}
-            placeholder="provider:hetzner && tag:edge"
-            showMatchCount
-            value={selectorExpression}
-            verification={
-              parsedSelector.error
-                ? "invalid"
-                : selectorExpression.trim()
-                  ? "valid"
-                  : "neutral"
-            }
-          />
-        </label>
+      <div
+        aria-label="VPS rule registry filters"
+        className="consoleFilterBar vpsRulesRegistryFilters"
+      >
         <label>
           <span>Key filter</span>
           <select
@@ -4208,7 +4220,6 @@ function VpsRulesPanel({
           <span>Show incomplete only</span>
         </label>
       </div>
-      <LocalTargetPreview agents={localSelectorTargets} />
       <div className="consoleInlineDetailGrid vpsRulesSummary">
         <span>
           <strong>Rule rows</strong>
@@ -4222,63 +4233,7 @@ function VpsRulesPanel({
           <strong>Incomplete VPS</strong>
           <span>{incompleteClients.size}</span>
         </span>
-        <span>
-          <strong>Current selector</strong>
-          <span className="monoValue">{selectorExpression || "unset"}</span>
-        </span>
-        <span>
-          <strong>Affected policies</strong>
-          <span>{affectedPolicyRules.length}</span>
-        </span>
       </div>
-      <section
-        className="consoleDetailPanel vpsRulesAlertImpact"
-        aria-label="Affected alert policy context"
-      >
-        <div className="consoleDetailPanelHeader">
-          <span>
-            <strong>Affected alert policies</strong>
-            <small>
-              Policies whose rule conditions reference the current edit keys:{" "}
-              <span className="monoValue">
-                {editedRuleKeys.join(", ") || "traffic.*"}
-              </span>
-            </small>
-          </span>
-          <button
-            className="secondaryAction compactAction"
-            onClick={onOpenAlerts}
-            type="button"
-          >
-            Open Observability alerts
-          </button>
-        </div>
-        <div className="configRiskList">
-          {affectedPolicyRules.slice(0, 6).map((impact) => (
-            <div
-              className="configRiskRow"
-              key={`${impact.policyId}:${impact.ruleId}`}
-            >
-              <span>
-                <strong>
-                  {impact.policyName} / {impact.ruleName}
-                </strong>
-                <small className="monoValue">
-                  {impact.conditionExpression}
-                </small>
-              </span>
-              <ConsoleStatusBadge tone={impact.enabled ? "warning" : "neutral"}>
-                {impact.severity}
-              </ConsoleStatusBadge>
-            </div>
-          ))}
-          {affectedPolicyRules.length === 0 && (
-            <div className="emptyState compactEmpty">
-              No loaded alert policy conditions reference the current rule keys.
-            </div>
-          )}
-        </div>
-      </section>
       <ConsoleDataGrid
         columns={columns}
         defaultPageSize={20}
@@ -4321,7 +4276,8 @@ function VpsRulesPanel({
         storageKey="vpsman.grid.config.vpsRules"
         title="VPS rule values"
       />
-      <section className="consoleDetailPanel">
+      <div className="vpsRulesMutationScope">
+        <section className="consoleDetailPanel">
         <div className="consoleDetailPanelHeader">
           <span>
             <ConfigHelpLabel
@@ -4404,12 +4360,12 @@ function VpsRulesPanel({
               </span>
             </div>
           </section>
-          <section className="vpsRulesEditorSection">
+          <section className="vpsRulesEditorSection vpsRulesTargetSection">
             <div className="sectionHeader compactHeader">
               <div>
                 <h4 title={CONFIG_HELP.ruleSelector}>Target VPS selector</h4>
-                <span className="monoValue">
-                  {selectorExpression || "unset"}
+                <span>
+                  Choose the VPS scope for the reviewed mutation.
                 </span>
               </div>
               <div className="consoleOperationsActions">
@@ -4423,21 +4379,47 @@ function VpsRulesPanel({
                 </button>
               </div>
             </div>
-            <div className="tokenPreview">
-              {matchedPreviewClients.length === 0 ? (
-                <span className="tokenChip">
-                  {preview
-                    ? `${preview.matched_vps_count} matched · no effective changes`
-                    : "No preview yet"}
-                </span>
-              ) : (
-                matchedPreviewClients.map(([clientId, displayName]) => (
-                  <span className="tokenChip" key={clientId} title={clientId}>
-                    {displayName}
+            <label className="consoleField">
+              <span>VPS selector expression</span>
+              <SearchExpressionInput
+                agents={agents}
+                ariaLabel="VPS rules selector expression"
+                disabled={applyPending}
+                onChange={setSelectorExpression}
+                placeholder="provider:hetzner && tag:edge"
+                showMatchCount
+                value={selectorExpression}
+                verification={
+                  parsedSelector.error
+                    ? "invalid"
+                    : selectorExpression.trim()
+                      ? "valid"
+                      : "neutral"
+                }
+              />
+            </label>
+            <LocalTargetPreview
+              agents={localSelectorTargets}
+              ariaLabel="Local VPS rule match preview"
+            />
+            <small className="vpsRulesTargetHint">
+              Local match only. Preview changes resolves and binds the authoritative VPS list.
+            </small>
+            {preview ? (
+              <div className="tokenPreview" aria-label="Reviewed VPS rule targets">
+                {matchedPreviewClients.length === 0 ? (
+                  <span className="tokenChip">
+                    {`${preview.matched_vps_count} matched · no effective changes`}
                   </span>
-                ))
-              )}
-            </div>
+                ) : (
+                  matchedPreviewClients.map(([clientId, displayName]) => (
+                    <span className="tokenChip" key={clientId} title={clientId}>
+                      {displayName}
+                    </span>
+                  ))
+                )}
+              </div>
+            ) : null}
           </section>
           {editMode === "upsert" ? (
             <section className="vpsRulesEditorSection vpsRulesTypedEditor">
@@ -4445,7 +4427,7 @@ function VpsRulesPanel({
                 <div>
                   <h4 title={CONFIG_HELP.ruleSetValues}>Common rule cards</h4>
                   <span title={CONFIG_HELP.ruleSetValues}>
-                    Typed fields for quota, reset day, and traffic interfaces
+                    Typed fields for billing, quota, reset day, and traffic interfaces
                   </span>
                 </div>
               </div>
@@ -4519,6 +4501,54 @@ function VpsRulesPanel({
             </section>
           )}
         </div>
+        <section
+          className="consoleDetailPanel vpsRulesAlertImpact"
+          aria-label="Affected alert policy context"
+        >
+          <div className="consoleDetailPanelHeader">
+            <span>
+              <strong>Affected alert policies</strong>
+              <small>
+                Policies whose rule conditions reference the current edit keys:{" "}
+                <span className="monoValue">
+                  {editedRuleKeys.join(", ") || "no edited keys"}
+                </span>
+              </small>
+            </span>
+            <button
+              className="secondaryAction compactAction"
+              onClick={onOpenAlerts}
+              type="button"
+            >
+              Open Observability alerts
+            </button>
+          </div>
+          <div className="configRiskList">
+            {affectedPolicyRules.slice(0, 6).map((impact) => (
+              <div
+                className="configRiskRow"
+                key={`${impact.policyId}:${impact.ruleId}`}
+              >
+                <span>
+                  <strong>
+                    {impact.policyName} / {impact.ruleName}
+                  </strong>
+                  <small className="monoValue">
+                    {impact.conditionExpression}
+                  </small>
+                </span>
+                <ConsoleStatusBadge tone={impact.enabled ? "warning" : "neutral"}>
+                  {impact.severity}
+                </ConsoleStatusBadge>
+              </div>
+            ))}
+            {affectedPolicyRules.length === 0 && (
+              <div className="emptyState compactEmpty">
+                No loaded alert policy conditions reference the current rule keys.
+              </div>
+            )}
+          </div>
+        </section>
         {preview ? (
           <VpsRulesPreviewTable
             columns={previewColumns}
@@ -4529,7 +4559,8 @@ function VpsRulesPanel({
             statusTone={statusTone}
           />
         ) : null}
-      </section>
+        </section>
+      </div>
       <ConfirmationPrompt
         confirmLabel={
           reviewSnapshot

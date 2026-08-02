@@ -14,6 +14,7 @@ import "uplot/dist/uPlot.min.css";
 
 export type TimeSeriesChartLine = {
   color: string;
+  initiallyHidden?: boolean;
   label: string;
   values: Array<number | null>;
 };
@@ -51,7 +52,14 @@ export function TimeSeriesChart({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<uPlot | null>(null);
   const [hover, setHover] = useState<HoverState | null>(null);
-  const [hiddenSeries, setHiddenSeries] = useState<Set<string>>(() => new Set());
+  const [hiddenSeries, setHiddenSeries] = useState<Set<string>>(
+    () =>
+      new Set(
+        lines.flatMap((line, index) =>
+          line.initiallyHidden ? [`${index}:${line.label}`] : [],
+        ),
+      ),
+  );
   const unixTimes = useMemo(
     () =>
       times
@@ -62,24 +70,38 @@ export function TimeSeriesChart({
   const sanitizedLines = useMemo(
     () =>
       lines
-        .map((line) => ({
+        .map((line, index) => ({
           ...line,
+          seriesKey: `${index}:${line.label}`,
           values: unixTimes.map((_, index) => line.values[index] ?? null),
         }))
-        .filter((line) => line.values.some((value) => value !== null && Number.isFinite(value))),
+        .filter((line) =>
+          line.values.some((value) => value !== null && Number.isFinite(value)),
+        ),
     [lines, unixTimes],
   );
   const data = useMemo(
     () =>
       [
         unixTimes,
-        ...sanitizedLines.map((line) => line.values.map((value) => (Number.isFinite(value) ? value : null))),
+        ...sanitizedLines.map((line) =>
+          line.values.map((value) => (Number.isFinite(value) ? value : null)),
+        ),
       ] as uPlot.AlignedData,
     [sanitizedLines, unixTimes],
   );
   const seriesKeys = useMemo(
-    () => sanitizedLines.map((line, index) => `${index}:${line.label}`),
+    () => sanitizedLines.map((line) => line.seriesKey),
     [sanitizedLines],
+  );
+  const initiallyHiddenKeys = useMemo(
+    () =>
+      new Set(
+        lines.flatMap((line, index) =>
+          line.initiallyHidden ? [`${index}:${line.label}`] : [],
+        ),
+      ),
+    [lines],
   );
   const visibleLines = useMemo(
     () =>
@@ -93,10 +115,17 @@ export function TimeSeriesChart({
   useEffect(() => {
     setHiddenSeries((current) => {
       const validKeys = new Set(seriesKeys);
-      const next = new Set([...current].filter((key) => validKeys.has(key)));
-      return next.size === current.size ? current : next;
+      const next = new Set(
+        [...current].filter(
+          (key) => validKeys.has(key) || initiallyHiddenKeys.has(key),
+        ),
+      );
+      return next.size === current.size &&
+        [...next].every((key) => current.has(key))
+        ? current
+        : next;
     });
-  }, [seriesKeys]);
+  }, [initiallyHiddenKeys, seriesKeys]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -116,17 +145,14 @@ export function TimeSeriesChart({
             grid: { stroke: consolePalette.neutral.borderSubtle, width: 1 },
             size: narrow ? 30 : 34,
             stroke: consolePalette.neutral.muted,
-            values: (_plot, ticks) =>
-              formatAxisTicks(ticks, width, unixTimes),
+            values: (_plot, ticks) => formatAxisTicks(ticks, width, unixTimes),
           },
           {
             grid: { stroke: consolePalette.neutral.borderSubtle, width: 1 },
             size: narrow ? 84 : 96,
             stroke: consolePalette.neutral.muted,
             values: (_plot, ticks) =>
-              deduplicateAxisLabels(
-                ticks.map((tick) => valueFormatter(tick)),
-              ),
+              deduplicateAxisLabels(ticks.map((tick) => valueFormatter(tick))),
           },
         ],
         cursor: {
@@ -139,17 +165,26 @@ export function TimeSeriesChart({
           setCursor: [
             (plot) => {
               const index = plot.cursor.idx;
-              if (index === null || index === undefined || index < 0 || index >= unixTimes.length) {
+              if (
+                index === null ||
+                index === undefined ||
+                index < 0 ||
+                index >= unixTimes.length
+              ) {
                 setHover(null);
                 return;
               }
               setHover({
                 fullTimeLabel: formatChartFullTime(unixTimes[index]),
                 index,
-                side: (plot.cursor.left ?? 0) > plot.width / 2 ? "left" : "right",
+                side:
+                  (plot.cursor.left ?? 0) > plot.width / 2 ? "left" : "right",
                 timeLabel: formatChartTime(unixTimes[index]),
                 values: sanitizedLines
-                  .filter((_line, lineIndex) => !hiddenSeries.has(seriesKeys[lineIndex]))
+                  .filter(
+                    (_line, lineIndex) =>
+                      !hiddenSeries.has(seriesKeys[lineIndex]),
+                  )
                   .map((line) => ({
                     color: line.color,
                     label: line.label,
@@ -171,7 +206,12 @@ export function TimeSeriesChart({
             },
             time: true,
           },
-          y: { range: (_plot, min, max) => [Math.min(0, min), Math.max(1, max * 1.08)] },
+          y: {
+            range: (_plot, min, max) => [
+              Math.min(0, min),
+              Math.max(1, max * 1.08),
+            ],
+          },
         },
         series: [
           {},
@@ -188,11 +228,14 @@ export function TimeSeriesChart({
       };
     };
 
-    const width = Math.max(260, host.clientWidth);
+    const width = Math.max(1, host.clientWidth);
     const plot = new uPlot(buildOptions(width), data, host);
     plotRef.current = plot;
     const resizeObserver = new ResizeObserver((entries) => {
-      const width = Math.max(260, Math.floor(entries[0]?.contentRect.width ?? host.clientWidth));
+      const width = Math.max(
+        1,
+        Math.floor(entries[0]?.contentRect.width ?? host.clientWidth),
+      );
       plot.setSize({ height, width });
     });
     resizeObserver.observe(host);
@@ -222,7 +265,9 @@ export function TimeSeriesChart({
         fullTimeLabel: formatChartFullTime(time),
         timeLabel: formatChartTime(time),
         values: sanitizedLines
-          .filter((_line, lineIndex) => !hiddenSeries.has(seriesKeys[lineIndex]))
+          .filter(
+            (_line, lineIndex) => !hiddenSeries.has(seriesKeys[lineIndex]),
+          )
           .map((line) => ({
             label: line.label,
             value: valueFormatter(line.values[sourceIndex] ?? null),
@@ -380,7 +425,9 @@ export function TimeSeriesChart({
             </div>
             {(hiddenSeries.size > 0 || exportFileName) && (
               <div className="timeSeriesLegendActions">
-                <span>{visibleLineCount}/{sanitizedLines.length} series</span>
+                <span>
+                  {visibleLineCount}/{sanitizedLines.length} series
+                </span>
                 {hiddenSeries.size > 0 && (
                   <button
                     className="timeSeriesLegendAction"
@@ -407,7 +454,10 @@ export function TimeSeriesChart({
             )}
           </div>
           {coverageLabel && (
-            <p className="timeSeriesCoverage" aria-label={`${ariaLabel} data coverage`}>
+            <p
+              className="timeSeriesCoverage"
+              aria-label={`${ariaLabel} data coverage`}
+            >
               {coverageLabel}
             </p>
           )}
@@ -425,12 +475,17 @@ export function TimeSeriesChart({
             </div>
           )}
           <table className="srOnly">
-            <caption>{ariaLabel} data, latest {accessibleRows.length} points</caption>
+            <caption>
+              {ariaLabel} data, latest {accessibleRows.length} points
+            </caption>
             <thead>
               <tr>
                 <th scope="col">Time</th>
                 {sanitizedLines
-                  .filter((_line, lineIndex) => !hiddenSeries.has(seriesKeys[lineIndex]))
+                  .filter(
+                    (_line, lineIndex) =>
+                      !hiddenSeries.has(seriesKeys[lineIndex]),
+                  )
                   .map((line) => (
                     <th key={line.label} scope="col">
                       {line.label}
@@ -443,7 +498,9 @@ export function TimeSeriesChart({
                 <tr key={`${row.timeLabel}-${index}`}>
                   <th scope="row">{row.fullTimeLabel}</th>
                   {row.values.map((entry) => (
-                    <td key={`${row.timeLabel}-${entry.label}`}>{entry.value}</td>
+                    <td key={`${row.timeLabel}-${entry.label}`}>
+                      {entry.value}
+                    </td>
                   ))}
                 </tr>
               ))}
@@ -515,13 +572,19 @@ function chartCoverageLabel(
       }
       observedPoints += 1;
       firstObservedIndex =
-        firstObservedIndex === null ? index : Math.min(firstObservedIndex, index);
+        firstObservedIndex === null
+          ? index
+          : Math.min(firstObservedIndex, index);
       lastObservedIndex =
         lastObservedIndex === null ? index : Math.max(lastObservedIndex, index);
     });
   }
 
-  if (observedPoints === 0 || firstObservedIndex === null || lastObservedIndex === null) {
+  if (
+    observedPoints === 0 ||
+    firstObservedIndex === null ||
+    lastObservedIndex === null
+  ) {
     return null;
   }
 
@@ -560,7 +623,9 @@ function latestSampleFreshnessLabel(unixTime: number): string {
     return `latest sample future-dated ${formatRelativeAge(Math.abs(ageMs))} ahead`;
   }
   const freshness =
-    ageMs > 24 * 60 * 60 * 1000 ? "latest sample stale" : "latest sample current";
+    ageMs > 24 * 60 * 60 * 1000
+      ? "latest sample stale"
+      : "latest sample current";
   return `${freshness} ${formatRelativeAge(Math.max(0, ageMs))} ago`;
 }
 

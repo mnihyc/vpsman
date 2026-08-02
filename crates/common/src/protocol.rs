@@ -907,7 +907,7 @@ pub struct TelemetryEnvelope {
 pub struct GatewayAgentHelloIngest {
     pub gateway_id: String,
     pub gateway_session_id: Uuid,
-    pub noise_public_key_hex: Option<String>,
+    pub noise_public_key_hex: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_ip: Option<String>,
     pub hello: AgentHello,

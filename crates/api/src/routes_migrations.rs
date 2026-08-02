@@ -188,6 +188,13 @@ async fn preflight_migration_restore_job(
     {
         return Err(ApiError::conflict("fixed_target_not_found"));
     }
+    if targets.iter().any(|target| {
+        resolved_agents.iter().any(|agent| {
+            agent.id == *target && matches!(agent.status.as_str(), "revoked" | "deleted")
+        })
+    }) {
+        return Err(ApiError::conflict("fixed_target_unavailable"));
+    }
     let command = request.job.job_command()?;
     if request.job.rollout.is_some() {
         return Err(ApiError::bad_request("migration_job_rollout_unsupported"));

@@ -50,6 +50,7 @@ import { generateNoiseKeypair } from "../noiseKeygen";
 import { scrollIntoViewWithMotion } from "../motion";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import { RELEASE_TAG } from "../buildInfo";
+import { ACCESS_REVOKED_RECOVERY_DETAIL } from "../agentDisplayState";
 import type {
   GatewaySessionRecord,
   LifecycleOutcomeRecord,
@@ -121,8 +122,7 @@ type LocalActionFeedback = {
 const AGENT_INSTALL_SCRIPT_URL =
   "https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-agent.sh";
 const DEFAULT_AGENT_INSTALL_RELEASE = RELEASE_TAG || "latest";
-const INSTALLER_CURL_FLAGS =
-  "-fL --retry 2 --connect-timeout 5 --max-time 30";
+const INSTALLER_CURL_FLAGS = "-fL --retry 2 --connect-timeout 5 --max-time 30";
 
 type AccessOverviewItem = {
   action: string;
@@ -159,7 +159,9 @@ function lifecycleCompletionFeedback(
   }
   return {
     message: `${successMessage} ${failures
-      .map((outcome) => lifecycleOutcomeFailureReason(outcome, "Identity change"))
+      .map((outcome) =>
+        lifecycleOutcomeFailureReason(outcome, "Identity change"),
+      )
       .join(" ")}`,
     tone: "warning",
   };
@@ -434,18 +436,17 @@ export function AccessPanel({
     operatorSessions.find((session) => session.current) ?? operatorSessions[0];
   const adminMfaRisk = operator?.role === "admin" && !operator.totp_enabled;
   const lifecycleClients = keyLifecycleReport?.clients ?? [];
-  const nextIdentityClientId = useMemo(
-    () => nextNumericalClientId(lifecycleClients),
-    [lifecycleClients],
-  );
+  const nextIdentityClientId = keyLifecycleReport?.suggested_client_id ?? "";
   const lifecycleVpsOptions = useMemo(
     () =>
-      lifecycleClients.map((client) => ({
-        display_name: client.display_name,
-        id: client.client_id,
-        status: client.status,
-        tags: [],
-      })),
+      lifecycleClients
+        .filter((client) => !clientAccessRevoked(client))
+        .map((client) => ({
+          display_name: client.display_name,
+          id: client.client_id,
+          status: client.status,
+          tags: [],
+        })),
     [lifecycleClients],
   );
   const lifecycleNameById = useMemo(
@@ -457,8 +458,7 @@ export function AccessPanel({
   const activeGatewaySessions = gatewaySessions.filter(
     (session) => !session.ended_at,
   ).length;
-  const gatewaySessionsTruncated =
-    gatewaySessions.length >= FLEET_DETAIL_LIMIT;
+  const gatewaySessionsTruncated = gatewaySessions.length >= FLEET_DETAIL_LIMIT;
   const operatorSessionsTruncated =
     operatorSessions.length >= FLEET_DETAIL_LIMIT;
   const operatorAuthEventsTruncated =
@@ -467,14 +467,16 @@ export function AccessPanel({
     clientKeyRevocations.length >= FLEET_DETAIL_LIMIT;
   const terminalSessionsTruncated =
     terminalSessions.length >= FLEET_DETAIL_LIMIT;
-  const accessFeedbackMessage = error ?? (loading ? "Refreshing access records" : null);
+  const accessFeedbackMessage =
+    error ?? (loading ? "Refreshing access records" : null);
   const accessFeedbackTone = error ? "danger" : "progress";
   const totpStateLabel = operator?.totp_enabled
     ? "enabled"
     : operator?.role === "admin"
       ? "admin MFA required"
       : "recommended account hardening";
-  const totpFeedbackMessage = totpError ?? (totpPending ? "Updating TOTP" : null);
+  const totpFeedbackMessage =
+    totpError ?? (totpPending ? "Updating TOTP" : null);
   const totpFeedbackTone = totpError ? "danger" : "progress";
   const gatewayInstallDefaultsNeedReview =
     canManageOperators &&
@@ -487,10 +489,12 @@ export function AccessPanel({
     (session) => !session.revoked && isOperatorSessionExpired(session),
   ).length;
   const revokedClientCount = lifecycleClients.filter(
-    (client) => client.status === "revoked" || client.current_key_revoked,
+    clientAccessRevoked,
   ).length;
   const blockedOrPendingClientCount = lifecycleClients.filter((client) =>
-    ["blocked", "pending", "revoked"].includes(identityStatus(client)),
+    clientAccessRevoked(client)
+      ? true
+      : ["blocked", "pending"].includes(client.status.trim().toLowerCase()),
   ).length;
   const currentBearerSessionState = currentBearerSession
     ? operatorSessionStateLabel(currentBearerSession)
@@ -537,21 +541,34 @@ export function AccessPanel({
     !identityReviewPending &&
     identityClientIdError === null &&
     isFixedHex32(identityPublicKeyHex);
+  const revokeClient = lifecycleClients.find(
+    (client) => client.client_id === revokeClientId.trim(),
+  );
+  const revokeTargetError = !revokeClientId.trim()
+    ? "VPS ID is required"
+    : !revokeClient
+      ? "Choose a registered VPS identity"
+      : clientAccessRevoked(revokeClient)
+        ? `This VPS already has Access revoked. ${ACCESS_REVOKED_RECOVERY_DETAIL}`
+        : null;
   const canRevokeClientKey =
     canManageOperators &&
     Boolean(privilegeMaterial) &&
-    revokeClientId.trim().length > 0 &&
+    revokeTargetError === null &&
     !revokePending &&
     !revokeReviewPending;
   const revokeFeedbackMessage =
     revokeError ??
     (revokeReviewPending
       ? "Preparing key revoke review"
-      : revokeCompletion?.message);
+      : revokeCompletion?.message ??
+        (revokeClientId.trim() ? revokeTargetError : null));
   const revokeFeedbackTone: ActionFeedbackTone = revokeError
     ? "danger"
     : revokeReviewPending
       ? "progress"
+      : revokeTargetError && revokeClientId.trim()
+        ? "warning"
       : (revokeCompletion?.tone ?? "progress");
   const identityFeedbackMessage =
     identityError ??
@@ -1042,7 +1059,6 @@ export function AccessPanel({
     setIdentityError(null);
     try {
       const boundPrivateKeyHex =
-        !snapshot.replaceExistingKey &&
         generatedPublicKeyHex?.toLowerCase() === snapshot.publicKeyHex
           ? privateKeyHex
           : null;
@@ -1095,9 +1111,9 @@ export function AccessPanel({
     const clientId = revokeClientId.trim();
     if (!canRevokeClientKey) {
       setRevokeError(
-        privilegeMaterial
-          ? "VPS ID is required"
-          : "Privilege vault unlock is required",
+        !privilegeMaterial
+          ? "Privilege vault unlock is required"
+          : revokeTargetError ?? "This VPS key cannot be revoked",
       );
       return;
     }
@@ -1154,10 +1170,7 @@ export function AccessPanel({
         snapshot.privilegeAssertion,
       );
       setRevokeCompletion(
-        lifecycleCompletionFeedback(
-          response.post_commit,
-          "VPS key revoked.",
-        ),
+        lifecycleCompletionFeedback(response.post_commit, "VPS key revoked."),
       );
       setRevokeClientId("");
       setRevokeReason("");
@@ -1206,7 +1219,7 @@ export function AccessPanel({
       ? {
           action: "Open identities",
           detail:
-            "Pending, revoked, or blocked VPS identities need operator review.",
+            "Pending, blocked, or access-revoked VPS identities need operator review. Assign a new key to recover an access-revoked VPS ID.",
           icon: <Fingerprint size={16} />,
           label: "VPS identity attention",
           onClick: () => openAccessSubpage("VPS identities"),
@@ -1252,7 +1265,7 @@ export function AccessPanel({
     {
       action: "Open identities",
       detail: canManageOperators
-        ? `${keyLifecycleReport?.revocation_count ?? formatLowerBoundCount(clientKeyRevocations.length, clientKeyRevocationsTruncated)} revocation records${!keyLifecycleReport && clientKeyRevocationsTruncated ? " loaded" : ""}; ${revokedClientCount} current keys blocked.`
+        ? `${keyLifecycleReport?.revocation_count ?? formatLowerBoundCount(clientKeyRevocations.length, clientKeyRevocationsTruncated)} revocation records${!keyLifecycleReport && clientKeyRevocationsTruncated ? " loaded" : ""}; ${revokedClientCount} VPS identities have Access revoked.`
         : "VPS public-key registration, rotation, and revocation inventory are intentionally visible only to admins.",
       icon: <Fingerprint size={16} />,
       label: "VPS identities",
@@ -1330,9 +1343,9 @@ export function AccessPanel({
           ? `${formatLowerBoundCount(gatewaySessions.length, gatewaySessionsTruncated)} recent${gatewaySessionsTruncated ? " loaded" : ""} gateway sessions; installer defaults are managed on the same page.`
           : gatewaySessionsTruncated
             ? "No active gateway session appears in the loaded history; more records may exist."
-          : canManageOperators
-            ? "No active gateway sessions. Configure reusable installer endpoints and the server public key on the Gateway sessions page."
-            : "No active gateway sessions are visible. An admin manages installer defaults on the Gateway sessions page.",
+            : canManageOperators
+              ? "No active gateway sessions. Configure reusable installer endpoints and the server public key on the Gateway sessions page."
+              : "No active gateway sessions are visible. An admin manages installer defaults on the Gateway sessions page.",
       icon: <Wifi size={16} />,
       label: "Gateway sessions",
       onClick: () => openAccessSubpage("Gateway sessions"),
@@ -1500,15 +1513,14 @@ export function AccessPanel({
                 </span>
               </div>
               <PrivilegeVaultBox
-                clearVaultLabel="Clear local vault"
                 labelPrefix="Access"
                 lastPayloadHash={privilegeMaterial ? "unlocked" : null}
                 lockPrivilegeLabel="Lock now"
+                onOpenUnlock={onOpenPrivilegeUnlock}
                 onPrivilegeMaterialChange={setPrivilegeMaterial}
-                onVaultAvailabilityChange={setVaultAvailable}
                 privilegeMaterial={privilegeMaterial}
-                unlockLabel="Unlock saved vault"
-                usePrivilegeLabel="Unlock"
+                showHandoffState
+                showVaultClear={false}
               />
             </section>
             <section className="controlPanel">
@@ -1575,7 +1587,9 @@ export function AccessPanel({
                       <input
                         aria-label="TOTP password"
                         autoComplete="current-password"
-                        onChange={(event) => setTotpPassword(event.target.value)}
+                        onChange={(event) =>
+                          setTotpPassword(event.target.value)
+                        }
                         type="password"
                         value={totpPassword}
                       />
@@ -1655,7 +1669,9 @@ export function AccessPanel({
                       <input
                         aria-label="TOTP password"
                         autoComplete="current-password"
-                        onChange={(event) => setTotpPassword(event.target.value)}
+                        onChange={(event) =>
+                          setTotpPassword(event.target.value)
+                        }
                         type="password"
                         value={totpPassword}
                       />
@@ -1706,7 +1722,9 @@ export function AccessPanel({
                 <div className="totpDisablePanel disabled">
                   <div>
                     <strong>Disable TOTP</strong>
-                    <span>No active TOTP factor is recorded for this account.</span>
+                    <span>
+                      No active TOTP factor is recorded for this account.
+                    </span>
                   </div>
                   <button
                     className="secondaryAction dangerAction"
@@ -1730,8 +1748,8 @@ export function AccessPanel({
                 <span>
                   {keyLifecycleReport?.direct_identity_client_count ??
                     lifecycleClients.length}{" "}
-                  registered; {blockedOrPendingClientCount} need review. Use row
-                  actions to rotate or revoke keys.
+                  registered; {blockedOrPendingClientCount} need review. Select
+                  identities, then use Actions to rotate or revoke keys.
                 </span>
               </div>
               <ConsoleDataGrid
@@ -1750,9 +1768,13 @@ export function AccessPanel({
                     label: "Revoke",
                     description: (rows) =>
                       rows.length === 1
-                        ? `Prefill current key revocation for ${rows[0].display_name}.`
+                        ? rows[0].current_key_revoked ||
+                          rows[0].status.trim().toLowerCase() === "revoked"
+                          ? `${rows[0].display_name} already has Access revoked; assign a new key to recover this VPS ID.`
+                          : `Prefill current key revocation for ${rows[0].display_name}.`
                         : "Select exactly one VPS identity to revoke.",
-                    disabled: (rows) => rows.length !== 1,
+                    disabled: (rows) =>
+                      rows.length !== 1 || clientAccessRevoked(rows[0]),
                     icon: <Ban size={14} />,
                     onSelect: (rows) =>
                       prepareClientKeyRevoke(rows[0].client_id),
@@ -1967,8 +1989,8 @@ export function AccessPanel({
               ? createdIdentityOperation === "rotate"
                 ? "The new public key is saved; review gateway disconnect status below"
                 : createdIdentityPrivateKeyHex
-                ? "Copy this VPS install command before starting another registration"
-                : "Registration is complete; use the matching private key from your secure source"
+                  ? "Copy this VPS install command before starting another registration"
+                  : "Registration is complete; use the matching private key from your secure source"
               : identityMode === "rotate"
                 ? "Replace the selected VPS public key"
                 : "Generate a keypair or import a public key"}
@@ -2162,7 +2184,10 @@ export function AccessPanel({
             </>
           )}
           {createdIdentity && (
-            <div className="formNote identityRegistrationComplete" role="status">
+            <div
+              className="formNote identityRegistrationComplete"
+              role="status"
+            >
               <strong>
                 {createdIdentity.display_name}{" "}
                 {createdIdentityOperation === "rotate"
@@ -2256,7 +2281,6 @@ export function AccessPanel({
             tone={revokeFeedbackTone}
           />
         </form>
-
       </aside>
 
       <ConfirmationPrompt
@@ -2281,7 +2305,9 @@ export function AccessPanel({
             label: "Display name",
             value: identitySnapshot?.replaceExistingKey
               ? "unchanged"
-              : (identitySnapshot?.displayName ?? identitySnapshot?.clientId ?? ""),
+              : (identitySnapshot?.displayName ??
+                identitySnapshot?.clientId ??
+                ""),
           },
           {
             label: "Tags",
@@ -2316,7 +2342,7 @@ export function AccessPanel({
       />
       <ConfirmationPrompt
         confirmLabel="Revoke key"
-        detail="The current stored public key is revoked, the VPS is hidden as revoked, the live gateway session is disconnected, and old active work is marked lost. Revoked or deleted identities cannot be reused through direct import."
+        detail="The current key is permanently revoked, the VPS remains visible as Access revoked, its live gateway session is disconnected, and active work is stopped. Recover this VPS ID by assigning it a new key; deletion alone permanently retires the VPS identity."
         items={[
           { label: "VPS", value: revokeSnapshot?.clientId ?? "" },
           {
@@ -2392,11 +2418,7 @@ function AccessOverviewRow({ item }: { item: AccessOverviewItem }) {
   );
 }
 
-function GatewaySessionEmptyState({
-  canConfigure,
-}: {
-  canConfigure: boolean;
-}) {
+function GatewaySessionEmptyState({ canConfigure }: { canConfigure: boolean }) {
   return (
     <section
       aria-label="Gateway sessions empty state"
@@ -2647,13 +2669,20 @@ function CopyableHash({ label, value }: { label: string; value: string }) {
 }
 
 function identityStatus(client: KeyLifecycleClientView): string {
-  if (client.current_key_revoked) {
-    return "blocked";
+  if (clientAccessRevoked(client)) {
+    return "Access revoked";
   }
   if (client.status === "online") {
     return "Identity active";
   }
   return client.status;
+}
+
+function clientAccessRevoked(client: KeyLifecycleClientView): boolean {
+  return (
+    client.current_key_revoked ||
+    client.status.trim().toLowerCase() === "revoked"
+  );
 }
 
 function gatewaySessionStateLabel(status: string): string {
@@ -2721,21 +2750,6 @@ function parseListInput(value: string): string[] {
   );
 }
 
-function nextNumericalClientId(clients: KeyLifecycleClientView[]): string {
-  let max = 0n;
-  for (const client of clients) {
-    const clientId = client.client_id.trim();
-    if (!/^(?:v-)?\d+$/.test(clientId)) {
-      continue;
-    }
-    const value = BigInt(clientId.replace(/^v-/, ""));
-    if (value > max) {
-      max = value;
-    }
-  }
-  return `v-${max + 1n}`;
-}
-
 function isFixedHex32(value: string): boolean {
   return /^[0-9a-fA-F]{64}$/.test(value.trim());
 }
@@ -2769,19 +2783,11 @@ function gatewayEndpointsValidationError(value: string): string | null {
   for (const [index, entry] of entries.entries()) {
     const fields = entry.split("=");
     const entryLabel = `Gateway endpoint ${index + 1}`;
-    if (
-      fields.length !== 3 ||
-      !fields[0] ||
-      !fields[1] ||
-      !fields[2]
-    ) {
+    if (fields.length !== 3 || !fields[0] || !fields[1] || !fields[2]) {
       return `${entryLabel} must use label=host:port=priority.`;
     }
     const [label, tcpAddress, priority] = fields;
-    if (
-      label.length > 64 ||
-      !/^[A-Za-z0-9._:-]+$/.test(label)
-    ) {
+    if (label.length > 64 || !/^[A-Za-z0-9._:-]+$/.test(label)) {
       return `${entryLabel} label may use only letters, numbers, dot, underscore, colon, and hyphen.`;
     }
     if (
@@ -2917,11 +2923,13 @@ function isValidHostname(value: string): boolean {
   ) {
     return false;
   }
-  return normalized.split(".").every(
-    (label) =>
-      label.length <= 63 &&
-      /^[0-9A-Za-z](?:[0-9A-Za-z-]*[0-9A-Za-z])?$/.test(label),
-  );
+  return normalized
+    .split(".")
+    .every(
+      (label) =>
+        label.length <= 63 &&
+        /^[0-9A-Za-z](?:[0-9A-Za-z-]*[0-9A-Za-z])?$/.test(label),
+    );
 }
 
 function scrollIntoViewSoon(element: HTMLElement | null) {
@@ -2989,12 +2997,13 @@ function InstallCommand({
     showGatewayValidation && !gatewayEndpointsValid;
   const canBuildCommand =
     hasInstallIdentity && gatewayKeyValid && gatewayEndpointsValid;
-  const gatewayValidationDescription = [
-    gatewayKeyInvalid ? gatewayKeyErrorId : null,
-    gatewayEndpointsInvalid ? gatewayEndpointsErrorId : null,
-  ]
-    .filter(Boolean)
-    .join(" ") || undefined;
+  const gatewayValidationDescription =
+    [
+      gatewayKeyInvalid ? gatewayKeyErrorId : null,
+      gatewayEndpointsInvalid ? gatewayEndpointsErrorId : null,
+    ]
+      .filter(Boolean)
+      .join(" ") || undefined;
   const installValidationDescription = hasInstallIdentity
     ? gatewayValidationDescription
     : undefined;
@@ -3155,7 +3164,9 @@ function InstallCommand({
           <span>Gateway public key</span>
           <input
             aria-describedby={gatewayKeyInvalid ? gatewayKeyErrorId : undefined}
-            aria-errormessage={gatewayKeyInvalid ? gatewayKeyErrorId : undefined}
+            aria-errormessage={
+              gatewayKeyInvalid ? gatewayKeyErrorId : undefined
+            }
             aria-invalid={gatewayKeyInvalid}
             aria-label="Gateway server public key hex"
             aria-required={hasInstallIdentity}
@@ -3216,10 +3227,7 @@ function InstallCommand({
       </div>
       <div aria-live="polite" className="installCommandValidation">
         {gatewayKeyInvalid ? (
-          <small
-            className="installCommandHint warn"
-            id={gatewayKeyErrorId}
-          >
+          <small className="installCommandHint warn" id={gatewayKeyErrorId}>
             {normalizedGatewayServerPublicKeyHex.length === 0
               ? "Gateway public key is required before saving defaults or copying the command."
               : "Gateway public key must be exactly 64 hex characters."}
@@ -3237,7 +3245,9 @@ function InstallCommand({
       <ActionFeedback
         className="localActionFeedback"
         message={
-          savePending ? "Saving gateway install defaults" : installFeedback?.message
+          savePending
+            ? "Saving gateway install defaults"
+            : installFeedback?.message
         }
         tone={savePending ? "progress" : installFeedback?.tone}
       />

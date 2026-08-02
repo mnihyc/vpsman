@@ -264,15 +264,8 @@ async function invokeOsUpdateAction(
   grid: ReturnType<Page["locator"]>,
   clientId: string,
   action: string,
-  projectName: string,
+  _projectName: string,
 ) {
-  if (projectName.includes("mobile")) {
-    const card = grid.getByLabel(
-      `Fleet package posture mobile card ${clientId}`,
-    );
-    await activate(card.getByRole("button", { name: action, exact: true }));
-    return;
-  }
   const selectedRows = grid.locator(
     'input[aria-label^="Select Fleet package posture row "]:checked',
   );

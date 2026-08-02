@@ -60,18 +60,18 @@ use crate::{
         get_host_storage_inventory, list_host_package_update_plans,
     },
     routes_ingest::{
-        ingest_agent_hello, ingest_command_output, ingest_gateway_session_ended,
-        ingest_gateway_session_started, ingest_telemetry, ingest_terminal_output,
-        request_runtime_config_reload, validate_agent_identity, verify_agent_update_artifact,
+        ingest_agent_hello, ingest_command_output, ingest_gateway_session_ended, ingest_telemetry,
+        ingest_terminal_output, request_runtime_config_reload, validate_agent_identity,
+        verify_agent_update_artifact,
     },
     routes_inventory::{
         assign_agent_tag, bulk_mutate_tags, create_server_runtime_config_patch_request, create_tag,
         delete_agent, delete_runtime_config_patch_generator, delete_tag, fleet_summary,
         list_agents, list_gateway_sessions, list_runtime_config_apply_states,
         list_runtime_config_patch_generators, list_tags, list_telemetry_network_rates,
-        list_telemetry_rollups, list_telemetry_tunnels, render_runtime_config_patch_generator,
-        resolve_bulk_targets, update_agent_alias, update_tag_order,
-        upsert_runtime_config_patch_generator,
+        list_telemetry_rollups, list_telemetry_samples, list_telemetry_tunnels,
+        render_runtime_config_patch_generator, resolve_bulk_targets, update_agent_alias,
+        update_tag_order, upsert_runtime_config_patch_generator,
     },
     routes_job_history::{
         compare_job_outputs, download_file_download_bundle, download_file_download_for_client,
@@ -92,6 +92,13 @@ use crate::{
         upsert_agent_identity,
     },
     routes_migrations::{create_migration_link, create_migration_run, list_migration_links},
+    routes_monitoring::{
+        bulk_ping_target_lifecycle, bulk_update_ping_targets, create_monitoring_share,
+        create_ping_target, delete_ping_target, extend_monitoring_shares, get_client_monitoring,
+        get_ping_target, list_monitoring_cards, list_monitoring_shares, list_ping_targets,
+        make_primary_ping_target, public_monitoring_share_bootstrap, public_monitoring_share_data,
+        revoke_monitoring_shares, update_ping_target,
+    },
     routes_network::{
         allocate_tunnel_endpoints, create_tunnel_plan, delete_tunnel_plan, disable_tunnel_plan,
         enable_tunnel_plan, export_tunnel_plan, get_topology_graph,
@@ -306,11 +313,61 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/api/v1/agents/{client_id}/delete", post(delete_agent))
         .route("/api/v1/gateway-sessions", get(list_gateway_sessions))
         .route("/api/v1/telemetry/rollups", get(list_telemetry_rollups))
+        .route("/api/v1/telemetry/samples", get(list_telemetry_samples))
         .route(
             "/api/v1/telemetry/network-rates",
             get(list_telemetry_network_rates),
         )
         .route("/api/v1/telemetry/tunnels", get(list_telemetry_tunnels))
+        .route(
+            "/api/v1/ping-targets",
+            get(list_ping_targets).post(create_ping_target),
+        )
+        .route(
+            "/api/v1/ping-targets/{target_id}",
+            get(get_ping_target).put(update_ping_target),
+        )
+        .route(
+            "/api/v1/ping-targets/{target_id}/primary",
+            post(make_primary_ping_target),
+        )
+        .route(
+            "/api/v1/ping-targets/{target_id}/delete",
+            post(delete_ping_target),
+        )
+        .route(
+            "/api/v1/ping-targets/update-targets",
+            post(bulk_update_ping_targets),
+        )
+        .route(
+            "/api/v1/ping-targets/lifecycle",
+            post(bulk_ping_target_lifecycle),
+        )
+        .route("/api/v1/monitoring/cards", get(list_monitoring_cards))
+        .route(
+            "/api/v1/clients/{client_id}/monitoring",
+            get(get_client_monitoring),
+        )
+        .route(
+            "/api/v1/monitoring-shares",
+            get(list_monitoring_shares).post(create_monitoring_share),
+        )
+        .route(
+            "/api/v1/monitoring-shares/extend",
+            post(extend_monitoring_shares),
+        )
+        .route(
+            "/api/v1/monitoring-shares/revoke",
+            post(revoke_monitoring_shares),
+        )
+        .route(
+            "/api/v1/public/monitoring-shares/{share_id}/bootstrap",
+            get(public_monitoring_share_bootstrap),
+        )
+        .route(
+            "/api/v1/public/monitoring-shares/{share_id}/data",
+            get(public_monitoring_share_data),
+        )
         .route(
             "/api/v1/history/retention-policies",
             get(list_history_retention_policies).post(upsert_history_retention_policy),
@@ -713,10 +770,6 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/internal/v1/gateway/runtime-config-reload",
             post(request_runtime_config_reload),
-        )
-        .route(
-            "/internal/v1/gateway/session-started",
-            post(ingest_gateway_session_started),
         )
         .route(
             "/internal/v1/gateway/session-ended",

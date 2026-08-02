@@ -794,6 +794,10 @@
   overflow-wrap: anywhere;
 }
 
+.observabilitySharedViewsPanel .consoleInlineDetailGrid {
+  padding: 16px;
+}
+
 .observabilityRangeLine {
   margin: 0;
   border: 1px solid var(--border);
@@ -993,6 +997,24 @@
 .observabilityEndpointRow > strong {
   color: var(--text);
   font-size: 13px;
+}
+
+.observabilityEndpointRow.heading {
+  border-color: var(--border-subtle);
+  background: var(--surface-neutral);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.observabilityEndpointRow.heading > span {
+  color: inherit;
+  font-size: inherit;
+}
+
+.observabilityEndpointMobileLabel {
+  display: none;
 }
 
 .observabilityOverlayList {
@@ -1464,6 +1486,30 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .observabilityEndpointRow.heading {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .observabilityEndpointRow:not(.heading) > [role="cell"] {
+    display: grid;
+    grid-template-columns: minmax(96px, 0.45fr) minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .observabilityEndpointMobileLabel {
+    display: block;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+
   .observabilityOverlayRow {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1648,6 +1694,42 @@
   min-width: 0;
 }
 
+.fleetMonitorSurface {
+  display: grid;
+  gap: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.fleetMonitorSurface > .fleetMonitorOverview,
+.fleetMonitorSurface > .fleetMonitorSnapshot,
+.fleetMonitorSurface > .fleetMonitorFilters,
+.fleetMonitorSurface > .publicMonitoringControls {
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+}
+
+.fleetMonitorSurface > .vpsMonitorGrid {
+  background: var(--canvas);
+  padding: 12px;
+}
+
+.fleetMonitorSurface > .emptyState,
+.fleetMonitorSurface > .localActionFeedback,
+.fleetMonitorSurface > .publicMonitoringPageError {
+  margin: 12px;
+}
+
+.fleetMonitorSurface > .fleetMonitorProgress {
+  padding: 10px 12px;
+}
+
+.fleetMonitorWorkspace.embedded .fleetMonitorSurface {
+  border: 0;
+  background: transparent;
+}
+
 .fleetMonitorToolbar {
   display: flex;
   align-items: center;
@@ -1721,27 +1803,200 @@
 
 .vpsMonitorGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 350px), 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 352px), 1fr));
   gap: 12px;
 }
 
 .vpsMonitorGrid.compact {
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 264px), 1fr));
   gap: 8px;
+}
+
+.fleetMonitorProgress {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 8px 0;
+  text-align: center;
+}
+
+.fleetMonitorOverview {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.fleetMonitorOverview button {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 7px;
+  min-width: 0;
+  min-height: 48px;
+  border: 0;
+  border-right: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  padding: 8px 12px;
+}
+
+.fleetMonitorOverview button:last-child {
+  border-right: 0;
+}
+
+.fleetMonitorOverview button:hover,
+.fleetMonitorOverview button.selected {
+  background: var(--primary-soft);
+}
+
+.fleetMonitorOverview button.online strong {
+  color: var(--success-text);
+}
+
+.fleetMonitorOverview button.warning strong {
+  color: var(--warning-text);
+}
+
+.fleetMonitorOverview button.offline strong {
+  color: var(--danger-strong);
+}
+
+.fleetMonitorOverview strong {
+  font-size: 20px;
+}
+
+.fleetMonitorOverview span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.fleetMonitorSnapshot {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  background: var(--surface);
+}
+
+.fleetMonitorSnapshot > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border-right: 1px solid var(--border-subtle);
+  padding: 9px 12px;
+}
+
+.fleetMonitorSnapshot > span:last-child {
+  border-right: 0;
+}
+
+.fleetMonitorSnapshot small,
+.fleetMonitorSnapshot em {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleetMonitorSnapshot strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleetMonitorFilters {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px 12px;
+}
+
+.fleetMonitorFilters > label {
+  display: grid;
+  gap: 4px;
+  min-width: 140px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.fleetMonitorFilters input,
+.fleetMonitorFilters select {
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--canvas);
+  color: var(--text);
+  font: inherit;
+  padding: 0 9px;
+}
+
+.fleetMonitorFilters .fleetMonitorSearch {
+  position: relative;
+  flex: 1 1 250px;
+  min-width: min(100%, 220px);
+}
+
+.fleetMonitorSearch > svg {
+  position: absolute;
+  left: 10px;
+  bottom: 9px;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.fleetMonitorFilters .fleetMonitorSearch input {
+  padding-left: 32px;
+}
+
+.fleetMonitorMatchCount {
+  margin-left: auto;
+  align-self: center;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.fleetMonitorWorkspace.embedded .fleetMonitorFilters {
+  display: none;
 }
 
 .vpsMonitorCard {
   display: grid;
   gap: 12px;
+  cursor: pointer;
   padding: 12px;
+  text-align: left;
+}
+
+.vpsMonitorCard:hover,
+.vpsMonitorCard:focus-visible {
+  border-color: var(--primary);
+  box-shadow: 0 1px 3px rgba(60, 64, 67, 0.18);
+  outline: 0;
 }
 
 .vpsMonitorCard.compact {
-  gap: 8px;
-  padding: 10px;
+  gap: 6px;
+  padding: 8px;
 }
 
-.vpsMonitorCard.compact .vpsMonitorCardMain {
+.vpsMonitorCardMain {
   grid-template-areas:
     "name status"
     "context context";
@@ -1749,12 +2004,12 @@
   column-gap: 8px;
 }
 
-.vpsMonitorCard.compact .vpsMonitorCardMain .vpsMonitorStatus {
+.vpsMonitorCardMain .vpsMonitorStatus {
   grid-area: status;
   justify-self: end;
 }
 
-.vpsMonitorCard.compact .vpsMonitorCardMain strong {
+.vpsMonitorCardMain strong {
   grid-area: name;
   align-self: center;
   overflow: hidden;
@@ -1762,15 +2017,19 @@
   white-space: nowrap;
 }
 
-.vpsMonitorCard.compact .vpsMonitorCardMain small {
+.vpsMonitorCardMain small {
   grid-area: context;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.vpsMonitorCard.online {
-  border-color: var(--success-border);
+.vpsMonitorCard.compact .vpsMonitorCardMain {
+  grid-template-areas: "name status";
+}
+
+.vpsMonitorCard.compact .vpsMonitorCardMain > small {
+  display: none;
 }
 
 .vpsMonitorCard.stale,
@@ -1865,48 +2124,980 @@
 }
 
 .vpsMonitorCard.compact .vpsMonitorMetrics {
-  gap: 6px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
 }
 
 .vpsMonitorMetric {
   display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 2px 6px;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 3px 6px;
   align-items: center;
   min-width: 0;
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  background: var(--canvas);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   padding: 8px;
 }
 
+.vpsMonitorMetric:nth-child(even) {
+  border-left: 1px solid var(--border-subtle);
+}
+
+.vpsMonitorMetric:nth-child(n + 3) {
+  border-top: 1px solid var(--border-subtle);
+}
+
 .vpsMonitorCard.compact .vpsMonitorMetric {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px 5px;
   padding: 6px;
 }
 
-.vpsMonitorMetric svg {
+.vpsMonitorMetricIcon {
+  display: inline-flex;
   color: var(--primary);
 }
 
-.vpsMonitorMetric span {
+.vpsMonitorMetricLabel {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vpsMonitorMetric > strong {
+  grid-column: 1 / -1;
+  min-width: 0;
+  color: var(--text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.vpsMonitorMetricTrack {
+  grid-column: 1 / -1;
+  display: block;
+  height: 5px;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--border-subtle);
+}
+
+.vpsMonitorMetricTrack > span {
+  display: block;
+  height: 100%;
+  max-width: 100%;
+  border-radius: inherit;
+  background: var(--primary);
+}
+
+.vpsMonitorMetricTrack.missing > span {
+  width: 0 !important;
+}
+
+.vpsMonitorMetric > small {
+  grid-column: 1 / -1;
+  color: var(--primary-text);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.vpsMonitorMetric > .vpsMonitorSparkline {
+  grid-column: 1 / -1;
+}
+
+.vpsMonitorCard.compact .vpsMonitorMetricIcon,
+.vpsMonitorCard.compact .vpsMonitorMetric > small {
+  display: none;
+}
+
+.vpsMonitorCard.compact .vpsMonitorMetricLabel {
+  grid-column: 1;
+  font-size: 9px;
+  text-align: center;
+}
+
+.vpsMonitorCard.compact .vpsMonitorMetric > strong {
+  grid-column: 1;
+  font-size: 10px;
+  text-align: center;
+}
+
+.vpsMonitorCard.compact .vpsMonitorMetricTrack {
+  height: 4px;
+}
+
+.vpsMonitorMetric.stale {
+  border-color: var(--border-subtle);
+  background: transparent;
+}
+
+.vpsMonitorMetric.stale strong {
+  color: var(--warning-text);
+}
+
+.vpsMonitorMetric.stale .vpsMonitorMetricTrack > span {
+  background: var(--warning);
+}
+
+.vpsMonitorFlowFacts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.vpsMonitorFlowFacts.compact {
+  gap: 0;
+}
+
+.vpsMonitorFlowFact {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 7px 8px;
+}
+
+.vpsMonitorFlowFact + .vpsMonitorFlowFact {
+  border-left: 1px solid var(--border-subtle);
+}
+
+.vpsMonitorAuxFacts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-width: 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.vpsMonitorAuxFacts.hasBilling {
+  grid-template-columns: repeat(2, minmax(48px, 0.55fr)) minmax(0, 2fr);
+}
+
+.vpsMonitorAuxFacts > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border-right: 1px solid var(--border-subtle);
+  padding: 7px 8px;
+}
+
+.vpsMonitorAuxFacts > span:last-child {
+  border-right: 0;
+}
+
+.vpsMonitorAuxFacts small,
+.vpsMonitorAuxFacts em {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vpsMonitorAuxFacts strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vpsMonitorCard.compact .vpsMonitorAuxFacts > span {
+  padding: 5px 6px;
+}
+
+.vpsMonitorCard.compact .vpsMonitorAuxFacts em {
+  display: none;
+}
+
+.vpsMonitorFlowFact small,
+.vpsMonitorFlowFact strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vpsMonitorSparkline {
+  display: block;
+  width: 100%;
+  height: 18px;
+  color: var(--primary);
+}
+
+.vpsMonitorSparkline polyline {
+  stroke: currentColor;
+  stroke-width: 1.5;
+}
+
+.vpsMonitorSparkline.rx {
+  color: var(--success);
+}
+
+.vpsMonitorSparkline.tx {
+  color: var(--primary);
+}
+
+.vpsMonitorSparkline.load {
+  color: var(--text-secondary);
+}
+
+.vpsMonitorSparkline.ping {
+  color: var(--warning);
+}
+
+span.vpsMonitorSparkline.empty {
+  height: auto;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vpsMonitorTraffic,
+.vpsMonitorPing {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+  border-radius: 0;
+  background: transparent;
+  padding: 8px 0 0;
+}
+
+.vpsMonitorTraffic > span:first-child,
+.vpsMonitorPing > span:first-child {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.vpsMonitorTraffic small,
+.vpsMonitorPing small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vpsMonitorTraffic strong,
+.vpsMonitorPing strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vpsMonitorTrafficTrack {
+  display: block;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--border-subtle);
+}
+
+.vpsMonitorTrafficTrack > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--primary);
+}
+
+.vpsMonitorTrafficTrack.missing > span {
+  width: 0 !important;
+}
+
+.vpsMonitorTraffic.exceeded {
+  border: 1px solid var(--danger-border);
+  border-radius: 8px;
+  background: var(--danger-soft);
+  padding: 8px;
+}
+
+.vpsMonitorTraffic.warning:not(.exceeded),
+.publicMonitoringTraffic.warning:not(.overQuota),
+.publicMonitoringPing.warning {
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+  background: var(--warning-soft);
+  padding: 8px;
+}
+
+.vpsMonitorTraffic.warning > small,
+.vpsMonitorPing > small.exceptionEvidence,
+.publicMonitoringTraffic.warning > small,
+.publicMonitoringPing.warning > small {
+  color: var(--warning-text);
+  font-weight: 700;
+}
+
+.vpsMonitorTraffic.exceeded .vpsMonitorTrafficTrack > span {
+  background: var(--danger);
+}
+
+.vpsMonitorPingVisual {
+  display: block;
+  min-height: 18px;
+}
+
+.vpsMonitorPingVisual .vpsMonitorSparkline {
+  height: 18px;
+}
+
+.vpsMonitorPing.ok .vpsMonitorSparkline,
+.vpsMonitorPing.up .vpsMonitorSparkline {
+  color: var(--success);
+}
+
+.vpsMonitorPing.failed .vpsMonitorSparkline,
+.vpsMonitorPing.down .vpsMonitorSparkline,
+.vpsMonitorPing.error .vpsMonitorSparkline {
+  color: var(--danger);
+}
+
+.vpsMonitorPing.failed,
+.vpsMonitorPing.down,
+.vpsMonitorPing.error {
+  border: 1px solid var(--danger-border);
+  border-radius: 8px;
+  background: var(--danger-soft);
+  padding: 8px;
+}
+
+.vpsMonitorPing.pending .vpsMonitorSparkline,
+.vpsMonitorPing.stale .vpsMonitorSparkline,
+.vpsMonitorPing.degraded .vpsMonitorSparkline {
+  color: var(--warning);
+}
+
+.vpsMonitorCard.compact .vpsMonitorTraffic,
+.vpsMonitorCard.compact .vpsMonitorPing {
+  gap: 3px;
+  padding: 6px 0 0;
+}
+
+.vpsMonitorCard.compact .vpsMonitorTraffic.warning,
+.vpsMonitorCard.compact .vpsMonitorTraffic.exceeded,
+.vpsMonitorCard.compact .vpsMonitorPing.failed,
+.vpsMonitorCard.compact .vpsMonitorPing.down,
+.vpsMonitorCard.compact .vpsMonitorPing.error,
+.publicMonitoringCard.compact .publicMonitoringTraffic.warning,
+.publicMonitoringCard.compact .publicMonitoringTraffic.overQuota,
+.publicMonitoringCard.compact .publicMonitoringPing.warning,
+.publicMonitoringCard.compact .publicMonitoringPing.failed,
+.publicMonitoringCard.compact .publicMonitoringPing.down,
+.publicMonitoringCard.compact .publicMonitoringPing.error {
+  padding: 6px;
+}
+
+.vpsMonitorCard.compact .vpsMonitorTraffic > small,
+.vpsMonitorCard.compact .vpsMonitorPing > small {
+  display: none;
+}
+
+.vpsMonitorCard.compact .vpsMonitorTraffic > small.exceptionEvidence,
+.vpsMonitorCard.compact .vpsMonitorPing > small.exceptionEvidence {
+  display: block;
+}
+
+.vpsMonitoringDetailPanel {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.vpsMonitoringToolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: flex-start;
+  border-color: var(--border-subtle);
+}
+
+.vpsMonitoringToolbar .dashboardToolbarActions {
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  width: 100%;
+}
+
+.vpsMonitoringRangeTabs {
+  flex: 1 1 auto;
+  max-width: none;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.vpsMonitoringRangeTabs button {
+  flex: 0 0 auto;
+}
+
+.vpsMonitoringCustomRange {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 12px;
+}
+
+.vpsMonitoringCustomRange label,
+.publicMonitoringCustomRange label {
+  display: grid;
+  gap: 4px;
+  min-width: min(100%, 210px);
   color: var(--muted);
   font-size: 11px;
   font-weight: 700;
 }
 
-.vpsMonitorMetric strong {
-  grid-column: 1 / -1;
-  overflow-wrap: anywhere;
+.vpsMonitoringCustomRange input,
+.publicMonitoringCustomRange input {
+  min-height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
   color: var(--text);
-  font-size: 13px;
+  padding: 0 8px;
 }
 
-.vpsMonitorMetric.stale {
+.vpsMonitoringSection {
+  overflow: hidden;
+  border-color: var(--border-subtle);
+}
+
+.vpsMonitoringChartGrid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.vpsMonitoringPingTargets,
+.vpsMonitoringTrafficSummary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
+  gap: 8px;
+  min-width: 0;
+  padding: 0 16px 16px;
+}
+
+.vpsMonitoringPingTarget,
+.vpsMonitoringTrafficSummary > span {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 9px 10px;
+}
+
+.vpsMonitoringPingTarget > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.vpsMonitoringPingTarget i {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+}
+
+.vpsMonitoringPingTarget strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vpsMonitoringPingTarget em {
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary-text);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 800;
+  padding: 2px 5px;
+}
+
+.vpsMonitoringPingTarget small,
+.vpsMonitoringTrafficSummary small,
+.vpsMonitoringTrafficSummary em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  overflow-wrap: anywhere;
+}
+
+.vpsMonitoringTrafficProgress {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px 10px;
+  align-items: center;
+}
+
+.vpsMonitoringTrafficTrack {
+  display: block;
+  height: 9px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--border-subtle);
+}
+
+.vpsMonitoringTrafficTrack i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--primary);
+}
+
+.vpsMonitoringTrafficProgress > small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.vpsMonitoringTrafficProgress.overLimit strong,
+.vpsMonitoringTrafficNote.incomplete {
+  color: var(--danger-strong);
+}
+
+.vpsMonitoringTrafficProgress.overLimit .vpsMonitoringTrafficTrack i {
+  background: var(--danger);
+}
+
+.vpsMonitoringTrafficNote {
+  color: var(--muted);
+  margin: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.publicMonitoringSharePage {
+  box-sizing: border-box;
+  width: min(100%, 1600px);
+  min-height: 100vh;
+  margin: 0 auto;
+  align-content: start;
+  background: var(--canvas);
+  padding: 20px;
+}
+
+.publicMonitoringShareHeader h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.publicMonitoringControls {
+  align-items: end;
+}
+
+.publicMonitoringSummary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(72px, 1fr));
+  gap: 6px;
+  min-width: min(100%, 360px);
+}
+
+.publicMonitoringSummaryFact {
+  display: grid;
+  gap: 2px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--canvas);
+  padding: 7px 9px;
+}
+
+.publicMonitoringSummaryFact strong {
+  color: var(--text);
+  font-size: 16px;
+}
+
+.publicMonitoringSummaryFact small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.publicMonitoringLoadEvidence {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.publicMonitoringPingHistory {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.publicMonitoringPingHistory > .vpsMonitoringPingMetric {
+  justify-self: end;
+}
+
+.publicMonitoringControls .fleetMonitorControls input,
+.publicMonitoringControls .fleetMonitorControls select {
+  min-height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--canvas);
+  color: var(--text);
+  padding: 0 9px;
+}
+
+.publicMonitoringCard.selected {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--primary-soft);
+}
+
+.publicMonitoringCardStatic {
+  cursor: default;
+}
+
+.publicMonitoringCardStatic .vpsMonitorCardMain {
+  cursor: default;
+}
+
+.vpsMonitorCard.publicMonitoringCardStatic:hover {
+  border-color: var(--border);
+  box-shadow: none;
+}
+
+.vpsMonitorCard.publicMonitoringCardStatic.warning:hover {
   border-color: var(--warning-border);
-  background: var(--warning-soft);
 }
 
-.vpsMonitorMetric.stale strong {
+.vpsMonitorCard.publicMonitoringCardStatic.offline:hover {
+  border-color: var(--danger-border);
+}
+
+.publicMonitoringNetwork {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.publicMonitoringFreshness {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.publicMonitoringNetwork.stale {
+  border-radius: 0;
+  outline: 0;
+}
+
+.publicMonitoringTraffic,
+.publicMonitoringPing {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+  border-radius: 0;
+  background: transparent;
+  padding: 8px 0 0;
+}
+
+.publicMonitoringTraffic > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.publicMonitoringTraffic span,
+.publicMonitoringPing span,
+.publicMonitoringTraffic small,
+.publicMonitoringPing small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.publicMonitoringTraffic.overQuota {
+  border: 1px solid var(--danger-border);
+  border-radius: 8px;
+  background: var(--danger-soft);
+  padding: 8px;
+}
+
+.publicMonitoringTraffic.warning:not(.overQuota),
+.publicMonitoringPing.warning:not(.failed):not(.down):not(.error) {
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+  background: var(--warning-soft);
+  padding: 8px;
+}
+
+.publicMonitoringTraffic.overQuota .vpsMonitorMetricTrack > span {
+  background: var(--danger);
+}
+
+.publicMonitoringPing {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.publicMonitoringPing > strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.publicMonitoringCard.compact .publicMonitoringPing {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.publicMonitoringCard.compact .publicMonitoringPing > span:not(.vpsMonitorSparkline) {
+  grid-column: 2;
+  grid-row: 2;
+  justify-self: start;
+  max-width: 100%;
+}
+
+.publicMonitoringPing > .vpsMonitorSparkline,
+.publicMonitoringPing > small {
+  grid-column: 1 / -1;
+}
+
+.publicMonitoringPing.failed,
+.publicMonitoringPing.down,
+.publicMonitoringPing.error {
+  border: 1px solid var(--danger-border);
+  border-radius: 8px;
+  background: var(--danger-soft);
+  padding: 8px;
+}
+
+.publicMonitoringPing.ok:not(.warning) .vpsMonitorSparkline,
+.publicMonitoringPing.up:not(.warning) .vpsMonitorSparkline {
+  color: var(--primary);
+}
+
+.publicMonitoringPing.failed .vpsMonitorSparkline,
+.publicMonitoringPing.down .vpsMonitorSparkline,
+.publicMonitoringPing.error .vpsMonitorSparkline {
+  color: var(--danger);
+}
+
+.publicMonitoringCard.compact .publicMonitoringTraffic > small,
+.publicMonitoringCard.compact .publicMonitoringPing > small {
+  display: none;
+}
+
+.publicMonitoringCard.compact .publicMonitoringTraffic.warning > small,
+.publicMonitoringCard.compact .publicMonitoringPing.warning > small {
+  display: block;
+}
+
+.publicMonitoringWarnings {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+  background: var(--warning-soft);
+  color: var(--warning-text);
+  padding: 7px 8px;
+}
+
+.publicMonitoringWarnings strong,
+.publicMonitoringWarnings span {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.publicMonitoringTrafficCycle {
+  border-color: var(--border-subtle);
+}
+
+.publicMonitoringDetail {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  border: 1px solid var(--primary-border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 14px;
+}
+
+.publicMonitoringDetailHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.publicMonitoringDetailHeader h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.publicMonitoringDetailHeader span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.publicMonitoringDetailHeader button,
+.publicMonitoringCustomRange button {
+  min-height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 700;
+  padding: 0 10px;
+}
+
+.publicMonitoringRangeControls {
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.publicMonitoringRangeControls .timeRangeTabs {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.publicMonitoringRangeControls .timeRangeTabs button {
+  flex: 0 0 auto;
+}
+
+.publicMonitoringCustomRange {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.publicMonitoringDetailCharts {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 0;
+}
+
+@media (max-width: 720px) {
+  .vpsMonitorGrid,
+  .vpsMonitorGrid.compact {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .fleetMonitorOverview {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .fleetMonitorOverview button:nth-child(2) {
+    border-right: 0;
+  }
+
+  .fleetMonitorOverview button:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .fleetMonitorSnapshot {
+    grid-template-columns: repeat(
+      auto-fit,
+      minmax(min(100%, 130px), 1fr)
+    );
+  }
+
+  .vpsMonitoringToolbar,
+  .publicMonitoringDetailHeader {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .vpsMonitoringToolbar .dashboardToolbarActions {
+    justify-content: flex-start;
+  }
+
+  .vpsMonitoringRangeTabs,
+  .vpsMonitoringChartGrid,
+  .publicMonitoringDetailCharts {
+    grid-template-columns: minmax(0, 1fr);
+    width: 100%;
+  }
+
+  .vpsMonitoringChartGrid .wideWidget,
+  .publicMonitoringDetailCharts .wideWidget {
+    grid-column: 1;
+  }
+
+  .publicMonitoringSharePage {
+    padding: 10px;
+  }
+
+  .publicMonitoringSummary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    min-width: 0;
+    width: 100%;
+  }
+
+  .publicMonitoringControls .fleetMonitorControls {
+    width: 100%;
+  }
+
+  .publicMonitoringControls .fleetMonitorControls label {
+    flex: 1 1 140px;
+  }
+}
+
+.vpsMonitorFlowFact small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.vpsMonitorFlowFact strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.vpsMonitorFlowFacts.compact .vpsMonitorFlowFact {
+  padding: 5px 6px;
+}
+
+.vpsMonitorFlowFacts.compact .vpsMonitorFlowFact small {
+  font-size: 9px;
+}
+
+.vpsMonitorFlowFacts.compact .vpsMonitorFlowFact strong {
+  font-size: 10px;
+}
+
+.vpsMonitorFlowFact.stale {
+  border-color: var(--border-subtle);
+  background: var(--surface);
+}
+
+.vpsMonitorFlowFact.stale strong {
   color: var(--warning-text);
 }
 
@@ -1923,11 +3114,6 @@
   overflow-wrap: anywhere;
 }
 
-.vpsMonitorEvidence.compactSummary {
-  gap: 3px;
-  font-size: 11px;
-}
-
 .vpsMonitorEvidence .telemetryEvidence.partial,
 .vpsMonitorEvidence .telemetryEvidence.stale {
   color: var(--warning-text);
@@ -1941,7 +3127,7 @@
 
 .vpsMonitorSignals {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 88px), 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
 }
 
@@ -1990,75 +3176,6 @@
 .vpsMonitorSignal.critical {
   background: var(--danger-soft);
   border-color: var(--danger-border);
-}
-
-.vpsMonitorActions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.vpsMonitorCard.compact .vpsMonitorActions {
-  gap: 6px;
-}
-
-.vpsMonitorActions button,
-.vpsMonitorActions summary {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 32px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  color: var(--text);
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 700;
-  padding: 0 9px;
-}
-
-.vpsMonitorActions summary {
-  list-style: none;
-}
-
-.vpsMonitorActions summary::-webkit-details-marker {
-  display: none;
-}
-
-.vpsMonitorActions button:hover,
-.vpsMonitorActions summary:hover {
-  border-color: var(--primary);
-  color: var(--primary-text);
-}
-
-.vpsMonitorMore {
-  position: relative;
-}
-
-.vpsMonitorMoreMenu {
-  display: none;
-}
-
-.vpsMonitorMore[open] .vpsMonitorMoreMenu {
-  position: absolute;
-  z-index: 20;
-  right: 0;
-  bottom: calc(100% + 6px);
-  display: grid;
-  gap: 4px;
-  min-width: 132px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  box-shadow: var(--shadow-menu);
-  padding: 6px;
-}
-
-.vpsMonitorMoreMenu button {
-  justify-content: flex-start;
-  width: 100%;
-  border-color: transparent;
 }
 
 .vpsDetailWorkspace {
@@ -2303,6 +3420,12 @@
 .detailTabSelect select {
   width: 100%;
   min-width: 0;
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0 9px;
 }
 
 .vpsConfigDetailTab {
@@ -5773,7 +6896,7 @@ button.vpsDetailRecord:hover {
   text-align: right;
 }
 
-.compactForm input:not(.searchExpressionEditor):not(.vpsComboboxEditor),
+.compactForm input:not([type="checkbox"]):not([type="radio"]):not(.searchExpressionEditor):not(.vpsComboboxEditor),
 .compactForm select,
 .compactForm textarea,
 .aliasEditor input,
@@ -5794,7 +6917,7 @@ button.vpsDetailRecord:hover {
   padding: 0 10px;
 }
 
-.compactForm input:not(.searchExpressionEditor):not(.vpsComboboxEditor):focus,
+.compactForm input:not([type="checkbox"]):not([type="radio"]):not(.searchExpressionEditor):not(.vpsComboboxEditor):focus,
 .compactForm select:focus,
 .compactForm textarea:focus,
 .aliasEditor input:focus,
@@ -6501,7 +7624,6 @@ button.vpsDetailRecord:hover {
   .operatorEditorActions {
     align-items: stretch;
   }
-
 }
 
 .countryBadge {
@@ -6533,7 +7655,6 @@ button.vpsDetailRecord:hover {
 
 .fleetNodeDetailHeader,
 .fleetSelectionHeader,
-.fleetCurveHeader,
 .fleetConfigRowsHeader {
   display: flex;
   align-items: flex-start;
@@ -6681,9 +7802,9 @@ button.vpsDetailRecord:hover {
   text-transform: uppercase;
 }
 
-.fleetCurveSection,
 .fleetSelectionPanel {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   min-width: 0;
   border: 1px solid var(--border);
@@ -6692,7 +7813,6 @@ button.vpsDetailRecord:hover {
   padding: 12px;
 }
 
-.fleetCurveHeader span,
 .fleetSelectionHeader > div:first-child,
 .fleetConfigRowsHeader {
   display: flex;
@@ -6701,31 +7821,8 @@ button.vpsDetailRecord:hover {
   min-width: 0;
 }
 
-.fleetCurveHeader small,
 .fleetSelectionHeader small {
   color: var(--muted);
-}
-
-.fleetCurveGrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
-  gap: 12px;
-  min-width: 0;
-}
-
-.fleetCurveCard {
-  display: grid;
-  gap: 8px;
-  min-width: 0;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  padding: 10px;
-}
-
-.fleetCurveCard > strong {
-  color: var(--text);
-  font-size: 13px;
 }
 
 .gridSelectionPanel {

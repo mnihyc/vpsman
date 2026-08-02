@@ -276,6 +276,39 @@ export function JobArtifactsPanel({
                   onOpenTransfers,
                 }),
             },
+            {
+              description: (rows) =>
+                `Copy ${rows.length} artifact object key${rows.length === 1 ? "" : "s"}.`,
+              icon: <Copy size={14} />,
+              label: "Copy object keys",
+              onSelect: (rows) =>
+                void copyText(rows.map((row) => row.objectKey).join("\n")),
+            },
+            {
+              description: (rows) =>
+                `Copy ${rows.length} artifact SHA-256 value${rows.length === 1 ? "" : "s"}.`,
+              icon: <Copy size={14} />,
+              label: "Copy SHA-256",
+              onSelect: (rows) =>
+                void copyText(rows.map((row) => row.sha256Hex).join("\n")),
+            },
+            {
+              description: (rows) => {
+                const count = rows.filter((row) => row.downloadPath).length;
+                return `Copy the ${count} available download path${count === 1 ? "" : "s"}.`;
+              },
+              disabled: (rows) => !rows.some((row) => row.downloadPath),
+              icon: <Copy size={14} />,
+              label: "Copy download paths",
+              onSelect: (rows) =>
+                void copyText(
+                  rows
+                    .flatMap((row) =>
+                      row.downloadPath ? [row.downloadPath] : [],
+                    )
+                    .join("\n"),
+                ),
+            },
           ]}
           columns={columns}
           defaultColumnVisibility={{ created: false }}
@@ -297,26 +330,10 @@ export function JobArtifactsPanel({
               <span>
                 <strong>Object key / URL</strong>
                 <span title={row.objectKey}>{row.objectKey}</span>
-                <button
-                  className="secondaryAction compactAction"
-                  onClick={() => void copyText(row.objectKey)}
-                  type="button"
-                >
-                  <Copy size={13} />
-                  Copy
-                </button>
               </span>
               <span>
                 <strong>SHA-256</strong>
                 <span title={row.sha256Hex}>{row.sha256Hex}</span>
-                <button
-                  className="secondaryAction compactAction"
-                  onClick={() => void copyText(row.sha256Hex)}
-                  type="button"
-                >
-                  <Copy size={13} />
-                  Copy
-                </button>
               </span>
               <span>
                 <strong>Source</strong>
@@ -331,22 +348,13 @@ export function JobArtifactsPanel({
               <span>
                 <strong>Download path</strong>
                 <span>{row.downloadPath ?? "Handled by source workflow"}</span>
-                {row.downloadPath ? (
-                  <button
-                    className="secondaryAction compactAction"
-                    onClick={() => void copyText(row.downloadPath ?? "")}
-                    type="button"
-                  >
-                    <Copy size={13} />
-                    Copy
-                  </button>
-                ) : null}
               </span>
             </div>
           )}
           rows={visibleRows}
           rowsTruncated={rowsTruncated}
           searchPlaceholder="Search artifacts"
+          showMobileRowActions={false}
           storageKey="vpsman.grid.jobs.artifacts"
           toolbarActions={
             <label className="jobArtifactTypeFilter">

@@ -13,7 +13,6 @@ import {
   Activity,
   AlertTriangle,
   ArrowUpCircle,
-  BarChart3,
   Bell,
   Boxes,
   Clock3,
@@ -76,11 +75,6 @@ import {
   agentsMatchingExpression,
   parseSearchExpression,
 } from "../searchExpression";
-import {
-  TimeSeriesChart,
-  type TimeSeriesChartLine,
-} from "../components/TimeSeriesChart";
-import { fleetChartColors } from "../colorPalette";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import {
   addressFamilyLabel,
@@ -478,14 +472,6 @@ export function FleetWorkspace({
   const latestTunnels = useMemo(
     () => latestTelemetryTunnelsByClient(telemetryTunnels),
     [telemetryTunnels],
-  );
-  const rollupHistoryByClient = useMemo(
-    () => telemetryRecordsByClient(telemetryRollups),
-    [telemetryRollups],
-  );
-  const networkRateHistoryByClient = useMemo(
-    () => telemetryRecordsByClient(telemetryNetworkRates),
-    [telemetryNetworkRates],
   );
   const trafficByClient = useMemo(
     () =>
@@ -1273,11 +1259,7 @@ export function FleetWorkspace({
               tagVisibilityOverrides={
                 preferences.fleet_tag_visibility_overrides
               }
-              telemetryNetworkRates={
-                networkRateHistoryByClient.get(agent.id) ?? []
-              }
               telemetryNetworkRatesTruncated={telemetryNetworkRatesTruncated}
-              telemetryRollups={rollupHistoryByClient.get(agent.id) ?? []}
               telemetryRollupsTruncated={telemetryRollupsTruncated}
               telemetryTunnelsTruncated={telemetryTunnelsTruncated}
               trafficAccounting={trafficByClient.get(agent.id) ?? null}
@@ -1442,7 +1424,7 @@ function FleetInstancesPanel({
         </div>
         <span className="sectionContext">
           {fleetCoreEvidenceAvailable
-            ? `${summary.online} live / ${summary.never + summary.unknown} no contact / ${summary.total} total`
+            ? `${summary.online} live / ${summary.revoked} access revoked / ${summary.never + summary.unknown} no contact / ${summary.total} total`
             : "Fleet inventory unavailable"}{" "}
           · {formatConsoleStreamState(wsState)}
         </span>
@@ -1575,9 +1557,7 @@ function FleetInstanceDetail({
   summary,
   tagDisplayOrder,
   tagVisibilityOverrides,
-  telemetryNetworkRates,
   telemetryNetworkRatesTruncated,
-  telemetryRollups,
   telemetryRollupsTruncated,
   telemetryTunnelsTruncated,
   trafficAccounting,
@@ -1628,9 +1608,7 @@ function FleetInstanceDetail({
   summary: FleetSummary;
   tagDisplayOrder: TagDisplayOrder;
   tagVisibilityOverrides: Record<string, boolean>;
-  telemetryNetworkRates: TelemetryNetworkRateRecord[];
   telemetryNetworkRatesTruncated: boolean;
-  telemetryRollups: TelemetryRollupRecord[];
   telemetryRollupsTruncated: boolean;
   telemetryTunnelsTruncated: boolean;
   trafficAccounting: TrafficAccountingRecord | null;
@@ -2081,7 +2059,7 @@ function FleetInstanceDetail({
             <DetailLine
               icon={<Gauge size={18} />}
               label="Fleet position"
-              value={`${summary.online} live / ${summary.never + summary.unknown} no contact / ${summary.total} total`}
+              value={`${summary.online} live / ${summary.revoked} access revoked / ${summary.never + summary.unknown} no contact / ${summary.total} total`}
             />
           </>
         )}
@@ -2155,7 +2133,7 @@ function FleetInstanceDetail({
             <DetailLine
               icon={<Server size={18} />}
               label="Agent status"
-              value={agent.status}
+              value={displayState.label}
             />
           </>
         )}
@@ -2271,13 +2249,6 @@ function FleetInstanceDetail({
           </>
         )}
       </div>
-      <FleetNodeCharts
-        networkRates={telemetryNetworkRates}
-        networkRatesTruncated={telemetryNetworkRatesTruncated}
-        rollups={telemetryRollups}
-        rollupsTruncated={telemetryRollupsTruncated}
-        title={agentLabel}
-      />
     </div>
   );
 }
@@ -3014,81 +2985,6 @@ function TrafficRulesDetail({
   );
 }
 
-function FleetNodeCharts({
-  networkRates,
-  networkRatesTruncated,
-  rollups,
-  rollupsTruncated,
-  title,
-}: {
-  networkRates: TelemetryNetworkRateRecord[];
-  networkRatesTruncated: boolean;
-  rollups: TelemetryRollupRecord[];
-  rollupsTruncated: boolean;
-  title: string;
-}) {
-  const resourceChart = resourcePercentChartData(rollups);
-  const cpuChart = cpuLoadChartData(rollups);
-  const networkChart = networkRateChartData(networkRates);
-  return (
-    <div className="fleetCurveSection">
-      <div className="fleetCurveHeader">
-        <span>
-          <BarChart3 size={16} /> Overview curves
-        </span>
-        <small>{title}</small>
-      </div>
-      <div className="fleetCurveGrid">
-        <div className="fleetCurveCard">
-          <strong>Resource use</strong>
-          <TimeSeriesChart
-            ariaLabel={`${title} resource percentage curves`}
-            emptyLabel={
-              rollupsTruncated
-                ? "No resource history for this VPS appears in the loaded rollup page; more may exist"
-                : "No resource rollup history"
-            }
-            height={210}
-            lines={resourceChart.lines}
-            times={resourceChart.times}
-            valueFormatter={formatChartPercent}
-          />
-        </div>
-        <div className="fleetCurveCard">
-          <strong>CPU load</strong>
-          <TimeSeriesChart
-            ariaLabel={`${title} CPU load curve`}
-            emptyLabel={
-              rollupsTruncated
-                ? "No CPU history for this VPS appears in the loaded rollup page; more may exist"
-                : "No CPU rollup history"
-            }
-            height={210}
-            lines={cpuChart.lines}
-            times={cpuChart.times}
-            valueFormatter={formatChartLoad}
-          />
-        </div>
-        <div className="fleetCurveCard">
-          <strong>Network rate</strong>
-          <TimeSeriesChart
-            ariaLabel={`${title} network rate curves`}
-            emptyLabel={
-              networkRatesTruncated
-                ? "No network history for this VPS appears in the loaded rate page; more may exist"
-                : "No network rate history"
-            }
-            height={210}
-            lines={networkChart.lines}
-            times={networkChart.times}
-            valueFormatter={formatChartBitsPerSecond}
-          />
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function FleetSelectionPanel({
   agents,
   allTags,
@@ -3356,143 +3252,163 @@ function FleetSelectionStatsTable({
     return (
       <div
         aria-labelledby={tabId("fleet-selection-stats", mode)}
-        className="fleetSelectionStatsTable networkMode"
         id="fleet-selection-stats-tabpanel"
         role="tabpanel"
       >
-        <div className="fleetSelectionStatsRow heading">
-          <span>VPS</span>
-          <span>Total rate</span>
-          <span>Interface rates</span>
-          <span>Counters</span>
+        <div
+          aria-label="Selected VPS network comparison"
+          className="fleetSelectionStatsTable networkMode"
+          role="table"
+        >
+          <div className="fleetSelectionStatsRow heading" role="row">
+            <span role="columnheader">VPS</span>
+            <span role="columnheader">Total rate</span>
+            <span role="columnheader">Interface rates</span>
+            <span role="columnheader">Counters</span>
+          </div>
+          {rows.map((agent) => {
+            const rates = latestNetworkRates.get(agent.id) ?? [];
+            const rollup = latestRollups.get(agent.id) ?? null;
+            return (
+              <div className="fleetSelectionStatsRow" key={agent.id} role="row">
+                <span role="cell" title={agent.id}>
+                  {formatVpsName(agent, vpsNameDisplayMode)}
+                </span>
+                <span role="cell">{formatNetworkRateSummary(rates, rollup)}</span>
+                <span role="cell">
+                  {rates
+                    .map(
+                      (rate) =>
+                        `${rate.interface}: ${formatBitsPerSecond(rate.rx_bps_avg + rate.tx_bps_avg)}`,
+                    )
+                    .join("; ") || "no rate rollup"}
+                </span>
+                <span role="cell">{formatNetworkBytes(rollup)}</span>
+              </div>
+            );
+          })}
         </div>
-        {rows.map((agent) => {
-          const rates = latestNetworkRates.get(agent.id) ?? [];
-          const rollup = latestRollups.get(agent.id) ?? null;
-          return (
-            <div className="fleetSelectionStatsRow" key={agent.id}>
-              <span title={agent.id}>
-                {formatVpsName(agent, vpsNameDisplayMode)}
-              </span>
-              <span>{formatNetworkRateSummary(rates, rollup)}</span>
-              <span>
-                {rates
-                  .map(
-                    (rate) =>
-                      `${rate.interface}: ${formatBitsPerSecond(rate.rx_bps_avg + rate.tx_bps_avg)}`,
-                  )
-                  .join("; ") || "no rate rollup"}
-              </span>
-              <span>{formatNetworkBytes(rollup)}</span>
-            </div>
-          );
-        })}
       </div>
     );
   if (mode === "overview")
     return (
       <div
         aria-labelledby={tabId("fleet-selection-stats", mode)}
-        className="fleetSelectionStatsTable overviewMode"
         id="fleet-selection-stats-tabpanel"
         role="tabpanel"
       >
-        <div className="fleetSelectionStatsRow heading">
-          <span>VPS</span>
-          <span>Status</span>
-          <span>Country</span>
-          <span>Provider</span>
-          <span>Last seen</span>
-          <span>Tags</span>
+        <div
+          aria-label="Selected VPS overview comparison"
+          className="fleetSelectionStatsTable overviewMode"
+          role="table"
+        >
+          <div className="fleetSelectionStatsRow heading" role="row">
+            <span role="columnheader">VPS</span>
+            <span role="columnheader">Status</span>
+            <span role="columnheader">Country</span>
+            <span role="columnheader">Provider</span>
+            <span role="columnheader">Last seen</span>
+            <span role="columnheader">Tags</span>
+          </div>
+          {rows.map((agent) => {
+            const displayState = agentDisplayState(agent);
+            return (
+              <div className="fleetSelectionStatsRow" key={agent.id} role="row">
+                <span role="cell" title={agent.id}>
+                  {formatVpsName(agent, vpsNameDisplayMode)}
+                </span>
+                <span role="cell" title={displayState.detail}>{displayState.label}</span>
+                <span role="cell">{countryFromTags(agent.tags) ?? "unset"}</span>
+                <span role="cell">{providerFromTags(agent.tags) ?? "unset"}</span>
+                <span role="cell">{formatLastSeen(agent.last_seen_at)}</span>
+                <span role="cell">
+                  {displayTags(
+                    agent.tags,
+                    tagDisplayOrder,
+                    tagVisibilityOverrides,
+                  ).join(", ") || "untagged"}
+                </span>
+              </div>
+            );
+          })}
         </div>
-        {rows.map((agent) => {
-          const displayState = agentDisplayState(agent);
-          return (
-            <div className="fleetSelectionStatsRow" key={agent.id}>
-              <span title={agent.id}>
-                {formatVpsName(agent, vpsNameDisplayMode)}
-              </span>
-              <span title={displayState.detail}>{displayState.label}</span>
-              <span>{countryFromTags(agent.tags) ?? "unset"}</span>
-              <span>{providerFromTags(agent.tags) ?? "unset"}</span>
-              <span>{formatLastSeen(agent.last_seen_at)}</span>
-              <span>
-                {displayTags(
-                  agent.tags,
-                  tagDisplayOrder,
-                  tagVisibilityOverrides,
-                ).join(", ") || "untagged"}
-              </span>
-            </div>
-          );
-        })}
       </div>
     );
   if (mode === "capabilities")
     return (
       <div
         aria-labelledby={tabId("fleet-selection-stats", mode)}
-        className="fleetSelectionStatsTable capabilitiesMode"
         id="fleet-selection-stats-tabpanel"
         role="tabpanel"
       >
-        <div className="fleetSelectionStatsRow heading">
-          <span>VPS</span>
-          <span>Privilege</span>
-          <span>UID</span>
-          <span>Tunnels</span>
-          <span>Process limits</span>
-          <span>Build</span>
-        </div>
-        {rows.map((agent) => (
-          <div className="fleetSelectionStatsRow" key={agent.id}>
-            <span title={agent.id}>
-              {formatVpsName(agent, vpsNameDisplayMode)}
-            </span>
-            <span>{formatPrivilege(agent.capabilities)}</span>
-            <span>{agent.capabilities.effective_uid ?? "unknown"}</span>
-            <span>{yesNo(agent.capabilities.can_manage_runtime_tunnels)}</span>
-            <span>{yesNo(agent.capabilities.can_apply_process_limits)}</span>
-            <span>
-              {agent.internal_build_number
-                ? `#${agent.internal_build_number}`
-                : "unknown"}
-            </span>
+        <div
+          aria-label="Selected VPS capability comparison"
+          className="fleetSelectionStatsTable capabilitiesMode"
+          role="table"
+        >
+          <div className="fleetSelectionStatsRow heading" role="row">
+            <span role="columnheader">VPS</span>
+            <span role="columnheader">Privilege</span>
+            <span role="columnheader">UID</span>
+            <span role="columnheader">Tunnels</span>
+            <span role="columnheader">Process limits</span>
+            <span role="columnheader">Build</span>
           </div>
-        ))}
+          {rows.map((agent) => (
+            <div className="fleetSelectionStatsRow" key={agent.id} role="row">
+              <span role="cell" title={agent.id}>
+                {formatVpsName(agent, vpsNameDisplayMode)}
+              </span>
+              <span role="cell">{formatPrivilege(agent.capabilities)}</span>
+              <span role="cell">{agent.capabilities.effective_uid ?? "unknown"}</span>
+              <span role="cell">{yesNo(agent.capabilities.can_manage_runtime_tunnels)}</span>
+              <span role="cell">{yesNo(agent.capabilities.can_apply_process_limits)}</span>
+              <span role="cell">
+                {agent.internal_build_number
+                  ? `#${agent.internal_build_number}`
+                  : "unknown"}
+              </span>
+            </div>
+          ))}
+        </div>
       </div>
     );
   return (
     <div
       aria-labelledby={tabId("fleet-selection-stats", mode)}
-      className="fleetSelectionStatsTable telemetryMode"
       id="fleet-selection-stats-tabpanel"
       role="tabpanel"
     >
-      <div className="fleetSelectionStatsRow heading">
-        <span>VPS</span>
-        <span>CPU</span>
-        <span>RAM used</span>
-        <span>Disk free</span>
-        <span>Network</span>
-        <span>Samples</span>
+      <div
+        aria-label="Selected VPS telemetry comparison"
+        className="fleetSelectionStatsTable telemetryMode"
+        role="table"
+      >
+        <div className="fleetSelectionStatsRow heading" role="row">
+          <span role="columnheader">VPS</span>
+          <span role="columnheader">CPU</span>
+          <span role="columnheader">RAM used</span>
+          <span role="columnheader">Disk free</span>
+          <span role="columnheader">Network</span>
+          <span role="columnheader">Samples</span>
+        </div>
+        {rows.map((agent) => {
+          const rollup = latestRollups.get(agent.id) ?? null;
+          const rates = latestNetworkRates.get(agent.id) ?? [];
+          return (
+            <div className="fleetSelectionStatsRow" key={agent.id} role="row">
+              <span role="cell" title={agent.id}>
+                {formatVpsName(agent, vpsNameDisplayMode)}
+              </span>
+              <span role="cell">{formatLoad(rollup?.cpu_load_1_avg)}</span>
+              <span role="cell">{formatMemoryUsed(rollup)}</span>
+              <span role="cell">{formatDiskFree(rollup)}</span>
+              <span role="cell">{formatNetworkRateSummary(rates, rollup)}</span>
+              <span role="cell">{formatRollupSamples(rollup)}</span>
+            </div>
+          );
+        })}
       </div>
-      {rows.map((agent) => {
-        const rollup = latestRollups.get(agent.id) ?? null;
-        const rates = latestNetworkRates.get(agent.id) ?? [];
-        return (
-          <div className="fleetSelectionStatsRow" key={agent.id}>
-            <span title={agent.id}>
-              {formatVpsName(agent, vpsNameDisplayMode)}
-            </span>
-            <span>{formatLoad(rollup?.cpu_load_1_avg)}</span>
-            <span>{formatMemoryUsed(rollup)}</span>
-            <span>{formatDiskFree(rollup)}</span>
-            <span>{formatNetworkRateSummary(rates, rollup)}</span>
-            <span>{formatRollupSamples(rollup)}</span>
-          </div>
-        );
-      })}
     </div>
   );
 }
@@ -3543,77 +3459,6 @@ function seedSingleFileBrowser(agent: AgentView) {
   }
 }
 
-function resourcePercentChartData(rollups: TelemetryRollupRecord[]) {
-  const sorted = sortRollups(rollups);
-  return {
-    times: sorted.map((rollup) => rollup.bucket_start),
-    lines: [
-      {
-        color: fleetChartColors[0],
-        label: "RAM used",
-        values: sorted.map((rollup) => memoryUsedRatio(rollup)),
-      },
-      {
-        color: fleetChartColors[1],
-        label: "Disk free",
-        values: sorted.map((rollup) => diskFreeRatio(rollup)),
-      },
-    ] satisfies TimeSeriesChartLine[],
-  };
-}
-function cpuLoadChartData(rollups: TelemetryRollupRecord[]) {
-  const sorted = sortRollups(rollups);
-  return {
-    times: sorted.map((rollup) => rollup.bucket_start),
-    lines: [
-      {
-        color: fleetChartColors[2],
-        label: "CPU load",
-        values: sorted.map((rollup) => rollup.cpu_load_1_avg),
-      },
-    ] satisfies TimeSeriesChartLine[],
-  };
-}
-function networkRateChartData(rates: TelemetryNetworkRateRecord[]) {
-  const times = sortedUniqueTimes(rates.map((rate) => rate.bucket_start));
-  const rx = new Map<string, number>();
-  const tx = new Map<string, number>();
-  for (const rate of rates) {
-    rx.set(
-      rate.bucket_start,
-      (rx.get(rate.bucket_start) ?? 0) + rate.rx_bps_avg,
-    );
-    tx.set(
-      rate.bucket_start,
-      (tx.get(rate.bucket_start) ?? 0) + rate.tx_bps_avg,
-    );
-  }
-  return {
-    times,
-    lines: [
-      {
-        color: fleetChartColors[0],
-        label: "RX",
-        values: times.map((time) => rx.get(time) ?? null),
-      },
-      {
-        color: fleetChartColors[3],
-        label: "TX",
-        values: times.map((time) => tx.get(time) ?? null),
-      },
-    ] satisfies TimeSeriesChartLine[],
-  };
-}
-function sortRollups(rollups: TelemetryRollupRecord[]) {
-  return rollups
-    .slice()
-    .sort((left, right) => left.bucket_start.localeCompare(right.bucket_start));
-}
-function sortedUniqueTimes(times: string[]) {
-  return Array.from(new Set(times)).sort((left, right) =>
-    left.localeCompare(right),
-  );
-}
 function memoryUsedRatio(
   rollup: TelemetryRollupRecord | null | undefined,
 ): number | null {
@@ -3635,21 +3480,6 @@ function networkRateTotal(rates: TelemetryNetworkRateRecord[]) {
     (total, rate) => total + rate.rx_bps_avg + rate.tx_bps_avg,
     0,
   );
-}
-function formatChartPercent(value: number | null) {
-  return typeof value === "number" && Number.isFinite(value)
-    ? `${Math.round(value)}%`
-    : "-";
-}
-function formatChartLoad(value: number | null) {
-  return typeof value === "number" && Number.isFinite(value)
-    ? value.toFixed(2)
-    : "-";
-}
-function formatChartBitsPerSecond(value: number | null) {
-  return typeof value === "number" && Number.isFinite(value)
-    ? formatBitsPerSecond(value)
-    : "-";
 }
 function yesNo(value: boolean | null | undefined) {
   return value ? "yes" : "no";
@@ -8913,18 +8743,6 @@ function latestTelemetryRollupsByClient(rollups: TelemetryRollupRecord[]) {
     }
   }
   return latest;
-}
-
-function telemetryRecordsByClient<T extends { client_id: string }>(
-  records: T[],
-) {
-  const grouped = new Map<string, T[]>();
-  for (const record of records) {
-    const clientRecords = grouped.get(record.client_id) ?? [];
-    clientRecords.push(record);
-    grouped.set(record.client_id, clientRecords);
-  }
-  return grouped;
 }
 
 function latestTelemetryNetworkRatesByClient(

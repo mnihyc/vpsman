@@ -112,7 +112,7 @@ than allowing one agent to impersonate another.
 
 Install the agent with `deploy/install-agent.sh` or follow
 `02-install-agents.md`. After it connects, use the assigned display name in Fleet
-and the numerical client ID in exact target expressions.
+and the full client ID, such as `v-1`, in exact target expressions.
 
 ## 4. Organize And Inspect
 

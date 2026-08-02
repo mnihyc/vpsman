@@ -2,13 +2,14 @@ use anyhow::{Context, Result};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
 
 use crate::{
     model::{
         AgentIdentityView, AgentView, AuditLogView, AuthContext, ClientKeyRevocationView,
-        KeyLifecycleClientView, KeyLifecycleReportView, UpsertAgentIdentityRequest,
+        ClientStatusHistoryView, KeyLifecycleClientView, KeyLifecycleReportView,
+        UpsertAgentIdentityRequest,
     },
     repository::Repository,
     repository_jobs::{
@@ -19,6 +20,34 @@ use crate::{
 };
 
 const TAG_DISPLAY_ORDER_STEP: i64 = 1024;
+
+fn normalized_numeric_client_id_digits(client_id: &str) -> Option<String> {
+    let digits = client_id.strip_prefix("v-").unwrap_or(client_id);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let normalized = digits.trim_start_matches('0');
+    Some(if normalized.is_empty() {
+        "0".to_string()
+    } else {
+        normalized.to_string()
+    })
+}
+
+fn increment_decimal_digits(digits: &str) -> String {
+    let mut bytes = digits.as_bytes().to_vec();
+    for digit in bytes.iter_mut().rev() {
+        if *digit < b'9' {
+            *digit += 1;
+            return String::from_utf8(bytes).expect("decimal digits are valid UTF-8");
+        }
+        *digit = b'0';
+    }
+    let mut incremented = String::with_capacity(bytes.len() + 1);
+    incremented.push('1');
+    incremented.push_str(&String::from_utf8(bytes).expect("decimal digits are valid UTF-8"));
+    incremented
+}
 
 impl Repository {
     pub(crate) async fn preflight_agent_identity_upsert(
@@ -61,9 +90,13 @@ impl Repository {
                 if memory.hidden_clients.read().await.contains(client_id) {
                     anyhow::bail!("agent_identity_deactivated");
                 }
-                if memory.agents.read().await.iter().any(|agent| {
-                    agent.id == client_id && matches!(agent.status.as_str(), "revoked" | "deleted")
-                }) {
+                if memory
+                    .agents
+                    .read()
+                    .await
+                    .iter()
+                    .any(|agent| agent.id == client_id && agent.status == "deleted")
+                {
                     anyhow::bail!("agent_identity_deactivated");
                 }
                 let existing = memory
@@ -110,7 +143,7 @@ impl Repository {
                 if let Some(row) = row {
                     let hidden: bool = row.try_get("hidden")?;
                     let status: String = row.try_get("status")?;
-                    if hidden || matches!(status.as_str(), "revoked" | "deleted") {
+                    if hidden || status == "deleted" {
                         anyhow::bail!("agent_identity_deactivated");
                     }
                     let existing_key: Vec<u8> = row.try_get("public_key")?;
@@ -193,9 +226,13 @@ impl Repository {
                 if memory.hidden_clients.read().await.contains(&client_id) {
                     anyhow::bail!("agent_identity_deactivated");
                 }
-                if memory.agents.read().await.iter().any(|agent| {
-                    agent.id == client_id && matches!(agent.status.as_str(), "revoked" | "deleted")
-                }) {
+                if memory
+                    .agents
+                    .read()
+                    .await
+                    .iter()
+                    .any(|agent| agent.id == client_id && agent.status == "deleted")
+                {
                     anyhow::bail!("agent_identity_deactivated");
                 }
                 let existing = memory
@@ -228,6 +265,17 @@ impl Repository {
                         .iter()
                         .find(|agent| agent.id == client_id)
                         .and_then(|agent| agent.process_incarnation_id)
+                } else {
+                    None
+                };
+                let prior_status = if request.replace_existing_key {
+                    memory
+                        .agents
+                        .read()
+                        .await
+                        .iter()
+                        .find(|agent| agent.id == client_id)
+                        .map(|agent| agent.status.clone())
                 } else {
                     None
                 };
@@ -298,7 +346,7 @@ impl Repository {
                 let view = {
                     let mut agents = memory.agents.write().await;
                     if let Some(agent) = agents.iter_mut().find(|agent| agent.id == client_id) {
-                        if matches!(agent.status.as_str(), "revoked" | "deleted") {
+                        if agent.status == "deleted" {
                             anyhow::bail!("agent_identity_deactivated");
                         }
                         if request.display_name.is_some() {
@@ -342,12 +390,43 @@ impl Repository {
                         AgentIdentityView {
                             client_id: client_id.to_string(),
                             display_name,
-                            status: "offline".to_string(),
+                            status: "never".to_string(),
                             current_public_key_sha256_hex: public_key_sha256_hex.clone(),
                             tags: agent_tags,
                         }
                     }
                 };
+                if let Some(prior_status) = prior_status.filter(|status| status != "offline") {
+                    memory
+                        .client_status_history
+                        .write()
+                        .await
+                        .push(ClientStatusHistoryView {
+                            id: Uuid::new_v4(),
+                            client_id: client_id.clone(),
+                            from_status: Some(prior_status.clone()),
+                            to_status: "offline".to_string(),
+                            reason: "client_key_replaced".to_string(),
+                            metadata: json!({
+                                "operator_id": operator.operator.id,
+                                "recovery_with_new_key": true,
+                            }),
+                            created_at: unix_now().to_string(),
+                        });
+                    self.record_client_status_webhook_event(
+                        &client_id,
+                        Some(&prior_status),
+                        "offline",
+                        "client_key_replaced",
+                        json!({
+                            "operator_id": operator.operator.id,
+                            "recovery_with_new_key": true,
+                            "origin_kind": "operator_request",
+                            "component": "agent-identity-controller",
+                        }),
+                    )
+                    .await?;
+                }
                 memory.audits.write().await.push(AuditLogView {
                     id: Uuid::new_v4(),
                     actor_id: Some(operator.operator.id),
@@ -422,7 +501,7 @@ impl Repository {
                 if let Some(row) = existing.as_ref() {
                     let hidden: bool = row.try_get("hidden")?;
                     let status: String = row.try_get("status")?;
-                    if hidden || matches!(status.as_str(), "revoked" | "deleted") {
+                    if hidden || status == "deleted" {
                         anyhow::bail!("agent_identity_deactivated");
                     }
                     let existing_key: Vec<u8> = row.try_get("public_key")?;
@@ -503,6 +582,22 @@ impl Repository {
                     .bind(request.replace_existing_key)
                     .execute(&mut *tx)
                     .await?;
+                    if request.replace_existing_key && status != "offline" {
+                        crate::repository_ingest::record_client_status_transition_in_tx(
+                            &mut tx,
+                            &client_id,
+                            Some(&status),
+                            "offline",
+                            "client_key_replaced",
+                            json!({
+                                "operator_id": operator.operator.id,
+                                "recovery_with_new_key": true,
+                            }),
+                            "operator_request",
+                            "agent-identity-controller",
+                        )
+                        .await?;
+                    }
                 } else {
                     sqlx::query(
                         r#"
@@ -574,35 +669,48 @@ impl Repository {
     async fn generate_auto_client_id(&self) -> Result<String> {
         match self {
             Self::Memory(memory) => {
-                let max_numeric = memory
+                let max_numeric_digits = memory
                     .agents
                     .read()
                     .await
                     .iter()
-                    .filter_map(|agent| {
-                        agent
-                            .id
-                            .strip_prefix("v-")
-                            .unwrap_or(&agent.id)
-                            .parse::<u64>()
-                            .ok()
+                    .filter_map(|agent| normalized_numeric_client_id_digits(&agent.id))
+                    .max_by(|left, right| {
+                        left.len().cmp(&right.len()).then_with(|| left.cmp(right))
                     })
-                    .max()
-                    .unwrap_or(0);
-                Ok(format!("v-{}", max_numeric + 1))
+                    .unwrap_or_else(|| "0".to_string());
+                let next = increment_decimal_digits(&max_numeric_digits);
+                Ok(format!("v-{next}"))
             }
             Self::Postgres(pool) => {
-                let row = sqlx::query(
+                let max_numeric_digits = sqlx::query_scalar::<_, String>(
                     r#"
-                    SELECT COALESCE(MAX(regexp_replace(id, '^v-', '')::bigint), 0) AS max_id
-                    FROM clients
-                    WHERE id ~ '^(v-)?\d+$'
+                    WITH numeric_client_ids AS (
+                        SELECT COALESCE(
+                            NULLIF(
+                                regexp_replace(
+                                    regexp_replace(id, '^v-', ''),
+                                    '^0+',
+                                    ''
+                                ),
+                                ''
+                            ),
+                            '0'
+                        ) AS digits
+                        FROM clients
+                        WHERE id ~ '^(v-)?[0-9]+$'
+                    )
+                    SELECT digits
+                    FROM numeric_client_ids
+                    ORDER BY length(digits) DESC, digits DESC
+                    LIMIT 1
                     "#,
                 )
-                .fetch_one(pool)
-                .await?;
-                let max_id: i64 = row.try_get("max_id")?;
-                Ok(format!("v-{}", max_id + 1))
+                .fetch_optional(pool)
+                .await?
+                .unwrap_or_else(|| "0".to_string());
+                let next = increment_decimal_digits(&max_numeric_digits);
+                Ok(format!("v-{next}"))
             }
         }
     }
@@ -663,8 +771,8 @@ impl Repository {
                             "client_key_revoked: target skipped before dispatch",
                         )
                         .await?;
-                    let removed_configuration_preset_override_count =
-                        mark_memory_agent_revoked(memory, client_id).await;
+                    let prior_status =
+                        mark_memory_agent_revoked(memory, client_id, reason.as_deref()).await;
                     memory.audits.write().await.push(AuditLogView {
                         id: Uuid::new_v4(),
                         actor_id: Some(operator.operator.id),
@@ -676,7 +784,6 @@ impl Repository {
                             "public_key_sha256_hex": existing.public_key_sha256_hex,
                             "reason": existing.reason,
                             "recovered_existing_revocation": true,
-                            "removed_configuration_preset_override_count": removed_configuration_preset_override_count,
                             "agent_lost_job_ids": agent_lost_job_ids,
                             "skipped_unstarted_job_ids": skipped_job_ids,
                             "result": "succeeded",
@@ -689,6 +796,22 @@ impl Repository {
                         }),
                         created_at: unix_now().to_string(),
                     });
+                    if let Some(prior_status) = prior_status {
+                        self.record_client_status_webhook_event(
+                            client_id,
+                            Some(&prior_status),
+                            "revoked",
+                            "client_key_revoked",
+                            json!({
+                                "reason": reason,
+                                "access_deactivated": true,
+                                "recovery_allowed_with_new_key": true,
+                                "origin_kind": "operator_request",
+                                "component": "client-key-controller",
+                            }),
+                        )
+                        .await?;
+                    }
                     return Ok(existing);
                 }
 
@@ -696,7 +819,7 @@ impl Repository {
                     id: Uuid::new_v4(),
                     client_id: client_id.to_string(),
                     public_key_sha256_hex,
-                    reason,
+                    reason: reason.clone(),
                     revoked_by: Some(operator.operator.id),
                     created_at: unix_now().to_string(),
                 };
@@ -725,8 +848,8 @@ impl Repository {
                         "client_key_revoked: target skipped before dispatch",
                     )
                     .await?;
-                let removed_configuration_preset_override_count =
-                    mark_memory_agent_revoked(memory, client_id).await;
+                let prior_status =
+                    mark_memory_agent_revoked(memory, client_id, reason.as_deref()).await;
                 memory.audits.write().await.push(AuditLogView {
                     id: Uuid::new_v4(),
                     actor_id: Some(operator.operator.id),
@@ -737,7 +860,6 @@ impl Repository {
                         "client_id": client_id,
                         "public_key_sha256_hex": record.public_key_sha256_hex,
                         "reason": record.reason,
-                        "removed_configuration_preset_override_count": removed_configuration_preset_override_count,
                         "agent_lost_job_ids": agent_lost_job_ids,
                         "skipped_unstarted_job_ids": skipped_job_ids,
                         "result": "succeeded",
@@ -750,6 +872,22 @@ impl Repository {
                     }),
                     created_at: unix_now().to_string(),
                 });
+                if let Some(prior_status) = prior_status {
+                    self.record_client_status_webhook_event(
+                        client_id,
+                        Some(&prior_status),
+                        "revoked",
+                        "client_key_revoked",
+                        json!({
+                            "reason": reason,
+                            "access_deactivated": true,
+                            "recovery_allowed_with_new_key": true,
+                            "origin_kind": "operator_request",
+                            "component": "client-key-controller",
+                        }),
+                    )
+                    .await?;
+                }
                 Ok(record)
             }
             Self::Postgres(pool) => {
@@ -758,8 +896,8 @@ impl Repository {
                 let row = sqlx::query(
                     r#"
                     SELECT public_key, status, process_incarnation_id
-                    FROM clients
-                    WHERE id = $1 AND hidden_at IS NULL
+                    FROM visible_clients
+                    WHERE id = $1
                     FOR UPDATE
                     "#,
                 )
@@ -794,10 +932,9 @@ impl Repository {
                         } else {
                             Vec::new()
                         };
-                    let removed_configuration_preset_override_count = mark_postgres_agent_revoked(
+                    mark_postgres_agent_revoked(
                         &mut tx,
                         client_id,
-                        operator.operator.id,
                         reason.as_deref(),
                         &prior_status,
                     )
@@ -825,7 +962,6 @@ impl Repository {
                         "public_key_sha256_hex": existing.public_key_sha256_hex,
                         "reason": existing.reason,
                         "recovered_existing_revocation": true,
-                        "removed_configuration_preset_override_count": removed_configuration_preset_override_count,
                         "agent_lost_job_ids": agent_lost_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
                         "skipped_unstarted_job_ids": skipped_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
                         "result": "succeeded",
@@ -879,14 +1015,8 @@ impl Repository {
                     } else {
                         Vec::new()
                     };
-                let removed_configuration_preset_override_count = mark_postgres_agent_revoked(
-                    &mut tx,
-                    client_id,
-                    operator.operator.id,
-                    reason.as_deref(),
-                    &prior_status,
-                )
-                .await?;
+                mark_postgres_agent_revoked(&mut tx, client_id, reason.as_deref(), &prior_status)
+                    .await?;
                 let skipped_job_ids = skip_unstarted_queued_targets_for_client_in_tx(
                     &mut tx,
                     client_id,
@@ -909,7 +1039,6 @@ impl Repository {
                     "client_id": client_id,
                     "public_key_sha256_hex": public_key_sha256_hex,
                     "reason": reason,
-                    "removed_configuration_preset_override_count": removed_configuration_preset_override_count,
                     "agent_lost_job_ids": agent_lost_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
                     "skipped_unstarted_job_ids": skipped_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
                     "result": "succeeded",
@@ -975,6 +1104,9 @@ impl Repository {
     }
 
     pub(crate) async fn key_lifecycle_report(&self) -> Result<KeyLifecycleReportView> {
+        // This is a suggestion, not a reservation. Concurrent registrations may
+        // legitimately conflict and retry with the next report value.
+        let suggested_client_id = self.generate_auto_client_id().await?;
         match self {
             Self::Memory(memory) => {
                 let agents = memory.agents.read().await.clone();
@@ -1020,6 +1152,7 @@ impl Repository {
                     .filter(|client| client.current_public_key_sha256_hex.is_some())
                     .count();
                 Ok(KeyLifecycleReportView {
+                    suggested_client_id,
                     direct_identity_client_count,
                     current_key_revoked_count,
                     revocation_count: revocations.len(),
@@ -1034,8 +1167,7 @@ impl Repository {
                 let client_rows = sqlx::query(
                     r#"
                     SELECT id, display_name, status, public_key
-                    FROM clients
-                    WHERE hidden_at IS NULL
+                    FROM visible_clients
                     ORDER BY display_name, id
                     "#,
                 )
@@ -1138,6 +1270,7 @@ impl Repository {
                     .filter(|client| client.current_public_key_sha256_hex.is_some())
                     .count();
                 Ok(KeyLifecycleReportView {
+                    suggested_client_id,
                     direct_identity_client_count,
                     current_key_revoked_count,
                     revocation_count: usize::try_from(revocation_count)
@@ -1233,8 +1366,8 @@ impl Repository {
                 let row = sqlx::query(
                     r#"
                     SELECT public_key
-                    FROM clients
-                    WHERE id = $1 AND hidden_at IS NULL
+                    FROM visible_clients
+                    WHERE id = $1
                     "#,
                 )
                 .bind(client_id)
@@ -1253,13 +1386,10 @@ impl Repository {
 async fn mark_memory_agent_revoked(
     memory: &crate::repository::MemoryState,
     client_id: &str,
-) -> usize {
+    request_reason: Option<&str>,
+) -> Option<String> {
     let now = unix_now().to_string();
-    memory
-        .hidden_clients
-        .write()
-        .await
-        .insert(client_id.to_string());
+    let mut prior_status = None;
     if let Some(agent) = memory
         .agents
         .write()
@@ -1267,10 +1397,33 @@ async fn mark_memory_agent_revoked(
         .iter_mut()
         .find(|agent| agent.id == client_id)
     {
+        if agent.status != "revoked" {
+            prior_status = Some(agent.status.clone());
+        }
         agent.status = "revoked".to_string();
         agent.process_incarnation_id = None;
         agent.stale_since = None;
         agent.stale_reason = None;
+    }
+    if let Some(prior_status) = prior_status.as_ref() {
+        memory
+            .client_status_history
+            .write()
+            .await
+            .push(ClientStatusHistoryView {
+                id: Uuid::new_v4(),
+                client_id: client_id.to_string(),
+                from_status: Some(prior_status.clone()),
+                to_status: "revoked".to_string(),
+                reason: "client_key_revoked".to_string(),
+                metadata: json!({
+                    "reason": request_reason,
+                    "frontend_visible": true,
+                    "access_deactivated": true,
+                    "recovery_allowed_with_new_key": true,
+                }),
+                created_at: now.clone(),
+            });
     }
     for session in memory.gateway_sessions.write().await.iter_mut() {
         if session.client_id == client_id && session.status == "active" {
@@ -1280,27 +1433,19 @@ async fn mark_memory_agent_revoked(
             session.end_reason = Some("client_key_revoked".to_string());
         }
     }
-    let mut overrides = memory.configuration_preset_overrides.write().await;
-    let previous_count = overrides.len();
-    overrides.retain(|override_record| override_record.client_id != client_id);
-    previous_count.saturating_sub(overrides.len())
+    prior_status
 }
 
 async fn mark_postgres_agent_revoked(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     client_id: &str,
-    operator_id: Uuid,
     request_reason: Option<&str>,
     prior_status: &str,
-) -> Result<u64> {
-    let hidden_reason = request_reason.unwrap_or("client_key_revoked");
+) -> Result<()> {
     sqlx::query(
         r#"
         UPDATE clients
         SET
-            hidden_at = COALESCE(hidden_at, now()),
-            hidden_by = COALESCE(hidden_by, $2),
-            hidden_reason = COALESCE($3, hidden_reason),
             status = 'revoked',
             process_incarnation_id = NULL,
             stale_since = NULL,
@@ -1310,16 +1455,8 @@ async fn mark_postgres_agent_revoked(
         "#,
     )
     .bind(client_id)
-    .bind(operator_id)
-    .bind(hidden_reason)
     .execute(&mut **tx)
     .await?;
-    let removed_configuration_preset_override_count =
-        sqlx::query("DELETE FROM client_configuration_preset_overrides WHERE client_id = $1")
-            .bind(client_id)
-            .execute(&mut **tx)
-            .await?
-            .rows_affected();
     sqlx::query(
         r#"
         UPDATE gateway_sessions
@@ -1335,26 +1472,24 @@ async fn mark_postgres_agent_revoked(
     .execute(&mut **tx)
     .await?;
     if prior_status != "revoked" {
-        sqlx::query(
-            r#"
-            INSERT INTO client_status_history (
-                id, client_id, from_status, to_status, reason, metadata
-            )
-            VALUES ($1, $2, $3, 'revoked', 'client_key_revoked', $4)
-            "#,
+        crate::repository_ingest::record_client_status_transition_in_tx(
+            tx,
+            client_id,
+            Some(prior_status),
+            "revoked",
+            "client_key_revoked",
+            json!({
+                "reason": request_reason,
+                "frontend_visible": true,
+                "access_deactivated": true,
+                "recovery_allowed_with_new_key": true,
+            }),
+            "operator_request",
+            "client-key-controller",
         )
-        .bind(Uuid::new_v4())
-        .bind(client_id)
-        .bind(prior_status)
-        .bind(json!({
-            "reason": request_reason,
-            "frontend_visible": false,
-            "access_deactivated": true,
-        }))
-        .execute(&mut **tx)
         .await?;
     }
-    Ok(removed_configuration_preset_override_count)
+    Ok(())
 }
 
 async fn fetch_postgres_agent_identity(
@@ -1369,10 +1504,10 @@ async fn fetch_postgres_agent_identity(
             c.status,
             c.public_key,
             COALESCE(array_remove(array_agg(t.name ORDER BY t.display_order, t.created_at, t.name), NULL), ARRAY[]::TEXT[]) AS tags
-        FROM clients c
+        FROM visible_clients c
         LEFT JOIN client_tags ct ON ct.client_id = c.id
         LEFT JOIN tags t ON t.id = ct.tag_id
-        WHERE c.id = $1 AND c.hidden_at IS NULL
+        WHERE c.id = $1
         GROUP BY c.id, c.display_name, c.status, c.public_key
         "#,
     )
@@ -1396,6 +1531,50 @@ pub(crate) async fn lock_postgres_agent_identity_lifecycle(
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('vpsman.agent_key_lifecycle'))")
         .execute(&mut **tx)
         .await?;
+    Ok(())
+}
+
+pub(crate) async fn require_visible_postgres_clients_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_ids: &[String],
+    error_code: &str,
+) -> Result<()> {
+    lock_postgres_agent_identity_lifecycle(tx).await?;
+    let expected = client_ids.iter().cloned().collect::<BTreeSet<_>>();
+    if expected.is_empty() {
+        return Ok(());
+    }
+    let visible = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT id
+        FROM visible_clients
+        WHERE id = ANY($1::text[])
+        ORDER BY id
+        FOR UPDATE
+        "#,
+    )
+    .bind(expected.iter().cloned().collect::<Vec<_>>())
+    .fetch_all(&mut **tx)
+    .await?
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    anyhow::ensure!(visible == expected, error_code.to_string());
+    Ok(())
+}
+
+pub(crate) async fn require_visible_memory_clients(
+    memory: &crate::repository::MemoryState,
+    client_ids: &[String],
+    error_code: &str,
+) -> Result<()> {
+    let expected = client_ids.iter().collect::<BTreeSet<_>>();
+    let hidden = memory.hidden_clients.read().await;
+    let agents = memory.agents.read().await;
+    let all_visible = expected.iter().all(|client_id| {
+        !hidden.contains(client_id.as_str())
+            && agents.iter().any(|agent| agent.id == client_id.as_str())
+    });
+    anyhow::ensure!(all_visible, error_code.to_string());
     Ok(())
 }
 

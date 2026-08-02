@@ -522,7 +522,10 @@ pub(crate) fn telemetry_rollups(
     latest: bool,
 ) -> Result<()> {
     if let Some(bucket_secs) = bucket_secs {
-        anyhow::ensure!(bucket_secs == 60, "--bucket-secs must be 60");
+        anyhow::ensure!(
+            bucket_secs >= 60 && bucket_secs % 60 == 0,
+            "--bucket-secs must be at least 60 and divisible by 60"
+        );
     }
     let mut path = format!("/api/v1/telemetry/rollups?limit={}", limit.clamp(1, 200));
     if let Some(client_id) = client_id {
@@ -554,7 +557,10 @@ pub(crate) fn telemetry_network_rates(
     latest: bool,
 ) -> Result<()> {
     if let Some(bucket_secs) = bucket_secs {
-        anyhow::ensure!(bucket_secs == 60, "--bucket-secs must be 60");
+        anyhow::ensure!(
+            bucket_secs >= 60 && bucket_secs % 60 == 0,
+            "--bucket-secs must be at least 60 and divisible by 60"
+        );
     }
     let mut path = format!(
         "/api/v1/telemetry/network-rates?limit={}",

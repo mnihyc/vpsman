@@ -117,6 +117,7 @@ export function RemoteOperationsPanel({
   commandTemplates,
   commandTemplatesTruncated,
   dispatchPreset,
+  fleetEvidenceAvailable,
   fileTransfers,
   fileTransfersTruncated,
   fileTransferSources,
@@ -165,6 +166,7 @@ export function RemoteOperationsPanel({
   commandTemplates: CommandTemplateRecord[];
   commandTemplatesTruncated: boolean;
   dispatchPreset?: JobDispatchPreset | null;
+  fleetEvidenceAvailable: boolean;
   fileTransfers: FileTransferSessionRecord[];
   fileTransfersTruncated: boolean;
   fileTransferSources: FileTransferSourceArtifactRecord[];
@@ -314,8 +316,9 @@ export function RemoteOperationsPanel({
   function updateProcessRoute(
     mode: ProcessWorkspaceMode,
     clientId = processRoute.clientId,
+    historyMode: "push" | "replace" = "push",
   ) {
-    setProcessWorkspaceRoute(mode, clientId, "push");
+    setProcessWorkspaceRoute(mode, clientId, historyMode);
     setProcessRoute({ clientId, mode });
   }
 
@@ -398,6 +401,7 @@ export function RemoteOperationsPanel({
           <FileBrowserPanel
             agents={agents}
             fileTransfers={fileTransfers}
+            fleetEvidenceAvailable={fleetEvidenceAvailable}
             loading={loading}
             onCreateJob={onCreateJob}
             onLoadOutputs={onLoadOutputs}
@@ -483,6 +487,7 @@ export function RemoteOperationsPanel({
               <ProcessSupervisorInventoryPanel
                 agents={agents}
                 clientLabel={clientLabel}
+                fleetEvidenceAvailable={fleetEvidenceAvailable}
                 initialTargetClientId={
                   initialTargetIntent?.destination === "processes"
                     ? initialTargetIntent.clientId
@@ -502,8 +507,8 @@ export function RemoteOperationsPanel({
                 onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
                 onInitialTargetConsumed={onInitialTargetIntentConsumed}
                 onRefresh={onRefresh}
-                onSelectedClientIdChange={(clientId) =>
-                  updateProcessRoute("managed", clientId)
+                onSelectedClientIdChange={(clientId, historyMode) =>
+                  updateProcessRoute("managed", clientId, historyMode)
                 }
                 privilegeMaterial={privilegeMaterial}
                 selectedClientId={processRoute.clientId}

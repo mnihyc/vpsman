@@ -2493,6 +2493,18 @@
   min-width: 0;
 }
 
+.topologyEvidenceStatusCell,
+.topologyEvidenceTimeCell {
+  display: grid;
+  justify-items: start;
+  gap: 4px;
+  min-width: 0;
+}
+
+.topologyEvidenceMobileLabel {
+  display: none;
+}
+
 .topologyMetric strong,
 .topologyMetric small {
   min-width: 0;
@@ -2817,26 +2829,6 @@
   font-size: 12px;
 }
 
-.handoffBulkBar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  padding: 12px 18px;
-  border-top: 1px solid var(--border-subtle);
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--canvas);
-}
-
-.handoffBulkActions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  min-width: 0;
-  flex-wrap: wrap;
-}
-
 .handoffModeControl {
   display: flex;
   align-items: center;
@@ -2847,25 +2839,12 @@
   font-weight: 700;
 }
 
+.handoffModeControl > span {
+  white-space: nowrap;
+}
+
 .handoffModeControl select {
   min-width: 150px;
-}
-
-.transferRowSelect {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  min-height: 30px;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.transferRowSelect input {
-  width: 15px;
-  height: 15px;
-  margin: 0;
-  accent-color: var(--primary);
 }
 
 .sourceArtifactAdvanced {
@@ -3618,94 +3597,6 @@
   color: var(--warning-text);
 }
 
-.processMobileList {
-  display: none;
-}
-
-.processMobileCard {
-  display: grid;
-  gap: 12px;
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--surface);
-  padding: 14px 16px;
-}
-
-.processMobileCardHeader {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-  min-width: 0;
-}
-
-.processMobileCardHeader > span:first-child {
-  display: grid;
-  flex: 1 1 150px;
-  gap: 3px;
-  min-width: 0;
-}
-
-.processMobileCardHeader .status {
-  flex: 0 0 auto;
-  overflow: visible;
-  text-overflow: clip;
-  white-space: normal;
-}
-
-.processMobileCardHeader strong,
-.processMobileCardHeader small {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.processMobileCardHeader small,
-.processMobileDetail {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.processMobileMetricGrid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  margin: 0;
-}
-
-.processMobileMetricGrid div {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  background: var(--surface-subtle);
-  padding: 8px;
-}
-
-.processMobileMetricGrid dt {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 800;
-  text-transform: uppercase;
-}
-
-.processMobileMetricGrid dd {
-  margin: 0;
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 750;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.processMobileDetail {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
 .processEvidenceValue {
   overflow-wrap: anywhere;
   word-break: break-word;
@@ -3743,87 +3634,6 @@
 .processInventoryGridShell .status {
   line-height: 1.2;
   white-space: nowrap;
-}
-
-.processInventoryGridShell .processRowActions {
-  flex-wrap: nowrap;
-}
-
-.processInventoryGridShell .processActionButton {
-  width: 32px;
-  padding: 0;
-}
-
-.processInventoryGridShell .processActionButton span {
-  display: none;
-}
-
-.processRowActions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
-.processActionButton {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  min-width: 0;
-  min-height: 28px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 650;
-  line-height: 1;
-  padding: 0 7px;
-}
-
-.processActionButton svg {
-  flex: 0 0 auto;
-}
-
-.processActionButton span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.processActionButton:hover:not(:disabled) {
-  border-color: var(--primary-border);
-  background: var(--primary-selected);
-  color: var(--primary-text);
-}
-
-.processActionButton:focus-visible {
-  border-color: var(--primary);
-  outline: 0;
-  box-shadow: var(--focus-ring);
-}
-
-.processActionButton:disabled {
-  background: var(--surface-neutral);
-  color: var(--placeholder);
-  cursor: not-allowed;
-}
-
-.processActionButton.dangerAction {
-  color: var(--danger);
-}
-
-.processActionButton.dangerAction:disabled {
-  color: var(--placeholder);
-}
-
-.processActionButton.dangerAction:hover:not(:disabled) {
-  border-color: var(--danger-border);
-  background: var(--danger-soft);
-  color: var(--danger-strong);
 }
 
 .compactRowActions {
@@ -4755,14 +4565,6 @@
     width: 100%;
   }
 
-  .processInventoryGridShell {
-    display: none;
-  }
-
-  .processMobileList {
-    display: grid;
-  }
-
   .processSupervisorSummaryStrip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     padding: 10px 14px;
@@ -4808,15 +4610,6 @@
   .osUpdateApplyEvidence {
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .processMobileCard .processRowActions {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .processMobileCard .processActionButton {
-    width: 100%;
   }
 
   .targetImpactGrid {

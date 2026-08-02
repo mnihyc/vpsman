@@ -65,6 +65,13 @@ Every update must keep these boundaries explicit:
 
 - The current migrations are a canonical fresh-database model, not an in-place
   upgrade path from an earlier schema.
+- Use the canonical `visible_clients` view for live operator workflows and
+  assignments. Use the base `clients` table only when identity lifecycle or
+  historical evidence must include tombstoned VPSs; do not hide deleted VPSs by
+  deleting their related records. VPS deletion is an irreversible hidden
+  tombstone and its ID cannot be reused. Key revocation keeps the VPS visible,
+  blocks the old key permanently, and permits recovery of the same ID only by
+  explicitly assigning a different key.
 - Change a canonical migration only when the product decision explicitly
   accepts a clean break. Update every code, test, and documentation consumer in
   the same change.
@@ -79,8 +86,8 @@ Every update must keep these boundaries explicit:
 - Write the canonical non-empty `result`, `origin_kind`, and `component` fields
   at the producer. Do not derive an outcome or origin in repository reads or UI
   presentation. `origin_kind` is one of `operator_request`, `authentication`,
-  `control_plane`, `gateway_ingest`, or `worker`; `component` is the stable name
-  of the writer.
+  `control_plane`, `gateway_ingest`, `worker`, or `public_share`; `component` is
+  the stable name of the writer.
 - Attribute operator work with `operator_id`, `operator_username`,
   `operator_role`, and `operator_session_id`. Link affected resources with their
   exact canonical keys, including `job_id`, `client_id`, `target_client_ids`,
@@ -121,6 +128,49 @@ Every update must keep these boundaries explicit:
   is an error; never fall back around it. If neither source is configured, keep
   the endpoint visibly unconfigured and reject dispatch.
 
+### Monitoring changes
+
+- Preserve one model across resource, network, traffic, and general Ping data:
+  accepted high-resolution samples for realtime/short queries, and
+  minute-derived authoritative long-term history. Defaults are 90 and 3,650
+  days respectively. Do not introduce an hourly/day authority or a parallel
+  retention model.
+- Materialize the authoritative minute before its accepted sample can be
+  pruned. Resource, network, and Ping storage may merge settled adjacent logical
+  minutes only when their complete retained values are exactly equivalent.
+  Keep spans minute-aligned and query them with correct duration/sample
+  weighting. Traffic counters remain minute-derived and keep selector-aware
+  per-stream baselines. Preserve counter-epoch changes and counter decreases as
+  reset evidence: reset-only buckets retain nullable volumes and chart gaps;
+  mixed buckets retain valid selected deltas plus their reset count. Never turn
+  a reset into zero traffic.
+- Keep **15m** as the existing rolling 15-minute sample view. 15m through 90d use
+  high-resolution data only while the complete range is retained; 180d, 1y,
+  All, and older custom ranges use minute history. Preserve missing intervals,
+  sample count, coverage, extrema, freshness, and CSV behavior across the
+  source boundary.
+- Keep CPU utilization optional and derived from valid `/proc/stat` deltas;
+  never substitute load. Live interface activity and configured authoritative
+  traffic accounting are different metrics and must remain labeled separately.
+  Keep traffic history diagnostic: RX and TX are initially visible, Total is
+  legend-selectable, and selector direction affects quota accounting rather
+  than diagnostic-series visibility. A configured date boundary restarts both
+  RX and TX cycle usage together even when only one direction is quota-billed.
+- Ping selectors resolve to frozen assignments. Probe-affecting edits advance a
+  generation; current/history reads must not mix generations. Preserve the
+  explicit primary selection and never silently replace a removed or disabled
+  primary.
+- Monitoring-share target and visibility scope are immutable after creation.
+  Store only the URL-secret digest, keep public DTOs allowlisted, and audit each
+  distinct visitor bootstrap without auditing every poll. Public projections
+  must not reuse private fleet DTOs. Unauthenticated visitor reads belong only
+  under `/api/v1/public/monitoring-shares/{share_id}/bootstrap` and `/data`;
+  authenticated management remains under `/api/v1/monitoring-shares`.
+- Update memory and PostgreSQL behavior together. Test source-tier selection,
+  adaptive-span equivalence, compaction-before-pruning, partial coverage/gaps,
+  Ping generation/failure modes, frozen selectors, primary uniqueness, share
+  expiry/extension/revocation, visitor evidence, and public-field allowlists.
+
 ### Console interaction changes
 
 - Use the shared searchable VPS combobox for one-VPS fields. A listed choice
@@ -132,12 +182,19 @@ Every update must keep these boundaries explicit:
 - Anchor suggestions to their input. Place them directly below when the
   rendered results fit, otherwise directly above, and keep them inside the
   viewport.
+- Use `ConsoleDataGrid` for operator registries. It is the common contract for
+  search, sorting, pagination, selectable rows, resizable/reorderable/hideable
+  columns, saved table preferences, keyboard access, and responsive cards.
+  A bounded read-only summary, comparison, or chart companion may keep a
+  purpose-built layout, but it must expose explicit headings and table
+  semantics when the visual content is tabular.
 - Put create and refresh controls in the table header. Put selected-row
   operations in the header **Actions** menu; expose the same row operations by
   right-click on desktop. On mobile, keep selection and the header **Actions**
   menu available instead of repeating a large action set on every card. Use
-  row or card expansion for inspection. Do not add a fixed rightmost Action
-  column.
+  the shared V-chevron row or card expansion for inspection; navigate to a
+  separate page only when the detail is itself a substantial workflow. Do not
+  add a fixed rightmost Action column or a second selection/action bar.
 - Keep shared table pagination choices consistent through 1,000 rows per page;
   individual tables may retain a smaller task-appropriate initial page size.
 - Keep action feedback inside the workflow that produced it. Long status or
@@ -194,6 +251,10 @@ npm audit --audit-level=moderate
 - Run the matching smoke scripts for every affected boundary.
 - For UI changes, use a real browser, exercise correct and mistaken operations,
   and inspect every retained desktop/mobile screenshot.
+- For monitoring UI changes, inspect Comfortable and Compact grid/detail/share
+  states with 0, 1, 8, 20, 100, and 1,000 VPS fixtures. Confirm the complete
+  matching fleet remains reachable, both densities differ materially, range
+  controls preserve gaps, and missing data is never presented as healthy.
 - For fleet behavior, include offline, reconnecting, partial, stale, timeout,
   cancellation, duplicate, and recovery paths as relevant.
 - For deployment changes, render Compose, package the bundle, and perform an

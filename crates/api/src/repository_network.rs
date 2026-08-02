@@ -12,8 +12,13 @@ use vpsman_common::{
 };
 
 use crate::{
-    internal_operator::persisted_actor_id, model::*, repository::Repository,
-    repository_key_lifecycle::lock_postgres_agent_identity_lifecycle, unix_now,
+    internal_operator::persisted_actor_id,
+    model::*,
+    repository::Repository,
+    repository_key_lifecycle::{
+        require_visible_memory_clients, require_visible_postgres_clients_in_tx,
+    },
+    unix_now,
 };
 
 #[derive(Clone, Copy)]
@@ -549,6 +554,13 @@ impl Repository {
 
         let persisted = match self {
             Self::Memory(memory) => {
+                let _lifecycle = memory.agent_key_lifecycle.lock().await;
+                require_visible_memory_clients(
+                    memory,
+                    &[view.left_client_id.clone(), view.right_client_id.clone()],
+                    "tunnel_plan_endpoint_agent_not_found",
+                )
+                .await?;
                 let mut plans = memory.tunnel_plans.write().await;
                 if plans
                     .iter()
@@ -653,6 +665,13 @@ impl Repository {
         };
         let updated = match self {
             Self::Memory(memory) => {
+                let _lifecycle = memory.agent_key_lifecycle.lock().await;
+                require_visible_memory_clients(
+                    memory,
+                    &[plan.left_client_id.clone(), plan.right_client_id.clone()],
+                    "tunnel_plan_endpoint_agent_not_found",
+                )
+                .await?;
                 let mut plans = memory.tunnel_plans.write().await;
                 let existing_index = plans
                     .iter()
@@ -1755,23 +1774,12 @@ async fn lock_visible_postgres_tunnel_endpoints(
         left_client_id != right_client_id,
         "tunnel_plan_endpoints_must_differ"
     );
-    lock_postgres_agent_identity_lifecycle(tx).await?;
-    let rows = sqlx::query(
-        r#"
-        SELECT id
-        FROM clients
-        WHERE id IN ($1, $2)
-          AND hidden_at IS NULL
-          AND status <> 'deleted'
-        ORDER BY id
-        FOR UPDATE
-        "#,
+    require_visible_postgres_clients_in_tx(
+        tx,
+        &[left_client_id.to_string(), right_client_id.to_string()],
+        "tunnel_plan_endpoint_agent_not_found",
     )
-    .bind(left_client_id)
-    .bind(right_client_id)
-    .fetch_all(&mut **tx)
     .await?;
-    anyhow::ensure!(rows.len() == 2, "tunnel_plan_endpoint_agent_not_found");
     Ok(())
 }
 

@@ -145,6 +145,13 @@ impl Repository {
         let schedule_request = backup_policy_schedule_input(&request);
         let (schedule, metadata) = match self {
             Self::Memory(memory) => {
+                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
+                crate::repository_key_lifecycle::require_visible_memory_clients(
+                    memory,
+                    &schedule_request.target_client_ids,
+                    "schedule_fixed_targets_not_found",
+                )
+                .await?;
                 let mut schedules = memory.schedules.write().await;
                 let Some(schedule) = schedules.iter_mut().find(|schedule| {
                     schedule.id == schedule_id

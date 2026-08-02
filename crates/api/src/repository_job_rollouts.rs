@@ -749,7 +749,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        repository::MemoryState, tests::operation_job_request, tests::test_operator,
+        repository::MemoryState,
+        tests::{operation_job_request, seed_never_connected_memory_agent, test_operator},
         TargetDispatchOutcome,
     };
 
@@ -787,6 +788,9 @@ mod tests {
     #[tokio::test]
     async fn rollout_releases_only_reviewed_batches_and_survives_failure_pause() {
         let repo = Repository::Memory(MemoryState::default());
+        for client_id in ["client-a", "client-b", "client-c", "client-d"] {
+            seed_never_connected_memory_agent(&repo, client_id).await;
+        }
         let operator = test_operator();
         let request = rollout_request(&["client-a", "client-b", "client-c", "client-d"]);
         let job_id = Uuid::new_v4();
@@ -873,6 +877,17 @@ mod tests {
     #[tokio::test]
     async fn malformed_current_batch_is_paused_without_starving_healthy_rollout() {
         let repo = Repository::Memory(MemoryState::default());
+        for client_id in [
+            "broken-a",
+            "broken-b",
+            "broken-c",
+            "broken-d",
+            "healthy-a",
+            "healthy-b",
+            "healthy-c",
+        ] {
+            seed_never_connected_memory_agent(&repo, client_id).await;
+        }
         let operator = test_operator();
         let malformed_job_id = Uuid::new_v4();
         let mut malformed_request =
@@ -960,6 +975,9 @@ mod tests {
     #[tokio::test]
     async fn cancel_aborts_rollout_and_prevents_unreleased_claims() {
         let repo = Repository::Memory(MemoryState::default());
+        for client_id in ["client-a", "client-b", "client-c"] {
+            seed_never_connected_memory_agent(&repo, client_id).await;
+        }
         let operator = test_operator();
         let request = rollout_request(&["client-a", "client-b", "client-c"]);
         let job_id = Uuid::new_v4();

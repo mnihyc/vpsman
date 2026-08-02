@@ -1,4 +1,4 @@
-@media (max-width: 1500px) and (min-width: 981px) {
+@media (max-width: 1500px) and (min-width: 1081px) {
   .topbar {
     grid-template-columns: minmax(220px, 280px) minmax(220px, 1fr);
   }
@@ -10,7 +10,7 @@
   }
 }
 
-@media (max-width: 980px) {
+@media (max-width: 1080px) {
   .shell {
     grid-template-columns: 72px minmax(0, 1fr);
   }
@@ -46,7 +46,21 @@
   }
 
   .topbarActions {
+    grid-column: 1 / -1;
     flex-wrap: wrap;
+    justify-content: flex-end;
+    width: 100%;
+  }
+
+  .mobilePageMenu {
+    display: flex;
+    flex: 1 1 220px;
+    min-height: 36px;
+    min-width: 180px;
+  }
+
+  .mobilePageSelector {
+    display: block;
   }
 
   .topbarActions > .savedViewControls {
@@ -200,7 +214,21 @@
   }
 
   .topologyEvidence .historyRow.heading.topologyEvidenceGrid {
-    display: none;
+    position: absolute;
+    left: -10000px;
+    top: auto;
+    width: 1px;
+    height: 1px;
+    min-width: 1px;
+    min-height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    border: 0;
+    clip: rect(0, 0, 0, 0);
+    clip-path: inset(50%);
+    contain: paint;
+    padding: 0;
+    white-space: nowrap;
   }
 
   .topologyEvidence .historyRow.topologyEvidenceGrid {
@@ -225,6 +253,15 @@
 
   .topologyEvidence .historyPrimary {
     gap: 2px;
+  }
+
+  .topologyEvidenceMobileLabel {
+    display: block;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.25;
+    text-transform: uppercase;
   }
 
   .topologyEvidence .historyPrimary .compactAction {
@@ -471,13 +508,27 @@
 
   .dashboardToolbarActions .timeRangeTabs {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: thin;
     width: 100%;
     max-width: 100%;
   }
 
   .dashboardToolbarActions .timeRangeTabs button {
-    flex: 1 0 25%;
+    flex: 0 0 auto;
+  }
+
+  .dashboardToolbarActions .vpsMonitoringRangeTabs,
+  .publicMonitoringRangeControls .timeRangeTabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+
+  .dashboardToolbarActions .vpsMonitoringRangeTabs button,
+  .publicMonitoringRangeControls .timeRangeTabs button {
+    flex: 0 0 auto;
   }
 
   .dashboardControlBar {
@@ -490,22 +541,38 @@
 
   .observabilityMetricsControls > .timeRangeTabs {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     flex-basis: 100%;
-    overflow: hidden;
+    overflow-x: auto;
+    scrollbar-width: thin;
     width: 100%;
   }
 
   .observabilityMetricsControls > .timeRangeTabs button {
-    flex: 1 0 25%;
-    min-width: 0;
+    flex: 0 0 auto;
+    min-width: max-content;
   }
 
-  .observabilityMetricsControls > .timeRangeTabs button:nth-child(-n + 4) {
-    border-bottom: 1px solid var(--border);
+  .publicMonitoringRangeControls.observabilityMetricsControls > .timeRangeTabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: thin;
   }
 
-  .observabilityMetricsControls > .timeRangeTabs button:nth-child(4n) {
+  .publicMonitoringRangeControls.observabilityMetricsControls > .timeRangeTabs button {
+    flex: 0 0 auto;
+    min-width: max-content;
+  }
+
+  .publicMonitoringRangeControls.observabilityMetricsControls > .timeRangeTabs button:nth-child(-n + 4) {
+    border-bottom: 0;
+  }
+
+  .publicMonitoringRangeControls.observabilityMetricsControls > .timeRangeTabs button:nth-child(4n) {
+    border-right: 1px solid var(--border);
+  }
+
+  .publicMonitoringRangeControls.observabilityMetricsControls > .timeRangeTabs button:last-child {
     border-right: 0;
   }
 
@@ -777,15 +844,6 @@
     grid-row: 1 / span 2;
   }
 
-  .handoffBulkBar {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .handoffBulkActions {
-    justify-content: flex-start;
-  }
-
   .handoffModeControl {
     width: 100%;
     justify-content: space-between;
@@ -836,25 +894,64 @@
   }
 
   .systemConfigStickyBar {
-    position: sticky;
-    top: auto;
-    bottom: 0;
-    z-index: var(--z-sticky);
-    margin-right: -14px;
-    margin-bottom: -14px;
-    margin-left: -14px;
-    border-right: 0;
-    border-bottom: 0;
-    border-left: 0;
-    border-radius: 0 0 8px 8px;
-    background: color-mix(in srgb, var(--surface) 96%, transparent);
-    padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
-    box-shadow: 0 -4px 8px rgba(60, 64, 67, 0.12);
-    backdrop-filter: blur(8px);
+    position: static;
+    z-index: auto;
+    margin: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    padding: 10px 12px;
+    box-shadow: none;
+    backdrop-filter: none;
   }
 
   .systemConfigStickyBar.dirty {
-    background: color-mix(in srgb, var(--warning-soft) 94%, var(--surface));
+    background: var(--warning-soft);
+  }
+
+  .systemConfigSideNav {
+    position: relative;
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 0;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    padding: 0;
+    scrollbar-width: thin;
+  }
+
+  .systemConfigSideNav strong {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .systemConfigSideNav button {
+    flex: 0 0 auto;
+    grid-template-columns: auto auto;
+    width: auto;
+    min-width: max-content;
+    border-radius: 0;
+    padding: 9px 11px;
+  }
+
+  .systemConfigSideNav button + button {
+    border-left-color: var(--border);
+  }
+
+  .systemConfigSideNav button:first-of-type {
+    border-radius: 7px 0 0 7px;
+  }
+
+  .systemConfigSideNav button:last-child {
+    border-radius: 0 7px 7px 0;
   }
 
   .commandComposer .segmented {
@@ -925,6 +1022,69 @@
   }
 
   .targetSelectorHeader span {
+    white-space: normal;
+  }
+
+  .tagScheduleImpactBlock > .bulkTagPreviewHeader {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .tagScheduleImpactBlock > .bulkTagPreviewHeader > .compactAction {
+    width: 100%;
+  }
+
+  .tagScheduleImpactTable {
+    overflow: visible;
+  }
+
+  .tagScheduleImpactRow.heading {
+    position: absolute;
+    width: 1px;
+    min-width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    border: 0;
+    clip: rect(0 0 0 0);
+    padding: 0;
+    white-space: nowrap;
+  }
+
+  .tagScheduleImpactRow:not(.heading) {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 7px;
+    min-width: 0;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    background: var(--canvas);
+    padding: 10px;
+  }
+
+  .tagScheduleImpactRow:not(.heading) > [data-label] {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+    gap: 3px;
+    overflow-wrap: anywhere;
+  }
+
+  .tagScheduleImpactRow:not(.heading) > [data-label]::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 800;
+    text-transform: uppercase;
+  }
+
+  .tagScheduleImpactRow:not(.heading) > [data-label] > * {
+    grid-column: 1;
+  }
+
+  .tagScheduleImpactRow .historyPrimary strong,
+  .tagScheduleImpactRow .historyPrimary small {
+    overflow: visible;
+    text-overflow: clip;
     white-space: normal;
   }
 

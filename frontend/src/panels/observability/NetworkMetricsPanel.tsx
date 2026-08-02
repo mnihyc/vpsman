@@ -331,7 +331,20 @@ export function NetworkMetricsPanel({
               <span>Endpoint telemetry covers only declared plans. Failed or absent reachability probes remain unverified and do not assert that a tunnel is disconnected.</span>
             </div>
           </div>
-          <div className="observabilityEndpointTable" aria-label="Network endpoint comparison">
+          <div
+            aria-label="Network endpoint comparison"
+            className="observabilityEndpointTable"
+            role={declaredTunnels.length > 0 ? "table" : undefined}
+          >
+            {declaredTunnels.length > 0 && (
+              <div className="observabilityEndpointRow heading" role="row">
+                <span role="columnheader">Endpoint</span>
+                <span role="columnheader">Plan / interface</span>
+                <span role="columnheader">Runtime</span>
+                <span role="columnheader">Reachability</span>
+                <span role="columnheader">Traffic</span>
+              </div>
+            )}
             {declaredTunnels.map((tunnel) => (
               <EndpointRow key={`${tunnel.client_id}:${tunnel.interface}:${tunnel.observed_at}`} tunnel={tunnel} />
             ))}
@@ -540,12 +553,40 @@ function EndpointRow({ tunnel }: { tunnel: TelemetryTunnelRecord }) {
   const traffic = `${formatBytes(tunnel.rx_bytes)} RX / ${formatBytes(tunnel.tx_bytes)} TX`;
   const reachability = formatEndpointLatency(tunnel);
   return (
-    <div className="observabilityEndpointRow">
-      <strong>{endpointDirectionLabel(tunnel.client_id, tunnel.peer_client_id)}</strong>
-      <span>{tunnel.plan_name ?? tunnel.interface}</span>
-      <span>{formatEndpointRuntime(tunnel)}</span>
-      <span title={endpointLatencyTitle(tunnel, reachability)}>{reachability}</span>
-      <span>{traffic}</span>
+    <div className="observabilityEndpointRow" role="row">
+      <strong role="cell">
+        <span aria-hidden="true" className="observabilityEndpointMobileLabel">
+          Endpoint
+        </span>
+        <span>{endpointDirectionLabel(tunnel.client_id, tunnel.peer_client_id)}</span>
+      </strong>
+      <span role="cell">
+        <span aria-hidden="true" className="observabilityEndpointMobileLabel">
+          Plan / interface
+        </span>
+        <span>{tunnel.plan_name ?? tunnel.interface}</span>
+      </span>
+      <span role="cell">
+        <span aria-hidden="true" className="observabilityEndpointMobileLabel">
+          Runtime
+        </span>
+        <span>{formatEndpointRuntime(tunnel)}</span>
+      </span>
+      <span
+        role="cell"
+        title={endpointLatencyTitle(tunnel, reachability)}
+      >
+        <span aria-hidden="true" className="observabilityEndpointMobileLabel">
+          Reachability
+        </span>
+        <span>{reachability}</span>
+      </span>
+      <span role="cell">
+        <span aria-hidden="true" className="observabilityEndpointMobileLabel">
+          Traffic
+        </span>
+        <span>{traffic}</span>
+      </span>
     </div>
   );
 }

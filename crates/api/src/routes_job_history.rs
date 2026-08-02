@@ -1384,7 +1384,7 @@ pub(crate) async fn list_network_observations(
     Ok(Json(
         state
             .repo
-            .list_network_observations(limit_or_default(query.limit))
+            .list_network_observations(limit_or_default(query.limit), true)
             .await?,
     ))
 }
@@ -1400,7 +1400,7 @@ pub(crate) async fn list_network_observation_trends(
     Ok(Json(
         state
             .repo
-            .list_network_observation_trends(limit_or_default(query.limit))
+            .list_network_observation_trends(limit_or_default(query.limit), true)
             .await?,
     ))
 }

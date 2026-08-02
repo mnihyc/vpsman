@@ -1,66 +1,166 @@
 # Telemetry Metric Definitions
 
-This document defines the numbers shown in Fleet / Monitor, Home, and
-Observability. It distinguishes retained interval averages from bounded network
-tests so operators do not interpret a chart point as a random instantaneous
-sample.
+This document defines the numbers shown in Fleet > Monitor, Home, VPS detail,
+and Observability. It separates live operational activity, authoritative traffic
+accounting, general Ping, and bounded tunnel tests so a chart never implies a
+measurement it does not contain.
 
-## Time And Aggregation
+## Time, Ranges, And Retention
+
+Monitoring has two retained tiers, not competing minute/hour/day histories:
+
+- Accepted high-resolution telemetry samples preserve the agent payload at its
+  configured collection cadence. They support realtime and short-range queries
+  and default to 90 days of retention.
+- Minute-derived resource, network, traffic-counter, and Ping history is the
+  authoritative long-term source. It defaults to 3,650 days of retention.
+- Resource, network, and Ping rows for adjacent, exact-equivalent logical minutes
+  may be stored as one longer minute-aligned span. This is lossless compaction,
+  not a coarser hourly value: queries preserve the constituent minute weighting,
+  sample count, coverage, extrema, latest evidence, and gaps. Traffic-counter
+  rows remain minute-derived counters and are not folded into these spans.
+- Long-term rows are materialized before an eligible high-resolution sample is
+  pruned. Retention and compaction run in bounded leased batches.
+
+The canonical VPS detail ranges are **15m**, **1h**, **8h**, **1d**, **7d**,
+**30d**, **90d**, **180d**, **1y**, **All**, and **Custom**. **15m** is the
+realtime view and uses the existing sample store. A range through
+90 days uses high-resolution samples only when the entire requested interval is
+still retained; 180d, 1y, All, and older custom intervals use minute history.
+All means all retained history, normally up to ten years. Server-side chart
+downsampling changes presentation density, never the authoritative retained
+tier.
 
 - The API accepts telemetry in authenticated process-incarnation and transport
   sequence order. Duplicate or older frames do not create another sample.
-- Durable resource and interface-counter rollups use API receive time, not the
-  agent wall clock. This prevents a misconfigured VPS clock from moving samples
-  into the wrong chart interval.
-- The base retained interval is 60 seconds. When a selected range needs a
-  coarser chart step, the dashboard averages the retained interval values in
-  that displayed step. Missing intervals remain gaps.
-- "Current" means the latest accepted interval that satisfies the page's
-  freshness and scope rules. It does not mean an instantaneous read performed
-  when the page rendered.
-- A Linux procfs read/parse failure or configured custom-source failure does
-  not become a zero-valued sample. The agent rejects that complete collection,
-  so the last accepted evidence ages naturally into stale/unavailable state.
+- Durable resource and interface-counter history uses API receive time, not the
+  agent wall clock. A misconfigured VPS clock therefore cannot move a sample
+  into another retained minute.
+- “Current” means the latest accepted evidence that satisfies the page's
+  freshness and scope rules. It does not mean a new read performed when the page
+  renders.
+- Missing intervals remain gaps. Missing, stale, invalid, unsupported, and
+  unconfigured values never become healthy zeroes.
+
+Operators manage the two tiers independently under Audit > Retention & export:
+`telemetry_samples` is the high-resolution policy, while
+`telemetry_rollups`, `telemetry_network_rates`, `telemetry_ping_rollups`, and
+`traffic_counter_samples` are long-term policies.
 
 ## Resource Metrics
 
-| Display metric | Base 60-second value | Coarser chart point | Peak/lowest value |
-| --- | --- | --- | --- |
-| CPU load | Sample-count-weighted arithmetic mean of Linux 1-minute load readings accepted in the interval. | Arithmetic mean of retained base-interval values. | Maximum accepted 1-minute load. Linux load is scheduler demand, not CPU utilization percent. |
-| Memory used | `(max MemTotal - mean MemAvailable) / max MemTotal` for the interval. | Arithmetic mean of retained used ratios. | Uses the minimum accepted `MemAvailable` value. |
-| Disk free | `mean available bytes / max total bytes` after summing reported filesystems for each sample. | Arithmetic mean of retained free ratios. | Uses the minimum accepted summed available bytes. |
+| Display metric | Retained meaning | Important unavailable state |
+| --- | --- | --- |
+| CPU utilization | Busy CPU time divided by total CPU time between two valid aggregate `/proc/stat` reads. Minute history retains average, maximum, valid-sample count, and core count. | The first read, a counter reset, a zero delta, or an invalid `/proc/stat` read has no utilization value. Load is never substituted. |
+| Load 1/5/15 | Sample-count-weighted arithmetic mean of the corresponding Linux load-average readings. Load pressure is normalized by the reported core count only for its visual track. | Missing load evidence remains unavailable; it is not CPU utilization. |
+| Memory used | `(max MemTotal - mean MemAvailable) / max MemTotal` for the interval. | A missing or invalid memory snapshot rejects the core Linux collection instead of synthesizing zero. |
+| Aggregate reported-filesystem disk used | `(max summed total - mean summed available) / max summed total` across the filesystems reported by the collector. | This is an aggregate of reported filesystems, not a root-volume or quota claim. |
+| TCP/UDP sockets | Agent-observed entries in the Linux network namespace's available IPv4 and IPv6 kernel socket tables. TCP includes every state and listening socket; UDP counts every reported UDP entry. | If neither address family supplies a protocol table, or a present table is malformed, both socket counts remain unavailable for that sample. Missing evidence is a chart gap, never a healthy zero. |
 
 The Linux disk collector ignores pseudo filesystems, deduplicates repeated
 source/filesystem pairs, and sums the filesystems it reports. A custom metrics
 provider can replace or augment the Linux snapshot under the configured agent
-contract. A replacement must provide all core fields and explicit arrays;
-omission is an invalid sample rather than an instruction to synthesize zeros.
+contract. A replacement must provide the required load, core, memory, disk, and
+network fields; CPU utilization remains optional. A core procfs or custom-source
+failure rejects that collection so previous evidence ages naturally. A failure
+limited to optional `/proc/stat` utilization resets its delta baseline and leaves
+that field unavailable without discarding otherwise valid telemetry.
 
-## Interface Rate And Traffic
+Cards pair exact CPU, RAM, disk, and load values with proportional tracks or
+small histories. Neutral colors stay stable; warning and danger states come from
+explicit backend alert or data state, not hidden browser thresholds.
+
+## Interface Rate
 
 Agents report cumulative RX and TX byte counters per interface. vpsman derives
-an interval-average bit rate for each VPS/interface pair:
+an interval-average bit rate for each VPS/interface stream:
 
 ```text
-rate_bps = max(current_counter_avg - previous_counter_avg, 0) * 8
-           / elapsed_seconds_between_bucket_starts
+rate_bps = (current_counter - previous_counter) * 8
+           / elapsed_seconds
 ```
 
 The query includes one pre-window counter as a baseline when available. A
-counter reset or wrap is clamped to zero instead of producing negative traffic.
-The first retained point without a baseline is therefore zero.
+counter reset or wrap invalidates that interval instead of inventing zero
+activity; the reset point is retained as the next interval's baseline. The
+first point without a baseline is likewise omitted, so both cases appear as an
+explicit chart gap.
 
-Fleet chart points sum interface rates for each base interval, then average
-those fleet totals when several base intervals share one displayed chart step.
-The current fleet/VPS value sums only the latest coherent interface rows; rows
-more than 180 seconds behind that VPS's newest interface sample are excluded.
-Virtual, bridge, and tunnel interfaces can represent overlapping traffic, so a
-sum across interfaces is operational activity rather than guaranteed unique
-wire volume.
+Fleet chart points sum interface rates for each logical interval, then average
+those fleet totals when several intervals share one displayed chart step. The
+current fleet/VPS value sums only the latest coherent interface rows; rows more
+than 180 seconds behind that VPS's newest interface sample are excluded.
+Virtual, bridge, and tunnel interfaces can represent overlapping traffic, so
+this sum is operational activity rather than guaranteed unique wire volume.
 
-Traffic totals are different: they sum non-negative counter deltas over the
-selected range and are displayed as bytes. Rate and traffic must not be treated
-as interchangeable.
+## Authoritative Traffic Accounting
+
+Traffic is separate from live interface rate. Config > Rules defines the
+authoritative interface/direction selectors, quota, reset day, and cycle. The
+cards and VPS detail use only those saved accounting rules and retained cycle
+state; they never silently sum arbitrary interfaces as billing traffic.
+
+- If selectors or reset-cycle configuration are missing, vpsman displays
+  **Traffic unconfigured**. Quotas are optional; traffic remains accounted and
+  visible without quota progress. A quota value of `-1` means explicitly
+  unlimited and remains distinct from an unset quota.
+- RX, TX, and total bytes remain exact even when usage exceeds a quota. A visual
+  progress track may fill completely, but the numeric percentage and totals may
+  exceed 100%.
+- Each selected source/interface counter stream is differenced independently.
+  Diagnostic RX and TX are visible by default, while the derived Total series
+  is selectable through the existing chart legend. A selector's billing
+  direction affects quota accounting only; it does not hide either diagnostic
+  direction from history.
+- Every configured date-based cycle boundary starts a new RX and TX accounting
+  cycle together, regardless of which direction contributes to the quota.
+  Billing direction changes the limited total, not the lifetime or reset point
+  of either diagnostic counter.
+- A counter-epoch change or counter decrease is reset evidence, not zero
+  traffic. A bucket containing only reset intervals has `sample_count = 0`, a
+  positive `reset_count`, and nullable RX, TX, and total values, so its chart
+  remains a gap. A mixed bucket retains its valid deltas and its reset count as
+  explicit incomplete evidence.
+- Long-term traffic counters keep the latest accepted counter for each logical
+  minute and default to ten years. Pruning preserves one pre-cutoff baseline per
+  VPS/source/interface stream, and configured retention cannot be shorter than
+  32 days so an active monthly cycle remains computable.
+
+The optional display rules next to traffic do not alter accounting:
+
+- `billing.price` accepts an amount, currency symbol or three-letter code, and
+  `/m`, `/q`, `/h` or `/hy`, or `/y`. `-1` explicitly displays billing as
+  **n/a**; an unset rule shows no billing fact.
+- `billing.cycle` is an optional renewal anchor, independent of traffic reset:
+  a day for monthly billing, or day-month for quarterly, half-yearly, and yearly
+  billing.
+- `network.port_speed` accepts an explicit bit-rate unit such as `400 Mbps` or
+  `1.5 Gbps`. It is display-only on monitoring cards. A new tunnel-plan draft
+  may use one endpoint's value, or the lower of two values, as a convenience;
+  it never configures shaping or discovers interface capacity.
+
+## General Ping Targets
+
+Observability > Ping targets owns reusable, named ICMP or TCP probes. A TCP
+target requires an explicit port. Each enabled target is distributed through
+server-managed runtime config to its frozen VPS assignments; an agent accepts at
+most 16 enabled targets and runs three bounded attempts every 60 seconds with
+bounded concurrency.
+
+Each result carries the target ID, target generation, checked time, average
+successful-attempt latency, loss ratio, status, and a bounded failure reason.
+Probe-affecting edits advance the generation. Current values and history accept
+only the active assignment generation, so old and new target definitions cannot
+be mixed.
+
+All assigned targets appear in a VPS's Ping detail. Only the explicitly selected
+primary target appears on its fleet card. Disabling or removing a primary leaves
+an explicit disabled or unconfigured state; vpsman does not silently choose a
+replacement. Missing probe intervals remain gaps, including complete loss where
+latency is unavailable.
+
+General Ping is independent from declared-tunnel tests. A Ping target does not
+enable a tunnel, assess an OSPF plan, or become tunnel health evidence.
 
 ## Declared-Tunnel Tests
 
@@ -89,20 +189,26 @@ bandwidth as evidence, not as automatic discovery of link capacity.
   between those measurements remain visible.
 - Last-known values stay available for diagnosis but carry stale state when
   they fall outside the current freshness window.
+- CSV export contains only the visible series and selected retained range.
+
+Shared monitoring views reuse these definitions but expose only the metric
+groups selected when the immutable share was created. They never expose real
+VPS IDs, IP addresses, internal configuration, actions, jobs, terminals, files,
+backups, audit data, or operator identity.
 
 ## Fleet Alert Read-Model Bounds
 
 Fleet alerts are a bounded operational read model, not an unbounded history
 export. The API combines current agent and resource snapshots with at most 200
-matching candidates from each durable event source.
-Client, category, severity, and dashboard-time filters are applied by the
-source before that horizon. The combined result is then merged with operator
-state, ordered, and limited to the requested page.
+matching candidates from each durable event source. Client, category, severity,
+and dashboard-time filters are applied by the source before that horizon. The
+combined result is then merged with operator state, ordered, and limited to the
+requested page.
 
 When any source reaches its horizon, dashboard responses mark the affected
 counts as truncated and the console renders them as lower bounds (`200+` or
-`≥200`) instead of presenting an exact total. An `operator_state` filter
-applies to this same bounded active-alert working set. Use the fleet-alert-state
-ledger for each alert's current durable triage state, the audit log for triage
+`≥200`) instead of presenting an exact total. An `operator_state` filter applies
+to this same bounded active-alert working set. Use the fleet-alert-state ledger
+for each alert's current durable triage state, the audit log for triage
 transitions, and the owning policy, job, backup, or network workflow for older
 event history.

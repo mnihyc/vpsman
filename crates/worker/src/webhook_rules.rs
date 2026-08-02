@@ -377,10 +377,9 @@ async fn list_visible_vps(tx: &mut Transaction<'_, Postgres>) -> Result<Vec<VpsR
             c.stale_reason,
             c.capabilities,
             COALESCE(array_agg(t.name ORDER BY t.name) FILTER (WHERE t.name IS NOT NULL), ARRAY[]::TEXT[]) AS tags
-        FROM clients c
+        FROM visible_clients c
         LEFT JOIN client_tags ct ON ct.client_id = c.id
         LEFT JOIN tags t ON t.id = ct.tag_id
-        WHERE c.hidden_at IS NULL
         GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.internal_build_number, c.stale_since, c.stale_reason, c.capabilities
         ORDER BY c.id
         "#,

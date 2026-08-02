@@ -85,6 +85,7 @@ export type FleetSummary = {
   online: number;
   offline: number;
   never: number;
+  revoked: number;
   unknown: number;
   stale: number;
   warnings: number;
@@ -94,11 +95,13 @@ export type FleetSummary = {
 export type DashboardWindow =
   | "15m"
   | "1h"
-  | "6h"
-  | "24h"
+  | "8h"
+  | "1d"
   | "7d"
-  | "14d"
   | "30d"
+  | "90d"
+  | "180d"
+  | "1y"
   | "all";
 
 export type DashboardGroupBy =
@@ -336,6 +339,7 @@ export type DashboardSummaryRecord = {
   total: number;
   online: number;
   offline: number;
+  revoked: number;
   stale: number;
   warnings: number;
   warnings_truncated: boolean;
@@ -444,6 +448,7 @@ export type DashboardLabelClusterRecord = {
   total: number;
   online: number;
   offline: number;
+  revoked: number;
   stale: number;
   warnings: number;
   running_jobs: number;
@@ -467,7 +472,7 @@ export type DashboardAlertSummaryRecord = {
 export type DashboardAgentSummaryRecord = {
   client_id: string;
   label: string;
-  status: FleetAlertNotificationDeliveryStatus;
+  status: AgentView["status"];
   tags: string[];
   drilldown: DashboardDrilldownRecord;
 };
@@ -914,8 +919,15 @@ export type TelemetryRollupRecord = {
   bucket_start: string;
   bucket_secs: number;
   sample_count: number;
+  cpu_usage_avg: number | null;
+  cpu_usage_sample_count: number;
+  cpu_cores_max: number;
   cpu_load_1_avg: number;
   cpu_load_1_max: number;
+  cpu_load_5_avg: number;
+  cpu_load_5_max: number;
+  cpu_load_15_avg: number;
+  cpu_load_15_max: number;
   memory_total_bytes_max: number;
   memory_available_bytes_avg: number;
   memory_available_bytes_min: number;
@@ -924,6 +936,10 @@ export type TelemetryRollupRecord = {
   disk_available_bytes_min: number;
   network_rx_bytes_max: number;
   network_tx_bytes_max: number;
+  connections_sample_count: number;
+  tcp_sockets_latest: number | null;
+  udp_sockets_latest: number | null;
+  connections_observed_at: string | null;
   latest_observed_at: string;
   updated_at: string;
 };
@@ -941,6 +957,384 @@ export type TelemetryNetworkRateRecord = {
   rx_bps_avg: number;
   tx_bps_avg: number;
   updated_at: string;
+};
+
+export type CurrentPingView = {
+  target_id: string;
+  target_name: string;
+  enabled: boolean;
+  generation: number;
+  state: string;
+  status: string | null;
+  latency_avg_ms: number | null;
+  loss_ratio: number | null;
+  reason: string | null;
+  checked_at: string | null;
+};
+
+export type MonitoringCardView = {
+  client: AgentView;
+  billing: BillingPlanView | null;
+  port_speed: PortSpeedView | null;
+  resources: TelemetryRollupRecord | null;
+  resource_history: TelemetryRollupRecord[];
+  network: TelemetryNetworkRateRecord[];
+  network_history: TelemetryNetworkRateRecord[];
+  traffic: TrafficAccountingRecord;
+  primary_ping: CurrentPingView | null;
+  primary_ping_history: PingRollupView[];
+};
+
+export type PortSpeedView = {
+  bps: number;
+  display: string;
+};
+
+export type BillingPlanView = {
+  disabled: boolean;
+  price: string | null;
+  currency: string | null;
+  currency_display: string | null;
+  period: "month" | "quarter" | "half_year" | "year" | string | null;
+  period_code: "m" | "q" | "hy" | "y" | string | null;
+  cycle: string | null;
+  display: string;
+};
+
+export type MonitoringCardsPageView = {
+  items: MonitoringCardView[];
+  offset: number;
+  limit: number;
+  total: number;
+  next_offset: number | null;
+};
+
+export type MonitoringRangeView = {
+  window: string;
+  source: "raw" | "minute" | string;
+  start_unix: number;
+  end_unix: number;
+  step_secs: number;
+  points: number;
+};
+
+export type ClientMonitoringView = {
+  client: AgentView;
+  range: MonitoringRangeView;
+  resources: TelemetryRollupRecord[];
+  network: TelemetryNetworkRateRecord[];
+  traffic: TrafficAccountingRecord;
+  traffic_history: TrafficHistoryPointView[];
+  ping_targets: CurrentPingView[];
+  ping: PingRollupView[];
+  primary_ping: CurrentPingView | null;
+};
+
+export type TrafficHistoryPointView = {
+  bucket_start: string;
+  bucket_secs: number;
+  sample_count: number;
+  reset_count: number;
+  rx_bytes: number | null;
+  tx_bytes: number | null;
+  total_bytes: number | null;
+};
+
+export type PublicMonitoringShareView = {
+  id: string;
+  name: string;
+  target_count: number;
+  visibility: MonitoringShareVisibilityView;
+  expires_at: string;
+};
+
+export type PublicMonitoringShareBootstrapView = {
+  share: PublicMonitoringShareView;
+  visitor_id: string;
+};
+
+export type PublicResourceMetricView = {
+  bucket_start: string;
+  bucket_secs: number;
+  sample_count: number;
+  cpu_usage_avg: number | null;
+  cpu_cores: number;
+  load_1: number;
+  load_5: number;
+  load_15: number;
+  memory_total_bytes: number;
+  memory_available_bytes: number;
+  disk_total_bytes: number;
+  disk_available_bytes: number;
+  tcp_sockets: number | null;
+  udp_sockets: number | null;
+  connections_observed_at: string | null;
+  observed_at: string;
+};
+
+export type PublicNetworkMetricView = {
+  rx_bps: number | null;
+  tx_bps: number | null;
+  observed_at: string | null;
+};
+
+export type PublicNetworkPointView = {
+  bucket_start: string;
+  bucket_secs: number;
+  rx_bps: number;
+  tx_bps: number;
+};
+
+export type PublicTrafficMetricView = {
+  configured: boolean;
+  cycle_start: string;
+  cycle_end: string;
+  rx_bytes: number;
+  tx_bytes: number;
+  total_bytes: number;
+  quota_rx_bytes: number | null;
+  quota_tx_bytes: number | null;
+  quota_total_bytes: number | null;
+  cycle_percent: number | null;
+  state: string;
+  observed_at: string | null;
+  port_speed: PortSpeedView | null;
+};
+
+export type PublicPingMetricView = {
+  target_name: string;
+  state: string;
+  status: string | null;
+  latency_avg_ms: number | null;
+  loss_ratio: number | null;
+  checked_at: string | null;
+};
+
+export type PublicPingPointView = {
+  target_name: string;
+  bucket_start: string;
+  bucket_secs: number;
+  sample_count: number;
+  latency_avg_ms: number | null;
+  loss_ratio: number;
+  status: string;
+  checked_at: string;
+};
+
+export type PublicMonitoringCardView = {
+  client_key: string;
+  display_name: string;
+  status: string;
+  tags?: string[];
+  resources?: PublicResourceMetricView;
+  resource_history?: PublicResourceMetricView[];
+  network?: PublicNetworkMetricView;
+  network_history?: PublicNetworkPointView[];
+  traffic?: PublicTrafficMetricView;
+  primary_ping?: PublicPingMetricView;
+  primary_ping_history?: PublicPingPointView[];
+};
+
+export type PublicMonitoringDetailView = {
+  client_key: string;
+  range: MonitoringRangeView;
+  resources?: PublicResourceMetricView[];
+  network?: PublicNetworkPointView[];
+  traffic?: TrafficHistoryPointView[];
+  ping_targets?: PublicPingMetricView[];
+  ping?: PublicPingPointView[];
+};
+
+export type PublicMonitoringDataView = {
+  share: PublicMonitoringShareView;
+  cards: PublicMonitoringCardView[];
+  offset: number;
+  total: number;
+  next_offset: number | null;
+  detail?: PublicMonitoringDetailView;
+};
+
+export type PingTargetView = {
+  id: string;
+  name: string;
+  host: string;
+  probe_kind: string;
+  port: number | null;
+  enabled: boolean;
+  selector_expression: string;
+  generation: number;
+  assigned_count: number;
+  primary_count: number;
+  runtime_sync: {
+    state: string;
+    reason: string;
+  };
+  target_update_available: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PingTargetAssignmentView = {
+  target_id: string;
+  client: AgentView;
+  is_primary: boolean;
+  assigned_at: string;
+};
+
+export type PingTargetDetailView = {
+  target: PingTargetView;
+  assignments: PingTargetAssignmentView[];
+};
+
+export type PingTargetMutationRequest = {
+  name: string;
+  host: string;
+  probe_kind: string;
+  port?: number | null;
+  enabled?: boolean;
+  selector_expression?: string;
+  target_client_ids?: string[];
+  confirmed?: boolean;
+};
+
+export type PingTargetMutationResponse = {
+  target: PingTargetDetailView;
+  runtime_sync: RuntimeConfigDispatchRecord[];
+};
+
+export type BulkUpdatePingTargetsRequest = {
+  target_ids: string[];
+  preview_hash?: string | null;
+  confirmed?: boolean;
+};
+
+export type PingTargetAssignmentChangeView = {
+  target_id: string;
+  target_name: string;
+  selector_expression: string;
+  added_client_ids: string[];
+  removed_client_ids: string[];
+  unchanged_count: number;
+};
+
+export type BulkUpdatePingTargetsResponse = {
+  preview_hash: string;
+  applied: boolean;
+  changes: PingTargetAssignmentChangeView[];
+  runtime_sync: RuntimeConfigDispatchRecord[];
+};
+
+export type MakePrimaryPingTargetRequest = {
+  client_ids: string[];
+};
+
+export type DeletePingTargetRequest = {
+  confirmed?: boolean;
+};
+
+export type DeletePingTargetResponse = {
+  runtime_sync: RuntimeConfigDispatchRecord[];
+};
+
+export type BulkPingTargetLifecycleRequest = {
+  target_ids: string[];
+  action: "enable" | "disable" | "delete";
+  confirmed?: boolean;
+};
+
+export type BulkPingTargetLifecycleResponse = {
+  action: "enable" | "disable" | "delete";
+  affected_target_ids: string[];
+  runtime_sync: RuntimeConfigDispatchRecord[];
+};
+
+export type PingRollupView = {
+  client_id: string;
+  target_id: string;
+  target_name: string;
+  is_primary: boolean;
+  generation: number;
+  bucket_start: string;
+  bucket_secs: number;
+  sample_count: number;
+  success_count: number;
+  latency_avg_ms: number | null;
+  latency_min_ms: number | null;
+  latency_max_ms: number | null;
+  loss_ratio_avg: number;
+  loss_ratio_max: number;
+  latest_status: string;
+  latest_reason: string | null;
+  latest_checked_at: string;
+};
+
+export type MonitoringShareListQuery = {
+  status?: string | null;
+  limit?: number | null;
+  offset?: number | null;
+};
+
+export type MonitoringShareVisibilityView = {
+  identity_context: boolean;
+  resources: boolean;
+  network: boolean;
+  traffic: boolean;
+  ping: boolean;
+  detail_history: boolean;
+};
+
+export type MonitoringShareVisibilityRequest = {
+  identity_context?: boolean;
+  resources?: boolean;
+  network?: boolean;
+  traffic?: boolean;
+  ping?: boolean;
+  detail_history?: boolean;
+};
+
+export type MonitoringShareView = {
+  id: string;
+  name: string;
+  selector_expression: string;
+  target_count: number;
+  visibility: MonitoringShareVisibilityView;
+  status: string;
+  expires_at: string;
+  revoked_at: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  visitor_count: number;
+  first_visited_at: string | null;
+  last_visited_at: string | null;
+};
+
+export type CreateMonitoringShareRequest = {
+  name: string;
+  selector_expression?: string;
+  target_client_ids?: string[];
+  visibility: MonitoringShareVisibilityRequest;
+  expires_in_secs: number;
+  confirmed?: boolean;
+};
+
+export type CreateMonitoringShareResponse = {
+  share: MonitoringShareView;
+  secret: string;
+  fragment_path: string;
+};
+
+export type ExtendMonitoringSharesRequest = {
+  share_ids: string[];
+  extend_by_secs: number;
+};
+
+export type RevokeMonitoringSharesRequest = {
+  share_ids: string[];
+};
+
+export type MonitoringSharesMutationResponse = {
+  shares: MonitoringShareView[];
 };
 
 export type TelemetryTunnelRecord = {
@@ -2497,8 +2891,6 @@ export type CreateScheduleRequest = {
 export type UpdateScheduleRequest = CreateScheduleRequest;
 
 export type UpdateScheduleTargetsRequest = {
-  selector_expression: string;
-  target_client_ids: string[];
   confirmed: boolean;
   privilege_assertion?: PrivilegeAssertion | null;
 };

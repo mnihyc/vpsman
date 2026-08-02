@@ -10,7 +10,7 @@ use vpsman_common::{
     GatewayRuntimeConfigReloadRequest, GatewaySessionLifecycleIngest, GatewayTelemetryIngest,
     GatewayTerminalOutputIngest, JobCommand, OutputStream, RoutingCostAdapterJobResult,
     RoutingCostAdapterOperation, MAX_RUNTIME_CONFIG_REASON_BYTES, MAX_TELEMETRY_DISKS,
-    MAX_TELEMETRY_NETWORKS, MAX_TELEMETRY_TUNNELS,
+    MAX_TELEMETRY_NETWORKS, MAX_TELEMETRY_PING_RESULTS, MAX_TELEMETRY_TUNNELS,
 };
 use vpsman_server_core::{
     target_status_is_active, TARGET_STATUS_AGENT_LOST, TARGET_STATUS_AGENT_TIMEOUT,
@@ -179,24 +179,6 @@ pub(crate) async fn request_runtime_config_reload(
         } else {
             format!("runtime config sync queued: {}", sync_jobs.len())
         },
-    }))
-}
-
-pub(crate) async fn ingest_gateway_session_started(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(event): Json<GatewaySessionLifecycleIngest>,
-) -> Result<Json<IngestResponse>, ApiError> {
-    state.require_internal_gateway(&headers)?;
-    validate_gateway_session_event(&event)?;
-    state.repo.record_gateway_session_started(&event).await?;
-    state.publish(WsEvent::AgentUpdated {
-        client_id: event.client_id,
-        gateway_id: event.gateway_id,
-    });
-    Ok(Json(IngestResponse {
-        accepted: true,
-        message: "gateway session start recorded".to_string(),
     }))
 }
 
@@ -966,9 +948,7 @@ fn validate_gateway_agent_hello(event: &GatewayAgentHelloIngest) -> Result<(), A
         return Err(ApiError::bad_request("invalid_gateway_agent_hello"));
     }
     validate_gateway_remote_ip(event.remote_ip.as_deref())?;
-    if let Some(key) = event.noise_public_key_hex.as_deref() {
-        validate_noise_public_key(key)?;
-    }
+    validate_noise_public_key(&event.noise_public_key_hex)?;
     Ok(())
 }
 
@@ -1027,6 +1007,11 @@ fn valid_agent_metrics(metrics: &vpsman_common::AgentMetrics) -> bool {
         || metrics.disks.len() > MAX_TELEMETRY_DISKS
         || metrics.networks.len() > MAX_TELEMETRY_NETWORKS
         || metrics.tunnels.len() > MAX_TELEMETRY_TUNNELS
+        || metrics.ping_results.len() > MAX_TELEMETRY_PING_RESULTS
+        || metrics
+            .cpu
+            .utilization_ratio
+            .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
         || ![
             metrics.cpu.load.one,
             metrics.cpu.load.five,
@@ -1073,6 +1058,27 @@ fn valid_agent_metrics(metrics: &vpsman_common::AgentMetrics) -> bool {
             || network.interface.len() > 64
             || network.interface.chars().any(char::is_control)
             || !interfaces.insert(network.interface.as_str())
+    }) {
+        return false;
+    }
+    let mut ping_results = std::collections::HashSet::new();
+    if metrics.ping_results.iter().any(|result| {
+        uuid::Uuid::parse_str(result.target_id.trim()).is_err()
+            || result.generation == 0
+            || result.checked_unix == 0
+            || result.checked_unix > metrics.observed_unix.saturating_add(300)
+            || metrics.observed_unix.saturating_sub(result.checked_unix) > 3_900
+            || !result.values_are_coherent()
+            || !result.loss_ratio.is_finite()
+            || !(0.0..=1.0).contains(&result.loss_ratio)
+            || result
+                .latency_avg_ms
+                .is_some_and(|value| !value.is_finite() || !(0.0..=3_600_000.0).contains(&value))
+            || result
+                .reason
+                .as_ref()
+                .is_some_and(|reason| reason.len() > 512 || reason.chars().any(char::is_control))
+            || !ping_results.insert((result.target_id.as_str(), result.generation))
     }) {
         return false;
     }

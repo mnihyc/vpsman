@@ -663,11 +663,14 @@ async function installTwentyFourVpsExpertMock(page: Page) {
       }
       if (pathname === "/api/v1/fleet/summary" && method === "GET") {
         return jsonResponse({
+          never: agents.filter((agent) => agent.status === "never").length,
           offline: agents.filter((agent) => agent.status === "offline").length,
           online: agents.filter((agent) => agent.status === "online").length,
+          revoked: agents.filter((agent) => agent.status === "revoked").length,
           running_jobs: 7,
           stale: agents.filter((agent) => agent.status === "stale").length,
           total: agents.length,
+          unknown: 0,
           warnings: 3,
         });
       }

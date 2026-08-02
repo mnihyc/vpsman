@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
@@ -14,8 +14,8 @@ use vpsman_common::{
 use vpsman_server_core::{TARGET_STATUS_AGENT_LOST, TARGET_STATUS_COMPLETED, TARGET_STATUS_FAILED};
 
 use crate::model::{
-    AgentView, TelemetryNetworkRateView, TelemetryRollupView, TelemetryTunnelAdapterHealthView,
-    TelemetryTunnelView,
+    AgentView, ClientStatusHistoryView, TelemetryNetworkRateView, TelemetryRollupView,
+    TelemetrySampleView, TelemetryTunnelAdapterHealthView, TelemetryTunnelView,
 };
 use crate::model_alert_policies::TrafficCounterSampleRecord;
 use crate::model_webhook_rules::WebhookEventCandidate;
@@ -25,6 +25,7 @@ use crate::repository_jobs::{
     enqueue_target_terminal_event_in_tx,
 };
 use crate::repository_key_lifecycle::public_key_sha256_hex;
+use crate::repository_monitoring::{accepted_postgres_ping_results, upsert_postgres_ping_results};
 use crate::security::constant_time_eq;
 
 const TELEMETRY_BUCKET_SECS: i32 = 60;
@@ -415,33 +416,57 @@ impl Repository {
         if provided.len() != 32 {
             return Ok(false);
         }
-        if self.is_public_key_revoked(&provided).await? {
-            return Ok(false);
-        }
+        let provided_fingerprint = public_key_sha256_hex(&provided);
         match self {
-            Self::Memory(memory) => Ok(memory
-                .client_public_keys
-                .read()
-                .await
-                .get(client_id)
-                .is_some_and(|expected| constant_time_eq(expected, &provided))
-                && !memory.hidden_clients.read().await.contains(client_id)),
+            Self::Memory(memory) => {
+                let _key_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
+                let current_key_matches = memory
+                    .client_public_keys
+                    .read()
+                    .await
+                    .get(client_id)
+                    .is_some_and(|expected| constant_time_eq(expected, &provided));
+                let key_revoked = memory
+                    .client_key_revocations
+                    .read()
+                    .await
+                    .iter()
+                    .any(|record| record.public_key_sha256_hex == provided_fingerprint);
+                let identity_active = memory
+                    .agents
+                    .read()
+                    .await
+                    .iter()
+                    .find(|agent| agent.id == client_id)
+                    .is_some_and(|agent| !matches!(agent.status.as_str(), "revoked" | "deleted"));
+                let hidden = memory.hidden_clients.read().await.contains(client_id);
+                Ok(current_key_matches && !key_revoked && identity_active && !hidden)
+            }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
-                    SELECT public_key
-                    FROM clients
-                    WHERE id = $1 AND hidden_at IS NULL
+                    SELECT
+                        public_key,
+                        status NOT IN ('revoked', 'deleted')
+                            AND NOT EXISTS (
+                                SELECT 1
+                                FROM client_key_revocations
+                                WHERE public_key_sha256_hex = $2
+                            ) AS identity_active
+                    FROM visible_clients
+                    WHERE id = $1
                     "#,
                 )
                 .bind(client_id)
+                .bind(provided_fingerprint)
                 .fetch_optional(pool)
                 .await?;
                 let Some(row) = row else {
                     return Ok(false);
                 };
                 let expected: Vec<u8> = row.try_get("public_key")?;
-                Ok(constant_time_eq(&expected, &provided))
+                let identity_active: bool = row.try_get("identity_active")?;
+                Ok(identity_active && constant_time_eq(&expected, &provided))
             }
         }
     }
@@ -450,61 +475,42 @@ impl Repository {
         let update_heartbeat = event.hello.update_heartbeat.clone();
         let mut accepted_hello = true;
         let session_event = agent_hello_session_event(event);
-        let authenticated_public_key = event
-            .noise_public_key_hex
-            .as_deref()
-            .map(|value| {
-                hex::decode(value).with_context(|| {
-                    format!("invalid noise public key hex for {}", event.hello.client_id)
-                })
-            })
-            .transpose()?;
-        if authenticated_public_key
-            .as_ref()
-            .is_some_and(|public_key| public_key.len() != 32)
-        {
+        let authenticated_public_key =
+            hex::decode(&event.noise_public_key_hex).with_context(|| {
+                format!("invalid noise public key hex for {}", event.hello.client_id)
+            })?;
+        if authenticated_public_key.len() != 32 {
             return Ok(false);
         }
         match self {
             Self::Memory(memory) => {
-                let _key_lifecycle_guard = if authenticated_public_key.is_some() {
-                    Some(memory.agent_key_lifecycle.lock().await)
-                } else {
-                    None
-                };
+                let _key_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
                 let hidden = memory
                     .hidden_clients
                     .read()
                     .await
                     .contains(&event.hello.client_id);
-                let credential_accepted =
-                    if let Some(public_key) = authenticated_public_key.as_ref() {
-                        let fingerprint = public_key_sha256_hex(public_key);
-                        let current_key_matches = memory
-                            .client_public_keys
-                            .read()
-                            .await
-                            .get(&event.hello.client_id)
-                            .is_some_and(|expected| constant_time_eq(expected, public_key));
-                        let key_revoked = memory
-                            .client_key_revocations
-                            .read()
-                            .await
-                            .iter()
-                            .any(|record| record.public_key_sha256_hex == fingerprint);
-                        let identity_active = memory
-                            .agents
-                            .read()
-                            .await
-                            .iter()
-                            .find(|agent| agent.id == event.hello.client_id)
-                            .is_some_and(|agent| {
-                                !matches!(agent.status.as_str(), "revoked" | "deleted")
-                            });
-                        current_key_matches && !key_revoked && identity_active
-                    } else {
-                        true
-                    };
+                let fingerprint = public_key_sha256_hex(&authenticated_public_key);
+                let current_key_matches = memory
+                    .client_public_keys
+                    .read()
+                    .await
+                    .get(&event.hello.client_id)
+                    .is_some_and(|expected| constant_time_eq(expected, &authenticated_public_key));
+                let key_revoked = memory
+                    .client_key_revocations
+                    .read()
+                    .await
+                    .iter()
+                    .any(|record| record.public_key_sha256_hex == fingerprint);
+                let identity_active = memory
+                    .agents
+                    .read()
+                    .await
+                    .iter()
+                    .find(|agent| agent.id == event.hello.client_id)
+                    .is_some_and(|agent| !matches!(agent.status.as_str(), "revoked" | "deleted"));
+                let credential_accepted = current_key_matches && !key_revoked && identity_active;
                 if !hidden && credential_accepted {
                     let prior = {
                         let agents = memory.agents.read().await;
@@ -539,21 +545,46 @@ impl Repository {
                     )
                     .await;
                     if let Some((prior_status, prior_build, stale_reason)) = prior {
-                        if prior_status == "stale"
-                            && !event.hello.agent_version.is_empty()
-                            && prior_build != event.hello.internal_build_number
-                        {
+                        let resulting_status = memory
+                            .agents
+                            .read()
+                            .await
+                            .iter()
+                            .find(|agent| agent.id == event.hello.client_id)
+                            .map(|agent| agent.status.clone())
+                            .unwrap_or(prior_status.clone());
+                        if prior_status != resulting_status {
+                            let reason = if prior_status == "never" {
+                                "agent_first_connection"
+                            } else if prior_status == "stale" {
+                                "agent_reconnected_with_changed_internal_build"
+                            } else {
+                                "agent_reconnected"
+                            };
+                            let now = crate::unix_now().to_string();
                             let metadata = serde_json::json!({
-                                "from_status": "stale",
-                                "to_status": "online",
-                                "reason": "agent_reconnected_with_changed_internal_build",
+                                "from_status": &prior_status,
+                                "to_status": &resulting_status,
+                                "reason": reason,
                                 "stale_reason": stale_reason,
                                 "previous_internal_build_number": prior_build,
                                 "internal_build_number": event.hello.internal_build_number,
-                                "result": "online",
+                                "gateway_id": &event.gateway_id,
+                                "result": &resulting_status,
                                 "origin_kind": "gateway_ingest",
                                 "component": "agent-ingest",
                             });
+                            memory.client_status_history.write().await.push(
+                                ClientStatusHistoryView {
+                                    id: Uuid::new_v4(),
+                                    client_id: event.hello.client_id.clone(),
+                                    from_status: Some(prior_status.clone()),
+                                    to_status: resulting_status.clone(),
+                                    reason: reason.to_string(),
+                                    metadata: metadata.clone(),
+                                    created_at: now.clone(),
+                                },
+                            );
                             memory
                                 .audits
                                 .write()
@@ -561,47 +592,17 @@ impl Repository {
                                 .push(crate::model::AuditLogView {
                                     id: Uuid::new_v4(),
                                     actor_id: None,
-                                    action: "agent.status_online".to_string(),
+                                    action: format!("agent.status_{resulting_status}"),
                                     target: format!("client:{}", event.hello.client_id),
                                     command_hash: None,
                                     metadata: metadata.clone(),
-                                    created_at: crate::unix_now().to_string(),
+                                    created_at: now,
                                 });
                             self.record_client_status_webhook_event(
                                 &event.hello.client_id,
-                                Some("stale"),
-                                "online",
-                                "agent_reconnected_with_changed_internal_build",
-                                metadata,
-                            )
-                            .await?;
-                        } else if prior_status == "never" {
-                            let metadata = serde_json::json!({
-                                "from_status": "never",
-                                "to_status": "online",
-                                "reason": "agent_first_connection",
-                                "result": "online",
-                                "origin_kind": "gateway_ingest",
-                                "component": "agent-ingest",
-                            });
-                            memory
-                                .audits
-                                .write()
-                                .await
-                                .push(crate::model::AuditLogView {
-                                    id: Uuid::new_v4(),
-                                    actor_id: None,
-                                    action: "agent.status_online".to_string(),
-                                    target: format!("client:{}", event.hello.client_id),
-                                    command_hash: None,
-                                    metadata: metadata.clone(),
-                                    created_at: crate::unix_now().to_string(),
-                                });
-                            self.record_client_status_webhook_event(
-                                &event.hello.client_id,
-                                Some("never"),
-                                "online",
-                                "agent_first_connection",
+                                Some(&prior_status),
+                                &resulting_status,
+                                reason,
                                 metadata,
                             )
                             .await?;
@@ -623,38 +624,36 @@ impl Repository {
                         internal_build_number,
                         stale_build_number,
                         process_incarnation_id
-                    FROM clients
-                    WHERE id = $1 AND hidden_at IS NULL
+                    FROM visible_clients
+                    WHERE id = $1
                     FOR UPDATE
                     "#,
                 )
                 .bind(&event.hello.client_id)
                 .fetch_optional(&mut *tx)
                 .await?;
-                if let Some(public_key) = authenticated_public_key.as_ref() {
-                    let Some(prior_row) = prior.as_ref() else {
-                        return Ok(false);
-                    };
-                    let current_public_key: Vec<u8> = prior_row.try_get("public_key")?;
-                    let current_status: String = prior_row.try_get("status")?;
-                    let revoked = sqlx::query(
-                        r#"
-                        SELECT 1
-                        FROM client_key_revocations
-                        WHERE public_key_sha256_hex = $1
-                        LIMIT 1
-                        "#,
-                    )
-                    .bind(public_key_sha256_hex(public_key))
-                    .fetch_optional(&mut *tx)
-                    .await?
-                    .is_some();
-                    if !constant_time_eq(&current_public_key, public_key)
-                        || matches!(current_status.as_str(), "revoked" | "deleted")
-                        || revoked
-                    {
-                        return Ok(false);
-                    }
+                let Some(prior_row) = prior.as_ref() else {
+                    return Ok(false);
+                };
+                let current_public_key: Vec<u8> = prior_row.try_get("public_key")?;
+                let current_status: String = prior_row.try_get("status")?;
+                let revoked = sqlx::query(
+                    r#"
+                    SELECT 1
+                    FROM client_key_revocations
+                    WHERE public_key_sha256_hex = $1
+                    LIMIT 1
+                    "#,
+                )
+                .bind(public_key_sha256_hex(&authenticated_public_key))
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_some();
+                if !constant_time_eq(&current_public_key, &authenticated_public_key)
+                    || matches!(current_status.as_str(), "revoked" | "deleted")
+                    || revoked
+                {
+                    return Ok(false);
                 }
                 let prior_status = prior
                     .as_ref()
@@ -729,7 +728,7 @@ impl Repository {
                 )
                 .bind(&event.hello.client_id)
                 .bind(&event.hello.client_id)
-                .bind(authenticated_public_key.clone().unwrap_or_default())
+                .bind(&authenticated_public_key)
                 .bind(&event.hello.agent_version)
                 .bind(event.hello.internal_build_number as i64)
                 .bind(event.hello.process_incarnation_id)
@@ -797,32 +796,28 @@ impl Repository {
                     .execute(&mut *tx)
                     .await?;
                 }
-                if accepted_hello && clears_stale {
+                let resulting_status = if prior_status.as_deref() == Some("stale") && !clears_stale
+                {
+                    "stale"
+                } else {
+                    "online"
+                };
+                if accepted_hello && prior_status.as_deref() != Some(resulting_status) {
+                    let reason = match prior_status.as_deref() {
+                        Some("never") => "agent_first_connection",
+                        Some("stale") => "agent_reconnected_with_changed_internal_build",
+                        _ => "agent_reconnected",
+                    };
                     record_client_status_transition_in_tx(
                         &mut tx,
                         &event.hello.client_id,
-                        Some("stale"),
-                        "online",
-                        "agent_reconnected_with_changed_internal_build",
+                        prior_status.as_deref(),
+                        resulting_status,
+                        reason,
                         serde_json::json!({
                             "old_internal_build_number": prior_build,
                             "stale_build_number": stale_build,
                             "new_internal_build_number": event.hello.internal_build_number,
-                            "gateway_id": &event.gateway_id,
-                        }),
-                        "gateway_ingest",
-                        "agent-ingest",
-                    )
-                    .await?;
-                }
-                if accepted_hello && prior_status.as_deref() == Some("never") {
-                    record_client_status_transition_in_tx(
-                        &mut tx,
-                        &event.hello.client_id,
-                        Some("never"),
-                        "online",
-                        "agent_first_connection",
-                        serde_json::json!({
                             "gateway_id": &event.gateway_id,
                         }),
                         "gateway_ingest",
@@ -854,15 +849,36 @@ impl Repository {
 
     pub(crate) async fn record_telemetry(&self, event: &GatewayTelemetryIngest) -> Result<bool> {
         let mut received_metrics = event.telemetry.metrics.clone();
-        received_metrics.observed_unix = crate::unix_now();
+        let reported_observed_unix = received_metrics.observed_unix;
+        let received_unix = crate::unix_now();
+        for result in &mut received_metrics.ping_results {
+            let check_age = reported_observed_unix.saturating_sub(result.checked_unix);
+            result.checked_unix = received_unix.saturating_sub(check_age);
+        }
+        received_metrics.observed_unix = received_unix;
         let record_result: Result<bool> = match self {
             Self::Memory(memory) => {
+                let _key_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
                 if memory
                     .hidden_clients
                     .read()
                     .await
                     .contains(&event.telemetry.client_id)
                 {
+                    return Ok(false);
+                }
+                let active_identity = memory.agents.read().await.iter().any(|agent| {
+                    agent.id == event.telemetry.client_id
+                        && !matches!(agent.status.as_str(), "revoked" | "deleted")
+                        && agent.process_incarnation_id == Some(event.process_incarnation_id)
+                });
+                let active_session = memory.gateway_sessions.read().await.iter().any(|session| {
+                    session.gateway_id == event.gateway_id
+                        && session.client_id == event.telemetry.client_id
+                        && session.id == event.gateway_session_id
+                        && session.status == "active"
+                });
+                if !active_identity || !active_session {
                     return Ok(false);
                 }
                 match claim_memory_telemetry_sequence(
@@ -876,6 +892,7 @@ impl Repository {
                 {
                     TelemetrySequenceClaim::Accepted => {}
                     TelemetrySequenceClaim::Duplicate => {
+                        drop(_key_lifecycle_guard);
                         self.record_port_forward_runtime_from_telemetry(
                             &event.telemetry.client_id,
                             &received_metrics,
@@ -886,30 +903,28 @@ impl Repository {
                     }
                     TelemetrySequenceClaim::Stale => return Ok(false),
                 }
-                let hello = AgentHello {
-                    client_id: event.telemetry.client_id.clone(),
-                    process_incarnation_id: Uuid::nil(),
-                    agent_version: String::new(),
-                    internal_build_number: 1,
-                    os_release: String::new(),
-                    arch: String::new(),
-                    update_heartbeat: None,
-                    capabilities: Default::default(),
-                };
-                upsert_memory_agent_with_remote_ip(
+                touch_memory_agent_from_telemetry(
                     &memory.agents,
-                    &hello,
+                    &event.telemetry.client_id,
                     event.remote_ip.as_deref(),
                 )
                 .await;
-                upsert_memory_telemetry_rollup(
-                    &memory.telemetry_rollups,
+                received_metrics.ping_results = self
+                    .accepted_ping_results_memory(
+                        &event.telemetry.client_id,
+                        received_metrics.observed_unix,
+                        &received_metrics.ping_results,
+                    )
+                    .await?;
+                upsert_memory_telemetry_sample(
+                    &memory.telemetry_samples,
+                    Uuid::new_v4(),
                     &event.telemetry.client_id,
                     &received_metrics,
                 )
-                .await;
-                upsert_memory_telemetry_network_rates(
-                    &memory.telemetry_network_rates,
+                .await?;
+                upsert_memory_telemetry_rollup(
+                    &memory.telemetry_rollups,
                     &event.telemetry.client_id,
                     &received_metrics,
                 )
@@ -920,6 +935,19 @@ impl Repository {
                     &received_metrics,
                 )
                 .await;
+                upsert_memory_telemetry_network_rates(
+                    &memory.telemetry_network_rates,
+                    &memory.traffic_counter_samples,
+                    &event.telemetry.client_id,
+                    &received_metrics,
+                )
+                .await;
+                self.record_ping_results_memory(
+                    &event.telemetry.client_id,
+                    received_metrics.observed_unix,
+                    &received_metrics.ping_results,
+                )
+                .await?;
                 let mut tunnels = memory.telemetry_tunnels.write().await;
                 tunnels.retain(|record| record.client_id != event.telemetry.client_id);
                 tunnels.extend(received_metrics.tunnels.iter().filter_map(|tunnel| {
@@ -932,20 +960,32 @@ impl Repository {
                 Ok(true)
             }
             Self::Postgres(pool) => {
-                let metrics = &received_metrics;
                 let mut tx = pool.begin().await?;
-                let deleted: bool = sqlx::query_scalar(
+                let visible_client = sqlx::query_scalar::<_, String>(
                     r#"
-                    SELECT COALESCE(
-                        (SELECT hidden_at IS NOT NULL FROM clients WHERE id = $1),
-                        false
-                    )
+                    SELECT client.id
+                    FROM visible_clients client
+                    WHERE client.id = $1
+                      AND client.status <> 'revoked'
+                      AND client.process_incarnation_id = $2
+                      AND EXISTS (
+                          SELECT 1
+                          FROM gateway_sessions session
+                          WHERE session.gateway_id = $3
+                            AND session.client_id = client.id
+                            AND session.id = $4
+                            AND session.status = 'active'
+                      )
+                    FOR UPDATE
                     "#,
                 )
                 .bind(&event.telemetry.client_id)
-                .fetch_one(&mut *tx)
+                .bind(event.process_incarnation_id)
+                .bind(&event.gateway_id)
+                .bind(event.gateway_session_id)
+                .fetch_optional(&mut *tx)
                 .await?;
-                if deleted {
+                if visible_client.is_none() {
                     tx.commit().await?;
                     return Ok(false);
                 }
@@ -966,18 +1006,40 @@ impl Repository {
                         return Ok(false);
                     }
                 }
+                received_metrics.ping_results = accepted_postgres_ping_results(
+                    &mut tx,
+                    &event.telemetry.client_id,
+                    received_metrics.observed_unix,
+                    &received_metrics.ping_results,
+                )
+                .await?;
+                let metrics = &received_metrics;
+                upsert_postgres_telemetry_sample(
+                    &mut tx,
+                    Uuid::new_v4(),
+                    &event.telemetry.client_id,
+                    metrics,
+                )
+                .await?;
                 upsert_postgres_telemetry_rollup(&mut tx, &event.telemetry.client_id, metrics)
                     .await?;
+                upsert_postgres_traffic_counter_samples(
+                    &mut tx,
+                    &event.telemetry.client_id,
+                    metrics,
+                )
+                .await?;
                 upsert_postgres_telemetry_network_rates(
                     &mut tx,
                     &event.telemetry.client_id,
                     metrics,
                 )
                 .await?;
-                upsert_postgres_traffic_counter_samples(
+                upsert_postgres_ping_results(
                     &mut tx,
                     &event.telemetry.client_id,
-                    metrics,
+                    metrics.observed_unix,
+                    &metrics.ping_results,
                 )
                 .await?;
                 upsert_postgres_telemetry_tunnels(&mut tx, &event.telemetry.client_id, metrics)
@@ -991,6 +1053,7 @@ impl Repository {
                         last_ip = COALESCE($2::inet, last_ip),
                         last_seen_at = now()
                     WHERE id = $1 AND hidden_at IS NULL
+                      AND status <> 'revoked'
                     "#,
                 )
                 .bind(&event.telemetry.client_id)
@@ -1091,6 +1154,9 @@ impl Repository {
             Self::Memory(memory) => {
                 let mut agents = memory.agents.write().await;
                 if let Some(agent) = agents.iter_mut().find(|agent| agent.id == client_id) {
+                    if matches!(agent.status.as_str(), "revoked" | "deleted") {
+                        return Ok(());
+                    }
                     if agent.status != "stale" {
                         let from_status = agent.status.clone();
                         agent.status = "stale".to_string();
@@ -1141,8 +1207,8 @@ impl Repository {
                 let prior = sqlx::query(
                     r#"
                     SELECT status, internal_build_number
-                    FROM clients
-                    WHERE id = $1 AND hidden_at IS NULL
+                    FROM visible_clients
+                    WHERE id = $1 AND status <> 'revoked'
                     FOR UPDATE
                     "#,
                 )
@@ -1340,6 +1406,65 @@ async fn claim_postgres_telemetry_sequence(
     })
 }
 
+async fn upsert_memory_telemetry_sample(
+    samples: &Arc<RwLock<Vec<TelemetrySampleView>>>,
+    id: Uuid,
+    client_id: &str,
+    metrics: &AgentMetrics,
+) -> Result<()> {
+    let observed_at = metrics.observed_unix.to_string();
+    let sample = TelemetrySampleView {
+        id,
+        client_id: client_id.to_string(),
+        observed_at: observed_at.clone(),
+        cpu_load_1: metrics.cpu.load.one,
+        memory_total_bytes: u64_to_i64(metrics.memory.total_bytes),
+        memory_available_bytes: u64_to_i64(metrics.memory.available_bytes),
+        payload: serde_json::to_value(metrics)?,
+    };
+    samples.write().await.push(sample);
+    Ok(())
+}
+
+async fn upsert_postgres_telemetry_sample(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: Uuid,
+    client_id: &str,
+    metrics: &AgentMetrics,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_samples (
+            id,
+            client_id,
+            observed_at,
+            cpu_load_1,
+            memory_total_bytes,
+            memory_available_bytes,
+            payload
+        ) VALUES (
+            $1,
+            $2,
+            to_timestamp($3::double precision),
+            $4,
+            $5,
+            $6,
+            $7
+        )
+        "#,
+    )
+    .bind(id)
+    .bind(client_id)
+    .bind(metrics.observed_unix as f64)
+    .bind(metrics.cpu.load.one)
+    .bind(u64_to_i64(metrics.memory.total_bytes))
+    .bind(u64_to_i64(metrics.memory.available_bytes))
+    .bind(SqlJson(metrics))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 async fn upsert_memory_telemetry_rollup(
     rollups: &Arc<RwLock<Vec<TelemetryRollupView>>>,
     client_id: &str,
@@ -1356,9 +1481,34 @@ async fn upsert_memory_telemetry_rollup(
     }) {
         let current_count = rollup.sample_count.max(1);
         rollup.sample_count = rollup.sample_count.saturating_add(1);
+        if let Some(cpu_usage) = metrics.cpu.utilization_ratio {
+            let usage_count = rollup.cpu_usage_sample_count.max(0);
+            rollup.cpu_usage_avg = Some(match rollup.cpu_usage_avg {
+                Some(current) if usage_count > 0 => {
+                    weighted_avg_f64(current, usage_count, cpu_usage)
+                }
+                _ => cpu_usage,
+            });
+            rollup.cpu_usage_max = Some(
+                rollup
+                    .cpu_usage_max
+                    .map_or(cpu_usage, |current| current.max(cpu_usage)),
+            );
+            rollup.cpu_usage_sample_count = usage_count.saturating_add(1);
+        }
+        rollup.cpu_cores_max = rollup.cpu_cores_max.max(i32::from(metrics.cpu.cores));
         rollup.cpu_load_1_avg =
             weighted_avg_f64(rollup.cpu_load_1_avg, current_count, metrics.cpu.load.one);
         rollup.cpu_load_1_max = rollup.cpu_load_1_max.max(metrics.cpu.load.one);
+        rollup.cpu_load_5_avg =
+            weighted_avg_f64(rollup.cpu_load_5_avg, current_count, metrics.cpu.load.five);
+        rollup.cpu_load_5_max = rollup.cpu_load_5_max.max(metrics.cpu.load.five);
+        rollup.cpu_load_15_avg = weighted_avg_f64(
+            rollup.cpu_load_15_avg,
+            current_count,
+            metrics.cpu.load.fifteen,
+        );
+        rollup.cpu_load_15_max = rollup.cpu_load_15_max.max(metrics.cpu.load.fifteen);
         rollup.memory_total_bytes_max = rollup
             .memory_total_bytes_max
             .max(u64_to_i64(metrics.memory.total_bytes));
@@ -1379,6 +1529,19 @@ async fn upsert_memory_telemetry_rollup(
         rollup.disk_available_bytes_min = rollup.disk_available_bytes_min.min(disk_available);
         rollup.network_rx_bytes_max = rollup.network_rx_bytes_max.max(network_rx);
         rollup.network_tx_bytes_max = rollup.network_tx_bytes_max.max(network_tx);
+        if let Some(connections) = metrics.connections.as_ref() {
+            rollup.connections_sample_count = rollup.connections_sample_count.saturating_add(1);
+            if rollup
+                .connections_observed_at
+                .as_deref()
+                .map(parse_unix)
+                .is_none_or(|stored| metrics.observed_unix >= stored)
+            {
+                rollup.tcp_sockets_latest = Some(u64_to_i64(connections.tcp));
+                rollup.udp_sockets_latest = Some(u64_to_i64(connections.udp));
+                rollup.connections_observed_at = Some(observed_at.clone());
+            }
+        }
         if metrics.observed_unix >= parse_unix(&rollup.latest_observed_at) {
             rollup.latest_observed_at = observed_at.clone();
         }
@@ -1391,8 +1554,16 @@ async fn upsert_memory_telemetry_rollup(
         bucket_start,
         bucket_secs: TELEMETRY_BUCKET_SECS,
         sample_count: 1,
+        cpu_usage_sample_count: i32::from(metrics.cpu.utilization_ratio.is_some()),
+        cpu_usage_avg: metrics.cpu.utilization_ratio,
+        cpu_usage_max: metrics.cpu.utilization_ratio,
+        cpu_cores_max: i32::from(metrics.cpu.cores),
         cpu_load_1_avg: metrics.cpu.load.one,
         cpu_load_1_max: metrics.cpu.load.one,
+        cpu_load_5_avg: metrics.cpu.load.five,
+        cpu_load_5_max: metrics.cpu.load.five,
+        cpu_load_15_avg: metrics.cpu.load.fifteen,
+        cpu_load_15_max: metrics.cpu.load.fifteen,
         memory_total_bytes_max: u64_to_i64(metrics.memory.total_bytes),
         memory_available_bytes_avg: u64_to_i64(metrics.memory.available_bytes),
         memory_available_bytes_min: u64_to_i64(metrics.memory.available_bytes),
@@ -1401,6 +1572,16 @@ async fn upsert_memory_telemetry_rollup(
         disk_available_bytes_min: disk_available,
         network_rx_bytes_max: network_rx,
         network_tx_bytes_max: network_tx,
+        connections_sample_count: i32::from(metrics.connections.is_some()),
+        tcp_sockets_latest: metrics
+            .connections
+            .as_ref()
+            .map(|connections| u64_to_i64(connections.tcp)),
+        udp_sockets_latest: metrics
+            .connections
+            .as_ref()
+            .map(|connections| u64_to_i64(connections.udp)),
+        connections_observed_at: metrics.connections.as_ref().map(|_| observed_at.clone()),
         latest_observed_at: observed_at.clone(),
         updated_at: observed_at,
     });
@@ -1408,17 +1589,40 @@ async fn upsert_memory_telemetry_rollup(
 
 async fn upsert_memory_telemetry_network_rates(
     rates: &Arc<RwLock<Vec<TelemetryNetworkRateView>>>,
+    traffic_samples: &Arc<RwLock<Vec<TrafficCounterSampleRecord>>>,
     client_id: &str,
     metrics: &AgentMetrics,
 ) {
     let bucket_start = bucket_start_unix(metrics.observed_unix).to_string();
     let observed_at = metrics.observed_unix.to_string();
+    let bucket_unix = bucket_start_unix(metrics.observed_unix) as i64;
+    let epochs_by_interface = traffic_samples
+        .read()
+        .await
+        .iter()
+        .filter(|sample| {
+            sample.client_id == client_id
+                && sample.source_kind == "host"
+                && sample.observed_unix == bucket_unix
+        })
+        .map(|sample| {
+            (
+                sample.interface.clone(),
+                (sample.rx_counter_epoch, sample.tx_counter_epoch),
+            )
+        })
+        .collect::<HashMap<_, _>>();
     let mut rates = rates.write().await;
     for network in metrics
         .networks
         .iter()
         .filter(|network| valid_telemetry_name(&network.interface))
     {
+        let Some(&(rx_counter_epoch, tx_counter_epoch)) =
+            epochs_by_interface.get(&network.interface)
+        else {
+            continue;
+        };
         let rx_bytes = u64_to_i64(network.rx_bytes);
         let tx_bytes = u64_to_i64(network.tx_bytes);
         if let Some(rate) = rates.iter_mut().find(|rate| {
@@ -1431,6 +1635,10 @@ async fn upsert_memory_telemetry_network_rates(
             rate.sample_count = rate.sample_count.saturating_add(1);
             rate.rx_bytes_avg = weighted_avg_i64(rate.rx_bytes_avg, current_count, rx_bytes);
             rate.tx_bytes_avg = weighted_avg_i64(rate.tx_bytes_avg, current_count, tx_bytes);
+            rate.rx_bytes_last = rx_bytes;
+            rate.tx_bytes_last = tx_bytes;
+            rate.rx_counter_epoch = rx_counter_epoch;
+            rate.tx_counter_epoch = tx_counter_epoch;
             rate.rx_bytes_delta = 0;
             rate.tx_bytes_delta = 0;
             rate.rx_bps_avg = 0.0;
@@ -1447,6 +1655,10 @@ async fn upsert_memory_telemetry_network_rates(
             sample_count: 1,
             rx_bytes_avg: rx_bytes,
             tx_bytes_avg: tx_bytes,
+            rx_bytes_last: rx_bytes,
+            tx_bytes_last: tx_bytes,
+            rx_counter_epoch,
+            tx_counter_epoch,
             rx_bytes_delta: 0,
             tx_bytes_delta: 0,
             rx_bps_avg: 0.0,
@@ -1461,44 +1673,88 @@ async fn upsert_memory_traffic_counter_samples(
     client_id: &str,
     metrics: &AgentMetrics,
 ) {
+    let bucket_unix = bucket_start_unix(metrics.observed_unix);
     let observed_at = Utc
-        .timestamp_opt(metrics.observed_unix as i64, 0)
+        .timestamp_opt(bucket_unix as i64, 0)
         .single()
         .map(|value| value.to_rfc3339())
-        .unwrap_or_else(|| metrics.observed_unix.to_string());
+        .unwrap_or_else(|| bucket_unix.to_string());
     let mut samples = samples.write().await;
     for network in metrics
         .networks
         .iter()
         .filter(|network| valid_telemetry_name(&network.interface))
     {
-        samples.push(TrafficCounterSampleRecord {
-            client_id: client_id.to_string(),
-            source_kind: "host".to_string(),
-            interface: network.interface.clone(),
-            observed_at: observed_at.clone(),
-            observed_unix: metrics.observed_unix as i64,
-            rx_bytes: u64_to_i64(network.rx_bytes),
-            tx_bytes: u64_to_i64(network.tx_bytes),
-            counter_epoch: 0,
-            sample_source: "agent_networks".to_string(),
-        });
+        upsert_memory_traffic_counter(
+            &mut samples,
+            TrafficCounterSampleRecord {
+                client_id: client_id.to_string(),
+                source_kind: "host".to_string(),
+                interface: network.interface.clone(),
+                observed_at: observed_at.clone(),
+                observed_unix: bucket_unix as i64,
+                rx_bytes: u64_to_i64(network.rx_bytes),
+                tx_bytes: u64_to_i64(network.tx_bytes),
+                rx_counter_epoch: 0,
+                tx_counter_epoch: 0,
+                sample_source: "agent_networks".to_string(),
+            },
+        );
     }
     for tunnel in metrics.tunnels.iter().filter(|tunnel| valid_tunnel(tunnel)) {
-        samples.push(TrafficCounterSampleRecord {
-            client_id: client_id.to_string(),
-            source_kind: "tunnel".to_string(),
-            interface: tunnel.interface.clone(),
-            observed_at: observed_at.clone(),
-            observed_unix: metrics.observed_unix as i64,
-            rx_bytes: u64_to_i64(tunnel.rx_bytes),
-            tx_bytes: u64_to_i64(tunnel.tx_bytes),
-            counter_epoch: 0,
-            sample_source: tunnel
-                .traffic_source
-                .clone()
-                .unwrap_or_else(|| "runtime_tunnel".to_string()),
-        });
+        upsert_memory_traffic_counter(
+            &mut samples,
+            TrafficCounterSampleRecord {
+                client_id: client_id.to_string(),
+                source_kind: "tunnel".to_string(),
+                interface: tunnel.interface.clone(),
+                observed_at: observed_at.clone(),
+                observed_unix: bucket_unix as i64,
+                rx_bytes: u64_to_i64(tunnel.rx_bytes),
+                tx_bytes: u64_to_i64(tunnel.tx_bytes),
+                rx_counter_epoch: 0,
+                tx_counter_epoch: 0,
+                sample_source: tunnel
+                    .traffic_source
+                    .clone()
+                    .unwrap_or_else(|| "runtime_tunnel".to_string()),
+            },
+        );
+    }
+}
+
+fn upsert_memory_traffic_counter(
+    samples: &mut Vec<TrafficCounterSampleRecord>,
+    mut sample: TrafficCounterSampleRecord,
+) {
+    if let Some(stored) = samples.iter_mut().find(|stored| {
+        stored.client_id == sample.client_id
+            && stored.source_kind == sample.source_kind
+            && stored.interface == sample.interface
+            && stored.observed_unix == sample.observed_unix
+    }) {
+        sample.rx_counter_epoch =
+            stored.rx_counter_epoch + i64::from(sample.rx_bytes < stored.rx_bytes);
+        sample.tx_counter_epoch =
+            stored.tx_counter_epoch + i64::from(sample.tx_bytes < stored.tx_bytes);
+        *stored = sample;
+    } else {
+        if let Some(previous) = samples
+            .iter()
+            .filter(|stored| {
+                stored.client_id == sample.client_id
+                    && stored.source_kind == sample.source_kind
+                    && stored.interface == sample.interface
+                    && stored.observed_unix < sample.observed_unix
+            })
+            .max_by_key(|stored| stored.observed_unix)
+        {
+            sample.rx_counter_epoch =
+                previous.rx_counter_epoch + i64::from(sample.rx_bytes < previous.rx_bytes);
+            sample.tx_counter_epoch =
+                previous.tx_counter_epoch + i64::from(sample.tx_bytes < previous.tx_bytes);
+        }
+        samples.push(sample);
     }
 }
 
@@ -1515,8 +1771,16 @@ async fn upsert_postgres_telemetry_rollup(
             bucket_start,
             bucket_secs,
             sample_count,
+            cpu_usage_sample_count,
+            cpu_usage_avg,
+            cpu_usage_max,
+            cpu_cores_max,
             cpu_load_1_avg,
             cpu_load_1_max,
+            cpu_load_5_avg,
+            cpu_load_5_max,
+            cpu_load_15_avg,
+            cpu_load_15_max,
             memory_total_bytes_max,
             memory_available_bytes_avg,
             memory_available_bytes_min,
@@ -1525,6 +1789,10 @@ async fn upsert_postgres_telemetry_rollup(
             disk_available_bytes_min,
             network_rx_bytes_max,
             network_tx_bytes_max,
+            connections_sample_count,
+            tcp_sockets_latest,
+            udp_sockets_latest,
+            connections_observed_at,
             latest_observed_at,
             updated_at
         )
@@ -1534,25 +1802,71 @@ async fn upsert_postgres_telemetry_rollup(
             $3,
             1,
             $4,
-            $4,
             $5,
-            $6,
             $6,
             $7,
             $8,
             $8,
             $9,
+            $9,
             $10,
-            to_timestamp($11::double precision),
+            $10,
+            $11,
+            $12,
+            $12,
+            $13,
+            $14,
+            $14,
+            $15,
+            $16,
+            $17,
+            $18,
+            $19,
+            CASE WHEN $20::double precision IS NULL
+                THEN NULL
+                ELSE to_timestamp($20::double precision)
+            END,
+            to_timestamp($21::double precision),
             now()
         )
         ON CONFLICT (client_id, bucket_secs, bucket_start) DO UPDATE SET
             sample_count = telemetry_rollups.sample_count + EXCLUDED.sample_count,
+            cpu_usage_sample_count = telemetry_rollups.cpu_usage_sample_count
+                + EXCLUDED.cpu_usage_sample_count,
+            cpu_usage_avg = CASE
+                WHEN telemetry_rollups.cpu_usage_sample_count + EXCLUDED.cpu_usage_sample_count = 0
+                    THEN NULL
+                ELSE (
+                    COALESCE(telemetry_rollups.cpu_usage_avg, 0)
+                        * telemetry_rollups.cpu_usage_sample_count::double precision
+                    + COALESCE(EXCLUDED.cpu_usage_avg, 0)
+                        * EXCLUDED.cpu_usage_sample_count::double precision
+                ) / (
+                    telemetry_rollups.cpu_usage_sample_count
+                    + EXCLUDED.cpu_usage_sample_count
+                )::double precision
+            END,
+            cpu_usage_max = CASE
+                WHEN telemetry_rollups.cpu_usage_max IS NULL THEN EXCLUDED.cpu_usage_max
+                WHEN EXCLUDED.cpu_usage_max IS NULL THEN telemetry_rollups.cpu_usage_max
+                ELSE GREATEST(telemetry_rollups.cpu_usage_max, EXCLUDED.cpu_usage_max)
+            END,
+            cpu_cores_max = GREATEST(telemetry_rollups.cpu_cores_max, EXCLUDED.cpu_cores_max),
             cpu_load_1_avg = (
                 telemetry_rollups.cpu_load_1_avg * telemetry_rollups.sample_count::double precision
                 + EXCLUDED.cpu_load_1_avg * EXCLUDED.sample_count::double precision
             ) / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::double precision,
             cpu_load_1_max = GREATEST(telemetry_rollups.cpu_load_1_max, EXCLUDED.cpu_load_1_max),
+            cpu_load_5_avg = (
+                telemetry_rollups.cpu_load_5_avg * telemetry_rollups.sample_count::double precision
+                + EXCLUDED.cpu_load_5_avg * EXCLUDED.sample_count::double precision
+            ) / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::double precision,
+            cpu_load_5_max = GREATEST(telemetry_rollups.cpu_load_5_max, EXCLUDED.cpu_load_5_max),
+            cpu_load_15_avg = (
+                telemetry_rollups.cpu_load_15_avg * telemetry_rollups.sample_count::double precision
+                + EXCLUDED.cpu_load_15_avg * EXCLUDED.sample_count::double precision
+            ) / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::double precision,
+            cpu_load_15_max = GREATEST(telemetry_rollups.cpu_load_15_max, EXCLUDED.cpu_load_15_max),
             memory_total_bytes_max = GREATEST(
                 telemetry_rollups.memory_total_bytes_max,
                 EXCLUDED.memory_total_bytes_max
@@ -1585,6 +1899,34 @@ async fn upsert_postgres_telemetry_rollup(
                 telemetry_rollups.network_tx_bytes_max,
                 EXCLUDED.network_tx_bytes_max
             ),
+            connections_sample_count = telemetry_rollups.connections_sample_count
+                + EXCLUDED.connections_sample_count,
+            tcp_sockets_latest = CASE
+                WHEN EXCLUDED.connections_observed_at IS NULL
+                    THEN telemetry_rollups.tcp_sockets_latest
+                WHEN telemetry_rollups.connections_observed_at IS NULL
+                    OR EXCLUDED.connections_observed_at >= telemetry_rollups.connections_observed_at
+                    THEN EXCLUDED.tcp_sockets_latest
+                ELSE telemetry_rollups.tcp_sockets_latest
+            END,
+            udp_sockets_latest = CASE
+                WHEN EXCLUDED.connections_observed_at IS NULL
+                    THEN telemetry_rollups.udp_sockets_latest
+                WHEN telemetry_rollups.connections_observed_at IS NULL
+                    OR EXCLUDED.connections_observed_at >= telemetry_rollups.connections_observed_at
+                    THEN EXCLUDED.udp_sockets_latest
+                ELSE telemetry_rollups.udp_sockets_latest
+            END,
+            connections_observed_at = CASE
+                WHEN telemetry_rollups.connections_observed_at IS NULL
+                    THEN EXCLUDED.connections_observed_at
+                WHEN EXCLUDED.connections_observed_at IS NULL
+                    THEN telemetry_rollups.connections_observed_at
+                ELSE GREATEST(
+                    telemetry_rollups.connections_observed_at,
+                    EXCLUDED.connections_observed_at
+                )
+            END,
             latest_observed_at = GREATEST(
                 telemetry_rollups.latest_observed_at,
                 EXCLUDED.latest_observed_at
@@ -1595,13 +1937,33 @@ async fn upsert_postgres_telemetry_rollup(
     .bind(client_id)
     .bind(bucket_start_unix(metrics.observed_unix) as f64)
     .bind(TELEMETRY_BUCKET_SECS)
+    .bind(i32::from(metrics.cpu.utilization_ratio.is_some()))
+    .bind(metrics.cpu.utilization_ratio)
+    .bind(metrics.cpu.utilization_ratio)
+    .bind(i32::from(metrics.cpu.cores))
     .bind(metrics.cpu.load.one)
+    .bind(metrics.cpu.load.five)
+    .bind(metrics.cpu.load.fifteen)
     .bind(u64_to_i64(metrics.memory.total_bytes))
     .bind(u64_to_i64(metrics.memory.available_bytes))
     .bind(disk_total)
     .bind(disk_available)
     .bind(network_rx)
     .bind(network_tx)
+    .bind(i32::from(metrics.connections.is_some()))
+    .bind(
+        metrics
+            .connections
+            .as_ref()
+            .map(|connections| u64_to_i64(connections.tcp)),
+    )
+    .bind(
+        metrics
+            .connections
+            .as_ref()
+            .map(|connections| u64_to_i64(connections.udp)),
+    )
+    .bind(metrics.connections.as_ref().map(|_| metrics.observed_unix as f64))
     .bind(metrics.observed_unix as f64)
     .execute(&mut **tx)
     .await?;
@@ -1628,9 +1990,13 @@ async fn upsert_postgres_telemetry_network_rates(
                 sample_count,
                 rx_bytes_avg,
                 tx_bytes_avg,
+                rx_bytes_last,
+                tx_bytes_last,
+                rx_counter_epoch,
+                tx_counter_epoch,
                 updated_at
             )
-            VALUES (
+            SELECT
                 $1,
                 $2,
                 to_timestamp($3::double precision),
@@ -1638,8 +2004,16 @@ async fn upsert_postgres_telemetry_network_rates(
                 1,
                 $5,
                 $6,
+                $5,
+                $6,
+                sample.rx_counter_epoch,
+                sample.tx_counter_epoch,
                 now()
-            )
+            FROM traffic_counter_samples sample
+            WHERE sample.client_id = $1
+              AND sample.source_kind = 'host'
+              AND sample.interface = $2
+              AND sample.observed_at = to_timestamp($3::double precision)
             ON CONFLICT (client_id, interface, bucket_secs, bucket_start) DO UPDATE SET
                 sample_count = telemetry_network_rates.sample_count + EXCLUDED.sample_count,
                 rx_bytes_avg = round((
@@ -1650,6 +2024,10 @@ async fn upsert_postgres_telemetry_network_rates(
                     telemetry_network_rates.tx_bytes_avg::numeric * telemetry_network_rates.sample_count::numeric
                     + EXCLUDED.tx_bytes_avg::numeric * EXCLUDED.sample_count::numeric
                 ) / (telemetry_network_rates.sample_count + EXCLUDED.sample_count)::numeric)::bigint,
+                rx_bytes_last = EXCLUDED.rx_bytes_last,
+                tx_bytes_last = EXCLUDED.tx_bytes_last,
+                rx_counter_epoch = EXCLUDED.rx_counter_epoch,
+                tx_counter_epoch = EXCLUDED.tx_counter_epoch,
                 updated_at = now()
             "#,
         )
@@ -1716,14 +2094,53 @@ async fn insert_traffic_counter_sample(
 ) -> Result<()> {
     sqlx::query(
         r#"
+        WITH previous AS (
+            SELECT rx_counter_epoch, tx_counter_epoch, rx_bytes, tx_bytes
+            FROM traffic_counter_samples
+            WHERE client_id = $1
+              AND source_kind = $2
+              AND interface = $3
+              AND observed_at <= date_trunc(
+                    'minute', to_timestamp($4::double precision)
+              )
+            ORDER BY observed_at DESC
+            LIMIT 1
+        )
         INSERT INTO traffic_counter_samples (
             client_id, source_kind, interface, observed_at, rx_bytes, tx_bytes,
-            counter_epoch, sample_source
+            rx_counter_epoch, tx_counter_epoch, sample_source
         )
-        VALUES ($1, $2, $3, to_timestamp($4::double precision), $5, $6, 0, $7)
+        SELECT
+            $1, $2, $3,
+            date_trunc('minute', to_timestamp($4::double precision)),
+            $5,
+            $6,
+            COALESCE(previous.rx_counter_epoch, 0)
+                + CASE WHEN $5 < previous.rx_bytes THEN 1 ELSE 0 END,
+            COALESCE(previous.tx_counter_epoch, 0)
+                + CASE WHEN $6 < previous.tx_bytes THEN 1 ELSE 0 END,
+            $7
+        FROM (SELECT 1) seed
+        LEFT JOIN previous ON TRUE
         ON CONFLICT (client_id, source_kind, interface, observed_at) DO UPDATE SET
             rx_bytes = EXCLUDED.rx_bytes,
             tx_bytes = EXCLUDED.tx_bytes,
+            rx_counter_epoch = CASE
+                WHEN EXCLUDED.rx_bytes < traffic_counter_samples.rx_bytes
+                THEN traffic_counter_samples.rx_counter_epoch + 1
+                ELSE GREATEST(
+                    traffic_counter_samples.rx_counter_epoch,
+                    EXCLUDED.rx_counter_epoch
+                )
+            END,
+            tx_counter_epoch = CASE
+                WHEN EXCLUDED.tx_bytes < traffic_counter_samples.tx_bytes
+                THEN traffic_counter_samples.tx_counter_epoch + 1
+                ELSE GREATEST(
+                    traffic_counter_samples.tx_counter_epoch,
+                    EXCLUDED.tx_counter_epoch
+                )
+            END,
             sample_source = EXCLUDED.sample_source
         "#,
     )
@@ -1923,7 +2340,7 @@ fn agent_hello_session_event(event: &GatewayAgentHelloIngest) -> GatewaySessionL
         gateway_id: event.gateway_id.clone(),
         client_id: event.hello.client_id.clone(),
         session_id: event.gateway_session_id,
-        noise_public_key_hex: event.noise_public_key_hex.clone(),
+        noise_public_key_hex: Some(event.noise_public_key_hex.clone()),
         remote_ip: event.remote_ip.clone(),
         agent_version: Some(event.hello.agent_version.clone()),
         reason: None,
@@ -2181,4 +2598,27 @@ pub(crate) async fn upsert_memory_agent_with_remote_ip(
         stale_reason: None,
         capabilities: hello.capabilities.clone(),
     });
+}
+
+async fn touch_memory_agent_from_telemetry(
+    agents: &Arc<RwLock<Vec<AgentView>>>,
+    client_id: &str,
+    remote_ip: Option<&str>,
+) {
+    let mut agents = agents.write().await;
+    let Some(agent) = agents.iter_mut().find(|agent| agent.id == client_id) else {
+        return;
+    };
+    if agent.status != "stale" {
+        agent.status = "online".to_string();
+        agent.stale_since = None;
+        agent.stale_reason = None;
+    }
+    if agent.registration_ip.is_none() {
+        agent.registration_ip = remote_ip.map(str::to_string);
+    }
+    if let Some(remote_ip) = remote_ip {
+        agent.last_ip = Some(remote_ip.to_string());
+    }
+    agent.last_seen_at = Some(crate::unix_now().to_string());
 }

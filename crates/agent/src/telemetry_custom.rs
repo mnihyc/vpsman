@@ -4,9 +4,9 @@ use anyhow::{ensure, Context, Result};
 use serde::Deserialize;
 use tokio::process::Command;
 use vpsman_common::{
-    AgentConfig, AgentMetrics, AgentTelemetrySource, CpuStat, DiskStat, LoadAverage, MemoryStat,
-    NetworkStat, RuntimeTunnelCommand, RuntimeTunnelStat, MAX_TELEMETRY_DISKS,
-    MAX_TELEMETRY_NETWORKS, MAX_TELEMETRY_TUNNELS,
+    AgentConfig, AgentMetrics, AgentTelemetrySource, ConnectionStat, CpuStat, DiskStat,
+    LoadAverage, MemoryStat, NetworkStat, RuntimeTunnelCommand, RuntimeTunnelStat,
+    MAX_TELEMETRY_DISKS, MAX_TELEMETRY_NETWORKS, MAX_TELEMETRY_TUNNELS,
 };
 
 use crate::child_process::{run_child_with_bounded_output, ChildCleanupPolicy, ChildRunResult};
@@ -25,6 +25,7 @@ struct CustomMetricsPatch {
     memory: Option<MemoryStat>,
     disks: Option<Vec<DiskStat>>,
     networks: Option<Vec<NetworkStat>>,
+    connections: Option<ConnectionStat>,
     tunnels: Option<Vec<RuntimeTunnelStat>>,
 }
 
@@ -33,6 +34,7 @@ struct CustomMetricsPatch {
 struct CpuPatch {
     load: Option<LoadAverage>,
     cores: Option<u16>,
+    utilization_ratio: Option<f64>,
 }
 
 pub(crate) fn custom_metrics_replaces_linux(config: &AgentConfig) -> bool {
@@ -132,6 +134,9 @@ fn apply_patch(metrics: &mut AgentMetrics, patch: CustomMetricsPatch) {
         if let Some(cores) = cpu.cores {
             metrics.cpu.cores = cores;
         }
+        if let Some(utilization_ratio) = cpu.utilization_ratio {
+            metrics.cpu.utilization_ratio = Some(utilization_ratio);
+        }
     }
     if let Some(memory) = patch.memory {
         metrics.memory = memory;
@@ -141,6 +146,9 @@ fn apply_patch(metrics: &mut AgentMetrics, patch: CustomMetricsPatch) {
     }
     if let Some(networks) = patch.networks {
         metrics.networks = networks;
+    }
+    if let Some(connections) = patch.connections {
+        metrics.connections = Some(connections);
     }
     if let Some(tunnels) = patch.tunnels {
         metrics.tunnels = tunnels;
@@ -155,6 +163,7 @@ fn validate_custom_metrics_patch(patch: &CustomMetricsPatch) -> Result<()> {
             || patch.memory.is_some()
             || patch.disks.is_some()
             || patch.networks.is_some()
+            || patch.connections.is_some()
             || patch.tunnels.is_some(),
         "custom telemetry patch is empty"
     );
@@ -169,7 +178,7 @@ fn validate_custom_metrics_patch(patch: &CustomMetricsPatch) -> Result<()> {
     }
     if let Some(cpu) = patch.cpu.as_ref() {
         ensure!(
-            cpu.load.is_some() || cpu.cores.is_some(),
+            cpu.load.is_some() || cpu.cores.is_some() || cpu.utilization_ratio.is_some(),
             "custom telemetry patch has an empty cpu override"
         );
         if let Some(load) = cpu.load.as_ref() {
@@ -184,6 +193,12 @@ fn validate_custom_metrics_patch(patch: &CustomMetricsPatch) -> Result<()> {
         }
         if let Some(cores) = cpu.cores {
             ensure!(cores > 0, "custom telemetry patch has invalid cpu.cores");
+        }
+        if let Some(utilization_ratio) = cpu.utilization_ratio {
+            ensure!(
+                utilization_ratio.is_finite() && (0.0..=1.0).contains(&utilization_ratio),
+                "custom telemetry patch has invalid cpu.utilization_ratio"
+            );
         }
     }
     if let Some(memory) = patch.memory.as_ref() {
@@ -296,11 +311,14 @@ pub(crate) fn empty_custom_metrics_snapshot(observed_unix: u64) -> AgentMetrics 
         cpu: CpuStat {
             load: LoadAverage::default(),
             cores: 1,
+            utilization_ratio: None,
         },
         memory: MemoryStat::default(),
         disks: Vec::new(),
         networks: Vec::new(),
+        connections: None,
         tunnels: Vec::new(),
+        ping_results: Vec::new(),
         port_forwarding: None,
     }
 }
@@ -378,6 +396,7 @@ mod tests {
                     fifteen: 0.0,
                 }),
                 cores: None,
+                utilization_ratio: None,
             }),
             ..CustomMetricsPatch::default()
         })
@@ -477,11 +496,42 @@ mod tests {
                     fifteen: 0.3,
                 }),
                 cores: None,
+                utilization_ratio: Some(0.25),
             }),
             networks: Some(Vec::new()),
             ..CustomMetricsPatch::default()
         })
         .unwrap();
+    }
+
+    #[test]
+    fn custom_cpu_utilization_is_optional_but_must_be_a_ratio() {
+        let snapshot = empty_custom_metrics_snapshot(1);
+        assert_eq!(snapshot.cpu.utilization_ratio, None);
+
+        let mut metrics = snapshot;
+        apply_patch(
+            &mut metrics,
+            CustomMetricsPatch {
+                cpu: Some(CpuPatch {
+                    utilization_ratio: Some(0.75),
+                    ..CpuPatch::default()
+                }),
+                ..CustomMetricsPatch::default()
+            },
+        );
+        assert_eq!(metrics.cpu.utilization_ratio, Some(0.75));
+
+        let error = validate_custom_metrics_patch(&CustomMetricsPatch {
+            cpu: Some(CpuPatch {
+                utilization_ratio: Some(1.01),
+                ..CpuPatch::default()
+            }),
+            ..CustomMetricsPatch::default()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("invalid cpu.utilization_ratio"));
     }
 
     #[test]

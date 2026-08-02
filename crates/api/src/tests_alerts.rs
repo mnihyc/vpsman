@@ -8,11 +8,6 @@ async fn fleet_alerts_derive_actionable_current_status() {
     let repo = Repository::Memory(MemoryState::default());
     let tunnel_input = alert_test_tunnel_input();
     crate::tests_network::seed_test_plan_adapter_definitions(&repo, &tunnel_input).await;
-    let tunnel_plan = vpsman_common::plan_tunnel(&tunnel_input).unwrap();
-    let saved_tunnel = repo
-        .record_tunnel_plan(&tunnel_input, &tunnel_plan, true, &test_operator())
-        .await
-        .unwrap();
     let online = AgentView {
         id: "edge-a".to_string(),
         display_name: "Edge A".to_string(),
@@ -52,9 +47,16 @@ async fn fleet_alerts_derive_actionable_current_status() {
             unprivileged_hint: Some("agent is running without root".to_string()),
         },
     };
-    let backup_job = Uuid::new_v4();
     if let Repository::Memory(memory) = &repo {
         memory.agents.write().await.extend([online, stale]);
+    }
+    let tunnel_plan = vpsman_common::plan_tunnel(&tunnel_input).unwrap();
+    let saved_tunnel = repo
+        .record_tunnel_plan(&tunnel_input, &tunnel_plan, true, &test_operator())
+        .await
+        .unwrap();
+    let backup_job = Uuid::new_v4();
+    if let Repository::Memory(memory) = &repo {
         memory
             .telemetry_tunnels
             .write()
@@ -240,6 +242,8 @@ async fn tunnel_adapter_failures_only_degrade_external_managed_plans() {
     ] {
         let repo = Repository::Memory(MemoryState::default());
         let input = crate::tests_network::test_plan_input(manager, false);
+        crate::tests::seed_never_connected_memory_agent(&repo, "client-a").await;
+        crate::tests::seed_never_connected_memory_agent(&repo, "client-b").await;
         crate::tests_network::seed_test_plan_adapter_definitions(&repo, &input).await;
         let plan = vpsman_common::plan_tunnel(&input).unwrap();
         let saved = repo
@@ -247,21 +251,6 @@ async fn tunnel_adapter_failures_only_degrade_external_managed_plans() {
             .await
             .unwrap();
         if let Repository::Memory(memory) = &repo {
-            memory.agents.write().await.push(AgentView {
-                id: "client-a".to_string(),
-                display_name: "Client A".to_string(),
-                status: "online".to_string(),
-                tags: Vec::new(),
-                registration_ip: None,
-                last_ip: None,
-                last_seen_at: None,
-                arch: None,
-                internal_build_number: 1,
-                process_incarnation_id: None,
-                stale_since: None,
-                stale_reason: None,
-                capabilities: AgentCapabilitySnapshot::default(),
-            });
             memory
                 .telemetry_tunnels
                 .write()
@@ -850,6 +839,94 @@ async fn filter_limit_regression_internal_traffic_accounting_is_unbounded() {
 }
 
 #[tokio::test]
+async fn configured_traffic_without_a_quota_remains_healthy() {
+    let memory = MemoryState::default();
+    let now = chrono::Utc::now().timestamp();
+    memory.agents.write().await.push(AgentView {
+        id: "v-1".to_string(),
+        display_name: "VPS 1".to_string(),
+        status: "online".to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: Some(now.to_string()),
+        arch: None,
+        internal_build_number: 1,
+        process_incarnation_id: None,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: AgentCapabilitySnapshot::default(),
+    });
+    let stored_rule = |key: &str, value_raw: &str, value_json: serde_json::Value| {
+        crate::model_alert_policies::VpsRuleValueRecord {
+            client_id: "v-1".to_string(),
+            key: key.to_string(),
+            value_raw: value_raw.to_string(),
+            value_json,
+            parsed_display: value_raw.to_string(),
+            state: "ok".to_string(),
+            validation_errors: Vec::new(),
+            source_kind: "test".to_string(),
+            source_id: None,
+            updated_by: None,
+            updated_at: now.to_string(),
+        }
+    };
+    memory.vps_rule_values.write().await.extend([
+        stored_rule(VPS_RULE_KEY_TRAFFIC_RESET_DAY, "1", json!({"day": 1})),
+        stored_rule(
+            VPS_RULE_KEY_TRAFFIC_SELECTORS,
+            "eth0",
+            json!({
+                "selectors": [{
+                    "source": "host",
+                    "interface": "eth0",
+                    "direction": "total",
+                    "canonical": "eth0"
+                }]
+            }),
+        ),
+    ]);
+    memory.traffic_counter_samples.write().await.extend([
+        TrafficCounterSampleRecord {
+            client_id: "v-1".to_string(),
+            source_kind: "host".to_string(),
+            interface: "eth0".to_string(),
+            observed_at: (now - 60).to_string(),
+            observed_unix: now - 60,
+            rx_bytes: 1_000,
+            tx_bytes: 2_000,
+            rx_counter_epoch: 0,
+            tx_counter_epoch: 0,
+            sample_source: "test".to_string(),
+        },
+        TrafficCounterSampleRecord {
+            client_id: "v-1".to_string(),
+            source_kind: "host".to_string(),
+            interface: "eth0".to_string(),
+            observed_at: now.to_string(),
+            observed_unix: now,
+            rx_bytes: 1_100,
+            tx_bytes: 2_200,
+            rx_counter_epoch: 0,
+            tx_counter_epoch: 0,
+            sample_source: "test".to_string(),
+        },
+    ]);
+    let accounting = Repository::Memory(memory)
+        .get_traffic_accounting("v-1")
+        .await
+        .unwrap();
+
+    assert_eq!(accounting.state, "ok");
+    assert!(accounting.incomplete_reasons.is_empty());
+    assert_eq!(accounting.quota_total_bytes, None);
+    assert_eq!(accounting.cycle_percent, None);
+    assert_eq!(accounting.rx_bytes, 100);
+    assert_eq!(accounting.tx_bytes, 200);
+}
+
+#[tokio::test]
 async fn filter_limit_regression_policy_evaluator_is_unbounded() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = test_operator();
@@ -1079,7 +1156,8 @@ async fn policy_evaluator_rejects_malformed_persisted_traffic_selector_without_f
                 observed_unix: now_unix - 60,
                 rx_bytes: 100,
                 tx_bytes: 100,
-                counter_epoch: 1,
+                rx_counter_epoch: 1,
+                tx_counter_epoch: 1,
                 sample_source: "test".to_string(),
             },
             TrafficCounterSampleRecord {
@@ -1090,7 +1168,8 @@ async fn policy_evaluator_rejects_malformed_persisted_traffic_selector_without_f
                 observed_unix: now_unix - 1,
                 rx_bytes: 1_000,
                 tx_bytes: 1_000,
-                counter_epoch: 1,
+                rx_counter_epoch: 1,
+                tx_counter_epoch: 1,
                 sample_source: "test".to_string(),
             },
         ]);
@@ -1263,15 +1342,6 @@ async fn fleet_alert_candidates_are_not_hidden_by_public_page_caps() {
     let repo = Repository::Memory(MemoryState::default());
     let tunnel_input = alert_test_tunnel_input();
     crate::tests_network::seed_test_plan_adapter_definitions(&repo, &tunnel_input).await;
-    let tunnel_plan = vpsman_common::plan_tunnel(&tunnel_input).unwrap();
-    let saved_tunnel = repo
-        .record_tunnel_plan(&tunnel_input, &tunnel_plan, true, &test_operator())
-        .await
-        .unwrap();
-    let policy_alert_id = Uuid::new_v4();
-    let failed_backup_id = Uuid::new_v4();
-    let failed_job_id = Uuid::new_v4();
-
     if let Repository::Memory(memory) = &repo {
         memory.agents.write().await.extend([
             AgentView {
@@ -1305,7 +1375,17 @@ async fn fleet_alert_candidates_are_not_hidden_by_public_page_caps() {
                 capabilities: AgentCapabilitySnapshot::default(),
             },
         ]);
+    }
+    let tunnel_plan = vpsman_common::plan_tunnel(&tunnel_input).unwrap();
+    let saved_tunnel = repo
+        .record_tunnel_plan(&tunnel_input, &tunnel_plan, true, &test_operator())
+        .await
+        .unwrap();
+    let policy_alert_id = Uuid::new_v4();
+    let failed_backup_id = Uuid::new_v4();
+    let failed_job_id = Uuid::new_v4();
 
+    if let Repository::Memory(memory) = &repo {
         let policy_group_id = Uuid::new_v4();
         let policy_rule_id = Uuid::new_v4();
         memory.policy_alerts.write().await.push(PolicyAlertRecord {
@@ -3009,8 +3089,16 @@ fn alert_test_rollup(
         bucket_start: "100".to_string(),
         bucket_secs: 60,
         sample_count: 3,
+        cpu_usage_sample_count: 0,
+        cpu_usage_avg: None,
+        cpu_usage_max: None,
+        cpu_cores_max: 0,
         cpu_load_1_avg: cpu_load_1_max,
         cpu_load_1_max,
+        cpu_load_5_avg: cpu_load_1_max,
+        cpu_load_5_max: cpu_load_1_max,
+        cpu_load_15_avg: cpu_load_1_max,
+        cpu_load_15_max: cpu_load_1_max,
         memory_total_bytes_max: 1000,
         memory_available_bytes_avg: memory_available,
         memory_available_bytes_min: memory_available,
@@ -3019,6 +3107,10 @@ fn alert_test_rollup(
         disk_available_bytes_min: disk_available,
         network_rx_bytes_max: 0,
         network_tx_bytes_max: 0,
+        connections_sample_count: 0,
+        tcp_sockets_latest: None,
+        udp_sockets_latest: None,
+        connections_observed_at: None,
         latest_observed_at: "120".to_string(),
         updated_at: "121".to_string(),
     }

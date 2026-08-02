@@ -42,7 +42,7 @@ super_password="docker-fleet-super-password"
 super_salt_hex="00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 privilege_verifier_key_hex="$(smoke_privilege_verifier_key_hex "$super_password" "$super_salt_hex")"
 object_store_dir="$SMOKE_TMPDIR/object-store"
-screenshot_dir="$ROOT_DIR/.tmp/audit/docker-24-agent-fleet-$run_id"
+screenshot_dir="$ROOT_DIR/output/playwright/docker-24-agent-fleet-$run_id"
 runtime_image="${VPSMAN_DOCKER_FLEET_RUNTIME_IMAGE:-ubuntu:24.04}"
 extended_review="${VPSMAN_DOCKER_FLEET_EXTENDED_REVIEW:-1}"
 mkdir -p "$object_store_dir" "$screenshot_dir"
@@ -341,8 +341,10 @@ until ((telemetry_network_rate_ready_client_count >= agent_count)); do
     docker exec "$pg_container" psql -U vpsman -d vpsman -c "SELECT client_id, interface, bucket_start, sample_count FROM telemetry_network_rates ORDER BY client_id, interface, bucket_start DESC" >&2 || true
     exit 1
   fi
+  # Every returned rate already has a prior counter baseline. sample_count is
+  # the number of observations in its current minute, not a baseline count.
   telemetry_network_rate_ready_client_count="$(api_get "/api/v1/telemetry/network-rates?limit=5000&bucket_secs=$rollup_bucket_secs" | jq -r '
-    [.[] | select(.sample_count >= 2 and (.interface | length) > 0) | .client_id] | unique | length
+    [.[] | select((.interface | length) > 0) | .client_id] | unique | length
   ')"
   sleep 1
 done
@@ -380,7 +382,11 @@ api_get "/api/v1/telemetry/rollups?limit=5000&bucket_secs=$rollup_bucket_secs" |
 ' >/dev/null
 
 api_get "/api/v1/telemetry/network-rates?limit=5000&bucket_secs=$rollup_bucket_secs" | jq -e --argjson expected "$agent_count" --argjson bucket "$rollup_bucket_secs" '
-  ([.[] | select(.bucket_secs == $bucket and .sample_count >= 2 and (.interface | length) > 0) | .client_id] | unique | length) >= $expected
+  ([.[] | select(.bucket_secs == $bucket and (.interface | length) > 0) | .client_id] | unique | length) >= $expected and
+  all(.[] | select(.bucket_secs == $bucket);
+    .sample_count >= 1 and
+    .rx_bytes_delta >= 0 and .tx_bytes_delta >= 0 and
+    .rx_bps_avg >= 0 and .tx_bps_avg >= 0)
 ' >/dev/null
 
 api_post "/api/v1/bulk/resolve" '{"selector_expression":"provider:alpha"}' \

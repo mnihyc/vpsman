@@ -1490,7 +1490,7 @@ nav {
   margin: 2px 0 0;
 }
 
-.confirmationPromptBody dl div {
+.confirmationPromptBody dl > div {
   display: grid;
   gap: 4px;
   min-width: 0;
@@ -1706,7 +1706,7 @@ h2 {
 
 .quickStats {
   gap: 8px;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 96px), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 112px), 1fr));
   justify-self: stretch;
   width: 100%;
 }
@@ -1971,6 +1971,7 @@ h2 {
 
 .consoleDataGrid {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
@@ -2024,6 +2025,13 @@ h2 {
   gap: 6px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.gridPagination {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 6px;
 }
 
 .gridPageSize select {

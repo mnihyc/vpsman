@@ -140,7 +140,6 @@ export function FileTransferSessionsPanel({
     useState<HandoffReviewSnapshot | null>(null);
   const [retrySnapshot, setRetrySnapshot] =
     useState<TransferRetryReviewSnapshot | null>(null);
-  const [selectedHandoffKeys, setSelectedHandoffKeys] = useState<string[]>([]);
   const [quickTransferMode, setQuickTransferMode] = useState<
     "download" | "upload"
   >("upload");
@@ -206,10 +205,6 @@ export function FileTransferSessionsPanel({
     0,
     completedDownloads.length - handoffCandidates.length,
   );
-  const selectedHandoffKeySet = new Set(selectedHandoffKeys);
-  const selectedHandoffTransfers = handoffCandidates.filter((transfer) =>
-    selectedHandoffKeySet.has(transferKey(transfer)),
-  );
   const handoffBusy = handoffPendingKey !== null;
   const handoffSummary = transfersTruncated
     ? `${formatLowerBoundCount(downloadTransfers.length, true)} downloads, ${formatLowerBoundCount(uploadTransfers.length, true)} uploads in loaded sessions`
@@ -224,38 +219,26 @@ export function FileTransferSessionsPanel({
         ? "Downloading source artifact"
         : null);
   const sourceArtifactFeedbackTone = sourceError ? "danger" : "progress";
+  const transferActions: ConsoleDataGridAction<FileTransferSessionRecord>[] = [
+    {
+      description: (selected) => {
+        const readyCount = selected.filter(canCreateHandoff).length;
+        if (readyCount !== selected.length) {
+          return `${readyCount} of ${selected.length} selected sessions are ready; select only completed downloads with retained evidence.`;
+        }
+        return `Review ${readyCount} selected download${readyCount === 1 ? "" : "s"} before saving.`;
+      },
+      disabled: (selected) =>
+        handoffBusy ||
+        selected.length === 0 ||
+        selected.some((transfer) => !canCreateHandoff(transfer)),
+      icon: <Download size={14} />,
+      label: "Review downloads",
+      onSelect: reviewSelectedHandoffs,
+    },
+  ];
   const transferRowActions: ConsoleDataGridAction<FileTransferSessionRecord>[] =
     [
-      {
-        description: ([transfer]) =>
-          transfer
-            ? `Add ready download ${shortId(transfer.session_id)} to the reviewed download selection.`
-            : "Select a ready download.",
-        hidden: ([transfer]) =>
-          !transfer ||
-          !canCreateHandoff(transfer) ||
-          selectedHandoffKeySet.has(transferKey(transfer)),
-        label: "Select download",
-        onSelect: ([transfer]) => {
-          if (transfer) {
-            toggleHandoffSelection(transfer, true);
-          }
-        },
-      },
-      {
-        description: ([transfer]) =>
-          transfer
-            ? `Remove ready download ${shortId(transfer.session_id)} from the reviewed download selection.`
-            : "Remove a ready download from the selection.",
-        hidden: ([transfer]) =>
-          !transfer || !selectedHandoffKeySet.has(transferKey(transfer)),
-        label: "Unselect download",
-        onSelect: ([transfer]) => {
-          if (transfer) {
-            toggleHandoffSelection(transfer, false);
-          }
-        },
-      },
       {
         description: ([transfer]) =>
           transfer
@@ -462,7 +445,7 @@ export function FileTransferSessionsPanel({
 
   useEffect(() => {
     setHandoffSnapshot(null);
-  }, [handoffDownloadMode, selectedHandoffKeys]);
+  }, [handoffDownloadMode]);
 
   function startQuickUpload() {
     if (quickTransferMode === "upload" && !quickUploadFile) {
@@ -523,14 +506,20 @@ export function FileTransferSessionsPanel({
     });
   }
 
-  function reviewSelectedHandoffs() {
-    if (selectedHandoffTransfers.length === 0) {
+  function reviewSelectedHandoffs(selected: FileTransferSessionRecord[]) {
+    if (selected.length === 0) {
+      return;
+    }
+    if (selected.some((transfer) => !canCreateHandoff(transfer))) {
+      setHandoffError(
+        "Select only completed downloads with retained evidence before review.",
+      );
       return;
     }
     setHandoffError(null);
     setHandoffSnapshot({
       mode: handoffDownloadMode,
-      transfers: selectedHandoffTransfers.map((transfer) =>
+      transfers: selected.map((transfer) =>
         handoffReviewItem(transfer, clientLabel),
       ),
     });
@@ -544,7 +533,6 @@ export function FileTransferSessionsPanel({
       handoffSnapshot.transfers.length === 1
         ? handoffSnapshot.transfers[0].key
         : "bulk";
-    const completedKeys = new Set<string>();
     setHandoffPendingKey(pendingKey);
     setHandoffError(null);
     setHandoffProgress(null);
@@ -563,7 +551,6 @@ export function FileTransferSessionsPanel({
           fileName: transfer.fileName,
           mode: handoffSnapshot.mode,
         });
-        completedKeys.add(transfer.key);
       }
       setHandoffProgress(
         `Downloaded ${handoffSnapshot.transfers.length} selected files`,
@@ -574,34 +561,8 @@ export function FileTransferSessionsPanel({
         error instanceof Error ? error.message : "Ready download failed",
       );
     } finally {
-      setSelectedHandoffKeys((keys) =>
-        keys.filter((key) => !completedKeys.has(key)),
-      );
       setHandoffPendingKey(null);
     }
-  }
-
-  function setAllHandoffSelection(selected: boolean) {
-    setSelectedHandoffKeys(selected ? handoffCandidates.map(transferKey) : []);
-  }
-
-  function toggleHandoffSelection(
-    transfer: FileTransferSessionRecord,
-    selected: boolean,
-  ) {
-    const key = transferKey(transfer);
-    const validKeys = new Set(handoffCandidates.map(transferKey));
-    setSelectedHandoffKeys((keys) => {
-      const next = new Set(
-        keys.filter((existingKey) => validKeys.has(existingKey)),
-      );
-      if (selected) {
-        next.add(key);
-      } else {
-        next.delete(key);
-      }
-      return Array.from(next);
-    });
   }
 
   async function reviewSourceArtifact() {
@@ -939,79 +900,6 @@ export function FileTransferSessionsPanel({
           tone="danger"
         />
       </section>
-      <div className="handoffBulkBar">
-        <span className="historyPrimary">
-          <strong>Ready downloads</strong>
-          <small
-            title={
-              transfersTruncated
-                ? `${formatLowerBoundCount(handoffCandidates.length, true)} ready in loaded sessions, ${unavailableCompletedDownloads} unavailable in loaded sessions, ${selectedHandoffTransfers.length} selected`
-                : `${handoffCandidates.length} ready to download, ${unavailableCompletedDownloads} unavailable, ${selectedHandoffTransfers.length} selected`
-            }
-          >
-            {transfersTruncated
-              ? `${formatLowerBoundCount(handoffCandidates.length, true)} ready in loaded sessions, ${unavailableCompletedDownloads} unavailable in loaded sessions, ${selectedHandoffTransfers.length} selected`
-              : `${handoffCandidates.length} ready to download, ${unavailableCompletedDownloads} unavailable, ${selectedHandoffTransfers.length} selected`}
-          </small>
-        </span>
-        <span className="handoffBulkActions">
-          <label className="handoffModeControl">
-            <span>Save method</span>
-            <select
-              aria-label="Ready download save method"
-              disabled={handoffBusy}
-              onChange={(event) =>
-                setHandoffDownloadMode(
-                  event.target.value as ArtifactDownloadMode,
-                )
-              }
-              value={handoffDownloadMode}
-            >
-              <option value="browser-download">Browser download</option>
-              <option value="stream-to-file">Stream to file</option>
-            </select>
-          </label>
-          <button
-            className="secondaryAction compactAction"
-            disabled={handoffBusy || handoffCandidates.length === 0}
-            onClick={() => setAllHandoffSelection(true)}
-            title={
-              handoffCandidates.length === 0
-                ? "No completed downloads currently have retained download evidence."
-                : "Select every completed download that is ready to save."
-            }
-            type="button"
-          >
-            Select all
-          </button>
-          <button
-            className="secondaryAction compactAction"
-            disabled={handoffBusy || selectedHandoffKeys.length === 0}
-            onClick={() => setAllHandoffSelection(false)}
-            type="button"
-          >
-            Clear
-          </button>
-          <button
-            className="primaryAction compactAction"
-            disabled={handoffBusy || selectedHandoffTransfers.length === 0}
-            onClick={() => reviewSelectedHandoffs()}
-            title={
-              selectedHandoffTransfers.length === 0
-                ? "Select one or more ready downloads first."
-                : "Review selected downloads before saving."
-            }
-            type="button"
-          >
-            <Download size={14} />
-            <span>
-              {handoffBusy && handoffPendingKey === "bulk"
-                ? "Downloading"
-                : "Review selected downloads"}
-            </span>
-          </button>
-        </span>
-      </div>
       <ConfirmationPrompt
         confirmLabel="Download selected files"
         detail="Saves the reviewed completed download sessions using the selected method."
@@ -1182,6 +1070,7 @@ export function FileTransferSessionsPanel({
         tone={handoffFeedbackTone}
       />
       <ConsoleDataGrid
+        actions={transferActions}
         columns={transferColumns}
         defaultPageSize={8}
         expandOnRowClick
@@ -1247,8 +1136,27 @@ export function FileTransferSessionsPanel({
         rowsTruncated={transfersTruncated}
         rowActions={transferRowActions}
         searchPlaceholder="Search transfers"
+        showMobileRowActions={false}
         mobileFieldLayout="stacked"
         storageKey="vpsman.jobs.fileTransferSessions"
+        toolbarActions={
+          <label className="handoffModeControl">
+            <span>Save method</span>
+            <select
+              aria-label="Ready download save method"
+              disabled={handoffBusy}
+              onChange={(event) =>
+                setHandoffDownloadMode(
+                  event.target.value as ArtifactDownloadMode,
+                )
+              }
+              value={handoffDownloadMode}
+            >
+              <option value="browser-download">Browser download</option>
+              <option value="stream-to-file">Stream to file</option>
+            </select>
+          </label>
+        }
         title="Transfer sessions"
       />
       <details className="sourceArtifactAdvanced">
@@ -1404,6 +1312,7 @@ export function FileTransferSessionsPanel({
               },
             ]}
             searchPlaceholder="Search source artifacts"
+            showMobileRowActions={false}
             storageKey="vpsman.jobs.fileTransferSources"
             title="Source artifacts"
           />

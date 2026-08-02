@@ -328,6 +328,16 @@ impl Repository {
     ) -> Result<Vec<ProcessSupervisorInventoryView>> {
         match self {
             Self::Memory(memory) => {
+                let _lifecycle_guard = memory.agent_key_lifecycle.lock().await;
+                let hidden = memory.hidden_clients.read().await;
+                let visible_client_ids = memory
+                    .agents
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|agent| !hidden.contains(&agent.id))
+                    .map(|agent| agent.id.clone())
+                    .collect::<BTreeSet<_>>();
                 let command_types = memory
                     .jobs
                     .read()
@@ -338,9 +348,10 @@ impl Repository {
                 let stored = memory.job_outputs.read().await;
                 let mut newest = BinaryHeap::<Reverse<(String, Uuid, String, i32, usize)>>::new();
                 for (index, output) in stored.iter().enumerate() {
-                    if !command_types
-                        .get(&output.job_id)
-                        .is_some_and(|command_type| is_process_supervisor_command(command_type))
+                    if !visible_client_ids.contains(output.client_id.as_str())
+                        || !command_types
+                            .get(&output.job_id)
+                            .is_some_and(|command_type| is_process_supervisor_command(command_type))
                     {
                         continue;
                     }
@@ -423,6 +434,7 @@ impl Repository {
                             job.command_type
                         FROM job_outputs output
                         JOIN jobs job ON job.id = output.job_id
+                        JOIN visible_clients client ON client.id = output.client_id
                         WHERE job.command_type IN (
                             'process_start',
                             'process_stop',

@@ -53,6 +53,84 @@ cargo run -p vpsctl -- telemetry-network-rates --latest
 cargo run -p vpsctl -- gateway-sessions
 ```
 
+### Scan the visual VPS grid
+
+Home shows a bounded fleet preview. Open **Fleet > Monitor** for the complete
+matching fleet; the grid defaults to all VPSs and progressively presents every
+match rather than making a small first page the workflow.
+
+Use search, status, tag, provider, and sort controls before changing density:
+
+- **Comfortable** normally shows fewer, wider cards with identity context,
+  fuller resource/network histories, traffic-cycle details, and primary Ping.
+- **Compact** fits more cards per row with a tight CPU/RAM/disk/load matrix, one
+  RX/TX activity row, one traffic row, and one primary-Ping strip. It is a
+  different information hierarchy, not a smaller Comfortable card.
+
+Every primary metric has a visual indicator and an exact value. A missing or
+stale value remains visibly unavailable; card color does not invent an alert
+threshold. **Traffic unconfigured** means the VPS lacks authoritative selectors
+or a reset cycle under Config > Rules. A quota is optional; accounting remains
+available without one. Card selection opens the canonical VPS detail, where
+resource, network, traffic, and all assigned Ping evidence share the ranges
+**15m**, **1h**, **8h**, **1d**, **7d**, **30d**, **90d**, **180d**, **1y**,
+**All**, and **Custom**. 15m is the rolling realtime view. Traffic
+history shows diagnostic RX and TX by default; use the existing chart legend to
+show Total. A selector's billing direction affects quota accounting, not which
+diagnostic direction remains available in the chart.
+
+Grid search, filters, sort, density, and scroll position belong to the current
+browser-history entry. Back/Forward restores them until a manual refresh starts
+a fresh entry.
+
+## Manage General Ping Targets
+
+Use **Observability > Ping targets** for reusable ICMP or TCP measurements that
+are independent from tunnel tests. A TCP target requires a port. Creating a
+target resolves the default `*` or entered selector to a frozen VPS list.
+Editing other fields preserves that list; changing the selector expression
+resolves its current matches for that save.
+
+When tags or other selector inputs later change, select one or more definitions
+whose saved expression resolves differently and use **Update targets** from the
+header **Actions** menu. Review the exact additions/removals, then confirm the
+transactional replacement. The saved expression is never a live assignment
+rule. Expand a target to inspect assigned VPSs; select VPS rows and use **Make
+primary** when that target should appear on those cards. Every assigned target
+still appears in VPS Ping detail.
+
+Probe-affecting edits start a new target generation, and runtime-sync evidence
+shows whether the affected agents received it. An agent accepts at most 16
+enabled targets and runs three bounded attempts every 60 seconds. Disabling or
+removing a primary leaves an explicit unconfigured/disabled state; no target is
+chosen automatically.
+
+## Manage Shared Monitoring Views
+
+Use **Observability > Shared views** as the durable management surface. The
+shortcut in Fleet > Monitor carries the current grid filter/selection into a new
+share draft; otherwise the default selector is `*`. Review freezes the exact VPS
+list and these optional visible groups: identity context, resources, network,
+traffic, Ping, and detail history. Display name and health are always visible.
+
+The default expiry is 24 hours; accepted expiry is one minute through 365 days.
+The secret public URL is shown once because only its digest is stored. Back and
+Forward retain it in that browser-history entry, but a reload removes it, so copy
+it before refreshing. Target and visibility scope are immutable after creation.
+
+The Active, Expired, and Revoked tables retain lifecycle and access evidence.
+Select active rows to extend them, capped at 365 days from extension time, or to
+revoke them immediately and irreversibly. Expired and revoked links cannot be
+reactivated; create a replacement. Each distinct visitor creates one
+`monitoring_share.visitor_opened` audit event with source-IP and bounded
+User-Agent evidence. Later polling updates last-accessed evidence without
+creating another event for that visitor.
+
+Public pages reuse the monitoring grid/detail in read-only form. They expose
+only the selected groups and opaque share-specific VPS keys, never IPs, internal
+configuration, actions, jobs, terminals, files, backups, audit data, or operator
+identity.
+
 ## Tune Fleet Alert Policy
 
 Resource alerts use a startup policy instead of hardcoded thresholds. Set these
@@ -116,6 +194,16 @@ cargo run -p vpsctl -- vps-rules upsert \
   --set traffic.selectors=eth0+tx,ens3 \
   --confirmed
 ```
+
+The same Config > Rules editor also accepts optional card-only facts:
+`billing.price=29.90 CNY/m`, `billing.cycle=15`, and
+`network.port_speed=1.5 Gbps`. Quarterly, half-yearly, and yearly prices use a
+day-month renewal anchor such as `15-06`; the billing anchor is independent of
+`traffic.reset_day`. Use `-1` for an explicitly unlimited traffic quota or an
+explicit billing **n/a**. Leaving a field blank means no rule, which is a
+different operator choice. Port speed is display-only, although a new tunnel
+plan can prefill its editable Mbps bandwidth from one endpoint or the lower of
+both endpoints.
 
 Then create a policy group. The selector chooses target VPSs using the same
 selector expressions as dispatch previews (`tag:edge`, `provider:hetzner`,

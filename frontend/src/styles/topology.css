@@ -125,42 +125,12 @@
   color: var(--primary-text);
 }
 
-.tunnelRegistryToolbar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-  min-height: 48px;
-  padding: 7px 18px;
-  border-top: 1px solid var(--border-subtle);
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--surface-subtle);
-}
-
-.tunnelRegistryToolbar .compactSearch {
-  width: min(320px, 100%);
-}
-
-.selectionActionBar {
-  display: inline-flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 7px;
-  margin-left: auto;
-}
-
-.selectionActionBar > span {
-  color: var(--primary-text);
-  font-size: 12px;
-  font-weight: 700;
-}
-
 .portForwardSummary,
 .portForwardRegistry,
-.portForwardDetails,
 .portForwardEditor {
   min-width: 0;
   overflow: hidden;
+  scroll-margin-block-start: var(--console-sticky-offset, 80px);
 }
 
 .portForwardActionFeedback {
@@ -170,147 +140,6 @@
 .portForwardRegistryFeedback,
 .portForwardDetailFeedback {
   margin: 10px 18px;
-}
-
-.portForwardSummary .headerActionStack {
-  flex-direction: row;
-  align-items: center;
-  min-width: 0;
-}
-
-.portForwardToolbar {
-  display: grid;
-  grid-template-columns: minmax(180px, 1.6fr) repeat(5, minmax(112px, 0.8fr));
-  gap: 8px;
-  align-items: center;
-  padding: 8px 18px;
-  border-top: 1px solid var(--border-subtle);
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--surface-subtle);
-}
-
-.portForwardToolbar .compactSearch,
-.portForwardToolbar .compactFilter,
-.portForwardToolbar select {
-  width: 100%;
-  min-width: 0;
-}
-
-.portForwardToolbar select {
-  height: 34px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface);
-  color: var(--text);
-  padding: 0 28px 0 9px;
-}
-
-.portForwardToolbar select:focus-visible {
-  border-color: var(--primary);
-  outline: 2px solid var(--primary-soft);
-  outline-offset: 1px;
-}
-
-.portForwardBulkBar {
-  width: 100%;
-  min-height: 44px;
-  margin: 0;
-  padding: 5px 18px;
-  border-bottom: 1px solid var(--primary-border);
-  background: var(--primary-selected);
-}
-
-.portForwardTableWrap {
-  max-width: 100%;
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-}
-
-.portForwardTable {
-  width: 100%;
-  min-width: 900px;
-  border-collapse: collapse;
-  table-layout: fixed;
-}
-
-.portForwardTable th,
-.portForwardTable td {
-  min-width: 0;
-  padding: 8px 11px;
-  border-bottom: 1px solid var(--border-subtle);
-  vertical-align: middle;
-  text-align: left;
-}
-
-.portForwardTable th {
-  height: 40px;
-  background: var(--surface-subtle);
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 800;
-}
-
-.portForwardTable tbody tr {
-  height: 58px;
-  cursor: pointer;
-}
-
-.portForwardTable tbody tr:hover {
-  background: var(--surface-subtle);
-}
-
-.portForwardTable tbody tr.expanded {
-  background: var(--primary-selected);
-}
-
-.portForwardTable tbody tr:focus-visible {
-  outline: 2px solid var(--primary);
-  outline-offset: -2px;
-}
-
-.portForwardTable td:nth-child(2) {
-  display: grid;
-  align-content: center;
-  gap: 3px;
-  height: 58px;
-}
-
-.portForwardTable td:nth-child(2) > span {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.portForwardTable .truncateValue {
-  display: block;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.portForwardTable td:nth-child(4) {
-  white-space: nowrap;
-}
-
-.portForwardTable .selectionCell {
-  width: 42px;
-  padding-right: 4px;
-  text-align: center;
-}
-
-.portForwardTable th:nth-child(2) { width: 18%; }
-.portForwardTable th:nth-child(3) { width: 27%; }
-.portForwardTable th:nth-child(4) { width: 12%; }
-.portForwardTable th:nth-child(5) { width: 14%; }
-.portForwardTable th:nth-child(6) { width: 14%; }
-.portForwardTable th:nth-child(7) { width: 9%; }
-
-.portForwardMobileStatus {
-  display: none;
-}
-
-.topologyMobileRowActions {
-  display: none;
 }
 
 .mappingValue {
@@ -364,6 +193,12 @@
   grid-template-columns: repeat(3, minmax(0, 1fr));
   margin: 0;
   border-top: 1px solid var(--border-subtle);
+}
+
+.portForwardInlineDetail {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
 }
 
 .portForwardDetailGrid > div {
@@ -571,7 +406,7 @@
 .portMappingPreview,
 .portForwardCapabilityNotice,
 .portForwardForm > .localActionFeedback,
-.portForwardForm > .formActions {
+.portForwardForm > .consoleFormActions {
   grid-column: 1 / -1;
 }
 
@@ -616,71 +451,6 @@
   color: var(--text);
   font-size: 13px;
 }
-
-.tunnelPlanTableWrap {
-  max-width: 100%;
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-}
-
-.tunnelPlanTableWrap {
-  container-type: inline-size;
-}
-
-.tunnelPlanTable {
-  width: 100%;
-  min-width: 1000px;
-  border-collapse: collapse;
-  table-layout: fixed;
-}
-
-.tunnelPlanTable th {
-  height: 40px;
-  color: var(--muted);
-  background: var(--surface-subtle);
-  font-size: 11px;
-  font-weight: 800;
-  text-align: left;
-}
-
-.tunnelPlanTable th,
-.tunnelPlanTable td {
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border-subtle);
-  vertical-align: middle;
-}
-
-.tunnelPlanTable tbody > tr:not(.tunnelPlanDetailRow) {
-  height: 58px;
-  cursor: pointer;
-}
-
-.tunnelPlanTable tbody > tr:not(.tunnelPlanDetailRow):hover {
-  background: var(--surface-subtle);
-}
-
-.tunnelPlanTable tbody > tr.isExpanded,
-.tunnelPlanTable tbody > tr.isSelected {
-  background: var(--primary-selected);
-}
-
-.tunnelPlanTable tbody > tr:focus-visible {
-  outline: 2px solid var(--primary);
-  outline-offset: -2px;
-}
-
-.tunnelPlanTable .selectionCell {
-  width: 42px;
-  padding-right: 4px;
-  text-align: center;
-}
-
-.tunnelPlanTable th:nth-child(2) { width: 15%; }
-.tunnelPlanTable th:nth-child(3) { width: 14%; }
-.tunnelPlanTable th:nth-child(4) { width: 14%; }
-.tunnelPlanTable th:nth-child(5) { width: 14%; }
-.tunnelPlanTable th:nth-child(6) { width: 17%; }
-.tunnelPlanTable th:nth-child(7) { width: 12%; }
 
 .endpointStatusPair,
 .topologyEndpointPair {
@@ -750,35 +520,6 @@
   min-width: 132px;
 }
 
-.topologyRowActions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 5px;
-  min-width: 0;
-}
-
-.isEnableAction {
-  color: var(--success-text);
-}
-
-.isDisableAction {
-  color: var(--danger-strong);
-}
-
-.isDeleteAction:not(:disabled) {
-  color: var(--danger-strong);
-}
-
-.isDeleteAction:disabled {
-  color: var(--muted);
-}
-
-.tunnelPlanDetailRow td {
-  padding: 0;
-  background: var(--canvas);
-}
-
 .tunnelPlanDetail,
 .topologyOspfDetail {
   position: relative;
@@ -788,16 +529,8 @@
 }
 
 .tunnelPlanDetail {
-  box-sizing: border-box;
-  width: 100cqw;
-  max-width: 100cqw;
-  padding: 16px 52px 16px 18px;
-}
-
-.topologyDetailClose {
-  position: absolute;
-  top: 10px;
-  right: 12px;
+  width: 100%;
+  max-width: 100%;
 }
 
 .tunnelPlanFacts,
@@ -1218,54 +951,9 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .portForwardToolbar {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .portForwardToolbar .compactSearch {
-    grid-column: span 2;
-  }
-}
-
-@media (min-width: 721px) and (max-width: 1360px) {
-  .tunnelPlanTable {
-    min-width: 980px;
-  }
-
-  .tunnelPlanTable tr > :nth-child(7) {
-    display: none;
-  }
-
-  .tunnelPlanTable th:nth-child(2) { width: 17%; }
-  .tunnelPlanTable th:nth-child(3) { width: 17%; }
-  .tunnelPlanTable th:nth-child(4) { width: 17%; }
-  .tunnelPlanTable th:nth-child(5) { width: 16%; }
-  .tunnelPlanTable th:nth-child(6) { width: 20%; }
 }
 
 @media (max-width: 720px) {
-  .topologyMobileRowActions {
-    display: block;
-    width: 100%;
-    margin-top: 8px;
-  }
-
-  .topologyMobileRowActions .gridMobileActions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-
-  .topologyMobileRowActions .compactAction {
-    flex: 1 1 min(100%, 132px);
-    justify-content: center;
-    height: auto;
-    max-width: 100%;
-    min-width: max-content;
-    min-height: 34px;
-    white-space: nowrap;
-  }
-
   .tunnelPlanComposerHeader {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
@@ -1277,19 +965,6 @@
     grid-column: 2;
     grid-row: 1;
     align-self: start;
-  }
-
-  .tunnelPlanTable {
-    min-width: 100%;
-    table-layout: auto;
-  }
-
-  .tunnelPlanTable tr > :nth-child(n + 3):nth-child(-n + 7) {
-    display: none;
-  }
-
-  .tunnelPlanTable th:nth-child(2) {
-    width: auto;
   }
 
   .networkMetricStrip,
@@ -1327,11 +1002,6 @@
     border-bottom: 0;
   }
 
-  .portForwardSummary .headerActionStack {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
   .runtimeManagerSegments {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1345,17 +1015,10 @@
     border-bottom: 0;
   }
 
-  .tunnelRegistryToolbar,
   .tunnelComposerFooter {
     align-items: stretch;
   }
 
-  .selectionActionBar {
-    width: 100%;
-    margin-left: 0;
-  }
-
-  .tunnelPlanDetail,
   .topologyOspfDetail {
     padding-left: 14px;
   }
@@ -1370,47 +1033,6 @@
     width: 100%;
   }
 
-  .portForwardToolbar {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    padding-inline: 12px;
-  }
-
-  .portForwardToolbar .compactSearch {
-    grid-column: 1 / -1;
-  }
-
-  .portForwardTable {
-    min-width: 100%;
-    table-layout: auto;
-  }
-
-  .portForwardTable tr > :nth-child(n + 3):nth-child(-n + 7) {
-    display: none;
-  }
-
-  .portForwardTable th:nth-child(2) {
-    width: auto;
-  }
-
-  .portForwardTable td:nth-child(2) {
-    display: table-cell;
-    height: auto;
-  }
-
-  .portForwardTable .portForwardMobileStatus {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 4px;
-    margin-top: 3px;
-  }
-
-  .portForwardMobileStatus .portForwardStatus {
-    min-height: 20px;
-    padding: 3px 6px;
-    font-size: 10px;
-  }
-
   .portForwardDetailGrid,
   .portForwardForm {
     grid-template-columns: minmax(0, 1fr);
@@ -1421,8 +1043,7 @@
     border-right: 0;
   }
 
-  .targetAddressField,
-  .portForwardToolbar {
+  .targetAddressField {
     align-items: stretch;
   }
 
@@ -1437,7 +1058,7 @@
   .portForwardForm > *,
   .portMappingPreview,
   .portForwardCapabilityNotice,
-  .portForwardForm > .formActions {
+  .portForwardForm > .consoleFormActions {
     grid-column: 1;
   }
 

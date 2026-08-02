@@ -217,6 +217,8 @@ vpsctl_json() {
 
 seed_agent() {
   local client_id="$1"
+  local capabilities="$2"
+  local noise_public_key_hex="$3"
   local process_incarnation_id="33333333-3333-4333-8333-333333333333"
   local gateway_session_id
   case "$client_id" in
@@ -224,27 +226,19 @@ seed_agent() {
     pg-agent-b) gateway_session_id="33333333-3333-4333-8333-33333333333b" ;;
     *) gateway_session_id="33333333-3333-4333-8333-33333333333f" ;;
   esac
-  local optional_hello_fields=""
-  local noise_public_key_json="null"
-  if [[ $# -ge 2 && -n "$2" ]]; then
-    optional_hello_fields=", \"capabilities\": $2"
-  fi
-  if [[ $# -ge 3 ]]; then
-    noise_public_key_json="\"$3\""
-  fi
   curl -fsS \
     -H "Authorization: Bearer $internal_token" \
     -H "Content-Type: application/json" \
     -d "{
       \"gateway_id\": \"postgres-persistence-gateway\",
       \"gateway_session_id\": \"$gateway_session_id\",
-      \"noise_public_key_hex\": $noise_public_key_json,
+      \"noise_public_key_hex\": \"$noise_public_key_hex\",
       \"hello\": {
         \"client_id\": \"$client_id\",
         \"process_incarnation_id\": \"$process_incarnation_id\",
         \"agent_version\": \"postgres-persistence-smoke\",
         \"os_release\": \"Debian smoke\",
-        \"arch\": \"x86_64\"$optional_hello_fields
+        \"arch\": \"x86_64\", \"capabilities\": $capabilities
       }
     }" \
     "$api_url/internal/v1/gateway/agent-hello" >/dev/null
@@ -296,6 +290,38 @@ seed_telemetry() {
     "$api_url/internal/v1/gateway/telemetry" >/dev/null
 }
 
+assert_persisted_network_rate_counters() {
+  # Two rapid frames may share one receive-time minute. Validate durable
+  # counters here; repository tests separately cover baseline-derived rates.
+  local storage_ok
+  storage_ok="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "
+    SELECT
+      COALESCE(sum(sample_count), 0) = 2
+      AND round(sum(rx_bytes_avg::numeric * sample_count) / sum(sample_count)) = 2500
+      AND round(sum(tx_bytes_avg::numeric * sample_count) / sum(sample_count)) = 5000
+      AND max(rx_bytes_last) = 4000
+      AND max(tx_bytes_last) = 8000
+      AND min(rx_counter_epoch) = 0
+      AND max(rx_counter_epoch) = 0
+      AND min(tx_counter_epoch) = 0
+      AND max(tx_counter_epoch) = 0
+    FROM telemetry_network_rates
+    WHERE client_id = 'pg-agent-a' AND interface = 'eth0' AND bucket_secs = 60
+  ")"
+  if [[ "$storage_ok" != "t" ]]; then
+    echo "persisted network counter aggregation did not match accepted telemetry" >&2
+    docker exec "$container_name" psql -U vpsman -d vpsman -c "
+      SELECT client_id, interface, bucket_start, bucket_secs, sample_count,
+             rx_bytes_avg, tx_bytes_avg, rx_bytes_last, tx_bytes_last,
+             rx_counter_epoch, tx_counter_epoch
+      FROM telemetry_network_rates
+      WHERE client_id = 'pg-agent-a' AND interface = 'eth0' AND bucket_secs = 60
+      ORDER BY bucket_start
+    " >&2 || true
+    exit 1
+  fi
+}
+
 validate_agent_identity() {
   local client_id="$1"
   local public_key_hex="$2"
@@ -324,6 +350,7 @@ first_public_key_hex="$(printf '11%.0s' {1..32})"
 second_public_key_hex="$(printf '22%.0s' {1..32})"
 third_public_key_hex="$(printf '33%.0s' {1..32})"
 revoked_replacement_key_hex="$(printf '44%.0s' {1..32})"
+pg_agent_b_public_key_hex="$(printf '55%.0s' {1..32})"
 vpsctl_json agent-identity-upsert \
   --client-id pg-agent-a \
   --client-public-key-hex "$first_public_key_hex" \
@@ -348,8 +375,13 @@ api_get "/api/v1/agents" | jq -e '
 
 port_forwarding_capabilities='{"privilege_mode":"root","effective_uid":0,"can_attempt_privileged_ops":true,"can_manage_runtime_tunnels":true,"can_apply_process_limits":true,"port_forwarding":{"status":"supported","nft_version":"nftables postgres smoke"}}'
 unprivileged_capabilities='{"privilege_mode":"unprivileged","effective_uid":1000,"can_attempt_privileged_ops":true,"can_manage_runtime_tunnels":false,"can_apply_process_limits":false,"unprivileged_hint":"postgres smoke agent is running without root"}'
+vpsctl_json agent-identity-upsert \
+  --client-id pg-agent-b \
+  --client-public-key-hex "$pg_agent_b_public_key_hex" \
+  --display-name pg-agent-b \
+  --confirmed >/dev/null
 seed_agent "pg-agent-a" "$port_forwarding_capabilities" "$first_public_key_hex"
-seed_agent "pg-agent-b" "$unprivileged_capabilities"
+seed_agent "pg-agent-b" "$unprivileged_capabilities" "$pg_agent_b_public_key_hex"
 api_post "/api/v1/agents/pg-agent-b/alias" '{"display_name":"pg-edge-b","confirmed":true}' >/dev/null
 vpsctl_json agent-tag --client-id pg-agent-b --tag edge --confirmed >/dev/null
 vpsctl_json agent-tag --client-id pg-agent-b --tag routing --confirmed >/dev/null
@@ -364,6 +396,7 @@ telemetry_bucket=$(( (($(date +%s) - 600) / 60) * 60 ))
 seed_telemetry "pg-agent-a" "$((telemetry_bucket + 10))" 0.5 134217728 5368709120 1000 2000 1
 seed_telemetry "pg-agent-a" "$((telemetry_bucket + 20))" 1.0 100663296 4294967296 4000 8000 2
 seed_telemetry "pg-agent-a" "$((telemetry_bucket - 7200))" 9.9 67108864 2147483648 9000 18000 1
+assert_persisted_network_rate_counters
 vpsctl_json telemetry-rollups --client-id pg-agent-a --bucket-secs 60 --limit 10 | jq -e '
   map(select(.client_id == "pg-agent-a" and .bucket_secs == 60)) as $rows |
   ($rows | map(.sample_count) | add) == 2 and
@@ -379,14 +412,6 @@ vpsctl_json telemetry-rollups --client-id pg-agent-a --bucket-secs 60 --limit 10
   ($rows | map(.network_rx_bytes_max) | max) == 4000 and
   ($rows | map(.network_tx_bytes_max) | max) == 8000
 ' >/dev/null
-vpsctl_json telemetry-network-rates --client-id pg-agent-a --interface eth0 --bucket-secs 60 --limit 10 | jq -e '
-  map(select(.client_id == "pg-agent-a" and .interface == "eth0" and .bucket_secs == 60)) as $rows |
-  ($rows | map(.sample_count) | add) == 2 and
-  (($rows | map(.rx_bytes_avg * .sample_count) | add) / 2) == 2500 and
-  (($rows | map(.tx_bytes_avg * .sample_count) | add) / 2) == 5000 and
-  all($rows[]; .rx_bytes_delta >= 0 and .tx_bytes_delta >= 0 and .rx_bps_avg >= 0 and .tx_bps_avg >= 0)
-' >/dev/null
-
 vpsctl_json agent-tag --client-id pg-agent-a --tag group:pg-persistent --confirmed >/dev/null
 vpsctl_json agent-tag --client-id pg-agent-a --tag persistent --confirmed >/dev/null
 
@@ -443,22 +468,30 @@ vpsctl_json client-key-revoke \
     any(.post_commit[]; .operation == "job_terminal_reconciliation" and (.status == "completed" or .status == "failed"))
   ' >/dev/null
 validate_agent_identity pg-revoked-agent "$third_public_key_hex" | jq -e '.accepted == false' >/dev/null
-if vpsctl_json agent-identity-upsert \
+api_get "/api/v1/agents" | jq -e '
+  any(.[]; .id == "pg-revoked-agent" and .status == "revoked" and (.tags | index("revoked-test")))
+' >/dev/null
+vpsctl_json agent-identity-upsert \
   --client-id pg-revoked-agent \
   --client-public-key-hex "$revoked_replacement_key_hex" \
   --replace-existing-key \
-  --confirmed >"$SMOKE_TMPDIR/revoked-replace.json" 2>&1; then
-  echo "expected revoked direct identity key replacement to fail" >&2
-  cat "$SMOKE_TMPDIR/revoked-replace.json" >&2 || true
-  exit 1
-fi
+  --confirmed | jq -e '
+    .identity.client_id == "pg-revoked-agent" and
+    .identity.status == "offline" and
+    (.identity.tags | index("revoked-test")) and
+    any(.post_commit[]; .operation == "job_terminal_reconciliation" and (.status == "completed" or .status == "failed"))
+  ' >/dev/null
+validate_agent_identity pg-revoked-agent "$third_public_key_hex" | jq -e '.accepted == false' >/dev/null
+validate_agent_identity pg-revoked-agent "$revoked_replacement_key_hex" | jq -e '.accepted == true' >/dev/null
 vpsctl_json key-lifecycle-report | jq -e '
   .current_key_revoked_count == 0 and
-  .revocation_count >= 1 and
+  .revocation_count >= 2 and
   any(.clients[]; .client_id == "pg-agent-a" and .current_key_revoked == false) and
-  all(.clients[]; .client_id != "pg-revoked-agent")
+  any(.clients[]; .client_id == "pg-revoked-agent" and .current_key_revoked == false)
 ' >/dev/null
-api_get "/api/v1/agents" | jq -e 'all(.[]; .id != "pg-revoked-agent")' >/dev/null
+api_get "/api/v1/agents" | jq -e '
+  any(.[]; .id == "pg-revoked-agent" and .status == "offline" and (.tags | index("revoked-test")))
+' >/dev/null
 seed_agent "pg-agent-a" "$port_forwarding_capabilities" "$second_public_key_hex"
 
 plan_json="$(api_post "/api/v1/tunnel-plans" '{
@@ -1130,10 +1163,13 @@ stop_api
 start_api "restart"
 
 api_get "/api/v1/auth/me" | jq -e '.username == "postgres-smoke"' >/dev/null
-api_get "/api/v1/fleet/summary" | jq -e '.total == 2 and .online == 2' >/dev/null
+api_get "/api/v1/fleet/summary" | jq -e '
+  .total == 3 and .online == 2 and .offline == 1 and .revoked == 0
+' >/dev/null
 api_get "/api/v1/agents" | jq -e '
   any(.[]; .id == "pg-agent-a" and .display_name == "pg-edge-a-rotated" and (.tags | index("persistent")) and (.tags | index("rotated")) and (.tags | index("os:debian"))) and
-  any(.[]; .id == "pg-agent-b" and (.tags | index("routing")) and .capabilities.privilege_mode == "unprivileged" and .capabilities.can_apply_process_limits == false)
+  any(.[]; .id == "pg-agent-b" and (.tags | index("routing")) and .capabilities.privilege_mode == "unprivileged" and .capabilities.can_apply_process_limits == false) and
+  any(.[]; .id == "pg-revoked-agent" and .status == "offline" and (.tags | index("revoked-test")))
 ' >/dev/null
 persisted_rotated_key_hex="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT encode(public_key, 'hex') FROM clients WHERE id = 'pg-agent-a'")"
 if [[ "$persisted_rotated_key_hex" != "$second_public_key_hex" ]]; then
@@ -1142,8 +1178,9 @@ if [[ "$persisted_rotated_key_hex" != "$second_public_key_hex" ]]; then
 fi
 api_get "/api/v1/key-lifecycle/report" | jq -e '
   .current_key_revoked_count == 0 and
-  .revocation_count >= 1 and
-  any(.clients[]; .client_id == "pg-agent-a" and .current_key_revoked == false)
+  .revocation_count >= 2 and
+  any(.clients[]; .client_id == "pg-agent-a" and .current_key_revoked == false) and
+  any(.clients[]; .client_id == "pg-revoked-agent" and .current_key_revoked == false)
 ' >/dev/null
 api_get "/api/v1/telemetry/rollups?client_id=pg-agent-a&bucket_secs=60&limit=10" | jq -e '
   map(select(.client_id == "pg-agent-a" and .bucket_secs == 60)) as $rows |
@@ -1153,13 +1190,7 @@ api_get "/api/v1/telemetry/rollups?client_id=pg-agent-a&bucket_secs=60&limit=10"
   ($rows | map(.network_rx_bytes_max) | max) == 4000 and
   ($rows | map(.network_tx_bytes_max) | max) == 8000
 ' >/dev/null
-api_get "/api/v1/telemetry/network-rates?client_id=pg-agent-a&interface=eth0&bucket_secs=60&limit=10" | jq -e '
-  map(select(.client_id == "pg-agent-a" and .interface == "eth0" and .bucket_secs == 60)) as $rows |
-  ($rows | map(.sample_count) | add) == 2 and
-  (($rows | map(.rx_bytes_avg * .sample_count) | add) / 2) == 2500 and
-  (($rows | map(.tx_bytes_avg * .sample_count) | add) / 2) == 5000 and
-  all($rows[]; .rx_bytes_delta >= 0 and .tx_bytes_delta >= 0 and .rx_bps_avg >= 0 and .tx_bps_avg >= 0)
-' >/dev/null
+assert_persisted_network_rate_counters
 api_post "/api/v1/bulk/resolve" '{"selector_expression":"tag:edge"}' \
   | jq -e '.target_count == 2 and (.targets | map(.id) | sort == ["pg-agent-a","pg-agent-b"])' >/dev/null
 api_get "/api/v1/tunnel-plans" | jq -e '

@@ -37,6 +37,11 @@ import {
 } from "../components/TimeSeriesChart";
 import { dashboardChartColors } from "../colorPalette";
 import {
+  dashboardWindowAccessibleLabel,
+  dashboardWindowLabel,
+  dashboardWindowOptions,
+} from "../dashboardQuery";
+import {
   buildPrivilegeAssertion,
   canonicalDbPrivilegeIntent,
   operatorDbPayloadHashHex,
@@ -147,15 +152,6 @@ type SystemPanelProps = {
   tags: TagView[];
 };
 
-const dashboardWindows: Array<{ label: string; value: SystemDashboardWindow }> =
-  [
-    { label: "15m", value: "15m" },
-    { label: "1h", value: "1h" },
-    { label: "6h", value: "6h" },
-    { label: "24h", value: "24h" },
-    { label: "7d", value: "7d" },
-    { label: "30d", value: "30d" },
-  ];
 const pointDensityOptions: Array<{
   label: string;
   value: SystemDashboardPointDensity;
@@ -200,12 +196,14 @@ const commonScopeOptions = [
   "schedules:read",
   "config:read",
   "network:read",
+  "sharing:read",
   "audit:read",
   "jobs:write",
   "inventory:write",
   "schedules:write",
   "backups:write",
   "network:write",
+  "sharing:write",
   "config:write",
   "integrations:write",
   "templates:write",
@@ -4327,15 +4325,17 @@ function SystemDashboardPanel({
               className="timeRangeTabs"
               aria-label="System overview time range"
             >
-              {dashboardWindows.map((option) => (
+              {dashboardWindowOptions.map((option) => (
                 <button
-                  aria-pressed={window === option.value}
-                  className={window === option.value ? "active" : ""}
-                  key={option.value}
-                  onClick={() => onWindowChange(option.value)}
+                  aria-label={dashboardWindowAccessibleLabel(option)}
+                  aria-pressed={window === option}
+                  className={window === option ? "active" : ""}
+                  key={option}
+                  onClick={() => onWindowChange(option)}
+                  title={dashboardWindowAccessibleLabel(option)}
                   type="button"
                 >
-                  {option.label}
+                  {dashboardWindowLabel(option)}
                 </button>
               ))}
             </div>
@@ -4982,7 +4982,7 @@ function SystemCapacityPanel({
             <h2>Capacity telemetry</h2>
             <span>
               {dashboard
-                ? `${dashboard.bucket_secs}s rollups / selected ${window}; ${sampleCoverage} / generated ${formatFullTime(dashboard.generated_at)}`
+                ? `${dashboard.bucket_secs}s rollups / selected ${dashboardWindowLabel(window)}; ${sampleCoverage} / generated ${formatFullTime(dashboard.generated_at)}`
                 : "Capacity telemetry loading"}
             </span>
           </div>
@@ -5009,15 +5009,17 @@ function SystemCapacityPanel({
               className="timeRangeTabs"
               aria-label="System capacity time range"
             >
-              {dashboardWindows.map((option) => (
+              {dashboardWindowOptions.map((option) => (
                 <button
-                  aria-pressed={window === option.value}
-                  className={window === option.value ? "active" : ""}
-                  key={option.value}
-                  onClick={() => onWindowChange(option.value)}
+                  aria-label={dashboardWindowAccessibleLabel(option)}
+                  aria-pressed={window === option}
+                  className={window === option ? "active" : ""}
+                  key={option}
+                  onClick={() => onWindowChange(option)}
+                  title={dashboardWindowAccessibleLabel(option)}
                   type="button"
                 >
-                  {option.label}
+                  {dashboardWindowLabel(option)}
                 </button>
               ))}
             </div>

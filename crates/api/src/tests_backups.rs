@@ -743,7 +743,7 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
     let headers = crate::test_auth_headers(&state).await;
     let request = CreateBackupPolicyRequest {
         name: "nightly-edge".to_string(),
-        selector_expression: "id:client-a || tag:edge".to_string(),
+        selector_expression: "id:client-a || id:client-b".to_string(),
         target_client_ids: vec!["client-a".to_string(), "client-b".to_string()],
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
@@ -806,7 +806,7 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
 
     assert_eq!(status, axum::http::StatusCode::CREATED);
     assert_eq!(view.name, "nightly-edge");
-    assert_eq!(view.selector_expression, "id:client-a || tag:edge");
+    assert_eq!(view.selector_expression, "id:client-a || id:client-b");
     assert_eq!(view.target_client_ids, vec!["client-a", "client-b"]);
     assert_eq!(view.paths, vec!["/etc/hostname"]);
     assert!(view.include_config);
@@ -846,8 +846,126 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
 }
 
 #[tokio::test]
+async fn backup_policy_create_rejects_stale_selector_snapshot() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_backup_agent_id(&repo, "client-a").await;
+    seed_backup_agent_id(&repo, "client-b").await;
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+
+    let error = create_backup_policy(
+        State(state),
+        headers,
+        Json(CreateBackupPolicyRequest {
+            name: "nightly-stale".to_string(),
+            selector_expression: "id:client-a".to_string(),
+            target_client_ids: vec!["client-b".to_string()],
+            paths: vec!["/etc/hostname".to_string()],
+            include_config: true,
+            follow_symlinks: false,
+            missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
+            retention_days: Some(30),
+            keep_last: Some(7),
+            rotation_generation: None,
+            cron_expr: "0 3 * * *".to_string(),
+            timezone: "UTC".to_string(),
+            enabled: true,
+            catch_up_policy: "skip_missed".to_string(),
+            catch_up_limit: 1,
+            retry_delay_secs: 300,
+            max_failures: 3,
+            confirmed: true,
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.status, StatusCode::CONFLICT);
+    assert_eq!(error.code, "backup_policy_target_snapshot_stale");
+    assert!(repo.list_schedules().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn backup_policy_update_rejects_stale_selector_snapshot_without_mutation() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_backup_agent_id(&repo, "client-a").await;
+    seed_backup_agent_id(&repo, "client-b").await;
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let (_, Json(created)) = create_backup_policy(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateBackupPolicyRequest {
+            name: "nightly-current".to_string(),
+            selector_expression: "id:client-a".to_string(),
+            target_client_ids: vec!["client-a".to_string()],
+            paths: vec!["/etc/hostname".to_string()],
+            include_config: true,
+            follow_symlinks: false,
+            missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
+            retention_days: Some(30),
+            keep_last: Some(7),
+            rotation_generation: None,
+            cron_expr: "0 3 * * *".to_string(),
+            timezone: "UTC".to_string(),
+            enabled: true,
+            catch_up_policy: "skip_missed".to_string(),
+            catch_up_limit: 1,
+            retry_delay_secs: 300,
+            max_failures: 3,
+            confirmed: true,
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let error = update_backup_policy(
+        State(state),
+        headers,
+        Path(created.schedule_id),
+        Json(UpdateBackupPolicyRequest {
+            name: "nightly-stale-update".to_string(),
+            selector_expression: "id:client-b".to_string(),
+            target_client_ids: vec!["client-a".to_string()],
+            paths: vec!["/etc".to_string()],
+            include_config: false,
+            follow_symlinks: false,
+            missing_path_policy: vpsman_common::BackupMissingPathPolicy::Skip,
+            retention_days: 45,
+            keep_last: 10,
+            rotation_generation: Some("keyring/v2".to_string()),
+            cron_expr: "30 2 * * *".to_string(),
+            timezone: "UTC".to_string(),
+            enabled: false,
+            catch_up_policy: "run_once".to_string(),
+            catch_up_limit: 1,
+            retry_delay_secs: 120,
+            max_failures: 5,
+            confirmed: true,
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.status, StatusCode::CONFLICT);
+    assert_eq!(error.code, "backup_policy_target_snapshot_stale");
+    let policies = repo
+        .list_backup_policies(&ListQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(policies.len(), 1);
+    assert_eq!(policies[0].name, "nightly-current");
+    assert_eq!(policies[0].selector_expression, "id:client-a");
+    assert_eq!(policies[0].target_client_ids, vec!["client-a"]);
+}
+
+#[tokio::test]
 async fn backup_policy_query_preserves_requested_order_after_filter_and_limit() {
     let repo = Repository::Memory(MemoryState::default());
+    seed_backup_agent(&repo).await;
     let operator = backup_test_operator();
     let request = |name: &str| CreateBackupPolicyRequest {
         name: name.to_string(),

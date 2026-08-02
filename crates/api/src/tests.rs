@@ -206,7 +206,7 @@ async fn stale_agent_clears_only_after_changed_internal_build_hello() {
         GatewayAgentHelloIngest {
             gateway_id: "gateway-a".to_string(),
             gateway_session_id: uuid::Uuid::new_v4(),
-            noise_public_key_hex: None,
+            noise_public_key_hex: "11".repeat(32),
             remote_ip: Some("203.0.113.10".to_string()),
             hello: AgentHello {
                 client_id: "client-a".to_string(),
@@ -222,6 +222,20 @@ async fn stale_agent_clears_only_after_changed_internal_build_hello() {
     }
 
     let repo = Repository::Memory(MemoryState::default());
+    repo.upsert_agent_identity(
+        &UpsertAgentIdentityRequest {
+            client_id: Some("client-a".to_string()),
+            client_public_key_hex: "11".repeat(32),
+            display_name: None,
+            tags: Vec::new(),
+            replace_existing_key: false,
+            confirmed: true,
+            privilege_assertion: None,
+        },
+        &test_operator(),
+    )
+    .await
+    .unwrap();
     repo.upsert_agent_hello(&hello(1)).await.unwrap();
     repo.mark_agent_stale(
         "client-a",
@@ -458,6 +472,324 @@ async fn deleting_memory_agent_removes_inventory_access_and_bulk_targets() {
             payload["code"] == "vps_deleted" && payload["status"] == TARGET_STATUS_AGENT_LOST
         }));
     }
+}
+
+#[tokio::test]
+async fn deleted_memory_agent_is_hidden_from_live_observability_but_retained_in_history() {
+    let repo = Repository::Memory(MemoryState::default());
+    let deleted_client_id = "deleted-observability";
+    let visible_peer_id = "visible-observability-peer";
+    let policy_alert_id = Uuid::new_v4();
+    let direct_observation_id = Uuid::new_v4();
+    let peer_observation_id = Uuid::new_v4();
+
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    for client_id in [deleted_client_id, visible_peer_id] {
+        upsert_memory_agent(
+            &memory.agents,
+            &AgentHello {
+                client_id: client_id.to_string(),
+                process_incarnation_id: Uuid::new_v4(),
+                agent_version: "test".to_string(),
+                os_release: "test".to_string(),
+                arch: "x86_64".to_string(),
+                update_heartbeat: None,
+                internal_build_number: 1,
+                capabilities: Default::default(),
+            },
+        )
+        .await;
+    }
+    memory
+        .telemetry_samples
+        .write()
+        .await
+        .push(TelemetrySampleView {
+            id: Uuid::new_v4(),
+            client_id: deleted_client_id.to_string(),
+            observed_at: "1700000000".to_string(),
+            cpu_load_1: 0.25,
+            memory_total_bytes: 1024,
+            memory_available_bytes: 512,
+            payload: serde_json::json!({"source": "lifecycle-regression"}),
+        });
+    memory
+        .telemetry_rollups
+        .write()
+        .await
+        .push(TelemetryRollupView {
+            client_id: deleted_client_id.to_string(),
+            bucket_start: "1700000000".to_string(),
+            bucket_secs: 60,
+            sample_count: 1,
+            cpu_usage_sample_count: 0,
+            cpu_usage_avg: None,
+            cpu_usage_max: None,
+            cpu_cores_max: 1,
+            cpu_load_1_avg: 0.25,
+            cpu_load_1_max: 0.25,
+            cpu_load_5_avg: 0.2,
+            cpu_load_5_max: 0.2,
+            cpu_load_15_avg: 0.1,
+            cpu_load_15_max: 0.1,
+            memory_total_bytes_max: 1024,
+            memory_available_bytes_avg: 512,
+            memory_available_bytes_min: 512,
+            disk_total_bytes_max: 2048,
+            disk_available_bytes_avg: 1024,
+            disk_available_bytes_min: 1024,
+            network_rx_bytes_max: 100,
+            network_tx_bytes_max: 200,
+            connections_sample_count: 0,
+            tcp_sockets_latest: None,
+            udp_sockets_latest: None,
+            connections_observed_at: None,
+            latest_observed_at: "1700000000".to_string(),
+            updated_at: "1700000000".to_string(),
+        });
+    memory.telemetry_network_rates.write().await.extend([
+        TelemetryNetworkRateView {
+            client_id: deleted_client_id.to_string(),
+            interface: "eth0".to_string(),
+            bucket_start: "1700000000".to_string(),
+            bucket_secs: 60,
+            sample_count: 1,
+            rx_bytes_avg: 100,
+            tx_bytes_avg: 200,
+            rx_bytes_last: 100,
+            tx_bytes_last: 200,
+            rx_counter_epoch: 0,
+            tx_counter_epoch: 0,
+            rx_bytes_delta: 0,
+            tx_bytes_delta: 0,
+            rx_bps_avg: 0.0,
+            tx_bps_avg: 0.0,
+            updated_at: "1700000000".to_string(),
+        },
+        TelemetryNetworkRateView {
+            client_id: deleted_client_id.to_string(),
+            interface: "eth0".to_string(),
+            bucket_start: "1700000060".to_string(),
+            bucket_secs: 60,
+            sample_count: 1,
+            rx_bytes_avg: 160,
+            tx_bytes_avg: 290,
+            rx_bytes_last: 160,
+            tx_bytes_last: 290,
+            rx_counter_epoch: 0,
+            tx_counter_epoch: 0,
+            rx_bytes_delta: 0,
+            tx_bytes_delta: 0,
+            rx_bps_avg: 0.0,
+            tx_bps_avg: 0.0,
+            updated_at: "1700000060".to_string(),
+        },
+    ]);
+    let observation = |id: Uuid, client_id: &str, peer_client_id: &str| NetworkObservationView {
+        id,
+        job_id: Uuid::new_v4(),
+        client_id: client_id.to_string(),
+        seq: 0,
+        kind: "network_probe".to_string(),
+        role: None,
+        plan_id: None,
+        topology_identity_hash: None,
+        plan_name: Some("lifecycle-regression".to_string()),
+        interface_name: Some("test0".to_string()),
+        peer_client_id: Some(peer_client_id.to_string()),
+        target: Some("192.0.2.1".to_string()),
+        healthy: Some(true),
+        latency_avg_ms: Some(5.0),
+        packet_loss_ratio: Some(0.0),
+        throughput_mbps: None,
+        bytes: None,
+        metadata: serde_json::json!({}),
+        observed_at: "1700000000".to_string(),
+    };
+    memory.network_observations.write().await.extend([
+        observation(direct_observation_id, deleted_client_id, visible_peer_id),
+        observation(peer_observation_id, visible_peer_id, deleted_client_id),
+    ]);
+    memory.policy_alerts.write().await.push(PolicyAlertRecord {
+        id: policy_alert_id,
+        policy_group_id: Uuid::new_v4(),
+        policy_rule_id: Uuid::new_v4(),
+        client_id: deleted_client_id.to_string(),
+        trigger_generation: 1,
+        severity: "warning".to_string(),
+        category: "resource".to_string(),
+        title: "Historical resource alert".to_string(),
+        detail: "retained after VPS deletion".to_string(),
+        actual_value: Some(0.9),
+        threshold_value: Some(0.8),
+        payload: serde_json::json!({"source": "lifecycle-regression"}),
+        observed_at: "1700000000".to_string(),
+        created_at: "1700000000".to_string(),
+    });
+    let process_job_id = Uuid::new_v4();
+    memory.jobs.write().await.push(JobHistoryView {
+        id: process_job_id,
+        actor_id: Some(test_operator().operator.id),
+        command_type: "process_status".to_string(),
+        source_schedule_id: None,
+        privileged: false,
+        status: "completed".to_string(),
+        target_count: 1,
+        payload_hash: "deleted-process-inventory".to_string(),
+        max_timeout_secs: 30,
+        created_at: "1700000000".to_string(),
+        completed_at: Some("1700000001".to_string()),
+    });
+    memory.job_outputs.write().await.push(JobOutputView {
+        job_id: process_job_id,
+        client_id: deleted_client_id.to_string(),
+        seq: 0,
+        stream: "stdout".to_string(),
+        data_base64: base64::engine::general_purpose::STANDARD.encode(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "process_status",
+                "processes": [{"name": "retained-worker", "status": "running"}]
+            }))
+            .unwrap(),
+        ),
+        storage: "inline".to_string(),
+        artifact_object_key: None,
+        artifact_sha256_hex: None,
+        artifact_size_bytes: None,
+        exit_code: None,
+        done: false,
+        received_at: Some("1700000000".to_string()),
+        created_at: "1700000000".to_string(),
+    });
+
+    assert_eq!(
+        repo.list_telemetry_samples(10, Some(deleted_client_id), None, None, true)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        repo.list_network_observations(10, true)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        repo.list_policy_alerts(&PolicyAlertQuery {
+            limit: Some(10),
+            client_id: Some(deleted_client_id.to_string()),
+            severity: None,
+            category: None,
+            policy_group_id: None,
+        })
+        .await
+        .unwrap()
+        .len(),
+        1
+    );
+    assert_eq!(
+        repo.list_process_supervisor_inventory(10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    repo.delete_agent(deleted_client_id, Some("retired"), &test_operator())
+        .await
+        .unwrap();
+
+    assert!(repo
+        .list_telemetry_samples(10, Some(deleted_client_id), None, None, true)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(repo
+        .list_telemetry_rollups(10, Some(deleted_client_id), None, true)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(repo
+        .list_telemetry_network_rates(10, Some(deleted_client_id), None, None, true)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(repo
+        .list_network_observations(10, true)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(repo
+        .list_policy_alerts(&PolicyAlertQuery {
+            limit: Some(10),
+            client_id: Some(deleted_client_id.to_string()),
+            severity: None,
+            category: None,
+            policy_group_id: None,
+        })
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(repo
+        .list_process_supervisor_inventory(10)
+        .await
+        .unwrap()
+        .is_empty());
+
+    assert_eq!(
+        repo.list_telemetry_samples(10, Some(deleted_client_id), None, None, false)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        repo.list_telemetry_rollups(10, Some(deleted_client_id), None, false)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        repo.list_telemetry_network_rates(10, Some(deleted_client_id), None, None, false)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let historical_observation_ids = repo
+        .list_network_observations(10, false)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|observation| observation.id)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        historical_observation_ids,
+        std::collections::HashSet::from([direct_observation_id, peer_observation_id])
+    );
+    assert!(memory
+        .policy_alerts
+        .read()
+        .await
+        .iter()
+        .any(|alert| alert.id == policy_alert_id));
+    assert!(memory
+        .job_outputs
+        .read()
+        .await
+        .iter()
+        .any(|output| output.job_id == process_job_id));
+    assert!(repo
+        .export_client_status_history(10, Some(deleted_client_id))
+        .await
+        .unwrap()
+        .iter()
+        .any(|row| row["to_status"] == "deleted" && row["reason"] == "vps_deleted"));
 }
 
 #[tokio::test]
@@ -1090,8 +1422,64 @@ fn process_list_job_command_bounds_limit() {
 }
 
 #[tokio::test]
+async fn memory_job_persistence_and_claim_revalidate_revoked_targets() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_never_connected_memory_agent(&repo, "client-a").await;
+    let operator = test_operator();
+    let request = test_job_request(&["client-a"]);
+    let command_hash = payload_hash(&encode_json(&request.job_command().unwrap()).unwrap());
+    let rejected_job_id = Uuid::new_v4();
+
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    memory.agents.write().await[0].status = "revoked".to_string();
+    let error = repo
+        .record_dispatching_job(
+            rejected_job_id,
+            &request,
+            &command_hash,
+            "revoked_before_persistence",
+            &operator,
+            &["client-a".to_string()],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "job_target_no_longer_available");
+    assert!(repo.get_job(rejected_job_id).await.unwrap().is_none());
+
+    memory.agents.write().await[0].status = "online".to_string();
+    let queued_job_id = Uuid::new_v4();
+    repo.record_dispatching_job(
+        queued_job_id,
+        &request,
+        &command_hash,
+        "revoked_before_claim",
+        &operator,
+        &["client-a".to_string()],
+    )
+    .await
+    .unwrap();
+    memory.agents.write().await[0].status = "revoked".to_string();
+
+    assert!(repo
+        .claim_due_job_targets(10, 30, 0)
+        .await
+        .unwrap()
+        .is_empty());
+    let target = repo
+        .list_job_targets(queued_job_id)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(target.status, "queued");
+    assert!(target.started_at.is_none());
+}
+
+#[tokio::test]
 async fn dispatching_job_records_and_updates_target_results() {
     let repo = Repository::Memory(MemoryState::default());
+    seed_never_connected_memory_agent(&repo, "client-a").await;
     let operator = AuthContext {
         operator: OperatorView {
             id: Uuid::nil(),
@@ -1225,6 +1613,7 @@ async fn dispatching_job_records_and_updates_target_results() {
 #[tokio::test]
 async fn memory_final_output_insert_terminalizes_target_atomically() {
     let repo = Repository::Memory(MemoryState::default());
+    seed_never_connected_memory_agent(&repo, "client-a").await;
     let operator = test_operator();
     let request = test_job_request(&["client-a"]);
     let command = request.job_command().unwrap();
@@ -1311,6 +1700,7 @@ async fn memory_final_output_insert_terminalizes_target_atomically() {
 #[tokio::test]
 async fn final_network_status_output_records_observation() {
     let repo = Repository::Memory(MemoryState::default());
+    seed_never_connected_memory_agent(&repo, "client-a").await;
     let operator = test_operator();
     let request = test_job_request(&["client-a"]);
     let command = request.job_command().unwrap();
@@ -1371,7 +1761,7 @@ async fn final_network_status_output_records_observation() {
     .await
     .unwrap();
 
-    let observations = repo.list_network_observations(10).await.unwrap();
+    let observations = repo.list_network_observations(10, false).await.unwrap();
     assert_eq!(observations.len(), 1);
     assert_eq!(observations[0].job_id, job_id);
     assert_eq!(observations[0].client_id, "client-a");
@@ -1384,6 +1774,7 @@ async fn final_network_status_output_records_observation() {
 #[tokio::test]
 async fn memory_final_output_waits_for_lower_sequences_before_terminalizing() {
     let repo = Repository::Memory(MemoryState::default());
+    seed_never_connected_memory_agent(&repo, "client-a").await;
     let operator = test_operator();
     let request = test_job_request(&["client-a"]);
     let command = request.job_command().unwrap();
@@ -1496,6 +1887,7 @@ async fn memory_final_output_waits_for_lower_sequences_before_terminalizing() {
 #[tokio::test]
 async fn memory_dispatch_claims_one_exclusive_target_per_client_per_batch() {
     let repo = Repository::Memory(MemoryState::default());
+    seed_never_connected_memory_agent(&repo, "client-a").await;
     let operator = test_operator();
     let command = JobCommand::AgentUpdateCheck {
         version_url: None,
@@ -1563,6 +1955,7 @@ async fn memory_dispatch_claims_one_exclusive_target_per_client_per_batch() {
 #[tokio::test]
 async fn memory_dispatch_claim_preserves_source_schedule_id() {
     let repo = Repository::Memory(MemoryState::default());
+    seed_never_connected_memory_agent(&repo, "client-a").await;
     let operator = test_operator();
     let request = test_job_request(&["client-a"]);
     let command = request.job_command().unwrap();
@@ -1590,6 +1983,7 @@ async fn memory_dispatch_claim_preserves_source_schedule_id() {
 #[tokio::test]
 async fn memory_dispatch_claim_promotes_parent_job_to_running() {
     let repo = Repository::Memory(MemoryState::default());
+    seed_never_connected_memory_agent(&repo, "client-a").await;
     let operator = test_operator();
     let request = test_job_request(&["client-a"]);
     let command = request.job_command().unwrap();
@@ -1622,6 +2016,9 @@ async fn memory_dispatch_claim_promotes_parent_job_to_running() {
 #[tokio::test]
 async fn memory_dispatch_claim_quarantines_missing_operation_and_keeps_healthy_progress() {
     let repo = Repository::Memory(MemoryState::default());
+    for client_id in ["poison-client", "healthy-client"] {
+        seed_never_connected_memory_agent(&repo, client_id).await;
+    }
     let operator = test_operator();
     let poison_request = test_job_request(&["poison-client"]);
     let healthy_request = test_job_request(&["healthy-client"]);
@@ -1704,6 +2101,9 @@ async fn memory_dispatch_claim_quarantines_missing_operation_and_keeps_healthy_p
 #[tokio::test]
 async fn memory_deadline_expiry_marks_missing_operation_without_blocking_healthy_target() {
     let repo = Repository::Memory(MemoryState::default());
+    for client_id in ["poison-client", "healthy-client"] {
+        seed_never_connected_memory_agent(&repo, client_id).await;
+    }
     let operator = test_operator();
     let command = test_job_request(&["poison-client"]).job_command().unwrap();
     let command_hash = payload_hash(&encode_json(&command).unwrap());
@@ -1785,6 +2185,7 @@ async fn memory_deadline_expiry_marks_missing_operation_without_blocking_healthy
 #[tokio::test]
 async fn late_final_output_does_not_rewrite_control_timeout_target() {
     let repo = Repository::Memory(MemoryState::default());
+    seed_never_connected_memory_agent(&repo, "client-a").await;
     let operator = test_operator();
     let request = test_job_request(&["client-a"]);
     let command = request.job_command().unwrap();
@@ -1851,6 +2252,7 @@ async fn spooled_command_output_accepts_seen_inactive_gateway_session() {
     state.internal_token = Some("test-token".to_string());
     let operator = test_operator();
     let client_id = "client-a";
+    seed_never_connected_memory_agent(&repo, client_id).await;
     let gateway_id = "gateway-a";
     let gateway_session_id = Uuid::new_v4();
     let process_incarnation_id = Uuid::new_v4();
@@ -1964,6 +2366,7 @@ async fn memory_dispatch_exclusivity_uses_operation_for_scheduled_labels() {
     for (case, operation) in exclusive_dispatch_operation_cases() {
         let scheduled_label = format!("scheduled_{}", job_command_type_label(&operation));
         let repo = Repository::Memory(MemoryState::default());
+        seed_never_connected_memory_agent(&repo, "client-a").await;
         let scheduled_job_id = record_memory_dispatch_job(
             &repo,
             operation.clone(),
@@ -2010,6 +2413,7 @@ async fn memory_dispatch_direct_exclusive_blocks_scheduled_operation() {
     for (case, operation) in exclusive_dispatch_operation_cases() {
         let scheduled_label = format!("scheduled_{}", job_command_type_label(&operation));
         let repo = Repository::Memory(MemoryState::default());
+        seed_never_connected_memory_agent(&repo, "client-a").await;
         let direct_job_id = record_memory_dispatch_job(
             &repo,
             operation.clone(),
@@ -2062,6 +2466,9 @@ async fn job_output_comparison_groups_execution_summaries_by_status_and_output()
         "client-c".to_string(),
         "client-d".to_string(),
     ];
+    for client_id in &target_clients {
+        seed_never_connected_memory_agent(&repo, client_id).await;
+    }
     let request = test_job_request(&["client-a", "client-b", "client-c", "client-d"]);
     let command = request.job_command().unwrap();
     let command_hash = payload_hash(&encode_json(&command).unwrap());
@@ -2141,6 +2548,9 @@ async fn job_output_comparison_text_mode_normalizes_line_endings_and_trailing_sp
     let repo = Repository::Memory(MemoryState::default());
     let operator = test_operator();
     let target_clients = vec!["client-a".to_string(), "client-b".to_string()];
+    for client_id in &target_clients {
+        seed_never_connected_memory_agent(&repo, client_id).await;
+    }
     let request = test_job_request(&["client-a", "client-b"]);
     let command = request.job_command().unwrap();
     let command_hash = payload_hash(&encode_json(&command).unwrap());
@@ -2195,6 +2605,9 @@ async fn job_output_comparison_groups_artifact_backed_output_by_metadata() {
         "client-b".to_string(),
         "client-c".to_string(),
     ];
+    for client_id in &target_clients {
+        seed_never_connected_memory_agent(&repo, client_id).await;
+    }
     let request = test_job_request(&["client-a", "client-b", "client-c"]);
     let command = request.job_command().unwrap();
     let command_hash = payload_hash(&encode_json(&command).unwrap());
@@ -2633,7 +3046,7 @@ fn terminal_stream_ingest(
     }
 }
 
-async fn seed_never_connected_memory_agent(repo: &Repository, client_id: &str) {
+pub(crate) async fn seed_never_connected_memory_agent(repo: &Repository, client_id: &str) {
     let Repository::Memory(memory) = repo else {
         panic!("seed_never_connected_memory_agent supports only memory repository tests");
     };

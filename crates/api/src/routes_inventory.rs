@@ -18,9 +18,9 @@ use crate::{
         RuntimeConfigApplyStateView, RuntimeConfigPatchGeneratorRenderView,
         RuntimeConfigPatchGeneratorView, RuntimeConfigPatchRequest, RuntimeConfigPatchResponse,
         TagMutationResponse, TagView, TelemetryNetworkRateQuery, TelemetryNetworkRateView,
-        TelemetryRollupQuery, TelemetryRollupView, TelemetryTunnelQuery, TelemetryTunnelView,
-        UpdateAgentAliasRequest, UpdateTagOrderRequest, UpsertRuntimeConfigPatchGeneratorRequest,
-        WsEvent,
+        TelemetryRollupQuery, TelemetryRollupView, TelemetrySampleQuery, TelemetrySampleView,
+        TelemetryTunnelQuery, TelemetryTunnelView, UpdateAgentAliasRequest, UpdateTagOrderRequest,
+        UpsertRuntimeConfigPatchGeneratorRequest, WsEvent,
     },
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
     runtime_config::{dispatch_runtime_config_for_clients, validate_runtime_config_patch_toml},
@@ -170,10 +170,34 @@ pub(crate) async fn list_telemetry_rollups(
                 limit_or_default(query.limit),
                 query.client_id.as_deref(),
                 query.bucket_secs,
+                true,
             )
             .await?
     };
     Ok(Json(rows))
+}
+
+pub(crate) async fn list_telemetry_samples(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<TelemetrySampleQuery>,
+) -> Result<Json<Vec<TelemetrySampleView>>, ApiError> {
+    state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
+    validate_telemetry_sample_query(&query)?;
+    Ok(Json(
+        state
+            .repo
+            .list_telemetry_samples(
+                limit_or_default(query.limit),
+                query.client_id.as_deref(),
+                query.start_unix,
+                query.end_unix,
+                true,
+            )
+            .await?,
+    ))
 }
 
 pub(crate) async fn list_telemetry_network_rates(
@@ -203,6 +227,7 @@ pub(crate) async fn list_telemetry_network_rates(
                 query.client_id.as_deref(),
                 query.interface.as_deref(),
                 query.bucket_secs,
+                true,
             )
             .await?
     };
@@ -413,7 +438,8 @@ pub(crate) async fn create_server_runtime_config_patch_request(
             &reason,
             &operator,
         )
-        .await?;
+        .await
+        .map_err(runtime_config_override_error)?;
     let sync = dispatch_runtime_config_for_clients(
         &state,
         &operator,
@@ -656,6 +682,17 @@ fn runtime_config_patch_validation_error(error: anyhow::Error) -> ApiError {
     }
 }
 
+fn runtime_config_override_error(error: anyhow::Error) -> ApiError {
+    if error
+        .to_string()
+        .contains("runtime_config_target_no_longer_available")
+    {
+        ApiError::conflict("runtime_config_target_no_longer_available")
+    } else {
+        ApiError::from(error)
+    }
+}
+
 async fn verified_fixed_target_ids(
     state: &AppState,
     target_client_ids: &[String],
@@ -734,9 +771,27 @@ fn validate_telemetry_rollup_query(query: &TelemetryRollupQuery) -> Result<(), A
     }
     if query
         .bucket_secs
-        .is_some_and(|bucket_secs| bucket_secs != 60)
+        .is_some_and(|bucket_secs| bucket_secs < 60 || bucket_secs % 60 != 0)
     {
         return Err(ApiError::bad_request("invalid_bucket_secs"));
+    }
+    Ok(())
+}
+
+fn validate_telemetry_sample_query(query: &TelemetrySampleQuery) -> Result<(), ApiError> {
+    if query
+        .client_id
+        .as_ref()
+        .is_some_and(|client_id| client_id.is_empty() || client_id.len() > 128)
+    {
+        return Err(ApiError::bad_request("invalid_client_id"));
+    }
+    if query
+        .start_unix
+        .zip(query.end_unix)
+        .is_some_and(|(start, end)| start > end)
+    {
+        return Err(ApiError::bad_request("invalid_telemetry_time_range"));
     }
     Ok(())
 }
@@ -878,7 +933,7 @@ fn validate_telemetry_network_rate_query(
     }
     if query
         .bucket_secs
-        .is_some_and(|bucket_secs| bucket_secs != 60)
+        .is_some_and(|bucket_secs| bucket_secs < 60 || bucket_secs % 60 != 0)
     {
         return Err(ApiError::bad_request("invalid_bucket_secs"));
     }
@@ -914,8 +969,10 @@ mod tests {
     use super::{
         peer_client_ids_for_deleted_agent, runtime_config_patch_validation_error,
         telemetry_network_rate_limit_or_default, validate_legacy_tag_name_for_cleanup,
-        validate_persisted_tag_name,
+        validate_persisted_tag_name, validate_telemetry_network_rate_query,
+        validate_telemetry_rollup_query,
     };
+    use crate::model::{TelemetryNetworkRateQuery, TelemetryRollupQuery};
     use axum::http::StatusCode;
 
     #[test]
@@ -951,6 +1008,47 @@ mod tests {
         assert_eq!(telemetry_network_rate_limit_or_default(None), 100);
         assert_eq!(telemetry_network_rate_limit_or_default(Some(5_000)), 5_000);
         assert_eq!(telemetry_network_rate_limit_or_default(Some(50_000)), 5_000);
+    }
+
+    #[test]
+    fn telemetry_queries_accept_adaptive_minute_aligned_spans() {
+        for bucket_secs in [60, 120, 300, 86_400] {
+            validate_telemetry_rollup_query(&TelemetryRollupQuery {
+                limit: None,
+                client_id: None,
+                bucket_secs: Some(bucket_secs),
+                latest: false,
+            })
+            .unwrap();
+            validate_telemetry_network_rate_query(&TelemetryNetworkRateQuery {
+                limit: None,
+                client_id: None,
+                interface: None,
+                bucket_secs: Some(bucket_secs),
+                latest: false,
+            })
+            .unwrap();
+        }
+
+        for bucket_secs in [-60, 0, 59, 61] {
+            assert!(validate_telemetry_rollup_query(&TelemetryRollupQuery {
+                limit: None,
+                client_id: None,
+                bucket_secs: Some(bucket_secs),
+                latest: false,
+            })
+            .is_err());
+            assert!(
+                validate_telemetry_network_rate_query(&TelemetryNetworkRateQuery {
+                    limit: None,
+                    client_id: None,
+                    interface: None,
+                    bucket_secs: Some(bucket_secs),
+                    latest: false,
+                })
+                .is_err()
+            );
+        }
     }
 
     #[test]

@@ -29,6 +29,7 @@ type PrivilegeVaultBoxProps = {
   unlockLabel?: string;
   usePrivilegeLabel?: string;
   showVaultClear?: boolean;
+  showHandoffState?: boolean;
 };
 
 export function PrivilegeVaultBox({
@@ -45,6 +46,7 @@ export function PrivilegeVaultBox({
   unlockLabel = "Unlock",
   usePrivilegeLabel = "Unlock privilege",
   showVaultClear = true,
+  showHandoffState = false,
 }: PrivilegeVaultBoxProps) {
   const [superPassword, setSuperPassword] = useState("");
   const [superSaltHex, setSuperSaltHex] = useState("");
@@ -61,16 +63,24 @@ export function PrivilegeVaultBox({
   const vaultPassphraseHintId = useId();
   const privilegeStatus = privilegeMaterial
     ? "Verified and unlocked"
-    : vaultAvailable
+    : !showHandoffState && vaultAvailable
       ? "Locked, saved local vault available"
       : "Locked";
   const unlockScope = privilegeMaterial
     ? "This browser, including restarts"
-    : "Current browser only";
+    : showHandoffState
+      ? "This browser after verification"
+      : "Current browser only";
   const unlockedUntil = privilegeMaterial
     ? "Until Lock, sign-out, or operator change"
     : "Not active";
-  const localVaultState = vaultAvailable ? "Saved locally" : "Not saved";
+  const localVaultState = showHandoffState
+    ? privilegeMaterial
+      ? "Derived capability saved locally"
+      : "No saved unlock"
+    : vaultAvailable
+      ? "Saved locally"
+      : "Not saved";
   const label = (value: string) => {
     if (!labelPrefix) {
       if (value === "Super password") {
@@ -192,7 +202,7 @@ export function PrivilegeVaultBox({
         <strong>{unlockedUntil}</strong>
       </span>
       <span>
-        <small>Local vault</small>
+        <small>{showHandoffState ? "Saved unlock" : "Local vault"}</small>
         <strong>{localVaultState}</strong>
       </span>
     </div>
@@ -205,10 +215,15 @@ export function PrivilegeVaultBox({
         <div className="privilegeVaultNotice">
           <ShieldCheck size={17} />
           <span>
-            <strong>Request-bound privilege assertions</strong>
+            <strong>
+              {showHandoffState
+                ? "Persistent browser unlock"
+                : "Request-bound privilege assertions"}
+            </strong>
             <small>
-              The server receives signed assertions for privileged actions, not
-              the saved secret or vault passphrase.
+              {showHandoffState
+                ? "The password entry is cleared after verification; only the derived signing capability is saved locally, and the API receives request-bound assertions."
+                : "The server receives signed assertions for privileged actions, not the saved secret or vault passphrase."}
             </small>
           </span>
         </div>
@@ -231,18 +246,37 @@ export function PrivilegeVaultBox({
 
   if (onOpenUnlock) {
     return (
-      <div className="privilegeManager">
-        <div className="privilegeStatus">
-          <ShieldCheck size={18} />
-          <div>
-            <strong>{privilegeStatus}</strong>
-            <span title={lastPayloadHash ?? undefined}>
-              {lastPayloadHash
-                ? shortHash(lastPayloadHash)
-                : "Access / Privilege Vault required"}
-            </span>
+      <div
+        className={`privilegeManager${showHandoffState ? " privilegeVaultWorkflow" : ""}`}
+      >
+        {showHandoffState ? (
+          <>
+            {stateGrid}
+            <div className="privilegeVaultNotice">
+              <ShieldCheck size={17} />
+              <span>
+                <strong>Persistent browser unlock</strong>
+                <small>
+                  Unlock is verified before a derived signing capability is
+                  saved for this browser. Lock, sign-out, or an operator change
+                  clears it.
+                </small>
+              </span>
+            </div>
+          </>
+        ) : (
+          <div className="privilegeStatus">
+            <ShieldCheck size={18} />
+            <div>
+              <strong>{privilegeStatus}</strong>
+              <span title={lastPayloadHash ?? undefined}>
+                {lastPayloadHash
+                  ? shortHash(lastPayloadHash)
+                  : "Access / Privilege Vault required"}
+              </span>
+            </div>
           </div>
-        </div>
+        )}
         <button
           className="secondaryAction"
           onClick={onOpenUnlock}

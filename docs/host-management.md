@@ -143,9 +143,11 @@ was already dispatched; later batches remain blocked until reviewed resume.
 
 ## Chart Investigation
 
-Fleet and Network metric charts preserve missing intervals, define whether each
-point is an interval average or one bounded diagnostic, and expose the exact
-sample timestamp. Operators can focus a chart and use Left/Right, Home, and End
-to inspect samples, toggle noisy series from the legend, restore all series,
-and export only the visible series as CSV. These controls do not alter telemetry
-or saved dashboard preferences.
+Fleet monitoring and Network metric charts preserve missing intervals, define
+whether each point is a retained interval value or one bounded diagnostic, and
+expose the exact sample timestamp. Operators can focus a chart and use
+Left/Right, Home, and End to inspect samples, toggle noisy series from the
+legend, restore all series, and export only the visible series as CSV. The
+canonical VPS detail applies the same selected 15m/1h/8h/1d/7d/30d/90d/180d/1y/All
+or Custom range to resource, network, traffic, and Ping evidence. These controls
+do not alter telemetry or saved dashboard preferences.

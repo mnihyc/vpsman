@@ -49,11 +49,8 @@ test("keeps host services routable and exposes logs plus snapshot-bound actions"
     const card = grid.getByLabel(
       "Host service inventory mobile card sshd.service",
     );
-    await activate(
-      card.getByRole("button", {
-        name: "Show details for Host service inventory row sshd.service",
-      }),
-    );
+    await expect(card.locator(".gridMobileActions")).toHaveCount(0);
+    await activate(card);
   } else {
     await activate(grid.getByText("sshd.service", { exact: true }).first());
   }
@@ -196,12 +193,12 @@ async function invokeServiceAction(
     const card = grid.getByLabel(
       `Host service inventory mobile card ${service}`,
     );
-    await activate(card.getByRole("button", { name: action, exact: true }));
-    return;
+    await card.getByRole("checkbox").check();
+  } else {
+    await grid
+      .getByLabel(`Select Host service inventory row ${service}`)
+      .check();
   }
-  await grid
-    .getByLabel(`Select Host service inventory row ${service}`)
-    .check();
   await grid
     .locator(".gridToolbarActions")
     .getByRole("button", { name: "Actions", exact: true })

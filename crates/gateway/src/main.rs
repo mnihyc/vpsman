@@ -887,7 +887,10 @@ async fn handle_agent_frame(
             let ingest = GatewayAgentHelloIngest {
                 gateway_id: context.args.gateway_id.clone(),
                 gateway_session_id: context.session_id,
-                noise_public_key_hex: context.noise_public_key_hex.clone(),
+                noise_public_key_hex: context
+                    .noise_public_key_hex
+                    .clone()
+                    .context("enrolled IK session did not expose client static key")?,
                 remote_ip: Some(context.remote_ip.to_string()),
                 hello: hello.clone(),
             };

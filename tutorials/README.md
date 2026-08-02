@@ -14,8 +14,8 @@ Use these in order for a new deployment:
 2. `01-local-control-plane.md`: run the API, gateway, worker, and panel locally.
 3. `02-install-agents.md`: create direct gateway identity material, install root or
    unprivileged agents, and reinstall rebuilt VPSs.
-4. `03-fleet-organization.md`: organize 20+ VPSs with tags, bulk targeting,
-   and alerts.
+4. `03-fleet-organization.md`: organize and visually monitor 20+ VPSs with
+   tags, bulk targeting, reusable Ping targets, managed shared views, and alerts.
 5. `04-daily-operations.md`: run commands, inspect job/audit history, manage
    retention/export, use terminal sessions, file transfers, process
    supervision, and schedules.

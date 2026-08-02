@@ -84,10 +84,40 @@ test("downloads selected ready transfers for multiple completed sessions", async
   await openConsoleSubpage(page, "Remote Operations", "Transfers");
 
   const panel = page.locator(".fleetPanel", { hasText: "File transfer sessions" });
-  await expect(panel.getByText("2 ready to download, 0 unavailable, 0 selected")).toBeVisible();
-  await activate(panel.getByRole("button", { name: "Select all" }));
-  await expect(panel.getByText("2 ready to download, 0 unavailable, 2 selected")).toBeVisible();
-  await activate(panel.getByRole("button", { name: "Review selected downloads" }));
+  await expect(panel.getByText("2 ready, 0 unavailable")).toBeVisible();
+  const grid = panel.getByLabel("Transfer sessions data grid");
+  const uploadRowId =
+    "agent-sfo-01:41414141-2222-4333-8444-555555555555";
+  const firstDownloadRowId =
+    "agent-fra-02:51515151-2222-4333-8444-555555555555";
+  const secondDownloadRowId =
+    "agent-sfo-01:52525252-2222-4333-8444-555555555555";
+  await grid.getByLabel(`Select Transfer sessions row ${uploadRowId}`).check();
+  await grid
+    .getByLabel(`Select Transfer sessions row ${firstDownloadRowId}`)
+    .check();
+  await grid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  await expect(
+    page.getByRole("menuitem", { name: "Review downloads", exact: true }),
+  ).toBeDisabled();
+  await page.keyboard.press("Escape");
+
+  await grid.getByLabel(`Select Transfer sessions row ${uploadRowId}`).uncheck();
+  await grid
+    .getByLabel(`Select Transfer sessions row ${secondDownloadRowId}`)
+    .check();
+  await expect(grid.getByText("2 selected", { exact: true })).toBeVisible();
+  await expect(panel.getByRole("button", { name: "Select all" })).toHaveCount(0);
+  await grid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  await activate(
+    page.getByRole("menuitem", { name: "Review downloads", exact: true }),
+  );
   await expect(panel.getByLabel("Confirm ready download")).toBeVisible();
   await activate(
     panel
@@ -235,7 +265,9 @@ test("opens failed transfer retry metadata in resumable dispatch", async ({ page
   await expect(composer.getByLabel("Resumable download path")).toHaveValue("/var/log/nginx/error.log");
   await expect(composer.getByLabel("Resumable download filename")).toHaveValue("error.log");
   await expect(composer.getByLabel("Resumable download chunk bytes")).toHaveValue("65536");
-  await expect(composer.getByLabel("Resumable download rate limit")).toHaveValue("50000");
+  await expect(
+    composer.getByLabel("Resumable download rate limit Mbps"),
+  ).toHaveValue("50");
   await expect(composer.getByLabel("Resumable download session")).toHaveValue(
     "53535353-2222-4333-8444-555555555555",
   );

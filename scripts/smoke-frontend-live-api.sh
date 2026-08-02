@@ -70,10 +70,20 @@ seed_agent() {
   local client_id="$1"
   local process_incarnation_id="22222222-2222-4222-8222-222222222222"
   local gateway_session_id
+  local noise_public_key_hex
   case "$client_id" in
-    live-agent-a) gateway_session_id="22222222-2222-4222-8222-22222222222a" ;;
-    live-agent-b) gateway_session_id="22222222-2222-4222-8222-22222222222b" ;;
-    *) gateway_session_id="22222222-2222-4222-8222-22222222222f" ;;
+    live-agent-a)
+      gateway_session_id="22222222-2222-4222-8222-22222222222a"
+      noise_public_key_hex="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ;;
+    live-agent-b)
+      gateway_session_id="22222222-2222-4222-8222-22222222222b"
+      noise_public_key_hex="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ;;
+    *)
+      gateway_session_id="22222222-2222-4222-8222-22222222222f"
+      noise_public_key_hex="ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      ;;
   esac
   curl -fsS \
     -H "Authorization: Bearer $internal_token" \
@@ -81,7 +91,7 @@ seed_agent() {
     -d "{
       \"gateway_id\": \"frontend-live-gateway\",
       \"gateway_session_id\": \"$gateway_session_id\",
-      \"noise_public_key_hex\": null,
+      \"noise_public_key_hex\": \"$noise_public_key_hex\",
       \"hello\": {
         \"client_id\": \"$client_id\",
         \"process_incarnation_id\": \"$process_incarnation_id\",
@@ -103,12 +113,24 @@ assign_agent_alias() {
     "$api_url/api/v1/agents/$client_id/alias" >/dev/null
 }
 
+seed_agent_identity_fixture() {
+  local client_id="$1"
+  local noise_public_key_hex="$2"
+  docker exec "${SMOKE_CONTAINERS[0]}" psql -v ON_ERROR_STOP=1 -U vpsman -d vpsman \
+    -c "INSERT INTO clients (id, display_name, public_key) VALUES ('$client_id', '$client_id', decode('$noise_public_key_hex', 'hex'))" \
+    >/dev/null
+}
+
 auth_json="$(curl -fsS \
   -H "Content-Type: application/json" \
   -d "{\"username\":\"$operator_username\",\"password\":\"$operator_password\"}" \
   "$api_url/api/v1/auth/bootstrap")"
 access_token="$(jq -r '.access_token' <<<"$auth_json")"
 
+seed_agent_identity_fixture "live-agent-a" \
+  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+seed_agent_identity_fixture "live-agent-b" \
+  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 seed_agent "live-agent-a"
 seed_agent "live-agent-b"
 assign_agent_alias "live-agent-a" "edge-live-a"

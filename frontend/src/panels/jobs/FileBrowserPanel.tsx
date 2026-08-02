@@ -115,6 +115,7 @@ type TransferHandoffHint = {
 
 export function FileBrowserPanel({
   agents,
+  fleetEvidenceAvailable,
   loading,
   fileTransfers = [],
   onCreateJob,
@@ -128,6 +129,7 @@ export function FileBrowserPanel({
 }: {
   agents: AgentView[];
   fileTransfers?: FileTransferSessionRecord[];
+  fleetEvidenceAvailable: boolean;
   loading: boolean;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
@@ -184,6 +186,7 @@ export function FileBrowserPanel({
   const workspaceRef = useRef<HTMLDivElement | null>(null);
   const editorPaneRef = useRef<HTMLElement | null>(null);
   const commandPopoverRef = useRef<HTMLElement | null>(null);
+  const targetGenerationRef = useRef(0);
   const selectedAgent = useMemo(
     () => agents.find((agent) => agent.id === targetClientId) ?? null,
     [agents, targetClientId],
@@ -257,14 +260,53 @@ export function FileBrowserPanel({
               title: "Select a text file to edit.",
             };
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (
-      agents[0]?.id &&
-      (!targetClientId || !agents.some((agent) => agent.id === targetClientId))
+      !fleetEvidenceAvailable ||
+      (targetClientId && agents.some((agent) => agent.id === targetClientId)) ||
+      (!targetClientId && editorDirty)
     ) {
-      setTargetClientId(agents[0].id);
+      return;
     }
-  }, [agents, targetClientId]);
+    const removedClientId = targetClientId;
+    const nextClientId = agents[0]?.id ?? "";
+    if (removedClientId === nextClientId) {
+      return;
+    }
+    targetGenerationRef.current += 1;
+    setTargetClientId(editorDirty ? "" : nextClientId);
+    setEntriesByPath({});
+    setDirectoryEvidenceByPath({});
+    setMetadataByPath({});
+    setExpandedPaths({ "/": true });
+    setSelectedPath(currentPath);
+    setPendingConfirmation(null);
+    setActiveCommand(null);
+    setBrowserClipboard(null);
+    setStaleDirectoryPath(null);
+    setTransferHandoffHint(null);
+    if (editorDirty) {
+      setActionError(
+        `VPS ${removedClientId} is no longer available. Its cached directory evidence was cleared; copy or close the preserved local draft before choosing another VPS.`,
+      );
+      setActionMessage(null);
+      return;
+    }
+    setEditorPath(null);
+    setEditorContent("");
+    setEditorSavedContent("");
+    setEditorSha256Hex(null);
+    setEditorConflictDetected(false);
+    setEditorDiscardPromptOpen(false);
+    setActionError(null);
+    setActionMessage(
+      removedClientId
+        ? nextClientId
+          ? `VPS ${removedClientId} is no longer available. Cached file evidence was cleared; selected ${nextClientId}.`
+          : `VPS ${removedClientId} is no longer available. Cached file evidence was cleared.`
+        : null,
+    );
+  }, [agents, currentPath, editorDirty, fleetEvidenceAvailable, targetClientId]);
 
   useEffect(() => {
     writeBrowserState({ path: currentPath, targetClientId, showHidden });
@@ -364,6 +406,10 @@ export function FileBrowserPanel({
       );
       return;
     }
+    if (value === targetClientId) {
+      return;
+    }
+    targetGenerationRef.current += 1;
     setTargetClientId(value);
     setEntriesByPath({});
     setDirectoryEvidenceByPath({});
@@ -390,24 +436,36 @@ export function FileBrowserPanel({
     if (!privilegeMaterial) {
       throw new Error("Unlock privilege before running a file operation.");
     }
+    const targetGeneration = targetGenerationRef.current;
+    const operationTargetClientId = selectedAgent.id;
+    const assertTargetCurrent = () => {
+      if (targetGeneration !== targetGenerationRef.current) {
+        throw new Error(
+          `Ignored ${fileBrowserOperationLabel(operation).toLocaleLowerCase()} result because the target VPS changed.`,
+        );
+      }
+    };
     const operationLabel = fileBrowserOperationLabel(operation);
     setActionMessage(`Preparing ${operationLabel.toLocaleLowerCase()}`);
     const maxTimeoutSecs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
-    const selectorExpression = selectorExpressionForClientIds([selectedAgent.id]);
+    const selectorExpression = selectorExpressionForClientIds([
+      operationTargetClientId,
+    ]);
     const built = await buildPrivilegeForJobOperation({
-      clientIds: [selectedAgent.id],
+      clientIds: [operationTargetClientId],
       commandType: operation.type,
       operation,
       privilegeMaterial,
       selectorExpression,
       maxTimeoutSecs,
     });
+    assertTargetCurrent();
     setLastPayloadHash(built.payloadHashHex);
     setActionMessage(`Dispatching ${operationLabel.toLocaleLowerCase()}`);
     const destructive = mutatesFileSystem(operation);
     const job = await onCreateJob({
       selector_expression: selectorExpression,
-      target_client_ids: [selectedAgent.id],
+      target_client_ids: [operationTargetClientId],
       destructive,
       confirmed: true,
       command: operation.type,
@@ -427,6 +485,7 @@ export function FileBrowserPanel({
       options.expectedType,
       FILE_BROWSER_RESULT_WAIT_TIMEOUT_MS,
     );
+    assertTargetCurrent();
     return { job, outputs };
   }
 
@@ -1045,12 +1104,12 @@ export function FileBrowserPanel({
       )}
 
       <div className="filePathBar">
-        <button className="iconButton" disabled={pending || currentPath === "/" || !privilegeMaterial} onClick={() => void loadDirectory(parentPath(currentPath))} title="Parent directory" type="button">
+        <button className="iconButton" disabled={pending || currentPath === "/" || !privilegeMaterial || !selectedAgent} onClick={() => void loadDirectory(parentPath(currentPath))} title="Parent directory" type="button">
           <ChevronRight className="rotate180" size={15} />
         </button>
         <button
           className="secondaryAction compactAction pathRefreshAction"
-          disabled={pending || loading || !privilegeMaterial}
+          disabled={pending || loading || !privilegeMaterial || !selectedAgent}
           onClick={() => void loadDirectory(pathRefreshTarget)}
           title={
             typedPathChanged
@@ -1132,7 +1191,7 @@ export function FileBrowserPanel({
         />
         <aside className="fileTreePane">
           <div className="fileTreeToolbar">
-            <button className="secondaryAction compactAction" disabled={pending || !privilegeMaterial} onClick={() => void loadDirectory("/")} type="button">
+            <button className="secondaryAction compactAction" disabled={pending || !privilegeMaterial || !selectedAgent} onClick={() => void loadDirectory("/")} type="button">
               /
             </button>
             <button className="secondaryAction compactAction" disabled={selectedDownloadDisabled} onClick={() => void downloadSelected()} title={selectedDownloadLabel} type="button">
@@ -1194,7 +1253,7 @@ export function FileBrowserPanel({
                   <button
                     aria-label={editorConflictDetected ? "Review overwrite" : "Review save"}
                     className={editorConflictDetected ? "dangerAction" : "primaryAction"}
-                    disabled={!editorDirty || pending || !privilegeMaterial}
+                    disabled={!editorDirty || pending || !privilegeMaterial || !selectedAgent}
                     onClick={() => void saveEditor(editorConflictDetected)}
                     title={
                       editorConflictDetected

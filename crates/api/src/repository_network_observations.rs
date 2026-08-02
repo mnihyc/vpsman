@@ -16,10 +16,21 @@ impl Repository {
     pub(crate) async fn list_network_observations(
         &self,
         limit: i64,
+        visible_only: bool,
     ) -> Result<Vec<NetworkObservationView>> {
         match self {
             Self::Memory(memory) => {
                 let mut observations = memory.network_observations.read().await.clone();
+                if visible_only {
+                    let hidden = memory.hidden_clients.read().await;
+                    observations.retain(|observation| {
+                        !hidden.contains(&observation.client_id)
+                            && observation
+                                .peer_client_id
+                                .as_ref()
+                                .is_none_or(|peer_client_id| !hidden.contains(peer_client_id))
+                    });
+                }
                 observations.sort_by(|left, right| {
                     compare_timestamps_desc(&left.observed_at, &right.observed_at)
                         .then_with(|| right.id.cmp(&left.id))
@@ -50,11 +61,26 @@ impl Repository {
                         metadata,
                         observed_at::text AS observed_at
                     FROM network_observations
+                    WHERE (
+                        NOT $2
+                        OR EXISTS (
+                            SELECT 1 FROM visible_clients
+                            WHERE visible_clients.id = network_observations.client_id
+                        )
+                        AND (
+                            network_observations.peer_client_id IS NULL
+                            OR EXISTS (
+                                SELECT 1 FROM visible_clients
+                                WHERE visible_clients.id = network_observations.peer_client_id
+                            )
+                        )
+                    )
                     ORDER BY observed_at DESC, id DESC
                     LIMIT $1
                     "#,
                 )
                 .bind(limit)
+                .bind(visible_only)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
@@ -397,11 +423,25 @@ impl Repository {
     pub(crate) async fn list_network_observation_trends(
         &self,
         limit: i64,
+        visible_only: bool,
     ) -> Result<Vec<NetworkObservationTrendView>> {
         match self {
             Self::Memory(memory) => {
                 let observations = memory.network_observations.read().await;
-                let mut trends = summarize_network_observation_trends(&observations);
+                let hidden = memory.hidden_clients.read().await;
+                let visible = observations
+                    .iter()
+                    .filter(|observation| {
+                        !visible_only
+                            || (!hidden.contains(&observation.client_id)
+                                && observation
+                                    .peer_client_id
+                                    .as_ref()
+                                    .is_none_or(|peer_client_id| !hidden.contains(peer_client_id)))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let mut trends = summarize_network_observation_trends(&visible);
                 trends.sort_by(|left, right| {
                     compare_timestamps_desc(&left.latest_observed_at, &right.latest_observed_at)
                         .then_with(|| left.kind.cmp(&right.kind))
@@ -432,12 +472,27 @@ impl Repository {
                         COALESCE(SUM(bytes), 0)::BIGINT AS bytes_total,
                         MAX(observed_at)::text AS latest_observed_at
                     FROM network_observations
+                    WHERE (
+                        NOT $2
+                        OR EXISTS (
+                            SELECT 1 FROM visible_clients
+                            WHERE visible_clients.id = network_observations.client_id
+                        )
+                        AND (
+                            network_observations.peer_client_id IS NULL
+                            OR EXISTS (
+                                SELECT 1 FROM visible_clients
+                                WHERE visible_clients.id = network_observations.peer_client_id
+                            )
+                        )
+                    )
                     GROUP BY kind, plan_id, topology_identity_hash, plan_name, interface_name, client_id, peer_client_id
                     ORDER BY MAX(observed_at) DESC, kind ASC, client_id ASC
                     LIMIT $1
                     "#,
                 )
                 .bind(limit)
+                .bind(visible_only)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()

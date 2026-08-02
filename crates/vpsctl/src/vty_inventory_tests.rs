@@ -300,26 +300,26 @@ fn parses_inventory_commands() {
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "telemetry-rollups --limit 20 --client-id edge/a --bucket-secs 60"
+            "telemetry-rollups --limit 20 --client-id edge/a --bucket-secs 300"
         )
         .unwrap(),
         VtyInventoryCommand::TelemetryRollups {
             limit: 20,
             client_id: Some("edge/a".to_string()),
-            bucket_secs: Some(60),
+            bucket_secs: Some(300),
             latest: false,
         }
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "telemetry-network-rates --limit 20 --client-id edge/a --interface eth0 --bucket-secs 60",
+            "telemetry-network-rates --limit 20 --client-id edge/a --interface eth0 --bucket-secs 300",
         )
         .unwrap(),
         VtyInventoryCommand::TelemetryNetworkRates {
             limit: 20,
             client_id: Some("edge/a".to_string()),
             interface: Some("eth0".to_string()),
-            bucket_secs: Some(60),
+            bucket_secs: Some(300),
             latest: false,
         }
     );
@@ -497,6 +497,7 @@ fn rejects_invalid_inventory_commands() {
         "/api/v1/fleet-alert-notifications?limit=10&channel_id=11111111-1111-4111-8111-111111111111&alert_id=agent_status%3Aagent%3Aabc&status=queued"
     );
     assert!(parse_vty_inventory_command("telemetry-rollups --bucket-secs 1").is_err());
+    assert!(parse_vty_inventory_command("telemetry-rollups --bucket-secs 61").is_err());
     assert!(
         parse_vty_inventory_command("telemetry-network-rates --interface '' --bucket-secs 1")
             .is_err()

@@ -4,6 +4,7 @@ import {
   Download,
   ExternalLink,
   Filter,
+  RefreshCw,
   RotateCcw,
   Scissors,
   ShieldCheck,
@@ -592,21 +593,12 @@ export function AuditLogPanel({
               <h2>Audit log</h2>
               <span>Operator and control-plane events</span>
             </div>
-            <div className="headerActionStack">
-              <button
-                className="secondaryAction"
-                disabled={loading}
-                onClick={onRefresh}
-                type="button"
-              >
-                Refresh
-              </button>
-              <ActionFeedback
-                message={auditFeedbackMessage}
-                tone={error ? "danger" : "progress"}
-              />
-            </div>
           </div>
+          <ActionFeedback
+            className="localActionFeedback"
+            message={auditFeedbackMessage}
+            tone={error ? "danger" : "progress"}
+          />
           <div className="auditEventSummary" aria-label="Audit event summary">
             <div className="auditEventMetric">
               <span>Visible events</span>
@@ -825,6 +817,17 @@ export function AuditLogPanel({
             singleExpandedRow
             storageKey="vpsman.grid.audit.events"
             title="Audit records"
+            toolbarActions={
+              <button
+                className="secondaryAction compactAction"
+                disabled={loading}
+                onClick={onRefresh}
+                type="button"
+              >
+                <RefreshCw size={15} />
+                Refresh
+              </button>
+            }
           />
         </div>
       )}
@@ -852,6 +855,9 @@ export function AuditLogPanel({
             message={error ?? retentionStatus}
             tone={error ? "danger" : retentionStatusTone}
           />
+          <p className="retentionPanelNote">
+            <strong>Monitoring lifecycle.</strong> Accepted high-resolution samples support realtime and short-range views; minute-derived resource, network, traffic-counter, and Ping history is the long-term authority. Equal adjacent resource, network, and Ping minutes may share a variable-length span without changing coverage or query results.
+          </p>
           <div
             className="retentionSummaryStrip"
             aria-label="History retention summary"
@@ -1579,9 +1585,11 @@ function historyDomainLabel(domain: string | null | undefined): string {
     job_outputs: "Job outputs",
     network_observations: "Network observations",
     system_metric_rollups: "System metrics",
-    telemetry_network_rates: "Network traffic rates",
-    telemetry_rollups: "Telemetry rollups",
-    traffic_counter_samples: "Traffic accounting counters",
+    telemetry_network_rates: "Long-term network history",
+    telemetry_ping_rollups: "Long-term Ping history",
+    telemetry_rollups: "Long-term resource history",
+    telemetry_samples: "High-resolution monitoring samples",
+    traffic_counter_samples: "Long-term traffic counters",
     topology_history: "Topology history",
   };
   return domain
@@ -1598,10 +1606,16 @@ function historyDomainDescription(domain: string | null | undefined): string {
     job_outputs: "Command output and retained job evidence",
     network_observations: "Tunnel health, probe, and observation history",
     system_metric_rollups: "Control-plane capacity rollups",
-    telemetry_network_rates: "Per-VPS network rate history",
-    telemetry_rollups: "Per-VPS telemetry rollups",
+    telemetry_network_rates:
+      "Authoritative minute-derived RX/TX counter history; equal adjacent minutes may share one span",
+    telemetry_ping_rollups:
+      "Authoritative minute-derived general Ping history, separated by target generation",
+    telemetry_rollups:
+      "Authoritative minute-derived CPU, load, memory, and aggregate disk history",
+    telemetry_samples:
+      "Accepted high-resolution resource, network, traffic, and Ping samples for realtime and short-range views",
     traffic_counter_samples:
-      "Raw per-interface counters used for monthly traffic accounting",
+      "Minute-derived counters for configured authoritative traffic-accounting streams",
     topology_history: "Topology graph and trend history",
   };
   return domain

@@ -158,6 +158,7 @@ async fn record_scheduled_memory_job(
 #[tokio::test]
 async fn schedule_create_lists_durable_selector_without_plaintext_privilege_material() {
     let repo = Repository::Memory(MemoryState::default());
+    seed_never_connected_agent(&repo, "client-a").await;
     let operator = schedule_test_operator();
     let request = shell_schedule_request("nightly-uptime", true);
 
@@ -188,6 +189,7 @@ async fn schedule_create_lists_durable_selector_without_plaintext_privilege_mate
 #[tokio::test]
 async fn malformed_memory_schedule_stays_visible_blocks_partial_actions_and_can_be_repaired() {
     let repo = Repository::Memory(MemoryState::default());
+    seed_never_connected_agent(&repo, "client-a").await;
     let operator = schedule_test_operator();
     let malformed = repo
         .create_schedule(
@@ -236,12 +238,7 @@ async fn malformed_memory_schedule_stays_visible_blocks_partial_actions_and_can_
     );
     assert_eq!(visible.operation_payload_hash, raw_hash);
     assert!(repo
-        .update_schedule_targets(
-            malformed.id,
-            "tag:new".to_string(),
-            vec!["client-a".to_string()],
-            &operator,
-        )
+        .update_schedule_targets(malformed.id, vec!["client-a".to_string()], &operator,)
         .await
         .is_err());
     assert!(repo
@@ -325,6 +322,7 @@ async fn tag_impact_preview_includes_schedules_beyond_one_thousand() {
 async fn public_schedule_list_is_bounded_while_internal_listing_remains_complete() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = schedule_test_operator();
+    seed_never_connected_agent(&repo, "client-a").await;
     let schedule = repo
         .create_schedule(
             shell_schedule_request("public-list-schedule-0000", true),
@@ -387,6 +385,7 @@ async fn schedule_mutations_require_explicit_confirmation() {
 async fn schedule_uuid_lifecycle_hides_soft_deleted_rows() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = schedule_test_operator();
+    seed_never_connected_agent(&repo, "client-a").await;
     let first = repo
         .create_schedule(shell_schedule_request("shared-name", true), &operator)
         .await
@@ -485,6 +484,7 @@ async fn schedule_uuid_lifecycle_hides_soft_deleted_rows() {
 async fn scheduled_failed_job_updates_retry_controls_on_finish() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = schedule_test_operator();
+    seed_never_connected_agent(&repo, "client-a").await;
     let mut schedule_request = shell_schedule_request("retrying-schedule", true);
     schedule_request.max_failures = 2;
     schedule_request.retry_delay_secs = 120;
@@ -531,6 +531,7 @@ async fn scheduled_failed_job_updates_retry_controls_on_finish() {
 async fn scheduled_job_finish_is_idempotent_for_failure_accounting() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = schedule_test_operator();
+    seed_never_connected_agent(&repo, "client-a").await;
     let schedule = repo
         .create_schedule(shell_schedule_request("idempotent-finish", true), &operator)
         .await
@@ -578,6 +579,7 @@ async fn scheduled_job_finish_is_idempotent_for_failure_accounting() {
 async fn scheduled_successful_job_resets_failure_controls_on_finish() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = schedule_test_operator();
+    seed_never_connected_agent(&repo, "client-a").await;
     let schedule = repo
         .create_schedule(
             shell_schedule_request("recovering-schedule", true),
@@ -611,6 +613,7 @@ async fn scheduled_partial_success_and_skipped_preserve_failure_controls_on_fini
     ] {
         let repo = Repository::Memory(MemoryState::default());
         let operator = schedule_test_operator();
+        seed_never_connected_agent(&repo, "client-a").await;
         let schedule = repo
             .create_schedule(
                 shell_schedule_request(&format!("recovering-schedule-{status}"), true),
@@ -644,6 +647,7 @@ async fn scheduled_partial_success_and_skipped_preserve_failure_controls_on_fini
 async fn scheduled_partial_success_with_failed_target_counts_as_failure() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = schedule_test_operator();
+    seed_never_connected_agent(&repo, "client-a").await;
     let schedule = repo
         .create_schedule(shell_schedule_request("degraded-schedule", true), &operator)
         .await

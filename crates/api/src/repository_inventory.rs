@@ -12,7 +12,8 @@ use crate::repository_jobs::{
     mark_active_targets_agent_lost_for_client_in_tx, skip_unstarted_queued_targets_for_client_in_tx,
 };
 use crate::repository_key_lifecycle::{
-    lock_postgres_agent_identity_lifecycle, public_key_sha256_hex,
+    lock_postgres_agent_identity_lifecycle, public_key_sha256_hex, require_visible_memory_clients,
+    require_visible_postgres_clients_in_tx,
 };
 use crate::repository_port_forwarding::{
     archive_postgres_port_forwarding_for_agent_delete, lock_postgres_port_forward_client,
@@ -51,9 +52,8 @@ impl Repository {
                 let row = sqlx::query(
                     r#"
                     SELECT id
-                    FROM clients
-                    WHERE hidden_at IS NULL
-                      AND lower(btrim(display_name)) = lower(btrim($1))
+                    FROM visible_clients
+                    WHERE lower(btrim(display_name)) = lower(btrim($1))
                       AND ($2::text IS NULL OR id <> $2)
                     LIMIT 1
                     "#,
@@ -93,25 +93,34 @@ impl Repository {
     pub(crate) async fn fleet_summary(&self) -> Result<FleetSummary> {
         match self {
             Self::Memory(memory) => {
-                let (total, online, offline, never, stale, unknown) = {
+                let (total, online, offline, never, revoked, stale, unknown) = {
                     let agents = memory.agents.read().await;
                     let hidden = memory.hidden_clients.read().await;
                     let visible_agents = agents
                         .iter()
                         .filter(|agent| !hidden.contains(&agent.id))
                         .collect::<Vec<_>>();
-                    let (mut online, mut offline, mut never, mut stale, mut unknown) =
-                        (0_usize, 0_usize, 0_usize, 0_usize, 0_usize);
+                    let (mut online, mut offline, mut never, mut revoked, mut stale, mut unknown) =
+                        (0_usize, 0_usize, 0_usize, 0_usize, 0_usize, 0_usize);
                     for agent in &visible_agents {
                         match agent.status.as_str() {
                             "online" if agent.last_seen_at.is_some() => online += 1,
                             "offline" | "disconnected" => offline += 1,
                             "never" => never += 1,
+                            "revoked" => revoked += 1,
                             "stale" => stale += 1,
                             _ => unknown += 1,
                         }
                     }
-                    (visible_agents.len(), online, offline, never, stale, unknown)
+                    (
+                        visible_agents.len(),
+                        online,
+                        offline,
+                        never,
+                        revoked,
+                        stale,
+                        unknown,
+                    )
                 };
                 let running_jobs = memory
                     .jobs
@@ -125,9 +134,10 @@ impl Repository {
                     online,
                     offline,
                     never,
+                    revoked,
                     unknown,
                     stale,
-                    warnings: offline + never + stale + unknown,
+                    warnings: offline + never + revoked + stale + unknown,
                     running_jobs,
                 })
             }
@@ -135,16 +145,17 @@ impl Repository {
                 let row = sqlx::query(
                     r#"
                     SELECT
-                        (SELECT count(*) FROM clients WHERE hidden_at IS NULL) AS total,
-                        (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status = 'online' AND last_seen_at IS NOT NULL) AS online,
-                        (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status IN ('offline', 'disconnected')) AS offline,
-                        (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status = 'never') AS never,
-                        (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status = 'stale') AS stale,
-                        (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND (
+                        (SELECT count(*) FROM visible_clients) AS total,
+                        (SELECT count(*) FROM visible_clients WHERE status = 'online' AND last_seen_at IS NOT NULL) AS online,
+                        (SELECT count(*) FROM visible_clients WHERE status IN ('offline', 'disconnected')) AS offline,
+                        (SELECT count(*) FROM visible_clients WHERE status = 'never') AS never,
+                        (SELECT count(*) FROM visible_clients WHERE status = 'revoked') AS revoked,
+                        (SELECT count(*) FROM visible_clients WHERE status = 'stale') AS stale,
+                        (SELECT count(*) FROM visible_clients WHERE (
                             (status = 'online' AND last_seen_at IS NULL)
-                            OR status NOT IN ('online', 'offline', 'disconnected', 'never', 'stale')
+                            OR status NOT IN ('online', 'offline', 'disconnected', 'never', 'revoked', 'stale')
                         )) AS unknown,
-                        (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND NOT (status = 'online' AND last_seen_at IS NOT NULL)) AS warnings,
+                        (SELECT count(*) FROM visible_clients WHERE NOT (status = 'online' AND last_seen_at IS NOT NULL)) AS warnings,
                         (SELECT count(*) FROM jobs WHERE status IN ('queued', 'running')) AS running_jobs
                     "#,
                 )
@@ -155,6 +166,7 @@ impl Repository {
                     online: row.try_get::<i64, _>("online")? as usize,
                     offline: row.try_get::<i64, _>("offline")? as usize,
                     never: row.try_get::<i64, _>("never")? as usize,
+                    revoked: row.try_get::<i64, _>("revoked")? as usize,
                     unknown: row.try_get::<i64, _>("unknown")? as usize,
                     stale: row.try_get::<i64, _>("stale")? as usize,
                     warnings: row.try_get::<i64, _>("warnings")? as usize,
@@ -223,11 +235,10 @@ impl Repository {
                             array_remove(array_agg(t.name ORDER BY t.display_order, t.created_at, t.name), NULL),
                             ARRAY[]::TEXT[]
                         ) AS tags
-                    FROM clients c
+                    FROM visible_clients c
                     LEFT JOIN client_tags ct ON ct.client_id = c.id
                     LEFT JOIN tags t ON t.id = ct.tag_id
-                    WHERE c.hidden_at IS NULL
-                      AND ($1::text[] IS NULL OR c.id = ANY($1))
+                    WHERE ($1::text[] IS NULL OR c.id = ANY($1))
                     GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.arch, c.internal_build_number, c.process_incarnation_id, c.stale_since, c.stale_reason, c.capabilities
                     ORDER BY c.display_name, c.id
                     "#,
@@ -416,9 +427,9 @@ impl Repository {
     pub(crate) async fn assign_agent_tag(&self, client_id: &str, tag: &str) -> Result<TagView> {
         match self {
             Self::Memory(memory) => {
-                if memory.hidden_clients.read().await.contains(client_id) {
-                    anyhow::bail!("agent_not_found");
-                }
+                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
+                require_visible_memory_clients(memory, &[client_id.to_string()], "agent_not_found")
+                    .await?;
                 let mut agents = memory.agents.write().await;
                 if let Some(agent) = agents.iter_mut().find(|agent| agent.id == client_id) {
                     if !agent.tags.iter().any(|existing| existing == tag) {
@@ -447,6 +458,12 @@ impl Repository {
             Self::Postgres(pool) => {
                 let tag_id = Uuid::new_v4();
                 let mut tx = pool.begin().await?;
+                require_visible_postgres_clients_in_tx(
+                    &mut tx,
+                    &[client_id.to_string()],
+                    "agent_not_found",
+                )
+                .await?;
                 sqlx::query(
                     r#"
                     INSERT INTO tags (id, name, display_order)
@@ -459,19 +476,6 @@ impl Repository {
                 .bind(TAG_DISPLAY_ORDER_STEP)
                 .execute(&mut *tx)
                 .await?;
-                let client_exists: bool = sqlx::query_scalar(
-                    r#"
-                    SELECT EXISTS (
-                        SELECT 1
-                        FROM clients
-                        WHERE id = $1 AND hidden_at IS NULL
-                    )
-                    "#,
-                )
-                .bind(client_id)
-                .fetch_one(&mut *tx)
-                .await?;
-                anyhow::ensure!(client_exists, "agent_not_found");
                 sqlx::query(
                     r#"
                     INSERT INTO client_tags (client_id, tag_id)
@@ -526,6 +530,17 @@ impl Repository {
         }
         match self {
             Self::Memory(memory) => {
+                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
+                let target_client_ids = targets
+                    .iter()
+                    .map(|agent| agent.id.clone())
+                    .collect::<Vec<_>>();
+                require_visible_memory_clients(
+                    memory,
+                    &target_client_ids,
+                    "fixed_targets_not_found",
+                )
+                .await?;
                 let mut changed = 0_usize;
                 if matches!(request.action, BulkTagMutationAction::Add) {
                     let mut tags = memory.tags.write().await;
@@ -578,6 +593,16 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                let target_client_ids = targets
+                    .iter()
+                    .map(|agent| agent.id.clone())
+                    .collect::<Vec<_>>();
+                require_visible_postgres_clients_in_tx(
+                    &mut tx,
+                    &target_client_ids,
+                    "fixed_targets_not_found",
+                )
+                .await?;
                 if matches!(request.action, BulkTagMutationAction::Add) {
                     sqlx::query(
                         r#"
@@ -906,6 +931,14 @@ impl Repository {
                     "agent_port_forwarding_cleanup_required"
                 );
                 let deleted_at = unix_now().to_string();
+                let prior_status = memory
+                    .agents
+                    .read()
+                    .await
+                    .iter()
+                    .find(|agent| agent.id == client_id)
+                    .map(|agent| agent.status.clone());
+                anyhow::ensure!(prior_status.is_some(), "agent_not_found");
                 let already_hidden = {
                     let mut hidden = memory.hidden_clients.write().await;
                     !hidden.insert(client_id.to_string())
@@ -918,16 +951,37 @@ impl Repository {
                     .find(|agent| agent.id == client_id)
                     .and_then(|agent| agent.process_incarnation_id);
                 let mut agents = memory.agents.write().await;
-                let found = agents.iter().any(|agent| agent.id == client_id);
-                agents.retain(|agent| agent.id != client_id);
+                let found =
+                    if let Some(agent) = agents.iter_mut().find(|agent| agent.id == client_id) {
+                        agent.status = "deleted".to_string();
+                        agent.process_incarnation_id = None;
+                        agent.stale_since = None;
+                        agent.stale_reason = None;
+                        true
+                    } else {
+                        false
+                    };
                 drop(agents);
-                anyhow::ensure!(found || already_hidden, "agent_not_found");
-                let removed_configuration_preset_override_count = {
-                    let mut overrides = memory.configuration_preset_overrides.write().await;
-                    let previous_count = overrides.len();
-                    overrides.retain(|override_record| override_record.client_id != client_id);
-                    previous_count.saturating_sub(overrides.len())
-                };
+                anyhow::ensure!(found, "agent_not_found");
+                if prior_status.as_deref() != Some("deleted") {
+                    memory
+                        .client_status_history
+                        .write()
+                        .await
+                        .push(ClientStatusHistoryView {
+                            id: Uuid::new_v4(),
+                            client_id: client_id.to_string(),
+                            from_status: prior_status,
+                            to_status: "deleted".to_string(),
+                            reason: "vps_deleted".to_string(),
+                            metadata: json!({
+                                "reason": &reason,
+                                "operator_id": operator.operator.id,
+                                "frontend_visible": false,
+                            }),
+                            created_at: deleted_at.clone(),
+                        });
+                }
                 let archived_port_forward_rule_count = {
                     let deleted_reason = reason
                         .as_deref()
@@ -1038,7 +1092,8 @@ impl Repository {
                         "already_hidden": already_hidden,
                         "frontend_visible": false,
                         "access_deactivated": true,
-                        "removed_configuration_preset_override_count": removed_configuration_preset_override_count,
+                        "related_configuration_and_assignments_preserved": true,
+                        "frozen_monitoring_share_targets_preserved": true,
                         "soft_deleted_tunnel_plan_count": soft_deleted_tunnel_plan_count,
                         "archived_port_forward_rule_count": archived_port_forward_rule_count,
                         "agent_lost_job_ids": agent_lost_job_ids,
@@ -1069,7 +1124,7 @@ impl Repository {
                 );
                 let client_row = sqlx::query(
                     r#"
-                    SELECT process_incarnation_id, public_key
+                    SELECT process_incarnation_id, public_key, status
                     FROM clients
                     WHERE id = $1
                     FOR UPDATE
@@ -1084,6 +1139,7 @@ impl Repository {
                 let old_process_incarnation_id: Option<Uuid> =
                     client_row.try_get("process_incarnation_id")?;
                 let public_key: Vec<u8> = client_row.try_get("public_key")?;
+                let prior_status: String = client_row.try_get("status")?;
                 if !public_key.is_empty() {
                     sqlx::query(
                         r#"
@@ -1124,13 +1180,26 @@ impl Repository {
                     anyhow::bail!("agent_not_found");
                 };
                 let deleted_at: String = row.try_get("deleted_at")?;
-                let removed_configuration_preset_override_count = sqlx::query(
-                    "DELETE FROM client_configuration_preset_overrides WHERE client_id = $1",
-                )
-                .bind(client_id)
-                .execute(&mut *tx)
-                .await?
-                .rows_affected();
+                if prior_status != "deleted" {
+                    sqlx::query(
+                        r#"
+                        INSERT INTO client_status_history (
+                            id, client_id, from_status, to_status, reason, metadata
+                        )
+                        VALUES ($1, $2, $3, 'deleted', 'vps_deleted', $4)
+                        "#,
+                    )
+                    .bind(Uuid::new_v4())
+                    .bind(client_id)
+                    .bind(&prior_status)
+                    .bind(json!({
+                        "reason": &reason,
+                        "operator_id": operator.operator.id,
+                        "frontend_visible": false,
+                    }))
+                    .execute(&mut *tx)
+                    .await?;
+                }
                 let archived_port_forward_rule_count =
                     archive_postgres_port_forwarding_for_agent_delete(
                         &mut tx,
@@ -1218,7 +1287,8 @@ impl Repository {
                     "reason": reason,
                     "frontend_visible": false,
                     "access_deactivated": true,
-                    "removed_configuration_preset_override_count": removed_configuration_preset_override_count,
+                    "related_configuration_and_assignments_preserved": true,
+                    "frozen_monitoring_share_targets_preserved": true,
                     "soft_deleted_tunnel_plan_count": soft_deleted_tunnel_plan_count,
                     "archived_port_forward_rule_count": archived_port_forward_rule_count,
                     "agent_lost_job_ids": agent_lost_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
@@ -1260,9 +1330,9 @@ impl Repository {
             .await?;
         match self {
             Self::Memory(memory) => {
-                if memory.hidden_clients.read().await.contains(client_id) {
-                    anyhow::bail!("agent_not_found");
-                }
+                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
+                require_visible_memory_clients(memory, &[client_id.to_string()], "agent_not_found")
+                    .await?;
                 let mut agents = memory.agents.write().await;
                 let Some(agent) = agents.iter_mut().find(|agent| agent.id == client_id) else {
                     anyhow::bail!("agent_not_found");
@@ -1295,11 +1365,17 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                require_visible_postgres_clients_in_tx(
+                    &mut tx,
+                    &[client_id.to_string()],
+                    "agent_not_found",
+                )
+                .await?;
                 let Some(existing) = sqlx::query(
                     r#"
                     SELECT display_name
-                    FROM clients
-                    WHERE id = $1 AND hidden_at IS NULL
+                    FROM visible_clients
+                    WHERE id = $1
                     FOR UPDATE
                     "#,
                 )
@@ -1391,10 +1467,10 @@ impl Repository {
                             array_remove(array_agg(t.name ORDER BY t.display_order, t.created_at, t.name), NULL),
                             ARRAY[]::TEXT[]
                         ) AS tags
-                    FROM clients c
+                    FROM visible_clients c
                     LEFT JOIN client_tags ct ON ct.client_id = c.id
                     LEFT JOIN tags t ON t.id = ct.tag_id
-                    WHERE c.id = $1 AND c.hidden_at IS NULL
+                    WHERE c.id = $1
                     GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.arch, c.internal_build_number, c.process_incarnation_id, c.stale_since, c.stale_reason, c.capabilities
                     "#,
                 )
@@ -1471,10 +1547,9 @@ impl Repository {
                             array_remove(array_agg(all_tags.name ORDER BY all_tags.display_order, all_tags.created_at, all_tags.name), NULL),
                             ARRAY[]::TEXT[]
                         ) AS tags
-                    FROM clients c
+                    FROM visible_clients c
                     LEFT JOIN client_tags all_ct ON all_ct.client_id = c.id
                     LEFT JOIN tags all_tags ON all_tags.id = all_ct.tag_id
-                    WHERE c.hidden_at IS NULL
                     GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.arch, c.internal_build_number, c.process_incarnation_id, c.stale_since, c.stale_reason, c.capabilities
                     ORDER BY c.display_name, c.id
                     "#,
@@ -1555,13 +1630,12 @@ impl Repository {
                             array_remove(array_agg(all_tags.name ORDER BY all_tags.display_order, all_tags.created_at, all_tags.name), NULL),
                             ARRAY[]::TEXT[]
                         ) AS tags
-                    FROM clients c
+                    FROM visible_clients c
                     JOIN client_tags matching_ct ON matching_ct.client_id = c.id
                     JOIN tags matching_tag ON matching_tag.id = matching_ct.tag_id
                     LEFT JOIN client_tags all_ct ON all_ct.client_id = c.id
                     LEFT JOIN tags all_tags ON all_tags.id = all_ct.tag_id
                     WHERE matching_tag.name = $1
-                      AND c.hidden_at IS NULL
                     GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.arch, c.internal_build_number, c.process_incarnation_id, c.stale_since, c.stale_reason, c.capabilities
                     ORDER BY c.display_name, c.id
                     "#,

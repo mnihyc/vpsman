@@ -24,6 +24,8 @@ import type {
   NetworkAdapterDefinitionRecord,
   OperatorAuthEventRecord,
   ScheduleRecord,
+  TagMutationResponse,
+  VpsRuleValueRecord,
 } from "../../src/types";
 
 type FixtureJobOutput = {
@@ -64,6 +66,7 @@ const summary = {
   never: 0,
   offline: 0,
   online: 0,
+  revoked: 0,
   running_jobs: 3,
   stale: 1,
   total: 3,
@@ -146,13 +149,15 @@ const dashboardOverview = {
       },
     ],
     windows: [
-      { label: "15 minutes", seconds: 900, value: "15m" },
+      { label: "Realtime · last 15 minutes", seconds: 900, value: "15m" },
       { label: "1 hour", seconds: 3600, value: "1h" },
-      { label: "6 hours", seconds: 21600, value: "6h" },
-      { label: "24 hours", seconds: 86400, value: "24h" },
+      { label: "8 hours", seconds: 28800, value: "8h" },
+      { label: "1 day", seconds: 86400, value: "1d" },
       { label: "7 days", seconds: 604800, value: "7d" },
-      { label: "14 days", seconds: 1209600, value: "14d" },
       { label: "30 days", seconds: 2592000, value: "30d" },
+      { label: "90 days", seconds: 7776000, value: "90d" },
+      { label: "180 days", seconds: 15552000, value: "180d" },
+      { label: "1 year", seconds: 31536000, value: "1y" },
       { label: "All", seconds: 0, value: "all" },
     ],
   },
@@ -181,7 +186,9 @@ const dashboardOverview = {
   label_clusters: [
     {
       counts_truncated: false,
+      offline: 0,
       online: 1,
+      revoked: 0,
       drilldown: {
         label: "Open matching VPS",
         query: "country:US",
@@ -200,7 +207,9 @@ const dashboardOverview = {
     },
     {
       counts_truncated: false,
+      offline: 0,
       online: 1,
+      revoked: 0,
       drilldown: {
         label: "Open matching VPS",
         query: "country:DE",
@@ -219,7 +228,9 @@ const dashboardOverview = {
     },
     {
       counts_truncated: false,
+      offline: 0,
       online: 1,
+      revoked: 0,
       drilldown: {
         label: "Open matching VPS",
         query: "provider:alpha",
@@ -238,7 +249,9 @@ const dashboardOverview = {
     },
     {
       counts_truncated: false,
+      offline: 0,
       online: 2,
+      revoked: 0,
       drilldown: {
         label: "Open matching VPS",
         query: null,
@@ -555,7 +568,9 @@ const dashboardOverview = {
     value: null,
   },
   summary: {
+    offline: 0,
     online: 2,
+    revoked: 0,
     running_jobs: 3,
     running_jobs_truncated: false,
     stale: 1,
@@ -569,9 +584,9 @@ const dashboardOverview = {
     mode: "window",
     start_at: "2026-06-04T20:44:58Z",
     start_unix: 1780605898,
-    window: "24h",
+    window: "1d",
   },
-  window: "24h",
+  window: "1d",
 };
 
 const systemDashboard = {
@@ -834,7 +849,7 @@ const systemDashboard = {
       [0, 0, 0],
     ),
   ],
-  window: "24h",
+  window: "1d",
 };
 
 const suiteConfigToml = `version = 1
@@ -2398,6 +2413,7 @@ const clientKeyRevocations = [
 ];
 
 const keyLifecycleReport = {
+  suggested_client_id: "v-1",
   clients: agents.map((agent, index) => ({
     client_id: agent.id,
     current_key_revoked: agent.id === "agent-nyc-03",
@@ -3259,7 +3275,8 @@ const ospfRecommendations = [
 export const ospfUpdatePlans = [
   {
     approval_scope: ["client:agent-sfo-01", "client:agent-fra-02"],
-    change_summary: "Apply OSPF cost 22 through the two resolved endpoint updaters",
+    change_summary:
+      "Apply OSPF cost 22 through the two resolved endpoint updaters",
     confidence: "measured",
     control_mode: "reviewed",
     evidence: {
@@ -3321,6 +3338,7 @@ export async function installConsoleApiMock(
     backupPoliciesOverride?: BackupPolicyRecord[];
     backupArtifactsOverride?: typeof backupArtifacts;
     bulkTagMutationDelayMs?: number;
+    bulkTagScheduleImpacts?: TagMutationResponse["schedule_impacts"];
     bulkResolveDelayMs?: number;
     bulkResolveFailure?: boolean;
     configurationSourceApplyFailure?: boolean;
@@ -3347,6 +3365,8 @@ export async function installConsoleApiMock(
     telemetryFailurePath?: "network-rates" | "rollups" | "tunnels";
     telemetryNetworkRateScales?: number[];
     terminalSessionsOverride?: typeof terminalSessions;
+    portSpeedRulesDelayMs?: number;
+    portSpeedRulesOverride?: VpsRuleValueRecord[];
     vpsRulesApplyDelayMs?: number;
   } = {},
 ) {
@@ -3365,6 +3385,7 @@ export async function installConsoleApiMock(
       backupPoliciesFixture,
       backupsFixture,
       bulkTagMutationDelayMsFixture,
+      bulkTagScheduleImpactsFixture,
       bulkResolveDelayMsFixture,
       bulkResolveFailureFixture,
       configurationSourceApplyFailureFixture,
@@ -3426,6 +3447,7 @@ export async function installConsoleApiMock(
       topologyGraphFixture,
       trafficAccountingFixture,
       tunnelPlansFixture,
+      portSpeedRulesDelayMsFixture,
       vpsRulesApplyDelayMsFixture,
       vpsRuleValuesFixture,
       webhookDeliveriesFixture,
@@ -4439,6 +4461,149 @@ export async function installConsoleApiMock(
             "3333333333333333333333333333333333333333333333333333333333333333",
         };
       };
+      const monitoringDetailFixture = (clientId: string) => {
+        const client =
+          agentsFixture.find((candidate) => candidate.id === clientId) ??
+          agentsFixture[0]!;
+        const starts = [
+          "2026-06-23T07:20:00Z",
+          "2026-06-23T07:25:00Z",
+          "2026-06-23T07:30:00Z",
+        ];
+        const resources = starts.map((bucketStart, index) => ({
+          bucket_secs: 60,
+          bucket_start: bucketStart,
+          client_id: client.id,
+          connections_observed_at: bucketStart,
+          connections_sample_count: 1,
+          cpu_cores_max: 4,
+          cpu_load_1_avg: [0.72, 1.08, 0.84][index],
+          cpu_load_1_max: [0.9, 1.24, 1.02][index],
+          cpu_load_5_avg: [0.65, 0.82, 0.79][index],
+          cpu_load_5_max: [0.78, 0.94, 0.88][index],
+          cpu_load_15_avg: [0.58, 0.68, 0.71][index],
+          cpu_load_15_max: [0.66, 0.75, 0.79][index],
+          cpu_usage_avg: [0.22, 0.37, 0.29][index],
+          cpu_usage_sample_count: 1,
+          disk_available_bytes_avg: [72, 71.8, 71.7][index] * 1_000_000_000,
+          disk_available_bytes_min: [71.9, 71.7, 71.6][index] * 1_000_000_000,
+          disk_total_bytes_max: 120_000_000_000,
+          latest_observed_at: bucketStart,
+          memory_available_bytes_avg: [6.4, 6.1, 6.25][index] * 1_000_000_000,
+          memory_available_bytes_min: [6.2, 5.9, 6.1][index] * 1_000_000_000,
+          memory_total_bytes_max: 8_000_000_000,
+          network_rx_bytes_max: [18, 18.4, 18.9][index] * 1_000_000_000,
+          network_tx_bytes_max: [8, 8.2, 8.45][index] * 1_000_000_000,
+          sample_count: 1,
+          tcp_sockets_latest: [34, 41, 38][index],
+          udp_sockets_latest: [5, 6, 5][index],
+          updated_at: bucketStart,
+        }));
+        const network = starts.map((bucketStart, index) => ({
+          bucket_secs: 60,
+          bucket_start: bucketStart,
+          client_id: client.id,
+          interface: "eth0",
+          rx_bps_avg: [640_000, 1_280_000, 920_000][index],
+          rx_bytes_avg: [18, 18.4, 18.9][index] * 1_000_000_000,
+          rx_bytes_delta: [4_800_000, 9_600_000, 6_900_000][index],
+          sample_count: 1,
+          tx_bps_avg: [320_000, 510_000, 420_000][index],
+          tx_bytes_avg: [8, 8.2, 8.45][index] * 1_000_000_000,
+          tx_bytes_delta: [2_400_000, 3_825_000, 3_150_000][index],
+          updated_at: bucketStart,
+        }));
+        const pingTargets = [
+          {
+            checked_at: starts[2],
+            enabled: true,
+            generation: 3,
+            latency_avg_ms: 22.4,
+            loss_ratio: 0,
+            reason: null,
+            state: "ok",
+            status: "ok",
+            target_id: "51515151-1111-4111-8111-111111111111",
+            target_name: "Singapore gateway",
+          },
+          {
+            checked_at: starts[2],
+            enabled: true,
+            generation: 2,
+            latency_avg_ms: 31.8,
+            loss_ratio: 0.03,
+            reason: "One of three probes timed out",
+            state: "degraded",
+            status: "degraded",
+            target_id: "52525252-2222-4222-8222-222222222222",
+            target_name: "Cloudflare DNS",
+          },
+        ];
+        const ping = pingTargets.flatMap((target, targetIndex) =>
+          starts.map((bucketStart, index) => ({
+            bucket_secs: 60,
+            bucket_start: bucketStart,
+            client_id: client.id,
+            generation: target.generation,
+            is_primary: targetIndex === 0,
+            latency_avg_ms:
+              targetIndex === 0
+                ? [24.2, 21.7, 22.4][index]
+                : [29.6, null, 31.8][index],
+            latency_max_ms:
+              targetIndex === 0
+                ? [25.3, 23.1, 24.0][index]
+                : [31.2, null, 34.5][index],
+            latency_min_ms:
+              targetIndex === 0
+                ? [23.4, 20.9, 21.5][index]
+                : [28.4, null, 29.7][index],
+            latest_checked_at: bucketStart,
+            latest_reason:
+              targetIndex === 1 && index === 1
+                ? "Probe timeout"
+                : target.reason,
+            latest_status:
+              targetIndex === 1 && index === 1 ? "timeout" : target.status,
+            loss_ratio_avg: targetIndex === 0 ? 0 : [0, 1, 0.03][index],
+            loss_ratio_max: targetIndex === 0 ? 0 : [0, 1, 0.09][index],
+            sample_count: 3,
+            success_count:
+              targetIndex === 1 && index === 1 ? 0 : targetIndex === 1 ? 2 : 3,
+            target_id: target.target_id,
+            target_name: target.target_name,
+          })),
+        );
+        return {
+          client,
+          network,
+          ping,
+          ping_targets: pingTargets,
+          primary_ping: pingTargets[0],
+          range: {
+            end_unix: Date.parse(starts[2]) / 1_000,
+            points: 11,
+            source: "minute",
+            start_unix: Date.parse(starts[0]) / 1_000,
+            step_secs: 60,
+            window: "15m",
+          },
+          resources,
+          traffic:
+            trafficAccountingFixture.find(
+              (row) => row.client_id === client.id,
+            ) ?? trafficAccountingFixture[0],
+          traffic_history: starts.map((bucketStart, index) => ({
+            bucket_secs: 60,
+            bucket_start: bucketStart,
+            reset_count: 0,
+            rx_bytes: [508, 509, 510][index] * 1_000_000_000,
+            sample_count: 1,
+            total_bytes: [2_406, 2_408, 2_410][index] * 1_000_000_000,
+            tx_bytes: [1_898, 1_899, 1_900][index] * 1_000_000_000,
+          })),
+        };
+      };
 
       window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = input instanceof Request ? input.url : String(input);
@@ -4453,7 +4618,7 @@ export async function installConsoleApiMock(
         trackedWindow.__vpsmanFetchRequests.push({ method, url });
         if (pathname === "/api/v1/dashboard/overview") {
           const params = new URL(url, window.location.href).searchParams;
-          const requestedWindow = params.get("window") ?? "24h";
+          const requestedWindow = params.get("window") ?? "1d";
           const requestedGroupBy = params.get("group_by") ?? "labels";
           const requestedResourceMetric =
             params.get("resource_metric") ??
@@ -4680,17 +4845,21 @@ export async function installConsoleApiMock(
           const stale = currentAgents.filter(
             (agent) => agent.status === "stale",
           ).length;
+          const revoked = currentAgents.filter(
+            (agent) => agent.status === "revoked",
+          ).length;
           const unknown =
-            currentAgents.length - online - offline - never - stale;
+            currentAgents.length - online - offline - never - revoked - stale;
           return jsonResponse({
             ...summaryFixture,
             never,
             offline,
             online,
+            revoked,
             stale,
             total: currentAgents.length,
             unknown,
-            warnings: offline + never + stale + unknown,
+            warnings: offline + never + revoked + stale + unknown,
           });
         }
         if (pathname === "/api/v1/fleet-alerts" && method === "GET") {
@@ -4729,6 +4898,15 @@ export async function installConsoleApiMock(
           });
         }
         if (pathname === "/api/v1/vps-rules" && method === "GET") {
+          const params = new URL(url, window.location.href).searchParams;
+          if (
+            params.get("key") === "network.port_speed" &&
+            portSpeedRulesDelayMsFixture > 0
+          ) {
+            await new Promise((resolve) =>
+              window.setTimeout(resolve, portSpeedRulesDelayMsFixture),
+            );
+          }
           return jsonResponse(vpsRuleValuesFixture);
         }
         if (pathname === "/api/v1/vps-rules/dry-run" && method === "POST") {
@@ -4754,6 +4932,43 @@ export async function installConsoleApiMock(
         }
         if (pathname === "/api/v1/traffic-accounting" && method === "GET") {
           return jsonResponse(trafficAccountingFixture);
+        }
+        if (pathname === "/api/v1/monitoring/cards" && method === "GET") {
+          const params = new URL(url, window.location.href).searchParams;
+          const offset = Math.max(0, Number(params.get("offset") ?? "0"));
+          const limit = Math.max(1, Number(params.get("limit") ?? "1000"));
+          const items = visibleAgents().map((client) => ({
+            client,
+            network: [],
+            network_history: [],
+            primary_ping: null,
+            primary_ping_history: [],
+            resource_history: [],
+            resources: null,
+            traffic:
+              trafficAccountingFixture.find(
+                (row) => row.client_id === client.id,
+              ) ?? null,
+          }));
+          const page = items.slice(offset, offset + limit);
+          const nextOffset = offset + page.length;
+          return jsonResponse({
+            items: page,
+            limit,
+            next_offset: nextOffset < items.length ? nextOffset : null,
+            offset,
+            total: items.length,
+          });
+        }
+        const clientMonitoringMatch = pathname.match(
+          /^\/api\/v1\/clients\/([^/]+)\/monitoring$/,
+        );
+        if (clientMonitoringMatch && method === "GET") {
+          return jsonResponse(
+            monitoringDetailFixture(
+              decodeURIComponent(clientMonitoringMatch[1]),
+            ),
+          );
         }
         const trafficAccountingMatch = pathname.match(
           /^\/api\/v1\/traffic-accounting\/([^/]+)$/,
@@ -5070,8 +5285,7 @@ export async function installConsoleApiMock(
             confirmation_required: !body?.confirmed,
             deleted_count: body?.confirmed ? matchedCount : 0,
             matched_count: matchedCount,
-            older_than:
-              body?.older_than ?? "2025-12-31T00:00:00.000Z",
+            older_than: body?.older_than ?? "2025-12-31T00:00:00.000Z",
             preview_hash: body?.preview_hash ?? "9".repeat(64),
             rule_id: body?.rule_id ?? null,
             status: body?.status ?? null,
@@ -5161,10 +5375,7 @@ export async function installConsoleApiMock(
         }
         if (pathname === "/api/v1/auth/me" && method === "GET")
           return jsonResponse(operatorView(currentOperatorRecord));
-        if (
-          pathname === "/api/v1/auth/privilege/verify" &&
-          method === "POST"
-        ) {
+        if (pathname === "/api/v1/auth/privilege/verify" && method === "POST") {
           const body = await readJsonBody(input, init);
           requests.privilegeVerifications.push(body);
           if (privilegeVerificationDelayMsFixture > 0) {
@@ -6014,9 +6225,7 @@ export async function installConsoleApiMock(
             action,
             behavior,
             preset: action === "set" ? selectedPreset : null,
-            preview_hash: String(
-              body.preview_hash ?? "8".repeat(64),
-            ),
+            preview_hash: String(body.preview_hash ?? "8".repeat(64)),
             selector_expression:
               typeof body.selector_expression === "string"
                 ? body.selector_expression.trim()
@@ -6665,7 +6874,9 @@ export async function installConsoleApiMock(
           return jsonResponse(terminalSessionsFixture);
         }
         if (
-          /^\/api\/v1\/terminal-sessions\/[^/]+\/[^/]+\/control$/.test(pathname) &&
+          /^\/api\/v1\/terminal-sessions\/[^/]+\/[^/]+\/control$/.test(
+            pathname,
+          ) &&
           method === "POST"
         ) {
           const body = await readJsonBody(input, init);
@@ -6939,7 +7150,7 @@ export async function installConsoleApiMock(
             preview_hash:
               (body as { preview_hash?: string | null } | null)?.preview_hash ??
               "6".repeat(64),
-            schedule_impacts: [],
+            schedule_impacts: bulkTagScheduleImpactsFixture,
             skipped_count: 0,
             tag: tagName,
             target_count: affected.length,
@@ -6976,7 +7187,7 @@ export async function installConsoleApiMock(
             changed_count: changedCount,
             confirmation_required: !request.confirmed,
             preview_hash: "7".repeat(64),
-            schedule_impacts: [],
+            schedule_impacts: bulkTagScheduleImpactsFixture,
             skipped_count: affected.length - changedCount,
             tag: request.tag ?? "",
             target_count: affected.length,
@@ -7115,14 +7326,9 @@ export async function installConsoleApiMock(
           if (!schedule) {
             return jsonResponse({ error: "schedule_not_found" }, 404);
           }
-          const request = body as {
-            selector_expression?: string;
-            target_client_ids?: string[];
-          };
-          schedule.selector_expression =
-            request.selector_expression ?? schedule.selector_expression;
-          schedule.target_client_ids =
-            request.target_client_ids ?? schedule.target_client_ids;
+          schedule.target_client_ids = scheduleTargetIdsFromSelector(
+            schedule.selector_expression,
+          );
           schedule.updated_at = "2026-06-02T10:06:30Z";
           return jsonResponse(schedule);
         }
@@ -7954,9 +8160,7 @@ export async function installConsoleApiMock(
             pathname.slice("/api/v1/audit/".length),
           );
           const audit =
-            (auditDetailFixture?.id === auditId
-              ? auditDetailFixture
-              : null) ??
+            (auditDetailFixture?.id === auditId ? auditDetailFixture : null) ??
             auditLogsFixture.find(
               (record: { id: string }) => record.id === auditId,
             );
@@ -8454,6 +8658,7 @@ export async function installConsoleApiMock(
       auditLogsFixture: options.auditLogsOverride ?? auditLogs,
       backupPoliciesFixture: options.backupPoliciesOverride ?? [],
       bulkTagMutationDelayMsFixture: options.bulkTagMutationDelayMs ?? 0,
+      bulkTagScheduleImpactsFixture: options.bulkTagScheduleImpacts ?? [],
       bulkResolveDelayMsFixture: options.bulkResolveDelayMs ?? 0,
       artifactsFixture:
         options.backupArtifactsOverride ??
@@ -8630,8 +8835,12 @@ export async function installConsoleApiMock(
       topologyGraphFixture: topologyGraph,
       trafficAccountingFixture: trafficAccounting,
       tunnelPlansFixture: tunnelPlans,
+      portSpeedRulesDelayMsFixture: options.portSpeedRulesDelayMs ?? 0,
       vpsRulesApplyDelayMsFixture: options.vpsRulesApplyDelayMs ?? 0,
-      vpsRuleValuesFixture: vpsRuleValues,
+      vpsRuleValuesFixture: [
+        ...vpsRuleValues,
+        ...(options.portSpeedRulesOverride ?? []),
+      ],
       webhookDeliveriesFixture: webhookDeliveries,
       webhookRulesFixture: webhookRules,
     },

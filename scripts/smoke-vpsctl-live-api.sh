@@ -55,6 +55,8 @@ viewer_password="vpsctl-live-api-viewer-password"
 scoped_password="vpsctl-live-api-scoped-password"
 super_password="vpsctl-live-api-super-password"
 super_salt_hex="1111111111111111111111111111111111111111111111111111111111111111"
+cli_agent_a_public_hex="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+cli_agent_b_public_hex="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2"
 privilege_verifier_key_hex="$(smoke_privilege_verifier_key_hex "$super_password" "$super_salt_hex")"
 gateway_keys="$(target/debug/vpsctl noise-keygen)"
 gateway_private_hex="$(jq -r '.private_key_hex' <<<"$gateway_keys")"
@@ -168,10 +170,20 @@ seed_agent() {
   local client_id="$1"
   local process_incarnation_id="11111111-1111-4111-8111-111111111111"
   local gateway_session_id
+  local noise_public_key_hex
   case "$client_id" in
-    cli-agent-a) gateway_session_id="11111111-1111-4111-8111-11111111111a" ;;
-    cli-agent-b) gateway_session_id="11111111-1111-4111-8111-11111111111b" ;;
-    *) gateway_session_id="11111111-1111-4111-8111-11111111111f" ;;
+    cli-agent-a)
+      gateway_session_id="11111111-1111-4111-8111-11111111111a"
+      noise_public_key_hex="$cli_agent_a_public_hex"
+      ;;
+    cli-agent-b)
+      gateway_session_id="11111111-1111-4111-8111-11111111111b"
+      noise_public_key_hex="$cli_agent_b_public_hex"
+      ;;
+    *)
+      gateway_session_id="11111111-1111-4111-8111-11111111111f"
+      noise_public_key_hex="fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff3"
+      ;;
   esac
   local optional_hello_fields=""
   if [[ $# -ge 2 && -n "$2" ]]; then
@@ -183,7 +195,7 @@ seed_agent() {
     -d "{
       \"gateway_id\": \"vpsctl-live-api-gateway\",
       \"gateway_session_id\": \"$gateway_session_id\",
-      \"noise_public_key_hex\": null,
+      \"noise_public_key_hex\": \"$noise_public_key_hex\",
       \"hello\": {
         \"client_id\": \"$client_id\",
         \"process_incarnation_id\": \"$process_incarnation_id\",
@@ -425,6 +437,16 @@ jq -e '.direct_identity_client_count >= 1' <<<"$key_report_json" >/dev/null
 
 root_capabilities='{"privilege_mode":"root","effective_uid":0,"can_attempt_privileged_ops":true,"can_manage_runtime_tunnels":true,"can_apply_process_limits":true}'
 unprivileged_capabilities='{"privilege_mode":"unprivileged","effective_uid":1000,"can_attempt_privileged_ops":true,"can_manage_runtime_tunnels":false,"can_apply_process_limits":false,"unprivileged_hint":"vpsctl smoke agent is running without root"}'
+vpsctl_auth agent-identity-upsert \
+  --client-id cli-agent-a \
+  --client-public-key-hex "$cli_agent_a_public_hex" \
+  --display-name cli-agent-a \
+  --confirmed >/dev/null
+vpsctl_auth agent-identity-upsert \
+  --client-id cli-agent-b \
+  --client-public-key-hex "$cli_agent_b_public_hex" \
+  --display-name cli-agent-b \
+  --confirmed >/dev/null
 seed_agent "cli-agent-a" "$root_capabilities"
 seed_agent "cli-agent-b" "$unprivileged_capabilities"
 assign_agent_alias "cli-agent-a" "cli-edge-a"

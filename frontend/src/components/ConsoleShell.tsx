@@ -176,9 +176,10 @@ export function ConsoleShell({
   const showFullFleetMetrics =
     activeView === "Home" || (activeView === "Fleet" && activeSubpage === "monitor");
   const noContactCount = summary.never + summary.unknown;
-  const unavailableCount = summary.offline + summary.stale + noContactCount;
+  const unavailableCount =
+    summary.offline + summary.stale + summary.revoked + noContactCount;
   const fleetStatusTitle = fleetCoreEvidenceAvailable
-    ? `${summaryScopeLabel}: ${summary.total} VPS; ${summary.online} online; ${summary.offline} offline; ${summary.stale} stale; ${noContactCount} no contact; ${summary.running_jobs} running jobs`
+    ? `${summaryScopeLabel}: ${summary.total} VPS; ${summary.online} online; ${summary.offline} offline; ${summary.stale} stale; ${summary.revoked} access revoked; ${noContactCount} no contact; ${summary.running_jobs} running jobs`
     : `${summaryScopeLabel}: fleet status evidence unavailable`;
   const fleetStatusText = fleetCoreEvidenceAvailable
     ? [
@@ -186,6 +187,7 @@ export function ConsoleShell({
         `${summary.online} online`,
         summary.offline > 0 ? `${summary.offline} offline` : null,
         summary.stale > 0 ? `${summary.stale} stale` : null,
+        summary.revoked > 0 ? `${summary.revoked} access revoked` : null,
         noContactCount > 0 ? `${noContactCount} no contact` : null,
         `${summary.running_jobs} running job${summary.running_jobs === 1 ? "" : "s"}`,
       ]
@@ -695,6 +697,7 @@ export function ConsoleShell({
                   <div className="navGroup" key={item.view}>
                     <div className={activeView === item.view ? "navItemRow active" : "navItemRow"}>
                       <button
+                        aria-label={label}
                         aria-current={activeView === item.view ? "page" : undefined}
                         className={activeView === item.view ? "navItem active" : "navItem"}
                         onClick={() => selectPrimaryNavItem(item.view, hasSubpages, expanded)}
@@ -703,6 +706,7 @@ export function ConsoleShell({
                             ? activePrimaryButtonRef
                             : undefined
                         }
+                        title={label}
                         type="button"
                       >
                         <Icon size={18} />
@@ -991,6 +995,18 @@ export function ConsoleShell({
                 }
               />
               <Metric
+                label="Access revoked"
+                title="VPS identities whose current key is blocked; assign a new key to recover the same VPS ID"
+                value={
+                  fleetCoreEvidenceAvailable ? String(summary.revoked) : "Unknown"
+                }
+                tone={
+                  fleetCoreEvidenceAvailable && summary.revoked > 0
+                    ? "yellow"
+                    : "neutral"
+                }
+              />
+              <Metric
                 label="No contact"
                 title="Never-connected VPSs plus records whose reported online state lacks trustworthy gateway contact evidence"
                 value={
@@ -1007,7 +1023,7 @@ export function ConsoleShell({
               />
               <Metric
                 label="Unavailable"
-                title="Offline, stale, never-connected, and contact-unknown VPSs"
+                title="Offline, stale, access-revoked, never-connected, and contact-unknown VPSs"
                 value={
                   fleetCoreEvidenceAvailable
                     ? String(unavailableCount)

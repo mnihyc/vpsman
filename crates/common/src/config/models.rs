@@ -354,8 +354,32 @@ pub struct AgentNetworkConfig {
     pub ospf_update_command: Option<RuntimeTunnelCommand>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runtime_status_telemetry_plans: Vec<AgentRuntimeStatusTelemetryPlan>,
+    /// Server-managed general reachability probes. Configuration presets and
+    /// per-VPS overrides cannot set this field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ping_targets: Vec<AgentPingTarget>,
     #[serde(default)]
     pub port_forwarding: crate::AgentPortForwardingConfig,
+}
+
+pub const MAX_AGENT_PING_TARGETS: usize = 16;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPingProbeKind {
+    Icmp,
+    Tcp,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct AgentPingTarget {
+    pub id: String,
+    pub generation: u64,
+    pub name: String,
+    pub host: String,
+    pub kind: AgentPingProbeKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -465,6 +489,7 @@ impl Default for AgentNetworkConfig {
             ospf_status_command: None,
             ospf_update_command: None,
             runtime_status_telemetry_plans: Vec::new(),
+            ping_targets: Vec::new(),
             port_forwarding: crate::AgentPortForwardingConfig::default(),
         }
     }

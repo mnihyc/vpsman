@@ -29,6 +29,7 @@ mod model_dashboard;
 mod model_file_transfer;
 mod model_history;
 mod model_host_management;
+mod model_monitoring;
 mod model_port_forwarding;
 mod model_runtime_config;
 mod model_server_jobs;
@@ -64,6 +65,7 @@ mod repository_job_rollouts;
 mod repository_jobs;
 mod repository_key_lifecycle;
 mod repository_migrations;
+mod repository_monitoring;
 mod repository_network;
 mod repository_network_adapters;
 mod repository_network_observations;
@@ -98,6 +100,7 @@ mod routes_job_rollouts;
 mod routes_jobs;
 mod routes_key_lifecycle;
 mod routes_migrations;
+mod routes_monitoring;
 mod routes_network;
 mod routes_port_forwarding;
 mod routes_restores;
@@ -863,7 +866,6 @@ mod tests_alerts;
 #[cfg(test)]
 mod tests_auth;
 #[cfg(test)]
-#[cfg(test)]
 mod tests_backups;
 #[cfg(test)]
 mod tests_config;
@@ -880,10 +882,11 @@ mod tests_job_approvals;
 #[cfg(test)]
 mod tests_migrations;
 #[cfg(test)]
+mod tests_monitoring;
+#[cfg(test)]
 mod tests_network;
 #[cfg(test)]
 mod tests_network_observations;
-#[cfg(test)]
 #[cfg(test)]
 mod tests_network_ospf_updates;
 #[cfg(test)]

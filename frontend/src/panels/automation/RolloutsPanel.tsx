@@ -558,6 +558,7 @@ export function RolloutsPanel({
           rows={rollouts}
           rowsTruncated={rolloutsTruncated}
           searchPlaceholder="Search job, operation, state, or pause reason"
+          showMobileRowActions={false}
           singleExpandedRow
           storageKey="vpsman.automation.rollouts"
           title="Rollout history"

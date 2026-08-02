@@ -21,8 +21,8 @@ use crate::{
     unix_now,
 };
 use vpsman_common::{
-    DEFAULT_TELEMETRY_RETENTION_DAYS, SERVER_JOB_STATUS_FAILED, SERVER_JOB_STATUS_RUNNING,
-    SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
+    DEFAULT_TELEMETRY_ROLLUP_RETENTION_DAYS, DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS,
+    SERVER_JOB_STATUS_FAILED, SERVER_JOB_STATUS_RUNNING, SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
 };
 
 #[tokio::test]
@@ -38,13 +38,18 @@ async fn history_retention_policy_updates_and_prunes_memory_audit() {
             && policy.built_in_default
     }));
     assert!(defaults.iter().any(|policy| {
+        policy.domain == "telemetry_samples"
+            && policy.retention_days == DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS
+            && policy.built_in_default
+    }));
+    assert!(defaults.iter().any(|policy| {
         policy.domain == "telemetry_rollups"
-            && policy.retention_days == DEFAULT_TELEMETRY_RETENTION_DAYS
+            && policy.retention_days == DEFAULT_TELEMETRY_ROLLUP_RETENTION_DAYS
             && policy.built_in_default
     }));
     assert!(defaults.iter().any(|policy| {
         policy.domain == "traffic_counter_samples"
-            && policy.retention_days == DEFAULT_TELEMETRY_RETENTION_DAYS
+            && policy.retention_days == DEFAULT_TELEMETRY_ROLLUP_RETENTION_DAYS
             && policy.built_in_default
     }));
 
@@ -470,7 +475,8 @@ fn traffic_counter_sample(
         observed_unix,
         rx_bytes: observed_unix,
         tx_bytes: observed_unix,
-        counter_epoch: 0,
+        rx_counter_epoch: 0,
+        tx_counter_epoch: 0,
         sample_source: "test".to_string(),
     }
 }
@@ -484,6 +490,10 @@ fn network_rate(client_id: &str, interface: &str, bucket_start: &str) -> Telemet
         sample_count: 1,
         rx_bytes_avg: 1,
         tx_bytes_avg: 1,
+        rx_bytes_last: 1,
+        tx_bytes_last: 1,
+        rx_counter_epoch: 0,
+        tx_counter_epoch: 0,
         rx_bytes_delta: 1,
         tx_bytes_delta: 1,
         rx_bps_avg: 1.0,

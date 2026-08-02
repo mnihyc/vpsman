@@ -18,7 +18,10 @@ use crate::{
         ResolvedOspfCommandSource, UpsertNetworkAdapterDefinitionRequest, CONFIGURATION_BEHAVIORS,
     },
     repository::Repository,
-    repository_key_lifecycle::lock_postgres_agent_identity_lifecycle,
+    repository_key_lifecycle::{
+        lock_postgres_agent_identity_lifecycle, require_visible_memory_clients,
+        require_visible_postgres_clients_in_tx,
+    },
     unix_now,
 };
 
@@ -341,6 +344,10 @@ impl Repository {
         let mut presets = match self {
             Self::Memory(memory) => {
                 let agents = self.list_agents().await?;
+                let visible_client_ids = agents
+                    .iter()
+                    .map(|agent| agent.id.as_str())
+                    .collect::<BTreeSet<_>>();
                 let overrides = memory.configuration_preset_overrides.read().await.clone();
                 let mut rows = memory
                     .configuration_presets
@@ -353,7 +360,10 @@ impl Repository {
                 for preset in &mut rows {
                     preset.override_vps_count = overrides
                         .iter()
-                        .filter(|entry| entry.preset_id == preset.id)
+                        .filter(|entry| {
+                            entry.preset_id == preset.id
+                                && visible_client_ids.contains(entry.client_id.as_str())
+                        })
                         .count() as i64;
                     preset.effective_vps_count = preset.override_vps_count;
                     if preset.is_default {
@@ -371,12 +381,6 @@ impl Repository {
             }
             Self::Postgres(pool) => sqlx::query(
                 r#"
-                WITH visible_clients AS (
-                    SELECT id
-                    FROM clients
-                    WHERE hidden_at IS NULL
-                      AND status NOT IN ('deleted', 'revoked')
-                )
                 SELECT
                     preset.id,
                     preset.behavior,
@@ -673,6 +677,16 @@ impl Repository {
         let now = unix_now().to_string();
         let mut preset = match self {
             Self::Memory(memory) => {
+                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
+                let hidden = memory.hidden_clients.read().await;
+                let visible_client_ids = memory
+                    .agents
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|agent| !hidden.contains(&agent.id))
+                    .map(|agent| agent.id.clone())
+                    .collect::<BTreeSet<_>>();
                 let mut presets = memory.configuration_presets.write().await;
                 let preset = presets
                     .iter_mut()
@@ -694,7 +708,10 @@ impl Repository {
                         .read()
                         .await
                         .iter()
-                        .filter(|entry| entry.preset_id == preset_id)
+                        .filter(|entry| {
+                            entry.preset_id == preset_id
+                                && visible_client_ids.contains(entry.client_id.as_str())
+                        })
                         .map(|entry| entry.client_id.clone())
                         .collect::<Vec<_>>();
                     current_clients.sort();
@@ -704,13 +721,26 @@ impl Repository {
                         "configuration_preset_preview_stale"
                     );
                 }
+                let visible_override_count = memory
+                    .configuration_preset_overrides
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|entry| {
+                        entry.preset_id == preset_id
+                            && visible_client_ids.contains(entry.client_id.as_str())
+                    })
+                    .count() as i64;
                 preset.description = preview.candidate_description.clone();
                 preset.definition = preview.candidate_definition.clone();
+                preset.override_vps_count = visible_override_count;
+                preset.effective_vps_count = visible_override_count;
                 preset.updated_at = now;
                 preset.clone()
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
                 let current = sqlx::query(
                     r#"
                     SELECT kind, description, definition, updated_at::text AS updated_at
@@ -743,10 +773,11 @@ impl Repository {
                     let current_clients = sqlx::query_scalar::<_, String>(
                         r#"
                         SELECT client_id
-                        FROM client_configuration_preset_overrides
-                        WHERE preset_id = $1
-                        ORDER BY client_id
-                        FOR UPDATE
+                        FROM client_configuration_preset_overrides selected
+                        JOIN visible_clients client ON client.id = selected.client_id
+                        WHERE selected.preset_id = $1
+                        ORDER BY selected.client_id
+                        FOR UPDATE OF selected
                         "#,
                     )
                     .bind(preset_id)
@@ -769,6 +800,7 @@ impl Repository {
                         (
                             SELECT count(*)::bigint
                             FROM client_configuration_preset_overrides selected
+                            JOIN visible_clients client ON client.id = selected.client_id
                             WHERE selected.preset_id = configuration_presets.id
                         ) AS override_vps_count
                     "#,
@@ -819,6 +851,16 @@ impl Repository {
         );
         match self {
             Self::Memory(memory) => {
+                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
+                let hidden = memory.hidden_clients.read().await;
+                let visible_client_ids = memory
+                    .agents
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|agent| !hidden.contains(&agent.id))
+                    .map(|agent| agent.id.clone())
+                    .collect::<BTreeSet<_>>();
                 let mut presets = memory.configuration_presets.write().await;
                 let current = presets
                     .iter()
@@ -834,13 +876,22 @@ impl Repository {
                         .read()
                         .await
                         .iter()
-                        .any(|entry| entry.preset_id == preset_id),
+                        .any(|entry| {
+                            entry.preset_id == preset_id
+                                && visible_client_ids.contains(entry.client_id.as_str())
+                        }),
                     "configuration_preset_in_use"
                 );
+                memory
+                    .configuration_preset_overrides
+                    .write()
+                    .await
+                    .retain(|entry| entry.preset_id != preset_id);
                 presets.retain(|candidate| candidate.id != preset_id);
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
                 let kind: Option<String> = sqlx::query_scalar(
                     "SELECT kind FROM configuration_presets WHERE id = $1 FOR UPDATE",
                 )
@@ -850,12 +901,33 @@ impl Repository {
                 let kind = kind.context("configuration_preset_not_found")?;
                 anyhow::ensure!(kind == "custom", "configuration_preset_system_immutable");
                 let in_use: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM client_configuration_preset_overrides WHERE preset_id = $1)",
+                    r#"
+                    SELECT EXISTS(
+                        SELECT 1
+                        FROM client_configuration_preset_overrides selected
+                        JOIN visible_clients client ON client.id = selected.client_id
+                        WHERE selected.preset_id = $1
+                    )
+                    "#,
                 )
                 .bind(preset_id)
                 .fetch_one(&mut *tx)
                 .await?;
                 anyhow::ensure!(!in_use, "configuration_preset_in_use");
+                sqlx::query(
+                    r#"
+                    DELETE FROM client_configuration_preset_overrides selected
+                    WHERE selected.preset_id = $1
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM visible_clients client
+                          WHERE client.id = selected.client_id
+                      )
+                    "#,
+                )
+                .bind(preset_id)
+                .execute(&mut *tx)
+                .await?;
                 sqlx::query("DELETE FROM configuration_presets WHERE id = $1")
                     .bind(preset_id)
                     .execute(&mut *tx)
@@ -1114,28 +1186,22 @@ impl Repository {
         operator: &AuthContext,
     ) -> Result<()> {
         let now = unix_now().to_string();
+        let target_ids = preview
+            .targets
+            .iter()
+            .map(|target| target.client_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         match self {
             Self::Memory(memory) => {
                 let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                let target_ids = preview
-                    .targets
-                    .iter()
-                    .map(|target| target.client_id.as_str())
-                    .collect::<BTreeSet<_>>();
-                let hidden = memory.hidden_clients.read().await;
-                let agents = memory.agents.read().await;
-                let visible_target_count = agents
-                    .iter()
-                    .filter(|agent| {
-                        target_ids.contains(agent.id.as_str()) && !hidden.contains(&agent.id)
-                    })
-                    .count();
-                anyhow::ensure!(
-                    visible_target_count == target_ids.len(),
-                    "configuration_source_override_preview_stale"
-                );
-                drop(agents);
-                drop(hidden);
+                require_visible_memory_clients(
+                    memory,
+                    &target_ids,
+                    "configuration_source_override_preview_stale",
+                )
+                .await?;
                 let presets = memory.configuration_presets.read().await;
                 let mut overrides = memory.configuration_preset_overrides.write().await;
                 if let Some(reviewed) = preview.preset.as_ref() {
@@ -1186,31 +1252,12 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
-                let target_ids = preview
-                    .targets
-                    .iter()
-                    .map(|target| target.client_id.as_str())
-                    .collect::<Vec<_>>();
-                let locked_target_count = sqlx::query(
-                    r#"
-                    SELECT id
-                    FROM clients
-                    WHERE id = ANY($1::text[])
-                      AND hidden_at IS NULL
-                      AND status <> 'deleted'
-                    ORDER BY id
-                    FOR UPDATE
-                    "#,
+                require_visible_postgres_clients_in_tx(
+                    &mut tx,
+                    &target_ids,
+                    "configuration_source_override_preview_stale",
                 )
-                .bind(&target_ids)
-                .fetch_all(&mut *tx)
-                .await?
-                .len();
-                anyhow::ensure!(
-                    locked_target_count == target_ids.len(),
-                    "configuration_source_override_preview_stale"
-                );
+                .await?;
                 if let Some(reviewed) = preview.preset.as_ref() {
                     let current = sqlx::query(
                         r#"
@@ -1242,7 +1289,7 @@ impl Repository {
                             WHEN selected.preset_id IS NULL THEN 'system_default'
                             ELSE 'explicit_override'
                         END AS selection_origin
-                    FROM clients client
+                    FROM visible_clients client
                     LEFT JOIN client_configuration_preset_overrides selected
                       ON selected.client_id = client.id
                      AND selected.behavior = $2
@@ -1250,8 +1297,6 @@ impl Repository {
                       ON fallback.behavior = $2
                      AND fallback.is_default
                     WHERE client.id = ANY($1::text[])
-                      AND client.hidden_at IS NULL
-                      AND client.status <> 'deleted'
                     ORDER BY client.id
                     "#,
                 )
@@ -1836,13 +1881,44 @@ impl Repository {
         &self,
         preset_id: Uuid,
     ) -> Result<Vec<String>> {
-        let mut clients = self
-            .list_configuration_preset_overrides(None, None)
-            .await?
-            .into_iter()
-            .filter(|entry| entry.preset_id == preset_id)
-            .map(|entry| entry.client_id)
-            .collect::<Vec<_>>();
+        let mut clients = match self {
+            Self::Memory(memory) => {
+                let hidden = memory.hidden_clients.read().await;
+                let visible_client_ids = memory
+                    .agents
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|agent| !hidden.contains(&agent.id))
+                    .map(|agent| agent.id.clone())
+                    .collect::<BTreeSet<_>>();
+                memory
+                    .configuration_preset_overrides
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|entry| {
+                        entry.preset_id == preset_id
+                            && visible_client_ids.contains(entry.client_id.as_str())
+                    })
+                    .map(|entry| entry.client_id.clone())
+                    .collect::<Vec<_>>()
+            }
+            Self::Postgres(pool) => {
+                sqlx::query_scalar::<_, String>(
+                    r#"
+                SELECT selected.client_id
+                FROM client_configuration_preset_overrides selected
+                JOIN visible_clients client ON client.id = selected.client_id
+                WHERE selected.preset_id = $1
+                ORDER BY selected.client_id
+                "#,
+                )
+                .bind(preset_id)
+                .fetch_all(pool)
+                .await?
+            }
+        };
         clients.sort();
         clients.dedup();
         Ok(clients)
@@ -2865,7 +2941,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deleting_agent_releases_its_configuration_preset_override() {
+    async fn deleting_agent_hides_but_preserves_its_configuration_preset_override() {
         let memory = MemoryState::default();
         memory.agents.write().await.push(test_agent("edge-delete"));
         let repo = Repository::Memory(memory);
@@ -2908,6 +2984,26 @@ mod tests {
             .unwrap();
         assert_eq!(released.override_vps_count, 0);
         assert_eq!(released.effective_vps_count, 0);
+        let update_preview = repo
+            .preview_configuration_preset_update(
+                preset.id,
+                &PreviewConfigurationPresetRequest {
+                    description: Some("Updated after endpoint retirement".to_string()),
+                    definition: serde_json::json!({
+                        "source": "vnstat",
+                        "vnstat_argv": ["/opt/vnstat"]
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(update_preview.affected_client_ids.is_empty());
+        let updated = repo
+            .update_configuration_preset(preset.id, &update_preview, &operator)
+            .await
+            .unwrap();
+        assert_eq!(updated.override_vps_count, 0);
+        assert_eq!(updated.effective_vps_count, 0);
         let stale_error = repo
             .apply_configuration_source_override(&preview, &operator)
             .await
@@ -2918,14 +3014,15 @@ mod tests {
         let Repository::Memory(memory) = &repo else {
             unreachable!()
         };
+        assert_eq!(memory.configuration_preset_overrides.read().await.len(), 1);
+        repo.delete_configuration_preset(preset.id, &operator)
+            .await
+            .unwrap();
         assert!(memory
             .configuration_preset_overrides
             .read()
             .await
             .is_empty());
-        repo.delete_configuration_preset(preset.id, &operator)
-            .await
-            .unwrap();
         assert!(repo
             .configuration_preset_by_id(preset.id)
             .await
@@ -2934,7 +3031,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revoking_agent_key_releases_its_configuration_preset_override() {
+    async fn revoking_agent_key_keeps_its_configuration_preset_override() {
         let memory = MemoryState::default();
         memory.agents.write().await.push(test_agent("edge-revoke"));
         memory
@@ -2968,28 +3065,15 @@ mod tests {
         let Repository::Memory(memory) = &repo else {
             unreachable!()
         };
-        assert!(memory
-            .configuration_preset_overrides
-            .read()
-            .await
-            .is_empty());
-        let audits = memory.audits.read().await;
-        let revocation = audits
-            .iter()
-            .find(|entry| entry.action == "client_key.revoked")
-            .unwrap();
+        assert_eq!(memory.configuration_preset_overrides.read().await.len(), 1);
         assert_eq!(
-            revocation.metadata["removed_configuration_preset_override_count"],
-            1
+            repo.agent_by_id("edge-revoke").await.unwrap().status,
+            "revoked"
         );
-        drop(audits);
-        repo.delete_configuration_preset(preset.id, &operator)
-            .await
-            .unwrap();
     }
 
     #[tokio::test]
-    async fn existing_key_revocation_recovery_audits_configuration_override_cleanup() {
+    async fn existing_key_revocation_record_preserves_configuration_override() {
         let memory = MemoryState::default();
         let public_key = vec![0x43; 32];
         memory.agents.write().await.push(test_agent("edge-recover"));
@@ -3030,11 +3114,7 @@ mod tests {
         let Repository::Memory(memory) = &repo else {
             unreachable!()
         };
-        assert!(memory
-            .configuration_preset_overrides
-            .read()
-            .await
-            .is_empty());
+        assert_eq!(memory.configuration_preset_overrides.read().await.len(), 1);
         let audits = memory.audits.read().await;
         let recovery = audits
             .iter()
@@ -3042,8 +3122,8 @@ mod tests {
             .unwrap();
         assert_eq!(recovery.metadata["recovered_existing_revocation"], true);
         assert_eq!(
-            recovery.metadata["removed_configuration_preset_override_count"],
-            1
+            repo.agent_by_id("edge-recover").await.unwrap().status,
+            "revoked"
         );
     }
 
@@ -3171,7 +3251,13 @@ mod tests {
 
     #[tokio::test]
     async fn retired_tunnel_plan_releases_its_adapter_definitions() {
-        let repo = Repository::Memory(MemoryState::default());
+        let memory = MemoryState::default();
+        memory
+            .agents
+            .write()
+            .await
+            .extend([test_agent("client-a"), test_agent("client-b")]);
+        let repo = Repository::Memory(memory);
         let operator = crate::tests::test_operator();
         let left = repo
             .create_network_adapter_definition(&runtime_adapter_request("Runtime left"), &operator)
@@ -3208,7 +3294,13 @@ mod tests {
 
     #[tokio::test]
     async fn tunnel_plan_persistence_rejects_missing_adapter_definitions() {
-        let repo = Repository::Memory(MemoryState::default());
+        let memory = MemoryState::default();
+        memory
+            .agents
+            .write()
+            .await
+            .extend([test_agent("client-a"), test_agent("client-b")]);
+        let repo = Repository::Memory(memory);
         let input = crate::tests_network::test_plan_input(
             vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter,
             false,

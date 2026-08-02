@@ -688,6 +688,7 @@ export function ServerJobsPanel({
           rows={jobs}
           rowsTruncated={jobsTruncated}
           searchPlaceholder="Search maintenance jobs"
+          showMobileRowActions={false}
           storageKey="vpsman.jobs.serverJobs"
           title="Maintenance job records"
         />

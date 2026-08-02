@@ -679,6 +679,7 @@ export function OsUpdatesPanel({
           rowActions={rowActions}
           rows={rows}
           searchPlaceholder="Search VPS, distro, provider, or state"
+          showMobileRowActions={false}
           singleExpandedRow
           storageKey="vpsman.automation.osUpdates"
           title="Fleet package posture"

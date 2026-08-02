@@ -852,11 +852,19 @@ test("keeps compact fleet and transfer controls usable on mobile", async ({
 
   await openConsoleSubpage(page, "Fleet", "Assignments");
   const assignmentGrid = page.getByLabel("VPS group assignments data grid");
+  const assignmentCard = assignmentGrid
+    .getByLabel(/VPS group assignments mobile card/)
+    .first();
+  await expect(
+    assignmentCard.getByRole("button", { name: "Edit groups" }),
+  ).toHaveCount(0);
+  await assignmentCard.getByRole("checkbox").check();
+  await assignmentGrid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
   await activate(
-    assignmentGrid
-      .getByLabel(/VPS group assignments mobile card/)
-      .first()
-      .getByRole("button", { name: "Edit groups" }),
+    page.getByRole("menuitem", { name: "Edit groups", exact: true }),
   );
   const addGroup = page.locator(".inlineTagAdd").first();
   await expect(addGroup.getByRole("button")).toBeVisible();

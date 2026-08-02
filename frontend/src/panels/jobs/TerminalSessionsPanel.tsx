@@ -1309,6 +1309,7 @@ export function TerminalSessionsPanel({
         rows={sessions}
         rowsTruncated={sessionsTruncated}
         searchPlaceholder="Search terminal sessions"
+        showMobileRowActions={false}
         storageKey="vpsman.jobs.terminalSessions"
         title="Session inventory and controls"
       />

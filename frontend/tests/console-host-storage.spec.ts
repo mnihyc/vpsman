@@ -31,9 +31,7 @@ test("keeps read-only storage routable and refreshes an explicit mount scope", a
   await expect(deviceGrid.getByText("91%", { exact: true })).toBeVisible();
   if (testInfo.project.name.includes("mobile")) {
     await activate(
-      deviceGrid.getByRole("button", {
-        name: "Show details for Block devices row /dev/vdb",
-      }),
+      deviceGrid.getByLabel("Block devices mobile card /dev/vdb"),
     );
   } else {
     await activate(deviceGrid.getByText("vdb", { exact: true }).first());
@@ -56,9 +54,9 @@ test("keeps read-only storage routable and refreshes an explicit mount scope", a
   ).toBeVisible();
   if (testInfo.project.name.includes("mobile")) {
     await activate(
-      mountGrid.getByRole("button", {
-        name: "Show details for Mounted filesystems row 37:/srv/archive",
-      }),
+      mountGrid.getByLabel(
+        "Mounted filesystems mobile card 37:/srv/archive",
+      ),
     );
   } else {
     await activate(

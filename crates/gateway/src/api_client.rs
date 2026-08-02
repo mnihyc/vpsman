@@ -2221,8 +2221,7 @@ impl GatewayForwardEventKind {
         match path {
             "/internal/v1/gateway/telemetry" => Self::Telemetry,
             "/internal/v1/gateway/command-output" => Self::CommandOutput,
-            "/internal/v1/gateway/session-started"
-            | "/internal/v1/gateway/session-ended"
+            "/internal/v1/gateway/session-ended"
             | "/internal/v1/gateway/agent-hello"
             | "/internal/v1/gateway/runtime-config-reload" => Self::Lifecycle,
             "/internal/v1/gateway/terminal-output" => Self::TerminalOutput,
@@ -2558,7 +2557,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_defers_non_command_events_to_spool() {
-        let event = test_event("/internal/v1/gateway/session-started", br#"{}"#);
+        let event = test_event("/internal/v1/gateway/agent-hello", br#"{}"#);
         let metrics = GatewayForwardMetrics::default();
         let critical_failure_handler = StdRwLock::new(None);
         let telemetry_pending = Mutex::new(HashMap::new());
@@ -2596,7 +2595,7 @@ mod tests {
             std::future::pending::<()>().await;
         });
 
-        let mut event = test_event("/internal/v1/gateway/session-started", br#"{}"#);
+        let mut event = test_event("/internal/v1/gateway/agent-hello", br#"{}"#);
         event.api_url = format!("http://{addr}");
         let metrics = GatewayForwardMetrics::default();
         let critical_failure_handler = StdRwLock::new(None);
@@ -2635,7 +2634,7 @@ mod tests {
         let error = client
             .post(
                 "client-a",
-                "/internal/v1/gateway/session-started",
+                "/internal/v1/gateway/agent-hello",
                 &serde_json::json!({}),
             )
             .await
@@ -2703,7 +2702,7 @@ mod tests {
         forwarder
             .enqueue(
                 "active-client".to_string(),
-                test_event("/internal/v1/gateway/session-started", br#"{}"#),
+                test_event("/internal/v1/gateway/agent-hello", br#"{}"#),
                 test_timeouts(),
             )
             .await

@@ -19,21 +19,19 @@ import {
   RefreshCcw,
   Repeat2,
   Route,
-  Search,
   Settings2,
   ShieldAlert,
   Trash2,
   X,
 } from "lucide-react";
 import { ActionFeedback, type ActionFeedbackTone } from "../components/ActionFeedback";
-import { ApiResponseError } from "../api";
+import { ApiResponseError, apiGet } from "../api";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import {
-  ConsoleActionMenu,
-  ConsoleContextActionMenu,
-  ConsoleInlineActions,
-  type ConsoleMenuAction,
-} from "../components/ConsoleLayout";
+  ConsoleDataGrid,
+  type ConsoleDataGridAction,
+  type ConsoleDataGridColumn,
+} from "../components/ConsoleDataGrid";
 import { VpsCombobox } from "../components/VpsCombobox";
 import { scrollIntoViewWithMotion } from "../motion";
 import { tunnelEndpointRuntimeStateBadgeClass } from "../jobStatusPresentation";
@@ -90,6 +88,7 @@ import type {
   UpdateTunnelPlanOspfCostRequest,
   UpdateTunnelPlanRequest,
   UpsertNetworkAdapterDefinitionRequest,
+  VpsRuleValueRecord,
 } from "../types";
 import {
   clientDisplayNameFromMap,
@@ -130,6 +129,7 @@ const DEFAULT_OSPF_POLICY: OspfCostPolicy = {
 export function TopologyPanel({
   activeSubpage,
   agents,
+  apiToken,
   configurationSources,
   configurationSourcesEvidenceState,
   error,
@@ -387,6 +387,7 @@ export function TopologyPanel({
   return (
     <TunnelPlansWorkspace
       agents={agents}
+      apiToken={apiToken}
       configurationSources={configurationSources}
       configurationSourcesEvidenceState={configurationSourcesEvidenceState}
       error={error ?? adapterDefinitionsLoadError}
@@ -516,6 +517,7 @@ function NetworkOverview({
 
 function TunnelPlansWorkspace({
   agents,
+  apiToken,
   configurationSources,
   configurationSourcesEvidenceState,
   error,
@@ -543,6 +545,7 @@ function TunnelPlansWorkspace({
   tunnelPlans,
 }: {
   agents: AgentView[];
+  apiToken: string;
   configurationSources: ConfigurationSourceView[];
   configurationSourcesEvidenceState: "available" | "loading" | "unavailable";
   error: string | null;
@@ -576,9 +579,6 @@ function TunnelPlansWorkspace({
   tunnelPlanCorruptions: import("../types").TunnelPlanCorruptRecord[];
   tunnelPlans: TunnelPlanRecord[];
 }) {
-  const [query, setQuery] = useState("");
-  const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [createOpen, setCreateOpen] = useState(initialPlanWorkflow === "create");
   const [editingPlan, setEditingPlan] = useState<TunnelPlanRecord | null>(null);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
@@ -589,24 +589,6 @@ function TunnelPlansWorkspace({
   const createRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLElement | null>(null);
   const planFeedbackRef = useRef<HTMLDivElement | null>(null);
-  const filtered = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) return tunnelPlans;
-    return tunnelPlans.filter((plan) =>
-      [
-        plan.name,
-        plan.kind,
-        plan.plan.interface_name,
-        plan.left_client_id,
-        plan.right_client_id,
-        runtimeManagerLabel(plan.plan.runtime_control?.manager),
-      ]
-        .join(" ")
-        .toLowerCase()
-        .includes(normalized),
-    );
-  }, [query, tunnelPlans]);
-
   useEffect(() => {
     if (initialPlanWorkflow !== "create") return;
     setEditingPlan(null);
@@ -677,7 +659,6 @@ function TunnelPlansWorkspace({
     try {
       const responses = await onSetTunnelPlanEnabled(snapshot.targets, snapshot.enabled);
       setLifecycleSnapshot(null);
-      setSelected(new Set());
       setFeedback(tunnelDispatchFeedback(
         responses.flatMap((response) => response.sync),
         snapshot.retryCleanup
@@ -703,16 +684,10 @@ function TunnelPlansWorkspace({
     try {
       const response = await onDeleteTunnelPlan(snapshot.target);
       setDeleteSnapshot(null);
-      setSelected((current) => {
-        const next = new Set(current);
-        next.delete(snapshot.target.plan_id);
-        return next;
-      });
       if (editingPlan?.id === snapshot.target.plan_id) {
         setCreateOpen(false);
         setEditingPlan(null);
       }
-      setExpandedId((current) => current === snapshot.target.plan_id ? null : current);
       setFeedback(tunnelRetirementFeedback(
         response.sync,
         `Deleted tunnel plan ${snapshot.plan.name}`,
@@ -750,101 +725,223 @@ function TunnelPlansWorkspace({
     }
   }
 
-  const selectedRows = tunnelPlans.filter((plan) => selected.has(plan.id));
-  const selectedDisabledRows = selectedRows.filter((plan) => !plan.enabled);
-  const selectedEnabledRows = selectedRows.filter((plan) => plan.enabled);
-  const selectedRow = selectedRows.length === 1 ? selectedRows[0] : null;
-  const selectedCleanupRetryNeeded = Boolean(
-    selectedRow
-      && !selectedRow.enabled
-      && [
-        selectedRow.left_runtime_config.status,
-        selectedRow.right_runtime_config.status,
-      ].some((status) => !["removed", "not_dispatched"].includes(status)),
-  );
-  const selectedApplyRetryNeeded = Boolean(
-    selectedRow
-      && selectedRow.enabled
-      && [
-        selectedRow.left_runtime_config.status,
-        selectedRow.right_runtime_config.status,
-      ].some((status) =>
-        ["failed", "not_applied", "not_dispatched", "stale_pending"].includes(
-          status,
-        ),
-      ),
-  );
   const editorOpen = createOpen;
-  function tunnelPlanRowActions(
-    plan: TunnelPlanRecord,
-  ): ConsoleMenuAction[] {
-    const cleanupRetryNeeded =
-      !plan.enabled &&
-      [plan.left_runtime_config.status, plan.right_runtime_config.status].some(
-        (status) => !["removed", "not_dispatched"].includes(status),
-      );
-    const applyRetryNeeded =
-      plan.enabled &&
-      [plan.left_runtime_config.status, plan.right_runtime_config.status].some(
-        (status) =>
-          ["failed", "not_applied", "not_dispatched", "stale_pending"].includes(
-            status,
-          ),
-      );
-    return [
-      {
-        disabled: editorOpen,
-        label: "Edit",
-        onSelect: () => {
-          setEditingPlan(plan);
-          setCreateOpen(true);
-        },
-        title: editorOpen ? "Close the current tunnel plan editor first" : undefined,
-      },
-      {
-        label: "Export",
-        onSelect: () => void exportPlan(plan),
-      },
-      {
-        label: plan.enabled ? "Disable" : "Enable",
-        onSelect: () => requestLifecycle([plan.id], !plan.enabled),
-      },
-      ...(cleanupRetryNeeded || applyRetryNeeded
-        ? [
-            {
-              label: "Retry runtime",
-              onSelect: () =>
-                requestLifecycle(
-                  [plan.id],
-                  plan.enabled,
-                  cleanupRetryNeeded,
-                  applyRetryNeeded,
-                ),
-            } satisfies ConsoleMenuAction,
-          ]
-        : []),
-      {
-        label: "Delete",
-        onSelect: () =>
-          setDeleteSnapshot({
-            plan,
-            target: {
-              expected_revision: plan.revision,
-              plan_id: plan.id,
-            },
-          }),
-        title: "Delete this plan and queue runtime removal",
-        tone: "danger",
-      },
-    ];
-  }
   const lifecycleIncludesOspf = Boolean(
     lifecycleSnapshot?.targets.some((target) => target.ospfEnabled),
   );
-  const runtimeEdgeByPlan = new Map(
-    topologyGraph.edges.map((edge) => [edge.plan_id, edge]),
+  const runtimeEdgeByPlan = useMemo(
+    () => new Map(topologyGraph.edges.map((edge) => [edge.plan_id, edge])),
+    [topologyGraph.edges],
   );
-  const agentNameById = clientDisplayNameMap(agents);
+  const agentNameById = useMemo(() => clientDisplayNameMap(agents), [agents]);
+  const columns = useMemo<ConsoleDataGridColumn<TunnelPlanRecord>[]>(
+    () => [
+      {
+        id: "plan",
+        header: "Plan",
+        cell: (plan) => (
+          <span className="historyPrimary">
+            <strong title={plan.name}>{plan.name}</strong>
+            <small title={`${plan.kind} · ${plan.plan.interface_name}`}>
+              {formatTunnelKind(plan.kind)} · {plan.plan.interface_name}
+            </small>
+          </span>
+        ),
+        mobilePrimary: true,
+        searchValue: (plan) => `${plan.name} ${plan.kind} ${plan.plan.interface_name}`,
+        sortValue: (plan) => plan.name,
+        minSize: 180,
+        size: 220,
+      },
+      {
+        id: "endpoints",
+        header: "Endpoints",
+        cell: (plan) => {
+          const left = clientDisplayNameFromMap(plan.left_client_id, agentNameById);
+          const right = clientDisplayNameFromMap(plan.right_client_id, agentNameById);
+          return (
+            <span className="historyPrimary">
+              <strong title={`${left}; full ID ${plan.left_client_id}`}>{left}</strong>
+              <small title={`${right}; full ID ${plan.right_client_id}`}>{right}</small>
+            </span>
+          );
+        },
+        searchValue: (plan) =>
+          `${clientDisplayNameFromMap(plan.left_client_id, agentNameById)} ${plan.left_client_id} ${clientDisplayNameFromMap(plan.right_client_id, agentNameById)} ${plan.right_client_id}`,
+        sortValue: (plan) => clientDisplayNameFromMap(plan.left_client_id, agentNameById),
+        minSize: 180,
+        size: 220,
+      },
+      {
+        id: "owner",
+        header: "Runtime owner",
+        cell: (plan) => (
+          <span className="historyPrimary">
+            <strong title={runtimeManagerLabel(plan.plan.runtime_control?.manager)}>
+              {runtimeManagerLabel(plan.plan.runtime_control?.manager)}
+            </strong>
+            <small>{plan.enabled ? "Enabled" : "Disabled"}</small>
+          </span>
+        ),
+        searchValue: (plan) => `${runtimeManagerLabel(plan.plan.runtime_control?.manager)} ${plan.enabled ? "enabled" : "disabled"}`,
+        sortValue: (plan) => runtimeManagerLabel(plan.plan.runtime_control?.manager),
+        minSize: 160,
+        size: 190,
+      },
+      {
+        id: "runtime",
+        header: "Runtime",
+        cell: (plan) => {
+          const edge = runtimeEdgeByPlan.get(plan.id);
+          const left = tunnelEndpointDisplayState(plan.enabled, plan.left_runtime_config, edge?.left_runtime_state);
+          const right = tunnelEndpointDisplayState(plan.enabled, plan.right_runtime_config, edge?.right_runtime_state);
+          return (
+            <span className="endpointStatusPair">
+              <span className={`status ${tunnelEndpointRuntimeStateBadgeClass(left)}`} title={tunnelEndpointStateTitle("Left", plan.left_runtime_config, edge?.left_runtime_reason, edge?.left_observed_at)}>L {readableTelemetryToken(left)}</span>
+              <span className={`status ${tunnelEndpointRuntimeStateBadgeClass(right)}`} title={tunnelEndpointStateTitle("Right", plan.right_runtime_config, edge?.right_runtime_reason, edge?.right_observed_at)}>R {readableTelemetryToken(right)}</span>
+            </span>
+          );
+        },
+        mobileState: true,
+        searchValue: (plan) => {
+          const edge = runtimeEdgeByPlan.get(plan.id);
+          return `${tunnelEndpointDisplayState(plan.enabled, plan.left_runtime_config, edge?.left_runtime_state)} ${tunnelEndpointDisplayState(plan.enabled, plan.right_runtime_config, edge?.right_runtime_state)}`;
+        },
+        sortValue: (plan) => `${plan.left_runtime_config.status} ${plan.right_runtime_config.status}`,
+        minSize: 165,
+        size: 190,
+      },
+      {
+        id: "connectivity",
+        header: "Connectivity",
+        cell: (plan) => {
+          const presentation = tunnelConnectivityPresentation(plan, runtimeEdgeByPlan.get(plan.id));
+          return (
+            <span className="historyPrimary tunnelConnectivitySummary">
+              <strong className={`status ${presentation.statusClass}`} title={presentation.title}>{presentation.label}</strong>
+              <small title={presentation.detail}>{presentation.detail}</small>
+            </span>
+          );
+        },
+        searchValue: (plan) => {
+          const presentation = tunnelConnectivityPresentation(plan, runtimeEdgeByPlan.get(plan.id));
+          return `${presentation.label} ${presentation.detail}`;
+        },
+        sortValue: (plan) => tunnelConnectivityPresentation(plan, runtimeEdgeByPlan.get(plan.id)).label,
+        minSize: 190,
+        size: 230,
+      },
+      {
+        id: "ospf",
+        header: "OSPF",
+        cell: (plan) => (
+          <span className="historyPrimary">
+            <strong title={plan.plan.ospf ? `${plan.recommended_ospf_cost ?? "unknown"} cost` : "OSPF off"}>
+              {plan.plan.ospf ? `${plan.recommended_ospf_cost ?? "?"} cost` : "Off"}
+            </strong>
+            <small title={plan.plan.ospf ? `${formatOspfMode(plan.plan.ospf.mode)} · ${readableTelemetryToken(plan.ospf_status)}` : "Tunnel only"}>
+              {plan.plan.ospf ? `${formatOspfMode(plan.plan.ospf.mode)} · ${readableTelemetryToken(plan.ospf_status)}` : "Tunnel only"}
+            </small>
+          </span>
+        ),
+        searchValue: (plan) => plan.plan.ospf ? `${formatOspfMode(plan.plan.ospf.mode)} ${plan.ospf_status}` : "OSPF off tunnel only",
+        sortValue: (plan) => plan.plan.ospf ? plan.recommended_ospf_cost ?? Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER,
+        size: 160,
+      },
+    ],
+    [agentNameById, runtimeEdgeByPlan],
+  );
+
+  function cleanupRetryNeeded(plan: TunnelPlanRecord) {
+    return !plan.enabled &&
+      [plan.left_runtime_config.status, plan.right_runtime_config.status].some(
+        (status) => !["removed", "not_dispatched"].includes(status),
+      );
+  }
+
+  function applyRetryNeeded(plan: TunnelPlanRecord) {
+    return plan.enabled &&
+      [plan.left_runtime_config.status, plan.right_runtime_config.status].some(
+        (status) =>
+          ["failed", "not_applied", "not_dispatched", "stale_pending"].includes(status),
+      );
+  }
+
+  const actions: ConsoleDataGridAction<TunnelPlanRecord>[] = [
+    {
+      description: (rows) => editorOpen
+        ? "Close the current tunnel plan editor first."
+        : rows.length === 1 ? `Edit ${rows[0].name}.` : "Select one tunnel plan to edit.",
+      disabled: (rows) => pending || editorOpen || rows.length !== 1,
+      icon: <Pencil size={14} />,
+      label: "Edit",
+      onSelect: (rows) => {
+        if (!rows[0]) return;
+        setEditingPlan(rows[0]);
+        setCreateOpen(true);
+      },
+    },
+    {
+      description: (rows) => rows.length === 1 ? `Export ${rows[0].name} as JSON.` : "Select one tunnel plan to export.",
+      disabled: (rows) => pending || rows.length !== 1,
+      icon: <Download size={14} />,
+      label: "Export",
+      onSelect: (rows) => rows[0] && void exportPlan(rows[0]),
+    },
+    {
+      description: (rows) => {
+        const eligible = rows.filter((plan) => !plan.enabled);
+        return eligible.length > 0
+          ? `Review enabling ${eligible.length} selected tunnel plan${eligible.length === 1 ? "" : "s"}.`
+          : "All selected tunnel plans are already enabled.";
+      },
+      disabled: (rows) => pending || rows.every((plan) => plan.enabled),
+      icon: <Power size={14} />,
+      label: "Enable",
+      onSelect: (rows) => requestLifecycle(rows.filter((plan) => !plan.enabled).map((plan) => plan.id), true),
+    },
+    {
+      description: (rows) => {
+        const eligible = rows.filter((plan) => plan.enabled);
+        return eligible.length > 0
+          ? `Review disabling ${eligible.length} selected tunnel plan${eligible.length === 1 ? "" : "s"}.`
+          : "All selected tunnel plans are already disabled.";
+      },
+      disabled: (rows) => pending || rows.every((plan) => !plan.enabled),
+      icon: <PowerOff size={14} />,
+      label: "Disable",
+      onSelect: (rows) => requestLifecycle(rows.filter((plan) => plan.enabled).map((plan) => plan.id), false),
+    },
+    {
+      description: (rows) => rows.length === 1
+        ? `Retry the current ${rows[0].enabled ? "apply" : "removal"} state on both endpoints.`
+        : "Retry runtime supports one tunnel plan at a time.",
+      disabled: (rows) => pending || rows.length !== 1,
+      hidden: (rows) => rows.length !== 1 || (!cleanupRetryNeeded(rows[0]) && !applyRetryNeeded(rows[0])),
+      icon: <RefreshCcw size={14} />,
+      label: "Retry runtime",
+      onSelect: (rows) => rows[0] && requestLifecycle(
+        [rows[0].id],
+        rows[0].enabled,
+        cleanupRetryNeeded(rows[0]),
+        applyRetryNeeded(rows[0]),
+      ),
+    },
+    {
+      description: (rows) => rows.length === 1
+        ? `Delete ${rows[0].name} and queue runtime removal on both endpoints.`
+        : "Select one tunnel plan to delete.",
+      disabled: (rows) => pending || rows.length !== 1,
+      icon: <Trash2 size={14} />,
+      label: "Delete",
+      onSelect: (rows) => rows[0] && setDeleteSnapshot({
+        plan: rows[0],
+        target: { expected_revision: rows[0].revision, plan_id: rows[0].id },
+      }),
+      separatorBefore: true,
+      tone: "danger",
+    },
+  ];
   return (
     <div className="topologyPageStack">
       <section className="fleetPanel tunnelPlanRegistry" ref={listRef}>
@@ -855,22 +952,6 @@ function TunnelPlansWorkspace({
               {tunnelPlans.length} declared point-to-point tunnel
               {tunnelPlans.length === 1 ? "" : "s"}
             </span>
-          </div>
-          <div className="headerActionStack">
-            <button className="secondaryAction" disabled={loading} onClick={() => void onRefresh()} type="button">
-              <RefreshCcw size={16} />
-              Refresh
-            </button>
-            <button
-              className="primaryAction"
-              disabled={editorOpen}
-              onClick={() => { setEditingPlan(null); setCreateOpen(true); }}
-              title={editorOpen ? "Close the current tunnel plan editor first" : "Create a tunnel plan"}
-              type="button"
-            >
-              <CirclePlus size={17} />
-              Create plan
-            </button>
           </div>
         </div>
         {tunnelPlanCorruptions.length > 0 && (
@@ -891,162 +972,57 @@ function TunnelPlansWorkspace({
           </div>
         )}
         <ActionFeedback className="localActionFeedback topologyPlanActionFeedback" message={error ?? feedback?.message} ref={planFeedbackRef} tone={error ? "danger" : feedback?.tone} />
-        <div className="tunnelRegistryToolbar">
-          <label className="searchControl compactSearch">
-            <Search size={15} />
-            <input aria-label="Search tunnel plans" onChange={(event) => setQuery(event.target.value)} placeholder="Search plans" value={query} />
-          </label>
-          {selectedRows.length > 0 && (
-            <div className="selectionActionBar" aria-label="Selected tunnel plan actions">
-              <span>{selectedRows.length} selected</span>
-              <ConsoleActionMenu
-                actions={[
-                  {
-                    disabled: !selectedRow || editorOpen,
-                    label: "Edit",
-                    onSelect: () => {
-                      if (selectedRow) {
-                        setEditingPlan(selectedRow);
-                        setCreateOpen(true);
-                      }
-                    },
-                  },
-                  {
-                    disabled: !selectedRow,
-                    label: "Export",
-                    onSelect: () => {
-                      if (selectedRow) void exportPlan(selectedRow);
-                    },
-                  },
-                  {
-                    disabled: selectedDisabledRows.length === 0,
-                    label: "Enable",
-                    onSelect: () =>
-                      requestLifecycle(
-                        selectedDisabledRows.map((plan) => plan.id),
-                        true,
-                      ),
-                    title:
-                      selectedDisabledRows.length === 0
-                        ? "All selected plans are already enabled"
-                        : undefined,
-                  },
-                  {
-                    disabled: selectedEnabledRows.length === 0,
-                    label: "Disable",
-                    onSelect: () =>
-                      requestLifecycle(
-                        selectedEnabledRows.map((plan) => plan.id),
-                        false,
-                      ),
-                    title:
-                      selectedEnabledRows.length === 0
-                        ? "All selected plans are already disabled"
-                        : undefined,
-                  },
-                  ...(selectedRow &&
-                  (selectedCleanupRetryNeeded || selectedApplyRetryNeeded)
-                    ? [
-                        {
-                          label: "Retry runtime",
-                          onSelect: () =>
-                            requestLifecycle(
-                              [selectedRow.id],
-                              selectedRow.enabled,
-                              selectedCleanupRetryNeeded,
-                              selectedApplyRetryNeeded,
-                            ),
-                        },
-                      ]
-                    : []),
-                  {
-                    disabled: !selectedRow,
-                    label: "Delete",
-                    onSelect: () => {
-                      if (selectedRow) {
-                        setDeleteSnapshot({
-                          plan: selectedRow,
-                          target: {
-                            expected_revision: selectedRow.revision,
-                            plan_id: selectedRow.id,
-                          },
-                        });
-                      }
-                    },
-                    tone: "danger",
-                    title: "Delete this plan and queue runtime removal",
-                  },
-                ]}
-                label={`Actions for ${selectedRows.length} selected tunnel plan${selectedRows.length === 1 ? "" : "s"}`}
-              />
+        <ConsoleDataGrid
+          actions={actions}
+          columns={columns}
+          defaultPageSize={100}
+          empty={
+            <div className="emptyState compactEmptyState">
+              <strong>{loading ? "Loading tunnel plans" : "No tunnel plans"}</strong>
+              <span>{loading ? "Reading declarations and endpoint runtime evidence." : "Create an explicit plan before vpsman observes or manages a tunnel."}</span>
             </div>
+          }
+          getRowId={(plan) => plan.id}
+          itemLabel="tunnel plans"
+          renderExpandedRow={(plan) => (
+            <TunnelPlanDetails
+              agentNameById={agentNameById}
+              onUpdateConnectionAssessment={onUpdateTunnelConnectionAssessment}
+              plan={plan}
+              runtimeEdge={runtimeEdgeByPlan.get(plan.id)}
+            />
           )}
-        </div>
-        {filtered.length === 0 ? (
-          <div className="emptyState compactEmptyState">
-            <strong>{tunnelPlans.length === 0 ? "No tunnel plans" : "No matching plans"}</strong>
-            <span>{tunnelPlans.length === 0 ? "Create an explicit plan before vpsman observes or manages a tunnel." : "Adjust the plan search."}</span>
-          </div>
-        ) : (
-          <div className="tunnelPlanTableWrap">
-            <table aria-label="Tunnel plans" className="tunnelPlanTable">
-              <thead>
-                <tr>
-                  <th className="selectionCell">
-                    <input
-                      aria-label="Select visible tunnel plans"
-                      checked={filtered.length > 0 && filtered.every((plan) => selected.has(plan.id))}
-                      onChange={(event) => {
-                        const next = new Set(selected);
-                        for (const plan of filtered) {
-                          if (event.target.checked) next.add(plan.id);
-                          else next.delete(plan.id);
-                        }
-                        setSelected(next);
-                      }}
-                      type="checkbox"
-                    />
-                  </th>
-                  <th>Plan</th>
-                  <th>Endpoints</th>
-                  <th>Runtime owner</th>
-                  <th>Runtime</th>
-                  <th>Connectivity</th>
-                  <th>OSPF</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((plan) => {
-                  const expanded = expandedId === plan.id;
-                  return (
-                    <TunnelPlanRows
-                      expanded={expanded}
-                      agentNameById={agentNameById}
-                      key={plan.id}
-                      onUpdateConnectionAssessment={onUpdateTunnelConnectionAssessment}
-                      contextActions={tunnelPlanRowActions(plan)}
-                      onSelect={(checked) => {
-                        const next = new Set(selected);
-                        if (checked) next.add(plan.id);
-                        else next.delete(plan.id);
-                        setSelected(next);
-                      }}
-                      onToggle={() => setExpandedId((current) => current === plan.id ? null : plan.id)}
-                      plan={plan}
-                      runtimeEdge={runtimeEdgeByPlan.get(plan.id)}
-                      selected={selected.has(plan.id)}
-                    />
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
+          rows={tunnelPlans}
+          searchPlaceholder="Search plan, endpoint, runtime, connectivity, or OSPF"
+          showMobileRowActions={false}
+          singleExpandedRow
+          storageKey="vpsman.network.tunnelPlans"
+          title="Tunnel plans"
+          toolbarActions={
+            <div className="previewMeta">
+              <button className="secondaryAction compactAction" disabled={loading} onClick={() => void onRefresh()} type="button">
+                <RefreshCcw size={14} />
+                Refresh
+              </button>
+              <button
+                className="primaryAction compactAction"
+                disabled={editorOpen}
+                onClick={() => { setEditingPlan(null); setCreateOpen(true); }}
+                title={editorOpen ? "Close the current tunnel plan editor first" : "Create a tunnel plan"}
+                type="button"
+              >
+                <CirclePlus size={15} />
+                Create plan
+              </button>
+            </div>
+          }
+        />
       </section>
       {createOpen && (
         <div ref={createRef}>
           <TunnelPlanComposer
             agents={agents}
+            apiToken={apiToken}
             configurationSources={configurationSources}
             configurationSourcesEvidenceState={
               configurationSourcesEvidenceState
@@ -1142,28 +1118,17 @@ function TunnelPlansWorkspace({
   );
 }
 
-function TunnelPlanRows({
+function TunnelPlanDetails({
   agentNameById,
-  contextActions,
-  expanded,
   onUpdateConnectionAssessment,
-  onSelect,
-  onToggle,
   plan,
   runtimeEdge,
-  selected,
 }: {
   agentNameById: Map<string, string>;
-  contextActions: ConsoleMenuAction[];
-  expanded: boolean;
   onUpdateConnectionAssessment: (planId: string, request: UpdateTunnelConnectionAssessmentRequest) => Promise<void>;
-  onSelect: (checked: boolean) => void;
-  onToggle: () => void;
   plan: TunnelPlanRecord;
   runtimeEdge?: TopologyGraphEdge;
-  selected: boolean;
 }) {
-  const runtime = plan.plan.runtime_control?.manager ?? "agent_iproute2_managed";
   const leftRuntimeState = tunnelEndpointDisplayState(
     plan.enabled,
     plan.left_runtime_config,
@@ -1230,180 +1195,106 @@ function TunnelPlanRows({
     }
   }
   return (
-    <>
-      <ConsoleContextActionMenu
-        actions={contextActions}
-        label={`Actions for ${plan.name}`}
-      >
-        <tr aria-expanded={expanded} className={`${expanded ? "isExpanded" : ""} ${selected ? "isSelected" : ""}`} onClick={onToggle} tabIndex={0} onKeyDown={(event) => {
-          if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
-            event.preventDefault();
-            onToggle();
+    <div className="tunnelPlanDetail">
+      <div className="tunnelPlanFacts">
+        <PlanFact label="Desired state" value={plan.enabled ? "Present on both endpoints" : "Absent from both endpoints"} />
+        <PlanFact
+          label="Endpoints"
+          title={`${plan.left_client_id} / ${plan.right_client_id}`}
+          value={`${leftClientName} / ${rightClientName}`}
+        />
+        <PlanFact label="Apply state" value={`L ${readableTelemetryToken(leftRuntimeState)} · R ${readableTelemetryToken(rightRuntimeState)}`} />
+        <PlanFact label="Connectivity" value={`${connectivity.label} · ${connectivity.detail}`} />
+        <PlanFact label="Left outer path" value={formatEndpointUnderlay(plan.plan.left_local_underlay, plan.plan.left_remote_underlay)} />
+        <PlanFact label="Right outer path" value={formatEndpointUnderlay(plan.plan.right_local_underlay, plan.plan.right_remote_underlay)} />
+        <PlanFact label="Tunnel addresses" value={formatTunnelAddresses(plan)} />
+        <PlanFact label="Bandwidth" value={`${plan.plan.bandwidth_mbps} Mbps`} />
+        <PlanFact
+          label="Runtime ownership"
+          title={
+            plan.plan.runtime_control?.manager === "external_managed_adapter"
+              ? `External adapters ${plan.plan.runtime_control.left_adapter_template_id ?? "missing"} / ${plan.plan.runtime_control.right_adapter_template_id ?? "missing"}`
+              : undefined
           }
-        }}>
-          <td className="selectionCell" onClick={(event) => event.stopPropagation()}>
-            <input aria-label={`Select ${plan.name}`} checked={selected} onChange={(event) => onSelect(event.target.checked)} type="checkbox" />
-          </td>
-          <td>
-            <span className="historyPrimary">
-              <strong title={plan.name}>{plan.name}</strong>
-              <small title={`${plan.kind} · ${plan.plan.interface_name}`}>{formatTunnelKind(plan.kind)} · {plan.plan.interface_name}</small>
-            </span>
-            <div
-              className="topologyMobileRowActions"
-              onClick={(event) => event.stopPropagation()}
-            >
-              <ConsoleInlineActions
-                actions={contextActions}
-                label={`Actions for ${plan.name}`}
-              />
-            </div>
-          </td>
-          <td>
-            <span className="historyPrimary">
-              <strong title={`${leftClientName}; full ID ${plan.left_client_id}`}>
-                {leftClientName}
-              </strong>
-              <small title={`${rightClientName}; full ID ${plan.right_client_id}`}>
-                {rightClientName}
-              </small>
-            </span>
-          </td>
-          <td>
-            <span className="historyPrimary">
-              <strong title={runtimeManagerLabel(runtime)}>{runtimeManagerLabel(runtime)}</strong>
-              <small title={plan.enabled ? "Enabled" : "Disabled"}>{plan.enabled ? "Enabled" : "Disabled"}</small>
-            </span>
-          </td>
-          <td>
-            <span className="endpointStatusPair">
-              <span className={`status ${tunnelEndpointRuntimeStateBadgeClass(leftRuntimeState)}`} title={tunnelEndpointStateTitle("Left", plan.left_runtime_config, runtimeEdge?.left_runtime_reason, runtimeEdge?.left_observed_at)}>L {readableTelemetryToken(leftRuntimeState)}</span>
-              <span className={`status ${tunnelEndpointRuntimeStateBadgeClass(rightRuntimeState)}`} title={tunnelEndpointStateTitle("Right", plan.right_runtime_config, runtimeEdge?.right_runtime_reason, runtimeEdge?.right_observed_at)}>R {readableTelemetryToken(rightRuntimeState)}</span>
-            </span>
-          </td>
-          <td>
-            <span className="historyPrimary tunnelConnectivitySummary">
-              <strong className={`status ${connectivity.statusClass}`} title={connectivity.title}>{connectivity.label}</strong>
-              <small title={connectivity.detail}>{connectivity.detail}</small>
-            </span>
-          </td>
-          <td>
-            <span className="historyPrimary">
-              <strong title={plan.plan.ospf ? `${plan.recommended_ospf_cost ?? "unknown"} cost` : "OSPF off"}>{plan.plan.ospf ? `${plan.recommended_ospf_cost ?? "?"} cost` : "Off"}</strong>
-              <small title={plan.plan.ospf ? `${formatOspfMode(plan.plan.ospf.mode)} · ${readableTelemetryToken(plan.ospf_status)}` : "Tunnel only"}>{plan.plan.ospf ? `${formatOspfMode(plan.plan.ospf.mode)} · ${readableTelemetryToken(plan.ospf_status)}` : "Tunnel only"}</small>
-            </span>
-          </td>
-        </tr>
-      </ConsoleContextActionMenu>
-      {expanded && (
-        <tr className="tunnelPlanDetailRow">
-          <td colSpan={7}>
-            <div className="tunnelPlanDetail">
-              <button aria-label={`Close details for ${plan.name}`} className="iconButton topologyDetailClose" onClick={onToggle} title="Close details" type="button"><X size={15} /></button>
-              <div className="tunnelPlanFacts">
-                <PlanFact label="Desired state" value={plan.enabled ? "Present on both endpoints" : "Absent from both endpoints"} />
-                <PlanFact
-                  label="Endpoints"
-                  title={`${plan.left_client_id} / ${plan.right_client_id}`}
-                  value={`${leftClientName} / ${rightClientName}`}
-                />
-                <PlanFact label="Apply state" value={`L ${readableTelemetryToken(leftRuntimeState)} · R ${readableTelemetryToken(rightRuntimeState)}`} />
-                <PlanFact label="Connectivity" value={`${connectivity.label} · ${connectivity.detail}`} />
-                <PlanFact label="Left outer path" value={formatEndpointUnderlay(plan.plan.left_local_underlay, plan.plan.left_remote_underlay)} />
-                <PlanFact label="Right outer path" value={formatEndpointUnderlay(plan.plan.right_local_underlay, plan.plan.right_remote_underlay)} />
-                <PlanFact label="Tunnel addresses" value={formatTunnelAddresses(plan)} />
-                <PlanFact label="Bandwidth" value={`${plan.plan.bandwidth_mbps} Mbps`} />
-                <PlanFact
-                  label="Runtime ownership"
-                  title={
-                    plan.plan.runtime_control?.manager ===
-                    "external_managed_adapter"
-                      ? `External adapters ${plan.plan.runtime_control.left_adapter_template_id ?? "missing"} / ${plan.plan.runtime_control.right_adapter_template_id ?? "missing"}`
-                      : undefined
-                  }
-                  value={formatRuntimeBinding(plan)}
-                />
-                <PlanFact label="OSPF control" value={formatPlanOspf(plan)} />
-              </div>
-              <form className="tunnelConnectionAssessment" onClick={(event) => event.stopPropagation()} onSubmit={(event) => void saveConnectionAssessment(event)}>
-                <div className="tunnelConnectionAssessmentHeading">
-                  <strong>Operator connectivity assessment</strong>
-                  <span title="Use only when endpoint probes cannot establish reachability.">Display-only annotation; runtime and automatic OSPF stay machine-derived.</span>
-                </div>
-                <label>
-                  <span>Assessment</span>
-                  <select
-                    aria-label={`Connectivity assessment for ${plan.name}`}
-                    disabled={assessmentPending || !plan.enabled}
-                    onChange={(event) => {
-                      setAssessment(event.target.value as TunnelConnectionAssessment);
-                      setAssessmentFeedback(null);
-                    }}
-                    value={assessment}
-                  >
-                    <option value="automatic">Automatic (measured)</option>
-                    <option value="connected">Connected (operator)</option>
-                    <option value="disconnected">Disconnected (operator)</option>
-                  </select>
-                </label>
-                {assessment !== "automatic" && (
-                  <label>
-                    <span>Evidence note</span>
-                    <input
-                      aria-label={`Connectivity assessment note for ${plan.name}`}
-                      disabled={assessmentPending || !plan.enabled}
-                      maxLength={500}
-                      onChange={(event) => {
-                        setAssessmentNote(event.target.value);
-                        setAssessmentFeedback(null);
-                      }}
-                      placeholder="e.g. application traffic verified; ICMP blocked"
-                      title={assessmentNote || "Explain the operator evidence for this assessment"}
-                      value={assessmentNote}
-                    />
-                  </label>
-                )}
-                <button
-                  className="secondaryAction compactAction"
-                  disabled={assessmentPending || !assessmentChanged || !assessmentValid}
-                  title={!plan.enabled
-                    ? "Enable the plan before recording a connectivity assessment"
-                    : !assessmentChanged
-                      ? "No assessment changes to save"
-                      : !assessmentValid
-                        ? "Add an evidence note of 500 characters or fewer"
-                        : "Save this audited display assessment without changing runtime or OSPF automation"}
-                  type="submit"
-                >
-                  {assessmentPending
-                    ? "Saving"
-                    : assessment === "automatic" && plan.connection_assessment !== "automatic"
-                      ? "Clear assessment"
-                      : "Save assessment"}
-                </button>
-              </form>
-              <ActionFeedback className="localActionFeedback" message={assessmentFeedback?.message} tone={assessmentFeedback?.tone} />
-              {(plan.plan.runtime_control?.manager ?? "agent_iproute2_managed") ===
-                "agent_iproute2_managed" &&
-                (plan.plan.runtime_topology?.desired_interfaces?.length ?? 0) > 0 && (
-                <div className="tunnelIntentLine">
-                  <strong>Declared interfaces</strong>
-                  <code title={plan.plan.runtime_topology?.desired_interfaces?.join(", ")}>{plan.plan.runtime_topology?.desired_interfaces?.join(", ")}</code>
-                </div>
-              )}
-              {plan.plan.conflicts.length > 0 && (
-                <ActionFeedback message={plan.plan.conflicts.join("; ")} tone="warning" />
-              )}
-            </div>
-          </td>
-        </tr>
+          value={formatRuntimeBinding(plan)}
+        />
+        <PlanFact label="OSPF control" value={formatPlanOspf(plan)} />
+      </div>
+      <form className="tunnelConnectionAssessment" onClick={(event) => event.stopPropagation()} onSubmit={(event) => void saveConnectionAssessment(event)}>
+        <div className="tunnelConnectionAssessmentHeading">
+          <strong>Operator connectivity assessment</strong>
+          <span title="Use only when endpoint probes cannot establish reachability.">Display-only annotation; runtime and automatic OSPF stay machine-derived.</span>
+        </div>
+        <label className="consoleField">
+          <span>Assessment</span>
+          <select
+            aria-label={`Connectivity assessment for ${plan.name}`}
+            disabled={assessmentPending || !plan.enabled}
+            onChange={(event) => {
+              setAssessment(event.target.value as TunnelConnectionAssessment);
+              setAssessmentFeedback(null);
+            }}
+            value={assessment}
+          >
+            <option value="automatic">Automatic (measured)</option>
+            <option value="connected">Connected (operator)</option>
+            <option value="disconnected">Disconnected (operator)</option>
+          </select>
+        </label>
+        {assessment !== "automatic" && (
+          <label className="consoleField">
+            <span>Evidence note</span>
+            <input
+              aria-label={`Connectivity assessment note for ${plan.name}`}
+              disabled={assessmentPending || !plan.enabled}
+              maxLength={500}
+              onChange={(event) => {
+                setAssessmentNote(event.target.value);
+                setAssessmentFeedback(null);
+              }}
+              placeholder="e.g. application traffic verified; ICMP blocked"
+              title={assessmentNote || "Explain the operator evidence for this assessment"}
+              value={assessmentNote}
+            />
+          </label>
+        )}
+        <button
+          className="secondaryAction compactAction"
+          disabled={assessmentPending || !assessmentChanged || !assessmentValid}
+          title={!plan.enabled
+            ? "Enable the plan before recording a connectivity assessment"
+            : !assessmentChanged
+              ? "No assessment changes to save"
+              : !assessmentValid
+                ? "Add an evidence note of 500 characters or fewer"
+                : "Save this audited display assessment without changing runtime or OSPF automation"}
+          type="submit"
+        >
+          {assessmentPending
+            ? "Saving"
+            : assessment === "automatic" && plan.connection_assessment !== "automatic"
+              ? "Clear assessment"
+              : "Save assessment"}
+        </button>
+      </form>
+      <ActionFeedback className="localActionFeedback" message={assessmentFeedback?.message} tone={assessmentFeedback?.tone} />
+      {(plan.plan.runtime_control?.manager ?? "agent_iproute2_managed") === "agent_iproute2_managed" &&
+        (plan.plan.runtime_topology?.desired_interfaces?.length ?? 0) > 0 && (
+        <div className="tunnelIntentLine">
+          <strong>Declared interfaces</strong>
+          <code title={plan.plan.runtime_topology?.desired_interfaces?.join(", ")}>{plan.plan.runtime_topology?.desired_interfaces?.join(", ")}</code>
+        </div>
       )}
-    </>
+      {plan.plan.conflicts.length > 0 && (
+        <ActionFeedback message={plan.plan.conflicts.join("; ")} tone="warning" />
+      )}
+    </div>
   );
 }
 
 function TunnelPlanComposer({
   agents,
+  apiToken,
   configurationSources,
   configurationSourcesEvidenceState,
   existingPlans,
@@ -1416,6 +1307,7 @@ function TunnelPlanComposer({
   networkAdapterDefinitions,
 }: {
   agents: AgentView[];
+  apiToken: string;
   configurationSources: ConfigurationSourceView[];
   configurationSourcesEvidenceState: "available" | "loading" | "unavailable";
   existingPlans: TunnelPlanRecord[];
@@ -1436,6 +1328,146 @@ function TunnelPlanComposer({
   const [pending, setPending] = useState(false);
   const [allocationPending, setAllocationPending] = useState(false);
   const [snapshot, setSnapshot] = useState<CreateTunnelPlanRequest | null>(null);
+  const [autoFillOwnership, setAutoFillOwnership] = useState(() => ({
+    bandwidth: !initialPlan,
+    leftRemote: !initialPlan,
+    rightRemote: !initialPlan,
+  }));
+  const portSpeedClientIds = useMemo(
+    () => Array.from(new Set([form.leftClientId, form.rightClientId].filter(Boolean))),
+    [form.leftClientId, form.rightClientId],
+  );
+  const portSpeedSelectionKey = portSpeedClientIds.join("\0");
+  const [portSpeedResolution, setPortSpeedResolution] =
+    useState<PortSpeedResolution>({
+      selectionKey: "",
+      speeds: {},
+      status: "idle",
+    });
+
+  useEffect(() => {
+    if (initialPlan) return;
+    setSnapshot(null);
+    setForm((current) => {
+      const suggestedLeft = observedPeerAddress(
+        agents,
+        current.rightClientId,
+        current.runtimeManager,
+      );
+      const suggestedRight = observedPeerAddress(
+        agents,
+        current.leftClientId,
+        current.runtimeManager,
+      );
+      const leftRemoteUnderlay = autoFillOwnership.leftRemote
+        ? suggestedLeft ?? ""
+        : current.leftRemoteUnderlay;
+      const rightRemoteUnderlay = autoFillOwnership.rightRemote
+        ? suggestedRight ?? ""
+        : current.rightRemoteUnderlay;
+      if (
+        leftRemoteUnderlay === current.leftRemoteUnderlay
+        && rightRemoteUnderlay === current.rightRemoteUnderlay
+      ) {
+        return current;
+      }
+      return { ...current, leftRemoteUnderlay, rightRemoteUnderlay };
+    });
+  }, [
+    agents,
+    autoFillOwnership.leftRemote,
+    autoFillOwnership.rightRemote,
+    form.leftClientId,
+    form.rightClientId,
+    form.runtimeManager,
+    initialPlan,
+  ]);
+
+  useEffect(() => {
+    if (initialPlan) return;
+    if (!portSpeedSelectionKey) {
+      setPortSpeedResolution({
+        selectionKey: "",
+        speeds: {},
+        status: "ready",
+      });
+      return;
+    }
+    if (!apiToken) {
+      setPortSpeedResolution({
+        selectionKey: portSpeedSelectionKey,
+        speeds: {},
+        status: "error",
+      });
+      return;
+    }
+    let active = true;
+    setPortSpeedResolution({
+      selectionKey: portSpeedSelectionKey,
+      speeds: {},
+      status: "loading",
+    });
+    void Promise.all(
+      portSpeedClientIds.map(async (clientId) => {
+        const rows = await apiGet<VpsRuleValueRecord[]>(
+          `/api/v1/vps-rules?limit=10&client_id=${encodeURIComponent(clientId)}&key=network.port_speed`,
+          apiToken,
+        );
+        const matching = rows.filter(
+          (row) => row.client_id === clientId && row.key === "network.port_speed",
+        );
+        if (matching.length > 1) {
+          throw new Error(`Multiple port-speed rules were returned for ${clientId}`);
+        }
+        return [
+          clientId,
+          matching.length === 0 ? null : portSpeedFromRule(matching[0]),
+        ] as const;
+      }),
+    )
+      .then((entries) => {
+        if (!active) return;
+        setPortSpeedResolution({
+          selectionKey: portSpeedSelectionKey,
+          speeds: Object.fromEntries(entries),
+          status: "ready",
+        });
+      })
+      .catch(() => {
+        if (!active) return;
+        setPortSpeedResolution({
+          selectionKey: portSpeedSelectionKey,
+          speeds: {},
+          status: "error",
+        });
+      });
+    return () => {
+      active = false;
+    };
+  }, [apiToken, initialPlan, portSpeedClientIds, portSpeedSelectionKey]);
+
+  const bandwidthSuggestion = useMemo(
+    () => tunnelBandwidthSuggestion(
+      portSpeedClientIds,
+      portSpeedSelectionKey,
+      portSpeedResolution,
+    ),
+    [portSpeedClientIds, portSpeedResolution, portSpeedSelectionKey],
+  );
+  useEffect(() => {
+    const suggestedValue = bandwidthSuggestion.value;
+    if (initialPlan || !autoFillOwnership.bandwidth || suggestedValue === null) {
+      return;
+    }
+    setSnapshot(null);
+    setForm((current) => current.bandwidthMbps === suggestedValue
+      ? current
+      : { ...current, bandwidthMbps: suggestedValue });
+  }, [
+    autoFillOwnership.bandwidth,
+    bandwidthSuggestion.value,
+    initialPlan,
+  ]);
   const runtimeDefinitions = networkAdapterDefinitions.filter(
     (definition) => definition.adapter_kind === "runtime_tunnel",
   );
@@ -1600,10 +1632,10 @@ function TunnelPlanComposer({
           </div>
           <div className="topologyFormGrid threeColumn tunnelEndpointUnderlayGrid">
             <Field label="Left VPS"><VpsCombobox agents={agents} ariaLabel="Left tunnel VPS" excludeIds={form.rightClientId ? [form.rightClientId] : []} onChange={(value) => update("leftClientId", value)} value={form.leftClientId} /></Field>
-            <Field label="Left remote destination" tooltip="Outer destination reached from the left VPS. Enter the peer's public or NAT address; vpsman never derives it from the right-side fields."><input aria-label="Left remote underlay destination" onChange={(event) => update("leftRemoteUnderlay", event.target.value)} placeholder="203.0.113.20" required value={form.leftRemoteUnderlay} /></Field>
+            <Field label="Left remote destination" tooltip="Outer destination reached from the left VPS. For a new plan, vpsman suggests only the right VPS's latest panel-connection IP when compatible. The value remains editable; interface addresses are never inferred."><input aria-label="Left remote underlay destination" onChange={(event) => { setAutoFillOwnership((current) => ({ ...current, leftRemote: false })); update("leftRemoteUnderlay", event.target.value); }} placeholder="Peer destination IP" required value={form.leftRemoteUnderlay} /></Field>
             <Field label="Left local source" tooltip="Optional outer-packet source bound on the left VPS. It may be a private interface address behind NAT. Leave empty to let the OS route choose."><input aria-label="Left local underlay source" onChange={(event) => update("leftLocalUnderlay", event.target.value)} placeholder="Automatic" value={form.leftLocalUnderlay} /></Field>
             <Field label="Right VPS"><VpsCombobox agents={agents} ariaLabel="Right tunnel VPS" excludeIds={form.leftClientId ? [form.leftClientId] : []} onChange={(value) => update("rightClientId", value)} value={form.rightClientId} /></Field>
-            <Field label="Right remote destination" tooltip="Outer destination reached from the right VPS. Enter the peer's public or NAT address; vpsman never derives it from the left-side fields."><input aria-label="Right remote underlay destination" onChange={(event) => update("rightRemoteUnderlay", event.target.value)} placeholder="198.51.100.10" required value={form.rightRemoteUnderlay} /></Field>
+            <Field label="Right remote destination" tooltip="Outer destination reached from the right VPS. For a new plan, vpsman suggests only the left VPS's latest panel-connection IP when compatible. The value remains editable; interface addresses are never inferred."><input aria-label="Right remote underlay destination" onChange={(event) => { setAutoFillOwnership((current) => ({ ...current, rightRemote: false })); update("rightRemoteUnderlay", event.target.value); }} placeholder="Peer destination IP" required value={form.rightRemoteUnderlay} /></Field>
             <Field label="Right local source" tooltip="Optional outer-packet source bound on the right VPS. It may be a private interface address behind NAT. Leave empty to let the OS route choose."><input aria-label="Right local underlay source" onChange={(event) => update("rightLocalUnderlay", event.target.value)} placeholder="Automatic" value={form.rightLocalUnderlay} /></Field>
           </div>
         </fieldset>
@@ -1630,17 +1662,20 @@ function TunnelPlanComposer({
           )}
           {form.runtimeManager !== "external_observed" && (
             <div className="topologyFormGrid fourColumn compactNumericGrid">
-              <Field label="Ingress limit" tooltip="Optional ingress limit from 64 to 1000000 Kbps."><UnitInput ariaLabel="Ingress limit" max={1_000_000} min={64} onChange={(value) => update("ingressKbps", value)} unit="Kbps" value={form.ingressKbps} /></Field>
-              <Field label="Egress limit" tooltip="Optional egress limit from 64 to 1000000 Kbps."><UnitInput ariaLabel="Egress limit" max={1_000_000} min={64} onChange={(value) => update("egressKbps", value)} unit="Kbps" value={form.egressKbps} /></Field>
+              <Field label="Ingress limit" tooltip="Optional ingress shaping limit from 0.064 to 1000 Mbps. This remains separate from display-only port speed."><UnitInput ariaLabel="Ingress limit" max={1_000} min={0.064} onChange={(value) => update("ingressMbps", value)} step="0.001" unit="Mbps" value={form.ingressMbps} /></Field>
+              <Field label="Egress limit" tooltip="Optional egress shaping limit from 0.064 to 1000 Mbps. This remains separate from display-only port speed."><UnitInput ariaLabel="Egress limit" max={1_000} min={0.064} onChange={(value) => update("egressMbps", value)} step="0.001" unit="Mbps" value={form.egressMbps} /></Field>
               <Field label="Burst" tooltip="Optional traffic shaping burst from 1 to 1048576 KiB."><UnitInput ariaLabel="Traffic burst" max={1_048_576} min={1} onChange={(value) => update("burstKb", value)} unit="KiB" value={form.burstKb} /></Field>
-              <Field label="Bandwidth" tooltip="Operator-declared planning bandwidth from 10 to 10000 Mbps."><UnitInput ariaLabel="Tunnel bandwidth" max={MAX_TUNNEL_BANDWIDTH_MBPS} min={MIN_TUNNEL_BANDWIDTH_MBPS} onChange={(value) => update("bandwidthMbps", value)} required unit="Mbps" value={form.bandwidthMbps} /></Field>
+              <Field label="Bandwidth" tooltip="Operator-declared planning bandwidth from 10 to 10000 Mbps. New plans use one configured endpoint port speed, or the lower of both, when that value fits the tunnel model."><UnitInput ariaLabel="Tunnel bandwidth" max={MAX_TUNNEL_BANDWIDTH_MBPS} min={MIN_TUNNEL_BANDWIDTH_MBPS} onChange={(value) => { setAutoFillOwnership((current) => ({ ...current, bandwidth: false })); update("bandwidthMbps", value); }} required unit="Mbps" value={form.bandwidthMbps} /></Field>
             </div>
           )}
           {form.runtimeManager === "external_observed" && (
             <div className="topologyFormGrid twoColumn compactNumericGrid">
-              <Field label="Bandwidth" tooltip="Operator-declared planning bandwidth from 10 to 10000 Mbps."><UnitInput ariaLabel="Tunnel bandwidth" max={MAX_TUNNEL_BANDWIDTH_MBPS} min={MIN_TUNNEL_BANDWIDTH_MBPS} onChange={(value) => update("bandwidthMbps", value)} required unit="Mbps" value={form.bandwidthMbps} /></Field>
+              <Field label="Bandwidth" tooltip="Operator-declared planning bandwidth from 10 to 10000 Mbps. New plans use one configured endpoint port speed, or the lower of both, when that value fits the tunnel model."><UnitInput ariaLabel="Tunnel bandwidth" max={MAX_TUNNEL_BANDWIDTH_MBPS} min={MIN_TUNNEL_BANDWIDTH_MBPS} onChange={(value) => { setAutoFillOwnership((current) => ({ ...current, bandwidth: false })); update("bandwidthMbps", value); }} required unit="Mbps" value={form.bandwidthMbps} /></Field>
             </div>
           )}
+          {!initialPlan && bandwidthSuggestion.detail ? (
+            <span className="formHint">{bandwidthSuggestion.detail}</span>
+          ) : null}
           {form.kind === "fou" && form.runtimeManager !== "external_observed" && (
             <div className="topologyFormGrid threeColumn compactNumericGrid">
               <Field label="FOU port" tooltip="UDP port registered locally by ip fou on each endpoint."><UnitInput ariaLabel="FOU local port" max={65535} min={1} onChange={(value) => update("fouPort", value)} unit="port" value={form.fouPort} /></Field>
@@ -2064,7 +2099,7 @@ function initialTunnelPlanForm(): TunnelPlanForm {
     bandwidthWeight: String(DEFAULT_OSPF_POLICY.bandwidth_weight),
     burstKb: "",
     desiredInterfaces: "",
-    egressKbps: "",
+    egressMbps: "",
     enabled: false,
     fouIpProto: "4",
     fouPeerPort: "5555",
@@ -2072,7 +2107,7 @@ function initialTunnelPlanForm(): TunnelPlanForm {
     healthyWindows: "2",
     includeIpv4: true,
     includeIpv6: false,
-    ingressKbps: "",
+    ingressMbps: "",
     interfaceName: "",
     ipv4Pool: "",
     ipv4Prefix: "31",
@@ -2128,7 +2163,7 @@ function tunnelPlanFormFromRecord(record: TunnelPlanRecord): TunnelPlanForm {
     bandwidthWeight: String(policy.bandwidth_weight),
     burstKb: optionalNumberText(traffic.burst_kb),
     desiredInterfaces: (topology.desired_interfaces ?? []).join("\n"),
-    egressKbps: optionalNumberText(traffic.egress_kbps),
+    egressMbps: kbpsToMbpsText(traffic.egress_kbps),
     enabled: record.enabled,
     fouIpProto: String(fou.ipproto),
     fouPeerPort: String(fou.peer_port),
@@ -2136,7 +2171,7 @@ function tunnelPlanFormFromRecord(record: TunnelPlanRecord): TunnelPlanForm {
     healthyWindows: String(ospf?.healthy_windows ?? 2),
     includeIpv4: Boolean(input.ipv4_tunnel),
     includeIpv6: Boolean(input.ipv6_tunnel),
-    ingressKbps: optionalNumberText(traffic.ingress_kbps),
+    ingressMbps: kbpsToMbpsText(traffic.ingress_kbps),
     interfaceName: input.interface_name,
     ipv4Pool: input.address_pool_cidr,
     ipv4Prefix: String(input.ipv4_tunnel?.prefix_len ?? 31),
@@ -2193,6 +2228,15 @@ function optionalNumberText(value: number | null | undefined): string {
   return value === null || value === undefined ? "" : String(value);
 }
 
+function kbpsToMbpsText(value: number | null | undefined): string {
+  return value === null || value === undefined ? "" : String(value / 1_000);
+}
+
+function mbpsToKbpsText(value: string): string {
+  if (!value.trim()) return "";
+  return String(Math.round(Number(value) * 1_000));
+}
+
 function validateTunnelPlanForm(form: TunnelPlanForm): string | null {
   if (!form.name.trim()) return "Plan name is required";
   if (form.name.trim().length > 128) return "Plan name must be 128 characters or fewer";
@@ -2217,8 +2261,8 @@ function validateTunnelPlanForm(form: TunnelPlanForm): string | null {
   const bandwidth = Number(form.bandwidthMbps);
   if (!Number.isInteger(bandwidth) || bandwidth < MIN_TUNNEL_BANDWIDTH_MBPS || bandwidth > MAX_TUNNEL_BANDWIDTH_MBPS) return `Bandwidth must be a whole number from ${MIN_TUNNEL_BANDWIDTH_MBPS} to ${MAX_TUNNEL_BANDWIDTH_MBPS} Mbps`;
   if (form.runtimeManager !== "external_observed") {
-    const trafficError = validateOptionalIntegerRange(form.ingressKbps, "Ingress limit", 64, 1_000_000)
-      ?? validateOptionalIntegerRange(form.egressKbps, "Egress limit", 64, 1_000_000)
+    const trafficError = validateOptionalMbpsLimit(form.ingressMbps, "Ingress limit")
+      ?? validateOptionalMbpsLimit(form.egressMbps, "Egress limit")
       ?? validateOptionalIntegerRange(form.burstKb, "Burst", 1, 1_048_576);
     if (trafficError) return trafficError;
   }
@@ -2267,6 +2311,25 @@ function validateTunnelPlanForm(form: TunnelPlanForm): string | null {
 
 function validateOptionalIntegerRange(value: string, label: string, min: number, max: number): string | null {
   return value.trim() ? validateIntegerRange(value, label, min, max) : null;
+}
+
+function validateOptionalMbpsLimit(value: string, label: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (!/^(?:0|[1-9]\d*)(?:\.\d{1,3})?$/.test(trimmed)) {
+    return `${label} must use Mbps with at most three decimal places`;
+  }
+  const parsed = Number(trimmed);
+  const kbps = parsed * 1_000;
+  if (
+    !Number.isFinite(parsed)
+    || parsed < 0.064
+    || parsed > 1_000
+    || Math.abs(kbps - Math.round(kbps)) > 0.000_001
+  ) {
+    return `${label} must be from 0.064 to 1000 Mbps in 0.001 Mbps steps`;
+  }
+  return null;
 }
 
 function validateIntegerRange(value: string, label: string, min: number, max: number): string | null {
@@ -2427,7 +2490,7 @@ function validateAdapterBindings(
     const right = rightRuntimeDefinitions.find((definition) => definition.id === form.rightRuntimeDefinitionId);
     if (form.leftRuntimeDefinitionId && !left) return "The left runtime adapter is no longer available for this VPS";
     if (form.rightRuntimeDefinitionId && !right) return "The right runtime adapter is no longer available for this VPS";
-    const hasTrafficLimit = [form.ingressKbps, form.egressKbps, form.burstKb]
+    const hasTrafficLimit = [form.ingressMbps, form.egressMbps, form.burstKb]
       .some((value) => value.trim() !== "");
     if (hasTrafficLimit && (!adapterHasDefinitionField(left, "traffic_limit_command") || !adapterHasDefinitionField(right, "traffic_limit_command"))) {
       return "Both selected runtime adapters must declare traffic_limit_command before this plan can apply traffic limits";
@@ -2460,11 +2523,11 @@ function adapterHasDefinitionField(
 function buildTunnelPlanRequest(form: TunnelPlanForm): CreateTunnelPlanRequest {
   const runtimeControl = buildRuntimeControl(form.runtimeManager, {
     burstKb: form.burstKb,
-    egressKbps: form.egressKbps,
+    egressKbps: mbpsToKbpsText(form.egressMbps),
     fouIpproto: form.kind === "fou" ? form.fouIpProto : undefined,
     fouPeerPort: form.kind === "fou" ? form.fouPeerPort : undefined,
     fouPort: form.kind === "fou" ? form.fouPort : undefined,
-    ingressKbps: form.ingressKbps,
+    ingressKbps: mbpsToKbpsText(form.ingressMbps),
     leftAdapterDefinitionId: form.leftRuntimeDefinitionId,
     rightAdapterDefinitionId: form.rightRuntimeDefinitionId,
   });
@@ -2625,8 +2688,8 @@ function createConfirmationItems(
     networkAdapterDefinitions.find((definition) => definition.id === definitionId)?.name
       ?? (definitionId ? shortId(definitionId) : "not bound");
   const trafficSummary = [
-    traffic?.ingress_kbps ? `ingress ${traffic.ingress_kbps} Kbps` : null,
-    traffic?.egress_kbps ? `egress ${traffic.egress_kbps} Kbps` : null,
+    traffic?.ingress_kbps ? `ingress ${kbpsToMbpsText(traffic.ingress_kbps)} Mbps` : null,
+    traffic?.egress_kbps ? `egress ${kbpsToMbpsText(traffic.egress_kbps)} Mbps` : null,
     traffic?.burst_kb ? `burst ${traffic.burst_kb} KiB` : null,
   ].filter(Boolean).join(", ") || "No shaping";
   const cleanupSummary = [
@@ -2799,12 +2862,116 @@ function safeFilename(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "tunnel-plan";
 }
 
+type PortSpeedRule = {
+  bps: number;
+  display: string;
+};
+
+type PortSpeedResolution = {
+  selectionKey: string;
+  speeds: Record<string, PortSpeedRule | null>;
+  status: "idle" | "loading" | "ready" | "error";
+};
+
+type TunnelBandwidthSuggestion = {
+  detail: string | null;
+  value: string | null;
+};
+
+function portSpeedFromRule(rule: VpsRuleValueRecord): PortSpeedRule {
+  if (rule.state !== "ok" || rule.validation_errors.length > 0) {
+    throw new Error(`Port-speed rule for ${rule.client_id} is invalid`);
+  }
+  const value = rule.value_json;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`Port-speed rule for ${rule.client_id} has no structured value`);
+  }
+  const fields = value as Record<string, unknown>;
+  const bps = fields.bps;
+  const display = fields.display;
+  if (
+    typeof bps !== "number"
+    || !Number.isSafeInteger(bps)
+    || bps <= 0
+    || typeof display !== "string"
+    || !display.trim()
+  ) {
+    throw new Error(`Port-speed rule for ${rule.client_id} is malformed`);
+  }
+  return { bps: Number(bps), display: display.trim() };
+}
+
+function tunnelBandwidthSuggestion(
+  clientIds: string[],
+  selectionKey: string,
+  resolution: PortSpeedResolution,
+): TunnelBandwidthSuggestion {
+  if (clientIds.length === 0) {
+    return {
+      detail: null,
+      value: String(DEFAULT_TUNNEL_BANDWIDTH_MBPS),
+    };
+  }
+  if (resolution.selectionKey !== selectionKey || resolution.status === "idle") {
+    return { detail: null, value: null };
+  }
+  if (resolution.status === "loading") {
+    return { detail: null, value: null };
+  }
+  if (resolution.status === "error") {
+    return { detail: null, value: "" };
+  }
+  const configured = clientIds
+    .map((clientId) => resolution.speeds[clientId] ?? null)
+    .filter((speed): speed is PortSpeedRule => speed !== null);
+  if (configured.length === 0) {
+    return {
+      detail: null,
+      value: String(DEFAULT_TUNNEL_BANDWIDTH_MBPS),
+    };
+  }
+  const minimum = configured.reduce((current, speed) =>
+    speed.bps < current.bps ? speed : current);
+  const exactMbps = minimum.bps / 1_000_000;
+  if (
+    !Number.isInteger(exactMbps)
+    || exactMbps < MIN_TUNNEL_BANDWIDTH_MBPS
+    || exactMbps > MAX_TUNNEL_BANDWIDTH_MBPS
+  ) {
+    return {
+      detail: null,
+      value: "",
+    };
+  }
+  const source = configured.length === 1
+    ? `${minimum.display} from the configured endpoint`
+    : `${configured.map((speed) => speed.display).join(" and ")}; lower value ${minimum.display}`;
+  return {
+    detail: `Planning bandwidth suggested from ${source}. This is editable and does not configure traffic shaping.`,
+    value: String(exactMbps),
+  };
+}
+
+function observedPeerAddress(
+  agents: AgentView[],
+  clientId: string,
+  manager: RuntimeTunnelManager,
+): string | null {
+  if (!clientId) return null;
+  const observed = agents.find((agent) => agent.id === clientId)?.last_ip?.trim();
+  if (!observed || !isIpAddress(observed)) return null;
+  if (manager === "agent_iproute2_managed" && !isIpv4Address(observed)) {
+    return null;
+  }
+  return observed;
+}
+
 type TunnelPlanForm = {
   bandwidthMbps: string;
   bandwidthWeight: string;
   burstKb: string;
   desiredInterfaces: string;
-  egressKbps: string;
+  egressMbps: string;
   enabled: boolean;
   fouIpProto: string;
   fouPeerPort: string;
@@ -2812,7 +2979,7 @@ type TunnelPlanForm = {
   healthyWindows: string;
   includeIpv4: boolean;
   includeIpv6: boolean;
-  ingressKbps: string;
+  ingressMbps: string;
   interfaceName: string;
   ipv4Pool: string;
   ipv4Prefix: string;
@@ -2872,6 +3039,7 @@ type DeleteSnapshot = {
 type TopologyPanelProps = {
   activeSubpage: string;
   agents: AgentView[];
+  apiToken: string;
   configurationSources: ConfigurationSourceView[];
   configurationSourcesEvidenceState: "available" | "loading" | "unavailable";
   error: string | null;

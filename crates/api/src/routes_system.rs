@@ -36,7 +36,7 @@ pub(crate) async fn system_dashboard(
     Query(query): Query<SystemDashboardQuery>,
 ) -> Result<Json<SystemDashboardView>, ApiError> {
     state.require_operator_scope(&headers, "fleet:read").await?;
-    let window = normalize_window(query.window.as_deref());
+    let window = validate_window(query.window.as_deref())?;
     let chart_points = query
         .chart_points
         .unwrap_or(DEFAULT_CHART_POINTS)
@@ -127,25 +127,36 @@ pub(crate) async fn collect_system_dashboard_snapshot(
     })
 }
 
-fn normalize_window(value: Option<&str>) -> &'static str {
-    match value.unwrap_or("24h").trim() {
+fn validate_window(value: Option<&str>) -> Result<&'static str, ApiError> {
+    let window = match value.unwrap_or("1d").trim() {
         "15m" => "15m",
         "1h" => "1h",
-        "6h" => "6h",
+        "8h" => "8h",
+        "1d" => "1d",
         "7d" => "7d",
         "30d" => "30d",
-        _ => "24h",
-    }
+        "90d" => "90d",
+        "180d" => "180d",
+        "1y" => "1y",
+        "all" => "all",
+        _ => return Err(ApiError::bad_request("invalid_system_dashboard_window")),
+    };
+    Ok(window)
 }
 
 fn window_seconds(window: &str) -> u64 {
     match window {
         "15m" => 900,
         "1h" => 3_600,
-        "6h" => 21_600,
+        "8h" => 28_800,
+        "1d" => 86_400,
         "7d" => 604_800,
         "30d" => 2_592_000,
-        _ => 86_400,
+        "90d" => 7_776_000,
+        "180d" => 15_552_000,
+        "1y" => 31_536_000,
+        "all" => u64::MAX,
+        _ => unreachable!("validated system dashboard window"),
     }
 }
 
@@ -271,5 +282,34 @@ fn system_metric_label_unit(metric: &str) -> (&'static str, &'static str) {
             ("Gateway rejected agent connections", "connections")
         }
         _ => ("System metric", "count"),
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::{validate_window, window_seconds};
+
+    #[test]
+    fn system_dashboard_uses_the_complete_monitoring_window_model() {
+        let expected = [
+            ("15m", 15 * 60),
+            ("1h", 60 * 60),
+            ("8h", 8 * 60 * 60),
+            ("1d", 24 * 60 * 60),
+            ("7d", 7 * 24 * 60 * 60),
+            ("30d", 30 * 24 * 60 * 60),
+            ("90d", 90 * 24 * 60 * 60),
+            ("180d", 180 * 24 * 60 * 60),
+            ("1y", 365 * 24 * 60 * 60),
+            ("all", u64::MAX),
+        ];
+        for (value, seconds) in expected {
+            assert_eq!(validate_window(Some(value)).unwrap(), value);
+            assert_eq!(window_seconds(value), seconds);
+        }
+        assert_eq!(validate_window(None).unwrap(), "1d");
+        assert!(validate_window(Some("6h")).is_err());
+        assert!(validate_window(Some("24h")).is_err());
+        assert!(validate_window(Some("14d")).is_err());
     }
 }

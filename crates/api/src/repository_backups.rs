@@ -14,6 +14,9 @@ use crate::{
         JobOutputView, ListQuery,
     },
     repository::Repository,
+    repository_key_lifecycle::{
+        require_visible_memory_clients, require_visible_postgres_clients_in_tx,
+    },
     unix_now,
     util::{
         compare_timestamps_desc, limit_or_default, offset_or_default, search_pattern,
@@ -450,8 +453,18 @@ impl Repository {
             note: request.note.clone(),
             created_at: unix_now().to_string(),
         };
+        let requires_live_target = status == BackupRequestStatus::RequestedMetadataOnly;
         match self {
             Self::Memory(memory) => {
+                let _lifecycle = memory.agent_key_lifecycle.lock().await;
+                if requires_live_target {
+                    require_visible_memory_clients(
+                        memory,
+                        std::slice::from_ref(&view.client_id),
+                        "backup_target_unavailable",
+                    )
+                    .await?;
+                }
                 memory.backup_requests.write().await.push(view.clone());
                 memory.audits.write().await.push(backup_request_audit(
                     &view,
@@ -462,6 +475,14 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                if requires_live_target {
+                    require_visible_postgres_clients_in_tx(
+                        &mut tx,
+                        std::slice::from_ref(&view.client_id),
+                        "backup_target_unavailable",
+                    )
+                    .await?;
+                }
                 let row = sqlx::query(
                     r#"
                     INSERT INTO backup_requests (

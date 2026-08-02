@@ -42,7 +42,7 @@ async fn records_network_observation_summaries_from_status_outputs() {
     .await
     .unwrap();
 
-    let observations = repo.list_network_observations(10).await.unwrap();
+    let observations = repo.list_network_observations(10, false).await.unwrap();
 
     assert_eq!(observations.len(), 1);
     assert_eq!(observations[0].kind, "network_probe");
@@ -86,7 +86,7 @@ async fn memory_network_observation_ordering_handles_mixed_timestamp_formats() {
         observation(Uuid::new_v4(), "1970-01-01T00:16:40Z"),
     ]);
 
-    let latest = repo.list_network_observations(1).await.unwrap();
+    let latest = repo.list_network_observations(1, false).await.unwrap();
     assert_eq!(latest[0].observed_at, "1970-01-01T00:16:40Z");
 
     let capped = repo
@@ -96,7 +96,10 @@ async fn memory_network_observation_ordering_handles_mixed_timestamp_formats() {
     assert_eq!(capped.len(), 1);
     assert_eq!(capped[0].observed_at, "1970-01-01T00:16:40Z");
 
-    let trends = repo.list_network_observation_trends(10).await.unwrap();
+    let trends = repo
+        .list_network_observation_trends(10, false)
+        .await
+        .unwrap();
     assert_eq!(trends.len(), 1);
     assert_eq!(trends[0].latest_observed_at, "1970-01-01T00:16:40Z");
 }
@@ -171,7 +174,10 @@ async fn rolls_up_network_observation_trends_by_plan_and_endpoint() {
     .await
     .unwrap();
 
-    let trends = repo.list_network_observation_trends(10).await.unwrap();
+    let trends = repo
+        .list_network_observation_trends(10, false)
+        .await
+        .unwrap();
     let probe = trends
         .iter()
         .find(|trend| trend.kind == "network_probe")
@@ -613,7 +619,11 @@ async fn topology_graph_ignores_observations_from_reused_plan_name_with_differen
     )
     .await
     .unwrap();
-    let old_observation = repo.list_network_observations(10).await.unwrap().remove(0);
+    let old_observation = repo
+        .list_network_observations(10, false)
+        .await
+        .unwrap()
+        .remove(0);
     assert!(old_observation.plan_id.is_some());
     assert!(old_observation.topology_identity_hash.is_some());
 
@@ -982,6 +992,8 @@ async fn topology_graph_exposes_explicit_runtime_status_coverage() {
 #[tokio::test]
 async fn recommends_ospf_cost_from_probe_and_speed_trends() {
     let repo = Repository::Memory(MemoryState::default());
+    crate::tests_network::seed_online_agent(&repo, "left-a").await;
+    crate::tests_network::seed_online_agent(&repo, "right-b").await;
     let operator = AuthContext {
         operator: OperatorView {
             id: Uuid::nil(),

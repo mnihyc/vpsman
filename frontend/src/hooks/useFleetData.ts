@@ -75,6 +75,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     token: string;
     promise: Promise<void>;
   } | null>(null);
+  const deletedClientIds = useRef(new Set<string>());
   const fleetSourceErrors = useRef<
     Partial<Record<FleetErrorSource, string>>
   >({});
@@ -234,22 +235,37 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       if (snapshotIsCurrent) {
         const summaryResult = coreResults[0];
         const agentsResult = coreResults[1];
+        const nextAgents =
+          agentsResult.status === "fulfilled"
+            ? (agentsResult.value as AgentView[])
+            : null;
+        const staleDeletedIds = nextAgents
+          ? deletedIdsInAgentSnapshot(nextAgents, deletedClientIds.current)
+          : [];
         setFleetCoreEvidenceAvailable(
-          coreResults.every((result) => result.status === "fulfilled"),
+          coreResults.every((result) => result.status === "fulfilled") &&
+            staleDeletedIds.length === 0,
         );
-        if (summaryResult.status === "fulfilled") {
+        if (
+          summaryResult.status === "fulfilled" &&
+          staleDeletedIds.length === 0
+        ) {
           setSummary(summaryResult.value as FleetSummary);
         }
-        if (agentsResult.status === "fulfilled") {
-          setAgents(agentsResult.value as AgentView[]);
+        if (nextAgents) {
+          setAgents(
+            withoutDeletedAgents(nextAgents, deletedClientIds.current),
+          );
         }
         publishFleetError(
           "core",
-          unavailableSourceSummary(
-            "Core fleet sources are unavailable",
-            coreResults,
-            FLEET_CORE_SOURCE_LABELS,
-          ),
+          staleDeletedIds.length > 0
+            ? staleFleetSnapshotMessage(staleDeletedIds)
+            : unavailableSourceSummary(
+                "Core fleet sources are unavailable",
+                coreResults,
+                FLEET_CORE_SOURCE_LABELS,
+              ),
         );
       }
       if (fullLoadIsCurrent) {
@@ -261,12 +277,28 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
             .slice(2, 5)
             .every((result) => result.status === "fulfilled"),
         );
-        applyOptionalValue<FleetAlertRecord[]>(0, setFleetAlerts);
+        applyOptionalValue<FleetAlertRecord[]>(0, (rows) =>
+          setFleetAlerts(
+            withoutDeletedClients(rows, deletedClientIds.current),
+          ),
+        );
         applyOptionalValue<FleetAlertStateRecord[]>(1, setFleetAlertStates);
         applyOptionalValue<FleetAlertPolicyRecord[]>(2, setFleetAlertPolicies);
-        applyOptionalValue<VpsRuleValueRecord[]>(3, setVpsRuleValues);
-        applyOptionalValue<TrafficAccountingRecord[]>(4, setTrafficAccounting);
-        applyOptionalValue<PolicyAlertRecord[]>(5, setPolicyAlerts);
+        applyOptionalValue<VpsRuleValueRecord[]>(3, (rows) =>
+          setVpsRuleValues(
+            withoutDeletedClients(rows, deletedClientIds.current),
+          ),
+        );
+        applyOptionalValue<TrafficAccountingRecord[]>(4, (rows) =>
+          setTrafficAccounting(
+            withoutDeletedClients(rows, deletedClientIds.current),
+          ),
+        );
+        applyOptionalValue<PolicyAlertRecord[]>(5, (rows) =>
+          setPolicyAlerts(
+            withoutDeletedClients(rows, deletedClientIds.current),
+          ),
+        );
         applyOptionalValue<FleetAlertNotificationChannelRecord[]>(
           6,
           setFleetAlertNotificationChannels,
@@ -290,12 +322,23 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         );
       }
       if (snapshotIsCurrent) {
-        applyOptionalValue<TelemetryRollupRecord[]>(10, setTelemetryRollups);
+        applyOptionalValue<TelemetryRollupRecord[]>(10, (rows) =>
+          setTelemetryRollups(
+            withoutDeletedClients(rows, deletedClientIds.current),
+          ),
+        );
         applyOptionalValue<TelemetryNetworkRateRecord[]>(
           11,
-          setTelemetryNetworkRates,
+          (rows) =>
+            setTelemetryNetworkRates(
+              withoutDeletedClients(rows, deletedClientIds.current),
+            ),
         );
-        applyOptionalValue<TelemetryTunnelRecord[]>(12, setTelemetryTunnels);
+        applyOptionalValue<TelemetryTunnelRecord[]>(12, (rows) =>
+          setTelemetryTunnels(
+            withoutDeletedClients(rows, deletedClientIds.current),
+          ),
+        );
         publishFleetError(
           "telemetry",
           unavailableSourceSummary(
@@ -400,34 +443,53 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         }
         const summaryResult = coreResults[0];
         const agentsResult = coreResults[1];
+        const nextAgents =
+          agentsResult.status === "fulfilled" ? agentsResult.value : null;
+        const staleDeletedIds = nextAgents
+          ? deletedIdsInAgentSnapshot(nextAgents, deletedClientIds.current)
+          : [];
         setFleetCoreEvidenceAvailable(
-          coreResults.every((result) => result.status === "fulfilled"),
+          coreResults.every((result) => result.status === "fulfilled") &&
+            staleDeletedIds.length === 0,
         );
-        if (summaryResult.status === "fulfilled") {
+        if (
+          summaryResult.status === "fulfilled" &&
+          staleDeletedIds.length === 0
+        ) {
           setSummary(summaryResult.value as FleetSummary);
         }
-        if (agentsResult.status === "fulfilled") {
-          setAgents(agentsResult.value as AgentView[]);
+        if (nextAgents) {
+          setAgents(
+            withoutDeletedAgents(nextAgents, deletedClientIds.current),
+          );
         }
         publishFleetError(
           "core",
-          unavailableSourceSummary(
-            "Core fleet sources are unavailable",
-            coreResults,
-            FLEET_CORE_SOURCE_LABELS,
-          ),
+          staleDeletedIds.length > 0
+            ? staleFleetSnapshotMessage(staleDeletedIds)
+            : unavailableSourceSummary(
+                "Core fleet sources are unavailable",
+                coreResults,
+                FLEET_CORE_SOURCE_LABELS,
+              ),
         );
         const rollups = telemetryResults[0];
         const rates = telemetryResults[1];
         const tunnels = telemetryResults[2];
         if (rollups.status === "fulfilled") {
-          setTelemetryRollups(rollups.value);
+          setTelemetryRollups(
+            withoutDeletedClients(rollups.value, deletedClientIds.current),
+          );
         }
         if (rates.status === "fulfilled") {
-          setTelemetryNetworkRates(rates.value);
+          setTelemetryNetworkRates(
+            withoutDeletedClients(rates.value, deletedClientIds.current),
+          );
         }
         if (tunnels.status === "fulfilled") {
-          setTelemetryTunnels(tunnels.value);
+          setTelemetryTunnels(
+            withoutDeletedClients(tunnels.value, deletedClientIds.current),
+          );
         }
         publishFleetError(
           "telemetry",
@@ -486,12 +548,22 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         return;
       }
       fleetSnapshotGeneration.current += 1;
+      const staleDeletedIds = deletedIdsInAgentSnapshot(
+        nextAgents,
+        deletedClientIds.current,
+      );
+      setAgents(withoutDeletedAgents(nextAgents, deletedClientIds.current));
+      if (staleDeletedIds.length > 0) {
+        setFleetCoreEvidenceAvailable(false);
+        publishFleetError("core", staleFleetSnapshotMessage(staleDeletedIds));
+        void loadFleet();
+        return;
+      }
       setSummary(nextSummary);
-      setAgents(nextAgents);
       setFleetCoreEvidenceAvailable(true);
       publishFleetError("core", null);
     },
-    [apiToken, publishFleetError],
+    [apiToken, loadFleet, publishFleetError],
   );
 
   const updateAgentAlias = useCallback(
@@ -526,8 +598,30 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       if (apiTokenRef.current !== apiToken) {
         return response;
       }
+      deletedClientIds.current.add(response.client_id);
       setAgents((current) =>
         current.filter((agent) => agent.id !== response.client_id),
+      );
+      setFleetAlerts((current) =>
+        current.filter((alert) => alert.client_id !== response.client_id),
+      );
+      setVpsRuleValues((current) =>
+        current.filter((rule) => rule.client_id !== response.client_id),
+      );
+      setTrafficAccounting((current) =>
+        current.filter((record) => record.client_id !== response.client_id),
+      );
+      setPolicyAlerts((current) =>
+        current.filter((alert) => alert.client_id !== response.client_id),
+      );
+      setTelemetryRollups((current) =>
+        current.filter((record) => record.client_id !== response.client_id),
+      );
+      setTelemetryNetworkRates((current) =>
+        current.filter((record) => record.client_id !== response.client_id),
+      );
+      setTelemetryTunnels((current) =>
+        current.filter((record) => record.client_id !== response.client_id),
       );
       await loadFleet();
       return response;
@@ -876,6 +970,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     fleetSnapshotGeneration.current += 1;
     fleetTelemetryInFlight.current = null;
     fleetSourceErrors.current = {};
+    deletedClientIds.current.clear();
     setSummary(emptySummary);
     setAgents([]);
     setFleetAlerts([]);
@@ -954,4 +1049,48 @@ function unavailableSourceSummary(
   return failedLabels.length > 0
     ? `${prefix}: ${failedLabels.join(", ")}`
     : null;
+}
+
+function withoutDeletedClients<T extends { client_id?: string | null }>(
+  rows: T[],
+  deletedClientIds: ReadonlySet<string>,
+): T[] {
+  if (deletedClientIds.size === 0) {
+    return rows;
+  }
+  return rows.filter(
+    (row) => !row.client_id || !deletedClientIds.has(row.client_id),
+  );
+}
+
+function withoutDeletedAgents(
+  agents: AgentView[],
+  deletedClientIds: ReadonlySet<string>,
+): AgentView[] {
+  if (deletedClientIds.size === 0) {
+    return agents;
+  }
+  return agents.filter((agent) => !deletedClientIds.has(agent.id));
+}
+
+function deletedIdsInAgentSnapshot(
+  agents: AgentView[],
+  deletedClientIds: ReadonlySet<string>,
+): string[] {
+  if (deletedClientIds.size === 0) {
+    return [];
+  }
+  return Array.from(
+    new Set(
+      agents
+        .map((agent) => agent.id)
+        .filter((clientId) => deletedClientIds.has(clientId)),
+    ),
+  ).sort();
+}
+
+function staleFleetSnapshotMessage(clientIds: string[]): string {
+  return `Ignored stale fleet data for permanently deleted VPS ${clientIds.join(
+    ", ",
+  )}; refreshing authoritative inventory`;
 }

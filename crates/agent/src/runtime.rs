@@ -59,7 +59,7 @@ use crate::{
     restore_rollback::{execute_restore_rollback_command, RestoreRollbackCommandInput},
     runtime_config_cache::RuntimeConfigCache,
     supervisor::reconcile_supervised_processes_on_start,
-    telemetry::{collect_metrics_for_config, TelemetryRuntimeState},
+    telemetry::{collect_metrics_for_config, TelemetryRuntimeState, GENERAL_PING_INTERVAL_SECS},
     terminal::{
         close_all_terminal_sessions_for_lifecycle, control_terminal_session,
         drain_pending_terminal_final_events, execute_terminal_command_with_stream_sink,
@@ -197,6 +197,15 @@ fn endpoint_candidates(config: &AgentConfig) -> Vec<ServerEndpoint> {
     endpoints
 }
 
+fn effective_telemetry_interval_secs(configured_secs: u64, has_ping_targets: bool) -> u64 {
+    let configured_secs = configured_secs.max(5);
+    if has_ping_targets {
+        configured_secs.min(GENERAL_PING_INTERVAL_SECS)
+    } else {
+        configured_secs
+    }
+}
+
 async fn connect_and_stream(
     config: &mut AgentConfig,
     config_path: &Path,
@@ -273,9 +282,10 @@ async fn connect_and_stream(
     }
     resume_active_commands(&mut stream, &mut seq, command_runtime).await?;
     let mut telemetry_runtime_state = TelemetryRuntimeState::default();
-    let mut ticker = time::interval(Duration::from_secs(
-        server_hello.telemetry_interval_secs.max(5),
-    ));
+    let mut ticker = time::interval(Duration::from_secs(effective_telemetry_interval_secs(
+        server_hello.telemetry_interval_secs,
+        !config.network.ping_targets.is_empty(),
+    )));
     let mut unmanaged_update_schedule = UnmanagedUpdateSchedule::new(config);
     let mut unmanaged_update_sleep =
         Box::pin(time::sleep_until(unmanaged_update_schedule.next_due()));
@@ -313,7 +323,12 @@ async fn connect_and_stream(
                             },
                         )
                         .await? {
-                            ticker = time::interval(Duration::from_secs(config.telemetry_interval_secs.max(5)));
+                            ticker = time::interval(Duration::from_secs(
+                                effective_telemetry_interval_secs(
+                                    config.telemetry_interval_secs,
+                                    !config.network.ping_targets.is_empty(),
+                                ),
+                            ));
                             unmanaged_update_schedule = UnmanagedUpdateSchedule::new(config);
                             unmanaged_update_sleep.as_mut().reset(unmanaged_update_schedule.next_due());
                         }
@@ -420,7 +435,12 @@ async fn connect_and_stream(
                             let config_update = result.config_update.take();
                             if let Some(next_config) = config_update {
                                 *config = next_config;
-                                ticker = time::interval(Duration::from_secs(config.telemetry_interval_secs.max(5)));
+                                ticker = time::interval(Duration::from_secs(
+                                    effective_telemetry_interval_secs(
+                                        config.telemetry_interval_secs,
+                                        !config.network.ping_targets.is_empty(),
+                                    ),
+                                ));
                                 unmanaged_update_schedule = UnmanagedUpdateSchedule::new(config);
                                 unmanaged_update_sleep.as_mut().reset(unmanaged_update_schedule.next_due());
                             }
@@ -2684,6 +2704,14 @@ async fn finish_active_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ping_targets_bound_telemetry_publish_cadence_to_one_minute() {
+        assert_eq!(effective_telemetry_interval_secs(3_600, true), 60);
+        assert_eq!(effective_telemetry_interval_secs(30, true), 30);
+        assert_eq!(effective_telemetry_interval_secs(3_600, false), 3_600);
+        assert_eq!(effective_telemetry_interval_secs(1, false), 5);
+    }
 
     #[test]
     fn configured_os_release_read_failure_is_explicit() {

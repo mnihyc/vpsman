@@ -5,16 +5,17 @@ import type {
   SuiteConfigUpdateResponse,
   SuiteConfigValidateResponse,
   SystemDashboardRecord,
+  DashboardWindow,
 } from "../types";
 
-export type SystemDashboardWindow = "15m" | "1h" | "6h" | "24h" | "7d" | "30d";
+export type SystemDashboardWindow = DashboardWindow;
 export type SystemDashboardPointDensity = "compact" | "balanced" | "dense";
 
 export function useSystemData(apiToken: string, onUnauthorized: () => void) {
   const [systemDashboard, setSystemDashboard] = useState<SystemDashboardRecord | null>(null);
   const [systemDashboardLoading, setSystemDashboardLoading] = useState(false);
   const [systemDashboardError, setSystemDashboardError] = useState<string | null>(null);
-  const [systemDashboardWindow, setSystemDashboardWindow] = useState<SystemDashboardWindow>("24h");
+  const [systemDashboardWindow, setSystemDashboardWindow] = useState<SystemDashboardWindow>("1d");
   const [systemDashboardPointDensity, setSystemDashboardPointDensity] = useState<SystemDashboardPointDensity>("balanced");
   const [suiteConfig, setSuiteConfig] = useState<SuiteConfigResponse | null>(null);
   const [suiteConfigLoading, setSuiteConfigLoading] = useState(false);

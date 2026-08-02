@@ -14,6 +14,9 @@ use crate::{
     },
     repository::Repository,
     repository_jobs::JobCreatedWebhookEvent,
+    repository_key_lifecycle::{
+        require_visible_memory_clients, require_visible_postgres_clients_in_tx,
+    },
     unix_now,
     util::{limit_or_default, offset_or_default, search_pattern, sort_descending},
 };
@@ -269,6 +272,13 @@ impl Repository {
         let view = migration_link_view_from_request(request, restore_plan, operator, status);
         match self {
             Self::Memory(memory) => {
+                let _lifecycle = memory.agent_key_lifecycle.lock().await;
+                require_visible_memory_clients(
+                    memory,
+                    std::slice::from_ref(&view.target_client_id),
+                    "migration_target_unavailable",
+                )
+                .await?;
                 if memory
                     .migration_links
                     .read()
@@ -288,6 +298,12 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                require_visible_postgres_clients_in_tx(
+                    &mut tx,
+                    std::slice::from_ref(&view.target_client_id),
+                    "migration_target_unavailable",
+                )
+                .await?;
                 let row = sqlx::query(
                     r#"
                     INSERT INTO migration_links (
@@ -384,6 +400,13 @@ impl Repository {
             .max(1);
         let persisted_link = match self {
             Self::Memory(memory) => {
+                let _lifecycle = memory.agent_key_lifecycle.lock().await;
+                require_visible_memory_clients(
+                    memory,
+                    resolved_targets,
+                    "migration_target_unavailable",
+                )
+                .await?;
                 let created_at = unix_now().to_string();
                 let mut links = memory.migration_links.write().await;
                 let mut jobs = memory.jobs.write().await;
@@ -487,6 +510,12 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                require_visible_postgres_clients_in_tx(
+                    &mut tx,
+                    resolved_targets,
+                    "migration_target_unavailable",
+                )
+                .await?;
                 let locked_restore_plan_id: Option<Uuid> = sqlx::query_scalar(
                     r#"
                     SELECT id

@@ -1,7 +1,8 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { backupId, installConsoleApiMock } from "./support/consoleLayoutFixtures";
+import { backupId, installConsoleApiMock,
+} from "./support/consoleLayoutFixtures";
 import {
   activate,
   openConsoleSubpage,
@@ -9,14 +10,16 @@ import {
   waitForConsoleShell,
 } from "./support/consoleNavigation";
 
-test.skip(!process.env.VPSMAN_VISUAL_AUDIT, "manual confirmation prompt screenshots only");
+test.skip(!process.env.VPSMAN_VISUAL_AUDIT, "manual confirmation prompt screenshots only",
+);
 test.setTimeout(120_000);
 
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
 });
 
-test("captures reviewed confirmation prompts in operator workflows", async ({ page }, testInfo) => {
+test("captures reviewed confirmation prompts in operator workflows", async ({ page,
+}, testInfo) => {
   const outputDir = process.env.VPSMAN_VISUAL_AUDIT_DIR
     ? join(process.env.VPSMAN_VISUAL_AUDIT_DIR, testInfo.project.name)
     : testInfo.outputPath("confirmation-prompts-visual-audit");
@@ -68,11 +71,13 @@ async function captureTopologyLifecyclePrompt(
   manifest: Array<Record<string, unknown>>,
 ) {
   await openConsoleSubpage(page, "Network", "Tunnel plans");
-  await page.getByLabel("Select sfo-fra-gre").check();
-  await page
-    .getByRole("button", {
-      name: "Actions for 1 selected tunnel plan",
-    })
+  const grid = page.getByLabel("Tunnel plans data grid");
+  await grid
+    .getByLabel("Select Tunnel plans row dddddddd-eeee-4fff-8000-111111111111")
+    .check();
+  await grid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
     .click();
   await activate(page.getByRole("menuitem", { name: "Disable", exact: true }));
   await expect(page.getByLabel("Confirm tunnel plan disable")).toBeVisible();
@@ -108,23 +113,45 @@ async function captureTopologySavePrompt(
   });
   await composer.scrollIntoViewIfNeeded();
   await composer.getByLabel("Tunnel plan name").fill("visual-gre");
-  await composer.getByLabel("Tunnel interface", { exact: true }).fill("visgre0");
-  await chooseVpsBySearch(composer, "Left tunnel VPS", "sfo", /edge-sfo-01.*agent-sfo-01/);
-  await chooseVpsBySearch(composer, "Right tunnel VPS", "fra", /core-fra-02.*agent-fra-02/);
-  await composer.getByLabel("Left remote underlay destination").fill("203.0.113.20");
+  await composer
+    .getByLabel("Tunnel interface", { exact: true })
+    .fill("visgre0");
+  await chooseVpsBySearch(
+    composer,
+    "Left tunnel VPS",
+    "sfo",
+    /edge-sfo-01.*agent-sfo-01/,
+  );
+  await chooseVpsBySearch(
+    composer,
+    "Right tunnel VPS",
+    "fra",
+    /core-fra-02.*agent-fra-02/,
+  );
+  await composer
+    .getByLabel("Left remote underlay destination")
+    .fill("203.0.113.20");
   await composer.getByLabel("Left local underlay source").fill("10.0.0.10");
-  await composer.getByLabel("Right remote underlay destination").fill("198.51.100.10");
+  await composer
+    .getByLabel("Right remote underlay destination")
+    .fill("198.51.100.10");
   await composer.getByLabel("Right local underlay source").fill("10.0.1.20");
   await composer.getByLabel("IPv4 allocation pool").fill("10.255.60.0/30");
   await activate(composer.getByRole("button", { name: "Allocate" }));
-  await expect(composer.getByLabel("Left tunnel IPv4")).toHaveValue("10.255.50.0");
+  await expect(composer.getByLabel("Left tunnel IPv4")).toHaveValue(
+    "10.255.50.0",
+  );
   await activate(composer.getByRole("button", { name: "Review plan" }));
   const prompt = page.getByLabel("Confirm tunnel plan creation");
   await expect(prompt).toBeVisible();
   await expect(prompt).toContainText("Left outer path");
-  await expect(prompt).toContainText("Source 10.0.0.10 -> destination 203.0.113.20");
+  await expect(prompt).toContainText(
+    "Source 10.0.0.10 -> destination 203.0.113.20",
+  );
   await expect(prompt).toContainText("Right outer path");
-  await expect(prompt).toContainText("Source 10.0.1.20 -> destination 198.51.100.10");
+  await expect(prompt).toContainText(
+    "Source 10.0.1.20 -> destination 198.51.100.10",
+  );
   await capture(page, outputDir, manifest, "topology-save-confirm");
   await activate(page.getByRole("button", { name: "Close confirmation" }));
 }
@@ -144,9 +171,13 @@ async function captureArtifactDeletionPrompt(
     .getByRole("textbox", { name: "Expression", exact: true })
     .fill('artifact.domain = "file_transfer_source"');
   await cleanupPanel.getByRole("button", { name: "Preview" }).click();
-  await expect(cleanupPanel.getByLabel("Artifact cleanup readiness")).toContainText("Ready for confirmation");
+  await expect(
+    cleanupPanel.getByLabel("Artifact cleanup readiness"),
+  ).toContainText("Ready for confirmation");
   await cleanupPanel.getByRole("button", { name: "Delete artifacts" }).click();
-  await expect(page.getByRole("region", { name: "Confirm artifact deletion" })).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Confirm artifact deletion" }),
+  ).toBeVisible();
   await capture(page, outputDir, manifest, "artifact-cleanup-confirm");
   await activate(page.getByRole("button", { name: "Close confirmation" }));
 }
@@ -160,8 +191,15 @@ async function captureBackupRestoreRunPrompt(
   await openConsoleSubpage(page, "Backups", "Restore");
   await activate(page.getByRole("button", { name: "Choose restore artifact" }));
   const restoreWorkflow = page.getByLabel("Choose restore artifact");
-  await restoreWorkflow.getByLabel("Restore source backup request").selectOption(backupId);
-  await chooseVpsBySearch(restoreWorkflow, "Restore target client", "fra", /core-fra-02.*agent-fra-02/);
+  await restoreWorkflow
+    .getByLabel("Restore source backup request")
+    .selectOption(backupId);
+  await chooseVpsBySearch(
+    restoreWorkflow,
+    "Restore target client",
+    "fra",
+    /core-fra-02.*agent-fra-02/,
+  );
   await activate(
     restoreWorkflow.getByRole("button", { name: "Review draft restore" }),
   );
@@ -174,7 +212,9 @@ async function captureBackupRestoreRunPrompt(
     "agent-fra-02:50505050-2222-4333-8444-555555555555",
   );
   await restoreWorkflow.getByLabel("Restore max timeout seconds").fill("120");
-  await activate(restoreWorkflow.getByRole("button", { name: "Review dry run" }));
+  await activate(
+    restoreWorkflow.getByRole("button", { name: "Review dry run" }),
+  );
   await expect(restoreWorkflow.getByLabel("Confirm restore")).toBeVisible();
   await capture(page, outputDir, manifest, "backup-restore-run-confirm");
   await activate(page.getByRole("button", { name: "Close confirmation" }));
@@ -207,7 +247,10 @@ async function capture(
     layout.uncontainedOverflowCandidates,
     `${name} uncontained horizontal overflow candidates: ${JSON.stringify(layout.overflowCandidates)}`,
   ).toHaveLength(0);
-  const path = join(outputDir, `${name}-${page.viewportSize()?.width ?? "viewport"}.png`);
+  const path = join(
+    outputDir,
+    `${name}-${page.viewportSize()?.width ?? "viewport"}.png`,
+  );
   await page.screenshot({ fullPage: false, path });
   manifest.push({ name, path, ...layout });
 }
@@ -217,7 +260,11 @@ async function assertPromptReady(page: Page, prompt: Locator) {
   await releaseLiveToolbarFocus(page, prompt);
   await expect
     .poll(() =>
-      prompt.evaluate((element) => element === document.activeElement || element.contains(document.activeElement)),
+      prompt.evaluate(
+        (element) =>
+          element === document.activeElement ||
+          element.contains(document.activeElement),
+      ),
     )
     .toBe(true);
   const viewport = page.viewportSize();
@@ -285,7 +332,9 @@ async function assertPromptReady(page: Page, prompt: Locator) {
         return JSON.stringify({
           bottom: Math.round(box.bottom),
           contentScrollTop: content?.scrollTop ?? null,
-          drawerBodyBottom: drawerBodyBox ? Math.round(drawerBodyBox.bottom) : null,
+          drawerBodyBottom: drawerBodyBox
+            ? Math.round(drawerBodyBox.bottom)
+            : null,
           drawerBodyScrollTop: drawerBody?.scrollTop ?? null,
           drawerBodyTop: drawerBodyBox ? Math.round(drawerBodyBox.top) : null,
           height: Math.round(box.height),
@@ -306,7 +355,9 @@ async function releaseLiveToolbarFocus(page: Page, prompt: Locator) {
     return Boolean(active && toolbar?.contains(active));
   });
   if (liveToolbarHasFocus) {
-    await prompt.evaluate((element) => (element as HTMLElement).focus({ preventScroll: true }));
+    await prompt.evaluate((element) =>
+      (element as HTMLElement).focus({ preventScroll: true }),
+    );
   }
 }
 
@@ -322,7 +373,10 @@ async function collectLayoutSignals(page: Page) {
           style.overflowX === "scroll" ||
           style.overflow === "auto" ||
           style.overflow === "scroll";
-        if (allowsHorizontalScroll && current.scrollWidth > current.clientWidth + 1) {
+        if (
+          allowsHorizontalScroll &&
+          current.scrollWidth > current.clientWidth + 1
+        ) {
           return true;
         }
         current = current.parentElement;
@@ -339,7 +393,10 @@ async function collectLayoutSignals(page: Page) {
           left: Math.round(rect.left),
           right: Math.round(rect.right),
           tagName: element.tagName.toLowerCase(),
-          text: (element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 100),
+          text: (element.textContent ?? "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 100),
           title: element.getAttribute("title") ?? "",
           width: Math.round(rect.width),
         };
@@ -347,9 +404,14 @@ async function collectLayoutSignals(page: Page) {
       .filter((entry) => entry.right > viewportWidth + 1)
       .slice(0, 10);
     return {
-      horizontalOverflowPx: Math.max(0, document.documentElement.scrollWidth - viewportWidth),
+      horizontalOverflowPx: Math.max(
+        0,
+        document.documentElement.scrollWidth - viewportWidth,
+      ),
       overflowCandidates,
-      uncontainedOverflowCandidates: overflowCandidates.filter((entry) => !entry.clippedByScroller),
+      uncontainedOverflowCandidates: overflowCandidates.filter(
+        (entry) => !entry.clippedByScroller,
+      ),
       viewportWidth,
     };
   });

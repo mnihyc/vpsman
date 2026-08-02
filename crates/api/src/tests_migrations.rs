@@ -120,6 +120,43 @@ async fn migration_run_validation_failure_creates_no_link_or_job() {
 }
 
 #[tokio::test]
+async fn migration_run_rejects_revoked_target_before_recording_link_or_job() {
+    let repo = seeded_migration_repo().await;
+    let source_backup_id = create_source_backup(&repo).await;
+    let restore_plan_id = create_restore_plan_record(&repo, source_backup_id).await;
+    if let Repository::Memory(memory) = &repo {
+        memory
+            .agents
+            .write()
+            .await
+            .iter_mut()
+            .find(|agent| agent.id == "rebuilt-client")
+            .expect("rebuilt migration target")
+            .status = "revoked".to_string();
+    }
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+
+    let error = create_migration_run(
+        State(state),
+        headers,
+        Json(migration_run_request(restore_plan_id, source_backup_id)),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(error.code, "fixed_target_unavailable");
+    assert!(repo.list_migration_links(10).await.unwrap().is_empty());
+    assert!(!repo
+        .list_jobs(10)
+        .await
+        .unwrap()
+        .iter()
+        .any(|job| job.command_type == "restore"));
+}
+
+#[tokio::test]
 async fn migration_run_reuses_matching_existing_link_and_records_restore_job() {
     let repo = seeded_migration_repo().await;
     let source_backup_id = create_source_backup(&repo).await;

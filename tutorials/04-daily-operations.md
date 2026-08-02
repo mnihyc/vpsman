@@ -144,16 +144,25 @@ For daily 20+ VPS operation, this is the preferred browser pattern:
 ## History Retention And Export
 
 History retention policies are managed by domain. This includes audit logs,
-system and telemetry rollups, per-interface network rates, raw traffic-accounting
-counters, job outputs, backup artifacts, network/topology history, client
-lifecycle history, and ended gateway sessions. Telemetry rollups, per-interface
-network rates, and raw traffic counters default to 90 days; the running worker
-applies all three policies automatically every minute in bounded leased batches.
-Raw counters require at least 32 days and retain one pre-cutoff baseline per
-VPS/source/interface stream so monthly accounting remains exact. A stored policy
-override changes the automatic age, batch limit, or enabled state. Other domains
-remain explicit maintenance workflows. Use dry-run before manual pruning,
-especially for object-backed domains such as job outputs and backup artifacts:
+system metrics, accepted high-resolution telemetry samples, minute-derived
+resource/network/Ping history, authoritative minute-derived traffic counters,
+job outputs, backup artifacts, network/topology history, client lifecycle
+history, and ended gateway sessions.
+
+`telemetry_samples` defaults to 90 days for realtime and short-range queries.
+`telemetry_rollups`, `telemetry_network_rates`, `telemetry_ping_rollups`, and
+`traffic_counter_samples` default to 3,650 days as the authoritative long-term
+history. The running worker applies those policies in bounded leased batches.
+Before pruning, it may compact settled adjacent resource/network/Ping minutes
+only when every retained value is exactly equivalent; the longer stored span
+preserves minute semantics and is not an hourly tier. Traffic counters remain
+minute-derived. They require at least 32 days and retain one pre-cutoff baseline
+per VPS/source/interface stream so monthly accounting remains exact.
+
+A stored policy override changes the automatic age, batch limit, or enabled
+state. Other domains remain explicit maintenance workflows. Use dry-run before
+manual pruning, especially for object-backed domains such as job outputs and
+backup artifacts:
 
 Dashboard network rates are interval averages derived from cumulative interface
 counters, not instantaneous samples. Active tunnel throughput is a separate
@@ -391,8 +400,8 @@ through missed intervals one worker pass at a time, or `run_all_limited` with
 `--catch-up-limit <1-25>` for bounded backlog materialization. Keep a stable
 `--worker-id` for repeated `vpsman-worker --once` runs in the same smoke or
 maintenance script so the worker can renew its singleton leases. Current
-singleton leases cover schedules, alert notifications, telemetry rollups,
-network-rate rollups, and telemetry pruning.
+singleton leases cover schedules, alert notifications, monitoring-history
+compaction/pruning, and other worker-owned maintenance tasks.
 
 Inspect schedules and their due-run history:
 
@@ -409,10 +418,11 @@ and update their snapshots together; each schedule still uses its own saved
 selector. Tag mutation dialogs show this as a target update notice, not as an
 automatic schedule edit.
 
-If a saved fixed target is later hidden, deleted, revoked, or otherwise no
-longer resolves, due runs and Apply now keep the reviewed schedule runnable by
-recording that fixed ID as skipped and dispatching the remaining available
-targets.
+If a saved fixed target is later deleted, revoked, or otherwise unavailable,
+due runs and Apply now keep the reviewed schedule runnable by recording that
+fixed ID as skipped and dispatching the remaining available targets. A revoked
+VPS remains visible and selector-resolvable; it is unavailable for dispatch
+until a new key is assigned.
 
 Manual **Apply now** runs use the same schedule job timeout source as the
 worker: `worker.schedule_job_max_timeout_secs`, then legacy

@@ -35,6 +35,10 @@ use crate::model::*;
 use crate::model_webhook_rules::WebhookEventCandidate;
 use crate::repository::Repository;
 use crate::repository_job_outputs::append_lock_keys;
+use crate::repository_key_lifecycle::{
+    lock_postgres_agent_identity_lifecycle, require_visible_memory_clients,
+    require_visible_postgres_clients_in_tx,
+};
 use crate::repository_runtime_config::{
     queue_runtime_config_apply_memory_state, queue_runtime_config_apply_postgres_in_tx,
 };
@@ -3349,6 +3353,11 @@ impl Repository {
             .map_err(|error| anyhow::anyhow!(error.code))?;
         let precompleted_by_client =
             precompleted_targets_by_client(resolved_targets, precompleted_targets)?;
+        let required_live_targets = resolved_targets
+            .iter()
+            .filter(|client_id| !precompleted_by_client.contains_key(client_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
         let capability_degraded_by_client = precompleted_targets
             .iter()
             .filter_map(|target| {
@@ -3365,6 +3374,24 @@ impl Repository {
         let mut finished_status = None::<String>;
         match self {
             Self::Memory(memory) => {
+                let _lifecycle_guard = memory.agent_key_lifecycle.lock().await;
+                require_visible_memory_clients(
+                    memory,
+                    &required_live_targets,
+                    "job_target_no_longer_available",
+                )
+                .await?;
+                let agents = memory.agents.read().await;
+                anyhow::ensure!(
+                    required_live_targets
+                        .iter()
+                        .all(|client_id| agents.iter().any(|agent| {
+                            agent.id == *client_id
+                                && !matches!(agent.status.as_str(), "revoked" | "deleted")
+                        })),
+                    "job_target_no_longer_available"
+                );
+                drop(agents);
                 let created_at = unix_now().to_string();
                 memory.jobs.write().await.push(JobHistoryView {
                     id: job_id,
@@ -3413,7 +3440,9 @@ impl Repository {
                         .await
                         .insert(job_id, approval_id);
                 }
-                if let Some(pending) = pending_runtime_config.as_ref() {
+                if let Some(pending) = pending_runtime_config.as_ref().filter(|pending| {
+                    !precompleted_by_client.contains_key(pending.client_id.as_str())
+                }) {
                     queue_runtime_config_apply_memory_state(
                         memory,
                         &pending.client_id,
@@ -3569,6 +3598,26 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                require_visible_postgres_clients_in_tx(
+                    &mut tx,
+                    &required_live_targets,
+                    "job_target_no_longer_available",
+                )
+                .await?;
+                let unavailable_target_exists = sqlx::query_scalar::<_, bool>(
+                    r#"
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM visible_clients
+                        WHERE id = ANY($1::text[])
+                          AND status IN ('revoked', 'deleted')
+                    )
+                    "#,
+                )
+                .bind(&required_live_targets)
+                .fetch_one(&mut *tx)
+                .await?;
+                anyhow::ensure!(!unavailable_target_exists, "job_target_no_longer_available");
                 sqlx::query(
                     r#"
                     INSERT INTO jobs (
@@ -3593,7 +3642,9 @@ impl Repository {
                 .bind(approval_id)
                 .execute(&mut *tx)
                 .await?;
-                if let Some(pending) = pending_runtime_config.as_ref() {
+                if let Some(pending) = pending_runtime_config.as_ref().filter(|pending| {
+                    !precompleted_by_client.contains_key(pending.client_id.as_str())
+                }) {
                     queue_runtime_config_apply_postgres_in_tx(
                         &mut tx,
                         &pending.client_id,
@@ -3773,8 +3824,23 @@ impl Repository {
     ) -> Result<Vec<ClaimedJobTarget>> {
         match self {
             Self::Memory(memory) => {
+                let _lifecycle_guard = memory.agent_key_lifecycle.lock().await;
                 let now_unix = unix_now();
                 let now = now_unix.to_string();
+                let dispatchable_clients = {
+                    let hidden = memory.hidden_clients.read().await;
+                    memory
+                        .agents
+                        .read()
+                        .await
+                        .iter()
+                        .filter(|agent| {
+                            !hidden.contains(&agent.id)
+                                && !matches!(agent.status.as_str(), "revoked" | "deleted")
+                        })
+                        .map(|agent| agent.id.clone())
+                        .collect::<HashSet<_>>()
+                };
                 let operations = memory.job_operations.read().await.clone();
                 let source_schedule_ids = memory.job_source_schedule_ids.read().await.clone();
                 let timeouts = memory.job_timeouts.read().await.clone();
@@ -3820,6 +3886,9 @@ impl Repository {
                 }) {
                     if selected >= limit.clamp(1, 500) as usize {
                         break;
+                    }
+                    if !dispatchable_clients.contains(&target.client_id) {
+                        continue;
                     }
                     let Some(job) = jobs.iter().find(|job| job.id == target.job_id) else {
                         continue;
@@ -4030,6 +4099,7 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
                 let rows = sqlx::query(
                     r#"
                     WITH due AS (
@@ -4045,7 +4115,7 @@ impl Repository {
                             clients.process_incarnation_id AS client_process_incarnation_id
                         FROM job_targets target
                         JOIN jobs job ON job.id = target.job_id
-                        JOIN clients ON clients.id = target.client_id
+                        JOIN visible_clients clients ON clients.id = target.client_id
                         WHERE target.completed_at IS NULL
                               AND target.cancel_requested_at IS NULL
                               AND target.status IN ('queued', 'dispatching')
@@ -4091,6 +4161,7 @@ impl Repository {
                                 )
                               )
                               AND clients.hidden_at IS NULL
+                              AND clients.status NOT IN ('revoked', 'deleted')
                               AND clients.process_incarnation_id IS NOT NULL
                               AND (
                                 (

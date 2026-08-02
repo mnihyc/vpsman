@@ -11,7 +11,8 @@ install tokens.
 Generate or obtain these values before running the installer on a VPS:
 
 - `VPSMAN_AGENT_CLIENT_ID`: stable client ID. New panel registrations default to
-  a numerical ID such as `1042`; imported legacy string IDs remain supported.
+  a prefixed numerical ID such as `v-1042`; imported legacy string IDs remain
+  supported.
 - `VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX`: the unique agent Noise private key for
   this VPS. Do not copy one VPS keypair to another VPS.
 - `VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX`: gateway Noise public key hex.
@@ -45,9 +46,9 @@ vpsctl agent-identity-upsert \
   --confirmed
 ```
 
-Use `--replace-existing-key --confirmed` only for a planned key rotation of a
-non-revoked, non-deleted identity. Revoked or deleted client ids are blocked and
-must not be reused.
+Use `--replace-existing-key --confirmed` for a planned key rotation or to
+recover a revoked client ID by assigning a new key. A deleted client ID is
+permanently blocked and must not be reused.
 
 Public-key ownership is global, not scoped only by client ID. Registration
 rejects a key already assigned to another VPS and rejects any key retired by

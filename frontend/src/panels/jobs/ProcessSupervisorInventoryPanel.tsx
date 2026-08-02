@@ -35,6 +35,7 @@ import { formatCompactTime, formatFullTime, statusClass } from "../../utils";
 export function ProcessSupervisorInventoryPanel({
   agents,
   clientLabel,
+  fleetEvidenceAvailable,
   initialTargetClientId,
   initialTargetRequestId,
   inventory,
@@ -52,6 +53,7 @@ export function ProcessSupervisorInventoryPanel({
 }: {
   agents: AgentView[];
   clientLabel: (clientId: string) => string;
+  fleetEvidenceAvailable: boolean;
   initialTargetClientId?: string | null;
   initialTargetRequestId?: string | null;
   inventory: ProcessSupervisorInventoryRecord[];
@@ -63,7 +65,10 @@ export function ProcessSupervisorInventoryPanel({
   onInitialTargetConsumed?: (requestId: string) => void;
   onOpenPrivilegeUnlock: () => void;
   onRefresh: () => void | Promise<void>;
-  onSelectedClientIdChange?: (clientId: string | null) => void;
+  onSelectedClientIdChange?: (
+    clientId: string | null,
+    historyMode?: "push" | "replace",
+  ) => void;
   privilegeMaterial: PrivilegeMaterial | null;
   selectedClientId?: string | null;
 }) {
@@ -77,9 +82,9 @@ export function ProcessSupervisorInventoryPanel({
   const focusedClientId =
     selectedClientId === undefined ? localFocusedClientId : selectedClientId;
   const setFocusedClientId = useCallback(
-    (clientId: string | null) => {
+    (clientId: string | null, historyMode: "push" | "replace" = "push") => {
       setLocalFocusedClientId(clientId);
-      onSelectedClientIdChange?.(clientId);
+      onSelectedClientIdChange?.(clientId, historyMode);
     },
     [onSelectedClientIdChange],
   );
@@ -92,10 +97,25 @@ export function ProcessSupervisorInventoryPanel({
   const focusedAgent = focusedClientId
     ? agents.find((agent) => agent.id === focusedClientId) ?? null
     : null;
-  const scopedAgents = focusedAgent ? [focusedAgent] : agents;
-  const scopedInventory = focusedAgent
-    ? inventory.filter((row) => row.client_id === focusedAgent.id)
-    : inventory;
+  const unresolvedFocus = Boolean(focusedClientId && !focusedAgent);
+  const visibleClientIds = useMemo(
+    () => new Set(agents.map((agent) => agent.id)),
+    [agents],
+  );
+  const visibleInventory = useMemo(
+    () => inventory.filter((row) => visibleClientIds.has(row.client_id)),
+    [inventory, visibleClientIds],
+  );
+  const scopedAgents = unresolvedFocus
+    ? []
+    : focusedAgent
+      ? [focusedAgent]
+      : agents;
+  const scopedInventory = unresolvedFocus
+    ? []
+    : focusedAgent
+      ? visibleInventory.filter((row) => row.client_id === focusedAgent.id)
+      : visibleInventory;
   const runningCount = scopedInventory.filter((row) => row.status === "running").length;
   const desiredOnlyLimitCount = scopedInventory.filter((row) => row.limit_effectiveness_status === "degraded_desired_only").length;
   const restartedCount = scopedInventory.filter((row) => (row.restart_attempts ?? 0) > 0).length;
@@ -107,7 +127,7 @@ export function ProcessSupervisorInventoryPanel({
     if (
       !initialTargetRequestId ||
       appliedInitialTargetRequestRef.current === initialTargetRequestId ||
-      agents.length === 0
+      !fleetEvidenceAvailable
     ) {
       return;
     }
@@ -121,9 +141,58 @@ export function ProcessSupervisorInventoryPanel({
     onInitialTargetConsumed?.(initialTargetRequestId);
   }, [
     agents,
+    fleetEvidenceAvailable,
     initialTargetClientId,
     initialTargetRequestId,
     onInitialTargetConsumed,
+    setFocusedClientId,
+  ]);
+
+  useEffect(() => {
+    if (!fleetEvidenceAvailable || !focusedClientId || focusedAgent) {
+      return;
+    }
+    const removedClientId = focusedClientId;
+    setFocusedClientId(null, "replace");
+    setRestartProcess(null);
+    setStopProcess(null);
+    setActionError(null);
+    setActionWarning(true);
+    setActionStatus(
+      `VPS ${removedClientId} is no longer available. Process focus and cached rows for that VPS were cleared.`,
+    );
+  }, [
+    fleetEvidenceAvailable,
+    focusedAgent,
+    focusedClientId,
+    setFocusedClientId,
+  ]);
+
+  useEffect(() => {
+    if (!fleetEvidenceAvailable) {
+      return;
+    }
+    const removedClientId = [restartProcess, stopProcess]
+      .map((row) => row?.client_id ?? null)
+      .find(
+        (clientId): clientId is string =>
+          Boolean(clientId && !visibleClientIds.has(clientId)),
+      );
+    if (!removedClientId) {
+      return;
+    }
+    setRestartProcess(null);
+    setStopProcess(null);
+    setActionError(null);
+    setActionWarning(true);
+    setActionStatus(
+      `VPS ${removedClientId} is no longer available. The pending process action was canceled and its cached rows were cleared.`,
+    );
+  }, [
+    fleetEvidenceAvailable,
+    restartProcess,
+    stopProcess,
+    visibleClientIds,
   ]);
 
   useEffect(() => {
@@ -141,6 +210,14 @@ export function ProcessSupervisorInventoryPanel({
       row: ProcessSupervisorInventoryRecord,
       action: Extract<SupervisorAction, "restart" | "stop">,
     ) => {
+      if (!agents.some((agent) => agent.id === row.client_id)) {
+        setRestartProcess(null);
+        setStopProcess(null);
+        setActionError(
+          `${clientLabel(row.client_id)} is no longer available in the fleet. Refresh process inventory before retrying.`,
+        );
+        return;
+      }
       if (!privilegeMaterial) {
         setActionError("Unlock privilege before restarting or stopping a supervised process.");
         onOpenPrivilegeUnlock();
@@ -293,64 +370,6 @@ export function ProcessSupervisorInventoryPanel({
       setActionPending(false);
     }
   }
-  const renderProcessActions = useCallback(
-    (row: ProcessSupervisorInventoryRecord) => (
-      <span className="processRowActions" aria-label={`Process ${row.name} actions`}>
-        <button
-          aria-label={`Open logs for process ${row.name}`}
-          className="processActionButton"
-          onClick={(event) => {
-            event.stopPropagation();
-            onOpenDispatchPreset(supervisorPreset(row, "logs"));
-          }}
-          title="Open a log request below this inventory with the VPS and process preselected"
-          type="button"
-        >
-          <FileText size={13} />
-          <span>Logs</span>
-        </button>
-        <button
-          aria-label={`Restart process ${row.name}`}
-          className="processActionButton"
-          disabled={actionPending}
-          onClick={(event) => {
-            event.stopPropagation();
-            setActionError(null);
-            setRestartProcess(row);
-          }}
-          title={
-            privilegeMaterial
-              ? "Review this exact process restart"
-              : "Unlock privilege before restarting this process"
-          }
-          type="button"
-        >
-          <RotateCcw size={13} />
-          <span>Restart</span>
-        </button>
-        <button
-          aria-label={`Stop process ${row.name}`}
-          className="processActionButton dangerAction"
-          disabled={row.status !== "running" || actionPending}
-          onClick={(event) => {
-            event.stopPropagation();
-            setActionError(null);
-            setStopProcess(row);
-          }}
-          title={
-            row.status === "running"
-              ? "Review one confirmation before stopping this process"
-              : "Stop is available when the process is running"
-          }
-          type="button"
-        >
-          <Square size={12} />
-          <span>Stop</span>
-        </button>
-      </span>
-    ),
-    [actionPending, executeProcessAction, onOpenDispatchPreset, privilegeMaterial],
-  );
   const rowActions = useMemo<
     ConsoleDataGridAction<ProcessSupervisorInventoryRecord>[]
   >(
@@ -358,8 +377,12 @@ export function ProcessSupervisorInventoryPanel({
       {
         description: ([row]) =>
           row
-            ? `Open a log request for ${row.name} with its VPS preselected.`
+            ? visibleClientIds.has(row.client_id)
+              ? `Open a log request for ${row.name} with its VPS preselected.`
+              : "This VPS is no longer available in the fleet."
             : "Open process logs.",
+        disabled: ([row]) =>
+          !row || !visibleClientIds.has(row.client_id),
         icon: <FileText size={13} />,
         label: "Logs",
         onSelect: ([row]) => {
@@ -375,7 +398,8 @@ export function ProcessSupervisorInventoryPanel({
               ? `Review restart of ${row.name}.`
               : "Unlock privilege before restarting this process."
             : "Review a process restart.",
-        disabled: () => actionPending,
+        disabled: ([row]) =>
+          !row || !visibleClientIds.has(row.client_id) || actionPending,
         icon: <RotateCcw size={13} />,
         label: "Restart",
         onSelect: ([row]) => {
@@ -391,7 +415,10 @@ export function ProcessSupervisorInventoryPanel({
             ? `Review stopping ${row.name}.`
             : "Stop is available only while the process is running.",
         disabled: ([row]) =>
-          !row || row.status !== "running" || actionPending,
+          !row ||
+          !visibleClientIds.has(row.client_id) ||
+          row.status !== "running" ||
+          actionPending,
         icon: <Square size={12} />,
         label: "Stop",
         onSelect: ([row]) => {
@@ -403,7 +430,12 @@ export function ProcessSupervisorInventoryPanel({
         tone: "danger",
       },
     ],
-    [actionPending, onOpenDispatchPreset, privilegeMaterial],
+    [
+      actionPending,
+      onOpenDispatchPreset,
+      privilegeMaterial,
+      visibleClientIds,
+    ],
   );
   const columns = useMemo<ConsoleDataGridColumn<ProcessSupervisorInventoryRecord>[]>(
     () => [
@@ -726,63 +758,6 @@ export function ProcessSupervisorInventoryPanel({
                 : "success"
         }
       />
-      <div className="processMobileList" aria-label="Process supervisor mobile cards">
-        {scopedInventory.length === 0 ? (
-          <div className="emptyState compactEmpty">
-            <TerminalSquare size={22} />
-            <strong>No supervised processes</strong>
-            <span>
-              {focusedAgent
-                ? inventoryTruncated
-                  ? `No supervised process for ${clientLabel(focusedAgent.id)} appears in the loaded global page; more records may exist.`
-                  : `No supervised process is retained for ${clientLabel(focusedAgent.id)}.`
-                : "Process start, status, restart, log, and stop jobs populate this inventory."}
-            </span>
-          </div>
-        ) : (
-          scopedInventory.map((row) => {
-            const state = processStateEvidence(row);
-            const timing = processTimingEvidence(row);
-            const restart = processRestartEvidence(row);
-            const exit = processLastExitEvidence(row);
-            return (
-              <article className="processMobileCard" key={`${row.client_id}:${row.name}`}>
-                <div className="processMobileCardHeader">
-                  <span>
-                    <strong title={row.name}>{row.name}</strong>
-                    <small>{clientLabel(row.client_id)} / {formatPid(row)}</small>
-                  </span>
-                  <span className={`status ${state.tone}`}>{state.label}</span>
-                </div>
-                <dl className="processMobileMetricGrid">
-                  <div>
-                    <dt>CPU</dt>
-                    <dd>{formatCpuPrimary(row)}</dd>
-                  </div>
-                  <div>
-                    <dt>Memory</dt>
-                    <dd>{formatMemoryPrimary(row)}</dd>
-                  </div>
-                  <div>
-                    <dt>Uptime</dt>
-                    <dd title={timing.detail}>{timing.uptimeLabel}</dd>
-                  </div>
-                  <div>
-                    <dt>Restarts</dt>
-                    <dd title={restart.detail}>{restart.primary}</dd>
-                  </div>
-                  <div>
-                    <dt>Last exit</dt>
-                    <dd title={exit.detail}>{exit.primary}</dd>
-                  </div>
-                </dl>
-                <p className="processMobileDetail" title={state.detail}>{state.detail}</p>
-                {renderProcessActions(row)}
-              </article>
-            );
-          })
-        )}
-      </div>
       <div className="processInventoryGridShell">
         <ConsoleDataGrid
           columns={columns}
@@ -847,6 +822,7 @@ export function ProcessSupervisorInventoryPanel({
           rows={scopedInventory}
           rowsTruncated={inventoryTruncated}
           searchPlaceholder="Search processes"
+          showMobileRowActions={false}
           storageKey="vpsman.jobs.processSupervisorInventory"
           title="Process health inventory"
         />

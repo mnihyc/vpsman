@@ -1799,37 +1799,51 @@ function ScheduleImpactTable({
     return <span>No saved schedule target snapshots need review</span>;
   }
   return (
-    <div className="tagScheduleImpactTable">
-      <div className="tagScheduleImpactRow heading">
-        <span>Schedule</span>
-        <span>Command</span>
-        <span>Selector result</span>
-        <span>Manual action</span>
-        <span>Added</span>
-        <span>Removed</span>
-      </div>
-      {impacts.map((impact) => (
-        <div className="tagScheduleImpactRow" key={impact.schedule_id}>
-          <span className="historyPrimary">
-            <strong>{impact.name}</strong>
-            <small>{impact.selector_expression}</small>
-          </span>
-          <span>{impact.command_type}</span>
-          <span>
-            {impact.before_target_count} -&gt; {impact.after_target_count}
-          </span>
-          <span className="tagScheduleManualAction">
-            <span>{impact.summary}; saved targets stay fixed until you update them.</span>
-            {onOpenSchedules && (
-              <button className="secondaryAction compactAction" type="button" onClick={onOpenSchedules}>
-                Open schedules
-              </button>
-            )}
-          </span>
-          <VpsChipList agents={impact.added_targets} />
-          <VpsChipList agents={impact.removed_targets} />
+    <div className="tagScheduleImpactBlock">
+      <div className="bulkTagPreviewHeader">
+        <div>
+          <strong>Affected schedules</strong>
+          <span>{impacts.length} saved target snapshot{impacts.length === 1 ? "" : "s"} need review</span>
         </div>
-      ))}
+        {onOpenSchedules && (
+          <button className="secondaryAction compactAction" type="button" onClick={onOpenSchedules}>
+            Open schedules
+          </button>
+        )}
+      </div>
+      <div
+        aria-label="Affected schedules"
+        className="tagScheduleImpactTable"
+        role="table"
+      >
+        <div className="tagScheduleImpactRow heading" role="row">
+          <span role="columnheader">Schedule</span>
+          <span role="columnheader">Command</span>
+          <span role="columnheader">Selector result</span>
+          <span role="columnheader">Impact</span>
+          <span role="columnheader">Added</span>
+          <span role="columnheader">Removed</span>
+        </div>
+        {impacts.map((impact) => (
+          <div className="tagScheduleImpactRow" key={impact.schedule_id} role="row">
+            <span className="historyPrimary" data-label="Schedule" role="cell">
+              <strong>{impact.name}</strong>
+              <small>{impact.selector_expression}</small>
+            </span>
+            <span data-label="Command" role="cell">{impact.command_type}</span>
+            <span data-label="Selector result" role="cell">
+              {impact.before_target_count} -&gt; {impact.after_target_count}
+            </span>
+            <span data-label="Impact" role="cell">{impact.summary}; saved targets stay fixed until you update them.</span>
+            <span data-label="Added" role="cell">
+              <VpsChipList agents={impact.added_targets} />
+            </span>
+            <span data-label="Removed" role="cell">
+              <VpsChipList agents={impact.removed_targets} />
+            </span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

@@ -8,23 +8,32 @@ use sqlx::{types::Json as SqlJson, Row};
 use uuid::Uuid;
 
 use crate::{
-    model::{AgentView, AuditLogView, AuthContext, FleetAlertView, TelemetryRollupView},
+    model::{
+        AgentView, AuditLogView, AuthContext, FleetAlertView, TelemetryRollupView,
+        TelemetrySampleView,
+    },
     model_alert_policies::{
         CreateFleetAlertPolicyRequest, PolicyAlertQuery, PolicyAlertRecord, PolicyDryRunRequest,
         PolicyDryRunResponse, PolicyDryRunRulePreview, PolicyGroupRecord, PolicyRuleRecord,
         PolicyRuleRequest, PolicyRuleStateRecord, TrafficAccountingQuery, TrafficAccountingRecord,
         TrafficAccountingSelectorBreakdown, TrafficCounterSampleRecord, VpsRuleChangePreview,
         VpsRuleQuery, VpsRuleValueRecord, VpsRulesBulkUnsetRequest, VpsRulesBulkUpsertRequest,
-        VpsRulesDryRunRequest, VpsRulesDryRunResponse, VPS_RULE_KEY_TRAFFIC_QUOTA_RX,
+        VpsRulesDryRunRequest, VpsRulesDryRunResponse, VPS_RULE_KEY_BILLING_CYCLE,
+        VPS_RULE_KEY_BILLING_PRICE, VPS_RULE_KEY_NETWORK_PORT_SPEED, VPS_RULE_KEY_TRAFFIC_QUOTA_RX,
         VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL, VPS_RULE_KEY_TRAFFIC_QUOTA_TX,
         VPS_RULE_KEY_TRAFFIC_RESET_DAY, VPS_RULE_KEY_TRAFFIC_SELECTORS,
     },
+    model_monitoring::TrafficHistoryPointView,
     model_webhook_rules::WebhookEventCandidate,
     repository::Repository,
+    repository_key_lifecycle::{
+        lock_postgres_agent_identity_lifecycle, require_visible_memory_clients,
+        require_visible_postgres_clients_in_tx,
+    },
     repository_webhook_rules::{record_webhook_event_in_tx, webhook_event_row},
     selector_expression::{agent_matches_selector_expression, parse_selector_expression},
     unix_now,
-    util::{compare_timestamps_desc, timestamp_in_optional_bounds},
+    util::{compare_timestamps_desc, parse_timestamp_unix, timestamp_in_optional_bounds},
 };
 
 const MAX_POLICY_NAME_BYTES: usize = 128;
@@ -35,6 +44,7 @@ const MAX_CONDITION_EXPRESSION_BYTES: usize = 4096;
 const MAX_VPS_RULE_VALUE_BYTES: usize = 4096;
 const MAX_TRAFFIC_SELECTOR_ITEMS: usize = 16;
 const MAX_TRAFFIC_INTERFACE_BYTES: usize = 128;
+const MAX_BILLING_PRICE_WHOLE_DIGITS: usize = 9;
 const TRAFFIC_SAMPLE_STALE_SECS: i64 = 900;
 const POLICY_WEBHOOK_REPAIR_WINDOW_SECS: i64 = 3600;
 static POLICY_EVALUATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -64,6 +74,13 @@ struct TrafficStreamRequest {
     cycle_start_unix: i64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TrafficHistoryStream {
+    source_kind: String,
+    interface: String,
+    direction_mask: i32,
+}
+
 #[derive(Clone, Debug)]
 struct TrafficCounterStreamUsage {
     client_id: String,
@@ -74,7 +91,8 @@ struct TrafficCounterStreamUsage {
     latest_rx: i64,
     latest_tx: i64,
     last_sample_unix: i64,
-    counter_epochs_seen: i64,
+    rx_counter_epochs_seen: i64,
+    tx_counter_epochs_seen: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -110,20 +128,19 @@ impl Repository {
         query: &VpsRuleQuery,
         result_limit: Option<usize>,
     ) -> Result<Vec<VpsRuleValueRecord>> {
+        let agents = self.list_agents().await?;
         let allowed_clients = if let Some(selector) = query.selector_expression.as_deref() {
-            let agents = self.list_agents().await?;
-            Some(
-                resolve_agents(&agents, selector)?
-                    .into_iter()
-                    .map(|agent| agent.id)
-                    .collect::<HashSet<_>>(),
-            )
+            resolve_agents(&agents, selector)?
+                .into_iter()
+                .map(|agent| agent.id)
+                .collect::<HashSet<_>>()
         } else {
-            None
+            agents
+                .into_iter()
+                .map(|agent| agent.id)
+                .collect::<HashSet<_>>()
         };
-        let allowed_client_ids = allowed_clients
-            .as_ref()
-            .map(|clients| clients.iter().cloned().collect::<Vec<_>>());
+        let allowed_client_ids = allowed_clients.iter().cloned().collect::<Vec<_>>();
         // `state` is derived while parsing persisted values, so PostgreSQL may
         // apply a result limit only when every requested filter is represented
         // in SQL. Otherwise rows are state-filtered before the API limit below.
@@ -156,7 +173,7 @@ impl Repository {
             )
             .bind(query.client_id.as_deref())
             .bind(query.key.as_deref())
-            .bind(allowed_client_ids.as_deref())
+            .bind(&allowed_client_ids)
             .bind(database_limit)
             .fetch_all(pool)
             .await?
@@ -174,9 +191,7 @@ impl Repository {
                     .state
                     .as_deref()
                     .is_none_or(|state| row.state == state)
-                && allowed_clients
-                    .as_ref()
-                    .is_none_or(|clients| clients.contains(&row.client_id))
+                && allowed_clients.contains(&row.client_id)
         });
         rows.sort_by(|left, right| {
             left.client_id
@@ -193,6 +208,13 @@ impl Repository {
         &self,
         client_id: &str,
     ) -> Result<Vec<VpsRuleValueRecord>> {
+        anyhow::ensure!(
+            self.list_agents()
+                .await?
+                .iter()
+                .any(|agent| agent.id == client_id),
+            "vps_rules_target_not_found"
+        );
         self.list_vps_rules_matching(
             &VpsRuleQuery {
                 limit: None,
@@ -204,6 +226,63 @@ impl Repository {
             None,
         )
         .await
+    }
+
+    pub(crate) async fn list_vps_rules_for_clients(
+        &self,
+        client_ids: &[String],
+        keys: &[&str],
+    ) -> Result<Vec<VpsRuleValueRecord>> {
+        let keys = keys
+            .iter()
+            .map(|key| normalize_vps_rule_key(key))
+            .collect::<Result<Vec<_>>>()?;
+        if client_ids.is_empty() || keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        match self {
+            Self::Memory(memory) => {
+                let allowed = client_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<HashSet<_>>();
+                let mut rows = memory
+                    .vps_rule_values
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|row| {
+                        allowed.contains(row.client_id.as_str()) && keys.contains(&row.key)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                rows.sort_by(|left, right| left.client_id.cmp(&right.client_id));
+                Ok(rows)
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        client_id,
+                        key,
+                        value_raw,
+                        value_json,
+                        source_kind,
+                        source_id,
+                        updated_by,
+                        updated_at::text AS updated_at
+                    FROM vps_rule_values
+                    WHERE client_id = ANY($1::TEXT[]) AND key = ANY($2::TEXT[])
+                    ORDER BY client_id ASC, key ASC
+                    "#,
+                )
+                .bind(client_ids)
+                .bind(&keys)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(vps_rule_from_row).collect()
+            }
+        }
     }
 
     pub(crate) async fn dry_run_vps_rules(
@@ -297,6 +376,37 @@ impl Repository {
         if let Some(client_id) = query.client_id.as_deref() {
             selected_agents.retain(|agent| agent.id == client_id);
         }
+        let mut records = self
+            .traffic_accounting_for_selected_agents(&selected_agents, now)
+            .await?;
+        records.retain(|record| {
+            query
+                .state
+                .as_deref()
+                .is_none_or(|state| record.state == state)
+        });
+        records.sort_by(|left, right| left.client_id.cmp(&right.client_id));
+        records.truncate(query.limit.unwrap_or(1000).clamp(1, 5000) as usize);
+        Ok(records)
+    }
+
+    pub(crate) async fn list_traffic_accounting_for_client_ids(
+        &self,
+        client_ids: &[String],
+    ) -> Result<Vec<TrafficAccountingRecord>> {
+        let selected_agents = self.list_agents_for_client_ids(client_ids).await?;
+        let mut records = self
+            .traffic_accounting_for_selected_agents(&selected_agents, Utc::now())
+            .await?;
+        records.sort_by(|left, right| left.client_id.cmp(&right.client_id));
+        Ok(records)
+    }
+
+    async fn traffic_accounting_for_selected_agents(
+        &self,
+        selected_agents: &[AgentView],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<TrafficAccountingRecord>> {
         let rules = self
             .list_vps_rules_matching(
                 &VpsRuleQuery {
@@ -320,17 +430,12 @@ impl Repository {
         let traffic_usage = self
             .list_traffic_counter_usage_for_streams(&stream_requests, now.timestamp())
             .await?;
-        let mut records =
-            traffic_accounting_for_agents(&selected_agents, &rules, &traffic_usage, now);
-        records.retain(|record| {
-            query
-                .state
-                .as_deref()
-                .is_none_or(|state| record.state == state)
-        });
-        records.sort_by(|left, right| left.client_id.cmp(&right.client_id));
-        records.truncate(query.limit.unwrap_or(1000).clamp(1, 5000) as usize);
-        Ok(records)
+        Ok(traffic_accounting_for_agents(
+            selected_agents,
+            &rules,
+            &traffic_usage,
+            now,
+        ))
     }
 
     pub(crate) async fn get_traffic_accounting(
@@ -347,6 +452,477 @@ impl Repository {
         .into_iter()
         .next()
         .context("traffic_accounting_not_found")
+    }
+
+    pub(crate) async fn traffic_history_start_unix(&self, client_id: &str) -> Result<Option<u64>> {
+        let streams = self.traffic_history_streams(client_id).await?;
+        if streams.is_empty() {
+            return Ok(None);
+        }
+        match self {
+            Self::Memory(memory) => Ok(memory
+                .traffic_counter_samples
+                .read()
+                .await
+                .iter()
+                .filter(|sample| sample.client_id == client_id)
+                .filter(|sample| {
+                    streams.iter().any(|stream| {
+                        stream.source_kind == sample.source_kind
+                            && stream.interface == sample.interface
+                    })
+                })
+                .filter_map(|sample| u64::try_from(sample.observed_unix).ok())
+                .min()),
+            Self::Postgres(pool) => {
+                let source_kinds = streams
+                    .iter()
+                    .map(|stream| stream.source_kind.clone())
+                    .collect::<Vec<_>>();
+                let interfaces = streams
+                    .iter()
+                    .map(|stream| stream.interface.clone())
+                    .collect::<Vec<_>>();
+                let value = sqlx::query_scalar::<_, Option<f64>>(
+                    r#"
+                    WITH requested AS (
+                        SELECT source_kind, interface
+                        FROM UNNEST($2::text[], $3::text[])
+                            AS stream(source_kind, interface)
+                    )
+                    SELECT extract(epoch FROM min(sample.observed_at))::double precision
+                    FROM traffic_counter_samples sample
+                    JOIN requested
+                      ON requested.source_kind = sample.source_kind
+                     AND requested.interface = sample.interface
+                    WHERE sample.client_id = $1
+                    "#,
+                )
+                .bind(client_id)
+                .bind(&source_kinds)
+                .bind(&interfaces)
+                .fetch_one(pool)
+                .await?;
+                Ok(value
+                    .filter(|value| value.is_finite() && *value >= 0.0)
+                    .map(|value| value as u64))
+            }
+        }
+    }
+
+    pub(crate) async fn list_traffic_history(
+        &self,
+        client_id: &str,
+        start_unix: u64,
+        end_unix: u64,
+        step_secs: i32,
+        raw: bool,
+    ) -> Result<Vec<TrafficHistoryPointView>> {
+        let streams = self.traffic_history_streams(client_id).await?;
+        if streams.is_empty() || start_unix > end_unix {
+            return Ok(Vec::new());
+        }
+        let step_secs = step_secs.max(60);
+        match self {
+            Self::Memory(memory) => {
+                let samples = if raw {
+                    raw_memory_traffic_samples(
+                        &memory.telemetry_samples.read().await,
+                        client_id,
+                        &streams,
+                    )?
+                } else {
+                    memory
+                        .traffic_counter_samples
+                        .read()
+                        .await
+                        .iter()
+                        .filter(|sample| sample.client_id == client_id)
+                        .cloned()
+                        .collect()
+                };
+                Ok(aggregate_memory_traffic_history(
+                    samples, &streams, start_unix, end_unix, step_secs,
+                ))
+            }
+            Self::Postgres(pool) => {
+                let source_kinds = streams
+                    .iter()
+                    .map(|stream| stream.source_kind.clone())
+                    .collect::<Vec<_>>();
+                let interfaces = streams
+                    .iter()
+                    .map(|stream| stream.interface.clone())
+                    .collect::<Vec<_>>();
+                let direction_masks = streams
+                    .iter()
+                    .map(|stream| stream.direction_mask)
+                    .collect::<Vec<_>>();
+                let rows = if raw {
+                    sqlx::query(
+                        r#"
+                        WITH requested AS (
+                            SELECT source_kind, interface, direction_mask
+                            FROM UNNEST($2::text[], $3::text[], $4::integer[])
+                                AS stream(source_kind, interface, direction_mask)
+                        ), expanded_range AS (
+                            SELECT
+                                requested.source_kind,
+                                requested.interface,
+                                requested.direction_mask,
+                                sample.observed_at,
+                                LEAST(
+                                    (counter.value ->> 'rx_bytes')::numeric,
+                                    9223372036854775807::numeric
+                                )::bigint AS rx_bytes,
+                                LEAST(
+                                    (counter.value ->> 'tx_bytes')::numeric,
+                                    9223372036854775807::numeric
+                                )::bigint AS tx_bytes
+                            FROM telemetry_samples sample
+                            CROSS JOIN LATERAL (
+                                SELECT 'host'::text AS source_kind, value
+                                FROM jsonb_array_elements(
+                                    CASE WHEN jsonb_typeof(sample.payload -> 'networks') = 'array'
+                                        THEN sample.payload -> 'networks' ELSE '[]'::jsonb END
+                                ) value
+                                UNION ALL
+                                SELECT 'tunnel'::text AS source_kind, value
+                                FROM jsonb_array_elements(
+                                    CASE WHEN jsonb_typeof(sample.payload -> 'tunnels') = 'array'
+                                        THEN sample.payload -> 'tunnels' ELSE '[]'::jsonb END
+                                ) value
+                            ) counter
+                            JOIN requested
+                              ON requested.source_kind = counter.source_kind
+                             AND requested.interface = counter.value ->> 'interface'
+                            WHERE sample.client_id = $1
+                              AND sample.observed_at >= to_timestamp($5)
+                              AND sample.observed_at <= to_timestamp($6)
+                        ), baseline AS (
+                            SELECT
+                                requested.source_kind,
+                                requested.interface,
+                                requested.direction_mask,
+                                previous.observed_at,
+                                previous.rx_bytes,
+                                previous.tx_bytes
+                            FROM requested
+                            JOIN LATERAL (
+                                SELECT
+                                    sample.observed_at,
+                                    LEAST(
+                                        (counter.value ->> 'rx_bytes')::numeric,
+                                        9223372036854775807::numeric
+                                    )::bigint AS rx_bytes,
+                                    LEAST(
+                                        (counter.value ->> 'tx_bytes')::numeric,
+                                        9223372036854775807::numeric
+                                    )::bigint AS tx_bytes
+                                FROM telemetry_samples sample
+                                CROSS JOIN LATERAL (
+                                    SELECT 'host'::text AS source_kind, value
+                                    FROM jsonb_array_elements(
+                                        CASE WHEN jsonb_typeof(sample.payload -> 'networks') = 'array'
+                                            THEN sample.payload -> 'networks' ELSE '[]'::jsonb END
+                                    ) value
+                                    UNION ALL
+                                    SELECT 'tunnel'::text AS source_kind, value
+                                    FROM jsonb_array_elements(
+                                        CASE WHEN jsonb_typeof(sample.payload -> 'tunnels') = 'array'
+                                            THEN sample.payload -> 'tunnels' ELSE '[]'::jsonb END
+                                    ) value
+                                ) counter
+                                WHERE sample.client_id = $1
+                                  AND sample.observed_at < to_timestamp($5)
+                                  AND counter.source_kind = requested.source_kind
+                                  AND counter.value ->> 'interface' = requested.interface
+                                ORDER BY sample.observed_at DESC
+                                LIMIT 1
+                            ) previous ON TRUE
+                        ), selected AS (
+                            SELECT * FROM expanded_range
+                            UNION ALL
+                            SELECT * FROM baseline
+                        ), sequenced AS (
+                            SELECT
+                                selected.*,
+                                lag(rx_bytes) OVER stream AS previous_rx_bytes,
+                                lag(tx_bytes) OVER stream AS previous_tx_bytes
+                            FROM selected
+                            WINDOW stream AS (
+                                PARTITION BY source_kind, interface
+                                ORDER BY observed_at
+                            )
+                        ), deltas AS (
+                            SELECT
+                                floor(extract(epoch FROM observed_at)::numeric / $7::numeric)
+                                    * $7::numeric AS bucket_epoch,
+                                direction_mask,
+                                rx_bytes,
+                                tx_bytes,
+                                previous_rx_bytes,
+                                previous_tx_bytes,
+                                (direction_mask & 1) <> 0 AS selected_rx,
+                                (direction_mask & 2) <> 0 AS selected_tx,
+                                rx_bytes >= previous_rx_bytes AS valid_rx,
+                                tx_bytes >= previous_tx_bytes AS valid_tx
+                            FROM sequenced
+                            WHERE observed_at >= to_timestamp($5)
+                              AND observed_at <= to_timestamp($6)
+                              AND previous_rx_bytes IS NOT NULL
+                        )
+                        SELECT
+                            to_timestamp(bucket_epoch)::text AS bucket_start,
+                            $7::integer AS bucket_secs,
+                            count(*) FILTER (
+                                WHERE (selected_rx AND valid_rx)
+                                   OR (selected_tx AND valid_tx)
+                            )::integer AS sample_count,
+                            count(*) FILTER (
+                                WHERE (selected_rx AND NOT valid_rx)
+                                   OR (selected_tx AND NOT valid_tx)
+                            )::integer AS reset_count,
+                            CASE
+                            WHEN count(*) FILTER (
+                                WHERE (selected_rx AND valid_rx)
+                                   OR (selected_tx AND valid_tx)
+                            ) = 0 THEN NULL
+                            WHEN bool_or(selected_rx) AND count(*) FILTER (
+                                WHERE selected_rx AND valid_rx
+                            ) = 0 THEN NULL
+                            ELSE
+                                COALESCE(sum(
+                                    CASE WHEN selected_rx AND valid_rx
+                                        THEN rx_bytes - previous_rx_bytes ELSE 0 END
+                                ), 0)::bigint
+                            END AS rx_bytes,
+                            CASE
+                            WHEN count(*) FILTER (
+                                WHERE (selected_rx AND valid_rx)
+                                   OR (selected_tx AND valid_tx)
+                            ) = 0 THEN NULL
+                            WHEN bool_or(selected_tx) AND count(*) FILTER (
+                                WHERE selected_tx AND valid_tx
+                            ) = 0 THEN NULL
+                            ELSE
+                                COALESCE(sum(
+                                    CASE WHEN selected_tx AND valid_tx
+                                        THEN tx_bytes - previous_tx_bytes ELSE 0 END
+                                ), 0)::bigint
+                            END AS tx_bytes
+                        FROM deltas
+                        GROUP BY bucket_epoch
+                        ORDER BY bucket_epoch
+                        "#,
+                    )
+                    .bind(client_id)
+                    .bind(&source_kinds)
+                    .bind(&interfaces)
+                    .bind(&direction_masks)
+                    .bind(start_unix as i64)
+                    .bind(end_unix as i64)
+                    .bind(step_secs)
+                    .fetch_all(pool)
+                    .await?
+                } else {
+                    sqlx::query(
+                        r#"
+                        WITH requested AS (
+                            SELECT source_kind, interface, direction_mask
+                            FROM UNNEST($2::text[], $3::text[], $4::integer[])
+                                AS stream(source_kind, interface, direction_mask)
+                        ), range_samples AS (
+                            SELECT
+                                sample.source_kind,
+                                sample.interface,
+                                requested.direction_mask,
+                                sample.observed_at,
+                                sample.rx_bytes,
+                                sample.tx_bytes,
+                                sample.rx_counter_epoch,
+                                sample.tx_counter_epoch
+                            FROM traffic_counter_samples sample
+                            JOIN requested
+                              ON requested.source_kind = sample.source_kind
+                             AND requested.interface = sample.interface
+                            WHERE sample.client_id = $1
+                              AND sample.observed_at >= to_timestamp($5)
+                              AND sample.observed_at <= to_timestamp($6)
+                        ), baseline AS (
+                            SELECT
+                                requested.source_kind,
+                                requested.interface,
+                                requested.direction_mask,
+                                previous.observed_at,
+                                previous.rx_bytes,
+                                previous.tx_bytes,
+                                previous.rx_counter_epoch,
+                                previous.tx_counter_epoch
+                            FROM requested
+                            JOIN LATERAL (
+                                SELECT
+                                    observed_at,
+                                    rx_bytes,
+                                    tx_bytes,
+                                    rx_counter_epoch,
+                                    tx_counter_epoch
+                                FROM traffic_counter_samples sample
+                                WHERE sample.client_id = $1
+                                  AND sample.source_kind = requested.source_kind
+                                  AND sample.interface = requested.interface
+                                  AND sample.observed_at < to_timestamp($5)
+                                ORDER BY sample.observed_at DESC
+                                LIMIT 1
+                            ) previous ON TRUE
+                        ), selected AS (
+                            SELECT * FROM range_samples
+                            UNION ALL
+                            SELECT * FROM baseline
+                        ), sequenced AS (
+                            SELECT
+                                selected.*,
+                                lag(rx_bytes) OVER stream AS previous_rx_bytes,
+                                lag(tx_bytes) OVER stream AS previous_tx_bytes,
+                                lag(rx_counter_epoch) OVER stream AS previous_rx_counter_epoch,
+                                lag(tx_counter_epoch) OVER stream AS previous_tx_counter_epoch
+                            FROM selected
+                            WINDOW stream AS (
+                                PARTITION BY source_kind, interface
+                                ORDER BY observed_at
+                            )
+                        ), deltas AS (
+                            SELECT
+                                floor(extract(epoch FROM observed_at)::numeric / $7::numeric)
+                                    * $7::numeric AS bucket_epoch,
+                                direction_mask,
+                                rx_bytes,
+                                tx_bytes,
+                                previous_rx_bytes,
+                                previous_tx_bytes,
+                                (direction_mask & 1) <> 0 AS selected_rx,
+                                (direction_mask & 2) <> 0 AS selected_tx,
+                                ((direction_mask & 1) = 0 OR (
+                                    rx_counter_epoch = previous_rx_counter_epoch
+                                    AND rx_bytes >= previous_rx_bytes
+                                )) AS valid_rx,
+                                ((direction_mask & 2) = 0 OR (
+                                    tx_counter_epoch = previous_tx_counter_epoch
+                                    AND tx_bytes >= previous_tx_bytes
+                                )) AS valid_tx
+                            FROM sequenced
+                            WHERE observed_at >= to_timestamp($5)
+                              AND observed_at <= to_timestamp($6)
+                              AND previous_rx_bytes IS NOT NULL
+                        )
+                        SELECT
+                            to_timestamp(bucket_epoch)::text AS bucket_start,
+                            $7::integer AS bucket_secs,
+                            count(*) FILTER (
+                                WHERE (selected_rx AND valid_rx)
+                                   OR (selected_tx AND valid_tx)
+                            )::integer AS sample_count,
+                            count(*) FILTER (
+                                WHERE (selected_rx AND NOT valid_rx)
+                                   OR (selected_tx AND NOT valid_tx)
+                            )::integer AS reset_count,
+                            CASE
+                            WHEN count(*) FILTER (
+                                WHERE (selected_rx AND valid_rx)
+                                   OR (selected_tx AND valid_tx)
+                            ) = 0 THEN NULL
+                            WHEN bool_or(selected_rx) AND count(*) FILTER (
+                                WHERE selected_rx AND valid_rx
+                            ) = 0 THEN NULL
+                            ELSE
+                                COALESCE(sum(
+                                    CASE WHEN selected_rx AND valid_rx
+                                        THEN rx_bytes - previous_rx_bytes ELSE 0 END
+                                ), 0)::bigint
+                            END AS rx_bytes,
+                            CASE
+                            WHEN count(*) FILTER (
+                                WHERE (selected_rx AND valid_rx)
+                                   OR (selected_tx AND valid_tx)
+                            ) = 0 THEN NULL
+                            WHEN bool_or(selected_tx) AND count(*) FILTER (
+                                WHERE selected_tx AND valid_tx
+                            ) = 0 THEN NULL
+                            ELSE
+                                COALESCE(sum(
+                                    CASE WHEN selected_tx AND valid_tx
+                                        THEN tx_bytes - previous_tx_bytes ELSE 0 END
+                                ), 0)::bigint
+                            END AS tx_bytes
+                        FROM deltas
+                        GROUP BY bucket_epoch
+                        ORDER BY bucket_epoch
+                        "#,
+                    )
+                    .bind(client_id)
+                    .bind(&source_kinds)
+                    .bind(&interfaces)
+                    .bind(&direction_masks)
+                    .bind(start_unix as i64)
+                    .bind(end_unix as i64)
+                    .bind(step_secs)
+                    .fetch_all(pool)
+                    .await?
+                };
+                rows.into_iter()
+                    .map(|row| {
+                        let rx_bytes: Option<i64> = row.try_get("rx_bytes")?;
+                        let tx_bytes: Option<i64> = row.try_get("tx_bytes")?;
+                        Ok(TrafficHistoryPointView {
+                            bucket_start: row.try_get("bucket_start")?,
+                            bucket_secs: row.try_get("bucket_secs")?,
+                            sample_count: row.try_get("sample_count")?,
+                            reset_count: row.try_get("reset_count")?,
+                            rx_bytes,
+                            tx_bytes,
+                            total_bytes: rx_bytes
+                                .zip(tx_bytes)
+                                .map(|(rx, tx)| rx.saturating_add(tx)),
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    async fn traffic_history_streams(&self, client_id: &str) -> Result<Vec<TrafficHistoryStream>> {
+        let rules = self
+            .list_vps_rules_matching(
+                &VpsRuleQuery {
+                    limit: None,
+                    client_id: Some(client_id.to_string()),
+                    selector_expression: None,
+                    key: Some(VPS_RULE_KEY_TRAFFIC_SELECTORS.to_string()),
+                    state: None,
+                },
+                None,
+            )
+            .await?;
+        let Some(rule) = rules.into_iter().next() else {
+            return Ok(Vec::new());
+        };
+        let Ok(selectors) = parse_persisted_traffic_selector_list(&rule.value_raw) else {
+            return Ok(Vec::new());
+        };
+        let mut streams = BTreeSet::<(String, String)>::new();
+        for selector in selectors {
+            streams.insert((selector.source, selector.interface));
+        }
+        Ok(streams
+            .into_iter()
+            .map(|(source_kind, interface)| TrafficHistoryStream {
+                source_kind,
+                interface,
+                // Billing direction controls accounting only. Diagnostic
+                // history always exposes both counters for a selected stream.
+                direction_mask: 0b11,
+            })
+            .collect())
     }
 
     pub(crate) async fn dry_run_fleet_alert_policy(
@@ -1049,7 +1625,17 @@ impl Repository {
         let allowed_client_id_values =
             allowed_client_ids.map(|client_ids| client_ids.iter().cloned().collect::<Vec<_>>());
         let mut alerts = match self {
-            Self::Memory(memory) => memory.policy_alerts.read().await.clone(),
+            Self::Memory(memory) => {
+                let hidden = memory.hidden_clients.read().await;
+                memory
+                    .policy_alerts
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|alert| !hidden.contains(&alert.client_id))
+                    .cloned()
+                    .collect()
+            }
             Self::Postgres(pool) => {
                 let sql = if prioritize_severity {
                     r#"
@@ -1070,6 +1656,10 @@ impl Repository {
                     created_at::text AS created_at
                 FROM policy_alerts
                 WHERE ($2::text IS NULL OR client_id = $2)
+                  AND EXISTS (
+                      SELECT 1 FROM visible_clients
+                      WHERE visible_clients.id = policy_alerts.client_id
+                  )
                   AND ($3::text IS NULL OR severity = $3)
                   AND ($4::text IS NULL OR category = $4)
                   AND ($5::uuid IS NULL OR policy_group_id = $5)
@@ -1106,6 +1696,10 @@ impl Repository {
                     created_at::text AS created_at
                 FROM policy_alerts
                 WHERE ($2::text IS NULL OR client_id = $2)
+                  AND EXISTS (
+                      SELECT 1 FROM visible_clients
+                      WHERE visible_clients.id = policy_alerts.client_id
+                  )
                   AND ($3::text IS NULL OR severity = $3)
                   AND ($4::text IS NULL OR category = $4)
                   AND ($5::uuid IS NULL OR policy_group_id = $5)
@@ -1307,6 +1901,11 @@ impl Repository {
             .collect::<HashMap<_, _>>();
         let mut changes = Vec::new();
         for agent in &matched {
+            let billing_touched = if operation == "upsert" {
+                values.keys().any(|key| is_billing_rule_key(key))
+            } else {
+                keys.iter().any(|key| is_billing_rule_key(key))
+            };
             if operation == "upsert" {
                 for (key, value) in values {
                     let parsed = parse_vps_rule_value(key, value);
@@ -1316,9 +1915,13 @@ impl Repository {
                         .err()
                         .map(|error| vec![error.to_string()])
                         .unwrap_or_default();
+                    let canonical_after = parsed
+                        .as_ref()
+                        .map(|parsed| parsed.raw.clone())
+                        .unwrap_or_else(|_| value.trim().to_string());
                     let action = if !validation_errors.is_empty() {
                         "invalid"
-                    } else if before.as_deref() == Some(value.trim()) {
+                    } else if before.as_deref() == Some(canonical_after.as_str()) {
                         "unchanged"
                     } else {
                         "set"
@@ -1328,7 +1931,7 @@ impl Repository {
                         display_name: agent.display_name.clone(),
                         key: key.clone(),
                         before,
-                        after: Some(value.trim().to_string()),
+                        after: Some(canonical_after),
                         action: action.to_string(),
                         validation: if validation_errors.is_empty() {
                             "ok".to_string()
@@ -1356,6 +1959,39 @@ impl Repository {
                         validation: "ok".to_string(),
                         validation_errors: Vec::new(),
                     });
+                }
+            }
+            if billing_touched {
+                let mut price = stored_map
+                    .get(&(agent.id.clone(), VPS_RULE_KEY_BILLING_PRICE.to_string()))
+                    .cloned();
+                let mut cycle = stored_map
+                    .get(&(agent.id.clone(), VPS_RULE_KEY_BILLING_CYCLE.to_string()))
+                    .cloned();
+                if operation == "upsert" {
+                    if let Some(value) = values.get(VPS_RULE_KEY_BILLING_PRICE) {
+                        price = parse_billing_price(value).ok().map(|parsed| parsed.raw);
+                    }
+                    if let Some(value) = values.get(VPS_RULE_KEY_BILLING_CYCLE) {
+                        cycle = parse_billing_cycle(value).ok().map(|parsed| parsed.raw);
+                    }
+                } else {
+                    if keys.iter().any(|key| key == VPS_RULE_KEY_BILLING_PRICE) {
+                        price = None;
+                    }
+                    if keys.iter().any(|key| key == VPS_RULE_KEY_BILLING_CYCLE) {
+                        cycle = None;
+                    }
+                }
+                if let Err(error) = validate_billing_rule_group(price.as_deref(), cycle.as_deref())
+                {
+                    for change in changes.iter_mut().filter(|change| {
+                        change.client_id == agent.id && is_billing_rule_key(&change.key)
+                    }) {
+                        change.action = "invalid".to_string();
+                        change.validation = "invalid".to_string();
+                        change.validation_errors.push(error.to_string());
+                    }
                 }
             }
         }
@@ -1391,8 +2027,22 @@ impl Repository {
             "vps_rules_preview_contains_invalid_rows"
         );
         let now = unix_now().to_string();
+        let target_client_ids = preview
+            .changes
+            .iter()
+            .map(|change| change.client_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         match self {
             Self::Memory(memory) => {
+                let _lifecycle_guard = memory.agent_key_lifecycle.lock().await;
+                require_visible_memory_clients(
+                    memory,
+                    &target_client_ids,
+                    "vps_rules_target_no_longer_available",
+                )
+                .await?;
                 let mut rows = memory.vps_rule_values.write().await;
                 for change in &preview.changes {
                     if change.action == "unchanged" {
@@ -1429,6 +2079,12 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                require_visible_postgres_clients_in_tx(
+                    &mut tx,
+                    &target_client_ids,
+                    "vps_rules_target_no_longer_available",
+                )
+                .await?;
                 for change in &preview.changes {
                     if change.action == "unchanged" {
                         continue;
@@ -1554,7 +2210,8 @@ impl Repository {
                             sample.observed_at,
                             sample.rx_bytes,
                             sample.tx_bytes,
-                            sample.counter_epoch,
+                            sample.rx_counter_epoch,
+                            sample.tx_counter_epoch,
                             requested.cycle_start_unix
                         FROM traffic_counter_samples sample
                         JOIN requested
@@ -1572,7 +2229,8 @@ impl Repository {
                             sample.observed_at,
                             sample.rx_bytes,
                             sample.tx_bytes,
-                            sample.counter_epoch,
+                            sample.rx_counter_epoch,
+                            sample.tx_counter_epoch,
                             requested.cycle_start_unix
                         FROM requested
                         JOIN LATERAL (
@@ -1580,7 +2238,8 @@ impl Repository {
                                 sample.observed_at,
                                 sample.rx_bytes,
                                 sample.tx_bytes,
-                                sample.counter_epoch
+                                sample.rx_counter_epoch,
+                                sample.tx_counter_epoch
                             FROM traffic_counter_samples sample
                             WHERE sample.client_id = requested.client_id
                               AND sample.source_kind = requested.source_kind
@@ -1604,7 +2263,8 @@ impl Repository {
                             LAG(observed_at) OVER stream AS previous_observed_at,
                             LAG(rx_bytes) OVER stream AS previous_rx_bytes,
                             LAG(tx_bytes) OVER stream AS previous_tx_bytes,
-                            LAG(counter_epoch) OVER stream AS previous_counter_epoch
+                            LAG(rx_counter_epoch) OVER stream AS previous_rx_counter_epoch,
+                            LAG(tx_counter_epoch) OVER stream AS previous_tx_counter_epoch
                         FROM selected_samples
                         WINDOW stream AS (
                             PARTITION BY client_id, source_kind, interface
@@ -1620,7 +2280,7 @@ impl Repository {
                                 CASE
                                     WHEN observed_at >= to_timestamp(cycle_start_unix)
                                      AND previous_observed_at IS NOT NULL
-                                     AND counter_epoch = previous_counter_epoch
+                                     AND rx_counter_epoch = previous_rx_counter_epoch
                                      AND rx_bytes >= previous_rx_bytes
                                     THEN rx_bytes - previous_rx_bytes
                                     ELSE 0
@@ -1630,13 +2290,16 @@ impl Repository {
                                 CASE
                                     WHEN observed_at >= to_timestamp(cycle_start_unix)
                                      AND previous_observed_at IS NOT NULL
-                                     AND counter_epoch = previous_counter_epoch
+                                     AND tx_counter_epoch = previous_tx_counter_epoch
                                      AND tx_bytes >= previous_tx_bytes
                                     THEN tx_bytes - previous_tx_bytes
                                     ELSE 0
                                 END
                             ), 0)::bigint AS cycle_tx,
-                            COUNT(DISTINCT counter_epoch)::bigint AS counter_epochs_seen
+                            COUNT(DISTINCT rx_counter_epoch)::bigint
+                                AS rx_counter_epochs_seen,
+                            COUNT(DISTINCT tx_counter_epoch)::bigint
+                                AS tx_counter_epochs_seen
                         FROM sequenced_samples
                         GROUP BY client_id, source_kind, interface
                     ),
@@ -1664,7 +2327,8 @@ impl Repository {
                         latest.latest_rx,
                         latest.latest_tx,
                         latest.last_sample_unix,
-                        usage.counter_epochs_seen
+                        usage.rx_counter_epochs_seen,
+                        usage.tx_counter_epochs_seen
                     FROM usage
                     JOIN latest
                       ON latest.client_id = usage.client_id
@@ -1691,7 +2355,8 @@ impl Repository {
                             latest_rx: row.try_get("latest_rx")?,
                             latest_tx: row.try_get("latest_tx")?,
                             last_sample_unix: row.try_get("last_sample_unix")?,
-                            counter_epochs_seen: row.try_get("counter_epochs_seen")?,
+                            rx_counter_epochs_seen: row.try_get("rx_counter_epochs_seen")?,
+                            tx_counter_epochs_seen: row.try_get("tx_counter_epochs_seen")?,
                         })
                     })
                     .collect()
@@ -1830,6 +2495,17 @@ impl Repository {
         let now_text = now.to_rfc3339();
         match self {
             Self::Memory(memory) => {
+                let _lifecycle = memory.agent_key_lifecycle.lock().await;
+                if require_visible_memory_clients(
+                    memory,
+                    std::slice::from_ref(&agent.id),
+                    "policy_alert_target_unavailable",
+                )
+                .await
+                .is_err()
+                {
+                    return Ok(false);
+                }
                 // Keep policy edits ordered before state/alert/event writes and
                 // reject an evaluator that loaded an obsolete policy snapshot.
                 let groups = memory.policy_groups.read().await;
@@ -1937,6 +2613,18 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
+                let target_is_visible = sqlx::query_scalar::<_, String>(
+                    "SELECT id FROM visible_clients WHERE id = $1 FOR UPDATE",
+                )
+                .bind(&agent.id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_some();
+                if !target_is_visible {
+                    tx.commit().await?;
+                    return Ok(false);
+                }
                 let lock_name = format!("vpsman:policy-rule-state:{}:{}", rule.id, agent.id);
                 sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
                     .bind(lock_name)
@@ -2133,6 +2821,38 @@ impl Repository {
             }
         }
     }
+}
+
+fn is_billing_rule_key(key: &str) -> bool {
+    matches!(key, VPS_RULE_KEY_BILLING_PRICE | VPS_RULE_KEY_BILLING_CYCLE)
+}
+
+fn validate_billing_rule_group(price: Option<&str>, cycle: Option<&str>) -> Result<()> {
+    let Some(price) = price else {
+        anyhow::ensure!(cycle.is_none(), "billing_cycle_requires_price");
+        return Ok(());
+    };
+    let price = parse_billing_price_parts(price)?;
+    if price.disabled {
+        anyhow::ensure!(cycle.is_none(), "billing_cycle_disabled_price_invalid");
+        return Ok(());
+    }
+    let Some(cycle) = cycle else {
+        return Ok(());
+    };
+    let cycle = parse_billing_cycle(cycle)?;
+    let has_month = cycle
+        .json
+        .get("month")
+        .is_some_and(|month| !month.is_null());
+    match price.period_code.as_deref() {
+        Some("m") => anyhow::ensure!(!has_month, "billing_month_cycle_requires_day"),
+        Some("q" | "hy" | "y") => {
+            anyhow::ensure!(has_month, "billing_long_cycle_requires_day_month")
+        }
+        _ => anyhow::bail!("billing_plan_period_invalid"),
+    }
+    Ok(())
 }
 
 async fn upsert_policy_rule_state_in_tx(
@@ -2545,9 +3265,14 @@ fn aggregate_memory_traffic_counter_usage(
             continue;
         }
         let usage = derive_cycle_usage(&selected, request.cycle_start_unix, now_unix);
-        let counter_epochs_seen = selected
+        let rx_counter_epochs_seen = selected
             .iter()
-            .map(|sample| sample.counter_epoch)
+            .map(|sample| sample.rx_counter_epoch)
+            .collect::<HashSet<_>>()
+            .len();
+        let tx_counter_epochs_seen = selected
+            .iter()
+            .map(|sample| sample.tx_counter_epoch)
             .collect::<HashSet<_>>()
             .len();
         rows.push(TrafficCounterStreamUsage {
@@ -2561,7 +3286,8 @@ fn aggregate_memory_traffic_counter_usage(
             last_sample_unix: usage
                 .last_sample_unix
                 .expect("non-empty selected traffic samples have a latest timestamp"),
-            counter_epochs_seen: i64::try_from(counter_epochs_seen).unwrap_or(i64::MAX),
+            rx_counter_epochs_seen: i64::try_from(rx_counter_epochs_seen).unwrap_or(i64::MAX),
+            tx_counter_epochs_seen: i64::try_from(tx_counter_epochs_seen).unwrap_or(i64::MAX),
         });
     }
     rows.sort_by(|left, right| {
@@ -2571,6 +3297,163 @@ fn aggregate_memory_traffic_counter_usage(
             .then_with(|| left.interface.cmp(&right.interface))
     });
     rows
+}
+
+fn raw_memory_traffic_samples(
+    samples: &[TelemetrySampleView],
+    client_id: &str,
+    streams: &[TrafficHistoryStream],
+) -> Result<Vec<TrafficCounterSampleRecord>> {
+    let selected = streams
+        .iter()
+        .map(|stream| (stream.source_kind.as_str(), stream.interface.as_str()))
+        .collect::<HashSet<_>>();
+    let mut rows = Vec::new();
+    for sample in samples
+        .iter()
+        .filter(|sample| sample.client_id == client_id)
+    {
+        let metrics: vpsman_common::AgentMetrics =
+            serde_json::from_value(sample.payload.clone())
+                .context("stored raw telemetry payload is invalid")?;
+        let observed_unix = i64::try_from(
+            parse_timestamp_unix(&sample.observed_at)
+                .context("stored raw telemetry receive timestamp is invalid")?,
+        )
+        .context("stored raw telemetry receive timestamp exceeds supported range")?;
+        for network in metrics
+            .networks
+            .into_iter()
+            .filter(|network| selected.contains(&("host", network.interface.as_str())))
+        {
+            rows.push(TrafficCounterSampleRecord {
+                client_id: client_id.to_string(),
+                source_kind: "host".to_string(),
+                interface: network.interface,
+                observed_at: sample.observed_at.clone(),
+                observed_unix,
+                rx_bytes: i64::try_from(network.rx_bytes).unwrap_or(i64::MAX),
+                tx_bytes: i64::try_from(network.tx_bytes).unwrap_or(i64::MAX),
+                rx_counter_epoch: 0,
+                tx_counter_epoch: 0,
+                sample_source: "raw_agent_networks".to_string(),
+            });
+        }
+        for tunnel in metrics
+            .tunnels
+            .into_iter()
+            .filter(|tunnel| selected.contains(&("tunnel", tunnel.interface.as_str())))
+        {
+            rows.push(TrafficCounterSampleRecord {
+                client_id: client_id.to_string(),
+                source_kind: "tunnel".to_string(),
+                interface: tunnel.interface,
+                observed_at: sample.observed_at.clone(),
+                observed_unix,
+                rx_bytes: i64::try_from(tunnel.rx_bytes).unwrap_or(i64::MAX),
+                tx_bytes: i64::try_from(tunnel.tx_bytes).unwrap_or(i64::MAX),
+                rx_counter_epoch: 0,
+                tx_counter_epoch: 0,
+                sample_source: "raw_runtime_tunnel".to_string(),
+            });
+        }
+    }
+    Ok(rows)
+}
+
+fn aggregate_memory_traffic_history(
+    samples: Vec<TrafficCounterSampleRecord>,
+    streams: &[TrafficHistoryStream],
+    start_unix: u64,
+    end_unix: u64,
+    step_secs: i32,
+) -> Vec<TrafficHistoryPointView> {
+    #[derive(Default)]
+    struct Bucket {
+        sample_count: i32,
+        reset_count: i32,
+        selected_rx: bool,
+        selected_tx: bool,
+        valid_rx_count: i32,
+        valid_tx_count: i32,
+        rx_bytes: i64,
+        tx_bytes: i64,
+    }
+
+    let start_unix = i64::try_from(start_unix).unwrap_or(i64::MAX);
+    let end_unix = i64::try_from(end_unix).unwrap_or(i64::MAX);
+    let step = i64::from(step_secs.max(60));
+    let mut buckets = BTreeMap::<i64, Bucket>::new();
+    for stream in streams {
+        let mut selected = samples
+            .iter()
+            .filter(|sample| {
+                sample.source_kind == stream.source_kind
+                    && sample.interface == stream.interface
+                    && sample.observed_unix <= end_unix
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        selected.sort_by_key(|sample| sample.observed_unix);
+        selected.dedup_by_key(|sample| sample.observed_unix);
+        let mut previous = None::<TrafficCounterSampleRecord>;
+        for sample in selected {
+            let Some(prior) = previous.replace(sample.clone()) else {
+                continue;
+            };
+            if sample.observed_unix < start_unix {
+                continue;
+            }
+            let bucket = buckets
+                .entry(sample.observed_unix.div_euclid(step) * step)
+                .or_default();
+            let selected_rx = stream.direction_mask & 1 != 0;
+            let selected_tx = stream.direction_mask & 2 != 0;
+            let valid_rx = sample.rx_counter_epoch == prior.rx_counter_epoch
+                && sample.rx_bytes >= prior.rx_bytes;
+            let valid_tx = sample.tx_counter_epoch == prior.tx_counter_epoch
+                && sample.tx_bytes >= prior.tx_bytes;
+            bucket.selected_rx |= selected_rx;
+            bucket.selected_tx |= selected_tx;
+            if (selected_rx && !valid_rx) || (selected_tx && !valid_tx) {
+                bucket.reset_count = bucket.reset_count.saturating_add(1);
+            }
+            if (selected_rx && valid_rx) || (selected_tx && valid_tx) {
+                bucket.sample_count = bucket.sample_count.saturating_add(1);
+            }
+            if selected_rx && valid_rx {
+                bucket.valid_rx_count = bucket.valid_rx_count.saturating_add(1);
+                bucket.rx_bytes = bucket
+                    .rx_bytes
+                    .saturating_add(sample.rx_bytes.saturating_sub(prior.rx_bytes));
+            }
+            if selected_tx && valid_tx {
+                bucket.valid_tx_count = bucket.valid_tx_count.saturating_add(1);
+                bucket.tx_bytes = bucket
+                    .tx_bytes
+                    .saturating_add(sample.tx_bytes.saturating_sub(prior.tx_bytes));
+            }
+        }
+    }
+    buckets
+        .into_iter()
+        .map(|(bucket_start, bucket)| {
+            let has_samples = bucket.sample_count > 0;
+            let rx_bytes = (has_samples && (!bucket.selected_rx || bucket.valid_rx_count > 0))
+                .then_some(bucket.rx_bytes);
+            let tx_bytes = (has_samples && (!bucket.selected_tx || bucket.valid_tx_count > 0))
+                .then_some(bucket.tx_bytes);
+            TrafficHistoryPointView {
+                bucket_start: bucket_start.to_string(),
+                bucket_secs: step_secs.max(60),
+                sample_count: bucket.sample_count,
+                reset_count: bucket.reset_count,
+                rx_bytes,
+                tx_bytes,
+                total_bytes: rx_bytes.zip(tx_bytes).map(|(rx, tx)| rx.saturating_add(tx)),
+            }
+        })
+        .collect()
 }
 
 fn validate_vps_rule_values(values: &BTreeMap<String, String>) -> Result<()> {
@@ -2601,6 +3484,9 @@ fn normalize_vps_rule_key(key: &str) -> Result<String> {
                 | VPS_RULE_KEY_TRAFFIC_QUOTA_RX
                 | VPS_RULE_KEY_TRAFFIC_QUOTA_TX
                 | VPS_RULE_KEY_TRAFFIC_SELECTORS
+                | VPS_RULE_KEY_BILLING_PRICE
+                | VPS_RULE_KEY_BILLING_CYCLE
+                | VPS_RULE_KEY_NETWORK_PORT_SPEED
         ),
         "vps_rules_key_unsupported"
     );
@@ -2642,6 +3528,13 @@ fn parse_vps_rule_value_with_legacy_selector_support(
         VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL
         | VPS_RULE_KEY_TRAFFIC_QUOTA_RX
         | VPS_RULE_KEY_TRAFFIC_QUOTA_TX => {
+            if raw == "-1" {
+                return Ok(ParsedRuleValue {
+                    raw: "-1".to_string(),
+                    json: json!({"bytes": -1, "unlimited": true, "display": "Unlimited"}),
+                    display: "Unlimited".to_string(),
+                });
+            }
             let bytes = parse_byte_size(raw)?;
             Ok(ParsedRuleValue {
                 raw: raw.to_string(),
@@ -2670,8 +3563,240 @@ fn parse_vps_rule_value_with_legacy_selector_support(
                 display: format!("{} selectors", selectors.len()),
             })
         }
+        VPS_RULE_KEY_BILLING_PRICE => parse_billing_price(raw),
+        VPS_RULE_KEY_BILLING_CYCLE => parse_billing_cycle(raw),
+        VPS_RULE_KEY_NETWORK_PORT_SPEED => parse_port_speed(raw),
         _ => unreachable!("normalize_vps_rule_key rejects unsupported keys"),
     }
+}
+
+#[derive(Clone, Debug)]
+struct ParsedBillingPrice {
+    currency: Option<String>,
+    currency_display: Option<String>,
+    disabled: bool,
+    period: Option<String>,
+    period_code: Option<String>,
+    price: Option<String>,
+}
+
+fn parse_billing_price(input: &str) -> Result<ParsedRuleValue> {
+    let price = parse_billing_price_parts(input)?;
+    if price.disabled {
+        return Ok(ParsedRuleValue {
+            raw: "-1".to_string(),
+            json: json!({"disabled": true, "display": "n/a"}),
+            display: "n/a".to_string(),
+        });
+    }
+    let amount = price.price.context("billing_plan_price_required")?;
+    let currency = price.currency.context("billing_plan_currency_required")?;
+    let currency_display = price
+        .currency_display
+        .context("billing_plan_currency_required")?;
+    let period = price.period.context("billing_plan_period_required")?;
+    let period_code = price.period_code.context("billing_plan_period_required")?;
+    let display = format!("{amount} {currency_display}/{period_code}");
+    Ok(ParsedRuleValue {
+        raw: display.clone(),
+        json: json!({
+            "disabled": false,
+            "price": amount,
+            "currency": currency,
+            "currency_display": currency_display,
+            "period": period,
+            "period_code": period_code,
+            "display": display,
+        }),
+        display,
+    })
+}
+
+fn parse_billing_price_parts(input: &str) -> Result<ParsedBillingPrice> {
+    let compact = input
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    if compact == "-1" {
+        return Ok(ParsedBillingPrice {
+            currency: None,
+            currency_display: None,
+            disabled: true,
+            period: None,
+            period_code: None,
+            price: None,
+        });
+    }
+    let (amount_and_currency, period_code) = compact
+        .split_once('/')
+        .context("billing_plan_period_required")?;
+    let currency_start = amount_and_currency
+        .char_indices()
+        .find(|(_, character)| !character.is_ascii_digit() && *character != '.')
+        .map(|(index, _)| index)
+        .context("billing_plan_currency_required")?;
+    let price = normalize_billing_price(&amount_and_currency[..currency_start])?;
+    let currency_input = &amount_and_currency[currency_start..];
+    let (currency, currency_display) = normalize_billing_currency(currency_input)?;
+    let period_input = period_code.to_ascii_lowercase();
+    let (period_code, period) = match period_input.as_str() {
+        "m" => ("m", "month"),
+        "q" => ("q", "quarter"),
+        "h" | "hy" => ("hy", "half_year"),
+        "y" => ("y", "year"),
+        _ => anyhow::bail!("billing_plan_period_invalid"),
+    };
+    Ok(ParsedBillingPrice {
+        currency: Some(currency),
+        currency_display: Some(currency_display),
+        disabled: false,
+        period: Some(period.to_string()),
+        period_code: Some(period_code.to_string()),
+        price: Some(price),
+    })
+}
+
+fn normalize_billing_currency(input: &str) -> Result<(String, String)> {
+    let upper = input.to_ascii_uppercase();
+    let normalized = match input {
+        "$" => ("USD".to_string(), "$".to_string()),
+        "¥" | "￥" => ("CNY".to_string(), "¥".to_string()),
+        "€" => ("EUR".to_string(), "€".to_string()),
+        "£" => ("GBP".to_string(), "£".to_string()),
+        _ if upper.len() == 3
+            && upper
+                .chars()
+                .all(|character| character.is_ascii_alphabetic()) =>
+        {
+            (upper.clone(), upper)
+        }
+        _ => anyhow::bail!("billing_plan_currency_invalid"),
+    };
+    Ok(normalized)
+}
+
+fn parse_billing_cycle(input: &str) -> Result<ParsedRuleValue> {
+    let raw = input.trim();
+    let (day, month) = match raw.split_once('-') {
+        Some((day, month)) => (parse_billing_day(day)?, Some(parse_billing_month(month)?)),
+        None => (parse_billing_day(raw)?, None),
+    };
+    let display = month.map_or_else(|| day.to_string(), |month| format!("{day:02}-{month:02}"));
+    Ok(ParsedRuleValue {
+        raw: display.clone(),
+        json: json!({"day": day, "month": month, "display": display}),
+        display,
+    })
+}
+
+fn parse_billing_day(input: &str) -> Result<u8> {
+    let day = input
+        .trim()
+        .parse::<u8>()
+        .context("billing_cycle_day_invalid")?;
+    anyhow::ensure!((1..=31).contains(&day), "billing_cycle_day_invalid");
+    Ok(day)
+}
+
+fn parse_billing_month(input: &str) -> Result<u8> {
+    let month = input
+        .trim()
+        .parse::<u8>()
+        .context("billing_cycle_month_invalid")?;
+    anyhow::ensure!((1..=12).contains(&month), "billing_cycle_month_invalid");
+    Ok(month)
+}
+
+fn parse_port_speed(input: &str) -> Result<ParsedRuleValue> {
+    let compact = input
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    let unit_start = compact
+        .find(|character: char| character.is_ascii_alphabetic())
+        .context("port_speed_unit_required")?;
+    let amount = &compact[..unit_start];
+    let unit_input = compact[unit_start..].to_ascii_lowercase();
+    let (unit, multiplier) = match unit_input.as_str() {
+        "bps" => ("bps", 1_u128),
+        "kbps" => ("Kbps", 1_000_u128),
+        "mbps" => ("Mbps", 1_000_000_u128),
+        "gbps" => ("Gbps", 1_000_000_000_u128),
+        "tbps" => ("Tbps", 1_000_000_000_000_u128),
+        _ => anyhow::bail!("port_speed_unit_invalid"),
+    };
+    let (whole, fraction) = amount.split_once('.').unwrap_or((amount, ""));
+    anyhow::ensure!(
+        !whole.is_empty()
+            && whole.chars().all(|character| character.is_ascii_digit())
+            && fraction.len() <= 3
+            && fraction.chars().all(|character| character.is_ascii_digit()),
+        "port_speed_value_invalid"
+    );
+    let scale = 10_u128.pow(fraction.len() as u32);
+    let whole_value = whole.parse::<u128>().context("port_speed_value_invalid")?;
+    let fraction_value = if fraction.is_empty() {
+        0
+    } else {
+        fraction
+            .parse::<u128>()
+            .context("port_speed_value_invalid")?
+    };
+    let scaled = whole_value
+        .checked_mul(scale)
+        .and_then(|value| value.checked_add(fraction_value))
+        .context("port_speed_value_too_large")?;
+    let bps = scaled
+        .checked_mul(multiplier)
+        .context("port_speed_value_too_large")?
+        / scale;
+    anyhow::ensure!(
+        bps > 0 && bps <= i64::MAX as u128,
+        "port_speed_value_invalid"
+    );
+    let normalized_whole = whole.trim_start_matches('0');
+    let normalized_whole = if normalized_whole.is_empty() {
+        "0"
+    } else {
+        normalized_whole
+    };
+    let normalized_fraction = fraction.trim_end_matches('0');
+    let normalized_amount = if normalized_fraction.is_empty() {
+        normalized_whole.to_string()
+    } else {
+        format!("{normalized_whole}.{normalized_fraction}")
+    };
+    let display = format!("{normalized_amount} {unit}");
+    Ok(ParsedRuleValue {
+        raw: display.clone(),
+        json: json!({"bps": bps as i64, "display": display}),
+        display,
+    })
+}
+
+fn normalize_billing_price(input: &str) -> Result<String> {
+    let (whole, fraction) = input.split_once('.').unwrap_or((input, ""));
+    anyhow::ensure!(
+        !whole.is_empty()
+            && whole.len() <= MAX_BILLING_PRICE_WHOLE_DIGITS
+            && whole.chars().all(|character| character.is_ascii_digit())
+            && fraction.len() <= 2
+            && fraction.chars().all(|character| character.is_ascii_digit()),
+        "billing_plan_price_invalid"
+    );
+    let normalized_whole = whole.trim_start_matches('0');
+    let normalized_whole = if normalized_whole.is_empty() {
+        "0"
+    } else {
+        normalized_whole
+    };
+    let normalized_fraction = match fraction.len() {
+        0 => "00".to_string(),
+        1 => format!("{fraction}0"),
+        2 => fraction.to_string(),
+        _ => unreachable!("billing price fraction length was validated"),
+    };
+    Ok(format!("{normalized_whole}.{normalized_fraction}"))
 }
 
 fn parse_traffic_selector_list(input: &str) -> Result<Vec<TrafficSelector>> {
@@ -2796,7 +3921,7 @@ fn parse_byte_size(input: &str) -> Result<i64> {
         .parse::<f64>()
         .map_err(|_| anyhow::anyhow!("byte_size_number_invalid"))?;
     anyhow::ensure!(
-        number.is_finite() && number >= 0.0,
+        number.is_finite() && number > 0.0,
         "byte_size_number_invalid"
     );
     let suffix = value[split_at..].trim().to_ascii_lowercase();
@@ -2971,17 +4096,12 @@ fn traffic_accounting_for_client_with_selector_override(
     let quota_total = quota_value(&rule_map, VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL);
     let quota_rx = quota_value(&rule_map, VPS_RULE_KEY_TRAFFIC_QUOTA_RX);
     let quota_tx = quota_value(&rule_map, VPS_RULE_KEY_TRAFFIC_QUOTA_TX);
-    if quota_total.is_none() && quota_rx.is_none() && quota_tx.is_none() {
-        incomplete_reasons.push("traffic quota missing".to_string());
-    }
     let (cycle_start, cycle_end) = cycle_bounds(reset_day.unwrap_or(1), now);
     let mut rx_bytes = 0_i64;
     let mut tx_bytes = 0_i64;
     let mut latest_rx = 0_i64;
     let mut latest_tx = 0_i64;
     let mut last_sample_unix = None::<i64>;
-    let mut counter_epochs_seen = 0_i64;
-    let mut counted_streams = HashSet::new();
     let mut counted_directions = HashMap::new();
     let mut stale_reasons = Vec::new();
     let mut breakdown = Vec::new();
@@ -3012,9 +4132,6 @@ fn traffic_accounting_for_client_with_selector_override(
             incomplete_reasons.push(format!("{} sample missing", selector.canonical));
             continue;
         };
-        if counted_streams.insert((usage.source_kind.clone(), usage.interface.clone())) {
-            counter_epochs_seen = counter_epochs_seen.saturating_add(usage.counter_epochs_seen);
-        }
         last_sample_unix = Some(last_sample_unix.map_or(usage.last_sample_unix, |last| {
             last.min(usage.last_sample_unix)
         }));
@@ -3023,6 +4140,10 @@ fn traffic_accounting_for_client_with_selector_override(
         let mut selected_cycle_tx = usage.cycle_tx;
         let mut selected_latest_rx = usage.latest_rx;
         let mut selected_latest_tx = usage.latest_tx;
+        let diagnostic_cycle_rx = usage.cycle_rx;
+        let diagnostic_cycle_tx = usage.cycle_tx;
+        let diagnostic_latest_rx = usage.latest_rx;
+        let diagnostic_latest_tx = usage.latest_tx;
         match selector.direction.as_str() {
             "rx" => {
                 selected_cycle_tx = 0;
@@ -3050,8 +4171,25 @@ fn traffic_accounting_for_client_with_selector_override(
         latest_tx += selected_latest_tx;
         let mut row_state = "ok".to_string();
         let mut row_reasons = Vec::new();
+        let selector_epochs_seen = match selector.direction.as_str() {
+            "rx" => usage.rx_counter_epochs_seen,
+            "tx" => usage.tx_counter_epochs_seen,
+            _ => usage
+                .rx_counter_epochs_seen
+                .max(usage.tx_counter_epochs_seen),
+        };
+        if selector_epochs_seen > 1 {
+            row_state = "incomplete".to_string();
+            row_reasons.push("counter reset interval excluded".to_string());
+            incomplete_reasons.push(format!(
+                "{} counter reset interval excluded",
+                selector.canonical
+            ));
+        }
         if sample_age.is_some_and(|age| age > TRAFFIC_SAMPLE_STALE_SECS) {
-            row_state = "stale".to_string();
+            if row_state == "ok" {
+                row_state = "stale".to_string();
+            }
             row_reasons.push("stale sample".to_string());
             stale_reasons.push(format!("{} sample stale", selector.canonical));
         }
@@ -3059,11 +4197,11 @@ fn traffic_accounting_for_client_with_selector_override(
             source: selector.source.clone(),
             interface: selector.interface.clone(),
             direction: selector.direction.clone(),
-            latest_rx_bytes: selected_latest_rx,
-            latest_tx_bytes: selected_latest_tx,
-            cycle_rx_bytes: selected_cycle_rx,
-            cycle_tx_bytes: selected_cycle_tx,
-            cycle_total_bytes: selected_cycle_rx + selected_cycle_tx,
+            latest_rx_bytes: diagnostic_latest_rx,
+            latest_tx_bytes: diagnostic_latest_tx,
+            cycle_rx_bytes: diagnostic_cycle_rx,
+            cycle_tx_bytes: diagnostic_cycle_tx,
+            cycle_total_bytes: diagnostic_cycle_rx.saturating_add(diagnostic_cycle_tx),
             sample_age_secs: sample_age,
             state: row_state,
             incomplete_reasons: row_reasons,
@@ -3072,9 +4210,15 @@ fn traffic_accounting_for_client_with_selector_override(
     let total_bytes = rx_bytes + tx_bytes;
     let latest_total = latest_rx + latest_tx;
     let cycle_percent = [
-        quota_total.map(|quota| percent(total_bytes, quota)),
-        quota_rx.map(|quota| percent(rx_bytes, quota)),
-        quota_tx.map(|quota| percent(tx_bytes, quota)),
+        quota_total
+            .filter(|quota| *quota > 0)
+            .map(|quota| percent(total_bytes, quota)),
+        quota_rx
+            .filter(|quota| *quota > 0)
+            .map(|quota| percent(rx_bytes, quota)),
+        quota_tx
+            .filter(|quota| *quota > 0)
+            .map(|quota| percent(tx_bytes, quota)),
     ]
     .into_iter()
     .flatten()
@@ -3089,6 +4233,34 @@ fn traffic_accounting_for_client_with_selector_override(
         "ok"
     };
     incomplete_reasons.extend(stale_reasons);
+    incomplete_reasons.sort();
+    incomplete_reasons.dedup();
+    let counter_epochs_seen = counted_directions
+        .iter()
+        .filter_map(|((source_kind, interface), direction_mask)| {
+            traffic_usage
+                .iter()
+                .find(|usage| {
+                    usage.client_id == client_id
+                        && usage.source_kind == *source_kind
+                        && usage.interface == *interface
+                        && usage.last_sample_unix <= now.timestamp()
+                })
+                .map(|usage| {
+                    let rx_epochs = if direction_mask & 0b01 != 0 {
+                        usage.rx_counter_epochs_seen
+                    } else {
+                        0
+                    };
+                    let tx_epochs = if direction_mask & 0b10 != 0 {
+                        usage.tx_counter_epochs_seen
+                    } else {
+                        0
+                    };
+                    rx_epochs.max(tx_epochs)
+                })
+        })
+        .fold(0_i64, i64::saturating_add);
     let selector_hash = selector_hash(
         &selectors
             .iter()
@@ -3153,13 +4325,16 @@ fn derive_cycle_usage(
         usage.last_sample_unix = Some(sample.observed_unix);
         if let Some(prev) = previous.as_ref() {
             if sample.observed_unix >= cycle_start_unix {
-                let same_epoch = sample.counter_epoch == prev.counter_epoch;
-                let rx_delta = if same_epoch && sample.rx_bytes >= prev.rx_bytes {
+                let rx_delta = if sample.rx_counter_epoch == prev.rx_counter_epoch
+                    && sample.rx_bytes >= prev.rx_bytes
+                {
                     sample.rx_bytes - prev.rx_bytes
                 } else {
                     0
                 };
-                let tx_delta = if same_epoch && sample.tx_bytes >= prev.tx_bytes {
+                let tx_delta = if sample.tx_counter_epoch == prev.tx_counter_epoch
+                    && sample.tx_bytes >= prev.tx_bytes
+                {
                     sample.tx_bytes - prev.tx_bytes
                 } else {
                     0
@@ -4521,28 +5696,82 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        aggregate_memory_traffic_counter_usage, claim_traffic_selector_directions,
-        derive_cycle_usage, next_policy_rule_state, parse_byte_size,
-        parse_persisted_traffic_selector_list, parse_traffic_selector, parse_traffic_selector_list,
-        policy_identifier_value, policy_state_is_alert_eligible, policy_webhook_repair_is_recent,
-        traffic_accounting_for_client, PolicyEvaluation, PolicyRuleRecord, PolicyRuleStateRecord,
-        TrafficCounterSampleRecord, TrafficCounterStreamUsage, TrafficStreamRequest,
-        VpsRuleValueRecord, VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL, VPS_RULE_KEY_TRAFFIC_RESET_DAY,
+        aggregate_memory_traffic_counter_usage, aggregate_memory_traffic_history,
+        claim_traffic_selector_directions, derive_cycle_usage, next_policy_rule_state,
+        parse_billing_cycle, parse_billing_price, parse_byte_size,
+        parse_persisted_traffic_selector_list, parse_port_speed, parse_traffic_selector,
+        parse_traffic_selector_list, parse_vps_rule_value, policy_identifier_value,
+        policy_state_is_alert_eligible, policy_webhook_repair_is_recent,
+        traffic_accounting_for_client, validate_billing_rule_group, PolicyEvaluation,
+        PolicyRuleRecord, PolicyRuleStateRecord, TrafficCounterSampleRecord,
+        TrafficCounterStreamUsage, TrafficHistoryStream, TrafficStreamRequest, VpsRuleValueRecord,
+        VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL, VPS_RULE_KEY_TRAFFIC_RESET_DAY,
         VPS_RULE_KEY_TRAFFIC_SELECTORS,
     };
 
     #[test]
+    fn billing_price_and_cycle_are_canonical_and_period_aware() {
+        let monthly = parse_billing_price("029.9 cny/m").unwrap();
+        assert_eq!(monthly.raw, "29.90 CNY/m");
+        assert_eq!(monthly.json["price"], "29.90");
+        assert_eq!(monthly.json["period"], "month");
+        let half_year = parse_billing_price("60 €/h").unwrap();
+        assert_eq!(half_year.raw, "60.00 €/hy");
+        assert_eq!(half_year.json["currency"], "EUR");
+        assert_eq!(parse_billing_cycle("7").unwrap().raw, "7");
+        assert_eq!(parse_billing_cycle("7-6").unwrap().raw, "07-06");
+        validate_billing_rule_group(Some("29.90 CNY/m"), Some("7")).unwrap();
+        validate_billing_rule_group(Some("60.00 EUR/hy"), Some("07-06")).unwrap();
+        assert!(
+            validate_billing_rule_group(Some("29.90 CNY/m"), Some("07-06"))
+                .unwrap_err()
+                .to_string()
+                .contains("billing_month_cycle_requires_day")
+        );
+        assert!(validate_billing_rule_group(None, Some("7"))
+            .unwrap_err()
+            .to_string()
+            .contains("billing_cycle_requires_price"));
+    }
+
+    #[test]
+    fn explicit_disabled_billing_and_unlimited_quota_are_not_unset() {
+        let disabled = parse_billing_price("-1").unwrap();
+        assert_eq!(disabled.raw, "-1");
+        assert_eq!(disabled.display, "n/a");
+        assert!(disabled.json["disabled"].as_bool().unwrap());
+        assert!(validate_billing_rule_group(Some("-1"), None).is_ok());
+        assert!(validate_billing_rule_group(Some("-1"), Some("7")).is_err());
+
+        let unlimited = parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL, "-1").unwrap();
+        assert_eq!(unlimited.raw, "-1");
+        assert_eq!(unlimited.json["bytes"], -1);
+        assert_eq!(unlimited.display, "Unlimited");
+    }
+
+    #[test]
+    fn port_speed_is_display_only_but_strictly_normalized() {
+        let mbps = parse_port_speed("400Mbps").unwrap();
+        assert_eq!(mbps.raw, "400 Mbps");
+        assert_eq!(mbps.json["bps"], 400_000_000_i64);
+        let gbps = parse_port_speed("1.500 Gbps").unwrap();
+        assert_eq!(gbps.raw, "1.5 Gbps");
+        assert_eq!(gbps.json["bps"], 1_500_000_000_i64);
+        assert!(parse_port_speed("fast").is_err());
+    }
+
+    #[test]
     fn traffic_stream_aggregation_preserves_usage_across_resets_and_epochs() {
         let samples = vec![
-            sample(90, 100, 200, 0),
-            sample(105, 110, 220, 0),
-            sample(110, 130, 260, 0),
-            sample(120, 10, 300, 0),
-            sample(125, 20, 320, 0),
-            sample(130, 30, 340, 0),
-            sample(140, 50, 60, 1),
-            sample(145, 60, 70, 1),
-            sample(150, 70, 80, 1),
+            sample(90, 100, 200, 0, 0),
+            sample(105, 110, 220, 0, 0),
+            sample(110, 130, 260, 0, 0),
+            sample(120, 10, 300, 1, 0),
+            sample(125, 20, 320, 1, 0),
+            sample(130, 30, 340, 1, 0),
+            sample(140, 50, 60, 1, 1),
+            sample(145, 60, 70, 1, 1),
+            sample(150, 70, 80, 1, 1),
         ];
         let full_usage = derive_cycle_usage(&samples, 100, 150);
         let aggregated = aggregate_memory_traffic_counter_usage(
@@ -4555,7 +5784,7 @@ mod tests {
             }],
             150,
         );
-        assert_eq!(full_usage.cycle_rx, 70);
+        assert_eq!(full_usage.cycle_rx, 90);
         assert_eq!(full_usage.cycle_tx, 160);
         assert_eq!(aggregated.len(), 1);
         assert_eq!(aggregated[0].cycle_rx, full_usage.cycle_rx);
@@ -4563,7 +5792,62 @@ mod tests {
         assert_eq!(aggregated[0].latest_rx, full_usage.latest_rx);
         assert_eq!(aggregated[0].latest_tx, full_usage.latest_tx);
         assert_eq!(aggregated[0].last_sample_unix, 150);
-        assert_eq!(aggregated[0].counter_epochs_seen, 2);
+        assert_eq!(aggregated[0].rx_counter_epochs_seen, 2);
+        assert_eq!(aggregated[0].tx_counter_epochs_seen, 2);
+    }
+
+    #[test]
+    fn traffic_history_ignores_resets_in_unselected_direction() {
+        let samples = vec![sample(90, 100, 200, 0, 0), sample(120, 120, 10, 0, 1)];
+        let rx = aggregate_memory_traffic_history(
+            samples.clone(),
+            &[TrafficHistoryStream {
+                source_kind: "host".to_string(),
+                interface: "eth0".to_string(),
+                direction_mask: 0b01,
+            }],
+            100,
+            130,
+            60,
+        );
+        assert_eq!(rx.len(), 1);
+        assert_eq!(rx[0].sample_count, 1);
+        assert_eq!(rx[0].reset_count, 0);
+        assert_eq!(rx[0].rx_bytes, Some(20));
+
+        let tx = aggregate_memory_traffic_history(
+            samples,
+            &[TrafficHistoryStream {
+                source_kind: "host".to_string(),
+                interface: "eth0".to_string(),
+                direction_mask: 0b10,
+            }],
+            100,
+            130,
+            60,
+        );
+        assert_eq!(tx.len(), 1);
+        assert_eq!(tx[0].sample_count, 0);
+        assert_eq!(tx[0].reset_count, 1);
+        assert_eq!(tx[0].tx_bytes, None);
+
+        let total = aggregate_memory_traffic_history(
+            vec![sample(90, 100, 200, 0, 0), sample(120, 120, 10, 0, 1)],
+            &[TrafficHistoryStream {
+                source_kind: "host".to_string(),
+                interface: "eth0".to_string(),
+                direction_mask: 0b11,
+            }],
+            100,
+            130,
+            60,
+        );
+        assert_eq!(total.len(), 1);
+        assert_eq!(total[0].sample_count, 1);
+        assert_eq!(total[0].reset_count, 1);
+        assert_eq!(total[0].rx_bytes, Some(20));
+        assert_eq!(total[0].tx_bytes, None);
+        assert_eq!(total[0].total_bytes, None);
     }
 
     #[test]
@@ -4826,7 +6110,8 @@ mod tests {
             latest_rx: 1_000,
             latest_tx: 2_000,
             last_sample_unix,
-            counter_epochs_seen: 1,
+            rx_counter_epochs_seen: 1,
+            tx_counter_epochs_seen: 1,
         }
     }
 
@@ -4834,7 +6119,8 @@ mod tests {
         observed_unix: i64,
         rx_bytes: i64,
         tx_bytes: i64,
-        counter_epoch: i64,
+        rx_counter_epoch: i64,
+        tx_counter_epoch: i64,
     ) -> TrafficCounterSampleRecord {
         TrafficCounterSampleRecord {
             client_id: "edge-a".to_string(),
@@ -4844,7 +6130,8 @@ mod tests {
             observed_unix,
             rx_bytes,
             tx_bytes,
-            counter_epoch,
+            rx_counter_epoch,
+            tx_counter_epoch,
             sample_source: "test".to_string(),
         }
     }

@@ -355,6 +355,7 @@ function BackupPoliciesTable({
         )}
         rows={policies}
         rowsTruncated={rowsTruncated}
+        showMobileRowActions={false}
         storageKey="vpsman.grid.backups.policies"
         title="Backup policy records"
       />
@@ -632,6 +633,7 @@ function BackupRequestsTable({
         rowActions={rowActions}
         rows={backups}
         rowsTruncated={rowsTruncated}
+        showMobileRowActions={false}
         storageKey="vpsman.grid.backups.requests"
         title="Backup request records"
       />
@@ -868,6 +870,7 @@ function ArtifactHistoryTable({
         ]}
         rows={artifacts}
         rowsTruncated={rowsTruncated}
+        showMobileRowActions={false}
         storageKey="vpsman.grid.backups.artifacts"
         title="Artifact inventory records"
       />
@@ -1154,6 +1157,7 @@ function RestoreSourcesTable({
         ]}
         rows={backups}
         rowsTruncated={rowsTruncated}
+        showMobileRowActions={false}
         storageKey="vpsman.grid.backups.restoreSources"
         title="Restore source records"
       />
@@ -1338,6 +1342,7 @@ function MigrationLinksTable({
         )}
         rows={migrationLinks}
         rowsTruncated={rowsTruncated}
+        showMobileRowActions={false}
         storageKey="vpsman.grid.backups.migrations"
         title="Migration mapping records"
       />

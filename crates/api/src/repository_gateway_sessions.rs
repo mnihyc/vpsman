@@ -33,6 +33,7 @@ impl Repository {
                 }
                 Ok(memory.agents.read().await.iter().any(|agent| {
                     agent.id == client_id
+                        && !matches!(agent.status.as_str(), "revoked" | "deleted")
                         && agent.process_incarnation_id == Some(process_incarnation_id)
                 }))
             }
@@ -42,12 +43,12 @@ impl Repository {
                     SELECT EXISTS (
                         SELECT 1
                         FROM gateway_sessions session
-                        JOIN clients client ON client.id = session.client_id
+                        JOIN visible_clients client ON client.id = session.client_id
                         WHERE session.gateway_id = $1
                           AND session.client_id = $2
                           AND session.id = $3
                           AND session.status = 'active'
-                          AND client.hidden_at IS NULL
+                          AND client.status <> 'revoked'
                           AND client.process_incarnation_id = $4
                     )
                     "#,
@@ -86,11 +87,10 @@ impl Repository {
                     SELECT EXISTS (
                         SELECT 1
                         FROM gateway_sessions session
-                        JOIN clients client ON client.id = session.client_id
+                        JOIN visible_clients client ON client.id = session.client_id
                         WHERE session.gateway_id = $1
                           AND session.client_id = $2
                           AND session.id = $3
-                          AND client.hidden_at IS NULL
                     )
                     "#,
                 )
@@ -104,17 +104,34 @@ impl Repository {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn record_gateway_session_started(
         &self,
         event: &GatewaySessionLifecycleIngest,
     ) -> Result<()> {
         match self {
             Self::Memory(memory) => {
+                let _key_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
                 if memory
                     .hidden_clients
                     .read()
                     .await
                     .contains(&event.client_id)
+                {
+                    return Ok(());
+                }
+                if memory.agents.read().await.iter().any(|agent| {
+                    agent.id == event.client_id
+                        && matches!(agent.status.as_str(), "revoked" | "deleted")
+                }) {
+                    return Ok(());
+                }
+                if memory
+                    .gateway_sessions
+                    .read()
+                    .await
+                    .iter()
+                    .any(|session| session.id == event.session_id && session.status != "active")
                 {
                     return Ok(());
                 }
@@ -158,8 +175,8 @@ impl Repository {
                 let prior_status: Option<String> = sqlx::query_scalar(
                     r#"
                     SELECT status
-                    FROM clients
-                    WHERE id = $1 AND hidden_at IS NULL
+                    FROM visible_clients
+                    WHERE id = $1 AND status <> 'revoked'
                     FOR UPDATE
                     "#,
                 )
@@ -170,6 +187,19 @@ impl Repository {
                     tx.commit().await?;
                     return Ok(());
                 };
+                let existing_session_status: Option<String> = sqlx::query_scalar(
+                    "SELECT status FROM gateway_sessions WHERE id = $1 FOR UPDATE",
+                )
+                .bind(event.session_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                if existing_session_status
+                    .as_deref()
+                    .is_some_and(|status| status != "active")
+                {
+                    tx.commit().await?;
+                    return Ok(());
+                }
                 sqlx::query(
                     r#"
                     UPDATE gateway_sessions
@@ -251,15 +281,24 @@ impl Repository {
     ) -> Result<()> {
         match self {
             Self::Memory(memory) => {
-                upsert_memory_gateway_session(memory, event, "ended", event.reason.clone()).await;
-                if !memory_has_active_other_session(memory, &event.client_id, event.session_id)
+                let _key_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
+                let should_transition_agent = memory
+                    .gateway_sessions
+                    .read()
                     .await
+                    .iter()
+                    .find(|session| session.id == event.session_id)
+                    .is_none_or(|session| session.status == "active");
+                upsert_memory_gateway_session(memory, event, "ended", event.reason.clone()).await;
+                if should_transition_agent
+                    && !memory_has_active_other_session(memory, &event.client_id, event.session_id)
+                        .await
                 {
                     if let Some(from_status) = set_memory_agent_status(
                         memory,
                         &event.client_id,
                         "disconnected",
-                        event.remote_ip.as_deref(),
+                        None,
                         false,
                     )
                     .await
@@ -293,14 +332,23 @@ impl Repository {
                 let prior_status: Option<String> = sqlx::query_scalar(
                     r#"
                     SELECT status
-                    FROM clients
-                    WHERE id = $1 AND hidden_at IS NULL
+                    FROM visible_clients
+                    WHERE id = $1
                     FOR UPDATE
                     "#,
                 )
                 .bind(&event.client_id)
                 .fetch_optional(&mut *tx)
                 .await?;
+                let prior_session_status: Option<String> = sqlx::query_scalar(
+                    "SELECT status FROM gateway_sessions WHERE id = $1 FOR UPDATE",
+                )
+                .bind(event.session_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let should_transition_agent = prior_session_status
+                    .as_deref()
+                    .is_none_or(|status| status == "active");
                 sqlx::query(
                     r#"
                     INSERT INTO gateway_sessions (
@@ -313,7 +361,7 @@ impl Repository {
                         status = 'ended',
                         last_seen_at = now(),
                         ended_at = COALESCE(gateway_sessions.ended_at, now()),
-                        end_reason = EXCLUDED.end_reason
+                        end_reason = COALESCE(gateway_sessions.end_reason, EXCLUDED.end_reason)
                     "#,
                 )
                 .bind(event.session_id)
@@ -329,11 +377,11 @@ impl Repository {
                     UPDATE clients
                     SET
                         status = CASE WHEN status = 'stale' THEN status ELSE 'disconnected' END,
-                        registration_ip = COALESCE(registration_ip, $3::inet),
-                        last_ip = COALESCE($3::inet, last_ip),
                         last_seen_at = now()
                     WHERE id = $1
                       AND hidden_at IS NULL
+                      AND status <> 'revoked'
+                      AND $3
                       AND NOT EXISTS (
                         SELECT 1
                         FROM gateway_sessions
@@ -345,7 +393,7 @@ impl Repository {
                 )
                 .bind(&event.client_id)
                 .bind(event.session_id)
-                .bind(event.remote_ip.as_deref())
+                .bind(should_transition_agent)
                 .execute(&mut *tx)
                 .await?;
                 if update.rows_affected() > 0 {
@@ -406,8 +454,7 @@ impl Repository {
                         gateway_sessions.ended_at::text AS ended_at,
                         gateway_sessions.end_reason
                     FROM gateway_sessions
-                    JOIN clients c ON c.id = gateway_sessions.client_id
-                    WHERE c.hidden_at IS NULL
+                    JOIN visible_clients c ON c.id = gateway_sessions.client_id
                     ORDER BY gateway_sessions.last_seen_at DESC, gateway_sessions.id DESC
                     LIMIT $1
                     "#,
@@ -460,7 +507,9 @@ pub(crate) async fn upsert_memory_gateway_session(
         session.last_seen_at = now.clone();
         if status == "ended" {
             session.ended_at = Some(now);
-            session.end_reason = end_reason;
+            if session.end_reason.is_none() {
+                session.end_reason = end_reason;
+            }
         } else {
             session.ended_at = None;
             session.end_reason = None;
@@ -530,6 +579,9 @@ async fn set_memory_agent_status(
         .iter_mut()
         .find(|agent| agent.id == client_id)
     {
+        if matches!(agent.status.as_str(), "revoked" | "deleted") {
+            return None;
+        }
         if (override_stale || agent.status != "stale") && agent.status != status {
             changed_from = Some(agent.status.clone());
             agent.status = status.to_string();
@@ -566,12 +618,20 @@ mod tests {
     use crate::{model::AgentView, repository::Repository};
 
     fn session_event(client_id: &str, session_id: uuid::Uuid) -> GatewaySessionLifecycleIngest {
+        session_event_from(client_id, session_id, "203.0.113.10")
+    }
+
+    fn session_event_from(
+        client_id: &str,
+        session_id: uuid::Uuid,
+        remote_ip: &str,
+    ) -> GatewaySessionLifecycleIngest {
         GatewaySessionLifecycleIngest {
             gateway_id: "gateway-a".to_string(),
             client_id: client_id.to_string(),
             session_id,
             noise_public_key_hex: Some("ab".repeat(32)),
-            remote_ip: Some("203.0.113.10".to_string()),
+            remote_ip: Some(remote_ip.to_string()),
             agent_version: Some("test".to_string()),
             reason: None,
         }
@@ -699,5 +759,51 @@ mod tests {
             .active_gateway_session_matches("gateway-a", "client-a", newer, uuid::Uuid::new_v4(),)
             .await
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn delayed_session_end_does_not_rewind_observed_connection_ip() {
+        let repo = Repository::Memory(MemoryState::default());
+        let Repository::Memory(memory) = &repo else {
+            unreachable!();
+        };
+        memory.agents.write().await.push(AgentView {
+            id: "client-a".to_string(),
+            display_name: "client-a".to_string(),
+            status: "offline".to_string(),
+            tags: Vec::new(),
+            registration_ip: None,
+            last_ip: None,
+            last_seen_at: None,
+            arch: None,
+            internal_build_number: 1,
+            process_incarnation_id: None,
+            stale_since: None,
+            stale_reason: None,
+            capabilities: Default::default(),
+        });
+        let older = uuid::Uuid::new_v4();
+        let newer = uuid::Uuid::new_v4();
+        repo.record_gateway_session_started(&session_event_from(
+            "client-a",
+            older,
+            "198.51.100.10",
+        ))
+        .await
+        .unwrap();
+        repo.record_gateway_session_started(&session_event_from("client-a", newer, "2001:db8::20"))
+            .await
+            .unwrap();
+
+        repo.record_gateway_session_ended(&session_event_from("client-a", newer, "2001:db8::20"))
+            .await
+            .unwrap();
+        repo.record_gateway_session_ended(&session_event_from("client-a", older, "198.51.100.10"))
+            .await
+            .unwrap();
+
+        let agents = memory.agents.read().await;
+        assert_eq!(agents[0].registration_ip.as_deref(), Some("198.51.100.10"));
+        assert_eq!(agents[0].last_ip.as_deref(), Some("2001:db8::20"));
     }
 }

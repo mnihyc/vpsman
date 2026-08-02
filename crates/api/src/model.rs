@@ -10,6 +10,7 @@ pub(crate) use crate::model_agent_updates::*;
 pub(crate) use crate::model_backups::*;
 pub(crate) use crate::model_configuration_presets::*;
 pub(crate) use crate::model_dashboard::*;
+pub(crate) use crate::model_monitoring::*;
 pub(crate) use crate::model_runtime_config::*;
 pub(crate) use crate::model_server_jobs::*;
 pub(crate) use vpsman_common::JobRolloutPolicy;
@@ -20,6 +21,7 @@ pub(crate) struct FleetSummary {
     pub(crate) online: usize,
     pub(crate) offline: usize,
     pub(crate) never: usize,
+    pub(crate) revoked: usize,
     pub(crate) unknown: usize,
     pub(crate) stale: usize,
     pub(crate) warnings: usize,
@@ -158,8 +160,16 @@ pub(crate) struct TelemetryRollupView {
     pub(crate) bucket_start: String,
     pub(crate) bucket_secs: i32,
     pub(crate) sample_count: i32,
+    pub(crate) cpu_usage_sample_count: i32,
+    pub(crate) cpu_usage_avg: Option<f64>,
+    pub(crate) cpu_usage_max: Option<f64>,
+    pub(crate) cpu_cores_max: i32,
     pub(crate) cpu_load_1_avg: f64,
     pub(crate) cpu_load_1_max: f64,
+    pub(crate) cpu_load_5_avg: f64,
+    pub(crate) cpu_load_5_max: f64,
+    pub(crate) cpu_load_15_avg: f64,
+    pub(crate) cpu_load_15_max: f64,
     pub(crate) memory_total_bytes_max: i64,
     pub(crate) memory_available_bytes_avg: i64,
     pub(crate) memory_available_bytes_min: i64,
@@ -168,8 +178,23 @@ pub(crate) struct TelemetryRollupView {
     pub(crate) disk_available_bytes_min: i64,
     pub(crate) network_rx_bytes_max: i64,
     pub(crate) network_tx_bytes_max: i64,
+    pub(crate) connections_sample_count: i32,
+    pub(crate) tcp_sockets_latest: Option<i64>,
+    pub(crate) udp_sockets_latest: Option<i64>,
+    pub(crate) connections_observed_at: Option<String>,
     pub(crate) latest_observed_at: String,
     pub(crate) updated_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct TelemetrySampleView {
+    pub(crate) id: Uuid,
+    pub(crate) client_id: String,
+    pub(crate) observed_at: String,
+    pub(crate) cpu_load_1: f64,
+    pub(crate) memory_total_bytes: i64,
+    pub(crate) memory_available_bytes: i64,
+    pub(crate) payload: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -181,6 +206,14 @@ pub(crate) struct TelemetryNetworkRateView {
     pub(crate) sample_count: i32,
     pub(crate) rx_bytes_avg: i64,
     pub(crate) tx_bytes_avg: i64,
+    #[serde(skip_serializing)]
+    pub(crate) rx_bytes_last: i64,
+    #[serde(skip_serializing)]
+    pub(crate) tx_bytes_last: i64,
+    #[serde(skip_serializing)]
+    pub(crate) rx_counter_epoch: i64,
+    #[serde(skip_serializing)]
+    pub(crate) tx_counter_epoch: i64,
     pub(crate) rx_bytes_delta: i64,
     pub(crate) tx_bytes_delta: i64,
     pub(crate) rx_bps_avg: f64,
@@ -603,6 +636,7 @@ pub(crate) struct KeyLifecycleClientView {
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct KeyLifecycleReportView {
+    pub(crate) suggested_client_id: String,
     pub(crate) direct_identity_client_count: usize,
     pub(crate) current_key_revoked_count: usize,
     pub(crate) revocation_count: usize,
@@ -738,6 +772,14 @@ pub(crate) struct TelemetryRollupQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct TelemetrySampleQuery {
+    pub(crate) limit: Option<i64>,
+    pub(crate) client_id: Option<String>,
+    pub(crate) start_unix: Option<u64>,
+    pub(crate) end_unix: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct TelemetryNetworkRateQuery {
     pub(crate) limit: Option<i64>,
     pub(crate) client_id: Option<String>,
@@ -832,9 +874,6 @@ pub(crate) struct SchedulePrivilegeMutationRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpdateScheduleTargetsRequest {
-    #[serde(default)]
-    pub(crate) selector_expression: String,
-    pub(crate) target_client_ids: Vec<String>,
     #[serde(default)]
     pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
     #[serde(default)]

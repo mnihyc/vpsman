@@ -1,25 +1,23 @@
 # Target Selectors
 
-`vpsman` target selectors are expression strings used for target previews,
-bulk resolution, tag mutation, configuration-preset assignment, and expression
-webhook rules. Jobs and schedules store the concrete VPS IDs resolved during
-CLI preview or the browser Review step; their `selector_expression` is optional
-audit context, not dispatch authority. It is retained for operator review and
-for an explicit future schedule **Update targets** action, never for implicit
-re-resolution at run time. The Rust parser/evaluator lives in `vpsman-common`;
-the frontend parser mirrors the same grammar for local previews and token
-tooltips.
+`vpsman` target selectors are expression strings used for target previews, bulk
+resolution, tag mutation, configuration-preset assignment, Ping-target
+assignment, monitoring-share scope, and expression webhook rules. Jobs,
+schedules, Ping definitions, and monitoring shares store the concrete VPS IDs
+resolved during API/CLI preview or the browser Review step. A saved selector is
+audit and maintenance context, not live authority. The Rust parser/evaluator
+lives in `vpsman-common`; the frontend parser mirrors the same grammar for local
+previews and token tooltips.
 
 ## Fixed Target Workflow
 
 Selectors are operator input and audit context. They are not a live binding for
-job or schedule execution or configuration-preset assignment. The browser
-Review step and CLI preview resolve the selector to concrete VPS IDs. The
-confirmation and API mutation use that fixed `target_client_ids` list; the
-backend dispatches only that list. Job `selector_expression` values may also be
-free-form audit text; job creation validates only transport safety, while
-schedule create/update keeps valid selector syntax when the audit selector is
-present so **Update targets** can resolve it later.
+job or schedule execution, configuration-preset assignment, Ping probing, or
+public sharing. The browser Review step and CLI/API preview resolve the selector
+to concrete VPS IDs. The confirmation and mutation use that fixed
+`target_client_ids` list. Job `selector_expression` values may also be free-form
+audit text; job creation validates only transport safety, while any record that
+supports a later **Update targets** action keeps valid selector syntax.
 
 Schedules follow the same rule. A schedule stores both the audit selector and a
 fixed target snapshot. Due runs use the saved snapshot. If a saved target is
@@ -32,8 +30,21 @@ The action supports one or many selected schedules. It resolves each saved
 audit selector on the backend, includes only changed non-empty snapshots in the
 privilege confirmation, and then saves those replacement snapshots.
 
-This keeps human review as the authority for bulk work: changing tags never
-silently changes the targets of an already-created job or schedule.
+This keeps human review as the authority for broad scope: changing tags never
+silently changes a saved job, schedule, Ping assignment, or monitoring share.
+
+Ping targets use the same fixed-list rule. Create resolves the expression and
+stores the exact assignments. A normal edit preserves that frozen list while
+the selector expression is unchanged; changing the expression resolves its new
+matches for the edit review. If a saved expression later resolves differently
+because fleet metadata changed, **Update targets** is the deliberate table
+action for one or many selected Ping definitions. It previews exact
+additions/removals and replaces assignments transactionally.
+
+Monitoring shares resolve and freeze their exact VPS list at creation. Their
+target and visibility scope are immutable evidence, so they intentionally have
+no **Update targets** action. Create a replacement share when either scope must
+change.
 
 In the console, selector matches are previewed locally as the expression is
 edited. That preview is for orientation only. Direct VPS choices and selector
@@ -44,10 +55,11 @@ An invalid expression or empty union cannot be reviewed.
 
 ## Fixed Target Snapshots
 
-Job submission and schedule creation are fixed-target workflows. Operators
-review a selector, then the API receives the resolved
-`target_client_ids` alongside the audit selector. A later tag or alias change
-does not silently change the VPSs affected by an existing job or schedule.
+Job submission, schedule creation, Ping-target assignment, and monitoring-share
+creation are fixed-target workflows. Operators review a selector, then the API
+receives the resolved `target_client_ids` alongside the audit selector. A later
+tag or alias change never silently changes the VPSs affected by the saved
+record.
 
 For schedules, **Update targets** is a deliberate table action for records
 whose saved audit selector currently resolves to a different non-empty VPS set.

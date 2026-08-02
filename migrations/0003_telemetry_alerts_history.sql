@@ -1,10 +1,38 @@
+CREATE TABLE telemetry_samples (
+    id UUID PRIMARY KEY,
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    observed_at TIMESTAMPTZ NOT NULL,
+    cpu_load_1 DOUBLE PRECISION NOT NULL,
+    memory_total_bytes BIGINT NOT NULL,
+    memory_available_bytes BIGINT NOT NULL,
+    payload JSONB NOT NULL,
+    CHECK (cpu_load_1 >= 0),
+    CHECK (memory_total_bytes >= 0),
+    CHECK (memory_available_bytes >= 0),
+    CHECK (jsonb_typeof(payload) = 'object')
+);
+
+CREATE INDEX telemetry_samples_client_latest_idx
+    ON telemetry_samples (client_id, observed_at DESC);
+
+CREATE INDEX telemetry_samples_retention_idx
+    ON telemetry_samples (observed_at);
+
 CREATE TABLE telemetry_rollups (
     client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     bucket_start TIMESTAMPTZ NOT NULL,
     bucket_secs INTEGER NOT NULL,
     sample_count INTEGER NOT NULL,
+    cpu_usage_sample_count INTEGER NOT NULL DEFAULT 0,
+    cpu_usage_avg DOUBLE PRECISION,
+    cpu_usage_max DOUBLE PRECISION,
+    cpu_cores_max INTEGER NOT NULL DEFAULT 0,
     cpu_load_1_avg DOUBLE PRECISION NOT NULL,
     cpu_load_1_max DOUBLE PRECISION NOT NULL,
+    cpu_load_5_avg DOUBLE PRECISION NOT NULL DEFAULT 0,
+    cpu_load_5_max DOUBLE PRECISION NOT NULL DEFAULT 0,
+    cpu_load_15_avg DOUBLE PRECISION NOT NULL DEFAULT 0,
+    cpu_load_15_max DOUBLE PRECISION NOT NULL DEFAULT 0,
     memory_total_bytes_max BIGINT NOT NULL,
     memory_available_bytes_avg BIGINT NOT NULL,
     memory_available_bytes_min BIGINT NOT NULL,
@@ -13,9 +41,36 @@ CREATE TABLE telemetry_rollups (
     disk_available_bytes_min BIGINT NOT NULL DEFAULT 0,
     network_rx_bytes_max BIGINT NOT NULL DEFAULT 0,
     network_tx_bytes_max BIGINT NOT NULL DEFAULT 0,
+    connections_sample_count INTEGER NOT NULL DEFAULT 0,
+    tcp_sockets_latest BIGINT,
+    udp_sockets_latest BIGINT,
+    connections_observed_at TIMESTAMPTZ,
     latest_observed_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (client_id, bucket_secs, bucket_start)
+    PRIMARY KEY (client_id, bucket_secs, bucket_start),
+    CHECK (bucket_secs >= 60 AND bucket_secs % 60 = 0),
+    CHECK (bucket_start = date_trunc('minute', bucket_start)),
+    CHECK (sample_count > 0),
+    CHECK (cpu_usage_avg IS NULL OR cpu_usage_avg BETWEEN 0 AND 1),
+    CHECK (cpu_usage_max IS NULL OR cpu_usage_max BETWEEN 0 AND 1),
+    CHECK (cpu_usage_sample_count BETWEEN 0 AND sample_count),
+    CHECK (cpu_cores_max >= 0),
+    CHECK (connections_sample_count BETWEEN 0 AND sample_count),
+    CHECK ((connections_sample_count = 0) = (connections_observed_at IS NULL)),
+    CHECK (
+        connections_observed_at IS NULL OR (
+            connections_observed_at >= bucket_start + make_interval(secs => bucket_secs - 60)
+            AND connections_observed_at < bucket_start + make_interval(secs => bucket_secs)
+        )
+    ),
+    CHECK (
+        latest_observed_at >= bucket_start + make_interval(secs => bucket_secs - 60)
+        AND latest_observed_at < bucket_start + make_interval(secs => bucket_secs)
+    ),
+    CHECK ((connections_sample_count = 0) = (tcp_sockets_latest IS NULL)),
+    CHECK ((tcp_sockets_latest IS NULL) = (udp_sockets_latest IS NULL)),
+    CHECK (tcp_sockets_latest IS NULL OR tcp_sockets_latest >= 0),
+    CHECK (udp_sockets_latest IS NULL OR udp_sockets_latest >= 0)
 );
 
 CREATE INDEX telemetry_rollups_latest_idx
@@ -35,8 +90,18 @@ CREATE TABLE telemetry_network_rates (
     sample_count INTEGER NOT NULL,
     rx_bytes_avg BIGINT NOT NULL,
     tx_bytes_avg BIGINT NOT NULL,
+    rx_bytes_last BIGINT NOT NULL,
+    tx_bytes_last BIGINT NOT NULL,
+    rx_counter_epoch BIGINT NOT NULL DEFAULT 0,
+    tx_counter_epoch BIGINT NOT NULL DEFAULT 0,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (client_id, interface, bucket_secs, bucket_start)
+    PRIMARY KEY (client_id, interface, bucket_secs, bucket_start),
+    CHECK (bucket_secs >= 60 AND bucket_secs % 60 = 0),
+    CHECK (bucket_start = date_trunc('minute', bucket_start)),
+    CHECK (sample_count > 0),
+    CHECK (rx_bytes_avg >= 0 AND tx_bytes_avg >= 0),
+    CHECK (rx_bytes_last >= 0 AND tx_bytes_last >= 0),
+    CHECK (rx_counter_epoch >= 0 AND tx_counter_epoch >= 0)
 );
 
 CREATE INDEX telemetry_network_rates_latest_idx
@@ -47,6 +112,145 @@ CREATE INDEX telemetry_network_rates_client_latest_idx
 
 CREATE INDEX telemetry_network_rates_retention_idx
     ON telemetry_network_rates (bucket_start);
+
+CREATE TABLE ping_targets (
+    id UUID PRIMARY KEY,
+    name TEXT NOT NULL,
+    host TEXT NOT NULL,
+    probe_kind TEXT NOT NULL,
+    port INTEGER,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    selector_expression TEXT NOT NULL DEFAULT '*',
+    generation BIGINT NOT NULL DEFAULT 1,
+    created_by UUID REFERENCES operators(id),
+    updated_by UUID REFERENCES operators(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (length(trim(name)) BETWEEN 1 AND 128),
+    CHECK (length(trim(host)) BETWEEN 1 AND 253),
+    CHECK (probe_kind IN ('icmp', 'tcp')),
+    CHECK (
+        (probe_kind = 'icmp' AND port IS NULL)
+        OR (probe_kind = 'tcp' AND port BETWEEN 1 AND 65535)
+    ),
+    CHECK (length(trim(selector_expression)) BETWEEN 1 AND 4096),
+    CHECK (generation > 0)
+);
+
+CREATE UNIQUE INDEX ping_targets_name_unique_idx
+    ON ping_targets (lower(name));
+
+CREATE INDEX ping_targets_updated_idx
+    ON ping_targets (updated_at DESC, name);
+
+CREATE TABLE ping_target_assignments (
+    target_id UUID NOT NULL REFERENCES ping_targets(id) ON DELETE CASCADE,
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+    assigned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (target_id, client_id)
+);
+
+CREATE INDEX ping_target_assignments_client_idx
+    ON ping_target_assignments (client_id, target_id);
+
+CREATE UNIQUE INDEX ping_target_assignments_one_primary_per_client_idx
+    ON ping_target_assignments (client_id)
+    WHERE is_primary;
+
+CREATE TABLE telemetry_ping_rollups (
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    target_id UUID NOT NULL REFERENCES ping_targets(id) ON DELETE CASCADE,
+    generation BIGINT NOT NULL,
+    bucket_start TIMESTAMPTZ NOT NULL,
+    bucket_secs INTEGER NOT NULL,
+    sample_count INTEGER NOT NULL,
+    success_count INTEGER NOT NULL,
+    latency_avg_ms DOUBLE PRECISION,
+    latency_min_ms DOUBLE PRECISION,
+    latency_max_ms DOUBLE PRECISION,
+    loss_ratio_avg DOUBLE PRECISION NOT NULL,
+    loss_ratio_max DOUBLE PRECISION NOT NULL,
+    latest_status TEXT NOT NULL,
+    latest_reason TEXT,
+    latest_checked_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (client_id, target_id, generation, bucket_secs, bucket_start),
+    CHECK (bucket_secs >= 60 AND bucket_secs % 60 = 0),
+    CHECK (bucket_start = date_trunc('minute', bucket_start)),
+    CHECK (generation > 0),
+    CHECK (sample_count > 0),
+    CHECK (success_count BETWEEN 0 AND sample_count),
+    CHECK (
+        latest_checked_at >= bucket_start + make_interval(secs => bucket_secs - 60)
+        AND latest_checked_at < bucket_start + make_interval(secs => bucket_secs)
+    ),
+    CHECK (latency_avg_ms IS NULL OR latency_avg_ms >= 0),
+    CHECK (latency_min_ms IS NULL OR latency_min_ms >= 0),
+    CHECK (latency_max_ms IS NULL OR latency_max_ms >= 0),
+    CHECK (loss_ratio_avg BETWEEN 0 AND 1),
+    CHECK (loss_ratio_max BETWEEN 0 AND 1),
+    CHECK (latest_status IN ('ok', 'degraded', 'down', 'error')),
+    CHECK (latest_reason IS NULL OR length(latest_reason) <= 512)
+);
+
+CREATE INDEX telemetry_ping_rollups_lookup_idx
+    ON telemetry_ping_rollups (client_id, target_id, bucket_start DESC);
+
+CREATE INDEX telemetry_ping_rollups_retention_idx
+    ON telemetry_ping_rollups (bucket_start);
+
+CREATE TABLE monitoring_share_links (
+    id UUID PRIMARY KEY,
+    name TEXT NOT NULL,
+    token_digest TEXT NOT NULL UNIQUE,
+    selector_expression TEXT NOT NULL,
+    show_identity_context BOOLEAN NOT NULL DEFAULT FALSE,
+    show_resources BOOLEAN NOT NULL DEFAULT TRUE,
+    show_network BOOLEAN NOT NULL DEFAULT TRUE,
+    show_traffic BOOLEAN NOT NULL DEFAULT TRUE,
+    show_ping BOOLEAN NOT NULL DEFAULT TRUE,
+    allow_detail_history BOOLEAN NOT NULL DEFAULT TRUE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    revoked_at TIMESTAMPTZ,
+    revoked_by UUID REFERENCES operators(id),
+    created_by UUID REFERENCES operators(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (length(trim(name)) BETWEEN 1 AND 128),
+    CHECK (length(token_digest) = 64),
+    -- A frozen grid selection can contain up to 1,000 explicit v-* IDs.
+    CHECK (length(trim(selector_expression)) BETWEEN 1 AND 65535),
+    CHECK (expires_at > created_at)
+);
+
+CREATE INDEX monitoring_share_links_status_idx
+    ON monitoring_share_links (revoked_at, expires_at, created_at DESC);
+
+CREATE TABLE monitoring_share_targets (
+    share_id UUID NOT NULL REFERENCES monitoring_share_links(id) ON DELETE CASCADE,
+    -- The client row is the immutable tombstone identity for a frozen share.
+    -- Logical deletion hides all live data but must not rewrite historical scope.
+    client_id TEXT NOT NULL REFERENCES clients(id),
+    PRIMARY KEY (share_id, client_id)
+);
+
+CREATE INDEX monitoring_share_targets_client_idx
+    ON monitoring_share_targets (client_id, share_id);
+
+CREATE TABLE monitoring_share_visitors (
+    share_id UUID NOT NULL REFERENCES monitoring_share_links(id) ON DELETE CASCADE,
+    visitor_id UUID NOT NULL,
+    source_ip INET,
+    user_agent TEXT,
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (share_id, visitor_id),
+    CHECK (user_agent IS NULL OR length(user_agent) <= 512)
+);
+
+CREATE INDEX monitoring_share_visitors_last_seen_idx
+    ON monitoring_share_visitors (share_id, last_seen_at DESC);
 
 CREATE TABLE telemetry_ingest_watermarks (
     client_id TEXT PRIMARY KEY REFERENCES clients(id) ON DELETE CASCADE,
@@ -113,7 +317,10 @@ CREATE TABLE vps_rule_values (
         'traffic.quota.total',
         'traffic.quota.rx',
         'traffic.quota.tx',
-        'traffic.selectors'
+        'traffic.selectors',
+        'billing.price',
+        'billing.cycle',
+        'network.port_speed'
     )),
     CHECK (length(value_raw) BETWEEN 1 AND 4096),
     CHECK (jsonb_typeof(value_json) = 'object')
@@ -129,13 +336,17 @@ CREATE TABLE traffic_counter_samples (
     observed_at TIMESTAMPTZ NOT NULL,
     rx_bytes BIGINT NOT NULL,
     tx_bytes BIGINT NOT NULL,
-    counter_epoch BIGINT NOT NULL DEFAULT 0,
+    rx_counter_epoch BIGINT NOT NULL DEFAULT 0,
+    tx_counter_epoch BIGINT NOT NULL DEFAULT 0,
     sample_source TEXT NOT NULL,
     PRIMARY KEY (client_id, source_kind, interface, observed_at),
     CHECK (source_kind IN ('host', 'tunnel')),
     CHECK (length(interface) BETWEEN 1 AND 128),
+    CHECK (observed_at = date_trunc('minute', observed_at)),
     CHECK (rx_bytes >= 0),
-    CHECK (tx_bytes >= 0)
+    CHECK (tx_bytes >= 0),
+    CHECK (rx_counter_epoch >= 0),
+    CHECK (tx_counter_epoch >= 0)
 );
 
 CREATE INDEX traffic_counter_samples_lookup_idx
@@ -631,8 +842,10 @@ CREATE TABLE history_retention_policies (
     CHECK (domain IN (
         'audit_logs',
         'system_metric_rollups',
+        'telemetry_samples',
         'telemetry_rollups',
         'telemetry_network_rates',
+        'telemetry_ping_rollups',
         'traffic_counter_samples',
         'job_outputs',
         'backup_artifacts',

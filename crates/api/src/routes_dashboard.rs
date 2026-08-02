@@ -29,10 +29,10 @@ use crate::{
 };
 
 const DASHBOARD_LIMIT: i64 = 200;
-const DASHBOARD_SOURCE_BUCKET_SECS: i32 = 60;
 const DASHBOARD_MIN_CHART_STEP_SECS: u64 = 60;
 const DASHBOARD_DEFAULT_CHART_POINTS: u32 = 240;
 const DASHBOARD_MAX_CHART_POINTS: u32 = 1_440;
+const DASHBOARD_MAX_CUSTOM_RANGE_SECS: u64 = 365 * 24 * 60 * 60;
 const DASHBOARD_TOP_CLUSTERS: usize = 8;
 const DASHBOARD_TOP_ALERTS: usize = 5;
 const DASHBOARD_TOP_DEGRADED: usize = 5;
@@ -386,7 +386,6 @@ async fn build_dashboard_overview(
                 include_muted: Some(false),
             },
             Some(FleetAlertSelector {
-                agents: &scoped_agents,
                 allowed_client_ids: &scoped_client_ids,
                 start_unix: range.start_unix,
                 end_unix: range.end_unix,
@@ -410,11 +409,9 @@ async fn build_dashboard_overview(
         range
     };
     let chart_step_secs = dashboard_chart_step_secs(&telemetry_range, chart_points);
-    let preferred_bucket_secs = preferred_dashboard_bucket_secs();
     let rollups = load_dashboard_rollups(
         state,
         &telemetry_range,
-        preferred_bucket_secs,
         chart_step_secs,
         chart_points,
         &scoped_client_id_list,
@@ -423,7 +420,6 @@ async fn build_dashboard_overview(
     let network_rates = load_dashboard_network_rates(
         state,
         &telemetry_range,
-        preferred_bucket_secs,
         chart_step_secs,
         chart_points,
         &scoped_client_id_list,
@@ -533,6 +529,10 @@ async fn build_dashboard_overview(
                     matches!(agent.status.as_str(), "offline" | "disconnected" | "never")
                 })
                 .count(),
+            revoked: scoped_agents
+                .iter()
+                .filter(|agent| agent.status == "revoked")
+                .count(),
             stale: stale_agents,
             warnings: stale_agents.max(alerts.len()),
             warnings_truncated: alerts_truncated,
@@ -581,7 +581,7 @@ fn validate_dashboard_range(
         if start_unix >= end_unix {
             return Err(ApiError::bad_request("invalid_dashboard_time_range"));
         }
-        if end_unix.saturating_sub(start_unix) > 90 * 24 * 60 * 60 {
+        if end_unix.saturating_sub(start_unix) > DASHBOARD_MAX_CUSTOM_RANGE_SECS {
             return Err(ApiError::bad_request("dashboard_time_range_too_large"));
         }
         return Ok(DashboardRange {
@@ -610,7 +610,7 @@ fn validate_dashboard_range(
 }
 
 fn validate_dashboard_window(value: Option<&str>) -> Result<DashboardWindow, ApiError> {
-    let requested = value.unwrap_or("24h").trim();
+    let requested = value.unwrap_or("1d").trim();
     dashboard_windows()
         .into_iter()
         .find(|window| window.label == requested)
@@ -676,7 +676,7 @@ fn dashboard_windows() -> Vec<DashboardWindow> {
     vec![
         DashboardWindow {
             label: "15m",
-            display_label: "15 minutes",
+            display_label: "Realtime · last 15 minutes",
             seconds: Some(15 * 60),
         },
         DashboardWindow {
@@ -685,13 +685,13 @@ fn dashboard_windows() -> Vec<DashboardWindow> {
             seconds: Some(60 * 60),
         },
         DashboardWindow {
-            label: "6h",
-            display_label: "6 hours",
-            seconds: Some(6 * 60 * 60),
+            label: "8h",
+            display_label: "8 hours",
+            seconds: Some(8 * 60 * 60),
         },
         DashboardWindow {
-            label: "24h",
-            display_label: "24 hours",
+            label: "1d",
+            display_label: "1 day",
             seconds: Some(24 * 60 * 60),
         },
         DashboardWindow {
@@ -700,14 +700,24 @@ fn dashboard_windows() -> Vec<DashboardWindow> {
             seconds: Some(7 * 24 * 60 * 60),
         },
         DashboardWindow {
-            label: "14d",
-            display_label: "14 days",
-            seconds: Some(14 * 24 * 60 * 60),
-        },
-        DashboardWindow {
             label: "30d",
             display_label: "30 days",
             seconds: Some(30 * 24 * 60 * 60),
+        },
+        DashboardWindow {
+            label: "90d",
+            display_label: "90 days",
+            seconds: Some(90 * 24 * 60 * 60),
+        },
+        DashboardWindow {
+            label: "180d",
+            display_label: "180 days",
+            seconds: Some(180 * 24 * 60 * 60),
+        },
+        DashboardWindow {
+            label: "1y",
+            display_label: "1 year",
+            seconds: Some(365 * 24 * 60 * 60),
         },
         DashboardWindow {
             label: "all",
@@ -820,75 +830,71 @@ fn dashboard_group_options() -> Vec<DashboardGroupByOptionView> {
 async fn load_dashboard_rollups(
     state: &AppState,
     range: &DashboardRange,
-    preferred_bucket_secs: Option<i32>,
     chart_step_secs: u64,
     chart_points: u32,
     client_ids: &[String],
 ) -> Result<Vec<TelemetryRollupView>, ApiError> {
+    if dashboard_uses_raw_samples(range) {
+        return Ok(state
+            .repo
+            .list_dashboard_raw_telemetry_rollups(
+                i64::from(chart_points),
+                range.start_unix,
+                range.end_unix,
+                chart_step_secs as i32,
+                client_ids,
+            )
+            .await?);
+    }
     let bounded_range = telemetry_query_bounds(range);
-    let chart_step_secs = chart_step_secs as i32;
-    let mut rollups = state
+    Ok(state
         .repo
         .list_dashboard_telemetry_rollups(
             i64::from(chart_points),
             bounded_range.0,
             bounded_range.1,
-            preferred_bucket_secs,
-            chart_step_secs,
+            None,
+            chart_step_secs as i32,
             client_ids,
         )
-        .await?;
-    if rollups.is_empty() && preferred_bucket_secs.is_some() {
-        rollups = state
-            .repo
-            .list_dashboard_telemetry_rollups(
-                i64::from(chart_points),
-                bounded_range.0,
-                bounded_range.1,
-                None,
-                chart_step_secs,
-                client_ids,
-            )
-            .await?;
-    }
-    Ok(rollups)
+        .await?)
 }
 
 async fn load_dashboard_network_rates(
     state: &AppState,
     range: &DashboardRange,
-    preferred_bucket_secs: Option<i32>,
     chart_step_secs: u64,
     chart_points: u32,
     client_ids: &[String],
 ) -> Result<Vec<TelemetryNetworkRateView>, ApiError> {
+    if dashboard_uses_raw_samples(range) {
+        return Ok(state
+            .repo
+            .list_dashboard_raw_telemetry_network_rates(
+                i64::from(chart_points),
+                range.start_unix,
+                range.end_unix,
+                chart_step_secs as i32,
+                client_ids,
+            )
+            .await?);
+    }
     let bounded_range = telemetry_query_bounds(range);
-    let chart_step_secs = chart_step_secs as i32;
-    let mut rates = state
+    Ok(state
         .repo
         .list_dashboard_telemetry_network_rates(
             i64::from(chart_points),
             bounded_range.0,
             bounded_range.1,
-            preferred_bucket_secs,
-            chart_step_secs,
+            None,
+            chart_step_secs as i32,
             client_ids,
         )
-        .await?;
-    if rates.is_empty() && preferred_bucket_secs.is_some() {
-        rates = state
-            .repo
-            .list_dashboard_telemetry_network_rates(
-                i64::from(chart_points),
-                bounded_range.0,
-                bounded_range.1,
-                None,
-                chart_step_secs,
-                client_ids,
-            )
-            .await?;
-    }
-    Ok(rates)
+        .await?)
+}
+
+fn dashboard_uses_raw_samples(range: &DashboardRange) -> bool {
+    range.window.is_some_and(|window| window.label == "15m")
 }
 
 fn telemetry_query_bounds(range: &DashboardRange) -> (Option<u64>, Option<u64>) {
@@ -897,10 +903,6 @@ fn telemetry_query_bounds(range: &DashboardRange) -> (Option<u64>, Option<u64>) 
     } else {
         (Some(range.start_unix), Some(range.end_unix))
     }
-}
-
-fn preferred_dashboard_bucket_secs() -> Option<i32> {
-    Some(DASHBOARD_SOURCE_BUCKET_SECS)
 }
 
 fn dashboard_chart_step_secs(range: &DashboardRange, chart_points: u32) -> u64 {
@@ -1664,6 +1666,7 @@ fn date_group_entry(
             total: 0,
             online: 0,
             offline: 0,
+            revoked: 0,
             stale: 0,
             warnings: 0,
             running_jobs: 0,
@@ -1697,6 +1700,7 @@ fn cluster_for_agents(
 ) -> DashboardLabelClusterView {
     let mut online = 0_usize;
     let mut offline = 0_usize;
+    let mut revoked = 0_usize;
     let mut stale = 0_usize;
     let mut warnings = 0_usize;
     let mut running_jobs = 0_usize;
@@ -1707,6 +1711,8 @@ fn cluster_for_agents(
             online += 1;
         } else if matches!(agent.status.as_str(), "offline" | "disconnected" | "never") {
             offline += 1;
+        } else if agent.status == "revoked" {
+            revoked += 1;
         } else if is_degraded_agent_status(&agent.status) {
             stale += 1;
         }
@@ -1731,6 +1737,7 @@ fn cluster_for_agents(
         total,
         online,
         offline,
+        revoked,
         stale,
         warnings,
         running_jobs,

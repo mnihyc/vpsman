@@ -39,6 +39,8 @@ pub const SCOPE_CONFIG_READ: &str = "config:read";
 pub const SCOPE_NETWORK_READ: &str = "network:read";
 pub const SCOPE_AUDIT_READ: &str = "audit:read";
 pub const SCOPE_HISTORY_WRITE: &str = "history:write";
+pub const SCOPE_SHARING_READ: &str = "sharing:read";
+pub const SCOPE_SHARING_WRITE: &str = "sharing:write";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NetworkTargetValidationError {
@@ -106,6 +108,8 @@ pub fn default_operator_scopes(role: &str) -> Vec<String> {
             SCOPE_INTEGRATIONS_WRITE.to_string(),
             SCOPE_TEMPLATES_WRITE.to_string(),
             SCOPE_HISTORY_WRITE.to_string(),
+            SCOPE_SHARING_READ.to_string(),
+            SCOPE_SHARING_WRITE.to_string(),
         ],
         "viewer" => vec![SCOPE_FLEET_READ.to_string()],
         _ => Vec::new(),

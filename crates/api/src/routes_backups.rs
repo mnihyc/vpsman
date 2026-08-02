@@ -42,7 +42,7 @@ use crate::{
     repository_backup_artifacts::backup_server_artifact,
     repository_backup_policies::BackupPolicyPruneCandidate,
     routes_file_transfers::{map_verified_object_error, streaming_artifact_file_body},
-    routes_schedules::validate_schedule_request,
+    routes_schedules::{require_selector_target_snapshot, validate_schedule_request},
     security::{operator_has_scope, SCOPE_BACKUPS_READ},
     selector_expression::id_selector_expression,
     state::AppState,
@@ -106,6 +106,13 @@ pub(crate) async fn create_backup_policy(
     }
     validate_create_backup_policy_request(&request)?;
     request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
+    require_selector_target_snapshot(
+        &state,
+        &request.selector_expression,
+        &request.target_client_ids,
+        "backup_policy_target_snapshot_stale",
+    )
+    .await?;
     verify_backup_policy_privilege(
         &state,
         &request,
@@ -135,6 +142,13 @@ pub(crate) async fn update_backup_policy(
     let mut request = CreateBackupPolicyRequest::from(request);
     validate_update_backup_policy_request(&request)?;
     request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
+    require_selector_target_snapshot(
+        &state,
+        &request.selector_expression,
+        &request.target_client_ids,
+        "backup_policy_target_snapshot_stale",
+    )
+    .await?;
     verify_backup_policy_privilege(
         &state,
         &request,

@@ -394,6 +394,56 @@ test("bulk tag mutation requires a fresh preview after selector edits", async ({
   });
 });
 
+test("affected schedule review keeps its navigation action above the evidence table", async ({
+  page,
+}, testInfo) => {
+  await installConsoleApiMock(page, {
+    bulkTagScheduleImpacts: [
+      {
+        schedule_id: "60000000-0000-4000-8000-000000000001",
+        name: "Edge maintenance",
+        command_type: "shell",
+        selector_expression: "tag:maintenance:test",
+        before_target_count: 1,
+        after_target_count: 2,
+        added_target_count: 1,
+        removed_target_count: 0,
+        unchanged_target_count: 1,
+        added_targets: [],
+        removed_targets: [],
+        summary: "One VPS now matches",
+      },
+    ],
+  });
+  await page.goto("/");
+  await openConsoleSubpage(page, "Fleet", "Bulk groups");
+  await unlockPrivilegeFor(page, "Fleet", "Bulk groups");
+  await page.getByLabel("Bulk group", { exact: true }).fill("maintenance:test");
+  const selector = page.getByRole("combobox", {
+    name: "Bulk group selector expression",
+  });
+  await selector.fill("id:agent-sfo-01");
+  await selector.press("Escape");
+  await includeBulkTagReviewTargets(page);
+  await reviewBulkTagMutation(page);
+
+  const confirmation = page.getByLabel("Confirm tag mutation");
+  const table = confirmation.getByRole("table", { name: "Affected schedules" });
+  await expect(table).toBeVisible();
+  const impactHeader = table.getByRole("columnheader", { name: "Impact" });
+  if (testInfo.project.name.includes("mobile")) {
+    await expect(impactHeader).toHaveCount(1);
+  } else {
+    await expect(impactHeader).toBeVisible();
+  }
+  await expect(table.getByRole("columnheader", { name: "Manual action" })).toHaveCount(0);
+  await expect(table.getByRole("button", { name: "Open schedules" })).toHaveCount(0);
+  const openSchedules = confirmation.getByRole("button", { name: "Open schedules" });
+  await expect(openSchedules).toHaveCount(1);
+  await activate(openSchedules);
+  await expect(page.getByRole("heading", { name: "Schedules", exact: true })).toBeVisible();
+});
+
 test("job dispatch async review preparation ignores stale edits", async ({
   page,
 }, testInfo) => {

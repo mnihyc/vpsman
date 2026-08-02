@@ -38,7 +38,7 @@ CREATE TABLE clients (
     id TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
     public_key BYTEA NOT NULL,
-    status TEXT NOT NULL DEFAULT 'offline',
+    status TEXT NOT NULL DEFAULT 'never',
     agent_version TEXT,
     internal_build_number BIGINT NOT NULL DEFAULT 1,
     process_incarnation_id UUID,
@@ -56,6 +56,9 @@ CREATE TABLE clients (
     hidden_reason TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT clients_status_check CHECK (status IN ('never', 'online', 'disconnected', 'offline', 'stale', 'revoked', 'deleted')),
+    CONSTRAINT clients_deleted_visibility_check CHECK (
+        (status = 'deleted') = (hidden_at IS NOT NULL)
+    ),
     CONSTRAINT clients_internal_build_number_check CHECK (internal_build_number >= 1),
     CONSTRAINT clients_stale_build_number_check CHECK (stale_build_number IS NULL OR stale_build_number >= 1)
 );
@@ -75,6 +78,37 @@ CREATE INDEX clients_visible_last_ip_idx
 CREATE UNIQUE INDEX clients_public_key_unique_idx
     ON clients (public_key)
     WHERE octet_length(public_key) > 0;
+
+-- Operational code reads this projection. Lifecycle, identity, and historical
+-- evidence code deliberately reads the clients table so tombstones remain
+-- authoritative and auditable.
+CREATE VIEW visible_clients AS
+SELECT
+    id,
+    display_name,
+    public_key,
+    status,
+    agent_version,
+    internal_build_number,
+    process_incarnation_id,
+    os_release,
+    arch,
+    capabilities,
+    registration_ip,
+    last_ip,
+    last_seen_at,
+    stale_since,
+    stale_reason,
+    stale_build_number,
+    hidden_at,
+    hidden_by,
+    hidden_reason,
+    created_at
+FROM clients
+WHERE hidden_at IS NULL;
+
+COMMENT ON VIEW visible_clients IS
+    'Live operational VPS projection; use clients explicitly for lifecycle and historical evidence.';
 
 CREATE TABLE client_status_history (
     id UUID PRIMARY KEY,
