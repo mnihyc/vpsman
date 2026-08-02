@@ -886,6 +886,14 @@ export function FleetWorkspace({
     }
     const targetIds = rows.map((agent) => agent.id);
     const selectorExpression = selectorExpressionForClientIds(targetIds);
+    const preview = await onBulkMutateTags({
+      action,
+      confirmed: false,
+      privilege_assertion: null,
+      selector_expression: selectorExpression,
+      target_client_ids: targetIds,
+      tag: normalizedTag,
+    });
     const privilegeAssertion = await buildPrivilegeAssertion({
       intent: canonicalDbPrivilegeIntent({
         action: action === "add" ? "tag.bulk_add" : "tag.bulk_remove",
@@ -899,6 +907,7 @@ export function FleetWorkspace({
     return onBulkMutateTags({
       action,
       confirmed: true,
+      preview_hash: preview.preview_hash,
       privilege_assertion: privilegeAssertion,
       selector_expression: selectorExpression,
       target_client_ids: targetIds,

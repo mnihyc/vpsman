@@ -543,6 +543,96 @@ test("bulk tag async preview ignores stale selector edits", async ({
   });
 });
 
+test("expanded VPS detail scopes row actions and preview-binds inline tag changes", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "expanded-row geometry and context actions are covered in the desktop grid",
+  );
+  await installConsoleApiMock(page);
+  await page.goto("/");
+  await unlockPrivilegeFor(page, "Fleet", "Instances");
+
+  const grid = page.getByLabel("VPS instance records data grid");
+  const row = grid
+    .locator(".gridBody [role=row]", { hasText: "edge-sfo-01" })
+    .first();
+  await activate(row.getByLabel("Expand VPS instance records row"));
+  const detail = grid
+    .locator(".gridExpandedRow", { hasText: "edge-sfo-01" })
+    .first();
+  await expect(detail).toBeVisible();
+
+  await detail.locator(".fleetNodeDetailHeader").click({ button: "right" });
+  await expect(page.locator(".consoleMenu:visible")).toHaveCount(0);
+  await row.click({ button: "right" });
+  await expect(page.locator(".consoleMenu:visible")).toContainText(
+    "Row actions",
+  );
+  await page.keyboard.press("Escape");
+
+  await detail.getByLabel("VPS display name").fill("edge-sfo-renamed");
+  await activate(detail.getByRole("button", { name: "Rename" }));
+  const controls = detail.locator(".fleetNodeDetailControls");
+  const prompt = detail.getByLabel("Confirm VPS rename");
+  await expect(prompt).toBeVisible();
+  const promptLayout = await Promise.all([
+    controls.boundingBox(),
+    prompt.boundingBox(),
+    prompt.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        alignSelf: style.alignSelf,
+        borderTopStyle: style.borderTopStyle,
+      };
+    }),
+  ]);
+  expect(promptLayout[0]).not.toBeNull();
+  expect(promptLayout[1]).not.toBeNull();
+  expect(
+    Math.abs((promptLayout[1]?.x ?? 0) - (promptLayout[0]?.x ?? 0)),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs((promptLayout[1]?.width ?? 0) - (promptLayout[0]?.width ?? 0)),
+  ).toBeLessThanOrEqual(2);
+  expect(promptLayout[2]).toMatchObject({
+    alignSelf: "start",
+    borderTopStyle: "solid",
+  });
+  await activate(prompt.getByRole("button", { name: "Cancel" }));
+
+  await detail.getByLabel("Fleet inline tag").fill("maintenance:inline");
+  await activate(detail.getByRole("button", { name: "Add", exact: true }));
+  await expect(detail).toContainText(
+    "add maintenance:inline: 1 changed, 0 skipped",
+  );
+  const requests = await page.evaluate(() =>
+    (
+      window as unknown as {
+        __vpsmanTestRequests: { bulkTagMutations: unknown[] };
+      }
+    ).__vpsmanTestRequests.bulkTagMutations.slice(-2),
+  );
+  expect(requests).toHaveLength(2);
+  expect(requests[0]).toMatchObject({
+    action: "add",
+    confirmed: false,
+    selector_expression: "id:agent-sfo-01",
+    target_client_ids: ["agent-sfo-01"],
+    tag: "maintenance:inline",
+  });
+  expect(requests[1]).toMatchObject({
+    action: "add",
+    confirmed: true,
+    preview_hash: "7".repeat(64),
+    selector_expression: "id:agent-sfo-01",
+    target_client_ids: ["agent-sfo-01"],
+    tag: "maintenance:inline",
+  });
+  expectPrivilegeAssertion(requests[1]);
+});
+
 test("artifact cleanup async preview ignores stale expression edits", async ({
   page,
 }, testInfo) => {

@@ -1018,9 +1018,9 @@ export function ConsoleDataGrid<T>({
               const rowIsActionable =
                 rowClickExpands || Boolean(openRowOnClick && onOpenRow);
               return (
-              <ContextMenu.Root key={row.id}>
-                <ContextMenu.Trigger asChild>
-                  <div className="gridRecord">
+                <ContextMenu.Root key={row.id}>
+                <div className="gridRecord">
+                  <ContextMenu.Trigger asChild>
                     {showMobileCards ? (
                       renderMobileCard(row)
                     ) : (
@@ -1076,27 +1076,27 @@ export function ConsoleDataGrid<T>({
                         ))}
                       </div>
                     )}
-                    {renderExpandedRow && expandedRows[row.id] && (
-                      <div className="gridExpandedRow">
-                        <button
-                          aria-label={`Close ${title} row details`}
-                          className="iconButton gridExpandedClose"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            toggleExpandedRow(row.id, row.original);
-                          }}
-                          title={`Close ${title} row details`}
-                          type="button"
-                        >
-                          <X size={15} />
-                        </button>
-                        <div className="gridExpandedContent">
-                          {renderExpandedRow(row.original)}
-                        </div>
+                  </ContextMenu.Trigger>
+                  {renderExpandedRow && expandedRows[row.id] && (
+                    <div className="gridExpandedRow">
+                      <button
+                        aria-label={`Close ${title} row details`}
+                        className="iconButton gridExpandedClose"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          toggleExpandedRow(row.id, row.original);
+                        }}
+                        title={`Close ${title} row details`}
+                        type="button"
+                      >
+                        <X size={15} />
+                      </button>
+                      <div className="gridExpandedContent">
+                        {renderExpandedRow(row.original)}
                       </div>
-                    )}
-                  </div>
-                </ContextMenu.Trigger>
+                    </div>
+                  )}
+                </div>
                 {visibleContextRowActions.length > 0 && (
                   <ContextMenu.Portal>
                     <ContextMenu.Content
@@ -1139,7 +1139,7 @@ export function ConsoleDataGrid<T>({
                     </ContextMenu.Content>
                   </ContextMenu.Portal>
                 )}
-              </ContextMenu.Root>
+                </ContextMenu.Root>
               );
             })}
           </div>

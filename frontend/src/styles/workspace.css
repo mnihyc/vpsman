@@ -7684,6 +7684,23 @@ button.vpsDetailRecord:hover {
   padding: 10px;
 }
 
+.fleetNodeDetailControls > .aliasEditor {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.fleetNodeDetailControls > .fleetInlineTagForm {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.fleetNodeDetailControls > .confirmationPrompt {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  align-self: start;
+  margin: 0;
+}
+
 .fleetNodeDetailCard .detailTabs {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 96px), 1fr));
   margin: 0;
@@ -7975,6 +7992,13 @@ button.vpsDetailRecord:hover {
   .fleetNodeDetailControls,
   .fleetDetailPane {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .fleetNodeDetailControls > .aliasEditor,
+  .fleetNodeDetailControls > .confirmationPrompt,
+  .fleetNodeDetailControls > .fleetInlineTagForm {
+    grid-column: 1;
+    grid-row: auto;
   }
 
   .fleetSelectionHeader {
