@@ -18,6 +18,7 @@ import {
 import { SearchExpressionInput } from "../../components/SearchExpressionInput";
 import { apiGet, apiPost } from "../../api";
 import { useHistoryEntryState } from "../../historyEntryState";
+import { scrollIntoViewWithMotion } from "../../motion";
 import {
   agentsMatchingExpression,
   parseSearchExpression,
@@ -149,6 +150,10 @@ export function SharedViewsPanel({
   const loadGeneration = useRef(0);
   const initialSelectorSnapshot = useRef(initialSelectorExpression);
   const initialSelectorConsumed = useRef(onInitialSelectorConsumed);
+  const feedbackRef = useRef<HTMLDivElement | null>(null);
+  const createFeedbackRef = useRef<HTMLDivElement | null>(null);
+  const oneTimeUrlRef = useRef<HTMLElement | null>(null);
+  const createdUrlFocusShareIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     initialSelectorConsumed.current?.();
@@ -199,6 +204,73 @@ export function SharedViewsPanel({
     };
   }, [loadShares]);
 
+  useEffect(() => {
+    const message = loadError ?? feedback?.message;
+    if (
+      !message ||
+      drawerOpen ||
+      review !== null ||
+      pendingAction !== null ||
+      createdUrlFocusShareIdRef.current !== null
+    ) {
+      return undefined;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const outcome = feedbackRef.current;
+      if (!outcome) {
+        return;
+      }
+      outcome.tabIndex = -1;
+      scrollIntoViewWithMotion(outcome, { block: "nearest" });
+      outcome.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    drawerOpen,
+    feedback?.message,
+    feedback?.tone,
+    loadError,
+    pendingAction,
+    review,
+  ]);
+
+  useEffect(() => {
+    if (!actionError || !drawerOpen || review !== null) {
+      return undefined;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const outcome = createFeedbackRef.current;
+      if (!outcome) {
+        return;
+      }
+      outcome.tabIndex = -1;
+      scrollIntoViewWithMotion(outcome, { block: "nearest" });
+      outcome.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [actionError, drawerOpen, review]);
+
+  useEffect(() => {
+    if (
+      !oneTimeUrl ||
+      drawerOpen ||
+      review !== null ||
+      createdUrlFocusShareIdRef.current !== oneTimeUrl.shareId
+    ) {
+      return undefined;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const outcome = oneTimeUrlRef.current;
+      if (!outcome) {
+        return;
+      }
+      createdUrlFocusShareIdRef.current = null;
+      scrollIntoViewWithMotion(outcome, { block: "start" });
+      outcome.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [drawerOpen, oneTimeUrl, review]);
+
   const sharesByStatus = useMemo(() => {
     const grouped: Record<ShareStatus, MonitoringShareView[]> = {
       active: [],
@@ -240,6 +312,7 @@ export function SharedViewsPanel({
     setDraft((current) => ({ ...current, ...update }));
     setReview(null);
     setActionError(null);
+    setFeedback(null);
   }
 
   function updateVisibility(
@@ -258,12 +331,14 @@ export function SharedViewsPanel({
     });
     setReview(null);
     setActionError(null);
+    setFeedback(null);
   }
 
   function openCreate() {
     setDraft(defaultShareDraft(initialSelectorSnapshot.current));
     setReview(null);
     setActionError(null);
+    setFeedback(null);
     setDrawerOpen(true);
   }
 
@@ -302,7 +377,9 @@ export function SharedViewsPanel({
         targets: resolved.targets,
       });
     } catch (error) {
-      setActionError(actionErrorMessage(error));
+      const message = actionErrorMessage(error);
+      setActionError(message);
+      setFeedback({ message, tone: "danger" });
     } finally {
       setPending(false);
     }
@@ -319,6 +396,7 @@ export function SharedViewsPanel({
         review.request,
       );
       setShares((current) => mergeShares(current, [response.share]));
+      createdUrlFocusShareIdRef.current = response.share.id;
       setOneTimeUrl({
         createdAt: response.share.created_at,
         name: response.share.name,
@@ -333,7 +411,9 @@ export function SharedViewsPanel({
       setReview(null);
       setDrawerOpen(false);
     } catch (error) {
-      setActionError(actionErrorMessage(error));
+      const message = actionErrorMessage(error);
+      setActionError(message);
+      setFeedback({ message, tone: "danger" });
     } finally {
       setPending(false);
     }
@@ -379,7 +459,9 @@ export function SharedViewsPanel({
       });
       setPendingAction(null);
     } catch (error) {
-      setActionError(actionErrorMessage(error));
+      const message = actionErrorMessage(error);
+      setActionError(message);
+      setFeedback({ message, tone: "danger" });
     } finally {
       setPending(false);
     }
@@ -522,6 +604,7 @@ export function SharedViewsPanel({
         label: "Extend",
         onSelect: (rows) => {
           setActionError(null);
+          setFeedback(null);
           setExtensionValue(24);
           setExtensionUnit("hours");
           setPendingAction({ kind: "extend", shares: rows });
@@ -540,6 +623,7 @@ export function SharedViewsPanel({
         label: "Revoke",
         onSelect: (rows) => {
           setActionError(null);
+          setFeedback(null);
           setPendingAction({ kind: "revoke", shares: rows });
         },
         separatorBefore: true,
@@ -587,6 +671,7 @@ export function SharedViewsPanel({
         <ActionFeedback
           className="localActionFeedback dashboardActionFeedback"
           message={loadError ?? feedback?.message}
+          ref={feedbackRef}
           tone={loadError ? "danger" : feedback?.tone}
         />
 
@@ -620,6 +705,8 @@ export function SharedViewsPanel({
           <section
             aria-label="One-time shared view URL"
             className="dashboardSection observabilityGroupSection"
+            ref={oneTimeUrlRef}
+            tabIndex={-1}
           >
             <div className="dashboardSectionHeader">
               <div>
@@ -853,6 +940,7 @@ export function SharedViewsPanel({
           <ActionFeedback
             className="localActionFeedback fieldFull"
             message={actionError}
+            ref={createFeedbackRef}
             tone="danger"
           />
           <div className="consoleFormActions fieldFull">
@@ -909,7 +997,6 @@ export function SharedViewsPanel({
         }
         onCancel={() => {
           if (pending) return;
-          setActionError(null);
           setReview(null);
         }}
         onConfirm={() => void createShare()}
@@ -963,9 +1050,11 @@ export function SharedViewsPanel({
                 disabled={pending}
                 max={durationMaximum(extensionUnit)}
                 min={1}
-                onChange={(event) =>
-                  setExtensionValue(Number(event.target.value))
-                }
+                onChange={(event) => {
+                  setExtensionValue(Number(event.target.value));
+                  setActionError(null);
+                  setFeedback(null);
+                }}
                 step={1}
                 type="number"
                 value={extensionValue}
@@ -976,9 +1065,11 @@ export function SharedViewsPanel({
               <select
                 aria-label="Shared view extension unit"
                 disabled={pending}
-                onChange={(event) =>
-                  setExtensionUnit(event.target.value as DurationUnit)
-                }
+                onChange={(event) => {
+                  setExtensionUnit(event.target.value as DurationUnit);
+                  setActionError(null);
+                  setFeedback(null);
+                }}
                 value={extensionUnit}
               >
                 <option value="minutes">Minutes</option>

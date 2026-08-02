@@ -146,6 +146,8 @@ pub(crate) struct UpdateBackupPolicyRequest {
     pub(crate) name: String,
     pub(crate) selector_expression: String,
     pub(crate) target_client_ids: Vec<String>,
+    pub(crate) expected_selector_expression: String,
+    pub(crate) expected_target_client_ids: Vec<String>,
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
     pub(crate) follow_symlinks: bool,

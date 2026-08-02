@@ -42,6 +42,7 @@ import {
   shortId,
 } from "../../utils";
 import { pushHistoryEntry } from "../../historyEntryState";
+import { scrollIntoViewWithMotion } from "../../motion";
 
 type FeedbackState = {
   jobId?: string;
@@ -85,6 +86,7 @@ export function RolloutsPanel({
   const pendingJobIdRef = useRef<string | null>(null);
   const submissionGuardRef = useRef(createSubmissionGuard());
   const [feedback, setFeedback] = useState<FeedbackState | null>(null);
+  const feedbackRef = useRef<HTMLDivElement | null>(null);
   const [selectedJobId, setSelectedJobId] = useState(readRolloutJobRoute);
   const [reviewAction, setReviewAction] = useState<ReviewAction | null>(null);
 
@@ -113,8 +115,20 @@ export function RolloutsPanel({
     [jobs],
   );
   const selected = selectedJobId
-    ? rollouts.find((rollout) => rollout.job_id === selectedJobId) ?? null
+    ? (rollouts.find((rollout) => rollout.job_id === selectedJobId) ?? null)
     : null;
+
+  useEffect(() => {
+    if (!feedback || (feedback.jobId && feedback.jobId === selected?.job_id)) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      if (feedbackRef.current) {
+        scrollIntoViewWithMotion(feedbackRef.current, { block: "nearest" });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [feedback, selected?.job_id]);
 
   async function reload() {
     if (loadingRef.current) return;
@@ -183,16 +197,13 @@ export function RolloutsPanel({
     } catch (error) {
       setFeedback({
         jobId: rollout.job_id,
-        message: error instanceof Error ? error.message : "Rollout pause failed",
+        message:
+          error instanceof Error ? error.message : "Rollout pause failed",
         tone: "danger",
       });
     } finally {
       pendingJobIdRef.current = null;
-      finishSubmission(
-        submissionGuardRef.current,
-        submissionKey,
-        successful,
-      );
+      finishSubmission(submissionGuardRef.current, submissionKey, successful);
       setPendingJobId(null);
     }
   }
@@ -252,11 +263,7 @@ export function RolloutsPanel({
       });
     } finally {
       pendingJobIdRef.current = null;
-      finishSubmission(
-        submissionGuardRef.current,
-        submissionKey,
-        successful,
-      );
+      finishSubmission(submissionGuardRef.current, submissionKey, successful);
       setPendingJobId(null);
     }
   }
@@ -294,11 +301,11 @@ export function RolloutsPanel({
           Boolean(pendingJobId) || rows[0]?.status !== "paused",
         icon: <Play size={14} />,
         label: "Resume",
-        onSelect: (rows) =>
-          rows[0] && reviewRolloutAction("resume", rows[0]),
+        onSelect: (rows) => rows[0] && reviewRolloutAction("resume", rows[0]),
       },
       {
-        description: () => "Open the underlying job and complete output evidence.",
+        description: () =>
+          "Open the underlying job and complete output evidence.",
         icon: <ExternalLink size={14} />,
         label: "Open job",
         onSelect: (rows) => rows[0] && onOpenJobDetails(rows[0].job_id),
@@ -311,8 +318,7 @@ export function RolloutsPanel({
           Boolean(pendingJobId) || isTerminalRollout(rows[0]?.status),
         icon: <XCircle size={14} />,
         label: "Abort rollout",
-        onSelect: (rows) =>
-          rows[0] && reviewRolloutAction("abort", rows[0]),
+        onSelect: (rows) => rows[0] && reviewRolloutAction("abort", rows[0]),
       },
     ],
     [pendingJobId],
@@ -458,7 +464,8 @@ export function RolloutsPanel({
           <div>
             <h2>Staged rollouts</h2>
             <span>
-              Durable canaries, bounded batches, safety pauses, and per-VPS evidence
+              Durable canaries, bounded batches, safety pauses, and per-VPS
+              evidence
             </span>
           </div>
           <div className="headerActionStack">
@@ -479,6 +486,7 @@ export function RolloutsPanel({
                   ? feedback?.message
                   : null
               }
+              ref={feedbackRef}
               tone={feedback?.tone}
             />
           </div>
@@ -489,24 +497,46 @@ export function RolloutsPanel({
           className="processSupervisorSummaryStrip"
         >
           <span>
-            <strong>{formatLowerBoundCount(activeCount, rolloutsTruncated)}</strong>
-            <small>{rolloutsTruncated ? "Running in loaded page" : "Running"}</small>
+            <strong>
+              {formatLowerBoundCount(activeCount, rolloutsTruncated)}
+            </strong>
+            <small>
+              {rolloutsTruncated ? "Running in loaded page" : "Running"}
+            </small>
           </span>
           <span className={pausedCount > 0 ? "attention" : undefined}>
-            <strong>{formatLowerBoundCount(pausedCount, rolloutsTruncated)}</strong>
-            <small>{rolloutsTruncated ? "Paused in loaded page" : "Paused"}</small>
+            <strong>
+              {formatLowerBoundCount(pausedCount, rolloutsTruncated)}
+            </strong>
+            <small>
+              {rolloutsTruncated ? "Paused in loaded page" : "Paused"}
+            </small>
           </span>
           <span className={failurePausedCount > 0 ? "attention" : undefined}>
-            <strong>{formatLowerBoundCount(failurePausedCount, rolloutsTruncated)}</strong>
-            <small>{rolloutsTruncated ? "Safety review in loaded page" : "Safety review"}</small>
+            <strong>
+              {formatLowerBoundCount(failurePausedCount, rolloutsTruncated)}
+            </strong>
+            <small>
+              {rolloutsTruncated
+                ? "Safety review in loaded page"
+                : "Safety review"}
+            </small>
           </span>
           <span>
-            <strong>{formatLowerBoundCount(completedCount, rolloutsTruncated)}</strong>
-            <small>{rolloutsTruncated ? "Completed in loaded page" : "Completed"}</small>
+            <strong>
+              {formatLowerBoundCount(completedCount, rolloutsTruncated)}
+            </strong>
+            <small>
+              {rolloutsTruncated ? "Completed in loaded page" : "Completed"}
+            </small>
           </span>
           <span className={abortedCount > 0 ? "attention" : undefined}>
-            <strong>{formatLowerBoundCount(abortedCount, rolloutsTruncated)}</strong>
-            <small>{rolloutsTruncated ? "Aborted in loaded page" : "Aborted"}</small>
+            <strong>
+              {formatLowerBoundCount(abortedCount, rolloutsTruncated)}
+            </strong>
+            <small>
+              {rolloutsTruncated ? "Aborted in loaded page" : "Aborted"}
+            </small>
           </span>
         </div>
 
@@ -516,7 +546,9 @@ export function RolloutsPanel({
           empty={
             <div className="emptyState compactEmpty">
               <ShieldCheck size={22} />
-              <strong>{loading ? "Loading rollouts" : "No staged rollouts"}</strong>
+              <strong>
+                {loading ? "Loading rollouts" : "No staged rollouts"}
+              </strong>
               <span>
                 Enable staged delivery while reviewing a multi-VPS dispatch.
               </span>
@@ -543,7 +575,8 @@ export function RolloutsPanel({
                 </strong>
                 <span>Failure threshold</span>
                 <strong>
-                  {rolloutFailureCount(rollout)} observed / {rollout.max_failures} tolerated
+                  {rolloutFailureCount(rollout)} observed /{" "}
+                  {rollout.max_failures} tolerated
                 </strong>
                 <span>Canaries</span>
                 <strong title={rollout.canary_client_ids.join(", ")}>
@@ -589,7 +622,15 @@ export function RolloutsPanel({
           reviewAction?.kind === "abort" ? "Abort rollout" : "Resume stage"
         }
         detail={
-          reviewAction ? reviewDetail(reviewAction) : "Review the rollout action."
+          reviewAction
+            ? reviewDetail(reviewAction)
+            : "Review the rollout action."
+        }
+        error={
+          feedback?.tone === "danger" &&
+          (!reviewAction || feedback.jobId === reviewAction.rollout.job_id)
+            ? feedback.message
+            : null
         }
         items={reviewAction ? reviewItems(reviewAction) : []}
         onCancel={() => setReviewAction(null)}
@@ -640,6 +681,16 @@ function RolloutDetail({
   pending: boolean;
   rollout: JobRolloutRecord;
 }) {
+  const feedbackRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!feedback) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (feedbackRef.current) {
+        scrollIntoViewWithMotion(feedbackRef.current, { block: "nearest" });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [feedback]);
   const targetColumns = useMemo<
     ConsoleDataGridColumn<JobRolloutTargetRecord>[]
   >(
@@ -760,6 +811,7 @@ function RolloutDetail({
       <ActionFeedback
         className="localActionFeedback rolloutActionFeedback"
         message={feedback?.message}
+        ref={feedbackRef}
         tone={feedback?.tone}
       />
       <div
@@ -852,7 +904,8 @@ function rolloutStateDetail(rollout: JobRolloutRecord) {
   if (rollout.pause_reason === "canary_review") return "Canary review required";
   if (rollout.pause_reason === "failure_threshold")
     return "Failure threshold exceeded";
-  if (rollout.pause_reason === "operator_requested") return "Paused by operator";
+  if (rollout.pause_reason === "operator_requested")
+    return "Paused by operator";
   if (rollout.pause_reason === "operator_aborted_rollout")
     return "Aborted by operator";
   if (rollout.pause_reason) return readableToken(rollout.pause_reason);

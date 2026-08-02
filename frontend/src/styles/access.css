@@ -1235,8 +1235,7 @@
 }
 
 .totpManualKey {
-  display: flex;
-  align-items: end;
+  display: grid;
   gap: 8px;
   min-width: 0;
 }
@@ -1260,6 +1259,10 @@
   color: var(--text);
   font-family: var(--font-mono);
   font-size: 12px;
+}
+
+.totpManualKey > button {
+  justify-self: start;
 }
 
 .totpSecretPanel span,

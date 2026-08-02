@@ -44,6 +44,7 @@ import {
   shortHash,
 } from "../utils";
 import { useHistoryEntryState } from "../historyEntryState";
+import { scrollIntoViewWithMotion } from "../motion";
 
 type AuditFilterState = {
   action: string;
@@ -109,16 +110,20 @@ export function AuditLogPanel({
   ) => Promise<void>;
 }) {
   const auditSubpage = activeSubpage === "retention" ? "retention" : "events";
+  const auditFeedbackMessage =
+    error ?? (loading ? "Refreshing audit records" : null);
   const selectedAuditId = activeSubpage.startsWith("events:id:")
     ? activeSubpage.slice("events:id:".length).trim()
     : null;
   const selectedAuditFromList = selectedAuditId
-    ? audits.find((audit) => audit.id === selectedAuditId) ?? null
+    ? (audits.find((audit) => audit.id === selectedAuditId) ?? null)
     : null;
   const [routedAudit, setRoutedAudit] = useState<AuditLogRecord | null>(null);
   const [routedAuditError, setRoutedAuditError] = useState<string | null>(null);
   const [routedAuditLoading, setRoutedAuditLoading] = useState(false);
   const routedAuditLoadGeneration = useRef(0);
+  const auditFeedbackRef = useRef<HTMLDivElement | null>(null);
+  const retentionFeedbackRef = useRef<HTMLDivElement | null>(null);
   const selectedAudit =
     selectedAuditFromList ??
     (routedAudit?.id === selectedAuditId ? routedAudit : null);
@@ -358,6 +363,35 @@ export function AuditLogPanel({
     setPruneConfirmationOpen(false);
   }
 
+  function clearRetentionReviewFeedback() {
+    clearPruneConfirmation();
+    setRetentionStatus(null);
+  }
+
+  useEffect(() => {
+    if (!auditFeedbackMessage || auditSubpage !== "events") return;
+    const frame = window.requestAnimationFrame(() => {
+      if (auditFeedbackRef.current) {
+        scrollIntoViewWithMotion(auditFeedbackRef.current, {
+          block: "nearest",
+        });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [auditFeedbackMessage, auditSubpage]);
+
+  useEffect(() => {
+    if (!(error ?? retentionStatus) || auditSubpage !== "retention") return;
+    const frame = window.requestAnimationFrame(() => {
+      if (retentionFeedbackRef.current) {
+        scrollIntoViewWithMotion(retentionFeedbackRef.current, {
+          block: "nearest",
+        });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [auditSubpage, error, retentionStatus]);
+
   const submitPolicy = async () => {
     if (
       minimumRetentionDays > 1 &&
@@ -383,7 +417,11 @@ export function AuditLogPanel({
       setRetentionStatus(`Saved ${selectedDomainName} retention policy`);
       setRetentionStatusTone("success");
     } catch (actionError) {
-      setRetentionStatus(actionError instanceof Error ? actionError.message : "History retention policy update failed");
+      setRetentionStatus(
+        actionError instanceof Error
+          ? actionError.message
+          : "History retention policy update failed",
+      );
       setRetentionStatusTone("danger");
     }
   };
@@ -422,12 +460,18 @@ export function AuditLogPanel({
         reviewedRows,
       });
       setPruneConfirmationOpen(false);
-      setRetentionStatus(reviewedRows > 0
-        ? `Cleanup preview matched ${reviewedRows} row${reviewedRows === 1 ? "" : "s"}`
-        : "Cleanup preview matched no rows; deletion is not needed");
+      setRetentionStatus(
+        reviewedRows > 0
+          ? `Cleanup preview matched ${reviewedRows} row${reviewedRows === 1 ? "" : "s"}`
+          : "Cleanup preview matched no rows; deletion is not needed",
+      );
       setRetentionStatusTone(reviewedRows > 0 ? "warning" : "success");
     } catch (actionError) {
-      setRetentionStatus(actionError instanceof Error ? actionError.message : "History cleanup preview failed");
+      setRetentionStatus(
+        actionError instanceof Error
+          ? actionError.message
+          : "History cleanup preview failed",
+      );
       setRetentionStatusTone("danger");
     }
   };
@@ -436,7 +480,9 @@ export function AuditLogPanel({
     if (!pruneSnapshot) {
       return;
     }
-    setRetentionStatus(`Deleting ${pruneSnapshot.reviewedRows} reviewed history row${pruneSnapshot.reviewedRows === 1 ? "" : "s"}`);
+    setRetentionStatus(
+      `Deleting ${pruneSnapshot.reviewedRows} reviewed history row${pruneSnapshot.reviewedRows === 1 ? "" : "s"}`,
+    );
     setRetentionStatusTone("progress");
     try {
       await onPruneHistoryRetention(pruneSnapshot.request);
@@ -444,7 +490,11 @@ export function AuditLogPanel({
       setRetentionStatusTone("success");
       clearPruneConfirmation();
     } catch (actionError) {
-      setRetentionStatus(actionError instanceof Error ? actionError.message : "History cleanup failed");
+      setRetentionStatus(
+        actionError instanceof Error
+          ? actionError.message
+          : "History cleanup failed",
+      );
       setRetentionStatusTone("danger");
     }
   };
@@ -466,7 +516,11 @@ export function AuditLogPanel({
       setRetentionStatus(`Downloaded ${selectedDomainName} history export`);
       setRetentionStatusTone("success");
     } catch (actionError) {
-      setRetentionStatus(actionError instanceof Error ? actionError.message : "History export failed");
+      setRetentionStatus(
+        actionError instanceof Error
+          ? actionError.message
+          : "History export failed",
+      );
       setRetentionStatusTone("danger");
     }
   };
@@ -509,9 +563,6 @@ export function AuditLogPanel({
     selectedDomainLabel === "audit_logs" && audits.length === 0
       ? "No audit events are visible for privileged control-plane workflows."
       : "Compliance-grade record totals and storage size are unavailable.";
-  const auditFeedbackMessage =
-    error ?? (loading ? "Refreshing audit records" : null);
-
   const retryRoutedAudit = async () => {
     if (!selectedAuditId) return;
     const generation = routedAuditLoadGeneration.current + 1;
@@ -597,6 +648,7 @@ export function AuditLogPanel({
           <ActionFeedback
             className="localActionFeedback"
             message={auditFeedbackMessage}
+            ref={auditFeedbackRef}
             tone={error ? "danger" : "progress"}
           />
           <div className="auditEventSummary" aria-label="Audit event summary">
@@ -853,10 +905,16 @@ export function AuditLogPanel({
           <ActionFeedback
             className="localActionFeedback"
             message={error ?? retentionStatus}
+            ref={retentionFeedbackRef}
             tone={error ? "danger" : retentionStatusTone}
           />
           <p className="retentionPanelNote">
-            <strong>Monitoring lifecycle.</strong> Accepted high-resolution samples support realtime and short-range views; minute-derived resource, network, traffic-counter, and Ping history is the long-term authority. Equal adjacent resource, network, and Ping minutes may share a variable-length span without changing coverage or query results.
+            <strong>Monitoring lifecycle.</strong> Accepted high-resolution
+            samples support realtime and short-range views; minute-derived
+            resource, network, traffic-counter, and Ping history is the
+            long-term authority. Equal adjacent resource, network, and Ping
+            minutes may share a variable-length span without changing coverage
+            or query results.
           </p>
           <div
             className="retentionSummaryStrip"
@@ -909,7 +967,7 @@ export function AuditLogPanel({
                   key={policy.domain}
                   onClick={() => {
                     setSelectedDomain(policy.domain);
-                    clearPruneConfirmation();
+                    clearRetentionReviewFeedback();
                   }}
                   type="button"
                 >
@@ -951,7 +1009,7 @@ export function AuditLogPanel({
                   value={selectedPolicy?.domain ?? selectedDomain}
                   onChange={(event) => {
                     setSelectedDomain(event.target.value);
-                    clearPruneConfirmation();
+                    clearRetentionReviewFeedback();
                   }}
                 >
                   {historyRetentionPolicies.map((policy) => (
@@ -971,7 +1029,7 @@ export function AuditLogPanel({
                     value={retentionDays}
                     onChange={(event) => {
                       setRetentionDays(event.target.value);
-                      clearPruneConfirmation();
+                      clearRetentionReviewFeedback();
                     }}
                   />
                   {minimumRetentionDays > 1 && (
@@ -990,7 +1048,7 @@ export function AuditLogPanel({
                     value={pruneLimit}
                     onChange={(event) => {
                       setPruneLimit(event.target.value);
-                      clearPruneConfirmation();
+                      clearRetentionReviewFeedback();
                     }}
                   />
                 </label>
@@ -1001,7 +1059,7 @@ export function AuditLogPanel({
                   type="checkbox"
                   onChange={(event) => {
                     setMetadataOnly(event.target.checked);
-                    clearPruneConfirmation();
+                    clearRetentionReviewFeedback();
                   }}
                 />
                 <span>Metadata only</span>
@@ -1010,7 +1068,10 @@ export function AuditLogPanel({
                 <input
                   checked={exportEnabled}
                   type="checkbox"
-                  onChange={(event) => setExportEnabled(event.target.checked)}
+                  onChange={(event) => {
+                    setExportEnabled(event.target.checked);
+                    clearRetentionReviewFeedback();
+                  }}
                 />
                 <span>Export enabled</span>
               </label>
@@ -1072,7 +1133,13 @@ export function AuditLogPanel({
                   className="secondaryAction dangerAction"
                   disabled={!pruneSnapshot || pruneSnapshot.reviewedRows === 0}
                   onClick={() => setPruneConfirmationOpen(true)}
-                  title={!pruneSnapshot ? "Preview cleanup first" : pruneSnapshot.reviewedRows === 0 ? "No reviewed rows match; deletion is not needed" : `Review deletion of ${pruneSnapshot.reviewedRows} matched rows`}
+                  title={
+                    !pruneSnapshot
+                      ? "Preview cleanup first"
+                      : pruneSnapshot.reviewedRows === 0
+                        ? "No reviewed rows match; deletion is not needed"
+                        : `Review deletion of ${pruneSnapshot.reviewedRows} matched rows`
+                  }
                   type="button"
                 >
                   <Scissors size={16} />
@@ -1172,6 +1239,11 @@ export function AuditLogPanel({
                 ? "Deletes history metadata rows that match the selected domain, retention days, and prune limit."
                 : "Deletes history rows and retained object files that match the selected domain, retention days, and prune limit."
             }
+            error={
+              retentionStatusTone === "danger"
+                ? (retentionStatus ?? undefined)
+                : undefined
+            }
             items={[
               {
                 label: "Domain",
@@ -1254,10 +1326,7 @@ function AuditEventDetailPanel({
 }) {
   const presentation = presentAudit(audit);
   return (
-    <div
-      className="auditEventDetailPanel"
-      aria-label="Audit event detail"
-    >
+    <div className="auditEventDetailPanel" aria-label="Audit event detail">
       <div className="consoleDetailPanelHeader">
         <span>
           <strong>Audit event detail</strong>
@@ -1333,17 +1402,21 @@ function AuditEventDetailPanel({
         <span>
           <strong>Gateway session</strong>
           <span>
-            {presentation.gatewaySessionId ??
-              auditMissingFieldLabel("gateway")}
+            {presentation.gatewaySessionId ?? auditMissingFieldLabel("gateway")}
           </span>
         </span>
         <span>
           <strong>Privilege scope</strong>
           <span>
-            {presentation.privilege ??
-              auditMissingFieldLabel("privilege")}
+            {presentation.privilege ?? auditMissingFieldLabel("privilege")}
           </span>
         </span>
+        {presentation.executionPrivilege && (
+          <span>
+            <strong>Execution privilege</strong>
+            <span>{presentation.executionPrivilege}</span>
+          </span>
+        )}
         <span>
           <strong>User agent</strong>
           <span>
@@ -1354,7 +1427,10 @@ function AuditEventDetailPanel({
       {presentation.evidenceReferences.some((reference) =>
         auditEvidenceHasDestination(reference),
       ) && (
-        <div className="consoleInlineDetailActions" aria-label="Related audit evidence links">
+        <div
+          className="consoleInlineDetailActions"
+          aria-label="Related audit evidence links"
+        >
           {presentation.evidenceReferences
             .filter(auditEvidenceHasDestination)
             .map((reference) => (
@@ -1401,7 +1477,9 @@ function AuditEventDetailPanel({
   );
 }
 
-function auditEvidenceHasDestination(reference: AuditEvidenceReference): boolean {
+function auditEvidenceHasDestination(
+  reference: AuditEvidenceReference,
+): boolean {
   return (
     reference.kind === "Job" &&
     /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(reference.value)
@@ -1534,9 +1612,17 @@ function auditFilterText(
   const presentation = presentAudit(audit);
   switch (field) {
     case "action":
-      return [audit.action, presentation.actionLabel, presentation.actionDetail].join(" ");
+      return [
+        audit.action,
+        presentation.actionLabel,
+        presentation.actionDetail,
+      ].join(" ");
     case "resource":
-      return [audit.target, presentation.targetLabel, presentation.targetDetail].join(" ");
+      return [
+        audit.target,
+        presentation.targetLabel,
+        presentation.targetDetail,
+      ].join(" ");
     case "result":
       return presentation.outcomeLabel;
     case "ip":

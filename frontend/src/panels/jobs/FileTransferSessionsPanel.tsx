@@ -9,7 +9,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ArtifactDownloadMode } from "../../artifactDownload";
 import { ActionFeedback } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
@@ -25,6 +25,7 @@ import {
   fileTransferSessionStatusBadgeClass,
 } from "../../jobStatusPresentation";
 import type { JobDispatchPresetInput } from "../../jobDispatchPreset";
+import { scrollIntoViewWithMotion } from "../../motion";
 import type { AgentView } from "../../types";
 import type {
   FileTransferHandoffRecord,
@@ -161,6 +162,7 @@ export function FileTransferSessionsPanel({
     fileName: string;
     request: UploadFileTransferSourceArtifactRequest;
   } | null>(null);
+  const handoffFeedbackRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (
       !initialUploadTargetClientId ||
@@ -441,11 +443,29 @@ export function FileTransferSessionsPanel({
 
   useEffect(() => {
     setSourceSnapshot(null);
+    setSourceError(null);
   }, [sourceFile, sourceName]);
 
   useEffect(() => {
     setHandoffSnapshot(null);
+    setHandoffError(null);
   }, [handoffDownloadMode]);
+
+  useEffect(() => {
+    if (!handoffFeedbackMessage || handoffSnapshot !== null) {
+      return undefined;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const outcome = handoffFeedbackRef.current;
+      if (!outcome) {
+        return;
+      }
+      outcome.tabIndex = -1;
+      scrollIntoViewWithMotion(outcome, { block: "nearest" });
+      outcome.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [handoffFeedbackMessage, handoffFeedbackTone, handoffSnapshot]);
 
   function startQuickUpload() {
     if (quickTransferMode === "upload" && !quickUploadFile) {
@@ -903,6 +923,7 @@ export function FileTransferSessionsPanel({
       <ConfirmationPrompt
         confirmLabel="Download selected files"
         detail="Saves the reviewed completed download sessions using the selected method."
+        error={handoffError}
         items={[
           { label: "Save method", value: handoffSnapshot?.mode ?? "-" },
           {
@@ -1067,6 +1088,7 @@ export function FileTransferSessionsPanel({
       <ActionFeedback
         className="localActionFeedback transferHandoffActionFeedback"
         message={handoffFeedbackMessage}
+        ref={handoffFeedbackRef}
         tone={handoffFeedbackTone}
       />
       <ConsoleDataGrid
@@ -1223,6 +1245,7 @@ export function FileTransferSessionsPanel({
           <ConfirmationPrompt
             confirmLabel="Upload source artifact"
             detail="Persists the reviewed source artifact with computed SHA-256 and size."
+            error={sourceSnapshot ? sourceError : null}
             items={[
               {
                 label: "Name",

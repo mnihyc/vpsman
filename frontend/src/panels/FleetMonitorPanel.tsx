@@ -28,6 +28,11 @@ import type {
 } from "../types";
 import { INTERFACE_RATE_DEFINITION } from "../telemetryMetrics";
 import { useHistoryEntryState } from "../historyEntryState";
+import {
+  OPERATOR_MONITOR_DENSITY_STORAGE_KEY,
+  usePersistentMonitorCardDensity,
+  type MonitorCardDensity,
+} from "../monitorCardDensity";
 import { selectorExpressionForClientIds } from "../searchExpression";
 import { displayNameOrUnnamed, formatTime, timestampMillis } from "../utils";
 
@@ -54,14 +59,9 @@ type FleetMonitorPanelProps = {
   onOpenSharedViews?: (selectorExpression: string) => void;
 };
 
-export type FleetMonitorDensity = "compact" | "comfortable";
+export type FleetMonitorDensity = MonitorCardDensity;
 type FleetMonitorSort =
-  | "warning"
-  | "traffic"
-  | "cpu"
-  | "memory"
-  | "region"
-  | "provider";
+  "warning" | "traffic" | "cpu" | "memory" | "region" | "provider";
 type FleetMonitorStatusFilter = "all" | "online" | "warning" | "offline";
 type MonitoringEvidenceState = "loading" | "ready" | "unavailable";
 type MonitorRecordBounds = {
@@ -102,9 +102,9 @@ export function FleetMonitorPanel({
   onOpenSharedViews,
 }: FleetMonitorPanelProps) {
   const historySlot = embedded ? "home.fleet-monitor" : "fleet.monitor";
-  const [density, setDensity] = useHistoryEntryState<FleetMonitorDensity>(
-    `${historySlot}.density`,
-    "comfortable",
+  const [density, setDensity] = usePersistentMonitorCardDensity(
+    historySlot,
+    OPERATOR_MONITOR_DENSITY_STORAGE_KEY,
   );
   const [sortMode, setSortMode] = useHistoryEntryState<FleetMonitorSort>(
     `${historySlot}.sort`,
@@ -498,12 +498,12 @@ export function FleetMonitorPanel({
 
   return (
     <section className={rootClassName}>
-      <div className="fleetMonitorToolbar">
-        <div>
-          <h2>{title}</h2>
-          <span>{description}</span>
-        </div>
-        {embedded ? (
+      {embedded ? (
+        <div className="fleetMonitorToolbar">
+          <div>
+            <h2>{title}</h2>
+            <span>{description}</span>
+          </div>
           <div className="fleetMonitorToolbarRight">
             <div
               className="fleetMonitorControls"
@@ -513,8 +513,8 @@ export function FleetMonitorPanel({
             </div>
             {toolbarAction}
           </div>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
       <div className="fleetMonitorSurface fleetPanel">
         <div
           className="fleetMonitorOverview"
@@ -745,6 +745,46 @@ export type VpsMonitorCardProps = {
   traffic: TrafficAccountingRecord | null;
 };
 
+export function VpsMonitorCardSurface({
+  ariaLabel,
+  children,
+  className,
+  header,
+  onOpen,
+  title,
+}: {
+  ariaLabel: string;
+  children: ReactNode;
+  className: string;
+  header: ReactNode;
+  onOpen?: () => void;
+  title?: string;
+}) {
+  const interactive = Boolean(onOpen);
+  return (
+    <article
+      aria-label={ariaLabel}
+      className={className}
+      onClick={onOpen}
+      onKeyDown={
+        interactive
+          ? (event) => {
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              onOpen?.();
+            }
+          : undefined
+      }
+      role={interactive ? "link" : undefined}
+      tabIndex={interactive ? 0 : undefined}
+      title={title}
+    >
+      <div className="vpsMonitorCardMain">{header}</div>
+      {children}
+    </article>
+  );
+}
+
 export function VpsMonitorCard({
   agent,
   billing,
@@ -768,9 +808,6 @@ export function VpsMonitorCard({
     tagValue(agent.tags, "country") ??
     tagValue(agent.tags, "region") ??
     "region unset";
-  const visibleTags = agent.tags.slice(0, 4);
-  const hiddenTags = agent.tags.slice(visibleTags.length);
-  const hiddenTagCount = Math.max(0, agent.tags.length - visibleTags.length);
   const currentRates = coherentNetworkRates(rates);
   const rxBps = sumNetworkRate(currentRates, "rx");
   const txBps = sumNetworkRate(currentRates, "tx");
@@ -895,62 +932,35 @@ export function VpsMonitorCard({
   const trafficHeading = `Traffic${portSpeed ? ` · ${portSpeed.display}` : ""}`;
   const trafficDetail =
     trafficConfigured && traffic
-      ? (trafficProblem ??
-        `${formatTrafficReset(traffic.cycle_end)} · RX ${formatBytes(traffic.rx_bytes)} / TX ${formatBytes(traffic.tx_bytes)}`)
+      ? (trafficProblem ?? formatTrafficReset(traffic.cycle_end))
       : null;
   const pingHeading = `Ping${primaryPing ? ` · ${primaryPing.target_name}` : ""}`;
-  const pingMonitoringDetail =
-    monitoringState === "loading"
-      ? "Reading Ping assignment and current result"
-      : "Monitoring card evidence unavailable; Ping assignment is not inferred";
+
+  const cardHeader = (
+    <>
+      <span className="vpsMonitorStatus" title={effectiveStatusTitle}>
+        <span aria-hidden="true" />
+        {density === "compact" && effectiveStatusLabel === "Contact unknown"
+          ? "No contact"
+          : effectiveStatusLabel}
+      </span>
+      <strong title={displayNameOrUnnamed(agent.display_name)}>
+        {displayNameOrUnnamed(agent.display_name)}
+      </strong>
+      <small title={`${provider} / ${region}`}>
+        {provider} / {region}
+      </small>
+    </>
+  );
 
   return (
-    <article
-      aria-label={`${displayNameOrUnnamed(agent.display_name)} ${effectiveStatusLabel} monitor card`}
+    <VpsMonitorCardSurface
+      ariaLabel={`${displayNameOrUnnamed(agent.display_name)} ${effectiveStatusLabel} monitor card`}
       className={`vpsMonitorCard ${statusCategory} ${density}`}
-      onClick={() => onOpenVpsDetail(agent)}
-      onKeyDown={(event) => {
-        if (event.key !== "Enter") return;
-        event.preventDefault();
-        onOpenVpsDetail(agent);
-      }}
-      role="link"
-      tabIndex={0}
+      header={cardHeader}
+      onOpen={() => onOpenVpsDetail(agent)}
       title={`Open ${displayNameOrUnnamed(agent.display_name)} detail`}
     >
-      <div className="vpsMonitorCardMain">
-        <span className="vpsMonitorStatus" title={effectiveStatusTitle}>
-          <span aria-hidden="true" />
-          {density === "compact" && effectiveStatusLabel === "Contact unknown"
-            ? "No contact"
-            : effectiveStatusLabel}
-        </span>
-        <strong title={displayNameOrUnnamed(agent.display_name)}>
-          {displayNameOrUnnamed(agent.display_name)}
-        </strong>
-        <small title={`${provider} / ${region}`}>
-          {provider} / {region}
-        </small>
-      </div>
-      {density === "comfortable" ? (
-        <div
-          className="vpsMonitorTags"
-          aria-label={`Tags for ${displayNameOrUnnamed(agent.display_name)}`}
-        >
-          {visibleTags.length === 0 ? (
-            <span>untagged</span>
-          ) : (
-            visibleTags.map((tag) => (
-              <span key={tag} title={tag}>
-                {tag}
-              </span>
-            ))
-          )}
-          {hiddenTagCount > 0 && (
-            <span title={hiddenTags.join(", ")}>+{hiddenTagCount}</span>
-          )}
-        </div>
-      ) : null}
       <div
         aria-label={`Current resource use for ${displayNameOrUnnamed(agent.display_name)}`}
         className="vpsMonitorMetrics"
@@ -1013,6 +1023,7 @@ export function VpsMonitorCard({
           stale={resourceTelemetryState.kind === "stale"}
           title="Linux load average, not CPU utilization. The bar shows 1-minute load divided by reported CPU cores; full means one runnable task per core"
           value={formatLoad(load)}
+          showCaption={density === "comfortable"}
         />
       </div>
       <div
@@ -1047,9 +1058,16 @@ export function VpsMonitorCard({
         />
       </div>
       <div
-        className={`vpsMonitorAuxFacts${billing ? " hasBilling" : ""}`}
+        className="vpsMonitorAuxFacts"
         aria-label={`Connection and billing facts for ${displayNameOrUnnamed(agent.display_name)}`}
       >
+        <span
+          title={billing ? billingTitle(billing) : "Billing is not configured"}
+        >
+          <small>Billing</small>
+          <strong>{billing?.display ?? "—"}</strong>
+          {billing?.cycle ? <em>Renews {billing.cycle}</em> : null}
+        </span>
         <span title={connectionCountTitle("TCP", connectionsTelemetryState)}>
           <small>TCP</small>
           <strong>{formatSocketCount(rollup?.tcp_sockets_latest)}</strong>
@@ -1058,13 +1076,6 @@ export function VpsMonitorCard({
           <small>UDP</small>
           <strong>{formatSocketCount(rollup?.udp_sockets_latest)}</strong>
         </span>
-        {billing ? (
-          <span title={billingTitle(billing)}>
-            <small>Billing</small>
-            <strong>{billing.display}</strong>
-            {billing.cycle ? <em>cycle {billing.cycle}</em> : null}
-          </span>
-        ) : null}
       </div>
       <div
         className={`vpsMonitorTraffic${trafficWarning > 0 ? " warning" : ""}${trafficPercent !== null && trafficPercent > 100 ? " exceeded" : ""}`}
@@ -1113,14 +1124,16 @@ export function VpsMonitorCard({
         >
           <span style={{ width: `${Math.min(100, trafficPercent ?? 0)}%` }} />
         </span>
-        {(density === "comfortable" || trafficWarning > 0) &&
-        trafficConfigured &&
-        traffic ? (
+        {trafficConfigured && traffic ? (
           <small
             className={trafficWarning > 0 ? "exceptionEvidence" : undefined}
-            title={trafficDetail ?? undefined}
+            title={`Current billing-cycle traffic: RX ${formatBytes(traffic.rx_bytes)}; TX ${formatBytes(traffic.tx_bytes)}.${trafficDetail ? ` ${trafficDetail}.` : ""}`}
           >
-            {trafficDetail}
+            ↓ {formatBytes(traffic.rx_bytes)} · ↑{" "}
+            {formatBytes(traffic.tx_bytes)}
+            {density === "comfortable" || trafficWarning > 0
+              ? ` · ${trafficDetail}`
+              : ""}
           </small>
         ) : null}
       </div>
@@ -1138,21 +1151,12 @@ export function VpsMonitorCard({
             values={pingHistory}
           />
         </span>
-        {monitoringState !== "ready" && density === "comfortable" ? (
-          <small title={pingMonitoringDetail}>{pingMonitoringDetail}</small>
-        ) : (density === "comfortable" || pingWarning > 0) && pingProblem ? (
+        {(density === "comfortable" || pingWarning > 0) && pingProblem ? (
           <small
             className={pingWarning > 0 ? "exceptionEvidence" : undefined}
             title={pingProblem}
           >
             {pingProblem}
-          </small>
-        ) : density === "comfortable" && primaryPing?.checked_at ? (
-          <small
-            className={pingTelemetryState.kind}
-            title={pingTelemetryState.label}
-          >
-            {pingTelemetryState.label}
           </small>
         ) : null}
       </div>
@@ -1202,33 +1206,36 @@ export function VpsMonitorCard({
           ) : null}
         </>
       ) : null}
-    </article>
+    </VpsMonitorCardSurface>
   );
 }
 
-function MonitorMetric({
+export function MonitorMetric({
   icon,
   label,
   meterCaption,
   meterMax,
   meterValue,
   sparkline,
+  showCaption = false,
   stale = false,
   title,
   value,
 }: {
-  icon: JSX.Element;
+  icon: ReactNode;
   label: string;
   meterCaption: string;
   meterMax: number;
   meterValue: number | null;
   sparkline?: ReactNode;
+  showCaption?: boolean;
   stale?: boolean;
   title?: string;
   value: string;
 }) {
   const metricTitle = [
     title,
+    meterCaption,
     stale ? "Last-known value; current telemetry is stale" : null,
   ]
     .filter(Boolean)
@@ -1270,18 +1277,22 @@ function MonitorMetric({
         <span style={{ width: `${fillPercent}%` }} />
       </span>
       {sparkline}
-      <small>{boundedValue === null ? "unavailable" : meterCaption}</small>
+      {showCaption ? (
+        <small>{boundedValue === null ? "unavailable" : meterCaption}</small>
+      ) : null}
     </span>
   );
 }
 
-function MonitorFact({
+export function MonitorFact({
+  icon,
   label,
   sparkline,
   stale = false,
   title,
   value,
 }: {
+  icon?: ReactNode;
   label: string;
   sparkline?: ReactNode;
   stale?: boolean;
@@ -1293,7 +1304,11 @@ function MonitorFact({
       className={`vpsMonitorFlowFact${stale ? " stale" : ""}`}
       title={title}
     >
-      <small title={label}>{label}</small>
+      <small title={label}>
+        {icon}
+        {icon ? " " : ""}
+        {label}
+      </small>
       <strong title={title}>{value}</strong>
       {sparkline}
     </span>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Pencil, Plus, Trash2 } from "lucide-react";
 import { ActionFeedback } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
@@ -8,6 +8,7 @@ import {
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
 import { ConsoleActionDrawer } from "../../components/ConsoleLayout";
+import { scrollIntoViewWithMotion } from "../../motion";
 import type {
   JsonValue,
   NetworkAdapterDefinitionRecord,
@@ -50,12 +51,44 @@ export function NetworkAdapterDefinitionsPanel({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [kind, setKind] = useState<NetworkAdapterKind>("runtime_tunnel");
-  const [definition, setDefinition] = useState<Record<string, JsonValue>>(
-    () => defaultAdapterDefinition("runtime_tunnel"),
+  const [definition, setDefinition] = useState<Record<string, JsonValue>>(() =>
+    defaultAdapterDefinition("runtime_tunnel"),
   );
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
+  const registryFeedbackRef = useRef<HTMLDivElement | null>(null);
+  const editorFeedbackRef = useRef<HTMLDivElement | null>(null);
+  const registryFeedbackMessage = editor === null ? (error ?? feedback) : null;
+
+  useEffect(() => {
+    if (!registryFeedbackMessage) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (registryFeedbackRef.current) {
+        scrollIntoViewWithMotion(registryFeedbackRef.current, {
+          block: "nearest",
+        });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [registryFeedbackMessage]);
+
+  useEffect(() => {
+    if (!editor || !error) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (editorFeedbackRef.current) {
+        scrollIntoViewWithMotion(editorFeedbackRef.current, {
+          block: "nearest",
+        });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [editor, error]);
+
+  function changeEditorDraft(change: () => void) {
+    setError(null);
+    change();
+  }
 
   useEffect(() => {
     if (!initialKind) return;
@@ -69,6 +102,7 @@ export function NetworkAdapterDefinitionsPanel({
     setDescription("");
     setDefinition(defaultAdapterDefinition(adapterKind));
     setError(null);
+    setFeedback(null);
     setEditor({ mode: "create", kind: adapterKind });
   }
 
@@ -78,11 +112,13 @@ export function NetworkAdapterDefinitionsPanel({
     setDescription(record.description ?? "");
     setDefinition(asObject(record.definition));
     setError(null);
+    setFeedback(null);
     setEditor({ mode: "edit", definition: record });
   }
 
   async function save(event: FormEvent) {
     event.preventDefault();
+    setFeedback(null);
     await runPanelAction(setPending, setError, async () => {
       if (!name.trim()) throw new Error("Adapter name is required");
       const definitionError = validateAdapterDefinition(kind, definition);
@@ -106,6 +142,7 @@ export function NetworkAdapterDefinitionsPanel({
 
   async function confirmDelete() {
     if (!deleteTarget) return;
+    setFeedback(null);
     await runPanelAction(setPending, setError, async () => {
       await onDelete(deleteTarget.id);
       setFeedback(`Deleted ${deleteTarget.name}`);
@@ -126,8 +163,7 @@ export function NetworkAdapterDefinitionsPanel({
             <small>{record.description ?? "No description"}</small>
           </span>
         ),
-        searchValue: (record) =>
-          `${record.name} ${record.description ?? ""}`,
+        searchValue: (record) => `${record.name} ${record.description ?? ""}`,
         sortValue: (record) => record.name,
       },
       {
@@ -165,8 +201,7 @@ export function NetworkAdapterDefinitionsPanel({
         disabled: (rows) =>
           rows.length !== 1 || adapterUseCount(rows[0].id, tunnelPlans) > 0,
         description: (rows) =>
-          rows.length === 1 &&
-          adapterUseCount(rows[0].id, tunnelPlans) > 0
+          rows.length === 1 && adapterUseCount(rows[0].id, tunnelPlans) > 0
             ? `Used by ${adapterUseCount(rows[0].id, tunnelPlans)} tunnel plans; create a replacement and change each plan explicitly.`
             : "Edit this unreferenced adapter definition.",
       },
@@ -176,13 +211,13 @@ export function NetworkAdapterDefinitionsPanel({
         tone: "danger",
         onSelect: (rows) => {
           setError(null);
+          setFeedback(null);
           setDeleteTarget(rows[0]);
         },
         disabled: (rows) =>
           rows.length !== 1 || adapterUseCount(rows[0].id, tunnelPlans) > 0,
         description: (rows) =>
-          rows.length === 1 &&
-          adapterUseCount(rows[0].id, tunnelPlans) > 0
+          rows.length === 1 && adapterUseCount(rows[0].id, tunnelPlans) > 0
             ? `Used by ${adapterUseCount(rows[0].id, tunnelPlans)} tunnel plans; unbind it from every plan first.`
             : "Delete this unreferenced adapter definition.",
       },
@@ -206,13 +241,9 @@ export function NetworkAdapterDefinitionsPanel({
       </div>
       <ActionFeedback
         className="localActionFeedback"
-        message={editor === null && deleteTarget === null ? error : null}
-        tone="danger"
-      />
-      <ActionFeedback
-        className="localActionFeedback"
-        message={feedback}
-        tone="success"
+        message={registryFeedbackMessage}
+        ref={registryFeedbackRef}
+        tone={error ? "danger" : "success"}
       />
       <ConsoleDataGrid
         actions={actions}
@@ -228,12 +259,6 @@ export function NetworkAdapterDefinitionsPanel({
         }
         getRowId={(record) => record.id}
         itemLabel="adapter definitions"
-        onOpenRow={(record) => {
-          if (adapterUseCount(record.id, tunnelPlans) === 0) {
-            openEdit(record);
-          }
-        }}
-        showMobileOpenRowAction={false}
         renderExpandedRow={(record) => (
           <div className="consoleInlineDetailGrid">
             <span>Purpose</span>
@@ -277,7 +302,7 @@ export function NetworkAdapterDefinitionsPanel({
       <ConfirmationPrompt
         confirmLabel="Delete adapter definition"
         detail="Delete this unused definition. Definitions bound to any tunnel plan must be unbound first."
-        error={deleteTarget ? error : null}
+        error={error}
         items={
           deleteTarget
             ? [
@@ -314,7 +339,11 @@ export function NetworkAdapterDefinitionsPanel({
         }
       >
         <form className="compactForm structuredDefinitionForm" onSubmit={save}>
-          <ActionFeedback message={editor ? error : null} tone="danger" />
+          <ActionFeedback
+            message={editor ? error : null}
+            ref={editorFeedbackRef}
+            tone="danger"
+          />
           <div className="formRow">
             <label>
               <span>Purpose</span>
@@ -323,8 +352,10 @@ export function NetworkAdapterDefinitionsPanel({
                 disabled={editor?.mode === "edit"}
                 onChange={(event) => {
                   const nextKind = event.target.value as NetworkAdapterKind;
-                  setKind(nextKind);
-                  setDefinition(defaultAdapterDefinition(nextKind));
+                  changeEditorDraft(() => {
+                    setKind(nextKind);
+                    setDefinition(defaultAdapterDefinition(nextKind));
+                  });
                 }}
                 value={kind}
               >
@@ -336,7 +367,9 @@ export function NetworkAdapterDefinitionsPanel({
               <span>Name</span>
               <input
                 aria-label="Adapter definition name"
-                onChange={(event) => setName(event.target.value)}
+                onChange={(event) =>
+                  changeEditorDraft(() => setName(event.target.value))
+                }
                 value={name}
               />
             </label>
@@ -345,14 +378,18 @@ export function NetworkAdapterDefinitionsPanel({
             <span>Description</span>
             <input
               aria-label="Adapter definition description"
-              onChange={(event) => setDescription(event.target.value)}
+              onChange={(event) =>
+                changeEditorDraft(() => setDescription(event.target.value))
+              }
               value={description}
             />
           </label>
           <AdapterCommandFields
             definition={definition}
             kind={kind}
-            onChange={setDefinition}
+            onChange={(nextDefinition) =>
+              changeEditorDraft(() => setDefinition(nextDefinition))
+            }
           />
           <details>
             <summary>Advanced contract preview</summary>
@@ -464,10 +501,7 @@ function AdapterCommandFields({
                     next[field] = {
                       argv,
                       max_timeout_secs: number(command.max_timeout_secs, 30),
-                      max_output_bytes: number(
-                        command.max_output_bytes,
-                        16384,
-                      ),
+                      max_output_bytes: number(command.max_output_bytes, 16384),
                     };
                   }
                   onChange(next);
@@ -605,9 +639,7 @@ function lines(value: string): string[] {
 }
 
 function number(value: JsonValue | undefined, fallback: number): number {
-  return typeof value === "number" && Number.isFinite(value)
-    ? value
-    : fallback;
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
 function validateAdapterDefinition(

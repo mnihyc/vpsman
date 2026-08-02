@@ -655,6 +655,7 @@ export function AgentUpdateReleasesPanel({
       <ConfirmationPrompt
         confirmLabel="Record release"
         detail={registryModel.confirmDetail}
+        error={releaseSnapshot ? releaseError : null}
         items={[
           {
             label: "Release",

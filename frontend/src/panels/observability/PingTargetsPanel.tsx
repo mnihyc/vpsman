@@ -11,15 +11,12 @@ import {
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
   type ReactNode,
 } from "react";
-import {
-  apiGet,
-  apiPost,
-  apiPut,
-} from "../../api";
+import { apiGet, apiPost, apiPut } from "../../api";
 import {
   ActionFeedback,
   type ActionFeedbackTone,
@@ -35,6 +32,8 @@ import {
   ConsoleStatusBadge,
 } from "../../components/ConsoleLayout";
 import { SearchExpressionInput } from "../../components/SearchExpressionInput";
+import { useReviewGenerationGuard } from "../../hooks/useReviewGenerationGuard";
+import { scrollIntoViewWithMotion } from "../../motion";
 import { usePanelDisplaySettings } from "../../panelDisplay";
 import {
   agentsMatchingExpression,
@@ -130,22 +129,60 @@ export function PingTargetsPanel({
   const [expandedTargetId, setExpandedTargetId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState(false);
+  const [reviewPending, setReviewPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [editor, setEditor] = useState<EditorState>(null);
   const [saveReview, setSaveReview] = useState<SaveReview | null>(null);
   const [updateTargetsReview, setUpdateTargetsReview] =
     useState<UpdateTargetsReview | null>(null);
-  const [lifecycleReview, setLifecycleReview] = useState<LifecycleReview | null>(null);
+  const [lifecycleReview, setLifecycleReview] =
+    useState<LifecycleReview | null>(null);
   const [name, setName] = useState("");
   const [host, setHost] = useState("");
   const [probeKind, setProbeKind] = useState<"icmp" | "tcp">("icmp");
   const [port, setPort] = useState("");
   const [enabled, setEnabled] = useState(true);
   const [selectorExpression, setSelectorExpression] = useState("*");
+  const pageFeedbackRef = useRef<HTMLDivElement | null>(null);
+  const editorFeedbackRef = useRef<HTMLDivElement | null>(null);
+  const {
+    captureReviewGeneration,
+    invalidateReviewGeneration,
+    isReviewGenerationCurrent,
+  } = useReviewGenerationGuard();
+  const pageFeedbackMessage =
+    editor === null ? (error ?? feedback?.message) : null;
+  const pageFeedbackTone = error && editor === null ? "danger" : feedback?.tone;
+
+  useEffect(() => {
+    if (!pageFeedbackMessage) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (pageFeedbackRef.current) {
+        scrollIntoViewWithMotion(pageFeedbackRef.current, {
+          block: "nearest",
+        });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [pageFeedbackMessage]);
+
+  useEffect(() => {
+    if (!editor || !error) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (editorFeedbackRef.current) {
+        scrollIntoViewWithMotion(editorFeedbackRef.current, {
+          block: "nearest",
+        });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [editor, error]);
 
   useEffect(() => {
     let active = true;
+    invalidateReviewGeneration();
+    setReviewPending(false);
     setLoading(true);
     setError(null);
     setTargets([]);
@@ -172,7 +209,7 @@ export function PingTargetsPanel({
     return () => {
       active = false;
     };
-  }, [apiToken]);
+  }, [apiToken, invalidateReviewGeneration]);
 
   const parsedSelector = useMemo(
     () => parseSearchExpression(selectorExpression),
@@ -189,15 +226,29 @@ export function PingTargetsPanel({
       return editor.assignments.map((assignment) => assignment.client);
     }
     return agentsMatchingExpression(agents, selectorExpression);
-  }, [agents, editor, parsedSelector.error, selectorChanged, selectorExpression]);
+  }, [
+    agents,
+    editor,
+    parsedSelector.error,
+    selectorChanged,
+    selectorExpression,
+  ]);
   const editorReady = Boolean(
     editor &&
-      name.trim() &&
-      host.trim() &&
-      selectorExpression.trim() &&
-      !parsedSelector.error &&
-      (probeKind === "icmp" || validPort(port)),
+    name.trim() &&
+    host.trim() &&
+    selectorExpression.trim() &&
+    !parsedSelector.error &&
+    (probeKind === "icmp" || validPort(port)),
   );
+
+  function changeEditorDraft(change: () => void) {
+    invalidateReviewGeneration();
+    setReviewPending(false);
+    setSaveReview(null);
+    setError(null);
+    change();
+  }
 
   async function refreshTargets() {
     setLoading(true);
@@ -245,6 +296,7 @@ export function PingTargetsPanel({
   }
 
   function openCreate() {
+    invalidateReviewGeneration();
     setEditor({ mode: "create" });
     setName("");
     setHost("");
@@ -257,6 +309,7 @@ export function PingTargetsPanel({
   }
 
   async function openEdit(target: PingTargetView) {
+    invalidateReviewGeneration();
     await runPanelAction(setPending, setError, async () => {
       const detail = details[target.id] ?? (await fetchDetail(target.id));
       setEditor({
@@ -277,43 +330,63 @@ export function PingTargetsPanel({
   async function reviewEditorSave(event: FormEvent) {
     event.preventDefault();
     if (!editorReady || !editor) return;
-    await runPanelAction(setPending, setError, async () => {
+    const reviewGeneration = captureReviewGeneration();
+    const frozenEditor = editor;
+    const frozenSelectorChanged = selectorChanged;
+    const frozenName = name;
+    const frozenHost = host;
+    const frozenProbeKind = probeKind;
+    const frozenPort = port;
+    const frozenEnabled = enabled;
+    const frozenSelectorExpression = selectorExpression;
+    setReviewPending(true);
+    setSaveReview(null);
+    setError(null);
+    try {
       const resolved =
-        editor.mode === "edit" && !selectorChanged
-          ? editor.assignments.map((assignment) => assignment.client)
+        frozenEditor.mode === "edit" && !frozenSelectorChanged
+          ? frozenEditor.assignments.map((assignment) => assignment.client)
           : (
               await onResolveTargets({
-                selector_expression: selectorExpression.trim(),
+                selector_expression: frozenSelectorExpression.trim(),
               })
             ).targets;
-      const targetClientIds = uniqueSorted(
-        resolved.map((agent) => agent.id),
-      );
+      if (!isReviewGenerationCurrent(reviewGeneration)) return;
+      const targetClientIds = uniqueSorted(resolved.map((agent) => agent.id));
       const request = editorRequest({
-        enabled,
-        host,
-        name,
-        port,
-        probeKind,
-        selectorExpression,
+        enabled: frozenEnabled,
+        host: frozenHost,
+        name: frozenName,
+        port: frozenPort,
+        probeKind: frozenProbeKind,
+        selectorExpression: frozenSelectorExpression,
         targetClientIds,
       });
-      const original = editor.mode === "edit" ? editor.original : null;
+      const original =
+        frozenEditor.mode === "edit" ? frozenEditor.original : null;
       setSaveReview({
         assignmentCount: targetClientIds.length,
         kind: original ? "update" : "create",
         probeChanged: Boolean(
           original &&
-            (original.host !== request.host ||
-              original.probe_kind !== request.probe_kind ||
-              original.port !== (request.port ?? null) ||
-              original.enabled !== request.enabled),
+          (original.host !== request.host ||
+            original.probe_kind !== request.probe_kind ||
+            original.port !== (request.port ?? null) ||
+            original.enabled !== request.enabled),
         ),
         request,
         targetId: original?.id ?? null,
         targetName: request.name,
       });
-    });
+    } catch (cause) {
+      if (isReviewGenerationCurrent(reviewGeneration)) {
+        setError(errorMessage(cause));
+      }
+    } finally {
+      if (isReviewGenerationCurrent(reviewGeneration)) {
+        setReviewPending(false);
+      }
+    }
   }
 
   async function confirmSave() {
@@ -352,6 +425,7 @@ export function PingTargetsPanel({
 
   async function reviewTargetUpdates(rows: PingTargetView[]) {
     if (rows.length === 0) return;
+    setFeedback(null);
     await runPanelAction(setPending, setError, async () => {
       const targetIds = uniqueSorted(rows.map((row) => row.id));
       const preview = await apiPost<BulkUpdatePingTargetsResponse>(
@@ -414,7 +488,9 @@ export function PingTargetsPanel({
       const request: BulkPingTargetLifecycleRequest = {
         action: lifecycleReview.action,
         confirmed: true,
-        target_ids: uniqueSorted(lifecycleReview.targets.map((target) => target.id)),
+        target_ids: uniqueSorted(
+          lifecycleReview.targets.map((target) => target.id),
+        ),
       };
       const response = await apiPost<BulkPingTargetLifecycleResponse>(
         "/api/v1/ping-targets/lifecycle",
@@ -451,6 +527,7 @@ export function PingTargetsPanel({
     target: PingTargetView,
     assignments: PingTargetAssignmentView[],
   ) {
+    setFeedback(null);
     await runPanelAction(setPending, setError, async () => {
       const request: MakePrimaryPingTargetRequest = {
         client_ids: uniqueSorted(
@@ -562,7 +639,8 @@ export function PingTargetsPanel({
         id: "runtime",
         header: "Runtime sync",
         cell: (target) => {
-          const evidence = runtimeEvidence[target.id] ?? runtimeEvidenceForTarget(target);
+          const evidence =
+            runtimeEvidence[target.id] ?? runtimeEvidenceForTarget(target);
           return (
             <span title={evidence.title}>
               <ConsoleStatusBadge tone={evidence.tone}>
@@ -572,9 +650,11 @@ export function PingTargetsPanel({
           );
         },
         searchValue: (target) =>
-          (runtimeEvidence[target.id] ?? runtimeEvidenceForTarget(target)).title,
+          (runtimeEvidence[target.id] ?? runtimeEvidenceForTarget(target))
+            .title,
         sortValue: (target) =>
-          (runtimeEvidence[target.id] ?? runtimeEvidenceForTarget(target)).label,
+          (runtimeEvidence[target.id] ?? runtimeEvidenceForTarget(target))
+            .label,
         minSize: 160,
         size: 180,
       },
@@ -610,7 +690,11 @@ export function PingTargetsPanel({
         pending || rows.length === 0 || rows.every((row) => row.enabled),
       icon: <Power size={14} />,
       label: "Enable",
-      onSelect: (rows) => setLifecycleReview({ action: "enable", targets: rows }),
+      onSelect: (rows) => {
+        setError(null);
+        setFeedback(null);
+        setLifecycleReview({ action: "enable", targets: rows });
+      },
     },
     {
       description: (rows) =>
@@ -621,7 +705,11 @@ export function PingTargetsPanel({
         pending || rows.length === 0 || rows.every((row) => !row.enabled),
       icon: <PowerOff size={14} />,
       label: "Disable",
-      onSelect: (rows) => setLifecycleReview({ action: "disable", targets: rows }),
+      onSelect: (rows) => {
+        setError(null);
+        setFeedback(null);
+        setLifecycleReview({ action: "disable", targets: rows });
+      },
     },
     {
       description: (rows) =>
@@ -644,7 +732,11 @@ export function PingTargetsPanel({
       disabled: (rows) => pending || rows.length === 0,
       icon: <Trash2 size={14} />,
       label: "Delete",
-      onSelect: (rows) => setLifecycleReview({ action: "delete", targets: rows }),
+      onSelect: (rows) => {
+        setError(null);
+        setFeedback(null);
+        setLifecycleReview({ action: "delete", targets: rows });
+      },
       separatorBefore: true,
       tone: "danger",
     },
@@ -664,13 +756,9 @@ export function PingTargetsPanel({
         </div>
         <ActionFeedback
           className="localActionFeedback"
-          message={error}
-          tone="danger"
-        />
-        <ActionFeedback
-          className="localActionFeedback"
-          message={feedback?.message}
-          tone={feedback?.tone}
+          message={pageFeedbackMessage}
+          ref={pageFeedbackRef}
+          tone={pageFeedbackTone}
         />
         <ConsoleDataGrid
           actions={actions}
@@ -678,7 +766,9 @@ export function PingTargetsPanel({
           defaultPageSize={100}
           empty={
             <div className="emptyState">
-              <strong>{loading ? "Loading Ping targets" : "No Ping targets"}</strong>
+              <strong>
+                {loading ? "Loading Ping targets" : "No Ping targets"}
+              </strong>
               <span>
                 {loading
                   ? "Reading reusable target definitions and assignment counts."
@@ -725,7 +815,7 @@ export function PingTargetsPanel({
               </button>
               <button
                 className="primaryAction compactAction"
-                disabled={pending}
+                disabled={pending || reviewPending}
                 onClick={openCreate}
                 type="button"
               >
@@ -741,6 +831,8 @@ export function PingTargetsPanel({
         description="The selector is resolved once when created or changed. Use Update targets later to re-resolve the saved expression."
         onClose={() => {
           if (pending) return;
+          invalidateReviewGeneration();
+          setReviewPending(false);
           setEditor(null);
           setSaveReview(null);
           setError(null);
@@ -753,14 +845,21 @@ export function PingTargetsPanel({
         }
       >
         <form className="compactForm" onSubmit={reviewEditorSave}>
-          <ActionFeedback message={editor ? error : null} tone="danger" />
+          <ActionFeedback
+            message={editor ? error : null}
+            ref={editorFeedbackRef}
+            tone="danger"
+          />
           <div className="formRow">
             <label className="actionDrawerInitialFocus">
               <span>Name</span>
               <input
                 aria-label="Ping target name"
+                disabled={pending}
                 maxLength={128}
-                onChange={(event) => setName(event.target.value)}
+                onChange={(event) =>
+                  changeEditorDraft(() => setName(event.target.value))
+                }
                 placeholder="Frankfurt gateway"
                 required
                 value={name}
@@ -770,10 +869,13 @@ export function PingTargetsPanel({
               <span>Probe</span>
               <select
                 aria-label="Ping target probe"
+                disabled={pending}
                 onChange={(event) => {
                   const next = event.target.value === "tcp" ? "tcp" : "icmp";
-                  setProbeKind(next);
-                  if (next === "icmp") setPort("");
+                  changeEditorDraft(() => {
+                    setProbeKind(next);
+                    if (next === "icmp") setPort("");
+                  });
                 }}
                 value={probeKind}
               >
@@ -787,8 +889,11 @@ export function PingTargetsPanel({
               <span>Host or IP</span>
               <input
                 aria-label="Ping target host or IP"
+                disabled={pending}
                 maxLength={253}
-                onChange={(event) => setHost(event.target.value)}
+                onChange={(event) =>
+                  changeEditorDraft(() => setHost(event.target.value))
+                }
                 placeholder="edge.example.net or 2001:db8::1"
                 required
                 value={host}
@@ -799,9 +904,12 @@ export function PingTargetsPanel({
                 <span>TCP port</span>
                 <input
                   aria-label="Ping target TCP port"
+                  disabled={pending}
                   max={65_535}
                   min={1}
-                  onChange={(event) => setPort(event.target.value)}
+                  onChange={(event) =>
+                    changeEditorDraft(() => setPort(event.target.value))
+                  }
                   required
                   type="number"
                   value={port}
@@ -812,7 +920,10 @@ export function PingTargetsPanel({
           <label className="inlineCheck tightCheck">
             <input
               checked={enabled}
-              onChange={(event) => setEnabled(event.target.checked)}
+              disabled={pending}
+              onChange={(event) =>
+                changeEditorDraft(() => setEnabled(event.target.checked))
+              }
               type="checkbox"
             />
             <span>Enabled</span>
@@ -830,7 +941,10 @@ export function PingTargetsPanel({
               agents={agents}
               ariaLabel="Ping target VPS selector"
               className="targetExpressionBar"
-              onChange={setSelectorExpression}
+              disabled={pending}
+              onChange={(value) =>
+                changeEditorDraft(() => setSelectorExpression(value))
+              }
               placeholder="* or provider:hetzner && country:DE"
               showMatchCount
               value={selectorExpression}
@@ -865,10 +979,16 @@ export function PingTargetsPanel({
           </div>
           <button
             className="primaryAction"
-            disabled={pending || !editorReady || saveReview !== null}
+            disabled={
+              pending || reviewPending || !editorReady || saveReview !== null
+            }
             type="submit"
           >
-            {editor?.mode === "edit" ? "Review changes" : "Review create"}
+            {reviewPending
+              ? "Reviewing targets…"
+              : editor?.mode === "edit"
+                ? "Review changes"
+                : "Review create"}
           </button>
         </form>
       </ConsoleActionDrawer>
@@ -876,7 +996,7 @@ export function PingTargetsPanel({
       <ConfirmationPrompt
         confirmLabel={saveReviewConfirmLabel(saveReview)}
         detail={saveReviewDetail(saveReview)}
-        error={saveReview ? error : null}
+        error={error}
         items={saveReviewItems(saveReview)}
         onCancel={() => {
           if (pending) return;
@@ -893,7 +1013,7 @@ export function PingTargetsPanel({
       <ConfirmationPrompt
         confirmLabel="Update frozen targets"
         detail="Apply the exact additions and removals resolved from each saved selector. All selected target definitions are updated transactionally."
-        error={updateTargetsReview ? error : null}
+        error={error}
         items={updateTargetReviewItems(updateTargetsReview, agents)}
         onCancel={() => {
           if (pending) return;
@@ -908,9 +1028,13 @@ export function PingTargetsPanel({
       />
 
       <ConfirmationPrompt
-        confirmLabel={lifecycleReview ? `${lifecycleVerb(lifecycleReview.action)} selected` : "Apply"}
+        confirmLabel={
+          lifecycleReview
+            ? `${lifecycleVerb(lifecycleReview.action)} selected`
+            : "Apply"
+        }
         detail={lifecycleReviewDetail(lifecycleReview)}
-        error={lifecycleReview ? error : null}
+        error={error}
         items={lifecycleReviewItems(lifecycleReview)}
         onCancel={() => {
           if (pending) return;
@@ -920,10 +1044,28 @@ export function PingTargetsPanel({
         onConfirm={() => void confirmLifecycle()}
         open={lifecycleReview !== null}
         pending={pending}
-        title={lifecycleReview ? `${lifecycleVerb(lifecycleReview.action)} Ping targets` : "Ping target lifecycle"}
-        tone={lifecycleReview?.action === "delete" ? "danger" : lifecycleReview?.action === "disable" ? "warning" : "normal"}
-        typedConfirmationLabel={lifecycleReview?.action === "delete" ? "Type the confirmation phrase" : undefined}
-        typedConfirmationText={lifecycleReview?.action === "delete" ? `DELETE ${lifecycleReview.targets.length}` : undefined}
+        title={
+          lifecycleReview
+            ? `${lifecycleVerb(lifecycleReview.action)} Ping targets`
+            : "Ping target lifecycle"
+        }
+        tone={
+          lifecycleReview?.action === "delete"
+            ? "danger"
+            : lifecycleReview?.action === "disable"
+              ? "warning"
+              : "normal"
+        }
+        typedConfirmationLabel={
+          lifecycleReview?.action === "delete"
+            ? "Type the confirmation phrase"
+            : undefined
+        }
+        typedConfirmationText={
+          lifecycleReview?.action === "delete"
+            ? `DELETE ${lifecycleReview.targets.length}`
+            : undefined
+        }
       />
     </section>
   );
@@ -1122,7 +1264,10 @@ function saveReviewItems(
       label: "State",
       value: review.request.enabled ? "Enabled" : "Disabled",
     },
-    { label: "Saved selector", value: review.request.selector_expression ?? "" },
+    {
+      label: "Saved selector",
+      value: review.request.selector_expression ?? "",
+    },
     {
       label: "Frozen VPSs",
       value: String(review.assignmentCount),
@@ -1166,20 +1311,27 @@ function lifecycleReviewItems(
     {
       label: `Ping targets (${review.targets.length})`,
       title: names.join(", "),
-      value: names.length <= 8
-        ? names.join(", ")
-        : `${names.slice(0, 8).join(", ")} · +${names.length - 8} more`,
+      value:
+        names.length <= 8
+          ? names.join(", ")
+          : `${names.slice(0, 8).join(", ")} · +${names.length - 8} more`,
     },
     {
       label: "Frozen assignments",
       value: String(
-        review.targets.reduce((total, target) => total + target.assigned_count, 0),
+        review.targets.reduce(
+          (total, target) => total + target.assigned_count,
+          0,
+        ),
       ),
     },
     {
       label: "Primary assignments",
       value: String(
-        review.targets.reduce((total, target) => total + target.primary_count, 0),
+        review.targets.reduce(
+          (total, target) => total + target.primary_count,
+          0,
+        ),
       ),
     },
     ...(review.action === "delete"
@@ -1241,7 +1393,8 @@ function pingTargetChangesPresent(
 ): boolean {
   return changes.some(
     (change) =>
-      change.added_client_ids.length > 0 || change.removed_client_ids.length > 0,
+      change.added_client_ids.length > 0 ||
+      change.removed_client_ids.length > 0,
   );
 }
 
@@ -1278,7 +1431,10 @@ function runtimeEvidenceFor(
 function runtimeEvidenceForTarget(target: PingTargetView): RuntimeEvidence {
   const state = target.runtime_sync.state;
   return {
-    label: state === "not_applicable" ? "Not applicable" : humanizeRuntimeState(state),
+    label:
+      state === "not_applicable"
+        ? "Not applicable"
+        : humanizeRuntimeState(state),
     title: target.runtime_sync.reason,
     tone:
       state === "applied"
@@ -1308,8 +1464,7 @@ function mutationFeedback(
     };
   }
   return {
-    message:
-      sync.length > 0 ? `${success}. ${evidence.title}` : `${success}.`,
+    message: sync.length > 0 ? `${success}. ${evidence.title}` : `${success}.`,
     tone: sync.length > 0 ? "progress" : "success",
   };
 }

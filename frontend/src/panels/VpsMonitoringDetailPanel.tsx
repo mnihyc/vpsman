@@ -1,8 +1,12 @@
 import { RefreshCw } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { apiGet } from "../api";
 import { consolePalette, dashboardChartColors } from "../colorPalette";
 import { ActionFeedback } from "../components/ActionFeedback";
+import {
+  MonitoringRangeTabs,
+  type MonitoringWindow,
+} from "../components/MonitoringRangeTabs";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import {
   TimeSeriesChart,
@@ -18,19 +22,6 @@ import type {
 } from "../types";
 import { formatTime, timestampMillis } from "../utils";
 import { useHistoryEntryState } from "../historyEntryState";
-
-type MonitoringWindow =
-  | "15m"
-  | "1h"
-  | "8h"
-  | "1d"
-  | "7d"
-  | "30d"
-  | "90d"
-  | "180d"
-  | "1y"
-  | "all"
-  | "custom";
 
 type MonitoringSection = "resources" | "ping";
 type PingMetric = "latency" | "loss";
@@ -78,30 +69,6 @@ type ChartData = {
   lines: TimeSeriesChartLine[];
   times: string[];
 };
-
-const RANGE_OPTIONS: ReadonlyArray<{
-  accessibleLabel: string;
-  label: string;
-  title?: string;
-  value: MonitoringWindow;
-}> = [
-  {
-    accessibleLabel: "Realtime, last 15 minutes",
-    label: "15m",
-    title: "Realtime · last 15 minutes.",
-    value: "15m",
-  },
-  { accessibleLabel: "Last hour", label: "1h", value: "1h" },
-  { accessibleLabel: "Last 8 hours", label: "8h", value: "8h" },
-  { accessibleLabel: "Last day", label: "1d", value: "1d" },
-  { accessibleLabel: "Last 7 days", label: "7d", value: "7d" },
-  { accessibleLabel: "Last 30 days", label: "30d", value: "30d" },
-  { accessibleLabel: "Last 90 days", label: "90d", value: "90d" },
-  { accessibleLabel: "Last 180 days", label: "180d", value: "180d" },
-  { accessibleLabel: "Last year", label: "1y", value: "1y" },
-  { accessibleLabel: "All retained history", label: "All", value: "all" },
-  { accessibleLabel: "Custom time range", label: "Custom", value: "custom" },
-];
 
 const CHART_POINTS = 720;
 
@@ -151,7 +118,6 @@ export function VpsMonitoringDetailPanel({
   const [data, setData] = useState<ClientMonitoringResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const rangeTabsRef = useRef<HTMLDivElement | null>(null);
 
   const query = useMemo(
     () => monitoringQuery(window, appliedCustomStart, appliedCustomEnd),
@@ -199,12 +165,6 @@ export function VpsMonitoringDetailPanel({
     };
   }, [apiToken, clientId, query.error, query.path, refreshKey, window]);
 
-  useEffect(() => {
-    rangeTabsRef.current
-      ?.querySelector<HTMLElement>(`[data-window="${window}"]`)
-      ?.scrollIntoView({ block: "nearest", inline: "center" });
-  }, [window]);
-
   function selectWindow(next: MonitoringWindow) {
     setWindow(next);
   }
@@ -248,27 +208,12 @@ export function VpsMonitoringDetailPanel({
           </span>
         </div>
         <div className="dashboardToolbarActions">
-          <div
-            aria-label="VPS monitoring time range"
-            className="timeRangeTabs vpsMonitoringRangeTabs"
-            ref={rangeTabsRef}
-            role="group"
-          >
-            {RANGE_OPTIONS.map((option) => (
-              <button
-                aria-label={option.accessibleLabel}
-                aria-pressed={window === option.value}
-                className={window === option.value ? "active" : ""}
-                data-window={option.value}
-                key={option.value}
-                onClick={() => selectWindow(option.value)}
-                title={option.title ?? option.accessibleLabel}
-                type="button"
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
+          <MonitoringRangeTabs
+            ariaLabel="VPS monitoring time range"
+            className="vpsMonitoringRangeTabs"
+            onChange={selectWindow}
+            value={window}
+          />
           <button
             className="secondaryAction compactAction"
             disabled={loading || Boolean(query.error)}

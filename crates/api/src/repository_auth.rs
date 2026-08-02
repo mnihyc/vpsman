@@ -86,6 +86,7 @@ impl Repository {
             totp_secret_ciphertext_hex: None,
             totp_secret_nonce_hex: None,
             totp_secret_salt_hex: None,
+            totp_last_accepted_step: None,
             session_refresh_ttl_secs: DEFAULT_REFRESH_TOKEN_TTL_SECS,
             created_at: now,
             disabled_at: None,
@@ -154,7 +155,7 @@ impl Repository {
         if !verify_operator_password(&request.password, &operator.password_hash)? {
             return Ok(None);
         }
-        if operator.totp_enabled {
+        let matched_totp_step = if operator.totp_enabled {
             let Some(code) = request.totp_code.as_deref() else {
                 return Ok(None);
             };
@@ -165,11 +166,23 @@ impl Repository {
                 Ok(secret) => secret,
                 Err(_) => return Ok(None),
             };
-            if !crate::auth_totp::verify_totp_code(&secret, code, unix_now()) {
+            let Some(step) = crate::auth_totp::matching_totp_step(&secret, code, unix_now()) else {
+                return Ok(None);
+            };
+            if operator
+                .totp_last_accepted_step
+                .is_some_and(|last_step| step <= last_step)
+            {
                 return Ok(None);
             }
+            Some(step)
+        } else {
+            None
+        };
+        match matched_totp_step {
+            Some(step) => self.issue_totp_login_session(&operator, step, None).await,
+            None => self.issue_session(operator.view()).await.map(Some),
         }
-        Ok(Some(self.issue_session(operator.view()).await?))
     }
 
     pub(crate) async fn login_operator_with_throttle(
@@ -251,7 +264,7 @@ impl Repository {
             .await?;
             return Ok(OperatorLoginAttempt::InvalidCredentials);
         }
-        if operator.totp_enabled {
+        let matched_totp_step = if operator.totp_enabled {
             let Some(code) = request.totp_code.as_deref() else {
                 self.record_operator_auth_event(
                     Some(&operator),
@@ -318,7 +331,13 @@ impl Repository {
                     return Ok(OperatorLoginAttempt::InvalidCredentials);
                 }
             };
-            if !crate::auth_totp::verify_totp_code(&secret, code, unix_now()) {
+            let matched_step = crate::auth_totp::matching_totp_step(&secret, code, unix_now())
+                .filter(|step| {
+                    operator
+                        .totp_last_accepted_step
+                        .is_none_or(|last_step| *step > last_step)
+                });
+            let Some(matched_step) = matched_step else {
                 self.record_operator_auth_event(
                     Some(&operator),
                     request.username.trim(),
@@ -338,13 +357,47 @@ impl Repository {
                 )
                 .await?;
                 return Ok(OperatorLoginAttempt::InvalidCredentials);
-            }
-        }
+            };
+            Some(matched_step)
+        } else {
+            None
+        };
         let previous_failures = self
             .operator_auth_previous_failures(&username_key, throttle)
             .await?;
-        self.clear_operator_auth_success(&username_key).await?;
-        let response = self.issue_session(operator.view()).await?;
+        let response = match matched_totp_step {
+            Some(step) => {
+                let Some(response) = self
+                    .issue_totp_login_session(&operator, step, Some(&username_key))
+                    .await?
+                else {
+                    self.record_operator_auth_event(
+                        Some(&operator),
+                        request.username.trim(),
+                        "failure",
+                        Some(OperatorLoginFailureReason::BadTotp.as_str()),
+                        &ip_key,
+                        user_agent,
+                        None,
+                        false,
+                    )
+                    .await?;
+                    self.record_operator_auth_failure(
+                        &username_key,
+                        &ip_key,
+                        OperatorLoginFailureReason::BadTotp,
+                        throttle,
+                    )
+                    .await?;
+                    return Ok(OperatorLoginAttempt::InvalidCredentials);
+                };
+                response
+            }
+            None => {
+                self.clear_operator_auth_success(&username_key).await?;
+                self.issue_session(operator.view()).await?
+            }
+        };
         self.record_operator_auth_event(
             Some(&operator),
             request.username.trim(),
@@ -600,26 +653,30 @@ impl Repository {
         } else {
             username.to_string()
         };
-        let metadata = serde_json::json!({
-            "operator_id": operator.map(|operator| operator.id),
-            "operator_username": operator.map(|operator| &operator.username),
+        let authenticated_operator = if result == "success" { operator } else { None };
+        let mut metadata = serde_json::json!({
             "attempted_username": normalized_username,
             "result": result,
             "reason": reason,
             "remote_ip": remote_ip,
             "user_agent": user_agent.unwrap_or(""),
-            "operator_session_id": session_id,
             "cleared_previous_failures": cleared_previous_failures,
             "origin_kind": "authentication",
             "component": "operator-auth",
         });
+        if let Some(operator) = authenticated_operator {
+            metadata["operator_id"] = serde_json::json!(operator.id);
+            metadata["operator_username"] = serde_json::json!(operator.username);
+            metadata["operator_role"] = serde_json::json!(operator.role);
+            metadata["operator_session_id"] = serde_json::json!(session_id);
+        }
         match self {
             Self::Memory(memory) => {
                 memory.audits.write().await.push(AuditLogView {
                     id: Uuid::new_v4(),
-                    actor_id: operator.map(|operator| operator.id),
+                    actor_id: authenticated_operator.map(|operator| operator.id),
                     action: action.to_string(),
-                    target: operator
+                    target: authenticated_operator
                         .map(|operator| format!("operator:{}", operator.id))
                         .unwrap_or_else(|| format!("operator-login:{normalized_username}")),
                     command_hash: None,
@@ -637,10 +694,10 @@ impl Repository {
                     "#,
                 )
                 .bind(Uuid::new_v4())
-                .bind(operator.map(|operator| operator.id))
+                .bind(authenticated_operator.map(|operator| operator.id))
                 .bind(action)
                 .bind(
-                    operator
+                    authenticated_operator
                         .map(|operator| format!("operator:{}", operator.id))
                         .unwrap_or_else(|| format!("operator-login:{normalized_username}")),
                 )
@@ -846,6 +903,7 @@ impl Repository {
                         totp_secret_ciphertext_hex,
                         totp_secret_nonce_hex,
                         totp_secret_salt_hex,
+                        totp_last_accepted_step,
                         session_refresh_ttl_secs,
                         created_at::text AS created_at,
                         disabled_at::text AS disabled_at,
@@ -870,6 +928,7 @@ impl Repository {
                         totp_secret_ciphertext_hex: row.try_get("totp_secret_ciphertext_hex")?,
                         totp_secret_nonce_hex: row.try_get("totp_secret_nonce_hex")?,
                         totp_secret_salt_hex: row.try_get("totp_secret_salt_hex")?,
+                        totp_last_accepted_step: postgres_totp_step(&row)?,
                         session_refresh_ttl_secs: row
                             .try_get::<i64, _>("session_refresh_ttl_secs")?
                             .try_into()
@@ -912,6 +971,7 @@ impl Repository {
                         totp_secret_ciphertext_hex,
                         totp_secret_nonce_hex,
                         totp_secret_salt_hex,
+                        totp_last_accepted_step,
                         session_refresh_ttl_secs,
                         created_at::text AS created_at,
                         disabled_at::text AS disabled_at,
@@ -936,6 +996,7 @@ impl Repository {
                         totp_secret_ciphertext_hex: row.try_get("totp_secret_ciphertext_hex")?,
                         totp_secret_nonce_hex: row.try_get("totp_secret_nonce_hex")?,
                         totp_secret_salt_hex: row.try_get("totp_secret_salt_hex")?,
+                        totp_last_accepted_step: postgres_totp_step(&row)?,
                         session_refresh_ttl_secs: row
                             .try_get::<i64, _>("session_refresh_ttl_secs")?
                             .try_into()
@@ -1032,6 +1093,7 @@ impl Repository {
             totp_secret_ciphertext_hex: None,
             totp_secret_nonce_hex: None,
             totp_secret_salt_hex: None,
+            totp_last_accepted_step: None,
             session_refresh_ttl_secs,
             created_at: now,
             disabled_at: None,
@@ -1413,6 +1475,7 @@ impl Repository {
                 operator.totp_secret_ciphertext_hex = None;
                 operator.totp_secret_nonce_hex = None;
                 operator.totp_secret_salt_hex = None;
+                operator.totp_last_accepted_step = None;
                 let view = operator.view();
                 drop(operators);
                 revoke_memory_operator_sessions(memory, operator_id).await;
@@ -1436,7 +1499,8 @@ impl Repository {
                         totp_enabled = FALSE,
                         totp_secret_ciphertext_hex = NULL,
                         totp_secret_nonce_hex = NULL,
-                        totp_secret_salt_hex = NULL
+                        totp_secret_salt_hex = NULL,
+                        totp_last_accepted_step = NULL
                     WHERE id = $1 AND status <> 'deleted'
                     RETURNING
                         id, username, status, role, scopes, preferences,
@@ -1502,6 +1566,7 @@ impl Repository {
                 operator.totp_secret_ciphertext_hex = None;
                 operator.totp_secret_nonce_hex = None;
                 operator.totp_secret_salt_hex = None;
+                operator.totp_last_accepted_step = None;
                 let view = operator.view();
                 drop(operators);
                 revoke_memory_operator_sessions(memory, operator_id).await;
@@ -1524,7 +1589,8 @@ impl Repository {
                     SET totp_enabled = false,
                         totp_secret_ciphertext_hex = NULL,
                         totp_secret_nonce_hex = NULL,
-                        totp_secret_salt_hex = NULL
+                        totp_secret_salt_hex = NULL,
+                        totp_last_accepted_step = NULL
                     WHERE id = $1 AND status <> 'deleted'
                     RETURNING
                         id, username, status, role, scopes, preferences,
@@ -2071,6 +2137,111 @@ impl Repository {
 
         Ok(session.auth_response(operator))
     }
+
+    async fn issue_totp_login_session(
+        &self,
+        verified_operator: &OperatorRecord,
+        matched_step: u64,
+        successful_username_key: Option<&str>,
+    ) -> Result<Option<AuthResponse>> {
+        let session = PreparedOperatorSession::new(verified_operator.session_refresh_ttl_secs);
+        match self {
+            Self::Memory(memory) => {
+                let mut operators = memory.operators.write().await;
+                let mut sessions = memory.sessions.write().await;
+                let mut throttle = if successful_username_key.is_some() {
+                    Some(memory.operator_auth_throttle.write().await)
+                } else {
+                    None
+                };
+                let Some(operator) = operators.iter_mut().find(|operator| {
+                    operator.id == verified_operator.id
+                        && operator.status == "active"
+                        && operator.totp_enabled
+                        && operator.password_hash == verified_operator.password_hash
+                        && operator.totp_secret_ciphertext_hex
+                            == verified_operator.totp_secret_ciphertext_hex
+                        && operator.totp_secret_nonce_hex == verified_operator.totp_secret_nonce_hex
+                        && operator.totp_secret_salt_hex == verified_operator.totp_secret_salt_hex
+                        && operator
+                            .totp_last_accepted_step
+                            .is_none_or(|last_step| matched_step > last_step)
+                }) else {
+                    return Ok(None);
+                };
+                operator.totp_last_accepted_step = Some(matched_step);
+                let view = operator.view();
+                sessions.push(OperatorSessionRecord {
+                    session_id: session.session_id,
+                    access_token_hash: session.access_hash.clone(),
+                    refresh_token_hash: session.refresh_hash.clone(),
+                    operator_id: operator.id,
+                    expires_unix: session.expires_unix,
+                    refresh_expires_unix: session.refresh_expires_unix,
+                    created_unix: session.created_unix,
+                    revoked: false,
+                });
+                if let (Some(username_key), Some(throttle)) =
+                    (successful_username_key, throttle.as_mut())
+                {
+                    throttle.remove(&("username_ip".to_string(), username_key.to_string()));
+                }
+                Ok(Some(session.auth_response(view)))
+            }
+            Self::Postgres(pool) => {
+                let encrypted = verified_operator
+                    .encrypted_totp_secret()
+                    .context("enabled TOTP operator is missing secret material")?;
+                let mut tx = pool.begin().await?;
+                let row = sqlx::query(
+                    r#"
+                    UPDATE operators
+                    SET totp_last_accepted_step = $2
+                    WHERE id = $1
+                      AND status = 'active'
+                      AND totp_enabled
+                      AND password_hash = $3
+                      AND totp_secret_ciphertext_hex = $4
+                      AND totp_secret_nonce_hex = $5
+                      AND totp_secret_salt_hex = $6
+                      AND (
+                          totp_last_accepted_step IS NULL
+                          OR totp_last_accepted_step < $2
+                      )
+                    RETURNING
+                        id, username, status, role, scopes, preferences,
+                        totp_enabled, session_refresh_ttl_secs,
+                        created_at::text AS created_at,
+                        disabled_at::text AS disabled_at,
+                        deleted_at::text AS deleted_at
+                    "#,
+                )
+                .bind(verified_operator.id)
+                .bind(matched_step as i64)
+                .bind(&verified_operator.password_hash)
+                .bind(&encrypted.ciphertext_hex)
+                .bind(&encrypted.nonce_hex)
+                .bind(&encrypted.salt_hex)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(row) = row else {
+                    return Ok(None);
+                };
+                let operator = operator_view_from_row(&row)?;
+                if let Some(username_key) = successful_username_key {
+                    sqlx::query(
+                        "DELETE FROM operator_auth_throttle WHERE scope_kind = 'username_ip' AND scope_key = $1",
+                    )
+                    .bind(username_key)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                insert_operator_session_in_tx(&mut tx, operator.id, &session).await?;
+                tx.commit().await?;
+                Ok(Some(session.auth_response(operator)))
+            }
+        }
+    }
 }
 
 fn normalize_session_refresh_ttl(value: u64) -> std::result::Result<u64, ApiError> {
@@ -2105,6 +2276,13 @@ fn operator_view_from_row(row: &sqlx::postgres::PgRow) -> Result<OperatorView> {
         disabled_at: row.try_get("disabled_at")?,
         deleted_at: row.try_get("deleted_at")?,
     })
+}
+
+pub(crate) fn postgres_totp_step(row: &sqlx::postgres::PgRow) -> Result<Option<u64>> {
+    row.try_get::<Option<i64>, _>("totp_last_accepted_step")?
+        .map(u64::try_from)
+        .transpose()
+        .map_err(Into::into)
 }
 
 async fn revoke_memory_operator_sessions(memory: &MemoryState, operator_id: Uuid) {
@@ -2663,4 +2841,56 @@ async fn record_session_logout_audit(
         }),
         created_at: unix_now().to_string(),
     });
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_login_for_known_username_is_not_attributed_to_that_operator() {
+        let repo = Repository::Memory(MemoryState::default());
+        let password = "admin-password-123";
+        let operator_id = repo
+            .bootstrap_operator(&BootstrapOperatorRequest {
+                username: "admin".to_string(),
+                password: password.to_string(),
+            })
+            .await
+            .unwrap()
+            .operator
+            .id;
+
+        let attempt = repo
+            .login_operator_with_throttle(
+                &LoginRequest {
+                    username: "admin".to_string(),
+                    password: "wrong-password-123".to_string(),
+                    totp_code: None,
+                },
+                "203.0.113.71",
+                Some("audit-test-browser"),
+                &OperatorAuthThrottleConfig::default(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(attempt, OperatorLoginAttempt::InvalidCredentials));
+
+        let audit = repo
+            .list_audit_logs(10)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|audit| audit.action == "operator_auth.login_failure")
+            .expect("failed login audit");
+        assert_eq!(audit.actor_id, None);
+        assert_eq!(audit.target, "operator-login:admin");
+        assert_eq!(audit.metadata["attempted_username"], "admin");
+        assert_eq!(audit.metadata["reason"], "bad_password");
+        assert!(audit.metadata.get("operator_id").is_none());
+        assert!(audit.metadata.get("operator_username").is_none());
+        assert!(!serde_json::to_string(&audit.metadata)
+            .unwrap()
+            .contains(&operator_id.to_string()));
+    }
 }

@@ -72,6 +72,12 @@ Every update must keep these boundaries explicit:
   tombstone and its ID cannot be reused. Key revocation keeps the VPS visible,
   blocks the old key permanently, and permits recovery of the same ID only by
   explicitly assigning a different key.
+- Suggested VPS IDs are derived from the greatest persisted numeric `N` in
+  either `N` or `v-N` form, including tombstones, and are presented as `v-`
+  followed by `N + 1` (for example, `v-223`). An abandoned registration consumes
+  nothing; concurrent use of the same suggestion must fail as an ordinary
+  identity conflict. Do not add a separate reservation registry or recycle a
+  deleted ID.
 - Change a canonical migration only when the product decision explicitly
   accepts a clean break. Update every code, test, and documentation consumer in
   the same change.
@@ -161,7 +167,9 @@ Every update must keep these boundaries explicit:
   explicit primary selection and never silently replace a removed or disabled
   primary.
 - Monitoring-share target and visibility scope are immutable after creation.
-  Store only the URL-secret digest, keep public DTOs allowlisted, and audit each
+  Store only the URL-secret digest and a persisted random 256-bit public key for
+  each frozen share target. Never derive a public target key from the share
+  digest or internal VPS ID. Keep public DTOs allowlisted, and audit each
   distinct visitor bootstrap without auditing every poll. Public projections
   must not reuse private fleet DTOs. Unauthenticated visitor reads belong only
   under `/api/v1/public/monitoring-shares/{share_id}/bootstrap` and `/data`;
@@ -197,10 +205,25 @@ Every update must keep these boundaries explicit:
   add a fixed rightmost Action column or a second selection/action bar.
 - Keep shared table pagination choices consistent through 1,000 rows per page;
   individual tables may retain a smaller task-appropriate initial page size.
+  Keep wide desktop tables horizontally scrollable, and show an explicit
+  shown/hidden mark for every hideable column in the **Fields** menu.
 - Keep action feedback inside the workflow that produced it. Long status or
-  error content must wrap or scroll within the visible page.
+  error content must wrap or scroll within the visible page. A terminal outcome
+  rendered outside the current viewport must scroll into view (and receive
+  focus when it is the active form/drawer result). Editing an input clears its
+  stale error and invalidates any review snapshot derived from the old draft.
 - Extend the existing console components and styles before introducing a new
   interaction pattern.
+
+### TOTP changes
+
+- Setup creates pending encrypted secret material but does not enable TOTP.
+  Confirmation must validate the submitted password and a current code against
+  that exact pending secret before enabling the factor and recording its
+  accepted time step. Wrong-secret, invalid, and replayed codes remain failures.
+- Reopening setup with the same pending password returns the same pending secret
+  so the displayed QR code and server confirmation state cannot drift. Changing
+  operator or password context invalidates the browser's pending enrollment.
 
 ### Deployment and reverse-proxy changes
 

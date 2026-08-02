@@ -804,6 +804,22 @@ fn vps_rules_error(error: anyhow::Error) -> ApiError {
         "byte_size_number_invalid",
         "byte_size_unit_invalid",
         "byte_size_too_large",
+        "billing_plan_price_required",
+        "billing_plan_price_invalid",
+        "billing_plan_currency_required",
+        "billing_plan_currency_invalid",
+        "billing_plan_period_required",
+        "billing_plan_period_invalid",
+        "billing_cycle_day_invalid",
+        "billing_cycle_month_invalid",
+        "billing_cycle_requires_price",
+        "billing_cycle_disabled_price_invalid",
+        "billing_month_cycle_requires_day",
+        "billing_long_cycle_requires_day_month",
+        "port_speed_unit_required",
+        "port_speed_unit_invalid",
+        "port_speed_value_invalid",
+        "port_speed_value_too_large",
     ] {
         if message.contains(code) {
             return ApiError::bad_request(code);
@@ -1008,6 +1024,40 @@ mod tests {
         let missing = fleet_alert_policy_error(anyhow::anyhow!("fleet_alert_policy_not_found"));
         assert_eq!(missing.status, axum::http::StatusCode::NOT_FOUND);
         assert_eq!(missing.code, "fleet_alert_policy_not_found");
+    }
+
+    #[test]
+    fn vps_rule_billing_and_port_speed_errors_are_bad_requests() {
+        for code in [
+            "billing_plan_price_required",
+            "billing_plan_price_invalid",
+            "billing_plan_currency_required",
+            "billing_plan_currency_invalid",
+            "billing_plan_period_required",
+            "billing_plan_period_invalid",
+            "billing_cycle_day_invalid",
+            "billing_cycle_month_invalid",
+            "billing_cycle_requires_price",
+            "billing_cycle_disabled_price_invalid",
+            "billing_month_cycle_requires_day",
+            "billing_long_cycle_requires_day_month",
+            "port_speed_unit_required",
+            "port_speed_unit_invalid",
+            "port_speed_value_invalid",
+            "port_speed_value_too_large",
+        ] {
+            let error = vps_rules_error(anyhow::anyhow!(code));
+            assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST, "{code}");
+            assert_eq!(error.code, code);
+        }
+
+        let unknown = vps_rules_error(anyhow::anyhow!("unexpected_storage_failure"));
+        assert_eq!(
+            unknown.status,
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(unknown.code, "internal_server_error");
+        assert!(unknown.public_message.is_none());
     }
 
     #[test]

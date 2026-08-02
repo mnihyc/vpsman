@@ -150,6 +150,15 @@ test.beforeEach(async ({ page }, testInfo) => {
     )
       ? tunnelPortSpeedRules
       : undefined,
+    totpSetupDelayMs: testInfo.tags.includes("@totp-context-switch")
+      ? 400
+      : undefined,
+    totpSetupOperatorIdOverride: testInfo.tags.includes(
+      "@totp-operator-mismatch",
+    )
+      ? "99999999-aaaa-4bbb-8ccc-000000000002"
+      : undefined,
+    totpSetupSwitchSession: testInfo.tags.includes("@totp-context-switch"),
     vpsRulesApplyDelayMs: testInfo.tags.includes("@vps-rules-apply-delay")
       ? 1_000
       : undefined,
@@ -1389,7 +1398,12 @@ test("supports interactive fleet data grid controls", async ({
       grid.getByRole("columnheader", { name: /Provider/ }),
     ).toHaveCount(0);
   }
-  await page.getByRole("menuitemcheckbox", { name: "Provider" }).click();
+  const hiddenProviderField = page.getByRole("menuitemcheckbox", {
+    name: /Provider.*hidden/i,
+  });
+  await expect(hiddenProviderField).toHaveAttribute("aria-checked", "false");
+  await expect(hiddenProviderField.locator(".lucide-x")).toBeVisible();
+  await hiddenProviderField.click();
   if (!mobileFleetGrid) {
     await expect(
       grid.getByRole("columnheader", { name: /Provider/ }),
@@ -1397,6 +1411,12 @@ test("supports interactive fleet data grid controls", async ({
   } else {
     await expect(coreRow).toContainText("core-fra-02");
   }
+  await grid.getByLabel("VPS instance records columns").click();
+  const shownProviderField = page.getByRole("menuitemcheckbox", {
+    name: /Provider.*shown/i,
+  });
+  await expect(shownProviderField).toHaveAttribute("aria-checked", "true");
+  await expect(shownProviderField.locator(".lucide-check")).toBeVisible();
   await page.keyboard.press("Escape");
 
   if (mobileFleetGrid) {
@@ -1442,6 +1462,38 @@ test("exposes traffic columns and the VPS Traffic & Rules drilldown", async ({
   await expect(
     grid.getByRole("columnheader", { name: /Traffic State/ }),
   ).toBeVisible();
+
+  const tableViewport = grid.locator(".gridTable");
+  const tableLayout = await tableViewport.evaluate((element) => {
+    const header = element.querySelector<HTMLElement>(".gridHeaderGroup");
+    const body = element.querySelector<HTMLElement>(".gridBody");
+    return {
+      bodyWidth: body?.getBoundingClientRect().width ?? 0,
+      clientWidth: element.clientWidth,
+      headerWidth: header?.getBoundingClientRect().width ?? 0,
+      scrollWidth: element.scrollWidth,
+    };
+  });
+  expect(tableLayout.headerWidth).toBeGreaterThan(tableLayout.clientWidth);
+  expect(
+    Math.abs(tableLayout.headerWidth - tableLayout.bodyWidth),
+  ).toBeLessThanOrEqual(1);
+  expect(tableLayout.scrollWidth).toBeGreaterThan(tableLayout.clientWidth);
+  await tableViewport.evaluate((element) => {
+    element.scrollLeft = element.scrollWidth;
+  });
+  await expect
+    .poll(() => tableViewport.evaluate((element) => element.scrollLeft))
+    .toBeGreaterThan(0);
+  await tableViewport.evaluate((element) => {
+    element.scrollLeft = 0;
+  });
+  const pageOverflow = await page.evaluate(
+    () =>
+      document.documentElement.scrollWidth -
+      document.documentElement.clientWidth,
+  );
+  expect(pageOverflow).toBeLessThanOrEqual(1);
 
   await selectGridRow(page, "VPS instance records", "agent-sfo-01");
   await runGridAction(page, "VPS instance records", "Open detail");
@@ -1602,6 +1654,23 @@ test(
     await expect(
       editor.getByRole("button", { name: "Preview unset" }),
     ).toHaveCount(0);
+    await editor.getByLabel("Billing price").fill("29 USD/w");
+    await editor
+      .getByRole("button", { name: "Preview changes", exact: true })
+      .click();
+    const invalidPreview = page.locator(".vpsRulesPreviewBlock");
+    await expect(invalidPreview).toContainText(
+      "Billing period must be m, q, hy, h, or y.",
+    );
+    await expect(
+      page.getByLabel("VPS rules preview final action"),
+    ).toContainText("Correct invalid values");
+    await expect(
+      page
+        .getByLabel("VPS rules preview final action")
+        .getByRole("button", { name: /Apply/ }),
+    ).toHaveCount(0);
+    await editor.getByLabel("Billing price").fill("");
     await editor.getByLabel("Reset day").fill("14");
     await editor.getByLabel("Total quota").fill("3TB");
     await editor.getByLabel("Interfaces / selectors").fill("ens3, eth0+tx");
@@ -5407,6 +5476,133 @@ test("renders a local authenticator QR code with a manual fallback", async ({
   await expect(enrollment).toContainText("SHA1 · 6 digits · 30-second period");
   await expect(totpPanel).not.toContainText("otpauth://");
 });
+
+test("keeps TOTP enrollment pending when the authenticator code is rejected", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await openConsoleSubpage(page, "Access", "Privilege vault");
+
+  const totpPanel = page.locator(".controlPanel").filter({
+    has: page.getByRole("heading", { level: 2, name: "TOTP" }),
+  });
+  await totpPanel.getByLabel("TOTP password").fill("valid-password-123");
+  await activate(totpPanel.getByRole("button", { name: "Set up TOTP" }));
+  await expect(totpPanel.getByLabel("Authenticator QR code")).toBeVisible();
+
+  await totpPanel.getByLabel("TOTP code").fill("000000");
+  await activate(totpPanel.getByRole("button", { name: "Complete setup" }));
+  await expect(totpPanel.locator(".actionFeedbackDanger")).toContainText(
+    "current password or authenticator code is incorrect",
+  );
+  await expect(totpPanel.getByLabel("Authenticator QR code")).toBeVisible();
+  await expect(totpPanel.locator(".sectionHeader")).toContainText(
+    "admin MFA required",
+  );
+
+  const currentTotpCode = await page.evaluate(() =>
+    (
+      window as unknown as {
+        __vpsmanFixtureTotpCode: () => Promise<string>;
+      }
+    ).__vpsmanFixtureTotpCode(),
+  );
+  await totpPanel.getByLabel("TOTP code").fill(currentTotpCode);
+  await activate(totpPanel.getByRole("button", { name: "Complete setup" }));
+  await expect(totpPanel.locator(".sectionHeader")).toContainText("enabled");
+  await expect(totpPanel.getByLabel("Authenticator QR code")).toHaveCount(0);
+});
+
+test("invalidates a displayed TOTP QR when its password context changes", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await openConsoleSubpage(page, "Access", "Privilege vault");
+
+  const totpPanel = page.locator(".controlPanel").filter({
+    has: page.getByRole("heading", { level: 2, name: "TOTP" }),
+  });
+  const password = totpPanel.getByLabel("TOTP password");
+  await password.fill("valid-password-123");
+  await activate(totpPanel.getByRole("button", { name: "Set up TOTP" }));
+  await expect(totpPanel.getByLabel("Authenticator QR code")).toBeVisible();
+  await totpPanel.getByLabel("TOTP code").fill("000000");
+
+  await password.fill("changed-password-123");
+
+  await expect(totpPanel.getByLabel("Authenticator QR code")).toHaveCount(0);
+  await expect(totpPanel.getByLabel("TOTP code")).toBeDisabled();
+  await expect(totpPanel.getByLabel("TOTP code")).toHaveValue("");
+  await expect(
+    totpPanel.getByRole("button", { name: "Set up TOTP" }),
+  ).toBeVisible();
+});
+
+test(
+  "rejects a TOTP setup response bound to another operator",
+  { tag: "@totp-operator-mismatch" },
+  async ({ page }) => {
+    await page.goto("/");
+    await openConsoleSubpage(page, "Access", "Privilege vault");
+
+    const totpPanel = page.locator(".controlPanel").filter({
+      has: page.getByRole("heading", { level: 2, name: "TOTP" }),
+    });
+    await totpPanel.getByLabel("TOTP password").fill("valid-password-123");
+    await activate(totpPanel.getByRole("button", { name: "Set up TOTP" }));
+
+    await expect(totpPanel.locator(".actionFeedbackDanger")).toContainText(
+      "returned for a different operator",
+    );
+    await expect(totpPanel.getByLabel("Authenticator QR code")).toHaveCount(0);
+    await expect(totpPanel.locator(".sectionHeader")).toContainText(
+      "admin MFA required",
+    );
+  },
+);
+
+test(
+  "ignores a late TOTP setup completion after the bearer session changes",
+  { tag: "@totp-context-switch" },
+  async ({ page }) => {
+    await page.goto("/");
+    await openConsoleSubpage(page, "Access", "Privilege vault");
+
+    const totpPanel = page.locator(".controlPanel").filter({
+      has: page.getByRole("heading", { level: 2, name: "TOTP" }),
+    });
+    const password = totpPanel.getByLabel("TOTP password");
+    await password.fill("valid-password-123");
+    await activate(totpPanel.getByRole("button", { name: "Set up TOTP" }));
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (
+              window as unknown as {
+                __vpsmanTestRequests: { totpSetups: unknown[] };
+              }
+            ).__vpsmanTestRequests.totpSetups.length,
+        ),
+      )
+      .toBe(1);
+
+    await activate(
+      page
+        .locator(".accessMain")
+        .getByRole("button", { name: "Refresh", exact: true }),
+    );
+    await expect(password).toHaveValue("");
+    await page.waitForTimeout(500);
+
+    await expect(totpPanel.getByLabel("Authenticator QR code")).toHaveCount(0);
+    await expect(totpPanel.locator(".actionFeedbackDanger")).toHaveCount(0);
+    await password.fill("valid-password-123");
+    await expect(
+      totpPanel.getByRole("button", { name: "Set up TOTP" }),
+    ).toBeEnabled();
+  },
+);
 
 test("rotates an existing agent key through the access panel", async ({
   page,

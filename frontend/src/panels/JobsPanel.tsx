@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import {
   ConsoleDataGrid,
+  type ConsoleDataGridAction,
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
 import {
@@ -668,12 +669,7 @@ export function JobsPanel({
     if (selectedJobId) {
       clearTargetDetails();
     }
-  }, [
-    clearTargetDetails,
-    openTargets,
-    routeSelectedJobId,
-    selectedJobId,
-  ]);
+  }, [clearTargetDetails, openTargets, routeSelectedJobId, selectedJobId]);
 
   useEffect(() => {
     if (!selectedJobId) {
@@ -1215,6 +1211,23 @@ export function JobsPanel({
     ],
     [agentNameById],
   );
+  const comparisonGroupActions = useMemo<
+    ConsoleDataGridAction<JobOutputComparisonGroup>[]
+  >(
+    () => [
+      {
+        description: (rows) =>
+          rows.length === 1
+            ? `Show only the ${rows[0].target_count} target result${rows[0].target_count === 1 ? "" : "s"} in this comparison group.`
+            : "Select one comparison group to show its target results.",
+        disabled: (rows) => rows.length !== 1,
+        label: "Show targets",
+        onSelect: (rows) =>
+          rows[0] && setSelectedComparisonGroupId(rows[0].group_id),
+      },
+    ],
+    [],
+  );
 
   async function compareSelectedJobOutputs(
     jobId: string,
@@ -1462,8 +1475,7 @@ export function JobsPanel({
                   {
                     label: "Open target detail",
                     disabled: (rows) => rows.length !== 1,
-                    onSelect: (rows) =>
-                      openSubmittedJobDetails(rows[0].id),
+                    onSelect: (rows) => openSubmittedJobDetails(rows[0].id),
                   },
                   {
                     label: "Copy job IDs",
@@ -1482,10 +1494,6 @@ export function JobsPanel({
                 }
                 getRowId={(job) => job.id}
                 itemLabel="jobs"
-                onOpenRow={(job) => openSubmittedJobDetails(job.id)}
-                openRowLabel="Open targets"
-                openRowTitle={(job) => `Load target results for job ${job.id}.`}
-                showMobileOpenRowAction={false}
                 renderExpandedRow={(job) => (
                   <div className="consoleInlineDetailGrid">
                     <span>Job ID</span>
@@ -1802,77 +1810,80 @@ export function JobsPanel({
                       </div>
                     )}
                     {outputComparison && outputComparison.groups.length > 0 && (
-                      <ConsoleDataGrid
-                        columns={comparisonGroupColumns}
-                        defaultPageSize={6}
-                        expandOnRowClick
-                        getRowId={(group) => group.group_id}
-                        itemLabel="groups"
-                        onOpenRow={(group) =>
-                          setSelectedComparisonGroupId(group.group_id)
-                        }
-                        openRowLabel="Select group"
-                        openRowTitle={(group) =>
-                          `Select comparison group ${group.group_id}.`
-                        }
-                        renderExpandedRow={(group) => (
-                          <div className="consoleInlineDetailGrid">
-                            <span>Group</span>
-                            <strong>{group.group_id}</strong>
-                            <span>Status</span>
-                            <strong>{group.status}</strong>
-                            <span>Targets</span>
-                            <strong>
-                              {group.client_ids.map(clientLabel).join(", ")}
-                            </strong>
-                            <span>Digest</span>
-                            <strong>{group.output_digest_hex}</strong>
-                            <span>Preview</span>
-                            <strong>{group.preview || "No preview"}</strong>
-                          </div>
-                        )}
-                        rows={outputComparison.groups}
-                        searchPlaceholder="Search grouped outcomes"
-                        selectable={false}
-                        showMobileOpenRowAction
-                        storageKey="vpsman.jobs.history.comparisonGroups"
-                        title="Grouped outcomes"
-                      />
+                      <section className="comparisonResultPanel">
+                        <ConsoleDataGrid
+                          actions={comparisonGroupActions}
+                          columns={comparisonGroupColumns}
+                          defaultPageSize={6}
+                          expandOnRowClick
+                          getRowId={(group) => group.group_id}
+                          itemLabel="groups"
+                          renderExpandedRow={(group) => (
+                            <div className="consoleInlineDetailGrid">
+                              <span>Group</span>
+                              <strong>{group.group_id}</strong>
+                              <span>Status</span>
+                              <strong>{group.status}</strong>
+                              <span>Targets</span>
+                              <strong>
+                                {group.client_ids.map(clientLabel).join(", ")}
+                              </strong>
+                              <span>Digest</span>
+                              <strong>{group.output_digest_hex}</strong>
+                              <span>Preview</span>
+                              <strong>{group.preview || "No preview"}</strong>
+                            </div>
+                          )}
+                          rowActions={comparisonGroupActions}
+                          rows={outputComparison.groups}
+                          searchPlaceholder="Search grouped outcomes"
+                          showMobileRowActions={false}
+                          singleExpandedRow
+                          storageKey="vpsman.jobs.history.comparisonGroups"
+                          title="Grouped outcomes"
+                        />
+                      </section>
                     )}
                     {outputComparison && displayedComparisonRows.length > 0 && (
-                      <ConsoleDataGrid
-                        columns={comparisonTargetColumns}
-                        defaultPageSize={8}
-                        expandOnRowClick
-                        getRowId={(row) => row.client_id}
-                        itemLabel="targets"
-                        title={
-                          selectedComparisonGroupId
-                            ? `Targets in ${selectedComparisonGroupId}`
-                            : "Target result details"
-                        }
-                        renderExpandedRow={(row) => (
-                          <div className="consoleInlineDetailGrid">
-                            <span>Client</span>
-                            <strong>{clientLabel(row.client_id)}</strong>
-                            <span>Group</span>
-                            <strong>{row.group_id}</strong>
-                            <span>Digest</span>
-                            <strong>{row.output_digest_hex}</strong>
-                            <span>Output</span>
-                            <strong>
-                              {row.stream_count} chunks /{" "}
-                              {formatBytes(row.byte_count)}
-                            </strong>
-                            <span>Preview</span>
-                            <strong>{row.preview || "No preview"}</strong>
-                          </div>
-                        )}
-                        rows={displayedComparisonRows}
-                        searchPlaceholder="Search target results"
-                        selectable={false}
-                        storageKey="vpsman.jobs.history.comparisonTargets"
-                      />
+                      <section
+                        aria-label="Comparison target sub-results"
+                        className="comparisonResultPanel subordinate"
+                      >
+                        <ConsoleDataGrid
+                          columns={comparisonTargetColumns}
+                          defaultPageSize={8}
+                          expandOnRowClick
+                          getRowId={(row) => row.client_id}
+                          itemLabel="targets"
+                          title={
+                            selectedComparisonGroupId
+                              ? `Targets in ${selectedComparisonGroupId}`
+                              : "Target result details"
+                          }
+                          renderExpandedRow={(row) => (
+                            <div className="consoleInlineDetailGrid">
+                              <span>Client</span>
+                              <strong>{clientLabel(row.client_id)}</strong>
+                              <span>Group</span>
+                              <strong>{row.group_id}</strong>
+                              <span>Digest</span>
+                              <strong>{row.output_digest_hex}</strong>
+                              <span>Output</span>
+                              <strong>
+                                {row.stream_count} chunks /{" "}
+                                {formatBytes(row.byte_count)}
+                              </strong>
+                              <span>Preview</span>
+                              <strong>{row.preview || "No preview"}</strong>
+                            </div>
+                          )}
+                          rows={displayedComparisonRows}
+                          searchPlaceholder="Search target results"
+                          selectable={false}
+                          singleExpandedRow
+                          storageKey="vpsman.jobs.history.comparisonTargets"
+                        />
+                      </section>
                     )}
                   </div>
                   {outputStreamDownloadTargets.length > 0 && (
@@ -2070,9 +2081,10 @@ export function JobsPanel({
                 }
                 detail="Review the frozen job request before recording a decision. Approval can include an optional note; rejection requires the operator reason."
                 error={
-                  approvalRejectReasonMissing
+                  approvalActionError ??
+                  (approvalRejectReasonMissing
                     ? "Rejection reason is required."
-                    : undefined
+                    : undefined)
                 }
                 items={[
                   {

@@ -446,6 +446,7 @@ impl Repository {
         &self,
         schedule_id: Uuid,
         request: ScheduleCreateInput,
+        expectation: Option<&ScheduleSnapshotExpectation>,
         operator: &AuthContext,
     ) -> Result<ScheduleView> {
         match self {
@@ -462,6 +463,7 @@ impl Repository {
                     .iter_mut()
                     .find(|schedule| schedule.id == schedule_id && schedule.deleted_at.is_none())
                     .ok_or_else(|| anyhow::anyhow!("schedule_not_found:{schedule_id}"))?;
+                ensure_schedule_snapshot(schedule, expectation)?;
                 let schedule = apply_schedule_update_memory(schedule, &request)?;
                 drop(schedules);
                 record_memory_schedule_audit(memory, &schedule, operator, "schedule.updated").await;
@@ -469,9 +471,14 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                let schedule =
-                    update_schedule_record_postgres_in_tx(&mut tx, schedule_id, &request, operator)
-                        .await?;
+                let schedule = update_schedule_record_postgres_in_tx(
+                    &mut tx,
+                    schedule_id,
+                    &request,
+                    expectation,
+                    operator,
+                )
+                .await?;
                 tx.commit().await?;
                 Ok(schedule)
             }
@@ -482,6 +489,7 @@ impl Repository {
         &self,
         schedule_id: Uuid,
         target_client_ids: Vec<String>,
+        expectation: Option<&ScheduleSnapshotExpectation>,
         operator: &AuthContext,
     ) -> Result<ScheduleView> {
         match self {
@@ -500,6 +508,7 @@ impl Repository {
                     .find(|schedule| schedule.id == schedule_id && schedule.deleted_at.is_none())
                     .ok_or_else(|| anyhow::anyhow!("schedule_not_found:{schedule_id}"))?;
                 ensure_schedule_operation_valid(schedule)?;
+                ensure_schedule_snapshot(schedule, expectation)?;
                 schedule.target_client_ids = target_client_ids;
                 schedule.updated_at = now;
                 let schedule = schedule.clone();
@@ -521,8 +530,10 @@ impl Repository {
                     "schedule_fixed_targets_not_found",
                 )
                 .await?;
-                let schedule = schedule_by_id_postgres_in_tx(&mut tx, schedule_id).await?;
+                let schedule =
+                    schedule_by_id_postgres_for_update_in_tx(&mut tx, schedule_id).await?;
                 ensure_schedule_operation_valid(&schedule)?;
+                ensure_schedule_snapshot(&schedule, expectation)?;
                 let result = sqlx::query(
                     r#"
                     UPDATE schedules
@@ -768,6 +779,12 @@ pub(crate) struct ScheduleCreateInput {
     pub(crate) max_failures: i32,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ScheduleSnapshotExpectation {
+    pub(crate) selector_expression: String,
+    pub(crate) target_client_ids: Vec<String>,
+}
+
 struct ScheduleRowParts {
     id: Uuid,
     name: String,
@@ -974,6 +991,7 @@ pub(crate) async fn update_schedule_record_postgres_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     schedule_id: Uuid,
     request: &ScheduleCreateInput,
+    expectation: Option<&ScheduleSnapshotExpectation>,
     operator: &AuthContext,
 ) -> Result<ScheduleView> {
     crate::repository_key_lifecycle::require_visible_postgres_clients_in_tx(
@@ -987,6 +1005,8 @@ pub(crate) async fn update_schedule_record_postgres_in_tx(
         .first()
         .cloned()
         .context("schedule cron has no future occurrence")?;
+    let current = schedule_by_id_postgres_for_update_in_tx(tx, schedule_id).await?;
+    ensure_schedule_snapshot(&current, expectation)?;
     let result = sqlx::query(
         r#"
         UPDATE schedules
@@ -1040,6 +1060,18 @@ pub(crate) async fn schedule_by_id_postgres_in_tx(
     schedule_id: Uuid,
 ) -> Result<ScheduleView> {
     let sql = schedule_select_sql("WHERE id = $1 AND deleted_at IS NULL");
+    let row = sqlx::query(&sql)
+        .bind(schedule_id)
+        .fetch_one(&mut **tx)
+        .await?;
+    schedule_from_postgres_row(row)
+}
+
+async fn schedule_by_id_postgres_for_update_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    schedule_id: Uuid,
+) -> Result<ScheduleView> {
+    let sql = schedule_select_sql("WHERE id = $1 AND deleted_at IS NULL FOR UPDATE");
     let row = sqlx::query(&sql)
         .bind(schedule_id)
         .fetch_one(&mut **tx)
@@ -1124,6 +1156,27 @@ pub(crate) fn apply_schedule_update_memory(
     schedule.next_run_at = next_run;
     schedule.updated_at = unix_now().to_string();
     Ok(schedule.clone())
+}
+
+pub(crate) fn ensure_schedule_snapshot(
+    schedule: &ScheduleView,
+    expectation: Option<&ScheduleSnapshotExpectation>,
+) -> Result<()> {
+    let Some(expectation) = expectation else {
+        return Ok(());
+    };
+    let mut expected_targets = expectation.target_client_ids.clone();
+    expected_targets.sort();
+    expected_targets.dedup();
+    let mut stored_targets = schedule.target_client_ids.clone();
+    stored_targets.sort();
+    stored_targets.dedup();
+    anyhow::ensure!(
+        schedule.selector_expression.trim() == expectation.selector_expression.trim()
+            && stored_targets == expected_targets,
+        "schedule_snapshot_stale"
+    );
+    Ok(())
 }
 
 pub(crate) async fn record_memory_schedule_audit(

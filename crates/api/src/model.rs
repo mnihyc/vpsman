@@ -831,6 +831,8 @@ pub(crate) struct UpdateScheduleRequest {
     #[serde(default)]
     pub(crate) selector_expression: String,
     pub(crate) target_client_ids: Vec<String>,
+    pub(crate) expected_selector_expression: String,
+    pub(crate) expected_target_client_ids: Vec<String>,
     pub(crate) cron_expr: String,
     #[serde(default = "default_schedule_timezone")]
     pub(crate) timezone: String,

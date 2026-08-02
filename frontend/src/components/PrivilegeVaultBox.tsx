@@ -169,6 +169,7 @@ export function PrivilegeVaultBox({
       <ConfirmationPrompt
         confirmLabel={clearVaultLabel}
         detail="This removes the encrypted local privilege vault from this browser and locks locally cached privilege material."
+        error={actionError}
         onCancel={() => setClearVaultPromptOpen(false)}
         onConfirm={() => void removeVault()}
         open={clearVaultPromptOpen}
@@ -181,9 +182,11 @@ export function PrivilegeVaultBox({
 
   const lockConfirmation = (
     <PrivilegeLockPrompt
+      error={actionError}
       onCancel={() => setLockPromptOpen(false)}
       onConfirm={() => void lockPrivilege()}
       open={lockPromptOpen}
+      pending={pending}
     />
   );
 
@@ -230,6 +233,7 @@ export function PrivilegeVaultBox({
         <div className="privilegeActionRow">
           <button
             className="secondaryAction"
+            disabled={pending}
             onClick={() => setLockPromptOpen(true)}
             type="button"
           >
@@ -238,6 +242,7 @@ export function PrivilegeVaultBox({
           </button>
           {showVaultClear && vaultClearButton(!vaultAvailable)}
         </div>
+        <ActionFeedback message={actionError} tone="danger" />
         {clearVaultConfirmation()}
         {lockConfirmation}
       </div>
@@ -323,7 +328,10 @@ export function PrivilegeVaultBox({
               aria-label={label("Vault passphrase")}
               autoComplete="off"
               name="vault_unlock_passphrase"
-              onChange={(event) => setUnlockPassphrase(event.target.value)}
+              onChange={(event) => {
+                setUnlockPassphrase(event.target.value);
+                setActionError(null);
+              }}
               placeholder="local vault passphrase"
               type="password"
               value={unlockPassphrase}
@@ -361,7 +369,10 @@ export function PrivilegeVaultBox({
                 aria-label={label("Super password")}
                 autoComplete="off"
                 name="privilege_secret"
-                onChange={(event) => setSuperPassword(event.target.value)}
+                onChange={(event) => {
+                  setSuperPassword(event.target.value);
+                  setActionError(null);
+                }}
                 placeholder="enter super password"
                 type="password"
                 value={superPassword}
@@ -373,7 +384,10 @@ export function PrivilegeVaultBox({
                 aria-label={label("Super salt hex")}
                 autoComplete="off"
                 name="privilege_salt_hex"
-                onChange={(event) => setSuperSaltHex(event.target.value)}
+                onChange={(event) => {
+                  setSuperSaltHex(event.target.value);
+                  setActionError(null);
+                }}
                 placeholder="paste salt printed by first-start"
                 value={superSaltHex}
               />
@@ -383,7 +397,10 @@ export function PrivilegeVaultBox({
             <input
               checked={saveToVault}
               name="save_privilege_to_vault"
-              onChange={(event) => setSaveToVault(event.target.checked)}
+              onChange={(event) => {
+                setSaveToVault(event.target.checked);
+                setActionError(null);
+              }}
               type="checkbox"
             />
             <span>
@@ -402,15 +419,18 @@ export function PrivilegeVaultBox({
                 autoComplete="off"
                 minLength={MIN_VAULT_PASSPHRASE_LENGTH}
                 name="new_vault_passphrase"
-                onChange={(event) => setVaultPassphrase(event.target.value)}
+                onChange={(event) => {
+                  setVaultPassphrase(event.target.value);
+                  setActionError(null);
+                }}
                 placeholder="new local vault passphrase"
                 type="password"
                 value={vaultPassphrase}
               />
               <small id={vaultPassphraseHintId}>
-                Use at least {MIN_VAULT_PASSPHRASE_LENGTH} characters. New vaults
-                use 600,000 PBKDF2-SHA256 iterations; existing vaults remain
-                unlockable with their recorded parameters.
+                Use at least {MIN_VAULT_PASSPHRASE_LENGTH} characters. New
+                vaults use 600,000 PBKDF2-SHA256 iterations; existing vaults
+                remain unlockable with their recorded parameters.
               </small>
             </>
           )}

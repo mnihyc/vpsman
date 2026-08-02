@@ -16,7 +16,9 @@ export function usePortForwardingData(
   onUnauthorized: () => void,
   onAuditChanged: () => Promise<void>,
 ) {
-  const [portForwardRules, setPortForwardRules] = useState<PortForwardRuleListItem[]>([]);
+  const [portForwardRules, setPortForwardRules] = useState<
+    PortForwardRuleListItem[]
+  >([]);
   const [portForwardError, setPortForwardError] = useState<string | null>(null);
   const [portForwardLoading, setPortForwardLoading] = useState(false);
   const portForwardLoadGeneration = useRef(0);
@@ -25,7 +27,7 @@ export function usePortForwardingData(
 
   const loadPortForwardRules = useCallback(async () => {
     if (currentApiToken.current !== apiToken) {
-      return;
+      return "The operator session changed before port-forward rules could be loaded.";
     }
     const generation = portForwardLoadGeneration.current + 1;
     portForwardLoadGeneration.current = generation;
@@ -40,25 +42,29 @@ export function usePortForwardingData(
         portForwardLoadGeneration.current !== generation ||
         currentApiToken.current !== apiToken
       ) {
-        return;
+        return "A newer port-forward refresh superseded this request.";
       }
       setPortForwardRules(records);
+      return null;
     } catch (error) {
       if (
         portForwardLoadGeneration.current !== generation ||
         currentApiToken.current !== apiToken
       ) {
-        return;
+        return "A newer port-forward refresh superseded this request.";
       }
       if (isApiUnauthorized(error)) {
         onUnauthorized();
         setPortForwardRules([]);
         setPortForwardError("Operator login required");
-        return;
+        return "Operator login required";
       }
-      setPortForwardError(
-        error instanceof Error ? error.message : "Port-forward rules unavailable",
-      );
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Port-forward rules unavailable";
+      setPortForwardError(message);
+      return message;
     } finally {
       if (
         portForwardLoadGeneration.current === generation &&

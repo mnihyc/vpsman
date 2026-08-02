@@ -232,7 +232,12 @@ CREATE TABLE monitoring_share_targets (
     -- The client row is the immutable tombstone identity for a frozen share.
     -- Logical deletion hides all live data but must not rewrite historical scope.
     client_id TEXT NOT NULL REFERENCES clients(id),
-    PRIMARY KEY (share_id, client_id)
+    -- Random per-share identity exposed to visitors. It is deliberately persisted
+    -- rather than derived from the predictable internal v-N client ID.
+    public_client_key TEXT NOT NULL,
+    PRIMARY KEY (share_id, client_id),
+    UNIQUE (share_id, public_client_key),
+    CHECK (public_client_key ~ '^[0-9a-f]{64}$')
 );
 
 CREATE INDEX monitoring_share_targets_client_idx

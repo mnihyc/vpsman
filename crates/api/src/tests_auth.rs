@@ -831,7 +831,7 @@ async fn totp_management_failures_use_operator_auth_throttle() {
         )
         .await
         .unwrap_err();
-        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
         assert_eq!(error.code, "invalid_totp_credentials");
     }
 
@@ -847,6 +847,171 @@ async fn totp_management_failures_use_operator_auth_throttle() {
     .unwrap_err();
     assert_eq!(error.status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(error.code, "operator_auth_throttled");
+}
+
+#[tokio::test]
+async fn totp_management_bad_credentials_preserve_session_and_factor_state() {
+    let state = memory_test_state();
+    let password = "admin-password-123";
+    let auth = state
+        .repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin".to_string(),
+            password: password.to_string(),
+        })
+        .await
+        .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        AUTHORIZATION,
+        format!("Bearer {}", auth.access_token).parse().unwrap(),
+    );
+    let peer = "203.0.113.41:44321"
+        .parse::<std::net::SocketAddr>()
+        .unwrap();
+
+    let bearer_error = routes_auth::setup_operator_totp(
+        axum::extract::State(state.clone()),
+        axum::extract::ConnectInfo(peer),
+        HeaderMap::new(),
+        axum::Json(TotpSetupRequest {
+            password: password.to_string(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(bearer_error.status, StatusCode::UNAUTHORIZED);
+
+    let setup_error = routes_auth::setup_operator_totp(
+        axum::extract::State(state.clone()),
+        axum::extract::ConnectInfo(peer),
+        headers.clone(),
+        axum::Json(TotpSetupRequest {
+            password: "wrong-password-123".to_string(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(setup_error.status, StatusCode::BAD_REQUEST);
+    assert_eq!(setup_error.code, "invalid_totp_credentials");
+    assert_eq!(
+        setup_error.public_message.as_deref(),
+        Some("The current password is incorrect.")
+    );
+    let axum::Json(current) =
+        routes_auth::current_operator(axum::extract::State(state.clone()), headers.clone())
+            .await
+            .unwrap();
+    assert!(!current.totp_enabled);
+
+    let _ = routes_auth::setup_operator_totp(
+        axum::extract::State(state.clone()),
+        axum::extract::ConnectInfo(peer),
+        headers.clone(),
+        axum::Json(TotpSetupRequest {
+            password: password.to_string(),
+        }),
+    )
+    .await
+    .unwrap();
+    let pending_before = state
+        .repo
+        .operator_by_username("admin")
+        .await
+        .unwrap()
+        .unwrap();
+    let encrypted_before = pending_before
+        .encrypted_totp_secret()
+        .expect("pending encrypted TOTP secret");
+    let secret = crate::auth_totp::decrypt_totp_secret(password, &encrypted_before).unwrap();
+    let wrong_code = ["000000", "111111", "222222", "333333"]
+        .into_iter()
+        .find(|candidate| !crate::auth_totp::verify_totp_code(&secret, candidate, unix_now()))
+        .expect("at least one candidate is outside the three-code TOTP window")
+        .to_string();
+
+    let confirm_error = routes_auth::confirm_operator_totp(
+        axum::extract::State(state.clone()),
+        axum::extract::ConnectInfo(peer),
+        headers.clone(),
+        axum::Json(TotpConfirmRequest {
+            password: password.to_string(),
+            code: wrong_code.clone(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(confirm_error.status, StatusCode::BAD_REQUEST);
+    assert_eq!(confirm_error.code, "invalid_totp_credentials");
+    assert_eq!(
+        confirm_error.public_message.as_deref(),
+        Some("The current password or authenticator code is incorrect.")
+    );
+    let pending_after = state
+        .repo
+        .operator_by_username("admin")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!pending_after.totp_enabled);
+    let encrypted_after = pending_after
+        .encrypted_totp_secret()
+        .expect("failed confirmation preserves pending TOTP secret");
+    assert_eq!(
+        encrypted_after.ciphertext_hex,
+        encrypted_before.ciphertext_hex
+    );
+
+    let code = crate::auth_totp::totp_code_for_step(&secret, unix_now() / 30);
+    let axum::Json(enabled) = routes_auth::confirm_operator_totp(
+        axum::extract::State(state.clone()),
+        axum::extract::ConnectInfo(peer),
+        headers.clone(),
+        axum::Json(TotpConfirmRequest {
+            password: password.to_string(),
+            code,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(enabled.totp_enabled);
+
+    let disable_error = routes_auth::disable_operator_totp(
+        axum::extract::State(state.clone()),
+        axum::extract::ConnectInfo(peer),
+        headers.clone(),
+        axum::Json(TotpDisableRequest {
+            password: password.to_string(),
+            code: wrong_code,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(disable_error.status, StatusCode::BAD_REQUEST);
+    assert_eq!(disable_error.code, "invalid_totp_credentials");
+    assert_eq!(
+        disable_error.public_message.as_deref(),
+        Some("The current password or authenticator code is incorrect.")
+    );
+    let enabled_after = state
+        .repo
+        .operator_by_username("admin")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(enabled_after.totp_enabled);
+    assert_eq!(
+        enabled_after
+            .encrypted_totp_secret()
+            .expect("failed disable preserves encrypted TOTP secret")
+            .ciphertext_hex,
+        encrypted_before.ciphertext_hex
+    );
+
+    let axum::Json(current) = routes_auth::current_operator(axum::extract::State(state), headers)
+        .await
+        .unwrap();
+    assert!(current.totp_enabled);
 }
 
 #[test]
@@ -2595,6 +2760,53 @@ fn stored_operator_preferences_drop_invalid_timezone() {
 }
 
 #[tokio::test]
+async fn repeated_totp_setup_reuses_pending_secret_without_enabling() {
+    let repo = Repository::Memory(MemoryState::default());
+    let password = "admin-password-123";
+    let auth = repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin".to_string(),
+            password: password.to_string(),
+        })
+        .await
+        .unwrap();
+    let actor = AuthContext {
+        operator: auth.operator,
+        session_id: Some(Uuid::new_v4()),
+    };
+    let TotpSetupOutcome::Created(first) =
+        repo.setup_operator_totp(&actor, password).await.unwrap()
+    else {
+        panic!("expected initial TOTP setup");
+    };
+    let stored_before = repo.operator_by_username("admin").await.unwrap().unwrap();
+    let encrypted_before = stored_before
+        .encrypted_totp_secret()
+        .expect("pending encrypted TOTP secret");
+
+    let TotpSetupOutcome::Created(second) =
+        repo.setup_operator_totp(&actor, password).await.unwrap()
+    else {
+        panic!("expected pending TOTP setup");
+    };
+    let stored_after = repo.operator_by_username("admin").await.unwrap().unwrap();
+    let encrypted_after = stored_after
+        .encrypted_totp_secret()
+        .expect("pending encrypted TOTP secret");
+
+    assert_eq!(second.secret_base32, first.secret_base32);
+    assert_eq!(second.otpauth_uri, first.otpauth_uri);
+    assert_eq!(
+        encrypted_after.ciphertext_hex,
+        encrypted_before.ciphertext_hex
+    );
+    assert_eq!(encrypted_after.nonce_hex, encrypted_before.nonce_hex);
+    assert_eq!(encrypted_after.salt_hex, encrypted_before.salt_hex);
+    assert!(!stored_after.totp_enabled);
+    assert_eq!(stored_after.totp_last_accepted_step, None);
+}
+
+#[tokio::test]
 async fn operator_totp_lifecycle_encrypts_secret_and_gates_login() {
     let repo = Repository::Memory(MemoryState::default());
     let password = "admin-password-123";
@@ -2625,7 +2837,9 @@ async fn operator_totp_lifecycle_encrypts_secret_and_gates_login() {
         .expect("encrypted totp secret");
     assert!(!encrypted.ciphertext_hex.contains(&setup.secret_base32));
     let secret = crate::auth_totp::decrypt_totp_secret(password, &encrypted).unwrap();
-    let code = crate::auth_totp::totp_code_for_step(&secret, unix_now() / 30);
+    let current_step = unix_now() / crate::auth_totp::TOTP_PERIOD_SECS;
+    let confirm_code = crate::auth_totp::totp_code_for_step(&secret, current_step);
+    let login_code = crate::auth_totp::totp_code_for_step(&secret, current_step.saturating_add(1));
 
     assert!(matches!(
         repo.confirm_operator_totp(&actor, password, "000000")
@@ -2634,13 +2848,19 @@ async fn operator_totp_lifecycle_encrypts_secret_and_gates_login() {
         TotpUpdateOutcome::InvalidCredentials
     ));
     let TotpUpdateOutcome::Updated(operator) = repo
-        .confirm_operator_totp(&actor, password, &code)
+        .confirm_operator_totp(&actor, password, &confirm_code)
         .await
         .unwrap()
     else {
         panic!("expected TOTP enabled");
     };
     assert!(operator.totp_enabled);
+    assert!(matches!(
+        repo.confirm_operator_totp(&actor, password, &login_code)
+            .await
+            .unwrap(),
+        TotpUpdateOutcome::AlreadyEnabled
+    ));
 
     assert!(repo
         .login_operator(&LoginRequest {
@@ -2655,7 +2875,7 @@ async fn operator_totp_lifecycle_encrypts_secret_and_gates_login() {
         .login_operator(&LoginRequest {
             username: "admin".to_string(),
             password: password.to_string(),
-            totp_code: Some("111111".to_string()),
+            totp_code: Some(confirm_code),
         })
         .await
         .unwrap()
@@ -2664,21 +2884,79 @@ async fn operator_totp_lifecycle_encrypts_secret_and_gates_login() {
         .login_operator(&LoginRequest {
             username: "admin".to_string(),
             password: password.to_string(),
-            totp_code: Some(code.clone()),
+            totp_code: Some(login_code.clone()),
         })
         .await
         .unwrap()
         .expect("login with TOTP");
     assert!(logged_in.operator.totp_enabled);
 
-    let TotpUpdateOutcome::Updated(disabled) = repo
-        .disable_operator_totp(
+    assert!(matches!(
+        repo.disable_operator_totp(
             &AuthContext {
-                operator: logged_in.operator,
+                operator: logged_in.operator.clone(),
                 session_id: Some(Uuid::new_v4()),
             },
             password,
-            &code,
+            &login_code,
+        )
+        .await
+        .unwrap(),
+        TotpUpdateOutcome::InvalidCredentials
+    ));
+
+    let audit_json = serde_json::to_string(&repo.list_audit_logs(10).await.unwrap()).unwrap();
+    assert!(audit_json.contains("operator_totp.setup"));
+    assert!(audit_json.contains("operator_totp.enabled"));
+    assert!(!audit_json.contains(&setup.secret_base32));
+}
+
+#[tokio::test]
+async fn operator_totp_disable_consumes_a_newer_code_and_clears_replay_state() {
+    let repo = Repository::Memory(MemoryState::default());
+    let password = "admin-password-123";
+    let auth = repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin".to_string(),
+            password: password.to_string(),
+        })
+        .await
+        .unwrap();
+    let actor = AuthContext {
+        operator: auth.operator,
+        session_id: Some(Uuid::new_v4()),
+    };
+    let TotpSetupOutcome::Created(_) = repo.setup_operator_totp(&actor, password).await.unwrap()
+    else {
+        panic!("expected TOTP setup");
+    };
+    let encrypted = repo
+        .operator_by_username("admin")
+        .await
+        .unwrap()
+        .unwrap()
+        .encrypted_totp_secret()
+        .unwrap();
+    let secret = crate::auth_totp::decrypt_totp_secret(password, &encrypted).unwrap();
+    let current_step = unix_now() / crate::auth_totp::TOTP_PERIOD_SECS;
+    let confirm_code = crate::auth_totp::totp_code_for_step(&secret, current_step);
+    let disable_code =
+        crate::auth_totp::totp_code_for_step(&secret, current_step.saturating_add(1));
+    let TotpUpdateOutcome::Updated(enabled) = repo
+        .confirm_operator_totp(&actor, password, &confirm_code)
+        .await
+        .unwrap()
+    else {
+        panic!("expected TOTP enabled");
+    };
+    let TotpUpdateOutcome::Updated(disabled) = repo
+        .disable_operator_totp(
+            &AuthContext {
+                operator: *enabled,
+                session_id: Some(Uuid::new_v4()),
+            },
+            password,
+            &disable_code,
         )
         .await
         .unwrap()
@@ -2686,19 +2964,81 @@ async fn operator_totp_lifecycle_encrypts_secret_and_gates_login() {
         panic!("expected TOTP disabled");
     };
     assert!(!disabled.totp_enabled);
-    assert!(repo
+    let stored = repo.operator_by_username("admin").await.unwrap().unwrap();
+    assert!(stored.encrypted_totp_secret().is_none());
+    assert_eq!(stored.totp_last_accepted_step, None);
+    assert!(
+        serde_json::to_string(&repo.list_audit_logs(10).await.unwrap())
+            .unwrap()
+            .contains("operator_totp.disabled")
+    );
+}
+
+#[tokio::test]
+async fn concurrent_totp_login_consumes_one_code_once() {
+    let repo = Repository::Memory(MemoryState::default());
+    let password = "admin-password-123";
+    let auth = repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin".to_string(),
+            password: password.to_string(),
+        })
+        .await
+        .unwrap();
+    let actor = AuthContext {
+        operator: auth.operator,
+        session_id: Some(Uuid::new_v4()),
+    };
+    let TotpSetupOutcome::Created(_) = repo.setup_operator_totp(&actor, password).await.unwrap()
+    else {
+        panic!("expected TOTP setup");
+    };
+    let encrypted = repo
         .operator_by_username("admin")
         .await
         .unwrap()
         .unwrap()
         .encrypted_totp_secret()
-        .is_none());
+        .unwrap();
+    let secret = crate::auth_totp::decrypt_totp_secret(password, &encrypted).unwrap();
+    let current_step = unix_now() / crate::auth_totp::TOTP_PERIOD_SECS;
+    let confirm_code = crate::auth_totp::totp_code_for_step(&secret, current_step);
+    let login_step = current_step.saturating_add(1);
+    let login_code = crate::auth_totp::totp_code_for_step(&secret, login_step);
+    assert!(matches!(
+        repo.confirm_operator_totp(&actor, password, &confirm_code)
+            .await
+            .unwrap(),
+        TotpUpdateOutcome::Updated(_)
+    ));
 
-    let audit_json = serde_json::to_string(&repo.list_audit_logs(10).await.unwrap()).unwrap();
-    assert!(audit_json.contains("operator_totp.setup"));
-    assert!(audit_json.contains("operator_totp.enabled"));
-    assert!(audit_json.contains("operator_totp.disabled"));
-    assert!(!audit_json.contains(&setup.secret_base32));
+    let left_request = LoginRequest {
+        username: "admin".to_string(),
+        password: password.to_string(),
+        totp_code: Some(login_code.clone()),
+    };
+    let right_request = LoginRequest {
+        username: "admin".to_string(),
+        password: password.to_string(),
+        totp_code: Some(login_code),
+    };
+    let (left, right) = tokio::join!(
+        repo.login_operator(&left_request),
+        repo.login_operator(&right_request),
+    );
+    let accepted = [left.unwrap(), right.unwrap()]
+        .into_iter()
+        .filter(Option::is_some)
+        .count();
+    assert_eq!(accepted, 1);
+    assert_eq!(
+        repo.operator_by_username("admin")
+            .await
+            .unwrap()
+            .unwrap()
+            .totp_last_accepted_step,
+        Some(login_step)
+    );
 }
 
 #[tokio::test]
@@ -2753,6 +3093,7 @@ async fn operator_password_reset_clears_totp_secret_material() {
         .unwrap();
     assert!(!stored.totp_enabled);
     assert!(stored.encrypted_totp_secret().is_none());
+    assert_eq!(stored.totp_last_accepted_step, None);
 
     let login = repo
         .login_operator(&LoginRequest {
@@ -2917,6 +3258,7 @@ async fn issue_test_operator_headers(
         totp_secret_ciphertext_hex: None,
         totp_secret_nonce_hex: None,
         totp_secret_salt_hex: None,
+        totp_last_accepted_step: None,
         status: "active".to_string(),
         session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
         created_at: crate::unix_now().to_string(),

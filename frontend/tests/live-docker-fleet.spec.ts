@@ -98,7 +98,9 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     writeScreenshotManifest(testInfo.project.name);
     await expectCleanLayout(page);
     await expect(page.locator(".workspaceRouteError")).toHaveCount(0);
-    expect(recoveredWorkspaceModuleTimeouts(consoleErrors)).toBeLessThanOrEqual(1);
+    expect(recoveredWorkspaceModuleTimeouts(consoleErrors)).toBeLessThanOrEqual(
+      1,
+    );
     expect(actionableConsoleErrors(consoleErrors)).toEqual([]);
     return;
   }
@@ -147,7 +149,9 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     "fleet-inline-instance-detail-telemetry",
     "Fleet inline VPS detail opened from the row chevron with live telemetry visible.",
   );
-  await activate(inlineDetail.getByLabel("Close VPS instance records row details"));
+  await activate(
+    inlineDetail.getByLabel("Close VPS instance records row details"),
+  );
   await expect(inlineDetail).toHaveCount(0);
   await openFleetDetailRoute(page, grid, "df-alpha-US-01");
   await expect(
@@ -210,9 +214,9 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   const viewport = page.viewportSize();
   expect(actionMenuBox).not.toBeNull();
   expect(viewport).not.toBeNull();
-  expect((actionMenuBox?.y ?? 0) + (actionMenuBox?.height ?? 0)).toBeLessThanOrEqual(
-    (viewport?.height ?? 0) - 12,
-  );
+  expect(
+    (actionMenuBox?.y ?? 0) + (actionMenuBox?.height ?? 0),
+  ).toBeLessThanOrEqual((viewport?.height ?? 0) - 12);
   const deletionAction = page.getByRole("menuitem", {
     name: "Review VPS deletion",
   });
@@ -234,7 +238,9 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     page.getByRole("menuitem", { name: "Open detail" }),
   ).toBeVisible();
   const rowBox = await firstRow.boundingBox();
-  const contextMenuBox = await page.locator(".consoleMenu:visible").boundingBox();
+  const contextMenuBox = await page
+    .locator(".consoleMenu:visible")
+    .boundingBox();
   expect(rowBox).not.toBeNull();
   expect(contextMenuBox).not.toBeNull();
   expect(contextMenuBox?.x ?? 0).toBeGreaterThanOrEqual(rowBox?.x ?? 0);
@@ -278,12 +284,21 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     .getByRole("combobox", { name: "Bulk group selector expression" })
     .fill("provider:alpha && country:US");
   await page.keyboard.press("Escape");
-  const bulkTagResolution = page.getByLabel("Bulk group target resolution");
-  await expect(bulkTagResolution).toContainText(
-    new RegExp(`Local match ${providerAlphaCountryUsCount} VPSs`),
+  const bulkTagSelectorStatus = page
+    .locator(".searchExpressionInput", {
+      has: page.getByRole("combobox", {
+        name: "Bulk group selector expression",
+      }),
+    })
+    .locator(".searchExpressionMeta");
+  await expect(bulkTagSelectorStatus).toHaveText(
+    `${providerAlphaCountryUsCount}/${expectedTotal}`,
   );
-  await expect(bulkTagResolution).toContainText(
-    `${providerAlphaCountryUsCount} ready`,
+  await expect(bulkTagSelectorStatus).toHaveAttribute(
+    "title",
+    new RegExp(
+      `Local match ${providerAlphaCountryUsCount} VPSs.*${providerAlphaCountryUsCount} ready`,
+    ),
   );
   const bulkTagAction = page.getByRole("button", {
     name: new RegExp(
@@ -345,7 +360,9 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   writeScreenshotManifest(testInfo.project.name);
 
   await expect(page.locator(".workspaceRouteError")).toHaveCount(0);
-  expect(recoveredWorkspaceModuleTimeouts(consoleErrors)).toBeLessThanOrEqual(1);
+  expect(recoveredWorkspaceModuleTimeouts(consoleErrors)).toBeLessThanOrEqual(
+    1,
+  );
   expect(actionableConsoleErrors(consoleErrors)).toEqual([]);
 });
 
@@ -586,14 +603,16 @@ async function expectLiveSystemDashboardTelemetry(
 }
 
 async function expectLiveFleetTelemetry(detail: Locator) {
-  await expect(
-    detail.locator(".metric", { hasText: "Traffic" }),
-  ).toContainText(/\d+(?:\.\d+)?\s*(?:bps|Kbps|Mbps|Gbps|B|KiB|MiB|GiB)/i, {
-    timeout: 30_000,
-  });
-  await expect(
-    detail.locator(".metric", { hasText: "Samples" }),
-  ).toContainText(/\d+\s+(?:rollup|rate)\b/i, { timeout: 30_000 });
+  await expect(detail.locator(".metric", { hasText: "Traffic" })).toContainText(
+    /\d+(?:\.\d+)?\s*(?:bps|Kbps|Mbps|Gbps|B|KiB|MiB|GiB)/i,
+    {
+      timeout: 30_000,
+    },
+  );
+  await expect(detail.locator(".metric", { hasText: "Samples" })).toContainText(
+    /\d+\s+(?:rollup|rate)\b/i,
+    { timeout: 30_000 },
+  );
   await activate(detail.getByRole("tab", { name: "Telemetry" }));
   const telemetryPanel = detail.getByRole("tabpanel");
   await expect(telemetryPanel.getByText("CPU load")).toBeVisible();
@@ -681,7 +700,9 @@ async function clickVisibleGridRowButton(
       if (!row) {
         return "row-missing";
       }
-      const button = Array.from(row.querySelectorAll<HTMLButtonElement>("button")).find(
+      const button = Array.from(
+        row.querySelectorAll<HTMLButtonElement>("button"),
+      ).find(
         (candidate) =>
           pattern.test(candidate.getAttribute("aria-label") ?? "") ||
           pattern.test(candidate.textContent ?? ""),
@@ -704,9 +725,7 @@ async function clickVisibleGridRowButton(
 }
 
 async function exerciseColumnControls(page: Page, grid: Locator) {
-  const vpsHeader = grid
-    .locator(".gridHeaderCell", { hasText: "VPS" })
-    .first();
+  const vpsHeader = grid.locator(".gridHeaderCell", { hasText: "VPS" }).first();
   const countryHeader = grid
     .locator(".gridHeaderCell", { hasText: "Country" })
     .first();
@@ -893,9 +912,7 @@ async function exerciseExpressionWebhooks(page: Page, projectName: string) {
     "Webhook queue operation after matching saved rules against the preview event.",
   );
 
-  await webhooks
-    .getByRole("tab", { name: "Maintenance" })
-    .click();
+  await webhooks.getByRole("tab", { name: "Maintenance" }).click();
   await webhooks.getByLabel("Webhook rotation days").fill("7");
   await webhooks
     .getByLabel("Webhook rotation status")
@@ -1446,8 +1463,12 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
         /0 healthy, (?:1 unknown, 0 attention|0 unknown, 1 attention)/,
       );
       await expect(layerSummary).not.toHaveClass(/\bready\b/);
-      await expect(graphPanel.getByText("OSPF cost", { exact: true })).toHaveCount(0);
-      await expect(graphPanel.getByText("Why OSPF cost changed")).toHaveCount(0);
+      await expect(
+        graphPanel.getByText("OSPF cost", { exact: true }),
+      ).toHaveCount(0);
+      await expect(graphPanel.getByText("Why OSPF cost changed")).toHaveCount(
+        0,
+      );
     }
     await expectCleanLayout(page);
     await maybeExtendedScreenshot(

@@ -1,0 +1,895 @@
+import { RefreshCw, Target } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { apiGet, apiPost, buildListPath } from "../api";
+import {
+  ActionFeedback,
+  type ActionFeedbackTone,
+} from "../components/ActionFeedback";
+import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
+import {
+  ConsoleDataGrid,
+  type ConsoleDataGridAction,
+  type ConsoleDataGridColumn,
+} from "../components/ConsoleDataGrid";
+import { ConsoleStatusBadge } from "../components/ConsoleLayout";
+import { scrollIntoViewWithMotion } from "../motion";
+import {
+  agentsMatchingExpression,
+  parseSearchExpression,
+} from "../searchExpression";
+import { buildScheduleTargetUpdatePrivilegeAssertion } from "../scheduleTargetMaintenance";
+import type {
+  AgentView,
+  ArtifactCleanupPreviewRecord,
+  BulkResolveResponse,
+  BulkUpdatePingTargetsResponse,
+  JobTargetSelection,
+  PingTargetAssignmentChangeView,
+  PingTargetView,
+  ScheduleRecord,
+  ServerJobRecord,
+} from "../types";
+import { formatCompactTime, shortId } from "../utils";
+import type { PrivilegeMaterial } from "../privilege";
+import { ServerJobsPanel } from "./jobs/ServerJobsPanel";
+
+type MaintenanceTab = "selectors" | "artifacts" | "jobs";
+
+type StaleSelectorRow = {
+  canUpdate: boolean;
+  frozenTargetIds: string[];
+  id: string;
+  kind: "Ping target" | "Schedule";
+  name: string;
+  reason: string;
+  resolvedTargetIds: string[] | null;
+  resourceId: string;
+  selectorExpression: string;
+  source: PingTargetView | ScheduleRecord;
+  updatedAt: string;
+};
+
+type ScheduleTargetReview = {
+  nextTargetIds: string[];
+  schedule: ScheduleRecord;
+  selectorExpression: string;
+};
+
+type SelectorUpdateReview = {
+  pingPreview: BulkUpdatePingTargetsResponse | null;
+  pingTargetIds: string[];
+  schedules: ScheduleTargetReview[];
+  selectedCount: number;
+};
+
+type Feedback = {
+  message: string;
+  tone: ActionFeedbackTone;
+};
+
+const maintenanceTabs: Array<{
+  id: MaintenanceTab;
+  label: string;
+  route: string;
+}> = [
+  { id: "selectors", label: "Stale selectors", route: "maintenance:selectors" },
+  {
+    id: "artifacts",
+    label: "Artifact cleanup",
+    route: "maintenance:artifacts",
+  },
+  { id: "jobs", label: "Maintenance jobs", route: "maintenance:jobs" },
+];
+
+const SELECTOR_PAGE_SIZE = 1_000;
+const MAX_SELECTOR_PAGES = 100;
+const SCHEDULE_TARGET_PRIVILEGE_REQUIRED =
+  "Privilege unlock is required to update schedule target snapshots.";
+
+export function SystemMaintenancePanel({
+  activeSubpage,
+  agents,
+  apiToken,
+  jobs,
+  jobsError,
+  jobsLoading,
+  onCancelJob,
+  onCreateCleanupJob,
+  onOpenPrivilegeUnlock,
+  onPreviewCleanup,
+  onRefreshJobs,
+  onRefreshSchedules,
+  onResolveTargets,
+  onSelectSubpage,
+  privilegeMaterial,
+}: {
+  activeSubpage: string;
+  agents: AgentView[];
+  apiToken: string;
+  jobs: ServerJobRecord[];
+  jobsError: string | null;
+  jobsLoading: boolean;
+  onCancelJob: (jobId: string) => Promise<ServerJobRecord>;
+  onCreateCleanupJob: (
+    expression: string,
+    domains: string[],
+    previewHash: string,
+  ) => Promise<ServerJobRecord>;
+  onOpenPrivilegeUnlock: () => void;
+  onPreviewCleanup: (
+    expression: string,
+    domains: string[],
+  ) => Promise<ArtifactCleanupPreviewRecord>;
+  onRefreshJobs: () => void;
+  onRefreshSchedules: () => Promise<void>;
+  onResolveTargets: (
+    selection: JobTargetSelection,
+  ) => Promise<BulkResolveResponse>;
+  onSelectSubpage: (subpage: string) => void;
+  privilegeMaterial: PrivilegeMaterial | null;
+}) {
+  const activeTab = maintenanceTabFromSubpage(activeSubpage);
+
+  return (
+    <section className="workspace singleColumn systemMaintenanceWorkspace">
+      <div className="fleetPanel maintenanceNavigationPanel">
+        <div className="sectionHeader compactSectionHeader">
+          <div>
+            <h2>System maintenance</h2>
+            <span>
+              Repair saved target snapshots, review artifact cleanup, and
+              inspect maintenance jobs.
+            </span>
+          </div>
+        </div>
+        <nav
+          aria-label="System maintenance subpanels"
+          className="subpanelTabs accessTabs maintenanceTabs"
+        >
+          {maintenanceTabs.map((tab) => (
+            <button
+              className={activeTab === tab.id ? "active" : ""}
+              key={tab.id}
+              onClick={() => onSelectSubpage(tab.route)}
+              type="button"
+            >
+              {tab.label}
+            </button>
+          ))}
+        </nav>
+      </div>
+
+      {activeTab === "selectors" ? (
+        <StaleSelectorMaintenancePanel
+          agents={agents}
+          apiToken={apiToken}
+          onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+          onRefreshSchedules={onRefreshSchedules}
+          onResolveTargets={onResolveTargets}
+          privilegeMaterial={privilegeMaterial}
+        />
+      ) : null}
+
+      {activeTab !== "selectors" ? (
+        <ServerJobsPanel
+          error={jobsError}
+          jobs={jobs}
+          loading={jobsLoading}
+          onCancelJob={onCancelJob}
+          onCreateCleanupJob={onCreateCleanupJob}
+          onPreviewCleanup={onPreviewCleanup}
+          onRefresh={onRefreshJobs}
+          section={activeTab === "artifacts" ? "cleanup" : "jobs"}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function StaleSelectorMaintenancePanel({
+  agents,
+  apiToken,
+  onOpenPrivilegeUnlock,
+  onRefreshSchedules,
+  onResolveTargets,
+  privilegeMaterial,
+}: {
+  agents: AgentView[];
+  apiToken: string;
+  onOpenPrivilegeUnlock: () => void;
+  onRefreshSchedules: () => Promise<void>;
+  onResolveTargets: (
+    selection: JobTargetSelection,
+  ) => Promise<BulkResolveResponse>;
+  privilegeMaterial: PrivilegeMaterial | null;
+}) {
+  const [schedules, setSchedules] = useState<ScheduleRecord[]>([]);
+  const [pingTargets, setPingTargets] = useState<PingTargetView[]>([]);
+  const [scheduleLoadError, setScheduleLoadError] = useState<string | null>(
+    null,
+  );
+  const [pingLoadError, setPingLoadError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const [review, setReview] = useState<SelectorUpdateReview | null>(null);
+  const feedbackRef = useRef<HTMLDivElement | null>(null);
+  const previousFeedbackRef = useRef<string | null>(null);
+
+  const refreshResources = useCallback(async () => {
+    setLoading(true);
+    setScheduleLoadError(null);
+    setPingLoadError(null);
+    const [scheduleResult, pingResult] = await Promise.allSettled([
+      loadAllSchedules(apiToken),
+      apiGet<PingTargetView[]>("/api/v1/ping-targets", apiToken),
+    ]);
+    if (scheduleResult.status === "fulfilled") {
+      setSchedules(scheduleResult.value);
+    } else {
+      setSchedules([]);
+      setScheduleLoadError(errorMessage(scheduleResult.reason));
+    }
+    if (pingResult.status === "fulfilled") {
+      setPingTargets(pingResult.value);
+    } else {
+      setPingTargets([]);
+      setPingLoadError(errorMessage(pingResult.reason));
+    }
+    setLoading(false);
+  }, [apiToken]);
+
+  useEffect(() => {
+    void refreshResources();
+  }, [refreshResources]);
+
+  useEffect(() => {
+    if (privilegeMaterial && error === SCHEDULE_TARGET_PRIVILEGE_REQUIRED) {
+      setError(null);
+    }
+  }, [error, privilegeMaterial]);
+
+  const rows = useMemo(
+    () => staleSelectorRows(schedules, pingTargets, agents),
+    [agents, pingTargets, schedules],
+  );
+  const updateableRows = rows.filter((row) => row.canUpdate);
+  const blockedRows = rows.length - updateableRows.length;
+  const pageFeedback = [
+    scheduleLoadError ? `Schedules: ${scheduleLoadError}` : null,
+    pingLoadError ? `Ping targets: ${pingLoadError}` : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const outcomeMessage = error ?? feedback?.message ?? null;
+  const outcomeTone: ActionFeedbackTone = error
+    ? "danger"
+    : (feedback?.tone ?? "info");
+
+  useEffect(() => {
+    if (!outcomeMessage) {
+      previousFeedbackRef.current = null;
+      return;
+    }
+    if (previousFeedbackRef.current === outcomeMessage) {
+      return;
+    }
+    previousFeedbackRef.current = outcomeMessage;
+    const frame = window.requestAnimationFrame(() => {
+      if (feedbackRef.current) {
+        scrollIntoViewWithMotion(feedbackRef.current, { block: "nearest" });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [outcomeMessage]);
+
+  const columns = useMemo<ConsoleDataGridColumn<StaleSelectorRow>[]>(
+    () => [
+      {
+        id: "resource",
+        header: "Resource",
+        mobilePrimary: true,
+        size: 220,
+        minSize: 180,
+        cell: (row) => (
+          <span className="historyPrimary">
+            <strong>{row.name}</strong>
+            <small title={row.resourceId}>
+              {row.kind} · {shortId(row.resourceId)}
+            </small>
+          </span>
+        ),
+        searchValue: (row) => `${row.kind} ${row.name} ${row.resourceId}`,
+        sortValue: (row) => `${row.kind}:${row.name}`,
+      },
+      {
+        id: "selector",
+        header: "Saved selector",
+        size: 270,
+        minSize: 190,
+        cell: (row) => (
+          <code title={row.selectorExpression}>{row.selectorExpression}</code>
+        ),
+        searchValue: (row) => row.selectorExpression,
+        sortValue: (row) => row.selectorExpression,
+      },
+      {
+        id: "frozen",
+        header: "Frozen targets",
+        size: 145,
+        minSize: 125,
+        cell: (row) => (
+          <span title={targetIdTitle(row.frozenTargetIds)}>
+            {targetCountLabel(row.frozenTargetIds.length)}
+          </span>
+        ),
+        searchValue: (row) => row.frozenTargetIds.join(" "),
+        sortValue: (row) => row.frozenTargetIds.length,
+      },
+      {
+        id: "current",
+        header: "Current resolution",
+        size: 170,
+        minSize: 145,
+        cell: (row) =>
+          row.resolvedTargetIds === null
+            ? "Unavailable"
+            : targetDeltaLabel(row.frozenTargetIds, row.resolvedTargetIds),
+        searchValue: (row) => row.resolvedTargetIds?.join(" ") ?? row.reason,
+        sortValue: (row) => row.resolvedTargetIds?.length ?? -1,
+      },
+      {
+        id: "state",
+        header: "State",
+        mobileState: true,
+        size: 150,
+        minSize: 130,
+        cell: (row) => (
+          <span title={row.reason}>
+            <ConsoleStatusBadge tone={row.canUpdate ? "warning" : "critical"}>
+              {row.canUpdate ? "Update available" : "Repair required"}
+            </ConsoleStatusBadge>
+          </span>
+        ),
+        searchValue: (row) => row.reason,
+        sortValue: (row) => Number(row.canUpdate),
+      },
+      {
+        id: "updated",
+        header: "Saved",
+        size: 150,
+        minSize: 130,
+        cell: (row) => formatCompactTime(row.updatedAt),
+        searchValue: (row) => row.updatedAt,
+        sortValue: (row) => row.updatedAt,
+      },
+    ],
+    [],
+  );
+
+  async function reviewRows(selectedRows: StaleSelectorRow[]) {
+    if (pending) return;
+    const selected = selectedRows.filter((row) => row.canUpdate);
+    if (selected.length === 0) {
+      setError(
+        "No selected stale selector can be updated until its saved definition is repaired.",
+      );
+      return;
+    }
+    const selectedSchedules = selected.filter(
+      (row): row is StaleSelectorRow & { source: ScheduleRecord } =>
+        row.kind === "Schedule",
+    );
+    if (selectedSchedules.length > 0 && !privilegeMaterial) {
+      setError(SCHEDULE_TARGET_PRIVILEGE_REQUIRED);
+      onOpenPrivilegeUnlock();
+      return;
+    }
+    setPending(true);
+    setError(null);
+    setFeedback({
+      message: "Resolving saved selectors for review",
+      tone: "progress",
+    });
+    try {
+      const resolvedBySelector = new Map<string, string[]>();
+      const scheduleUpdates: ScheduleTargetReview[] = [];
+      for (const row of selectedSchedules) {
+        let targetIds = resolvedBySelector.get(row.selectorExpression);
+        if (!targetIds) {
+          const resolved = await onResolveTargets({
+            selector_expression: row.selectorExpression,
+          });
+          targetIds = uniqueSorted(resolved.targets.map((target) => target.id));
+          resolvedBySelector.set(row.selectorExpression, targetIds);
+        }
+        if (!sameStringSet(row.frozenTargetIds, targetIds)) {
+          scheduleUpdates.push({
+            nextTargetIds: targetIds,
+            schedule: row.source,
+            selectorExpression: row.selectorExpression,
+          });
+        }
+      }
+
+      const pingTargetIds = selected
+        .filter((row) => row.kind === "Ping target")
+        .map((row) => row.resourceId);
+      const pingPreview =
+        pingTargetIds.length > 0
+          ? await apiPost<BulkUpdatePingTargetsResponse>(
+              "/api/v1/ping-targets/update-targets",
+              apiToken,
+              { confirmed: false, target_ids: pingTargetIds },
+            )
+          : null;
+      const pingChanges = pingPreview?.changes.filter(pingChangeHasDelta) ?? [];
+      if (scheduleUpdates.length === 0 && pingChanges.length === 0) {
+        setFeedback({
+          message:
+            "Server resolution confirms every selected frozen target list is current.",
+          tone: "info",
+        });
+        await refreshResources();
+        return;
+      }
+      setReview({
+        pingPreview: pingPreview
+          ? { ...pingPreview, changes: pingChanges }
+          : null,
+        pingTargetIds: pingChanges.map((change) => change.target_id),
+        schedules: scheduleUpdates,
+        selectedCount: selectedRows.length,
+      });
+      setFeedback(null);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function confirmUpdates() {
+    const snapshot = review;
+    if (!snapshot || pending) return;
+    if (snapshot.schedules.length > 0 && !privilegeMaterial) {
+      setError(
+        "Privilege unlock expired before schedule target updates were applied.",
+      );
+      onOpenPrivilegeUnlock();
+      return;
+    }
+    setPending(true);
+    setError(null);
+    setFeedback({
+      message: "Updating reviewed frozen target snapshots",
+      tone: "progress",
+    });
+    const failures: string[] = [];
+    let updatedSchedules = 0;
+    let updatedPingTargets = 0;
+    try {
+      const preparedSchedules = await Promise.all(
+        snapshot.schedules.map(async (update) => ({
+          ...update,
+          privilegeAssertion: await buildScheduleTargetUpdatePrivilegeAssertion(
+            {
+              privilegeMaterial: privilegeMaterial!,
+              schedule: update.schedule,
+              selectorExpression: update.selectorExpression,
+              targetClientIds: update.nextTargetIds,
+            },
+          ),
+        })),
+      );
+      for (let offset = 0; offset < preparedSchedules.length; offset += 8) {
+        const batch = preparedSchedules.slice(offset, offset + 8);
+        const results = await Promise.allSettled(
+          batch.map((update) =>
+            apiPost<ScheduleRecord>(
+              `/api/v1/schedules/${encodeURIComponent(update.schedule.id)}/targets`,
+              apiToken,
+              {
+                confirmed: true,
+                privilege_assertion: update.privilegeAssertion,
+              },
+            ),
+          ),
+        );
+        results.forEach((result, index) => {
+          if (result.status === "fulfilled") {
+            updatedSchedules += 1;
+          } else {
+            failures.push(
+              `${batch[index]?.schedule.name ?? "Schedule"}: ${errorMessage(result.reason)}`,
+            );
+          }
+        });
+      }
+
+      if (snapshot.pingPreview && snapshot.pingTargetIds.length > 0) {
+        try {
+          const response = await apiPost<BulkUpdatePingTargetsResponse>(
+            "/api/v1/ping-targets/update-targets",
+            apiToken,
+            {
+              confirmed: true,
+              preview_hash: snapshot.pingPreview.preview_hash,
+              target_ids: snapshot.pingTargetIds,
+            },
+          );
+          updatedPingTargets =
+            response.changes.filter(pingChangeHasDelta).length;
+          for (const sync of response.runtime_sync) {
+            if (sync.status !== "queued") {
+              failures.push(
+                `Ping runtime sync for ${sync.client_id}: ${sync.error ?? sync.status}`,
+              );
+            }
+          }
+        } catch (cause) {
+          failures.push(`Ping targets: ${errorMessage(cause)}`);
+        }
+      }
+    } catch (cause) {
+      failures.push(errorMessage(cause));
+    }
+
+    setReview(null);
+    await Promise.allSettled([refreshResources(), onRefreshSchedules()]);
+    const successParts = [
+      updatedSchedules > 0
+        ? `${updatedSchedules} schedule${updatedSchedules === 1 ? "" : "s"}`
+        : null,
+      updatedPingTargets > 0
+        ? `${updatedPingTargets} Ping target${updatedPingTargets === 1 ? "" : "s"}`
+        : null,
+    ].filter(Boolean);
+    if (failures.length > 0 && successParts.length === 0) {
+      setError(`No target snapshot was updated. ${failures.join(" ")}`);
+      setFeedback(null);
+    } else {
+      setFeedback({
+        message: `${successParts.length > 0 ? `Updated ${successParts.join(" and ")}.` : "No target snapshot required a write."}${failures.length > 0 ? ` Remaining problems: ${failures.join(" ")}` : ""}`,
+        tone: failures.length > 0 ? "warning" : "success",
+      });
+    }
+    setPending(false);
+  }
+
+  const actions: ConsoleDataGridAction<StaleSelectorRow>[] = [
+    {
+      description: (selected) =>
+        selected.length > 0
+          ? `Resolve and review ${selected.filter((row) => row.canUpdate).length} updateable saved selector${selected.length === 1 ? "" : "s"}.`
+          : "Select one or more stale saved selectors.",
+      disabled: (selected) => pending || !selected.some((row) => row.canUpdate),
+      icon: <Target size={14} />,
+      label: "Update targets",
+      onSelect: (selected) => void reviewRows(selected),
+    },
+  ];
+
+  return (
+    <div className="fleetPanel staleSelectorMaintenancePanel">
+      <div className="sectionHeader">
+        <div>
+          <h2>Stale frozen selectors</h2>
+          <span>
+            {loading
+              ? "Checking saved selectors"
+              : rows.length === 0
+                ? "All mutable frozen target lists match their saved selectors"
+                : `${rows.length} stale or invalid saved selector${rows.length === 1 ? "" : "s"}; ${updateableRows.length} updateable${blockedRows > 0 ? `, ${blockedRows} require repair` : ""}`}
+          </span>
+        </div>
+      </div>
+      <ActionFeedback
+        className="localActionFeedback"
+        message={pageFeedback || null}
+        tone="danger"
+      />
+      <ActionFeedback
+        className="localActionFeedback"
+        message={outcomeMessage}
+        ref={feedbackRef}
+        tone={outcomeTone}
+      />
+      <div className="scheduleExecutionPolicy selectorMaintenancePolicy">
+        <Target size={16} />
+        <span>
+          Schedules include backup policies. Ping assignments update
+          transactionally; schedules keep their native per-schedule review and
+          audit boundary. Shared views and approval records are intentionally
+          immutable evidence and never appear here.
+        </span>
+      </div>
+      <ConsoleDataGrid
+        actions={actions}
+        columns={columns}
+        defaultPageSize={100}
+        empty={
+          <div className="emptyState compactEmpty">
+            <Target size={22} />
+            <strong>
+              {loading ? "Checking selectors" : "No stale selectors"}
+            </strong>
+            <span>
+              {loading
+                ? "Loading all schedule pages and current Ping target assignments."
+                : "Mutable frozen target lists match their saved selector expressions."}
+            </span>
+          </div>
+        }
+        getRowId={(row) => row.id}
+        itemLabel="selectors"
+        renderExpandedRow={(row) => (
+          <div className="consoleInlineDetailGrid">
+            <span>
+              <strong>Resource ID</strong>
+              <span className="monoValue">{row.resourceId}</span>
+            </span>
+            <span>
+              <strong>Reason</strong>
+              <span>{row.reason}</span>
+            </span>
+            <span>
+              <strong>Frozen target IDs</strong>
+              <span className="monoValue">
+                {row.frozenTargetIds.join(", ") || "None"}
+              </span>
+            </span>
+            <span>
+              <strong>Current local resolution</strong>
+              <span className="monoValue">
+                {row.resolvedTargetIds?.join(", ") ?? "Unavailable"}
+              </span>
+            </span>
+          </div>
+        )}
+        rowActions={actions}
+        rows={rows}
+        searchPlaceholder="Search resource, selector, or frozen VPS ID"
+        singleExpandedRow
+        storageKey="vpsman.grid.system.staleSelectors"
+        title="Stale selector records"
+        toolbarActions={
+          <div className="previewMeta">
+            <button
+              className="secondaryAction compactAction"
+              disabled={loading || pending}
+              onClick={() => void refreshResources()}
+              type="button"
+            >
+              <RefreshCw size={14} />
+              Refresh
+            </button>
+            <button
+              className="primaryAction compactAction"
+              disabled={pending || updateableRows.length === 0}
+              onClick={() => void reviewRows(updateableRows)}
+              title={
+                blockedRows > 0
+                  ? `Update every resolvable stale snapshot; ${blockedRows} invalid definition${blockedRows === 1 ? " remains" : "s remain"} for repair.`
+                  : "Resolve and review every stale mutable target snapshot."
+              }
+              type="button"
+            >
+              <Target size={14} />
+              Update all
+            </button>
+          </div>
+        }
+      />
+      <ConfirmationPrompt
+        confirmLabel="Update targets"
+        detail="Replace only the reviewed frozen target IDs. Saved selector text and every other resource setting remain unchanged."
+        error={error}
+        items={selectorReviewItems(review)}
+        onCancel={() => setReview(null)}
+        onConfirm={() => void confirmUpdates()}
+        open={review !== null}
+        pending={pending}
+        title="Confirm stale target updates"
+      />
+    </div>
+  );
+}
+
+function staleSelectorRows(
+  schedules: ScheduleRecord[],
+  pingTargets: PingTargetView[],
+  agents: AgentView[],
+): StaleSelectorRow[] {
+  const rows: StaleSelectorRow[] = [];
+  for (const schedule of schedules) {
+    const selectorExpression = schedule.selector_expression.trim();
+    const parsed = parseSearchExpression(selectorExpression);
+    const frozenTargetIds = uniqueSorted(schedule.target_client_ids ?? []);
+    const resolvedTargetIds =
+      selectorExpression && !parsed.error
+        ? uniqueSorted(
+            agentsMatchingExpression(agents, selectorExpression).map(
+              (agent) => agent.id,
+            ),
+          )
+        : null;
+    if (
+      resolvedTargetIds !== null &&
+      sameStringSet(frozenTargetIds, resolvedTargetIds)
+    ) {
+      continue;
+    }
+    const operationInvalid =
+      !schedule.operation || Boolean(schedule.operation_error);
+    const reason = parsed.error
+      ? `Invalid saved selector: ${parsed.error}`
+      : operationInvalid
+        ? "Saved operation is invalid; repair the schedule before updating targets"
+        : resolvedTargetIds?.length === 0
+          ? "Saved selector currently matches no visible VPS; update will freeze that exact empty result"
+          : "Current selector resolution differs from the frozen target IDs";
+    rows.push({
+      canUpdate:
+        !parsed.error && !operationInvalid && resolvedTargetIds !== null,
+      frozenTargetIds,
+      id: `schedule:${schedule.id}`,
+      kind: "Schedule",
+      name: schedule.name,
+      reason,
+      resolvedTargetIds,
+      resourceId: schedule.id,
+      selectorExpression,
+      source: schedule,
+      updatedAt: schedule.updated_at,
+    });
+  }
+  for (const target of pingTargets) {
+    const selectorExpression = target.selector_expression.trim();
+    const parsed = parseSearchExpression(selectorExpression);
+    const frozenTargetIds = uniqueSorted(target.target_client_ids ?? []);
+    const resolvedTargetIds =
+      selectorExpression && !parsed.error
+        ? uniqueSorted(
+            agentsMatchingExpression(agents, selectorExpression).map(
+              (agent) => agent.id,
+            ),
+          )
+        : null;
+    if (
+      !target.target_update_available &&
+      (resolvedTargetIds === null ||
+        sameStringSet(frozenTargetIds, resolvedTargetIds))
+    ) {
+      continue;
+    }
+    rows.push({
+      canUpdate: !parsed.error,
+      frozenTargetIds,
+      id: `ping:${target.id}`,
+      kind: "Ping target",
+      name: target.name,
+      reason: parsed.error
+        ? `Invalid saved selector: ${parsed.error}`
+        : "Current selector resolution differs from the frozen assignments",
+      resolvedTargetIds,
+      resourceId: target.id,
+      selectorExpression,
+      source: target,
+      updatedAt: target.updated_at,
+    });
+  }
+  return rows.sort(
+    (left, right) =>
+      left.kind.localeCompare(right.kind) ||
+      left.name.localeCompare(right.name),
+  );
+}
+
+async function loadAllSchedules(apiToken: string): Promise<ScheduleRecord[]> {
+  const schedules: ScheduleRecord[] = [];
+  for (let page = 0; page < MAX_SELECTOR_PAGES; page += 1) {
+    const records = await apiGet<ScheduleRecord[]>(
+      buildListPath("/api/v1/schedules", {
+        dir: "asc",
+        limit: SELECTOR_PAGE_SIZE,
+        offset: page * SELECTOR_PAGE_SIZE,
+        sort: "name",
+      }),
+      apiToken,
+    );
+    schedules.push(...records);
+    if (records.length < SELECTOR_PAGE_SIZE) {
+      return schedules;
+    }
+  }
+  throw new Error(
+    `Schedule maintenance scan reached its explicit ${MAX_SELECTOR_PAGES * SELECTOR_PAGE_SIZE}-record boundary; narrow or remove old schedules before using Update all.`,
+  );
+}
+
+function selectorReviewItems(review: SelectorUpdateReview | null) {
+  const pingChanges = review?.pingPreview?.changes ?? [];
+  const schedules = review?.schedules ?? [];
+  return [
+    { label: "Selected stale records", value: review?.selectedCount ?? 0 },
+    { label: "Schedule snapshots", value: schedules.length },
+    { label: "Ping assignments", value: pingChanges.length },
+    {
+      label: "Only change",
+      value: "Frozen VPS target IDs",
+    },
+    {
+      label: "Target deltas",
+      value: (
+        <div className="configurationReviewList">
+          {schedules.map((update) => (
+            <span key={`schedule:${update.schedule.id}`}>
+              <strong>{update.schedule.name}</strong>
+              <small>
+                {targetDeltaLabel(
+                  update.schedule.target_client_ids,
+                  update.nextTargetIds,
+                )}
+              </small>
+            </span>
+          ))}
+          {pingChanges.map((change) => (
+            <span key={`ping:${change.target_id}`}>
+              <strong>{change.target_name}</strong>
+              <small>
+                +{change.added_client_ids.length} / -
+                {change.removed_client_ids.length}
+              </small>
+            </span>
+          ))}
+        </div>
+      ),
+    },
+  ];
+}
+
+function maintenanceTabFromSubpage(subpage: string): MaintenanceTab {
+  const detail = subpage.split(":")[1];
+  return detail === "artifacts" || detail === "jobs" ? detail : "selectors";
+}
+
+function pingChangeHasDelta(change: PingTargetAssignmentChangeView): boolean {
+  return (
+    change.added_client_ids.length > 0 || change.removed_client_ids.length > 0
+  );
+}
+
+function targetDeltaLabel(current: string[], next: string[]): string {
+  const currentSet = new Set(current);
+  const nextSet = new Set(next);
+  const added = next.filter((id) => !currentSet.has(id)).length;
+  const removed = current.filter((id) => !nextSet.has(id)).length;
+  return `${targetCountLabel(next.length)} now · +${added} / -${removed}`;
+}
+
+function targetCountLabel(count: number): string {
+  return `${count} VPS${count === 1 ? "" : "s"}`;
+}
+
+function targetIdTitle(ids: string[]): string {
+  return ids.length > 0 ? ids.join(", ") : "No frozen target IDs";
+}
+
+function uniqueSorted(values: string[]): string[] {
+  return Array.from(new Set(values)).sort();
+}
+
+function sameStringSet(left: string[], right: string[]): boolean {
+  const normalizedLeft = uniqueSorted(left);
+  const normalizedRight = uniqueSorted(right);
+  return (
+    normalizedLeft.length === normalizedRight.length &&
+    normalizedLeft.every((value, index) => value === normalizedRight[index])
+  );
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}

@@ -3365,6 +3365,9 @@ export async function installConsoleApiMock(
     telemetryFailurePath?: "network-rates" | "rollups" | "tunnels";
     telemetryNetworkRateScales?: number[];
     terminalSessionsOverride?: typeof terminalSessions;
+    totpSetupDelayMs?: number;
+    totpSetupOperatorIdOverride?: string;
+    totpSetupSwitchSession?: boolean;
     portSpeedRulesDelayMs?: number;
     portSpeedRulesOverride?: VpsRuleValueRecord[];
     vpsRulesApplyDelayMs?: number;
@@ -3444,6 +3447,9 @@ export async function installConsoleApiMock(
       telemetryFailurePathFixture,
       telemetryNetworkRateScalesFixture,
       terminalSessionsFixture,
+      totpSetupDelayMsFixture,
+      totpSetupOperatorIdOverrideFixture,
+      totpSetupSwitchSessionFixture,
       topologyGraphFixture,
       trafficAccountingFixture,
       tunnelPlansFixture,
@@ -3670,6 +3676,7 @@ export async function installConsoleApiMock(
         suiteConfigs: [] as unknown[],
         suiteConfigReads: 0,
         terminalControls: [] as unknown[],
+        totpSetups: [] as unknown[],
         tunnelPlanAllocations: [] as unknown[],
         tunnelPlanEnabledMutations: [] as unknown[],
         tunnelPlanConnectionAssessments: [] as unknown[],
@@ -3686,6 +3693,55 @@ export async function installConsoleApiMock(
       Object.defineProperty(window, "__vpsmanTestRequests", {
         configurable: true,
         value: requests,
+      });
+      const fixtureTotpSecret = "JBSWY3DPEHPK3PXP";
+      const decodeFixtureBase32 = (value: string) => {
+        const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+        let bits = 0;
+        let buffer = 0;
+        const bytes: number[] = [];
+        for (const character of value.replace(/=+$/u, "").toUpperCase()) {
+          const digit = alphabet.indexOf(character);
+          if (digit < 0) {
+            throw new Error("Invalid fixture TOTP secret");
+          }
+          buffer = (buffer << 5) | digit;
+          bits += 5;
+          if (bits >= 8) {
+            bits -= 8;
+            bytes.push((buffer >>> bits) & 0xff);
+          }
+        }
+        return new Uint8Array(bytes);
+      };
+      const fixtureTotpCode = async () => {
+        let counter = Math.floor(Date.now() / 30_000);
+        const counterBytes = new Uint8Array(8);
+        for (let index = counterBytes.length - 1; index >= 0; index -= 1) {
+          counterBytes[index] = counter & 0xff;
+          counter = Math.floor(counter / 256);
+        }
+        const key = await crypto.subtle.importKey(
+          "raw",
+          decodeFixtureBase32(fixtureTotpSecret),
+          { hash: "SHA-1", name: "HMAC" },
+          false,
+          ["sign"],
+        );
+        const digest = new Uint8Array(
+          await crypto.subtle.sign("HMAC", key, counterBytes),
+        );
+        const offset = digest[digest.length - 1] & 0x0f;
+        const binary =
+          ((digest[offset] & 0x7f) << 24) |
+          ((digest[offset + 1] & 0xff) << 16) |
+          ((digest[offset + 2] & 0xff) << 8) |
+          (digest[offset + 3] & 0xff);
+        return String(binary % 1_000_000).padStart(6, "0");
+      };
+      Object.defineProperty(window, "__vpsmanFixtureTotpCode", {
+        configurable: true,
+        value: fixtureTotpCode,
       });
       const operatorRecords = [
         {
@@ -4437,25 +4493,33 @@ export async function installConsoleApiMock(
                   "traffic.reset_day": "14",
                 },
               );
-        return {
-          changed_row_count: keys.length,
-          changes: keys.map((key) => ({
+        const values =
+          (body.values as Record<string, string> | undefined) ?? {};
+        const changes = keys.map((key) => {
+          const after = operation === "unset" ? null : (values[key] ?? "14");
+          const validationErrors =
+            key === "billing.price" && after?.endsWith("/w")
+              ? ["billing_plan_period_invalid"]
+              : [];
+          return {
             action: operation === "unset" ? "unset" : "set",
-            after:
-              operation === "unset"
-                ? null
-                : ((body.values as Record<string, string> | undefined)?.[key] ??
-                  "14"),
+            after,
             before:
               vpsRuleValuesFixture.find((row) => row.key === key)?.value_raw ??
               null,
             client_id: "agent-sfo-01",
             display_name: "edge-sfo-01",
             key,
-            validation: "ok",
-            validation_errors: [],
-          })),
-          invalid_row_count: 0,
+            validation: validationErrors.length > 0 ? "invalid" : "ok",
+            validation_errors: validationErrors,
+          };
+        });
+        return {
+          changed_row_count: changes.length,
+          changes,
+          invalid_row_count: changes.filter(
+            (change) => change.validation !== "ok",
+          ).length,
           matched_vps_count: 1,
           preview_hash:
             "3333333333333333333333333333333333333333333333333333333333333333",
@@ -4938,9 +5002,26 @@ export async function installConsoleApiMock(
           const offset = Math.max(0, Number(params.get("offset") ?? "0"));
           const limit = Math.max(1, Number(params.get("limit") ?? "1000"));
           const items = visibleAgents().map((client) => ({
+            billing:
+              client.id === "agent-sfo-01"
+                ? {
+                    currency: "CNY",
+                    currency_display: "¥",
+                    cycle: "14",
+                    disabled: false,
+                    display: "29.90 ¥/m",
+                    period: "month",
+                    period_code: "m",
+                    price: "29.90",
+                  }
+                : null,
             client,
             network: [],
             network_history: [],
+            port_speed:
+              client.id === "agent-sfo-01"
+                ? { bps: 1_500_000_000, display: "1.5 Gbps" }
+                : null,
             primary_ping: null,
             primary_ping_history: [],
             resource_history: [],
@@ -5411,25 +5492,71 @@ export async function installConsoleApiMock(
         }
         if (pathname === "/api/v1/auth/totp/setup" && method === "POST") {
           const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
-          if (String(body.password ?? "").length < 12) {
-            return jsonResponse({ error: "password_too_short" }, 400);
+          requests.totpSetups.push(body);
+          if (String(body.password ?? "") !== "valid-password-123") {
+            return jsonResponse(
+              {
+                error: "invalid_totp_credentials",
+                message: "The current password is incorrect.",
+              },
+              400,
+            );
+          }
+          if (totpSetupSwitchSessionFixture && operatorSessions.length > 1) {
+            operatorSessions.forEach((session, index) => {
+              session.current = index === 1;
+            });
+          }
+          if (totpSetupDelayMsFixture > 0) {
+            await new Promise((resolve) =>
+              window.setTimeout(resolve, totpSetupDelayMsFixture),
+            );
           }
           return jsonResponse({
             algorithm: "SHA1",
             digits: 6,
-            otpauth_uri:
-              "otpauth://totp/vpsman:console-admin?secret=JBSWY3DPEHPK3PXP&issuer=vpsman",
+            operator_id:
+              totpSetupOperatorIdOverrideFixture ?? currentOperatorRecord.id,
+            otpauth_uri: `otpauth://totp/vpsman:console-admin?secret=${fixtureTotpSecret}&issuer=vpsman`,
             period_secs: 30,
-            secret_base32: "JBSWY3DPEHPK3PXP",
+            secret_base32: fixtureTotpSecret,
           });
         }
         if (pathname === "/api/v1/auth/totp/confirm" && method === "POST") {
-          operatorRecords[0].totp_enabled = true;
-          return jsonResponse(operatorView(operatorRecords[0]));
+          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
+          if (
+            String(body.password ?? "") !== "valid-password-123" ||
+            String(body.code ?? "") !== (await fixtureTotpCode())
+          ) {
+            return jsonResponse(
+              {
+                error: "invalid_totp_credentials",
+                message:
+                  "The current password or authenticator code is incorrect.",
+              },
+              400,
+            );
+          }
+          currentOperatorRecord.totp_enabled = true;
+          return jsonResponse(operatorView(currentOperatorRecord));
         }
         if (pathname === "/api/v1/auth/totp/disable" && method === "POST") {
-          operatorRecords[0].totp_enabled = false;
-          return jsonResponse(operatorView(operatorRecords[0]));
+          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
+          if (
+            String(body.password ?? "") !== "valid-password-123" ||
+            String(body.code ?? "") !== (await fixtureTotpCode())
+          ) {
+            return jsonResponse(
+              {
+                error: "invalid_totp_credentials",
+                message:
+                  "The current password or authenticator code is incorrect.",
+              },
+              400,
+            );
+          }
+          currentOperatorRecord.totp_enabled = false;
+          return jsonResponse(operatorView(currentOperatorRecord));
         }
         if (pathname === "/api/v1/operators" && method === "POST") {
           const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
@@ -8832,6 +8959,10 @@ export async function installConsoleApiMock(
       ],
       terminalSessionsFixture:
         options.terminalSessionsOverride ?? terminalSessions,
+      totpSetupDelayMsFixture: options.totpSetupDelayMs ?? 0,
+      totpSetupOperatorIdOverrideFixture:
+        options.totpSetupOperatorIdOverride ?? null,
+      totpSetupSwitchSessionFixture: options.totpSetupSwitchSession ?? false,
       topologyGraphFixture: topologyGraph,
       trafficAccountingFixture: trafficAccounting,
       tunnelPlansFixture: tunnelPlans,

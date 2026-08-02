@@ -20,6 +20,7 @@ use crate::{
     },
     privilege::{verify_privilege_intent, SchedulePrivilegeIntent, SchedulePrivilegeIntentInput},
     repository_schedules::next_cron_runs,
+    repository_schedules::ScheduleSnapshotExpectation,
     routes_jobs::create_job_from_saved_schedule,
     security::{operator_has_scope, SCOPE_SCHEDULES_READ},
     selector_expression::parse_selector_expression,
@@ -46,6 +47,22 @@ pub(crate) async fn list_schedules(
         ..query
     };
     Ok(Json(state.repo.query_schedules(&query).await?))
+}
+
+pub(crate) async fn get_schedule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(schedule_id): Path<Uuid>,
+) -> Result<Json<ScheduleView>, ApiError> {
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_SCHEDULES_READ)
+        .await?;
+    let schedule = state
+        .repo
+        .schedule_by_id(schedule_id)
+        .await
+        .map_err(map_schedule_lookup_error)?;
+    Ok(Json(schedule))
 }
 
 pub(crate) async fn create_schedule(
@@ -95,13 +112,27 @@ pub(crate) async fn update_schedule(
     validate_update_schedule_request(&request)?;
     require_schedule_confirmed(request.confirmed)?;
     request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
-    require_selector_target_snapshot(
-        &state,
-        &request.selector_expression,
-        &request.target_client_ids,
-        "schedule_target_snapshot_stale",
-    )
-    .await?;
+    request.expected_target_client_ids =
+        normalized_target_client_ids(&request.expected_target_client_ids)?;
+    let expectation = ScheduleSnapshotExpectation {
+        selector_expression: request.expected_selector_expression.clone(),
+        target_client_ids: request.expected_target_client_ids.clone(),
+    };
+    let current = state.repo.schedule_by_id(schedule_id).await?;
+    require_schedule_snapshot(&current, &expectation)?;
+    if request.selector_expression.trim() == expectation.selector_expression.trim() {
+        if request.target_client_ids != expectation.target_client_ids {
+            return Err(ApiError::conflict("schedule_target_snapshot_stale"));
+        }
+    } else {
+        require_selector_target_snapshot(
+            &state,
+            &request.selector_expression,
+            &request.target_client_ids,
+            "schedule_target_snapshot_stale",
+        )
+        .await?;
+    }
     verify_schedule_privilege_for_definition(
         &state,
         "schedule.update",
@@ -116,8 +147,9 @@ pub(crate) async fn update_schedule(
     Ok(Json(
         state
             .repo
-            .update_schedule_record(schedule_id, request.into(), &operator)
-            .await?,
+            .update_schedule_record(schedule_id, request.into(), Some(&expectation), &operator)
+            .await
+            .map_err(map_schedule_snapshot_error)?,
     ))
 }
 
@@ -151,6 +183,16 @@ pub(crate) async fn update_schedule_targets(
         .collect::<Vec<_>>();
     target_client_ids.sort();
     target_client_ids.dedup();
+    let expectation = ScheduleSnapshotExpectation {
+        selector_expression: schedule.selector_expression.clone(),
+        target_client_ids: schedule.target_client_ids.clone(),
+    };
+    let mut current_target_client_ids = schedule.target_client_ids.clone();
+    current_target_client_ids.sort();
+    current_target_client_ids.dedup();
+    if current_target_client_ids == target_client_ids {
+        return Err(ApiError::conflict("schedule_targets_already_current"));
+    }
     verify_schedule_privilege_for_stored_view(
         &state,
         "schedule.targets.update",
@@ -166,8 +208,14 @@ pub(crate) async fn update_schedule_targets(
     Ok(Json(
         state
             .repo
-            .update_schedule_targets(schedule_id, target_client_ids, &operator)
-            .await?,
+            .update_schedule_targets(
+                schedule_id,
+                target_client_ids,
+                Some(&expectation),
+                &operator,
+            )
+            .await
+            .map_err(map_schedule_snapshot_error)?,
     ))
 }
 
@@ -502,7 +550,11 @@ async fn verify_schedule_privilege_for_stored_view(
     deleted: bool,
     assertion: Option<PrivilegeAssertion>,
 ) -> Result<(), ApiError> {
-    let resolved_targets = normalized_target_client_ids(target_client_ids)?;
+    let resolved_targets = if target_client_ids.is_empty() {
+        Vec::new()
+    } else {
+        normalized_target_client_ids(target_client_ids)?
+    };
     let schedule_id = schedule.id.to_string();
     let privilege_intent = SchedulePrivilegeIntent::new(SchedulePrivilegeIntentInput {
         action,
@@ -652,5 +704,43 @@ impl From<UpdateScheduleRequest> for crate::repository_schedules::ScheduleCreate
             retry_delay_secs: request.retry_delay_secs,
             max_failures: request.max_failures,
         }
+    }
+}
+
+pub(crate) fn require_schedule_snapshot(
+    schedule: &ScheduleView,
+    expectation: &ScheduleSnapshotExpectation,
+) -> Result<(), ApiError> {
+    let mut stored_targets = schedule.target_client_ids.clone();
+    stored_targets.sort();
+    stored_targets.dedup();
+    let mut expected_targets = expectation.target_client_ids.clone();
+    expected_targets.sort();
+    expected_targets.dedup();
+    if schedule.selector_expression.trim() != expectation.selector_expression.trim()
+        || stored_targets != expected_targets
+    {
+        return Err(ApiError::conflict("schedule_snapshot_stale"));
+    }
+    Ok(())
+}
+
+pub(crate) fn map_schedule_snapshot_error(error: anyhow::Error) -> ApiError {
+    if error.to_string().contains("schedule_snapshot_stale") {
+        ApiError::conflict("schedule_snapshot_stale")
+    } else {
+        ApiError::from(error)
+    }
+}
+
+fn map_schedule_lookup_error(error: anyhow::Error) -> ApiError {
+    if error.to_string().contains("schedule_not_found")
+        || error
+            .downcast_ref::<sqlx::Error>()
+            .is_some_and(|error| matches!(error, sqlx::Error::RowNotFound))
+    {
+        ApiError::not_found("schedule_not_found")
+    } else {
+        ApiError::from(error)
     }
 }

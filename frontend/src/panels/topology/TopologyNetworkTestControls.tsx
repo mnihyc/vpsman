@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, GitBranch, Search, ShieldCheck } from "lucide-react";
 import {
   bulkOutcomeSummary,
@@ -23,6 +23,7 @@ import {
   waitForReviewRender,
 } from "../../hooks/useReviewGenerationGuard";
 import { usePanelDisplaySettings } from "../../panelDisplay";
+import { scrollIntoViewWithMotion } from "../../motion";
 import {
   buildPrivilegeForJobOperation,
   type PrivilegeAssertion,
@@ -122,6 +123,8 @@ export function TopologyNetworkTestControls({
   const [pending, setPending] = useState(false);
   const [reviewPending, setReviewPending] = useState(false);
   const [reviewAction, setReviewAction] = useState<NetworkAction | null>(null);
+  const feedbackRef = useRef<HTMLDivElement | null>(null);
+  const resultRef = useRef<HTMLDivElement | null>(null);
   const selectedPlan =
     tunnelPlans.find((plan) => plan.id === selectedPlanId) ??
     tunnelPlans[0] ??
@@ -188,15 +191,37 @@ export function TopologyNetworkTestControls({
     : lastJob
       ? `${actionLabel(lastAction)} ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} target${lastJob.target_count === 1 ? "" : "s"}`
       : "No local network test run in this view";
-  const networkHeaderStatus = selectedPlan && !selectedPlan.enabled
-    ? "Plan disabled; inspect only"
-    : privilegeMaterial
-      ? "Dispatch ready"
-      : "Inspect available; unlock for probe/speed";
+  const networkHeaderStatus =
+    selectedPlan && !selectedPlan.enabled
+      ? "Plan disabled; inspect only"
+      : privilegeMaterial
+        ? "Dispatch ready"
+        : "Inspect available; unlock for probe/speed";
   const networkTestFeedbackMessage =
-    actionError ?? (reviewPending && reviewAction
+    actionError ??
+    (reviewPending && reviewAction
       ? `Preparing ${actionLabel(reviewAction).toLowerCase()} review`
       : null);
+
+  useEffect(() => {
+    if (!actionError) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (feedbackRef.current) {
+        scrollIntoViewWithMotion(feedbackRef.current, { block: "nearest" });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [actionError]);
+
+  useEffect(() => {
+    if (!visibleJobProgress || networkSnapshot) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (resultRef.current) {
+        scrollIntoViewWithMotion(resultRef.current, { block: "nearest" });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [networkSnapshot, visibleJobProgress]);
 
   useEffect(() => {
     if (tunnelPlans.length === 0) {
@@ -223,6 +248,7 @@ export function TopologyNetworkTestControls({
   function clearNetworkReview() {
     invalidateReviewGeneration();
     setNetworkSnapshot(null);
+    setActionError(null);
   }
 
   async function openNetworkPrompt(mode: NetworkAction) {
@@ -295,7 +321,11 @@ export function TopologyNetworkTestControls({
     ): Promise<NetworkJobSubmission> => {
       const builtOperation =
         mode === "status"
-          ? buildNetworkStatusOperation(planRecord.id, planRecord.plan, planSide)
+          ? buildNetworkStatusOperation(
+              planRecord.id,
+              planRecord.plan,
+              planSide,
+            )
           : mode === "probe"
             ? buildNetworkProbeOperation(
                 planRecord.id,
@@ -321,7 +351,8 @@ export function TopologyNetworkTestControls({
               builtOperation.endpoint.peerClientId,
             ]
           : [builtOperation.endpoint.localClientId];
-      const selectorExpression = selectorExpressionForClientIds(targetClientIds);
+      const selectorExpression =
+        selectorExpressionForClientIds(targetClientIds);
       const builtPrivilege = needsPrivilege
         ? await buildPrivilegeForJobOperation({
             clientIds: targetClientIds,
@@ -387,9 +418,10 @@ export function TopologyNetworkTestControls({
         { label: "Plans", value: planLabel },
         {
           label: "Endpoint",
-          value: mode === "speed_test" || submissions.length > 1
-            ? "Both endpoints"
-            : side,
+          value:
+            mode === "speed_test" || submissions.length > 1
+              ? "Both endpoints"
+              : side,
         },
         { label: "Baseline", value: formatPlanBaseline(selectedPlan) },
         { label: "Recent evidence", value: evidenceSummary },
@@ -438,11 +470,11 @@ export function TopologyNetworkTestControls({
   async function submitNetworkChange(snapshot: NetworkActionSnapshot) {
     await runPanelAction(setPending, setActionError, async () => {
       await executeNetworkSnapshot(snapshot);
+      setNetworkSnapshot(null);
     });
   }
 
   async function executeNetworkSnapshot(snapshot: NetworkActionSnapshot) {
-    setNetworkSnapshot(null);
     clearExecutionResults();
     const jobs: Array<{
       job: CreateJobResponse;
@@ -472,11 +504,13 @@ export function TopologyNetworkTestControls({
     setLastAction(snapshot.action);
     for (const { job, submission } of jobs) {
       setLastJob(job);
-      outputs.push(...await trackNetworkProgress(
-        job,
-        submission.targets,
-        submission.maxTimeoutSecs,
-      ));
+      outputs.push(
+        ...(await trackNetworkProgress(
+          job,
+          submission.targets,
+          submission.maxTimeoutSecs,
+        )),
+      );
       setLastOutputs(outputs.slice());
     }
     try {
@@ -525,17 +559,30 @@ export function TopologyNetworkTestControls({
         <div className="sectionHeader">
           <div>
             <h2>Network tests</h2>
-            <span>{loading ? "Loading tunnel plans" : "No saved tunnel plans"}</span>
+            <span>
+              {loading ? "Loading tunnel plans" : "No saved tunnel plans"}
+            </span>
           </div>
           <ShieldCheck aria-hidden="true" size={20} />
         </div>
         {loading ? (
-          <ActionFeedback className="localActionFeedback" message="Loading tunnel plans" tone="progress" />
+          <ActionFeedback
+            className="localActionFeedback"
+            message="Loading tunnel plans"
+            tone="progress"
+          />
         ) : (
           <div className="emptyState compactEmptyState">
             <strong>Create a declared tunnel before inspecting it</strong>
-            <span>Status can verify enabled state or disabled-plan cleanup. Probe and speed jobs require an enabled plan.</span>
-            <button className="primaryAction compactAction" onClick={onOpenTunnelPlans} type="button">
+            <span>
+              Status can verify enabled state or disabled-plan cleanup. Probe
+              and speed jobs require an enabled plan.
+            </span>
+            <button
+              className="primaryAction compactAction"
+              onClick={onOpenTunnelPlans}
+              type="button"
+            >
               <GitBranch size={15} />
               Open tunnel plans
             </button>
@@ -563,6 +610,7 @@ export function TopologyNetworkTestControls({
         <ActionFeedback
           className="localActionFeedback"
           message={networkTestFeedbackMessage}
+          ref={feedbackRef}
           tone={actionError ? "danger" : "progress"}
         />
         <div
@@ -572,9 +620,7 @@ export function TopologyNetworkTestControls({
           <div className={privilegeMaterial ? "ready" : "attention"}>
             <span>Required privilege</span>
             <strong>
-              {privilegeMaterial
-                ? "Probe/speed unlocked"
-                : "Inspect available"}
+              {privilegeMaterial ? "Probe/speed unlocked" : "Inspect available"}
             </strong>
             <p>
               {privilegeMaterial
@@ -889,6 +935,7 @@ export function TopologyNetworkTestControls({
               ? minSubmissionExpiry(networkSnapshot.submissions)
               : undefined
           }
+          error={actionError}
           items={networkSnapshot?.items ?? []}
           onCancel={() => setNetworkSnapshot(null)}
           onConfirm={() =>
@@ -904,18 +951,20 @@ export function TopologyNetworkTestControls({
           tone="normal"
         />
         {networkSnapshot === null && visibleJobProgress && (
-          <ExecutionResultPanel
-            context={`Network ${actionLabel(lastAction).toLowerCase()}`}
-            loading={jobProgress !== null}
-            onClearResults={clearExecutionResults}
-            onOpenJobDetails={onOpenJobDetails}
-            progress={visibleJobProgress}
-          >
-            <NetworkExecutionEvidence
-              clientLabel={clientLabel}
-              outputs={lastOutputs}
-            />
-          </ExecutionResultPanel>
+          <div ref={resultRef} tabIndex={-1}>
+            <ExecutionResultPanel
+              context={`Network ${actionLabel(lastAction).toLowerCase()}`}
+              loading={jobProgress !== null}
+              onClearResults={clearExecutionResults}
+              onOpenJobDetails={onOpenJobDetails}
+              progress={visibleJobProgress}
+            >
+              <NetworkExecutionEvidence
+                clientLabel={clientLabel}
+                outputs={lastOutputs}
+              />
+            </ExecutionResultPanel>
+          </div>
         )}
       </form>
       {!privilegeMaterial && (
@@ -961,26 +1010,38 @@ function NetworkExecutionEvidence({
 }) {
   const rows = networkExecutionRows(outputs, clientLabel);
   return (
-    <div className="topologyNetworkResultEvidence" aria-label="Per-endpoint network test evidence">
+    <div
+      className="topologyNetworkResultEvidence"
+      aria-label="Per-endpoint network test evidence"
+    >
       <div className="topologyNetworkResultHeader">
         <strong>Endpoint evidence</strong>
-        <span>{rows.length > 0 ? `${rows.length} retained result${rows.length === 1 ? "" : "s"}` : "No retained status output"}</span>
+        <span>
+          {rows.length > 0
+            ? `${rows.length} retained result${rows.length === 1 ? "" : "s"}`
+            : "No retained status output"}
+        </span>
       </div>
-      {rows.length > 0 ? rows.map((row) => (
-        <div className="topologyNetworkResultRow" key={row.id}>
-          <span className="historyPrimary">
-            <strong title={row.target}>{row.target}</strong>
-            <small title={row.detail}>{row.detail}</small>
-          </span>
-          <span className="historyPrimary topologyNetworkResultMetric">
-            <strong title={row.metric}>{row.metric}</strong>
-            <small>{row.kind}</small>
-          </span>
-          <ConsoleStatusBadge tone={row.tone}>{row.status}</ConsoleStatusBadge>
-        </div>
-      )) : (
+      {rows.length > 0 ? (
+        rows.map((row) => (
+          <div className="topologyNetworkResultRow" key={row.id}>
+            <span className="historyPrimary">
+              <strong title={row.target}>{row.target}</strong>
+              <small title={row.detail}>{row.detail}</small>
+            </span>
+            <span className="historyPrimary topologyNetworkResultMetric">
+              <strong title={row.metric}>{row.metric}</strong>
+              <small>{row.kind}</small>
+            </span>
+            <ConsoleStatusBadge tone={row.tone}>
+              {row.status}
+            </ConsoleStatusBadge>
+          </div>
+        ))
+      ) : (
         <span className="topologyNetworkResultEmpty">
-          The job is terminal, but no structured status output is retained. Open job details for target state and raw output evidence.
+          The job is terminal, but no structured status output is retained. Open
+          job details for target state and raw output evidence.
         </span>
       )}
     </div>
@@ -1006,7 +1067,8 @@ function networkExecutionRows(
     let parsed: Record<string, unknown>;
     try {
       const value = JSON.parse(decodeOutputPreview(output.data_base64));
-      if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+      if (!value || typeof value !== "object" || Array.isArray(value))
+        return [];
       parsed = value as Record<string, unknown>;
     } catch {
       return [];
@@ -1023,63 +1085,80 @@ function networkExecutionRows(
       const reasons = stringArrayValue(summary.reasons);
       const status = stringValue(summary.status) ?? "unknown";
       const healthy = summary.healthy === true;
-      return [{
-        detail: reasons.length > 0
-          ? reasons.map(readableNetworkToken).join(", ")
-          : `Interface ${stringValue(parsed.interface) ?? "unknown"}; no runtime drift reason reported`,
-        id: `${output.client_id}:${type}:${index}`,
-        kind: "Runtime status",
-        metric: `${stringValue(parsed.interface) ?? "interface"} · ${readableNetworkToken(status)}`,
-        status: healthy ? "Healthy" : readableNetworkToken(status),
-        target,
-        tone: healthy ? "ok" : "warning",
-      }];
+      return [
+        {
+          detail:
+            reasons.length > 0
+              ? reasons.map(readableNetworkToken).join(", ")
+              : `Interface ${stringValue(parsed.interface) ?? "unknown"}; no runtime drift reason reported`,
+          id: `${output.client_id}:${type}:${index}`,
+          kind: "Runtime status",
+          metric: `${stringValue(parsed.interface) ?? "interface"} · ${readableNetworkToken(status)}`,
+          status: healthy ? "Healthy" : readableNetworkToken(status),
+          target,
+          tone: healthy ? "ok" : "warning",
+        },
+      ];
     }
     if (type === "network_probe") {
       const probe = recordValue(parsed.parsed);
       const latency = numberValue(probe.latency_avg_ms);
       const loss = numberValue(probe.packet_loss_ratio);
       const healthy = probe.healthy === true || parsed.success === true;
-      return [{
-        detail: `${loss === null ? "Loss unavailable" : `${formatMetric(loss * 100)}% loss`}; target ${stringValue(parsed.target) ?? "peer tunnel address"}`,
-        id: `${output.client_id}:${type}:${index}`,
-        kind: "Probe",
-        metric: latency === null ? "Latency unavailable" : `${formatMetric(latency)} ms average`,
-        status: healthy ? "Healthy" : "Probe failed",
-        target,
-        tone: healthy ? "ok" : "critical",
-      }];
+      return [
+        {
+          detail: `${loss === null ? "Loss unavailable" : `${formatMetric(loss * 100)}% loss`}; target ${stringValue(parsed.target) ?? "peer tunnel address"}`,
+          id: `${output.client_id}:${type}:${index}`,
+          kind: "Probe",
+          metric:
+            latency === null
+              ? "Latency unavailable"
+              : `${formatMetric(latency)} ms average`,
+          status: healthy ? "Healthy" : "Probe failed",
+          target,
+          tone: healthy ? "ok" : "critical",
+        },
+      ];
     }
     if (type === "network_speed_test") {
       const throughput = numberValue(parsed.throughput_mbps);
       const bytes = numberValue(parsed.bytes);
       const success = parsed.success === true;
       const message = stringValue(parsed.message);
-      return [{
-        detail: `${readableNetworkToken(stringValue(parsed.role) ?? "endpoint")} role; ${bytes === null ? "bytes unavailable" : `${formatNetworkBytes(bytes)} transferred`}${message ? `; ${message}` : ""}`,
-        id: `${output.client_id}:${type}:${index}`,
-        kind: "Speed test",
-        metric: throughput === null ? "Throughput unavailable" : `${formatMetric(throughput)} Mbps`,
-        status: success ? "Completed" : "Failed",
-        target,
-        tone: success ? "ok" : "critical",
-      }];
+      return [
+        {
+          detail: `${readableNetworkToken(stringValue(parsed.role) ?? "endpoint")} role; ${bytes === null ? "bytes unavailable" : `${formatNetworkBytes(bytes)} transferred`}${message ? `; ${message}` : ""}`,
+          id: `${output.client_id}:${type}:${index}`,
+          kind: "Speed test",
+          metric:
+            throughput === null
+              ? "Throughput unavailable"
+              : `${formatMetric(throughput)} Mbps`,
+          status: success ? "Completed" : "Failed",
+          target,
+          tone: success ? "ok" : "critical",
+        },
+      ];
     }
-    return [{
-      detail: stringValue(parsed.message) ?? "Structured network status output retained",
-      id: `${output.client_id}:${type}:${index}`,
-      kind: readableNetworkToken(type),
-      metric: "Result retained",
-      status: output.exit_code === 0 ? "Completed" : "Needs review",
-      target,
-      tone: output.exit_code === 0 ? "ok" : "warning",
-    }];
+    return [
+      {
+        detail:
+          stringValue(parsed.message) ??
+          "Structured network status output retained",
+        id: `${output.client_id}:${type}:${index}`,
+        kind: readableNetworkToken(type),
+        metric: "Result retained",
+        status: output.exit_code === 0 ? "Completed" : "Needs review",
+        target,
+        tone: output.exit_code === 0 ? "ok" : "warning",
+      },
+    ];
   });
 }
 
 function recordValue(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
+    ? (value as Record<string, unknown>)
     : {};
 }
 
@@ -1089,7 +1168,9 @@ function stringValue(value: unknown): string | null {
 
 function stringArrayValue(value: unknown): string[] {
   return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string" && item.length > 0)
+    ? value.filter(
+        (item): item is string => typeof item === "string" && item.length > 0,
+      )
     : [];
 }
 
@@ -1098,7 +1179,9 @@ function numberValue(value: unknown): number | null {
 }
 
 function readableNetworkToken(value: string): string {
-  return value.replace(/_/g, " ").replace(/^./, (letter: string) => letter.toUpperCase());
+  return value
+    .replace(/_/g, " ")
+    .replace(/^./, (letter: string) => letter.toUpperCase());
 }
 
 function formatNetworkBytes(value: number): string {
@@ -1177,7 +1260,8 @@ function NetworkTestTrendCharts({
         <div>
           <strong>Trend evidence</strong>
           <span>
-            Persisted probe and capped throughput-test ranges for the selected plan.
+            Persisted probe and capped throughput-test ranges for the selected
+            plan.
           </span>
         </div>
       </div>
@@ -1261,7 +1345,9 @@ function NetworkTrendChartCard({
           <strong className={baselineAttention ? "attention" : undefined}>
             {baselineLabel ?? "Single evidence bucket"}
           </strong>
-          <span>No trend line yet; capture another run to compare movement.</span>
+          <span>
+            No trend line yet; capture another run to compare movement.
+          </span>
           {sampleValues.length > 0 ? (
             <dl>
               {sampleValues.map((sample) => (
@@ -1383,7 +1469,8 @@ function runtimeOwnershipHint(plan: TunnelPlanRecord | null): string {
   if (!plan) {
     return "No tunnel plan selected";
   }
-  const manager = plan.plan.runtime_control?.manager ?? "agent_iproute2_managed";
+  const manager =
+    plan.plan.runtime_control?.manager ?? "agent_iproute2_managed";
   return `Runtime ownership: ${manager.replace(/_/g, " ")}`;
 }
 

@@ -36,6 +36,7 @@ import {
   useReviewGenerationGuard,
   waitForReviewRender,
 } from "../hooks/useReviewGenerationGuard";
+import { scrollIntoViewWithMotion } from "../motion";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import {
   buildPrivilegeAssertion,
@@ -243,13 +244,37 @@ type BackupWorkflowAction =
   | "migration-link"
   | "migration-run";
 
-type BackupPolicySnapshot = {
-  request: UpdateBackupPolicyRequest;
-  scheduleId: string | null;
-  selectorExpression: string;
-  targetClientIds: string[];
-  targets: AgentView[];
-};
+function backupWorkflowActionForConfirmation(
+  action: BackupConfirmationAction,
+): BackupWorkflowAction {
+  switch (action) {
+    case "backup-request":
+      return "backup";
+    case "artifact-upload":
+    case "artifact-handoff":
+      return "artifact";
+    case "restore-run":
+      return "restore";
+    default:
+      return action;
+  }
+}
+
+type BackupPolicySnapshot =
+  | {
+      request: CreateBackupPolicyRequest;
+      scheduleId: null;
+      selectorExpression: string;
+      targetClientIds: string[];
+      targetLabels: string[];
+    }
+  | {
+      request: UpdateBackupPolicyRequest;
+      scheduleId: string;
+      selectorExpression: string;
+      targetClientIds: string[];
+      targetLabels: string[];
+    };
 
 type BackupActionSnapshot =
   | {
@@ -413,8 +438,9 @@ export function BackupsPanel({
   const [policyPruneDryRun, setPolicyPruneDryRun] = useState(true);
   const [policyPruneMetadataOnly, setPolicyPruneMetadataOnly] = useState(false);
   const [lastPolicy, setLastPolicy] = useState<BackupPolicyRecord | null>(null);
-  const [editingPolicy, setEditingPolicy] =
-    useState<BackupPolicyRecord | null>(null);
+  const [editingPolicy, setEditingPolicy] = useState<BackupPolicyRecord | null>(
+    null,
+  );
   const [lastPolicyPrune, setLastPolicyPrune] =
     useState<BackupPolicyPruneResponse | null>(null);
   const [lastBackupJob, setLastBackupJob] = useState<CreateJobResponse | null>(
@@ -477,6 +503,7 @@ export function BackupsPanel({
   const [reviewStatus, setReviewStatus] = useState<string | null>(null);
   const [workflowOpen, setWorkflowOpen] = useState(false);
   const workflowOwnerSubpageRef = useRef<string | null>(null);
+  const workflowFeedbackRef = useRef<HTMLDivElement | null>(null);
   const [policyWorkflowMode, setPolicyWorkflowMode] = useState<
     "create" | "edit" | "prune"
   >("create");
@@ -510,7 +537,8 @@ export function BackupsPanel({
   useEffect(() => {
     if (
       !initialTargetIntent ||
-      appliedInitialTargetRequestRef.current === initialTargetIntent.requestId ||
+      appliedInitialTargetRequestRef.current ===
+        initialTargetIntent.requestId ||
       agents.length === 0
     ) {
       return;
@@ -717,8 +745,7 @@ export function BackupsPanel({
   const backupsTruncated = backups.length >= HISTORY_DETAIL_LIMIT;
   const artifactsTruncated = artifacts.length >= HISTORY_DETAIL_LIMIT;
   const restorePlansTruncated = restorePlans.length >= HISTORY_DETAIL_LIMIT;
-  const migrationLinksTruncated =
-    migrationLinks.length >= HISTORY_DETAIL_LIMIT;
+  const migrationLinksTruncated = migrationLinks.length >= HISTORY_DETAIL_LIMIT;
   const status = `${formatLowerBoundCount(backupPolicies.length, backupPoliciesTruncated)}${backupPoliciesTruncated ? " loaded" : ""} polic${backupPolicies.length === 1 ? "y" : "ies"}, ${formatLowerBoundCount(backups.length, backupsTruncated)}${backupsTruncated ? " loaded" : ""} backup request${
     backups.length === 1 ? "" : "s"
   }, ${formatLowerBoundCount(artifacts.length, artifactsTruncated)}${artifactsTruncated ? " loaded" : ""} artifact${artifacts.length === 1 ? "" : "s"}, ${formatLowerBoundCount(restorePlans.length, restorePlansTruncated)}${restorePlansTruncated ? " loaded" : ""} restore plan${
@@ -813,6 +840,34 @@ export function BackupsPanel({
     : reviewStatus
       ? "progress"
       : (lastWorkflowFeedback?.tone ?? "success");
+
+  useEffect(() => {
+    if (
+      !backupWorkflowFeedbackMessage ||
+      !workflowOpen ||
+      workflowOwnerSubpageRef.current !== backupSubpage ||
+      pendingConfirmation !== null
+    ) {
+      return undefined;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const outcome = workflowFeedbackRef.current;
+      if (!outcome) {
+        return;
+      }
+      outcome.tabIndex = -1;
+      scrollIntoViewWithMotion(outcome, { block: "nearest" });
+      outcome.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    backupSubpage,
+    backupWorkflowFeedbackMessage,
+    backupWorkflowFeedbackTone,
+    pendingConfirmation,
+    workflowOpen,
+  ]);
+
   const backupPostureItems = buildBackupPostureItems({
     agents,
     artifacts,
@@ -919,13 +974,25 @@ export function BackupsPanel({
         if (!selectorExpression) {
           throw new Error("Add at least one target selector");
         }
-        const resolved = await onResolveTargets({
-          selector_expression: selectorExpression,
-        });
-        const targetClientIds = resolved.targets.map((target) => target.id);
+        const selectorUnchanged = Boolean(
+          editingPolicy &&
+          editingPolicy.selector_expression.trim() === selectorExpression,
+        );
+        const resolved = selectorUnchanged
+          ? null
+          : await onResolveTargets({
+              selector_expression: selectorExpression,
+            });
+        const targetClientIds = selectorUnchanged
+          ? [...(editingPolicy?.target_client_ids ?? [])]
+          : (resolved?.targets ?? []).map((target) => target.id);
         if (!targetClientIds.length) {
           throw new Error("Backup policy confirmation resolved no VPSs");
         }
+        const targetLabels = targetClientIds.map((clientId) => {
+          const target = agents.find((agent) => agent.id === clientId);
+          return target ? formatVpsName(target, vpsNameDisplayMode) : clientId;
+        });
         const operation: JobOperation = {
           type: "backup",
           paths: policyPaths,
@@ -943,7 +1010,7 @@ export function BackupsPanel({
           ? editingPolicy.retry_delay_secs
           : 300;
         const maxFailures = editingPolicy ? editingPolicy.max_failures : 3;
-        const request: UpdateBackupPolicyRequest = {
+        const request: CreateBackupPolicyRequest = {
           name: policyName.trim(),
           selector_expression: selectorExpression,
           target_client_ids: targetClientIds,
@@ -986,14 +1053,35 @@ export function BackupsPanel({
             privilegeMaterial,
           }),
         };
+        const reviewedRequest:
+          CreateBackupPolicyRequest | UpdateBackupPolicyRequest = editingPolicy
+          ? {
+              ...request,
+              retention_days: request.retention_days ?? 30,
+              keep_last: request.keep_last ?? 7,
+              rotation_generation: request.rotation_generation ?? null,
+              expected_selector_expression: editingPolicy.selector_expression,
+              expected_target_client_ids: [...editingPolicy.target_client_ids],
+            }
+          : request;
         requireCurrentBackupReview(reviewGeneration);
-        setPendingPolicySnapshot({
-          request,
-          scheduleId,
-          selectorExpression,
-          targetClientIds,
-          targets: resolved.targets,
-        });
+        setPendingPolicySnapshot(
+          editingPolicy
+            ? {
+                request: reviewedRequest as UpdateBackupPolicyRequest,
+                scheduleId: editingPolicy.schedule_id,
+                selectorExpression,
+                targetClientIds,
+                targetLabels,
+              }
+            : {
+                request: reviewedRequest as CreateBackupPolicyRequest,
+                scheduleId: null,
+                selectorExpression,
+                targetClientIds,
+                targetLabels,
+              },
+        );
         setPendingConfirmation("policy");
       },
     );
@@ -1017,16 +1105,23 @@ export function BackupsPanel({
   }
 
   function clearPolicyConfirmation() {
-    invalidateReviewGeneration();
-    setPendingPolicySnapshot(null);
-    setPendingConfirmation((current) =>
-      current === "policy" ? null : current,
-    );
+    clearBackupConfirmations(["policy"]);
   }
 
   function clearBackupConfirmations(actions: BackupConfirmationAction[]) {
     invalidateReviewGeneration();
     const actionSet = new Set(actions);
+    const workflowActions = new Set(
+      actions.map(backupWorkflowActionForConfirmation),
+    );
+    setActionError(null);
+    setReviewStatus(null);
+    setLastWorkflowAction((current) =>
+      current && workflowActions.has(current) ? null : current,
+    );
+    if (actionSet.has("policy-prune")) {
+      setLastPolicyPrune(null);
+    }
     if (actionSet.has("policy")) {
       setPendingPolicySnapshot(null);
     }
@@ -1926,9 +2021,7 @@ export function BackupsPanel({
           {
             label: "Preview",
             value: policySnapshot
-              ? policySnapshot.targets
-                  .map((target) => formatVpsName(target, vpsNameDisplayMode))
-                  .join(", ")
+              ? policySnapshot.targetLabels.join(", ")
               : "Review policy to freeze targets",
           },
         ];
@@ -2681,20 +2774,20 @@ export function BackupsPanel({
       <ConsoleActionDrawer
         description={backupWorkflowDescription}
         onClose={closeBackupWorkflow}
-        open={
-          workflowOpen && workflowOwnerSubpageRef.current === backupSubpage
-        }
+        open={workflowOpen && workflowOwnerSubpageRef.current === backupSubpage}
         title={backupWorkflowLabel}
       >
         <div className="backupInspector backupWorkflowBody">
           <ActionFeedback
             className="localActionFeedback"
             message={backupWorkflowFeedbackMessage}
+            ref={workflowFeedbackRef}
             tone={backupWorkflowFeedbackTone}
           />
           <ConfirmationPrompt
             confirmLabel={backupConfirmationConfirmLabel}
             detail={backupConfirmationDetail(pendingConfirmation)}
+            error={actionError ?? undefined}
             items={backupConfirmationItems}
             onCancel={() => {
               if (pendingConfirmation === "policy") {
@@ -2710,8 +2803,8 @@ export function BackupsPanel({
             title={backupConfirmationTitle}
             tone={backupConfirmationTone}
           />
-          {backupSubpage === "policies" && (
-            policyWorkflowMode !== "prune" ? (
+          {backupSubpage === "policies" &&
+            (policyWorkflowMode !== "prune" ? (
               <BackupPolicyForm
                 agents={agents}
                 confirmationOpen={pendingConfirmation === "policy"}
@@ -2805,8 +2898,7 @@ export function BackupsPanel({
                 result={lastPolicyPrune}
                 scheduleId={policyPruneScheduleId}
               />
-            )
-          )}
+            ))}
           {backupSubpage === "requests" && (
             <>
               {selectedAgent && onOpenVpsDetail ? (
@@ -3319,7 +3411,9 @@ function BackupPolicySummary({
   truncated: boolean;
 }) {
   const automatic = backupPolicies.filter(backupPolicyRunsAutomatically);
-  const invalid = backupPolicies.filter((policy) => Boolean(policy.cadence_error));
+  const invalid = backupPolicies.filter((policy) =>
+    Boolean(policy.cadence_error),
+  );
   const failing = backupPolicies.filter(
     (policy) =>
       !policy.cadence_error &&
@@ -3457,8 +3551,7 @@ function BackupMigrationSummary({
   selectedPlan: RestorePlanRecord | null;
   selectedSourceArtifact: BackupArtifactRecord | null;
 }) {
-  const migrationLinksTruncated =
-    migrationLinks.length >= HISTORY_DETAIL_LIMIT;
+  const migrationLinksTruncated = migrationLinks.length >= HISTORY_DETAIL_LIMIT;
   const restorePlansTruncated = restorePlans.length >= HISTORY_DETAIL_LIMIT;
   const artifactsTruncated = artifacts.length >= HISTORY_DETAIL_LIMIT;
   const latestMapping =
@@ -3513,9 +3606,7 @@ function BackupMigrationSummary({
           <span>Source VPS/artifact</span>
           <strong>{sourceTitle}</strong>
           <small
-            title={
-              sourceArtifact?.id ?? sourceBackup?.artifact_id ?? undefined
-            }
+            title={sourceArtifact?.id ?? sourceBackup?.artifact_id ?? undefined}
           >
             {sourceDetail}
           </small>
@@ -3529,10 +3620,7 @@ function BackupMigrationSummary({
       </div>
       <div className="backupMigrationMeta">
         <span>
-          {formatLowerBoundCount(
-            restorePlans.length,
-            restorePlansTruncated,
-          )}{" "}
+          {formatLowerBoundCount(restorePlans.length, restorePlansTruncated)}{" "}
           {restorePlansTruncated ? "loaded " : ""}draft restore
           {restorePlans.length === 1 ? "" : "s"}
         </span>
@@ -3590,8 +3678,7 @@ function BackupOverview({
   const backupsTruncated = backups.length >= HISTORY_DETAIL_LIMIT;
   const artifactsTruncated = artifacts.length >= HISTORY_DETAIL_LIMIT;
   const restorePlansTruncated = restorePlans.length >= HISTORY_DETAIL_LIMIT;
-  const migrationLinksTruncated =
-    migrationLinks.length >= HISTORY_DETAIL_LIMIT;
+  const migrationLinksTruncated = migrationLinks.length >= HISTORY_DETAIL_LIMIT;
   const protectionEvidenceTruncated = backupsTruncated || artifactsTruncated;
   const recoveryEvidenceTruncated =
     protectionEvidenceTruncated || restorePlansTruncated;
@@ -3947,19 +4034,17 @@ function BackupOverview({
               policyIssues.length > 0
                 ? policyIssues
                     .slice(0, 2)
-                    .map(
-                      (policy) => {
-                        if (policy.cadence_error) {
-                          return `${policy.name}: invalid cadence; edit required`;
-                        }
-                        return (
-                          policy.last_error ??
-                          `${policy.name}: ${policy.failure_count} execution failure${
-                            policy.failure_count === 1 ? "" : "s"
-                          }`
-                        );
-                      },
-                    )
+                    .map((policy) => {
+                      if (policy.cadence_error) {
+                        return `${policy.name}: invalid cadence; edit required`;
+                      }
+                      return (
+                        policy.last_error ??
+                        `${policy.name}: ${policy.failure_count} execution failure${
+                          policy.failure_count === 1 ? "" : "s"
+                        }`
+                      );
+                    })
                     .join("; ")
                 : backupPolicies.length > 0
                   ? "No visible cadence or execution failure evidence."
@@ -4285,8 +4370,7 @@ function buildBackupPostureItems({
   const backupsTruncated = backups.length >= HISTORY_DETAIL_LIMIT;
   const artifactsTruncated = artifacts.length >= HISTORY_DETAIL_LIMIT;
   const restorePlansTruncated = restorePlans.length >= HISTORY_DETAIL_LIMIT;
-  const migrationLinksTruncated =
-    migrationLinks.length >= HISTORY_DETAIL_LIMIT;
+  const migrationLinksTruncated = migrationLinks.length >= HISTORY_DETAIL_LIMIT;
   const protectionEvidenceTruncated = backupsTruncated || artifactsTruncated;
   const nextPolicy = latestByIso(
     automaticPolicies.filter((policy) => policy.next_run_at),
@@ -4301,23 +4385,21 @@ function buildBackupPostureItems({
   );
   return [
     {
-      detail:
-        protectionEvidenceTruncated
-          ? topProblem
-            ? `${formatVpsName(topProblem.agent)}: ${topProblem.detail} Classification covers loaded evidence only.`
-            : "No gap appears in loaded evidence; more backup or artifact history may exist."
-          : protection.recent === agents.length && agents.length > 0
-            ? "Every visible VPS has a recent usable backup inside its expected freshness window."
-            : topProblem
-              ? `${formatVpsName(topProblem.agent)}: ${topProblem.detail}`
-              : "No visible VPS backup records are available.",
+      detail: protectionEvidenceTruncated
+        ? topProblem
+          ? `${formatVpsName(topProblem.agent)}: ${topProblem.detail} Classification covers loaded evidence only.`
+          : "No gap appears in loaded evidence; more backup or artifact history may exist."
+        : protection.recent === agents.length && agents.length > 0
+          ? "Every visible VPS has a recent usable backup inside its expected freshness window."
+          : topProblem
+            ? `${formatVpsName(topProblem.agent)}: ${topProblem.detail}`
+            : "No visible VPS backup records are available.",
       label: "Recent backups",
-      tone:
-        protectionEvidenceTruncated
-          ? undefined
-          : protection.recent === agents.length && agents.length > 0
-            ? "ready"
-            : "attention",
+      tone: protectionEvidenceTruncated
+        ? undefined
+        : protection.recent === agents.length && agents.length > 0
+          ? "ready"
+          : "attention",
       value: `${protection.recent}/${agents.length}${protectionEvidenceTruncated ? " in loaded evidence" : ""}`,
     },
     {
@@ -4332,7 +4414,9 @@ function buildBackupPostureItems({
               .map(
                 (record) => `${formatVpsName(record.agent)}: ${record.detail}`,
               )
-              .join("; ")}${protectionEvidenceTruncated ? " Loaded evidence only." : ""}`,
+              .join(
+                "; ",
+              )}${protectionEvidenceTruncated ? " Loaded evidence only." : ""}`,
       label: "Overdue",
       tone: protectionEvidenceTruncated
         ? undefined
@@ -4353,7 +4437,9 @@ function buildBackupPostureItems({
               .map(
                 (record) => `${formatVpsName(record.agent)}: ${record.detail}`,
               )
-              .join("; ")}${protectionEvidenceTruncated ? " Classification covers loaded evidence only." : ""}`,
+              .join(
+                "; ",
+              )}${protectionEvidenceTruncated ? " Classification covers loaded evidence only." : ""}`,
       label: "Unprotected",
       tone: protectionEvidenceTruncated
         ? undefined
@@ -4374,7 +4460,9 @@ function buildBackupPostureItems({
               .map(
                 (record) => `${formatVpsName(record.agent)}: ${record.detail}`,
               )
-              .join("; ")}${protectionEvidenceTruncated ? " Classification covers loaded evidence only." : ""}`,
+              .join(
+                "; ",
+              )}${protectionEvidenceTruncated ? " Classification covers loaded evidence only." : ""}`,
       label: "Unknown",
       tone: protectionEvidenceTruncated
         ? undefined
@@ -4415,7 +4503,9 @@ function buildBackupPostureItems({
                 (backup) =>
                   `${shortId(backup.id)} ${backupStatusLabel(backup.status)}`,
               )
-              .join("; ")}${backupsTruncated ? "; more may exist outside loaded history." : ""}`,
+              .join(
+                "; ",
+              )}${backupsTruncated ? "; more may exist outside loaded history." : ""}`,
       label: "Failed requests",
       title: failedBackups.map((backup) => backup.id).join(", ") || undefined,
       tone:

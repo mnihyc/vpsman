@@ -36,6 +36,7 @@ import {
   type TimeSeriesChartLine,
 } from "../components/TimeSeriesChart";
 import { dashboardChartColors } from "../colorPalette";
+import { scrollIntoViewWithMotion } from "../motion";
 import {
   dashboardWindowAccessibleLabel,
   dashboardWindowLabel,
@@ -947,6 +948,8 @@ export function SystemUsersPanel({
   const [reviewPending, setReviewPending] = useState(false);
   const operatorEditorRef = useRef<HTMLElement | null>(null);
   const operatorUsernameRef = useRef<HTMLInputElement | null>(null);
+  const operatorActionOutcomeRef = useRef<HTMLDivElement | null>(null);
+  const previousOperatorActionOutcomeRef = useRef<string | null>(null);
   const canManageUsers = currentOperator?.role === "admin";
   const accessSummaries = useMemo(
     () => buildOperatorAccessSummaries(operators, sessions, authEvents),
@@ -1033,6 +1036,28 @@ export function SystemUsersPanel({
     : reviewPending || actionPending
       ? "progress"
       : "success";
+  const operatorActionOutcome = pendingAction
+    ? null
+    : (actionError ?? actionStatus);
+
+  useEffect(() => {
+    if (!operatorActionOutcome) {
+      previousOperatorActionOutcomeRef.current = null;
+      return;
+    }
+    if (previousOperatorActionOutcomeRef.current === operatorActionOutcome) {
+      return;
+    }
+    previousOperatorActionOutcomeRef.current = operatorActionOutcome;
+    const frame = window.requestAnimationFrame(() => {
+      if (operatorActionOutcomeRef.current) {
+        scrollIntoViewWithMotion(operatorActionOutcomeRef.current, {
+          block: "nearest",
+        });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [operatorActionOutcome]);
 
   useEffect(() => {
     if (editorMode === "closed") return;
@@ -1187,6 +1212,7 @@ export function SystemUsersPanel({
   function invalidateUserReview() {
     setPendingAction(null);
     setReviewPending(false);
+    setActionError(null);
     setActionStatus(null);
     invalidateReviewGeneration();
   }
@@ -1762,6 +1788,7 @@ export function SystemUsersPanel({
           <ActionFeedback
             className="localActionFeedback"
             message={operatorActionFeedbackMessage}
+            ref={operatorActionOutcomeRef}
             tone={operatorActionFeedbackTone}
           />
         ) : null}
@@ -1868,9 +1895,6 @@ export function SystemUsersPanel({
           expandOnRowClick
           getRowId={(row) => row.id}
           itemLabel="operators"
-          onOpenRow={(row) => setSelectedOperatorId(row.id)}
-          openRowLabel="Open operator"
-          openRowTitle={(row) => `Show operator details for ${row.username}.`}
           renderExpandedRow={(row) => (
             <OperatorDetailGrid
               authEventsTruncated={authEventsTruncated}
@@ -1940,6 +1964,7 @@ export function SystemUsersPanel({
             <ActionFeedback
               className="localActionFeedback"
               message={operatorActionFeedbackMessage}
+              ref={operatorActionOutcomeRef}
               tone={operatorActionFeedbackTone}
             />
             {selectedOperator && selectedAccessSummary ? (
@@ -2229,6 +2254,7 @@ export function SystemUsersPanel({
       <ConfirmationPrompt
         confirmLabel={pendingUserActionLabel(pendingAction)}
         detail={pendingUserActionDetail(pendingAction)}
+        error={actionError ?? undefined}
         items={pendingUserActionItems(pendingAction)}
         onCancel={() => setPendingAction(null)}
         onConfirm={() => void confirmUserAction()}
@@ -2276,6 +2302,8 @@ function SystemSessionsPanel({
   const [reviewPending, setReviewPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sessionStatus, setSessionStatus] = useState<string | null>(null);
+  const sessionActionOutcomeRef = useRef<HTMLDivElement | null>(null);
+  const previousSessionActionOutcomeRef = useRef<string | null>(null);
   const [authFilter, setAuthFilter] = useState<
     "all" | "failures" | "success" | "suspicious"
   >("all");
@@ -2335,6 +2363,7 @@ function SystemSessionsPanel({
     : reviewPending || pending
       ? "progress"
       : "success";
+  const sessionActionOutcome = pendingRevoke ? null : (error ?? sessionStatus);
   const uniqueRemoteIps = new Set(
     authEvents
       .map((event) => event.remote_ip)
@@ -2501,6 +2530,25 @@ function SystemSessionsPanel({
     setReviewPending(false);
     invalidateReviewGeneration();
   }, [sessions, invalidateReviewGeneration]);
+
+  useEffect(() => {
+    if (!sessionActionOutcome) {
+      previousSessionActionOutcomeRef.current = null;
+      return;
+    }
+    if (previousSessionActionOutcomeRef.current === sessionActionOutcome) {
+      return;
+    }
+    previousSessionActionOutcomeRef.current = sessionActionOutcome;
+    const frame = window.requestAnimationFrame(() => {
+      if (sessionActionOutcomeRef.current) {
+        scrollIntoViewWithMotion(sessionActionOutcomeRef.current, {
+          block: "nearest",
+        });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [sessionActionOutcome]);
 
   async function requestSessionRevoke(rows: OperatorSessionRecord[]) {
     setSessionStatus(null);
@@ -2734,6 +2782,7 @@ function SystemSessionsPanel({
           <ActionFeedback
             className="localActionFeedback systemSessionActionFeedback"
             message={sessionActionFeedbackMessage}
+            ref={sessionActionOutcomeRef}
             tone={sessionActionFeedbackTone}
           />
           <ConsoleDataGrid
@@ -2882,6 +2931,7 @@ function SystemSessionsPanel({
               ? "This revokes the selected bearer session."
               : "This revokes the selected bearer sessions."
         }
+        error={error ?? undefined}
         items={[
           { label: "Sessions", value: pendingRevoke?.sessions.length ?? 0 },
           {
@@ -2974,9 +3024,7 @@ function OperatorAccessEvidencePanel({
         <OperatorEvidenceTile
           label="Active sessions"
           tone={
-            summary.activeSessions > 0 || sessionsTruncated
-              ? "info"
-              : "neutral"
+            summary.activeSessions > 0 || sessionsTruncated ? "info" : "neutral"
           }
           value={`${formatLowerBoundCount(
             summary.activeSessions,
@@ -4241,22 +4289,16 @@ function SystemDashboardPanel({
   const dispatchTone: SystemHealthTone =
     queueDepth === null
       ? "neutral"
-      : dispatchHealthTone(
-          queueDepth,
-          dispatcherInFlight,
-          dispatcherBatch,
-        );
+      : dispatchHealthTone(queueDepth, dispatcherInFlight, dispatcherBatch);
   const deadlineTone =
     !dashboard || lifecycleFailures === null
       ? "neutral"
       : dashboard.current.targets.deadline_expired_active > 0
-      ? "critical"
-      : lifecycleFailures > 0
-        ? "warning"
-        : "ok";
-  const gatewayTone = dashboard
-    ? gatewayHealthTone(gatewayEvents)
-    : "neutral";
+        ? "critical"
+        : lifecycleFailures > 0
+          ? "warning"
+          : "ok";
+  const gatewayTone = dashboard ? gatewayHealthTone(gatewayEvents) : "neutral";
   const postureTone = mostSevereTone([
     dbTone,
     dispatchTone,
@@ -4820,8 +4862,7 @@ function SystemCapacityPanel({
       id: "database",
       label: "Database",
       tone: dbTone,
-      value:
-        dbPressurePercent === null ? "Unknown" : `${dbPressurePercent}%`,
+      value: dbPressurePercent === null ? "Unknown" : `${dbPressurePercent}%`,
     },
     {
       id: "dispatch",
@@ -4845,9 +4886,7 @@ function SystemCapacityPanel({
             label: "Pool pressure",
             tone: dbTone,
             value:
-              dbPressurePercent === null
-                ? "Unknown"
-                : `${dbPressurePercent}%`,
+              dbPressurePercent === null ? "Unknown" : `${dbPressurePercent}%`,
           },
           {
             detail: "Warning threshold is 70% of max connections.",
@@ -4955,8 +4994,8 @@ function SystemCapacityPanel({
               value: !dashboard
                 ? "Unknown"
                 : dispatcherInFlight
-                ? `${dispatcherInFlight} in-flight configured`
-                : "Not configured",
+                  ? `${dispatcherInFlight} in-flight configured`
+                  : "Not configured",
             },
           ];
   const selectedConfigLinks =
@@ -5507,6 +5546,7 @@ function SystemConfigPanel({
         return null;
       }
       setValidation(result);
+      setConfigError(null);
       if (!silent) {
         setConfigMessage(
           `Validation passed; ${result.changed_keys.length} changed key${result.changed_keys.length === 1 ? "" : "s"}.`,
@@ -5613,6 +5653,8 @@ function SystemConfigPanel({
     validationRequestId.current += 1;
     const next = cloneTable(parsedDraft.table);
     setTomlPath(next, path.split("."), value);
+    setConfigError(null);
+    setConfigMessage(null);
     setDraftToml(stringify(next));
     setValidation(null);
     setValidationPending(false);
@@ -5993,8 +6035,12 @@ function SystemConfigPanel({
                     className="systemConfigToml"
                     onChange={(event) => {
                       validationRequestId.current += 1;
+                      setConfigError(null);
+                      setConfigMessage(null);
                       setDraftToml(event.target.value);
-                      setAdvancedTomlEdited(event.target.value !== config?.toml);
+                      setAdvancedTomlEdited(
+                        event.target.value !== config?.toml,
+                      );
                       setValidation(null);
                       setValidationPending(false);
                       setConfirmOpen(false);
@@ -6237,8 +6283,7 @@ function SystemConfigPanel({
 }
 
 type ParsedTomlDraft =
-  | { ok: true; table: TomlTable }
-  | { ok: false; error: string };
+  { ok: true; table: TomlTable } | { ok: false; error: string };
 
 function SystemConfigStatusItem({
   icon,

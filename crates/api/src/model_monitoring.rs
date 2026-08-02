@@ -36,13 +36,19 @@ pub(crate) struct PingTargetAssignmentReplacement {
     pub(crate) next_client_ids: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MonitoringShareTargetRecord {
+    pub(crate) client_id: String,
+    pub(crate) public_client_key: String,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct MonitoringShareRecord {
     pub(crate) id: Uuid,
     pub(crate) name: String,
     pub(crate) token_digest: String,
     pub(crate) selector_expression: String,
-    pub(crate) target_client_ids: Vec<String>,
+    pub(crate) targets: Vec<MonitoringShareTargetRecord>,
     pub(crate) visibility: MonitoringShareVisibilityView,
     pub(crate) expires_at: String,
     pub(crate) revoked_at: Option<String>,
@@ -50,6 +56,29 @@ pub(crate) struct MonitoringShareRecord {
     pub(crate) created_by: Option<Uuid>,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
+}
+
+impl MonitoringShareRecord {
+    pub(crate) fn target_client_ids(&self) -> Vec<String> {
+        self.targets
+            .iter()
+            .map(|target| target.client_id.clone())
+            .collect()
+    }
+
+    pub(crate) fn public_client_key(&self, client_id: &str) -> Option<&str> {
+        self.targets
+            .iter()
+            .find(|target| target.client_id == client_id)
+            .map(|target| target.public_client_key.as_str())
+    }
+
+    pub(crate) fn client_id_for_public_key(&self, public_client_key: &str) -> Option<&str> {
+        self.targets
+            .iter()
+            .find(|target| target.public_client_key == public_client_key)
+            .map(|target| target.client_id.as_str())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -79,6 +108,7 @@ pub(crate) struct PingTargetView {
     pub(crate) selector_expression: String,
     pub(crate) generation: i64,
     pub(crate) assigned_count: usize,
+    pub(crate) target_client_ids: Vec<String>,
     pub(crate) primary_count: usize,
     pub(crate) runtime_sync: PingTargetRuntimeSyncView,
     pub(crate) target_update_available: bool,

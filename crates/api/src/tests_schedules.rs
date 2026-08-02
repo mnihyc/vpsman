@@ -238,7 +238,7 @@ async fn malformed_memory_schedule_stays_visible_blocks_partial_actions_and_can_
     );
     assert_eq!(visible.operation_payload_hash, raw_hash);
     assert!(repo
-        .update_schedule_targets(malformed.id, vec!["client-a".to_string()], &operator,)
+        .update_schedule_targets(malformed.id, vec!["client-a".to_string()], None, &operator,)
         .await
         .is_err());
     assert!(repo
@@ -268,6 +268,8 @@ async fn malformed_memory_schedule_stays_visible_blocks_partial_actions_and_can_
                 },
                 selector_expression: "tag:edge".to_string(),
                 target_client_ids: vec!["client-a".to_string()],
+                expected_selector_expression: "tag:edge".to_string(),
+                expected_target_client_ids: vec!["client-a".to_string()],
                 cron_expr: "0 * * * *".to_string(),
                 timezone: "UTC".to_string(),
                 enabled: false,
@@ -279,6 +281,7 @@ async fn malformed_memory_schedule_stays_visible_blocks_partial_actions_and_can_
                 confirmed: true,
             }
             .into(),
+            None,
             &operator,
         )
         .await
@@ -382,6 +385,163 @@ async fn schedule_mutations_require_explicit_confirmation() {
 }
 
 #[tokio::test]
+async fn unchanged_schedule_selector_preserves_frozen_targets_until_manual_update() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = schedule_test_operator();
+    seed_never_connected_agent(&repo, "client-a").await;
+    seed_never_connected_agent(&repo, "client-b").await;
+    if let Repository::Memory(memory) = &repo {
+        for agent in memory.agents.write().await.iter_mut() {
+            agent.tags = vec!["edge".to_string()];
+        }
+    }
+    let schedule = repo
+        .create_schedule(shell_schedule_request("frozen-edge", true), &operator)
+        .await
+        .unwrap();
+    assert_eq!(schedule.target_client_ids, vec!["client-a"]);
+    let state = schedule_test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+
+    let Json(updated) = crate::routes_schedules::update_schedule(
+        State(state.clone()),
+        headers.clone(),
+        Path(schedule.id),
+        Json(UpdateScheduleRequest {
+            name: "frozen-edge-renamed".to_string(),
+            operation: schedule.operation.clone().unwrap(),
+            selector_expression: schedule.selector_expression.clone(),
+            target_client_ids: schedule.target_client_ids.clone(),
+            expected_selector_expression: schedule.selector_expression.clone(),
+            expected_target_client_ids: schedule.target_client_ids.clone(),
+            cron_expr: schedule.cron_expr.clone(),
+            timezone: schedule.timezone.clone(),
+            enabled: schedule.enabled,
+            catch_up_policy: schedule.catch_up_policy.clone(),
+            catch_up_limit: schedule.catch_up_limit,
+            retry_delay_secs: schedule.retry_delay_secs,
+            max_failures: schedule.max_failures,
+            privilege_assertion: None,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(updated.target_client_ids, vec!["client-a"]);
+
+    let Json(retargeted) = crate::routes_schedules::update_schedule_targets(
+        State(state.clone()),
+        headers.clone(),
+        Path(schedule.id),
+        Json(UpdateScheduleTargetsRequest {
+            privilege_assertion: None,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(retargeted.target_client_ids, vec!["client-a", "client-b"]);
+
+    let error = crate::routes_schedules::update_schedule_targets(
+        State(state),
+        headers,
+        Path(schedule.id),
+        Json(UpdateScheduleTargetsRequest {
+            privilege_assertion: None,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::CONFLICT);
+    assert_eq!(error.code, "schedule_targets_already_current");
+}
+
+#[tokio::test]
+async fn schedule_target_update_persists_an_empty_resolution() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = schedule_test_operator();
+    seed_never_connected_agent(&repo, "client-a").await;
+    let mut request = shell_schedule_request("empty-retarget", true);
+    request.selector_expression = "tag:missing".to_string();
+    let schedule = repo.create_schedule(request, &operator).await.unwrap();
+    let state = schedule_test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+
+    let Json(updated) = crate::routes_schedules::update_schedule_targets(
+        State(state),
+        headers,
+        Path(schedule.id),
+        Json(UpdateScheduleTargetsRequest {
+            privilege_assertion: None,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(updated.target_client_ids.is_empty());
+    assert!(repo
+        .schedule_by_id(schedule.id)
+        .await
+        .unwrap()
+        .target_client_ids
+        .is_empty());
+}
+
+#[tokio::test]
+async fn concurrent_schedule_edit_cannot_overwrite_retargeted_clients() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = schedule_test_operator();
+    seed_never_connected_agent(&repo, "client-a").await;
+    seed_never_connected_agent(&repo, "client-b").await;
+    let schedule = repo
+        .create_schedule(
+            shell_schedule_request("concurrent-snapshot", true),
+            &operator,
+        )
+        .await
+        .unwrap();
+    let expectation = crate::repository_schedules::ScheduleSnapshotExpectation {
+        selector_expression: schedule.selector_expression.clone(),
+        target_client_ids: schedule.target_client_ids.clone(),
+    };
+    let update = crate::repository_schedules::ScheduleCreateInput {
+        name: "concurrent-snapshot-edited".to_string(),
+        operation: schedule.operation.clone().unwrap(),
+        selector_expression: schedule.selector_expression.clone(),
+        target_client_ids: schedule.target_client_ids.clone(),
+        cron_expr: schedule.cron_expr.clone(),
+        timezone: schedule.timezone.clone(),
+        enabled: schedule.enabled,
+        catch_up_policy: schedule.catch_up_policy.clone(),
+        catch_up_limit: schedule.catch_up_limit,
+        retry_delay_secs: schedule.retry_delay_secs,
+        max_failures: schedule.max_failures,
+    };
+
+    let (edit_result, retarget_result) = tokio::join!(
+        repo.update_schedule_record(schedule.id, update, Some(&expectation), &operator),
+        repo.update_schedule_targets(
+            schedule.id,
+            vec!["client-b".to_string()],
+            Some(&expectation),
+            &operator,
+        ),
+    );
+    assert!(retarget_result.is_ok());
+    if let Err(error) = edit_result {
+        assert!(error.to_string().contains("schedule_snapshot_stale"));
+    }
+    assert_eq!(
+        repo.schedule_by_id(schedule.id)
+            .await
+            .unwrap()
+            .target_client_ids,
+        vec!["client-b".to_string()]
+    );
+}
+
+#[tokio::test]
 async fn schedule_uuid_lifecycle_hides_soft_deleted_rows() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = schedule_test_operator();
@@ -408,6 +568,8 @@ async fn schedule_uuid_lifecycle_hides_soft_deleted_rows() {
                 },
                 selector_expression: "tag:edge && id:client-a".to_string(),
                 target_client_ids: vec!["client-a".to_string()],
+                expected_selector_expression: "tag:edge".to_string(),
+                expected_target_client_ids: vec!["client-a".to_string()],
                 cron_expr: "15 * * * *".to_string(),
                 timezone: "UTC".to_string(),
                 enabled: false,
@@ -419,6 +581,7 @@ async fn schedule_uuid_lifecycle_hides_soft_deleted_rows() {
                 confirmed: true,
             }
             .into(),
+            None,
             &operator,
         )
         .await
@@ -958,6 +1121,8 @@ fn schedule_update_validation_rejects_cadence_without_a_future_occurrence() {
         },
         selector_expression: "tag:edge".to_string(),
         target_client_ids: vec!["client-a".to_string()],
+        expected_selector_expression: "tag:edge".to_string(),
+        expected_target_client_ids: vec!["client-a".to_string()],
         cron_expr: "0 0 31 2 *".to_string(),
         timezone: "UTC".to_string(),
         enabled: true,

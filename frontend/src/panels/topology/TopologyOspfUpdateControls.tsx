@@ -7,7 +7,10 @@ import {
   ShieldCheck,
   TriangleAlert,
 } from "lucide-react";
-import { ActionFeedback, type ActionFeedbackTone } from "../../components/ActionFeedback";
+import {
+  ActionFeedback,
+  type ActionFeedbackTone,
+} from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import {
   ConsoleDataGrid,
@@ -66,7 +69,9 @@ export function TopologyOspfUpdateControls({
   onOpenConfigurationSources: () => void;
   onOpenTunnelPlans: () => void;
   onRefresh: () => Promise<void>;
-  onRefreshTunnelPlanOspfStatus: (planId: string) => Promise<TunnelPlanOspfJobsResponse>;
+  onRefreshTunnelPlanOspfStatus: (
+    planId: string,
+  ) => Promise<TunnelPlanOspfJobsResponse>;
   onUpdateTunnelPlanOspfCost: (
     planId: string,
     request: UpdateTunnelPlanOspfCostRequest,
@@ -112,7 +117,8 @@ export function TopologyOspfUpdateControls({
       setFeedback({ message: "OSPF cost state refreshed", tone: "success" });
     } catch (error) {
       setFeedback({
-        message: error instanceof Error ? error.message : "OSPF state refresh failed",
+        message:
+          error instanceof Error ? error.message : "OSPF state refresh failed",
         tone: "danger",
       });
     } finally {
@@ -125,13 +131,16 @@ export function TopologyOspfUpdateControls({
     setPendingPlanId(plan.plan_id);
     try {
       const response = await onRefreshTunnelPlanOspfStatus(plan.plan_id);
-      setFeedback(ospfDispatchFeedback(
-        response.dispatch,
-        `OSPF updater checks for ${plan.plan_name}`,
-      ));
+      setFeedback(
+        ospfDispatchFeedback(
+          response.dispatch,
+          `OSPF updater checks for ${plan.plan_name}`,
+        ),
+      );
     } catch (error) {
       setFeedback({
-        message: error instanceof Error ? error.message : "OSPF updater check failed",
+        message:
+          error instanceof Error ? error.message : "OSPF updater check failed",
         tone: "danger",
       });
     } finally {
@@ -177,7 +186,9 @@ export function TopologyOspfUpdateControls({
     setPendingPlanId(active.plan.plan_id);
     try {
       const payloadHash = await sha256Hex(
-        encoder.encode(ospfPrivilegePayload(active.plan.plan_id, active.request)),
+        encoder.encode(
+          ospfPrivilegePayload(active.plan.plan_id, active.request),
+        ),
       );
       const privilegeAssertion = await buildPrivilegeAssertion({
         intent: canonicalDbPrivilegeIntent({
@@ -194,14 +205,16 @@ export function TopologyOspfUpdateControls({
         privilege_assertion: privilegeAssertion,
       });
       setSnapshot(null);
-      setFeedback(ospfDispatchFeedback(
-        response.dispatch,
-        `Routing cost update for ${active.plan.plan_name}`,
-      ));
+      setFeedback(
+        ospfDispatchFeedback(
+          response.dispatch,
+          `Routing cost update for ${active.plan.plan_name}`,
+        ),
+      );
     } catch (error) {
-      setSnapshot(null);
       setFeedback({
-        message: error instanceof Error ? error.message : "Routing cost update failed",
+        message:
+          error instanceof Error ? error.message : "Routing cost update failed",
         tone: "danger",
       });
     } finally {
@@ -226,9 +239,7 @@ export function TopologyOspfUpdateControls({
       cell: (plan) => (
         <span className="historyPrimary">
           <strong
-            title={
-              plan.control_mode === "automatic" ? "Automatic" : "Reviewed"
-            }
+            title={plan.control_mode === "automatic" ? "Automatic" : "Reviewed"}
           >
             {plan.control_mode === "automatic" ? "Automatic" : "Reviewed"}
           </strong>
@@ -287,8 +298,8 @@ export function TopologyOspfUpdateControls({
             {formatConfidence(plan.confidence)}
           </strong>
           <small title={plan.evidence_summary}>
-            {plan.evidence.sample_count} samples,{" "}
-            {plan.evidence.degraded_count} degraded
+            {plan.evidence.sample_count} samples, {plan.evidence.degraded_count}{" "}
+            degraded
           </small>
         </span>
       ),
@@ -353,15 +364,27 @@ export function TopologyOspfUpdateControls({
             per-plan command override.
           </span>
           <div className="dispatchActions">
-            <button className="secondaryAction compactAction" onClick={onOpenConfigurationSources} type="button">
+            <button
+              className="secondaryAction compactAction"
+              onClick={onOpenConfigurationSources}
+              type="button"
+            >
               <ExternalLink size={15} />
               Configure VPS presets
             </button>
-            <button className="secondaryAction compactAction" onClick={onOpenAdapterDefinitions} type="button">
+            <button
+              className="secondaryAction compactAction"
+              onClick={onOpenAdapterDefinitions}
+              type="button"
+            >
               <ExternalLink size={15} />
               Manage plan overrides
             </button>
-            <button className="primaryAction compactAction" onClick={onOpenTunnelPlans} type="button">
+            <button
+              className="primaryAction compactAction"
+              onClick={onOpenTunnelPlans}
+              type="button"
+            >
               <Gauge size={15} />
               Open tunnel plans
             </button>
@@ -395,7 +418,10 @@ export function TopologyOspfUpdateControls({
             title="Refresh saved plans, endpoint cost status, and recommendations"
             type="button"
           >
-            <RefreshCw className={refreshing ? "isSpinning" : undefined} size={15} />
+            <RefreshCw
+              className={refreshing ? "isSpinning" : undefined}
+              size={15}
+            />
             Refresh
           </button>
           <button
@@ -448,14 +474,25 @@ export function TopologyOspfUpdateControls({
       <ConfirmationPrompt
         confirmDisabled={!privilegeMaterial}
         confirmLabel="Apply routing cost"
-        detail={snapshot ? applyConfirmationDetail(snapshot.plan) : "Review the frozen routing cost snapshot."}
+        detail={
+          snapshot
+            ? applyConfirmationDetail(snapshot.plan)
+            : "Review the frozen routing cost snapshot."
+        }
+        error={
+          snapshot && feedback?.tone === "danger" ? feedback.message : null
+        }
         items={snapshot ? confirmationItems(snapshot, clientLabel) : []}
         onCancel={() => setSnapshot(null)}
         onConfirm={() => snapshot && void applySnapshot(snapshot)}
         open={snapshot !== null}
         pending={snapshot ? pendingPlanId === snapshot.plan.plan_id : false}
         title="Confirm OSPF cost update"
-        tone={snapshot && isCautionRecommendation(snapshot.plan) ? "warning" : "normal"}
+        tone={
+          snapshot && isCautionRecommendation(snapshot.plan)
+            ? "warning"
+            : "normal"
+        }
       >
         {snapshot && !privilegeMaterial && (
           <PrivilegeVaultBox
@@ -530,9 +567,7 @@ function OspfPlanDetail({
             ? shortId(plan.right_adapter_definition_hash)
             : "unavailable"}
         </code>
-        <span
-          title={plan.evidence.latest_observed_at ?? "No observation time"}
-        >
+        <span title={plan.evidence.latest_observed_at ?? "No observation time"}>
           {plan.evidence.latest_observed_at
             ? formatCompactTime(plan.evidence.latest_observed_at)
             : "No observation time"}
@@ -546,9 +581,7 @@ function OspfPlanDetail({
           {savedPlan.left_ospf_job_id && (
             <button
               className="secondaryAction compactAction"
-              onClick={() =>
-                onOpenJobDetails?.(savedPlan.left_ospf_job_id!)
-              }
+              onClick={() => onOpenJobDetails?.(savedPlan.left_ospf_job_id!)}
               title={`Open left updater job ${savedPlan.left_ospf_job_id}`}
               type="button"
             >
@@ -558,9 +591,7 @@ function OspfPlanDetail({
           {savedPlan.right_ospf_job_id && (
             <button
               className="secondaryAction compactAction"
-              onClick={() =>
-                onOpenJobDetails?.(savedPlan.right_ospf_job_id!)
-              }
+              onClick={() => onOpenJobDetails?.(savedPlan.right_ospf_job_id!)}
               title={`Open right updater job ${savedPlan.right_ospf_job_id}`}
               type="button"
             >
@@ -584,7 +615,10 @@ function EndpointCost({
 }) {
   const healthy = status === "verified" && cost !== null;
   return (
-    <span className={`endpointCost ${healthy ? "isVerified" : "needsCheck"}`} title={`${status}; cost ${cost ?? "unknown"}`}>
+    <span
+      className={`endpointCost ${healthy ? "isVerified" : "needsCheck"}`}
+      title={`${status}; cost ${cost ?? "unknown"}`}
+    >
       {healthy ? <CircleCheck size={13} /> : <TriangleAlert size={13} />}
       <b>{label}</b>
       <span>{cost ?? "?"}</span>
@@ -604,7 +638,9 @@ function Fact({ label, value }: { label: string; value: string }) {
 function canApply(plan: NetworkOspfUpdatePlanRecord): boolean {
   return (
     plan.control_mode === "reviewed" &&
-    ["review_required", "review_degraded", "review_planned_baseline"].includes(plan.status) &&
+    ["review_required", "review_degraded", "review_planned_baseline"].includes(
+      plan.status,
+    ) &&
     plan.left_ospf_status === "verified" &&
     plan.right_ospf_status === "verified" &&
     Boolean(plan.left_adapter_definition_hash) &&
@@ -613,10 +649,16 @@ function canApply(plan: NetworkOspfUpdatePlanRecord): boolean {
 }
 
 function applyBlockedReason(plan: NetworkOspfUpdatePlanRecord): string {
-  if (!plan.left_adapter_definition_hash || !plan.right_adapter_definition_hash) {
+  if (
+    !plan.left_adapter_definition_hash ||
+    !plan.right_adapter_definition_hash
+  ) {
     return "Both endpoint OSPF updaters must be configured";
   }
-  if (plan.left_ospf_status !== "verified" || plan.right_ospf_status !== "verified") {
+  if (
+    plan.left_ospf_status !== "verified" ||
+    plan.right_ospf_status !== "verified"
+  ) {
     return "Check both endpoint updaters before applying a cost";
   }
   if (plan.status === "below_minimum_delta") {
@@ -634,7 +676,10 @@ function confirmationItems(
 ) {
   const { plan, request } = snapshot;
   return [
-    { label: "Plan", value: `${plan.plan_name} · ${plan.interface_name} · r${plan.plan_revision}` },
+    {
+      label: "Plan",
+      value: `${plan.plan_name} · ${plan.interface_name} · r${plan.plan_revision}`,
+    },
     {
       label: "Endpoints",
       value: `${clientLabel(plan.left_client_id)} / ${clientLabel(plan.right_client_id)}`,
@@ -659,7 +704,8 @@ function isCautionRecommendation(plan: NetworkOspfUpdatePlanRecord): boolean {
 }
 
 function applyConfirmationDetail(plan: NetworkOspfUpdatePlanRecord): string {
-  const base = "Run the resolved OSPF updater on both endpoints using frozen command snapshots. A per-plan override takes precedence; otherwise the endpoint VPS Configuration preset is used. The agent executes only the stored argv and never edits routing-daemon files itself.";
+  const base =
+    "Run the resolved OSPF updater on both endpoints using frozen command snapshots. A per-plan override takes precedence; otherwise the endpoint VPS Configuration preset is used. The agent executes only the stored argv and never edits routing-daemon files itself.";
   if (plan.status === "review_degraded") {
     return `${base} Recent evidence includes degraded samples; apply only after judging that evidence.`;
   }
@@ -757,7 +803,9 @@ function updaterSourceLabel(
 
 function formatConfidence(value: string): string {
   const normalized = value.replace(/[_-]+/g, " ").trim();
-  return normalized ? normalized[0].toUpperCase() + normalized.slice(1) : "Unknown";
+  return normalized
+    ? normalized[0].toUpperCase() + normalized.slice(1)
+    : "Unknown";
 }
 
 function formatMaximumDelta(delta: number): string {
@@ -766,7 +814,10 @@ function formatMaximumDelta(delta: number): string {
 }
 
 function formatPlanDelta(plan: NetworkOspfUpdatePlanRecord): string {
-  if (plan.left_current_ospf_cost === null || plan.right_current_ospf_cost === null) {
+  if (
+    plan.left_current_ospf_cost === null ||
+    plan.right_current_ospf_cost === null
+  ) {
     return "Initial apply";
   }
   return formatMaximumDelta(plan.maximum_cost_delta);

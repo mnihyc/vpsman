@@ -56,15 +56,9 @@ import type {
   JobDispatchPreset,
   JobDispatchPresetInput,
 } from "./jobDispatchPreset";
-import {
-  pushHistoryEntry,
-  replaceHistoryEntry,
-} from "./historyEntryState";
+import { pushHistoryEntry, replaceHistoryEntry } from "./historyEntryState";
 import { retryableLazy } from "./lazyImport";
-import {
-  presentAudit,
-  type AuditEvidenceReference,
-} from "./auditPresentation";
+import { presentAudit, type AuditEvidenceReference } from "./auditPresentation";
 
 type ReleaseRouteTarget = AgentView | string;
 
@@ -208,9 +202,7 @@ function combineErrors(
 ): string | null {
   const messages = Array.from(
     new Set(
-      errors.filter(
-        (error): error is string => Boolean(error && error.trim()),
-      ),
+      errors.filter((error): error is string => Boolean(error && error.trim())),
     ),
   );
   return messages.length > 0 ? messages.join(" · ") : null;
@@ -267,9 +259,9 @@ const RemoteOperationsPanel = retryableLazy(() =>
     default: module.RemoteOperationsPanel,
   })),
 );
-const ServerJobsPanel = retryableLazy(() =>
-  import("./panels/jobs/ServerJobsPanel").then((module) => ({
-    default: module.ServerJobsPanel,
+const SystemMaintenancePanel = retryableLazy(() =>
+  import("./panels/SystemMaintenancePanel").then((module) => ({
+    default: module.SystemMaintenancePanel,
   })),
 );
 const FleetGroupsPanel = retryableLazy(() =>
@@ -372,7 +364,7 @@ const SystemPanel = retryableLazy(() =>
 
 function getScopedPageTitle(view: ActiveView, subpage: string): string {
   if (view === "System") {
-    switch (subpage) {
+    switch (subpage.split(":")[0]) {
       case "suite_config":
         return "Suite config";
       case "capacity":
@@ -577,7 +569,7 @@ function getScopedPageDescription(view: ActiveView, subpage: string): string {
     }
   }
   if (view === "System") {
-    switch (subpage) {
+    switch (subpage.split(":")[0]) {
       case "suite_config":
         return "Suite settings, validation, save review, and reload impact";
       case "capacity":
@@ -776,10 +768,7 @@ function subpageRouteSegment(view: ActiveView, subpage: string): string {
     const clientId = subpage.slice("rules:id:".length).trim();
     return `rules/${encodeURIComponent(clientId)}`;
   }
-  if (
-    view === "Observability" &&
-    subpage.startsWith("alerts:policy:")
-  ) {
+  if (view === "Observability" && subpage.startsWith("alerts:policy:")) {
     const policyId = subpage.slice("alerts:policy:".length).trim();
     return `alert-policy/${encodeURIComponent(policyId)}`;
   }
@@ -907,13 +896,10 @@ export function App() {
     key: string;
     promise: Promise<void>;
   } | null>(null);
-  const closePrivilegeUnlock = useCallback(
-    () => {
-      setPrivilegeUnlockOpen(false);
-      setPrivilegeRestoreError(null);
-    },
-    [],
-  );
+  const closePrivilegeUnlock = useCallback(() => {
+    setPrivilegeUnlockOpen(false);
+    setPrivilegeRestoreError(null);
+  }, []);
   const dashboard = useDashboardData(activeView);
   const privilegeAuthContextRef = useRef({
     apiToken: dashboard.apiToken,
@@ -1151,7 +1137,7 @@ export function App() {
     const clientId =
       activeView === "Fleet" ? fleetDetailClientId(activeSubpage) : null;
     return clientId
-      ? dashboard.agents.find((agent) => agent.id === clientId) ?? null
+      ? (dashboard.agents.find((agent) => agent.id === clientId) ?? null)
       : null;
   }, [activeSubpage, activeView, dashboard.agents]);
   useEffect(() => {
@@ -1201,8 +1187,7 @@ export function App() {
       : "unavailable";
   const configInventoryEvidenceState = dashboard.tagsLoading
     ? "loading"
-    : dashboard.tagInventoryEvidenceAvailable &&
-        dashboard.tagsError === null
+    : dashboard.tagInventoryEvidenceAvailable && dashboard.tagsError === null
       ? "available"
       : "unavailable";
   const homeEvidenceLoading =
@@ -1318,10 +1303,10 @@ export function App() {
     activeView === "Fleet" && !dashboard.fleetCoreEvidenceAvailable
       ? "Fleet inventory evidence unavailable; retry before assuming the fleet is empty"
       : activeView === "Fleet" && hasFleetScope
-      ? `${visibleSummary.online} visible live / ${visibleSummary.offline} offline / ${visibleSummary.stale} stale / ${visibleSummary.revoked} access revoked / ${visibleSummary.never + visibleSummary.unknown} no contact / ${visibleSummary.total} visible / ${dashboard.summary.total} total`
-      : activeView === "Fleet"
-        ? `${visibleSummary.online} live / ${visibleSummary.offline} offline / ${visibleSummary.stale} stale / ${visibleSummary.revoked} access revoked / ${visibleSummary.never + visibleSummary.unknown} no contact / ${visibleSummary.total} total`
-        : getScopedPageDescription(activeView, activeSubpage);
+        ? `${visibleSummary.online} visible live / ${visibleSummary.offline} offline / ${visibleSummary.stale} stale / ${visibleSummary.revoked} access revoked / ${visibleSummary.never + visibleSummary.unknown} no contact / ${visibleSummary.total} visible / ${dashboard.summary.total} total`
+        : activeView === "Fleet"
+          ? `${visibleSummary.online} live / ${visibleSummary.offline} offline / ${visibleSummary.stale} stale / ${visibleSummary.revoked} access revoked / ${visibleSummary.never + visibleSummary.unknown} no contact / ${visibleSummary.total} total`
+          : getScopedPageDescription(activeView, activeSubpage);
 
   useEffect(() => {
     setPreferredTimeZone(operatorPreferences.timezone);
@@ -1435,7 +1420,10 @@ export function App() {
   ) {
     const destination = releaseDestination(view, subpage);
     if (targetClientId) {
-      if (destination.view === "Fleet" && destination.subpage === "instance_detail") {
+      if (
+        destination.view === "Fleet" &&
+        destination.subpage === "instance_detail"
+      ) {
         openVpsDetail(targetClientId);
         return;
       }
@@ -1460,7 +1448,10 @@ export function App() {
         openRemoteProcesses(targetClientId);
         return;
       }
-      if (destination.view === "Backups" && destination.subpage === "requests") {
+      if (
+        destination.view === "Backups" &&
+        destination.subpage === "requests"
+      ) {
         openBackupWorkflowById(targetClientId);
         return;
       }
@@ -2486,23 +2477,29 @@ export function App() {
       );
     }
     return (
-      <section className="workspace singleColumn">
-        <ServerJobsPanel
-          error={dashboard.serverJobsError}
-          jobs={dashboard.serverJobs}
-          loading={dashboard.jobsLoading}
-          onCancelJob={dashboard.cancelServerJob}
-          onCreateCleanupJob={dashboard.createArtifactCleanupJob}
-          onPreviewCleanup={dashboard.previewArtifactCleanup}
-          onRefresh={dashboard.loadJobs}
-        />
-      </section>
+      <SystemMaintenancePanel
+        activeSubpage={activeSubpage}
+        agents={dashboard.agents}
+        apiToken={dashboard.apiToken}
+        jobs={dashboard.serverJobs}
+        jobsError={dashboard.serverJobsError}
+        jobsLoading={dashboard.jobsLoading}
+        onCancelJob={dashboard.cancelServerJob}
+        onCreateCleanupJob={dashboard.createArtifactCleanupJob}
+        onOpenPrivilegeUnlock={openPrivilegeUnlock}
+        onPreviewCleanup={dashboard.previewArtifactCleanup}
+        onRefreshJobs={dashboard.loadJobs}
+        onRefreshSchedules={dashboard.loadSchedules}
+        onResolveTargets={dashboard.resolveJobTargets}
+        onSelectSubpage={(subpage) => selectView("System", subpage)}
+        privilegeMaterial={privilegeMaterial}
+      />
     );
   }
 
   function renderSchedulesPanel() {
     return (
-        <SchedulesPanel
+      <SchedulesPanel
         activeSubpage="registry"
         agents={dashboard.agents}
         commandTemplates={dashboard.commandTemplates}
@@ -2532,107 +2529,109 @@ export function App() {
     return (
       <div className="workspace singleColumn">
         <TopologyPanel
-        activeSubpage={panelSubpage}
-        agents={dashboard.agents}
-        apiToken={dashboard.apiToken}
-        configurationSources={dashboard.configurationSources}
-        configurationSourcesEvidenceState={
-          dashboard.configurationSourcesLoading
-            ? "loading"
-            : dashboard.configurationSourcesEvidenceAvailable
-              ? "available"
-              : "unavailable"
-        }
-        error={combineErrors(
-          dashboard.topologyError,
-          dashboard.tagsError,
-          dashboard.configurationSourcesError,
-          dashboard.runtimeConfigApplyError,
-        )}
-        initialAdapterKind={networkAdapterWorkflowIntent}
-        jobs={dashboard.jobs}
-        loading={dashboard.topologyLoading}
-        initialPlanWorkflow={networkPlanWorkflowIntent}
-        initialTargetIntent={
-          workflowTargetIntent?.destination === "network_graph"
-            ? workflowTargetIntent
-            : null
-        }
-        networkObservations={dashboard.networkObservations}
-        networkTrends={dashboard.networkTrends}
-        onInitialAdapterKindConsumed={() =>
-          setNetworkAdapterWorkflowIntent(null)
-        }
-        onInitialPlanWorkflowConsumed={() => setNetworkPlanWorkflowIntent(null)}
-        onInitialTargetIntentConsumed={consumeWorkflowTargetIntent}
-        ospfRecommendations={dashboard.ospfRecommendations}
-        ospfUpdatePlans={dashboard.ospfUpdatePlans}
-        operator={dashboard.operator}
-        portForwardError={dashboard.portForwardError}
-        portForwardLoading={dashboard.portForwardLoading}
-        portForwardRules={dashboard.portForwardRules}
-        runtimeConfigEvidenceState={runtimeConfigEvidenceState}
-        runtimeConfigApplyStates={dashboard.runtimeConfigApplyStates}
-        onAllocateTunnelEndpoints={dashboard.allocateTunnelEndpoints}
-        onCreateJob={dashboard.createJob}
-        onCreateNetworkAdapterDefinition={
-          dashboard.createNetworkAdapterDefinition
-        }
-        onCreateTunnelPlan={dashboard.createTunnelPlan}
-        onDeleteNetworkAdapterDefinition={
-          dashboard.deleteNetworkAdapterDefinition
-        }
-        onDeleteTunnelPlan={dashboard.deleteTunnelPlan}
-        onExportTunnelPlan={dashboard.exportTunnelPlan}
-        onLoadNetworkObservations={dashboard.loadNetworkObservations}
-        onLoadConfigurationSources={dashboard.loadConfigurationSources}
-        onLoadNetworkTrends={dashboard.loadNetworkTrends}
-        onLoadOspfRecommendations={dashboard.loadOspfRecommendations}
-        onLoadOspfUpdatePlans={dashboard.loadOspfUpdatePlans}
-        onLoadRuntimeConfigApplyStates={
-          dashboard.loadRuntimeConfigApplyStates
-        }
-        onLoadNetworkAdapterDefinitions={
-          dashboard.loadNetworkAdapterDefinitions
-        }
-        onLoadTopologyGraph={dashboard.loadTopologyGraph}
-        onLoadOutputs={dashboard.loadJobOutputs}
-        onLoadTargets={dashboard.loadJobTargets}
-        onOpenCreateTunnelPlan={openCreateTunnelPlan}
-        onOpenConfigurationSources={() => selectView("Config", "sources")}
-        onOpenJobDetails={openJobDetails}
-        onOpenPrivilegeUnlock={openPrivilegeUnlock}
-        onOpenAdapterDefinitions={(kind) => {
-          setNetworkAdapterWorkflowIntent(kind);
-          selectView("Network", "tunnel_plans");
-        }}
-        onOpenVpsDetail={releaseRoutes.openVpsDetail}
-        onBulkMutatePortForwardRules={dashboard.bulkMutatePortForwardRules}
-        onCreatePortForwardRule={dashboard.createPortForwardRule}
-        onLoadPortForwardRules={dashboard.loadPortForwardRules}
-        onMutatePortForwardRule={dashboard.mutatePortForwardRule}
-        onResolvePortForwardHostname={dashboard.resolvePortForwardHostname}
-        onUpdatePortForwardRule={dashboard.updatePortForwardRule}
-        onSelectSubpage={(subpage) =>
-          selectReleaseDestination("Network", subpage)
-        }
-        onRefresh={dashboard.loadTunnelPlans}
-        onRefreshTunnelPlanOspfStatus={dashboard.refreshTunnelPlanOspfStatus}
-        onSetTunnelPlanEnabled={dashboard.setTunnelPlanEnabled}
-        onUpdateTunnelConnectionAssessment={
-          dashboard.updateTunnelConnectionAssessment
-        }
-        onUpdateTunnelPlanOspfCost={dashboard.updateTunnelPlanOspfCost}
-        onUpdateTunnelPlan={dashboard.updateTunnelPlan}
-        onUpdateNetworkAdapterDefinition={
-          dashboard.updateNetworkAdapterDefinition
-        }
-        networkAdapterDefinitions={dashboard.networkAdapterDefinitions}
-        privilegeMaterial={privilegeMaterial}
-        setPrivilegeMaterial={setPrivilegeMaterial}
-        topologyGraph={dashboard.topologyGraph}
-        telemetryTunnels={dashboard.telemetryTunnels}
-        tunnelPlanCorruptions={dashboard.tunnelPlanCorruptions}
+          activeSubpage={panelSubpage}
+          agents={dashboard.agents}
+          apiToken={dashboard.apiToken}
+          configurationSources={dashboard.configurationSources}
+          configurationSourcesEvidenceState={
+            dashboard.configurationSourcesLoading
+              ? "loading"
+              : dashboard.configurationSourcesEvidenceAvailable
+                ? "available"
+                : "unavailable"
+          }
+          error={combineErrors(
+            dashboard.topologyError,
+            dashboard.tagsError,
+            dashboard.configurationSourcesError,
+            dashboard.runtimeConfigApplyError,
+          )}
+          initialAdapterKind={networkAdapterWorkflowIntent}
+          jobs={dashboard.jobs}
+          loading={dashboard.topologyLoading}
+          initialPlanWorkflow={networkPlanWorkflowIntent}
+          initialTargetIntent={
+            workflowTargetIntent?.destination === "network_graph"
+              ? workflowTargetIntent
+              : null
+          }
+          networkObservations={dashboard.networkObservations}
+          networkTrends={dashboard.networkTrends}
+          onInitialAdapterKindConsumed={() =>
+            setNetworkAdapterWorkflowIntent(null)
+          }
+          onInitialPlanWorkflowConsumed={() =>
+            setNetworkPlanWorkflowIntent(null)
+          }
+          onInitialTargetIntentConsumed={consumeWorkflowTargetIntent}
+          ospfRecommendations={dashboard.ospfRecommendations}
+          ospfUpdatePlans={dashboard.ospfUpdatePlans}
+          operator={dashboard.operator}
+          portForwardError={dashboard.portForwardError}
+          portForwardLoading={dashboard.portForwardLoading}
+          portForwardRules={dashboard.portForwardRules}
+          runtimeConfigEvidenceState={runtimeConfigEvidenceState}
+          runtimeConfigApplyStates={dashboard.runtimeConfigApplyStates}
+          onAllocateTunnelEndpoints={dashboard.allocateTunnelEndpoints}
+          onCreateJob={dashboard.createJob}
+          onCreateNetworkAdapterDefinition={
+            dashboard.createNetworkAdapterDefinition
+          }
+          onCreateTunnelPlan={dashboard.createTunnelPlan}
+          onDeleteNetworkAdapterDefinition={
+            dashboard.deleteNetworkAdapterDefinition
+          }
+          onDeleteTunnelPlan={dashboard.deleteTunnelPlan}
+          onExportTunnelPlan={dashboard.exportTunnelPlan}
+          onLoadNetworkObservations={dashboard.loadNetworkObservations}
+          onLoadConfigurationSources={dashboard.loadConfigurationSources}
+          onLoadNetworkTrends={dashboard.loadNetworkTrends}
+          onLoadOspfRecommendations={dashboard.loadOspfRecommendations}
+          onLoadOspfUpdatePlans={dashboard.loadOspfUpdatePlans}
+          onLoadRuntimeConfigApplyStates={
+            dashboard.loadRuntimeConfigApplyStates
+          }
+          onLoadNetworkAdapterDefinitions={
+            dashboard.loadNetworkAdapterDefinitions
+          }
+          onLoadTopologyGraph={dashboard.loadTopologyGraph}
+          onLoadOutputs={dashboard.loadJobOutputs}
+          onLoadTargets={dashboard.loadJobTargets}
+          onOpenCreateTunnelPlan={openCreateTunnelPlan}
+          onOpenConfigurationSources={() => selectView("Config", "sources")}
+          onOpenJobDetails={openJobDetails}
+          onOpenPrivilegeUnlock={openPrivilegeUnlock}
+          onOpenAdapterDefinitions={(kind) => {
+            setNetworkAdapterWorkflowIntent(kind);
+            selectView("Network", "tunnel_plans");
+          }}
+          onOpenVpsDetail={releaseRoutes.openVpsDetail}
+          onBulkMutatePortForwardRules={dashboard.bulkMutatePortForwardRules}
+          onCreatePortForwardRule={dashboard.createPortForwardRule}
+          onLoadPortForwardRules={dashboard.loadPortForwardRules}
+          onMutatePortForwardRule={dashboard.mutatePortForwardRule}
+          onResolvePortForwardHostname={dashboard.resolvePortForwardHostname}
+          onUpdatePortForwardRule={dashboard.updatePortForwardRule}
+          onSelectSubpage={(subpage) =>
+            selectReleaseDestination("Network", subpage)
+          }
+          onRefresh={dashboard.loadTunnelPlans}
+          onRefreshTunnelPlanOspfStatus={dashboard.refreshTunnelPlanOspfStatus}
+          onSetTunnelPlanEnabled={dashboard.setTunnelPlanEnabled}
+          onUpdateTunnelConnectionAssessment={
+            dashboard.updateTunnelConnectionAssessment
+          }
+          onUpdateTunnelPlanOspfCost={dashboard.updateTunnelPlanOspfCost}
+          onUpdateTunnelPlan={dashboard.updateTunnelPlan}
+          onUpdateNetworkAdapterDefinition={
+            dashboard.updateNetworkAdapterDefinition
+          }
+          networkAdapterDefinitions={dashboard.networkAdapterDefinitions}
+          privilegeMaterial={privilegeMaterial}
+          setPrivilegeMaterial={setPrivilegeMaterial}
+          topologyGraph={dashboard.topologyGraph}
+          telemetryTunnels={dashboard.telemetryTunnels}
+          tunnelPlanCorruptions={dashboard.tunnelPlanCorruptions}
           tunnelPlans={dashboard.tunnelPlans}
         />
       </div>
@@ -2877,10 +2876,7 @@ export function App() {
             fileTransferSourcesTruncated={
               dashboard.fileTransferSourcesTruncated
             }
-            error={combineErrors(
-              dashboard.jobsError,
-              dashboard.backupsError,
-            )}
+            error={combineErrors(dashboard.jobsError, dashboard.backupsError)}
             loading={dashboard.jobsLoading || dashboard.backupsLoading}
             onOpenAgentUpdates={() => selectView("Automation", "agent_updates")}
             onOpenBackupsArtifacts={() => selectView("Backups", "artifacts")}
@@ -2905,8 +2901,7 @@ export function App() {
       return renderBackupsPanel(activeSubpage);
     }
     if (activeView === "Config") {
-      if (activeSubpage === "sources")
-        return renderConfigurationSourcesPanel();
+      if (activeSubpage === "sources") return renderConfigurationSourcesPanel();
       return renderConfigPanel(configSubpage(activeSubpage));
     }
     if (activeView === "Observability") {
@@ -2926,10 +2921,7 @@ export function App() {
       return renderFleetMetricsPanel();
     }
     if (activeView === "Audit") {
-      if (
-        activeSubpage === "events" ||
-        activeSubpage.startsWith("events:id:")
-      )
+      if (activeSubpage === "events" || activeSubpage.startsWith("events:id:"))
         return renderAuditPanel(activeSubpage);
       if (activeSubpage === "job_evidence") {
         return (
@@ -2999,7 +2991,7 @@ export function App() {
       return renderAccessPanel(accessSubpage(activeSubpage));
     }
     if (activeView === "System") {
-      if (activeSubpage === "maintenance")
+      if (activeSubpage.split(":")[0] === "maintenance")
         return renderSystemMaintenancePanel();
       return renderSystemPanel(systemSubpage(activeSubpage));
     }
@@ -3044,13 +3036,13 @@ export function App() {
           onlineRatio={onlineRatio}
           draftSavedFleetViewName={fleetViews.draftSavedViewName}
           filteredAgentCount={visibleAgents.length}
-          fleetAlertsEvidenceAvailable={
-            scopedFleetAlertsEvidenceAvailable
-          }
+          fleetAlertsEvidenceAvailable={scopedFleetAlertsEvidenceAvailable}
           fleetCoreEvidenceAvailable={dashboard.fleetCoreEvidenceAvailable}
           fleetQuery={fleetViews.fleetQuery}
           hideFleetStatusSummary={
-            activeView === "Fleet" && activeSubpage.startsWith("instance_detail")
+            activeView === "Fleet" &&
+            (activeSubpage === "monitor" ||
+              activeSubpage.startsWith("instance_detail"))
           }
           pageDescription={pageDescription}
           pageTitle={pageTitle}
@@ -3150,9 +3142,7 @@ function configReleaseSubpage(subpage: string) {
     return subpage;
   }
   if (
-    ["overview", "sources", "per_vps", "bulk_patch", "rules"].includes(
-      subpage,
-    )
+    ["overview", "sources", "per_vps", "bulk_patch", "rules"].includes(subpage)
   ) {
     return subpage;
   }
@@ -3216,7 +3206,13 @@ function remoteOperationsReleaseSubpage(subpage: string) {
 
 function automationReleaseSubpage(subpage: string) {
   if (
-    ["rollouts", "schedules", "runbooks", "os_updates", "agent_updates"].includes(subpage)
+    [
+      "rollouts",
+      "schedules",
+      "runbooks",
+      "os_updates",
+      "agent_updates",
+    ].includes(subpage)
   ) {
     return subpage;
   }
@@ -3262,7 +3258,8 @@ function systemReleaseDestination(subpage: string): {
   subpage: string;
 } {
   if (
-    ["capacity", "suite_config", "maintenance", "preferences"].includes(subpage)
+    ["capacity", "suite_config", "preferences"].includes(subpage) ||
+    subpage.split(":")[0] === "maintenance"
   ) {
     return { view: "System", subpage };
   }
@@ -3338,9 +3335,14 @@ function configSubpage(subpage: string) {
 function remoteOperationsSubpage(subpage: string) {
   if (subpage === "bulk_files") return "multi_files";
   if (
-    ["terminal", "files", "transfers", "processes", "services", "storage"].includes(
-      subpage,
-    )
+    [
+      "terminal",
+      "files",
+      "transfers",
+      "processes",
+      "services",
+      "storage",
+    ].includes(subpage)
   )
     return subpage;
   return "terminal";

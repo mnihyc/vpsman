@@ -222,7 +222,7 @@ type AccessPanelProps = {
     adminRiskAcknowledged: boolean,
     privilegeAssertion: PrivilegeAssertion,
   ) => Promise<void>;
-  onSetupTotp: (password: string) => Promise<TotpSetupResponse | null>;
+  onSetupTotp: (password: string) => Promise<TotpSetupResponse>;
   onSelectSubpage: (subpage: AccessReleaseSubpage) => void;
   onSetOperatorStatus: (
     operatorId: string,
@@ -371,6 +371,9 @@ export function AccessPanel({
   const revokeFormRef = useRef<HTMLFormElement | null>(null);
   const identityWorkflowRef = useRef<HTMLElement | null>(null);
   const identityWorkflowIntentHandledRef = useRef(false);
+  const totpFeedbackRef = useRef<HTMLDivElement | null>(null);
+  const totpEnrollmentContextRef = useRef<string | null>(null);
+  const totpRequestGenerationRef = useRef(0);
   const [activeSubpage, setActiveSubpage] = useState<AccessSubpage>(
     accessSubpageFromRoute(routeSubpage),
   );
@@ -432,8 +435,26 @@ export function AccessPanel({
     : vaultAvailable
       ? "Saved local privilege vault"
       : "No saved local vault";
-  const currentBearerSession =
-    operatorSessions.find((session) => session.current) ?? operatorSessions[0];
+  const currentBearerSession = operatorSessions.find(
+    (session) => session.current,
+  );
+  useEffect(() => {
+    const context = `${operator?.id ?? ""}:${currentBearerSession?.id ?? ""}`;
+    if (totpEnrollmentContextRef.current === null) {
+      totpEnrollmentContextRef.current = context;
+      return;
+    }
+    if (totpEnrollmentContextRef.current === context) {
+      return;
+    }
+    totpEnrollmentContextRef.current = context;
+    totpRequestGenerationRef.current += 1;
+    setTotpPassword("");
+    setTotpCode("");
+    setTotpSetup(null);
+    setTotpError(null);
+    setTotpPending(false);
+  }, [currentBearerSession?.id, operator?.id]);
   const adminMfaRisk = operator?.role === "admin" && !operator.totp_enabled;
   const lifecycleClients = keyLifecycleReport?.clients ?? [];
   const nextIdentityClientId = keyLifecycleReport?.suggested_client_id ?? "";
@@ -478,6 +499,17 @@ export function AccessPanel({
   const totpFeedbackMessage =
     totpError ?? (totpPending ? "Updating TOTP" : null);
   const totpFeedbackTone = totpError ? "danger" : "progress";
+  useEffect(() => {
+    if (!totpFeedbackMessage) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (totpFeedbackRef.current) {
+        scrollIntoViewWithMotion(totpFeedbackRef.current, {
+          block: "nearest",
+        });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [totpFeedbackMessage]);
   const gatewayInstallDefaultsNeedReview =
     canManageOperators &&
     activeGatewaySessions === 0 &&
@@ -488,9 +520,8 @@ export function AccessPanel({
   const expiredOperatorSessions = operatorSessions.filter(
     (session) => !session.revoked && isOperatorSessionExpired(session),
   ).length;
-  const revokedClientCount = lifecycleClients.filter(
-    clientAccessRevoked,
-  ).length;
+  const revokedClientCount =
+    lifecycleClients.filter(clientAccessRevoked).length;
   const blockedOrPendingClientCount = lifecycleClients.filter((client) =>
     clientAccessRevoked(client)
       ? true
@@ -561,15 +592,15 @@ export function AccessPanel({
     revokeError ??
     (revokeReviewPending
       ? "Preparing key revoke review"
-      : revokeCompletion?.message ??
-        (revokeClientId.trim() ? revokeTargetError : null));
+      : (revokeCompletion?.message ??
+        (revokeClientId.trim() ? revokeTargetError : null)));
   const revokeFeedbackTone: ActionFeedbackTone = revokeError
     ? "danger"
     : revokeReviewPending
       ? "progress"
       : revokeTargetError && revokeClientId.trim()
         ? "warning"
-      : (revokeCompletion?.tone ?? "progress");
+        : (revokeCompletion?.tone ?? "progress");
   const identityFeedbackMessage =
     identityError ??
     (identityReviewPending
@@ -887,18 +918,37 @@ export function AccessPanel({
     if (!totpPassword) {
       return;
     }
+    const generation = totpRequestGenerationRef.current + 1;
+    totpRequestGenerationRef.current = generation;
+    const operatorId = operator?.id ?? null;
     setTotpPending(true);
     setTotpError(null);
+    setTotpCode("");
+    setTotpSetup(null);
     try {
-      setTotpSetup(await onSetupTotp(totpPassword));
+      const setup = await onSetupTotp(totpPassword);
+      if (totpRequestGenerationRef.current !== generation) {
+        return;
+      }
+      if (!operatorId || setup.operator_id !== operatorId) {
+        throw new Error(
+          "TOTP setup was returned for a different operator. Refresh the current session before retrying.",
+        );
+      }
+      setTotpSetup(setup);
     } catch (actionError) {
+      if (totpRequestGenerationRef.current !== generation) {
+        return;
+      }
       setTotpError(
         actionError instanceof Error
           ? actionError.message
           : "TOTP setup failed",
       );
     } finally {
-      setTotpPending(false);
+      if (totpRequestGenerationRef.current === generation) {
+        setTotpPending(false);
+      }
     }
   }
 
@@ -906,21 +956,31 @@ export function AccessPanel({
     if (!totpPassword || !totpCode) {
       return;
     }
+    const generation = totpRequestGenerationRef.current + 1;
+    totpRequestGenerationRef.current = generation;
     setTotpPending(true);
     setTotpError(null);
     try {
       await onConfirmTotp(totpPassword, totpCode);
+      if (totpRequestGenerationRef.current !== generation) {
+        return;
+      }
       setTotpPassword("");
       setTotpCode("");
       setTotpSetup(null);
     } catch (actionError) {
+      if (totpRequestGenerationRef.current !== generation) {
+        return;
+      }
       setTotpError(
         actionError instanceof Error
           ? actionError.message
           : "TOTP confirmation failed",
       );
     } finally {
-      setTotpPending(false);
+      if (totpRequestGenerationRef.current === generation) {
+        setTotpPending(false);
+      }
     }
   }
 
@@ -1113,7 +1173,7 @@ export function AccessPanel({
       setRevokeError(
         !privilegeMaterial
           ? "Privilege vault unlock is required"
-          : revokeTargetError ?? "This VPS key cannot be revoked",
+          : (revokeTargetError ?? "This VPS key cannot be revoked"),
       );
       return;
     }
@@ -1552,6 +1612,7 @@ export function AccessPanel({
               <ActionFeedback
                 className="localActionFeedback"
                 message={totpFeedbackMessage}
+                ref={totpFeedbackRef}
                 tone={totpFeedbackTone}
               />
               {operator?.totp_enabled ? (
@@ -1669,22 +1730,31 @@ export function AccessPanel({
                       <input
                         aria-label="TOTP password"
                         autoComplete="current-password"
-                        onChange={(event) =>
-                          setTotpPassword(event.target.value)
-                        }
+                        onChange={(event) => {
+                          const nextPassword = event.target.value;
+                          if (nextPassword !== totpPassword) {
+                            totpRequestGenerationRef.current += 1;
+                            setTotpPending(false);
+                            setTotpCode("");
+                            setTotpSetup(null);
+                            setTotpError(null);
+                          }
+                          setTotpPassword(nextPassword);
+                        }}
                         type="password"
                         value={totpPassword}
                       />
                     </label>
-                    <button
-                      className="secondaryAction"
-                      disabled={totpPending || !totpPassword}
-                      onClick={totpSetup ? () => void setupTotp() : undefined}
-                      type={totpSetup ? "button" : "submit"}
-                    >
-                      <ShieldCheck size={17} />
-                      Set up TOTP
-                    </button>
+                    {!totpSetup && (
+                      <button
+                        className="secondaryAction"
+                        disabled={totpPending || !totpPassword}
+                        type="submit"
+                      >
+                        <ShieldCheck size={17} />
+                        Set up TOTP
+                      </button>
+                    )}
                     {totpSetup ? (
                       <TotpEnrollmentQr setup={totpSetup} />
                     ) : (
@@ -2325,6 +2395,7 @@ export function AccessPanel({
               : "new registration",
           },
         ]}
+        error={identityError ?? undefined}
         onCancel={() => {
           setIdentitySnapshot(null);
           setPendingConfirmation(null);
@@ -2343,6 +2414,7 @@ export function AccessPanel({
       <ConfirmationPrompt
         confirmLabel="Revoke key"
         detail="The current key is permanently revoked, the VPS remains visible as Access revoked, its live gateway session is disconnected, and active work is stopped. Recover this VPS ID by assigning it a new key; deletion alone permanently retires the VPS identity."
+        error={revokeError ?? undefined}
         items={[
           { label: "VPS", value: revokeSnapshot?.clientId ?? "" },
           {
@@ -2363,6 +2435,7 @@ export function AccessPanel({
       <ConfirmationPrompt
         confirmLabel="Disable TOTP"
         detail="This disables TOTP for the current operator after validating the supplied password and authenticator code."
+        error={totpError ?? undefined}
         onCancel={() => setPendingConfirmation(null)}
         onConfirm={() => void disableTotp()}
         open={pendingConfirmation === "totp-disable"}

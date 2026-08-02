@@ -717,6 +717,7 @@ mod tests {
             totp_secret_ciphertext_hex: None,
             totp_secret_nonce_hex: None,
             totp_secret_salt_hex: None,
+            totp_last_accepted_step: None,
             session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
             created_at: crate::unix_now().to_string(),
             disabled_at: None,

@@ -12,6 +12,8 @@ import { Group, Panel, Separator } from "react-resizable-panels";
 import { ChevronDown, GripVertical, X } from "lucide-react";
 import { scrollIntoViewWithMotion } from "../motion";
 
+const ACTION_DRAWER_FOCUS_SETTLE_MS = 50;
+
 export function ConsoleActionDrawer({
   children,
   description,
@@ -62,7 +64,7 @@ export function ConsoleActionDrawer({
     if (!open) {
       return;
     }
-    const frame = window.requestAnimationFrame(() => {
+    const focusTimer = window.setTimeout(() => {
       if (drawerRef.current) {
         scrollIntoViewWithMotion(drawerRef.current, { block: "start" });
       }
@@ -75,8 +77,8 @@ export function ConsoleActionDrawer({
       (preferredControl ?? firstControl ?? closeButtonRef.current)?.focus({
         preventScroll: true,
       });
-    });
-    return () => window.cancelAnimationFrame(frame);
+    }, ACTION_DRAWER_FOCUS_SETTLE_MS);
+    return () => window.clearTimeout(focusTimer);
   }, [open, title]);
 
   if (!open) {
@@ -154,7 +156,11 @@ export function ConsoleActionMenu({
         >
           {actions.map((action) => (
             <DropdownMenu.Item
-              className={action.tone === "danger" ? "consoleMenuItem danger" : "consoleMenuItem"}
+              className={
+                action.tone === "danger"
+                  ? "consoleMenuItem danger"
+                  : "consoleMenuItem"
+              }
               disabled={action.disabled}
               key={action.label}
               onSelect={action.onSelect}
@@ -264,20 +270,33 @@ export function ConsoleCollapsibleSection({
     }
   }, [forceOpenKey, setOpen]);
   return (
-    <Collapsible.Root className="consoleCollapsible" onOpenChange={setOpen} open={open}>
+    <Collapsible.Root
+      className="consoleCollapsible"
+      onOpenChange={setOpen}
+      open={open}
+    >
       <div className="consoleCollapsibleHeader">
         <div>
           <h2>{title}</h2>
           {summary && <span>{summary}</span>}
         </div>
         <Collapsible.Trigger asChild>
-          <button aria-label={`${open ? "Collapse" : "Expand"} ${title}`} className="secondaryAction compactAction" type="button">
-            <ChevronDown className={open ? "collapseChevron open" : "collapseChevron"} size={17} />
+          <button
+            aria-label={`${open ? "Collapse" : "Expand"} ${title}`}
+            className="secondaryAction compactAction"
+            type="button"
+          >
+            <ChevronDown
+              className={open ? "collapseChevron open" : "collapseChevron"}
+              size={17}
+            />
             <span>{open ? "Hide" : "Show"}</span>
           </button>
         </Collapsible.Trigger>
       </div>
-      <Collapsible.Content className="consoleCollapsibleBody">{children}</Collapsible.Content>
+      <Collapsible.Content className="consoleCollapsibleBody">
+        {children}
+      </Collapsible.Content>
     </Collapsible.Root>
   );
 }
@@ -296,7 +315,10 @@ export function ConsoleSplitWorkspace({
   main: ReactNode;
 }) {
   const storageKey = `vpsman.split.${id}`;
-  const [layout, setLayout] = useStoredLayout(storageKey, [100 - detailSize, detailSize]);
+  const [layout, setLayout] = useStoredLayout(storageKey, [
+    100 - detailSize,
+    detailSize,
+  ]);
   return (
     <Group
       className="consoleSplitWorkspace"
@@ -322,7 +344,10 @@ export function ConsoleSplitWorkspace({
   );
 }
 
-function useStoredBoolean(storageKey: string, fallback: boolean): [boolean, (value: boolean) => void] {
+function useStoredBoolean(
+  storageKey: string,
+  fallback: boolean,
+): [boolean, (value: boolean) => void] {
   const [value, setValue] = useState(() => {
     if (typeof window === "undefined") {
       return fallback;
@@ -353,14 +378,23 @@ function idDetail(id: string): string {
   return `${id}-detail`;
 }
 
-function useStoredLayout(storageKey: string, fallback: [number, number]): [[number, number], (value: [number, number]) => void] {
+function useStoredLayout(
+  storageKey: string,
+  fallback: [number, number],
+): [[number, number], (value: [number, number]) => void] {
   const [value, setValue] = useState<[number, number]>(() => {
     if (typeof window === "undefined") {
       return fallback;
     }
     try {
-      const parsed = JSON.parse(window.localStorage.getItem(storageKey) ?? "null") as [number, number] | null;
-      return Array.isArray(parsed) && parsed.length === 2 && parsed.every((item) => typeof item === "number") ? parsed : fallback;
+      const parsed = JSON.parse(
+        window.localStorage.getItem(storageKey) ?? "null",
+      ) as [number, number] | null;
+      return Array.isArray(parsed) &&
+        parsed.length === 2 &&
+        parsed.every((item) => typeof item === "number")
+        ? parsed
+        : fallback;
     } catch {
       return fallback;
     }

@@ -455,7 +455,11 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     ) => {
       setAccessError(null);
       const action =
-        status === "active" ? "enable" : status === "disabled" ? "disable" : "delete";
+        status === "active"
+          ? "enable"
+          : status === "disabled"
+            ? "disable"
+            : "delete";
       try {
         await apiPost<OperatorView>(
           `/api/v1/operators/${encodeURIComponent(operatorId)}/${action}`,
@@ -481,7 +485,9 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
           return;
         }
         setAccessError(
-          error instanceof Error ? error.message : "Operator status change failed",
+          error instanceof Error
+            ? error.message
+            : "Operator status change failed",
         );
         throw error;
       }
@@ -581,22 +587,21 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
           { password },
         );
         if (currentApiToken.current !== apiToken) {
-          return null;
+          throw new Error(
+            "The operator session changed before TOTP setup could be confirmed. Retry setup from the current session.",
+          );
         }
         return response;
       } catch (error) {
         if (currentApiToken.current !== apiToken) {
-          return null;
+          throw error;
         }
         if (isApiUnauthorized(error)) {
           onUnauthorized();
           resetAccessRecords();
           setAccessError("Operator login required");
-          return null;
+          throw error;
         }
-        setAccessError(
-          error instanceof Error ? error.message : "TOTP setup failed",
-        );
         throw error;
       }
     },
@@ -607,62 +612,64 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     async (password: string, code: string) => {
       setAccessError(null);
       try {
-        await apiPost<OperatorView>("/api/v1/auth/totp/confirm", apiToken, {
-          password,
-          code,
-        });
+        const updated = await apiPost<OperatorView>(
+          "/api/v1/auth/totp/confirm",
+          apiToken,
+          { password, code },
+        );
         if (currentApiToken.current !== apiToken) {
-          return;
+          throw new Error(
+            "The operator session changed before TOTP confirmation could be reflected. Refresh current access state before retrying.",
+          );
         }
+        setAuthenticatedOperator(updated);
         await loadCurrentOperator();
       } catch (error) {
         if (currentApiToken.current !== apiToken) {
-          return;
+          throw error;
         }
         if (isApiUnauthorized(error)) {
           onUnauthorized();
           resetAccessRecords();
           setAccessError("Operator login required");
-          return;
+          throw error;
         }
-        setAccessError(
-          error instanceof Error ? error.message : "TOTP confirmation failed",
-        );
         throw error;
       }
     },
-    [apiToken, loadCurrentOperator, onUnauthorized],
+    [apiToken, loadCurrentOperator, onUnauthorized, setAuthenticatedOperator],
   );
 
   const disableTotp = useCallback(
     async (password: string, code: string) => {
       setAccessError(null);
       try {
-        await apiPost<OperatorView>("/api/v1/auth/totp/disable", apiToken, {
-          password,
-          code,
-        });
+        const updated = await apiPost<OperatorView>(
+          "/api/v1/auth/totp/disable",
+          apiToken,
+          { password, code },
+        );
         if (currentApiToken.current !== apiToken) {
-          return;
+          throw new Error(
+            "The operator session changed before the TOTP disable result could be reflected. Refresh current access state before retrying.",
+          );
         }
+        setAuthenticatedOperator(updated);
         await loadCurrentOperator();
       } catch (error) {
         if (currentApiToken.current !== apiToken) {
-          return;
+          throw error;
         }
         if (isApiUnauthorized(error)) {
           onUnauthorized();
           resetAccessRecords();
           setAccessError("Operator login required");
-          return;
+          throw error;
         }
-        setAccessError(
-          error instanceof Error ? error.message : "TOTP disable failed",
-        );
         throw error;
       }
     },
-    [apiToken, loadCurrentOperator, onUnauthorized],
+    [apiToken, loadCurrentOperator, onUnauthorized, setAuthenticatedOperator],
   );
 
   const revokeClientKey = useCallback(
@@ -705,8 +712,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
 
   const updateOperatorPreferences = useCallback(
     async (preferences: OperatorPreferences) => {
-      const operationGeneration =
-        preferencesMutationGeneration.current + 1;
+      const operationGeneration = preferencesMutationGeneration.current + 1;
       preferencesMutationGeneration.current = operationGeneration;
       setPreferencesSaving(true);
       setPreferencesError(null);

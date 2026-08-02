@@ -57,6 +57,7 @@ import {
   type VpsNameDisplayMode,
 } from "../utils";
 import { usePanelDisplaySettings } from "../panelDisplay";
+import { scrollIntoViewWithMotion } from "../motion";
 
 const BEHAVIORS: readonly ConfigurationBehavior[] = [
   "host_metrics",
@@ -185,6 +186,10 @@ export function ConfigurationSourcesPanel({
   );
   const inspectionGeneration = useRef(0);
   const assignmentReviewGeneration = useRef(0);
+  const pageOutcomeRef = useRef<HTMLDivElement | null>(null);
+  const drawerOutcomeRef = useRef<HTMLDivElement | null>(null);
+  const previousPageOutcomeRef = useRef<string | null>(null);
+  const previousDrawerOutcomeRef = useRef<string | null>(null);
 
   const agentById = useMemo(
     () => new Map(agents.map((agent) => [agent.id, agent])),
@@ -220,12 +225,7 @@ export function ConfigurationSourcesPanel({
         return leftName.localeCompare(rightName) || left.localeCompare(right);
       });
     return [...direct, ...matched];
-  }, [
-    agentById,
-    directTargetIds,
-    selectorTargetIds,
-    vpsNameDisplayMode,
-  ]);
+  }, [agentById, directTargetIds, selectorTargetIds, vpsNameDisplayMode]);
   const assignablePresets = useMemo(
     () =>
       presets.filter(
@@ -280,10 +280,56 @@ export function ConfigurationSourcesPanel({
   ).length;
   const sourceVpsCount = new Set(sources.map((source) => source.client_id))
     .size;
+  const pageOutcomeMessage =
+    !drawer && !confirmation
+      ? (actionError ?? feedback?.message ?? null)
+      : null;
+  const pageOutcomeTone = actionError ? "danger" : feedback?.tone;
+  const drawerOutcomeMessage =
+    drawer && !confirmation ? (actionError ?? feedback?.message ?? null) : null;
+  const drawerOutcomeTone = actionError ? "danger" : feedback?.tone;
 
   useEffect(() => {
     void runPanelAction(setPending, setActionError, onRefresh);
   }, [onRefresh]);
+
+  useEffect(() => {
+    if (!pageOutcomeMessage) {
+      previousPageOutcomeRef.current = null;
+      return;
+    }
+    if (previousPageOutcomeRef.current === pageOutcomeMessage) {
+      return;
+    }
+    previousPageOutcomeRef.current = pageOutcomeMessage;
+    const frame = window.requestAnimationFrame(() => {
+      const outcome = pageOutcomeRef.current;
+      if (!outcome) return;
+      outcome.tabIndex = -1;
+      scrollIntoViewWithMotion(outcome, { block: "nearest" });
+      outcome.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [pageOutcomeMessage]);
+
+  useEffect(() => {
+    if (!drawerOutcomeMessage) {
+      previousDrawerOutcomeRef.current = null;
+      return;
+    }
+    if (previousDrawerOutcomeRef.current === drawerOutcomeMessage) {
+      return;
+    }
+    previousDrawerOutcomeRef.current = drawerOutcomeMessage;
+    const frame = window.requestAnimationFrame(() => {
+      const outcome = drawerOutcomeRef.current;
+      if (!outcome) return;
+      outcome.tabIndex = -1;
+      scrollIntoViewWithMotion(outcome, { block: "nearest" });
+      outcome.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [drawerOutcomeMessage]);
 
   function resetMessages() {
     setActionError(null);
@@ -300,6 +346,15 @@ export function ConfigurationSourcesPanel({
   function clearEffectiveConfigInspection() {
     inspectionGeneration.current += 1;
     setRenderedConfig(null);
+  }
+
+  function invalidateAssignmentDraft() {
+    assignmentReviewGeneration.current += 1;
+    setPending(false);
+    setActionError(null);
+    setFeedback(null);
+    setConfirmation(null);
+    clearEffectiveConfigInspection();
   }
 
   function replaceEditorDefinition(definition: Record<string, JsonValue>) {
@@ -1001,17 +1056,11 @@ export function ConfigurationSourcesPanel({
           message={error}
           tone="danger"
         />
-        {!drawer && !confirmation ? (
-          <ActionFeedback
-            className="localActionFeedback"
-            message={actionError}
-            tone="danger"
-          />
-        ) : null}
         <ActionFeedback
           className="localActionFeedback"
-          message={feedback?.message}
-          tone={feedback?.tone}
+          message={pageOutcomeMessage}
+          ref={pageOutcomeRef}
+          tone={pageOutcomeTone}
         />
 
         <div
@@ -1036,9 +1085,6 @@ export function ConfigurationSourcesPanel({
               }
               getRowId={(source) => `${source.client_id}:${source.behavior}`}
               itemLabel="configuration sources"
-              onOpenRow={openAssignment}
-              openRowLabel="Change"
-              showMobileOpenRowAction={false}
               renderExpandedRow={(source) => (
                 <div className="consoleInlineDetailGrid">
                   <span>Selection</span>
@@ -1097,11 +1143,6 @@ export function ConfigurationSourcesPanel({
               }
               getRowId={(preset) => preset.id}
               itemLabel="configuration presets"
-              onOpenRow={(preset) =>
-                preset.kind === "custom" ? openEdit(preset) : openClone(preset)
-              }
-              openRowLabel="Open"
-              showMobileOpenRowAction={false}
               renderExpandedRow={(preset) => {
                 const effectiveSources = sources.filter(
                   (source) => source.effective_preset_id === preset.id,
@@ -1168,11 +1209,7 @@ export function ConfigurationSourcesPanel({
         }
         detail={confirmationDetail(confirmation)}
         error={actionError}
-        items={confirmationItems(
-          confirmation,
-          agentById,
-          vpsNameDisplayMode,
-        )}
+        items={confirmationItems(confirmation, agentById, vpsNameDisplayMode)}
         onCancel={() => {
           setActionError(null);
           setConfirmation(null);
@@ -1220,201 +1257,210 @@ export function ConfigurationSourcesPanel({
               void reviewOverride(effectiveAssignPresetId ? "set" : "reset");
             }}
           >
-            <fieldset
-              className="configurationDrawerFields"
-              disabled={pending}
-            >
+            <fieldset className="configurationDrawerFields" disabled={pending}>
               <strong>Choose behavior and preset</strong>
-            <div className="formRow">
-              <label>
-                <span>Behavior</span>
-                <select
-                  aria-label="Configuration behavior"
-                  onChange={(event) => {
-                    const behavior = event.target
-                      .value as ConfigurationBehavior;
-                    setAssignBehavior(behavior);
-                    setAssignPresetId("");
-                    clearEffectiveConfigInspection();
-                  }}
-                  value={assignBehavior}
-                >
-                  {BEHAVIORS.map((behavior) => (
-                    <option key={behavior} value={behavior}>
-                      {behaviorLabel(behavior)}
-                    </option>
-                  ))}
-                </select>
-                {assignablePresets.length === 0 ? (
-                  <span className="formHint">
-                    No alternative preset exists for this behavior. Keep the
-                    system default, or{" "}
-                    <button
-                      className="linkButton"
-                      onClick={() => openCreate(assignBehavior)}
-                      type="button"
-                    >
-                      create a preset
-                    </button>
-                    .
-                  </span>
-                ) : null}
-              </label>
-              <label>
-                <span>Preset</span>
-                <select
-                  aria-label="Configuration preset"
-                  onChange={(event) => {
-                    setAssignPresetId(event.target.value);
-                    clearEffectiveConfigInspection();
-                  }}
-                  value={effectiveAssignPresetId}
-                >
-                  <option value="">Inherit system default</option>
-                  {assignablePresets.map((preset) => (
-                    <option key={preset.id} value={preset.id}>
-                      {preset.name} ·{" "}
-                      {preset.kind === "system" ? "System option" : "Custom"}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
+              <div className="formRow">
+                <label>
+                  <span>Behavior</span>
+                  <select
+                    aria-label="Configuration behavior"
+                    onChange={(event) => {
+                      invalidateAssignmentDraft();
+                      const behavior = event.target
+                        .value as ConfigurationBehavior;
+                      setAssignBehavior(behavior);
+                      setAssignPresetId("");
+                    }}
+                    value={assignBehavior}
+                  >
+                    {BEHAVIORS.map((behavior) => (
+                      <option key={behavior} value={behavior}>
+                        {behaviorLabel(behavior)}
+                      </option>
+                    ))}
+                  </select>
+                  {assignablePresets.length === 0 ? (
+                    <span className="formHint">
+                      No alternative preset exists for this behavior. Keep the
+                      system default, or{" "}
+                      <button
+                        className="linkButton"
+                        onClick={() => openCreate(assignBehavior)}
+                        type="button"
+                      >
+                        create a preset
+                      </button>
+                      .
+                    </span>
+                  ) : null}
+                </label>
+                <label>
+                  <span>Preset</span>
+                  <select
+                    aria-label="Configuration preset"
+                    onChange={(event) => {
+                      invalidateAssignmentDraft();
+                      setAssignPresetId(event.target.value);
+                    }}
+                    value={effectiveAssignPresetId}
+                  >
+                    <option value="">Inherit system default</option>
+                    {assignablePresets.map((preset) => (
+                      <option key={preset.id} value={preset.id}>
+                        {preset.name} ·{" "}
+                        {preset.kind === "system" ? "System option" : "Custom"}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
 
-            <div className="targetSelector">
-              <div className="targetSelectorHeader">
-                <strong>Targets</strong>
-                <span>
-                  {parsedAssignmentSelector.error
-                    ? "Fix the selector before review"
-                    : `${assignmentTargetIds.length} ${assignmentTargetIds.length === 1 ? "VPS" : "VPSs"} selected locally`}
+              <div className="targetSelector">
+                <div className="targetSelectorHeader">
+                  <strong>Targets</strong>
+                  <span>
+                    {parsedAssignmentSelector.error
+                      ? "Fix the selector before review"
+                      : `${assignmentTargetIds.length} ${assignmentTargetIds.length === 1 ? "VPS" : "VPSs"} selected locally`}
+                  </span>
+                </div>
+                <VpsCombobox
+                  agents={agents}
+                  ariaLabel="Add configuration target VPS"
+                  excludeIds={directTargetIds}
+                  onChange={(clientId) => {
+                    if (!clientId) {
+                      setTargetCandidate("");
+                      return;
+                    }
+                    invalidateAssignmentDraft();
+                    setDirectTargetIds((current) => [
+                      ...new Set([...current, clientId]),
+                    ]);
+                    setTargetCandidate("");
+                  }}
+                  placeholder="Add an individual VPS"
+                  value={targetCandidate}
+                />
+                <details>
+                  <summary>
+                    {selectorExpression.trim()
+                      ? `Edit target selector · ${selectorExpression.trim()}`
+                      : "Add targets by selector"}
+                  </summary>
+                  <SearchExpressionInput
+                    agents={agents}
+                    ariaLabel="Configuration target selector"
+                    onChange={(value) => {
+                      invalidateAssignmentDraft();
+                      setSelectorExpression(value);
+                    }}
+                    placeholder="For example tag:edge"
+                    showMatchCount
+                    value={selectorExpression}
+                    verification={
+                      parsedAssignmentSelector.error
+                        ? "invalid"
+                        : selectorExpression.trim()
+                          ? "valid"
+                          : "neutral"
+                    }
+                  />
+                </details>
+                <AssignmentTargetPreview
+                  agentById={agentById}
+                  directTargetIds={directTargetIds}
+                  onRemoveDirectTarget={(clientId) => {
+                    invalidateAssignmentDraft();
+                    setDirectTargetIds((current) =>
+                      current.filter((id) => id !== clientId),
+                    );
+                  }}
+                  targetIds={assignmentTargetIds}
+                  vpsNameDisplayMode={vpsNameDisplayMode}
+                />
+                <span className="formHint">
+                  Direct choices and selector matches form one list. Review
+                  verifies it on the server and freezes the exact VPSs; later
+                  tag changes do not alter this operation.
                 </span>
               </div>
-              <VpsCombobox
-                agents={agents}
-                ariaLabel="Add configuration target VPS"
-                excludeIds={directTargetIds}
-                onChange={(clientId) => {
-                  if (!clientId) {
-                    setTargetCandidate("");
-                    return;
-                  }
-                  setDirectTargetIds((current) => [
-                    ...new Set([...current, clientId]),
-                  ]);
-                  setTargetCandidate("");
-                  clearEffectiveConfigInspection();
-                }}
-                placeholder="Add an individual VPS"
-                value={targetCandidate}
-              />
-              <details>
-                <summary>
-                  {selectorExpression.trim()
-                    ? `Edit target selector · ${selectorExpression.trim()}`
-                    : "Add targets by selector"}
-                </summary>
-                <SearchExpressionInput
-                  agents={agents}
-                  ariaLabel="Configuration target selector"
-                  onChange={(value) => {
-                    setSelectorExpression(value);
-                    clearEffectiveConfigInspection();
-                  }}
-                  placeholder="For example tag:edge"
-                  showMatchCount
-                  value={selectorExpression}
-                  verification={
-                    parsedAssignmentSelector.error
-                      ? "invalid"
-                      : selectorExpression.trim()
-                        ? "valid"
-                        : "neutral"
-                  }
-                />
-              </details>
-              <AssignmentTargetPreview
-                agentById={agentById}
-                directTargetIds={directTargetIds}
-                onRemoveDirectTarget={(clientId) => {
-                  clearEffectiveConfigInspection();
-                  setDirectTargetIds((current) =>
-                    current.filter((id) => id !== clientId),
-                  );
-                }}
-                targetIds={assignmentTargetIds}
-                vpsNameDisplayMode={vpsNameDisplayMode}
-              />
-              <span className="formHint">
-                Direct choices and selector matches form one list. Review
-                verifies it on the server and freezes the exact VPSs; later tag
-                changes do not alter this operation.
-              </span>
-            </div>
 
-            {!confirmation ? (
-              <ActionFeedback message={actionError} tone="danger" />
-            ) : null}
-            <div className="formRow">
-              <button
-                className="primaryAction"
-                disabled={Boolean(primaryAssignmentReviewBlockedReason)}
-                title={primaryAssignmentReviewBlockedReason ?? "Review the exact VPS list and configuration change."}
-                type="submit"
-              >
-                {effectiveAssignPresetId
-                  ? "Review change"
-                  : "Review reset to system default"}
-              </button>
-              {effectiveAssignPresetId ? (
+              <ActionFeedback
+                message={drawerOutcomeMessage}
+                ref={drawerOutcomeRef}
+                tone={drawerOutcomeTone}
+              />
+              <div className="formRow">
                 <button
-                  className="secondaryAction"
-                  disabled={Boolean(resetAssignmentReviewBlockedReason)}
-                  onClick={() => void reviewOverride("reset")}
-                  title={resetAssignmentReviewBlockedReason ?? "Review resetting the exact VPS list to the system default."}
+                  className="primaryAction"
+                  disabled={Boolean(primaryAssignmentReviewBlockedReason)}
+                  title={
+                    primaryAssignmentReviewBlockedReason ??
+                    "Review the exact VPS list and configuration change."
+                  }
+                  type="submit"
+                >
+                  {effectiveAssignPresetId
+                    ? "Review change"
+                    : "Review reset to system default"}
+                </button>
+                {effectiveAssignPresetId ? (
+                  <button
+                    className="secondaryAction"
+                    disabled={Boolean(resetAssignmentReviewBlockedReason)}
+                    onClick={() => void reviewOverride("reset")}
+                    title={
+                      resetAssignmentReviewBlockedReason ??
+                      "Review resetting the exact VPS list to the system default."
+                    }
+                    type="button"
+                  >
+                    <RotateCcw size={15} />
+                    Reset to system default
+                  </button>
+                ) : null}
+              </div>
+
+              {directTargetIds.length === 1 && !selectorExpression.trim() ? (
+                <button
+                  className="secondaryAction compactAction"
+                  disabled={pending}
+                  onClick={() =>
+                    void inspectEffectiveConfig(directTargetIds[0])
+                  }
                   type="button"
                 >
-                  <RotateCcw size={15} />
-                  Reset to system default
+                  Inspect current effective config
                 </button>
               ) : null}
-            </div>
-
-            {directTargetIds.length === 1 && !selectorExpression.trim() ? (
-              <button
-                className="secondaryAction compactAction"
-                disabled={pending}
-                onClick={() => void inspectEffectiveConfig(directTargetIds[0])}
-                type="button"
-              >
-                Inspect current effective config
-              </button>
-            ) : null}
-            {renderedConfig ? (
-              <details className="configPreview" open>
-                <summary>Current effective config (TOML)</summary>
-                <div className="previewMeta">
-                  <span>
-                    {reviewedVpsLabel(
-                      renderedConfig.client_id,
-                      agentById,
-                      vpsNameDisplayMode,
-                    )}
+              {renderedConfig ? (
+                <details className="configPreview" open>
+                  <summary>Current effective config (TOML)</summary>
+                  <div className="previewMeta">
+                    <span>
+                      {reviewedVpsLabel(
+                        renderedConfig.client_id,
+                        agentById,
+                        vpsNameDisplayMode,
+                      )}
+                    </span>
+                    <span>
+                      {renderedConfig.sources.length} effective sources
+                    </span>
+                    <span>{formatTime(renderedConfig.generated_at)}</span>
+                  </div>
+                  <span className="formHint">
+                    Current server-rendered configuration. A preset choice above
+                    is only a candidate until you review and apply it.
                   </span>
-                  <span>{renderedConfig.sources.length} effective sources</span>
-                  <span>{formatTime(renderedConfig.generated_at)}</span>
-                </div>
-                <span className="formHint">
-                  Current server-rendered configuration. A preset choice above
-                  is only a candidate until you review and apply it.
-                </span>
-                <textarea
-                  aria-label="Effective agent config TOML"
-                  readOnly
-                  value={renderedConfig.toml}
-                />
-              </details>
-            ) : null}
+                  <textarea
+                    aria-label="Effective agent config TOML"
+                    readOnly
+                    value={renderedConfig.toml}
+                  />
+                </details>
+              ) : null}
             </fieldset>
           </form>
         ) : null}
@@ -1426,126 +1472,127 @@ export function ConfigurationSourcesPanel({
             className="compactForm structuredDefinitionForm"
             onSubmit={submitPresetEditor}
           >
-            <fieldset
-              className="configurationDrawerFields"
-              disabled={pending}
-            >
-            {drawer.kind === "create" ? (
-              <span className="formHint">
-                Create a reusable alternative for one behavior. VPSs keep
-                inheriting the system default until you explicitly assign this
-                preset.
-              </span>
-            ) : null}
-            {drawer.kind === "clone" ? (
-              <>
-                <label>
-                  <span>Name</span>
-                  <input
-                    aria-label="Cloned preset name"
-                    onChange={(event) => setEditorName(event.target.value)}
-                    value={editorName}
-                  />
-                </label>
-                <label>
-                  <span>Description</span>
-                  <input
-                    aria-label="Cloned preset description"
-                    onChange={(event) =>
-                      setEditorDescription(event.target.value)
-                    }
-                    value={editorDescription}
-                  />
-                </label>
-                <details>
-                  <summary>Definition copied from selected preset</summary>
-                  <pre>{JSON.stringify(drawer.preset.definition, null, 2)}</pre>
-                </details>
-              </>
-            ) : (
-              <>
-                <div className="formRow">
-                  <label>
-                    <span>Behavior</span>
-                    <select
-                      aria-label="Preset behavior"
-                      disabled={drawer.kind === "edit"}
-                      onChange={(event) => {
-                        const behavior = event.target
-                          .value as ConfigurationBehavior;
-                        setEditorBehavior(behavior);
-                        replaceEditorDefinition(defaultDefinition(behavior));
-                      }}
-                      value={editorBehavior}
-                    >
-                      {BEHAVIORS.map((behavior) => (
-                        <option key={behavior} value={behavior}>
-                          {behaviorLabel(behavior)}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+            <fieldset className="configurationDrawerFields" disabled={pending}>
+              {drawer.kind === "create" ? (
+                <span className="formHint">
+                  Create a reusable alternative for one behavior. VPSs keep
+                  inheriting the system default until you explicitly assign this
+                  preset.
+                </span>
+              ) : null}
+              {drawer.kind === "clone" ? (
+                <>
                   <label>
                     <span>Name</span>
                     <input
-                      aria-label="Preset name"
-                      disabled={drawer.kind === "edit"}
+                      aria-label="Cloned preset name"
                       onChange={(event) => setEditorName(event.target.value)}
                       value={editorName}
                     />
                   </label>
-                </div>
-                <label>
-                  <span>Description</span>
-                  <input
-                    aria-label="Preset description"
-                    onChange={(event) =>
-                      setEditorDescription(event.target.value)
+                  <label>
+                    <span>Description</span>
+                    <input
+                      aria-label="Cloned preset description"
+                      onChange={(event) =>
+                        setEditorDescription(event.target.value)
+                      }
+                      value={editorDescription}
+                    />
+                  </label>
+                  <details>
+                    <summary>Definition copied from selected preset</summary>
+                    <pre>
+                      {JSON.stringify(drawer.preset.definition, null, 2)}
+                    </pre>
+                  </details>
+                </>
+              ) : (
+                <>
+                  <div className="formRow">
+                    <label>
+                      <span>Behavior</span>
+                      <select
+                        aria-label="Preset behavior"
+                        disabled={drawer.kind === "edit"}
+                        onChange={(event) => {
+                          const behavior = event.target
+                            .value as ConfigurationBehavior;
+                          setEditorBehavior(behavior);
+                          replaceEditorDefinition(defaultDefinition(behavior));
+                        }}
+                        value={editorBehavior}
+                      >
+                        {BEHAVIORS.map((behavior) => (
+                          <option key={behavior} value={behavior}>
+                            {behaviorLabel(behavior)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span>Name</span>
+                      <input
+                        aria-label="Preset name"
+                        disabled={drawer.kind === "edit"}
+                        onChange={(event) => setEditorName(event.target.value)}
+                        value={editorName}
+                      />
+                    </label>
+                  </div>
+                  <label>
+                    <span>Description</span>
+                    <input
+                      aria-label="Preset description"
+                      onChange={(event) =>
+                        setEditorDescription(event.target.value)
+                      }
+                      value={editorDescription}
+                    />
+                  </label>
+                  <PresetDefinitionEditor
+                    behavior={editorBehavior}
+                    definition={editorDefinition}
+                    onChange={setEditorDefinition}
+                    onReplace={replaceEditorDefinition}
+                    onTextDraftChange={(key, value) =>
+                      setEditorTextDrafts((current) => ({
+                        ...current,
+                        [key]: value,
+                      }))
                     }
-                    value={editorDescription}
+                    textDrafts={editorTextDrafts}
                   />
-                </label>
-                <PresetDefinitionEditor
-                  behavior={editorBehavior}
-                  definition={editorDefinition}
-                  onChange={setEditorDefinition}
-                  onReplace={replaceEditorDefinition}
-                  onTextDraftChange={(key, value) =>
-                    setEditorTextDrafts((current) => ({
-                      ...current,
-                      [key]: value,
-                    }))
-                  }
-                  textDrafts={editorTextDrafts}
-                />
-                <details>
-                  <summary>Advanced definition preview</summary>
-                  <pre>
-                    {editorDefinitionPreview.error
-                      ? editorDefinitionPreview.error
-                      : JSON.stringify(
-                          editorDefinitionPreview.definition,
-                          null,
-                          2,
-                        )}
-                  </pre>
-                </details>
-              </>
-            )}
-            {!confirmation ? (
-              <ActionFeedback message={actionError} tone="danger" />
-            ) : null}
-            <button
-              className="primaryAction"
-              disabled={pending || !editorName.trim()}
-              type="submit"
-            >
-              {drawer.kind === "create"
-                ? "Create preset"
-                : drawer.kind === "clone"
-                  ? "Clone preset"
-                  : "Review preset update"}
-            </button>
+                  <details>
+                    <summary>Advanced definition preview</summary>
+                    <pre>
+                      {editorDefinitionPreview.error
+                        ? editorDefinitionPreview.error
+                        : JSON.stringify(
+                            editorDefinitionPreview.definition,
+                            null,
+                            2,
+                          )}
+                    </pre>
+                  </details>
+                </>
+              )}
+              <ActionFeedback
+                message={drawerOutcomeMessage}
+                ref={drawerOutcomeRef}
+                tone={drawerOutcomeTone}
+              />
+              <button
+                className="primaryAction"
+                disabled={pending || !editorName.trim()}
+                type="submit"
+              >
+                {drawer.kind === "create"
+                  ? "Create preset"
+                  : drawer.kind === "clone"
+                    ? "Clone preset"
+                    : "Review preset update"}
+              </button>
             </fieldset>
           </form>
         ) : null}
@@ -2217,11 +2264,7 @@ function confirmationItems(
         value: (
           <ConfigurationReviewList
             items={confirmation.preview.targets.map((target) =>
-              reviewedVpsLabel(
-                target.client_id,
-                agentById,
-                vpsNameDisplayMode,
-              ),
+              reviewedVpsLabel(target.client_id, agentById, vpsNameDisplayMode),
             )}
           />
         ),
@@ -2235,7 +2278,9 @@ function confirmationItems(
         ? [
             {
               label:
-                changedTargets.length === 1 ? "Preset change" : "Preset changes",
+                changedTargets.length === 1
+                  ? "Preset change"
+                  : "Preset changes",
               value: (
                 <ConfigurationReviewList
                   items={changedTargets.map(
@@ -2285,21 +2330,16 @@ function confirmationItems(
       {
         label: "Affected VPSs",
         value:
-          confirmation.preview.affected_client_count === 0
-            ? "0 · None"
-            : (
-                <ConfigurationReviewList
-                  items={confirmation.preview.affected_client_ids.map(
-                    (clientId) =>
-                      reviewedVpsLabel(
-                        clientId,
-                        agentById,
-                        vpsNameDisplayMode,
-                      ),
-                  )}
-                  summary={`${confirmation.preview.affected_client_count} total`}
-                />
-              ),
+          confirmation.preview.affected_client_count === 0 ? (
+            "0 · None"
+          ) : (
+            <ConfigurationReviewList
+              items={confirmation.preview.affected_client_ids.map((clientId) =>
+                reviewedVpsLabel(clientId, agentById, vpsNameDisplayMode),
+              )}
+              summary={`${confirmation.preview.affected_client_count} total`}
+            />
+          ),
       },
     ];
   }
@@ -2632,8 +2672,7 @@ function validatePresetDefinition(
       validateBoundedCommand(
         definition.status_command,
         "Read current OSPF cost",
-      ) ??
-      validateBoundedCommand(definition.update_command, "Update OSPF cost")
+      ) ?? validateBoundedCommand(definition.update_command, "Update OSPF cost")
     );
   }
   if (behavior === "command_execution") {

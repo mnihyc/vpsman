@@ -2,11 +2,7 @@ import type { AuditLogRecord, JsonValue } from "./types";
 import { isJsonObject, shortId } from "./utils";
 
 export type AuditOutcomeTone =
-  | "critical"
-  | "warning"
-  | "ok"
-  | "info"
-  | "neutral";
+  "critical" | "warning" | "ok" | "info" | "neutral";
 
 export type AuditEvidenceKind =
   | "Gateway session"
@@ -30,6 +26,7 @@ export type AuditPresentation = {
   evidenceDetail: string;
   evidenceLabel: string;
   evidenceReferences: AuditEvidenceReference[];
+  executionPrivilege: string | null;
   gatewaySessionId: string | null;
   operatorSessionId: string | null;
   originLabel: string;
@@ -90,6 +87,10 @@ const TARGET_PREFIX_LABELS: Record<string, string> = {
   history_retention: "History retention",
   job_approval: "Job approval",
   migration_link: "Migration link",
+  monitoring_share: "Monitoring share",
+  monitoring_shares: "Monitoring shares",
+  ping_target: "Ping target",
+  ping_targets: "Ping targets",
   port_forward_rule: "Port-forward rule",
   restore_plan: "Restore plan",
   runtime_config_patch_generator: "Runtime-config patch generator",
@@ -111,6 +112,7 @@ const OUTCOME_TONES: Record<string, AuditOutcomeTone> = Object.fromEntries([
     "error",
     "execution_canceled",
     "execution_failed",
+    "failure",
     "failed",
     "permanently_failed",
     "rejected",
@@ -122,6 +124,7 @@ const OUTCOME_TONES: Record<string, AuditOutcomeTone> = Object.fromEntries([
     "disconnected_timeout",
     "expired",
     "idle_timeout",
+    "ignored",
     "lifecycle_disconnected",
     "locked",
     "missing",
@@ -129,6 +132,8 @@ const OUTCOME_TONES: Record<string, AuditOutcomeTone> = Object.fromEntries([
     "partial_success",
     "skipped",
     "stale",
+    "throttled",
+    "unavailable",
     "warning",
   ].map((value) => [value, "warning"] as const),
   ...[
@@ -194,13 +199,17 @@ export function presentAudit(audit: AuditLogRecord): AuditPresentation {
             .map((reference) => reference.label)
             .join(" · "),
     evidenceReferences,
+    executionPrivilege: auditExecutionPrivilege(audit),
     gatewaySessionId: sessions.gateway,
     operatorSessionId: sessions.operator,
     originLabel: auditOriginLabel(audit),
     outcomeLabel: outcome.label,
     outcomeTone: outcome.tone,
     privilege: firstDirectMetadataText(audit.metadata, ["privilege_scope"]),
-    sourceIp: firstDirectMetadataText(audit.metadata, ["remote_ip"]),
+    sourceIp: firstDirectMetadataText(audit.metadata, [
+      "remote_ip",
+      "source_ip",
+    ]),
     targetDetail: target.detail,
     targetLabel: target.label,
     terminalSessionId: sessions.terminal,
@@ -210,7 +219,9 @@ export function presentAudit(audit: AuditLogRecord): AuditPresentation {
 
 function auditOriginLabel(audit: AuditLogRecord): string {
   const component = firstDirectMetadataText(audit.metadata, ["component"]);
-  const explicitOrigin = firstDirectMetadataText(audit.metadata, ["origin_kind"]);
+  const explicitOrigin = firstDirectMetadataText(audit.metadata, [
+    "origin_kind",
+  ]);
   if (explicitOrigin) {
     const origin = readableCode(explicitOrigin);
     return component && component.toLowerCase() !== explicitOrigin.toLowerCase()
@@ -242,7 +253,12 @@ export function auditMissingFieldLabel(
 export function auditEvidenceSearchText(audit: AuditLogRecord): string {
   const presentation = presentAudit(audit);
   return presentation.evidenceReferences
-    .flatMap((reference) => [reference.kind, reference.label, reference.detail, reference.value])
+    .flatMap((reference) => [
+      reference.kind,
+      reference.label,
+      reference.detail,
+      reference.value,
+    ])
     .join(" ");
 }
 
@@ -262,13 +278,13 @@ export function auditClientIds(audit: AuditLogRecord): string[] {
     "source_client_id",
     "target_client_id",
   ]) {
-    const value = audit.metadata[key];
+    const value = directMetadataValue(audit.metadata, key);
     if (typeof value === "string" && value.trim()) {
       clientIds.add(value.trim());
     }
   }
   for (const key of ["client_ids", "target_client_ids"]) {
-    const value = audit.metadata[key];
+    const value = directMetadataValue(audit.metadata, key);
     if (!Array.isArray(value)) continue;
     for (const entry of value) {
       if (typeof entry === "string" && entry.trim()) {
@@ -282,12 +298,17 @@ export function auditClientIds(audit: AuditLogRecord): string[] {
 export function auditSessionSearchText(audit: AuditLogRecord): string {
   const presentation = presentAudit(audit);
   return [
-    presentation.operatorSessionId,
-    presentation.terminalSessionId,
-    presentation.gatewaySessionId,
-  ]
-    .filter((value): value is string => Boolean(value))
-    .join(" ");
+    ...new Set(
+      [
+        presentation.operatorSessionId,
+        presentation.terminalSessionId,
+        presentation.gatewaySessionId,
+        ...presentation.evidenceReferences
+          .filter((reference) => reference.kind.includes("session"))
+          .map((reference) => reference.value),
+      ].filter((value): value is string => Boolean(value)),
+    ),
+  ].join(" ");
 }
 
 function auditActionDetail(audit: AuditLogRecord): string {
@@ -324,11 +345,21 @@ function auditActionDetail(audit: AuditLogRecord): string {
 }
 
 function auditActor(audit: AuditLogRecord): { detail: string; label: string } {
-  const username = firstDirectMetadataText(audit.metadata, ["operator_username"]);
+  const username = firstDirectMetadataText(audit.metadata, [
+    "operator_username",
+  ]);
   const attemptedUsername = firstDirectMetadataText(audit.metadata, [
     "attempted_username",
   ]);
   const role = firstDirectMetadataText(audit.metadata, ["operator_role"]);
+  const origin = firstDirectMetadataText(audit.metadata, ["origin_kind"]);
+  const visitorId = firstDirectMetadataText(audit.metadata, ["visitor_id"]);
+  if (!audit.actor_id && origin === "public_share" && visitorId) {
+    return {
+      detail: `Visitor ${shortId(visitorId)}`,
+      label: "Public visitor",
+    };
+  }
   if (!audit.actor_id && audit.action.startsWith("operator_auth.")) {
     return {
       detail: attemptedUsername
@@ -368,9 +399,10 @@ function auditTarget(audit: AuditLogRecord): { detail: string; label: string } {
   }
   if (target.startsWith("api:/api/v1/jobs")) {
     return {
-      detail: targetCount !== null
-        ? `${targetCount} resolved target${targetCount === 1 ? "" : "s"}`
-        : "Job submission endpoint",
+      detail:
+        targetCount !== null
+          ? `${targetCount} resolved target${targetCount === 1 ? "" : "s"}`
+          : "Job submission endpoint",
       label: "Jobs API",
     };
   }
@@ -387,7 +419,9 @@ function auditTarget(audit: AuditLogRecord): { detail: string; label: string } {
     return { detail: id, label: `Operator session ${shortId(id)}` };
   }
   if (target.startsWith("terminal:")) {
-    const terminal = firstDirectMetadataText(audit.metadata, ["terminal_session_id"]);
+    const terminal = firstDirectMetadataText(audit.metadata, [
+      "terminal_session_id",
+    ]);
     return {
       detail: terminal ?? target.slice("terminal:".length),
       label: clientId ? `Terminal on VPS ${clientId}` : "Terminal session",
@@ -431,7 +465,10 @@ function auditOutcome(audit: AuditLogRecord): {
   label: string;
   tone: AuditOutcomeTone;
 } {
-  const raw = firstDirectMetadataText(audit.metadata, ["result"]);
+  const raw = firstDirectMetadataText(
+    audit.metadata,
+    audit.action === "job.target_result" ? ["result", "status"] : ["result"],
+  );
   if (!raw) {
     return { label: "Outcome not recorded", tone: "neutral" };
   }
@@ -442,6 +479,31 @@ function auditOutcome(audit: AuditLogRecord): {
   };
 }
 
+function auditExecutionPrivilege(audit: AuditLogRecord): string | null {
+  const privileged = directMetadataBoolean(audit.metadata, "privileged");
+  const forceUnprivileged = directMetadataBoolean(
+    audit.metadata,
+    "force_unprivileged",
+  );
+  if (privileged === null && forceUnprivileged === null) {
+    return null;
+  }
+  return [
+    privileged === null
+      ? null
+      : privileged
+        ? "Privileged requested"
+        : "Unprivileged requested",
+    forceUnprivileged === null
+      ? null
+      : forceUnprivileged
+        ? "Force-unprivileged enabled"
+        : "Force-unprivileged disabled",
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(" · ");
+}
+
 function auditSessions(audit: AuditLogRecord): {
   gateway: string | null;
   operator: string | null;
@@ -450,8 +512,12 @@ function auditSessions(audit: AuditLogRecord): {
   const directOperator = firstDirectMetadataText(audit.metadata, [
     "operator_session_id",
   ]);
-  const gateway = firstDirectMetadataText(audit.metadata, ["gateway_session_id"]);
-  const terminal = firstDirectMetadataText(audit.metadata, ["terminal_session_id"]);
+  const gateway = firstDirectMetadataText(audit.metadata, [
+    "gateway_session_id",
+  ]);
+  const terminal = firstDirectMetadataText(audit.metadata, [
+    "terminal_session_id",
+  ]);
   return {
     gateway,
     operator: directOperator,
@@ -465,7 +531,12 @@ function auditEvidenceReferences(
 ): AuditEvidenceReference[] {
   const references: AuditEvidenceReference[] = [];
   const push = (kind: AuditEvidenceKind, value: string | null) => {
-    if (!value || references.some((reference) => reference.kind === kind && reference.value === value)) {
+    if (
+      !value ||
+      references.some(
+        (reference) => reference.kind === kind && reference.value === value,
+      )
+    ) {
       return;
     }
     references.push({
@@ -486,6 +557,11 @@ function auditEvidenceReferences(
   ]) {
     push("Job", firstDirectMetadataText(audit.metadata, [key]));
   }
+  for (const key of ["agent_lost_job_ids", "skipped_unstarted_job_ids"]) {
+    for (const jobId of directMetadataTextArray(audit.metadata, key)) {
+      push("Job", jobId);
+    }
+  }
   push("Terminal session", sessions.terminal);
   push(
     "Operator session",
@@ -494,11 +570,17 @@ function auditEvidenceReferences(
   push("Operator session", sessions.operator);
   push("Gateway session", sessions.gateway);
   push("Schedule", firstDirectMetadataText(audit.metadata, ["schedule_id"]));
-  push("Schedule", firstDirectMetadataText(audit.metadata, ["source_schedule_id"]));
+  push(
+    "Schedule",
+    firstDirectMetadataText(audit.metadata, ["source_schedule_id"]),
+  );
   return references;
 }
 
-function firstDirectMetadataText(metadata: JsonValue, keys: string[]): string | null {
+function firstDirectMetadataText(
+  metadata: JsonValue,
+  keys: string[],
+): string | null {
   for (const key of keys) {
     const text = directMetadataText(metadata, key);
     if (text) return text;
@@ -520,9 +602,40 @@ function directMetadataCount(metadata: JsonValue, key: string): number | null {
     : null;
 }
 
-function directMetadataValue(metadata: JsonValue, key: string): JsonValue | undefined {
+function directMetadataBoolean(
+  metadata: JsonValue,
+  key: string,
+): boolean | null {
+  const value = directMetadataValue(metadata, key);
+  return typeof value === "boolean" ? value : null;
+}
+
+function directMetadataTextArray(metadata: JsonValue, key: string): string[] {
+  const value = directMetadataValue(metadata, key);
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (typeof entry !== "string") return [];
+    const trimmed = entry.trim();
+    return trimmed ? [trimmed] : [];
+  });
+}
+
+function directMetadataValue(
+  metadata: JsonValue,
+  key: string,
+): JsonValue | undefined {
   if (!isJsonObject(metadata)) return undefined;
-  return Object.prototype.hasOwnProperty.call(metadata, key) ? metadata[key] : undefined;
+  if (Object.prototype.hasOwnProperty.call(metadata, key)) {
+    return metadata[key];
+  }
+  if (
+    metadata.component === "monitoring-controller" &&
+    isJsonObject(metadata.details) &&
+    Object.prototype.hasOwnProperty.call(metadata.details, key)
+  ) {
+    return metadata.details[key];
+  }
+  return undefined;
 }
 
 function readableCode(value: string): string {

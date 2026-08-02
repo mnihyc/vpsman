@@ -19,7 +19,10 @@ use crate::{
     backup_artifact_validation::{
         validate_artifact_metadata, validate_artifact_object_key, MAX_BACKUP_ARTIFACT_UPLOAD_BYTES,
     },
-    commands_schedules::{resolve_schedule_target_ids, selector_expression_from_targets},
+    commands_schedules::{
+        resolve_schedule_target_ids, saved_schedule_target_snapshot,
+        selector_expression_from_targets,
+    },
     http::{http_get, http_post_json, http_put_json},
     jobs::resolve_target_ids,
     privilege::{
@@ -377,7 +380,18 @@ pub(crate) fn backup_policy_upsert(
         "backup-policy-upsert requires --confirmed"
     );
     let selector_expression = selector_expression_from_targets(&options.clients, &options.tags);
-    let target_ids = resolve_schedule_target_ids(api_url, token, &selector_expression)?;
+    let target = backup_policy_upsert_target(options.schedule_id);
+    let stored_snapshot = target
+        .schedule_id
+        .as_deref()
+        .map(|schedule_id| saved_schedule_target_snapshot(api_url, token, schedule_id))
+        .transpose()?;
+    let target_ids = match stored_snapshot.as_ref() {
+        Some(snapshot) if snapshot.selector_expression.trim() == selector_expression.trim() => {
+            snapshot.target_client_ids.clone()
+        }
+        _ => resolve_schedule_target_ids(api_url, token, &selector_expression)?,
+    };
     let operation = JobCommand::Backup {
         paths: options.paths.clone(),
         include_config: options.include_config,
@@ -386,7 +400,6 @@ pub(crate) fn backup_policy_upsert(
     };
     let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
     let salt_hex = load_super_salt_hex(None)?;
-    let target = backup_policy_upsert_target(options.schedule_id);
     let privilege_assertion = build_privilege_for_schedule(
         SchedulePrivilegeRequest {
             action: target.action,
@@ -410,7 +423,7 @@ pub(crate) fn backup_policy_upsert(
         &salt_hex,
         300,
     )?;
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "name": options.name,
         "paths": options.paths,
         "include_config": options.include_config,
@@ -435,6 +448,11 @@ pub(crate) fn backup_policy_upsert(
         "confirmed": options.confirmed,
         "privilege_assertion": privilege_assertion,
     });
+    if let Some(snapshot) = stored_snapshot {
+        payload["expected_selector_expression"] =
+            serde_json::Value::String(snapshot.selector_expression);
+        payload["expected_target_client_ids"] = serde_json::to_value(snapshot.target_client_ids)?;
+    }
     let response = if target.schedule_id.is_some() {
         http_put_json(api_url, &target.path, token, &payload)?
     } else {

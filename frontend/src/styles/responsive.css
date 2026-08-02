@@ -122,7 +122,6 @@
   .preferenceTagVisibilityToolbar,
   .preferenceStickySaveBar,
   .systemLinkedPreferenceRow,
-  .tagCreateForm .formRow,
   .accessQueueRow {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -559,20 +558,28 @@
     scrollbar-width: thin;
   }
 
-  .publicMonitoringRangeControls.observabilityMetricsControls > .timeRangeTabs button {
+  .publicMonitoringRangeControls.observabilityMetricsControls
+    > .timeRangeTabs
+    button {
     flex: 0 0 auto;
     min-width: max-content;
   }
 
-  .publicMonitoringRangeControls.observabilityMetricsControls > .timeRangeTabs button:nth-child(-n + 4) {
+  .publicMonitoringRangeControls.observabilityMetricsControls
+    > .timeRangeTabs
+    button:nth-child(-n + 4) {
     border-bottom: 0;
   }
 
-  .publicMonitoringRangeControls.observabilityMetricsControls > .timeRangeTabs button:nth-child(4n) {
+  .publicMonitoringRangeControls.observabilityMetricsControls
+    > .timeRangeTabs
+    button:nth-child(4n) {
     border-right: 1px solid var(--border);
   }
 
-  .publicMonitoringRangeControls.observabilityMetricsControls > .timeRangeTabs button:last-child {
+  .publicMonitoringRangeControls.observabilityMetricsControls
+    > .timeRangeTabs
+    button:last-child {
     border-right: 0;
   }
 
@@ -1196,7 +1203,10 @@
   }
 
   .thresholdMatrixRow {
-    grid-template-columns: minmax(86px, 1fr) minmax(72px, 88px) minmax(72px, 88px);
+    grid-template-columns: minmax(86px, 1fr) minmax(72px, 88px) minmax(
+        72px,
+        88px
+      );
     gap: 6px;
   }
 

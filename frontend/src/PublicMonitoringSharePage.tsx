@@ -8,16 +8,30 @@ import {
 } from "./components/TimeSeriesChart";
 import { ConsoleStatusBadge } from "./components/ConsoleLayout";
 import {
+  MonitoringRangeTabs,
+  type MonitoringWindow,
+} from "./components/MonitoringRangeTabs";
+import {
   pushHistoryEntry,
   replaceHistoryEntry,
   useHistoryEntryState,
 } from "./historyEntryState";
-import { MiniSparkline } from "./panels/FleetMonitorPanel";
+import {
+  PUBLIC_MONITOR_DENSITY_STORAGE_KEY,
+  usePersistentMonitorCardDensity,
+  type MonitorCardDensity,
+} from "./monitorCardDensity";
+import {
+  MiniSparkline,
+  MonitorFact,
+  MonitorMetric,
+  VpsMonitorCardSurface,
+} from "./panels/FleetMonitorPanel";
 import type {
-  MonitoringRangeView as MonitoringRange,
   PublicMonitoringCardView as PublicMonitoringCard,
   PublicMonitoringDataView as PublicMonitoringData,
   PublicMonitoringDetailView as PublicMonitoringDetail,
+  PublicMonitoringRangeView as MonitoringRange,
   PublicNetworkMetricView as PublicNetworkMetric,
   PublicNetworkPointView as PublicNetworkPoint,
   PublicPingMetricView as PublicPingMetric,
@@ -26,7 +40,7 @@ import type {
   PublicMonitoringShareBootstrapView,
   PublicMonitoringShareView,
   PublicTrafficMetricView as PublicTrafficMetric,
-  TrafficHistoryPointView as PublicTrafficPoint,
+  PublicTrafficHistoryPointView as PublicTrafficPoint,
 } from "./types";
 import { formatCompactTime, formatFullTime, timestampMillis } from "./utils";
 import { agentStatusPresentation } from "./agentDisplayState";
@@ -37,43 +51,12 @@ type PublicMonitoringSharePageProps = {
   secret: string;
 };
 
-type Density = "comfortable" | "compact";
+type Density = MonitorCardDensity;
 type CardStatusFilter = "all" | "online" | "warning" | "offline";
-type MonitoringWindow =
-  | "15m"
-  | "1h"
-  | "8h"
-  | "1d"
-  | "7d"
-  | "30d"
-  | "90d"
-  | "180d"
-  | "1y"
-  | "all"
-  | "custom";
-
 type CustomBounds = {
   startUnix: number;
   endUnix: number;
 };
-
-const RANGE_OPTIONS: ReadonlyArray<{
-  label: string;
-  title?: string;
-  value: MonitoringWindow;
-}> = [
-  { label: "15m", title: "Realtime · last 15 minutes", value: "15m" },
-  { label: "1h", value: "1h" },
-  { label: "8h", value: "8h" },
-  { label: "1d", value: "1d" },
-  { label: "7d", value: "7d" },
-  { label: "30d", value: "30d" },
-  { label: "90d", value: "90d" },
-  { label: "180d", value: "180d" },
-  { label: "1y", value: "1y" },
-  { label: "All", value: "all" },
-  { label: "Custom", value: "custom" },
-];
 
 // React StrictMode remounts effects in development. Sharing only an in-flight
 // bootstrap avoids recording that remount as a second visitor. The secret is
@@ -89,9 +72,9 @@ export function PublicMonitoringSharePage({
   secret,
 }: PublicMonitoringSharePageProps) {
   const historySlot = `public-monitoring-share.${shareId}`;
-  const [density, setDensity] = useHistoryEntryState<Density>(
-    `${historySlot}.density`,
-    "comfortable",
+  const [density, setDensity] = usePersistentMonitorCardDensity(
+    historySlot,
+    PUBLIC_MONITOR_DENSITY_STORAGE_KEY,
   );
   const [search, setSearch] = useHistoryEntryState(`${historySlot}.search`, "");
   const [statusFilter, setStatusFilter] =
@@ -512,20 +495,24 @@ export function PublicMonitoringSharePage({
                 : `${cards.length} of ${total} VPSs loaded`}
             </span>
             <div className="fleetMonitorControls">
-              <label>
+              <label htmlFor="public-monitoring-search">
                 <span>Search</span>
                 <input
                   aria-label="Search shared VPSs"
+                  id="public-monitoring-search"
+                  name="public-monitoring-search"
                   onChange={(event) => setSearch(event.target.value)}
                   placeholder="Name or tag"
                   type="search"
                   value={search}
                 />
               </label>
-              <label>
+              <label htmlFor="public-monitoring-status">
                 <span>Status</span>
                 <select
                   aria-label="Filter shared VPSs by status"
+                  id="public-monitoring-status"
+                  name="public-monitoring-status"
                   onChange={(event) =>
                     setStatusFilter(event.target.value as CardStatusFilter)
                   }
@@ -772,29 +759,17 @@ function PublicMonitoringCardView({
     </>
   );
   return (
-    <article
-      aria-label={`${cardTitle} shared monitoring card`}
+    <VpsMonitorCardSurface
+      ariaLabel={`${cardTitle} shared monitoring card`}
       className={`vpsMonitorCard publicMonitoringCard ${effectiveStatus} ${density}${selected ? " selected" : ""}${detailAllowed ? "" : " publicMonitoringCardStatic"}`}
-      onClick={detailAllowed ? onOpen : undefined}
-      onKeyDown={
-        detailAllowed
-          ? (event) => {
-              if (event.key !== "Enter") return;
-              event.preventDefault();
-              onOpen();
-            }
-          : undefined
-      }
-      role={detailAllowed ? "link" : undefined}
-      tabIndex={detailAllowed ? 0 : undefined}
+      header={cardHeader}
+      onOpen={detailAllowed ? onOpen : undefined}
       title={
         detailAllowed
           ? `Open read-only history for ${card.display_name || "this VPS"}`
           : undefined
       }
     >
-      <div className="vpsMonitorCardMain">{cardHeader}</div>
-
       {density === "comfortable" && visibility?.identity_context ? (
         <div className="vpsMonitorTags" aria-label="Shared identity tags">
           {(card.tags ?? []).length ? (
@@ -907,7 +882,7 @@ function PublicMonitoringCardView({
 
       {visibility?.resources ? (
         <div
-          className="vpsMonitorAuxFacts"
+          className="vpsMonitorAuxFacts publicMonitoringConnections"
           aria-label={`Connection counts for ${card.display_name}`}
         >
           <span
@@ -950,7 +925,7 @@ function PublicMonitoringCardView({
           <span>{warnings.join(" · ")}</span>
         </div>
       ) : null}
-    </article>
+    </VpsMonitorCardSurface>
   );
 }
 
@@ -971,32 +946,18 @@ function PublicMetric({
   stale?: boolean;
   value: string;
 }) {
-  const bounded = percent === null ? null : Math.max(0, Math.min(100, percent));
   return (
-    <span
-      className={`vpsMonitorMetric${bounded === null ? " missing" : ""}${stale ? " stale" : ""}`}
-    >
-      <span aria-hidden="true" className="vpsMonitorMetricIcon">
-        {icon}
-      </span>
-      <span className="vpsMonitorMetricLabel">{label}</span>
-      <strong>{value}</strong>
-      <span
-        aria-label={
-          bounded === null ? undefined : `${label}: ${value}; ${caption}`
-        }
-        aria-valuemax={bounded === null ? undefined : 100}
-        aria-valuemin={bounded === null ? undefined : 0}
-        aria-valuenow={bounded ?? undefined}
-        aria-valuetext={bounded === null ? undefined : `${value}; ${caption}`}
-        className={`vpsMonitorMetricTrack${bounded === null ? " missing" : ""}`}
-        role={bounded === null ? undefined : "meter"}
-      >
-        <span style={{ width: `${bounded ?? 0}%` }} />
-      </span>
-      {sparkline}
-      <small>{caption}</small>
-    </span>
+    <MonitorMetric
+      icon={icon}
+      label={label}
+      meterCaption={caption}
+      meterMax={100}
+      meterValue={percent}
+      showCaption
+      sparkline={sparkline}
+      stale={stale}
+      value={value}
+    />
   );
 }
 
@@ -1014,15 +975,14 @@ function PublicFact({
   value: string;
 }) {
   return (
-    <span className={`vpsMonitorFlowFact${stale ? " stale" : ""}`}>
-      <small>
-        {icon}
-        {icon ? " " : ""}
-        {label}
-      </small>
-      <strong title={value}>{value}</strong>
-      {sparkline}
-    </span>
+    <MonitorFact
+      icon={icon}
+      label={label}
+      sparkline={sparkline}
+      stale={stale}
+      title={value}
+      value={value}
+    />
   );
 }
 
@@ -1176,7 +1136,6 @@ function PublicMonitoringDetailPanel({
     "latency",
   );
   const headingRef = useRef<HTMLHeadingElement | null>(null);
-  const rangeTabsRef = useRef<HTMLDivElement | null>(null);
   const resources = detail?.resources ?? [];
   const network = detail?.network ?? [];
   const traffic = detail?.traffic ?? [];
@@ -1194,11 +1153,6 @@ function PublicMonitoringDetailPanel({
   useEffect(() => {
     headingRef.current?.focus({ preventScroll: false });
   }, [card.client_key]);
-  useEffect(() => {
-    rangeTabsRef.current
-      ?.querySelector<HTMLElement>(`[data-window="${window}"]`)
-      ?.scrollIntoView({ block: "nearest", inline: "center" });
-  }, [window]);
   return (
     <section
       aria-busy={loading}
@@ -1224,26 +1178,11 @@ function PublicMonitoringDetailPanel({
         </button>
       </header>
       <div className="observabilityMetricsControls publicMonitoringRangeControls">
-        <div
-          className="timeRangeTabs"
-          ref={rangeTabsRef}
-          role="group"
-          aria-label="History range"
-        >
-          {RANGE_OPTIONS.map((option) => (
-            <button
-              aria-pressed={window === option.value}
-              className={window === option.value ? "active" : ""}
-              data-window={option.value}
-              key={option.value}
-              onClick={() => onWindowChange(option.value)}
-              title={option.title}
-              type="button"
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
+        <MonitoringRangeTabs
+          ariaLabel="History range"
+          onChange={onWindowChange}
+          value={window}
+        />
       </div>
       {window === "custom" ? (
         <div className="publicMonitoringCustomRange">

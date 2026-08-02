@@ -2,6 +2,7 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
 } from "react";
@@ -12,6 +13,7 @@ import {
   Clock3,
   Pencil,
   Play,
+  Plus,
   Power,
   PowerOff,
   RefreshCcw,
@@ -66,16 +68,12 @@ import {
   shortId,
 } from "../utils";
 import { LocalTargetPreview } from "./TargetImpactPreview";
+import { buildScheduleTargetUpdatePrivilegeAssertion } from "../scheduleTargetMaintenance";
+import { scrollIntoViewWithMotion } from "../motion";
 
 const SCHEDULE_SELECTOR_STORAGE_KEY = "vpsman.schedules.selectorExpression";
 
-function ScheduleFieldLabel({
-  help,
-  label,
-}: {
-  help: string;
-  label: string;
-}) {
+function ScheduleFieldLabel({ help, label }: { help: string; label: string }) {
   return (
     <span className="fieldLabelWithHelp">
       <span>{label}</span>
@@ -181,6 +179,11 @@ export function SchedulesPanel({
   const [editingScheduleId, setEditingScheduleId] = useState<string | null>(
     null,
   );
+  const [composerRevealRequest, setComposerRevealRequest] = useState(0);
+  const scheduleComposerRef = useRef<HTMLElement | null>(null);
+  const scheduleNameRef = useRef<HTMLInputElement | null>(null);
+  const scheduleLifecycleFeedbackRef = useRef<HTMLDivElement | null>(null);
+  const preserveNextComposerSuccessRef = useRef(false);
   const [scheduleAction, setScheduleAction] = useState<ScheduleAction | null>(
     null,
   );
@@ -201,6 +204,33 @@ export function SchedulesPanel({
     invalidateReviewGeneration,
     isReviewGenerationCurrent,
   } = useReviewGenerationGuard();
+
+  useEffect(() => {
+    if (composerRevealRequest === 0) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      if (scheduleComposerRef.current) {
+        scrollIntoViewWithMotion(scheduleComposerRef.current, {
+          block: "start",
+        });
+        scheduleNameRef.current?.focus({ preventScroll: true });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [composerRevealRequest]);
+
+  useEffect(() => {
+    if (!scheduleLifecycleFeedback?.message) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (scheduleLifecycleFeedbackRef.current) {
+        scrollIntoViewWithMotion(scheduleLifecycleFeedbackRef.current, {
+          block: "nearest",
+        });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [scheduleLifecycleFeedback?.message]);
 
   const argv = useMemo(() => {
     try {
@@ -245,10 +275,7 @@ export function SchedulesPanel({
     [selectedTargets],
   );
   const selectedTargetCount = selectedTargetIds.length;
-  const cronShapeValid = useMemo(
-    () => hasCronFieldShape(cronExpr),
-    [cronExpr],
-  );
+  const cronShapeValid = useMemo(() => hasCronFieldShape(cronExpr), [cronExpr]);
   const nextRuns = useMemo(() => previewNextCronRuns(cronExpr, 5), [cronExpr]);
   const ready =
     name.trim().length > 0 &&
@@ -358,7 +385,11 @@ export function SchedulesPanel({
           `${schedule.command_type} ${operationSummary(schedule.operation)} ${schedule.operation_error ?? ""}`,
         cell: (schedule) => (
           <span className="historyPrimary">
-            <strong className={scheduleOperationInvalid(schedule) ? "status warn" : undefined}>
+            <strong
+              className={
+                scheduleOperationInvalid(schedule) ? "status warn" : undefined
+              }
+            >
               {scheduleOperationInvalid(schedule)
                 ? "Invalid saved operation"
                 : operationSummary(schedule.operation)}
@@ -502,19 +533,19 @@ export function SchedulesPanel({
                 {operationInvalid
                   ? "Invalid operation"
                   : cadenceError
-                  ? "Invalid cadence"
-                  : schedule.enabled
-                    ? "Enabled"
-                    : "Disabled"}
+                    ? "Invalid cadence"
+                    : schedule.enabled
+                      ? "Enabled"
+                      : "Disabled"}
               </span>
               <small>
                 {operationInvalid
                   ? "Run, enable, defer, and retarget are blocked"
                   : cadenceError
-                  ? "Edit required; automatic runs blocked"
-                  : schedule.enabled
-                    ? "Automatic runs authorized"
-                    : "Automatic runs paused"}
+                    ? "Edit required; automatic runs blocked"
+                    : schedule.enabled
+                      ? "Automatic runs authorized"
+                      : "Automatic runs paused"}
               </small>
               {schedule.failure_count > 0 && (
                 <small>
@@ -621,7 +652,12 @@ export function SchedulesPanel({
         privilege_assertion: privilegeAssertion,
       };
       if (snapshot.editingScheduleId) {
-        await onUpdateSchedule(snapshot.editingScheduleId, request);
+        await onUpdateSchedule(snapshot.editingScheduleId, {
+          ...request,
+          expected_selector_expression:
+            snapshot.expectedSelectorExpression ?? "",
+          expected_target_client_ids: snapshot.expectedTargetClientIds ?? [],
+        });
       } else {
         await onCreateSchedule(request);
       }
@@ -631,13 +667,28 @@ export function SchedulesPanel({
           ? `${snapshot.name} updated`
           : `${snapshot.name} saved ${snapshot.enabled ? "and enabled; automatic runs authorized" : "as disabled; automatic runs paused"}`,
       );
-      setName("");
-      setCommandText("");
-      setSelectedTemplateId("");
-      setEnabled(false);
-      setEditingScheduleId(null);
+      preserveNextComposerSuccessRef.current = true;
+      resetScheduleComposer();
       setPendingScheduleSnapshot(null);
     });
+  }
+
+  function resetScheduleComposer() {
+    invalidateReviewGeneration();
+    setName("");
+    setSelectedTemplateId("");
+    setCommandText("");
+    setCronExpr("0 * * * *");
+    setEnabled(false);
+    setCatchUpPolicy("skip_missed");
+    setCatchUpLimit(1);
+    setRetryDelaySecs(300);
+    setMaxFailures(3);
+    setSelectorExpression("");
+    setEditingScheduleId(null);
+    setConfirmationOpen(false);
+    setPendingScheduleSnapshot(null);
+    setActionError(null);
   }
 
   async function buildScheduleDraftSnapshot(): Promise<ScheduleDraftSnapshot> {
@@ -660,13 +711,26 @@ export function SchedulesPanel({
       nextRun: nextRuns[0] ?? null,
       selectedTemplateName: selectedTemplate?.name ?? null,
     };
-    const resolved = await onResolveTargets({ selector_expression: selector });
-    const targetClientIds = resolved.targets.map((target) => target.id);
+    const editingSchedule = editingScheduleId
+      ? (schedules.find((schedule) => schedule.id === editingScheduleId) ??
+        null)
+      : null;
+    const selectorChanged =
+      editingSchedule !== null &&
+      selector !== editingSchedule.selector_expression.trim();
+    const targetClientIds =
+      editingSchedule && !selectorChanged
+        ? fixedTargetIds(editingSchedule)
+        : (
+            await onResolveTargets({ selector_expression: selector })
+          ).targets.map((target) => target.id);
     if (!targetClientIds.length) {
       throw new Error("Schedule confirmation resolved no VPSs");
     }
     return {
       ...draft,
+      expectedSelectorExpression: editingSchedule?.selector_expression ?? null,
+      expectedTargetClientIds: editingSchedule?.target_client_ids ?? null,
       targetClientIds,
     };
   }
@@ -688,10 +752,9 @@ export function SchedulesPanel({
       !matchingTemplate
     ) {
       setScheduleLifecycleFeedback({
-        message:
-          commandTemplatesTruncated
-            ? "This schedule's non-shell template is not in the loaded template page; older templates may exist. Modification stays disabled until that template is loaded."
-            : "Non-shell schedules can be modified from their command template",
+        message: commandTemplatesTruncated
+          ? "This schedule's non-shell template is not in the loaded template page; older templates may exist. Modification stays disabled until that template is loaded."
+          : "Non-shell schedules can be modified from their command template",
         tone: commandTemplatesTruncated ? "warning" : "danger",
       });
       return;
@@ -718,6 +781,7 @@ export function SchedulesPanel({
     setRetryDelaySecs(schedule.retry_delay_secs);
     setMaxFailures(schedule.max_failures);
     setSelectorExpression(schedule.selector_expression);
+    setComposerRevealRequest((current) => current + 1);
   }
 
   function startDefer(schedule: ScheduleRecord) {
@@ -766,15 +830,13 @@ export function SchedulesPanel({
         const reviewedUpdates = await Promise.all(
           action.updates.map(async (update) => ({
             ...update,
-            privilegeAssertion: await buildSchedulePrivilege(
-              update.schedule,
-              actionName(action),
-              update.schedule.enabled,
-              update.schedule.deferred_until,
-              false,
-              update.targetClientIds,
-              update.selectorExpression,
-            ),
+            privilegeAssertion:
+              await buildScheduleTargetUpdatePrivilegeAssertion({
+                privilegeMaterial,
+                schedule: update.schedule,
+                selectorExpression: update.selectorExpression,
+                targetClientIds: update.targetClientIds,
+              }),
           })),
         );
         for (const update of reviewedUpdates) {
@@ -900,8 +962,7 @@ export function SchedulesPanel({
       const resolvedBySelector = new Map<string, string[]>();
       const updates: ScheduleTargetUpdate[] = [];
       for (const schedule of candidates) {
-        const selectorExpressionForIntent =
-          schedule.selector_expression.trim();
+        const selectorExpressionForIntent = schedule.selector_expression.trim();
         let targetClientIds = resolvedBySelector.get(
           selectorExpressionForIntent,
         );
@@ -912,9 +973,7 @@ export function SchedulesPanel({
           targetClientIds = resolved.targets.map((target) => target.id);
           resolvedBySelector.set(selectorExpressionForIntent, targetClientIds);
         }
-        if (
-          sameStringSet(fixedTargetIds(schedule), targetClientIds)
-        ) {
+        if (sameStringSet(fixedTargetIds(schedule), targetClientIds)) {
           continue;
         }
         updates.push({
@@ -924,9 +983,7 @@ export function SchedulesPanel({
         });
       }
       if (updates.length === 0) {
-        throw new Error(
-          "Server resolution found no changed target snapshots",
-        );
+        throw new Error("Server resolution found no changed target snapshots");
       }
       openScheduleAction({
         type: "targetUpdate",
@@ -1002,7 +1059,9 @@ export function SchedulesPanel({
   function actionDetail(action: ScheduleAction): string {
     if (action.type === "targetUpdate") {
       return `Re-resolves each saved audit selector and replaces only the ${
-        action.updates.length === 1 ? "fixed target snapshot" : "fixed target snapshots"
+        action.updates.length === 1
+          ? "fixed target snapshot"
+          : "fixed target snapshots"
       }. No other schedule setting changes.`;
     }
     if (action.type === "applyNow") {
@@ -1089,10 +1148,10 @@ export function SchedulesPanel({
         value: scheduleOperationInvalid(action.schedule)
           ? "Invalid operation — execution blocked"
           : action.schedule.cadence_error
-          ? "Invalid cadence — automatic runs blocked"
-          : action.schedule.enabled
-            ? "Enabled"
-            : "Disabled",
+            ? "Invalid cadence — automatic runs blocked"
+            : action.schedule.enabled
+              ? "Enabled"
+              : "Disabled",
       },
     ];
     if (action.type === "defer") {
@@ -1112,6 +1171,11 @@ export function SchedulesPanel({
     invalidateReviewGeneration();
     setConfirmationOpen(false);
     setPendingScheduleSnapshot(null);
+    if (preserveNextComposerSuccessRef.current) {
+      preserveNextComposerSuccessRef.current = false;
+    } else {
+      setActionSuccess(null);
+    }
   }, [
     catchUpLimit,
     catchUpPolicy,
@@ -1177,8 +1241,7 @@ export function SchedulesPanel({
       onSelect: (rows) => rows[0] && editSchedule(rows[0]),
     },
     {
-      description: (rows) =>
-        describeScheduleTargetUpdate(rows, agents),
+      description: (rows) => describeScheduleTargetUpdate(rows, agents),
       label: "Update targets",
       disabled: (rows) =>
         pending ||
@@ -1291,6 +1354,7 @@ export function SchedulesPanel({
         <ActionFeedback
           className="localActionFeedback scheduleLifecycleFeedback"
           message={scheduleLifecycleFeedback?.message}
+          ref={scheduleLifecycleFeedbackRef}
           tone={scheduleLifecycleFeedback?.tone}
         />
         <ConsoleDataGrid
@@ -1326,6 +1390,22 @@ export function SchedulesPanel({
           singleExpandedRow
           storageKey="vpsman.grid.schedules"
           title="Schedule records"
+          toolbarActions={
+            <button
+              className="primaryAction compactAction"
+              disabled={pending || editingScheduleId !== null}
+              onClick={() => setComposerRevealRequest((current) => current + 1)}
+              title={
+                editingScheduleId
+                  ? "Finish or cancel the current schedule edit before starting another schedule."
+                  : "Open the existing Create schedule form below."
+              }
+              type="button"
+            >
+              <Plus size={14} />
+              Create schedule
+            </button>
+          }
         />
         <div
           className={`privilegeGateBox ${privilegeMaterial ? "ready" : ""}`}
@@ -1434,9 +1514,14 @@ export function SchedulesPanel({
         />
       </section>
 
-      <section>
+      <section ref={scheduleComposerRef}>
         <ConsoleCollapsibleSection
-          forceOpenKey={editingScheduleId}
+          forceOpenKey={
+            editingScheduleId ??
+            (composerRevealRequest > 0
+              ? `create:${composerRevealRequest}`
+              : null)
+          }
           defaultOpen={schedules.length === 0}
           storageKey="vpsman.panel.schedules.create"
           summary={
@@ -1452,6 +1537,7 @@ export function SchedulesPanel({
               <input
                 aria-label="Schedule name"
                 onChange={(event) => setName(event.target.value)}
+                ref={scheduleNameRef}
                 value={name}
               />
             </label>
@@ -1671,14 +1757,26 @@ export function SchedulesPanel({
               />
             )}
             {!confirmationOpen && (
-              <button
-                className="primaryAction"
-                disabled={pending || !ready}
-                type="submit"
-              >
-                <Save size={17} />
-                {editingScheduleId ? "Review update" : "Review save"}
-              </button>
+              <div className="consoleFormActions">
+                {editingScheduleId ? (
+                  <button
+                    className="secondaryAction"
+                    disabled={pending}
+                    onClick={resetScheduleComposer}
+                    type="button"
+                  >
+                    Cancel edit
+                  </button>
+                ) : null}
+                <button
+                  className="primaryAction"
+                  disabled={pending || !ready}
+                  type="submit"
+                >
+                  <Save size={17} />
+                  {editingScheduleId ? "Review update" : "Review save"}
+                </button>
+              </div>
             )}
             <ConfirmationPrompt
               confirmLabel={
@@ -1770,6 +1868,8 @@ type ScheduleDraftSnapshot = {
   maxFailures: number;
   nextRun: string | null;
   selectedTemplateName: string | null;
+  expectedSelectorExpression: string | null;
+  expectedTargetClientIds: string[] | null;
 };
 
 function actionName(action: ScheduleAction): string {
@@ -1890,7 +1990,8 @@ function scheduleTargetsNeedUpdate(
   const currentTargetIds = currentScheduleTargetIds(schedule, agents);
   return Boolean(
     currentTargetIds &&
-      !sameStringSet(fixedTargetIds(schedule), currentTargetIds),
+    currentTargetIds.length > 0 &&
+    !sameStringSet(fixedTargetIds(schedule), currentTargetIds),
   );
 }
 
@@ -2019,15 +2120,8 @@ function previewNextCronRuns(expr: string, count: number): string[] {
   if (!parsed) {
     return [];
   }
-  const {
-    domAny,
-    domValues,
-    dowAny,
-    dowValues,
-    hours,
-    minutes,
-    months,
-  } = parsed;
+  const { domAny, domValues, dowAny, dowValues, hours, minutes, months } =
+    parsed;
   const result: string[] = [];
   const cursor = new Date();
   cursor.setUTCSeconds(0, 0);
@@ -2266,8 +2360,8 @@ function ScheduleExpandedDetail({
             ? scheduleOperationInvalid(schedule)
               ? "Invalid operation — automatic and manual runs are blocked"
               : schedule.cadence_error
-              ? "Invalid cadence — edit required; automatic runs are blocked"
-              : "Enabled schedules authorize future runs automatically"
+                ? "Invalid cadence — edit required; automatic runs are blocked"
+                : "Enabled schedules authorize future runs automatically"
             : "Disabled schedules do not dispatch future runs"}
         </span>
         <span>{describeSchedulePolicy(schedule)}</span>

@@ -27,6 +27,11 @@ struct ScheduleRecord {
     deferred_until: Option<String>,
 }
 
+pub(crate) struct SavedScheduleTargetSnapshot {
+    pub(crate) selector_expression: String,
+    pub(crate) target_client_ids: Vec<String>,
+}
+
 pub(crate) struct ScheduleCreateOptions {
     pub(crate) name: String,
     pub(crate) command: String,
@@ -171,7 +176,12 @@ pub(crate) fn schedule_update(
         },
         pty: options.pty,
     };
-    let target_ids = resolve_schedule_target_ids(api_url, token, &selector_expression)?;
+    let current = schedule_by_id(api_url, token, &options.schedule_id)?;
+    let target_ids = if current.selector_expression.trim() == selector_expression.trim() {
+        current.target_client_ids.clone()
+    } else {
+        resolve_schedule_target_ids(api_url, token, &selector_expression)?
+    };
     let privilege_assertion = schedule_privilege_assertion(SchedulePrivilegeRequest {
         action: "schedule.update",
         schedule_id: Some(&options.schedule_id),
@@ -205,6 +215,8 @@ pub(crate) fn schedule_update(
                 "operation": operation,
                 "selector_expression": selector_expression,
                 "target_client_ids": target_ids,
+                "expected_selector_expression": current.selector_expression,
+                "expected_target_client_ids": current.target_client_ids,
                 "cron_expr": options.cron_expr,
                 "timezone": "UTC",
                 "enabled": !options.disabled,
@@ -390,13 +402,21 @@ fn schedule_state_mutation(
 }
 
 fn schedule_by_id(api_url: &str, token: Option<&str>, schedule_id: &str) -> Result<ScheduleRecord> {
-    let body = http_get(api_url, "/api/v1/schedules?limit=1000", token)?;
-    let schedules: Vec<ScheduleRecord> =
-        serde_json::from_str(&body).context("failed to parse schedule list")?;
-    schedules
-        .into_iter()
-        .find(|schedule| schedule.id == schedule_id)
-        .with_context(|| format!("schedule not found: {schedule_id}"))
+    let schedule_id = uuid::Uuid::parse_str(schedule_id).context("invalid schedule UUID")?;
+    let body = http_get(api_url, &format!("/api/v1/schedules/{schedule_id}"), token)?;
+    serde_json::from_str(&body).context("failed to parse schedule")
+}
+
+pub(crate) fn saved_schedule_target_snapshot(
+    api_url: &str,
+    token: Option<&str>,
+    schedule_id: &str,
+) -> Result<SavedScheduleTargetSnapshot> {
+    let schedule = schedule_by_id(api_url, token, schedule_id)?;
+    Ok(SavedScheduleTargetSnapshot {
+        selector_expression: schedule.selector_expression,
+        target_client_ids: schedule.target_client_ids,
+    })
 }
 
 fn schedule_privilege_for_record(

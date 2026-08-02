@@ -105,9 +105,11 @@ Public projections always include only display name and health. Depending on
 the immutable visibility selection, they may also include allowlisted
 provider/region/country context whose value is not an IP literal, resources,
 network rate, authoritative traffic, general Ping, and detail history. They use
-an opaque share-specific VPS key and never expose real VPS IDs, IP addresses,
-internal configuration, actions, jobs, terminals, files, backups, audit data, or
-operator identity.
+a persisted random 256-bit VPS key generated independently for each target in
+each share. The key is stable for that share's lifetime and is never derived
+from the URL-secret digest or predictable internal VPS ID. Public projections
+never expose real VPS IDs, IP addresses, internal configuration, actions, jobs,
+terminals, files, backups, audit data, or operator identity.
 
 ## Practical Defaults
 
@@ -132,7 +134,12 @@ under Access > Operators. Audit > Sessions provides searchable operator and
 terminal evidence plus reviewed bulk revocation of active non-current bearer
 sessions. Operators enroll TOTP under Access > Privilege vault by scanning the
 QR code (the manual setup key remains available) and confirming the current
-six-digit code.
+six-digit code. Setup first stores a disabled pending secret; TOTP becomes
+enabled only after the password and a current code from that exact QR/setup key
+both validate. A wrong-secret or invalid code leaves TOTP disabled and reports
+failure; an accepted time step cannot be reused for a later TOTP mutation.
+Reopening the same pending enrollment returns the same QR/setup key instead of
+silently replacing it.
 
 Access > Gateway sessions shows live and ended agent streams and edits the
 current admin's reusable agent-installer endpoints, server public key, and

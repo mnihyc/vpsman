@@ -76,6 +76,7 @@ import {
   parseSearchExpression,
 } from "../searchExpression";
 import { usePanelDisplaySettings } from "../panelDisplay";
+import { scrollIntoViewWithMotion } from "../motion";
 import {
   addressFamilyLabel,
   latencyStatusLabel,
@@ -169,17 +170,9 @@ import type {
 } from "../types";
 
 type FleetDetailTab =
-  | "Overview"
-  | "Telemetry"
-  | "Traffic & Rules"
-  | "Jobs"
-  | "Network"
-  | "Config";
+  "Overview" | "Telemetry" | "Traffic & Rules" | "Jobs" | "Network" | "Config";
 type FleetSelectionStatsMode =
-  | "telemetry"
-  | "network"
-  | "overview"
-  | "capabilities";
+  "telemetry" | "network" | "overview" | "capabilities";
 
 type DeleteAgentConfirmationSnapshot = {
   clientId: string;
@@ -972,6 +965,7 @@ export function FleetWorkspace({
 
   async function requestDeleteAgent(rows: AgentView[]) {
     clearDeleteReview();
+    setDeleteError(null);
     setDeleteFeedback(null);
     if (rows.length !== 1) {
       return;
@@ -1207,14 +1201,6 @@ export function FleetWorkspace({
               ? () => onNavigatePanel("Fleet", "monitor")
               : undefined
           }
-          onOpenRow={(agent) =>
-            openSingleReleaseWorkflow([agent], "Fleet", "instance_detail")
-          }
-          openRowOnClick={false}
-          openRowLabel="Open VPS"
-          openRowTitle={(agent) =>
-            `Open VPS detail for ${formatVpsName(agent, vpsNameDisplayMode)}.`
-          }
           onSelectionChange={handleFleetSelectionChange}
           renderSelectionPanel={(rows) => (
             <FleetSelectionPanel
@@ -1377,10 +1363,6 @@ function FleetInstancesPanel({
   onCancelDelete,
   onConfirmDelete,
   onOpenMonitor,
-  onOpenRow,
-  openRowOnClick,
-  openRowLabel,
-  openRowTitle,
   onSelectionChange,
   renderExpandedRow,
   renderSelectionPanel,
@@ -1401,10 +1383,6 @@ function FleetInstancesPanel({
   onCancelDelete: () => void;
   onConfirmDelete: () => void;
   onOpenMonitor?: () => void;
-  onOpenRow: (agent: AgentView) => void;
-  openRowOnClick?: boolean;
-  openRowLabel?: string;
-  openRowTitle?: (agent: AgentView) => string;
   onSelectionChange: (rows: AgentView[]) => void;
   renderExpandedRow: (row: AgentView) => ReactNode;
   renderSelectionPanel: (rows: AgentView[]) => ReactNode;
@@ -1413,6 +1391,12 @@ function FleetInstancesPanel({
   vpsNameDisplayMode: VpsNameDisplayMode;
   wsState: string;
 }) {
+  const deleteOutcomeRef = useRef<HTMLDivElement | null>(null);
+  const previousDeleteOutcomeRef = useRef<string | null>(null);
+  const deleteOutcomeMessage = deleteError ?? deleteFeedback?.message ?? null;
+  const deleteOutcomeTone = deleteError
+    ? "danger"
+    : (deleteFeedback?.tone ?? "info");
   const stableAgents = useMemo(
     () =>
       [...agents].sort(
@@ -1423,6 +1407,25 @@ function FleetInstancesPanel({
       ),
     [agents, vpsNameDisplayMode],
   );
+
+  useEffect(() => {
+    if (!deleteOutcomeMessage) {
+      previousDeleteOutcomeRef.current = null;
+      return;
+    }
+    if (previousDeleteOutcomeRef.current === deleteOutcomeMessage) {
+      return;
+    }
+    previousDeleteOutcomeRef.current = deleteOutcomeMessage;
+    const frame = window.requestAnimationFrame(() => {
+      if (deleteOutcomeRef.current) {
+        scrollIntoViewWithMotion(deleteOutcomeRef.current, {
+          block: "nearest",
+        });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [deleteOutcomeMessage]);
 
   return (
     <div className="fleetPanel fleetInstancesPanel">
@@ -1441,8 +1444,9 @@ function FleetInstancesPanel({
       <ConsoleFreshnessBanner error={apiError} />
       <ActionFeedback
         className="localActionFeedback"
-        message={deleteFeedback?.message}
-        tone={deleteFeedback?.tone}
+        message={deleteOutcomeMessage}
+        ref={deleteOutcomeRef}
+        tone={deleteOutcomeTone}
       />
 
       <ConsoleDataGrid
@@ -1481,11 +1485,6 @@ function FleetInstancesPanel({
         }
         getRowId={(agent) => agent.id}
         itemLabel="instances"
-        onOpenRow={onOpenRow}
-        openRowOnClick={openRowOnClick}
-        openRowLabel={openRowLabel}
-        openRowTitle={openRowTitle}
-        showMobileOpenRowAction={false}
         onSelectionChange={onSelectionChange}
         renderExpandedRow={renderExpandedRow}
         renderSelectionPanel={renderSelectionPanel}
@@ -2792,12 +2791,7 @@ function TrafficRulesDetail({
           <button
             className="secondaryAction compactAction"
             type="button"
-            onClick={() =>
-              onNavigatePanel?.(
-                "Config",
-                `rules:id:${agent.id}`,
-              )
-            }
+            onClick={() => onNavigatePanel?.("Config", `rules:id:${agent.id}`)}
           >
             Edit VPS Rules
           </button>
@@ -3283,7 +3277,9 @@ function FleetSelectionStatsTable({
                 <span role="cell" title={agent.id}>
                   {formatVpsName(agent, vpsNameDisplayMode)}
                 </span>
-                <span role="cell">{formatNetworkRateSummary(rates, rollup)}</span>
+                <span role="cell">
+                  {formatNetworkRateSummary(rates, rollup)}
+                </span>
                 <span role="cell">
                   {rates
                     .map(
@@ -3326,9 +3322,15 @@ function FleetSelectionStatsTable({
                 <span role="cell" title={agent.id}>
                   {formatVpsName(agent, vpsNameDisplayMode)}
                 </span>
-                <span role="cell" title={displayState.detail}>{displayState.label}</span>
-                <span role="cell">{countryFromTags(agent.tags) ?? "unset"}</span>
-                <span role="cell">{providerFromTags(agent.tags) ?? "unset"}</span>
+                <span role="cell" title={displayState.detail}>
+                  {displayState.label}
+                </span>
+                <span role="cell">
+                  {countryFromTags(agent.tags) ?? "unset"}
+                </span>
+                <span role="cell">
+                  {providerFromTags(agent.tags) ?? "unset"}
+                </span>
                 <span role="cell">{formatLastSeen(agent.last_seen_at)}</span>
                 <span role="cell">
                   {displayTags(
@@ -3369,9 +3371,15 @@ function FleetSelectionStatsTable({
                 {formatVpsName(agent, vpsNameDisplayMode)}
               </span>
               <span role="cell">{formatPrivilege(agent.capabilities)}</span>
-              <span role="cell">{agent.capabilities.effective_uid ?? "unknown"}</span>
-              <span role="cell">{yesNo(agent.capabilities.can_manage_runtime_tunnels)}</span>
-              <span role="cell">{yesNo(agent.capabilities.can_apply_process_limits)}</span>
+              <span role="cell">
+                {agent.capabilities.effective_uid ?? "unknown"}
+              </span>
+              <span role="cell">
+                {yesNo(agent.capabilities.can_manage_runtime_tunnels)}
+              </span>
+              <span role="cell">
+                {yesNo(agent.capabilities.can_apply_process_limits)}
+              </span>
               <span role="cell">
                 {agent.internal_build_number
                   ? `#${agent.internal_build_number}`
@@ -3770,12 +3778,13 @@ function reviewedWebhookDispatchEventId(
   return eventIds[0];
 }
 
-function reviewedWebhookRuleSummary(
-  rows: WebhookRuleDeliveryRecord[],
-): string {
+function reviewedWebhookRuleSummary(rows: WebhookRuleDeliveryRecord[]): string {
   const rules = Array.from(
     new Map(
-      rows.map((row) => [row.rule_id, `${row.rule_name} (${shortId(row.rule_id)})`]),
+      rows.map((row) => [
+        row.rule_id,
+        `${row.rule_name} (${shortId(row.rule_id)})`,
+      ]),
     ).values(),
   );
   return rules.join(", ") || "no rules";
@@ -3951,7 +3960,9 @@ function ChannelDetailGrid({
       {channel.configuration_error ? (
         <span>
           <strong>Configuration</strong>
-          <span>Stored filters are invalid; delete and replace this channel</span>
+          <span>
+            Stored filters are invalid; delete and replace this channel
+          </span>
         </span>
       ) : null}
       <span>
@@ -4197,6 +4208,7 @@ export function FleetAlertPolicyManager({
   const [dryRunPending, setDryRunPending] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [statusTone, setStatusTone] = useState<ActionFeedbackTone>("info");
+  const statusFeedbackRef = useRef<HTMLDivElement | null>(null);
   const {
     captureReviewGeneration: capturePolicyReviewGeneration,
     invalidateReviewGeneration: invalidatePolicyReviewGeneration,
@@ -4368,6 +4380,12 @@ export function FleetAlertPolicyManager({
     ruleDrafts,
     selectorExpression,
   ]);
+
+  useEffect(() => {
+    if (status && statusTone !== "info" && statusFeedbackRef.current) {
+      scrollIntoViewWithMotion(statusFeedbackRef.current, { block: "nearest" });
+    }
+  }, [status, statusTone]);
 
   useEffect(() => {
     return () => {
@@ -4757,16 +4775,21 @@ export function FleetAlertPolicyManager({
           : "consoleCrudPanel"
       }
     >
-      <ActionFeedback
-        className="localActionFeedback fleetPolicyActionFeedback"
-        message={status}
-        tone={statusTone}
-      />
+      {status ? (
+        <div ref={statusFeedbackRef}>
+          <ActionFeedback
+            className="localActionFeedback fleetPolicyActionFeedback"
+            message={status}
+            tone={statusTone}
+          />
+        </div>
+      ) : null}
       <div className="consoleResourceLayout fullWidth">
         {showPolicyList && policyFilterClientId ? (
           <div className="consoleInlineNotice policyFocusNotice">
             <strong>
-              Focused VPS: <span className="monoValue">{policyFilterClientId}</span>
+              Focused VPS:{" "}
+              <span className="monoValue">{policyFilterClientId}</span>
             </strong>
             <small>
               Policy rows show server-evaluated match counts; open a policy
@@ -4993,7 +5016,8 @@ export function FleetAlertPolicyManager({
                 <div>
                   <h4>Rule rows</h4>
                   <span>
-                    {ruleDrafts.length} {ruleDrafts.length === 1 ? "rule row" : "rule rows"}
+                    {ruleDrafts.length}{" "}
+                    {ruleDrafts.length === 1 ? "rule row" : "rule rows"}
                   </span>
                 </div>
                 <button
@@ -5152,6 +5176,7 @@ export function FleetAlertPolicyManager({
         onConfirm={() => void submit()}
         open={saveSnapshot !== null}
         pending={savePending}
+        error={saveSnapshot && statusTone === "danger" ? status : null}
         title="Confirm alert policy save"
       />
       <ConfirmationPrompt
@@ -5344,10 +5369,7 @@ function IssuedPolicyAlertList({
 }
 
 type NotificationRegistryTab =
-  | "channels"
-  | "webhooks"
-  | "deliveries"
-  | "maintenance";
+  "channels" | "webhooks" | "deliveries" | "maintenance";
 
 export function FleetNotificationsHub({
   agents,
@@ -5631,6 +5653,7 @@ export function FleetAlertNotificationManager({
   const [notes, setNotes] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [statusTone, setStatusTone] = useState<ActionFeedbackTone>("info");
+  const statusFeedbackRef = useRef<HTMLDivElement | null>(null);
   const [queueConfirmation, setQueueConfirmation] = useState<
     "dispatch" | "process" | null
   >(null);
@@ -5710,15 +5733,15 @@ export function FleetAlertNotificationManager({
               {channel.configuration_error
                 ? "Invalid stored filters"
                 : channel.categories.length > 0
-                ? channel.categories.join(", ")
-                : "all categories"}
+                  ? channel.categories.join(", ")
+                  : "all categories"}
             </strong>
             <small>
               {channel.configuration_error
                 ? "Channel is skipped until replaced"
                 : channel.operator_states.length > 0
-                ? channel.operator_states.join(", ")
-                : "all states"}
+                  ? channel.operator_states.join(", ")
+                  : "all states"}
             </small>
           </span>
         ),
@@ -5773,6 +5796,7 @@ export function FleetAlertNotificationManager({
 
   useEffect(() => {
     setSaveSnapshot(null);
+    setStatus(null);
   }, [
     name,
     scopeKind,
@@ -5786,6 +5810,12 @@ export function FleetAlertNotificationManager({
     enabled,
     notes,
   ]);
+
+  useEffect(() => {
+    if (status && statusTone !== "info" && statusFeedbackRef.current) {
+      scrollIntoViewWithMotion(statusFeedbackRef.current, { block: "nearest" });
+    }
+  }, [status, statusTone]);
 
   function resetForm() {
     setEditingId(null);
@@ -6075,7 +6105,10 @@ export function FleetAlertNotificationManager({
       return;
     }
     if (!hasQueuedDeliveries) {
-      setChannelStatus("No queued notification deliveries are available", "info");
+      setChannelStatus(
+        "No queued notification deliveries are available",
+        "info",
+      );
       return;
     }
     setChannelStatus(
@@ -6238,16 +6271,20 @@ export function FleetAlertNotificationManager({
       },
     ];
   const detailChannel = detailChannelId
-    ? channels.find((channel) => channel.id === detailChannelId) ?? null
+    ? (channels.find((channel) => channel.id === detailChannelId) ?? null)
     : null;
 
   return (
     <div className="consoleCrudPanel">
-      <ActionFeedback
-        className="localActionFeedback fleetPolicyActionFeedback"
-        message={status}
-        tone={statusTone}
-      />
+      {status ? (
+        <div ref={statusFeedbackRef}>
+          <ActionFeedback
+            className="localActionFeedback fleetPolicyActionFeedback"
+            message={status}
+            tone={statusTone}
+          />
+        </div>
+      ) : null}
       <div className="consoleResourceLayout fullWidth">
         <ConsoleDataGrid
           actions={channelActions}
@@ -6281,7 +6318,9 @@ export function FleetAlertNotificationManager({
             actions={
               <button
                 className="secondaryAction"
-                disabled={!detailChannel || Boolean(detailChannel.configuration_error)}
+                disabled={
+                  !detailChannel || Boolean(detailChannel.configuration_error)
+                }
                 title={
                   detailChannel?.configuration_error
                     ? "Stored filters are invalid; delete and replace this channel"
@@ -6315,7 +6354,15 @@ export function FleetAlertNotificationManager({
                 <button
                   className="primaryAction"
                   disabled={savePending || !name.trim() || !target.trim()}
-                  title={!name.trim() ? "Enter a channel name" : !target.trim() ? "Enter a delivery target" : editingId ? "Review the channel update" : "Review the new channel"}
+                  title={
+                    !name.trim()
+                      ? "Enter a channel name"
+                      : !target.trim()
+                        ? "Enter a delivery target"
+                        : editingId
+                          ? "Review the channel update"
+                          : "Review the new channel"
+                  }
                   type="button"
                   onClick={reviewSubmit}
                 >
@@ -6483,8 +6530,8 @@ export function FleetAlertNotificationManager({
             {!hasEnabledChannels
               ? "Create and enable a destination before previewing or queueing alert notifications."
               : queueMode === "configuration"
-              ? "Preview matching alerts, queue or deliver reviewed records, or open delivery evidence."
-              : "Review matching or process queued deliveries without leaving the registry."}
+                ? "Preview matching alerts, queue or deliver reviewed records, or open delivery evidence."
+                : "Review matching or process queued deliveries without leaving the registry."}
           </small>
         </span>
         <div className="consoleOperationsActions">
@@ -6499,9 +6546,7 @@ export function FleetAlertNotificationManager({
             type="button"
             onClick={() => void dispatch(true)}
           >
-            {queueMode === "configuration"
-              ? "Preview match"
-              : "Review matches"}
+            {queueMode === "configuration" ? "Preview match" : "Review matches"}
           </button>
           <button
             className="secondaryAction"
@@ -6586,6 +6631,7 @@ export function FleetAlertNotificationManager({
         onConfirm={() => void confirmQueueAction()}
         open={queueConfirmation !== null && queueSnapshot !== null}
         pending={queuePending}
+        error={queueConfirmation && statusTone === "danger" ? status : null}
         title={
           queueConfirmation === "dispatch"
             ? "Confirm notification queue dispatch"
@@ -6622,6 +6668,7 @@ export function FleetAlertNotificationManager({
         onConfirm={() => void submit()}
         open={saveSnapshot !== null}
         pending={savePending}
+        error={saveSnapshot && statusTone === "danger" ? status : null}
         title="Confirm notification channel save"
       />
       <ConfirmationPrompt
@@ -6919,6 +6966,8 @@ export function WebhookRuleManager({
   const [statusScope, setStatusScope] = useState<"queue" | "resource">(
     "resource",
   );
+  const resourceFeedbackRef = useRef<HTMLDivElement | null>(null);
+  const queueFeedbackRef = useRef<HTMLDivElement | null>(null);
   const [queueConfirmation, setQueueConfirmation] = useState<
     "dispatch" | "process" | null
   >(null);
@@ -7035,6 +7084,17 @@ export function WebhookRuleManager({
     cooldownSecs,
     notes,
   ]);
+
+  useEffect(() => {
+    if (!status || statusTone === "info") return;
+    const feedback =
+      statusScope === "queue"
+        ? queueFeedbackRef.current
+        : resourceFeedbackRef.current;
+    if (feedback) {
+      scrollIntoViewWithMotion(feedback, { block: "nearest" });
+    }
+  }, [status, statusScope, statusTone]);
 
   function resetForm() {
     setEditingId(null);
@@ -7225,10 +7285,10 @@ export function WebhookRuleManager({
   async function setRulesEnabled(
     rows: WebhookRuleRecord[],
     nextEnabled: boolean,
-  ) {
-    if (rows.length === 0) return;
+  ): Promise<boolean> {
+    if (rows.length === 0) return false;
     if (!beginSaveMutation()) {
-      return;
+      return false;
     }
     setWebhookStatus(
       nextEnabled ? "enabling webhook rules" : "disabling webhook rules",
@@ -7242,11 +7302,13 @@ export function WebhookRuleManager({
         `${nextEnabled ? "Enabled" : "Disabled"} ${resourceCount(rows.length, "webhook rule")}`,
         "success",
       );
+      return true;
     } catch (error) {
       setWebhookStatus(
         error instanceof Error ? error.message : "rule update failed",
         "danger",
       );
+      return false;
     } finally {
       finishSaveMutation();
     }
@@ -7256,6 +7318,13 @@ export function WebhookRuleManager({
     const disabledRows = rows.filter((rule) => !rule.enabled);
     if (disabledRows.length === 0) return;
     setEnableRows(disabledRows);
+  }
+
+  async function confirmEnableRules() {
+    const rows = enableRows ?? [];
+    if (await setRulesEnabled(rows, true)) {
+      setEnableRows(null);
+    }
   }
 
   async function dryRun(rule?: WebhookRuleRecord) {
@@ -7324,12 +7393,14 @@ export function WebhookRuleManager({
     setEventKind(value);
     setEditorTestPreview(null);
     clearWebhookQueueReview();
+    setStatus(null);
   }
 
   function setWebhookEventId(value: string) {
     setEventId(value);
     setEditorTestPreview(null);
     clearWebhookQueueReview();
+    setStatus(null);
   }
 
   async function dispatch(
@@ -7614,12 +7685,14 @@ export function WebhookRuleManager({
   return (
     <div className="consoleCrudPanel">
       <div className="consoleResourceLayout fullWidth">
-        {statusScope === "resource" && !editorOpen ? (
-          <ActionFeedback
-            className="localActionFeedback fleetPolicyActionFeedback"
-            message={status}
-            tone={statusTone}
-          />
+        {statusScope === "resource" && !editorOpen && !detailRuleId ? (
+          <div ref={resourceFeedbackRef}>
+            <ActionFeedback
+              className="localActionFeedback fleetPolicyActionFeedback"
+              message={status}
+              tone={statusTone}
+            />
+          </div>
         ) : null}
         <ConsoleDataGrid
           actions={ruleActions}
@@ -7651,11 +7724,13 @@ export function WebhookRuleManager({
             actions={
               <>
                 {statusScope === "resource" ? (
-                  <ActionFeedback
-                    className="localActionFeedback fleetPolicyActionFeedback webhookEditorActionFeedback"
-                    message={status}
-                    tone={statusTone}
-                  />
+                  <div ref={resourceFeedbackRef}>
+                    <ActionFeedback
+                      className="localActionFeedback fleetPolicyActionFeedback webhookEditorActionFeedback"
+                      message={status}
+                      tone={statusTone}
+                    />
+                  </div>
                 ) : null}
                 <button
                   className="secondaryAction"
@@ -7712,11 +7787,13 @@ export function WebhookRuleManager({
             actions={
               <>
                 {statusScope === "resource" ? (
-                  <ActionFeedback
-                    className="localActionFeedback fleetPolicyActionFeedback webhookEditorActionFeedback"
-                    message={status}
-                    tone={statusTone}
-                  />
+                  <div ref={resourceFeedbackRef}>
+                    <ActionFeedback
+                      className="localActionFeedback fleetPolicyActionFeedback webhookEditorActionFeedback"
+                      message={status}
+                      tone={statusTone}
+                    />
+                  </div>
                 ) : null}
                 <button
                   className="secondaryAction"
@@ -7911,9 +7988,7 @@ export function WebhookRuleManager({
                 </ConsoleField>
               ) : null}
               <ConsoleField label="Local hint" className="fieldFull">
-                <span>
-                  Use Test for the exact server-resolved VPS matches.
-                </span>
+                <span>Use Test for the exact server-resolved VPS matches.</span>
               </ConsoleField>
             </form>
           </ConsoleDetailPanel>
@@ -7929,8 +8004,8 @@ export function WebhookRuleManager({
               {!hasEnabledRules && !hasFailedDeliveries
                 ? "Create and enable a rule before previewing or sending test events."
                 : configurationQueue
-                ? "Preview and send reviewed test events, or retry failed event webhook deliveries."
-                : "Review first; retained deliveries stay in the Deliveries tab."}
+                  ? "Preview and send reviewed test events, or retry failed event webhook deliveries."
+                  : "Review first; retained deliveries stay in the Deliveries tab."}
             </small>
           </span>
           <div className="consoleOperationsActions">
@@ -8104,6 +8179,13 @@ export function WebhookRuleManager({
         onConfirm={() => void confirmQueueAction()}
         open={queueConfirmation !== null && queueSnapshot !== null}
         pending={queuePending}
+        error={
+          queueConfirmation &&
+          statusScope === "queue" &&
+          statusTone === "danger"
+            ? status
+            : null
+        }
         title={
           queueConfirmation === "dispatch"
             ? configurationQueue
@@ -8117,11 +8199,13 @@ export function WebhookRuleManager({
         tone={queueConfirmation === "process" ? "danger" : "normal"}
       />
       {statusScope === "queue" ? (
-        <ActionFeedback
-          className="localActionFeedback fleetPolicyActionFeedback"
-          message={status}
-          tone={statusTone}
-        />
+        <div ref={queueFeedbackRef}>
+          <ActionFeedback
+            className="localActionFeedback fleetPolicyActionFeedback"
+            message={status}
+            tone={statusTone}
+          />
+        </div>
       ) : null}
       <ConfirmationPrompt
         confirmLabel="Enable webhook rules"
@@ -8143,18 +8227,18 @@ export function WebhookRuleManager({
           },
           {
             label: "Cadence",
-            value:
-              enableRows?.map((row) => row.expression).join(", ") ?? "-",
+            value: enableRows?.map((row) => row.expression).join(", ") ?? "-",
           },
         ]}
         onCancel={() => setEnableRows(null)}
-        onConfirm={() => {
-          const rows = enableRows ?? [];
-          setEnableRows(null);
-          void setRulesEnabled(rows, true);
-        }}
+        onConfirm={() => void confirmEnableRules()}
         open={enableRows !== null}
         pending={savePending}
+        error={
+          enableRows && statusScope === "resource" && statusTone === "danger"
+            ? status
+            : null
+        }
         title="Confirm webhook enable"
       />
       <ConfirmationPrompt
@@ -8193,6 +8277,11 @@ export function WebhookRuleManager({
         onConfirm={() => void submit()}
         open={saveSnapshot !== null}
         pending={savePending}
+        error={
+          saveSnapshot && statusScope === "resource" && statusTone === "danger"
+            ? status
+            : null
+        }
         title="Confirm webhook rule save"
       />
       <ConfirmationPrompt
@@ -8237,7 +8326,8 @@ export function WebhookDryRunNotice({
     <div className="consoleInlineNotice">
       <strong>
         {preview.matched_vps.length}{" "}
-        {preview.matched_vps.length === 1 ? "VPS" : "VPSs"} matched webhook dry run
+        {preview.matched_vps.length === 1 ? "VPS" : "VPSs"} matched webhook dry
+        run
       </strong>
       <small>{matchedNames || "No VPSs matched this rule."}</small>
       {preview.validation_errors.length > 0 && (
@@ -8421,7 +8511,8 @@ export function WebhookDeliveryHistoryGrid({
             className="monoValue"
             title={webhookMatchedVpsNames(delivery.matched_vps)}
           >
-            Matched VPS: {webhookMatchedVpsNames(delivery.matched_vps) || "none"}
+            Matched VPS:{" "}
+            {webhookMatchedVpsNames(delivery.matched_vps) || "none"}
           </span>
           {delivery.error && (
             <span className="deliveryErrorText" title={delivery.error}>
@@ -8483,10 +8574,7 @@ export function WebhookDeliveryMaintenancePanel({
     setRotationError(null);
   }
 
-  function setRotationStatusMessage(
-    message: string,
-    tone: ActionFeedbackTone,
-  ) {
+  function setRotationStatusMessage(message: string, tone: ActionFeedbackTone) {
     setStatus(message);
     setStatusTone(tone);
   }
@@ -8840,7 +8928,9 @@ function formatDiskFree(rollup: TelemetryRollupRecord | null | undefined) {
 function formatRollupFreshness(
   rollup: TelemetryRollupRecord | null | undefined,
 ) {
-  return rollup ? `Telemetry ${formatCompactTime(rollup.latest_observed_at)}` : "No telemetry";
+  return rollup
+    ? `Telemetry ${formatCompactTime(rollup.latest_observed_at)}`
+    : "No telemetry";
 }
 
 function formatConsoleStreamState(wsState: string) {
@@ -9198,7 +9288,9 @@ function NetworkInterfacesPanel({
   selectedAgent: AgentView | null;
   snapshot: NetworkInterfacesSnapshot | null;
 }) {
-  const live = selectedAgent ? agentDisplayState(selectedAgent).label === "Online" : false;
+  const live = selectedAgent
+    ? agentDisplayState(selectedAgent).label === "Online"
+    : false;
   const networkInterfaceSummary = snapshot
     ? `${snapshot.interfaces.length} interface${snapshot.interfaces.length === 1 ? "" : "s"}`
     : privilegeReady
@@ -9276,10 +9368,7 @@ function NetworkInterfaceList({
   snapshot: NetworkInterfacesSnapshot;
 }) {
   const sources: Array<
-    [
-      string,
-      { status?: string; error?: string | null } | null | undefined,
-    ]
+    [string, { status?: string; error?: string | null } | null | undefined]
   > = [
     ["Interface metadata", snapshot.sysfs_source],
     ["Traffic counters", snapshot.counter_source],
@@ -9579,10 +9668,7 @@ function tunnelRowClass(tunnel: TelemetryTunnelRecord): string {
   ) {
     return "telemetryRowCritical";
   }
-  if (
-    tunnel.latency_status === "down" ||
-    tunnel.latency_status === "missed"
-  ) {
+  if (tunnel.latency_status === "down" || tunnel.latency_status === "missed") {
     return "telemetryRowWarn";
   }
   return "";
@@ -9642,7 +9728,9 @@ function formatTunnelPlanMain(tunnel: TelemetryTunnelRecord): string {
 function formatTunnelPlanDetail(tunnel: TelemetryTunnelRecord): string {
   return [
     tunnel.endpoint_side ? `${tunnel.endpoint_side} endpoint` : "endpoint",
-    tunnel.peer_client_id ? `peer ${tunnel.peer_client_id}` : "peer unavailable",
+    tunnel.peer_client_id
+      ? `peer ${tunnel.peer_client_id}`
+      : "peer unavailable",
     tunnel.plan_id ? `plan ${shortId(tunnel.plan_id)}` : "plan unavailable",
   ].join("; ");
 }
@@ -9675,7 +9763,10 @@ function adapterTone(
   ) {
     return "critical";
   }
-  if (tunnel.adapter_health?.success === true || tunnel.ownership_mode === "external_observed") {
+  if (
+    tunnel.adapter_health?.success === true ||
+    tunnel.ownership_mode === "external_observed"
+  ) {
     return "ok";
   }
   return "neutral";

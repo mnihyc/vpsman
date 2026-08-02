@@ -14,7 +14,8 @@ use crate::{
     repository_schedules::{
         apply_schedule_update_memory, backup_policy_schedule_by_id_postgres,
         backup_policy_schedule_by_id_postgres_in_tx, create_schedule_record_postgres_in_tx,
-        record_memory_schedule_audit, update_schedule_record_postgres_in_tx, ScheduleCreateInput,
+        ensure_schedule_snapshot, record_memory_schedule_audit,
+        update_schedule_record_postgres_in_tx, ScheduleCreateInput, ScheduleSnapshotExpectation,
     },
     unix_now,
 };
@@ -133,6 +134,7 @@ impl Repository {
         &self,
         schedule_id: Uuid,
         request: CreateBackupPolicyRequest,
+        expectation: &ScheduleSnapshotExpectation,
         operator: &AuthContext,
     ) -> Result<Option<BackupPolicyView>> {
         let retention_days = request
@@ -160,6 +162,7 @@ impl Repository {
                 }) else {
                     return Ok(None);
                 };
+                ensure_schedule_snapshot(schedule, Some(expectation))?;
                 let mut policies = memory.backup_policies.write().await;
                 let Some(metadata) = policies
                     .iter_mut()
@@ -191,6 +194,7 @@ impl Repository {
                     &mut tx,
                     schedule_id,
                     &schedule_request,
+                    Some(expectation),
                     operator,
                 )
                 .await?;

@@ -41,6 +41,7 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import {
+  Check,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -363,6 +364,9 @@ export function ConsoleDataGrid<T>({
       sorting,
     },
   });
+  const gridContentStyle = showMobileCards
+    ? undefined
+    : { minWidth: table.getTotalSize() };
   const selectedRows = table
     .getSelectedRowModel()
     .rows.map((row) => row.original);
@@ -528,8 +532,10 @@ export function ConsoleDataGrid<T>({
       ? contextRowActions.filter((action) => !action.hidden?.([row.original]))
       : [];
     const showOpenRowAction = Boolean(onOpenRow && showMobileOpenRowAction);
-    const showExpandedRowAction = showMobileRowActions && Boolean(renderExpandedRow)
-      && !primaryRowActions.some(
+    const showExpandedRowAction =
+      showMobileRowActions &&
+      Boolean(renderExpandedRow) &&
+      !primaryRowActions.some(
         (action) => action.label.trim().toLowerCase() === "details",
       );
     const hasCardActions =
@@ -586,7 +592,9 @@ export function ConsoleDataGrid<T>({
           }
         }}
         role="group"
-        tabIndex={rowClickExpands || (openRowOnClick && onOpenRow) ? 0 : undefined}
+        tabIndex={
+          rowClickExpands || (openRowOnClick && onOpenRow) ? 0 : undefined
+        }
       >
         <div className="gridMobileCardHeader">
           {selectable ? (
@@ -600,7 +608,9 @@ export function ConsoleDataGrid<T>({
           ) : null}
           <div
             className="gridMobilePrimary"
-            title={primaryCell ? tooltipForCell(primaryCell, row.original) : rowId}
+            title={
+              primaryCell ? tooltipForCell(primaryCell, row.original) : rowId
+            }
           >
             {primaryCell ? (
               flexRender(
@@ -632,7 +642,9 @@ export function ConsoleDataGrid<T>({
                 key={cell.id}
                 title={tooltipForCell(cell, row.original)}
               >
-                <span title={cellHeaderLabel(cell)}>{cellHeaderLabel(cell)}</span>
+                <span title={cellHeaderLabel(cell)}>
+                  {cellHeaderLabel(cell)}
+                </span>
                 <div
                   className="gridMobileFieldValue"
                   title={tooltipForCell(cell, row.original)}
@@ -644,7 +656,9 @@ export function ConsoleDataGrid<T>({
           </div>
         ) : null}
 
-        {(primaryRowActions.length > 0 || showOpenRowAction || showExpandedRowAction) && (
+        {(primaryRowActions.length > 0 ||
+          showOpenRowAction ||
+          showExpandedRowAction) && (
           <div className="gridMobileActions">
             {primaryRowActions.map((action) => {
               const sourceRows = [row.original];
@@ -814,7 +828,9 @@ export function ConsoleDataGrid<T>({
             >
               <CheckSquare size={16} />
               <span>
-                {allCurrentPageRowsSelected ? "Clear visible" : "Select visible"}
+                {allCurrentPageRowsSelected
+                  ? "Clear visible"
+                  : "Select visible"}
               </span>
             </button>
           )}
@@ -824,20 +840,20 @@ export function ConsoleDataGrid<T>({
                 <button
                   className="secondaryAction compactAction"
                   disabled={
-                    selectedRows.length === 0
-                    || visibleSelectionActions.length === 0
-                    || (actions.length === 0 && selectedRows.length !== 1)
+                    selectedRows.length === 0 ||
+                    visibleSelectionActions.length === 0 ||
+                    (actions.length === 0 && selectedRows.length !== 1)
                   }
                   title={
                     selectedRows.length === 0
                       ? "Select table rows to use actions."
                       : visibleSelectionActions.length === 0
                         ? "No actions are available for the selected rows."
-                      : actions.length === 0 && selectedRows.length !== 1
-                        ? "Select exactly one row to use row actions."
-                      : `Open actions for ${selectedRows.length} selected ${
-                          selectedRows.length === 1 ? "row" : "rows"
-                        }.`
+                        : actions.length === 0 && selectedRows.length !== 1
+                          ? "Select exactly one row to use row actions."
+                          : `Open actions for ${selectedRows.length} selected ${
+                              selectedRows.length === 1 ? "row" : "rows"
+                            }.`
                   }
                   type="button"
                 >
@@ -868,8 +884,8 @@ export function ConsoleDataGrid<T>({
                           }
                           disabled={
                             selectedRows.length === 0 ||
-                            (selectionRowActions.includes(action)
-                              && selectedRows.length !== 1) ||
+                            (selectionRowActions.includes(action) &&
+                              selectedRows.length !== 1) ||
                             action.disabled?.(selectedRows)
                           }
                           onSelect={() => invokeAction(action)}
@@ -912,18 +928,30 @@ export function ConsoleDataGrid<T>({
                 {table
                   .getAllLeafColumns()
                   .filter((column) => column.getCanHide())
-                  .map((column) => (
-                    <DropdownMenu.CheckboxItem
-                      checked={column.getIsVisible()}
-                      className="consoleMenuItem"
-                      key={column.id}
-                      onCheckedChange={(checked) =>
-                        column.toggleVisibility(Boolean(checked))
-                      }
-                    >
-                      {String(column.columnDef.header)}
-                    </DropdownMenu.CheckboxItem>
-                  ))}
+                  .map((column) => {
+                    const columnLabel = String(column.columnDef.header);
+                    const isVisible = column.getIsVisible();
+                    return (
+                      <DropdownMenu.CheckboxItem
+                        aria-label={`${columnLabel} · ${isVisible ? "shown" : "hidden"}`}
+                        checked={isVisible}
+                        className="consoleMenuItem"
+                        key={column.id}
+                        onCheckedChange={(checked) =>
+                          column.toggleVisibility(Boolean(checked))
+                        }
+                        title={`${columnLabel} is ${isVisible ? "shown" : "hidden"}. Activate to ${isVisible ? "hide" : "show"} it.`}
+                      >
+                        <span className="consoleMenuIcon" aria-hidden>
+                          {isVisible ? <Check size={14} /> : <X size={14} />}
+                        </span>
+                        <span>{columnLabel}</span>
+                        <span className="visuallyHidden">
+                          {isVisible ? "Shown" : "Hidden"}
+                        </span>
+                      </DropdownMenu.CheckboxItem>
+                    );
+                  })}
               </DropdownMenu.Content>
             </DropdownMenu.Portal>
           </DropdownMenu.Root>
@@ -985,7 +1013,11 @@ export function ConsoleDataGrid<T>({
         renderEmptyContent()
       ) : (
         <div className="gridTable" role="grid">
-          <div className="gridHeaderGroup" role="rowgroup">
+          <div
+            className="gridHeaderGroup"
+            role="rowgroup"
+            style={gridContentStyle}
+          >
             {table.getHeaderGroups().map((headerGroup) => (
               <DndContext
                 collisionDetection={closestCenter}
@@ -1010,7 +1042,7 @@ export function ConsoleDataGrid<T>({
               </DndContext>
             ))}
           </div>
-          <div className="gridBody" role="rowgroup">
+          <div className="gridBody" role="rowgroup" style={gridContentStyle}>
             {table.getRowModel().rows.map((row) => {
               const visibleContextRowActions = contextRowActions.filter(
                 (action) => !action.hidden?.([row.original]),
@@ -1019,126 +1051,132 @@ export function ConsoleDataGrid<T>({
                 rowClickExpands || Boolean(openRowOnClick && onOpenRow);
               return (
                 <ContextMenu.Root key={row.id}>
-                <div className="gridRecord">
-                  <ContextMenu.Trigger asChild>
-                    {showMobileCards ? (
-                      renderMobileCard(row)
-                    ) : (
-                      <div
-                        aria-expanded={
-                          renderExpandedRow
-                            ? Boolean(expandedRows[row.id])
-                            : undefined
-                        }
-                        className={
-                          row.getIsSelected() ? "gridRow selected" : "gridRow"
-                        }
-                        onClick={() => {
-                          if (rowClickExpands) {
+                  <div className="gridRecord">
+                    <ContextMenu.Trigger
+                      asChild
+                      disabled={visibleContextRowActions.length === 0}
+                    >
+                      {showMobileCards ? (
+                        renderMobileCard(row)
+                      ) : (
+                        <div
+                          aria-expanded={
+                            renderExpandedRow
+                              ? Boolean(expandedRows[row.id])
+                              : undefined
+                          }
+                          className={
+                            row.getIsSelected() ? "gridRow selected" : "gridRow"
+                          }
+                          onClick={() => {
+                            if (rowClickExpands) {
+                              toggleExpandedRow(row.id, row.original);
+                              return;
+                            }
+                            if (openRowOnClick) {
+                              onOpenRow?.(row.original);
+                            }
+                          }}
+                          onKeyDown={(event) => {
+                            if (
+                              !rowIsActionable ||
+                              event.target !== event.currentTarget ||
+                              (event.key !== "Enter" && event.key !== " ")
+                            ) {
+                              return;
+                            }
+                            event.preventDefault();
+                            if (rowClickExpands) {
+                              toggleExpandedRow(row.id, row.original);
+                            } else if (openRowOnClick) {
+                              onOpenRow?.(row.original);
+                            }
+                          }}
+                          role="row"
+                          tabIndex={rowIsActionable ? 0 : undefined}
+                        >
+                          {row.getVisibleCells().map((cell) => (
+                            <div
+                              className="gridCell"
+                              key={cell.id}
+                              role="gridcell"
+                              style={gridColumnStyle(cell.column)}
+                              title={tooltipForCell(cell, row.original)}
+                            >
+                              {flexRender(
+                                cell.column.columnDef.cell,
+                                cell.getContext(),
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </ContextMenu.Trigger>
+                    {renderExpandedRow && expandedRows[row.id] && (
+                      <div className="gridExpandedRow">
+                        <button
+                          aria-label={`Close ${title} row details`}
+                          className="iconButton gridExpandedClose"
+                          onClick={(event) => {
+                            event.stopPropagation();
                             toggleExpandedRow(row.id, row.original);
-                            return;
-                          }
-                          if (openRowOnClick) {
-                            onOpenRow?.(row.original);
-                          }
-                        }}
-                        onKeyDown={(event) => {
-                          if (
-                            !rowIsActionable ||
-                            event.target !== event.currentTarget ||
-                            (event.key !== "Enter" && event.key !== " ")
-                          ) {
-                            return;
-                          }
-                          event.preventDefault();
-                          if (rowClickExpands) {
-                            toggleExpandedRow(row.id, row.original);
-                          } else if (openRowOnClick) {
-                            onOpenRow?.(row.original);
-                          }
-                        }}
-                        role="row"
-                        tabIndex={rowIsActionable ? 0 : undefined}
-                      >
-                        {row.getVisibleCells().map((cell) => (
-                          <div
-                            className="gridCell"
-                            key={cell.id}
-                            role="gridcell"
-                            style={gridColumnStyle(cell.column)}
-                            title={tooltipForCell(cell, row.original)}
-                          >
-                            {flexRender(
-                              cell.column.columnDef.cell,
-                              cell.getContext(),
-                            )}
-                          </div>
-                        ))}
+                          }}
+                          title={`Close ${title} row details`}
+                          type="button"
+                        >
+                          <X size={15} />
+                        </button>
+                        <div className="gridExpandedContent">
+                          {renderExpandedRow(row.original)}
+                        </div>
                       </div>
                     )}
-                  </ContextMenu.Trigger>
-                  {renderExpandedRow && expandedRows[row.id] && (
-                    <div className="gridExpandedRow">
-                      <button
-                        aria-label={`Close ${title} row details`}
-                        className="iconButton gridExpandedClose"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          toggleExpandedRow(row.id, row.original);
-                        }}
-                        title={`Close ${title} row details`}
-                        type="button"
+                  </div>
+                  {visibleContextRowActions.length > 0 && (
+                    <ContextMenu.Portal>
+                      <ContextMenu.Content
+                        className="consoleMenu"
+                        collisionPadding={12}
+                        loop
                       >
-                        <X size={15} />
-                      </button>
-                      <div className="gridExpandedContent">
-                        {renderExpandedRow(row.original)}
-                      </div>
-                    </div>
+                        {visibleContextRowActions.length > 0 && (
+                          <>
+                            <ContextMenu.Label className="consoleMenuLabel">
+                              Row actions
+                            </ContextMenu.Label>
+                            {visibleContextRowActions.map((action) => {
+                              const sourceRows = [row.original];
+                              return (
+                                <ContextMenu.Item
+                                  className={
+                                    action.tone === "danger"
+                                      ? "consoleMenuItem danger"
+                                      : "consoleMenuItem"
+                                  }
+                                  disabled={action.disabled?.(sourceRows)}
+                                  key={`row:${action.label}`}
+                                  onSelect={() =>
+                                    invokeAction(action, sourceRows)
+                                  }
+                                  title={actionDescription(action, sourceRows)}
+                                >
+                                  {action.icon && (
+                                    <span
+                                      className="consoleMenuIcon"
+                                      aria-hidden
+                                    >
+                                      {action.icon}
+                                    </span>
+                                  )}
+                                  <span>{action.label}</span>
+                                </ContextMenu.Item>
+                              );
+                            })}
+                          </>
+                        )}
+                      </ContextMenu.Content>
+                    </ContextMenu.Portal>
                   )}
-                </div>
-                {visibleContextRowActions.length > 0 && (
-                  <ContextMenu.Portal>
-                    <ContextMenu.Content
-                      className="consoleMenu"
-                      collisionPadding={12}
-                      loop
-                    >
-                      {visibleContextRowActions.length > 0 && (
-                        <>
-                          <ContextMenu.Label className="consoleMenuLabel">
-                            Row actions
-                          </ContextMenu.Label>
-                          {visibleContextRowActions.map((action) => {
-                            const sourceRows = [row.original];
-                            return (
-                              <ContextMenu.Item
-                                className={
-                                  action.tone === "danger"
-                                    ? "consoleMenuItem danger"
-                                    : "consoleMenuItem"
-                                }
-                                disabled={action.disabled?.(sourceRows)}
-                                key={`row:${action.label}`}
-                                onSelect={() =>
-                                  invokeAction(action, sourceRows)
-                                }
-                                title={actionDescription(action, sourceRows)}
-                              >
-                                {action.icon && (
-                                  <span className="consoleMenuIcon" aria-hidden>
-                                    {action.icon}
-                                  </span>
-                                )}
-                                <span>{action.label}</span>
-                              </ContextMenu.Item>
-                            );
-                          })}
-                        </>
-                      )}
-                    </ContextMenu.Content>
-                  </ContextMenu.Portal>
-                )}
                 </ContextMenu.Root>
               );
             })}
@@ -1247,10 +1285,7 @@ function SortableHeaderCell<T>({
     disabled: !canDrag,
     id: header.column.id,
   });
-  const headerClassName = [
-    "gridHeaderCell",
-    isDragging ? "dragging" : "",
-  ]
+  const headerClassName = ["gridHeaderCell", isDragging ? "dragging" : ""]
     .filter(Boolean)
     .join(" ");
   const headerDefinition = header.column.columnDef.header;
@@ -1328,9 +1363,25 @@ function gridColumnStyle<T>(column: Header<T, unknown>["column"]) {
   };
 }
 
-function reconcileColumnOrder(current: string[], defaults: string[]): string[] {
+const STRUCTURAL_COLUMN_ORDER = ["__select", "__expand"] as const;
+
+export function reconcileColumnOrder(
+  current: string[],
+  defaults: string[],
+): string[] {
   const defaultSet = new Set(defaults);
-  const kept = current.filter((id) => defaultSet.has(id));
-  const missing = defaults.filter((id) => !kept.includes(id));
-  return [...kept, ...missing];
+  const structural = STRUCTURAL_COLUMN_ORDER.filter((id) => defaultSet.has(id));
+  const structuralSet = new Set<string>(STRUCTURAL_COLUMN_ORDER);
+  const keptData: string[] = [];
+  const seenData = new Set<string>();
+  for (const id of current) {
+    if (defaultSet.has(id) && !structuralSet.has(id) && !seenData.has(id)) {
+      keptData.push(id);
+      seenData.add(id);
+    }
+  }
+  const missingData = defaults.filter(
+    (id) => !structuralSet.has(id) && !seenData.has(id),
+  );
+  return [...structural, ...keptData, ...missingData];
 }

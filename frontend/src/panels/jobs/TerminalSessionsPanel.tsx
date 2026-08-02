@@ -32,6 +32,7 @@ import { consolePalette } from "../../colorPalette";
 import { formatLowerBoundCount } from "../../constants";
 import { MAX_TERMINAL_INPUT_BYTES } from "../../generated/protocolContracts";
 import { terminalSessionStateBadgeClass } from "../../jobStatusPresentation";
+import { scrollIntoViewWithMotion } from "../../motion";
 import type { AgentView, WsTerminalOutputEvent } from "../../types";
 import type {
   TerminalControlAck,
@@ -122,12 +123,17 @@ export function TerminalSessionsPanel({
     sessionId: string,
     request: TerminalControlSubmitRequest,
   ) => Promise<TerminalControlAck>;
-  onReplay: (clientId: string, sessionId: string, fromSeq?: number) => Promise<TerminalReplayRecord>;
+  onReplay: (
+    clientId: string,
+    sessionId: string,
+    fromSeq?: number,
+  ) => Promise<TerminalReplayRecord>;
   onRefresh: () => void;
   privilegeMaterial: PrivilegeMaterial | null;
 }) {
   const [launchTargetId, setLaunchTargetId] = useState("");
-  const [launchProfile, setLaunchProfile] = useState<TerminalLaunchProfile>("posix-login");
+  const [launchProfile, setLaunchProfile] =
+    useState<TerminalLaunchProfile>("posix-login");
   const [launchCwd, setLaunchCwd] = useState("");
   const [launchUser, setLaunchUser] = useState<TerminalLaunchUser>("agent");
   const [launchIdleTimeoutSecs, setLaunchIdleTimeoutSecs] = useState(3600);
@@ -137,13 +143,16 @@ export function TerminalSessionsPanel({
   const [launchStatusTone, setLaunchStatusTone] =
     useState<ActionFeedbackTone>("info");
   const [launchPending, setLaunchPending] = useState(false);
-  const [replayPreview, setReplayPreview] = useState<TerminalReplayPreview | null>(null);
+  const [replayPreview, setReplayPreview] =
+    useState<TerminalReplayPreview | null>(null);
   const [replayPendingKey, setReplayPendingKey] = useState<string | null>(null);
   const [replayError, setReplayError] = useState<string | null>(null);
   const [followKey, setFollowKey] = useState<string | null>(null);
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [terminalFocusOpen, setTerminalFocusOpen] = useState(false);
-  const [terminalControlStatus, setTerminalControlStatus] = useState<string | null>(null);
+  const [terminalControlStatus, setTerminalControlStatus] = useState<
+    string | null
+  >(null);
   const [terminalControlStatusTone, setTerminalControlStatusTone] =
     useState<ActionFeedbackTone>("info");
   const [closeSession, setCloseSession] =
@@ -153,15 +162,21 @@ export function TerminalSessionsPanel({
   const [closeStatusTone, setCloseStatusTone] =
     useState<ActionFeedbackTone>("info");
   const terminalFocusRef = useRef<HTMLDivElement | null>(null);
+  const terminalReplayFeedbackRef = useRef<HTMLDivElement | null>(null);
+  const terminalFocusReplayFeedbackRef = useRef<HTMLDivElement | null>(null);
+  const terminalCloseFeedbackRef = useRef<HTMLDivElement | null>(null);
   const appliedInitialTargetRequestRef = useRef<string | null>(null);
   const terminalControlQueueRef = useRef<QueuedTerminalControl[]>([]);
   const terminalControlSendingRef = useRef(false);
   const lastTerminalResizeRef = useRef(new Map<string, string>());
   const terminalControlHandlerRef = useRef(onControl);
   terminalControlHandlerRef.current = onControl;
-  const launchTarget = agents.find((agent) => agent.id === launchTargetId) ?? null;
+  const launchTarget =
+    agents.find((agent) => agent.id === launchTargetId) ?? null;
   const launchProfileRecord =
-    TERMINAL_LAUNCH_PROFILES.find((profile) => profile.value === launchProfile) ?? TERMINAL_LAUNCH_PROFILES[0];
+    TERMINAL_LAUNCH_PROFILES.find(
+      (profile) => profile.value === launchProfile,
+    ) ?? TERMINAL_LAUNCH_PROFILES[0];
   const privilegeReady = Boolean(privilegeMaterial);
   const launchFeedbackMessage =
     privilegeReady && launchStatus === TERMINAL_UNLOCK_REQUIRED_STATUS
@@ -183,19 +198,30 @@ export function TerminalSessionsPanel({
         : "Unlock privilege; after unlock, this same launcher opens the terminal directly.";
   const activeSession = useMemo(
     () =>
-      sessions.find((session) => `${session.client_id}:${session.session_id}` === activeKey) ??
+      sessions.find(
+        (session) => `${session.client_id}:${session.session_id}` === activeKey,
+      ) ??
       sessions.find(isTerminalActive) ??
       sessions[0] ??
       null,
     [activeKey, sessions],
   );
   const openSessions = sessions.filter(isTerminalActive).length;
-  const replayableSessions = sessions.filter((session) => session.output_next_seq !== null).length;
-  const retainedBytes = sessions.reduce((total, session) => total + (session.output_retained_bytes ?? 0), 0);
+  const replayableSessions = sessions.filter(
+    (session) => session.output_next_seq !== null,
+  ).length;
+  const retainedBytes = sessions.reduce(
+    (total, session) => total + (session.output_retained_bytes ?? 0),
+    0,
+  );
   const followedSession = followKey
-    ? sessions.find((session) => `${session.client_id}:${session.session_id}` === followKey) ?? null
+    ? (sessions.find(
+        (session) => `${session.client_id}:${session.session_id}` === followKey,
+      ) ?? null)
     : null;
-  const followingLive = Boolean(followedSession && isTerminalActive(followedSession));
+  const followingLive = Boolean(
+    followedSession && isTerminalActive(followedSession),
+  );
   const terminalSummary = sessionsTruncated
     ? `${formatLowerBoundCount(openSessions, true)} open, ${formatLowerBoundCount(replayableSessions, true)} replayable, ${formatBytes(retainedBytes)} retained in loaded sessions`
     : `${openSessions} open, ${replayableSessions} replayable, ${formatBytes(retainedBytes)} retained`;
@@ -222,8 +248,8 @@ export function TerminalSessionsPanel({
       hidden: ([session]) =>
         Boolean(
           session &&
-            followingLive &&
-            followKey === `${session.client_id}:${session.session_id}`,
+          followingLive &&
+          followKey === `${session.client_id}:${session.session_id}`,
         ),
       icon: <Radio size={13} />,
       label: "Follow",
@@ -280,7 +306,9 @@ export function TerminalSessionsPanel({
     {
       cell: (session) => {
         const key = `${session.client_id}:${session.session_id}`;
-        const selected = activeSession?.client_id === session.client_id && activeSession.session_id === session.session_id;
+        const selected =
+          activeSession?.client_id === session.client_id &&
+          activeSession.session_id === session.session_id;
         return (
           <span className="historyPrimary">
             <button
@@ -299,13 +327,19 @@ export function TerminalSessionsPanel({
       },
       header: "Session",
       id: "session",
-      searchValue: (session) => `${clientLabel(session.client_id)} ${session.client_id} ${session.session_id}`,
-      sortValue: (session) => `${clientLabel(session.client_id)}:${session.session_id}`,
+      searchValue: (session) =>
+        `${clientLabel(session.client_id)} ${session.client_id} ${session.session_id}`,
+      sortValue: (session) =>
+        `${clientLabel(session.client_id)}:${session.session_id}`,
     },
     {
       cell: (session) => (
         <span className="historyPrimary">
-          <span className={`status ${terminalSessionStateBadgeClass(session.state)}`}>{session.state}</span>
+          <span
+            className={`status ${terminalSessionStateBadgeClass(session.state)}`}
+          >
+            {session.state}
+          </span>
           <small>{formatSessionLifecycle(session)}</small>
         </span>
       ),
@@ -317,13 +351,16 @@ export function TerminalSessionsPanel({
     {
       cell: (session) => (
         <span className="historyPrimary">
-          <strong title={formatArgv(session.argv)}>{formatArgv(session.argv) || "Terminal"}</strong>
+          <strong title={formatArgv(session.argv)}>
+            {formatArgv(session.argv) || "Terminal"}
+          </strong>
           <small>{formatShellContext(session)}</small>
         </span>
       ),
       header: "Command",
       id: "command",
-      searchValue: (session) => `${formatArgv(session.argv)} terminal_open ${session.cwd ?? ""}`,
+      searchValue: (session) =>
+        `${formatArgv(session.argv)} terminal_open ${session.cwd ?? ""}`,
       sortValue: (session) => formatArgv(session.argv) || "terminal_open",
     },
     {
@@ -335,21 +372,29 @@ export function TerminalSessionsPanel({
       ),
       header: "Window",
       id: "window",
-      searchValue: (session) => `${formatWindow(session)} ${formatLimits(session)}`,
+      searchValue: (session) =>
+        `${formatWindow(session)} ${formatLimits(session)}`,
       sortValue: (session) => formatWindow(session),
     },
     {
       cell: (session) => (
         <span className="historyPrimary">
           <strong>{formatOutputRange(session)}</strong>
-          <small className={session.output_dropped_bytes || session.output_replay_truncated ? "terminalWarning" : undefined}>
+          <small
+            className={
+              session.output_dropped_bytes || session.output_replay_truncated
+                ? "terminalWarning"
+                : undefined
+            }
+          >
             {formatOutputRetention(session)}
           </small>
         </span>
       ),
       header: "Output",
       id: "output",
-      searchValue: (session) => `${formatOutputRange(session)} ${formatOutputRetention(session)}`,
+      searchValue: (session) =>
+        `${formatOutputRange(session)} ${formatOutputRetention(session)}`,
       sortValue: (session) => session.output_next_seq ?? 0,
     },
     {
@@ -366,7 +411,10 @@ export function TerminalSessionsPanel({
       setLaunchTargetId("");
       return;
     }
-    if (launchTargetId && !agents.some((agent) => agent.id === launchTargetId)) {
+    if (
+      launchTargetId &&
+      !agents.some((agent) => agent.id === launchTargetId)
+    ) {
       setLaunchTargetId("");
     }
   }, [agents, launchTargetId]);
@@ -398,7 +446,10 @@ export function TerminalSessionsPanel({
     if (eventKey !== followKey) {
       return;
     }
-    void loadLiveReplay(lastTerminalOutputEvent.client_id, lastTerminalOutputEvent.session_id);
+    void loadLiveReplay(
+      lastTerminalOutputEvent.client_id,
+      lastTerminalOutputEvent.session_id,
+    );
   }, [lastTerminalOutputEvent, followKey]);
 
   useEffect(() => {
@@ -508,7 +559,10 @@ export function TerminalSessionsPanel({
       if (event.shiftKey && (active === first || !overlay.contains(active))) {
         event.preventDefault();
         last.focus({ preventScroll: true });
-      } else if (!event.shiftKey && (active === last || !overlay.contains(active))) {
+      } else if (
+        !event.shiftKey &&
+        (active === last || !overlay.contains(active))
+      ) {
         event.preventDefault();
         first.focus({ preventScroll: true });
       }
@@ -525,7 +579,11 @@ export function TerminalSessionsPanel({
     document.addEventListener("keydown", handleFocusedTerminalKeyDown, true);
     document.addEventListener("focusin", handleFocusedTerminalFocus);
     return () => {
-      document.removeEventListener("keydown", handleFocusedTerminalKeyDown, true);
+      document.removeEventListener(
+        "keydown",
+        handleFocusedTerminalKeyDown,
+        true,
+      );
       document.removeEventListener("focusin", handleFocusedTerminalFocus);
       for (const sibling of siblings) {
         sibling.element.inert = sibling.inert;
@@ -541,17 +599,58 @@ export function TerminalSessionsPanel({
     };
   }, [terminalFocusOpen]);
 
+  useEffect(() => {
+    if (!replayError) {
+      return undefined;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const outcome = terminalFocusOpen
+        ? terminalFocusReplayFeedbackRef.current
+        : terminalReplayFeedbackRef.current;
+      if (!outcome) {
+        return;
+      }
+      outcome.tabIndex = -1;
+      scrollIntoViewWithMotion(outcome, { block: "nearest" });
+      outcome.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [replayError, terminalFocusOpen]);
+
+  useEffect(() => {
+    if (!closeStatus || closeSession !== null) {
+      return undefined;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const outcome = terminalCloseFeedbackRef.current;
+      if (!outcome) {
+        return;
+      }
+      outcome.tabIndex = -1;
+      scrollIntoViewWithMotion(outcome, { block: "nearest" });
+      outcome.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [closeSession, closeStatus, closeStatusTone]);
+
   async function loadDurableReplay(session: TerminalSessionRecord) {
     const key = `${session.client_id}:${session.session_id}`;
     selectTerminalSession(key);
     setReplayPendingKey(key);
     setReplayError(null);
     try {
-      const fromSeq = session.output_retained_first_seq ?? session.output_first_seq ?? 1;
-      const replay = await onReplay(session.client_id, session.session_id, fromSeq);
+      const fromSeq =
+        session.output_retained_first_seq ?? session.output_first_seq ?? 1;
+      const replay = await onReplay(
+        session.client_id,
+        session.session_id,
+        fromSeq,
+      );
       setReplayPreview(toReplayPreview(replay));
     } catch (error) {
-      setReplayError(error instanceof Error ? error.message : "Terminal replay unavailable");
+      setReplayError(
+        error instanceof Error ? error.message : "Terminal replay unavailable",
+      );
     } finally {
       setReplayPendingKey(null);
     }
@@ -561,11 +660,18 @@ export function TerminalSessionsPanel({
     const key = `${clientId}:${sessionId}`;
     setReplayError(null);
     try {
-      const fromSeq = replayPreview?.sessionId === sessionId ? replayPreview.nextSeq : 1;
+      const fromSeq =
+        replayPreview?.sessionId === sessionId ? replayPreview.nextSeq : 1;
       const replay = await onReplay(clientId, sessionId, fromSeq);
-      setReplayPreview((current) => mergeReplayPreview(current, toReplayPreview(replay)));
+      setReplayPreview((current) =>
+        mergeReplayPreview(current, toReplayPreview(replay)),
+      );
     } catch (error) {
-      setReplayError(error instanceof Error ? error.message : "Terminal live replay unavailable");
+      setReplayError(
+        error instanceof Error
+          ? error.message
+          : "Terminal live replay unavailable",
+      );
       setFollowKey((current) => (current === key ? null : current));
     }
   }
@@ -582,7 +688,9 @@ export function TerminalSessionsPanel({
     if (!activeReplay?.text) {
       return;
     }
-    const blob = new Blob([activeReplay.text], { type: "text/plain;charset=utf-8" });
+    const blob = new Blob([activeReplay.text], {
+      type: "text/plain;charset=utf-8",
+    });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
@@ -625,7 +733,11 @@ export function TerminalSessionsPanel({
       return;
     }
     const bytes = new TextEncoder().encode(data);
-    for (let offset = 0; offset < bytes.length; offset += MAX_TERMINAL_INPUT_BYTES) {
+    for (
+      let offset = 0;
+      offset < bytes.length;
+      offset += MAX_TERMINAL_INPUT_BYTES
+    ) {
       const chunk = bytes.slice(offset, offset + MAX_TERMINAL_INPUT_BYTES);
       const queue = terminalControlQueueRef.current;
       const previous = queue[queue.length - 1];
@@ -723,7 +835,9 @@ export function TerminalSessionsPanel({
             },
           );
           if (!ack.accepted) {
-            throw new Error(ack.message || `Terminal ${ack.action} was rejected.`);
+            throw new Error(
+              ack.message || `Terminal ${ack.action} was rejected.`,
+            );
           }
           queued.resolve?.(ack);
           if (queued.action.type !== "input") {
@@ -761,7 +875,6 @@ export function TerminalSessionsPanel({
   async function confirmTerminalClose() {
     const session = closeSession;
     if (!session || closePending) return;
-    setCloseSession(null);
     setClosePending(true);
     setCloseStatusTone("progress");
     setCloseStatus(
@@ -773,9 +886,8 @@ export function TerminalSessionsPanel({
         reason: "operator_closed",
       });
       setCloseStatusTone("success");
-      setCloseStatus(
-        `Terminal ${shortId(session.session_id)} closed.`,
-      );
+      setCloseStatus(`Terminal ${shortId(session.session_id)} closed.`);
+      setCloseSession(null);
     } catch (error) {
       setCloseStatusTone("danger");
       setCloseStatus(
@@ -838,22 +950,28 @@ export function TerminalSessionsPanel({
         session,
         terminalReplayFromSeq: "",
         terminalUser: launchUser === "agent" ? "" : "root",
-        terminalUserPolicy: launchUser === "root-fallback" ? "fallback" : "fail",
+        terminalUserPolicy:
+          launchUser === "root-fallback" ? "fallback" : "fail",
       });
       selectTerminalSession(`${session.client_id}:${session.session_id}`);
       setFollowKey(null);
       setReplayPreview(null);
       setLaunchStatusTone("success");
-      setLaunchStatus(`${clientLabel(launchTarget.id)} terminal open job submitted.`);
+      setLaunchStatus(
+        `${clientLabel(launchTarget.id)} terminal open job submitted.`,
+      );
     } catch (error) {
       setLaunchStatusTone("danger");
-      setLaunchStatus(error instanceof Error ? error.message : "Terminal open failed.");
+      setLaunchStatus(
+        error instanceof Error ? error.message : "Terminal open failed.",
+      );
     } finally {
       setLaunchPending(false);
     }
   }
 
   function selectTerminalSession(key: string) {
+    setReplayError(null);
     setTerminalControlStatus(null);
     setActiveKey(key);
   }
@@ -882,18 +1000,17 @@ export function TerminalSessionsPanel({
               className="secondaryAction compactAction"
               disabled={loading}
               onClick={onRefresh}
-              title={loading ? "Terminal session inventory is refreshing." : "Refresh terminal session inventory and retained state."}
+              title={
+                loading
+                  ? "Terminal session inventory is refreshing."
+                  : "Refresh terminal session inventory and retained state."
+              }
               type="button"
             >
               <RefreshCw size={14} />
               <span>Refresh</span>
             </button>
           </div>
-          <ActionFeedback
-            className="localActionFeedback terminalReplayActionFeedback"
-            message={terminalReplayFeedbackMessage}
-            tone="danger"
-          />
         </div>
       </div>
       <div className="terminalLaunchPanel" aria-label="New terminal composer">
@@ -915,7 +1032,9 @@ export function TerminalSessionsPanel({
               ) : (
                 <LockKeyhole size={13} />
               )}
-              <span>{privilegeReady ? "Privilege ready" : "Privilege locked"}</span>
+              <span>
+                {privilegeReady ? "Privilege ready" : "Privilege locked"}
+              </span>
             </span>
           </div>
         </div>
@@ -938,7 +1057,9 @@ export function TerminalSessionsPanel({
             <span>Shell profile</span>
             <select
               aria-label="Terminal shell profile"
-              onChange={(event) => setLaunchProfile(event.target.value as TerminalLaunchProfile)}
+              onChange={(event) =>
+                setLaunchProfile(event.target.value as TerminalLaunchProfile)
+              }
               title={
                 TERMINAL_LAUNCH_PROFILES.find(
                   (profile) => profile.value === launchProfile,
@@ -966,12 +1087,16 @@ export function TerminalSessionsPanel({
             <span>Run as</span>
             <select
               aria-label="New terminal user policy"
-              onChange={(event) => setLaunchUser(event.target.value as TerminalLaunchUser)}
+              onChange={(event) =>
+                setLaunchUser(event.target.value as TerminalLaunchUser)
+              }
               value={launchUser}
             >
               <option value="agent">Agent user</option>
               <option value="root">root, fail if unavailable</option>
-              <option value="root-fallback">root, fallback to agent user</option>
+              <option value="root-fallback">
+                root, fallback to agent user
+              </option>
             </select>
           </label>
         </div>
@@ -984,7 +1109,9 @@ export function TerminalSessionsPanel({
                 aria-label="New terminal idle timeout seconds"
                 max={86400}
                 min={10}
-                onChange={(event) => setLaunchIdleTimeoutSecs(Number(event.target.value))}
+                onChange={(event) =>
+                  setLaunchIdleTimeoutSecs(Number(event.target.value))
+                }
                 type="number"
                 value={launchIdleTimeoutSecs}
               />
@@ -1015,7 +1142,7 @@ export function TerminalSessionsPanel({
         </details>
         <div className="terminalLaunchFooter">
           <span>
-              {privilegeReady
+            {privilegeReady
               ? "Open submits one privileged terminal_open job; the live terminal then carries keyboard and resize controls."
               : "Unlock privilege once to enable terminal_open; replay, copy, and audit evidence stay available while locked."}
           </span>
@@ -1038,16 +1165,28 @@ export function TerminalSessionsPanel({
       </div>
       <div className="terminalSummaryStrip">
         <span>
-          <strong>{formatLowerBoundCount(openSessions, sessionsTruncated)}</strong>
-          <small>{sessionsTruncated ? "Open in loaded sessions" : "Open"}</small>
+          <strong>
+            {formatLowerBoundCount(openSessions, sessionsTruncated)}
+          </strong>
+          <small>
+            {sessionsTruncated ? "Open in loaded sessions" : "Open"}
+          </small>
         </span>
         <span>
-          <strong>{formatLowerBoundCount(replayableSessions, sessionsTruncated)}</strong>
-          <small>{sessionsTruncated ? "Replayable in loaded sessions" : "Replayable"}</small>
+          <strong>
+            {formatLowerBoundCount(replayableSessions, sessionsTruncated)}
+          </strong>
+          <small>
+            {sessionsTruncated ? "Replayable in loaded sessions" : "Replayable"}
+          </small>
         </span>
         <span>
           <strong>{formatBytes(retainedBytes)}</strong>
-          <small>{sessionsTruncated ? "Retained in loaded sessions" : "Retained output"}</small>
+          <small>
+            {sessionsTruncated
+              ? "Retained in loaded sessions"
+              : "Retained output"}
+          </small>
         </span>
         <span>
           <strong>{followingLive ? "Following" : "Not following"}</strong>
@@ -1057,7 +1196,11 @@ export function TerminalSessionsPanel({
       <div className="terminalWorkspace">
         <div className="terminalActiveHeader">
           <div>
-            <strong>{activeSession ? clientLabel(activeSession.client_id) : "No active terminal"}</strong>
+            <strong>
+              {activeSession
+                ? clientLabel(activeSession.client_id)
+                : "No active terminal"}
+            </strong>
             <span>
               {activeSession
                 ? `${shortId(activeSession.session_id)} - ${formatArgv(activeSession.argv) || "terminal"}`
@@ -1068,7 +1211,9 @@ export function TerminalSessionsPanel({
             <button
               className="secondaryAction compactAction"
               disabled={!activeSession}
-              onClick={() => activeSession && void loadDurableReplay(activeSession)}
+              onClick={() =>
+                activeSession && void loadDurableReplay(activeSession)
+              }
               title="Load retained replay for the active terminal session."
               type="button"
             >
@@ -1079,7 +1224,10 @@ export function TerminalSessionsPanel({
               className="secondaryAction compactAction"
               disabled={!activeReplay?.text}
               onClick={() => void copyTranscript()}
-              title={transcriptUnavailableReason ?? "Copy the loaded retained replay text"}
+              title={
+                transcriptUnavailableReason ??
+                "Copy the loaded retained replay text"
+              }
               type="button"
             >
               <Copy size={13} />
@@ -1089,7 +1237,10 @@ export function TerminalSessionsPanel({
               className="secondaryAction compactAction"
               disabled={!activeReplay?.text}
               onClick={downloadTranscript}
-              title={transcriptUnavailableReason ?? "Download the loaded retained replay text"}
+              title={
+                transcriptUnavailableReason ??
+                "Download the loaded retained replay text"
+              }
               type="button"
             >
               <Download size={13} />
@@ -1121,24 +1272,43 @@ export function TerminalSessionsPanel({
             </button>
           </div>
         </div>
-        <div className="terminalTranscriptState" aria-label="Terminal transcript availability">
-          {transcriptUnavailableReason ?? "Loaded retained replay can be copied or downloaded from this browser."}
+        <div
+          className="terminalTranscriptState"
+          aria-label="Terminal transcript availability"
+        >
+          {transcriptUnavailableReason ??
+            "Loaded retained replay can be copied or downloaded from this browser."}
         </div>
-        <div className="terminalSessionContext" aria-label="Active terminal session context">
+        <div
+          className="terminalSessionContext"
+          aria-label="Active terminal session context"
+        >
           <span>
-            <strong>{activeSession ? formatSessionLifecycle(activeSession) : "No session selected"}</strong>
+            <strong>
+              {activeSession
+                ? formatSessionLifecycle(activeSession)
+                : "No session selected"}
+            </strong>
             <small>Lifecycle</small>
           </span>
           <span>
-            <strong>{activeSession ? activeSession.cwd ?? "Working directory not reported" : "-"}</strong>
+            <strong>
+              {activeSession
+                ? (activeSession.cwd ?? "Working directory not reported")
+                : "-"}
+            </strong>
             <small>Working directory</small>
           </span>
           <span>
-            <strong>{activeSession ? formatOutputRange(activeSession) : "-"}</strong>
+            <strong>
+              {activeSession ? formatOutputRange(activeSession) : "-"}
+            </strong>
             <small>Replay range</small>
           </span>
           <span>
-            <strong>{activeSession ? formatLastInput(activeSession) : "-"}</strong>
+            <strong>
+              {activeSession ? formatLastInput(activeSession) : "-"}
+            </strong>
             <small>Input state</small>
           </span>
         </div>
@@ -1159,7 +1329,8 @@ export function TerminalSessionsPanel({
             }
           }}
           text={
-            replayPreview && replayPreview.sessionId === activeSession?.session_id
+            replayPreview &&
+            replayPreview.sessionId === activeSession?.session_id
               ? replayPreview.text
               : activeSession
                 ? "Select Replay or Follow to load retained output for this session.\r\n"
@@ -1172,84 +1343,102 @@ export function TerminalSessionsPanel({
           tone={terminalControlStatusTone}
         />
       </div>
-      {terminalFocusOpen && activeSession && createPortal(
-        <div
-          aria-label="Focused terminal workspace"
-          aria-modal="true"
-          className="terminalFocusOverlay"
-          ref={terminalFocusRef}
-          role="dialog"
-          tabIndex={-1}
-        >
-          <header>
-            <div>
-              <strong>{clientLabel(activeSession.client_id)}</strong>
-              <span>
-                {shortId(activeSession.session_id)} -{" "}
-                {formatArgv(activeSession.argv) || "terminal"}
-              </span>
-            </div>
-            <div className="rowActions compactRowActions">
-              <button
-                className="secondaryAction compactAction"
-                onClick={() => void loadDurableReplay(activeSession)}
-                title="Reload retained replay for the focused terminal session."
-                type="button"
-              >
-                <History size={13} />
-                <span>Replay</span>
-              </button>
-              <button
-                className="secondaryAction compactAction"
-                disabled={!isTerminalActive(activeSession)}
-                onClick={() => focusTerminalInput(activeSession)}
-                title={
-                  isTerminalActive(activeSession)
-                    ? "Focus the interactive terminal."
-                    : "Closed terminal sessions cannot receive input."
-                }
-                type="button"
-              >
-                <Keyboard size={13} />
-                <span>Input</span>
-              </button>
-              <button
-                aria-label="Exit focused terminal view"
-                className="secondaryAction compactAction"
-                onClick={() => setTerminalFocusOpen(false)}
-                title="Close focused terminal view and return to the session workspace."
-                type="button"
-              >
-                <XCircle size={13} />
-                <span>Exit view</span>
-              </button>
-            </div>
-          </header>
-          <XtermReplay
-            autoFocus
-            inputEnabled={isTerminalActive(activeSession)}
-            label="Focused terminal emulator"
-            onData={(data) => queueTerminalInput(activeSession, data)}
-            onResize={(cols, rows) =>
-              queueTerminalResize(activeSession, cols, rows)
-            }
-            text={
-              replayPreview && replayPreview.sessionId === activeSession.session_id
-                ? replayPreview.text
-                : "Select Replay or Follow to load retained output for this session.\r\n"
+      {terminalFocusOpen &&
+        activeSession &&
+        createPortal(
+          <div
+            aria-label="Focused terminal workspace"
+            aria-modal="true"
+            className="terminalFocusOverlay"
+            ref={terminalFocusRef}
+            role="dialog"
+            tabIndex={-1}
+          >
+            <header>
+              <div>
+                <strong>{clientLabel(activeSession.client_id)}</strong>
+                <span>
+                  {shortId(activeSession.session_id)} -{" "}
+                  {formatArgv(activeSession.argv) || "terminal"}
+                </span>
+              </div>
+              <div className="rowActions compactRowActions">
+                <button
+                  className="secondaryAction compactAction"
+                  onClick={() => void loadDurableReplay(activeSession)}
+                  title="Reload retained replay for the focused terminal session."
+                  type="button"
+                >
+                  <History size={13} />
+                  <span>Replay</span>
+                </button>
+                <button
+                  className="secondaryAction compactAction"
+                  disabled={!isTerminalActive(activeSession)}
+                  onClick={() => focusTerminalInput(activeSession)}
+                  title={
+                    isTerminalActive(activeSession)
+                      ? "Focus the interactive terminal."
+                      : "Closed terminal sessions cannot receive input."
+                  }
+                  type="button"
+                >
+                  <Keyboard size={13} />
+                  <span>Input</span>
+                </button>
+                <button
+                  aria-label="Exit focused terminal view"
+                  className="secondaryAction compactAction"
+                  onClick={() => setTerminalFocusOpen(false)}
+                  title="Close focused terminal view and return to the session workspace."
+                  type="button"
+                >
+                  <XCircle size={13} />
+                  <span>Exit view</span>
+                </button>
+              </div>
+            </header>
+            <ActionFeedback
+              className="localActionFeedback terminalReplayActionFeedback"
+              message={terminalReplayFeedbackMessage}
+              ref={terminalFocusReplayFeedbackRef}
+              tone="danger"
+            />
+            <XtermReplay
+              autoFocus
+              inputEnabled={isTerminalActive(activeSession)}
+              label="Focused terminal emulator"
+              onData={(data) => queueTerminalInput(activeSession, data)}
+              onResize={(cols, rows) =>
+                queueTerminalResize(activeSession, cols, rows)
               }
-          />
-          <ActionFeedback
-            className="localActionFeedback terminalInputFeedback"
-            message={terminalControlStatus}
-            tone={terminalControlStatusTone}
-          />
-        </div>,
-        document.body,
+              text={
+                replayPreview &&
+                replayPreview.sessionId === activeSession.session_id
+                  ? replayPreview.text
+                  : "Select Replay or Follow to load retained output for this session.\r\n"
+              }
+            />
+            <ActionFeedback
+              className="localActionFeedback terminalInputFeedback"
+              message={terminalControlStatus}
+              tone={terminalControlStatusTone}
+            />
+          </div>,
+          document.body,
+        )}
+      {!terminalFocusOpen && (
+        <ActionFeedback
+          className="localActionFeedback terminalReplayActionFeedback"
+          message={terminalReplayFeedbackMessage}
+          ref={terminalReplayFeedbackRef}
+          tone="danger"
+        />
       )}
       <ActionFeedback
         className="localActionFeedback terminalCloseActionFeedback"
         message={closeStatus}
+        ref={terminalCloseFeedbackRef}
         tone={closeStatusTone}
       />
       <ConsoleDataGrid
@@ -1262,7 +1451,10 @@ export function TerminalSessionsPanel({
           <div className="emptyState">
             <TerminalSquare size={22} />
             <strong>No terminal sessions</strong>
-            <span>Opening a terminal creates its authorized session and durable replay record.</span>
+            <span>
+              Opening a terminal creates its authorized session and durable
+              replay record.
+            </span>
           </div>
         }
         renderExpandedRow={(session) => (
@@ -1288,7 +1480,10 @@ export function TerminalSessionsPanel({
             <span>Last input</span>
             <strong>{formatLastInput(session)}</strong>
             <span>Close reason</span>
-            <strong>{session.close_reason ?? (isTerminalActive(session) ? "Open session" : "Not reported")}</strong>
+            <strong>
+              {session.close_reason ??
+                (isTerminalActive(session) ? "Open session" : "Not reported")}
+            </strong>
             <span>Authorization job</span>
             <strong>{session.job_id}</strong>
             <span>Last input sequence</span>
@@ -1314,18 +1509,26 @@ export function TerminalSessionsPanel({
         title="Session inventory and controls"
       />
       {replayPreview && (
-        <div className="terminalReplayPreview" aria-label="Durable terminal replay status">
+        <div
+          className="terminalReplayPreview"
+          aria-label="Durable terminal replay status"
+        >
           <div>
             <strong>
-              Durable replay {shortId(replayPreview.sessionId)}: {replayPreview.chunkCount} chunks,{" "}
+              Durable replay {shortId(replayPreview.sessionId)}:{" "}
+              {replayPreview.chunkCount} chunks,{" "}
               {formatBytes(replayPreview.byteCount)}
             </strong>
             <span>
-              {formatReplaySequence(replayPreview.availableFirstSeq ?? replayPreview.fromSeq, replayPreview.nextSeq)}
+              {formatReplaySequence(
+                replayPreview.availableFirstSeq ?? replayPreview.fromSeq,
+                replayPreview.nextSeq,
+              )}
               {replayPreview.truncated ? "; truncated" : ""}
               {followingLive &&
               activeSession?.session_id === replayPreview.sessionId &&
-              followKey === `${activeSession.client_id}:${activeSession.session_id}`
+              followKey ===
+                `${activeSession.client_id}:${activeSession.session_id}`
                 ? "; following live output"
                 : "; retained replay"}
             </span>
@@ -1335,6 +1538,7 @@ export function TerminalSessionsPanel({
       <ConfirmationPrompt
         confirmLabel="Close terminal"
         detail="Ends this exact authorized terminal session. Retained replay remains available after it closes."
+        error={closeStatusTone === "danger" ? closeStatus : null}
         items={[
           {
             label: "VPS",
@@ -1395,7 +1599,8 @@ function XtermReplay({
       convertEol: true,
       cursorBlink: false,
       disableStdin: true,
-      fontFamily: 'ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace',
+      fontFamily:
+        'ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace',
       fontSize: 12,
       rows: 18,
       theme: {
@@ -1610,8 +1815,12 @@ function formatWindow(session: TerminalSessionRecord): string {
 }
 
 function formatLimits(session: TerminalSessionRecord): string {
-  const idle = session.idle_timeout_secs ? `Idle timeout ${formatDuration(session.idle_timeout_secs)}` : "Idle timeout n/a";
-  const flow = session.flow_window_bytes ? `${formatBytes(session.flow_window_bytes)} flow window` : "Flow window n/a";
+  const idle = session.idle_timeout_secs
+    ? `Idle timeout ${formatDuration(session.idle_timeout_secs)}`
+    : "Idle timeout n/a";
+  const flow = session.flow_window_bytes
+    ? `${formatBytes(session.flow_window_bytes)} flow window`
+    : "Flow window n/a";
   return `${idle}; ${flow}`;
 }
 
@@ -1640,11 +1849,15 @@ function formatReplaySequence(first: number, next: number): string {
 function formatOutputRetention(session: TerminalSessionRecord): string {
   const input = formatLastInput(session);
   const retained =
-    session.output_retained_bytes === null ? "retained n/a" : `${formatBytes(session.output_retained_bytes)} kept`;
+    session.output_retained_bytes === null
+      ? "retained n/a"
+      : `${formatBytes(session.output_retained_bytes)} kept`;
   if (!session.output_dropped_bytes) {
     return `${input}; ${retained}`;
   }
-  const chunks = session.output_dropped_chunks ? `, ${session.output_dropped_chunks} chunks` : "";
+  const chunks = session.output_dropped_chunks
+    ? `, ${session.output_dropped_chunks} chunks`
+    : "";
   const replay = session.output_replay_truncated ? "; replay truncated" : "";
   return `${input}; ${formatBytes(session.output_dropped_bytes)} dropped${chunks}${replay}`;
 }

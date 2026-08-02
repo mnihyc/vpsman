@@ -17,6 +17,7 @@ pub(crate) struct OperatorRecord {
     pub(crate) totp_secret_ciphertext_hex: Option<String>,
     pub(crate) totp_secret_nonce_hex: Option<String>,
     pub(crate) totp_secret_salt_hex: Option<String>,
+    pub(crate) totp_last_accepted_step: Option<u64>,
     pub(crate) session_refresh_ttl_secs: u64,
     pub(crate) created_at: String,
     pub(crate) disabled_at: Option<String>,
@@ -472,6 +473,7 @@ pub(crate) enum TotpSetupOutcome {
 #[derive(Debug)]
 pub(crate) enum TotpUpdateOutcome {
     Updated(Box<OperatorView>),
+    AlreadyEnabled,
     InvalidCredentials,
     NotConfigured,
     OperatorMissing,

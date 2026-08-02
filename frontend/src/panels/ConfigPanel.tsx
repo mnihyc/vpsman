@@ -292,10 +292,33 @@ export function ConfigPanel({
   const configPageFeedbackTone = error ? "danger" : "progress";
   const configActionFeedbackMessage =
     subpage === "bulk" || subpage === "single" ? actionError : null;
+  const configActionFeedbackRef = useRef<HTMLDivElement | null>(null);
+  const previousConfigActionFeedbackRef = useRef<string | null>(null);
 
   useEffect(() => {
     setActionError(null);
   }, [subpage]);
+
+  useEffect(() => {
+    if (!configActionFeedbackMessage) {
+      previousConfigActionFeedbackRef.current = null;
+      return;
+    }
+    if (
+      previousConfigActionFeedbackRef.current === configActionFeedbackMessage
+    ) {
+      return;
+    }
+    previousConfigActionFeedbackRef.current = configActionFeedbackMessage;
+    const frame = window.requestAnimationFrame(() => {
+      if (configActionFeedbackRef.current) {
+        scrollIntoViewWithMotion(configActionFeedbackRef.current, {
+          block: "nearest",
+        });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [configActionFeedbackMessage]);
 
   useEffect(() => {
     if (subpage === "overview") {
@@ -334,6 +357,7 @@ export function ConfigPanel({
         <ActionFeedback
           className="localActionFeedback configActionFeedback"
           message={configActionFeedbackMessage}
+          ref={configActionFeedbackRef}
           tone="danger"
         />
         {subpage === "overview" && (
@@ -356,6 +380,7 @@ export function ConfigPanel({
         )}
         {subpage === "bulk" && (
           <BulkConfigApply
+            actionError={actionError}
             agents={agents}
             runtimeConfigPatchGenerators={runtimeConfigPatchGenerators}
             onSubmitRuntimeConfigPatch={onSubmitRuntimeConfigPatch}
@@ -384,6 +409,7 @@ export function ConfigPanel({
         )}
         {subpage === "single" && (
           <SingleVpsConfig
+            actionError={actionError}
             agents={agents}
             runtimeConfigApplyStates={runtimeConfigApplyStates}
             runtimeConfigEvidenceState={runtimeConfigEvidenceState}
@@ -470,8 +496,7 @@ function ConfigOverview({
       sourceReadyRows.length,
     0,
   );
-  const runtimeEvidenceAvailable =
-    runtimeConfigEvidenceState === "available";
+  const runtimeEvidenceAvailable = runtimeConfigEvidenceState === "available";
   const inventoryEvidenceAvailable = inventoryEvidenceState === "available";
   const configurationSourcesEvidenceAvailable =
     configurationSourcesEvidenceState === "available";
@@ -485,10 +510,9 @@ function ConfigOverview({
     runtimeConfigEvidenceState === "loading" ||
     inventoryEvidenceState === "loading" ||
     configurationSourcesEvidenceState === "loading";
-  const trustedRuntimeConfigApplyStates =
-    runtimeEvidenceAvailable
-      ? runtimeConfigApplyStates
-      : [];
+  const trustedRuntimeConfigApplyStates = runtimeEvidenceAvailable
+    ? runtimeConfigApplyStates
+    : [];
   const allConfigStateRows = currentStateEvidenceAvailable
     ? buildConfigCurrentStateRows(agents, trustedRuntimeConfigApplyStates)
     : [];
@@ -544,28 +568,26 @@ function ConfigOverview({
   const retryableApplyRows = currentStateRows.filter(
     (row) => row.actionKind === "retry",
   );
-  const configHealth =
-    completeSummaryEvidence
-      ? configHealthStatus({
-          failedSyncs,
-          invalidRuleRows,
-          missingApplyStates,
-          missingSourceEvidence,
-          pendingSyncs,
-          staleApplyRows,
-          sourceNeutralCount: sourceNeutralRows,
-          sourceRiskCount: sourceRiskRows.length,
-          totalRuleRows: vpsRuleValues.length,
-          validRuleRows,
-        })
-      : {
-          detail:
-            evidenceLoading
-              ? "Required config evidence is still loading. Health, drift, and zero-value claims remain unknown until the refresh finishes."
-              : "Required config evidence is incomplete. Health, drift, and zero-value claims remain unknown; cached rows are retained only as historical context.",
-          label: evidenceLoading ? "Checking evidence" : "Evidence incomplete",
-          tone: "warning" as const,
-        };
+  const configHealth = completeSummaryEvidence
+    ? configHealthStatus({
+        failedSyncs,
+        invalidRuleRows,
+        missingApplyStates,
+        missingSourceEvidence,
+        pendingSyncs,
+        staleApplyRows,
+        sourceNeutralCount: sourceNeutralRows,
+        sourceRiskCount: sourceRiskRows.length,
+        totalRuleRows: vpsRuleValues.length,
+        validRuleRows,
+      })
+    : {
+        detail: evidenceLoading
+          ? "Required config evidence is still loading. Health, drift, and zero-value claims remain unknown until the refresh finishes."
+          : "Required config evidence is incomplete. Health, drift, and zero-value claims remain unknown; cached rows are retained only as historical context.",
+        label: evidenceLoading ? "Checking evidence" : "Evidence incomplete",
+        tone: "warning" as const,
+      };
   const latestApplyStates = trustedRuntimeConfigApplyStates
     .slice()
     .sort(
@@ -663,9 +685,7 @@ function ConfigOverview({
           </span>
           <span>
             <strong>
-              {currentStateEvidenceAvailable
-                ? applyAttentionCount
-                : "Unknown"}
+              {currentStateEvidenceAvailable ? applyAttentionCount : "Unknown"}
             </strong>
             <small>need attention</small>
           </span>
@@ -723,8 +743,7 @@ function ConfigOverview({
           onOpenAction={openCurrentStateAction}
           rows={attentionStateRows}
         />
-        {currentStateEvidenceAvailable &&
-        attentionStateRows.length === 0 ? (
+        {currentStateEvidenceAvailable && attentionStateRows.length === 0 ? (
           <div className="emptyState compactEmptyState">
             <strong>All current VPS config states are healthy</strong>
             <span>
@@ -767,9 +786,7 @@ function ConfigOverview({
             <h3>Drift summary</h3>
             <ConsoleStatusBadge
               tone={
-                !completeSummaryEvidence ||
-                sourceRiskRows.length ||
-                failedSyncs
+                !completeSummaryEvidence || sourceRiskRows.length || failedSyncs
                   ? "warning"
                   : "ok"
               }
@@ -795,10 +812,10 @@ function ConfigOverview({
                 !currentStateEvidenceAvailable
                   ? "warning"
                   : failedSyncs
-                  ? "critical"
-                  : staleApplyRows || pendingSyncs || missingApplyStates
-                    ? "warning"
-                    : "ok"
+                    ? "critical"
+                    : staleApplyRows || pendingSyncs || missingApplyStates
+                      ? "warning"
+                      : "ok"
               }
               value={
                 currentStateEvidenceAvailable
@@ -812,16 +829,15 @@ function ConfigOverview({
             <ConfigOverviewRiskRow
               detail={
                 configurationSourcesEvidenceAvailable
-                  ? configurationSourceAttentionReason(sourceRiskRows[0]) ??
-                    `${sourceReadyRows.length} verified ready; ${sourceNeutralRows} offline or not yet verified`
+                  ? (configurationSourceAttentionReason(sourceRiskRows[0]) ??
+                    `${sourceReadyRows.length} verified ready; ${sourceNeutralRows} offline or not yet verified`)
                   : configurationSourcesEvidenceState === "loading"
                     ? "Source readiness evidence is still loading."
                     : "Source readiness evidence is unavailable."
               }
               label="Source readiness drift"
               tone={
-                !configurationSourcesEvidenceAvailable ||
-                sourceRiskRows.length
+                !configurationSourcesEvidenceAvailable || sourceRiskRows.length
                   ? "warning"
                   : sourceNeutralRows
                     ? "neutral"
@@ -845,9 +861,7 @@ function ConfigOverview({
                   ? "warning"
                   : "ok"
               }
-              value={
-                fleetConfigEvidenceAvailable ? invalidRuleRows : "Unknown"
-              }
+              value={fleetConfigEvidenceAvailable ? invalidRuleRows : "Unknown"}
             />
           </div>
         </section>
@@ -911,8 +925,8 @@ function ConfigOverview({
             </span>
           </div>
           <p>
-            Open Sources to see the exact preset distribution across the
-            fleet. No single VPS is treated as the fleet-wide desired source.
+            Open Sources to see the exact preset distribution across the fleet.
+            No single VPS is treated as the fleet-wide desired source.
           </p>
         </section>
       </div>
@@ -960,17 +974,29 @@ function ConfigOverview({
               ? formatTime(change.time)
               : "No timestamp";
             return (
-            <div className="historyRow configRecentGrid" key={change.id} role="row">
-              <span role="cell" title={change.target}>{change.target}</span>
-              <span role="cell" title={change.operation}>{change.operation}</span>
-              <span role="cell" title={change.status}>
-                <ConsoleStatusBadge tone={change.tone}>
-                  {change.status}
-                </ConsoleStatusBadge>
-              </span>
-              <span role="cell" title={change.title}>{change.detail}</span>
-              <span role="cell" title={updated}>{updated}</span>
-            </div>
+              <div
+                className="historyRow configRecentGrid"
+                key={change.id}
+                role="row"
+              >
+                <span role="cell" title={change.target}>
+                  {change.target}
+                </span>
+                <span role="cell" title={change.operation}>
+                  {change.operation}
+                </span>
+                <span role="cell" title={change.status}>
+                  <ConsoleStatusBadge tone={change.tone}>
+                    {change.status}
+                  </ConsoleStatusBadge>
+                </span>
+                <span role="cell" title={change.title}>
+                  {change.detail}
+                </span>
+                <span role="cell" title={updated}>
+                  {updated}
+                </span>
+              </div>
             );
           })}
         </div>
@@ -1057,11 +1083,7 @@ function ConfigCurrentStateRowsList({
 }
 
 type ConfigApplyStatusKind =
-  | "current"
-  | "failed"
-  | "queued"
-  | "stale"
-  | "unknown";
+  "current" | "failed" | "queued" | "stale" | "unknown";
 
 type ConfigCurrentStateRow = {
   actionKind: "inspect" | "none" | "retry" | "unavailable";
@@ -1319,9 +1341,7 @@ function configurationSourceNeedsAttention(
   );
 }
 
-function configurationSourceIsReady(
-  source: ConfigurationSourceView,
-): boolean {
+function configurationSourceIsReady(source: ConfigurationSourceView): boolean {
   return (
     source.runtime_sync.state === "applied" &&
     source.readiness.state === "ready"
@@ -1460,6 +1480,7 @@ function configJobStatusTone(
 }
 
 function BulkConfigApply({
+  actionError,
   agents,
   runtimeConfigPatchGenerators,
   onSubmitRuntimeConfigPatch,
@@ -1477,6 +1498,7 @@ function BulkConfigApply({
   privilegeMaterial,
   runAction,
 }: {
+  actionError: string | null;
   agents: AgentView[];
   runtimeConfigPatchGenerators: RuntimeConfigPatchGeneratorRecord[];
   onSubmitRuntimeConfigPatch: (
@@ -2268,7 +2290,9 @@ function BulkConfigApply({
             disabled={pending || !ready}
             onClick={() => {
               if (!privilegeMaterial) {
-                setReviewStatus("Unlock privilege to apply this reviewed patch");
+                setReviewStatus(
+                  "Unlock privilege to apply this reviewed patch",
+                );
                 onOpenPrivilegeUnlock();
                 return;
               }
@@ -2281,7 +2305,7 @@ function BulkConfigApply({
                   ? "Preview changes before applying."
                   : !privilegeMaterial
                     ? "Open the shared privilege unlock, then apply this unchanged preview."
-                  : "Open the final runtime config apply confirmation."
+                    : "Open the final runtime config apply confirmation."
             }
             type="button"
           >
@@ -2519,6 +2543,7 @@ function BulkConfigApply({
       <ConfirmationPrompt
         confirmLabel="Apply runtime config patch"
         detail={`Apply one generated incremental patch to ${bulkVpsCountLabel(applySnapshot?.clientIds.length ?? 0)}.`}
+        error={actionError}
         expiresAtUnix={applySnapshot?.privilegeAssertion.expires_unix}
         items={[
           {
@@ -2555,6 +2580,7 @@ function BulkConfigApply({
       <ConfirmationPrompt
         confirmLabel="Delete patch generator"
         detail="This removes the reviewed operator-managed patch generator. Built-in patch generators are read-only."
+        error={actionError}
         items={[
           { label: "Generator", value: deleteGenerator?.name ?? "" },
           { label: "Domain", value: deleteGenerator?.domain ?? "" },
@@ -2658,6 +2684,7 @@ function bulkVpsCountLabel(count: number): string {
 }
 
 function SingleVpsConfig({
+  actionError,
   agents,
   runtimeConfigApplyStates,
   runtimeConfigEvidenceState,
@@ -2671,6 +2698,7 @@ function SingleVpsConfig({
   privilegeMaterial,
   runAction,
 }: {
+  actionError: string | null;
   agents: AgentView[];
   runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
   runtimeConfigEvidenceState: EvidenceState;
@@ -2720,9 +2748,9 @@ function SingleVpsConfig({
   const runtimeApplyState = useMemo(
     () =>
       runtimeConfigEvidenceState === "available"
-        ? runtimeConfigApplyStates.find(
+        ? (runtimeConfigApplyStates.find(
             (state) => state.client_id === clientId,
-          ) ?? null
+          ) ?? null)
         : null,
     [clientId, runtimeConfigApplyStates, runtimeConfigEvidenceState],
   );
@@ -2730,7 +2758,9 @@ function SingleVpsConfig({
     () => countConfigPatchLines(overrideToml),
     [overrideToml],
   );
-  const overrideReady = Boolean(singleTarget && baseHash && overrideToml.trim());
+  const overrideReady = Boolean(
+    singleTarget && baseHash && overrideToml.trim(),
+  );
   const reviewFeedbackTone = reviewStatus?.startsWith("Patch preview ready")
     ? "success"
     : reviewStatus?.startsWith("Desired")
@@ -3314,6 +3344,7 @@ function SingleVpsConfig({
       <ConfirmationPrompt
         confirmLabel="Apply one-VPS override"
         detail={`Apply one reviewed runtime config override to ${applySnapshot?.target.display_name ?? "one VPS"}.`}
+        error={actionError}
         expiresAtUnix={applySnapshot?.privilegeAssertion.expires_unix}
         items={[
           { label: "VPS", value: applySnapshot?.target.display_name ?? "-" },
@@ -3541,23 +3572,82 @@ function buildOperatorVpsRulesPreview(
   preview: VpsRulesDryRunResponse,
 ): VpsRulesOperatorPreview {
   const changes = preview.changes.filter(
-    (change) => !isNoOpVpsRuleChange(change),
+    (change) => !isValidVpsRuleChange(change) || !isNoOpVpsRuleChange(change),
   );
+  const changedRowCount = changes.filter(isValidVpsRuleChange).length;
+  const noOpRowCount = preview.changes.filter(
+    (change) => isValidVpsRuleChange(change) && isNoOpVpsRuleChange(change),
+  ).length;
   return {
     ...preview,
-    changed_row_count: changes.length,
+    changed_row_count: changedRowCount,
     changes,
-    no_op_row_count: preview.changes.length - changes.length,
+    no_op_row_count: noOpRowCount,
   };
 }
 
+function isValidVpsRuleChange(change: VpsRuleChangePreview): boolean {
+  return change.validation === "ok" && change.validation_errors.length === 0;
+}
+
 function isNoOpVpsRuleChange(change: VpsRuleChangePreview): boolean {
-  if (change.validation !== "ok" || change.validation_errors.length > 0) {
+  if (!isValidVpsRuleChange(change)) {
     return false;
   }
   return (
     normalizeVpsRuleValue(change.key, change.before) ===
     normalizeVpsRuleValue(change.key, change.after)
+  );
+}
+
+const VPS_RULE_VALIDATION_MESSAGES: Record<string, string> = {
+  billing_plan_price_required:
+    "Enter a price before the currency and /period, or use -1 to disable billing.",
+  billing_plan_price_invalid:
+    "Use a positive decimal price, or -1 to disable billing.",
+  billing_plan_currency_required:
+    "Add a currency symbol or three-letter currency code after the price.",
+  billing_plan_currency_invalid:
+    "Use $, ¥, €, £, or a three-letter currency code.",
+  billing_plan_period_required:
+    "Add /m, /q, /hy, or /y after the billing price.",
+  billing_plan_period_invalid: "Billing period must be m, q, hy, h, or y.",
+  billing_cycle_day_invalid: "Billing-cycle day must be between 1 and 31.",
+  billing_cycle_month_invalid: "Billing-cycle month must be between 1 and 12.",
+  billing_cycle_requires_price:
+    "Set a billing price before setting its renewal cycle.",
+  billing_cycle_disabled_price_invalid:
+    "Remove the renewal cycle while billing is disabled with -1.",
+  billing_month_cycle_requires_day:
+    "Monthly billing uses a day only, such as 15.",
+  billing_long_cycle_requires_day_month:
+    "Quarterly, half-year, and yearly billing use day-month, such as 15-06.",
+  port_speed_unit_required: "Add bps, Kbps, Mbps, Gbps, or Tbps.",
+  port_speed_unit_invalid:
+    "Port-speed unit must be bps, Kbps, Mbps, Gbps, or Tbps.",
+  port_speed_value_invalid:
+    "Port speed must be a positive number with at most three decimal places.",
+  port_speed_value_too_large: "Port speed is larger than the supported range.",
+  traffic_reset_day_invalid: "Traffic reset day must be between 1 and 31.",
+  byte_size_empty: "Enter a traffic quota or use -1 for unlimited.",
+  byte_size_number_invalid: "Traffic quota must start with a valid number.",
+  byte_size_unit_invalid: "Use bytes, KB, MB, GB, TB, KiB, MiB, GiB, or TiB.",
+  byte_size_too_large: "Traffic quota is larger than the supported range.",
+};
+
+function vpsRuleValidationMessages(change: VpsRuleChangePreview): string[] {
+  const codes =
+    change.validation_errors.length > 0
+      ? change.validation_errors
+      : change.validation === "ok"
+        ? []
+        : [change.validation];
+  return codes.map(
+    (code) =>
+      VPS_RULE_VALIDATION_MESSAGES[code] ??
+      code
+        .replace(/_/g, " ")
+        .replace(/^./, (letter: string) => letter.toUpperCase()),
   );
 }
 
@@ -3767,11 +3857,38 @@ function VpsRulesPanel({
   const pending = reviewPending || applyPending;
   const [status, setStatus] = useState<string | null>(null);
   const [statusTone, setStatusTone] = useState<ActionFeedbackTone>("info");
+  const statusFeedbackRef = useRef<HTMLDivElement | null>(null);
+  const previousStatusFeedbackRef = useRef<string | null>(null);
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
     isReviewGenerationCurrent,
   } = useReviewGenerationGuard();
+
+  useEffect(() => {
+    const terminalStatus =
+      !preview && status && statusTone !== "info" && statusTone !== "progress"
+        ? `${statusTone}:${status}`
+        : null;
+    if (!terminalStatus) {
+      if (!status) {
+        previousStatusFeedbackRef.current = null;
+      }
+      return;
+    }
+    if (previousStatusFeedbackRef.current === terminalStatus) {
+      return;
+    }
+    previousStatusFeedbackRef.current = terminalStatus;
+    const frame = window.requestAnimationFrame(() => {
+      if (statusFeedbackRef.current) {
+        scrollIntoViewWithMotion(statusFeedbackRef.current, {
+          block: "nearest",
+        });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [preview, status, statusTone]);
   const parsedSelector = useMemo(
     () => parseSearchExpression(selectorExpression),
     [selectorExpression],
@@ -3979,16 +4096,26 @@ function VpsRulesPanel({
       {
         id: "validation",
         header: "Validation",
-        size: 130,
-        minSize: 100,
+        size: 280,
+        minSize: 180,
         searchValue: (row) =>
           `${row.validation} ${row.validation_errors.join(" ")}`,
         sortValue: (row) => row.validation,
-        cell: (row) => (
-          <ConsoleStatusBadge tone={row.validation === "ok" ? "ok" : "warning"}>
-            {row.validation}
-          </ConsoleStatusBadge>
-        ),
+        cell: (row) => {
+          const messages = vpsRuleValidationMessages(row);
+          return (
+            <span className="vpsRuleValidation">
+              <ConsoleStatusBadge
+                tone={isValidVpsRuleChange(row) ? "ok" : "warning"}
+              >
+                {isValidVpsRuleChange(row) ? "valid" : "invalid"}
+              </ConsoleStatusBadge>
+              {messages.length > 0 ? (
+                <small title={messages.join(" ")}>{messages.join(" ")}</small>
+              ) : null}
+            </span>
+          );
+        },
       },
     ],
     [],
@@ -4094,7 +4221,7 @@ function VpsRulesPanel({
       const nextPreview = buildOperatorVpsRulesPreview(rawPreview);
       setPreview(nextPreview);
       setReviewSnapshot(
-        nextPreview.changed_row_count > 0
+        nextPreview.changed_row_count > 0 && nextPreview.invalid_row_count === 0
           ? {
               operation,
               selectorExpression: selectorExpression.trim(),
@@ -4105,10 +4232,16 @@ function VpsRulesPanel({
           : null,
       );
       setRuleStatus(
-        nextPreview.changed_row_count === 0
-          ? `No changes detected across ${nextPreview.matched_vps_count} matched VPSs`
-          : `${operation === "upsert" ? "set" : "unset"} preview found ${nextPreview.changed_row_count} changes across ${nextPreview.matched_vps_count} matched VPSs`,
-        nextPreview.changed_row_count === 0 ? "warning" : "success",
+        nextPreview.invalid_row_count > 0
+          ? `${nextPreview.invalid_row_count} invalid ${nextPreview.invalid_row_count === 1 ? "row needs" : "rows need"} correction; review the listed reason${nextPreview.invalid_row_count === 1 ? "" : "s"} and preview again`
+          : nextPreview.changed_row_count === 0
+            ? `No changes detected across ${nextPreview.matched_vps_count} matched VPSs`
+            : `${operation === "upsert" ? "set" : "unset"} preview found ${nextPreview.changed_row_count} changes across ${nextPreview.matched_vps_count} matched VPSs`,
+        nextPreview.invalid_row_count > 0
+          ? "danger"
+          : nextPreview.changed_row_count === 0
+            ? "warning"
+            : "success",
       );
     } catch (error) {
       if (isReviewGenerationCurrent(reviewGeneration)) {
@@ -4133,6 +4266,14 @@ function VpsRulesPanel({
     }
     if (snapshot.preview.changed_row_count === 0) {
       setRuleStatus("No changes detected; Apply is disabled.", "warning");
+      setReviewSnapshot(null);
+      return;
+    }
+    if (snapshot.preview.invalid_row_count > 0) {
+      setRuleStatus(
+        "Correct every invalid VPS rule row and run Preview changes again before applying.",
+        "danger",
+      );
       setReviewSnapshot(null);
       return;
     }
@@ -4278,287 +4419,299 @@ function VpsRulesPanel({
       />
       <div className="vpsRulesMutationScope">
         <section className="consoleDetailPanel">
-        <div className="consoleDetailPanelHeader">
-          <span>
-            <ConfigHelpLabel
-              help={CONFIG_HELP.vpsRules}
-              label="Bulk rule editor"
-              strong
-            />
-            <small>
-              Dry-run matched VPSs and changed keys before applying.
-            </small>
-          </span>
-          <div className="consoleOperationsActions">
-            <div
-              aria-label="VPS rule edit mode"
-              className="segmented vpsRulesModeSwitch"
-              role="group"
-            >
-              <button
-                aria-pressed={editMode === "upsert"}
-                className={editMode === "upsert" ? "selected" : ""}
-                disabled={applyPending}
-                onClick={() => {
-                  setEditMode("upsert");
-                }}
-                type="button"
-              >
-                Set values
-              </button>
-              <button
-                aria-pressed={editMode === "unset"}
-                className={editMode === "unset" ? "selected" : ""}
-                disabled={applyPending}
-                onClick={() => {
-                  setEditMode("unset");
-                }}
-                type="button"
-              >
-                Unset values
-              </button>
-            </div>
-            <button
-              className="primaryAction compactAction"
-              disabled={pending}
-              onClick={() => void dryRun(editMode)}
-              title={
-                pending
-                  ? "Wait for the current VPS rule operation to finish before preview."
-                  : editMode === "upsert"
-                    ? "Preview effective VPS rule value changes before applying them."
-                    : "Preview effective VPS rule removals before applying them."
-              }
-              type="button"
-            >
-              Preview changes
-            </button>
-          </div>
-        </div>
-        {!preview ? (
-          <ActionFeedback
-            className="localActionFeedback vpsRulesActionFeedback"
-            message={status}
-            tone={statusTone}
-          />
-        ) : null}
-        <div className="vpsRulesBulkEditor">
-          <section
-            className="vpsRulesEditorSection vpsRulesModeLegend"
-            aria-label="VPS rule edit mode semantics"
-          >
-            <div>
-              <strong>Set values</strong>
-              <span title={CONFIG_HELP.ruleSetValues}>
-                Key=value lines become typed rule updates after dry-run.
-              </span>
-            </div>
-            <div>
-              <h4 title={CONFIG_HELP.ruleUnsetValues}>Unset values</h4>
-              <span title={CONFIG_HELP.ruleUnsetValues}>
-                Explicit rule keys are removed only after preview review.
-              </span>
-            </div>
-          </section>
-          <section className="vpsRulesEditorSection vpsRulesTargetSection">
-            <div className="sectionHeader compactHeader">
-              <div>
-                <h4 title={CONFIG_HELP.ruleSelector}>Target VPS selector</h4>
-                <span>
-                  Choose the VPS scope for the reviewed mutation.
-                </span>
-              </div>
-              <div className="consoleOperationsActions">
-                <button
-                  className="secondaryAction compactAction"
-                  disabled={applyPending}
-                  onClick={() => setSelectorExpression("")}
-                  type="button"
-                >
-                  Clear
-                </button>
-              </div>
-            </div>
-            <label className="consoleField">
-              <span>VPS selector expression</span>
-              <SearchExpressionInput
-                agents={agents}
-                ariaLabel="VPS rules selector expression"
-                disabled={applyPending}
-                onChange={setSelectorExpression}
-                placeholder="provider:hetzner && tag:edge"
-                showMatchCount
-                value={selectorExpression}
-                verification={
-                  parsedSelector.error
-                    ? "invalid"
-                    : selectorExpression.trim()
-                      ? "valid"
-                      : "neutral"
-                }
-              />
-            </label>
-            <LocalTargetPreview
-              agents={localSelectorTargets}
-              ariaLabel="Local VPS rule match preview"
-            />
-            <small className="vpsRulesTargetHint">
-              Local match only. Preview changes resolves and binds the authoritative VPS list.
-            </small>
-            {preview ? (
-              <div className="tokenPreview" aria-label="Reviewed VPS rule targets">
-                {matchedPreviewClients.length === 0 ? (
-                  <span className="tokenChip">
-                    {`${preview.matched_vps_count} matched · no effective changes`}
-                  </span>
-                ) : (
-                  matchedPreviewClients.map(([clientId, displayName]) => (
-                    <span className="tokenChip" key={clientId} title={clientId}>
-                      {displayName}
-                    </span>
-                  ))
-                )}
-              </div>
-            ) : null}
-          </section>
-          {editMode === "upsert" ? (
-            <section className="vpsRulesEditorSection vpsRulesTypedEditor">
-              <div className="sectionHeader compactHeader">
-                <div>
-                  <h4 title={CONFIG_HELP.ruleSetValues}>Common rule cards</h4>
-                  <span title={CONFIG_HELP.ruleSetValues}>
-                    Typed fields for billing, quota, reset day, and traffic interfaces
-                  </span>
-                </div>
-              </div>
-              <div
-                className="vpsRuleTypedGrid"
-                aria-label="Common VPS rule fields"
-              >
-                {VPS_RULE_FIELD_DEFINITIONS.map((field) => (
-                  <label className="vpsRuleTypedCard" key={field.key}>
-                    <span>
-                      <strong>{field.label}</strong>
-                      <small className="monoValue">{field.key}</small>
-                    </span>
-                    <input
-                      aria-label={field.label}
-                      disabled={applyPending}
-                      inputMode={field.inputMode ?? "text"}
-                      onChange={(event) =>
-                        setValuesText((current) =>
-                          updateVpsRuleTextValue(
-                            current,
-                            field.key,
-                            event.target.value,
-                          ),
-                        )
-                      }
-                      placeholder={field.placeholder}
-                      title={field.help}
-                      value={typedRuleValues[field.key] ?? ""}
-                    />
-                    <small>{field.help}</small>
-                  </label>
-                ))}
-              </div>
-              <details className="vpsRulesAdvancedRaw">
-                <summary>Advanced raw key/value</summary>
-                <textarea
-                  aria-label="VPS rule set values"
-                  disabled={applyPending}
-                  value={valuesText}
-                  onChange={(event) => setValuesText(event.target.value)}
-                />
-              </details>
-            </section>
-          ) : (
-            <section className="vpsRulesEditorSection">
-              <div className="sectionHeader compactHeader">
-                <div>
-                  <h4 title={CONFIG_HELP.ruleUnsetValues}>Unset values</h4>
-                  <span title={CONFIG_HELP.ruleUnsetValues}>
-                    Explicit key checklist
-                  </span>
-                </div>
-              </div>
-              <div className="checkListPanel compactChecklist">
-                {VPS_RULE_KEYS.map((key) => (
-                  <label className="checkLine" key={key}>
-                    <input
-                      aria-label={`Unset ${key}`}
-                      checked={unsetKeys.includes(key)}
-                      disabled={applyPending}
-                      onChange={(event) =>
-                        toggleUnsetKey(key, event.target.checked)
-                      }
-                      type="checkbox"
-                    />
-                    <span className="monoValue">{key}</span>
-                  </label>
-                ))}
-              </div>
-            </section>
-          )}
-        </div>
-        <section
-          className="consoleDetailPanel vpsRulesAlertImpact"
-          aria-label="Affected alert policy context"
-        >
           <div className="consoleDetailPanelHeader">
             <span>
-              <strong>Affected alert policies</strong>
+              <ConfigHelpLabel
+                help={CONFIG_HELP.vpsRules}
+                label="Bulk rule editor"
+                strong
+              />
               <small>
-                Policies whose rule conditions reference the current edit keys:{" "}
-                <span className="monoValue">
-                  {editedRuleKeys.join(", ") || "no edited keys"}
-                </span>
+                Dry-run matched VPSs and changed keys before applying.
               </small>
             </span>
-            <button
-              className="secondaryAction compactAction"
-              onClick={onOpenAlerts}
-              type="button"
-            >
-              Open Observability alerts
-            </button>
-          </div>
-          <div className="configRiskList">
-            {affectedPolicyRules.slice(0, 6).map((impact) => (
+            <div className="consoleOperationsActions">
               <div
-                className="configRiskRow"
-                key={`${impact.policyId}:${impact.ruleId}`}
+                aria-label="VPS rule edit mode"
+                className="segmented vpsRulesModeSwitch"
+                role="group"
               >
-                <span>
-                  <strong>
-                    {impact.policyName} / {impact.ruleName}
-                  </strong>
-                  <small className="monoValue">
-                    {impact.conditionExpression}
-                  </small>
+                <button
+                  aria-pressed={editMode === "upsert"}
+                  className={editMode === "upsert" ? "selected" : ""}
+                  disabled={applyPending}
+                  onClick={() => {
+                    setEditMode("upsert");
+                  }}
+                  type="button"
+                >
+                  Set values
+                </button>
+                <button
+                  aria-pressed={editMode === "unset"}
+                  className={editMode === "unset" ? "selected" : ""}
+                  disabled={applyPending}
+                  onClick={() => {
+                    setEditMode("unset");
+                  }}
+                  type="button"
+                >
+                  Unset values
+                </button>
+              </div>
+              <button
+                className="primaryAction compactAction"
+                disabled={pending}
+                onClick={() => void dryRun(editMode)}
+                title={
+                  pending
+                    ? "Wait for the current VPS rule operation to finish before preview."
+                    : editMode === "upsert"
+                      ? "Preview effective VPS rule value changes before applying them."
+                      : "Preview effective VPS rule removals before applying them."
+                }
+                type="button"
+              >
+                Preview changes
+              </button>
+            </div>
+          </div>
+          {!preview ? (
+            <ActionFeedback
+              className="localActionFeedback vpsRulesActionFeedback"
+              message={status}
+              ref={statusFeedbackRef}
+              tone={statusTone}
+            />
+          ) : null}
+          <div className="vpsRulesBulkEditor">
+            <section
+              className="vpsRulesEditorSection vpsRulesModeLegend"
+              aria-label="VPS rule edit mode semantics"
+            >
+              <div>
+                <strong>Set values</strong>
+                <span title={CONFIG_HELP.ruleSetValues}>
+                  Key=value lines become typed rule updates after dry-run.
                 </span>
-                <ConsoleStatusBadge tone={impact.enabled ? "warning" : "neutral"}>
-                  {impact.severity}
-                </ConsoleStatusBadge>
               </div>
-            ))}
-            {affectedPolicyRules.length === 0 && (
-              <div className="emptyState compactEmpty">
-                No loaded alert policy conditions reference the current rule keys.
+              <div>
+                <h4 title={CONFIG_HELP.ruleUnsetValues}>Unset values</h4>
+                <span title={CONFIG_HELP.ruleUnsetValues}>
+                  Explicit rule keys are removed only after preview review.
+                </span>
               </div>
+            </section>
+            <section className="vpsRulesEditorSection vpsRulesTargetSection">
+              <div className="sectionHeader compactHeader">
+                <div>
+                  <h4 title={CONFIG_HELP.ruleSelector}>Target VPS selector</h4>
+                  <span>Choose the VPS scope for the reviewed mutation.</span>
+                </div>
+                <div className="consoleOperationsActions">
+                  <button
+                    className="secondaryAction compactAction"
+                    disabled={applyPending}
+                    onClick={() => setSelectorExpression("")}
+                    type="button"
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+              <label className="consoleField">
+                <span>VPS selector expression</span>
+                <SearchExpressionInput
+                  agents={agents}
+                  ariaLabel="VPS rules selector expression"
+                  disabled={applyPending}
+                  onChange={setSelectorExpression}
+                  placeholder="provider:hetzner && tag:edge"
+                  showMatchCount
+                  value={selectorExpression}
+                  verification={
+                    parsedSelector.error
+                      ? "invalid"
+                      : selectorExpression.trim()
+                        ? "valid"
+                        : "neutral"
+                  }
+                />
+              </label>
+              <LocalTargetPreview
+                agents={localSelectorTargets}
+                ariaLabel="Local VPS rule match preview"
+              />
+              <small className="vpsRulesTargetHint">
+                Local match only. Preview changes resolves and binds the
+                authoritative VPS list.
+              </small>
+              {preview ? (
+                <div
+                  className="tokenPreview"
+                  aria-label="Reviewed VPS rule targets"
+                >
+                  {matchedPreviewClients.length === 0 ? (
+                    <span className="tokenChip">
+                      {`${preview.matched_vps_count} matched · no effective changes`}
+                    </span>
+                  ) : (
+                    matchedPreviewClients.map(([clientId, displayName]) => (
+                      <span
+                        className="tokenChip"
+                        key={clientId}
+                        title={clientId}
+                      >
+                        {displayName}
+                      </span>
+                    ))
+                  )}
+                </div>
+              ) : null}
+            </section>
+            {editMode === "upsert" ? (
+              <section className="vpsRulesEditorSection vpsRulesTypedEditor">
+                <div className="sectionHeader compactHeader">
+                  <div>
+                    <h4 title={CONFIG_HELP.ruleSetValues}>Common rule cards</h4>
+                    <span title={CONFIG_HELP.ruleSetValues}>
+                      Typed fields for billing, quota, reset day, and traffic
+                      interfaces
+                    </span>
+                  </div>
+                </div>
+                <div
+                  className="vpsRuleTypedGrid"
+                  aria-label="Common VPS rule fields"
+                >
+                  {VPS_RULE_FIELD_DEFINITIONS.map((field) => (
+                    <label className="vpsRuleTypedCard" key={field.key}>
+                      <span>
+                        <strong>{field.label}</strong>
+                        <small className="monoValue">{field.key}</small>
+                      </span>
+                      <input
+                        aria-label={field.label}
+                        disabled={applyPending}
+                        inputMode={field.inputMode ?? "text"}
+                        onChange={(event) =>
+                          setValuesText((current) =>
+                            updateVpsRuleTextValue(
+                              current,
+                              field.key,
+                              event.target.value,
+                            ),
+                          )
+                        }
+                        placeholder={field.placeholder}
+                        title={field.help}
+                        value={typedRuleValues[field.key] ?? ""}
+                      />
+                      <small>{field.help}</small>
+                    </label>
+                  ))}
+                </div>
+                <details className="vpsRulesAdvancedRaw">
+                  <summary>Advanced raw key/value</summary>
+                  <textarea
+                    aria-label="VPS rule set values"
+                    disabled={applyPending}
+                    value={valuesText}
+                    onChange={(event) => setValuesText(event.target.value)}
+                  />
+                </details>
+              </section>
+            ) : (
+              <section className="vpsRulesEditorSection">
+                <div className="sectionHeader compactHeader">
+                  <div>
+                    <h4 title={CONFIG_HELP.ruleUnsetValues}>Unset values</h4>
+                    <span title={CONFIG_HELP.ruleUnsetValues}>
+                      Explicit key checklist
+                    </span>
+                  </div>
+                </div>
+                <div className="checkListPanel compactChecklist">
+                  {VPS_RULE_KEYS.map((key) => (
+                    <label className="checkLine" key={key}>
+                      <input
+                        aria-label={`Unset ${key}`}
+                        checked={unsetKeys.includes(key)}
+                        disabled={applyPending}
+                        onChange={(event) =>
+                          toggleUnsetKey(key, event.target.checked)
+                        }
+                        type="checkbox"
+                      />
+                      <span className="monoValue">{key}</span>
+                    </label>
+                  ))}
+                </div>
+              </section>
             )}
           </div>
-        </section>
-        {preview ? (
-          <VpsRulesPreviewTable
-            columns={previewColumns}
-            onRequestApply={() => setReviewPromptOpen(true)}
-            pending={pending}
-            preview={preview}
-            status={status}
-            statusTone={statusTone}
-          />
-        ) : null}
+          <section
+            className="consoleDetailPanel vpsRulesAlertImpact"
+            aria-label="Affected alert policy context"
+          >
+            <div className="consoleDetailPanelHeader">
+              <span>
+                <strong>Affected alert policies</strong>
+                <small>
+                  Policies whose rule conditions reference the current edit
+                  keys:{" "}
+                  <span className="monoValue">
+                    {editedRuleKeys.join(", ") || "no edited keys"}
+                  </span>
+                </small>
+              </span>
+              <button
+                className="secondaryAction compactAction"
+                onClick={onOpenAlerts}
+                type="button"
+              >
+                Open Observability alerts
+              </button>
+            </div>
+            <div className="configRiskList">
+              {affectedPolicyRules.slice(0, 6).map((impact) => (
+                <div
+                  className="configRiskRow"
+                  key={`${impact.policyId}:${impact.ruleId}`}
+                >
+                  <span>
+                    <strong>
+                      {impact.policyName} / {impact.ruleName}
+                    </strong>
+                    <small className="monoValue">
+                      {impact.conditionExpression}
+                    </small>
+                  </span>
+                  <ConsoleStatusBadge
+                    tone={impact.enabled ? "warning" : "neutral"}
+                  >
+                    {impact.severity}
+                  </ConsoleStatusBadge>
+                </div>
+              ))}
+              {affectedPolicyRules.length === 0 && (
+                <div className="emptyState compactEmpty">
+                  No loaded alert policy conditions reference the current rule
+                  keys.
+                </div>
+              )}
+            </div>
+          </section>
+          {preview ? (
+            <VpsRulesPreviewTable
+              columns={previewColumns}
+              onRequestApply={() => setReviewPromptOpen(true)}
+              pending={pending}
+              preview={preview}
+              status={status}
+              statusTone={statusTone}
+            />
+          ) : null}
         </section>
       </div>
       <ConfirmationPrompt
@@ -4568,6 +4721,7 @@ function VpsRulesPanel({
             : "Apply changes"
         }
         detail="Applies the reviewed preview bound to its selector and server-issued preview hash."
+        error={statusTone === "danger" ? status : null}
         items={[
           {
             label: "Selector",
@@ -4704,14 +4858,51 @@ function VpsRulesPreviewTable({
   status: string | null;
   statusTone: ActionFeedbackTone;
 }) {
+  const previewRef = useRef<HTMLDivElement | null>(null);
+  const previousPreviewHashRef = useRef<string | null>(null);
+  const previousPreviewOutcomeRef = useRef<string | null>(null);
   const finalActionLabel = `Apply ${preview.changed_row_count} ${preview.changed_row_count === 1 ? "change" : "changes"}`;
+  const hasInvalidRows = preview.invalid_row_count > 0;
   const finalActionSummary = `${preview.changed_row_count} effective ${
     preview.changed_row_count === 1 ? "change" : "changes"
   } - ${preview.no_op_row_count} no-op${
     preview.no_op_row_count === 1 ? "" : "s"
   } hidden`;
+  useEffect(() => {
+    const isNewPreview =
+      previousPreviewHashRef.current !== preview.preview_hash;
+    previousPreviewHashRef.current = preview.preview_hash;
+    const terminalOutcome =
+      status && statusTone !== "info" && statusTone !== "progress"
+        ? `${statusTone}:${status}`
+        : null;
+    if (!isNewPreview && !terminalOutcome) {
+      return;
+    }
+    if (
+      !isNewPreview &&
+      previousPreviewOutcomeRef.current === terminalOutcome
+    ) {
+      return;
+    }
+    previousPreviewOutcomeRef.current = terminalOutcome;
+    const frame = window.requestAnimationFrame(() => {
+      const previewElement = previewRef.current;
+      if (!previewElement) {
+        return;
+      }
+      scrollIntoViewWithMotion(previewElement, {
+        block: isNewPreview ? "start" : "nearest",
+      });
+      if (isNewPreview) {
+        previewElement.focus({ preventScroll: true });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [preview.preview_hash, status, statusTone]);
+
   return (
-    <div className="vpsRulesPreviewBlock">
+    <div className="vpsRulesPreviewBlock" ref={previewRef} tabIndex={-1}>
       <div className="consoleInlineDetailGrid">
         <span>
           <strong>Matched VPS</strong>
@@ -4739,7 +4930,7 @@ function VpsRulesPreviewTable({
           </details>
         </span>
       </div>
-      {preview.changed_row_count === 0 ? (
+      {preview.changed_row_count === 0 && !hasInvalidRows ? (
         <div className="emptyState compactEmpty">No changes detected</div>
       ) : null}
       <ActionFeedback
@@ -4750,7 +4941,7 @@ function VpsRulesPreviewTable({
       <ConsoleDataGrid
         columns={columns}
         defaultPageSize={10}
-        empty="No effective changes in preview."
+        empty="No effective or invalid changes in preview."
         getRowId={(change) =>
           `${change.client_id}:${change.key}:${change.action}`
         }
@@ -4763,7 +4954,7 @@ function VpsRulesPreviewTable({
       />
       <div
         className={
-          preview.changed_row_count === 0
+          preview.changed_row_count === 0 || hasInvalidRows
             ? "vpsRulesPreviewFinalAction neutral"
             : "vpsRulesPreviewFinalAction"
         }
@@ -4771,17 +4962,21 @@ function VpsRulesPreviewTable({
       >
         <span>
           <strong>
-            {preview.changed_row_count === 0
-              ? "No changes detected"
-              : finalActionLabel}
+            {hasInvalidRows
+              ? "Correct invalid values"
+              : preview.changed_row_count === 0
+                ? "No changes detected"
+                : finalActionLabel}
           </strong>
           <small>
-            {preview.changed_row_count === 0
-              ? `${preview.matched_vps_count} matched VPSs; Apply is disabled.`
-              : `${finalActionSummary}; final write uses this selector result for ${preview.matched_vps_count} matched VPSs.`}
+            {hasInvalidRows
+              ? `${preview.invalid_row_count} invalid ${preview.invalid_row_count === 1 ? "row is" : "rows are"} listed above; no write is available.`
+              : preview.changed_row_count === 0
+                ? `${preview.matched_vps_count} matched VPSs; Apply is disabled.`
+                : `${finalActionSummary}; final write uses this selector result for ${preview.matched_vps_count} matched VPSs.`}
           </small>
         </span>
-        {preview.changed_row_count > 0 ? (
+        {preview.changed_row_count > 0 && !hasInvalidRows ? (
           <button
             className="primaryAction compactAction"
             disabled={pending}
@@ -4846,11 +5041,7 @@ function normalizeConfigSubpage(
   if (base === "bulk_patch") {
     return "bulk";
   }
-  if (
-    base === "bulk" ||
-    base === "single" ||
-    base === "rules"
-  ) {
+  if (base === "bulk" || base === "single" || base === "rules") {
     return base;
   }
   return "overview";

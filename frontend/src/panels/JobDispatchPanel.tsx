@@ -1,4 +1,11 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import { LockKeyhole, Play, ShieldCheck } from "lucide-react";
 import {
   buildBulkJobProgress,
@@ -13,7 +20,11 @@ import { PrivilegeLockPrompt } from "../components/PrivilegeLockPrompt";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { ActionFeedback } from "../components/ActionFeedback";
 import { VpsCombobox } from "../components/VpsCombobox";
-import { FILE_TRANSFER_CHUNK_BYTES, readFilePushPayload, sha256Hex } from "../fileTransfer";
+import {
+  FILE_TRANSFER_CHUNK_BYTES,
+  readFilePushPayload,
+  sha256Hex,
+} from "../fileTransfer";
 import {
   JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE,
   JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE,
@@ -24,8 +35,12 @@ import {
   DEFAULT_UPDATE_VERSION_URL,
   type JobDispatchPreset,
 } from "../jobDispatchPreset";
-import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
+import {
+  useReviewGenerationGuard,
+  waitForReviewRender,
+} from "../hooks/useReviewGenerationGuard";
 import { useHistoryEntryState } from "../historyEntryState";
+import { scrollIntoViewWithMotion } from "../motion";
 import {
   buildPrivilegeAssertion,
   canonicalJobPrivilegeIntent,
@@ -35,7 +50,10 @@ import {
   type PrivilegeAssertion,
   type PrivilegeMaterial,
 } from "../privilege";
-import { DEFAULT_JOB_BACKUP_PATHS, DEFAULT_TERMINAL_ARGV } from "../presets/jobOperationPresets";
+import {
+  DEFAULT_JOB_BACKUP_PATHS,
+  DEFAULT_TERMINAL_ARGV,
+} from "../presets/jobOperationPresets";
 import {
   runBrowserResumableDownload,
   runBrowserResumableUpload,
@@ -80,9 +98,18 @@ import type {
 import type { FileTransferSourceArtifactRecord } from "../typesFileTransfer";
 import { runPanelAction, shortId } from "../utils";
 import { DispatchOptions, JobTargetSelector } from "./JobDispatchControls";
-import { JobOperationEditor, OperationModeTabs } from "./jobs/JobOperationControls";
-import { agentsMatchingExpression, parseSearchExpression } from "../searchExpression";
-import { TargetImpactPreview, targetImpactModeForDispatch } from "./TargetImpactPreview";
+import {
+  JobOperationEditor,
+  OperationModeTabs,
+} from "./jobs/JobOperationControls";
+import {
+  agentsMatchingExpression,
+  parseSearchExpression,
+} from "../searchExpression";
+import {
+  TargetImpactPreview,
+  targetImpactModeForDispatch,
+} from "./TargetImpactPreview";
 
 const JOB_SELECTOR_STORAGE_KEY = "vpsman.jobDispatch.selectorExpression";
 
@@ -97,7 +124,9 @@ function shellQuoteArg(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-function commandTypeForApi(operation: CreateJobRequest["operation"]): GeneratedJobCommandType {
+function commandTypeForApi(
+  operation: CreateJobRequest["operation"],
+): GeneratedJobCommandType {
   if (!operation) {
     return "shell_argv";
   }
@@ -107,11 +136,16 @@ function commandTypeForApi(operation: CreateJobRequest["operation"]): GeneratedJ
   return JOB_COMMAND_TYPE_BY_OPERATION_TYPE[operation.type];
 }
 
-function displayGroupForOperation(operation: CreateJobRequest["operation"]): string | null {
+function displayGroupForOperation(
+  operation: CreateJobRequest["operation"],
+): string | null {
   if (!operation) {
     return JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE.shell_argv;
   }
-  return JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE[commandTypeForApi(operation)] ?? null;
+  return (
+    JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE[commandTypeForApi(operation)] ??
+    null
+  );
 }
 
 function readLocalString(key: string): string {
@@ -313,7 +347,11 @@ export function JobDispatchPanel({
     request: CreateJobApprovalRequest,
   ) => Promise<JobApprovalRecord>;
   onDownloadFileTransferSource: (downloadPath: string) => Promise<Blob>;
-  onDownloadOutputChunk: (jobId: string, clientId: string, seq: number) => Promise<Blob>;
+  onDownloadOutputChunk: (
+    jobId: string,
+    clientId: string,
+    seq: number,
+  ) => Promise<Blob>;
   onOpenJobsDispatch?: () => void;
   onOpenRollout?: (jobId: string) => void;
   onOpenRemoteTerminal?: () => void;
@@ -323,12 +361,16 @@ export function JobDispatchPanel({
   onOpenJobDetails?: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
   onApprovalRequested?: (approval: JobApprovalRecord) => void;
-  onResolveTargets: (selection: JobTargetSelection) => Promise<BulkResolveResponse>;
+  onResolveTargets: (
+    selection: JobTargetSelection,
+  ) => Promise<BulkResolveResponse>;
   onDeleteCommandTemplate: (
     templateId: string,
     request: DeleteCommandTemplateRequest,
   ) => Promise<CommandTemplateRecord>;
-  onUpsertCommandTemplate: (request: UpsertCommandTemplateRequest) => Promise<CommandTemplateRecord>;
+  onUpsertCommandTemplate: (
+    request: UpsertCommandTemplateRequest,
+  ) => Promise<CommandTemplateRecord>;
   privilegeMaterial: PrivilegeMaterial | null;
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
 }) {
@@ -360,14 +402,15 @@ export function JobDispatchPanel({
   // Terminal workflows use their dedicated surface, so these values never
   // belong to the Jobs composer history snapshot.
   const terminalAction: TerminalAction = "open";
-  const [terminalSessionId, setTerminalSessionId] = useState<string>(
-    () => crypto.randomUUID(),
+  const [terminalSessionId, setTerminalSessionId] = useState<string>(() =>
+    crypto.randomUUID(),
   );
   const [terminalArgv, setTerminalArgv] = useState(DEFAULT_TERMINAL_ARGV);
   const [terminalCwd, setTerminalCwd] = useState("");
   const [terminalUser, setTerminalUser] = useState("");
-  const [terminalUserPolicy, setTerminalUserPolicy] =
-    useState<"fail" | "fallback">("fail");
+  const [terminalUserPolicy, setTerminalUserPolicy] = useState<
+    "fail" | "fallback"
+  >("fail");
   const [terminalCols, setTerminalCols] = useState(120);
   const [terminalRows, setTerminalRows] = useState(40);
   const [terminalReplayFromSeq, setTerminalReplayFromSeq] = useState("");
@@ -378,12 +421,11 @@ export function JobDispatchPanel({
     "",
     preserveHistoryState,
   );
-  const [fileFollowSymlinks, setFileFollowSymlinks] =
-    useDispatchHistoryState(
-      "fileFollowSymlinks",
-      false,
-      preserveHistoryState,
-    );
+  const [fileFollowSymlinks, setFileFollowSymlinks] = useDispatchHistoryState(
+    "fileFollowSymlinks",
+    false,
+    preserveHistoryState,
+  );
   const [filePushPath, setFilePushPath] = useDispatchHistoryState(
     "filePushPath",
     "",
@@ -428,11 +470,7 @@ export function JobDispatchPanel({
       preserveHistoryState,
     );
   const [fileTransferRateLimit, setFileTransferRateLimit] =
-    useDispatchHistoryState(
-      "fileTransferRateLimit",
-      0,
-      preserveHistoryState,
-    );
+    useDispatchHistoryState("fileTransferRateLimit", 0, preserveHistoryState);
   const [fileTransferExistingPolicy, setFileTransferExistingPolicy] =
     useDispatchHistoryState<FileExistingPolicy>(
       "fileTransferExistingPolicy",
@@ -445,43 +483,41 @@ export function JobDispatchPanel({
       "same-offset",
       preserveHistoryState,
     );
-  const [selectedTemplateId, setSelectedTemplateId] =
-    useDispatchHistoryState(
-      "selectedTemplateId",
-      "",
-      preserveHistoryState,
-    );
+  const [selectedTemplateId, setSelectedTemplateId] = useDispatchHistoryState(
+    "selectedTemplateId",
+    "",
+    preserveHistoryState,
+  );
   const [templateName, setTemplateName] = useDispatchHistoryState(
     "templateName",
     "",
     preserveHistoryState,
   );
-  const [templateScopeKind, setTemplateScopeKind] =
-    useDispatchHistoryState<"global" | "provider" | "tag" | "client">(
-      "templateScopeKind",
-      "global",
-      preserveHistoryState,
-    );
-  const [templateScopeValue, setTemplateScopeValue] =
-    useDispatchHistoryState(
-      "templateScopeValue",
-      "",
-      preserveHistoryState,
-    );
+  const [templateScopeKind, setTemplateScopeKind] = useDispatchHistoryState<
+    "global" | "provider" | "tag" | "client"
+  >("templateScopeKind", "global", preserveHistoryState);
+  const [templateScopeValue, setTemplateScopeValue] = useDispatchHistoryState(
+    "templateScopeValue",
+    "",
+    preserveHistoryState,
+  );
   const [templatePending, setTemplatePending] = useState(false);
-  const [templateConfirmation, setTemplateConfirmation] = useState<"save" | "save-copy" | "delete" | null>(null);
+  const [templateError, setTemplateError] = useState<string | null>(null);
+  const [templateConfirmation, setTemplateConfirmation] = useState<
+    "save" | "save-copy" | "delete" | null
+  >(null);
   const [templateSaveSnapshot, setTemplateSaveSnapshot] = useState<{
     request: UpsertCommandTemplateRequest;
     title: string;
   } | null>(null);
   const [deleteTemplateSnapshot, setDeleteTemplateSnapshot] =
     useState<CommandTemplateRecord | null>(null);
-  const [updateArtifactUrl, setUpdateArtifactUrl] =
-    useDispatchHistoryState(
-      "updateArtifactUrl",
-      "",
-      preserveHistoryState,
-    );
+  const templateFeedbackRef = useRef<HTMLDivElement | null>(null);
+  const [updateArtifactUrl, setUpdateArtifactUrl] = useDispatchHistoryState(
+    "updateArtifactUrl",
+    "",
+    preserveHistoryState,
+  );
   const [updateSha256Hex, setUpdateSha256Hex] = useDispatchHistoryState(
     "updateSha256Hex",
     "",
@@ -499,12 +535,11 @@ export function JobDispatchPanel({
       "",
       preserveHistoryState,
     );
-  const [updateRestartAgent, setUpdateRestartAgent] =
-    useDispatchHistoryState(
-      "updateRestartAgent",
-      false,
-      preserveHistoryState,
-    );
+  const [updateRestartAgent, setUpdateRestartAgent] = useDispatchHistoryState(
+    "updateRestartAgent",
+    false,
+    preserveHistoryState,
+  );
   const [updateRollbackSha256Hex, setUpdateRollbackSha256Hex] =
     useDispatchHistoryState(
       "updateRollbackSha256Hex",
@@ -516,12 +551,11 @@ export function JobDispatchPanel({
     DEFAULT_JOB_BACKUP_PATHS,
     preserveHistoryState,
   );
-  const [backupIncludeConfig, setBackupIncludeConfig] =
-    useDispatchHistoryState(
-      "backupIncludeConfig",
-      true,
-      preserveHistoryState,
-    );
+  const [backupIncludeConfig, setBackupIncludeConfig] = useDispatchHistoryState(
+    "backupIncludeConfig",
+    true,
+    preserveHistoryState,
+  );
   const [backupFollowSymlinks, setBackupFollowSymlinks] =
     useDispatchHistoryState(
       "backupFollowSymlinks",
@@ -565,55 +599,43 @@ export function JobDispatchPanel({
     "",
     preserveHistoryState,
   );
-  const [supervisorLogBytes, setSupervisorLogBytes] =
-    useDispatchHistoryState(
-      "supervisorLogBytes",
-      65536,
-      preserveHistoryState,
-    );
-  const [selectorExpression, setSelectorExpression] =
-    useDispatchHistoryState(
-      "selectorExpression",
-      () =>
-        visibleDispatchSelector(
-          readLocalString(JOB_SELECTOR_STORAGE_KEY),
-        ),
-      preserveHistoryState,
-    );
+  const [supervisorLogBytes, setSupervisorLogBytes] = useDispatchHistoryState(
+    "supervisorLogBytes",
+    65536,
+    preserveHistoryState,
+  );
+  const [selectorExpression, setSelectorExpression] = useDispatchHistoryState(
+    "selectorExpression",
+    () => visibleDispatchSelector(readLocalString(JOB_SELECTOR_STORAGE_KEY)),
+    preserveHistoryState,
+  );
   const [maxTimeoutSecs, setMaxTimeoutSecs] = useDispatchHistoryState(
     "maxTimeoutSecs",
     "",
     preserveHistoryState,
   );
-  const [forceUnprivileged, setForceUnprivileged] =
-    useDispatchHistoryState(
-      "forceUnprivileged",
-      false,
-      preserveHistoryState,
-    );
+  const [forceUnprivileged, setForceUnprivileged] = useDispatchHistoryState(
+    "forceUnprivileged",
+    false,
+    preserveHistoryState,
+  );
   const [rolloutEnabled, setRolloutEnabled] = useDispatchHistoryState(
     "rolloutEnabled",
     false,
     preserveHistoryState,
   );
   const [rolloutCanaryClientId, setRolloutCanaryClientId] =
-    useDispatchHistoryState(
-      "rolloutCanaryClientId",
-      "",
-      preserveHistoryState,
-    );
-  const [rolloutBatchSize, setRolloutBatchSize] =
-    useDispatchHistoryState(
-      "rolloutBatchSize",
-      "5",
-      preserveHistoryState,
-    );
-  const [rolloutMaxFailures, setRolloutMaxFailures] =
-    useDispatchHistoryState(
-      "rolloutMaxFailures",
-      "0",
-      preserveHistoryState,
-    );
+    useDispatchHistoryState("rolloutCanaryClientId", "", preserveHistoryState);
+  const [rolloutBatchSize, setRolloutBatchSize] = useDispatchHistoryState(
+    "rolloutBatchSize",
+    "5",
+    preserveHistoryState,
+  );
+  const [rolloutMaxFailures, setRolloutMaxFailures] = useDispatchHistoryState(
+    "rolloutMaxFailures",
+    "0",
+    preserveHistoryState,
+  );
   const [rolloutPauseAfterCanary, setRolloutPauseAfterCanary] =
     useDispatchHistoryState(
       "rolloutPauseAfterCanary",
@@ -621,11 +643,7 @@ export function JobDispatchPanel({
       preserveHistoryState,
     );
   const [rolloutBatchDelaySecs, setRolloutBatchDelaySecs] =
-    useDispatchHistoryState(
-      "rolloutBatchDelaySecs",
-      "0",
-      preserveHistoryState,
-    );
+    useDispatchHistoryState("rolloutBatchDelaySecs", "0", preserveHistoryState);
   // The target preview is refreshed from the restored selector; caching it
   // would briefly expose stale target resolution after Back.
   const [preview, setPreview] = useState<BulkResolveResponse | null>(null);
@@ -637,24 +655,15 @@ export function JobDispatchPanel({
       null,
       preserveHistoryState,
     );
-  const [lastDispatchContext, setLastDispatchContext] =
-    useDispatchHistoryState<string | null>(
-      "lastDispatchContext",
-      null,
-      preserveHistoryState,
-    );
-  const [lastPayloadHash, setLastPayloadHash] =
-    useDispatchHistoryState<string | null>(
-      "lastPayloadHash",
-      null,
-      preserveHistoryState,
-    );
-  const [lastRolloutJobId, setLastRolloutJobId] =
-    useDispatchHistoryState<string | null>(
-      "lastRolloutJobId",
-      null,
-      preserveHistoryState,
-    );
+  const [lastDispatchContext, setLastDispatchContext] = useDispatchHistoryState<
+    string | null
+  >("lastDispatchContext", null, preserveHistoryState);
+  const [lastPayloadHash, setLastPayloadHash] = useDispatchHistoryState<
+    string | null
+  >("lastPayloadHash", null, preserveHistoryState);
+  const [lastRolloutJobId, setLastRolloutJobId] = useDispatchHistoryState<
+    string | null
+  >("lastRolloutJobId", null, preserveHistoryState);
   const [transferProgress, setTransferProgress] =
     useDispatchHistoryState<VisibleTransferProgress | null>(
       "transferProgress",
@@ -664,15 +673,21 @@ export function JobDispatchPanel({
   const [actionError, setActionError] = useState<string | null>(null);
   const [dispatchPromptOpen, setDispatchPromptOpen] = useState(false);
   const [lockPromptOpen, setLockPromptOpen] = useState(false);
-  const [dispatchConfirmation, setDispatchConfirmation] = useState<DispatchConfirmationSnapshot | null>(null);
+  const [lockPending, setLockPending] = useState(false);
+  const [dispatchConfirmation, setDispatchConfirmation] =
+    useState<DispatchConfirmationSnapshot | null>(null);
   const [dispatchReviewIntent, setDispatchReviewIntent] = useState<
     "dispatch" | "approval"
   >("dispatch");
   const [approvalRequestReason, setApprovalRequestReason] = useState("");
-  const [selectorVerification, setSelectorVerification] = useState<"checking" | "invalid" | "neutral" | "valid">("neutral");
-  const [selectorVerificationMessage, setSelectorVerificationMessage] = useState<string | null>(null);
-  const [selectorVerificationError, setSelectorVerificationError] =
+  const [selectorVerification, setSelectorVerification] = useState<
+    "checking" | "invalid" | "neutral" | "valid"
+  >("neutral");
+  const [selectorVerificationMessage, setSelectorVerificationMessage] =
     useState<string | null>(null);
+  const [selectorVerificationError, setSelectorVerificationError] = useState<
+    string | null
+  >(null);
   const [pending, setPending] = useState(false);
   const [reviewStatus, setReviewStatus] = useState<string | null>(null);
   const {
@@ -680,7 +695,8 @@ export function JobDispatchPanel({
     invalidateReviewGeneration,
     isReviewGenerationCurrent,
   } = useReviewGenerationGuard();
-  const normalizedSelectorExpression = normalizedDispatchSelector(selectorExpression);
+  const normalizedSelectorExpression =
+    normalizedDispatchSelector(selectorExpression);
   const selectorParse = useMemo(
     () => parseSearchExpression(normalizedSelectorExpression),
     [normalizedSelectorExpression],
@@ -732,14 +748,21 @@ export function JobDispatchPanel({
     }
     setModeState(fixedMode ?? dispatchPreset.mode);
     if (dispatchPreset.selectorExpression !== undefined) {
-      setSelectorExpression(visibleDispatchSelector(dispatchPreset.selectorExpression));
+      setSelectorExpression(
+        visibleDispatchSelector(dispatchPreset.selectorExpression),
+      );
     }
     if (dispatchPreset.commandTemplateId) {
       applyCommandTemplate(dispatchPreset.commandTemplateId);
     }
     if (dispatchPreset.maxTimeoutSecs !== undefined) {
-      setMaxTimeoutSecs(String(clampJobMaxTimeoutSecs(dispatchPreset.maxTimeoutSecs)));
-    } else if (dispatchPreset.mode === "agent_update_activate" || dispatchPreset.mode === "agent_update_rollback") {
+      setMaxTimeoutSecs(
+        String(clampJobMaxTimeoutSecs(dispatchPreset.maxTimeoutSecs)),
+      );
+    } else if (
+      dispatchPreset.mode === "agent_update_activate" ||
+      dispatchPreset.mode === "agent_update_rollback"
+    ) {
       setMaxTimeoutSecs("60");
     } else if (dispatchPreset.mode.startsWith("agent_update")) {
       setMaxTimeoutSecs("300");
@@ -749,10 +772,14 @@ export function JobDispatchPanel({
       setUpdateSha256Hex(dispatchPreset.updateSha256Hex ?? "");
     }
     if (dispatchPreset.mode === "agent_update_check") {
-      setUpdateCheckVersionUrl(dispatchPreset.updateCheckVersionUrl ?? DEFAULT_UPDATE_VERSION_URL);
+      setUpdateCheckVersionUrl(
+        dispatchPreset.updateCheckVersionUrl ?? DEFAULT_UPDATE_VERSION_URL,
+      );
     }
     if (dispatchPreset.mode === "agent_update_activate") {
-      setUpdateActivationSha256Hex(dispatchPreset.updateActivationSha256Hex ?? "");
+      setUpdateActivationSha256Hex(
+        dispatchPreset.updateActivationSha256Hex ?? "",
+      );
       setUpdateRestartAgent(dispatchPreset.updateRestartAgent ?? true);
     }
     if (dispatchPreset.mode === "agent_update_rollback") {
@@ -766,38 +793,68 @@ export function JobDispatchPanel({
       setSupervisorEnv(dispatchPreset.supervisorEnv ?? "");
       setSupervisorLogBytes(dispatchPreset.supervisorLogBytes ?? 65536);
       if (dispatchPreset.maxTimeoutSecs === undefined) {
-        setMaxTimeoutSecs(dispatchPreset.supervisorAction === "logs" ? "30" : "60");
+        setMaxTimeoutSecs(
+          dispatchPreset.supervisorAction === "logs" ? "30" : "60",
+        );
       }
     }
     if (dispatchPreset.mode === "file_transfer_upload") {
       setFilePushPath(dispatchPreset.filePushPath ?? "");
       setFilePushMode(dispatchPreset.filePushMode ?? "0644");
       setFilePushSource(dispatchPreset.fileTransferUploadFile ?? null);
-      setFileTransferUploadSourceKind(dispatchPreset.fileTransferUploadSourceKind ?? "local-file");
-      setFileTransferSourceArtifactId(dispatchPreset.fileTransferSourceArtifactId ?? "");
+      setFileTransferUploadSourceKind(
+        dispatchPreset.fileTransferUploadSourceKind ?? "local-file",
+      );
+      setFileTransferSourceArtifactId(
+        dispatchPreset.fileTransferSourceArtifactId ?? "",
+      );
       setFileTransferSessionId(dispatchPreset.fileTransferSessionId ?? "");
       setFileTransferResumeToken(dispatchPreset.fileTransferResumeToken ?? "");
       setFileTransferChunkSize(
-        clampInteger(dispatchPreset.fileTransferChunkSize ?? 65536, 1, FILE_TRANSFER_CHUNK_BYTES),
+        clampInteger(
+          dispatchPreset.fileTransferChunkSize ?? 65536,
+          1,
+          FILE_TRANSFER_CHUNK_BYTES,
+        ),
       );
       setFileTransferRateLimit(
-        clampInteger(dispatchPreset.fileTransferRateLimit ?? 0, 0, MAX_FILE_TRANSFER_RATE_LIMIT_KBPS),
+        clampInteger(
+          dispatchPreset.fileTransferRateLimit ?? 0,
+          0,
+          MAX_FILE_TRANSFER_RATE_LIMIT_KBPS,
+        ),
       );
-      setFileTransferExistingPolicy(dispatchPreset.fileTransferExistingPolicy ?? "skip");
-      setFileTransferMultiTargetPolicy(dispatchPreset.fileTransferMultiTargetPolicy ?? "same-offset");
+      setFileTransferExistingPolicy(
+        dispatchPreset.fileTransferExistingPolicy ?? "skip",
+      );
+      setFileTransferMultiTargetPolicy(
+        dispatchPreset.fileTransferMultiTargetPolicy ?? "same-offset",
+      );
     }
     if (dispatchPreset.mode === "file_transfer_download") {
       setFilePath(dispatchPreset.filePath ?? "");
       setFileFollowSymlinks(dispatchPreset.fileFollowSymlinks ?? false);
-      setFileTransferDownloadName(dispatchPreset.fileTransferDownloadName ?? "");
-      setFileTransferDownloadSink(dispatchPreset.fileTransferDownloadSink ?? "browser-download");
+      setFileTransferDownloadName(
+        dispatchPreset.fileTransferDownloadName ?? "",
+      );
+      setFileTransferDownloadSink(
+        dispatchPreset.fileTransferDownloadSink ?? "browser-download",
+      );
       setFileTransferSessionId(dispatchPreset.fileTransferSessionId ?? "");
       setFileTransferResumeToken(dispatchPreset.fileTransferResumeToken ?? "");
       setFileTransferChunkSize(
-        clampInteger(dispatchPreset.fileTransferChunkSize ?? 65536, 1, FILE_TRANSFER_CHUNK_BYTES),
+        clampInteger(
+          dispatchPreset.fileTransferChunkSize ?? 65536,
+          1,
+          FILE_TRANSFER_CHUNK_BYTES,
+        ),
       );
       setFileTransferRateLimit(
-        clampInteger(dispatchPreset.fileTransferRateLimit ?? 0, 0, MAX_FILE_TRANSFER_RATE_LIMIT_KBPS),
+        clampInteger(
+          dispatchPreset.fileTransferRateLimit ?? 0,
+          0,
+          MAX_FILE_TRANSFER_RATE_LIMIT_KBPS,
+        ),
       );
     }
     setPreview(null);
@@ -819,6 +876,7 @@ export function JobDispatchPanel({
   useEffect(() => {
     setTemplateSaveSnapshot(null);
     setDeleteTemplateSnapshot(null);
+    setTemplateError(null);
     setTemplateConfirmation((current) =>
       current === "save" || current === "save-copy" || current === "delete"
         ? null
@@ -832,6 +890,7 @@ export function JobDispatchPanel({
     setDispatchConfirmation(null);
     setReviewStatus(null);
     setTemplateSaveSnapshot(null);
+    setTemplateError(null);
     setTemplateConfirmation((current) =>
       current === "save" || current === "save-copy" ? null : current,
     );
@@ -897,6 +956,18 @@ export function JobDispatchPanel({
   ]);
 
   useEffect(() => {
+    if (!templateError) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (templateFeedbackRef.current) {
+        scrollIntoViewWithMotion(templateFeedbackRef.current, {
+          block: "nearest",
+        });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [templateError]);
+
+  useEffect(() => {
     if (selectorParse.error) {
       setSelectorVerification("invalid");
       setSelectorVerificationMessage("Invalid");
@@ -918,7 +989,9 @@ export function JobDispatchPanel({
           }
           setPreview(response);
           setSelectorVerification("valid");
-          setSelectorVerificationMessage(`${response.target_count}/${agents.length}`);
+          setSelectorVerificationMessage(
+            `${response.target_count}/${agents.length}`,
+          );
           setSelectorVerificationError(null);
         })
         .catch((error) => {
@@ -941,7 +1014,13 @@ export function JobDispatchPanel({
       disposed = true;
       window.clearTimeout(timeout);
     };
-  }, [agents.length, mode, normalizedSelectorExpression, onResolveTargets, selectorParse.error]);
+  }, [
+    agents.length,
+    mode,
+    normalizedSelectorExpression,
+    onResolveTargets,
+    selectorParse.error,
+  ]);
 
   const parsedArgv = useMemo(() => {
     try {
@@ -955,9 +1034,12 @@ export function JobDispatchPanel({
   const filePushReady = filePushPath.startsWith("/") && !!filePushSource;
   const fileTransferUploadReady =
     filePushPath.startsWith("/") &&
-    (fileTransferUploadSourceKind === "local-file" ? !!filePushSource : !!fileTransferSourceArtifactId);
+    (fileTransferUploadSourceKind === "local-file"
+      ? !!filePushSource
+      : !!fileTransferSourceArtifactId);
   const fileTransferDownloadReady = filePath.startsWith("/");
-  const backupReady = backupIncludeConfig || parseBackupPaths(backupPathsText).length > 0;
+  const backupReady =
+    backupIncludeConfig || parseBackupPaths(backupPathsText).length > 0;
   const operationReady =
     mode === "shell"
       ? parsedArgv.length > 0
@@ -974,22 +1056,33 @@ export function JobDispatchPanel({
                 : mode === "file_transfer_download"
                   ? fileTransferDownloadReady
                   : mode === "agent_update"
-                        ? updateArtifactUrl.startsWith("https://") &&
-                          /^[0-9a-fA-F]{64}$/.test(updateSha256Hex.trim())
-                        : mode === "agent_update_check"
-                          ? updateCheckVersionUrl.trim().length > 0
-                          : mode === "agent_update_activate"
-                            ? /^[0-9a-fA-F]{64}$/.test(updateActivationSha256Hex.trim())
-                            : mode === "agent_update_rollback"
-                              ? (!updateRollbackSha256Hex.trim() ||
-                                  /^[0-9a-fA-F]{64}$/.test(updateRollbackSha256Hex.trim()))
-                              : mode === "process_supervisor"
-                                ? supervisorReady(supervisorAction, supervisorName, supervisorArgv)
-                                : mode === "backup"
-                                  ? backupReady
-                                  : true;
+                    ? updateArtifactUrl.startsWith("https://") &&
+                      /^[0-9a-fA-F]{64}$/.test(updateSha256Hex.trim())
+                    : mode === "agent_update_check"
+                      ? updateCheckVersionUrl.trim().length > 0
+                      : mode === "agent_update_activate"
+                        ? /^[0-9a-fA-F]{64}$/.test(
+                            updateActivationSha256Hex.trim(),
+                          )
+                        : mode === "agent_update_rollback"
+                          ? !updateRollbackSha256Hex.trim() ||
+                            /^[0-9a-fA-F]{64}$/.test(
+                              updateRollbackSha256Hex.trim(),
+                            )
+                          : mode === "process_supervisor"
+                            ? supervisorReady(
+                                supervisorAction,
+                                supervisorName,
+                                supervisorArgv,
+                              )
+                            : mode === "backup"
+                              ? backupReady
+                              : true;
   const expressionTargets = useMemo(
-    () => (selectorParse.error ? [] : agentsMatchingExpression(agents, normalizedSelectorExpression)),
+    () =>
+      selectorParse.error
+        ? []
+        : agentsMatchingExpression(agents, normalizedSelectorExpression),
     [agents, normalizedSelectorExpression, selectorParse.error],
   );
   const impactMode = targetImpactModeForDispatch(mode);
@@ -1000,9 +1093,9 @@ export function JobDispatchPanel({
   );
   const approvalRequestSupported = Boolean(
     !terminalSurface &&
-      onCreateJobApproval &&
-      mode !== "file_transfer_upload" &&
-      mode !== "file_transfer_download",
+    onCreateJobApproval &&
+    mode !== "file_transfer_upload" &&
+    mode !== "file_transfer_download",
   );
   const impactTargets = preview?.targets ?? expressionTargets;
   const rolloutUnavailableReason = rolloutUnsupportedReason(
@@ -1010,18 +1103,25 @@ export function JobDispatchPanel({
     fixedMode,
     mode,
   );
-  const activeDispatchConfirmation = dispatchPromptOpen ? dispatchConfirmation : null;
+  const activeDispatchConfirmation = dispatchPromptOpen
+    ? dispatchConfirmation
+    : null;
   const dispatchConfirmationSelector =
-    activeDispatchConfirmation?.selectorExpression ?? normalizedSelectorExpression;
+    activeDispatchConfirmation?.selectorExpression ??
+    normalizedSelectorExpression;
   const dispatchConfirmationTargets =
-    activeDispatchConfirmation?.targets ?? preview?.targets ?? expressionTargets;
+    activeDispatchConfirmation?.targets ??
+    preview?.targets ??
+    expressionTargets;
   const dispatchConfirmationMaxTimeoutSecs =
-    activeDispatchConfirmation?.maxTimeoutSecs ?? effectiveJobMaxTimeoutSecs(maxTimeoutSecs);
+    activeDispatchConfirmation?.maxTimeoutSecs ??
+    effectiveJobMaxTimeoutSecs(maxTimeoutSecs);
   const dispatchConfirmationForceUnprivileged =
     activeDispatchConfirmation?.forceUnprivileged ??
     (supportsForceUnprivileged ? forceUnprivileged : false);
   const dispatchConfirmationOperationLabel =
-    activeDispatchConfirmation?.operationLabel ?? operationCommandLabel(mode, commandText);
+    activeDispatchConfirmation?.operationLabel ??
+    operationCommandLabel(mode, commandText);
   const dispatchConfirmationTargetNames = dispatchTargetIdentitySummary(
     dispatchConfirmationTargets,
   );
@@ -1041,7 +1141,9 @@ export function JobDispatchPanel({
           activeDispatchConfirmation.operation?.type === "file_pull"
         ? activeDispatchConfirmation.operation.follow_symlinks
         : null;
-  const selectedTemplate = commandTemplates.find((template) => template.id === selectedTemplateId) ?? null;
+  const selectedTemplate =
+    commandTemplates.find((template) => template.id === selectedTemplateId) ??
+    null;
   const builtinTemplates = useMemo(
     () => commandTemplates.filter((template) => template.built_in),
     [commandTemplates],
@@ -1062,7 +1164,9 @@ export function JobDispatchPanel({
     },
     ...transferReviewItems(activeDispatchConfirmation),
     ...operationReviewItems(
-      activeDispatchConfirmation?.kind === "job" ? activeDispatchConfirmation.operation : undefined,
+      activeDispatchConfirmation?.kind === "job"
+        ? activeDispatchConfirmation.operation
+        : undefined,
     ),
     ...rolloutReviewItems(activeDispatchConfirmation),
     ...(dispatchConfirmationFollowSymlinks === null
@@ -1070,7 +1174,9 @@ export function JobDispatchPanel({
       : [
           {
             label: "Symlinks",
-            value: dispatchConfirmationFollowSymlinks ? "Follow targets" : "Do not follow",
+            value: dispatchConfirmationFollowSymlinks
+              ? "Follow targets"
+              : "Do not follow",
           },
         ]),
     { label: "Selector", value: dispatchConfirmationSelector || "-" },
@@ -1104,10 +1210,19 @@ export function JobDispatchPanel({
     actionError || selectorVerificationError ? "danger" : "progress";
 
   async function lockPrivilege() {
-    setLockPromptOpen(false);
-    await setPrivilegeMaterial(null);
+    setLockPending(true);
     setActionError(null);
-    clearDispatchReview();
+    try {
+      await setPrivilegeMaterial(null);
+      setLockPromptOpen(false);
+      clearDispatchReview();
+    } catch (error) {
+      setActionError(
+        error instanceof Error ? error.message : "Privilege lock failed",
+      );
+    } finally {
+      setLockPending(false);
+    }
   }
 
   function clearExecutionResults() {
@@ -1168,7 +1283,9 @@ export function JobDispatchPanel({
         if (!resolved.targets.length) {
           throw new Error("Target confirmation resolved no VPSs");
         }
-        const snapshot = await buildDispatchConfirmationSnapshot(resolved.targets);
+        const snapshot = await buildDispatchConfirmationSnapshot(
+          resolved.targets,
+        );
         if (!isReviewGenerationCurrent(reviewGeneration)) {
           return;
         }
@@ -1185,14 +1302,19 @@ export function JobDispatchPanel({
     }
   }
 
-  async function buildDispatchConfirmationSnapshot(targets: AgentView[]): Promise<DispatchConfirmationSnapshot> {
+  async function buildDispatchConfirmationSnapshot(
+    targets: AgentView[],
+  ): Promise<DispatchConfirmationSnapshot> {
     if (!privilegeMaterial) {
       throw new Error("Privilege unlock is locked");
     }
     const selector = normalizedSelectorExpression;
     const maxTimeoutOverride = parseOptionalJobMaxTimeoutSecs(maxTimeoutSecs);
-    const maxTimeout = maxTimeoutOverride ?? effectiveJobMaxTimeoutSecs(maxTimeoutSecs);
-    const frozenForceUnprivileged = supportsForceUnprivileged ? forceUnprivileged : false;
+    const maxTimeout =
+      maxTimeoutOverride ?? effectiveJobMaxTimeoutSecs(maxTimeoutSecs);
+    const frozenForceUnprivileged = supportsForceUnprivileged
+      ? forceUnprivileged
+      : false;
     const operationLabel = operationCommandLabel(mode, commandText);
     const rollout = reviewedRolloutPolicy(targets);
     const base = {
@@ -1251,7 +1373,8 @@ export function JobDispatchPanel({
         sessionId: fileTransferSessionId,
       };
     }
-    const filePushPayload = mode === "file_push" ? await readFilePushPayload(filePushSource) : null;
+    const filePushPayload =
+      mode === "file_push" ? await readFilePushPayload(filePushSource) : null;
     const operation = buildOperation(
       mode,
       commandText,
@@ -1315,7 +1438,8 @@ export function JobDispatchPanel({
     });
     return {
       ...base,
-      argv: mode === "shell" && operation.type === "shell" ? operation.argv : [],
+      argv:
+        mode === "shell" && operation.type === "shell" ? operation.argv : [],
       commandType,
       destructive: operationNeedsConfirmation,
       jobId: crypto.randomUUID(),
@@ -1327,7 +1451,9 @@ export function JobDispatchPanel({
     };
   }
 
-  function reviewedRolloutPolicy(targets: AgentView[]): JobRolloutPolicy | null {
+  function reviewedRolloutPolicy(
+    targets: AgentView[],
+  ): JobRolloutPolicy | null {
     if (!rolloutEnabled) return null;
     if (rolloutUnavailableReason) {
       throw new Error(rolloutUnavailableReason);
@@ -1337,7 +1463,9 @@ export function JobDispatchPanel({
     }
     const canary = rolloutCanaryClientId.trim();
     if (!canary || !targets.some((target) => target.id === canary)) {
-      throw new Error("Select one canary from the current resolved target scope.");
+      throw new Error(
+        "Select one canary from the current resolved target scope.",
+      );
     }
     return {
       batch_delay_secs: parseRolloutInteger(
@@ -1346,12 +1474,7 @@ export function JobDispatchPanel({
         0,
         86_400,
       ),
-      batch_size: parseRolloutInteger(
-        rolloutBatchSize,
-        "Batch size",
-        1,
-        100,
-      ),
+      batch_size: parseRolloutInteger(rolloutBatchSize, "Batch size", 1, 100),
       canary_client_ids: [canary],
       max_failures: parseRolloutInteger(
         rolloutMaxFailures,
@@ -1365,19 +1488,27 @@ export function JobDispatchPanel({
 
   function applyCommandTemplate(templateId: string) {
     setSelectedTemplateId(templateId);
-    const template = commandTemplates.find((candidate) => candidate.id === templateId);
+    const template = commandTemplates.find(
+      (candidate) => candidate.id === templateId,
+    );
     if (!template) {
       return;
     }
     if (!terminalSurface && template.operation.type === "terminal_open") {
       setSelectedTemplateId("");
-      setActionError("Open terminal sessions from Remote / Terminal. Jobs / Dispatch stays focused on generic command, file, backup, update, session, and process dispatch.");
+      setActionError(
+        "Open terminal sessions from Remote / Terminal. Jobs / Dispatch stays focused on generic command, file, backup, update, session, and process dispatch.",
+      );
       return;
     }
     applyTemplateOperation(template.operation);
     applyTemplateDefaults(template.defaults);
-    setTemplateName(template.built_in ? `${template.name} copy` : template.name);
-    setTemplateScopeKind(template.scope_kind as "global" | "provider" | "tag" | "client");
+    setTemplateName(
+      template.built_in ? `${template.name} copy` : template.name,
+    );
+    setTemplateScopeKind(
+      template.scope_kind as "global" | "provider" | "tag" | "client",
+    );
     setTemplateScopeValue(template.scope_value ?? "");
     setTemplateConfirmation(null);
     setActionError(null);
@@ -1388,14 +1519,18 @@ export function JobDispatchPanel({
       return;
     }
     if (typeof defaults.max_timeout_secs === "number") {
-      setMaxTimeoutSecs(String(clampJobMaxTimeoutSecs(defaults.max_timeout_secs)));
+      setMaxTimeoutSecs(
+        String(clampJobMaxTimeoutSecs(defaults.max_timeout_secs)),
+      );
     }
     if (typeof defaults.force_unprivileged === "boolean") {
       setForceUnprivileged(defaults.force_unprivileged);
     }
   }
 
-  function applyTemplateOperation(operation: CommandTemplateRecord["operation"]) {
+  function applyTemplateOperation(
+    operation: CommandTemplateRecord["operation"],
+  ) {
     switch (operation.type) {
       case "shell":
         setMode("shell");
@@ -1444,7 +1579,9 @@ export function JobDispatchPanel({
         return;
       case "agent_update_check":
         setMode("agent_update_check");
-        setUpdateCheckVersionUrl(operation.version_url ?? DEFAULT_UPDATE_VERSION_URL);
+        setUpdateCheckVersionUrl(
+          operation.version_url ?? DEFAULT_UPDATE_VERSION_URL,
+        );
         return;
       case "agent_update_activate":
         setMode("agent_update_activate");
@@ -1456,7 +1593,9 @@ export function JobDispatchPanel({
         setUpdateRollbackSha256Hex(operation.rollback_sha256_hex ?? "");
         return;
       default:
-        setActionError(`Template operation ${operation.type} is not editable in this composer yet`);
+        setActionError(
+          `Template operation ${operation.type} is not editable in this composer yet`,
+        );
     }
   }
 
@@ -1465,7 +1604,8 @@ export function JobDispatchPanel({
     if (!name) {
       throw new Error("Template name is required");
     }
-    const scopeValue = templateScopeKind === "global" ? null : templateScopeValue.trim();
+    const scopeValue =
+      templateScopeKind === "global" ? null : templateScopeValue.trim();
     if (templateScopeKind !== "global" && !scopeValue) {
       throw new Error("Template scope value is required");
     }
@@ -1518,15 +1658,19 @@ export function JobDispatchPanel({
       defaults: {
         confirmed: operationNeedsConfirmation,
         destructive: operationNeedsConfirmation,
-        force_unprivileged: supportsForceUnprivileged ? forceUnprivileged : false,
-        ...(maxTimeoutOverride !== undefined ? { max_timeout_secs: maxTimeoutOverride } : {}),
+        force_unprivileged: supportsForceUnprivileged
+          ? forceUnprivileged
+          : false,
+        ...(maxTimeoutOverride !== undefined
+          ? { max_timeout_secs: maxTimeoutOverride }
+          : {}),
       },
       confirmed: true,
     };
   }
 
   async function reviewCommandTemplateSave() {
-    await runPanelAction(setTemplatePending, setActionError, async () => {
+    await runPanelAction(setTemplatePending, setTemplateError, async () => {
       const request = commandTemplateRequest();
       setTemplateSaveSnapshot({
         request,
@@ -1534,21 +1678,25 @@ export function JobDispatchPanel({
           ? "Save built-in as user template"
           : "Save command template",
       });
-      setTemplateConfirmation(selectedTemplate?.built_in ? "save-copy" : "save");
+      setTemplateConfirmation(
+        selectedTemplate?.built_in ? "save-copy" : "save",
+      );
     });
   }
 
   async function saveCommandTemplate() {
     const snapshot = templateSaveSnapshot;
     if (!snapshot) {
-      setActionError("Review template before saving");
+      setTemplateError("Review template before saving");
       return;
     }
-    await runPanelAction(setTemplatePending, setActionError, async () => {
+    await runPanelAction(setTemplatePending, setTemplateError, async () => {
       const saved = await onUpsertCommandTemplate(snapshot.request);
       setSelectedTemplateId(saved.id);
       setTemplateName(saved.name);
-      setTemplateScopeKind(saved.scope_kind as "global" | "provider" | "tag" | "client");
+      setTemplateScopeKind(
+        saved.scope_kind as "global" | "provider" | "tag" | "client",
+      );
       setTemplateScopeValue(saved.scope_value ?? "");
       setTemplateConfirmation(null);
       setTemplateSaveSnapshot(null);
@@ -1559,7 +1707,7 @@ export function JobDispatchPanel({
     if (!deleteTemplateSnapshot || deleteTemplateSnapshot.built_in) {
       return;
     }
-    await runPanelAction(setTemplatePending, setActionError, async () => {
+    await runPanelAction(setTemplatePending, setTemplateError, async () => {
       await onDeleteCommandTemplate(deleteTemplateSnapshot.id, {
         confirmed: true,
         reviewed_name: deleteTemplateSnapshot.name,
@@ -1571,7 +1719,6 @@ export function JobDispatchPanel({
   }
 
   async function dispatchJobNow() {
-    setDispatchPromptOpen(false);
     clearExecutionResults();
     await runPanelAction(setPending, setActionError, async () => {
       if (!privilegeMaterial) {
@@ -1579,7 +1726,9 @@ export function JobDispatchPanel({
       }
       const confirmed = dispatchConfirmation;
       if (!confirmed?.targets.length) {
-        throw new Error("Confirmed target snapshot is missing; review the targets again");
+        throw new Error(
+          "Confirmed target snapshot is missing; review the targets again",
+        );
       }
       setLastDispatchContext(confirmed.operationLabel);
       if (confirmed.kind === "transfer_upload") {
@@ -1609,7 +1758,12 @@ export function JobDispatchPanel({
           },
         });
         setLastPayloadHash(null);
-        await trackDispatchProgress(commitJob, confirmed.targets, confirmed.maxTimeoutSecs);
+        await trackDispatchProgress(
+          commitJob,
+          confirmed.targets,
+          confirmed.maxTimeoutSecs,
+        );
+        setDispatchPromptOpen(false);
         return;
       }
       if (confirmed.kind === "transfer_download") {
@@ -1639,7 +1793,12 @@ export function JobDispatchPanel({
           },
         });
         setLastPayloadHash(null);
-        await trackDispatchProgress(startJob, confirmed.targets, confirmed.maxTimeoutSecs);
+        await trackDispatchProgress(
+          startJob,
+          confirmed.targets,
+          confirmed.maxTimeoutSecs,
+        );
+        setDispatchPromptOpen(false);
         return;
       }
       const nextJob = await onCreateJob(
@@ -1668,11 +1827,11 @@ export function JobDispatchPanel({
           confirmed.maxTimeoutSecs,
         );
       }
+      setDispatchPromptOpen(false);
     });
   }
 
   async function requestJobApproval() {
-    setDispatchPromptOpen(false);
     clearExecutionResults();
     await runPanelAction(setPending, setActionError, async () => {
       if (!onCreateJobApproval) {
@@ -1688,23 +1847,32 @@ export function JobDispatchPanel({
         job: jobRequestFromConfirmation(confirmed, true),
         reason: approvalRequestReason.trim() || null,
       });
+      setDispatchPromptOpen(false);
       setDispatchConfirmation(null);
       setApprovalRequestReason("");
       onApprovalRequested?.(approval);
     });
   }
 
-  async function trackDispatchProgress(job: CreateJobResponse, targets: AgentView[], jobMaxTimeoutSecs?: number) {
+  async function trackDispatchProgress(
+    job: CreateJobResponse,
+    targets: AgentView[],
+    jobMaxTimeoutSecs?: number,
+  ) {
     const targetCount = createJobTargetCount(job);
-    const boundedJobTimeoutSecs = clampJobMaxTimeoutSecs(jobMaxTimeoutSecs ?? effectiveJobMaxTimeoutSecs(maxTimeoutSecs));
+    const boundedJobTimeoutSecs = clampJobMaxTimeoutSecs(
+      jobMaxTimeoutSecs ?? effectiveJobMaxTimeoutSecs(maxTimeoutSecs),
+    );
     setLastDispatchProgress(null);
-    setDispatchProgress(buildBulkJobProgress({
-      jobId: job.job_id,
-      targetCount,
-      targetRecords: [],
-      targets,
-      maxTimeoutSecs: boundedJobTimeoutSecs,
-    }));
+    setDispatchProgress(
+      buildBulkJobProgress({
+        jobId: job.job_id,
+        targetCount,
+        targetRecords: [],
+        targets,
+        maxTimeoutSecs: boundedJobTimeoutSecs,
+      }),
+    );
     try {
       const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
         onLoadOutputs,
@@ -1726,10 +1894,14 @@ export function JobDispatchPanel({
   }
 
   return (
-    <section className={`fleetPanel commandComposer ${terminalSurface ? "terminalCommandComposer" : ""}`.trim()}>
+    <section
+      className={`fleetPanel commandComposer ${terminalSurface ? "terminalCommandComposer" : ""}`.trim()}
+    >
       <div className="sectionHeader">
         <div>
-          <h2>{terminalSurface ? "Terminal review composer" : "Dispatch command"}</h2>
+          <h2>
+            {terminalSurface ? "Terminal review composer" : "Dispatch command"}
+          </h2>
           <span>{dispatchHeaderStatus}</span>
         </div>
         <div className="headerActionStack">
@@ -1751,13 +1923,18 @@ export function JobDispatchPanel({
       <form className="dispatchForm" onSubmit={submitJob}>
         {!terminalSurface && (
           <>
-            <div className="templateToolbar" aria-label="Command template controls">
+            <div
+              className="templateToolbar"
+              aria-label="Command template controls"
+            >
               <div className="templateToolbarPrimary">
                 <label>
                   <span>Template</span>
                   <select
                     aria-label="Template selector"
-                    onChange={(event) => applyCommandTemplate(event.target.value)}
+                    onChange={(event) =>
+                      applyCommandTemplate(event.target.value)
+                    }
                     value={selectedTemplateId}
                   >
                     <option value="">Select template</option>
@@ -1779,7 +1956,9 @@ export function JobDispatchPanel({
                           {userTemplates.map((template) => (
                             <option key={template.id} value={template.id}>
                               {template.name} · {template.scope_kind}
-                              {template.scope_value ? `:${template.scope_value}` : ""}
+                              {template.scope_value
+                                ? `:${template.scope_value}`
+                                : ""}
                             </option>
                           ))}
                         </optgroup>
@@ -1788,7 +1967,9 @@ export function JobDispatchPanel({
                   </select>
                 </label>
                 <span className="templateToolbarStatus">
-                  {selectedTemplate ? `${selectedTemplate.scope_kind}${selectedTemplate.scope_value ? `:${selectedTemplate.scope_value}` : ""}` : "Optional"}
+                  {selectedTemplate
+                    ? `${selectedTemplate.scope_kind}${selectedTemplate.scope_value ? `:${selectedTemplate.scope_value}` : ""}`
+                    : "Optional"}
                   {commandTemplatesTruncated
                     ? ` · ${commandTemplates.length} templates loaded; older templates may not appear`
                     : ""}
@@ -1860,15 +2041,22 @@ export function JobDispatchPanel({
                       onClick={() => void reviewCommandTemplateSave()}
                       type="button"
                     >
-                      {selectedTemplate?.built_in ? "Review copy" : "Review save"}
+                      {selectedTemplate?.built_in
+                        ? "Review copy"
+                        : "Review save"}
                     </button>
                     <button
                       className="secondaryAction dangerAction"
-                      disabled={templatePending || !selectedTemplate || selectedTemplate.built_in}
+                      disabled={
+                        templatePending ||
+                        !selectedTemplate ||
+                        selectedTemplate.built_in
+                      }
                       onClick={() => {
                         if (!selectedTemplate || selectedTemplate.built_in) {
                           return;
                         }
+                        setTemplateError(null);
                         setDeleteTemplateSnapshot(selectedTemplate);
                         setTemplateConfirmation("delete");
                       }}
@@ -1879,6 +2067,12 @@ export function JobDispatchPanel({
                   </div>
                 </div>
               </details>
+              <ActionFeedback
+                className="localActionFeedback"
+                message={templateError}
+                ref={templateFeedbackRef}
+                tone="danger"
+              />
             </div>
             <ConfirmationPrompt
               confirmLabel={templateSaveSnapshot?.title ?? "Save template"}
@@ -1887,8 +2081,12 @@ export function JobDispatchPanel({
                   ? "Creates a user-defined command template. The built-in template remains unchanged."
                   : "Saves the reviewed command template request exactly as shown."
               }
+              error={templateError}
               items={[
-                { label: "Template", value: templateSaveSnapshot?.request.name ?? "-" },
+                {
+                  label: "Template",
+                  value: templateSaveSnapshot?.request.name ?? "-",
+                },
                 {
                   label: "Scope",
                   value: templateSaveSnapshot
@@ -1918,8 +2116,12 @@ export function JobDispatchPanel({
             <ConfirmationPrompt
               confirmLabel="Delete template"
               detail="Deletes this user-defined command template. Built-in templates cannot be deleted."
+              error={templateError}
               items={[
-                { label: "Template", value: deleteTemplateSnapshot?.name ?? "-" },
+                {
+                  label: "Template",
+                  value: deleteTemplateSnapshot?.name ?? "-",
+                },
                 {
                   label: "Scope",
                   value: deleteTemplateSnapshot
@@ -1934,7 +2136,10 @@ export function JobDispatchPanel({
                 setDeleteTemplateSnapshot(null);
               }}
               onConfirm={() => void deleteSelectedCommandTemplate()}
-              open={templateConfirmation === "delete" && deleteTemplateSnapshot !== null}
+              open={
+                templateConfirmation === "delete" &&
+                deleteTemplateSnapshot !== null
+              }
               pending={templatePending}
               title="Confirm template delete"
               tone="danger"
@@ -1942,27 +2147,45 @@ export function JobDispatchPanel({
           </>
         )}
         {fixedMode ? (
-          <div className="dispatchModeNotice" aria-label="Dispatch mode boundary">
+          <div
+            className="dispatchModeNotice"
+            aria-label="Dispatch mode boundary"
+          >
             <strong>{focusedModeBoundary?.label}</strong>
             <span>{focusedModeBoundary?.detail}</span>
             {onOpenJobsDispatch ? (
-              <button className="secondaryAction compactAction" onClick={onOpenJobsDispatch} type="button">
+              <button
+                className="secondaryAction compactAction"
+                onClick={onOpenJobsDispatch}
+                type="button"
+              >
                 Jobs / Dispatch
               </button>
             ) : null}
           </div>
         ) : (
           <>
-            <div className="dispatchModeNotice" aria-label="Dispatch mode boundary">
+            <div
+              className="dispatchModeNotice"
+              aria-label="Dispatch mode boundary"
+            >
               <strong>Advanced dispatch</strong>
               <span>Terminal open and resume start in Remote / Terminal.</span>
               {onOpenRemoteTerminal ? (
-                <button className="secondaryAction compactAction" onClick={onOpenRemoteTerminal} type="button">
+                <button
+                  className="secondaryAction compactAction"
+                  onClick={onOpenRemoteTerminal}
+                  type="button"
+                >
                   Remote terminal
                 </button>
               ) : null}
             </div>
-            <OperationModeTabs includeTerminal={false} mode={mode} onModeChange={setMode} />
+            <OperationModeTabs
+              includeTerminal={false}
+              mode={mode}
+              onModeChange={setMode}
+            />
           </>
         )}
         <JobOperationEditor
@@ -2072,7 +2295,9 @@ export function JobDispatchPanel({
           verificationMessage={selectorVerificationMessage}
         />
         <TargetImpactPreview
-          forceUnprivileged={supportsForceUnprivileged ? forceUnprivileged : false}
+          forceUnprivileged={
+            supportsForceUnprivileged ? forceUnprivileged : false
+          }
           mode={impactMode}
           targets={impactTargets}
         />
@@ -2084,7 +2309,9 @@ export function JobDispatchPanel({
                 <input
                   aria-label="Force unprivileged job best effort"
                   checked={forceUnprivileged}
-                  onChange={(event) => setForceUnprivileged(event.target.checked)}
+                  onChange={(event) =>
+                    setForceUnprivileged(event.target.checked)
+                  }
                   type="checkbox"
                 />
                 <span>Force unprivileged best effort</span>
@@ -2096,11 +2323,19 @@ export function JobDispatchPanel({
             />
             {!terminalSurface && !fixedMode && (
               <div className="dispatchOptionNote rolloutControls">
-                <label className="checkLine" title={rolloutUnavailableReason ?? "Release one reviewed canary before bounded fleet batches"}>
+                <label
+                  className="checkLine"
+                  title={
+                    rolloutUnavailableReason ??
+                    "Release one reviewed canary before bounded fleet batches"
+                  }
+                >
                   <input
                     checked={rolloutEnabled}
                     disabled={Boolean(rolloutUnavailableReason)}
-                    onChange={(event) => setRolloutEnabled(event.target.checked)}
+                    onChange={(event) =>
+                      setRolloutEnabled(event.target.checked)
+                    }
                     type="checkbox"
                   />
                   <span>Staged rollout</span>
@@ -2187,7 +2422,8 @@ export function JobDispatchPanel({
               : "Confirm job dispatch"
           }
           tone={
-            dispatchReviewIntent === "dispatch" && dispatchConfirmationDestructive
+            dispatchReviewIntent === "dispatch" &&
+            dispatchConfirmationDestructive
               ? "danger"
               : "normal"
           }
@@ -2212,7 +2448,11 @@ export function JobDispatchPanel({
 
         {!dispatchPromptOpen && visibleDispatchProgress && (
           <ExecutionResultPanel
-            context={lastDispatchContext ? `Dispatch: ${lastDispatchContext}` : undefined}
+            context={
+              lastDispatchContext
+                ? `Dispatch: ${lastDispatchContext}`
+                : undefined
+            }
             loading={dispatchProgress !== null}
             onClearResults={clearExecutionResults}
             onOpenJobDetails={onOpenJobDetails}
@@ -2267,7 +2507,11 @@ export function JobDispatchPanel({
         {transferProgress && (
           <div
             className="transferProgress"
-            aria-label={transferProgress.event === "downloaded" ? "Resumable download progress" : "Resumable upload progress"}
+            aria-label={
+              transferProgress.event === "downloaded"
+                ? "Resumable download progress"
+                : "Resumable upload progress"
+            }
           >
             <strong>
               {transferProgress.event === "downloaded"
@@ -2277,9 +2521,14 @@ export function JobDispatchPanel({
                   : "Transfer in progress"}
             </strong>
             <span>
-              {transferProgress.nextOffset}/{transferProgress.sizeBytes} bytes · session {shortId(transferProgress.sessionId)}
-              {"multiTargetPolicy" in transferProgress ? ` · ${transferProgress.multiTargetPolicy}` : ""}
-              {"downloadSink" in transferProgress ? ` · ${transferProgress.downloadSink}` : ""}
+              {transferProgress.nextOffset}/{transferProgress.sizeBytes} bytes ·
+              session {shortId(transferProgress.sessionId)}
+              {"multiTargetPolicy" in transferProgress
+                ? ` · ${transferProgress.multiTargetPolicy}`
+                : ""}
+              {"downloadSink" in transferProgress
+                ? ` · ${transferProgress.downloadSink}`
+                : ""}
             </span>
           </div>
         )}
@@ -2294,9 +2543,11 @@ export function JobDispatchPanel({
         />
       )}
       <PrivilegeLockPrompt
+        error={actionError}
         onCancel={() => setLockPromptOpen(false)}
         onConfirm={() => void lockPrivilege()}
         open={lockPromptOpen}
+        pending={lockPending}
       />
     </section>
   );
@@ -2350,7 +2601,8 @@ function operationReviewItems(
     return [
       {
         label: "Rollback artifact",
-        value: operation.rollback_sha256_hex ?? "Agent-managed previous artifact",
+        value:
+          operation.rollback_sha256_hex ?? "Agent-managed previous artifact",
       },
     ];
   }
@@ -2358,7 +2610,8 @@ function operationReviewItems(
     return [
       {
         label: "Session",
-        value: "session_id" in operation ? operation.session_id : "Not reported",
+        value:
+          "session_id" in operation ? operation.session_id : "Not reported",
       },
       { label: "Effect", value: jobOperationLabel(operation, operation.type) },
     ];
@@ -2367,7 +2620,9 @@ function operationReviewItems(
     return [];
   }
   const processName =
-    "name" in operation && typeof operation.name === "string" && operation.name.trim()
+    "name" in operation &&
+    typeof operation.name === "string" &&
+    operation.name.trim()
       ? operation.name
       : "All supervised processes";
   const effectByType: Record<string, string> = {
@@ -2628,9 +2883,7 @@ function generatedConfirmationRequiredForMode(
   return JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE[operationType];
 }
 
-function operationUsesDangerTone(
-  operation: JobOperation | undefined,
-): boolean {
+function operationUsesDangerTone(operation: JobOperation | undefined): boolean {
   if (!operation) {
     return false;
   }
@@ -2660,7 +2913,9 @@ function operationUsesDangerTone(
 
 function blurActiveElement() {
   if (document.activeElement instanceof HTMLElement) {
-    document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Escape" }));
+    document.activeElement.dispatchEvent(
+      new KeyboardEvent("keydown", { bubbles: true, key: "Escape" }),
+    );
     document.activeElement.blur();
   }
 }

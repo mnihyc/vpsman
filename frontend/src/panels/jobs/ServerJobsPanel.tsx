@@ -6,11 +6,11 @@ import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
+import { FLEET_DETAIL_LIMIT, formatLowerBoundCount } from "../../constants";
 import {
-  FLEET_DETAIL_LIMIT,
-  formatLowerBoundCount,
-} from "../../constants";
-import { useReviewGenerationGuard, waitForReviewRender } from "../../hooks/useReviewGenerationGuard";
+  useReviewGenerationGuard,
+  waitForReviewRender,
+} from "../../hooks/useReviewGenerationGuard";
 import { serverJobStatusBadgeClass } from "../../jobStatusPresentation";
 import type {
   ArtifactCleanupPreviewRecord,
@@ -19,7 +19,8 @@ import type {
 import { formatTime, shortHash, shortId } from "../../utils";
 
 type ArtifactCleanupDomain = "job_output" | "file_transfer" | "backup_artifact";
-type CleanupArtifactState = "active" | "delete_failed" | "deleting" | "creating" | "any";
+type CleanupArtifactState =
+  "active" | "delete_failed" | "deleting" | "creating" | "any";
 
 const artifactCleanupDomainOptions: Array<{
   description: string;
@@ -27,12 +28,14 @@ const artifactCleanupDomainOptions: Array<{
   value: ArtifactCleanupDomain;
 }> = [
   {
-    description: "Retained command output objects and downloadable job payloads.",
+    description:
+      "Retained command output objects and downloadable job payloads.",
     label: "Job output",
     value: "job_output",
   },
   {
-    description: "Uploaded transfer source files and promoted download handoff objects.",
+    description:
+      "Uploaded transfer source files and promoted download handoff objects.",
     label: "File transfer",
     value: "file_transfer",
   },
@@ -51,6 +54,7 @@ export function ServerJobsPanel({
   onCreateCleanupJob,
   onPreviewCleanup,
   onRefresh,
+  section = "all",
 }: {
   error: string | null;
   jobs: ServerJobRecord[];
@@ -66,9 +70,11 @@ export function ServerJobsPanel({
     domains: string[],
   ) => Promise<ArtifactCleanupPreviewRecord>;
   onRefresh: () => void;
+  section?: "all" | "cleanup" | "hidden" | "jobs";
 }) {
   const [olderThanDays, setOlderThanDays] = useState("30");
-  const [artifactState, setArtifactState] = useState<CleanupArtifactState>("active");
+  const [artifactState, setArtifactState] =
+    useState<CleanupArtifactState>("active");
   const [objectPrefix, setObjectPrefix] = useState("");
   const [advancedExpression, setAdvancedExpression] = useState("");
   const [domains, setDomains] = useState<ArtifactCleanupDomain[]>([
@@ -83,44 +89,59 @@ export function ServerJobsPanel({
   const [error, setError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [previewStatus, setPreviewStatus] = useState<string | null>(null);
-  const [cancelJobSnapshot, setCancelJobSnapshot] = useState<ServerJobRecord | null>(null);
+  const [cancelJobSnapshot, setCancelJobSnapshot] =
+    useState<ServerJobRecord | null>(null);
   const previewResultRef = useRef<HTMLDivElement>(null);
+  const cleanupFeedbackRef = useRef<HTMLDivElement>(null);
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
     isReviewGenerationCurrent,
   } = useReviewGenerationGuard();
   const expression = useMemo(
-    () => buildCleanupExpression(olderThanDays, artifactState, objectPrefix, advancedExpression),
+    () =>
+      buildCleanupExpression(
+        olderThanDays,
+        artifactState,
+        objectPrefix,
+        advancedExpression,
+      ),
     [advancedExpression, artifactState, objectPrefix, olderThanDays],
   );
-  const expressionValid = expression.trim().length > 0 && !expression.startsWith("__invalid__");
+  const expressionValid =
+    expression.trim().length > 0 && !expression.startsWith("__invalid__");
   const jobsTruncated = jobs.length >= FLEET_DETAIL_LIMIT;
   const summary = preview
     ? `${artifactCountLabel(preview.matched_count)} previewed, ${formatBytes(preview.matched_bytes)}`
     : `${formatLowerBoundCount(jobs.length, jobsTruncated)} maintenance jobs${jobsTruncated ? " loaded" : ""}`;
   const cleanupPageFeedbackMessage = error ?? loadError;
   const cleanupActionFeedbackMessage = previewStatus;
+  const cleanupOutcomeMessage =
+    cleanupPageFeedbackMessage ?? cleanupActionFeedbackMessage;
   const previewExpressionMatches = preview?.expression === expression;
-  const previewDomainsMatch = preview ? sameDomains(preview.domains, domains) : false;
-  const previewFresh = Boolean(preview && previewExpressionMatches && previewDomainsMatch);
+  const previewDomainsMatch = preview
+    ? sameDomains(preview.domains, domains)
+    : false;
+  const previewFresh = Boolean(
+    preview && previewExpressionMatches && previewDomainsMatch,
+  );
   const previewEmpty = Boolean(previewFresh && preview?.matched_count === 0);
   const cleanupEvidence = cleanupPreviewEvidence(preview);
   const cleanupCanDelete = Boolean(
     previewFresh &&
-      cleanupEvidence.complete &&
-      preview &&
-      preview.matched_count > 0,
+    cleanupEvidence.complete &&
+    preview &&
+    preview.matched_count > 0,
   );
   const previewReadiness = cleanupCanDelete
     ? "Reviewed preview has deletion evidence and can open one final confirmation."
     : previewEmpty
       ? "Preview is current. No artifacts match the cleanup criteria."
-    : previewFresh
-      ? "Preview is current, but deletion is blocked until age range, retention/protection, and affected-object evidence are available."
-    : preview
-      ? "Preview is stale; rerun Preview before deletion."
-      : "Preview required before deletion.";
+      : previewFresh
+        ? "Preview is current, but deletion is blocked until age range, retention/protection, and affected-object evidence are available."
+        : preview
+          ? "Preview is stale; rerun Preview before deletion."
+          : "Preview required before deletion.";
 
   useEffect(() => {
     if (!preview) {
@@ -135,6 +156,17 @@ export function ServerJobsPanel({
     });
     return () => window.cancelAnimationFrame(frame);
   }, [preview]);
+
+  useEffect(() => {
+    if (!cleanupOutcomeMessage || section === "jobs") return;
+    const frame = window.requestAnimationFrame(() => {
+      cleanupFeedbackRef.current?.scrollIntoView({
+        block: "nearest",
+        inline: "nearest",
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [cleanupOutcomeMessage, section]);
   const serverJobColumns = useMemo<ConsoleDataGridColumn<ServerJobRecord>[]>(
     () => [
       {
@@ -160,7 +192,8 @@ export function ServerJobsPanel({
         ),
         header: "Status",
         id: "status",
-        searchValue: (job) => `${job.status} ${job.error ?? ""} ${job.expression ?? ""}`,
+        searchValue: (job) =>
+          `${job.status} ${job.error ?? ""} ${job.expression ?? ""}`,
         sortValue: (job) => job.status,
       },
       {
@@ -172,7 +205,8 @@ export function ServerJobsPanel({
         ),
         header: "Matched",
         id: "matched",
-        searchValue: (job) => `${job.matched_count} ${formatBytes(job.matched_bytes)}`,
+        searchValue: (job) =>
+          `${job.matched_count} ${formatBytes(job.matched_bytes)}`,
         sortValue: (job) => job.matched_count,
       },
       {
@@ -184,7 +218,8 @@ export function ServerJobsPanel({
         ),
         header: "Deleted",
         id: "deleted",
-        searchValue: (job) => `${job.deleted_count} ${formatBytes(job.deleted_bytes)}`,
+        searchValue: (job) =>
+          `${job.deleted_count} ${formatBytes(job.deleted_bytes)}`,
         sortValue: (job) => job.deleted_count,
       },
       {
@@ -211,7 +246,10 @@ export function ServerJobsPanel({
     setPreviewStatus("Preparing cleanup preview");
     try {
       await waitForReviewRender();
-      const nextPreview = await onPreviewCleanup(frozenExpression, frozenDomains);
+      const nextPreview = await onPreviewCleanup(
+        frozenExpression,
+        frozenDomains,
+      );
       if (!isReviewGenerationCurrent(reviewGeneration)) {
         return;
       }
@@ -240,7 +278,9 @@ export function ServerJobsPanel({
       return;
     }
     if (!cleanupCanDelete) {
-      setError("Deletion is blocked until cleanup preview includes age range, retention/protection, and affected-object evidence.");
+      setError(
+        "Deletion is blocked until cleanup preview includes age range, retention/protection, and affected-object evidence.",
+      );
       return;
     }
     setPending(true);
@@ -301,13 +341,385 @@ export function ServerJobsPanel({
 
   return (
     <div className="jobConsoleStack">
-      <div className="fleetPanel">
-        <div className="sectionHeader">
-          <div>
-            <h2>Artifact cleanup</h2>
-            <span>{summary}</span>
+      {(section === "all" || section === "cleanup") && (
+        <div className="fleetPanel">
+          <div className="sectionHeader">
+            <div>
+              <h2>Artifact cleanup</h2>
+              <span>{summary}</span>
+            </div>
+            <div className="headerActionStack">
+              <button
+                className="secondaryAction"
+                disabled={loading}
+                onClick={onRefresh}
+                type="button"
+              >
+                <RefreshCw size={14} />
+                Refresh
+              </button>
+            </div>
           </div>
-          <div className="headerActionStack">
+          <ActionFeedback
+            className="localActionFeedback"
+            message={cleanupOutcomeMessage}
+            ref={cleanupFeedbackRef}
+            tone={cleanupPageFeedbackMessage ? "danger" : "progress"}
+          />
+          <div className="historyRetentionGrid">
+            <div className="cleanupPreviewContract">
+              <ShieldCheck size={18} />
+              <div>
+                <strong>Preview gate</strong>
+                <span>
+                  Preview shows the current count and size. Delete stays blocked
+                  until the preview also proves object age,
+                  retention/protection, and affected-object evidence.
+                </span>
+              </div>
+            </div>
+            <div className="artifactCleanupDomains">
+              <span>Artifact types</span>
+              <div className="artifactDomainOptions">
+                {artifactCleanupDomainOptions.map((option) => (
+                  <label
+                    className="artifactDomainOption"
+                    key={option.value}
+                    title={option.description}
+                  >
+                    <input
+                      checked={domains.includes(option.value)}
+                      onChange={(event) =>
+                        updateDomain(option.value, event.target.checked)
+                      }
+                      type="checkbox"
+                    />
+                    <span>
+                      <strong>{option.label}</strong>
+                      <small>{option.description}</small>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div className="cleanupCriteriaGrid">
+              <label>
+                <span>Older than</span>
+                <div className="inlineUnitInput">
+                  <input
+                    aria-label="Older than days"
+                    inputMode="numeric"
+                    min={0}
+                    max={3650}
+                    onChange={(event) => {
+                      invalidateReviewGeneration();
+                      setOlderThanDays(event.target.value);
+                      setPreview(null);
+                      setConfirmOpen(false);
+                      setPreviewStatus(null);
+                    }}
+                    type="number"
+                    value={olderThanDays}
+                  />
+                  <small>days</small>
+                </div>
+              </label>
+              <label>
+                <span>State</span>
+                <select
+                  aria-label="Artifact state"
+                  onChange={(event) => {
+                    invalidateReviewGeneration();
+                    setArtifactState(
+                      event.target.value as CleanupArtifactState,
+                    );
+                    setPreview(null);
+                    setConfirmOpen(false);
+                    setPreviewStatus(null);
+                  }}
+                  value={artifactState}
+                >
+                  <option value="active">Active</option>
+                  <option value="delete_failed">Delete failed</option>
+                  <option value="deleting">Deleting</option>
+                  <option value="creating">Creating</option>
+                  <option value="any">Any state</option>
+                </select>
+              </label>
+              <label>
+                <span>Object path/prefix</span>
+                <input
+                  aria-label="Object path prefix"
+                  onChange={(event) => {
+                    invalidateReviewGeneration();
+                    setObjectPrefix(event.target.value);
+                    setPreview(null);
+                    setConfirmOpen(false);
+                    setPreviewStatus(null);
+                  }}
+                  placeholder="Optional object key prefix"
+                  value={objectPrefix}
+                />
+              </label>
+            </div>
+            <details className="cleanupAdvanced">
+              <summary>Advanced expression</summary>
+              <label className="artifactCleanupExpression">
+                <span>Additional filter expression</span>
+                <textarea
+                  aria-label="Expression"
+                  rows={3}
+                  title="Advanced expression filters artifacts inside the selected artifact types. It is combined with the common criteria above."
+                  value={advancedExpression}
+                  onChange={(event) => {
+                    invalidateReviewGeneration();
+                    setAdvancedExpression(event.target.value);
+                    setPreview(null);
+                    setConfirmOpen(false);
+                    setPreviewStatus(null);
+                  }}
+                />
+              </label>
+              <div
+                className="cleanupExpressionPreview"
+                aria-label="Effective cleanup expression"
+              >
+                <span>Effective expression</span>
+                <code>{expressionValid ? expression : "Invalid criteria"}</code>
+              </div>
+            </details>
+            <div
+              aria-label="Cleanup preview result"
+              className="cleanupPreviewFacts"
+              ref={previewResultRef}
+              tabIndex={-1}
+            >
+              <div>
+                <span>Matched</span>
+                <strong>
+                  {preview
+                    ? `${artifactCountLabel(preview.matched_count)} / ${formatBytes(preview.matched_bytes)}`
+                    : "Preview required"}
+                </strong>
+              </div>
+              <div>
+                <span>Age range</span>
+                <strong>{cleanupEvidence.ageRangeLabel}</strong>
+              </div>
+              <div>
+                <span>Retention/protection</span>
+                <strong>{cleanupEvidence.retentionLabel}</strong>
+              </div>
+              <div>
+                <span>Affected objects</span>
+                <strong>{cleanupEvidence.objectsLabel}</strong>
+              </div>
+              <div>
+                <span>Preview snapshot</span>
+                <strong title={preview?.preview_hash}>
+                  {preview ? shortHash(preview.preview_hash) : "Not created"}
+                </strong>
+              </div>
+            </div>
+            {preview?.representative_objects?.length ? (
+              <div
+                className="cleanupObjectPreview"
+                aria-label="Representative cleanup objects"
+              >
+                <div>
+                  <span>Representative objects</span>
+                  <strong>
+                    {preview.representative_objects.length} shown from preview
+                  </strong>
+                </div>
+                <ul>
+                  {preview.representative_objects.slice(0, 5).map((object) => (
+                    <li key={`${object.domain}:${object.object_key}`}>
+                      <span className="cleanupObjectIdentity">
+                        <strong>{displayToken(object.domain)}</strong>
+                        <code title={object.object_key}>
+                          {object.object_key}
+                        </code>
+                      </span>
+                      <span className="cleanupObjectMeta">
+                        {formatBytes(object.size_bytes)} ·{" "}
+                        {object.created_at
+                          ? formatTime(object.created_at)
+                          : "age unavailable"}{" "}
+                        · {displayToken(object.status)}
+                        {object.reference_protected ? " · protected" : ""}
+                      </span>
+                      {object.reason ? (
+                        <span className="cleanupObjectReason">
+                          {object.reason}
+                        </span>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            <div
+              className="cleanupReadinessSummary"
+              aria-label="Artifact cleanup readiness"
+            >
+              <div
+                className={
+                  cleanupCanDelete
+                    ? "ready"
+                    : previewEmpty
+                      ? undefined
+                      : "attention"
+                }
+              >
+                <span>Delete status</span>
+                <strong>
+                  {cleanupCanDelete
+                    ? "Ready for confirmation"
+                    : previewEmpty
+                      ? "Nothing to delete"
+                      : previewFresh
+                        ? "Delete blocked"
+                        : "Preview required"}
+                </strong>
+                <p>{previewReadiness}</p>
+              </div>
+              <div>
+                <span>Scope</span>
+                <strong>
+                  {formatCleanupDomains(preview?.domains ?? domains) ||
+                    "No domains selected"}
+                </strong>
+                <p>
+                  {domains.length} selected artifact types. Type filters and
+                  object-prefix criteria narrow the preview.
+                </p>
+              </div>
+              <div
+                className={preview && !previewEmpty ? "attention" : undefined}
+              >
+                <span>Deletion impact</span>
+                <strong>
+                  {preview
+                    ? `${artifactCountLabel(preview.matched_count)} / ${formatBytes(preview.matched_bytes)}`
+                    : "Unknown until preview"}
+                </strong>
+                <p>
+                  {preview
+                    ? previewEmpty
+                      ? "No artifacts match. Adjust the criteria to inspect a different cleanup scope."
+                      : "Count and size are known, but deletion requires object-level evidence before confirmation."
+                    : "Run Preview to calculate object count and total size."}
+                </p>
+              </div>
+              <div>
+                <span>
+                  {previewEmpty ? "Evidence status" : "Missing evidence"}
+                </span>
+                <strong>
+                  {previewEmpty ? "Not needed" : cleanupEvidence.missingLabel}
+                </strong>
+                <p>
+                  {previewEmpty
+                    ? "Object-level evidence is required only when the preview contains artifacts."
+                    : "The preview must include oldest/newest object age, retained/reference-protected counts, and a representative object list or download."}
+                </p>
+              </div>
+            </div>
+            <div className="retentionActions">
+              <button
+                className="secondaryAction"
+                disabled={pending || !expressionValid || domains.length === 0}
+                onClick={() => void previewCleanup()}
+                title="Build a reviewed cleanup snapshot for the selected domains"
+                type="button"
+              >
+                <ShieldCheck size={16} />
+                Preview
+              </button>
+              <button
+                className="secondaryAction dangerAction"
+                disabled={pending || !cleanupCanDelete}
+                onClick={() => setConfirmOpen(true)}
+                title={
+                  cleanupCanDelete
+                    ? "Delete artifacts using the reviewed expression, artifact types, preview hash, and object evidence"
+                    : previewEmpty
+                      ? "No artifacts match the current preview"
+                      : "Deletion blocked until preview includes age range, retention/protection, and affected-object evidence"
+                }
+                type="button"
+              >
+                <Trash2 size={16} />
+                Delete artifacts
+              </button>
+            </div>
+          </div>
+          <ConfirmationPrompt
+            confirmLabel="Delete artifacts"
+            detail="Queues the reviewed artifact set for deletion. This operation is destructive and uses the preview hash plus object evidence as its guardrail."
+            error={error}
+            items={[
+              {
+                label: "Preview gate",
+                value: cleanupCanDelete
+                  ? "Fresh preview evidence verified"
+                  : "Preview evidence incomplete",
+              },
+              { label: "Expression", value: preview?.expression ?? expression },
+              {
+                label: "Artifact types",
+                title: formatCleanupDomains(preview?.domains ?? domains),
+                value: formatCleanupDomains(preview?.domains ?? domains),
+              },
+              { label: "Artifacts", value: preview?.matched_count ?? 0 },
+              {
+                label: "Bytes",
+                value: preview ? formatBytes(preview.matched_bytes) : "0 B",
+              },
+              {
+                label: "Age range",
+                value: cleanupEvidence.ageRangeLabel,
+              },
+              {
+                label: "Affected objects",
+                value: cleanupEvidence.objectsLabel,
+              },
+              {
+                label: "Preview hash",
+                title: preview?.preview_hash,
+                value: preview ? shortHash(preview.preview_hash) : "-",
+              },
+              {
+                label: "Retention detail",
+                value: cleanupEvidence.retentionLabel,
+              },
+              {
+                label: "Effect",
+                value: "Irreversible artifact deletion request",
+              },
+            ]}
+            onCancel={() => setConfirmOpen(false)}
+            onConfirm={() => void queueCleanup()}
+            open={confirmOpen}
+            pending={pending}
+            title="Confirm artifact deletion"
+            tone="danger"
+            typedConfirmationLabel="Type DELETE to confirm artifact deletion"
+            typedConfirmationText="DELETE"
+          />
+        </div>
+      )}
+      {(section === "all" || section === "jobs") && (
+        <div className="fleetPanel">
+          <div className="sectionHeader">
+            <div>
+              <h2>Maintenance jobs</h2>
+              <span>
+                {formatLowerBoundCount(jobs.length, jobsTruncated)} retained
+                control-plane maintenance jobs{jobsTruncated ? " loaded" : ""}
+              </span>
+            </div>
             <button
               className="secondaryAction"
               disabled={loading}
@@ -317,402 +729,99 @@ export function ServerJobsPanel({
               <RefreshCw size={14} />
               Refresh
             </button>
-            <ActionFeedback
-              message={cleanupPageFeedbackMessage}
-              tone="danger"
-            />
           </div>
-        </div>
-        <ActionFeedback
-          className="localActionFeedback"
-          message={cleanupActionFeedbackMessage}
-          tone="progress"
-        />
-        <div className="historyRetentionGrid">
-          <div className="cleanupPreviewContract">
-            <ShieldCheck size={18} />
-            <div>
-              <strong>Preview gate</strong>
-              <span>
-                Preview shows the current count and size. Delete stays blocked until the preview also proves object age, retention/protection, and affected-object evidence.
-              </span>
-            </div>
-          </div>
-          <div className="artifactCleanupDomains">
-            <span>Artifact types</span>
-            <div className="artifactDomainOptions">
-              {artifactCleanupDomainOptions.map((option) => (
-                <label
-                  className="artifactDomainOption"
-                  key={option.value}
-                  title={option.description}
-                >
-                  <input
-                    checked={domains.includes(option.value)}
-                    onChange={(event) => updateDomain(option.value, event.target.checked)}
-                    type="checkbox"
-                  />
-                  <span>
-                    <strong>{option.label}</strong>
-                    <small>{option.description}</small>
-                  </span>
-                </label>
-              ))}
-            </div>
-          </div>
-          <div className="cleanupCriteriaGrid">
-            <label>
-              <span>Older than</span>
-              <div className="inlineUnitInput">
-                <input
-                  aria-label="Older than days"
-                  inputMode="numeric"
-                  min={0}
-                  max={3650}
-                  onChange={(event) => {
-                    invalidateReviewGeneration();
-                    setOlderThanDays(event.target.value);
-                    setPreview(null);
-                    setConfirmOpen(false);
-                    setPreviewStatus(null);
-                  }}
-                  type="number"
-                  value={olderThanDays}
-                />
-                <small>days</small>
+          <ActionFeedback
+            className="localActionFeedback"
+            message={loadError}
+            tone="danger"
+          />
+          <ConsoleDataGrid
+            actions={[
+              {
+                description: (rows) =>
+                  rows.length === 1
+                    ? "Cancel this queued maintenance job."
+                    : "Select one queued maintenance job to cancel.",
+                disabled: (rows) =>
+                  rows.length !== 1 ||
+                  rows[0].status !== "queued" ||
+                  pendingJobId === rows[0].id,
+                icon: <XCircle size={14} />,
+                label: "Cancel queued job",
+                onSelect: (rows) => reviewCancelJob(rows[0]),
+                tone: "danger",
+              },
+            ]}
+            columns={serverJobColumns}
+            defaultPageSize={10}
+            expandOnRowClick
+            getRowId={(job) => job.id}
+            itemLabel="jobs"
+            empty={
+              <div className="emptyState">
+                <Trash2 size={22} />
+                <strong>No maintenance jobs</strong>
+                <span>Artifact cleanup jobs appear here after queueing.</span>
               </div>
-            </label>
-            <label>
-              <span>State</span>
-              <select
-                aria-label="Artifact state"
-                onChange={(event) => {
-                  invalidateReviewGeneration();
-                  setArtifactState(event.target.value as CleanupArtifactState);
-                  setPreview(null);
-                  setConfirmOpen(false);
-                  setPreviewStatus(null);
-                }}
-                value={artifactState}
-              >
-                <option value="active">Active</option>
-                <option value="delete_failed">Delete failed</option>
-                <option value="deleting">Deleting</option>
-                <option value="creating">Creating</option>
-                <option value="any">Any state</option>
-              </select>
-            </label>
-            <label>
-              <span>Object path/prefix</span>
-              <input
-                aria-label="Object path prefix"
-                onChange={(event) => {
-                  invalidateReviewGeneration();
-                  setObjectPrefix(event.target.value);
-                  setPreview(null);
-                  setConfirmOpen(false);
-                  setPreviewStatus(null);
-                }}
-                placeholder="Optional object key prefix"
-                value={objectPrefix}
-              />
-            </label>
-          </div>
-          <details className="cleanupAdvanced">
-            <summary>Advanced expression</summary>
-            <label className="artifactCleanupExpression">
-              <span>Additional filter expression</span>
-              <textarea
-                aria-label="Expression"
-                rows={3}
-                title="Advanced expression filters artifacts inside the selected artifact types. It is combined with the common criteria above."
-                value={advancedExpression}
-                onChange={(event) => {
-                  invalidateReviewGeneration();
-                  setAdvancedExpression(event.target.value);
-                  setPreview(null);
-                  setConfirmOpen(false);
-                  setPreviewStatus(null);
-                }}
-              />
-            </label>
-            <div className="cleanupExpressionPreview" aria-label="Effective cleanup expression">
-              <span>Effective expression</span>
-              <code>{expressionValid ? expression : "Invalid criteria"}</code>
-            </div>
-          </details>
-          <div
-            aria-label="Cleanup preview result"
-            className="cleanupPreviewFacts"
-            ref={previewResultRef}
-            tabIndex={-1}
-          >
-            <div>
-              <span>Matched</span>
-              <strong>
-                {preview
-                  ? `${artifactCountLabel(preview.matched_count)} / ${formatBytes(preview.matched_bytes)}`
-                  : "Preview required"}
-              </strong>
-            </div>
-            <div>
-              <span>Age range</span>
-              <strong>{cleanupEvidence.ageRangeLabel}</strong>
-            </div>
-            <div>
-              <span>Retention/protection</span>
-              <strong>{cleanupEvidence.retentionLabel}</strong>
-            </div>
-            <div>
-              <span>Affected objects</span>
-              <strong>{cleanupEvidence.objectsLabel}</strong>
-            </div>
-            <div>
-              <span>Preview snapshot</span>
-              <strong title={preview?.preview_hash}>
-                {preview ? shortHash(preview.preview_hash) : "Not created"}
-              </strong>
-            </div>
-          </div>
-          {preview?.representative_objects?.length ? (
-            <div className="cleanupObjectPreview" aria-label="Representative cleanup objects">
-              <div>
-                <span>Representative objects</span>
-                <strong>{preview.representative_objects.length} shown from preview</strong>
-              </div>
-              <ul>
-                {preview.representative_objects.slice(0, 5).map((object) => (
-                  <li key={`${object.domain}:${object.object_key}`}>
-                    <span className="cleanupObjectIdentity">
-                      <strong>{displayToken(object.domain)}</strong>
-                      <code title={object.object_key}>{object.object_key}</code>
-                    </span>
-                    <span className="cleanupObjectMeta">
-                      {formatBytes(object.size_bytes)} · {object.created_at ? formatTime(object.created_at) : "age unavailable"} · {displayToken(object.status)}
-                      {object.reference_protected ? " · protected" : ""}
-                    </span>
-                    {object.reason ? <span className="cleanupObjectReason">{object.reason}</span> : null}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-          <div className="cleanupReadinessSummary" aria-label="Artifact cleanup readiness">
-            <div className={cleanupCanDelete ? "ready" : previewEmpty ? undefined : "attention"}>
-              <span>Delete status</span>
-              <strong>
-                {cleanupCanDelete
-                  ? "Ready for confirmation"
-                  : previewEmpty
-                    ? "Nothing to delete"
-                  : previewFresh
-                    ? "Delete blocked"
-                    : "Preview required"}
-              </strong>
-              <p>{previewReadiness}</p>
-            </div>
-            <div>
-              <span>Scope</span>
-              <strong>{formatCleanupDomains(preview?.domains ?? domains) || "No domains selected"}</strong>
-              <p>{domains.length} selected artifact types. Type filters and object-prefix criteria narrow the preview.</p>
-            </div>
-            <div className={preview && !previewEmpty ? "attention" : undefined}>
-              <span>Deletion impact</span>
-              <strong>
-                {preview
-                  ? `${artifactCountLabel(preview.matched_count)} / ${formatBytes(preview.matched_bytes)}`
-                  : "Unknown until preview"}
-              </strong>
-              <p>
-                {preview
-                  ? previewEmpty
-                    ? "No artifacts match. Adjust the criteria to inspect a different cleanup scope."
-                    : "Count and size are known, but deletion requires object-level evidence before confirmation."
-                  : "Run Preview to calculate object count and total size."}
-              </p>
-            </div>
-            <div>
-              <span>{previewEmpty ? "Evidence status" : "Missing evidence"}</span>
-              <strong>{previewEmpty ? "Not needed" : cleanupEvidence.missingLabel}</strong>
-              <p>
-                {previewEmpty
-                  ? "Object-level evidence is required only when the preview contains artifacts."
-                  : "The preview must include oldest/newest object age, retained/reference-protected counts, and a representative object list or download."}
-              </p>
-            </div>
-          </div>
-          <div className="retentionActions">
-            <button
-              className="secondaryAction"
-              disabled={pending || !expressionValid || domains.length === 0}
-              onClick={() => void previewCleanup()}
-              title="Build a reviewed cleanup snapshot for the selected domains"
-              type="button"
-            >
-              <ShieldCheck size={16} />
-              Preview
-            </button>
-            <button
-              className="secondaryAction dangerAction"
-              disabled={pending || !cleanupCanDelete}
-              onClick={() => setConfirmOpen(true)}
-              title={
-                cleanupCanDelete
-                  ? "Delete artifacts using the reviewed expression, artifact types, preview hash, and object evidence"
-                  : previewEmpty
-                    ? "No artifacts match the current preview"
-                  : "Deletion blocked until preview includes age range, retention/protection, and affected-object evidence"
-              }
-              type="button"
-            >
-              <Trash2 size={16} />
-              Delete artifacts
-            </button>
-          </div>
-        </div>
-        <ConfirmationPrompt
-          confirmLabel="Delete artifacts"
-          detail="Queues the reviewed artifact set for deletion. This operation is destructive and uses the preview hash plus object evidence as its guardrail."
-          error={error}
-          items={[
-            { label: "Preview gate", value: cleanupCanDelete ? "Fresh preview evidence verified" : "Preview evidence incomplete" },
-            { label: "Expression", value: preview?.expression ?? expression },
-            {
-              label: "Artifact types",
-              title: formatCleanupDomains(preview?.domains ?? domains),
-              value: formatCleanupDomains(preview?.domains ?? domains),
-            },
-            { label: "Artifacts", value: preview?.matched_count ?? 0 },
-            {
-              label: "Bytes",
-              value: preview ? formatBytes(preview.matched_bytes) : "0 B",
-            },
-            {
-              label: "Age range",
-              value: cleanupEvidence.ageRangeLabel,
-            },
-            {
-              label: "Affected objects",
-              value: cleanupEvidence.objectsLabel,
-            },
-            {
-              label: "Preview hash",
-              title: preview?.preview_hash,
-              value: preview ? shortHash(preview.preview_hash) : "-",
-            },
-            {
-              label: "Retention detail",
-              value: cleanupEvidence.retentionLabel,
-            },
-            {
-              label: "Effect",
-              value: "Irreversible artifact deletion request",
-            },
-          ]}
-          onCancel={() => setConfirmOpen(false)}
-          onConfirm={() => void queueCleanup()}
-          open={confirmOpen}
-          pending={pending}
-          title="Confirm artifact deletion"
-          tone="danger"
-          typedConfirmationLabel="Type DELETE to confirm artifact deletion"
-          typedConfirmationText="DELETE"
-        />
-      </div>
-      <div className="fleetPanel">
-        <div className="sectionHeader">
-          <div>
-            <h2>Maintenance jobs</h2>
-            <span>
-              {formatLowerBoundCount(jobs.length, jobsTruncated)} retained
-              control-plane maintenance jobs{jobsTruncated ? " loaded" : ""}
-            </span>
-          </div>
-          <button
-            className="secondaryAction"
-            disabled={loading}
-            onClick={onRefresh}
-            type="button"
-          >
-            <RefreshCw size={14} />
-            Refresh
-          </button>
-        </div>
-        <ConsoleDataGrid
-          actions={[
-            {
-              description: (rows) =>
-                rows.length === 1
-                  ? "Cancel this queued maintenance job."
-                  : "Select one queued maintenance job to cancel.",
-              disabled: (rows) =>
-                rows.length !== 1 ||
-                rows[0].status !== "queued" ||
-                pendingJobId === rows[0].id,
-              icon: <XCircle size={14} />,
-              label: "Cancel queued job",
-              onSelect: (rows) => reviewCancelJob(rows[0]),
-              tone: "danger",
-            },
-          ]}
-          columns={serverJobColumns}
-          defaultPageSize={10}
-          expandOnRowClick
-          getRowId={(job) => job.id}
-          itemLabel="jobs"
-          empty={
-            <div className="emptyState">
-              <Trash2 size={22} />
-              <strong>No maintenance jobs</strong>
-              <span>Artifact cleanup jobs appear here after queueing.</span>
-            </div>
-          }
-          renderExpandedRow={(job) => (
-            <div className="consoleInlineDetailGrid">
-              <span>Job ID</span>
-              <strong>{job.id}</strong>
-              <span>Type</span>
-              <strong>{displayToken(job.job_type)}</strong>
-              <span>Status</span>
-              <strong>{displayToken(job.status)}</strong>
-              <span>Expression</span>
-              <strong>{job.expression ?? "Not recorded"}</strong>
-              <span>Matched bytes</span>
-              <strong>{formatBytes(job.matched_bytes)}</strong>
-              <span>Deleted bytes</span>
-              <strong>{formatBytes(job.deleted_bytes)}</strong>
-              <span>Error</span>
-              <strong>{job.error ?? "None"}</strong>
-            </div>
-          )}
-          rows={jobs}
-          rowsTruncated={jobsTruncated}
-          searchPlaceholder="Search maintenance jobs"
-          showMobileRowActions={false}
-          storageKey="vpsman.jobs.serverJobs"
-          title="Maintenance job records"
-        />
-        <ConfirmationPrompt
-          confirmLabel="Cancel job"
-          detail="Cancel the reviewed queued control-plane maintenance job."
-          error={error}
-          items={[
-            { label: "Job", value: cancelJobSnapshot ? shortId(cancelJobSnapshot.id) : "-" },
-            { label: "Type", value: cancelJobSnapshot ? displayToken(cancelJobSnapshot.job_type) : "-" },
-            { label: "Matched", value: cancelJobSnapshot?.matched_count ?? 0 },
-          ]}
-          onCancel={() => setCancelJobSnapshot(null)}
-          onConfirm={() => {
-            if (cancelJobSnapshot) {
-              void cancelJob(cancelJobSnapshot);
             }
-          }}
-          open={cancelJobSnapshot !== null}
-          pending={pendingJobId !== null}
-          title="Confirm maintenance job cancellation"
-          tone="danger"
-        />
-      </div>
+            renderExpandedRow={(job) => (
+              <div className="consoleInlineDetailGrid">
+                <span>Job ID</span>
+                <strong>{job.id}</strong>
+                <span>Type</span>
+                <strong>{displayToken(job.job_type)}</strong>
+                <span>Status</span>
+                <strong>{displayToken(job.status)}</strong>
+                <span>Expression</span>
+                <strong>{job.expression ?? "Not recorded"}</strong>
+                <span>Matched bytes</span>
+                <strong>{formatBytes(job.matched_bytes)}</strong>
+                <span>Deleted bytes</span>
+                <strong>{formatBytes(job.deleted_bytes)}</strong>
+                <span>Error</span>
+                <strong>{job.error ?? "None"}</strong>
+              </div>
+            )}
+            rows={jobs}
+            rowsTruncated={jobsTruncated}
+            searchPlaceholder="Search maintenance jobs"
+            showMobileRowActions={false}
+            storageKey="vpsman.jobs.serverJobs"
+            title="Maintenance job records"
+          />
+          <ConfirmationPrompt
+            confirmLabel="Cancel job"
+            detail="Cancel the reviewed queued control-plane maintenance job."
+            error={error}
+            items={[
+              {
+                label: "Job",
+                value: cancelJobSnapshot ? shortId(cancelJobSnapshot.id) : "-",
+              },
+              {
+                label: "Type",
+                value: cancelJobSnapshot
+                  ? displayToken(cancelJobSnapshot.job_type)
+                  : "-",
+              },
+              {
+                label: "Matched",
+                value: cancelJobSnapshot?.matched_count ?? 0,
+              },
+            ]}
+            onCancel={() => setCancelJobSnapshot(null)}
+            onConfirm={() => {
+              if (cancelJobSnapshot) {
+                void cancelJob(cancelJobSnapshot);
+              }
+            }}
+            open={cancelJobSnapshot !== null}
+            pending={pendingJobId !== null}
+            title="Confirm maintenance job cancellation"
+            tone="danger"
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -735,12 +844,18 @@ function buildCleanupExpression(
       return "__invalid__: older than must be 0-3650 days";
     }
     if (parsedDays > 0) {
-      const cutoff = new Date(Date.now() - parsedDays * 24 * 60 * 60 * 1000).toISOString();
-      filters.push(`artifact.created_at <= "${escapeExpressionLiteral(cutoff)}"`);
+      const cutoff = new Date(
+        Date.now() - parsedDays * 24 * 60 * 60 * 1000,
+      ).toISOString();
+      filters.push(
+        `artifact.created_at <= "${escapeExpressionLiteral(cutoff)}"`,
+      );
     }
   }
   if (artifactState !== "any") {
-    filters.push(`artifact.status = "${escapeExpressionLiteral(artifactState)}"`);
+    filters.push(
+      `artifact.status = "${escapeExpressionLiteral(artifactState)}"`,
+    );
   }
   const prefix = objectPrefix.trim();
   if (prefix) {
@@ -786,7 +901,9 @@ function cleanupPreviewEvidence(preview: ArtifactCleanupPreviewRecord | null): {
       retentionLabel: "0 eligible / 0 protected",
     };
   }
-  const ageRangeReady = Boolean(preview.oldest_created_at && preview.newest_created_at);
+  const ageRangeReady = Boolean(
+    preview.oldest_created_at && preview.newest_created_at,
+  );
   const retentionReady =
     typeof preview.retained_count === "number" &&
     typeof preview.reference_protected_count === "number";
@@ -826,7 +943,9 @@ function formatCleanupDomains(domains: string[]): string {
   const labels = new Map(
     artifactCleanupDomainOptions.map((option) => [option.value, option.label]),
   );
-  return domains.map((domain) => labels.get(domain as ArtifactCleanupDomain) ?? domain).join(", ");
+  return domains
+    .map((domain) => labels.get(domain as ArtifactCleanupDomain) ?? domain)
+    .join(", ");
 }
 
 function sameDomains(left: string[], right: string[]): boolean {
@@ -835,7 +954,9 @@ function sameDomains(left: string[], right: string[]): boolean {
   }
   const normalizedLeft = [...left].sort();
   const normalizedRight = [...right].sort();
-  return normalizedLeft.every((value, index) => value === normalizedRight[index]);
+  return normalizedLeft.every(
+    (value, index) => value === normalizedRight[index],
+  );
 }
 
 function formatBytes(value: number): string {

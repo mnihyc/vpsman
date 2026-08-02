@@ -434,6 +434,62 @@ async fn a_single_ping_edit_rejects_a_changed_assignment_snapshot() {
 }
 
 #[tokio::test]
+async fn shared_view_creation_persists_random_public_target_keys() {
+    let repo = Repository::Memory(MemoryState::default());
+    let state = monitoring_test_state(repo.clone());
+    let (_operator, headers) = crate::test_auth_context_and_headers(&state).await;
+    seed_monitoring_agent(&repo, "v-1").await;
+    let request = || CreateMonitoringShareRequest {
+        name: "Public status".to_string(),
+        selector_expression: "*".to_string(),
+        target_client_ids: vec!["v-1".to_string()],
+        visibility: MonitoringShareVisibilityRequest {
+            identity_context: false,
+            resources: true,
+            network: true,
+            traffic: true,
+            ping: true,
+            detail_history: true,
+        },
+        expires_in_secs: 3_600,
+        confirmed: true,
+    };
+
+    let (_, Json(first)) = crate::routes_monitoring::create_monitoring_share(
+        State(state.clone()),
+        headers.clone(),
+        Json(request()),
+    )
+    .await
+    .unwrap();
+    let (_, Json(second)) =
+        crate::routes_monitoring::create_monitoring_share(State(state), headers, Json(request()))
+            .await
+            .unwrap();
+    let first_record = repo
+        .monitoring_share_record(first.share.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let second_record = repo
+        .monitoring_share_record(second.share.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let first_key = first_record.public_client_key("v-1").unwrap();
+    let second_key = second_record.public_client_key("v-1").unwrap();
+    assert_eq!(first_key.len(), 64);
+    assert!(first_key
+        .bytes()
+        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')));
+    assert_ne!(first_key, second_key);
+    assert_ne!(
+        first_key,
+        vpsman_common::payload_hash(format!("{}\0v-1", first_record.token_digest).as_bytes())
+    );
+}
+
+#[tokio::test]
 async fn shared_view_records_each_new_visitor_once_and_touches_active_access() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = monitoring_test_operator();
@@ -443,7 +499,7 @@ async fn shared_view_records_each_new_visitor_once_and_touches_active_access() {
         name: "Public status".to_string(),
         token_digest: vpsman_common::payload_hash(b"share-secret"),
         selector_expression: "*".to_string(),
-        target_client_ids: Vec::new(),
+        targets: Vec::new(),
         visibility: MonitoringShareVisibilityView {
             identity_context: false,
             resources: true,
@@ -749,7 +805,10 @@ async fn deleting_a_vps_removes_live_ping_but_preserves_frozen_share_scope() {
         name: "cleanup".to_string(),
         token_digest: "digest".to_string(),
         selector_expression: "*".to_string(),
-        target_client_ids: vec!["v-1".to_string()],
+        targets: vec![MonitoringShareTargetRecord {
+            client_id: "v-1".to_string(),
+            public_client_key: "1".repeat(64),
+        }],
         visibility: MonitoringShareVisibilityView {
             identity_context: false,
             resources: true,
@@ -828,9 +887,15 @@ async fn deleting_a_vps_removes_live_ping_but_preserves_frozen_share_scope() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(retained_share.target_client_ids, vec!["v-1".to_string()]);
+    assert_eq!(retained_share.target_client_ids(), vec!["v-1".to_string()]);
+    let expected_public_client_key = "1".repeat(64);
+    assert_eq!(
+        retained_share.public_client_key("v-1"),
+        Some(expected_public_client_key.as_str())
+    );
+    let retained_target_client_ids = retained_share.target_client_ids();
     let visible_target_count = repo
-        .list_agents_for_client_ids(&retained_share.target_client_ids)
+        .list_agents_for_client_ids(&retained_target_client_ids)
         .await
         .unwrap()
         .len();
@@ -885,7 +950,10 @@ async fn deleting_a_vps_removes_live_ping_but_preserves_frozen_share_scope() {
     let mut stale_share = share;
     stale_share.id = Uuid::new_v4();
     stale_share.name = "stale share resolution".to_string();
-    stale_share.target_client_ids = vec!["v-1".to_string()];
+    stale_share.targets = vec![MonitoringShareTargetRecord {
+        client_id: "v-1".to_string(),
+        public_client_key: "2".repeat(64),
+    }];
     let error = repo
         .create_monitoring_share(stale_share, &operator)
         .await
@@ -903,7 +971,7 @@ fn monitoring_share_expiry_is_fail_closed_for_invalid_values() {
         name: "expiry".to_string(),
         token_digest: "digest".to_string(),
         selector_expression: "*".to_string(),
-        target_client_ids: Vec::new(),
+        targets: Vec::new(),
         visibility: MonitoringShareVisibilityView {
             identity_context: false,
             resources: true,

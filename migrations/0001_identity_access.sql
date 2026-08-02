@@ -9,6 +9,7 @@ CREATE TABLE operators (
     totp_secret_ciphertext_hex TEXT,
     totp_secret_nonce_hex TEXT,
     totp_secret_salt_hex TEXT,
+    totp_last_accepted_step BIGINT,
     preferences JSONB NOT NULL DEFAULT '{}'::jsonb,
     session_refresh_ttl_secs BIGINT NOT NULL DEFAULT 31536000,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -26,9 +27,24 @@ CREATE TABLE operators (
             AND totp_secret_salt_hex IS NULL
         )
         OR (
-            totp_secret_ciphertext_hex ~ '^[0-9a-f]+$'
+            totp_secret_ciphertext_hex IS NOT NULL
+            AND totp_secret_nonce_hex IS NOT NULL
+            AND totp_secret_salt_hex IS NOT NULL
+            AND totp_secret_ciphertext_hex ~ '^[0-9a-f]+$'
             AND totp_secret_nonce_hex ~ '^[0-9a-f]{24}$'
             AND totp_secret_salt_hex ~ '^[0-9a-f]{32}$'
+        )
+    ),
+    CONSTRAINT operators_totp_state_check CHECK (
+        (
+            totp_enabled
+            AND totp_secret_ciphertext_hex IS NOT NULL
+            AND totp_last_accepted_step IS NOT NULL
+            AND totp_last_accepted_step >= 0
+        )
+        OR (
+            NOT totp_enabled
+            AND totp_last_accepted_step IS NULL
         )
     ),
     CONSTRAINT operators_preferences_json_object CHECK (jsonb_typeof(preferences) = 'object')

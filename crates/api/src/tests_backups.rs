@@ -181,6 +181,8 @@ fn backup_policy_update_wire_contract_requires_complete_definition() {
         "name": "nightly",
         "selector_expression": "id:client-a",
         "target_client_ids": ["client-a"],
+        "expected_selector_expression": "id:client-a",
+        "expected_target_client_ids": ["client-a"],
         "paths": ["/etc"],
         "include_config": true,
         "follow_symlinks": false,
@@ -204,6 +206,8 @@ fn backup_policy_update_wire_contract_requires_complete_definition() {
         "name",
         "selector_expression",
         "target_client_ids",
+        "expected_selector_expression",
+        "expected_target_client_ids",
         "paths",
         "include_config",
         "follow_symlinks",
@@ -929,6 +933,8 @@ async fn backup_policy_update_rejects_stale_selector_snapshot_without_mutation()
             name: "nightly-stale-update".to_string(),
             selector_expression: "id:client-b".to_string(),
             target_client_ids: vec!["client-a".to_string()],
+            expected_selector_expression: "id:client-a".to_string(),
+            expected_target_client_ids: vec!["client-a".to_string()],
             paths: vec!["/etc".to_string()],
             include_config: false,
             follow_symlinks: false,
@@ -960,6 +966,93 @@ async fn backup_policy_update_rejects_stale_selector_snapshot_without_mutation()
     assert_eq!(policies[0].name, "nightly-current");
     assert_eq!(policies[0].selector_expression, "id:client-a");
     assert_eq!(policies[0].target_client_ids, vec!["client-a"]);
+}
+
+#[tokio::test]
+async fn backup_policy_edit_preserves_frozen_targets_when_selector_is_unchanged() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_backup_agent_id(&repo, "client-a").await;
+    seed_backup_agent_id(&repo, "client-b").await;
+    if let Repository::Memory(memory) = &repo {
+        let mut agents = memory.agents.write().await;
+        agents
+            .iter_mut()
+            .find(|agent| agent.id == "client-a")
+            .unwrap()
+            .tags = vec!["edge".to_string()];
+    }
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let (_, Json(created)) = create_backup_policy(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateBackupPolicyRequest {
+            name: "nightly-edge".to_string(),
+            selector_expression: "tag:edge".to_string(),
+            target_client_ids: vec!["client-a".to_string()],
+            paths: vec!["/etc/hostname".to_string()],
+            include_config: true,
+            follow_symlinks: false,
+            missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
+            retention_days: Some(30),
+            keep_last: Some(7),
+            rotation_generation: None,
+            cron_expr: "0 3 * * *".to_string(),
+            timezone: "UTC".to_string(),
+            enabled: true,
+            catch_up_policy: "skip_missed".to_string(),
+            catch_up_limit: 1,
+            retry_delay_secs: 300,
+            max_failures: 3,
+            confirmed: true,
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap();
+    if let Repository::Memory(memory) = &repo {
+        memory
+            .agents
+            .write()
+            .await
+            .iter_mut()
+            .find(|agent| agent.id == "client-b")
+            .unwrap()
+            .tags = vec!["edge".to_string()];
+    }
+
+    let Json(updated) = update_backup_policy(
+        State(state),
+        headers,
+        Path(created.schedule_id),
+        Json(UpdateBackupPolicyRequest {
+            name: "nightly-edge-renamed".to_string(),
+            selector_expression: created.selector_expression.clone(),
+            target_client_ids: created.target_client_ids.clone(),
+            expected_selector_expression: created.selector_expression.clone(),
+            expected_target_client_ids: created.target_client_ids.clone(),
+            paths: created.paths.clone(),
+            include_config: created.include_config,
+            follow_symlinks: created.follow_symlinks,
+            missing_path_policy: created.missing_path_policy,
+            retention_days: created.retention_days,
+            keep_last: created.keep_last,
+            rotation_generation: created.rotation_generation.clone(),
+            cron_expr: created.cron_expr.clone(),
+            timezone: created.timezone.clone(),
+            enabled: created.enabled,
+            catch_up_policy: created.catch_up_policy.clone(),
+            catch_up_limit: created.catch_up_limit,
+            retry_delay_secs: created.retry_delay_secs,
+            max_failures: created.max_failures,
+            confirmed: true,
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(updated.name, "nightly-edge-renamed");
+    assert_eq!(updated.target_client_ids, vec!["client-a"]);
 }
 
 #[tokio::test]
@@ -1088,6 +1181,8 @@ async fn backup_policy_update_repairs_cadence_without_replacing_schedule() {
             name: "repaired-backup".to_string(),
             selector_expression: "id:client-a".to_string(),
             target_client_ids: vec!["client-a".to_string()],
+            expected_selector_expression: "id:client-a".to_string(),
+            expected_target_client_ids: vec!["client-a".to_string()],
             paths: vec!["/etc".to_string(), "/var/lib/app".to_string()],
             include_config: false,
             follow_symlinks: false,

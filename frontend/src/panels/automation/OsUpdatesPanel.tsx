@@ -10,14 +10,15 @@ import {
 import { ActionFeedback } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import {
-} from "../../components/ConsoleLayout";
-import {
   ConsoleDataGrid,
   type ConsoleDataGridAction,
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
 import { ConsoleDetailPanel } from "../../components/ConsoleDetailPanel";
-import { createJobTargetCount, waitForBulkJobTargets } from "../../bulkJobProgress";
+import {
+  createJobTargetCount,
+  waitForBulkJobTargets,
+} from "../../bulkJobProgress";
 import { JOB_COMMAND_TYPE_BY_OPERATION_TYPE } from "../../generated/protocolContracts";
 import {
   buildPrivilegeForJobOperation,
@@ -41,6 +42,7 @@ import type {
 } from "../../types";
 import { formatCompactTime, formatFullTime, shortHash } from "../../utils";
 import { pushHistoryEntry } from "../../historyEntryState";
+import { scrollIntoViewWithMotion } from "../../motion";
 
 type OsUpdateRow = {
   agent: AgentView;
@@ -94,9 +96,13 @@ export function OsUpdatesPanel({
   const pendingClientIdRef = useRef<string | null>(null);
   const submissionGuardRef = useRef(createSubmissionGuard());
   const [feedback, setFeedback] = useState<ActionFeedbackState | null>(null);
-  const [selectedClientId, setSelectedClientId] = useState(readOsUpdateClientRoute);
+  const [selectedClientId, setSelectedClientId] = useState(
+    readOsUpdateClientRoute,
+  );
   const [applyReview, setApplyReview] = useState<ApplyReview | null>(null);
-  const [applyEvidence, setApplyEvidence] = useState<ApplyEvidence | null>(null);
+  const [applyEvidence, setApplyEvidence] = useState<ApplyEvidence | null>(
+    null,
+  );
 
   const reloadEvidence = useCallback(async () => {
     setLoading(true);
@@ -138,13 +144,12 @@ export function OsUpdatesPanel({
     () =>
       agents.map((agent) => ({
         agent,
-        plan:
-          planByClientId.get(agent.id) ?? emptyPackagePlanRecord(agent.id),
+        plan: planByClientId.get(agent.id) ?? emptyPackagePlanRecord(agent.id),
       })),
     [agents, planByClientId],
   );
   const selectedRow = selectedClientId
-    ? rows.find((row) => row.agent.id === selectedClientId) ?? null
+    ? (rows.find((row) => row.agent.id === selectedClientId) ?? null)
     : null;
 
   function replacePlan(next: HostPackageUpdatePlanRecord) {
@@ -166,7 +171,6 @@ export function OsUpdatesPanel({
   function closePlan() {
     setOsUpdateClientRoute(null);
     setSelectedClientId(null);
-    setApplyReview(null);
     setApplyEvidence(null);
   }
 
@@ -222,9 +226,7 @@ export function OsUpdatesPanel({
     });
     if (completion.progress.successful < completion.progress.total) {
       const reason = completion.progress.failureReasons?.[0]?.reason;
-      throw new Error(
-        `Package check failed${reason ? `: ${reason}` : "."}`,
-      );
+      throw new Error(`Package check failed${reason ? `: ${reason}` : "."}`);
     }
     const next = await onLoadPlan(row.agent.id);
     replacePlan(next);
@@ -292,11 +294,7 @@ export function OsUpdatesPanel({
       });
     } finally {
       pendingClientIdRef.current = null;
-      finishSubmission(
-        submissionGuardRef.current,
-        submissionKey,
-        successful,
-      );
+      finishSubmission(submissionGuardRef.current, submissionKey, successful);
       setPendingClientId(null);
     }
   }
@@ -372,18 +370,25 @@ export function OsUpdatesPanel({
         selector_expression: `id:${row.agent.id}`,
         target_client_ids: [row.agent.id],
       });
-      const completion = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
-        maxTimeoutSecs,
-        onProgress: (progress) => {
-          setFeedback({
-            clientId: row.agent.id,
-            message: `Applying reviewed updates on ${agentLabel(row.agent)} · ${progress.terminal}/${progress.total} VPS reported`,
-            tone: "progress",
-          });
+      // Build/dispatch failures remain in the confirmation prompt. Once the
+      // authorized job exists, close it so progress is visible in the detail.
+      setApplyReview(null);
+      const completion = await waitForBulkJobTargets(
+        job.job_id,
+        onLoadTargets,
+        {
+          maxTimeoutSecs,
+          onProgress: (progress) => {
+            setFeedback({
+              clientId: row.agent.id,
+              message: `Applying reviewed updates on ${agentLabel(row.agent)} · ${progress.terminal}/${progress.total} VPS reported`,
+              tone: "progress",
+            });
+          },
+          targetCount: createJobTargetCount(job),
+          targets: [row.agent],
         },
-        targetCount: createJobTargetCount(job),
-        targets: [row.agent],
-      });
+      );
       const result = await readApplyResult(
         await onDownloadOutputStream(job.job_id, row.agent.id, "stdout"),
       );
@@ -437,7 +442,9 @@ export function OsUpdatesPanel({
     (row) => row.plan.capability?.status === "supported",
   ).length;
   const uncheckedCount = rows.filter((row) => !row.plan.observed_at).length;
-  const updateHostCount = rows.filter((row) => row.plan.packages.length > 0).length;
+  const updateHostCount = rows.filter(
+    (row) => row.plan.packages.length > 0,
+  ).length;
   const updateCount = rows.reduce(
     (count, row) => count + row.plan.packages.length,
     0,
@@ -494,7 +501,9 @@ export function OsUpdatesPanel({
       {
         cell: (row) => (
           <span className="historyPrimary">
-            <strong title={agentLabel(row.agent)}>{agentLabel(row.agent)}</strong>
+            <strong title={agentLabel(row.agent)}>
+              {agentLabel(row.agent)}
+            </strong>
             <small title={row.agent.id}>{row.agent.id}</small>
           </span>
         ),
@@ -508,7 +517,9 @@ export function OsUpdatesPanel({
       {
         cell: (row) => (
           <span className="historyPrimary">
-            <strong>{providerLabel(row.plan.capability?.provider ?? null)}</strong>
+            <strong>
+              {providerLabel(row.plan.capability?.provider ?? null)}
+            </strong>
             <small title={distroLabel(row.plan)}>{distroLabel(row.plan)}</small>
           </span>
         ),
@@ -543,8 +554,16 @@ export function OsUpdatesPanel({
       {
         cell: (row) => (
           <span className="historyPrimary">
-            <strong title={row.plan.observed_at ? formatFullTime(row.plan.observed_at) : undefined}>
-              {row.plan.observed_at ? formatCompactTime(row.plan.observed_at) : "Never"}
+            <strong
+              title={
+                row.plan.observed_at
+                  ? formatFullTime(row.plan.observed_at)
+                  : undefined
+              }
+            >
+              {row.plan.observed_at
+                ? formatCompactTime(row.plan.observed_at)
+                : "Never"}
             </strong>
             <small>
               {row.plan.observed_at
@@ -595,7 +614,10 @@ export function OsUpdatesPanel({
         <div className="sectionHeader">
           <div>
             <h2>OS update posture</h2>
-            <span>Native package support, reviewed candidates, and explicit application</span>
+            <span>
+              Native package support, reviewed candidates, and explicit
+              application
+            </span>
           </div>
           <div className="headerActionStack">
             <button
@@ -613,16 +635,21 @@ export function OsUpdatesPanel({
               message={
                 selectedRow && feedback?.clientId === selectedRow.agent.id
                   ? null
-                  : feedback?.message ?? null
+                  : (feedback?.message ?? null)
               }
               tone={feedback?.tone}
             />
           </div>
         </div>
 
-        <div aria-label="OS update fleet summary" className="processSupervisorSummaryStrip">
+        <div
+          aria-label="OS update fleet summary"
+          className="processSupervisorSummaryStrip"
+        >
           <span>
-            <strong>{supportedCount} / {rows.length}</strong>
+            <strong>
+              {supportedCount} / {rows.length}
+            </strong>
             <small>Supported</small>
           </span>
           <span className={updateHostCount > 0 ? "attention" : undefined}>
@@ -649,7 +676,9 @@ export function OsUpdatesPanel({
           empty={
             <div className="emptyState compactEmpty">
               <PackageCheck size={22} />
-              <strong>{loading ? "Loading OS update posture" : "No VPSs available"}</strong>
+              <strong>
+                {loading ? "Loading OS update posture" : "No VPSs available"}
+              </strong>
               <span>Joined VPSs appear here after fleet state loads.</span>
             </div>
           }
@@ -663,13 +692,21 @@ export function OsUpdatesPanel({
               <span>Agent state</span>
               <strong>{readableState(row.agent.status)}</strong>
               <span>Package provider</span>
-              <strong>{providerLabel(row.plan.capability?.provider ?? null)}</strong>
+              <strong>
+                {providerLabel(row.plan.capability?.provider ?? null)}
+              </strong>
               <span>Distribution</span>
-              <strong title={distroLabel(row.plan)}>{distroLabel(row.plan)}</strong>
+              <strong title={distroLabel(row.plan)}>
+                {distroLabel(row.plan)}
+              </strong>
               <span>Capability</span>
-              <strong>{readableState(row.plan.capability?.status ?? "not_checked")}</strong>
+              <strong>
+                {readableState(row.plan.capability?.status ?? "not_checked")}
+              </strong>
               <span>Reason</span>
-              <strong title={packageRowState(row).reason}>{packageRowState(row).reason}</strong>
+              <strong title={packageRowState(row).reason}>
+                {packageRowState(row).reason}
+              </strong>
               <span>Plan hash</span>
               <strong title={row.plan.plan_hash ?? undefined}>
                 {row.plan.plan_hash ? shortHash(row.plan.plan_hash) : "No plan"}
@@ -757,6 +794,13 @@ export function OsUpdatesPanel({
         onConfirm={() => applyReview && void applyPlan(applyReview)}
         open={Boolean(applyReview)}
         pending={Boolean(pendingClientId)}
+        error={
+          applyReview &&
+          feedback?.clientId === applyReview.row.agent.id &&
+          feedback.tone === "danger"
+            ? feedback.message
+            : null
+        }
         title="Confirm OS package update"
         tone="warning"
       />
@@ -787,7 +831,16 @@ function PackagePlanDetail({
   privilegeMaterial: PrivilegeMaterial | null;
   row: OsUpdateRow;
 }) {
-  const packageColumns = useMemo<ConsoleDataGridColumn<HostPackageUpdateRecord>[]>(
+  const feedbackRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if ((feedback?.message || applyEvidence) && feedbackRef.current) {
+      scrollIntoViewWithMotion(feedbackRef.current, { block: "nearest" });
+    }
+  }, [applyEvidence, feedback?.message]);
+
+  const packageColumns = useMemo<
+    ConsoleDataGridColumn<HostPackageUpdateRecord>[]
+  >(
     () => [
       {
         cell: (item) => (
@@ -820,7 +873,9 @@ function PackagePlanDetail({
       },
       {
         cell: (item) => (
-          <strong title={item.candidate_version}>{item.candidate_version}</strong>
+          <strong title={item.candidate_version}>
+            {item.candidate_version}
+          </strong>
         ),
         header: "Candidate",
         id: "candidate",
@@ -894,7 +949,10 @@ function PackagePlanDetail({
             className="primaryAction"
             disabled={Boolean(applyUnavailable) || pending}
             onClick={onApply}
-            title={applyUnavailable ?? "Review and apply this full native package candidate set"}
+            title={
+              applyUnavailable ??
+              "Review and apply this full native package candidate set"
+            }
             type="button"
           >
             <PackageCheck size={14} />
@@ -906,31 +964,33 @@ function PackagePlanDetail({
       onClose={onClose}
       title={`${agentLabel(row.agent)} package plan`}
     >
-      <ActionFeedback
-        className="localActionFeedback"
-        message={feedback?.message ?? null}
-        tone={feedback?.tone}
-      />
-      {applyEvidence ? (
-        <div className="osUpdateApplyEvidence">
-          {!feedback ? (
-            <ActionFeedback
-              className="localActionFeedback"
-              message={`${applyEvidence.result.applied_package_count} package${applyEvidence.result.applied_package_count === 1 ? "" : "s"} applied; ${applyEvidence.result.remaining_packages.length} remaining on ${agentLabel(row.agent)}. Package posture refreshed.${applyEvidence.result.reboot_required_after ? " The OS reports that a reboot is required; no reboot was started." : " No reboot was started."}`}
-              tone={applyEvidence.result.completed ? "success" : "warning"}
-            />
-          ) : null}
-          <button
-            className="secondaryAction compactAction"
-            onClick={() => onOpenJobDetails(applyEvidence.jobId)}
-            title={`Open update job ${applyEvidence.jobId}`}
-            type="button"
-          >
-            <ExternalLink size={14} />
-            Update evidence
-          </button>
-        </div>
-      ) : null}
+      <div ref={feedbackRef}>
+        <ActionFeedback
+          className="localActionFeedback"
+          message={feedback?.message ?? null}
+          tone={feedback?.tone}
+        />
+        {applyEvidence ? (
+          <div className="osUpdateApplyEvidence">
+            {!feedback ? (
+              <ActionFeedback
+                className="localActionFeedback"
+                message={`${applyEvidence.result.applied_package_count} package${applyEvidence.result.applied_package_count === 1 ? "" : "s"} applied; ${applyEvidence.result.remaining_packages.length} remaining on ${agentLabel(row.agent)}. Package posture refreshed.${applyEvidence.result.reboot_required_after ? " The OS reports that a reboot is required; no reboot was started." : " No reboot was started."}`}
+                tone={applyEvidence.result.completed ? "success" : "warning"}
+              />
+            ) : null}
+            <button
+              className="secondaryAction compactAction"
+              onClick={() => onOpenJobDetails(applyEvidence.jobId)}
+              title={`Open update job ${applyEvidence.jobId}`}
+              type="button"
+            >
+              <ExternalLink size={14} />
+              Update evidence
+            </button>
+          </div>
+        ) : null}
+      </div>
       <div className="consoleInlineDetailGrid osUpdatePlanSummary">
         <span>Capability</span>
         <strong className={`status ${state.tone}`} title={state.reason}>
@@ -941,8 +1001,16 @@ function PackagePlanDetail({
         <span>Provider</span>
         <strong>{providerLabel(row.plan.capability?.provider ?? null)}</strong>
         <span>Observed</span>
-        <strong title={row.plan.observed_at ? formatFullTime(row.plan.observed_at) : undefined}>
-          {row.plan.observed_at ? formatCompactTime(row.plan.observed_at) : "Never"}
+        <strong
+          title={
+            row.plan.observed_at
+              ? formatFullTime(row.plan.observed_at)
+              : undefined
+          }
+        >
+          {row.plan.observed_at
+            ? formatCompactTime(row.plan.observed_at)
+            : "Never"}
         </strong>
         <span>Metadata source</span>
         <strong>
@@ -1003,9 +1071,15 @@ function PackagePlanDetail({
         defaultPageSize={25}
         empty={
           <div className="emptyState compactEmpty">
-            {row.plan.observed_at ? <PackageCheck size={22} /> : <ShieldAlert size={22} />}
+            {row.plan.observed_at ? (
+              <PackageCheck size={22} />
+            ) : (
+              <ShieldAlert size={22} />
+            )}
             <strong>
-              {row.plan.observed_at ? "No updates in this plan" : "No package plan"}
+              {row.plan.observed_at
+                ? "No updates in this plan"
+                : "No package plan"}
             </strong>
             <span>
               {row.plan.observed_at
@@ -1046,7 +1120,9 @@ function applyUnavailableReason(
     );
   }
   if (!row.plan.capability.can_apply) {
-    return row.plan.capability.reason ?? "This agent cannot apply package updates.";
+    return (
+      row.plan.capability.reason ?? "This agent cannot apply package updates."
+    );
   }
   if (!row.plan.plan_hash) {
     return "Run a package check before applying updates.";
@@ -1110,7 +1186,8 @@ function packageRowState(row: OsUpdateRow): {
     return {
       detail: "Run first check",
       label: "Unchecked",
-      reason: "No package provider or update plan has been observed for this VPS.",
+      reason:
+        "No package provider or update plan has been observed for this VPS.",
       tone: "neutral",
     };
   }
@@ -1128,7 +1205,8 @@ function packageRowState(row: OsUpdateRow): {
     return {
       detail: "Review limit exceeded",
       label: "Blocked",
-      reason: "The full native plan is too large for safe console review and application.",
+      reason:
+        "The full native plan is too large for safe console review and application.",
       tone: "warn",
     };
   }
@@ -1143,7 +1221,8 @@ function packageRowState(row: OsUpdateRow): {
   return {
     detail: "No updates",
     label: "Current",
-    reason: "The latest native package candidate snapshot contains no available updates.",
+    reason:
+      "The latest native package candidate snapshot contains no available updates.",
     tone: "ok",
   };
 }
@@ -1232,7 +1311,9 @@ function boundedAgentTimeout(agent: AgentView, requested: number): number {
   );
 }
 
-async function readApplyResult(blob: Blob): Promise<HostPackageUpdateApplyResult> {
+async function readApplyResult(
+  blob: Blob,
+): Promise<HostPackageUpdateApplyResult> {
   let parsed: HostPackageUpdateApplyResult;
   try {
     parsed = JSON.parse(await blob.text()) as HostPackageUpdateApplyResult;
@@ -1252,8 +1333,9 @@ async function readApplyResult(blob: Blob): Promise<HostPackageUpdateApplyResult
 function readOsUpdateClientRoute(): string | null {
   if (typeof window === "undefined") return null;
   return (
-    new URLSearchParams(window.location.search).get("os_update_client")?.trim() ||
-    null
+    new URLSearchParams(window.location.search)
+      .get("os_update_client")
+      ?.trim() || null
   );
 }
 

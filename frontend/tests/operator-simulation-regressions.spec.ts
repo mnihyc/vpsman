@@ -65,7 +65,9 @@ test("presents admin-only records as role boundaries without forbidden config re
   await openConsoleSubpage(page, "Access", "Operators");
   await expect(page.getByText("Admin role required")).toBeVisible();
   await expect(page.getByText("Current role: operator.")).toBeVisible();
-  await expect(page.getByRole("button", { name: "New", exact: true })).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "New", exact: true }),
+  ).toHaveCount(0);
 
   await openConsoleSubpage(page, "Access", "VPS identities");
   await expect(
@@ -131,11 +133,15 @@ test("uses role-aware operator defaults and reports successful creation", async 
   await expect(prompt).toBeVisible();
   await activate(prompt.getByRole("button", { name: "Create user" }));
 
-  await expect(page.getByText("Created operator release-operator")).toBeVisible();
+  await expect(
+    page.getByText("Created operator release-operator"),
+  ).toBeVisible();
   await expect(page.getByText("3 operator records")).toBeVisible();
 });
 
-test("submits the privilege unlock form with Enter", async ({ page }, testInfo) => {
+test("submits the privilege unlock form with Enter", async ({
+  page,
+}, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
     "keyboard unlock behavior is covered in the desktop console",
@@ -226,9 +232,9 @@ test("restores a persistent verified unlock after refresh and confirms before lo
       ]);
       return Boolean(
         bounds &&
-          viewport &&
-          bounds.y >= 0 &&
-          bounds.y + bounds.height <= viewport.height,
+        viewport &&
+        bounds.y >= 0 &&
+        bounds.y + bounds.height <= viewport.height,
       );
     })
     .toBe(true);
@@ -364,15 +370,11 @@ test("does not restore privilege after sign-out wins a delayed verification race
       .getByRole("button", { name: "Sign out", exact: true }),
   );
 
-  await expect(
-    page.getByRole("heading", { name: "Sign in" }),
-  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
   await page.waitForTimeout(5_500);
   await expect
     .poll(async () =>
-      page.evaluate(() =>
-        window.localStorage.getItem("vpsman.privilegeGrant"),
-      ),
+      page.evaluate(() => window.localStorage.getItem("vpsman.privilegeGrant")),
     )
     .toBeNull();
 });
@@ -480,9 +482,7 @@ test("privilege unlock reaches refreshable session actions while Audit evidence 
   const unlockCurrentDialog = async () => {
     const dialog = page.getByRole("dialog", { name: "Unlock privilege" });
     await expect(dialog).toBeVisible();
-    await dialog
-      .getByLabel(/super password/i)
-      .fill("local-super-password");
+    await dialog.getByLabel(/super password/i).fill("local-super-password");
     await dialog
       .getByLabel(/(privilege salt|verifier salt hex)/i)
       .fill("00112233445566778899aabbccddeeff");
@@ -618,8 +618,8 @@ test("keeps cross-route job evidence below the mobile toolbar", async ({
       ]);
       return Boolean(
         detailBounds &&
-          topbarBounds &&
-          detailBounds.y >= topbarBounds.y + topbarBounds.height,
+        topbarBounds &&
+        detailBounds.y >= topbarBounds.y + topbarBounds.height,
       );
     })
     .toBe(true);
@@ -636,9 +636,9 @@ test("keeps cross-route job evidence below the mobile toolbar", async ({
       ]);
       return Boolean(
         headerBounds &&
-          closeBounds &&
-          closeBounds.x >= headerBounds.x + headerBounds.width / 2 &&
-          closeBounds.y < headerBounds.y + headerBounds.height / 2,
+        closeBounds &&
+        closeBounds.x >= headerBounds.x + headerBounds.width / 2 &&
+        closeBounds.y < headerBounds.y + headerBounds.height / 2,
       );
     })
     .toBe(true);
@@ -775,15 +775,11 @@ test("keeps focused transfer review local, explicit, and frozen", async ({
     name: "Transfer target VPS",
   });
   await target.fill("edge-sfo-01");
-  await page
-    .getByRole("option", { name: /edge-sfo-01.*agent-sfo-01/ })
-    .click();
+  await page.getByRole("option", { name: /edge-sfo-01.*agent-sfo-01/ }).click();
   await quickTransfer
     .getByLabel("Transfer upload destination path")
     .fill("/tmp/operator-simulation.txt");
-  await activate(
-    quickTransfer.getByRole("button", { name: "Review upload" }),
-  );
+  await activate(quickTransfer.getByRole("button", { name: "Review upload" }));
 
   const detail = page.locator(".consoleDetailPanel", {
     hasText: "File transfer",
@@ -795,9 +791,7 @@ test("keeps focused transfer review local, explicit, and frozen", async ({
   await expect(detail.getByLabel("Dispatch mode boundary")).not.toContainText(
     "Terminal mode",
   );
-  await activate(
-    detail.getByRole("button", { name: "Dispatch", exact: true }),
-  );
+  await activate(detail.getByRole("button", { name: "Dispatch", exact: true }));
 
   const prompt = page.getByLabel("Confirm job dispatch");
   await expect(prompt).toBeVisible();
@@ -806,8 +800,10 @@ test("keeps focused transfer review local, explicit, and frozen", async ({
   await expect(prompt).toContainText("edge-sfo-01 (agent-sfo-01)");
   await expect(prompt).toContainText("Skip upload if the file already exists");
   await expect(prompt).toContainText("Shared offset across all targets");
-  const hashValue = prompt.locator("dt", { hasText: "Source SHA-256" })
-    .locator("..").locator("dd");
+  const hashValue = prompt
+    .locator("dt", { hasText: "Source SHA-256" })
+    .locator("..")
+    .locator("dd");
   await expect(hashValue).toHaveAttribute("title", /^[0-9a-f]{64}$/);
   await expect(hashValue).toContainText("...");
   await expect(prompt.getByText("Symlinks", { exact: true })).toHaveCount(0);
@@ -866,20 +862,24 @@ test("keeps compact fleet and transfer controls usable on mobile", async ({
   await activate(
     page.getByRole("menuitem", { name: "Edit groups", exact: true }),
   );
-  const addGroup = page.locator(".inlineTagAdd").first();
-  await expect(addGroup.getByRole("button")).toBeVisible();
-  const addGroupBounds = await addGroup.boundingBox();
-  const addGroupContainerBounds = await addGroup.locator("..").boundingBox();
+  const assignmentDrawer = page.getByLabel(/^Edit groups ·/);
+  const addGroupField = assignmentDrawer.locator(".consoleField", {
+    hasText: "Add group",
+  });
+  const addGroupInput = addGroupField.getByRole("combobox");
+  await expect(addGroupInput).toBeVisible();
+  await expect(
+    assignmentDrawer.getByRole("button", { name: /Add group to/ }),
+  ).toBeVisible();
+  const addGroupBounds = await addGroupField.boundingBox();
+  const addGroupInputBounds = await addGroupInput.boundingBox();
   expect(addGroupBounds).not.toBeNull();
-  expect(addGroupContainerBounds).not.toBeNull();
-  expect(addGroupBounds!.width).toBeLessThanOrEqual(
-    addGroupContainerBounds!.width + 1,
-  );
-  expect(addGroupBounds!.x + addGroupBounds!.width).toBeLessThanOrEqual(
-    addGroupContainerBounds!.x + addGroupContainerBounds!.width + 1,
+  expect(addGroupInputBounds).not.toBeNull();
+  expect(addGroupInputBounds!.width).toBeGreaterThanOrEqual(
+    addGroupBounds!.width - 2,
   );
   expect(
-    await addGroup.evaluate(
+    await assignmentDrawer.evaluate(
       (element) => element.scrollWidth - element.clientWidth,
     ),
   ).toBeLessThanOrEqual(1);
@@ -896,11 +896,7 @@ test("keeps compact fleet and transfer controls usable on mobile", async ({
   const scheduleCard = scheduleGrid
     .getByLabel(/Schedule records mobile card/)
     .first();
-  for (const action of [
-    "Update targets",
-    "Defer",
-    "Review deletion",
-  ]) {
+  for (const action of ["Update targets", "Defer", "Review deletion"]) {
     await expect(
       scheduleCard.getByRole("button", { name: action, exact: true }),
     ).toHaveCount(0);
@@ -927,7 +923,9 @@ test("keeps compact fleet and transfer controls usable on mobile", async ({
 
   await openConsoleSubpage(page, "Remote Operations", "Transfers");
   const direction = page.getByLabel("Transfer direction");
-  await expect(direction.getByRole("button", { name: "Download" })).toBeVisible();
+  await expect(
+    direction.getByRole("button", { name: "Download" }),
+  ).toBeVisible();
   const transferHeader = direction.locator("..");
   const transferHeadingBounds = await transferHeader
     .getByRole("heading")
@@ -1030,9 +1028,19 @@ test("reports group creation beside the registry action", async ({
   await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, "Fleet", "Groups");
 
-  await page.getByLabel("Group name").fill("simulation:created");
-  await activate(page.getByRole("button", { name: "Create group" }));
-  await expect(page.getByText("Created group simulation:created")).toBeVisible();
+  await activate(
+    page
+      .getByLabel("Group registry data grid")
+      .getByRole("button", { name: "Create group" }),
+  );
+  const createGroupDrawer = page.getByLabel("Create group");
+  await createGroupDrawer.getByLabel("Group name").fill("simulation:created");
+  await activate(
+    createGroupDrawer.getByRole("button", { name: "Create group" }),
+  );
+  await expect(
+    page.getByText("Created group simulation:created"),
+  ).toBeVisible();
 });
 
 test("deleting a webhook rule retains its delivery evidence", async ({

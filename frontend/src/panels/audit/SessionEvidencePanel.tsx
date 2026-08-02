@@ -6,7 +6,7 @@ import {
   TerminalSquare,
   UserX,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ActionFeedback } from "../../components/ActionFeedback";
 import { presentAudit } from "../../auditPresentation";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
@@ -14,9 +14,7 @@ import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
-import {
-  formatLowerBoundCount,
-} from "../../constants";
+import { formatLowerBoundCount } from "../../constants";
 import type {
   AgentView,
   AuditLogRecord,
@@ -38,6 +36,7 @@ import {
   useReviewGenerationGuard,
   waitForReviewRender,
 } from "../../hooks/useReviewGenerationGuard";
+import { scrollIntoViewWithMotion } from "../../motion";
 import {
   formatCompactTime,
   formatFullTime,
@@ -536,7 +535,9 @@ export function SessionEvidencePanel({
         itemLabel="terminal sessions"
         onOpenRow={(row) => setSelectedKey(terminalKey(row.session))}
         openRowLabel="Select proof"
-        openRowTitle={(row) => `Show terminal proof for session ${row.session.session_id}.`}
+        openRowTitle={(row) =>
+          `Show terminal proof for session ${row.session.session_id}.`
+        }
         rows={evidenceRows}
         rowsTruncated={terminalSessionsTruncated}
         searchPlaceholder="Search terminal session, actor, target, transcript, status, or audit event"
@@ -863,6 +864,7 @@ function OperatorSessionEvidence({
     message: string;
     tone: "danger" | "progress" | "success";
   } | null>(null);
+  const feedbackRef = useRef<HTMLDivElement | null>(null);
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
@@ -879,8 +881,7 @@ function OperatorSessionEvidence({
             <small title={session.id}>{shortId(session.id)}</small>
           </span>
         ),
-        searchValue: (session) =>
-          `${session.operator_username} ${session.id}`,
+        searchValue: (session) => `${session.operator_username} ${session.id}`,
         sortValue: (session) => session.operator_username,
       },
       {
@@ -900,8 +901,7 @@ function OperatorSessionEvidence({
         header: "State",
         cell: (session) => {
           const state =
-            stateById.get(session.id) ??
-            operatorSessionEvidenceState(session);
+            stateById.get(session.id) ?? operatorSessionEvidenceState(session);
           return (
             <span className={`status ${state.tone}`} title={state.detail}>
               {state.label}
@@ -910,8 +910,7 @@ function OperatorSessionEvidence({
         },
         searchValue: (session) => {
           const state =
-            stateById.get(session.id) ??
-            operatorSessionEvidenceState(session);
+            stateById.get(session.id) ?? operatorSessionEvidenceState(session);
           return `${state.label} ${state.detail}`;
         },
       },
@@ -970,6 +969,22 @@ function OperatorSessionEvidence({
     invalidateReviewGeneration();
     setPendingRevoke(null);
   }, [invalidateReviewGeneration, operatorSessions]);
+
+  useEffect(() => {
+    if (!feedback?.message || pendingRevoke !== null) {
+      return undefined;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const outcome = feedbackRef.current;
+      if (!outcome) {
+        return;
+      }
+      outcome.tabIndex = -1;
+      scrollIntoViewWithMotion(outcome, { block: "nearest" });
+      outcome.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [feedback?.message, feedback?.tone, pendingRevoke]);
 
   async function requestRevoke(rows: OperatorSessionRecord[]) {
     const sessions = rows.filter(
@@ -1103,6 +1118,7 @@ function OperatorSessionEvidence({
           <ActionFeedback
             className="localActionFeedback"
             message={feedback?.message ?? null}
+            ref={feedbackRef}
             tone={feedback?.tone}
           />
           <ConsoleDataGrid
@@ -1119,8 +1135,7 @@ function OperatorSessionEvidence({
                   rows.length === 0 ||
                   rows.some(
                     (session) =>
-                      session.current ||
-                      !isOperatorSessionRevokable(session),
+                      session.current || !isOperatorSessionRevokable(session),
                   ),
                 icon: <UserX size={14} />,
                 onSelect: (rows) => void requestRevoke(rows),
@@ -1191,6 +1206,7 @@ function OperatorSessionEvidence({
                 ? "This revokes one or more admin bearer sessions. The current browser session cannot be selected here."
                 : "This revokes the selected non-current bearer sessions."
             }
+            error={feedback?.tone === "danger" ? feedback.message : null}
             items={[
               {
                 label: "Sessions",
@@ -1228,9 +1244,7 @@ function OperatorSessionEvidence({
   );
 }
 
-function isOperatorSessionRevokable(
-  session: OperatorSessionRecord,
-): boolean {
+function isOperatorSessionRevokable(session: OperatorSessionRecord): boolean {
   return !session.revoked && !isPast(session.refresh_expires_at);
 }
 
@@ -1447,15 +1461,14 @@ function terminalStartedAt(record: TerminalEvidenceRecord): string | null {
     record.audits
       .filter((audit) => audit.action === "terminal.open")
       .map((audit) => audit.created_at)
-      .sort((left, right) => left.localeCompare(right))[0] ?? null
+      .sort((left, right) => left.localeCompare(right))[0] ??
+    null
   );
 }
 
 function terminalStartedLabel(record: TerminalEvidenceRecord): string {
   const startedAt = terminalStartedAt(record);
-  return startedAt
-    ? formatCompactTime(startedAt)
-    : "Open time unavailable";
+  return startedAt ? formatCompactTime(startedAt) : "Open time unavailable";
 }
 
 function terminalStartedDetail(record: TerminalEvidenceRecord): string {

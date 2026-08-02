@@ -275,7 +275,9 @@ ordinary tags. Resolver-only selectors such as `id:<client_id>` and
 
 Jobs and schedules execute fixed, reviewed target snapshots. Selector text is
 kept as audit context, but the submitted API payload contains the concrete VPS
-IDs that were reviewed.
+IDs that were reviewed. **System > Maintenance > Stale selectors** consolidates
+deliberate target refresh for mutable Schedule and Ping snapshots; shared views
+and approval evidence remain immutable.
 
 Read more in [docs/target-selectors.md](docs/target-selectors.md).
 
@@ -300,8 +302,10 @@ VPS assignments, and an explicit primary target for each card.
 then retains the lifecycle needed to extend active links or revoke them. Each
 share freezes its VPS and visible-data scope at creation. Its secret URL is shown
 once because the control plane stores only a digest. Public projections use
-opaque share-specific VPS keys and never expose IPs, internal configuration,
-actions, jobs, terminals, files, backups, audit data, or operator identity.
+persisted random share-specific VPS keys and never expose internal VPS IDs, IPs,
+internal configuration, actions, jobs, terminals, files, backups, audit data, or
+operator identity. Visitor bootstrap/data reads live only below
+`/api/v1/public/monitoring-shares`; share management remains authenticated.
 
 See [Telemetry metric definitions](docs/telemetry-metrics.md) for aggregation,
 retention, gaps, and source semantics.

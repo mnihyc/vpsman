@@ -1430,6 +1430,10 @@ async fn postgres_legacy_invalid_schedule_cadences_remain_visible_and_repairable
                 confirmed: true,
                 privilege_assertion: None,
             },
+            &crate::repository_schedules::ScheduleSnapshotExpectation {
+                selector_expression: backup.selector_expression.clone(),
+                target_client_ids: backup.target_client_ids.clone(),
+            },
             &operator,
         )
         .await
@@ -1492,6 +1496,7 @@ async fn postgres_legacy_invalid_schedule_cadences_remain_visible_and_repairable
                 retry_delay_secs: repair.retry_delay_secs,
                 max_failures: repair.max_failures,
             },
+            None,
             &operator,
         )
         .await
@@ -1565,6 +1570,7 @@ async fn postgres_malformed_schedule_operation_is_listable_isolated_and_repairab
         .update_schedule_targets(
             malformed.id,
             vec!["malformed-schedule-client".to_string()],
+            None,
             &operator,
         )
         .await
@@ -1601,6 +1607,7 @@ async fn postgres_malformed_schedule_operation_is_listable_isolated_and_repairab
                 retry_delay_secs: repair.retry_delay_secs,
                 max_failures: repair.max_failures,
             },
+            None,
             &operator,
         )
         .await
@@ -1743,6 +1750,7 @@ async fn postgres_audited_mutations_roll_back_when_audit_insert_fails() {
                     retry_delay_secs: 120,
                     max_failures: 2,
                 },
+                None,
                 &operator,
             )
             .await,
@@ -1759,7 +1767,7 @@ async fn postgres_audited_mutations_roll_back_when_audit_insert_fails() {
     set_rejected_audit_action(&db.pool, "schedule.targets_updated").await;
     assert_forced_audit_failure(
         db.repo
-            .update_schedule_targets(schedule.id, vec!["atomic-b".to_string()], &operator)
+            .update_schedule_targets(schedule.id, vec!["atomic-b".to_string()], None, &operator)
             .await,
     );
     assert_eq!(
@@ -2373,7 +2381,10 @@ async fn postgres_authoritative_traffic_history_tracks_counter_epochs_and_raw_ra
         name: "Traffic evidence".to_string(),
         token_digest: payload_hash(b"traffic-share"),
         selector_expression: "*".to_string(),
-        target_client_ids: vec![client_id.to_string()],
+        targets: vec![crate::model_monitoring::MonitoringShareTargetRecord {
+            client_id: client_id.to_string(),
+            public_client_key: "3".repeat(64),
+        }],
         visibility: crate::model_monitoring::MonitoringShareVisibilityView {
             identity_context: false,
             resources: true,
@@ -2393,6 +2404,13 @@ async fn postgres_authoritative_traffic_history_tracks_counter_epochs_and_raw_ra
         .create_monitoring_share(share.clone(), &operator)
         .await
         .unwrap();
+    let persisted_share = db
+        .repo
+        .monitoring_share_record(share.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted_share.targets, share.targets);
     for source_ip in ["198.51.100.10", "198.51.100.11"] {
         db.repo
             .record_monitoring_share_visitor(
@@ -6039,6 +6057,422 @@ async fn postgres_operator_login_throttle_persists_per_client_identity_bucket() 
         .await
         .unwrap();
     assert_eq!(audit_count, 1);
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_repeated_totp_setup_reuses_pending_secret_without_enabling() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let password = "admin-password-123";
+    let auth = db
+        .repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin".to_string(),
+            password: password.to_string(),
+        })
+        .await
+        .unwrap();
+    let actor = AuthContext {
+        operator: auth.operator,
+        session_id: Some(Uuid::new_v4()),
+    };
+    let crate::model::TotpSetupOutcome::Created(first) =
+        db.repo.setup_operator_totp(&actor, password).await.unwrap()
+    else {
+        panic!("expected initial TOTP setup");
+    };
+    let factor_before = sqlx::query_as::<
+        _,
+        (
+            bool,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+        ),
+    >(
+        r#"
+        SELECT totp_enabled,
+               totp_secret_ciphertext_hex,
+               totp_secret_nonce_hex,
+               totp_secret_salt_hex,
+               totp_last_accepted_step
+        FROM operators
+        WHERE id = $1
+        "#,
+    )
+    .bind(actor.operator.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+
+    let crate::model::TotpSetupOutcome::Created(second) =
+        db.repo.setup_operator_totp(&actor, password).await.unwrap()
+    else {
+        panic!("expected pending TOTP setup");
+    };
+    let factor_after = sqlx::query_as::<
+        _,
+        (
+            bool,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+        ),
+    >(
+        r#"
+        SELECT totp_enabled,
+               totp_secret_ciphertext_hex,
+               totp_secret_nonce_hex,
+               totp_secret_salt_hex,
+               totp_last_accepted_step
+        FROM operators
+        WHERE id = $1
+        "#,
+    )
+    .bind(actor.operator.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(second.secret_base32, first.secret_base32);
+    assert_eq!(second.otpauth_uri, first.otpauth_uri);
+    assert_eq!(factor_after, factor_before);
+    assert!(!factor_after.0);
+    assert_eq!(factor_after.4, None);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE action = 'operator_totp.setup'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_concurrent_totp_login_consumes_one_code_once() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let password = "admin-password-123";
+    let auth = db
+        .repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin".to_string(),
+            password: password.to_string(),
+        })
+        .await
+        .unwrap();
+    let actor = AuthContext {
+        operator: auth.operator,
+        session_id: Some(Uuid::new_v4()),
+    };
+    let crate::model::TotpSetupOutcome::Created(_) =
+        db.repo.setup_operator_totp(&actor, password).await.unwrap()
+    else {
+        panic!("expected TOTP setup");
+    };
+    let encrypted = db
+        .repo
+        .operator_by_username("admin")
+        .await
+        .unwrap()
+        .unwrap()
+        .encrypted_totp_secret()
+        .unwrap();
+    let secret = crate::auth_totp::decrypt_totp_secret(password, &encrypted).unwrap();
+    let current_step = crate::unix_now() / crate::auth_totp::TOTP_PERIOD_SECS;
+    let confirm_code = crate::auth_totp::totp_code_for_step(&secret, current_step);
+    let login_step = current_step.saturating_add(1);
+    let login_code = crate::auth_totp::totp_code_for_step(&secret, login_step);
+    assert!(matches!(
+        db.repo
+            .confirm_operator_totp(&actor, password, &confirm_code)
+            .await
+            .unwrap(),
+        crate::model::TotpUpdateOutcome::Updated(_)
+    ));
+
+    let left_repo = Repository::Postgres(db.pool.clone());
+    let right_repo = Repository::Postgres(db.pool.clone());
+    let left_request = LoginRequest {
+        username: "admin".to_string(),
+        password: password.to_string(),
+        totp_code: Some(login_code.clone()),
+    };
+    let right_request = LoginRequest {
+        username: "admin".to_string(),
+        password: password.to_string(),
+        totp_code: Some(login_code),
+    };
+    let throttle = crate::state::OperatorAuthThrottleConfig {
+        username_failed_attempt_limit: 100,
+        ip_failed_attempt_limit: 100,
+        failed_attempt_window_secs: 300,
+        lockout_secs: 60,
+    };
+    let (left, right) = tokio::join!(
+        left_repo.login_operator_with_throttle(
+            &left_request,
+            "203.0.113.81",
+            Some("totp-concurrency-left"),
+            &throttle,
+        ),
+        right_repo.login_operator_with_throttle(
+            &right_request,
+            "203.0.113.82",
+            Some("totp-concurrency-right"),
+            &throttle,
+        ),
+    );
+    assert_eq!(
+        [left.unwrap(), right.unwrap()]
+            .into_iter()
+            .filter(|attempt| {
+                matches!(
+                    attempt,
+                    crate::repository_auth::OperatorLoginAttempt::Authenticated(_)
+                )
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM operator_sessions WHERE operator_id = $1",
+        )
+        .bind(actor.operator.id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT totp_last_accepted_step FROM operators WHERE id = $1",
+        )
+        .bind(actor.operator.id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        Some(login_step as i64)
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_incorrect_totp_code_preserves_factor_and_creates_no_session() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let password = "admin-password-123";
+    let auth = db
+        .repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin".to_string(),
+            password: password.to_string(),
+        })
+        .await
+        .unwrap();
+    let actor = AuthContext {
+        operator: auth.operator,
+        session_id: Some(Uuid::new_v4()),
+    };
+    let crate::model::TotpSetupOutcome::Created(_) =
+        db.repo.setup_operator_totp(&actor, password).await.unwrap()
+    else {
+        panic!("expected TOTP setup");
+    };
+    let encrypted = db
+        .repo
+        .operator_by_username("admin")
+        .await
+        .unwrap()
+        .unwrap()
+        .encrypted_totp_secret()
+        .unwrap();
+    let secret = crate::auth_totp::decrypt_totp_secret(password, &encrypted).unwrap();
+    let current_step = crate::unix_now() / crate::auth_totp::TOTP_PERIOD_SECS;
+    let confirm_code = crate::auth_totp::totp_code_for_step(&secret, current_step);
+    assert!(matches!(
+        db.repo
+            .confirm_operator_totp(&actor, password, &confirm_code)
+            .await
+            .unwrap(),
+        crate::model::TotpUpdateOutcome::Updated(_)
+    ));
+
+    let factor_before = sqlx::query_as::<
+        _,
+        (
+            bool,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+        ),
+    >(
+        r#"
+        SELECT totp_enabled,
+               totp_secret_ciphertext_hex,
+               totp_secret_nonce_hex,
+               totp_secret_salt_hex,
+               totp_last_accepted_step
+        FROM operators
+        WHERE id = $1
+        "#,
+    )
+    .bind(actor.operator.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(factor_before.0);
+    assert_eq!(factor_before.4, Some(current_step as i64));
+    let session_count_before = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM operator_sessions WHERE operator_id = $1",
+    )
+    .bind(actor.operator.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+
+    let wrong_code = (0..=999_999)
+        .map(|value| format!("{value:06}"))
+        .find(|candidate| {
+            (current_step.saturating_sub(2)..=current_step.saturating_add(3)).all(|step| {
+                crate::auth_totp::totp_code_for_step(&secret, step).as_str() != candidate.as_str()
+            })
+        })
+        .expect("six surrounding TOTP steps cannot exhaust the code space");
+    let attempt = db
+        .repo
+        .login_operator_with_throttle(
+            &LoginRequest {
+                username: "admin".to_string(),
+                password: password.to_string(),
+                totp_code: Some(wrong_code),
+            },
+            "203.0.113.83",
+            Some("totp-wrong-code"),
+            &crate::state::OperatorAuthThrottleConfig {
+                username_failed_attempt_limit: 100,
+                ip_failed_attempt_limit: 100,
+                failed_attempt_window_secs: 300,
+                lockout_secs: 60,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        attempt,
+        crate::repository_auth::OperatorLoginAttempt::InvalidCredentials
+    ));
+
+    let factor_after = sqlx::query_as::<
+        _,
+        (
+            bool,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+        ),
+    >(
+        r#"
+        SELECT totp_enabled,
+               totp_secret_ciphertext_hex,
+               totp_secret_nonce_hex,
+               totp_secret_salt_hex,
+               totp_last_accepted_step
+        FROM operators
+        WHERE id = $1
+        "#,
+    )
+    .bind(actor.operator.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(factor_after, factor_before);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM operator_sessions WHERE operator_id = $1",
+        )
+        .bind(actor.operator.id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        session_count_before
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_operator_totp_constraints_reject_partial_or_inconsistent_state() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let auth = db
+        .repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin".to_string(),
+            password: "admin-password-123".to_string(),
+        })
+        .await
+        .unwrap();
+
+    let partial_secret =
+        sqlx::query("UPDATE operators SET totp_secret_ciphertext_hex = 'aa' WHERE id = $1")
+            .bind(auth.operator.id)
+            .execute(&db.pool)
+            .await;
+    assert!(partial_secret.is_err());
+
+    let enabled_without_step = sqlx::query(
+        r#"
+        UPDATE operators
+        SET totp_enabled = TRUE,
+            totp_secret_ciphertext_hex = 'aa',
+            totp_secret_nonce_hex = repeat('b', 24),
+            totp_secret_salt_hex = repeat('c', 32),
+            totp_last_accepted_step = NULL
+        WHERE id = $1
+        "#,
+    )
+    .bind(auth.operator.id)
+    .execute(&db.pool)
+    .await;
+    assert!(enabled_without_step.is_err());
+
+    let disabled_with_step =
+        sqlx::query("UPDATE operators SET totp_last_accepted_step = 1 WHERE id = $1")
+            .bind(auth.operator.id)
+            .execute(&db.pool)
+            .await;
+    assert!(disabled_with_step.is_err());
+
+    sqlx::query(
+        r#"
+        UPDATE operators
+        SET totp_secret_ciphertext_hex = 'aa',
+            totp_secret_nonce_hex = repeat('b', 24),
+            totp_secret_salt_hex = repeat('c', 32)
+        WHERE id = $1
+        "#,
+    )
+    .bind(auth.operator.id)
+    .execute(&db.pool)
+    .await
+    .expect("pending enrollment is a valid canonical TOTP state");
+
     db.cleanup().await;
 }
 

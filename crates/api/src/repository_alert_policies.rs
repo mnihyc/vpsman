@@ -295,7 +295,7 @@ impl Repository {
             "vps_rules_operation_invalid"
         );
         if operation == "upsert" {
-            validate_vps_rule_values(&request.values)?;
+            anyhow::ensure!(!request.values.is_empty(), "vps_rules_values_required");
         } else {
             validate_vps_rule_keys(&request.keys)?;
         }
@@ -5718,6 +5718,17 @@ mod tests {
         let half_year = parse_billing_price("60 €/h").unwrap();
         assert_eq!(half_year.raw, "60.00 €/hy");
         assert_eq!(half_year.json["currency"], "EUR");
+        assert_eq!(
+            parse_billing_price("500USD / m").unwrap().raw,
+            "500.00 USD/m"
+        );
+        assert_eq!(parse_billing_price("10.2 ￥/m").unwrap().raw, "10.20 ¥/m");
+        assert_eq!(
+            parse_billing_price("\u{2003}10.2\u{a0}￥\u{2009}/\u{3000}m\u{202f}")
+                .unwrap()
+                .raw,
+            "10.20 ¥/m"
+        );
         assert_eq!(parse_billing_cycle("7").unwrap().raw, "7");
         assert_eq!(parse_billing_cycle("7-6").unwrap().raw, "07-06");
         validate_billing_rule_group(Some("29.90 CNY/m"), Some("7")).unwrap();

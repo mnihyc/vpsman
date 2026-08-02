@@ -45,6 +45,14 @@ warning that schedule targets changed automatically. Use the Schedules table
 **Update targets** table action when the saved snapshot should be replaced by
 the selector's current resolution.
 
+For a fleet-wide check, open **System > Maintenance > Stale selectors**. The
+table compares current visible-fleet resolution with frozen Schedule (including
+backup-policy) and Ping target snapshots. Select records and use **Actions >
+Update targets**, or use **Update all** to review every resolvable stale row.
+Rows marked **Repair required** have invalid selector or schedule data and must
+be corrected in their owning workflow. Shared views and approval records do not
+appear because their frozen scope is immutable evidence.
+
 ## Inspect Jobs And Output
 
 ```sh
@@ -129,7 +137,10 @@ then use the header **Actions** menu for operations on that selection. On
 desktop, right-clicking a row exposes the same row operations without changing
 the selection. On mobile, select the card and use the same header **Actions**
 menu; tap the card to expand its details. There is intentionally no rightmost
-Action column to chase while horizontally scrolling.
+Action column to chase while horizontally scrolling. Wide desktop tables scroll
+horizontally inside their panel. The **Fields** menu marks every optional column
+as shown or hidden, and saved order, width, visibility, and page-size choices
+remain specific to that table.
 
 For daily 20+ VPS operation, this is the preferred browser pattern:
 
@@ -139,7 +150,9 @@ For daily 20+ VPS operation, this is the preferred browser pattern:
 4. Select the intended rows and use **Actions**, or open **Details** for one
    record.
 5. Follow local progress and the matching audit/job record; status feedback
-   stays with the workflow that produced it.
+   stays with the workflow that produced it. A completed outcome scrolls into
+   view instead of appearing silently outside the viewport; correcting a draft
+   clears the obsolete error from the prior input.
 
 ## History Retention And Export
 

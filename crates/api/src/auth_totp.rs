@@ -75,18 +75,26 @@ pub(crate) fn decrypt_totp_secret(
         .map_err(|_| anyhow::anyhow!("invalid TOTP password or ciphertext"))
 }
 
+#[cfg(test)]
 pub(crate) fn verify_totp_code(secret: &[u8], code: &str, now_unix: u64) -> bool {
-    let Some(code) = normalize_totp_code(code) else {
-        return false;
-    };
+    matching_totp_step(secret, code, now_unix).is_some()
+}
+
+pub(crate) fn matching_totp_step(secret: &[u8], code: &str, now_unix: u64) -> Option<u64> {
+    let code = normalize_totp_code(code)?;
     let current_step = now_unix / TOTP_PERIOD_SECS;
     [
-        current_step.saturating_sub(1),
-        current_step,
         current_step.saturating_add(1),
+        current_step,
+        current_step.saturating_sub(1),
     ]
     .into_iter()
-    .any(|step| constant_time_eq(totp_code_for_step(secret, step).as_bytes(), code.as_bytes()))
+    .find(|step| {
+        constant_time_eq(
+            totp_code_for_step(secret, *step).as_bytes(),
+            code.as_bytes(),
+        )
+    })
 }
 
 pub(crate) fn totp_code_for_step(secret: &[u8], step: u64) -> String {

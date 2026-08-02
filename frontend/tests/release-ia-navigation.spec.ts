@@ -1981,10 +1981,16 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
     .locator(".vpsMonitorCard", { hasText: "edge-sfo-01" })
     .first();
   await expect(edgeCard).toHaveAttribute("role", "link");
-  await expect(edgeCard.getByLabel("Tags for edge-sfo-01")).toContainText(
-    "provider:alpha",
-  );
   await expect(edgeCard.locator(".vpsMonitorCardMain > small")).toBeVisible();
+  await expect(edgeCard.locator(".vpsMonitorCardMain > small")).toContainText(
+    "alpha",
+  );
+  await expect(edgeCard.locator(".vpsMonitorAuxFacts")).toContainText(
+    "29.90 ¥/m",
+  );
+  await expect(edgeCard.locator(".vpsMonitorAuxFacts")).toContainText(
+    "Renews 14",
+  );
   const snapshot = page.getByLabel("VPS cards current totals");
   await expect(snapshot.locator("strong[title], em[title]")).toHaveCount(6);
   await expect(edgeCard.locator(".vpsMonitorTraffic strong")).toHaveAttribute(
@@ -2031,11 +2037,14 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
   expect(compactFirstRow).toBeGreaterThanOrEqual(comfortableFirstRow);
   expect(compactCardWidth).toBeLessThan(comfortableCardWidth);
   expect(compactCardHeight).toBeLessThan(comfortableCardHeight);
+  expect(comfortableCardHeight).toBeLessThan(430);
   await expect(edgeCard.getByText("No contact").first()).toBeVisible();
-  await expect(edgeCard.getByLabel("Tags for edge-sfo-01")).toHaveCount(0);
   await expect(
     edgeCard.locator(".vpsMonitorCardMain > small"),
   ).not.toBeVisible();
+  await expect(edgeCard.locator(".vpsMonitorAuxFacts")).toContainText(
+    "Renews 14",
+  );
   await expect(edgeCard.locator(".comfortableSummary")).toHaveCount(0);
   await expect(edgeCard.locator("button, a, summary, details")).toHaveCount(0);
 
@@ -2057,7 +2066,7 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
   await page.goBack();
   await expect(monitor).toHaveAttribute("data-density", "compact");
   await page.reload();
-  await expect(monitor).toHaveAttribute("data-density", "comfortable");
+  await expect(monitor).toHaveAttribute("data-density", "compact");
   await expect(monitor).toHaveAttribute("data-sort", "warning");
 });
 
@@ -2273,22 +2282,25 @@ test("fleet groups expose registry assignments and reviewed bulk mutation eviden
   await expect(
     page.getByRole("heading", { level: 2, name: "Fleet groups" }),
   ).toBeVisible();
-  const createGroupForm = page.locator(".tagCreateForm");
-  await expect(createGroupForm.getByText("Create group").first()).toBeVisible();
-  await expect(page.getByLabel("Group name")).toHaveAttribute(
+  const groupRegistryGrid = page.getByLabel("Group registry data grid");
+  await activate(
+    groupRegistryGrid.getByRole("button", { name: "Create group" }),
+  );
+  const createGroupDrawer = page.getByLabel("Create group");
+  await expect(createGroupDrawer.getByLabel("Group name")).toHaveAttribute(
     "placeholder",
     "role:edge or maintenance",
   );
-  await page.getByLabel("Group name").fill("role:a,role:b");
+  await createGroupDrawer.getByLabel("Group name").fill("role:a,role:b");
   await expect(
-    page.getByText(
-      "Use one group name per submission; commas are not accepted here.",
-    ),
+    createGroupDrawer.getByText("Use one group name; commas are not accepted."),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Create group" }),
+    createGroupDrawer.getByRole("button", { name: "Create group" }),
   ).toBeDisabled();
-  await page.getByLabel("Group name").fill("");
+  await activate(
+    createGroupDrawer.getByRole("button", { name: "Close Create group" }),
+  );
   await expect(page.getByText("Group registry")).toBeVisible();
   await expect(page.getByLabel("Group registry search")).toBeVisible();
   await expect(page.getByLabel("Fleet group counts")).toContainText(
@@ -2331,11 +2343,10 @@ test("fleet groups expose registry assignments and reviewed bulk mutation eviden
     "live/review/offline",
   );
   await expect(page.getByText("Manage display order")).toBeVisible();
-  const groupRegistryGrid = page.getByLabel("Group registry data grid");
   await expect(groupRegistryGrid).toContainText("Operator group");
-  const createTop = await createGroupForm.boundingBox();
   const summaryTop = await page.getByLabel("Fleet group counts").boundingBox();
-  expect(createTop?.y ?? 0).toBeLessThan(summaryTop?.y ?? 0);
+  const registryTop = await groupRegistryGrid.boundingBox();
+  expect(summaryTop?.y ?? 0).toBeLessThan(registryTop?.y ?? 0);
 
   const operatorGroupRow = groupRegistryGrid
     .getByRole("row")
@@ -2392,7 +2403,9 @@ test("fleet groups expose registry assignments and reviewed bulk mutation eviden
     }),
   ).toBeVisible();
   await expect(assignmentDrawer).toContainText("Used by 1 schedule");
-  await expect(assignmentDrawer).toContainText("Suggestions: edge (2 VPSs)");
+  await expect(
+    assignmentDrawer.getByLabel("Group to add to edge-sfo-01"),
+  ).toHaveAttribute("title", /Suggestions: edge \(2 VPSs\)/);
   await expect(
     assignmentDrawer.getByRole("button", {
       name: "Remove role:edge from edge-sfo-01",
@@ -2493,13 +2506,10 @@ test("fleet groups expose registry assignments and reviewed bulk mutation eviden
     "title",
     "Local match 1 VPS · 0 ready · 1 needs review · review targets excluded",
   );
-  const resolution = page.getByLabel("Bulk group target resolution");
-  await expect(resolution).toContainText("Local match 1 VPS");
-  await expect(resolution).toContainText("0 ready");
-  await expect(resolution).toContainText("1 needs review");
-  await expect(resolution).toContainText("review targets excluded");
-  await expect(resolution).toContainText(
-    "Server resolution runs before confirmation",
+  await expect(selectorStatus).toHaveText("1/3");
+  await expect(selectorStatus).toHaveAttribute(
+    "aria-label",
+    "Local match 1 VPS · 0 ready · 1 needs review · review targets excluded",
   );
   await expect(
     page.getByRole("button", {
@@ -2507,7 +2517,8 @@ test("fleet groups expose registry assignments and reviewed bulk mutation eviden
     }),
   ).toBeDisabled();
   await page.getByLabel("Include targets needing review").check();
-  await expect(resolution).toContainText("1 included");
+  await expect(selectorStatus).toHaveText("1/3");
+  await expect(selectorStatus).toHaveAttribute("title", /1 included/);
   await expect(
     page.getByRole("button", { name: "Add maintenance:test to 1 VPS" }),
   ).toBeEnabled();

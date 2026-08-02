@@ -1,18 +1,18 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sqlx::Row;
 use uuid::Uuid;
 
 use crate::{
     auth_totp::{
-        base32_no_padding, decrypt_totp_secret, encrypt_new_totp_secret, otpauth_uri,
-        verify_totp_code, TOTP_DIGITS, TOTP_PERIOD_SECS,
+        base32_no_padding, decrypt_totp_secret, encrypt_new_totp_secret, matching_totp_step,
+        otpauth_uri, TOTP_DIGITS, TOTP_PERIOD_SECS,
     },
     model::{
         AuditLogView, AuthContext, OperatorRecord, OperatorView, TotpSetupOutcome,
         TotpSetupResponse, TotpUpdateOutcome,
     },
     repository::Repository,
-    repository_auth::{parse_operator_preferences, parse_scopes},
+    repository_auth::{parse_operator_preferences, parse_scopes, postgres_totp_step},
     unix_now, verify_operator_password, DEFAULT_REFRESH_TOKEN_TTL_SECS,
 };
 
@@ -37,10 +37,17 @@ impl Repository {
                 if !verify_operator_password(password, &operator.password_hash)? {
                     return Ok(TotpSetupOutcome::InvalidPassword);
                 }
+                if let Some(secret) = existing_pending_totp_secret(operator, password)? {
+                    return Ok(TotpSetupOutcome::Created(setup_response(
+                        &operator.view(),
+                        &secret,
+                    )));
+                }
                 let (secret, encrypted) = encrypt_new_totp_secret(password)?;
                 operator.totp_secret_ciphertext_hex = Some(encrypted.ciphertext_hex);
                 operator.totp_secret_nonce_hex = Some(encrypted.nonce_hex);
                 operator.totp_secret_salt_hex = Some(encrypted.salt_hex);
+                operator.totp_last_accepted_step = None;
                 let response = setup_response(&operator.view(), &secret);
                 drop(operators);
                 record_totp_audit(memory, actor, "operator_totp.setup", "pending").await;
@@ -58,6 +65,12 @@ impl Repository {
                 if !verify_operator_password(password, &operator.password_hash)? {
                     return Ok(TotpSetupOutcome::InvalidPassword);
                 }
+                if let Some(secret) = existing_pending_totp_secret(&operator, password)? {
+                    return Ok(TotpSetupOutcome::Created(setup_response(
+                        &operator.view(),
+                        &secret,
+                    )));
+                }
                 let (secret, encrypted) = encrypt_new_totp_secret(password)?;
                 sqlx::query(
                     r#"
@@ -66,7 +79,8 @@ impl Repository {
                         totp_enabled = false,
                         totp_secret_ciphertext_hex = $2,
                         totp_secret_nonce_hex = $3,
-                        totp_secret_salt_hex = $4
+                        totp_secret_salt_hex = $4,
+                        totp_last_accepted_step = NULL
                     WHERE id = $1
                     "#,
                 )
@@ -124,16 +138,28 @@ impl Repository {
                 if operator.encrypted_totp_secret().is_none() {
                     return Ok(TotpUpdateOutcome::NotConfigured);
                 }
-                if !verify_totp_operator_code(operator, password, code)? {
+                if enable && operator.totp_enabled {
+                    return Ok(TotpUpdateOutcome::AlreadyEnabled);
+                }
+                let Some(matched_step) = matching_operator_totp_step(operator, password, code)?
+                else {
+                    return Ok(TotpUpdateOutcome::InvalidCredentials);
+                };
+                if operator
+                    .totp_last_accepted_step
+                    .is_some_and(|last_step| matched_step <= last_step)
+                {
                     return Ok(TotpUpdateOutcome::InvalidCredentials);
                 }
                 if enable {
                     operator.totp_enabled = true;
+                    operator.totp_last_accepted_step = Some(matched_step);
                 } else {
                     operator.totp_enabled = false;
                     operator.totp_secret_ciphertext_hex = None;
                     operator.totp_secret_nonce_hex = None;
                     operator.totp_secret_salt_hex = None;
+                    operator.totp_last_accepted_step = None;
                 }
                 let view = operator.view();
                 drop(operators);
@@ -159,18 +185,31 @@ impl Repository {
                 if operator.encrypted_totp_secret().is_none() {
                     return Ok(TotpUpdateOutcome::NotConfigured);
                 }
-                if !verify_totp_operator_code(&operator, password, code)? {
+                if enable && operator.totp_enabled {
+                    return Ok(TotpUpdateOutcome::AlreadyEnabled);
+                }
+                let Some(matched_step) = matching_operator_totp_step(&operator, password, code)?
+                else {
+                    return Ok(TotpUpdateOutcome::InvalidCredentials);
+                };
+                if operator
+                    .totp_last_accepted_step
+                    .is_some_and(|last_step| matched_step <= last_step)
+                {
                     return Ok(TotpUpdateOutcome::InvalidCredentials);
                 }
                 let view = if enable {
                     sqlx::query(
                         r#"
                         UPDATE operators
-                        SET totp_enabled = true
+                        SET
+                            totp_enabled = true,
+                            totp_last_accepted_step = $2
                         WHERE id = $1
                         "#,
                     )
                     .bind(operator.id)
+                    .bind(matched_step as i64)
                     .execute(&mut *tx)
                     .await?;
                     OperatorView {
@@ -185,7 +224,8 @@ impl Repository {
                             totp_enabled = false,
                             totp_secret_ciphertext_hex = NULL,
                             totp_secret_nonce_hex = NULL,
-                            totp_secret_salt_hex = NULL
+                            totp_secret_salt_hex = NULL,
+                            totp_last_accepted_step = NULL
                         WHERE id = $1
                         "#,
                     )
@@ -215,6 +255,36 @@ impl Repository {
     }
 }
 
+fn existing_pending_totp_secret(
+    operator: &OperatorRecord,
+    password: &str,
+) -> Result<Option<Vec<u8>>> {
+    anyhow::ensure!(
+        operator.totp_last_accepted_step.is_none(),
+        "disabled operator has inconsistent TOTP replay state"
+    );
+    match [
+        operator.totp_secret_ciphertext_hex.is_some(),
+        operator.totp_secret_nonce_hex.is_some(),
+        operator.totp_secret_salt_hex.is_some(),
+    ] {
+        [false, false, false] => Ok(None),
+        [true, true, true] => {
+            let encrypted = operator
+                .encrypted_totp_secret()
+                .context("complete pending TOTP material could not be read")?;
+            let secret = decrypt_totp_secret(password, &encrypted)
+                .context("stored pending TOTP secret is corrupt")?;
+            anyhow::ensure!(
+                (16..=64).contains(&secret.len()),
+                "stored pending TOTP secret length is invalid"
+            );
+            Ok(Some(secret))
+        }
+        _ => anyhow::bail!("stored pending TOTP secret material is incomplete"),
+    }
+}
+
 fn setup_response(operator: &OperatorView, secret: &[u8]) -> TotpSetupResponse {
     let secret_base32 = base32_no_padding(secret);
     TotpSetupResponse {
@@ -227,22 +297,22 @@ fn setup_response(operator: &OperatorView, secret: &[u8]) -> TotpSetupResponse {
     }
 }
 
-fn verify_totp_operator_code(
+fn matching_operator_totp_step(
     operator: &OperatorRecord,
     password: &str,
     code: &str,
-) -> Result<bool> {
+) -> Result<Option<u64>> {
     if !verify_operator_password(password, &operator.password_hash)? {
-        return Ok(false);
+        return Ok(None);
     }
     let Some(encrypted) = operator.encrypted_totp_secret() else {
-        return Ok(false);
+        return Ok(None);
     };
     let secret = match decrypt_totp_secret(password, &encrypted) {
         Ok(secret) => secret,
-        Err(_) => return Ok(false),
+        Err(_) => return Ok(None),
     };
-    Ok(verify_totp_code(&secret, code, unix_now()))
+    Ok(matching_totp_step(&secret, code, unix_now()))
 }
 
 async fn select_operator_for_update(
@@ -263,6 +333,7 @@ async fn select_operator_for_update(
             totp_secret_ciphertext_hex,
             totp_secret_nonce_hex,
             totp_secret_salt_hex,
+            totp_last_accepted_step,
             session_refresh_ttl_secs,
             created_at::text AS created_at,
             disabled_at::text AS disabled_at,
@@ -288,6 +359,7 @@ async fn select_operator_for_update(
             totp_secret_ciphertext_hex: row.try_get("totp_secret_ciphertext_hex")?,
             totp_secret_nonce_hex: row.try_get("totp_secret_nonce_hex")?,
             totp_secret_salt_hex: row.try_get("totp_secret_salt_hex")?,
+            totp_last_accepted_step: postgres_totp_step(&row)?,
             session_refresh_ttl_secs: row
                 .try_get::<i64, _>("session_refresh_ttl_secs")?
                 .try_into()

@@ -23,7 +23,15 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { GripVertical, Plus, RefreshCw, ShieldCheck, Tag, Trash2, X } from "lucide-react";
+import {
+  GripVertical,
+  Plus,
+  RefreshCw,
+  ShieldCheck,
+  Tag,
+  Trash2,
+  X,
+} from "lucide-react";
 import {
   ActionFeedback,
   type ActionFeedbackTone,
@@ -34,7 +42,10 @@ import {
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
 import { ConsoleActionDrawer } from "../components/ConsoleLayout";
-import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
+import {
+  useReviewGenerationGuard,
+  waitForReviewRender,
+} from "../hooks/useReviewGenerationGuard";
 import { scrollIntoViewWithMotion } from "../motion";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import { usePanelDisplaySettings } from "../panelDisplay";
@@ -48,8 +59,17 @@ import type {
   TagMutationResponse,
   TagView,
 } from "../types";
-import { buildPrivilegeAssertion, canonicalDbPrivilegeIntent, type PrivilegeMaterial, type PrivilegeAssertion } from "../privilege";
-import { agentsMatchingExpression, parseSearchExpression, selectorExpressionForClientIds } from "../searchExpression";
+import {
+  buildPrivilegeAssertion,
+  canonicalDbPrivilegeIntent,
+  type PrivilegeMaterial,
+  type PrivilegeAssertion,
+} from "../privilege";
+import {
+  agentsMatchingExpression,
+  parseSearchExpression,
+  selectorExpressionForClientIds,
+} from "../searchExpression";
 import { formatVpsName, runPanelAction } from "../utils";
 import { LocalTargetPreview } from "./TargetImpactPreview";
 
@@ -85,9 +105,18 @@ export function FleetGroupsPanel({
   agents: AgentView[];
   error: string | null;
   loading: boolean;
-  onAssignTag: (clientId: string, tag: string, privilegeAssertion: PrivilegeAssertion) => Promise<TagMutationResponse>;
-  onBulkMutateTags: (request: BulkTagMutationRequest) => Promise<TagMutationResponse>;
-  onCreateTag: (name: string, privilegeAssertion: PrivilegeAssertion) => Promise<void>;
+  onAssignTag: (
+    clientId: string,
+    tag: string,
+    privilegeAssertion: PrivilegeAssertion,
+  ) => Promise<TagMutationResponse>;
+  onBulkMutateTags: (
+    request: BulkTagMutationRequest,
+  ) => Promise<TagMutationResponse>;
+  onCreateTag: (
+    name: string,
+    privilegeAssertion: PrivilegeAssertion,
+  ) => Promise<void>;
   onDeleteTag: (
     tag: string,
     confirmed: boolean,
@@ -104,14 +133,23 @@ export function FleetGroupsPanel({
   tags: TagView[];
   fleetAlertPolicies: FleetAlertPolicyRecord[];
 }) {
-  const subpage = ["registry", "assignments", "bulk"].includes(activeSubpage) ? activeSubpage : "registry";
+  const subpage = ["registry", "assignments", "bulk"].includes(activeSubpage)
+    ? activeSubpage
+    : "registry";
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionStatus, setActionStatus] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-  const [lastMutation, setLastMutation] = useState<TagMutationResponse | null>(null);
-  const groupSummary = useMemo(() => buildGroupSummary(tags, agents), [agents, tags]);
+  const [lastMutation, setLastMutation] = useState<TagMutationResponse | null>(
+    null,
+  );
+  const groupSummary = useMemo(
+    () => buildGroupSummary(tags, agents),
+    [agents, tags],
+  );
   const activeLabelCount =
-    groupSummary.providerGroupCount + groupSummary.countryGroupCount + groupSummary.customGroupCount;
+    groupSummary.providerGroupCount +
+    groupSummary.countryGroupCount +
+    groupSummary.customGroupCount;
   const headerDescription = `${tags.length} registry groups, ${activeLabelCount} active labels across ${agents.length} VPSs`;
   const groupsPageFeedbackMessage =
     error ?? (loading ? "Refreshing group state" : null);
@@ -145,28 +183,37 @@ export function FleetGroupsPanel({
       <div className="fleetPanel">
         <div className="sectionHeader">
           <div>
-            <h2>{subpage === "bulk" ? "Bulk groups" : subpage === "assignments" ? "Group assignments" : "Fleet groups"}</h2>
+            <h2>
+              {subpage === "bulk"
+                ? "Bulk groups"
+                : subpage === "assignments"
+                  ? "Group assignments"
+                  : "Fleet groups"}
+            </h2>
             <span>{headerDescription}</span>
           </div>
           <div className="headerActionStack">
-            <button className="secondaryAction" disabled={loading || pending} onClick={onRefresh} type="button">
+            <button
+              className="secondaryAction"
+              disabled={loading || pending}
+              onClick={onRefresh}
+              type="button"
+            >
               <RefreshCw size={15} />
               <span>Refresh</span>
             </button>
-            <ActionFeedback message={groupsPageFeedbackMessage} tone={groupsPageFeedbackTone} />
+            <ActionFeedback
+              message={groupsPageFeedbackMessage}
+              tone={groupsPageFeedbackTone}
+            />
           </div>
         </div>
-        {subpage !== "registry" && subpage !== "assignments" && (
-          <ActionFeedback
-            className="localActionFeedback"
-            message={groupsActionFeedbackMessage}
-            tone={groupsActionFeedbackTone}
-          />
-        )}
+        <GroupSummaryStrip summary={groupSummary} />
         {subpage === "registry" && (
           <TagRegistry
             actionFeedbackMessage={groupsActionFeedbackMessage}
             actionFeedbackTone={groupsActionFeedbackTone}
+            onClearActionFeedback={clearGroupActionFeedback}
             onCreateTag={onCreateTag}
             onDeleteTag={onDeleteTag}
             onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
@@ -177,11 +224,9 @@ export function FleetGroupsPanel({
             runAction={runGroupAction}
             setActionStatus={setActionStatus}
             setLastMutation={setLastMutation}
-            summary={groupSummary}
             tags={tags}
           />
         )}
-        {subpage !== "registry" && <GroupSummaryStrip summary={groupSummary} />}
         {subpage === "assignments" && (
           <TagAssignments
             actionFeedbackMessage={groupsActionFeedbackMessage}
@@ -202,6 +247,8 @@ export function FleetGroupsPanel({
         )}
         {subpage === "bulk" && (
           <BulkTagPanel
+            actionFeedbackMessage={groupsActionFeedbackMessage}
+            actionFeedbackTone={groupsActionFeedbackTone}
             agents={agents}
             onBulkMutateTags={onBulkMutateTags}
             onDeleteTag={onDeleteTag}
@@ -255,7 +302,10 @@ function GroupSummaryStrip({ summary }: { summary: GroupSummary }) {
         <small>assigned VPS</small>
       </span>
       <span>
-        <strong>{summary.reachableCount}/{summary.contactReviewCount}/{summary.offlineCount}</strong>
+        <strong>
+          {summary.reachableCount}/{summary.contactReviewCount}/
+          {summary.offlineCount}
+        </strong>
         <small>reachable/review/offline</small>
       </span>
     </div>
@@ -290,11 +340,17 @@ function buildGroupSummary(tags: TagView[], agents: AgentView[]): GroupSummary {
         state.label !== "Offline" &&
         (state.tone === "warning" || state.tone === "critical"),
     ).length,
-    countryGroupCount: groupNameList.filter((tag) => isCountryGroup(tag)).length,
-    customGroupCount: groupNameList.filter((tag) => !isProviderGroup(tag) && !isCountryGroup(tag)).length,
-    offlineCount: displayStates.filter((state) => state.label === "Offline").length,
-    providerGroupCount: groupNameList.filter((tag) => isProviderGroup(tag)).length,
-    reachableCount: displayStates.filter((state) => state.label === "Online").length,
+    countryGroupCount: groupNameList.filter((tag) => isCountryGroup(tag))
+      .length,
+    customGroupCount: groupNameList.filter(
+      (tag) => !isProviderGroup(tag) && !isCountryGroup(tag),
+    ).length,
+    offlineCount: displayStates.filter((state) => state.label === "Offline")
+      .length,
+    providerGroupCount: groupNameList.filter((tag) => isProviderGroup(tag))
+      .length,
+    reachableCount: displayStates.filter((state) => state.label === "Online")
+      .length,
     totalAssignments: assignments.size,
   };
 }
@@ -355,6 +411,26 @@ function groupOptionLabel(tag: string, clientCount: number) {
   return `${tag} (${clientCount} VPS${clientCount === 1 ? "" : "s"})`;
 }
 
+function groupNameValidationError(value: string): string | null {
+  const name = value.trim();
+  if (name.length > 128) {
+    return "Group names must be 128 characters or fewer.";
+  }
+  if (name.includes(",")) {
+    return "Use one group name; commas are not accepted.";
+  }
+  if (name && name.split(":").some((segment) => segment.length === 0)) {
+    return "Every group segment before or after a colon must have a value.";
+  }
+  if (name && !/^[A-Za-z0-9._:-]+$/.test(name)) {
+    return "Use letters, numbers, periods, dashes, underscores, and colons only.";
+  }
+  if (name.startsWith("id:") || name.startsWith("name:")) {
+    return "The id: and name: prefixes are reserved for VPS selectors.";
+  }
+  return null;
+}
+
 function tagClientsCount(tags: TagView[], tagName: string) {
   return tags.find((tag) => tag.name === tagName)?.clients.length ?? 0;
 }
@@ -377,7 +453,8 @@ function groupDependencySummary(
   ).length;
   const policyCount = fleetAlertPolicies.filter(
     (policy) =>
-      policy.enabled && selectorReferencesGroup(policy.selector_expression, tag),
+      policy.enabled &&
+      selectorReferencesGroup(policy.selector_expression, tag),
   ).length;
   return {
     alertPolicies: policyCount,
@@ -386,7 +463,10 @@ function groupDependencySummary(
   };
 }
 
-function selectorReferencesGroup(selector: string | null | undefined, tag: string) {
+function selectorReferencesGroup(
+  selector: string | null | undefined,
+  tag: string,
+) {
   if (!selector || !tag) {
     return false;
   }
@@ -400,7 +480,10 @@ function selectorReferencesGroup(selector: string | null | undefined, tag: strin
     `vps.tags:${needle}`,
   ]);
   return Array.from(variants).some((variant) =>
-    new RegExp(`(^|[^a-z0-9_:-])${escapeRegExp(variant)}($|[^a-z0-9_:-])`, "i").test(haystack),
+    new RegExp(
+      `(^|[^a-z0-9_:-])${escapeRegExp(variant)}($|[^a-z0-9_:-])`,
+      "i",
+    ).test(haystack),
   );
 }
 
@@ -410,10 +493,14 @@ function dependencySummaryText(summary: GroupDependencySummary) {
   }
   const parts = [];
   if (summary.schedules > 0) {
-    parts.push(`${summary.schedules} schedule${summary.schedules === 1 ? "" : "s"}`);
+    parts.push(
+      `${summary.schedules} schedule${summary.schedules === 1 ? "" : "s"}`,
+    );
   }
   if (summary.alertPolicies > 0) {
-    parts.push(`${summary.alertPolicies} alert polic${summary.alertPolicies === 1 ? "y" : "ies"}`);
+    parts.push(
+      `${summary.alertPolicies} alert polic${summary.alertPolicies === 1 ? "y" : "ies"}`,
+    );
   }
   return `Used by ${parts.join(" and ")}`;
 }
@@ -536,6 +623,7 @@ function escapeRegExp(value: string) {
 function TagRegistry({
   actionFeedbackMessage,
   actionFeedbackTone,
+  onClearActionFeedback,
   onCreateTag,
   onDeleteTag,
   onOpenPrivilegeUnlock,
@@ -546,12 +634,15 @@ function TagRegistry({
   runAction,
   setActionStatus,
   setLastMutation,
-  summary,
   tags,
 }: {
   actionFeedbackMessage: string | null;
   actionFeedbackTone: "danger" | "success";
-  onCreateTag: (name: string, privilegeAssertion: PrivilegeAssertion) => Promise<void>;
+  onClearActionFeedback: () => void;
+  onCreateTag: (
+    name: string,
+    privilegeAssertion: PrivilegeAssertion,
+  ) => Promise<void>;
   onDeleteTag: (
     tag: string,
     confirmed: boolean,
@@ -566,34 +657,28 @@ function TagRegistry({
   runAction: (action: () => Promise<void>) => Promise<void>;
   setActionStatus: (status: string | null) => void;
   setLastMutation: (response: TagMutationResponse | null) => void;
-  summary: GroupSummary;
   tags: TagView[];
 }) {
   const [tagName, setTagName] = useState("");
+  const [createOpen, setCreateOpen] = useState(false);
   const [deleteCandidate, setDeleteCandidate] = useState<TagView | null>(null);
-  const [deletePreview, setDeletePreview] = useState<TagMutationResponse | null>(null);
+  const [deletePreview, setDeletePreview] =
+    useState<TagMutationResponse | null>(null);
+  const actionFeedbackRef = useRef<HTMLDivElement | null>(null);
   const trimmedGroupName = tagName.trim();
-  const groupNameHasComma = trimmedGroupName.includes(",");
-  const groupNameHasEmptySegment =
-    trimmedGroupName.length > 0 &&
-    trimmedGroupName.split(":").some((segment) => segment.length === 0);
-  const groupNameHasInvalidCharacters =
-    trimmedGroupName.length > 0 &&
-    !/^[A-Za-z0-9._:-]+$/.test(trimmedGroupName);
-  const groupNameIsReserved =
-    trimmedGroupName.startsWith("id:") || trimmedGroupName.startsWith("name:");
-  const groupNameError =
-    trimmedGroupName.length > 128
-      ? "Group names must be 128 characters or fewer."
-      : groupNameHasComma
-        ? "Use one group name per submission; commas are not accepted here."
-        : groupNameHasEmptySegment
-          ? "Every group segment before or after a colon must have a value."
-          : groupNameHasInvalidCharacters
-            ? "Use letters, numbers, periods, dashes, underscores, and colons only."
-            : groupNameIsReserved
-              ? "The id: and name: prefixes are reserved for VPS selectors."
-              : null;
+  const groupNameError = groupNameValidationError(tagName);
+
+  useEffect(() => {
+    if (!actionFeedbackMessage || createOpen) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (actionFeedbackRef.current) {
+        scrollIntoViewWithMotion(actionFeedbackRef.current, {
+          block: "nearest",
+        });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [actionFeedbackMessage, createOpen]);
 
   async function submitTag(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -612,6 +697,7 @@ function TagRegistry({
       );
       await onCreateTag(tag, privilegeAssertion);
       setTagName("");
+      setCreateOpen(false);
       setLastMutation(null);
       setActionStatus(`Created group ${tag}`);
     });
@@ -627,13 +713,13 @@ function TagRegistry({
   async function deleteSelected() {
     const candidate = deleteCandidate;
     const preview = deletePreview;
-    setDeleteCandidate(null);
-    setDeletePreview(null);
-    if (!candidate) {
+    if (!candidate || !preview) {
       return;
     }
     await runAction(async () => {
-      const targetIds = (preview?.affected ?? candidate.clients).map((client) => client.id);
+      const targetIds = (preview?.affected ?? candidate.clients).map(
+        (client) => client.id,
+      );
       const privilegeAssertion = await dbPrivilegeAssertion(
         privilegeMaterial,
         onOpenPrivilegeUnlock,
@@ -650,6 +736,8 @@ function TagRegistry({
           preview?.preview_hash ?? null,
         ),
       );
+      setDeleteCandidate(null);
+      setDeletePreview(null);
     });
   }
 
@@ -691,37 +779,10 @@ function TagRegistry({
 
   return (
     <>
-      <form className="compactForm tagCreateForm" onSubmit={submitTag}>
-        <strong>Create group</strong>
-        <span className="formHint">
-          Add one fleet group per submission. Use provider: and country:
-          prefixes for structured targeting.
-        </span>
-        <div className="formRow">
-          <input
-            aria-describedby="group-name-hint"
-            aria-label="Group name"
-            onChange={(event) => setTagName(event.target.value)}
-            placeholder="role:edge or maintenance"
-            value={tagName}
-          />
-          <button
-            className="secondaryAction"
-            disabled={pending || !trimmedGroupName || groupNameError !== null}
-            type="submit"
-          >
-            <Plus size={14} />
-            <span>Create group</span>
-          </button>
-        </div>
-        <small id="group-name-hint">
-          {groupNameError ??
-            "Use the group later in selectors, schedules, alerts, and bulk operations."}
-        </small>
-      </form>
       <ActionFeedback
         className="localActionFeedback"
-        message={actionFeedbackMessage}
+        message={createOpen ? null : actionFeedbackMessage}
+        ref={actionFeedbackRef}
         tone={actionFeedbackTone}
       />
       <ConsoleDataGrid
@@ -734,7 +795,9 @@ function TagRegistry({
           <div className="emptyState">
             <ShieldCheck size={22} />
             <strong>No groups</strong>
-            <span>Create operator groups to target recurring VPS workflows.</span>
+            <span>
+              Create operator groups to target recurring VPS workflows.
+            </span>
           </div>
         }
         renderExpandedRow={(tag) => (
@@ -748,7 +811,9 @@ function TagRegistry({
             <span>Assigned VPSs</span>
             <strong>{tag.clients.length}</strong>
             <span>VPS IDs</span>
-            <strong>{tag.clients.map((client) => client.id).join(", ") || "None"}</strong>
+            <strong>
+              {tag.clients.map((client) => client.id).join(", ") || "None"}
+            </strong>
           </div>
         )}
         rowActions={[
@@ -767,29 +832,120 @@ function TagRegistry({
         searchPlaceholder="Search groups or namespaces"
         storageKey="vpsman.tags.registry"
         title="Group registry"
+        toolbarActions={
+          <button
+            className="primaryAction compactAction"
+            disabled={pending}
+            onClick={() => {
+              onClearActionFeedback();
+              setTagName("");
+              setCreateOpen(true);
+            }}
+            type="button"
+          >
+            <Plus size={14} />
+            Create group
+          </button>
+        }
       />
-      <GroupSummaryStrip summary={summary} />
       <TagOrderManager
         disabled={pending}
         onUpdateTagOrder={onUpdateTagOrder}
         tags={tags}
       />
+      <ConsoleActionDrawer
+        description="Create one reusable fleet group. Assignment can also create a valid group when needed."
+        onClose={() => {
+          if (pending) return;
+          onClearActionFeedback();
+          setCreateOpen(false);
+          setTagName("");
+        }}
+        open={createOpen}
+        title="Create group"
+      >
+        <form className="consoleFormGrid" onSubmit={submitTag}>
+          <ActionFeedback
+            className="localActionFeedback fieldFull"
+            message={actionFeedbackMessage}
+            tone={actionFeedbackTone}
+          />
+          <label className="consoleField fieldFull">
+            <span>Group name</span>
+            <input
+              aria-describedby="group-name-hint"
+              aria-label="Group name"
+              data-action-drawer-initial-focus="true"
+              maxLength={129}
+              onChange={(event) => setTagName(event.target.value)}
+              placeholder="role:edge or maintenance"
+              value={tagName}
+            />
+            <small id="group-name-hint">
+              {groupNameError ??
+                "Use provider: or country: for structured groups; other valid names create operator groups."}
+            </small>
+          </label>
+          <div className="consoleFormActions fieldFull">
+            <button
+              className="secondaryAction"
+              disabled={pending}
+              onClick={() => {
+                onClearActionFeedback();
+                setCreateOpen(false);
+                setTagName("");
+              }}
+              type="button"
+            >
+              Cancel
+            </button>
+            <button
+              className="primaryAction"
+              disabled={pending || !trimmedGroupName || groupNameError !== null}
+              type="submit"
+            >
+              <Plus size={14} />
+              Create group
+            </button>
+          </div>
+        </form>
+      </ConsoleActionDrawer>
       <ConfirmationPrompt
         confirmLabel="Delete group"
         detail="Delete this group and remove it from assigned VPSs. Recreate and reassign it to use the group again."
+        error={
+          actionFeedbackTone === "danger"
+            ? (actionFeedbackMessage ?? undefined)
+            : undefined
+        }
         items={[
           { label: "Group", value: deleteCandidate?.name ?? "-" },
           {
             label: "Type",
             value: deleteCandidate ? groupKindLabel(deleteCandidate.name) : "-",
           },
-          { label: "Assignments", value: String(deletePreview?.target_count ?? deleteCandidate?.clients.length ?? 0) },
+          {
+            label: "Assignments",
+            value: String(
+              deletePreview?.target_count ??
+                deleteCandidate?.clients.length ??
+                0,
+            ),
+          },
           {
             label: "Preview hash",
             title: deletePreview?.preview_hash,
             value: deletePreview?.preview_hash ?? "-",
           },
-          { label: "Schedule target notices", value: <ScheduleImpactTable impacts={deletePreview?.schedule_impacts ?? []} onOpenSchedules={onOpenSchedules} /> },
+          {
+            label: "Schedule target notices",
+            value: (
+              <ScheduleImpactTable
+                impacts={deletePreview?.schedule_impacts ?? []}
+                onOpenSchedules={onOpenSchedules}
+              />
+            ),
+          },
         ]}
         onCancel={() => {
           setDeleteCandidate(null);
@@ -813,17 +969,27 @@ function TagOrderManager({
   onUpdateTagOrder: (orderedTags: string[]) => Promise<TagView[]>;
   tags: TagView[];
 }) {
-  const [orderedNames, setOrderedNames] = useState(() => tags.map((tag) => tag.name));
+  const [orderedNames, setOrderedNames] = useState(() =>
+    tags.map((tag) => tag.name),
+  );
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
-  const tagByName = useMemo(() => new Map(tags.map((tag) => [tag.name, tag])), [tags]);
+  const tagByName = useMemo(
+    () => new Map(tags.map((tag) => [tag.name, tag])),
+    [tags],
+  );
   const orderedTags = useMemo(
-    () => orderedNames.map((name) => tagByName.get(name)).filter((tag): tag is TagView => Boolean(tag)),
+    () =>
+      orderedNames
+        .map((name) => tagByName.get(name))
+        .filter((tag): tag is TagView => Boolean(tag)),
     [orderedNames, tagByName],
   );
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
   );
 
   useEffect(() => {
@@ -865,7 +1031,9 @@ function TagOrderManager({
           <span>{tags.length} groups</span>
         </div>
         {status && (
-          <span className={`consoleStatusBadge ${saving || status !== "Order saved" ? "warning" : "ok"}`}>
+          <span
+            className={`consoleStatusBadge ${saving || status !== "Order saved" ? "warning" : "ok"}`}
+          >
             {status}
           </span>
         )}
@@ -877,8 +1045,15 @@ function TagOrderManager({
           <span>Create groups before setting fleet display order.</span>
         </div>
       ) : (
-        <DndContext collisionDetection={closestCenter} onDragEnd={(event) => void handleDragEnd(event)} sensors={sensors}>
-          <SortableContext items={orderedTags.map((tag) => tag.name)} strategy={verticalListSortingStrategy}>
+        <DndContext
+          collisionDetection={closestCenter}
+          onDragEnd={(event) => void handleDragEnd(event)}
+          sensors={sensors}
+        >
+          <SortableContext
+            items={orderedTags.map((tag) => tag.name)}
+            strategy={verticalListSortingStrategy}
+          >
             <div className="tagOrderList" role="list">
               {orderedTags.map((tag, index) => (
                 <SortableTagOrderRow
@@ -937,7 +1112,9 @@ function SortableTagOrderRow({
       <span className="tags">
         <em>{tag.name}</em>
       </span>
-      <span className="tagOrderClients">{tag.clients.length} VPS{tag.clients.length === 1 ? "" : "s"}</span>
+      <span className="tagOrderClients">
+        {tag.clients.length} VPS{tag.clients.length === 1 ? "" : "s"}
+      </span>
     </div>
   );
 }
@@ -962,8 +1139,14 @@ function TagAssignments({
   actionFeedbackTone: ActionFeedbackTone;
   agents: AgentView[];
   fleetAlertPolicies: FleetAlertPolicyRecord[];
-  onAssignTag: (clientId: string, tag: string, privilegeAssertion: PrivilegeAssertion) => Promise<TagMutationResponse>;
-  onBulkMutateTags: (request: BulkTagMutationRequest) => Promise<TagMutationResponse>;
+  onAssignTag: (
+    clientId: string,
+    tag: string,
+    privilegeAssertion: PrivilegeAssertion,
+  ) => Promise<TagMutationResponse>;
+  onBulkMutateTags: (
+    request: BulkTagMutationRequest,
+  ) => Promise<TagMutationResponse>;
   onClearActionFeedback: () => void;
   onOpenPrivilegeUnlock: () => void;
   pending: boolean;
@@ -989,8 +1172,15 @@ function TagAssignments({
   const tagNames = useMemo(() => tags.map((tag) => tag.name), [tags]);
   const tagOptions = useMemo(() => tags.map(groupOption), [tags]);
   const suggestionsText = tagOptions.length
-    ? `Suggestions: ${tagOptions.slice(0, 4).map((option) => option.label).join(", ")}`
+    ? `Suggestions: ${tagOptions
+        .slice(0, 4)
+        .map((option) => option.label)
+        .join(", ")}`
     : "No saved operator groups yet";
+  const editingGroupInput = editingAgent
+    ? (tagByAgent[editingAgent.id] ?? "")
+    : "";
+  const editingGroupError = groupNameValidationError(editingGroupInput);
 
   useEffect(() => {
     if (editingAgentId && !editingAgent) {
@@ -1010,60 +1200,80 @@ function TagAssignments({
     return () => window.cancelAnimationFrame(frame);
   }, [actionFeedbackMessage]);
 
-  const addTag = useCallback(async (agent: AgentView) => {
-    const tag = tagByAgent[agent.id]?.trim();
-    if (!tag) {
-      return;
-    }
-    await runAction(async () => {
-      const privilegeAssertion = await dbPrivilegeAssertion(
-        privilegeMaterial,
-        onOpenPrivilegeUnlock,
-        "tag.assign",
-        tag,
-        null,
-        [agent.id],
-      );
-      setLastMutation(await onAssignTag(agent.id, tag, privilegeAssertion));
-      setTagByAgent((current) => ({ ...current, [agent.id]: "" }));
-      setRecentRemoval(null);
-    });
-  }, [onAssignTag, onOpenPrivilegeUnlock, privilegeMaterial, runAction, setLastMutation, tagByAgent]);
-
-  const removeTag = useCallback(async (agent: AgentView, tag: string) => {
-    const agentLabel = formatVpsName(agent, vpsNameDisplayMode);
-    await runAction(async () => {
-      const selector = selectorExpressionForClientIds([agent.id]);
-      const privilegeAssertion = await dbPrivilegeAssertion(
-        privilegeMaterial,
-        onOpenPrivilegeUnlock,
-        "tag.bulk_remove",
-        tag,
-        selector,
-        [agent.id],
-      );
-      const response = await onBulkMutateTags({
-        action: "remove",
-        confirmed: true,
-        privilege_assertion: privilegeAssertion,
-        selector_expression: selector,
-        target_client_ids: [agent.id],
-        tag,
+  const addTag = useCallback(
+    async (agent: AgentView) => {
+      const tag = tagByAgent[agent.id]?.trim();
+      if (!tag || groupNameValidationError(tag)) {
+        return;
+      }
+      await runAction(async () => {
+        const privilegeAssertion = await dbPrivilegeAssertion(
+          privilegeMaterial,
+          onOpenPrivilegeUnlock,
+          "tag.assign",
+          tag,
+          null,
+          [agent.id],
+        );
+        setLastMutation(await onAssignTag(agent.id, tag, privilegeAssertion));
+        setTagByAgent((current) => ({ ...current, [agent.id]: "" }));
+        setRecentRemoval(null);
       });
-      setLastMutation(response);
-      if (response.changed_count > 0) {
-        setRecentRemoval({
-          agentId: agent.id,
-          agentLabel,
-          scheduleImpactCount: response.schedule_impacts.length,
-          selectorExpression: selector,
+    },
+    [
+      onAssignTag,
+      onOpenPrivilegeUnlock,
+      privilegeMaterial,
+      runAction,
+      setLastMutation,
+      tagByAgent,
+    ],
+  );
+
+  const removeTag = useCallback(
+    async (agent: AgentView, tag: string) => {
+      const agentLabel = formatVpsName(agent, vpsNameDisplayMode);
+      await runAction(async () => {
+        const selector = selectorExpressionForClientIds([agent.id]);
+        const privilegeAssertion = await dbPrivilegeAssertion(
+          privilegeMaterial,
+          onOpenPrivilegeUnlock,
+          "tag.bulk_remove",
+          tag,
+          selector,
+          [agent.id],
+        );
+        const response = await onBulkMutateTags({
+          action: "remove",
+          confirmed: true,
+          privilege_assertion: privilegeAssertion,
+          selector_expression: selector,
+          target_client_ids: [agent.id],
           tag,
         });
-      } else {
-        setRecentRemoval(null);
-      }
-    });
-  }, [onBulkMutateTags, onOpenPrivilegeUnlock, privilegeMaterial, runAction, setLastMutation, vpsNameDisplayMode]);
+        setLastMutation(response);
+        if (response.changed_count > 0) {
+          setRecentRemoval({
+            agentId: agent.id,
+            agentLabel,
+            scheduleImpactCount: response.schedule_impacts.length,
+            selectorExpression: selector,
+            tag,
+          });
+        } else {
+          setRecentRemoval(null);
+        }
+      });
+    },
+    [
+      onBulkMutateTags,
+      onOpenPrivilegeUnlock,
+      privilegeMaterial,
+      runAction,
+      setLastMutation,
+      vpsNameDisplayMode,
+    ],
+  );
 
   async function undoRemoveTag() {
     if (!recentRemoval) {
@@ -1098,13 +1308,16 @@ function TagAssignments({
       {
         cell: (agent) => (
           <span className="historyPrimary">
-            <strong title={agent.id}>{formatVpsName(agent, vpsNameDisplayMode)}</strong>
+            <strong title={agent.id}>
+              {formatVpsName(agent, vpsNameDisplayMode)}
+            </strong>
             <small>{agent.id}</small>
           </span>
         ),
         header: "VPS",
         id: "vps",
-        searchValue: (agent) => `${formatVpsName(agent, vpsNameDisplayMode)} ${agent.id}`,
+        searchValue: (agent) =>
+          `${formatVpsName(agent, vpsNameDisplayMode)} ${agent.id}`,
         sortValue: (agent) => formatVpsName(agent, vpsNameDisplayMode),
       },
       {
@@ -1112,7 +1325,9 @@ function TagAssignments({
           const state = agentDisplayState(agent);
           return (
             <span className="historyPrimary">
-              <strong className={`status ${groupReachabilityToneClass(state.tone)}`}>
+              <strong
+                className={`status ${groupReachabilityToneClass(state.tone)}`}
+              >
                 {state.label}
               </strong>
               <small title={state.detail}>{state.detail}</small>
@@ -1131,7 +1346,11 @@ function TagAssignments({
         cell: (agent) => (
           <span className="tagChipList">
             {agent.tags.map((tag) => {
-              const dependencies = groupDependencySummary(tag, schedules, fleetAlertPolicies);
+              const dependencies = groupDependencySummary(
+                tag,
+                schedules,
+                fleetAlertPolicies,
+              );
               const dependencyLabel = dependencySummaryText(dependencies);
               const hasDependencies = dependencies.total > 0;
               return (
@@ -1182,8 +1401,8 @@ function TagAssignments({
               pending
                 ? "Wait for the current group change to finish before editing another VPS."
                 : rows[0]
-                ? `Edit groups assigned to ${formatVpsName(rows[0], vpsNameDisplayMode)}.`
-                : "Select one VPS to edit its groups.",
+                  ? `Edit groups assigned to ${formatVpsName(rows[0], vpsNameDisplayMode)}.`
+                  : "Select one VPS to edit its groups.",
             disabled: (rows) => pending || rows.length !== 1,
             icon: <Tag size={14} />,
             label: "Edit groups",
@@ -1233,44 +1452,50 @@ function TagAssignments({
               ref={actionFeedbackRef}
               tone={actionFeedbackTone}
             />
-            <strong>Assigned groups</strong>
-            {editingAgent.tags.length > 0 ? (
-              <span className="tagChipList">
-                {editingAgent.tags.map((tag) => {
-                  const dependencies = groupDependencySummary(
-                    tag,
-                    schedules,
-                    fleetAlertPolicies,
-                  );
-                  const dependencyLabel = dependencySummaryText(dependencies);
-                  return (
-                    <button
-                      aria-label={`Remove ${tag} from ${formatVpsName(editingAgent, vpsNameDisplayMode)}`}
-                      className={`tagRemoveChip${dependencies.total > 0 ? " linked" : ""}`}
-                      disabled={pending}
-                      key={tag}
-                      onClick={() => void removeTag(editingAgent, tag)}
-                      title={`Remove ${tag} (${groupKindLabel(tag).toLowerCase()}). ${dependencyLabel}`}
-                      type="button"
-                    >
-                      <span>{tag}</span>
-                      {dependencies.total > 0 && (
-                        <small>{dependencyLabel}</small>
-                      )}
-                      <X size={12} />
-                    </button>
-                  );
-                })}
-              </span>
-            ) : (
-              <span className="formHint">No groups assigned.</span>
-            )}
-            <label>
-              <span>Add group</span>
-              <span className="formRow inlineTagAdd">
+            <section className="consoleFormGroup">
+              <div className="consoleFormGroupHeader">
+                <strong>Group membership</strong>
+                <span>
+                  Remove an assigned group, or choose an existing group name to
+                  add. A new valid name is created on assignment.
+                </span>
+              </div>
+              {editingAgent.tags.length > 0 ? (
+                <span className="tagChipList">
+                  {editingAgent.tags.map((tag) => {
+                    const dependencies = groupDependencySummary(
+                      tag,
+                      schedules,
+                      fleetAlertPolicies,
+                    );
+                    const dependencyLabel = dependencySummaryText(dependencies);
+                    return (
+                      <button
+                        aria-label={`Remove ${tag} from ${formatVpsName(editingAgent, vpsNameDisplayMode)}`}
+                        className={`tagRemoveChip${dependencies.total > 0 ? " linked" : ""}`}
+                        disabled={pending}
+                        key={tag}
+                        onClick={() => void removeTag(editingAgent, tag)}
+                        title={`Remove ${tag} (${groupKindLabel(tag).toLowerCase()}). ${dependencyLabel}`}
+                        type="button"
+                      >
+                        <span>{tag}</span>
+                        {dependencies.total > 0 && (
+                          <small>{dependencyLabel}</small>
+                        )}
+                        <X size={12} />
+                      </button>
+                    );
+                  })}
+                </span>
+              ) : (
+                <span className="formHint">No groups assigned.</span>
+              )}
+              <label className="consoleField fieldFull">
+                <span>Add group</span>
                 <input
                   aria-describedby={`group-suggestions-${editingAgent.id}`}
-                  aria-label={`Group to add to ${editingAgent.display_name}`}
+                  aria-label={`Group to add to ${formatVpsName(editingAgent, vpsNameDisplayMode)}`}
                   data-action-drawer-initial-focus="true"
                   list="tag-options"
                   onChange={(event) =>
@@ -1280,13 +1505,22 @@ function TagAssignments({
                     }))
                   }
                   placeholder="group name"
-                  value={tagByAgent[editingAgent.id] ?? ""}
+                  title={suggestionsText}
+                  value={editingGroupInput}
                 />
+                <small id={`group-suggestions-${editingAgent.id}`}>
+                  {editingGroupError ??
+                    "Choose a saved group from the dropdown or enter one new valid group name."}
+                </small>
+              </label>
+              <div className="consoleFormActions">
                 <button
                   aria-label={`Add group to ${formatVpsName(editingAgent, vpsNameDisplayMode)}`}
-                  className="secondaryAction compactAction"
+                  className="primaryAction"
                   disabled={
-                    pending || !(tagByAgent[editingAgent.id] ?? "").trim()
+                    pending ||
+                    !editingGroupInput.trim() ||
+                    editingGroupError !== null
                   }
                   onClick={() => void addTag(editingAgent)}
                   type="button"
@@ -1294,44 +1528,45 @@ function TagAssignments({
                   <Plus size={13} />
                   Add
                 </button>
-              </span>
-              <small id={`group-suggestions-${editingAgent.id}`}>
-                {suggestionsText}
-              </small>
-            </label>
-            {recentRemoval?.agentId === editingAgent.id ? (
-              <div
-                aria-live="polite"
-                className="tagAssignmentNotice"
-                role="status"
-              >
-                <span>
-                  Removed <strong>{recentRemoval.tag}</strong> from{" "}
-                  <strong>{recentRemoval.agentLabel}</strong>.
-                </span>
-                {recentRemoval.scheduleImpactCount > 0 && (
-                  <small>
-                    Used by {recentRemoval.scheduleImpactCount} schedule
-                    {recentRemoval.scheduleImpactCount === 1 ? "" : "s"}; saved
-                    targets stay fixed until updated.
-                  </small>
-                )}
-                <button
-                  className="secondaryAction compactAction"
-                  disabled={pending}
-                  onClick={undoRemoveTag}
-                  type="button"
-                >
-                  Undo
-                </button>
               </div>
-            ) : null}
+              {recentRemoval?.agentId === editingAgent.id ? (
+                <div
+                  aria-live="polite"
+                  className="tagAssignmentNotice"
+                  role="status"
+                >
+                  <span>
+                    Removed <strong>{recentRemoval.tag}</strong> from{" "}
+                    <strong>{recentRemoval.agentLabel}</strong>.
+                  </span>
+                  {recentRemoval.scheduleImpactCount > 0 && (
+                    <small>
+                      Used by {recentRemoval.scheduleImpactCount} schedule
+                      {recentRemoval.scheduleImpactCount === 1 ? "" : "s"};
+                      saved targets stay fixed until updated.
+                    </small>
+                  )}
+                  <button
+                    className="secondaryAction compactAction"
+                    disabled={pending}
+                    onClick={undoRemoveTag}
+                    type="button"
+                  >
+                    Undo
+                  </button>
+                </div>
+              ) : null}
+            </section>
           </div>
         ) : null}
       </ConsoleActionDrawer>
       <datalist id="tag-options">
         {tagNames.map((tag) => (
-          <option key={tag} label={groupOptionLabel(tag, tagClientsCount(tags, tag))} value={tag} />
+          <option
+            key={tag}
+            label={groupOptionLabel(tag, tagClientsCount(tags, tag))}
+            value={tag}
+          />
         ))}
       </datalist>
     </>
@@ -1348,6 +1583,8 @@ function groupReachabilityToneClass(
 }
 
 function BulkTagPanel({
+  actionFeedbackMessage,
+  actionFeedbackTone,
   agents,
   onBulkMutateTags,
   onDeleteTag,
@@ -1360,8 +1597,12 @@ function BulkTagPanel({
   setLastMutation,
   tags,
 }: {
+  actionFeedbackMessage: string | null;
+  actionFeedbackTone: ActionFeedbackTone;
   agents: AgentView[];
-  onBulkMutateTags: (request: BulkTagMutationRequest) => Promise<TagMutationResponse>;
+  onBulkMutateTags: (
+    request: BulkTagMutationRequest,
+  ) => Promise<TagMutationResponse>;
   onDeleteTag: (
     tag: string,
     confirmed: boolean,
@@ -1377,23 +1618,32 @@ function BulkTagPanel({
   setLastMutation: (response: TagMutationResponse | null) => void;
   tags: TagView[];
 }) {
-  const [selectorExpression, setSelectorExpression] = useState(() => readLocalString(TAG_BULK_SELECTOR_STORAGE_KEY));
+  const [selectorExpression, setSelectorExpression] = useState(() =>
+    readLocalString(TAG_BULK_SELECTOR_STORAGE_KEY),
+  );
   const [action, setAction] = useState<"add" | "remove" | "delete">("add");
   const [tag, setTag] = useState("");
   const [preview, setPreview] = useState<TagMutationResponse | null>(null);
-  const [resolvedTargets, setResolvedTargets] = useState<BulkResolveResponse | null>(null);
+  const [resolvedTargets, setResolvedTargets] =
+    useState<BulkResolveResponse | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const [mutationSnapshot, setMutationSnapshot] = useState<BulkTagMutationSnapshot | null>(null);
+  const [mutationSnapshot, setMutationSnapshot] =
+    useState<BulkTagMutationSnapshot | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewStatus, setPreviewStatus] = useState<string | null>(null);
   const [includeReviewTargets, setIncludeReviewTargets] = useState(false);
+  const actionFeedbackRef = useRef<HTMLDivElement | null>(null);
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
     isReviewGenerationCurrent,
   } = useReviewGenerationGuard();
-  const selectorParse = useMemo(() => parseSearchExpression(selectorExpression), [selectorExpression]);
+  const selectorParse = useMemo(
+    () => parseSearchExpression(selectorExpression),
+    [selectorExpression],
+  );
   const trimmedTag = tag.trim();
+  const bulkGroupNameError = groupNameValidationError(tag);
   const trimmedSelector = selectorExpression.trim();
   const localTargets = useMemo(
     () =>
@@ -1409,7 +1659,10 @@ function BulkTagPanel({
   const eligibleResolvedTargets = useMemo(
     () =>
       resolvedTargets
-        ? tagMutationEligibleTargets(resolvedTargets.targets, includeReviewTargets)
+        ? tagMutationEligibleTargets(
+            resolvedTargets.targets,
+            includeReviewTargets,
+          )
         : null,
     [includeReviewTargets, resolvedTargets],
   );
@@ -1419,11 +1672,38 @@ function BulkTagPanel({
       : (eligibleResolvedTargets?.length ?? eligibleLocalTargets.length);
   const canReviewMutation = Boolean(
     trimmedTag &&
-      (action === "delete" ||
-        (trimmedSelector && !selectorParse.error && eligibleLocalTargets.length > 0)),
+    !bulkGroupNameError &&
+    (action === "delete" ||
+      (trimmedSelector &&
+        !selectorParse.error &&
+        eligibleLocalTargets.length > 0)),
   );
 
-  useEffect(() => writeLocalString(TAG_BULK_SELECTOR_STORAGE_KEY, selectorExpression), [selectorExpression]);
+  const localFeedbackMessage = previewError
+    ? `Preview failed. ${previewError}. Retry review; final apply stays locked until a fresh server preview succeeds.`
+    : (previewStatus ?? actionFeedbackMessage);
+  const localFeedbackTone: ActionFeedbackTone = previewError
+    ? "danger"
+    : previewStatus
+      ? "progress"
+      : actionFeedbackTone;
+
+  useEffect(() => {
+    if (!localFeedbackMessage) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (actionFeedbackRef.current) {
+        scrollIntoViewWithMotion(actionFeedbackRef.current, {
+          block: "nearest",
+        });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [localFeedbackMessage]);
+
+  useEffect(
+    () => writeLocalString(TAG_BULK_SELECTOR_STORAGE_KEY, selectorExpression),
+    [selectorExpression],
+  );
 
   function clearMutationPreview() {
     invalidateReviewGeneration();
@@ -1442,13 +1722,20 @@ function BulkTagPanel({
     const frozenTag = trimmedTag;
     const frozenSelector = trimmedSelector;
     setPreviewError(null);
-    setPreviewStatus(frozenAction === "delete" ? "Preparing delete preview" : "Resolving targets and preparing preview");
+    setPreviewStatus(
+      frozenAction === "delete"
+        ? "Preparing delete preview"
+        : "Resolving targets and preparing preview",
+    );
     try {
       await runAction(async () => {
         try {
           await waitForReviewRender();
           if (frozenAction !== "delete" && selectorParse.error) {
             throw new Error(selectorParse.error);
+          }
+          if (bulkGroupNameError) {
+            throw new Error(bulkGroupNameError);
           }
           if (frozenAction === "delete") {
             const nextPreview = await onDeleteTag(frozenTag, false, null);
@@ -1522,11 +1809,15 @@ function BulkTagPanel({
     setConfirmOpen(false);
     await runAction(async () => {
       if (!snapshot) {
-        throw new Error("Group mutation confirmation snapshot is missing; preview the mutation again");
+        throw new Error(
+          "Group mutation confirmation snapshot is missing; preview the mutation again",
+        );
       }
       if (!privilegeMaterial) {
         onOpenPrivilegeUnlock();
-        throw new Error("Privilege unlock is required before bulk group mutation");
+        throw new Error(
+          "Privilege unlock is required before bulk group mutation",
+        );
       }
       if (snapshot.action === "delete") {
         const targetIds = snapshot.preview.affected.map((client) => client.id);
@@ -1538,7 +1829,14 @@ function BulkTagPanel({
           null,
           targetIds,
         );
-        setLastMutation(await onDeleteTag(snapshot.tag, true, privilegeAssertion, snapshot.preview.preview_hash));
+        setLastMutation(
+          await onDeleteTag(
+            snapshot.tag,
+            true,
+            privilegeAssertion,
+            snapshot.preview.preview_hash,
+          ),
+        );
         setMutationSnapshot(null);
         return;
       }
@@ -1567,6 +1865,7 @@ function BulkTagPanel({
       );
       setMutationSnapshot(null);
     });
+    clearMutationPreview();
   }
 
   const previewAgents = preview?.affected ?? [];
@@ -1612,6 +1911,10 @@ function BulkTagPanel({
             placeholder="provider:aws or role:edge"
             value={tag}
           />
+          <small className={bulkGroupNameError ? "errorText" : "formHint"}>
+            {bulkGroupNameError ??
+              "Choose an existing group or enter one valid new group name."}
+          </small>
         </label>
         <datalist id="bulk-tag-options">
           {tags.map((item) => (
@@ -1624,6 +1927,15 @@ function BulkTagPanel({
               agents={agents}
               ariaLabel="Bulk group selector expression"
               className="targetExpressionBar"
+              metaDescription={
+                selectorExpression.trim() && !selectorParse.error
+                  ? targetStatusText(
+                      "Local match",
+                      localTargets,
+                      includeReviewTargets,
+                    )
+                  : undefined
+              }
               onChange={(value) => {
                 setSelectorExpression(value);
                 clearMutationPreview();
@@ -1631,23 +1943,15 @@ function BulkTagPanel({
               placeholder="provider:* && country:US"
               showMatchCount
               value={selectorExpression}
-              verification={selectorParse.error ? "invalid" : selectorExpression.trim() ? "valid" : "neutral"}
-              verificationMessage={selectorParse.error ?? (selectorExpression.trim() ? targetStatusText("Local match", localTargets, includeReviewTargets) : undefined)}
+              verification={
+                selectorParse.error
+                  ? "invalid"
+                  : selectorExpression.trim()
+                    ? "valid"
+                    : "neutral"
+              }
+              verificationMessage={selectorParse.error ?? undefined}
             />
-            <div className="bulkTargetResolution" aria-label="Bulk group target resolution">
-              <span>
-                {selectorExpression.trim()
-                  ? selectorParse.error
-                    ? selectorParse.error
-                    : targetStatusText("Local match", localTargets, includeReviewTargets)
-                  : "Enter a selector to estimate local matches."}
-              </span>
-              <span>
-                {resolvedTargets
-                  ? targetStatusText("Server resolved", resolvedTargets.targets, includeReviewTargets)
-                  : "Server resolution runs before confirmation."}
-              </span>
-            </div>
             <LocalTargetPreview
               agents={localTargets}
               ariaLabel="Bulk group local VPS preview"
@@ -1670,9 +1974,17 @@ function BulkTagPanel({
         )}
         <div className={`privilegeGateBox ${privilegeMaterial ? "ready" : ""}`}>
           <ShieldCheck size={16} />
-          <span>{privilegeMaterial ? "Privilege unlocked for final apply" : "Preview works now; unlock only when applying."}</span>
+          <span>
+            {privilegeMaterial
+              ? "Privilege unlocked for final apply"
+              : "Preview works now; unlock only when applying."}
+          </span>
           {!privilegeMaterial && (
-            <button className="secondaryAction compactAction" onClick={onOpenPrivilegeUnlock} type="button">
+            <button
+              className="secondaryAction compactAction"
+              onClick={onOpenPrivilegeUnlock}
+              type="button"
+            >
               Unlock privilege
             </button>
           )}
@@ -1693,23 +2005,26 @@ function BulkTagPanel({
         </button>
         <ActionFeedback
           className="localActionFeedback bulkTagPreviewActionFeedback"
-          message={
-            previewError
-              ? `Preview failed. ${previewError}. Retry review; final apply stays locked until a fresh server preview succeeds.`
-              : previewStatus
-          }
-          tone={previewError ? "danger" : "progress"}
+          message={localFeedbackMessage}
+          ref={actionFeedbackRef}
+          tone={localFeedbackTone}
         />
       </div>
       {preview && (
-        <section className="bulkTagPreviewPanel" aria-label="Bulk group target preview">
+        <section
+          className="bulkTagPreviewPanel"
+          aria-label="Bulk group target preview"
+        >
           <div className="bulkTagPreviewHeader">
             <div>
               <strong>Server preview</strong>
               <span>{`${preview.target_count} resolved / ${preview.changed_count} changes`}</span>
             </div>
           </div>
-          <div className="bulkTagPreviewStats" aria-label="Bulk group preview evidence">
+          <div
+            className="bulkTagPreviewStats"
+            aria-label="Bulk group preview evidence"
+          >
             <span>
               <strong>{preview.target_count}</strong>
               <small>selected</small>
@@ -1727,7 +2042,9 @@ function BulkTagPanel({
               <small>schedule impacts</small>
             </span>
             <span>
-              <strong title={preview.preview_hash}>{preview.preview_hash}</strong>
+              <strong title={preview.preview_hash}>
+                {preview.preview_hash}
+              </strong>
               <small>preview hash</small>
             </span>
           </div>
@@ -1749,7 +2066,11 @@ function BulkTagPanel({
       )}
       <ConfirmationPrompt
         confirmLabel="Apply tag mutation"
-        detail={confirmationSnapshot?.action === "delete" ? "Delete this tag and all assignments." : "Apply this selector-based tag mutation."}
+        detail={
+          confirmationSnapshot?.action === "delete"
+            ? "Delete this tag and all assignments."
+            : "Apply this selector-based tag mutation."
+        }
         items={[
           { label: "Action", value: confirmationSnapshot?.action ?? action },
           { label: "Group", value: confirmationSnapshot?.tag || tag || "-" },
@@ -1758,18 +2079,43 @@ function BulkTagPanel({
             value:
               confirmationSnapshot?.action === "delete"
                 ? "all assignments"
-                : confirmationSnapshot?.selectorExpression || selectorExpression || "-",
+                : confirmationSnapshot?.selectorExpression ||
+                  selectorExpression ||
+                  "-",
           },
-          { label: "Targets", value: String(confirmationPreview?.target_count ?? 0) },
-          { label: "Changed", value: String(confirmationPreview?.changed_count ?? 0) },
-          { label: "Excluded / no-change", value: String(confirmationPreview?.skipped_count ?? 0) },
-          { label: "Membership after apply", value: membershipOutcomeText(confirmationSnapshot?.action ?? action, confirmationPreview) },
+          {
+            label: "Targets",
+            value: String(confirmationPreview?.target_count ?? 0),
+          },
+          {
+            label: "Changed",
+            value: String(confirmationPreview?.changed_count ?? 0),
+          },
+          {
+            label: "Excluded / no-change",
+            value: String(confirmationPreview?.skipped_count ?? 0),
+          },
+          {
+            label: "Membership after apply",
+            value: membershipOutcomeText(
+              confirmationSnapshot?.action ?? action,
+              confirmationPreview,
+            ),
+          },
           {
             label: "Preview hash",
             title: confirmationPreview?.preview_hash,
             value: confirmationPreview?.preview_hash ?? "-",
           },
-          { label: "Schedule target notices", value: <ScheduleImpactTable impacts={confirmationPreview?.schedule_impacts ?? []} onOpenSchedules={onOpenSchedules} /> },
+          {
+            label: "Schedule target notices",
+            value: (
+              <ScheduleImpactTable
+                impacts={confirmationPreview?.schedule_impacts ?? []}
+                onOpenSchedules={onOpenSchedules}
+              />
+            ),
+          },
         ]}
         onCancel={() => {
           setConfirmOpen(false);
@@ -1803,10 +2149,17 @@ function ScheduleImpactTable({
       <div className="bulkTagPreviewHeader">
         <div>
           <strong>Affected schedules</strong>
-          <span>{impacts.length} saved target snapshot{impacts.length === 1 ? "" : "s"} need review</span>
+          <span>
+            {impacts.length} saved target snapshot
+            {impacts.length === 1 ? "" : "s"} need review
+          </span>
         </div>
         {onOpenSchedules && (
-          <button className="secondaryAction compactAction" type="button" onClick={onOpenSchedules}>
+          <button
+            className="secondaryAction compactAction"
+            type="button"
+            onClick={onOpenSchedules}
+          >
             Open schedules
           </button>
         )}
@@ -1825,16 +2178,24 @@ function ScheduleImpactTable({
           <span role="columnheader">Removed</span>
         </div>
         {impacts.map((impact) => (
-          <div className="tagScheduleImpactRow" key={impact.schedule_id} role="row">
+          <div
+            className="tagScheduleImpactRow"
+            key={impact.schedule_id}
+            role="row"
+          >
             <span className="historyPrimary" data-label="Schedule" role="cell">
               <strong>{impact.name}</strong>
               <small>{impact.selector_expression}</small>
             </span>
-            <span data-label="Command" role="cell">{impact.command_type}</span>
+            <span data-label="Command" role="cell">
+              {impact.command_type}
+            </span>
             <span data-label="Selector result" role="cell">
               {impact.before_target_count} -&gt; {impact.after_target_count}
             </span>
-            <span data-label="Impact" role="cell">{impact.summary}; saved targets stay fixed until you update them.</span>
+            <span data-label="Impact" role="cell">
+              {impact.summary}; saved targets stay fixed until you update them.
+            </span>
             <span data-label="Added" role="cell">
               <VpsChipList agents={impact.added_targets} />
             </span>

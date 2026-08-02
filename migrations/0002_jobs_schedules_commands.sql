@@ -37,7 +37,7 @@ CREATE TABLE schedules (
         CHECK (failure_count >= 0),
     CONSTRAINT schedules_timezone_utc CHECK (timezone = 'UTC'),
     CONSTRAINT schedules_cron_expr_not_empty CHECK (length(trim(cron_expr)) > 0),
-    CONSTRAINT schedules_target_client_ids_nonempty CHECK (cardinality(target_client_ids) BETWEEN 1 AND 500)
+    CONSTRAINT schedules_target_client_ids_limit CHECK (cardinality(target_client_ids) BETWEEN 0 AND 500)
 );
 
 CREATE INDEX schedules_due_idx

@@ -144,7 +144,10 @@ pub(crate) async fn setup_operator_totp(
         TotpSetupOutcome::AlreadyEnabled => Err(ApiError::conflict("totp_already_enabled")),
         TotpSetupOutcome::InvalidPassword => {
             record_totp_management_failure(&state, &operator, &remote_ip).await?;
-            Err(ApiError::unauthorized("invalid_totp_credentials"))
+            Err(ApiError::bad_request_with_message(
+                "invalid_totp_credentials",
+                "The current password is incorrect.",
+            ))
         }
         TotpSetupOutcome::OperatorMissing => Err(ApiError::not_found("operator_not_found")),
     }
@@ -172,9 +175,13 @@ pub(crate) async fn confirm_operator_totp(
                 .await?;
             Ok(Json(*updated))
         }
+        TotpUpdateOutcome::AlreadyEnabled => Err(ApiError::conflict("totp_already_enabled")),
         TotpUpdateOutcome::InvalidCredentials => {
             record_totp_management_failure(&state, &operator, &remote_ip).await?;
-            Err(ApiError::unauthorized("invalid_totp_credentials"))
+            Err(ApiError::bad_request_with_message(
+                "invalid_totp_credentials",
+                "The current password or authenticator code is incorrect.",
+            ))
         }
         TotpUpdateOutcome::NotConfigured => Err(ApiError::conflict("totp_not_configured")),
         TotpUpdateOutcome::OperatorMissing => Err(ApiError::not_found("operator_not_found")),
@@ -203,9 +210,13 @@ pub(crate) async fn disable_operator_totp(
                 .await?;
             Ok(Json(*updated))
         }
+        TotpUpdateOutcome::AlreadyEnabled => Err(ApiError::conflict("totp_already_enabled")),
         TotpUpdateOutcome::InvalidCredentials => {
             record_totp_management_failure(&state, &operator, &remote_ip).await?;
-            Err(ApiError::unauthorized("invalid_totp_credentials"))
+            Err(ApiError::bad_request_with_message(
+                "invalid_totp_credentials",
+                "The current password or authenticator code is incorrect.",
+            ))
         }
         TotpUpdateOutcome::NotConfigured => Err(ApiError::conflict("totp_not_configured")),
         TotpUpdateOutcome::OperatorMissing => Err(ApiError::not_found("operator_not_found")),

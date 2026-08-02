@@ -41,8 +41,11 @@ use crate::{
     },
     repository_backup_artifacts::backup_server_artifact,
     repository_backup_policies::BackupPolicyPruneCandidate,
+    repository_schedules::ScheduleSnapshotExpectation,
     routes_file_transfers::{map_verified_object_error, streaming_artifact_file_body},
-    routes_schedules::{require_selector_target_snapshot, validate_schedule_request},
+    routes_schedules::{
+        map_schedule_snapshot_error, require_selector_target_snapshot, validate_schedule_request,
+    },
     security::{operator_has_scope, SCOPE_BACKUPS_READ},
     selector_expression::id_selector_expression,
     state::AppState,
@@ -131,7 +134,7 @@ pub(crate) async fn update_backup_policy(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(schedule_id): Path<uuid::Uuid>,
-    Json(request): Json<UpdateBackupPolicyRequest>,
+    Json(mut request): Json<UpdateBackupPolicyRequest>,
 ) -> Result<Json<BackupPolicyView>, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "backups:write")
@@ -139,16 +142,34 @@ pub(crate) async fn update_backup_policy(
     if !operator_has_scope(&operator.operator.scopes, "schedules:write") {
         return Err(ApiError::forbidden("operator_scope_insufficient"));
     }
-    let mut request = CreateBackupPolicyRequest::from(request);
-    validate_update_backup_policy_request(&request)?;
     request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
-    require_selector_target_snapshot(
-        &state,
-        &request.selector_expression,
-        &request.target_client_ids,
-        "backup_policy_target_snapshot_stale",
-    )
-    .await?;
+    request.expected_target_client_ids =
+        normalized_target_client_ids(&request.expected_target_client_ids)?;
+    let expectation = ScheduleSnapshotExpectation {
+        selector_expression: request.expected_selector_expression.clone(),
+        target_client_ids: request.expected_target_client_ids.clone(),
+    };
+    let request = CreateBackupPolicyRequest::from(request);
+    validate_update_backup_policy_request(&request)?;
+    let current = state
+        .repo
+        .backup_policy_by_schedule_id(schedule_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("backup_policy_not_found"))?;
+    require_backup_policy_snapshot(&current, &expectation)?;
+    if request.selector_expression.trim() == expectation.selector_expression.trim() {
+        if request.target_client_ids != expectation.target_client_ids {
+            return Err(ApiError::conflict("backup_policy_target_snapshot_stale"));
+        }
+    } else {
+        require_selector_target_snapshot(
+            &state,
+            &request.selector_expression,
+            &request.target_client_ids,
+            "backup_policy_target_snapshot_stale",
+        )
+        .await?;
+    }
     verify_backup_policy_privilege(
         &state,
         &request,
@@ -159,10 +180,29 @@ pub(crate) async fn update_backup_policy(
     .await?;
     let updated = state
         .repo
-        .update_backup_policy(schedule_id, request, &operator)
-        .await?
+        .update_backup_policy(schedule_id, request, &expectation, &operator)
+        .await
+        .map_err(map_schedule_snapshot_error)?
         .ok_or_else(|| ApiError::not_found("backup_policy_not_found"))?;
     Ok(Json(updated))
+}
+
+fn require_backup_policy_snapshot(
+    current: &BackupPolicyView,
+    expectation: &ScheduleSnapshotExpectation,
+) -> Result<(), ApiError> {
+    let mut stored_targets = current.target_client_ids.clone();
+    stored_targets.sort();
+    stored_targets.dedup();
+    let mut expected_targets = expectation.target_client_ids.clone();
+    expected_targets.sort();
+    expected_targets.dedup();
+    if current.selector_expression.trim() != expectation.selector_expression.trim()
+        || stored_targets != expected_targets
+    {
+        return Err(ApiError::conflict("schedule_snapshot_stale"));
+    }
+    Ok(())
 }
 
 async fn verify_backup_policy_privilege(

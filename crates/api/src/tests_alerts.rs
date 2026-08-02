@@ -839,6 +839,86 @@ async fn filter_limit_regression_internal_traffic_accounting_is_unbounded() {
 }
 
 #[tokio::test]
+async fn vps_rules_dry_run_returns_invalid_billing_row_without_persisting() {
+    use tower::ServiceExt as _;
+
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        memory.agents.write().await.push(AgentView {
+            id: "v-1".to_string(),
+            display_name: "VPS 1".to_string(),
+            status: "online".to_string(),
+            tags: Vec::new(),
+            registration_ip: None,
+            last_ip: None,
+            last_seen_at: None,
+            arch: None,
+            internal_build_number: 1,
+            process_incarnation_id: None,
+            stale_since: None,
+            stale_reason: None,
+            capabilities: AgentCapabilitySnapshot::default(),
+        });
+    }
+    let auth = repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin".to_string(),
+            password: "admin-password-123".to_string(),
+        })
+        .await
+        .unwrap();
+    let state = alert_test_state(repo.clone());
+    let response = crate::routes::build_router(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/v1/vps-rules/dry-run")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {}", auth.access_token),
+                )
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&json!({
+                        "operation": "upsert",
+                        "selector_expression": "id:v-1",
+                        "values": {"billing.price": "10 USD/week"},
+                        "keys": []
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let preview: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(preview["matched_vps_count"], 1);
+    assert_eq!(preview["changed_row_count"], 0);
+    assert_eq!(preview["invalid_row_count"], 1);
+    assert_eq!(preview["changes"][0]["action"], "invalid");
+    assert_eq!(
+        preview["changes"][0]["validation_errors"],
+        json!(["billing_plan_period_invalid"])
+    );
+    assert!(repo
+        .list_vps_rules(&VpsRuleQuery {
+            limit: None,
+            client_id: Some("v-1".to_string()),
+            selector_expression: None,
+            key: None,
+            state: None,
+        })
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
 async fn configured_traffic_without_a_quota_remains_healthy() {
     let memory = MemoryState::default();
     let now = chrono::Utc::now().timestamp();
@@ -3181,6 +3261,7 @@ fn test_operator_record(auth: &AuthContext) -> crate::auth_model::OperatorRecord
         totp_secret_ciphertext_hex: None,
         totp_secret_nonce_hex: None,
         totp_secret_salt_hex: None,
+        totp_last_accepted_step: None,
         session_refresh_ttl_secs: auth.operator.session_refresh_ttl_secs,
         created_at: auth.operator.created_at.clone(),
         disabled_at: auth.operator.disabled_at.clone(),

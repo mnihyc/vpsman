@@ -9,10 +9,11 @@ use vpsman_common::{
 
 use crate::{
     model::{
-        AuditLogView, AuthContext, MonitoringShareRecord, MonitoringShareView,
-        MonitoringShareVisibilityView, MonitoringShareVisitorRecord, PingRollupView,
-        PingTargetAssignmentRecord, PingTargetAssignmentReplacement, PingTargetAssignmentView,
-        PingTargetDetailView, PingTargetRecord, PingTargetRuntimeSyncView, PingTargetView,
+        AuditLogView, AuthContext, MonitoringShareRecord, MonitoringShareTargetRecord,
+        MonitoringShareView, MonitoringShareVisibilityView, MonitoringShareVisitorRecord,
+        PingRollupView, PingTargetAssignmentRecord, PingTargetAssignmentReplacement,
+        PingTargetAssignmentView, PingTargetDetailView, PingTargetRecord,
+        PingTargetRuntimeSyncView, PingTargetView,
     },
     model_monitoring::CurrentPingView,
     repository::Repository,
@@ -32,13 +33,20 @@ impl Repository {
     pub(crate) async fn list_ping_targets(&self) -> Result<Vec<PingTargetView>> {
         let records = self.list_ping_target_records().await?;
         let assignments = self.list_ping_target_assignment_records(None).await?;
-        let mut assigned = HashMap::<Uuid, usize>::new();
+        let mut assigned = HashMap::<Uuid, Vec<String>>::new();
         let mut primary = HashMap::<Uuid, usize>::new();
         for assignment in assignments {
-            *assigned.entry(assignment.target_id).or_default() += 1;
+            assigned
+                .entry(assignment.target_id)
+                .or_default()
+                .push(assignment.client_id);
             if assignment.is_primary {
                 *primary.entry(assignment.target_id).or_default() += 1;
             }
+        }
+        for client_ids in assigned.values_mut() {
+            client_ids.sort();
+            client_ids.dedup();
         }
         Ok(records
             .into_iter()
@@ -86,7 +94,13 @@ impl Repository {
             })
             .collect::<Vec<_>>();
         let mut assigned = HashMap::new();
-        assigned.insert(target_id, assignments.len());
+        assigned.insert(
+            target_id,
+            assignments
+                .iter()
+                .map(|assignment| assignment.client.id.clone())
+                .collect(),
+        );
         let mut primary = HashMap::new();
         primary.insert(
             target_id,
@@ -2098,7 +2112,12 @@ impl Repository {
                             array_agg(st.client_id ORDER BY st.client_id)
                                 FILTER (WHERE st.client_id IS NOT NULL),
                             ARRAY[]::TEXT[]
-                        ) AS target_client_ids
+                        ) AS target_client_ids,
+                        COALESCE(
+                            array_agg(st.public_client_key ORDER BY st.client_id)
+                                FILTER (WHERE st.client_id IS NOT NULL),
+                            ARRAY[]::TEXT[]
+                        ) AS target_public_client_keys
                     FROM monitoring_share_links s
                     LEFT JOIN monitoring_share_targets st ON st.share_id = s.id
                     WHERE s.id = $1
@@ -2140,7 +2159,12 @@ impl Repository {
                             array_agg(st.client_id ORDER BY st.client_id)
                                 FILTER (WHERE st.client_id IS NOT NULL),
                             ARRAY[]::TEXT[]
-                        ) AS target_client_ids
+                        ) AS target_client_ids,
+                        COALESCE(
+                            array_agg(st.public_client_key ORDER BY st.client_id)
+                                FILTER (WHERE st.client_id IS NOT NULL),
+                            ARRAY[]::TEXT[]
+                        ) AS target_public_client_keys
                     FROM monitoring_share_links s
                     LEFT JOIN monitoring_share_targets st ON st.share_id = s.id
                     GROUP BY s.id
@@ -2198,12 +2222,14 @@ impl Repository {
         record: MonitoringShareRecord,
         operator: &AuthContext,
     ) -> Result<MonitoringShareView> {
+        validate_monitoring_share_targets(&record.targets)?;
+        let target_client_ids = record.target_client_ids();
         match self {
             Self::Memory(memory) => {
                 let _lifecycle = memory.agent_key_lifecycle.lock().await;
                 require_visible_memory_clients(
                     memory,
-                    &record.target_client_ids,
+                    &target_client_ids,
                     "monitoring_share_resolution_stale",
                 )
                 .await?;
@@ -2221,7 +2247,7 @@ impl Repository {
                 let mut tx = pool.begin().await?;
                 require_visible_postgres_clients_in_tx(
                     &mut tx,
-                    &record.target_client_ids,
+                    &target_client_ids,
                     "monitoring_share_resolution_stale",
                 )
                 .await?;
@@ -2254,14 +2280,24 @@ impl Repository {
                 .bind(required_timestamp_f64(&record.created_at)?)
                 .execute(&mut *tx)
                 .await?;
+                let public_client_keys = record
+                    .targets
+                    .iter()
+                    .map(|target| target.public_client_key.clone())
+                    .collect::<Vec<_>>();
                 sqlx::query(
                     r#"
-                    INSERT INTO monitoring_share_targets (share_id, client_id)
-                    SELECT $1, value FROM unnest($2::TEXT[]) AS value
+                    INSERT INTO monitoring_share_targets (
+                        share_id, client_id, public_client_key
+                    )
+                    SELECT $1, target.client_id, target.public_client_key
+                    FROM unnest($2::TEXT[], $3::TEXT[])
+                        AS target(client_id, public_client_key)
                     "#,
                 )
                 .bind(record.id)
-                .bind(&record.target_client_ids)
+                .bind(&target_client_ids)
+                .bind(&public_client_keys)
                 .execute(&mut *tx)
                 .await?;
                 insert_monitoring_audit(
@@ -2802,9 +2838,10 @@ pub(crate) async fn accepted_postgres_ping_results(
 
 fn ping_target_view(
     record: &PingTargetRecord,
-    assigned: &HashMap<Uuid, usize>,
+    assigned: &HashMap<Uuid, Vec<String>>,
     primary: &HashMap<Uuid, usize>,
 ) -> PingTargetView {
+    let target_client_ids = assigned.get(&record.id).cloned().unwrap_or_default();
     PingTargetView {
         id: record.id,
         name: record.name.clone(),
@@ -2814,7 +2851,8 @@ fn ping_target_view(
         enabled: record.enabled,
         selector_expression: record.selector_expression.clone(),
         generation: record.generation,
-        assigned_count: assigned.get(&record.id).copied().unwrap_or(0),
+        assigned_count: target_client_ids.len(),
+        target_client_ids,
         primary_count: primary.get(&record.id).copied().unwrap_or(0),
         runtime_sync: PingTargetRuntimeSyncView {
             state: "unknown".to_string(),
@@ -3445,16 +3483,35 @@ pub(crate) fn base_monitoring_audit_metadata(
     operator: &AuthContext,
     details: serde_json::Value,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "result": "succeeded",
-        "origin_kind": "operator_request",
-        "component": "monitoring-controller",
-        "operator_id": operator.operator.id,
-        "operator_username": operator.operator.username,
-        "operator_role": operator.operator.role,
-        "operator_session_id": operator.audit_session_id(),
-        "details": details,
-    })
+    let serde_json::Value::Object(mut metadata) = details else {
+        panic!("monitoring audit details must be a JSON object");
+    };
+    metadata.insert("result".to_string(), serde_json::json!("succeeded"));
+    metadata.insert(
+        "origin_kind".to_string(),
+        serde_json::json!("operator_request"),
+    );
+    metadata.insert(
+        "component".to_string(),
+        serde_json::json!("monitoring-controller"),
+    );
+    metadata.insert(
+        "operator_id".to_string(),
+        serde_json::json!(operator.operator.id),
+    );
+    metadata.insert(
+        "operator_username".to_string(),
+        serde_json::json!(operator.operator.username),
+    );
+    metadata.insert(
+        "operator_role".to_string(),
+        serde_json::json!(operator.operator.role),
+    );
+    metadata.insert(
+        "operator_session_id".to_string(),
+        serde_json::json!(operator.audit_session_id()),
+    );
+    serde_json::Value::Object(metadata)
 }
 
 fn required_timestamp_f64(value: &str) -> Result<f64> {
@@ -3574,12 +3631,29 @@ async fn postgres_monitoring_share_views(
 }
 
 fn monitoring_share_record_from_row(row: sqlx::postgres::PgRow) -> Result<MonitoringShareRecord> {
+    let target_client_ids: Vec<String> = row.try_get("target_client_ids")?;
+    let target_public_client_keys: Vec<String> = row.try_get("target_public_client_keys")?;
+    anyhow::ensure!(
+        target_client_ids.len() == target_public_client_keys.len(),
+        "monitoring share target identity arrays are inconsistent"
+    );
+    let targets = target_client_ids
+        .into_iter()
+        .zip(target_public_client_keys)
+        .map(
+            |(client_id, public_client_key)| MonitoringShareTargetRecord {
+                client_id,
+                public_client_key,
+            },
+        )
+        .collect::<Vec<_>>();
+    validate_monitoring_share_targets(&targets)?;
     Ok(MonitoringShareRecord {
         id: row.try_get("id")?,
         name: row.try_get("name")?,
         token_digest: row.try_get("token_digest")?,
         selector_expression: row.try_get("selector_expression")?,
-        target_client_ids: row.try_get("target_client_ids")?,
+        targets,
         visibility: MonitoringShareVisibilityView {
             identity_context: row.try_get("show_identity_context")?,
             resources: row.try_get("show_resources")?,
@@ -3610,7 +3684,7 @@ fn monitoring_share_view(
         id: record.id,
         name: record.name.clone(),
         selector_expression: record.selector_expression.clone(),
-        target_count: record.target_client_ids.len(),
+        target_count: record.targets.len(),
         visibility: record.visibility.clone(),
         status: monitoring_share_status(record, crate::unix_now()).to_string(),
         expires_at: record.expires_at.clone(),
@@ -3645,14 +3719,15 @@ fn share_operator_audit_metadata(
     record: &MonitoringShareRecord,
     operator: &AuthContext,
 ) -> serde_json::Value {
+    let target_client_ids = record.target_client_ids();
     base_monitoring_audit_metadata(
         operator,
         serde_json::json!({
             "share_id": record.id,
             "name": record.name,
             "selector_expression": record.selector_expression,
-            "target_client_ids": record.target_client_ids,
-            "target_count": record.target_client_ids.len(),
+            "target_client_ids": target_client_ids,
+            "target_count": record.targets.len(),
             "visibility": record.visibility,
             "expires_at": record.expires_at,
         }),
@@ -3662,7 +3737,7 @@ fn share_operator_audit_metadata(
 fn share_visitor_audit_metadata(
     share: &MonitoringShareRecord,
     visitor_id: Uuid,
-    source_ip: &str,
+    remote_ip: &str,
     user_agent: Option<&str>,
 ) -> serde_json::Value {
     serde_json::json!({
@@ -3671,16 +3746,102 @@ fn share_visitor_audit_metadata(
         "component": "monitoring-share-controller",
         "share_id": share.id,
         "visitor_id": visitor_id,
-        "source_ip": source_ip,
+        "remote_ip": remote_ip,
         "user_agent": user_agent,
-        "target_count": share.target_client_ids.len(),
+        "target_count": share.targets.len(),
         "visibility": share.visibility,
     })
+}
+
+fn validate_monitoring_share_targets(targets: &[MonitoringShareTargetRecord]) -> Result<()> {
+    anyhow::ensure!(
+        targets.len() <= 1_000,
+        "monitoring_share_target_count_too_large"
+    );
+    let mut client_ids = HashSet::with_capacity(targets.len());
+    let mut public_client_keys = HashSet::with_capacity(targets.len());
+    for target in targets {
+        anyhow::ensure!(
+            !target.client_id.trim().is_empty() && client_ids.insert(target.client_id.as_str()),
+            "monitoring_share_target_client_id_invalid"
+        );
+        anyhow::ensure!(
+            target.public_client_key.len() == 64
+                && target
+                    .public_client_key
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+                && public_client_keys.insert(target.public_client_key.as_str()),
+            "monitoring_share_public_client_key_invalid"
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn monitoring_audit_metadata_is_flat_and_reserves_provenance_fields() {
+        let operator = crate::tests::test_operator();
+        let metadata = base_monitoring_audit_metadata(
+            &operator,
+            serde_json::json!({
+                "target_client_ids": ["v-1", "v-2"],
+                "target_count": 2,
+                "result": "overridden",
+                "component": "overridden",
+            }),
+        );
+
+        assert_eq!(
+            metadata["target_client_ids"],
+            serde_json::json!(["v-1", "v-2"])
+        );
+        assert_eq!(metadata["target_count"], 2);
+        assert_eq!(metadata["result"], "succeeded");
+        assert_eq!(metadata["component"], "monitoring-controller");
+        assert_eq!(metadata["operator_id"], operator.operator.id.to_string());
+        assert!(metadata.get("details").is_none());
+    }
+
+    #[test]
+    fn public_share_visitor_audit_uses_canonical_request_ip_key() {
+        let share = MonitoringShareRecord {
+            id: Uuid::new_v4(),
+            name: "Status view".to_string(),
+            token_digest: "digest".to_string(),
+            selector_expression: "*".to_string(),
+            targets: vec![MonitoringShareTargetRecord {
+                client_id: "v-1".to_string(),
+                public_client_key: "1".repeat(64),
+            }],
+            visibility: MonitoringShareVisibilityView {
+                identity_context: false,
+                resources: true,
+                network: true,
+                traffic: true,
+                ping: true,
+                detail_history: false,
+            },
+            expires_at: "200".to_string(),
+            revoked_at: None,
+            revoked_by: None,
+            created_by: None,
+            created_at: "100".to_string(),
+            updated_at: "100".to_string(),
+        };
+        let metadata = share_visitor_audit_metadata(
+            &share,
+            Uuid::new_v4(),
+            "203.0.113.70",
+            Some("visitor-browser"),
+        );
+
+        assert_eq!(metadata["remote_ip"], "203.0.113.70");
+        assert!(metadata.get("source_ip").is_none());
+    }
 
     #[test]
     fn cached_ping_results_are_counted_once_and_fresh_checks_aggregate() {

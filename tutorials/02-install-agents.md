@@ -31,6 +31,13 @@ cargo run -p vpsctl -- agent-identity-upsert \
   --confirmed
 ```
 
+A new registration is prefilled with `v-` plus one more than the greatest
+persisted numeric identity. Both legacy numeric IDs and current `v-N` IDs
+contribute to that maximum, including deleted tombstones. Merely opening or
+abandoning the form does not reserve an ID; if another registration commits the
+same suggestion first, refresh and use the newly suggested ID after the explicit
+conflict.
+
 A key change requires `--replace-existing-key --confirmed`. Public-key ownership
 is global: registration rejects a key already assigned to another client and a
 key retired by any rotation, revocation, or deletion. Revoked or deleted client
@@ -116,7 +123,10 @@ immediately queues runtime-config cleanup for surviving peers, and marks pending
 or active work for that VPS as skipped or lost. If cleanup cannot be queued, the
 panel reports the affected peers so the operator can retry convergence before
 trusting those interfaces. A deleted client id is not reused; rebuild with a new
-id unless you are only rotating the current key.
+id unless you are only rotating the current key. Deletion is a hidden tombstone,
+not a physical identity-row removal: lifecycle, frozen-scope, and audit evidence
+remain available to the owning historical workflows while normal fleet reads
+exclude the VPS.
 
 ## 6. Rebuild or rotate safely
 
